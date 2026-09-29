@@ -210,16 +210,16 @@ type clusterNodeResourceRequirements struct {
 }
 
 type kubeNodeSummary struct {
-	Node    kubeNodeSummaryNode    `json:"node"`
-	Runtime kubeNodeSummaryRuntime `json:"runtime,omitempty"`
-	Pods    []kubeNodeSummaryPod   `json:"pods,omitempty"`
+	Node kubeNodeSummaryNode  `json:"node"`
+	Pods []kubeNodeSummaryPod `json:"pods,omitempty"`
 }
 
 type kubeNodeSummaryNode struct {
-	NodeName string             `json:"nodeName,omitempty"`
-	CPU      kubeNodeSummaryCPU `json:"cpu,omitempty"`
-	Memory   kubeNodeSummaryMem `json:"memory,omitempty"`
-	FS       kubeNodeSummaryFS  `json:"fs,omitempty"`
+	NodeName string                 `json:"nodeName,omitempty"`
+	CPU      kubeNodeSummaryCPU     `json:"cpu,omitempty"`
+	Memory   kubeNodeSummaryMem     `json:"memory,omitempty"`
+	FS       kubeNodeSummaryFS      `json:"fs,omitempty"`
+	Runtime  kubeNodeSummaryRuntime `json:"runtime,omitempty"`
 }
 
 type kubeNodeSummaryCPU struct {
@@ -1944,12 +1944,16 @@ func buildClusterNodeStorageStats(node kubeNode, summary *kubeNodeSummary, reque
 		reportedAllocatable,
 		summaryCapacity,
 	)
+	var filesystem kubeNodeSummaryFS
+	if summary != nil {
+		filesystem = summary.Node.FS
+	}
 
 	stats := &model.ClusterNodeStorageStats{
 		CapacityBytes:        capacity,
 		AllocatableBytes:     allocatable,
 		UsedBytes:            used,
-		UsagePercent:         usagePercent(used, allocatable, capacity),
+		UsagePercent:         filesystemUsagePercent(filesystem, used, capacity),
 		RequestedBytes:       requestedBytes,
 		RequestPercent:       usagePercent(requestedBytes, allocatable, capacity),
 		SchedulableFreeBytes: schedulableFree(allocatable, requestedBytes),
@@ -1962,15 +1966,30 @@ func buildClusterNodeStorageStats(node kubeNode, summary *kubeNodeSummary, reque
 
 func buildClusterNodeImageFilesystemStats(summary *kubeNodeSummary) *model.ClusterNodeStorageStats {
 	used, capacity := clusterNodeImageFilesystemUsage(summary)
+	var filesystem kubeNodeSummaryFS
+	if summary != nil {
+		filesystem = summary.Node.Runtime.ImageFS
+	}
 	stats := &model.ClusterNodeStorageStats{
 		CapacityBytes: capacity,
 		UsedBytes:     used,
-		UsagePercent:  usagePercent(used, capacity),
+		UsagePercent:  filesystemUsagePercent(filesystem, used, capacity),
 	}
 	if isEmptyClusterNodeStorageStats(stats) {
 		return nil
 	}
 	return stats
+}
+
+// Kubelet's image-GC watermark is based on physical free space, not scheduler
+// reservations or image-owned bytes. imageFs.usedBytes can exclude logs and
+// volumes sharing the device, so prefer availableBytes when kubelet supplies it.
+func filesystemUsagePercent(filesystem kubeNodeSummaryFS, used, capacity *int64) *float64 {
+	if capacity != nil && *capacity > 0 && filesystem.AvailableBytes != nil && *filesystem.AvailableBytes <= uint64(*capacity) {
+		unavailable := *capacity - int64(*filesystem.AvailableBytes)
+		return usagePercent(&unavailable, capacity)
+	}
+	return usagePercent(used, capacity)
 }
 
 // Kubelet can leave node.status.ephemeral-storage stale after a root disk resize
@@ -2082,19 +2101,19 @@ func clusterNodeImageFilesystemUsage(summary *kubeNodeSummary) (*int64, *int64) 
 	}
 
 	var capacity *int64
-	if summary.Runtime.ImageFS.CapacityBytes != nil {
-		capacity = uint64PointerToInt64(summary.Runtime.ImageFS.CapacityBytes)
+	if summary.Node.Runtime.ImageFS.CapacityBytes != nil {
+		capacity = uint64PointerToInt64(summary.Node.Runtime.ImageFS.CapacityBytes)
 	}
-	if summary.Runtime.ImageFS.UsedBytes != nil {
-		return uint64PointerToInt64(summary.Runtime.ImageFS.UsedBytes), capacity
+	if summary.Node.Runtime.ImageFS.UsedBytes != nil {
+		return uint64PointerToInt64(summary.Node.Runtime.ImageFS.UsedBytes), capacity
 	}
-	if summary.Runtime.ImageFS.AvailableBytes == nil || summary.Runtime.ImageFS.CapacityBytes == nil {
+	if summary.Node.Runtime.ImageFS.AvailableBytes == nil || summary.Node.Runtime.ImageFS.CapacityBytes == nil {
 		return nil, capacity
 	}
-	if *summary.Runtime.ImageFS.AvailableBytes > *summary.Runtime.ImageFS.CapacityBytes {
+	if *summary.Node.Runtime.ImageFS.AvailableBytes > *summary.Node.Runtime.ImageFS.CapacityBytes {
 		return nil, capacity
 	}
-	value := int64(*summary.Runtime.ImageFS.CapacityBytes - *summary.Runtime.ImageFS.AvailableBytes)
+	value := int64(*summary.Node.Runtime.ImageFS.CapacityBytes - *summary.Node.Runtime.ImageFS.AvailableBytes)
 	return &value, capacity
 }
 

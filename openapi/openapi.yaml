@@ -21614,15 +21614,18 @@ components:
         used_bytes:
           type: integer
           format: int64
+          description: Used bytes reported by kubelet. For image filesystems this may count image data only, rather than all data on the filesystem.
         usage_percent:
           type: number
           format: double
+          description: Physical filesystem fullness, calculated from capacity minus available bytes when available, otherwise used bytes divided by capacity. Scheduler allocatable bytes are never the denominator.
         requested_bytes:
           type: integer
           format: int64
         request_percent:
           type: number
           format: double
+          description: Requested storage divided by scheduler allocatable bytes, falling back to capacity when allocatable is unavailable.
         schedulable_free_bytes:
           type: integer
           format: int64
@@ -21854,6 +21857,7 @@ components:
           type: boolean
         filesystem_usage_percent:
           type: number
+          description: Physical filesystem fullness for the image or node filesystem used by the pressure assessment; independent of scheduler allocatable storage.
         filesystem_pressure_reason:
           type: string
         node_schedulable:

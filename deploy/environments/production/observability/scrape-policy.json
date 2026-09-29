@@ -88,6 +88,81 @@
           "action": "keep"
         }
       ]
+    },
+    {
+      "job_name": "fugue-public-dns",
+      "metrics_path": "/metrics",
+      "scrape_interval": "30s",
+      "scrape_timeout": "5s",
+      "sample_limit": 2500,
+      "body_size_limit": "2MB",
+      "kubernetes_sd_configs": [
+        {
+          "role": "endpoints",
+          "namespaces": {
+            "names": [
+              "fugue-system"
+            ]
+          }
+        }
+      ],
+      "relabel_configs": [
+        {
+          "source_labels": [
+            "__meta_kubernetes_service_label_app_kubernetes_io_managed_by"
+          ],
+          "regex": "fugue-dns-transport",
+          "action": "keep"
+        },
+        {
+          "source_labels": [
+            "__meta_kubernetes_service_name"
+          ],
+          "regex": "fugue-dns-public-[a-z0-9-]+",
+          "action": "keep"
+        },
+        {
+          "source_labels": [
+            "__meta_kubernetes_pod_container_name",
+            "__meta_kubernetes_pod_container_port_name",
+            "__meta_kubernetes_pod_container_port_protocol"
+          ],
+          "regex": "dns;(http|metrics|health);TCP",
+          "action": "keep"
+        },
+        {
+          "source_labels": [
+            "__meta_kubernetes_namespace"
+          ],
+          "target_label": "namespace"
+        },
+        {
+          "source_labels": [
+            "__meta_kubernetes_service_name"
+          ],
+          "target_label": "service"
+        },
+        {
+          "source_labels": [
+            "__meta_kubernetes_pod_name"
+          ],
+          "target_label": "pod"
+        },
+        {
+          "source_labels": [
+            "__meta_kubernetes_pod_node_name"
+          ],
+          "target_label": "node"
+        },
+        {
+          "target_label": "component",
+          "replacement": "dns"
+        },
+        {
+          "target_label": "serving_role",
+          "replacement": "public"
+        }
+      ]
     }
   ],
   "verificationQueries": [
@@ -95,6 +170,14 @@
     "count((time() - timestamp(etcd_disk_backend_commit_duration_seconds_count{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})",
     "count((time() - timestamp(etcd_disk_wal_fsync_duration_seconds_count{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})",
     "count((time() - timestamp(etcd_mvcc_db_total_size_in_bytes{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})",
-    "count((time() - timestamp(etcd_server_has_leader{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})"
-  ]
+    "count((time() - timestamp(etcd_server_has_leader{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})",
+    "count(up{job=\"fugue-public-dns\"}) >= 2",
+    "count(up{job=\"fugue-public-dns\"} == 1) == count(up{job=\"fugue-public-dns\"})",
+    "count((time() - timestamp(fugue_dns_health{job=\"fugue-public-dns\"})) < 90) == count(up{job=\"fugue-public-dns\"})"
+  ],
+  "publicDNSTargets": {
+    "job": "fugue-public-dns",
+    "serviceLabelSelector": "app.kubernetes.io/managed-by=fugue-dns-transport",
+    "serviceNamePattern": "fugue-dns-public-[a-z0-9-]+"
+  }
 }

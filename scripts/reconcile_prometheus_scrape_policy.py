@@ -123,6 +123,42 @@ def verify_queries(proxy, queries):
         time.sleep(5)
 
 
+def public_dns_targets_match(services, endpoints, targets, check):
+    """Compare selected backends, not merely a count of healthy DNS Pods."""
+    selected = {service["metadata"]["name"] for service in services
+                if re.fullmatch(check["serviceNamePattern"], service["metadata"]["name"])}
+    if not selected:
+        return False
+    expected = set()
+    for endpoint in endpoints:
+        service = endpoint["metadata"]["name"]
+        if service not in selected:
+            continue
+        for subset in endpoint.get("subsets", []):
+            for address in subset.get("addresses", []) + subset.get("notReadyAddresses", []):
+                ref = address.get("targetRef", {})
+                if ref.get("kind") == "Pod" and ref.get("name"):
+                    expected.add((service, ref["name"]))
+    if {service for service, _ in expected} != selected:
+        return False
+    observed = {(target.get("labels", {}).get("service"), target.get("labels", {}).get("pod"))
+                for target in targets if target.get("labels", {}).get("job") == check["job"] and target.get("health") == "up"}
+    return expected == observed
+
+
+def verify_public_dns_targets(base, proxy, check):
+    deadline = time.monotonic() + 120
+    while True:
+        services = json.loads(run(base + ["get", "services", "-l", check["serviceLabelSelector"], "-o", "json"]))["items"]
+        endpoints = json.loads(run(base + ["get", "endpoints", "-o", "json"]))["items"]
+        targets = json.loads(run(["kubectl", "get", "--raw", proxy + "/api/v1/targets?state=active"]))["data"]["activeTargets"]
+        if public_dns_targets_match(services, endpoints, targets, check):
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("public DNS metrics targets do not match the selected Service backends")
+        time.sleep(5)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("policy")
@@ -178,6 +214,8 @@ def main():
                 raise RuntimeError("Prometheus did not load the new scrape policy")
             time.sleep(2)
         verify_queries(proxy.removesuffix("/api/v1/status/config"), policy.get("verificationQueries", []))
+        if policy.get("publicDNSTargets"):
+            verify_public_dns_targets(base, proxy.removesuffix("/api/v1/status/config"), policy["publicDNSTargets"])
     print("Prometheus scrape policy loaded without replacing Pods or TSDB")
 
 
