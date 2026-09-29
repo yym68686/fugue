@@ -213,7 +213,7 @@ def enroll(c, api, evidence):
         existing = resource(c, "configmap", c["bootstrap_config_map"])
         cm, authorization = permission(c, release, existing)
         if existing is None:
-            kubectl("create", "-f", "-", "--field-manager=" + MANAGER, body=canonical(cm))
+            kubectl("create", "-f", "-", "-o", "json", "--field-manager=" + MANAGER, body=canonical(cm))
         evidence["authorization"] = authorization
     evidence["release_id"] = release["id"]
     deadline = time.monotonic() + c["observation"]["timeout_seconds"]
@@ -242,7 +242,7 @@ def enroll(c, api, evidence):
         if activation(c) is not None:
             raise ValueError("activation appeared before initial CAS")
         job = activation_job(c, initial, observed, authorization)
-        kubectl("create", "-f", "-", "--field-manager=" + MANAGER, body=canonical(job))
+        kubectl("create", "-f", "-", "-o", "json", "--field-manager=" + MANAGER, body=canonical(job))
         # The job can only initialize an absent file on the isolated PVC.
         for _ in range(12):
             current = activation(c)

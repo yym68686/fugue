@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -180,6 +181,9 @@ func validateGroupInventoryProducerState(value GroupInventoryProducerState, grou
 func cloneGroupInventoryProducerState(value GroupInventoryProducerState) GroupInventoryProducerState {
 	value.RecentNonces = append([]string(nil), value.RecentNonces...)
 	value.Observations = append([]GroupInventoryProducerObservation(nil), value.Observations...)
+	for i := range value.Observations {
+		value.Observations[i].Instance = cloneInventoryInstance(value.Observations[i].Instance)
+	}
 	return value
 }
 
@@ -201,4 +205,24 @@ func groupInventoryProducerGeneration(producerGeneration uint64, snapshot GroupI
 	}
 	digest := sha256.Sum256(raw)
 	return "inventory-" + hex.EncodeToString(digest[:])
+}
+
+func bootstrapProducerBound(snapshot GroupInventorySnapshot, instance GroupInstance) bool {
+	eligibility := instance.BootstrapEligibility
+	if eligibility == nil {
+		return false
+	}
+	if snapshot.verifiedProducer == nil {
+		return inventoryProducerGeneration(eligibility.ProducerGeneration) == strings.TrimSpace(snapshot.Generation)
+	}
+	producer := snapshot.verifiedProducer
+	if validateGroupInventoryProducerState(*producer, snapshot.GroupID) != nil || snapshot.Generation != groupInventoryProducerGeneration(producer.Generation, snapshot) {
+		return false
+	}
+	for _, observation := range producer.Observations {
+		if observation.NodeID == instance.EdgeID && observation.Slot == instance.Slot && observation.ProducerGeneration == eligibility.ProducerGeneration && reflect.DeepEqual(observation.Instance, instance) {
+			return !observation.ObservedAt.After(snapshot.ObservedAt) && snapshot.ObservedAt.Sub(observation.ObservedAt) <= maxInventoryHeartbeatTTL
+		}
+	}
+	return false
 }

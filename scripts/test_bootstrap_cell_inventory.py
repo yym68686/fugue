@@ -134,6 +134,7 @@ class EnrollmentTests(unittest.TestCase):
     def test_unproven_serving_never_initializes_activation(self):
         c, release, writes = config(), {"id": "gray-one", "fencing_token": 1}, []
         def kube(*args, body=None):
+            self.assertEqual("json", args[args.index("-o") + 1])
             writes.append(json.loads(body))
         with patch.object(b, "isolated_worker", return_value={}), patch.object(b, "activation", return_value=None), patch.object(b, "parent"), patch.object(b, "gray", return_value=release), patch.object(b, "resource", return_value=None), patch.object(b, "kubectl", side_effect=kube), patch.object(b, "health", side_effect=ValueError("no verified TLS")), patch.object(b.time, "monotonic", side_effect=[0, 1, 181]), patch.object(b.time, "sleep"):
             with self.assertRaisesRegex(ValueError, "no verified TLS"):

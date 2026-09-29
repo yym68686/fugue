@@ -694,3 +694,12 @@ observations require fresh inventory after initialization. Missing proofs,
 replaced executors, expired permission, existing foreign activation or serving
 transport stop this initial lane; an expired permission is never renewed by a
 retry. Later full/LKG promotion and public handoff remain separate operations.
+
+Initial inventory eligibility survives authenticated inventory aggregation:
+the stored snapshot has a content digest, while each signed heartbeat has its
+own producer generation. The local store supplies verified producer observations
+in memory; compilation checks the aggregate digest and exact instance against
+those observations. This provenance is never serialized into a heartbeat.
+Restart reads preserve the original eligibility deadline, and eligibility still
+stops after the first publication. Neither aggregated identity nor bootstrap
+eligibility is serving health.
