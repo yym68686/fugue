@@ -226,6 +226,7 @@ func TestDiskIndexOverflowFallsBackWithoutSkippingRequest(t *testing.T) {
 	// large disk or runtime workload just to trigger capacity handling.
 	path := filepath.Join(dir, "observations-00.jsonl")
 	for s.indexRecords < maxDiskIndexRecords {
+		r.SpanID = fmt.Sprintf("capacity-span-%d", s.indexRecords)
 		s.indexRecord(path, r, 0, 1, nil)
 	}
 	s.write(queryFixture(t, 2, at.Add(time.Second), 2000))
@@ -237,6 +238,90 @@ func TestDiskIndexOverflowFallsBackWithoutSkippingRequest(t *testing.T) {
 	out, err := s.Query(q)
 	if err != nil || !out.DiskScanComplete || len(out.Records) != 1 || out.Records[0].RequestID != "request-2" {
 		t.Fatal("overflow skipped fallback", out, err)
+	}
+}
+
+func TestCompactedIndexPreservesHistoricalWindowAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0700)
+	cfg := StoreConfig{NodeID: "edge-a", Directory: dir, MaxRecords: 1}
+	s, err := NewStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { s.Close() }()
+	at := time.Now().Add(-time.Minute)
+	r := queryFixture(t, 1, at, 2000)
+	r.Sequence = 1
+	s.write(r)
+	for seq := uint64(2); seq <= 12; seq++ {
+		r.Sequence = seq
+		r.ObservedAt = at.Add(time.Duration(seq) * time.Second)
+		r.Body.ReadBlockMS = 0
+		r.Body.MaxReadBlockMS = 0
+		s.write(r)
+	}
+	for phase := 0; phase < 2; phase++ {
+		if s.indexRecords != 1 {
+			t.Fatal("snapshot not compacted", phase, s.indexRecords)
+		}
+		historical := Query{RequestID: r.RequestID, Since: at.Add(-time.Second), Until: at.Add(time.Second), MinReadMS: 1000, Limit: 10}
+		out, e := s.Query(historical)
+		if e != nil || !out.DiskScanComplete || out.Truncated || len(out.Records) != 1 || out.Records[0].Sequence != 1 {
+			t.Fatal("historical snapshot omitted", phase, out, e)
+		}
+		historical.Until = time.Now()
+		out, e = s.Query(historical)
+		if e != nil || !out.DiskScanComplete || len(out.Records) != 0 {
+			t.Fatal("superseded wait revived", phase, out, e)
+		}
+		historical.Until = at.Add(11 * time.Second)
+		historical.MinReadMS = 0
+		out, e = s.Query(historical)
+		if e != nil || !out.DiskScanComplete || len(out.Records) != 1 || out.Records[0].Sequence != 11 {
+			t.Fatal("recent in-flight query window missing", phase, out, e)
+		}
+		if phase == 0 {
+			s.Close()
+			s, err = NewStore(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestCompactedIndexKeepsApplicationIDPerSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0700)
+	s, e := NewStore(StoreConfig{NodeID: "edge-a", Directory: dir, MaxRecords: 1})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	at := time.Now().Add(-time.Minute)
+	r := queryFixture(t, 1, at, 0)
+	r.ApplicationRequestID = ""
+	r.Sequence = 1
+	s.write(r)
+	r.Sequence = 2
+	r.ObservedAt = at.Add(time.Second)
+	r.ApplicationRequestID = "app-terminal"
+	s.write(r)
+	q := Query{RequestID: r.RequestID, Since: at.Add(-time.Second), Until: at.Add(500 * time.Millisecond), Limit: 10}
+	out, e := s.Query(q)
+	if e != nil || !out.DiskScanComplete || len(out.Records) != 1 || out.Records[0].ApplicationRequestID != "" {
+		t.Fatal("snapshot acquired later application identity", out, e)
+	}
+	q.RequestID = "app-terminal"
+	out, e = s.Query(q)
+	if e != nil || !out.DiskScanComplete || len(out.Records) != 0 {
+		t.Fatal("application identity appeared before terminal", out, e)
+	}
+	q.Until = time.Now()
+	out, e = s.Query(q)
+	if e != nil || !out.DiskScanComplete || len(out.Records) != 1 || out.Records[0].ApplicationRequestID != "app-terminal" {
+		t.Fatal("terminal application lookup missing", out, e)
 	}
 }
 
@@ -308,5 +393,24 @@ func TestQueryBusyDoesNotBlockCollectorSubmission(t *testing.T) {
 	out, err := s.Query(Query{Since: time.Now().Add(-time.Hour), Until: time.Now(), Limit: 1})
 	if err != nil || out.Status != "storage_degraded" || !out.Truncated {
 		t.Fatal(out, err)
+	}
+}
+
+func TestRepeatedSnapshotsDoNotExhaustDiskIndex(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0700)
+	s, err := NewStore(StoreConfig{NodeID: "edge-a", Directory: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r := queryFixture(t, 1, time.Now().Add(-time.Minute), 0)
+	s.write(r)
+	for i := 0; i < maxDiskIndexRecords+2; i++ {
+		r.Sequence++
+		s.indexRecord(s.file.Name(), r, 0, 1, nil)
+	}
+	if s.indexRecords != 1 || s.Status()["disk_index_complete"] != true {
+		t.Fatalf("repeated snapshot positions exhausted bounded index: entries=%d complete=%v", s.indexRecords, s.Status()["disk_index_complete"])
 	}
 }

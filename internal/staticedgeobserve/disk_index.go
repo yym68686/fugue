@@ -19,12 +19,47 @@ type diskRecordRef struct {
 	waitMS                        float64
 	offset                        int64
 	length                        int
+	previous                      [3]diskRecordLocation
+	previousCount                 int
+	discarded                     bool
+	discardedFirst, discardedLast time.Time
+	discardedSequence             uint64
+}
+
+type diskRecordLocation struct {
+	sequence      uint64
+	applicationID string
+	observed      time.Time
+	waitMS        float64
+	offset        int64
+	length        int
+}
+
+func (r diskRecordRef) location() diskRecordLocation {
+	return diskRecordLocation{r.sequence, r.applicationID, r.observed, r.waitMS, r.offset, r.length}
+}
+func (r *diskRecordRef) setLocation(v diskRecordLocation) {
+	r.sequence, r.observed, r.waitMS, r.offset, r.length = v.sequence, v.observed, v.waitMS, v.offset, v.length
+	r.applicationID = v.applicationID
+}
+func (r *diskRecordRef) discard(v diskRecordLocation) {
+	if !r.discarded || v.observed.Before(r.discardedFirst) {
+		r.discardedFirst = v.observed
+	}
+	if !r.discarded || v.observed.After(r.discardedLast) {
+		r.discardedLast = v.observed
+	}
+	if v.sequence > r.discardedSequence {
+		r.discardedSequence = v.sequence
+	}
+	r.discarded = true
 }
 
 type diskSegmentIndex struct {
-	info    os.FileInfo
-	clean   bool
-	records []diskRecordRef
+	info      os.FileInfo
+	clean     bool
+	records   []diskRecordRef
+	positions map[string]int
 }
 
 type diskIndexSnapshot struct {
@@ -48,7 +83,7 @@ func (s *Store) resetDiskIndex(path string, info os.FileInfo) {
 	if old := s.diskIndex[path]; old != nil {
 		s.indexRecords -= len(old.records)
 	}
-	s.diskIndex[path] = &diskSegmentIndex{info: info, clean: true}
+	s.diskIndex[path] = &diskSegmentIndex{info: info, clean: true, positions: make(map[string]int)}
 }
 
 func (s *Store) forgetDiskIndex(path string) {
@@ -81,13 +116,47 @@ func (s *Store) indexRecord(path string, r Record, offset int64, length int, inf
 	if !seg.clean {
 		return
 	}
+	ref := diskRecordRef{key: recordKey(r), requestID: r.RequestID,
+		applicationID: r.ApplicationRequestID, sequence: r.Sequence, observed: r.ObservedAt,
+		waitMS: readWaitMS(r), offset: offset, length: length}
+	if position, ok := seg.positions[ref.key]; ok {
+		old := seg.records[position]
+		if old.requestID != ref.requestID ||
+			(old.applicationID != "" && old.applicationID != ref.applicationID) ||
+			(old.sequence >= ref.sequence && old.applicationID == "" && ref.applicationID != "") {
+			seg.clean = false
+			return
+		}
+		locations := [5]diskRecordLocation{old.location()}
+		count := 1 + old.previousCount
+		copy(locations[1:], old.previous[:old.previousCount])
+		for i := 0; i < count; i++ {
+			if locations[i].sequence == ref.sequence {
+				if !locations[i].observed.Equal(ref.observed) || locations[i].waitMS != ref.waitMS || locations[i].applicationID != ref.applicationID {
+					seg.clean = false
+				}
+				return
+			}
+		}
+		locations[count] = ref.location()
+		count++
+		sort.Slice(locations[:count], func(i, j int) bool { return locations[i].sequence > locations[j].sequence })
+		if count > 4 {
+			old.discard(locations[4])
+			count = 4
+		}
+		old.setLocation(locations[0])
+		old.previousCount = count - 1
+		copy(old.previous[:], locations[1:count])
+		seg.records[position] = old
+		return
+	}
 	if s.indexRecords >= maxDiskIndexRecords {
 		seg.clean = false
 		return
 	}
-	seg.records = append(seg.records, diskRecordRef{key: recordKey(r), requestID: r.RequestID,
-		applicationID: r.ApplicationRequestID, sequence: r.Sequence, observed: r.ObservedAt,
-		waitMS: readWaitMS(r), offset: offset, length: length})
+	seg.positions[ref.key] = len(seg.records)
+	seg.records = append(seg.records, ref)
 	s.indexRecords++
 }
 
@@ -134,10 +203,29 @@ func (s *Store) indexedDiskQuery(q Query, files []string, deadline time.Time, co
 				out.DiskScanComplete = false
 				return true
 			}
-			if ref.observed.Before(cutoff) || ref.observed.Before(q.Since) || ref.observed.After(q.Until) {
+			if q.RequestID != "" && ref.requestID != q.RequestID && ref.applicationID != q.RequestID {
 				continue
 			}
-			if q.RequestID != "" && ref.requestID != q.RequestID && ref.applicationID != q.RequestID {
+			locations := [4]diskRecordLocation{ref.location()}
+			copy(locations[1:], ref.previous[:ref.previousCount])
+			found := false
+			for _, loc := range locations[:1+ref.previousCount] {
+				if q.RequestID != "" && q.RequestID != ref.requestID && q.RequestID != loc.applicationID {
+					continue
+				}
+				if !loc.observed.Before(cutoff) && !loc.observed.Before(q.Since) && !loc.observed.After(q.Until) {
+					ref.setLocation(loc)
+					found = true
+					break
+				}
+			}
+			// The latest four sequence locations cover normal live queries,
+			// including snapshots arriving while the RPC is in flight. Older
+			// historical windows conservatively use the validated scan.
+			if ref.discarded && !ref.discardedFirst.After(q.Until) && !ref.discardedLast.Before(q.Since) && !ref.discardedLast.Before(cutoff) && (!found || ref.sequence <= ref.discardedSequence) {
+				return false
+			}
+			if !found {
 				continue
 			}
 			if old, ok := latest[ref.key]; ok && old.ref.sequence >= ref.sequence {

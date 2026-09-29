@@ -111,13 +111,20 @@ The collector alone performs disk I/O. Record queries apply the configured
 retention (default 24h); physical segments rotate hourly and expire within
 retention plus one hour and one cleanup minute. Disk capacity can shorten that
 window. The collector builds a volatile index of at most 32,768 validated
-record locations and scalar identity/time/wait metadata. It rebuilds the index
+span entries per segment and scalar identity/time/wait metadata. Each span
+retains its latest four sequence locations, so live queries tolerate new
+snapshots arriving while their RPC is in flight. Repeated snapshots replace
+older locations instead of exhausting the index with copies. It rebuilds the index
 from retained JSONL at startup; no new disk format or sidecar is required. Queries
 scan this bounded metadata, choose the latest sequence per span, then apply the
 slow threshold before retaining at most 200 matching spans. Only those candidates
 are decoded from disk. Exact request/application ID lookups no longer decode
 unrelated event arrays. Indexed queries describe the captured segment snapshot;
 submissions arriving later are visible to the next query.
+Time/sequence bounds for discarded index locations preserve historical-window
+semantics: if a window could require older, unindexed snapshots, the query
+uses the bounded validated disk scan instead of claiming absence. JSONL
+snapshot history itself is unchanged.
 
 The 1.5s query deadline, single disk-query slot, 64 MiB default disk limit and
 2 MiB reply cap remain unchanged. File identity/size/mtime changes, malformed
