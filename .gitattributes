@@ -1,2 +1,4 @@
-# Unified diff context requires a leading space before blank lines and tabs.
+# Unified diff context deliberately contains a space before Go tabs and a
+# single-space blank context line. Source formatting is checked after apply.
 third_party/**/*.patch whitespace=-blank-at-eol,-space-before-tab
+static-caddy/patches/** whitespace=-blank-at-eol,-space-before-tab

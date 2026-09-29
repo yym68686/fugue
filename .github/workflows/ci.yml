@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   static_edge_observability:
+    needs: prepush
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 30
