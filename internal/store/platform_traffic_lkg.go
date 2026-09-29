@@ -38,7 +38,8 @@ func trafficLKGMembers(state *model.State, parent model.PlatformArtifact, releas
 		}
 	}
 	ids, ok := parent.Content["artifact_ids"].([]any)
-	if !ok || len(ids) != 3 {
+	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
+	if !ok || compositionErr != nil {
 		return fail()
 	}
 	members := []model.PlatformArtifact{}

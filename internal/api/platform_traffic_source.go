@@ -40,9 +40,13 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficScope(group, scope string, re
 	}
 	var child model.PlatformArtifact
 	var latest model.PlatformExpectedConsumerSet
-	// Read all three prepared topologies; a partially completed preparation
-	// cannot activate only the route member of a traffic release.
-	for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig} {
+	// Every member of the signed publication role must be prepared. An ordinary
+	// traffic release still requires route, DNS and TLS membership.
+	kinds, err := platformconfig.ValidateReleaseComposition(parent)
+	if err != nil {
+		return fail()
+	}
+	for _, kind := range kinds {
 		artifact, err := consumerAssignmentChild(parent, kind, readArtifact)
 		if err != nil || artifact.ScopeKey != parent.ScopeKey || s.store.VerifyPlatformArtifactIntegrity(artifact) != nil {
 			return fail()

@@ -212,6 +212,11 @@ func (s *Server) validateReleaseSetReferences(artifact model.PlatformArtifact) m
 }
 
 func validateReleaseSetReferences(artifact model.PlatformArtifact, readArtifact func(string) (model.PlatformArtifact, error)) model.PlatformArtifactValidationResult {
+	if _, explicitRole := artifact.Content["publication_role"]; explicitRole {
+		if _, err := platformconfig.ValidateReleaseComposition(artifact); err != nil {
+			return model.PlatformArtifactValidationResult{Name: "release_set.composition", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: err.Error()}
+		}
+	}
 	ids, idsOK := artifact.Content["artifact_ids"].([]any)
 	kinds, kindsOK := artifact.Content["artifact_kinds"].([]any)
 	if !idsOK || !kindsOK || len(ids) == 0 || len(ids) != len(kinds) {
@@ -787,8 +792,8 @@ func (s *Server) preparePlatformReleaseSetConsumers(ctx context.Context, princip
 			for _, n := range topology.DNSNodes {
 				dns = dns || n.EdgeGroupID == group
 			}
-			if !edge || !dns {
-				return nil, &platformConfigReferenceError{"traffic canary group lacks complete declared Edge and DNS topology"}
+			if !edge || !dns && releaseSet.Content["publication_role"] != platformconfig.PublicationRoleCellRoutes {
+				return nil, &platformConfigReferenceError{"traffic canary group lacks complete declared topology for its publication role"}
 			}
 		}
 	}
@@ -1516,22 +1521,12 @@ func platformArtifactInvariantValidation(artifact model.PlatformArtifact) model.
 		pass = records || answers
 		message = "DNS artifacts must include records or answers"
 	case model.PlatformArtifactKindReleaseSet:
-		ids, idsOK := artifact.Content["artifact_ids"].([]any)
-		kinds, kindsOK := artifact.Content["artifact_kinds"].([]any)
 		lineage, lineageOK := artifact.Content["lineage"].(map[string]any)
-		seenKinds := map[string]bool{}
-		for _, value := range kinds {
-			if kind, ok := value.(string); ok {
-				seenKinds[kind] = true
-			}
-		}
-		pass = idsOK && kindsOK && lineageOK && len(ids) == len(kinds) && len(ids) >= 3 &&
-			seenKinds[model.PlatformArtifactKindEdgeRouteBundle] &&
-			seenKinds[model.PlatformArtifactKindDNSAnswerBundle] &&
-			seenKinds[model.PlatformArtifactKindCaddyRouteConfig] &&
+		_, err := platformconfig.ValidateReleaseComposition(artifact)
+		pass = err == nil && lineageOK &&
 			strings.TrimSpace(fmt.Sprint(lineage["intent_digest"])) != "" &&
 			strings.TrimSpace(fmt.Sprint(lineage["policy_digest"])) != ""
-		message = "release sets must bind route, DNS, and TLS artifacts with lineage"
+		message = "release sets must bind the complete signed publication role with lineage"
 	case model.PlatformArtifactKindReleaseGuardPolicy:
 		return releaseSignalPolicyValidationResult(artifact)
 	case model.PlatformArtifactKindGatePolicyRegistry:

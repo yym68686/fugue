@@ -12,6 +12,7 @@ import (
 // ProjectionPolicyInput is the supported producer subset of PolicySnapshot.
 // Unused fields are rejected rather than silently ignored.
 type ProjectionPolicyInput struct {
+	PublicationRole          string                                    `json:"publication_role,omitempty"`
 	AuthorityCellID          string                                    `json:"authority_cell_id,omitempty"`
 	ConsumerTopologyDigest   string                                    `json:"consumer_topology_digest,omitempty"`
 	DNSPlacementMode         string                                    `json:"dns_placement_mode,omitempty"`
@@ -45,6 +46,7 @@ func DecodeProjectionPolicy(a model.PlatformArtifact, consumers []platformconfig
 	if d.Decode(&p) != nil {
 		return fail()
 	}
+
 	for _, key := range []string{"minimum_healthy_edges", "max_stale_seconds", "route_constraints", "edge_selection_constraints", "dns_route_state_constraints"} {
 		if value, present := a.Content[key]; present && value == nil {
 			return fail()
@@ -54,6 +56,19 @@ func DecodeProjectionPolicy(a model.PlatformArtifact, consumers []platformconfig
 		if value, present := a.Content[key]; present && (value == nil || key == "dns_placement_mode" && value == "") {
 			return fail()
 		}
+	}
+	if p.PublicationRole == platformconfig.PublicationRoleCellRoutes {
+		defaults, present, err := p.RouteDefaults()
+		if err != nil || !present || p.Scope != a.ScopeKey || p.Generation != a.Generation || p.SchemaVersion != platformconfig.SchemaVersion || a.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || len(consumers) != 0 || len(templates) != 0 || p.TLSReadiness == nil || len(p.Cohorts) == 0 {
+			return fail()
+		}
+		defaults.DNSPlacementMode, defaults.DNSQueryPolicy = p.DNSPlacementMode, p.DNSQueryPolicy
+		defaults.DNSAuthorities, defaults.DNSClientPolicies = p.Authorities, p.Clients
+		defaults.DNSReadiness, defaults.TLSReadiness, defaults.TrafficRolloutCohorts = p.DNSReadiness, p.TLSReadiness, p.Cohorts
+		if platformconfig.ValidatePolicySnapshot(defaults) != nil {
+			return fail()
+		}
+		return p, nil
 	}
 	if platformconfig.ValidateDNSPlacementMode(platformconfig.PolicySnapshot{DNSPlacementMode: p.DNSPlacementMode, DNSQueryPolicy: p.DNSQueryPolicy, DNSReadiness: p.DNSReadiness, TLSReadiness: p.TLSReadiness, DNSAuthorities: p.Authorities, DNSClientPolicies: p.Clients, TrafficRolloutCohorts: p.Cohorts}) != nil {
 		return fail()
@@ -67,7 +82,7 @@ func DecodeProjectionPolicy(a model.PlatformArtifact, consumers []platformconfig
 	if _, err := PolicyScopeForTarget(p.Scope); err != nil {
 		return fail()
 	}
-	if platformconfig.ValidatePolicySnapshot(platformconfig.PolicySnapshot{SchemaVersion: p.SchemaVersion, Generation: p.Generation, Scope: p.Scope, AuthorityCellID: p.AuthorityCellID, ConsumerTopologyDigest: p.ConsumerTopologyDigest, TrafficRolloutCohorts: p.Cohorts}) != nil {
+	if platformconfig.ValidatePolicySnapshot(platformconfig.PolicySnapshot{PublicationRole: p.PublicationRole, SchemaVersion: p.SchemaVersion, Generation: p.Generation, Scope: p.Scope, AuthorityCellID: p.AuthorityCellID, ConsumerTopologyDigest: p.ConsumerTopologyDigest, TrafficRolloutCohorts: p.Cohorts}) != nil {
 		return fail()
 	}
 	if a.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || a.ScopeKey != p.Scope || p.Generation != a.Generation || p.SchemaVersion != platformconfig.SchemaVersion || len(consumers) == 0 || platformconfig.ValidateDNSConsumers(consumers) != nil || len(p.Authorities) == 0 || len(p.Clients) != len(consumers) || p.DNSReadiness == nil || p.TLSReadiness == nil || len(p.Cohorts) == 0 {
@@ -111,7 +126,10 @@ func (p ProjectionPolicyInput) RouteDefaults() (platformconfig.PolicySnapshot, b
 	if scope == "" {
 		scope = "global"
 	}
-	out := platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: scope, AuthorityCellID: p.AuthorityCellID, ConsumerTopologyDigest: p.ConsumerTopologyDigest, Generation: p.Generation, MinimumHealthyEdges: *p.MinimumHealthyEdges, MaxStaleSeconds: *p.MaxStaleSeconds, RouteConstraints: *p.RouteConstraints, DNSRouteStateConstraints: *p.DNSRouteStateConstraints}
+	out := platformconfig.PolicySnapshot{PublicationRole: p.PublicationRole, SchemaVersion: platformconfig.SchemaVersion, Scope: scope, AuthorityCellID: p.AuthorityCellID, ConsumerTopologyDigest: p.ConsumerTopologyDigest, Generation: p.Generation, MinimumHealthyEdges: *p.MinimumHealthyEdges, MaxStaleSeconds: *p.MaxStaleSeconds, RouteConstraints: *p.RouteConstraints, DNSRouteStateConstraints: *p.DNSRouteStateConstraints}
+	if p.PublicationRole == platformconfig.PublicationRoleCellRoutes {
+		out.TLSReadiness, out.TrafficRolloutCohorts = p.TLSReadiness, p.Cohorts
+	}
 	if p.EdgeSelectionConstraints != nil {
 		out.EdgeSelectionConstraints = *p.EdgeSelectionConstraints
 	}

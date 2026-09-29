@@ -146,6 +146,7 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 		clone := static.EdgeTopology.Clone()
 		projection.Intent.EdgeTopology = &clone
 		if static.AuthorityCellID != "" {
+			projection.Intent.PublicationRole = static.PublicationRole
 			projection.Intent.Scope, projection.Intent.AuthorityCellID = static.Scope, static.AuthorityCellID
 			projection.Intent.DNSConsumers = static.Consumers
 		}
@@ -165,6 +166,17 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	projection.BusinessSnapshotAt = business.CapturedAt
 	if err := projectDomainTLSLifecycle(&projection, snapshot.TLSAllowlist, business.Domains); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("TLS domain lifecycle projection invalid")
+	}
+	if static.PublicationRole == platformconfig.PublicationRoleCellRoutes {
+		// The signed role owns route/TLS only. DNS rows still participate in
+		// business hostname ownership, but are never projected as DNS authority.
+		projection.Issues = slices.DeleteFunc(projection.Issues, func(issue platformProjectionIssue) bool {
+			return issue.Code == "transaction_snapshot_not_frozen" || issue.Code == "dns_output_equivalence_not_verified" || issue.Code == "dns_acme_not_projected"
+		})
+		if err := ctx.Err(); err != nil {
+			return platformIntentProjectionResponse{}, err
+		}
+		return projection, nil
 	}
 	if err := projectPlatformEntryDNS(&projection, static.Routes, static.DNS, []string{domainsConfig.AppBaseDomain, domainsConfig.CustomDomainBaseDomain}); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("platform DNS entry migration configuration invalid")
@@ -481,7 +493,9 @@ func projectBusinessRouteDraftWithPolicy(snapshot model.EdgeRouteIntentSnapshot,
 		intent.Routes = append(intent.Routes, route)
 	}
 	intent = platformconfig.NormalizePlatformIntent(intent)
-	intent.DNS, result.DNSExclusions = projectBusinessDNSDraft(&result, apps, hostedZones, dnsRecords, staticRecords)
+	if defaults == nil || defaults.PublicationRole != platformconfig.PublicationRoleCellRoutes {
+		intent.DNS, result.DNSExclusions = projectBusinessDNSDraft(&result, apps, hostedZones, dnsRecords, staticRecords)
+	}
 	// TLS policy is desired route configuration and can be projected without
 	// copying certificate readiness or other runtime facts.
 	tlsByHost := make(map[string]platformconfig.TLSIntent, len(intent.Routes))

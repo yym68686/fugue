@@ -25,6 +25,9 @@ func validateFullReleaseSetInState(state *model.State, parent model.PlatformArti
 	if parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keyring).Pass {
 		return fail("untrusted parent")
 	}
+	if _, err := platformconfig.ValidateReleaseComposition(parent); err != nil {
+		return fail("publication role membership invalid")
+	}
 	var latest *model.PlatformArtifactRelease
 	for _, r := range state.PlatformArtifactReleases {
 		if r.ArtifactID != parent.ID || r.ArtifactKind != parent.ArtifactKind || r.ScopeKey != parent.ScopeKey || r.Status != model.PlatformArtifactReleaseStatusActive {

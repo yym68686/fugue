@@ -15,13 +15,14 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v30"
+	CompilerVersion = "platform-config-compiler/v31"
 	GlobalScopeKey  = "global"
 )
 
 // PlatformIntent is the versioned description of what Fugue should serve.
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
+	PublicationRole    string                    `json:"publication_role,omitempty"`
 	AuthorityCellID    string                    `json:"authority_cell_id,omitempty"`
 	ApplicationDomains *ApplicationDomainsIntent `json:"application_domains,omitempty"`
 	EdgeTopology       *edgetopology.Intent      `json:"edge_topology,omitempty"`
@@ -130,6 +131,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	PublicationRole          string                    `json:"publication_role,omitempty"`
 	AuthorityCellID          string                    `json:"authority_cell_id,omitempty"`
 	ConsumerTopologyDigest   string                    `json:"consumer_topology_digest,omitempty"`
 	DNSPlacementMode         string                    `json:"dns_placement_mode,omitempty"`
@@ -178,6 +180,7 @@ type Lineage struct {
 }
 
 type ReleaseSet struct {
+	PublicationRole       string                   `json:"publication_role,omitempty"`
 	ConsumerTopology      *TrafficConsumerTopology `json:"consumer_topology,omitempty"`
 	TrafficRolloutCohorts []TrafficRolloutCohort   `json:"traffic_rollout_cohorts,omitempty"`
 	SchemaVersion         string                   `json:"schema_version"`
@@ -270,6 +273,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if err := validatePolicy(policy); err != nil {
 		return CompileResult{}, err
 	}
+	if intent.PublicationRole != policy.PublicationRole {
+		return CompileResult{}, fmt.Errorf("intent and policy publication roles differ")
+	}
 	consumerTopology, err := CompileTrafficConsumerTopology(intent, policy)
 	if err != nil {
 		return CompileResult{}, err
@@ -283,6 +289,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
+	if intent.PublicationRole == PublicationRoleCellRoutes && (len(runtimeSnapshot.DNSSelections) != 0 || len(runtimeSnapshot.DNSEdgeEndpoints) != 0 || len(runtimeSnapshot.DNSConsumers) != 0 || len(runtimeSnapshot.DNSPlacements) != 0 || len(runtimeSnapshot.DNSFlatten) != 0) {
+		return CompileResult{}, fmt.Errorf("cell route publication cannot contain DNS runtime facts")
+	}
 	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && len(runtimeSnapshot.DNSFlatten) == 0 && len(runtimeSnapshot.DNSPlacements) == 0 && len(runtimeSnapshot.TLSDomains) == 0 && len(runtimeSnapshot.DNSConsumers) == 0 && len(runtimeSnapshot.DNSEdgeEndpoints) == 0 && len(runtimeSnapshot.DNSSelections) == 0 && req.InputSnapshot != nil {
 		runtimeSnapshot = RuntimeSnapshot{IntentGeneration: intent.Generation, PolicyGeneration: policy.Generation, Facts: req.InputSnapshot}
 	}
@@ -450,6 +459,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	tlsArtifact := buildArtifact(model.PlatformArtifactKindCaddyRouteConfig, intent.Scope, "tls-"+configurationGeneration, tlsPayload, metadata, now)
 
 	releaseSet := ReleaseSet{
+		PublicationRole:       intent.PublicationRole,
 		ConsumerTopology:      consumerTopology,
 		TrafficRolloutCohorts: NormalizeTrafficRolloutCohorts(policy.TrafficRolloutCohorts),
 		SchemaVersion:         SchemaVersion,
@@ -467,6 +477,12 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		Lineage: lineage,
 	}
 	releaseSet.ArtifactIDs = []string{routeArtifact.ID, dnsArtifact.ID, tlsArtifact.ID}
+	if intent.PublicationRole == PublicationRoleCellRoutes {
+		dnsArtifact = model.PlatformArtifact{}
+		releaseSet.ArtifactIDs = []string{routeArtifact.ID, tlsArtifact.ID}
+		releaseSet.ArtifactKinds = PublicationArtifactKinds(intent.PublicationRole)
+		releaseSet.Dependencies = []ArtifactDependency{{From: model.PlatformArtifactKindCaddyRouteConfig, To: model.PlatformArtifactKindEdgeRouteBundle, Relation: "requires"}}
+	}
 	releaseArtifact := buildArtifact(model.PlatformArtifactKindReleaseSet, intent.Scope, releaseSet.Generation, releaseSet, metadata, now)
 	return CompileResult{
 		InputSnapshot:   runtimeSnapshot,

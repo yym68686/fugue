@@ -20,6 +20,7 @@ var trafficConsumerNodeID = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-
 var trafficConsumerDigest = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
 type TrafficConsumerTopology struct {
+	PublicationRole string   `json:"publication_role,omitempty"`
 	SchemaVersion   string   `json:"schema_version"`
 	AuthorityCellID string   `json:"authority_cell_id"`
 	EdgeNodeIDs     []string `json:"edge_node_ids"`
@@ -33,14 +34,17 @@ func validTrafficConsumerCell(cell string) bool {
 }
 
 func (topology TrafficConsumerTopology) Validate(scope string) error {
+	if err := ValidatePublicationRole(topology.PublicationRole, topology.AuthorityCellID, scope); err != nil {
+		return err
+	}
 	if topology.SchemaVersion != TrafficConsumerTopologySchema || !validTrafficConsumerCell(topology.AuthorityCellID) || scope != AuthorityCellScope(topology.AuthorityCellID) {
 		return fmt.Errorf("traffic consumer authority or scope invalid")
 	}
 	for _, list := range []struct {
-		ids []string
-		max int
-	}{{topology.EdgeNodeIDs, 10000}, {topology.DNSNodeIDs, 4096}} {
-		if len(list.ids) == 0 || len(list.ids) > list.max {
+		ids      []string
+		min, max int
+	}{{topology.EdgeNodeIDs, 1, 10000}, {topology.DNSNodeIDs, 0, 4096}} {
+		if len(list.ids) < list.min || len(list.ids) > list.max {
 			return fmt.Errorf("traffic consumer membership must be nonempty and bounded")
 		}
 		for i, id := range list.ids {
@@ -49,12 +53,18 @@ func (topology TrafficConsumerTopology) Validate(scope string) error {
 			}
 		}
 	}
+	if topology.PublicationRole == PublicationRoleCellRoutes && len(topology.DNSNodeIDs) != 0 || topology.PublicationRole == "" && len(topology.DNSNodeIDs) == 0 {
+		return fmt.Errorf("DNS membership differs from publication role")
+	}
 	return nil
 }
 
 // Only explicit intent enrolls a cell. Inventory health, aliases and process
 // observations cannot add or remove a required execution identity.
 func TrafficConsumerTopologyFromIntent(intent PlatformIntent) (*TrafficConsumerTopology, error) {
+	if err := validateRouteOnlyIntent(intent); err != nil {
+		return nil, err
+	}
 	if intent.AuthorityCellID == "" {
 		if strings.HasPrefix(intent.Scope, authorityCellScopePrefix) {
 			return nil, fmt.Errorf("cell scope requires explicit consumer authority")
@@ -65,7 +75,7 @@ func TrafficConsumerTopologyFromIntent(intent PlatformIntent) (*TrafficConsumerT
 	if !validTrafficConsumerCell(cell) || intent.Scope != AuthorityCellScope(cell) || intent.EdgeTopology == nil || intent.EdgeTopology.Validate() != nil || len(intent.EdgeTopology.Cells) != 1 || intent.EdgeTopology.Cells[0].ID != cell || intent.EdgeTopology.Cells[0].LegacyGroupID != "" || ValidateDNSConsumers(intent.DNSConsumers) != nil {
 		return nil, fmt.Errorf("cell publication requires one explicit neutral topology and DNS ownership")
 	}
-	out := &TrafficConsumerTopology{SchemaVersion: TrafficConsumerTopologySchema, AuthorityCellID: cell, EdgeNodeIDs: []string{}, DNSNodeIDs: []string{}}
+	out := &TrafficConsumerTopology{PublicationRole: intent.PublicationRole, SchemaVersion: TrafficConsumerTopologySchema, AuthorityCellID: cell, EdgeNodeIDs: []string{}, DNSNodeIDs: []string{}}
 	for _, edge := range intent.EdgeTopology.Edges {
 		if edge.AuthorityCellID != cell {
 			return nil, fmt.Errorf("foreign Edge authority")
@@ -87,6 +97,9 @@ func TrafficConsumerTopologyFromIntent(intent PlatformIntent) (*TrafficConsumerT
 }
 
 func validateConsumerTopologyPolicy(policy PolicySnapshot) error {
+	if err := validateRouteOnlyPolicy(policy); err != nil {
+		return err
+	}
 	if policy.AuthorityCellID == "" && policy.ConsumerTopologyDigest == "" {
 		if strings.HasPrefix(policy.Scope, authorityCellScopePrefix) {
 			return fmt.Errorf("cell policy requires authority and topology digest")
@@ -121,7 +134,7 @@ func CompileTrafficConsumerTopology(intent PlatformIntent, policy PolicySnapshot
 		return nil, nil
 	}
 	digest, err := Digest(topology)
-	if err != nil || policy.Scope != intent.Scope || policy.AuthorityCellID != topology.AuthorityCellID || policy.ConsumerTopologyDigest != digest {
+	if err != nil || policy.PublicationRole != topology.PublicationRole || policy.Scope != intent.Scope || policy.AuthorityCellID != topology.AuthorityCellID || policy.ConsumerTopologyDigest != digest {
 		return nil, fmt.Errorf("consumer topology differs from pinned policy")
 	}
 	return topology, nil
@@ -131,7 +144,7 @@ func CompileTrafficConsumerTopology(intent PlatformIntent, policy PolicySnapshot
 func TrafficConsumersFromRelease(parent model.PlatformArtifact) (*TrafficConsumerTopology, error) {
 	value, present := parent.Content["consumer_topology"]
 	if !present {
-		if strings.HasPrefix(parent.ScopeKey, authorityCellScopePrefix) || parent.Metadata["consumer_topology_digest"] != "" {
+		if strings.HasPrefix(parent.ScopeKey, authorityCellScopePrefix) || parent.Metadata["consumer_topology_digest"] != "" || parent.Content["publication_role"] != nil {
 			return nil, fmt.Errorf("release consumer topology missing")
 		}
 		return nil, nil
@@ -148,6 +161,10 @@ func TrafficConsumersFromRelease(parent model.PlatformArtifact) (*TrafficConsume
 	d.DisallowUnknownFields()
 	if d.Decode(&topology) != nil || d.Decode(&struct{}{}) != io.EOF || topology.Validate(parent.ScopeKey) != nil {
 		return nil, fmt.Errorf("release consumer topology invalid")
+	}
+	role, _ := parent.Content["publication_role"].(string)
+	if role != topology.PublicationRole {
+		return nil, fmt.Errorf("release publication role differs from membership")
 	}
 	digest, err := Digest(topology)
 	if err != nil || parent.Metadata["consumer_topology_digest"] != digest {
@@ -169,12 +186,12 @@ func ValidateTrafficConsumerTopologyProjection(parent, child model.PlatformArtif
 		return fmt.Errorf("child consumer policy unavailable")
 	}
 	if topology == nil {
-		if p.Policy.AuthorityCellID != "" || p.Policy.ConsumerTopologyDigest != "" || child.Metadata["consumer_topology_digest"] != "" {
+		if p.Policy.PublicationRole != "" || p.Policy.AuthorityCellID != "" || p.Policy.ConsumerTopologyDigest != "" || child.Metadata["consumer_topology_digest"] != "" {
 			return fmt.Errorf("child consumer topology has no parent authority")
 		}
 		return nil
 	}
-	if child.ScopeKey != parent.ScopeKey || validateConsumerTopologyPolicy(p.Policy) != nil || p.Policy.AuthorityCellID != topology.AuthorityCellID || p.Policy.ConsumerTopologyDigest != parent.Metadata["consumer_topology_digest"] || child.Metadata["consumer_topology_digest"] != p.Policy.ConsumerTopologyDigest {
+	if child.ScopeKey != parent.ScopeKey || validateConsumerTopologyPolicy(p.Policy) != nil || p.Policy.PublicationRole != topology.PublicationRole || p.Policy.AuthorityCellID != topology.AuthorityCellID || p.Policy.ConsumerTopologyDigest != parent.Metadata["consumer_topology_digest"] || child.Metadata["consumer_topology_digest"] != p.Policy.ConsumerTopologyDigest {
 		return fmt.Errorf("child consumer topology differs from parent or policy")
 	}
 	return nil

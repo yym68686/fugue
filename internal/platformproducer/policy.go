@@ -26,6 +26,7 @@ const (
 )
 
 type Policy struct {
+	PublicationRole           string               `json:"publication_role,omitempty"`
 	AuthorityCellID           string               `json:"authority_cell_id,omitempty"`
 	Serving                   *ServingPolicy       `json:"serving,omitempty"`
 	RequireDNSQueryPolicy     bool                 `json:"require_dns_query_policy,omitempty"`
@@ -92,13 +93,16 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 	if p.TargetScope == "global" && p.AuthorityCellID != "" || p.TargetScope != "global" && (p.AuthorityCellID == "" || p.TargetScope != platformconfig.AuthorityCellScope(p.AuthorityCellID) || p.DNSPolicyArtifactID == "") {
 		return p, fmt.Errorf("producer cell authority or pinned policy missing")
 	}
-	if p.AuthorityCellID != "" && (!p.RequireApplicationDomains || !p.RequireRouteDefaults || !p.RequireDNSQueryPolicy) {
+	if platformconfig.ValidatePublicationRole(p.PublicationRole, p.AuthorityCellID, p.TargetScope) != nil || p.PublicationRole == platformconfig.PublicationRoleCellRoutes && (p.RequireDNSQueryPolicy || len(p.HostedZoneTemplates) != 0) {
+		return p, fmt.Errorf("producer publication role invalid")
+	}
+	if p.AuthorityCellID != "" && (!p.RequireApplicationDomains || !p.RequireRouteDefaults || p.PublicationRole == "" && !p.RequireDNSQueryPolicy) {
 		return p, fmt.Errorf("cell producer requires complete explicit configuration inputs")
 	}
 	if p.Mode != "paused" && p.Mode != "shadow" && p.Mode != "serving" || p.IntervalSeconds < 30 || p.IntervalSeconds > 900 || p.RefreshSeconds < 120 || p.RefreshSeconds > 3600 || p.RefreshSeconds < p.IntervalSeconds {
 		return p, fmt.Errorf("producer policy mode, source or schedule invalid")
 	}
-	if p.Mode == "serving" && (p.Serving == nil || p.InputSource != "business-static-intent" || !p.RequireApplicationDomains || !p.RequireRouteDefaults || !p.RequireDNSQueryPolicy) {
+	if p.Mode == "serving" && (p.Serving == nil || p.InputSource != "business-static-intent" || !p.RequireApplicationDomains || !p.RequireRouteDefaults || p.PublicationRole == "" && !p.RequireDNSQueryPolicy) {
 		return p, fmt.Errorf("serving producer requires explicit promotion policy and complete pinned inputs")
 	}
 	if v := p.Serving; v != nil {

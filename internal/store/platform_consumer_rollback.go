@@ -64,7 +64,8 @@ func consumerCursorForTrafficRollback(state *model.State, previous model.Platfor
 	}
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
-	if !ok || !kindsOK || len(ids) != 3 || len(kinds) != 3 {
+	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
+	if !ok || !kindsOK || compositionErr != nil {
 		return fail()
 	}
 	var child model.PlatformArtifact

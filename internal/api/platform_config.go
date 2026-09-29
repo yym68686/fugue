@@ -31,7 +31,7 @@ type platformConfigCompileResponse struct {
 	IntentArtifact  model.PlatformArtifact    `json:"intent_artifact"`
 	PolicyArtifact  model.PlatformArtifact    `json:"policy_artifact"`
 	RouteArtifact   model.PlatformArtifact    `json:"route_artifact"`
-	DNSArtifact     model.PlatformArtifact    `json:"dns_artifact"`
+	DNSArtifact     model.PlatformArtifact    `json:"dns_artifact,omitzero"`
 	TLSArtifact     model.PlatformArtifact    `json:"tls_artifact"`
 	ReleaseArtifact model.PlatformArtifact    `json:"release_artifact"`
 }

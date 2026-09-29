@@ -14,6 +14,7 @@ import (
 // environment, workload, or business table. Unsupported fields reject the input
 // instead of silently dropping executable intent during migration.
 type StaticIntentInput struct {
+	PublicationRole    string
 	Scope              string
 	AuthorityCellID    string
 	ApplicationDomains *platformconfig.ApplicationDomainsIntent
@@ -43,7 +44,7 @@ func DecodeStaticIntent(a model.PlatformArtifact) (StaticIntentInput, error) {
 	if intent.SchemaVersion != platformconfig.SchemaVersion || intent.Scope != a.ScopeKey || intent.Generation != a.Generation || platformconfig.ValidatePlatformIntent(intent) != nil || len(intent.ACMEChallenges) > 0 || len(intent.TLS) > 0 || len(intent.CachePolicies) > 0 {
 		return fail()
 	}
-	out := StaticIntentInput{Scope: intent.Scope, AuthorityCellID: intent.AuthorityCellID, ApplicationDomains: platformconfig.CloneApplicationDomains(intent.ApplicationDomains), Consumers: platformconfig.NormalizePlatformIntent(intent).DNSConsumers}
+	out := StaticIntentInput{PublicationRole: intent.PublicationRole, Scope: intent.Scope, AuthorityCellID: intent.AuthorityCellID, ApplicationDomains: platformconfig.CloneApplicationDomains(intent.ApplicationDomains), Consumers: platformconfig.NormalizePlatformIntent(intent).DNSConsumers}
 	if intent.EdgeTopology != nil {
 		clone := intent.EdgeTopology.Clone()
 		out.EdgeTopology = &clone
