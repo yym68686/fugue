@@ -117,7 +117,11 @@ func (cli *CLI) staticEdgeObservationCommand(op string) *cobra.Command {
 			if e = staticEdgeWriteFile(out, append(raw, '\n')); e != nil {
 				return e
 			}
-			return cli.renderResourceResult(map[string]any{"file": out, "source": "direct", "records": len(response.Observations.Records)})
+			recordCount := 0
+			for _, result := range results {
+				recordCount += len(result.Records)
+			}
+			return cli.renderResourceResult(map[string]any{"file": out, "source": "direct", "records": recordCount})
 		}
 		return cli.renderResourceResult(output)
 	}}

@@ -16,11 +16,27 @@ must remain explicit. Old serving artifacts remain usable without telemetry.
 - [x] Direct mTLS/SSH CLI status, slow search, explain and evidence export.
 - [x] Conservative multi-hop explanation with measured/unknown boundaries.
 - [x] Optional client instrumentation and evidence provenance.
-- [ ] Existing application observation fields preserved through Fugue ingestion.
-- [ ] Isolation, protocol fidelity, failure injection, race and overhead verification.
-- [ ] Declarative CI/package/release integration and reproducible artifacts.
+- [x] Existing application observation fields preserved through Fugue ingestion.
+- [x] Isolation, protocol fidelity, failure injection, race and overhead verification.
+- [x] Declarative CI/package/release integration and reproducible artifacts.
 - [ ] Production baseline, candidate health, natural draining and rollback evidence.
 - [ ] ovhusstaticedges updated to the verified release; origin observations verified.
+
+As of the v0.8.16 rollout, the new primary TCP entry and origin use official
+source `548e535d`; a natural 10,775,681-byte request produced six completed,
+joined spans with complete disk queries. The existing application request fact
+retained its `inboundBody` timing fields. CI run `36596348440` passed the static
+artifact, API release and front handoff/drain jobs; its overall conclusion is
+`cancelled` because the queued `agent_edge_shadow_policy` job was superseded by
+a higher-priority request in its shared concurrency group. Tagged tests and
+release `36599117584` succeeded. This is not an all-green whole-run claim.
+
+The last two checklist items remain open for retained legacy protocol paths.
+Old wildcard UDP443 and previously advertised H3 listeners still serve old
+connections/clients; they must not be force-retired to finish this checklist.
+Isolated direct takeover of a wildcard QUIC listener by an exact-IP listener
+interrupted a synthetic upload even with the old process retained. The verified
+TCP overlap mechanism therefore does not prove a safe QUIC handoff.
 
 ## Safety and attribution contract
 
@@ -62,6 +78,10 @@ last hop removes the internal carrier. Each reverse-proxy RoundTrip gets its
 own span, including a repeated Caddy attempt. Multiple connections inside Go's
 transparent transport retry remain visible as repeated trace events; they are
 not falsely advertised as separately authenticated wire attempts.
+
+Export receipts count all records written across the entry and explicit peers.
+The saved per-node completeness, truncation and loss fields remain authoritative;
+a nonzero record count alone is not a complete-chain claim.
 
 An explicit `--transport` override applies to the primary context and every
 `--peer` for that invocation; it never rewrites saved contexts or silently falls
@@ -111,7 +131,8 @@ The collector alone performs disk I/O. Record queries apply the configured
 retention (default 24h); physical segments rotate hourly and expire within
 retention plus one hour and one cleanup minute. Disk capacity can shorten that
 window. The collector builds a volatile index of at most 32,768 validated
-span entries per segment and scalar identity/time/wait metadata. Each span
+span entries across all segments, plus scalar identity/time/wait metadata. A span
+present in multiple segments has one entry in each of those segments. Each entry
 retains its latest four sequence locations, so live queries tolerate new
 snapshots arriving while their RPC is in flight. Repeated snapshots replace
 older locations instead of exhausting the index with copies. It rebuilds the index

@@ -75,3 +75,69 @@ func TestStaticEdgeObservationTransportOverrideIncludesPeers(t *testing.T) {
 		t.Fatal("one-command transport override persisted into context", err)
 	}
 }
+
+func TestStaticEdgeExportReceiptCountsAllSavedPeerRecords(t *testing.T) {
+	cfg, creds := tlsFixture(t)
+	peer := cfg
+	peer.Name, peer.EdgeID = "peer-context", "peer-edge"
+	makeRecord := func(node, span string) o.Record {
+		observer := o.New(o.Record{NodeID: node, ProcessID: "process-fixture", RequestID: "request-fixture", Hop: "ingress", Protocol: "HTTP/2.0", Build: "fixture", ConfigDigest: "fixture", Correlation: "entry"}, nil)
+		observer.Finish(200, false, "")
+		r, _ := observer.Snapshot()
+		r.SpanID = span
+		return r
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, _, err := creds.Authorize(r); err != nil {
+			http.Error(w, "denied", 403)
+			return
+		}
+		var request c.Request
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		records := []o.Record{makeRecord(request.EdgeID, request.EdgeID+"-first")}
+		if request.EdgeID == cfg.EdgeID {
+			records = append(records, makeRecord(request.EdgeID, request.EdgeID+"-second"))
+		}
+		json.NewEncoder(w).Encode(c.Response{Schema: c.RPCSchema, EdgeID: request.EdgeID, RequestID: request.RequestID, OK: true, Status: 200, Observations: &o.Result{Schema: o.Schema, NodeID: request.EdgeID, Records: records, Findings: []o.Finding{}, Status: "available", DiskScanComplete: true}})
+	}))
+	server.TLS = creds.Config()
+	server.StartTLS()
+	defer server.Close()
+	cfg.ManagerURL, peer.ManagerURL = server.URL, server.URL
+	dir := t.TempDir()
+	t.Setenv("FUGUE_STATIC_EDGE_CONTEXT_FILE", filepath.Join(dir, "contexts.json"))
+	if err := saveStaticEdgeContexts(staticEdgeContextFile{SchemaVersion: 1, Contexts: []staticEdgeContext{cfg, peer}}); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "evidence.json")
+	var stdout, stderr bytes.Buffer
+	if err := runWithStreams([]string{"--json", "static-edge", "requests", "export", cfg.Name, "--request-id", "request-fixture", "--peer", peer.Name, "--transport", "mtls", "--file", file}, &stdout, &stderr); err != nil {
+		t.Fatal(err, stderr.String())
+	}
+	var receipt struct {
+		Records int `json:"records"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		Results []o.Result `json:"results"`
+	}
+	if err = json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, result := range saved.Results {
+		count += len(result.Records)
+	}
+	if len(saved.Results) != 2 || count != 3 || receipt.Records != count {
+		t.Fatalf("export receipt differs from saved peer evidence: nodes=%d saved=%d receipt=%d", len(saved.Results), count, receipt.Records)
+	}
+}
