@@ -47,6 +47,7 @@ func tlsShadowFixtures(t *testing.T, roles ...string) (edgePlatformCandidate, ed
 		}
 		request.Policy.ConsumerTopologyDigest, _ = platformconfig.Digest(topology)
 		request.Policy.TLSReadiness = &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxProbes: 100, MaxConcurrency: 4}
+		request.Policy.TrafficRolloutCohorts = []platformconfig.TrafficRolloutCohort{{ID: "initial", EdgeGroupIDs: []string{"cell-a"}}}
 	}
 	compiled, err := platformconfig.Compile(request)
 	if err != nil {

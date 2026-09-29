@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"fugue/internal/config"
-	"fugue/internal/edgegroupfront"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 )
@@ -38,6 +37,7 @@ type InventoryProducerConfig struct {
 	AuthorityService    string
 	IdentityKeyringFile string
 	ActivationStateFile string
+	BootstrapFile       string
 	Interval            time.Duration
 }
 
@@ -58,6 +58,7 @@ func InventoryProducerConfigFromEnv() InventoryProducerConfig {
 		AuthorityService:    strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_AUTHORITY_SERVICE")),
 		IdentityKeyringFile: strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_IDENTITY_KEYRING_FILE")),
 		ActivationStateFile: strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_ACTIVATION_STATE_FILE")),
+		BootstrapFile:       strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_BOOTSTRAP_FILE")),
 	}
 	if raw := strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_HEARTBEAT_INTERVAL")); raw != "" {
 		interval, err := time.ParseDuration(raw)
@@ -66,14 +67,14 @@ func InventoryProducerConfigFromEnv() InventoryProducerConfig {
 		} else {
 			cfg.Interval = interval
 		}
-	} else if cfg.URL != "" || cfg.IdentityKeyringFile != "" || cfg.ActivationStateFile != "" {
+	} else if cfg.URL != "" || cfg.IdentityKeyringFile != "" || cfg.ActivationStateFile != "" || cfg.BootstrapFile != "" {
 		cfg.Interval = 30 * time.Second
 	}
 	return cfg
 }
 
 func (cfg InventoryProducerConfig) enabled() bool {
-	return strings.TrimSpace(cfg.URL) != "" || strings.TrimSpace(cfg.IdentityKeyringFile) != "" || strings.TrimSpace(cfg.ActivationStateFile) != "" || cfg.Interval != 0
+	return strings.TrimSpace(cfg.URL) != "" || strings.TrimSpace(cfg.IdentityKeyringFile) != "" || strings.TrimSpace(cfg.ActivationStateFile) != "" || cfg.BootstrapFile != "" || cfg.Interval != 0
 }
 
 func validateInventoryProducerConfig(producer InventoryProducerConfig, edgeConfig config.EdgeConfig) error {
@@ -106,6 +107,9 @@ func validateInventoryProducerConfig(producer InventoryProducerConfig, edgeConfi
 	}
 	if producer.IdentityKeyringFile == producer.ActivationStateFile || producer.Interval < 5*time.Second || producer.Interval > time.Minute {
 		return errors.New("Edge inventory producer projection or interval is invalid")
+	}
+	if path := producer.BootstrapFile; path != "" && (!filepath.IsAbs(path) || filepath.Clean(path) != path || path == producer.ActivationStateFile || path == producer.IdentityKeyringFile || platformcontrol.ConsumerAuthorityID(edgeConfig.EdgeGroupID) == "" || edgeConfig.PlatformScopeKey != "authority-cell:"+edgeConfig.EdgeGroupID) {
+		return errors.New("initial inventory bootstrap requires an independent path and explicit cell scope")
 	}
 	if strings.TrimSpace(edgeConfig.EdgeID) == "" || strings.TrimSpace(edgeConfig.EdgeGroupID) == "" ||
 		strings.TrimSpace(edgeConfig.EdgeSlot) == "" || strings.TrimSpace(edgeConfig.EdgeInstanceUID) == "" || strings.TrimSpace(edgeConfig.EdgeReleaseEpoch) == "" ||
@@ -223,14 +227,11 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 }
 
 func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig config.EdgeConfig, status Status) error {
-	activation, exists, err := edgegroupfront.ReadActivationState(s.InventoryProducer.ActivationStateFile)
-	if err != nil || !exists {
-		return errors.New("Edge inventory producer activation state is unavailable")
+	selection, err := s.selectInventoryEpoch(ctx, edgeConfig)
+	if err != nil {
+		return err
 	}
-	if activation.GroupID != strings.TrimSpace(edgeConfig.EdgeGroupID) {
-		return errors.New("Edge inventory producer activation group is invalid")
-	}
-	if activation.ActiveSlot != strings.TrimSpace(edgeConfig.EdgeSlot) {
+	if selection.Slot != strings.TrimSpace(edgeConfig.EdgeSlot) {
 		s.recordInventoryProducerInactive()
 		return nil
 	}
@@ -247,6 +248,9 @@ func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig conf
 	}
 	now := time.Now().UTC()
 	expiresAt := time.Unix(now.Add(time.Minute).Unix(), 0).UTC()
+	if selection.Bootstrap != nil && selection.Bootstrap.ExpiresAt.Before(expiresAt) {
+		expiresAt = time.Unix(selection.Bootstrap.ExpiresAt.Unix(), 0).UTC()
+	}
 	nonce, err := newInventoryProducerNonce()
 	if err != nil {
 		return errors.New("Edge inventory producer nonce is unavailable")
@@ -270,8 +274,8 @@ func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig conf
 			Schema: groupInventorySchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), FaultDomainID: strings.TrimSpace(edgeConfig.FaultDomainID), EdgePoolID: strings.TrimSpace(edgeConfig.EdgePoolID), Sequence: sequence + 1,
 			Generation: producerInventoryEnvelopeGeneration(nextProducerGeneration), ObservedAt: now,
 			ActiveEpoch: groupActiveEpoch{
-				GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), FaultDomainID: strings.TrimSpace(edgeConfig.FaultDomainID), EdgePoolID: strings.TrimSpace(edgeConfig.EdgePoolID), Slot: activation.ActiveSlot, ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
-				FenceSequence: activation.Generation, MinHealthyInstances: 1,
+				GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), FaultDomainID: strings.TrimSpace(edgeConfig.FaultDomainID), EdgePoolID: strings.TrimSpace(edgeConfig.EdgePoolID), Slot: selection.Slot, ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
+				FenceSequence: selection.Fence, MinHealthyInstances: 1,
 			},
 			Instances: []groupInstance{{
 				EdgeID: strings.TrimSpace(edgeConfig.EdgeID), GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), FaultDomainID: strings.TrimSpace(edgeConfig.FaultDomainID), EdgePoolID: strings.TrimSpace(edgeConfig.EdgePoolID), Slot: strings.TrimSpace(edgeConfig.EdgeSlot),
@@ -293,6 +297,12 @@ func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig conf
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	if selection.Bootstrap != nil {
+		current, checkErr := s.selectInventoryEpoch(ctx, edgeConfig)
+		if checkErr != nil || current.Bootstrap == nil || *current.Bootstrap != *selection.Bootstrap || !expiresAt.After(time.Now().UTC()) {
+			return errors.New("initial cell bootstrap authorization changed before inventory publication")
+		}
+	}
 	response, err := s.InventoryProducerHTTPClient.Do(request)
 	if err != nil {
 		return &inventoryProducerTransportError{operation: "heartbeat", cause: err}

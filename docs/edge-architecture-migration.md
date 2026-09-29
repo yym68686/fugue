@@ -658,3 +658,21 @@ the existing full/LKG transaction gates. Route-only verification cannot create
 a DNS LKG; a failed candidate preserves the previous positive route/TLS LKG.
 This capability does not rewrite an existing authority or select public traffic.
 Cross-cell DNS publication remains a separate implementation and rollout step.
+
+`FUGUE_EDGE_INVENTORY_BOOTSTRAP_FILE` optionally points to an independently
+projected, non-secret initial inventory permission. It is used only when the
+actual activation file is absent; malformed or unreadable activation never
+falls back. The permission names the exact cell, physical Edge, Pod instance,
+slot, executable source and signed prepared gray route-only parent. Its absolute
+lease is at most fifteen minutes and is never renewed by a read or heartbeat.
+The Worker verifies current scoped assignment and signed membership twice around
+inventory preparation, and caps its signed heartbeat to the original deadline.
+Bootstrap eligibility remains distinct from applied serving health.
+
+This permission writes no Front activation, bundle, serving cache or LKG. The
+first observed and verified group bundle is still required before the existing
+activation CAS initializes a real serving record. Once a valid activation exists,
+the producer uses that record independently of the bootstrap file, so missing or
+expired bootstrap configuration cannot invalidate positive serving recovery.
+The optional projection alone grants nothing; enrollment and private probes
+remain separate configuration steps.
