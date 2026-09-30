@@ -62,3 +62,18 @@ func VerifyPreviousInput(p platformconfig.PreviousTrafficPublicationInput, keys 
 	}
 	return nil
 }
+
+// VerifyDNSAuthorityHandoff authenticates the artifacts before comparing one
+// node's complete DNS behavior. It is only the immutable-input gate; fresh
+// serving snapshots and transport identity CAS remain separate requirements.
+func VerifyDNSAuthorityHandoff(previous, next model.PlatformArtifact, node string, keys bundleauth.Keyring) error {
+	for _, artifact := range []model.PlatformArtifact{previous, next} {
+		if !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass {
+			return fmt.Errorf("DNS handoff artifact signature rejected")
+		}
+	}
+	if _, err := VerifyDNSArtifact(next, keys); err != nil {
+		return err
+	}
+	return platformconfig.ValidateDNSAuthorityHandoff(previous, next, node)
+}

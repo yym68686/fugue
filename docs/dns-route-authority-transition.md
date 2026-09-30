@@ -39,3 +39,18 @@ protocol does not switch public Services or Fronts. Public handoff additionally
 requires fresh transport observations, complete DNS behavior validation and the
 existing UID/resource-version selector CAS. A continuously changing source needs
 new exact references; a previous proof never silently inherits a newer fence.
+
+The immutable-input handoff gate also authenticates both DNS artifacts and
+compares each physical DNS node's complete consumer/query views, zone policy,
+client matching and answer rules. Only the declared routing aliases and the
+DNS process's own probe-record authority are translated. Probe addresses and
+all wire values remain exact. Record and zone enumeration order is canonicalized;
+candidate/preference order stays significant. TTL, nameserver, ECS, record-set,
+client-selection, ownership or candidate changes reject this gate. It does not
+replace the subsequent fresh-runtime and Service identity checks.
+
+Before adopting a new transition checkpoint, record a compatible API/DNS
+predecessor in the code release chain. The first reader release retains the
+old predecessor only while no transition artifact exists. A separately accepted
+reader release then pins that compatible reader as its rollback target, so a
+later code rollback can still validate the currently serving signed artifact.
