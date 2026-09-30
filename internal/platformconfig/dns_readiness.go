@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -34,26 +35,36 @@ type DNSEdgeEndpoint struct {
 	AAAA        []string  `json:"aaaa,omitempty"`
 }
 
+// DNSPreviousAuthority is one exact predecessor alternative. It never adds a
+// target or quorum vote, and requires signed behavior equivalence.
+type DNSPreviousAuthority struct {
+	PublicationDigest string `json:"publication_digest"`
+	EdgeGroupID       string `json:"edge_group_id"`
+	RouteDigest       string `json:"route_digest"`
+}
+
 type DNSReadinessProbe struct {
-	CellPublicationDigest string `json:"cell_publication_digest,omitempty"`
-	FactMaxAgeSeconds     int    `json:"fact_max_age_seconds,omitempty"`
-	ID                    string `json:"id"`
-	EdgeID                string `json:"edge_id"`
-	EdgeGroupID           string `json:"edge_group_id"`
-	Address               string `json:"address"`
-	Hostname              string `json:"hostname"`
-	Path                  string `json:"path"`
-	RouteDigest           string `json:"route_digest"`
-	State                 string `json:"state,omitempty"`
+	PreviousAuthority     *DNSPreviousAuthority `json:"previous_authority,omitempty"`
+	CellPublicationDigest string                `json:"cell_publication_digest,omitempty"`
+	FactMaxAgeSeconds     int                   `json:"fact_max_age_seconds,omitempty"`
+	ID                    string                `json:"id"`
+	EdgeID                string                `json:"edge_id"`
+	EdgeGroupID           string                `json:"edge_group_id"`
+	Address               string                `json:"address"`
+	Hostname              string                `json:"hostname"`
+	Path                  string                `json:"path"`
+	RouteDigest           string                `json:"route_digest"`
+	State                 string                `json:"state,omitempty"`
 }
 
 type DNSReadinessTarget struct {
-	FailureDomains map[string]string `json:"failure_domains,omitempty"`
-	EdgeID         string            `json:"edge_id"`
-	EdgeGroupID    string            `json:"edge_group_id"`
-	Address        string            `json:"address"`
-	Family         string            `json:"family"`
-	ProbeIDs       []string          `json:"probe_ids"`
+	RequireSinglePublication bool              `json:"require_single_publication,omitempty"`
+	FailureDomains           map[string]string `json:"failure_domains,omitempty"`
+	EdgeID                   string            `json:"edge_id"`
+	EdgeGroupID              string            `json:"edge_group_id"`
+	Address                  string            `json:"address"`
+	Family                   string            `json:"family"`
+	ProbeIDs                 []string          `json:"probe_ids"`
 }
 
 type DNSReadinessRecord struct {
@@ -266,6 +277,11 @@ func ValidateDNSReadinessPlan(plan *DNSReadinessPlan, policy *DNSReadinessPolicy
 	probes := map[string]DNSReadinessProbe{}
 	owners := map[string]string{}
 	for _, p := range plan.Probes {
+		if previous := p.PreviousAuthority; previous != nil {
+			if p.CellPublicationDigest == "" || !trafficConsumerDigest.MatchString(previous.PublicationDigest) || !trafficConsumerDigest.MatchString(previous.RouteDigest) || !platformRouteArtifactGroupID.MatchString(previous.EdgeGroupID) {
+				return fmt.Errorf("invalid previous DNS authority alternative")
+			}
+		}
 		if p.CellPublicationDigest != "" && !trafficConsumerDigest.MatchString(p.CellPublicationDigest) || p.FactMaxAgeSeconds < 0 || p.FactMaxAgeSeconds > policy.FactFreshnessSeconds {
 			return fmt.Errorf("invalid DNS Cell proof reference or freshness bound")
 		}
@@ -317,6 +333,9 @@ func ValidateDNSReadinessPlan(plan *DNSReadinessPlan, policy *DNSReadinessPolicy
 				if !ok || refs[id] || p.EdgeID != target.EdgeID || p.EdgeGroupID != target.EdgeGroupID || p.Address != target.Address {
 					return fmt.Errorf("DNS readiness target proof binding mismatch")
 				}
+				if p.PreviousAuthority != nil && !target.RequireSinglePublication {
+					return fmt.Errorf("DNS authority alternatives require one coherent publication per target")
+				}
 				refs[id] = true
 				used[id] = true
 			}
@@ -326,4 +345,55 @@ func ValidateDNSReadinessPlan(plan *DNSReadinessPlan, policy *DNSReadinessPolicy
 		return fmt.Errorf("orphan DNS readiness probe")
 	}
 	return nil
+}
+
+// DNSReadinessProofReferences returns only explicitly declared source digests
+// for this exact physical identity and route behavior. It grants no freshness.
+func DNSReadinessProofReferences(p DNSReadinessProbe, edge, group, digest string) []string {
+	if edge != p.EdgeID {
+		return nil
+	}
+	refs := []string{}
+	if group == p.EdgeGroupID && digest == p.RouteDigest {
+		refs = append(refs, p.CellPublicationDigest)
+	}
+	if old := p.PreviousAuthority; old != nil && group == old.EdgeGroupID && digest == old.RouteDigest {
+		refs = append(refs, old.PublicationDigest)
+	}
+	return refs
+}
+
+// Every dependency must be positive. During an authority transition all of a
+// physical target's dependencies must also belong to the same actual serving
+// publication; old and new partial proofs cannot be assembled into readiness.
+// Ordinary release refreshes retain their established compatibility behavior.
+func DNSReadinessTargetReady(target DNSReadinessTarget, lookup func(string) (string, *model.TrafficReleaseBinding, bool)) bool {
+	if len(target.ProbeIDs) == 0 {
+		return false
+	}
+	var first *model.TrafficReleaseBinding
+	group := ""
+	for _, id := range target.ProbeIDs {
+		actual, binding, ready := lookup(id)
+		if !ready {
+			return false
+		}
+		if !target.RequireSinglePublication {
+			continue
+		}
+		if binding == nil || actual == "" {
+			return false
+		}
+		if first == nil {
+			first, group = binding, actual
+		} else if group != actual || !reflect.DeepEqual(first, binding) {
+			return false
+		}
+	}
+	return true
+}
+
+func DNSReadinessProofMatches(p DNSReadinessProbe, edge, group, digest string) bool {
+	return edge == p.EdgeID && (group == p.EdgeGroupID && digest == p.RouteDigest ||
+		p.PreviousAuthority != nil && group == p.PreviousAuthority.EdgeGroupID && digest == p.PreviousAuthority.RouteDigest)
 }

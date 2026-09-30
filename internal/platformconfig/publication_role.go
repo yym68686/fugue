@@ -77,7 +77,7 @@ func validateRouteOnlyIntent(in PlatformIntent) error {
 	if in.PublicationRole == PublicationRoleCellDNS {
 		return validateCellDNSIntent(in)
 	}
-	if len(in.CellRoutePublications) != 0 {
+	if len(in.CellRoutePublications) != 0 || in.RouteAuthorityTransition != nil {
 		return fmt.Errorf("Cell references require DNS-only intent")
 	}
 	return nil

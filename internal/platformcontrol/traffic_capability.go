@@ -13,3 +13,7 @@ const CellRoutesCapabilityV1 = "cell_routes_v1"
 
 // CellDNSCapabilityV1 verifies independent DNS membership and exact embedded Cell route/TLS references.
 const CellDNSCapabilityV1 = "cell_dns_v1"
+
+// DNSAuthorityTransitionCapabilityV1 verifies signed previous global sources,
+// explicit alias equivalence and coherent per-physical-target proof alternatives.
+const DNSAuthorityTransitionCapabilityV1 = "dns_authority_transition_v1"

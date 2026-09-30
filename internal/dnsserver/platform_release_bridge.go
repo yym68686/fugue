@@ -44,7 +44,7 @@ func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) 
 	}
 	allowed := make(map[string]bool, len(oldPlan.Probes))
 	for _, probe := range oldPlan.Probes {
-		if next, exists := nextProbes[probe.ID]; exists && probe == next {
+		if next, exists := nextProbes[probe.ID]; exists && reflect.DeepEqual(probe, next) {
 			allowed[probe.ID] = true
 		}
 	}

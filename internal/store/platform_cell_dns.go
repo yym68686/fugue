@@ -1,7 +1,9 @@
 package store
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/cellpublication"
@@ -13,16 +15,19 @@ import (
 // Called while the publication transaction holds its authority locks. A DNS
 // publication cannot endorse a stale Cell fence read before that transaction.
 func validateCellDNSReferencesInState(state *model.State, child model.PlatformArtifact, keys bundleauth.Keyring) error {
-	pubs, err := cellpublication.VerifyDNSArtifact(child, keys)
+	_, err := cellpublication.VerifyDNSArtifact(child, keys)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrConflict, err)
 	}
 	fail := func() error { return fmt.Errorf("%w: referenced Cell publication is no longer selected", ErrConflict) }
-	for _, p := range pubs {
-		ref := p.Reference
+	dependencies, err := platformconfig.DNSRouteDependencies(child)
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrConflict, err)
+	}
+	for _, dependency := range dependencies {
 		var selected *model.PlatformArtifactRelease
 		for _, r := range state.PlatformArtifactReleases {
-			if r.ScopeKey != p.Parent.ScopeKey || r.ArtifactKind != model.PlatformArtifactKindReleaseSet || r.Status != model.PlatformArtifactReleaseStatusActive || (r.ReleaseChannel != "gray" && r.ReleaseChannel != "full") {
+			if r.ScopeKey != dependency.Parent.ScopeKey || r.ArtifactKind != model.PlatformArtifactKindReleaseSet || r.Status != model.PlatformArtifactReleaseStatusActive || (r.ReleaseChannel != "gray" && r.ReleaseChannel != "full") {
 				continue
 			}
 			lane, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, r.LaneKey)
@@ -38,7 +43,7 @@ func validateCellDNSReferencesInState(state *model.State, child model.PlatformAr
 				if err != nil {
 					return fail()
 				}
-				if !platformconfig.TrafficCanaryContains(groups, ref.AuthorityCellID) {
+				if !platformconfig.TrafficCanaryContains(groups, dependency.GroupID) {
 					continue
 				}
 			}
@@ -50,10 +55,13 @@ func validateCellDNSReferencesInState(state *model.State, child model.PlatformAr
 				selected = &copy
 			}
 		}
-		if selected == nil || selected.ID != ref.ReleaseID || selected.ArtifactID != ref.ReleaseSetID || selected.Generation != p.Parent.Generation || selected.FencingToken != ref.FencingToken || selected.ReleaseChannel != ref.ReleaseChannel || selected.CanaryRuleRef != ref.CanaryRuleRef {
+		if selected == nil || selected.ID != dependency.ReleaseID || selected.ArtifactID != dependency.Parent.ID || selected.Generation != dependency.Parent.Generation || selected.FencingToken != dependency.FencingToken || selected.ReleaseChannel != dependency.ReleaseChannel || selected.CanaryRuleRef != dependency.CanaryRuleRef {
 			return fail()
 		}
-		for _, embedded := range []model.PlatformArtifact{p.Parent, p.Route, p.TLS} {
+		if dependency.RequireVerified && (selected.VerificationState != model.PlatformArtifactVerificationStateVerified || selected.VerifiedLKGGeneration != dependency.Parent.Generation) {
+			return fail()
+		}
+		for _, embedded := range dependency.Artifacts {
 			index := platformArtifactIndex(state.PlatformArtifacts, embedded.ID)
 			if index < 0 {
 				return fail()
@@ -65,4 +73,34 @@ func validateCellDNSReferencesInState(state *model.State, child model.PlatformAr
 		}
 	}
 	return nil
+}
+
+// ValidateDNSPublicationReferences checks one coherent read snapshot during
+// compilation. Serving publication repeats these same checks under its own
+// transaction; compiling immutable content is never a serving grant.
+func (s *Store) ValidateDNSPublicationReferences(child model.PlatformArtifact) error {
+	dependencies, err := platformconfig.DNSRouteDependencies(child)
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrConflict, err)
+	}
+	if len(dependencies) == 0 {
+		return nil
+	}
+	keys := s.platformArtifactSigningKeyring()
+	if s.db == nil {
+		return s.withLockedState(false, func(state *model.State) error { return validateCellDNSReferencesInState(state, child, keys) })
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{child}}
+	parent := model.PlatformArtifact{ScopeKey: child.ScopeKey, Content: map[string]any{"publication_role": platformconfig.PublicationRoleCellDNS}}
+	if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
+		return err
+	}
+	return validateCellDNSReferencesInState(state, child, keys)
 }

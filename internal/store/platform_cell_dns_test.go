@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -12,10 +14,11 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/schemamigrate"
 	"fugue/internal/testfixture/celldns"
 )
 
-func TestCellDNSPublicationAndLKG(t *testing.T) { testCellDNSPublication(t, "") }
+func TestCellDNSPublicationAndLKG(t *testing.T) { testCellDNSPublication(t, "", false) }
 func TestCellDNSPublicationAndLKGPostgres(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if address == "" {
@@ -25,62 +28,108 @@ func TestCellDNSPublicationAndLKGPostgres(t *testing.T) {
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
 		t.Fatal("requires disposable loopback database")
 	}
-	testCellDNSPublication(t, address)
+	testCellDNSPublication(t, address, false)
 }
 
 func seedCellDNSRoutePublications(t *testing.T, s *Store, req *platformconfig.CompileRequest) {
 	t.Helper()
-	for i := range req.CellRoutePublications {
-		p := &req.CellRoutePublications[i]
-		for _, a := range []*model.PlatformArtifact{&p.Parent, &p.Route, &p.TLS} {
+	storeArtifacts := func(artifacts ...*model.PlatformArtifact) {
+		for _, a := range artifacts {
 			stored, _, err := s.EnsurePlatformArtifact(*a)
 			if err != nil {
 				t.Fatal(err)
 			}
 			*a = stored
 		}
-		r := celldns.Publication(*p)
-		r.Scope = p.Parent.Scope
-		r.Version = 1
-		r.CreatedAt = r.ReleasedAt
-		r.UpdatedAt = r.ReleasedAt
-		r.OverrideMode = model.PlatformArtifactOverrideModeNone
+	}
+	for i := range req.CellRoutePublications {
+		p := &req.CellRoutePublications[i]
+		storeArtifacts(&p.Parent, &p.Route, &p.TLS)
+		seedDNSRouteRelease(t, s, celldns.Publication(*p))
+	}
+	if p := req.PreviousTrafficPublication; p != nil {
+		storeArtifacts(&p.Parent, &p.Route, &p.TLS, &p.DNS)
+		seedDNSRouteRelease(t, s, celldns.PreviousPublication(*p))
+	}
+}
 
-		if s.db == nil {
-			if err := s.withLockedState(true, func(state *model.State) error {
-				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
-				state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, FencingToken: r.FencingToken, Version: 1, ActiveReleaseID: r.ID, UpdatedAt: r.ReleasedAt})
-				return nil
-			}); err != nil {
-				t.Fatal(err)
+func seedDNSRouteRelease(t *testing.T, s *Store, r model.PlatformArtifactRelease) {
+	t.Helper()
+	r.Version = 1
+	r.CreatedAt, r.UpdatedAt = r.ReleasedAt, r.ReleasedAt
+	r.OverrideMode = model.PlatformArtifactOverrideModeNone
+	if s.db == nil {
+		if err := s.withLockedState(true, func(state *model.State) error {
+			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
+			state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, FencingToken: r.FencingToken, Version: 1, ActiveReleaseID: r.ID, UpdatedAt: r.ReleasedAt})
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := pgNextPlatformReleaseLane(ctx, tx, r.ArtifactKind, r.ScopeKey, r.ReleaseChannel, r.ReleasedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pgInsertPlatformArtifactRelease(ctx, tx, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := pgSetPlatformReleaseLaneActive(ctx, tx, r.LaneKey, r.ID, r.FencingToken, r.ReleasedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testCellDNSPublication(t *testing.T, address string, transition bool) {
+	s := New(t.TempDir()+"/state.json", address)
+	if address != "" {
+		base, err := sql.Open("pgx", address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		schema := fmt.Sprintf("cell_dns_%d", time.Now().UnixNano())
+		if _, err := base.Exec("CREATE SCHEMA " + schema); err != nil {
+			base.Close()
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if _, err := base.Exec("DROP SCHEMA " + schema + " CASCADE"); err != nil {
+				t.Error(err)
 			}
-		} else {
-			ctx := context.Background()
-			tx, err := s.db.BeginTx(ctx, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err = pgNextPlatformReleaseLane(ctx, tx, r.ArtifactKind, r.ScopeKey, r.ReleaseChannel, r.ReleasedAt); err != nil {
-				tx.Rollback()
-				t.Fatal(err)
-			}
-			if _, err = pgInsertPlatformArtifactRelease(ctx, tx, r); err != nil {
-				tx.Rollback()
-				t.Fatal(err)
-			}
-			if err = pgSetPlatformReleaseLaneActive(ctx, tx, r.LaneKey, r.ID, r.FencingToken, r.ReleasedAt); err != nil {
-				tx.Rollback()
-				t.Fatal(err)
-			}
-			if err = tx.Commit(); err != nil {
+			base.Close()
+		})
+		address = postgresIntegrationURLWithSearchPath(t, address, schema)
+		db, err := sql.Open("pgx", address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s = &Store{db: db, databaseURL: address}
+		ctx := context.Background()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.applyPostgresSchemaTx(ctx, tx); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		for _, migrate := range []func(context.Context, string) error{schemamigrate.MigratePlatformState, schemamigrate.MigrateImageCacheManifestGraph, schemamigrate.MigrateEdgeInstanceFencing, schemamigrate.MigrateSourceUploadSessions} {
+			if err := migrate(ctx, address); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-}
-
-func testCellDNSPublication(t *testing.T, address string) {
-	s := New(t.TempDir()+"/state.json", address)
 	s.ConfigurePlatformArtifactSigning(celldns.Keys())
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
@@ -89,11 +138,18 @@ func testCellDNSPublication(t *testing.T, address string) {
 		t.Cleanup(func() { s.db.Close() })
 	}
 	req := celldns.Request(t)
+	if transition {
+		req = celldns.TransitionRequest(t)
+	}
 	seedCellDNSRoutePublications(t, s, &req)
 	compiled, err := platformconfig.Compile(req)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := s.ValidateDNSPublicationReferences(compiled.DNSArtifact); err != nil {
+		t.Fatal("coherent compilation reference snapshot rejected", err)
+	}
+
 	save := func(a model.PlatformArtifact) model.PlatformArtifact {
 		t.Helper()
 		a, err := s.CreatePlatformArtifact(a)
@@ -153,6 +209,10 @@ func testCellDNSPublication(t *testing.T, address string) {
 	}
 	legacyCaps := []string{platformcontrol.TrafficReleaseCapabilityV1}
 	fullCaps := []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1}
+	if transition {
+		legacyCaps = append([]string(nil), fullCaps...)
+		fullCaps = append(fullCaps, platformcontrol.DNSAuthorityTransitionCapabilityV1)
+	}
 	report(shadow, 1, legacyCaps, false)
 	grayRequest := model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=complete"}
 	if _, _, _, _, err = s.ReleasePlatformArtifact(parent.ID, grayRequest, testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
@@ -165,11 +225,19 @@ func testCellDNSPublication(t *testing.T, address string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = pgLockPromotionScope(context.Background(), tx, req.CellRoutePublications[0].Parent.ScopeKey, true); err != nil {
+		scope := req.CellRoutePublications[0].Parent.ScopeKey
+		if transition {
+			scope = "global"
+		}
+		if err = pgLockPromotionScope(context.Background(), tx, scope, true); err != nil {
 			tx.Rollback()
 			t.Fatal(err)
 		}
 		started := time.Now()
+		if err := s.ValidateDNSPublicationReferences(compiled.DNSArtifact); !errors.Is(err, ErrConflict) || time.Since(started) > 2*time.Second {
+			t.Fatal("compilation waited on changing authority", err)
+		}
+		started = time.Now()
 		_, _, _, _, err = s.ReleasePlatformArtifact(parent.ID, grayRequest, testPlatformPrincipal())
 		tx.Rollback()
 		if !errors.Is(err, ErrConflict) || time.Since(started) > 2*time.Second {
@@ -249,4 +317,17 @@ func TestCellDNSAdmissionRejectsChangedReferencedAuthority(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDNSAuthorityTransitionPublicationAndLKG(t *testing.T) { testCellDNSPublication(t, "", true) }
+func TestDNSAuthorityTransitionPublicationAndLKGPostgres(t *testing.T) {
+	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
+	if address == "" {
+		t.Skip("set disposable test database")
+	}
+	u, err := url.Parse(address)
+	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
+		t.Fatal("requires disposable loopback database")
+	}
+	testCellDNSPublication(t, address, true)
 }

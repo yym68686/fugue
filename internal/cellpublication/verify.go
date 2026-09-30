@@ -39,5 +39,26 @@ func VerifyDNSArtifact(a model.PlatformArtifact, keys bundleauth.Keyring) ([]pla
 			return nil, err
 		}
 	}
+	previous, err := platformconfig.DecodePreviousTrafficPublication(a)
+	if err != nil {
+		return nil, err
+	}
+	if previous != nil {
+		if err := VerifyPreviousInput(*previous, keys); err != nil {
+			return nil, err
+		}
+	}
 	return pubs, nil
+}
+
+func VerifyPreviousInput(p platformconfig.PreviousTrafficPublicationInput, keys bundleauth.Keyring) error {
+	if err := platformconfig.ValidatePreviousTrafficPublication(p); err != nil {
+		return err
+	}
+	for _, a := range []model.PlatformArtifact{p.Parent, p.Route, p.TLS, p.DNS} {
+		if !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass {
+			return fmt.Errorf("previous traffic artifact signature rejected")
+		}
+	}
+	return nil
 }

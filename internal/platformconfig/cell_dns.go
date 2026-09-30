@@ -12,6 +12,9 @@ import (
 )
 
 func validateCellDNSIntent(in PlatformIntent) error {
+	if _, err := RouteAuthorityAliases(in); err != nil {
+		return err
+	}
 	if len(in.Routes) != 0 || len(in.TLS) != 0 || len(in.CachePolicies) != 0 || in.ApplicationDomains != nil || len(in.DNSConsumers) == 0 || ValidateDNSConsumers(in.DNSConsumers) != nil || in.EdgeTopology == nil || in.EdgeTopology.Validate() != nil || len(in.CellRoutePublications) < 1 || len(in.CellRoutePublications) > 16 {
 		return fmt.Errorf("DNS-only intent requires independent consumers, explicit topology and exact Cell references, without route/TLS configuration")
 	}
@@ -88,8 +91,11 @@ func cellDNSConstraintAllows(c EdgeSelectionConstraint, edge edgetopology.Edge) 
 // Each Cell supplies its own route projection and hard route constraints.
 // Combining these immutable inputs never recompiles a Cell's routes under DNS
 // policy. Quorum counts physical Edges once, including across IP families.
-func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePublicationInput, snapshot RuntimeSnapshot, policy PolicySnapshot) (*DNSReadinessPlan, error) {
+func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePublicationInput, snapshot RuntimeSnapshot, policy PolicySnapshot, previous *PreviousTrafficPublicationInput) (*DNSReadinessPlan, error) {
 	if err := validateCellDNSInputs(intent, publications, snapshot); err != nil {
+		return nil, err
+	}
+	if err := validateRouteAuthorityTransitionInputs(intent, publications, previous); err != nil {
 		return nil, err
 	}
 	if policy.DNSReadiness == nil || ValidateDNSReadinessPolicy(policy.DNSReadiness) != nil || validateDNSEdgeEndpoints(snapshot.DNSEdgeEndpoints, snapshot.CapturedAt) != nil {
@@ -256,6 +262,11 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 	}
 	sort.Slice(out.Probes, func(i, j int) bool { return out.Probes[i].ID < out.Probes[j].ID })
 	sort.Slice(out.Records, func(i, j int) bool { return out.Records[i].Hostname < out.Records[j].Hostname })
+	if previous != nil {
+		if err := addPreviousAuthorityRequirements(out, intent, *previous, policy); err != nil {
+			return nil, err
+		}
+	}
 	return out, ValidateDNSReadinessPlan(out, policy.DNSReadiness)
 }
 
@@ -282,12 +293,12 @@ func ValidateDNSCellPlan(artifact model.PlatformArtifact) error {
 		return fmt.Errorf("invalid DNS readiness content")
 	}
 	if len(pubs) == 0 {
-		if payload.Source != nil {
+		if payload.Source != nil || artifact.Content["previous_traffic_publication"] != nil {
 			return fmt.Errorf("DNS Cell source in ordinary publication")
 		}
 		if payload.Plan != nil {
 			for _, p := range payload.Plan.Probes {
-				if p.CellPublicationDigest != "" {
+				if p.CellPublicationDigest != "" || p.PreviousAuthority != nil {
 					return fmt.Errorf("foreign Cell proof in ordinary DNS")
 				}
 			}
@@ -305,7 +316,11 @@ func ValidateDNSCellPlan(artifact model.PlatformArtifact) error {
 	if _, err := CompileTrafficConsumerTopology(payload.Source.Intent, payload.Policy); err != nil {
 		return err
 	}
-	want, err := compileCellDNSReadiness(payload.Source.Intent, pubs, RuntimeSnapshot{DNSEdgeEndpoints: payload.Source.Endpoints, CapturedAt: payload.Source.CapturedAt}, payload.Policy)
+	previous, err := DecodePreviousTrafficPublication(artifact)
+	if err != nil {
+		return err
+	}
+	want, err := compileCellDNSReadiness(payload.Source.Intent, pubs, RuntimeSnapshot{DNSEdgeEndpoints: payload.Source.Endpoints, CapturedAt: payload.Source.CapturedAt}, payload.Policy, previous)
 	if err != nil {
 		return err
 	}

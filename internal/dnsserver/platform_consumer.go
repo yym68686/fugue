@@ -175,7 +175,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		DesiredGeneration: chosen.ExpectedGeneration, ActualGeneration: status.ServingGeneration, LKGGeneration: status.LKGGeneration,
 		ApplyStatus: "staged", ProbeStatus: "shadow_validated", ServingLKG: status.StaleCache, LKGExpired: status.MaxStaleExceeded,
 	}
-	heartbeat.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1}
+	heartbeat.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.DNSAuthorityTransitionCapabilityV1}
 	heartbeat.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat)
 	if err != nil {
 		return errors.New("encode platform heartbeat evidence failed")
@@ -234,16 +234,17 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 		return dnsCandidateCounts{}, err
 	}
 	var payload struct {
-		CellRoutePublications []platformconfig.CellRoutePublicationInput `json:"cell_route_publications,omitempty"`
-		CellDNSSource         *platformconfig.CellDNSPlanSource          `json:"cell_dns_source,omitempty"`
-		Schema                string                                     `json:"schema_version"`
-		Generation            string                                     `json:"generation"`
-		Records               []platformconfig.DNSIntent                 `json:"records"`
-		ConsumerViews         []platformconfig.DNSConsumerView           `json:"consumer_views,omitempty"`
-		ReadinessPlan         *platformconfig.DNSReadinessPlan           `json:"readiness_plan,omitempty"`
-		QueryViews            []platformconfig.DNSQueryView              `json:"query_views,omitempty"`
-		Policy                platformconfig.PolicySnapshot              `json:"policy"`
-		Lineage               platformconfig.Lineage                     `json:"lineage"`
+		PreviousTrafficPublication *platformconfig.PreviousTrafficPublicationInput `json:"previous_traffic_publication,omitempty"`
+		CellRoutePublications      []platformconfig.CellRoutePublicationInput      `json:"cell_route_publications,omitempty"`
+		CellDNSSource              *platformconfig.CellDNSPlanSource               `json:"cell_dns_source,omitempty"`
+		Schema                     string                                          `json:"schema_version"`
+		Generation                 string                                          `json:"generation"`
+		Records                    []platformconfig.DNSIntent                      `json:"records"`
+		ConsumerViews              []platformconfig.DNSConsumerView                `json:"consumer_views,omitempty"`
+		ReadinessPlan              *platformconfig.DNSReadinessPlan                `json:"readiness_plan,omitempty"`
+		QueryViews                 []platformconfig.DNSQueryView                   `json:"query_views,omitempty"`
+		Policy                     platformconfig.PolicySnapshot                   `json:"policy"`
+		Lineage                    platformconfig.Lineage                          `json:"lineage"`
 	}
 	raw, err := json.Marshal(c.Artifact.Content)
 	if err != nil {

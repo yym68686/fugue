@@ -208,6 +208,25 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 				return fail()
 			}
 			candidateSource.cellBindings = map[string]*model.TrafficReleaseBinding{}
+			if payload.PreviousTrafficPublication != nil {
+				if payload.CellDNSSource == nil {
+					return fail()
+				}
+				aliases, err := platformconfig.RouteAuthorityAliases(payload.CellDNSSource.Intent)
+				if err != nil {
+					return fail()
+				}
+				digest, _ := platformconfig.Digest(payload.PreviousTrafficPublication.Reference)
+				for group := range aliases {
+					binding, err := platformconfig.PreviousTrafficPublicationBinding(*payload.PreviousTrafficPublication, group)
+					if err != nil {
+						return fail()
+					}
+					candidateSource.cellBindings[digest] = binding
+					break
+				}
+			}
+
 			for _, input := range pubs {
 				b, err := platformconfig.CellRoutePublicationBinding(input)
 				if err != nil {
@@ -365,21 +384,27 @@ func evaluateDNSRuntimeSnapshot(snapshot dnsfacts.Snapshot, source dnsFactSource
 		requirements[p.ID] = p
 	}
 	seen, valid := map[string]bool{}, map[string]bool{}
+	factsByID := map[string]dnsfacts.Probe{}
 	for _, fact := range snapshot.Facts {
 		req, found := requirements[fact.ProbeID]
 		if !found || seen[fact.ProbeID] {
 			return fail()
 		}
 		seen[fact.ProbeID] = true
+		factsByID[fact.ProbeID] = fact
 		if !fact.Ready {
 			continue
 		}
 		p, b := fact.Proof, fact.Proof.TrafficRelease
-		expectedBinding := source.trafficBinding
+		bindingMatches := source.trafficBinding != nil && reflect.DeepEqual(b, source.trafficBinding)
 		if source.payload.Policy.PublicationRole == platformconfig.PublicationRoleCellDNS {
-			expectedBinding = source.cellBindings[req.CellPublicationDigest]
+			bindingMatches = false
+			for _, ref := range platformconfig.DNSReadinessProofReferences(req, p.EdgeID, p.GroupID, p.Digest) {
+				expected := source.cellBindings[ref]
+				bindingMatches = bindingMatches || expected != nil && reflect.DeepEqual(b, expected)
+			}
 		}
-		if p.Digest != req.RouteDigest || p.EdgeID != req.EdgeID || p.GroupID != req.EdgeGroupID || p.State != req.State || p.Version == "" || p.CheckedAt.IsZero() || p.CheckedAt.After(snapshot.EvaluatedAt) || p.ValidUntil.After(p.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(req, policy))*time.Second)) || b == nil || expectedBinding == nil || !reflect.DeepEqual(b, expectedBinding) {
+		if !platformconfig.DNSReadinessProofMatches(req, p.EdgeID, p.GroupID, p.Digest) || p.State != req.State || p.Version == "" || p.CheckedAt.IsZero() || p.CheckedAt.After(snapshot.EvaluatedAt) || p.ValidUntil.After(p.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(req, policy))*time.Second)) || b == nil || !bindingMatches {
 			return fail()
 		}
 		valid[fact.ProbeID] = p.ValidUntil.After(now) && snapshot.CheckpointValidUntil.After(now)
@@ -387,15 +412,10 @@ func evaluateDNSRuntimeSnapshot(snapshot dnsfacts.Snapshot, source dnsFactSource
 	ready := snapshot.Ready && snapshot.CheckpointValidUntil.After(now)
 	for _, record := range plan.Records {
 		ready = ready && platformconfig.DNSReadinessQuorum(record, func(target platformconfig.DNSReadinessTarget) bool {
-			if len(target.ProbeIDs) == 0 {
-				return false
-			}
-			for _, id := range target.ProbeIDs {
-				if !valid[id] {
-					return false
-				}
-			}
-			return true
+			return platformconfig.DNSReadinessTargetReady(target, func(id string) (string, *model.TrafficReleaseBinding, bool) {
+				fact := factsByID[id]
+				return fact.Proof.GroupID, fact.Proof.TrafficRelease, valid[id]
+			})
 		})
 	}
 	ids := []string{}

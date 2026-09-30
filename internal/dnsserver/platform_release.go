@@ -14,18 +14,21 @@ import (
 )
 
 type dnsServingPayload struct {
-	CellRoutePublications []platformconfig.CellRoutePublicationInput `json:"cell_route_publications,omitempty"`
-	CellDNSSource         *platformconfig.CellDNSPlanSource          `json:"cell_dns_source,omitempty"`
-	cellBindings          map[string]*model.TrafficReleaseBinding
-	cellNodes             map[string]string
-	Schema                string                           `json:"schema_version"`
-	Generation            string                           `json:"generation"`
-	Records               []platformconfig.DNSIntent       `json:"records"`
-	Views                 []platformconfig.DNSConsumerView `json:"consumer_views"`
-	Plan                  *platformconfig.DNSReadinessPlan `json:"readiness_plan"`
-	Queries               []platformconfig.DNSQueryView    `json:"query_views"`
-	Policy                platformconfig.PolicySnapshot    `json:"policy"`
-	Lineage               platformconfig.Lineage           `json:"lineage"`
+	PreviousTrafficPublication *platformconfig.PreviousTrafficPublicationInput `json:"previous_traffic_publication,omitempty"`
+	previousBindings           map[string]*model.TrafficReleaseBinding
+	previousCells              map[string]string
+	CellRoutePublications      []platformconfig.CellRoutePublicationInput `json:"cell_route_publications,omitempty"`
+	CellDNSSource              *platformconfig.CellDNSPlanSource          `json:"cell_dns_source,omitempty"`
+	cellBindings               map[string]*model.TrafficReleaseBinding
+	cellNodes                  map[string]string
+	Schema                     string                           `json:"schema_version"`
+	Generation                 string                           `json:"generation"`
+	Records                    []platformconfig.DNSIntent       `json:"records"`
+	Views                      []platformconfig.DNSConsumerView `json:"consumer_views"`
+	Plan                       *platformconfig.DNSReadinessPlan `json:"readiness_plan"`
+	Queries                    []platformconfig.DNSQueryView    `json:"query_views"`
+	Policy                     platformconfig.PolicySnapshot    `json:"policy"`
+	Lineage                    platformconfig.Lineage           `json:"lineage"`
 }
 
 func (s *Service) verifyDNSServingRelease(parent model.PlatformArtifact, c dnsPlatformCandidate) (dnsServingPayload, string, error) {
@@ -157,11 +160,21 @@ func (s *Service) platformDNSKeys() bundleauth.Keyring {
 
 func dnsProofMatchesRelease(proof routeprobe.Proof, parent model.PlatformArtifact, c dnsPlatformCandidate, routeID string, payload ...dnsServingPayload) bool {
 	if parent.Content["publication_role"] == platformconfig.PublicationRoleCellDNS {
-		if len(payload) != 1 || payload[0].cellNodes[proof.EdgeID] != proof.GroupID {
+		if len(payload) != 1 {
 			return false
 		}
-		b := payload[0].cellBindings[proof.GroupID]
-		return b != nil && reflect.DeepEqual(b, proof.TrafficRelease)
+		p := payload[0]
+		cell := p.cellNodes[proof.EdgeID]
+		if cell == proof.GroupID {
+			if b := p.cellBindings[cell]; b != nil && reflect.DeepEqual(b, proof.TrafficRelease) {
+				return true
+			}
+		}
+		if cell != "" && p.previousCells[proof.GroupID] == cell {
+			b := p.previousBindings[proof.GroupID]
+			return b != nil && reflect.DeepEqual(b, proof.TrafficRelease)
+		}
+		return false
 	}
 	b := proof.TrafficRelease
 	return b != nil && b.ReleaseSetID == parent.ID && b.ReleaseSetDigest == parent.ContentHash && b.RouteArtifactID == routeID && b.PolicyDigest == c.Artifact.Metadata["policy_digest"] && b.IntentDigest == c.Artifact.Metadata["intent_digest"] && b.InputSnapshotDigest == c.Artifact.Metadata["input_snapshot_digest"] && b.ReleaseID == c.Release.ID && b.ReleaseChannel == c.Release.ReleaseChannel && b.FencingToken == c.Release.FencingToken && b.ScopeKey == c.Assignment.ScopeKey
@@ -170,6 +183,24 @@ func dnsProofMatchesRelease(proof routeprobe.Proof, parent model.PlatformArtifac
 func populateDNSCellBindings(p *dnsServingPayload) error {
 	if len(p.CellRoutePublications) == 0 {
 		return nil
+	}
+	p.previousBindings = map[string]*model.TrafficReleaseBinding{}
+	if p.PreviousTrafficPublication != nil {
+		if p.CellDNSSource == nil {
+			return errors.New("DNS transition source missing")
+		}
+		aliases, err := platformconfig.RouteAuthorityAliases(p.CellDNSSource.Intent)
+		if err != nil {
+			return err
+		}
+		p.previousCells = aliases
+		for group := range aliases {
+			binding, err := platformconfig.PreviousTrafficPublicationBinding(*p.PreviousTrafficPublication, group)
+			if err != nil {
+				return err
+			}
+			p.previousBindings[group] = binding
+		}
 	}
 	p.cellBindings = map[string]*model.TrafficReleaseBinding{}
 	p.cellNodes = map[string]string{}

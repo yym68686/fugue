@@ -14,7 +14,21 @@ import (
 )
 
 func TestCellDNSServingUsesExactIndependentProofsAndOfflineRecovery(t *testing.T) {
-	c := celldns.Compile(t, celldns.Request(t))
+	for _, transition := range []bool{false, true} {
+		name := "neutral-only"
+		if transition {
+			name = "authority-transition"
+		}
+		t.Run(name, func(t *testing.T) { testCellDNSServingUsesExactIndependentProofs(t, transition) })
+	}
+}
+
+func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool) {
+	request := celldns.Request(t)
+	if transition {
+		request = celldns.TransitionRequest(t)
+	}
+	c := celldns.Compile(t, request)
 	keys := celldns.Keys()
 	s := NewService(config.DNSConfig{DNSNodeID: "dns-a", EdgeGroupID: "cell-dns", PlatformScopeKey: platformconfig.AuthorityCellScope("cell-dns"), Zone: "example.test", BundleSigningKey: keys.PrimaryKey, BundleSigningKeyID: keys.PrimaryKeyID}, nil)
 	now := time.Now().UTC()
@@ -28,6 +42,11 @@ func TestCellDNSServingUsesExactIndependentProofsAndOfflineRecovery(t *testing.T
 	facts := []dnsReadinessFact{}
 	for _, req := range p.Plan.Probes {
 		proof := routeprobe.Proof{Digest: req.RouteDigest, Version: "observed-bundle", EdgeID: req.EdgeID, GroupID: req.EdgeGroupID, CheckedAt: now, ValidUntil: now.Add(20 * time.Second), TrafficRelease: p.cellBindings[req.EdgeGroupID]}
+		if transition && req.EdgeID == "edge-a" {
+			old := req.PreviousAuthority
+			proof.GroupID, proof.Digest, proof.TrafficRelease = old.EdgeGroupID, old.RouteDigest, p.previousBindings[old.EdgeGroupID]
+		}
+
 		if !dnsProofMatchesRelease(proof, c.ReleaseArtifact, candidate, routeID, p) {
 			t.Fatal("exact Cell proof rejected")
 		}
@@ -85,8 +104,36 @@ func TestCellDNSServingUsesExactIndependentProofsAndOfflineRecovery(t *testing.T
 		t.Fatal("checkpoint fabricated readiness after restart")
 	}
 	snapshot, err := dnsRuntimeFacts(st, now)
-	if err != nil || !snapshot.Ready || snapshot.RouteArtifactID != "" || len(snapshot.Facts) != 2 {
+	if err != nil || !snapshot.Ready || snapshot.RouteArtifactID != "" || len(snapshot.Facts) != len(p.Plan.Probes) {
 		t.Fatal("independent runtime observations invalid", err)
+	}
+	if transition {
+		// Both sources are individually valid, but one old path plus one new
+		// path on a single endpoint cannot satisfy that endpoint's dependency set.
+		mixed := append([]dnsReadinessFact(nil), facts...)
+		for i, fact := range mixed {
+			if fact.Proof.EdgeID != "edge-a" {
+				continue
+			}
+			for _, req := range p.Plan.Probes {
+				if req.ID != fact.ProbeID {
+					continue
+				}
+				mixed[i].Proof.GroupID, mixed[i].Proof.Digest, mixed[i].Proof.TrafficRelease = req.EdgeGroupID, req.RouteDigest, p.cellBindings[req.EdgeGroupID]
+			}
+			break
+		}
+		incoherent, err := buildDNSServingState(recovered, p, routeID, "dns-a", "cell-dns", mixed, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if answer := incoherent.answer(question, "", now); answer.Rcode != dns.RcodeServerFailure {
+			t.Fatal("mixed authority paths satisfied physical quorum", answer)
+		}
+		facts, err := dnsRuntimeFacts(incoherent, now)
+		if err != nil || facts.Ready {
+			t.Fatal("mixed authority runtime facts claimed readiness", err)
+		}
 	}
 	// A re-signed DNS envelope cannot conceal an untrusted embedded Cell.
 	// It also cannot classify an active route as an omitted inactive route:
@@ -110,6 +157,18 @@ func TestCellDNSServingUsesExactIndependentProofsAndOfflineRecovery(t *testing.T
 	if _, _, err := s.verifyDNSServingRelease(c.ReleaseArtifact, copy); err == nil {
 		t.Fatal("untrusted embedded Cell signature accepted")
 	}
+	if transition {
+		copy = candidate
+		encoded, _ = json.Marshal(candidate.Artifact)
+		json.Unmarshal(encoded, &copy.Artifact)
+		copy.Artifact.Content["previous_traffic_publication"].(map[string]any)["dns"].(map[string]any)["provenance"].(map[string]any)["signature"] = "forged"
+		copy.Artifact = celldns.Sign(t, copy.Artifact, copy.Artifact.ID, 1)
+		copy.Assignment.ContentHash = copy.Artifact.ContentHash
+		if _, _, err := s.verifyDNSServingRelease(c.ReleaseArtifact, copy); err == nil {
+			t.Fatal("untrusted previous endpoint ownership signature accepted")
+		}
+	}
+
 }
 
 func TestCellDNSOmittedInactiveRouteStaysAbsentAfterOfflineRecovery(t *testing.T) {

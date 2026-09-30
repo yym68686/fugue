@@ -122,9 +122,9 @@ func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadi
 					fact.Reason = "probe_unavailable"
 				case err != nil:
 					fact.Reason = "probe_failed"
-				case proof.Digest != requirement.RouteDigest:
+				case proof.Digest != requirement.RouteDigest && (requirement.PreviousAuthority == nil || proof.Digest != requirement.PreviousAuthority.RouteDigest):
 					fact.Reason = "route_digest_mismatch"
-				case proof.EdgeID != requirement.EdgeID || proof.GroupID != requirement.EdgeGroupID:
+				case !platformconfig.DNSReadinessProofMatches(requirement, proof.EdgeID, proof.GroupID, proof.Digest):
 					fact.Reason = "endpoint_identity_mismatch"
 				case proof.State != requirement.State:
 					fact.Reason = "route_state_mismatch"
@@ -205,15 +205,10 @@ func summarizeDNSReadiness(plan *platformconfig.DNSReadinessPlan, policy *platfo
 	status.FailedProbes = status.Probes - status.ReadyProbes
 	for _, record := range plan.Records {
 		if platformconfig.DNSReadinessQuorum(record, func(target platformconfig.DNSReadinessTarget) bool {
-			if len(target.ProbeIDs) == 0 {
-				return false
-			}
-			for _, id := range target.ProbeIDs {
-				if !valid[id] {
-					return false
-				}
-			}
-			return true
+			return platformconfig.DNSReadinessTargetReady(target, func(id string) (string, *model.TrafficReleaseBinding, bool) {
+				fact, ok := validFacts[id]
+				return fact.Proof.GroupID, fact.Proof.TrafficRelease, ok
+			})
 		}) {
 			status.ReadyRecords++
 		}
@@ -243,7 +238,7 @@ func validDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy *platf
 	}
 	for _, fact := range facts {
 		requirement, exists := requirements[fact.ProbeID]
-		if !exists || duplicate[fact.ProbeID] || fact.Proof.Digest != requirement.RouteDigest || fact.Proof.EdgeID != requirement.EdgeID || fact.Proof.GroupID != requirement.EdgeGroupID || fact.Proof.State != requirement.State || fact.Proof.Version == "" || fact.Proof.ValidUntil.After(fact.Proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy))*time.Second)) {
+		if !exists || duplicate[fact.ProbeID] || !platformconfig.DNSReadinessProofMatches(requirement, fact.Proof.EdgeID, fact.Proof.GroupID, fact.Proof.Digest) || fact.Proof.State != requirement.State || fact.Proof.Version == "" || fact.Proof.ValidUntil.After(fact.Proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy))*time.Second)) {
 			continue
 		}
 		if !fact.Ready || fact.Proof.CheckedAt.IsZero() || fact.Proof.CheckedAt.After(now) || !fact.Proof.ValidUntil.After(now) {

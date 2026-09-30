@@ -230,6 +230,10 @@ func materializeDNSQueries(view platformconfig.DNSQueryView, plan *platformconfi
 					until = f.Proof.ValidUntil
 				}
 			}
+			ready = ready && platformconfig.DNSReadinessTargetReady(target, func(id string) (string, *model.TrafficReleaseBinding, bool) {
+				fact, ok := valid[id]
+				return fact.Proof.GroupID, fact.Proof.TrafficRelease, ok
+			})
 			if !ready || until.Sub(now) < time.Second {
 				continue
 			}

@@ -19,11 +19,12 @@ import (
 )
 
 type platformConfigCompileRequest struct {
-	CellRoutePublications []platformconfig.CellRoutePublicationInput `json:"cell_route_publications,omitempty"`
-	Intent                platformconfig.PlatformIntent              `json:"intent"`
-	Policy                platformconfig.PolicySnapshot              `json:"policy"`
-	RuntimeSnapshot       platformconfig.RuntimeSnapshot             `json:"runtime_snapshot,omitempty"`
-	InputSnapshot         map[string]any                             `json:"input_snapshot,omitempty"`
+	PreviousTrafficPublication *platformconfig.PreviousTrafficPublicationInput `json:"previous_traffic_publication,omitempty"`
+	CellRoutePublications      []platformconfig.CellRoutePublicationInput      `json:"cell_route_publications,omitempty"`
+	Intent                     platformconfig.PlatformIntent                   `json:"intent"`
+	Policy                     platformconfig.PolicySnapshot                   `json:"policy"`
+	RuntimeSnapshot            platformconfig.RuntimeSnapshot                  `json:"runtime_snapshot,omitempty"`
+	InputSnapshot              map[string]any                                  `json:"input_snapshot,omitempty"`
 }
 
 type platformConfigCompileResponse struct {
@@ -62,12 +63,12 @@ func (s *Server) handleCompilePlatformConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{
-		CellRoutePublications: request.CellRoutePublications,
-		Intent:                request.Intent,
-		Policy:                request.Policy,
-		RuntimeSnapshot:       request.RuntimeSnapshot,
-		InputSnapshot:         request.InputSnapshot,
-		CreatedAt:             time.Now().UTC(),
+		PreviousTrafficPublication: request.PreviousTrafficPublication, CellRoutePublications: request.CellRoutePublications,
+		Intent:          request.Intent,
+		Policy:          request.Policy,
+		RuntimeSnapshot: request.RuntimeSnapshot,
+		InputSnapshot:   request.InputSnapshot,
+		CreatedAt:       time.Now().UTC(),
 	})
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -82,10 +83,11 @@ func (s *Server) handleCompilePlatformConfig(w http.ResponseWriter, r *http.Requ
 }
 
 type platformConfigCompileArtifactsRequest struct {
-	CellRoutePublications []platformconfig.CellRoutePublicationInput `json:"cell_route_publications,omitempty"`
-	IntentArtifactID      string                                     `json:"intent_artifact_id"`
-	PolicyArtifactID      string                                     `json:"policy_artifact_id"`
-	RuntimeSnapshot       platformconfig.RuntimeSnapshot             `json:"runtime_snapshot,omitempty"`
+	PreviousTrafficPublication *platformconfig.PreviousTrafficPublicationInput `json:"previous_traffic_publication,omitempty"`
+	CellRoutePublications      []platformconfig.CellRoutePublicationInput      `json:"cell_route_publications,omitempty"`
+	IntentArtifactID           string                                          `json:"intent_artifact_id"`
+	PolicyArtifactID           string                                          `json:"policy_artifact_id"`
+	RuntimeSnapshot            platformconfig.RuntimeSnapshot                  `json:"runtime_snapshot,omitempty"`
 }
 
 // handleCompilePlatformConfigFromArtifacts compiles only immutable validated
@@ -173,7 +175,7 @@ func (s *Server) handleCompilePlatformConfigFromArtifacts(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusConflict, "artifact scope does not match typed content")
 		return
 	}
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{CellRoutePublications: request.CellRoutePublications, Intent: intent, Policy: policy, RuntimeSnapshot: request.RuntimeSnapshot, CreatedAt: time.Now().UTC()})
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{PreviousTrafficPublication: request.PreviousTrafficPublication, CellRoutePublications: request.CellRoutePublications, Intent: intent, Policy: policy, RuntimeSnapshot: request.RuntimeSnapshot, CreatedAt: time.Now().UTC()})
 	if err != nil {
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 		return

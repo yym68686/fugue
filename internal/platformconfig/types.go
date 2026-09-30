@@ -15,28 +15,29 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v32"
+	CompilerVersion = "platform-config-compiler/v33"
 	GlobalScopeKey  = "global"
 )
 
 // PlatformIntent is the versioned description of what Fugue should serve.
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
-	CellRoutePublications []CellRoutePublicationReference `json:"cell_route_publications,omitempty"`
-	PublicationRole       string                          `json:"publication_role,omitempty"`
-	AuthorityCellID       string                          `json:"authority_cell_id,omitempty"`
-	ApplicationDomains    *ApplicationDomainsIntent       `json:"application_domains,omitempty"`
-	EdgeTopology          *edgetopology.Intent            `json:"edge_topology,omitempty"`
-	DNSConsumers          []DNSConsumerIntent             `json:"dns_consumers,omitempty"`
-	ACMEChallenges        []ACMEChallengeIntent           `json:"acme_challenges,omitempty"`
-	SchemaVersion         string                          `json:"schema_version"`
-	Generation            string                          `json:"generation"`
-	Scope                 string                          `json:"scope"`
-	Routes                []RouteIntent                   `json:"routes,omitempty"`
-	DNS                   []DNSIntent                     `json:"dns,omitempty"`
-	TLS                   []TLSIntent                     `json:"tls,omitempty"`
-	CachePolicies         []model.CachePolicy             `json:"cache_policies,omitempty"`
-	CreatedAt             time.Time                       `json:"created_at,omitempty"`
+	RouteAuthorityTransition *RouteAuthorityTransition       `json:"route_authority_transition,omitempty"`
+	CellRoutePublications    []CellRoutePublicationReference `json:"cell_route_publications,omitempty"`
+	PublicationRole          string                          `json:"publication_role,omitempty"`
+	AuthorityCellID          string                          `json:"authority_cell_id,omitempty"`
+	ApplicationDomains       *ApplicationDomainsIntent       `json:"application_domains,omitempty"`
+	EdgeTopology             *edgetopology.Intent            `json:"edge_topology,omitempty"`
+	DNSConsumers             []DNSConsumerIntent             `json:"dns_consumers,omitempty"`
+	ACMEChallenges           []ACMEChallengeIntent           `json:"acme_challenges,omitempty"`
+	SchemaVersion            string                          `json:"schema_version"`
+	Generation               string                          `json:"generation"`
+	Scope                    string                          `json:"scope"`
+	Routes                   []RouteIntent                   `json:"routes,omitempty"`
+	DNS                      []DNSIntent                     `json:"dns,omitempty"`
+	TLS                      []TLSIntent                     `json:"tls,omitempty"`
+	CachePolicies            []model.CachePolicy             `json:"cache_policies,omitempty"`
+	CreatedAt                time.Time                       `json:"created_at,omitempty"`
 }
 
 type RouteIntent struct {
@@ -200,10 +201,11 @@ type ArtifactDependency struct {
 }
 
 type CompileRequest struct {
-	CellRoutePublications []CellRoutePublicationInput
-	Intent                PlatformIntent
-	Policy                PolicySnapshot
-	RuntimeSnapshot       RuntimeSnapshot
+	PreviousTrafficPublication *PreviousTrafficPublicationInput
+	CellRoutePublications      []CellRoutePublicationInput
+	Intent                     PlatformIntent
+	Policy                     PolicySnapshot
+	RuntimeSnapshot            RuntimeSnapshot
 	// InputSnapshot is retained as a wire compatibility fallback. New callers
 	// should use RuntimeSnapshot so generation binding is explicit.
 	InputSnapshot map[string]any
@@ -291,6 +293,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
+	if req.PreviousTrafficPublication != nil && intent.RouteAuthorityTransition == nil {
+		return CompileResult{}, fmt.Errorf("previous publication requires explicit DNS transition")
+	}
 	if err := validateCellDNSInputs(intent, req.CellRoutePublications, runtimeSnapshot); err != nil {
 		return CompileResult{}, err
 	}
@@ -346,7 +351,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	var readiness *DNSReadinessPlan
 	var compiledDNS []DNSIntent
 	if intent.PublicationRole == PublicationRoleCellDNS {
-		readiness, err = compileCellDNSReadiness(intent, publications, runtimeSnapshot, policy)
+		readiness, err = compileCellDNSReadiness(intent, publications, runtimeSnapshot, policy, req.PreviousTrafficPublication)
 		if err != nil {
 			return CompileResult{}, err
 		}
@@ -449,6 +454,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	}
 	if intent.PublicationRole == PublicationRoleCellDNS {
 		dnsPayload["cell_route_publications"] = publications
+		if req.PreviousTrafficPublication != nil {
+			dnsPayload["previous_traffic_publication"] = req.PreviousTrafficPublication
+		}
 		dnsPayload["cell_dns_source"] = CellDNSPlanSource{Intent: intent, Endpoints: runtimeSnapshot.DNSEdgeEndpoints, CapturedAt: runtimeSnapshot.CapturedAt}
 	}
 	if len(queryViews) > 0 {
