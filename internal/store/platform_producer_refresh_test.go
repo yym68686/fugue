@@ -44,6 +44,10 @@ func (f *reconfigurationFixture) seedCompletedPublication(t *testing.T, policy, 
 		parent.Metadata = map[string]string{}
 	}
 	parent.Metadata[platformproducer.PolicyReleaseMetadata] = policy
+	parent.Metadata[platformproducer.StaticIntentIDMetadata] = f.policy.StaticIntentArtifactID
+	parent.Metadata[platformproducer.StaticIntentDigestMetadata] = f.policy.StaticIntentDigest
+	parent.Metadata[platformproducer.DNSPolicyIDMetadata] = f.policy.DNSPolicyArtifactID
+	parent.Metadata[platformproducer.DNSPolicyDigestMetadata] = f.policy.DNSPolicyDigest
 	parent, err = platformsafety.SignPlatformArtifact(parent, celldns.Keys())
 	if err != nil {
 		t.Fatal(err)

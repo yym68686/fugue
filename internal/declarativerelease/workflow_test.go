@@ -82,7 +82,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"deploy/environments/production/cell-producer-reconfiguration", "one existing Cell producer per configuration atom", "scripts.reconfigure_cell_producer", "selected == 'true'", "fugue-production-cell-producer-shadow"} {
+	for _, required := range []string{"deploy/environments/production/cell-producer-reconfiguration", "deploy/environments/production/cell-membership-expansion", "one existing Cell producer per configuration atom", "scripts.reconfigure_cell_producer", "scripts.expand_cell_membership", "selected == 'true'", "fugue-production-cell-producer-shadow"} {
 		if !strings.Contains(string(reconfigurationRaw), required) {
 			t.Fatalf("existing Cell configuration lacks scoped selection, CAS or serialization: %s", required)
 		}

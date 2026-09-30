@@ -45,6 +45,10 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
+	case "expand_membership":
+		if p.Mode != "shadow" || p.Serving == nil || !p.Serving.SinglePublication {
+			return p, ErrInvalidInput
+		}
 	default:
 		return p, ErrInvalidInput
 	}
@@ -104,18 +108,29 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	if err != nil || p.Generation == previous.Generation || a.GenerationSequence <= old.GenerationSequence {
 		return ErrConflict
 	}
-	if r.Operation == "refresh_serving" {
+	if r.Operation == "refresh_serving" || r.Operation == "expand_membership" {
 		if previous.Mode != "serving" || previous.Serving == nil || !previous.Serving.SinglePublication {
 			return ErrConflict
 		}
 	} else if previous.Mode != "shadow" && previous.Mode != "paused" {
 		return ErrConflict
 	}
+	oldSources := previous
+	if r.Operation == "expand_membership" {
+		if err := validateProducerMembershipInputs(state, previous, p, keys); err != nil {
+			return err
+		}
+	}
 	// Each explicit operation has a disjoint change boundary. In particular,
 	// activation cannot also alter the already reviewed placement transition.
 	previous.Generation, p.Generation = "", ""
 	if r.Operation == "activate_serving" {
 		previous.Serving, p.Serving = nil, nil
+	} else if r.Operation == "expand_membership" {
+		previous.StaticIntentArtifactID, p.StaticIntentArtifactID = "", ""
+		previous.StaticIntentDigest, p.StaticIntentDigest = "", ""
+		previous.DNSPolicyArtifactID, p.DNSPolicyArtifactID = "", ""
+		previous.DNSPolicyDigest, p.DNSPolicyDigest = "", ""
 	} else if r.Operation != "refresh_serving" {
 		previous.RoutePlacementTransition, p.RoutePlacementTransition = nil, nil
 	}
@@ -143,7 +158,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	if _, err := platformconfig.ValidateReleaseComposition(full); err != nil {
 		return ErrConflict
 	}
-	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" {
+	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" || r.Operation == "expand_membership" {
 		// Resolve the cohort against the exact current baseline before enabling
 		// automatic publication; fresh candidate admission remains independent.
 		target, err := platformproducer.Decode(a)
@@ -156,8 +171,16 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		if release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.VerifiedLKGGeneration != full.Generation {
 			return ErrConflict
 		}
-		if r.Operation == "refresh_serving" && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
+		if (r.Operation == "refresh_serving" || r.Operation == "expand_membership") && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
 			return ErrConflict
+		}
+		if r.Operation == "expand_membership" && (full.Metadata[platformproducer.StaticIntentIDMetadata] != oldSources.StaticIntentArtifactID || full.Metadata[platformproducer.StaticIntentDigestMetadata] != oldSources.StaticIntentDigest || full.Metadata[platformproducer.DNSPolicyIDMetadata] != oldSources.DNSPolicyArtifactID || full.Metadata[platformproducer.DNSPolicyDigestMetadata] != oldSources.DNSPolicyDigest) {
+			return ErrConflict
+		}
+		if r.Operation == "expand_membership" {
+			if err := validateMembershipBaseline(state, oldSources, full, release); err != nil {
+				return err
+			}
 		}
 	}
 	lkg := verifiedPlatformLKGSnapshotFromState(state, model.PlatformArtifactKindReleaseSet, p.TargetScope, now, keys)
@@ -212,12 +235,29 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 		state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	}
-	for _, key := range []string{
+	if r.Operation == "expand_membership" {
+		index := platformArtifactIndex(state.PlatformArtifacts, r.PreviousPolicy.ArtifactID)
+		if index < 0 {
+			return ErrConflict
+		}
+		previous, err := platformproducer.Decode(state.PlatformArtifacts[index])
+		if err != nil {
+			return ErrConflict
+		}
+		if err := pgLoadProducerMembershipInputs(ctx, tx, state, previous, p); err != nil {
+			return err
+		}
+	}
+	laneKeys := []string{
 		platformsafety.ReleaseLaneKey(a.ArtifactKind, a.ScopeKey, "shadow"),
 		platformsafety.ReleaseLaneKey(a.ArtifactKind, a.ScopeKey, "gray"),
 		platformsafety.ReleaseLaneKey(a.ArtifactKind, a.ScopeKey, "full"),
 		platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, p.TargetScope, "full"),
-	} {
+	}
+	if r.Operation == "expand_membership" {
+		laneKeys = append(laneKeys, platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, p.TargetScope, "gray"))
+	}
+	for _, key := range laneKeys {
 		lane, err := pgGetPlatformReleaseLaneForUpdate(ctx, tx, key)
 		if err == ErrNotFound {
 			continue
@@ -226,6 +266,13 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 			return err
 		}
 		state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, lane)
+		if r.Operation == "expand_membership" && lane.ArtifactKind == model.PlatformArtifactKindReleaseSet && lane.ReleaseChannel == "gray" && lane.ActiveReleaseID != "" {
+			gray, err := pgGetPlatformArtifactRelease(ctx, tx, lane.ActiveReleaseID, false)
+			if err != nil {
+				return err
+			}
+			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, gray)
+		}
 	}
 	if existing, found, err := pgGetPlatformArtifactReleaseByIdempotency(ctx, tx, platformsafety.ReleaseLaneKey(a.ArtifactKind, a.ScopeKey, "shadow"), req.IdempotencyKey); err != nil {
 		return err

@@ -386,19 +386,24 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producer-reconfiguration)
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producer-reconfiguration deploy/environments/production/cell-membership-expansion)
           if (( ${#declarations[@]} > 1 )); then
             echo 'one existing Cell producer per configuration atom is required' >&2
             exit 1
           fi
           if (( ${#declarations[@]} == 1 )); then
             config="${declarations[0]}"
-            [[ "$config" =~ ^deploy/environments/production/cell-producer-reconfiguration/cell-[a-z0-9-]+\.json$ ]]
+            [[ "$config" =~ ^deploy/environments/production/(cell-producer-reconfiguration|cell-membership-expansion)/cell-[a-z0-9-]+\.json$ ]]
+            runner=scripts.reconfigure_cell_producer
+            if [[ "$config" == deploy/environments/production/cell-membership-expansion/* ]]; then
+              runner=scripts.expand_cell_membership
+            fi
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/reconfigure_cell_producer.py scripts/test_reconfigure_cell_producer.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py; then
-              python3 -m unittest scripts.test_reconfigure_cell_producer
-              python3 -m scripts.reconfigure_cell_producer "$config" --validate-only
+            if git diff --quiet HEAD origin/main -- "$config" scripts/reconfigure_cell_producer.py scripts/test_reconfigure_cell_producer.py scripts/expand_cell_membership.py scripts/test_expand_cell_membership.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py; then
+              python3 -m unittest scripts.test_reconfigure_cell_producer scripts.test_expand_cell_membership
+              python3 -m "$runner" "$config" --validate-only
               echo "config=$config" >> "$GITHUB_OUTPUT"
+              echo "runner=$runner" >> "$GITHUB_OUTPUT"
               echo 'selected=true' >> "$GITHUB_OUTPUT"
             fi
           fi
@@ -406,7 +411,7 @@ jobs:
         if: steps.configuration.outputs.selected == 'true'
         env:
           FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
-        run: python3 -m scripts.reconfigure_cell_producer "${{ steps.configuration.outputs.config }}" --evidence "$RUNNER_TEMP/cell-producer-reconfiguration.json"
+        run: python3 -m "${{ steps.configuration.outputs.runner }}" "${{ steps.configuration.outputs.config }}" --evidence "$RUNNER_TEMP/cell-producer-reconfiguration.json"
       - name: Retain reconfiguration evidence
         if: always() && steps.configuration.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

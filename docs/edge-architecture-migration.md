@@ -919,3 +919,22 @@ DNS data. A missing dependency, orphan query rule or insufficient active quorum
 still rejects the compilation. `serve_error_page` retains exact loaded-state and
 TLS proofs. DNS consumers replay the signed Cell inputs to validate these
 decisions, including after offline checkpoint recovery.
+
+An established route Cell can stage one additional execution member through
+`expand_membership`, using a declaration in
+`deploy/environments/production/cell-membership-expansion`. The same independent
+configuration lane admits one reconfiguration or membership declaration per
+commit. The predecessor must be a completed serving producer with a positive
+full/LKG. Its source metadata and signed membership must match the pinned static
+input. An in-progress or frozen gray lane rejects expansion.
+
+Expansion moves the producer to shadow and pins two new immutable inputs. The
+static input may add exactly one Edge already declared identically in the signed
+placement transition; all existing members, their labels and failure domains,
+pools and serving intent stay identical. The projection policy only changes its
+generation and matching topology digest. Source signatures, current publication
+fences and positive LKG are checked under the producer/target transaction locks.
+The previous full remains selected. The added process still needs independent
+code deployment, fresh route/TLS evidence and inventory enrollment before a
+separate serving activation. Expansion itself never grants public transport,
+fabricates health, or initializes an activation file.
