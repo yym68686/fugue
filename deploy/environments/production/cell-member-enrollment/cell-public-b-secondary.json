@@ -1,0 +1,60 @@
+{
+  "schema": "fugue.cell-member-enrollment/v1",
+  "generation": 1,
+  "origin": "https://api.fugue.pro",
+  "authority_cell_id": "cell-public-b",
+  "namespace": "fugue-system",
+  "release_set": {
+    "id": "artifact_1790788459_29b382ef63a2",
+    "digest": "sha256:baa5de9504f33bdbc59fd7c657c88824dc77e55dd77d564b0fa849cb522d01e7"
+  },
+  "cohort": "complete",
+  "bootstrap_config_map": "fugue-cell-public-b-secondary-inventory-bootstrap",
+  "worker": {
+    "deployment": "fugue-edge-worker-public-b-secondary-candidate",
+    "deployment_uid": "bf865ce4-8793-4e24-abc8-d72a9d9e815f",
+    "pod": "fugue-edge-worker-public-b-secondary-candidate-85f5d9c845-lpc8m",
+    "instance_uid": "d9e6d9e0-a8ed-44e7-bc58-8dba5bab44e4",
+    "node": "bwg",
+    "slot": "a",
+    "container": "edge",
+    "service_account": "fugue-edge-worker-public-b-secondary-candidate",
+    "source_sha": "be8793a46e815846767e27262b81b5f827e0c6ab",
+    "image_digest": "sha256:c77dc38c8b43118239896a688f8f439a8205e9ad16d2c80810be0617e5f78809",
+    "pvc": "fugue-edge-worker-public-b-secondary-candidate-state",
+    "activation_path": "/var/lib/fugue-edge-front/activation.json"
+  },
+  "observation": {
+    "samples": 3,
+    "interval_seconds": 10,
+    "timeout_seconds": 180
+  },
+  "full_publication": {
+    "artifact_id": "artifact_1790788459_29b382ef63a2",
+    "content_hash": "sha256:baa5de9504f33bdbc59fd7c657c88824dc77e55dd77d564b0fa849cb522d01e7",
+    "release_id": "artifactrel_1790788653_c7cf98fb7495",
+    "fencing_token": 4
+  },
+  "verification_evidence_hash": "sha256:07a3e87ff4029d73596ccc7dbf6817ba95f890ad0dc8af3c52afd71f015a0f9f",
+  "member_node_ids": [
+    "bwg",
+    "vps-591f4447"
+  ],
+  "serving_epoch": {
+    "slot": "a",
+    "fence_sequence": 1,
+    "min_healthy_instances": 1
+  },
+  "control": {
+    "deployment": "edge-control-public-b",
+    "pod": "edge-control-public-b-957bffbf9-mjqtn",
+    "instance_uid": "3a7790f8-7e4f-4a82-915a-03da0378378b",
+    "source_sha": "a2e0329c3aa9ea302d64756cca21960bc8000336",
+    "image_digest": "sha256:70d30ac793ac3837982ec1592c1b33c8c9f70f449aa2eb4ce74d15be760a940d",
+    "state_file": "/var/lib/fugue-edge-control/group-fc4d37f408e2c85a87c7a38f75dbdd1db8a9c6228f504afe255cdedc34e656f9.json"
+  },
+  "admission_window": {
+    "not_before": "2026-09-30T17:22:10.280302+00:00",
+    "expires_at": "2026-09-30T17:37:05.280302+00:00"
+  }
+}
