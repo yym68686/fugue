@@ -1,29 +1,29 @@
 {
   "schema": "fugue.cell-producer-reconfiguration/v1",
-  "generation": 4,
+  "generation": 5,
   "origin": "https://api.fugue.pro",
   "authority_cell_id": "cell-public-a",
   "precondition": {
-    "operation": "refresh_serving",
+    "operation": "continuous_serving",
     "previous_policy": {
-      "artifact_id": "artifact_1790745040_bc4762e56951",
-      "content_hash": "sha256:39953439178d47523ae4cd2f24cc006f882b3e4f8f7bfd70221360810605eda5",
-      "release_id": "artifactrel_1790745050_d2ded030a703",
-      "fencing_token": 5
+      "artifact_id": "artifact_1790795413_a9dbac76a549",
+      "content_hash": "sha256:df622bcd508f9db6194c16025ae3c7dad0645009188b3b2582f46ffabddc4d61",
+      "release_id": "artifactrel_1790795418_cc735615a7f4",
+      "fencing_token": 6
     },
     "serving_full": {
-      "artifact_id": "artifact_1790745076_a0a92a3a4526",
-      "content_hash": "sha256:108fabeb7bcda10311512315c854a002a0becc6ad9bf133de3530d56902b3322",
-      "release_id": "artifactrel_1790745141_6a4eb8291bd4",
-      "fencing_token": 3
+      "artifact_id": "artifact_1790795457_53e1cdbb9b8d",
+      "content_hash": "sha256:f9124e93ed985dddab93ef92f071942663174796d05ccf6806b1404b623114aa",
+      "release_id": "artifactrel_1790795588_df6c0d2e6209",
+      "fencing_token": 4
     },
-    "verification_evidence_hash": "sha256:b8f62dedff3160dc63bed7bd007b9575aefe7b24b190e28dc0f838f80aab9ba1"
+    "verification_evidence_hash": "sha256:60fbeec2d0c3287d4e4e46a1f5b7219bd54dd325f62de2e91132a06d80d3ba4b"
   },
   "policy": {
     "authority_cell_id": "cell-public-a",
     "dns_policy_artifact_id": "artifact_1790687648_b177e2e8a771",
     "dns_policy_digest": "sha256:cbc23c231fe8854a69f5e1aeb4c0c7207d0ea2c81899281c0624a740b12614d7",
-    "generation": "cell-public-a-serving-refresh-4",
+    "generation": "cell-public-a-continuous-5",
     "hosted_zone_templates": [],
     "input_source": "business-static-intent",
     "interval_seconds": 60,
@@ -332,7 +332,7 @@
       "full_min_seconds": 60,
       "gray_min_seconds": 30,
       "rollout_timeout_seconds": 600,
-      "single_publication": true
+      "single_publication": false
     },
     "static_intent_artifact_id": "artifact_1790687647_8586da2a59f3",
     "static_intent_digest": "sha256:48b54f7e2bc8a9cce96ed9de1ba6147e3a54b6c748447f569eecbe98db81de78",
