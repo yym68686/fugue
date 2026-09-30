@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ func TestRealCaddyPreservesStreamAcrossActivationAndRollback(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	release := make(chan struct{})
+	releaseStream := sync.OnceFunc(func() { close(release) })
 	sent := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/stream" {
@@ -39,13 +41,18 @@ func TestRealCaddyPreservesStreamAcrossActivationAndRollback(t *testing.T) {
 			fmt.Fprint(w, "data: first\n\n")
 			w.(http.Flusher).Flush()
 			close(sent)
-			<-release
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
 			fmt.Fprint(w, "data: last\n\n")
 			return
 		}
 		fmt.Fprint(w, "ok")
 	}))
 	defer upstream.Close()
+	defer releaseStream()
 	listener, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
 		t.Fatal(e)
@@ -74,7 +81,18 @@ func TestRealCaddyPreservesStreamAcrossActivationAndRollback(t *testing.T) {
 	if e = cmd.Start(); e != nil {
 		t.Fatal(e)
 	}
-	defer func() { cmd.Process.Signal(os.Interrupt); cmd.Wait() }()
+	defer func() {
+		releaseStream()
+		cmd.Process.Signal(os.Interrupt)
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+			<-done
+		}
+	}()
 	raw, _ := os.ReadFile(binary)
 	rt, e := NewCaddyRuntime(CaddyConfig{Binary: binary, BinarySHA256: c.Hash(raw), AdminSocket: socket, ConfigFile: file, Checks: map[string]Probe{"health": {URL: "http://" + addr + "/health", Status: 200, Body: "ok"}}})
 	if e != nil {
@@ -136,7 +154,7 @@ func TestRealCaddyPreservesStreamAcrossActivationAndRollback(t *testing.T) {
 		t.Fatal("new request didn't use new config")
 	}
 	call("rollback", "rollback", nil, b1.BundleDigest)
-	close(release)
+	releaseStream()
 	remaining := []byte{}
 	for {
 		line, e = reader.ReadString('\n')
