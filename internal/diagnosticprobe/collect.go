@@ -210,6 +210,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return processIdentities(ctx, req, hostProc, c.GoModules...)
 	case "process-cpu-profile":
 		return processCPUProfile(ctx, req, c)
+	case "process-memory-profile":
+		return processMemoryProfile(ctx, req, c)
 	case "process-page-faults":
 		return processPageFaults(ctx, req, c)
 	case "process-runqueue-latency":
