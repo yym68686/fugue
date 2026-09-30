@@ -66,12 +66,30 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	memberEnrollment := yamlMappingValue(t, jobs, "cell_member_enrollment")
+	for _, key := range yamlMappingKeys(t, memberEnrollment) {
+		if key == "needs" {
+			t.Fatal("member inventory configuration must remain independent of code builds")
+		}
+	}
+	memberRaw, err := yaml.Marshal(memberEnrollment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"deploy/environments/production/cell-member-enrollment", "one Cell member per enrollment atom", "scripts.enroll_cell_member", "selected == 'true'", "fugue-production-cell-member-enrollment", "git fetch origin main"} {
+		if !strings.Contains(string(memberRaw), required) {
+			t.Fatal("member enrollment lost explicit declaration gate", required)
+		}
+	}
+	if yamlMappingValue(t, memberEnrollment, "environment").Value != "production" {
+		t.Fatal("member enrollment bypasses production environment")
+	}
 	reconfiguration := yamlMappingValue(t, jobs, "cell_producer_reconfiguration")
 	for _, key := range yamlMappingKeys(t, reconfiguration) {
 		if key == "needs" {

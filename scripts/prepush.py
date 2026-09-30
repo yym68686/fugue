@@ -490,6 +490,8 @@ def main() -> int:
         non_go_tasks["cell-producer-reconfiguration-tests"] = ["python3", "-m", "unittest", "scripts.test_reconfigure_cell_producer", "scripts.test_expand_cell_membership"]
     if any(name in {"scripts/bootstrap_cell_inventory.py", "scripts/test_bootstrap_cell_inventory.py"} or name.startswith("deploy/environments/production/cell-inventory/") for name in paths):
         non_go_tasks["cell-inventory-bootstrap-tests"] = ["python3", "-m", "unittest", "scripts.test_bootstrap_cell_inventory"]
+    if any(name in {"scripts/enroll_cell_member.py", "scripts/test_enroll_cell_member.py", "scripts/bootstrap_cell_inventory.py"} or name.startswith("deploy/environments/production/cell-member-enrollment/") for name in paths):
+        non_go_tasks["cell-member-enrollment-tests"] = ["python3", "-m", "unittest", "scripts.test_enroll_cell_member", "scripts.test_bootstrap_cell_inventory"]
     if any(name in {"scripts/promote_cell_routes.py", "scripts/test_promote_cell_routes.py", "scripts/bootstrap_cell_inventory.py"} or name.startswith("deploy/environments/production/cell-route-promotion/") for name in paths):
         non_go_tasks["cell-route-promotion-tests"] = ["python3", "-m", "unittest", "scripts.test_promote_cell_routes"]
     if any(name in {"scripts/prepush.py", "scripts/test_prepush.py"} for name in paths):

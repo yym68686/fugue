@@ -32,6 +32,7 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 	stateFile := flags.String("state-file", "", "absolute group-local activation state file")
 	groupID := flags.String("group", "", "exact edge group id")
 	expectedGeneration := flags.Uint64("expected-generation", 0, "exact current activation generation")
+	initialGeneration := flags.Uint64("initial-generation", 0, "verified existing Cell fence for a fresh activation file; zero defaults to one")
 	expectedSlot := flags.String("expected-slot", "", "exact current slot")
 	targetSlot := flags.String("target-slot", "", "target slot")
 	bundleGeneration := flags.String("bundle-generation", "", "verified worker bundle generation")
@@ -44,7 +45,7 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 		return errors.New("invalid edge front CAS arguments")
 	}
 	receipt, err := edgegroupfront.ApplyActivationCAS(*stateFile, edgegroupfront.ActivationCASRequest{
-		GroupID: *groupID, ExpectedGeneration: *expectedGeneration, ExpectedSlot: *expectedSlot, TargetSlot: *targetSlot,
+		GroupID: *groupID, ExpectedGeneration: *expectedGeneration, InitialGeneration: *initialGeneration, ExpectedSlot: *expectedSlot, TargetSlot: *targetSlot,
 		BundleGeneration: *bundleGeneration, WorkerSourceCommit: *workerSourceCommit, WorkerImageDigest: *workerImageDigest,
 		Operation: *operation, RollbackOfGeneration: *rollbackOfGeneration, Reason: *reason,
 	}, now)

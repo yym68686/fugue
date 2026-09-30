@@ -52,8 +52,11 @@ type ActivationState struct {
 }
 
 type ActivationCASRequest struct {
-	GroupID              string
-	ExpectedGeneration   uint64
+	GroupID            string
+	ExpectedGeneration uint64
+	// InitialGeneration joins a verified existing Cell fence on a fresh node.
+	// Zero preserves first-cell initialization at one. It never rebases a file.
+	InitialGeneration    uint64
 	ExpectedSlot         string
 	TargetSlot           string
 	BundleGeneration     string
@@ -116,8 +119,13 @@ func ApplyActivationCAS(path string, request ActivationCASRequest, now time.Time
 	nextGeneration := uint64(1)
 	previousSlot := ""
 	if exists {
+		if previous.Generation == ^uint64(0) {
+			return ActivationReceipt{}, errors.New("edge front activation generation is exhausted")
+		}
 		nextGeneration = previous.Generation + 1
 		previousSlot = previous.ActiveSlot
+	} else if request.InitialGeneration != 0 {
+		nextGeneration = request.InitialGeneration
 	}
 	next := ActivationState{
 		Schema: ActivationStateSchemaV1, GroupID: request.GroupID, Generation: nextGeneration,
@@ -176,6 +184,9 @@ func ReadActivationState(path string) (ActivationState, bool, error) {
 }
 
 func validateActivationRequest(request ActivationCASRequest) error {
+	if request.InitialGeneration == ^uint64(0) || request.InitialGeneration != 0 && request.Operation != ActivationOperationInit {
+		return errors.New("initial activation generation requires fresh initialization and room for a successor")
+	}
 	request.ExpectedSlot = normalizeSlot(request.ExpectedSlot)
 	request.TargetSlot = normalizeSlot(request.TargetSlot)
 	if !activationGroupPattern.MatchString(request.GroupID) || request.ExpectedSlot == "" || request.TargetSlot == "" ||

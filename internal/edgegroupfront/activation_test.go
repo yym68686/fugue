@@ -51,6 +51,38 @@ func TestActivationCASInitializesPromotesAndRollsBackOneGroup(t *testing.T) {
 	}
 }
 
+func TestActivationCASJoinsExistingFenceOnlyOnAnAbsentFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "activation.json")
+	now := time.Now().UTC()
+	request := activationRequest(ActivationOperationInit, 0, "a", "a", "verified-member-bundle", 0)
+	request.GroupID, request.InitialGeneration = "cell-member-test", 7
+	receipt, err := ApplyActivationCAS(path, request, now)
+	if err != nil || receipt.PreviousExists || receipt.Current.Generation != 7 || receipt.Current.PreviousSlot != "" {
+		t.Fatal("fresh member did not join exact established fence", receipt, err)
+	}
+	for _, generation := range []uint64{1, 7, 8} {
+		request.InitialGeneration = generation
+		if _, err := ApplyActivationCAS(path, request, now); !errors.Is(err, ErrActivationCASConflict) {
+			t.Fatal("initialization rebased existing activation", generation, err)
+		}
+	}
+	promote := activationRequest(ActivationOperationPromote, 7, "a", "b", "next-bundle", 0)
+	promote.GroupID = request.GroupID
+	promote.InitialGeneration = 9
+	if _, err := ApplyActivationCAS(path, promote, now); err == nil {
+		t.Fatal("promotion accepted an initialization fence")
+	}
+	promote.InitialGeneration = 0
+	receipt, err = ApplyActivationCAS(path, promote, now)
+	if err != nil || receipt.Current.Generation != 8 {
+		t.Fatal("joined member lost normal monotonic CAS", receipt, err)
+	}
+	request.InitialGeneration = ^uint64(0)
+	if _, err := ApplyActivationCAS(filepath.Join(t.TempDir(), "activation.json"), request, now); err == nil {
+		t.Fatal("initialization exhausted the fencing counter")
+	}
+}
+
 func TestActivationCASAllowsExactlyOneConcurrentGroupTransition(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "activation.json")
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
