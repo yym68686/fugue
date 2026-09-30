@@ -104,6 +104,7 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 		constraints[c.Hostname] = c
 	}
 	usedConstraints := map[string]bool{}
+	completeDependencies := map[string]bool{}
 	probes := map[string]DNSReadinessProbe{}
 	records := map[string]DNSReadinessRecord{}
 	for _, pub := range publications {
@@ -146,6 +147,10 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 			if err := ValidateDNSRouteOwners(record, owners); err != nil {
 				return nil, err
 			}
+			// A known inactive dependency can intentionally yield no readiness
+			// record under the omit policy. Preserve that distinction from a
+			// missing dependency; neither case grants an answer or relaxes quorum.
+			completeDependencies[record.Hostname] = true
 			rules := []EdgeSelectionConstraint{}
 			minimum, cells, freshness := max(policy.MinimumHealthyEdges, payload.Policy.MinimumHealthyEdges), 0, policy.DNSReadiness.FactFreshnessSeconds
 			for _, route := range requiredProjection.Routes {
@@ -235,7 +240,7 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 	}
 	for _, r := range intent.DNS {
 		if DNSPlacementOptions(r) != nil && (r.Status == "" || r.Status == model.EdgeRouteStatusActive) {
-			if _, ok := records[r.Hostname]; !ok {
+			if !completeDependencies[r.Hostname] {
 				return nil, fmt.Errorf("DNS record %s has no complete referenced Cell routes", r.Hostname)
 			}
 		}

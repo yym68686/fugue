@@ -910,3 +910,12 @@ successors use the same transaction locks and exact predecessor checks; a
 changed, unverified or operator-owned baseline rejects without altering LKG.
 Refresh still captures current business configuration and requires new gray and
 full receipts. It does not attest route equivalence for a DNS handoff.
+
+Independent DNS distinguishes missing dependencies from known inactive routes.
+Every symbolic record must have complete signed route dependencies with matching
+ownership. When those routes are inactive and policy says `omit`, compilation
+keeps them out of both answers and readiness targets without blocking unrelated
+DNS data. A missing dependency, orphan query rule or insufficient active quorum
+still rejects the compilation. `serve_error_page` retains exact loaded-state and
+TLS proofs. DNS consumers replay the signed Cell inputs to validate these
+decisions, including after offline checkpoint recovery.

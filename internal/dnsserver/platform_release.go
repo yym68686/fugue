@@ -95,7 +95,11 @@ func (s *Service) verifyDNSRelease(parent model.PlatformArtifact, c dnsPlatformC
 	if err := populateDNSCellBindings(&p); err != nil {
 		return fail()
 	}
-	if !dnsEdgeSelectionRequirementsComplete(p.Plan, p.Policy.EdgeSelectionConstraints) {
+	// Independent DNS has already replayed its entire plan from signed Cell
+	// routes in verifyPlatformDNSCandidate. That replay validates active quorum
+	// and explicit inactive omissions. The legacy approximation below cannot
+	// distinguish a valid omission from a missing required target.
+	if set.PublicationRole != platformconfig.PublicationRoleCellDNS && !dnsEdgeSelectionRequirementsComplete(p.Plan, p.Policy.EdgeSelectionConstraints) {
 		return fail()
 	}
 	consumers := map[string]*platformconfig.DNSConsumerIntent{}

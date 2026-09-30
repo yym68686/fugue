@@ -15,7 +15,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v31"
+	CompilerVersion = "platform-config-compiler/v32"
 	GlobalScopeKey  = "global"
 )
 

@@ -89,13 +89,76 @@ func TestCellDNSServingUsesExactIndependentProofsAndOfflineRecovery(t *testing.T
 		t.Fatal("independent runtime observations invalid", err)
 	}
 	// A re-signed DNS envelope cannot conceal an untrusted embedded Cell.
-	copy := candidate
+	// It also cannot classify an active route as an omitted inactive route:
+	// canonical replay still requires its complete plan and quorum.
+	missing := candidate
 	encoded, _ := json.Marshal(candidate.Artifact)
+	json.Unmarshal(encoded, &missing.Artifact)
+	missing.Artifact.Content["readiness_plan"] = platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{}, Records: []platformconfig.DNSReadinessRecord{}}
+	missing.Artifact = celldns.Sign(t, missing.Artifact, missing.Artifact.ID, 1)
+	missing.Assignment.ContentHash = missing.Artifact.ContentHash
+	if _, _, err := s.verifyDNSServingRelease(c.ReleaseArtifact, missing); err == nil {
+		t.Fatal("active route disguised as an inactive omission")
+	}
+
+	copy := candidate
+	encoded, _ = json.Marshal(candidate.Artifact)
 	json.Unmarshal(encoded, &copy.Artifact)
 	copy.Artifact.Content["cell_route_publications"].([]any)[0].(map[string]any)["route"].(map[string]any)["provenance"].(map[string]any)["signature"] = "forged"
 	copy.Artifact = celldns.Sign(t, copy.Artifact, copy.Artifact.ID, 1)
 	copy.Assignment.ContentHash = copy.Artifact.ContentHash
 	if _, _, err := s.verifyDNSServingRelease(c.ReleaseArtifact, copy); err == nil {
 		t.Fatal("untrusted embedded Cell signature accepted")
+	}
+}
+
+func TestCellDNSOmittedInactiveRouteStaysAbsentAfterOfflineRecovery(t *testing.T) {
+	request := celldns.Request(t)
+	request.Policy.DNSAnswerRules, request.RuntimeSnapshot.DNSSelections = nil, nil
+	request.Intent.DNS = append(request.Intent.DNS, platformconfig.DNSIntent{Hostname: "static.example.test", Type: "TXT", Values: []string{"retained"}, TTL: 60})
+	for i := range request.CellRoutePublications {
+		p := &request.CellRoutePublications[i]
+		route := p.Route.Content["routes"].([]any)[0].(map[string]any)
+		route["enabled"], route["status"] = false, "unavailable"
+		p.Route = celldns.Sign(t, p.Route, p.Route.ID, 1)
+		p.Reference.RouteArtifactDigest = p.Route.ContentHash
+		request.Intent.CellRoutePublications[i] = p.Reference
+	}
+	c := celldns.Compile(t, request)
+	keys := celldns.Keys()
+	s := NewService(config.DNSConfig{DNSNodeID: "dns-a", EdgeGroupID: "cell-dns", PlatformScopeKey: platformconfig.AuthorityCellScope("cell-dns"), Zone: "example.test", BundleSigningKey: keys.PrimaryKey, BundleSigningKeyID: keys.PrimaryKeyID}, nil)
+	now := time.Now().UTC()
+	r := model.PlatformArtifactRelease{ID: "dns-release", ArtifactID: c.ReleaseArtifact.ID, ArtifactKind: c.ReleaseArtifact.ArtifactKind, ScopeKey: c.ReleaseArtifact.ScopeKey, Generation: c.ReleaseArtifact.Generation, ReleaseChannel: "full", FencingToken: 1, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now}
+	a := model.PlatformConsumerAssignment{ExpectedConsumerSetID: "dns-set", Revision: 1, ArtifactReleaseID: r.ID, ReleaseSetID: c.ReleaseArtifact.ID, ArtifactID: c.DNSArtifact.ID, ArtifactKind: c.DNSArtifact.ArtifactKind, ScopeKey: c.DNSArtifact.ScopeKey, ExpectedGeneration: c.DNSArtifact.Generation, GenerationSequence: c.DNSArtifact.GenerationSequence, ContentHash: c.DNSArtifact.ContentHash, FencingToken: r.FencingToken, ReleaseChannel: r.ReleaseChannel}
+	candidate := dnsPlatformCandidate{Artifact: c.DNSArtifact, Assignment: a, Release: r}
+	p, routeID, err := s.verifyDNSServingRelease(c.ReleaseArtifact, candidate)
+	if err != nil {
+		t.Fatal("consumer rejected omitted route", err)
+	}
+	checkpoint := dnsServingCheckpoint{Schema: "fugue.dns.positive-checkpoint/v1", NodeID: "dns-a", GroupID: "cell-dns", Parent: c.ReleaseArtifact, Candidate: candidate, AppliedAt: now, Positive: true}
+	if err := s.signDNSCheckpoint(&checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(checkpoint)
+	recovered, err := s.decodeDNSCheckpoint(raw)
+	if err != nil {
+		t.Fatal("offline replay rejected", err)
+	}
+	st, err := buildDNSServingState(recovered, p, routeID, "dns-a", "cell-dns", nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	question := new(dns.Msg)
+	question.SetQuestion("app.example.test.", dns.TypeA)
+	if answer := st.answer(question, "", now); answer.Rcode != dns.RcodeNameError || len(answer.Answer) != 0 {
+		t.Fatal("omitted inactive route returned an address", answer)
+	}
+	question.SetQuestion("static.example.test.", dns.TypeTXT)
+	answer := st.answer(question, "", now)
+	if answer.Rcode != dns.RcodeSuccess || len(answer.Answer) != 1 {
+		t.Fatal("inactive route blocked unrelated DNS", answer)
+	}
+	if txt, ok := answer.Answer[0].(*dns.TXT); !ok || len(txt.Txt) != 1 || txt.Txt[0] != "retained" {
+		t.Fatal("static answer changed", answer)
 	}
 }

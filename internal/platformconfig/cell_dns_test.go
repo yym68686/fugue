@@ -195,3 +195,94 @@ func TestCellDNSPerRouteMinimumCannotLowerCellPolicyFloor(t *testing.T) {
 		t.Fatal("route override lowered Cell minimum")
 	}
 }
+
+func TestCellDNSInactiveDependenciesRespectOmitAndErrorPagePolicy(t *testing.T) {
+	for _, scenario := range []string{"omit unavailable", "omit disabled", "error page", "mixed active", "missing dependency", "foreign owner", "route policy denied", "orphan query rule"} {
+		t.Run(scenario, func(t *testing.T) {
+			r := celldns.Request(t)
+			r.Intent.DNS[0].RecordKind = model.EdgeDNSRecordKindPlatform
+			r.Intent.DNS = append(r.Intent.DNS, platformconfig.DNSIntent{Hostname: "static.example.test", Type: "TXT", Values: []string{"retained"}, TTL: 60})
+			if scenario == "omit unavailable" || scenario == "omit disabled" || scenario == "route policy denied" {
+				r.Policy.DNSAnswerRules, r.RuntimeSnapshot.DNSSelections = nil, nil
+			}
+			if scenario == "error page" || scenario == "route policy denied" {
+				r.Policy.DNSRouteStateConstraints = []platformconfig.DNSRouteStateConstraint{{RecordKind: model.EdgeDNSRecordKindPlatform, InactiveBehavior: "serve_error_page"}}
+			}
+			for i := range r.CellRoutePublications {
+				p := &r.CellRoutePublications[i]
+				route := p.Route.Content["routes"].([]any)[0].(map[string]any)
+				if scenario != "mixed active" || i == 0 {
+					route["enabled"], route["status"] = false, "unavailable"
+					if scenario == "omit disabled" {
+						route["status"] = "disabled"
+					}
+				}
+				if scenario == "missing dependency" {
+					route["hostname"] = "different.example.test"
+				}
+				if scenario == "foreign owner" {
+					route["tenant_id"] = "foreign-tenant"
+				}
+				if scenario == "route policy denied" {
+					route["route_policy"] = model.EdgeRoutePolicyRouteAOnly
+				}
+				p.Route = celldns.Sign(t, p.Route, p.Route.ID, 1)
+				p.Reference.RouteArtifactDigest = p.Route.ContentHash
+				r.Intent.CellRoutePublications[i] = p.Reference
+			}
+			compiled, err := platformconfig.Compile(r)
+			if scenario == "mixed active" || scenario == "missing dependency" || scenario == "foreign owner" || scenario == "orphan query rule" {
+				if err == nil {
+					t.Fatal("missing, unauthorized or insufficient active dependencies accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal("known inactive dependencies blocked compilation", err)
+			}
+			if err := platformconfig.ValidateDNSCellPlan(compiled.DNSArtifact); err != nil {
+				t.Fatal("offline replay rejected", err)
+			}
+			var payload struct {
+				Plan    platformconfig.DNSReadinessPlan `json:"readiness_plan"`
+				Records []platformconfig.DNSIntent      `json:"records"`
+				Queries []platformconfig.DNSQueryView   `json:"query_views"`
+			}
+			raw, _ := json.Marshal(compiled.DNSArtifact.Content)
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.ContainsFunc(payload.Records, func(r platformconfig.DNSIntent) bool {
+				return r.Hostname == "static.example.test" && r.Type == "TXT" && reflect.DeepEqual(r.Values, []string{"retained"})
+			}) {
+				t.Fatal("inactive route removed unrelated DNS data")
+			}
+			if scenario == "error page" {
+				if len(payload.Plan.Records) != 1 || len(payload.Plan.Probes) != 2 || payload.Plan.Records[0].MinimumHealthyEdges != 2 {
+					t.Fatal("error page lost exact quorum")
+				}
+				for _, p := range payload.Plan.Probes {
+					if p.State != "unavailable" {
+						t.Fatal("error page lost loaded-state proof")
+					}
+				}
+			} else {
+				if len(payload.Plan.Records) != 0 || len(payload.Plan.Probes) != 0 {
+					t.Fatal("omitted route obtained proof authority")
+				}
+				for _, record := range payload.Records {
+					if record.Hostname == "app.example.test" {
+						t.Fatal("omitted route regained an answer")
+					}
+				}
+				for _, view := range payload.Queries {
+					for _, record := range view.Records {
+						if record.Name == "app.example.test" {
+							t.Fatal("omitted route regained query candidates")
+						}
+					}
+				}
+			}
+		})
+	}
+}
