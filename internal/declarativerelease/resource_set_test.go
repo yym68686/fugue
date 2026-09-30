@@ -46,12 +46,14 @@ func TestResourceDesiredSubsetAllowsServerDefaultsButRejectsDesiredDrift(t *test
 	desired := map[string]any{
 		"apiVersion": "v1", "kind": "Service",
 		"metadata": map[string]any{"name": "fugue-api-tls", "namespace": "fugue-system"},
-		"spec":     map[string]any{"ports": []any{map[string]any{"port": 8443.0}}},
+		"spec":     map[string]any{"ports": []any{map[string]any{"port": 8443.0}}, "publishNotReadyAddresses": false},
 	}
 	live := deepCopyMap(desired)
 	liveMetadata := live["metadata"].(map[string]any)
 	liveMetadata["uid"] = "generated"
-	live["spec"].(map[string]any)["clusterIP"] = "10.43.0.1"
+	liveSpec := live["spec"].(map[string]any)
+	liveSpec["clusterIP"] = "10.43.0.1"
+	delete(liveSpec, "publishNotReadyAddresses")
 	if !ResourceDesiredSubset(desired, live) {
 		t.Fatal("server-populated fields made desired subset fail")
 	}

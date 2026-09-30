@@ -666,7 +666,13 @@ func desiredSubset(desired, live any, path string) bool {
 				continue
 			}
 			liveValue, exists := candidate[key]
-			if !exists || !desiredSubset(value, liveValue, joinJSONPath(path, key)) {
+			if !exists {
+				if kubernetesDefaultedFieldMatches(path, key, value) {
+					continue
+				}
+				return false
+			}
+			if !desiredSubset(value, liveValue, joinJSONPath(path, key)) {
 				return false
 			}
 		}
@@ -691,6 +697,13 @@ func desiredSubset(desired, live any, path string) bool {
 	default:
 		return fmt.Sprint(live) == fmt.Sprint(desired)
 	}
+}
+
+// Kubernetes omits some fields when the declared value is the API default.
+// Keep subset comparison semantic rather than requiring the server to echo an
+// explicit false that it intentionally normalized away.
+func kubernetesDefaultedFieldMatches(path, key string, desired any) bool {
+	return path == "spec" && key == "publishNotReadyAddresses" && desired == false
 }
 
 func mapListHasNonEmptyKey(desired, live []any, key string) bool {
