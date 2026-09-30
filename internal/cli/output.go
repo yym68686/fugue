@@ -208,10 +208,7 @@ func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectN
 	if app.Spec.Workspace != nil {
 		workspaceRoot = strings.TrimSpace(app.Spec.Workspace.MountPath)
 	}
-	postgresRuntime := ""
-	if app.Spec.Postgres != nil {
-		postgresRuntime = strings.TrimSpace(app.Spec.Postgres.RuntimeID)
-	}
+	postgresRuntime := appPostgresRuntimeID(app)
 	tenantName := firstNonEmptyTrimmed(tenantNames[app.TenantID], app.TenantID)
 	projectName := firstNonEmptyTrimmed(projectNames[app.ProjectID], app.ProjectID)
 	runtimeName := firstNonEmptyTrimmed(runtimeNames[runtimeID], runtimeID)
@@ -308,6 +305,26 @@ func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectN
 		)
 	}
 	return writeKeyValues(w, pairs...)
+}
+
+// appPostgresRuntimeID reads the observed app-owned backing service when the
+// app spec was created without the managed database's runtime overlay. The
+// desired app spec and the backing-service projection are separate sources of
+// truth; status output should not silently report an empty runtime when the
+// database is active and attached.
+func appPostgresRuntimeID(app model.App) string {
+	if app.Spec.Postgres != nil && strings.TrimSpace(app.Spec.Postgres.RuntimeID) != "" {
+		return strings.TrimSpace(app.Spec.Postgres.RuntimeID)
+	}
+	for _, service := range app.BackingServices {
+		if !strings.EqualFold(strings.TrimSpace(service.Type), "postgres") || service.Spec.Postgres == nil {
+			continue
+		}
+		if runtimeID := strings.TrimSpace(service.Spec.Postgres.RuntimeID); runtimeID != "" {
+			return runtimeID
+		}
+	}
+	return ""
 }
 
 func sourceRef(source *model.AppSource) string {

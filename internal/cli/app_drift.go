@@ -99,7 +99,7 @@ func runtimeDriftError(result model.AppRuntimeState) error {
 	}
 }
 func (c *CLI) newAppReconcileCommand() *cobra.Command {
-	var apply, plan bool
+	var apply, plan, wait bool
 	var expected string
 	var timeout time.Duration
 	cmd := &cobra.Command{Use: "reconcile <app>", Short: "Plan or reapply committed intent using an atomic spec precondition, then verify runtime facts", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -143,6 +143,11 @@ func (c *CLI) newAppReconcileCommand() *cobra.Command {
 			return err
 		}
 		result["operation"] = response.Operation
+		if !wait {
+			result["outcome"] = "queued"
+			result["next_command"] = "fugue operation wait " + shellSingleQuote(response.Operation.ID)
+			return c.renderResourceResult(result)
+		}
 		operation, waitErr := waitOperation(ctx, client, response.Operation.ID, 2*time.Second)
 		result["operation"] = operation
 		if waitErr != nil {
@@ -182,6 +187,7 @@ func (c *CLI) newAppReconcileCommand() *cobra.Command {
 	}}
 	cmd.Flags().BoolVar(&plan, "plan", false, "Only inspect intent and runtime evidence (the default)")
 	cmd.Flags().BoolVar(&apply, "apply", false, "Apply the current committed spec and verify; never builds or selects another image")
+	cmd.Flags().BoolVar(&wait, "wait", true, "Wait for the reconcile operation and runtime verification (default true)")
 	cmd.Flags().StringVar(&expected, "expected-spec-hash", "", "Require the hash from a previously inspected plan")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, "Total observation and apply deadline; does not cancel server operations")
 	return cmd

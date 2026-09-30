@@ -126,7 +126,11 @@ func (c *CLI) newAppListCommand() *cobra.Command {
 	var search string
 	var domain string
 	var sourceRef string
-	var includeLiveStatus bool
+	// App listing is an operational command. Show fresh runtime evidence by
+	// default so a healthy workload is not rendered as "unknown / 0" unless
+	// the caller explicitly asks for the cheap stored-only view.
+	var includeLiveStatus = true
+	var noLive bool
 	var includeResourceUsage bool
 	var allTenants bool
 	cmd := &cobra.Command{
@@ -152,7 +156,7 @@ func (c *CLI) newAppListCommand() *cobra.Command {
 				}
 			}
 			apps, err := client.ListAppsWithOptions(listAppsOptions{
-				IncludeLiveStatus:    includeLiveStatus,
+				IncludeLiveStatus:    includeLiveStatus && !noLive,
 				IncludeResourceUsage: includeResourceUsage,
 				TenantID:             tenantID,
 				ProjectID:            projectID,
@@ -177,7 +181,8 @@ func (c *CLI) newAppListCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&search, "search", "q", "", "Filter apps by id, name, route, project, tenant, or source metadata")
 	cmd.Flags().StringVar(&domain, "domain", "", "Filter apps by route or custom domain hostname")
 	cmd.Flags().StringVar(&sourceRef, "source-ref", "", "Filter apps by repository, image, upload, commit, or build metadata")
-	cmd.Flags().BoolVar(&includeLiveStatus, "live", false, "Include live runtime status overlay")
+	cmd.Flags().BoolVar(&includeLiveStatus, "live", true, "Include live runtime status overlay (default true)")
+	cmd.Flags().BoolVar(&noLive, "no-live", false, "Use stored app status without a live runtime overlay")
 	cmd.Flags().BoolVar(&includeResourceUsage, "resource-usage", false, "Include current resource usage overlay")
 	cmd.Flags().BoolVar(&allTenants, "all-tenants", false, "Search every visible tenant instead of the configured workspace")
 	return cmd

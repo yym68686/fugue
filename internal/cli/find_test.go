@@ -87,8 +87,8 @@ func TestRunAppListSearchSendsServerSideFilters(t *testing.T) {
 			if got := r.URL.Query().Get("source_ref"); got != "github.com/example/uni" {
 				t.Fatalf("expected source_ref filter, got %q", got)
 			}
-			if got := r.URL.Query().Get("include_live_status"); got != "false" {
-				t.Fatalf("expected include_live_status=false, got %q", got)
+			if got := r.URL.Query().Get("include_live_status"); got != "true" {
+				t.Fatalf("expected include_live_status=true, got %q", got)
 			}
 			if got := r.URL.Query().Get("include_resource_usage"); got != "false" {
 				t.Fatalf("expected include_resource_usage=false, got %q", got)
