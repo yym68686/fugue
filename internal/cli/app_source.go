@@ -69,11 +69,14 @@ func (c *CLI) newAppSourceBindGitHubCommand() *cobra.Command {
 		BuildContextDir string
 		ImageNameSuffix string
 		ComposeService  string
-	}{}
+		Sync            bool
+		Wait            bool
+	}{Wait: true}
 
 	cmd := &cobra.Command{
 		Use:   "bind-github <app> <repo-or-url>",
 		Short: "Rebind an app's durable source ownership to GitHub",
+		Long:  "Bind future builds to a GitHub branch. The controller polls tracked repositories automatically; no webhook is required. The build source describes the last build and changes only after a successful sync. Use --sync to build immediately.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if opts.Public && opts.Private {
@@ -135,18 +138,39 @@ func (c *CLI) newAppSourceBindGitHubCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if opts.Sync {
+				rebuild, err := client.RebuildApp(app.ID, rebuildPlanRequest{})
+				if err != nil {
+					return fmt.Errorf("GitHub binding saved, but immediate sync failed: %w", err)
+				}
+				operation, err := c.waitForAppRebuildOperation(client, app.ID, rebuild.Operation, opts.Wait)
+				if err != nil {
+					return err
+				}
+				response.Operation = &operation
+				response.App, err = client.GetApp(app.ID)
+				if err != nil {
+					return err
+				}
+			}
 			if c.wantsJSON() {
 				response.App = redactAppForOutput(response.App)
 				return c.writeJSON(map[string]any{
-					"app":             response.App,
-					"already_current": response.AlreadyCurrent,
-					"origin_source":   model.AppOriginSource(response.App),
-					"build_source":    model.AppBuildSource(response.App),
+					"app":               response.App,
+					"already_current":   response.AlreadyCurrent,
+					"operation":         response.Operation,
+					"source_sync_mode":  "polling",
+					"source_sync_phase": sourceSyncPhase(response.App.Status.SourceSync),
+					"origin_source":     model.AppOriginSource(response.App),
+					"build_source":      model.AppBuildSource(response.App),
 				})
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "app", Value: response.App.Name},
 				kvPair{Key: "already_current", Value: strconv.FormatBool(response.AlreadyCurrent)},
+				kvPair{Key: "source_sync_mode", Value: "polling"},
+				kvPair{Key: "source_sync_phase", Value: sourceSyncPhase(response.App.Status.SourceSync)},
+				kvPair{Key: "build_source_note", Value: "last completed build; changes after successful sync"},
 				kvPair{Key: "origin_source_type", Value: sourceField(model.AppOriginSource(response.App), func(source *model.AppSource) string { return source.Type })},
 				kvPair{Key: "origin_source_ref", Value: sourceRef(model.AppOriginSource(response.App))},
 				kvPair{Key: "build_source_type", Value: sourceField(model.AppBuildSource(response.App), func(source *model.AppSource) string { return source.Type })},
@@ -154,6 +178,8 @@ func (c *CLI) newAppSourceBindGitHubCommand() *cobra.Command {
 			)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.Sync, "sync", false, "Build and deploy immediately after saving the binding")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", true, "With --sync, wait for deployment and public availability")
 	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Git branch to track for future syncs")
 	cmd.Flags().BoolVar(&opts.Public, "public", false, "Treat the rebound repository as public")
 	cmd.Flags().BoolVar(&opts.Private, "private", false, "Treat the rebound repository as private")

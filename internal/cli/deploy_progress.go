@@ -116,6 +116,11 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 		}
 
 		if pending == 0 {
+			for _, app := range currentApps {
+				if err := c.waitForPublicApp(client, app); err != nil {
+					return bundle, nil, err
+				}
+			}
 			bundle.Operations = currentOps
 			bundle.Apps = currentApps
 			if op, ok := findOperationByID(currentOps, bundle.PrimaryOp.ID); ok {

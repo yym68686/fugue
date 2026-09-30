@@ -139,6 +139,7 @@ type Server struct {
 	appProxyTransport                      http.RoundTripper
 	edgeDNSAuthorityHTTPClient             *http.Client
 	appRequestHTTPClient                   *http.Client
+	appPublicRequestHTTPClient             *http.Client
 	openAppDatabase                        func(driverName, dsn string) (*sql.DB, error)
 	appDatabaseImportRunner                func(context.Context, model.AppDatabaseImportJob) (string, error)
 	backupRunner                           func(context.Context, model.BackupRun) ([]model.BackupArtifact, error)

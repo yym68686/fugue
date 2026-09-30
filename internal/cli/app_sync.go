@@ -72,6 +72,12 @@ func (c *CLI) newAppSyncStatusCommand() *cobra.Command {
 				{Key: "commit_sha", Value: sourceField(originSource, func(source *model.AppSource) string { return source.CommitSHA })},
 				{Key: "build_strategy", Value: sourceField(originSource, func(source *model.AppSource) string { return source.BuildStrategy })},
 			}
+			if originSource != nil && model.IsGitHubAppSourceType(originSource.Type) {
+				pairs = append(pairs, kvPair{Key: "source_sync_mode", Value: "polling"})
+				if app.Status.SourceSync == nil {
+					pairs = append(pairs, kvPair{Key: "source_sync_phase", Value: "pending"})
+				}
+			}
 			if app.Status.SourceSync != nil {
 				pairs = append(pairs, appSourceSyncStatusPairs(app.Status.SourceSync)...)
 			}
@@ -239,7 +245,7 @@ func appSourceSyncStatusPairs(status *model.AppSourceSyncStatus) []kvPair {
 
 func sourceSyncPhase(status *model.AppSourceSyncStatus) string {
 	if status == nil {
-		return model.AppSourceSyncPhaseOK
+		return "pending"
 	}
 	return strings.TrimSpace(status.Phase)
 }

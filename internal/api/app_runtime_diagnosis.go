@@ -367,7 +367,7 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	}
 
 	if component == "app" && app.Route != nil {
-		s.appendAppPublishedRouteEvidence(r.Context(), app, &diagnosis)
+		s.appendAppPublicRouteEvidence(r.Context(), app, &diagnosis)
 	}
 	if diagnosis.Summary == "" {
 		diagnosis.Summary = "no single runtime root cause was identified"
@@ -375,52 +375,31 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	return diagnosis, nil
 }
 
-// appendAppPublishedRouteEvidence keeps the pod diagnosis honest when the
-// workload is healthy but the public route release is missing, stale, or has
-// no converged edge consumer. Internal readiness alone cannot prove that the
-// public URL is serving.
-func (s *Server) appendAppPublishedRouteEvidence(ctx context.Context, app model.App, diagnosis *appDiagnosis) {
-	if s == nil || diagnosis == nil || app.Route == nil {
+// Keep workload and public-route observations separate. Existing runtime
+// failures retain priority; an unavailable public path cannot be called healthy.
+func (s *Server) appendAppPublicRouteEvidence(ctx context.Context, app model.App, diagnosis *appDiagnosis) {
+	if app.Route == nil || app.Spec.Replicas <= 0 || model.AppUsesInternalNetwork(app.Spec) || model.AppUsesBackgroundNetwork(app.Spec) || appUsesKnownNonHTTPRouteProtocol(app) {
 		return
 	}
-	snapshot, healthy, err := s.publishedRouteDiagnostics(ctx, "")
-	if err != nil {
-		diagnosis.Warnings = appendUniqueString(diagnosis.Warnings, fmt.Sprintf("public route publication evidence unavailable: %v", err))
+	target := strings.TrimSpace(app.Route.PublicURL)
+	if target == "" {
 		return
 	}
-	bindings := publishedRouteDiagnosticBindings(snapshot, healthy)
-	wantHost := normalizeExternalAppDomain(app.Route.Hostname)
-	wantPath := strings.TrimSpace(app.Route.PathPrefix)
-	if wantPath == "" {
-		wantPath = "/"
-	}
-	var match *model.EdgeRouteBinding
-	for index := range bindings {
-		candidate := &bindings[index]
-		path := strings.TrimSpace(candidate.PathPrefix)
-		if path == "" {
-			path = "/"
-		}
-		if normalizeExternalAppDomain(candidate.Hostname) == wantHost && path == wantPath && strings.TrimSpace(candidate.AppID) == strings.TrimSpace(app.ID) {
-			match = candidate
-			break
-		}
-	}
-	if match == nil {
-		diagnosis.Category = "edge-route-unavailable"
-		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the public route has not been published", diagnosis.ReadyPods, diagnosis.LivePods)
-		diagnosis.Hint = "Wait for the edge route publication to converge, then retry the diagnosis. Inspect the published traffic release and edge consumer evidence if it remains unavailable."
-		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, "no matching published edge route was found for the app hostname and path")
+	observed := httpx.ObservePublicRoute(ctx, target, s.appPublicRequestHTTPClient)
+	diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, fmt.Sprintf("public HEAD status=%d reachable=%t edge_request_id=%s bundle_version=%s", observed.StatusCode, observed.Reachable, observed.RequestID, observed.BundleVersion))
+	if observed.Reachable {
 		return
 	}
-	if !strings.EqualFold(strings.TrimSpace(match.Status), model.EdgeRouteStatusActive) || strings.TrimSpace(match.UpstreamURL) == "" {
-		diagnosis.Category = "edge-route-unavailable"
-		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the public route is unavailable: %s", diagnosis.ReadyPods, diagnosis.LivePods, firstNonEmpty(match.StatusReason, "published edge consumers are not ready"))
-		diagnosis.Hint = "Inspect edge consumer convergence and route publication evidence; the application runtime is ready but the public edge path is not serving."
-		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, fmt.Sprintf("published edge route status=%s reason=%s", strings.TrimSpace(match.Status), firstNonEmpty(match.StatusReason, "none")))
+	diagnosis.Warnings = appendUniqueString(diagnosis.Warnings, observed.Reason)
+	if diagnosis.Category != "available" {
 		return
 	}
-	diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, fmt.Sprintf("published edge route is active: generation=%s", strings.TrimSpace(match.RouteGeneration)))
+	diagnosis.Category = "public-route-unavailable"
+	if observed.StatusCode == 0 || observed.StatusCode == http.StatusNotFound {
+		diagnosis.Category = "public-route-inconclusive"
+	}
+	diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but public availability is not established: %s", diagnosis.ReadyPods, diagnosis.LivePods, observed.Reason)
+	diagnosis.Hint = "Compare public and internal responses with fugue app request compare; inspect edge publication and serving evidence before rebuilding the application."
 }
 
 func appRestrictedIngress(app model.App) bool {

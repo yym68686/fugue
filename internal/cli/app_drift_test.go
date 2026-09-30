@@ -69,3 +69,41 @@ func TestReconcilePlanNeverWritesAndApplySendsPrecondition(t *testing.T) {
 		})
 	}
 }
+
+func TestReconcileWaitFlagPreservesPlanAndAllowsQueueOnlyApply(t *testing.T) {
+	for _, apply := range []bool{false, true} {
+		writes := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/v1/apps":
+				fmt.Fprint(w, `{"apps":[{"id":"app_test","name":"demo"}]}`)
+			case r.Method == "POST":
+				writes++
+				if r.Header.Get("If-Match") != `"`+strings.Repeat("a", 64)+`"` {
+					t.Error("missing precondition")
+				}
+				fmt.Fprint(w, `{"operation":{"id":"op_test","status":"pending"}}`)
+			case strings.HasPrefix(r.URL.Path, "/v1/operations"):
+				t.Error("queue-only reconcile waited")
+			default:
+				json.NewEncoder(w).Encode(model.AppRuntimeState{SchemaVersion: 1, AppID: "app_test", DesiredSpecHash: strings.Repeat("a", 64), State: "drifted"})
+			}
+		}))
+		args := []string{"--base-url", srv.URL, "--token", "test", "--json", "app", "reconcile", "demo", "--wait"}
+		if apply {
+			args = append(args, "--apply", "--wait=false")
+		}
+		var out, stderr bytes.Buffer
+		err := runWithStreams(args, &out, &stderr)
+		srv.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if apply && (writes != 1 || !strings.Contains(out.String(), `"outcome": "queued"`)) {
+			t.Fatal(out.String())
+		}
+		if !apply && writes != 0 {
+			t.Fatal("--wait authorized a mutation")
+		}
+	}
+}

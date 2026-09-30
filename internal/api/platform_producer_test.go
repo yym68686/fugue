@@ -64,10 +64,11 @@ func TestPlatformProducerPublishesAndReusesShadow(t *testing.T) {
 	}
 	count := 0
 	desired := "one"
+	available := false
 	capture := func(ctx context.Context, p model.Principal) (platformIntentProjectionResponse, error) {
 		count++
 		now := time.Now().UTC()
-		return platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Generation: "intent-" + desired, Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://" + desired + ":8080", Enabled: true}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global"}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now}, BusinessSnapshotRevision: desired}, nil
+		return platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Generation: "intent-" + desired, Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://" + desired + ":8080", Enabled: true, OriginRef: "origin", RuntimeID: "runtime-a"}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global"}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, Origins: []platformconfig.OriginObservation{{Ref: "origin", ObservedAt: now, RuntimeID: "runtime-a", Status: map[bool]string{false: "unavailable", true: "active"}[available]}}}, BusinessSnapshotRevision: desired}, nil
 	}
 	if _, err := server.reconcilePlatformConfigurationWithCapture(context.Background(), capture); err != nil || count != 0 {
 		t.Fatal("missing policy activated producer", err)
@@ -97,6 +98,32 @@ func TestPlatformProducerPublishesAndReusesShadow(t *testing.T) {
 	if repeated.ID != first.ID {
 		t.Fatal("timestamp-only recapture advanced shadow")
 	}
+	// With unchanged intent, an origin becoming ready must publish before the
+	// five-minute refresh. It must not mutate intent or promote serving/LKG.
+	available = true
+	if _, err := server.reconcilePlatformConfigurationWithCapture(context.Background(), capture); err != nil {
+		t.Fatal(err)
+	}
+	readyParent, readyRelease, _, err := state.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", "shadow")
+	if err != nil || readyRelease.ID == first.ID {
+		t.Fatal("runtime recovery waited for periodic refresh", err)
+	}
+	route, err := server.consumerAssignmentChild(readyParent, model.PlatformArtifactKindEdgeRouteBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, err := projectPlatformRouteArtifact(route)
+	if err != nil || len(projected.Routes) != 1 || projected.Routes[0].OriginStatus != "active" {
+		t.Fatal("recovered route was not active", projected, err)
+	}
+	if _, err := server.reconcilePlatformConfigurationWithCapture(context.Background(), capture); err != nil {
+		t.Fatal(err)
+	}
+	_, unchangedReady, _, _ := state.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", "shadow")
+	if unchangedReady.ID != readyRelease.ID {
+		t.Fatal("heartbeat-only recapture republished recovered route")
+	}
+	first = readyRelease
 	desired = "two"
 	if _, err := server.reconcilePlatformConfigurationWithCapture(context.Background(), capture); err != nil {
 		t.Fatal(err)

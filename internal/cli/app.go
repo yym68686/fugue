@@ -929,6 +929,11 @@ func (c *CLI) waitForSingleAppOperation(client *Client, appID string, op model.O
 	if err != nil {
 		return nil, &finalOp, err
 	}
+	if finalOp.Type == model.OperationTypeDeploy {
+		if err := c.waitForPublicApp(client, app); err != nil {
+			return &app, &finalOp, err
+		}
+	}
 	return &app, &finalOp, nil
 }
 

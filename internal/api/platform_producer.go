@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -186,11 +187,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
-	sourceDigest, err := platformconfig.Digest(struct {
-		Intent    platformconfig.PlatformIntent
-		Policy    platformconfig.PolicySnapshot
-		Authority string
-	}{projection.Intent, projection.Policy, authority.ID})
+	sourceDigest, err := platformProducerSourceDigest(projection, authority.ID)
 	if err != nil {
 		return interval, err
 	}
@@ -259,6 +256,40 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		return interval, s.stageProducedTraffic(ctx, policy, authority, result.ReleaseArtifact)
 	}
 	return interval, nil
+}
+
+// Compare the route behavior resolved from fixed runtime facts as well as
+// configuration. A newly ready origin must replace a startup error route on
+// the next check, not wait for the periodic artifact renewal. The resolvers
+// validate freshness before hashing; timestamps alone do not cause churn.
+// This fingerprint schedules compilation, never changes intent or grants
+// permission to bypass signed policy, consumer convergence, or the LKG gates.
+func platformProducerSourceDigest(projection platformIntentProjectionResponse, authority string) (string, error) {
+	policy := platformconfig.NormalizePolicySnapshot(projection.Policy)
+	routes, err := platformconfig.ResolveRouteOrigins(projection.Intent.Routes, projection.RuntimeSnapshot, policy)
+	if err != nil {
+		return "", err
+	}
+	routes, err = platformconfig.ApplyRoutePolicyConstraints(routes, policy, projection.RuntimeSnapshot.CapturedAt)
+	if err != nil {
+		return "", err
+	}
+	routes, err = platformconfig.ApplyTrafficPolicyConstraints(routes, policy, projection.RuntimeSnapshot)
+	if err != nil {
+		return "", err
+	}
+	sort.Slice(routes, func(i, j int) bool {
+		if routes[i].Hostname != routes[j].Hostname {
+			return routes[i].Hostname < routes[j].Hostname
+		}
+		return routes[i].PathPrefix < routes[j].PathPrefix
+	})
+	return platformconfig.Digest(struct {
+		Intent    platformconfig.PlatformIntent
+		Policy    platformconfig.PolicySnapshot
+		Authority string
+		Routes    []platformconfig.CompiledRoute
+	}{projection.Intent, projection.Policy, authority, routes})
 }
 
 func (s *Server) loadStaticPlatformIntent(id, digest string) (platformproducer.StaticIntentInput, error) {
