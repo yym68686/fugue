@@ -330,8 +330,42 @@ jobs:
           python3 scripts/reconcile_cell_trust.py "${args[@]}"
           python3 scripts/reconcile_cell_trust.py "${args[@]}" --check
 
-  cell_producer_shadow:
+  cell_producer_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      shadow: ${{ steps.plan.outputs.shadow }}
+      reconfiguration: ${{ steps.plan.outputs.reconfiguration }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Admit one changed declaration before entering the shared producer queue
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producers deploy/environments/production/cell-producer-reconfiguration deploy/environments/production/cell-membership-expansion)
+          if (( ${#declarations[@]} > 1 )); then
+            echo 'one Cell producer declaration per configuration atom is required' >&2
+            exit 1
+          fi
+          if (( ${#declarations[@]} == 1 )); then
+            case "${declarations[0]}" in
+              deploy/environments/production/cell-producers/*) echo 'shadow=true' >> "$GITHUB_OUTPUT" ;;
+              *) echo 'reconfiguration=true' >> "$GITHUB_OUTPUT" ;;
+            esac
+          fi
+
+  cell_producer_shadow:
+    needs: cell_producer_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.cell_producer_plan.outputs.shadow == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
@@ -382,7 +416,8 @@ jobs:
           retention-days: 30
 
   cell_producer_reconfiguration:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: cell_producer_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.cell_producer_plan.outputs.reconfiguration == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
