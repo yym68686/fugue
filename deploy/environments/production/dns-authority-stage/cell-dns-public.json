@@ -1,0 +1,116 @@
+{
+  "schema": "fugue.dns-authority-transition-stage/v1",
+  "generation": 1,
+  "origin": "https://api.fugue.pro",
+  "authority_cell_id": "cell-dns-public",
+  "previous_topology": {
+    "authority_cells": [
+      {
+        "id": "cell-public-a",
+        "legacy_group_id": "edge-group-country-de"
+      },
+      {
+        "id": "cell-public-b",
+        "legacy_group_id": "edge-group-country-us"
+      }
+    ],
+    "edges": [
+      {
+        "authority_cell_id": "cell-public-b",
+        "capabilities": [
+          "http",
+          "tls"
+        ],
+        "failure_domains": {
+          "host": "bwg"
+        },
+        "id": "bwg",
+        "labels": {
+          "country": "us",
+          "region": "us"
+        },
+        "serving_pool_ids": [
+          "pool-public"
+        ]
+      },
+      {
+        "authority_cell_id": "cell-public-b",
+        "capabilities": [
+          "http",
+          "tls"
+        ],
+        "failure_domains": {
+          "host": "vps-591f4447"
+        },
+        "id": "vps-591f4447",
+        "labels": {
+          "country": "us",
+          "region": "us"
+        },
+        "serving_pool_ids": [
+          "pool-public"
+        ]
+      },
+      {
+        "authority_cell_id": "cell-public-a",
+        "capabilities": [
+          "http",
+          "tls"
+        ],
+        "failure_domains": {
+          "host": "vps-84c8f0a9"
+        },
+        "id": "vps-84c8f0a9",
+        "labels": {
+          "country": "de",
+          "region": "de"
+        },
+        "serving_pool_ids": [
+          "pool-public"
+        ]
+      }
+    ],
+    "schema_version": "edge-topology/v1",
+    "serving_pools": [
+      {
+        "id": "pool-public"
+      }
+    ]
+  },
+  "route_publications": [
+    {
+      "release_set_id": "artifact_1790795457_53e1cdbb9b8d",
+      "release_set_digest": "sha256:f9124e93ed985dddab93ef92f071942663174796d05ccf6806b1404b623114aa",
+      "release_id": "artifactrel_1790795588_df6c0d2e6209",
+      "fencing_token": 4,
+      "route_artifact_id": "artifact_1790795456_1ebac73c4ba4",
+      "route_artifact_digest": "sha256:c61dce1bc6f441fe4120fbb70879c52e3c806184b21247fdd9cf838d8f0d0483",
+      "tls_artifact_id": "artifact_1790795456_908822f893e6",
+      "tls_artifact_digest": "sha256:13331f0322fd2d13bc4721d690c2003ef9590e39ed166a4e7bbe7870d9bf2102",
+      "authority_cell_id": "cell-public-a",
+      "release_channel": "full"
+    },
+    {
+      "release_set_id": "artifact_1790795967_085b9ffdfe57",
+      "release_set_digest": "sha256:e12446d171ef3ccd9658c1d649487c902542afe478a8bcf07272ac8ed25efc5d",
+      "release_id": "artifactrel_1790796035_98d5cc5043e2",
+      "fencing_token": 5,
+      "route_artifact_id": "artifact_1790795967_e0b51808e9a2",
+      "route_artifact_digest": "sha256:de0a43c14c5dd19703107a583721c9641ab468eaac357e1e3f17ad00e52713c2",
+      "tls_artifact_id": "artifact_1790795967_3f03a2151175",
+      "tls_artifact_digest": "sha256:edc91dce639862716ab2c054ac4156b0e7ee8ec59906cceae757d0483a0520de",
+      "authority_cell_id": "cell-public-b",
+      "release_channel": "full"
+    }
+  ],
+  "dns_node_ids": [
+    "vps-591f4447",
+    "vps-84c8f0a9"
+  ],
+  "expected_previous_shadow": null,
+  "capture": {
+    "timeout_seconds": 900,
+    "poll_seconds": 10,
+    "max_source_age_seconds": 180
+  }
+}
