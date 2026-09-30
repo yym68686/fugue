@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -167,6 +168,15 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 			}
 			if platformconfig.ValidateTrafficCohortProjection(parent, child) != nil {
 				return ErrConflict
+			}
+			if policy.RoutePlacementTransition != nil {
+				var payload struct {
+					Policy platformconfig.PolicySnapshot `json:"policy"`
+				}
+				raw, err := json.Marshal(child.Content)
+				if err != nil || json.Unmarshal(raw, &payload) != nil || platformproducer.ValidateRoutePlacementOutput(policy, payload.Policy) != nil {
+					return ErrConflict
+				}
 			}
 			seen[child.ArtifactKind] = true
 		}

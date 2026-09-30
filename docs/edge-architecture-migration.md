@@ -844,3 +844,24 @@ Their egress permits the API, cluster resolver and public HTTPS route probes;
 observer ingress is limited to API Pods. Routing Cells keep their own scopes and
 state. Initial DNS intent, immutable references, capability enrollment and public
 handoff are later configuration steps, independent of these executable lanes.
+
+Route-only producers may opt into a signed `route_placement_transition` before
+neutral DNS configuration is compiled. The declaration contains complete old
+and new topology intents, plus each affected route constraint and its canonical
+source digest. The topology pair may only remove explicitly declared authority
+aliases. Physical Edge membership, pools, capabilities, locality labels and
+failure domains must remain identical; countries are never interpreted as
+authority identifiers. Enrolled private Cell members must match the declared
+neutral topology exactly.
+
+Capture compares every affected constraint against its pinned source before
+replacing aliases in DNS placement and group exclusions. Tenant/app ownership,
+matching scope, physical exclusions, exclusion expiry/owner/generation/fence,
+enablement and health minimums remain intact. Missing, changed and unlisted
+affected constraints reject capture. The publication transaction independently
+reconstructs each transformed constraint from the signed source and checks both
+route and TLS children. Rollback retains its independent verified baseline.
+The option is rejected for global and complete-traffic producers. It never
+changes business rows, runtime identity, publication selection or LKG by itself;
+activation and public handoff still require their own observed configuration
+transitions.

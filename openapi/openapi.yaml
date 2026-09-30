@@ -34177,6 +34177,31 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PlatformArtifactLineageDependency"
+    PlatformRoutePlacementTransition:
+      type: object
+      additionalProperties: false
+      required: [previous_topology, next_topology, constraints]
+      description: Explicit signed producer configuration for retiring declared authority aliases in route placement constraints. Only cell-routes producers may use it. The topology pair must differ solely by removing one or more legacy_group_id values; stable Edge IDs, membership, pools, capabilities, labels and failure domains are identical. No country-derived mapping, runtime identity rebinding, public selection or LKG promotion is authorized. Each affected constraint is pinned in full, including ownership, exclusions, their original expiry/fence and health minimums. Capture rejects missing, changed or unlisted affected source constraints; publication rechecks the exact transformed output. Failed capture or publication preserves the prior positive LKG.
+      properties:
+        previous_topology:
+          $ref: "#/components/schemas/PlatformEdgeTopology"
+        next_topology:
+          $ref: "#/components/schemas/PlatformEdgeTopology"
+        constraints:
+          type: array
+          minItems: 1
+          maxItems: 4096
+          description: Unique source constraints sorted by hostname. Every listed source must change at least one declared alias. Canonical sources use the ordinary PolicySnapshot normalization; their digest hashes the normalized constraint as a JSON object with sorted keys, omitted empty optional fields and the platform JSON escaping rules.
+          items:
+            type: object
+            additionalProperties: false
+            required: [source, source_digest]
+            properties:
+              source:
+                $ref: "#/components/schemas/PlatformRoutePolicyConstraint"
+              source_digest:
+                type: string
+                pattern: '^sha256:[a-f0-9]{64}$'
     PlatformProducerPolicy:
       type: object
       additionalProperties: false
@@ -34184,7 +34209,9 @@ components:
       description: Signed operational policy stored as policy_snapshot in platform-config-producer for global, or platform-config-producer:<cell-id> for an independent cell. Activate or pause through the existing artifact shadow release API; a draft has no effect. A cell producer explicitly declares authority_cell_id and pins static intent and projection policy in its exact target scope.
       oneOf:
         - not:
-            required: [publication_role]
+            anyOf:
+              - required: [publication_role]
+              - required: [route_placement_transition]
         - required: [publication_role, authority_cell_id, dns_policy_artifact_id, dns_policy_digest]
           properties:
             require_dns_query_policy: {type: boolean, enum: [false]}
@@ -34192,6 +34219,8 @@ components:
             require_route_defaults: {type: boolean, enum: [true]}
             hosted_zone_templates: {type: array, maxItems: 0, items: {}}
       properties:
+        route_placement_transition:
+          $ref: "#/components/schemas/PlatformRoutePlacementTransition"
         publication_role:
           type: string
           enum: [cell-routes]

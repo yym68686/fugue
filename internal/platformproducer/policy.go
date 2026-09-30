@@ -26,24 +26,25 @@ const (
 )
 
 type Policy struct {
-	PublicationRole           string               `json:"publication_role,omitempty"`
-	AuthorityCellID           string               `json:"authority_cell_id,omitempty"`
-	Serving                   *ServingPolicy       `json:"serving,omitempty"`
-	RequireDNSQueryPolicy     bool                 `json:"require_dns_query_policy,omitempty"`
-	RequireRouteDefaults      bool                 `json:"require_route_defaults,omitempty"`
-	RequireApplicationDomains bool                 `json:"require_application_domains,omitempty"`
-	SchemaVersion             string               `json:"schema_version"`
-	Generation                string               `json:"generation"`
-	Mode                      string               `json:"mode"`
-	InputSource               string               `json:"input_source"`
-	TargetScope               string               `json:"target_scope"`
-	IntervalSeconds           int                  `json:"interval_seconds"`
-	RefreshSeconds            int                  `json:"refresh_seconds"`
-	StaticIntentArtifactID    string               `json:"static_intent_artifact_id,omitempty"`
-	StaticIntentDigest        string               `json:"static_intent_digest,omitempty"`
-	DNSPolicyArtifactID       string               `json:"dns_policy_artifact_id,omitempty"`
-	DNSPolicyDigest           string               `json:"dns_policy_digest,omitempty"`
-	HostedZoneTemplates       []HostedZoneTemplate `json:"hosted_zone_templates,omitempty"`
+	RoutePlacementTransition  *RoutePlacementTransition `json:"route_placement_transition,omitempty"`
+	PublicationRole           string                    `json:"publication_role,omitempty"`
+	AuthorityCellID           string                    `json:"authority_cell_id,omitempty"`
+	Serving                   *ServingPolicy            `json:"serving,omitempty"`
+	RequireDNSQueryPolicy     bool                      `json:"require_dns_query_policy,omitempty"`
+	RequireRouteDefaults      bool                      `json:"require_route_defaults,omitempty"`
+	RequireApplicationDomains bool                      `json:"require_application_domains,omitempty"`
+	SchemaVersion             string                    `json:"schema_version"`
+	Generation                string                    `json:"generation"`
+	Mode                      string                    `json:"mode"`
+	InputSource               string                    `json:"input_source"`
+	TargetScope               string                    `json:"target_scope"`
+	IntervalSeconds           int                       `json:"interval_seconds"`
+	RefreshSeconds            int                       `json:"refresh_seconds"`
+	StaticIntentArtifactID    string                    `json:"static_intent_artifact_id,omitempty"`
+	StaticIntentDigest        string                    `json:"static_intent_digest,omitempty"`
+	DNSPolicyArtifactID       string                    `json:"dns_policy_artifact_id,omitempty"`
+	DNSPolicyDigest           string                    `json:"dns_policy_digest,omitempty"`
+	HostedZoneTemplates       []HostedZoneTemplate      `json:"hosted_zone_templates,omitempty"`
 }
 
 type ServingPolicy struct {
@@ -77,6 +78,9 @@ type HostedZoneTemplate struct {
 
 func Decode(artifact model.PlatformArtifact) (Policy, error) {
 	var p Policy
+	if value, present := artifact.Content["route_placement_transition"]; present && value == nil {
+		return p, fmt.Errorf("route placement transition cannot be null")
+	}
 	raw, err := json.Marshal(artifact.Content)
 	if err != nil {
 		return p, err
@@ -92,6 +96,9 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 	}
 	if p.TargetScope == "global" && p.AuthorityCellID != "" || p.TargetScope != "global" && (p.AuthorityCellID == "" || p.TargetScope != platformconfig.AuthorityCellScope(p.AuthorityCellID) || p.DNSPolicyArtifactID == "") {
 		return p, fmt.Errorf("producer cell authority or pinned policy missing")
+	}
+	if err := validatePlacementTransitionPolicy(p); err != nil {
+		return p, err
 	}
 	if p.PublicationRole == platformconfig.PublicationRoleCellDNS || platformconfig.ValidatePublicationRole(p.PublicationRole, p.AuthorityCellID, p.TargetScope) != nil || p.PublicationRole == platformconfig.PublicationRoleCellRoutes && (p.RequireDNSQueryPolicy || len(p.HostedZoneTemplates) != 0) {
 		return p, fmt.Errorf("producer publication role invalid")
