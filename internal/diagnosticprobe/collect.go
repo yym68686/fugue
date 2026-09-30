@@ -122,10 +122,7 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 			visited[i] = true
 			observed := time.Now().UTC()
 			e := livediagnostics.Evidence{Name: c.Name, Source: c.Kind, ObservedAt: observed, Status: "complete"}
-			budget := 8 * time.Second
-			if c.Kind == "process-cpu-profile" || c.Kind == "perf-capture-check" || c.Kind == "process-page-faults" || c.Kind == "process-runqueue-latency" {
-				budget = time.Duration(req.DurationSeconds-1) * time.Second
-			}
+			budget := collectorBudget(req.DurationSeconds, c.Kind)
 			budgetCtx, stop := context.WithTimeout(ctx, budget)
 			value, err := collectOne(budgetCtx, req, c, client)
 			stop()
@@ -199,6 +196,14 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 	report.FinishedAt = time.Now().UTC()
 	appendWindowSummary(&report)
 	return report, nil
+}
+func collectorBudget(sessionSeconds int, kind string) time.Duration {
+	switch kind {
+	case "process-cpu-profile", "process-memory-profile", "perf-capture-check", "process-page-faults", "process-runqueue-latency":
+		return time.Duration(sessionSeconds-1) * time.Second
+	default:
+		return 8 * time.Second
+	}
 }
 func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collector, k *kubeReader) (any, error) {
 	switch c.Kind {

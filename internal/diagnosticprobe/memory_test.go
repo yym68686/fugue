@@ -4,9 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"fugue/internal/livediagnostics"
 )
+
+func TestMemoryCollectorBudgetAllowsCaptureAndAnalysis(t *testing.T) {
+	for _, capture := range []int{5, 60, 120} {
+		session := capture + 30
+		budget := collectorBudget(session, "process-memory-profile")
+		if budget < time.Duration(capture+20)*time.Second || budget >= time.Duration(session)*time.Second {
+			t.Fatalf("memory capture %ds has insufficient or unbounded deadline: %s", capture, budget)
+		}
+	}
+	if collectorBudget(90, "kubernetes-objects") > 8*time.Second {
+		t.Fatal("profiling relaxed the ordinary collector timeout")
+	}
+}
 
 func TestMemoryProfileRequiresExactBoundedContainer(t *testing.T) {
 	for _, tc := range []struct {

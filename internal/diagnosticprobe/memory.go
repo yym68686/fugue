@@ -29,8 +29,18 @@ func processMemoryProfile(ctx context.Context, req livediagnostics.ProbeRequest,
 	defer os.RemoveAll(dir)
 	args := []string{"--kind", "memory-profile", "--duration", strconv.Itoa(c.CaptureSeconds), "--sample-interval-ms", "1000", "--container-id", req.ContainerID, "--output-dir", dir}
 	raw, truncated, resources, err := observedCommandEnvironment(ctx, 2<<20, 192<<20, []string{"GOMEMLIMIT=128MiB"}, "/usr/local/bin/fugue-diagnostic-agent", args...)
-	if err != nil || truncated {
-		return nil, errors.New("memory sampler failed or exceeded its output budget")
+	if err != nil {
+		detail := boundedError(err)
+		var failure struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(raw, &failure) == nil && failure.Error != "" {
+			detail = safeText(failure.Error)
+		}
+		return partialValue{Value: map[string]any{"sampler_error": detail, "sampler_resources": resources}, Gaps: []string{"memory sampler failed: " + detail}}, nil
+	}
+	if truncated {
+		return nil, errors.New("memory sampler exceeded its output budget")
 	}
 	after, err := profileProcessIdentities(ctx, req)
 	if err != nil || len(before) != len(after) {
