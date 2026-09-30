@@ -2238,7 +2238,7 @@ func (cluster *kubectlCluster) MonitorConverged(ctx context.Context, release dec
 		stripMonitorReleaseEvidence(desired)
 		stripMonitorReleaseEvidence(live)
 		if !declarativerelease.ResourceDesiredSubset(desired, live) {
-			return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
+			return fmt.Errorf("declared resource %s/%s has not converged: %s", identity.Kind, identity.Name, resourceMismatchSummary(desired, live))
 		}
 	}
 	return nil
@@ -2254,6 +2254,125 @@ func stripMonitorReleaseEvidence(resource map[string]any) {
 	} {
 		delete(annotations, key)
 	}
+}
+
+// resourceMismatchSummary keeps a terminal convergence receipt useful after a
+// failed atom has been compensated.  The live object is deleted during
+// rollback, so the error must identify the first declarative field that the
+// API server normalized or rejected without dumping the complete object.
+func resourceMismatchSummary(desired, live map[string]any) string {
+	path, expected, observed := firstResourceMismatch(desired, live, "")
+	if path == "" {
+		return "field difference unavailable"
+	}
+	return path + " expected=" + compactResourceValue(expected) + " observed=" + compactResourceValue(observed)
+}
+
+func firstResourceMismatch(desired, live any, path string) (string, any, any) {
+	switch expected := desired.(type) {
+	case map[string]any:
+		observed, ok := live.(map[string]any)
+		if !ok {
+			return path, desired, live
+		}
+		keys := make([]string, 0, len(expected))
+		for key := range expected {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if path == "metadata" && (key == "uid" || key == "resourceVersion" || key == "generation" || key == "creationTimestamp" || key == "managedFields") {
+				continue
+			}
+			value, exists := observed[key]
+			if !exists {
+				return joinResourcePath(path, key), expected[key], nil
+			}
+			if mismatchPath, mismatchExpected, mismatchObserved := firstResourceMismatch(expected[key], value, joinResourcePath(path, key)); mismatchPath != "" {
+				return mismatchPath, mismatchExpected, mismatchObserved
+			}
+		}
+	case []any:
+		observed, ok := live.([]any)
+		if !ok || len(observed) != len(expected) {
+			return path + ".length", len(expected), len(observed)
+		}
+		key := resourceMapListKey(path)
+		if key != "" && resourceMapListHasKeys(expected, observed, key) {
+			indexed := make(map[string]any, len(observed))
+			for _, item := range observed {
+				object, _ := item.(map[string]any)
+				indexed[stringValue(object[key])] = item
+			}
+			for _, item := range expected {
+				object, _ := item.(map[string]any)
+				name := stringValue(object[key])
+				candidate, exists := indexed[name]
+				if !exists {
+					return path + "[" + key + "=" + name + "]", item, nil
+				}
+				if mismatchPath, mismatchExpected, mismatchObserved := firstResourceMismatch(item, candidate, path+"["+key+"="+name+"]"); mismatchPath != "" {
+					return mismatchPath, mismatchExpected, mismatchObserved
+				}
+			}
+			return "", nil, nil
+		}
+		for index := range expected {
+			if mismatchPath, mismatchExpected, mismatchObserved := firstResourceMismatch(expected[index], observed[index], fmt.Sprintf("%s[%d]", path, index)); mismatchPath != "" {
+				return mismatchPath, mismatchExpected, mismatchObserved
+			}
+		}
+	default:
+		if fmt.Sprint(desired) != fmt.Sprint(live) {
+			return path, desired, live
+		}
+	}
+	return "", nil, nil
+}
+
+func resourceMapListKey(path string) string {
+	switch {
+	case path == "spec.ports" || strings.HasSuffix(path, ".spec.ports"):
+		return "name"
+	case strings.HasSuffix(path, ".volumes"):
+		return "name"
+	case strings.HasSuffix(path, ".volumeMounts"):
+		return "mountPath"
+	default:
+		return ""
+	}
+}
+
+func resourceMapListHasKeys(desired, live []any, key string) bool {
+	if len(desired) == 0 || len(live) == 0 {
+		return false
+	}
+	for _, item := range append(append([]any(nil), desired...), live...) {
+		object, ok := item.(map[string]any)
+		if !ok || strings.TrimSpace(stringValue(object[key])) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func joinResourcePath(parent, child string) string {
+	if parent == "" {
+		return child
+	}
+	return parent + "." + child
+}
+
+func compactResourceValue(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("%q", fmt.Sprint(value))
+	}
+	const maxValueBytes = 160
+	if len(encoded) > maxValueBytes {
+		encoded = append(encoded[:maxValueBytes], '.', '.', '.')
+	}
+	return string(encoded)
 }
 
 func waitHealthyTerminalError(contextErr, lastFailure error) error {
@@ -2322,7 +2441,7 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 			return decodeErr
 		}
 		if !declarativerelease.ResourceDesiredSubset(desired, live) {
-			return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
+			return fmt.Errorf("declared resource %s/%s has not converged: %s", identity.Kind, identity.Name, resourceMismatchSummary(desired, live))
 		}
 	}
 	return nil
