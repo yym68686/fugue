@@ -1,29 +1,29 @@
 {
   "schema": "fugue.cell-producer-reconfiguration/v1",
-  "generation": 3,
+  "generation": 4,
   "origin": "https://api.fugue.pro",
   "authority_cell_id": "cell-public-a",
   "precondition": {
     "operation": "refresh_serving",
     "previous_policy": {
-      "artifact_id": "artifact_1790741325_4d3700db3a44",
-      "content_hash": "sha256:4a8837fff8286b3cc36badf0062ab9ea2aa58abe3917c2054244d549cc26afd6",
-      "release_id": "artifactrel_1790741329_cff0af801a4b",
-      "fencing_token": 4
+      "artifact_id": "artifact_1790745040_bc4762e56951",
+      "content_hash": "sha256:39953439178d47523ae4cd2f24cc006f882b3e4f8f7bfd70221360810605eda5",
+      "release_id": "artifactrel_1790745050_d2ded030a703",
+      "fencing_token": 5
     },
     "serving_full": {
-      "artifact_id": "artifact_1790741365_222acb0d57d0",
-      "content_hash": "sha256:faa9a98e408fc9bf04a03beaa709944b461dc4ac3e301c6f6229b0b2d98e1977",
-      "release_id": "artifactrel_1790741497_74eccc43d5ee",
-      "fencing_token": 2
+      "artifact_id": "artifact_1790745076_a0a92a3a4526",
+      "content_hash": "sha256:108fabeb7bcda10311512315c854a002a0becc6ad9bf133de3530d56902b3322",
+      "release_id": "artifactrel_1790745141_6a4eb8291bd4",
+      "fencing_token": 3
     },
-    "verification_evidence_hash": "sha256:525c700cd80dc4e31f5e9e7d1fdf879bc5d8dcc621008341943e7c285913f876"
+    "verification_evidence_hash": "sha256:b8f62dedff3160dc63bed7bd007b9575aefe7b24b190e28dc0f838f80aab9ba1"
   },
   "policy": {
     "authority_cell_id": "cell-public-a",
     "dns_policy_artifact_id": "artifact_1790687648_b177e2e8a771",
     "dns_policy_digest": "sha256:cbc23c231fe8854a69f5e1aeb4c0c7207d0ea2c81899281c0624a740b12614d7",
-    "generation": "cell-public-a-serving-once-2",
+    "generation": "cell-public-a-serving-refresh-4",
     "hosted_zone_templates": [],
     "input_source": "business-static-intent",
     "interval_seconds": 60,
@@ -33,13 +33,225 @@
     "require_application_domains": true,
     "require_dns_query_policy": false,
     "require_route_defaults": true,
-    "schema_version": "fugue.platform.producer/v1",
-    "static_intent_artifact_id": "artifact_1790687647_8586da2a59f3",
-    "static_intent_digest": "sha256:48b54f7e2bc8a9cce96ed9de1ba6147e3a54b6c748447f569eecbe98db81de78",
-    "target_scope": "authority-cell:cell-public-a",
     "route_placement_transition": {
-      "previous_topology": {
+      "constraints": [
+        {
+          "source": {
+            "app_id": "app_1778958829_7a965e0863ed",
+            "edge_group_id": "edge-group-country-us",
+            "enabled": true,
+            "excluded_edge_group_ids": [
+              "edge-group-country-de"
+            ],
+            "excluded_edge_ids": [
+              "vps-84c8f0a9"
+            ],
+            "exclusion_expires_at": "2026-08-24T17:21:07.937326Z",
+            "exclusion_fence": "edge_exclusion_fence_1786987268_580d4301aaab",
+            "exclusion_generation": 6,
+            "exclusion_owner_digest": "sha256:5c0af92a99ba260ea8f2332eb55b8769f8fdc0f7872c8c6e4048bf5f4fb41075",
+            "exclusion_reason": "traffic-safety-stage0",
+            "hostname": "api.0-0.pro",
+            "id": "edge_route_policy_1786845813_a1ea665e43cb",
+            "match_scope": "tenant_hostname",
+            "min_healthy_edge_nodes": 1,
+            "route_policy": "edge_enabled",
+            "tenant_id": "tenant_1774393589_e35b60a6fc11"
+          },
+          "source_digest": "sha256:56c10b0d46f5fa9c58f514f3ceb297aa02584d9525a1c861e9a3e3e45078e7a2"
+        },
+        {
+          "source": {
+            "app_id": "app_1776461431_3177b9d97f68",
+            "edge_group_id": "edge-group-country-us",
+            "enabled": true,
+            "hostname": "argus.fugue.pro",
+            "id": "edge_route_policy_1779060088_9901565cf955",
+            "match_scope": "tenant_hostname",
+            "route_policy": "edge_canary",
+            "tenant_id": "tenant_1774495361_ceff207a44cc"
+          },
+          "source_digest": "sha256:a120eba50b634707599789282791701fa019f02e1b2ff3e8b035250db6d9a99e"
+        },
+        {
+          "source": {
+            "app_id": "app_1775641965_cfdd55d8ef9d",
+            "edge_group_id": "edge-group-country-us",
+            "enabled": true,
+            "hostname": "canvas.fugue.pro",
+            "id": "edge_route_policy_1778551190_bd49acca1b40",
+            "match_scope": "tenant_hostname",
+            "route_policy": "edge_canary",
+            "tenant_id": "tenant_1774720388_5c9ca0db3d42"
+          },
+          "source_digest": "sha256:fdbb33bdc2ba5d91006a755167490c22ddf754cbcc3f00b9a4045304a55bd554"
+        },
+        {
+          "source": {
+            "app_id": "app_1776061061_697d78e2ed55",
+            "edge_group_id": "edge-group-country-us",
+            "enabled": true,
+            "hostname": "cerebr.fugue.pro",
+            "id": "edge_route_policy_1778507020_bc374ff74000",
+            "match_scope": "tenant_hostname",
+            "route_policy": "edge_canary",
+            "tenant_id": "tenant_1774720388_5c9ca0db3d42"
+          },
+          "source_digest": "sha256:abaf1d52cabf8745704f290cbbc5ab25476617377e2e3186e6bc1f0b72642212"
+        },
+        {
+          "source": {
+            "app_id": "app_1778527450_64c2e9210bf7",
+            "edge_group_id": "edge-group-country-us",
+            "enabled": true,
+            "hostname": "edge-protocol-canary.fugue.pro",
+            "id": "edge_route_policy_1778527600_5a110006f512",
+            "match_scope": "tenant_hostname",
+            "route_policy": "edge_canary",
+            "tenant_id": "tenant_1774720388_5c9ca0db3d42"
+          },
+          "source_digest": "sha256:da59dd0bd44ded97c2a59b60aa662929cc985e805d4041e1695f34c68bce1a54"
+        },
+        {
+          "source": {
+            "app_id": "app_1776145116_41836e746787",
+            "edge_group_id": "edge-group-country-us",
+            "enabled": true,
+            "hostname": "env-maple.fugue.pro",
+            "id": "edge_route_policy_1778546820_b89f4f667783",
+            "match_scope": "tenant_hostname",
+            "route_policy": "edge_canary",
+            "tenant_id": "tenant_1774720388_5c9ca0db3d42"
+          },
+          "source_digest": "sha256:e2de74059bee2d44ce1cecb728bc76ac566f7b2ce4afba41a53453657e48b076"
+        },
+        {
+          "source": {
+            "app_id": "app_1775999455_7c8ac1ac4919",
+            "edge_group_id": "edge-group-country-us",
+            "enabled": true,
+            "hostname": "listening.fugue.pro",
+            "id": "edge_route_policy_1778551190_1c0e922538fc",
+            "match_scope": "tenant_hostname",
+            "route_policy": "edge_canary",
+            "tenant_id": "tenant_1774720388_5c9ca0db3d42"
+          },
+          "source_digest": "sha256:bc7da44dfb741ac3caa6f5d89c5918e6194e4abdd5c7dafa84e064c925c0a9e0"
+        },
+        {
+          "source": {
+            "app_id": "app_1774720664_ef855e625cae",
+            "edge_group_id": "edge-group-country-de",
+            "enabled": true,
+            "hostname": "music.chikai.de",
+            "id": "edge_route_policy_1778693617_0f4fac816cb2",
+            "match_scope": "tenant_hostname",
+            "route_policy": "edge_enabled",
+            "tenant_id": "tenant_1774720388_5c9ca0db3d42"
+          },
+          "source_digest": "sha256:321ca8cc62083ccf88adcee5dcd3ce4a897a38ba3b0772ac41188dc6c78e4752"
+        },
+        {
+          "source": {
+            "app_id": "app_1776071893_eb3c67828c53",
+            "edge_group_id": "edge-group-country-us",
+            "enabled": true,
+            "hostname": "oaix.fugue.pro",
+            "id": "edge_route_policy_1778583012_2e33e722e728",
+            "match_scope": "tenant_hostname",
+            "route_policy": "edge_canary",
+            "tenant_id": "tenant_1774393589_e35b60a6fc11"
+          },
+          "source_digest": "sha256:90c7d3cdf184bd92a07a8e854303653fb05ce9696eae1097eda58e99e693d4b4"
+        },
+        {
+          "source": {
+            "app_id": "app_1780014428_4ccd706744ad",
+            "edge_group_id": "edge-group-country-us",
+            "enabled": true,
+            "hostname": "uni-api-ember.fugue.pro",
+            "id": "edge_route_policy_1786786324_9e21c7f72dc2",
+            "match_scope": "tenant_hostname",
+            "min_healthy_edge_nodes": 1,
+            "route_policy": "edge_enabled",
+            "tenant_id": "tenant_1774393589_e35b60a6fc11"
+          },
+          "source_digest": "sha256:c2e0ee4d78b981bb354e95defa5e782a0cc356d5acaf9954951aff135f008450"
+        }
+      ],
+      "next_topology": {
+        "authority_cells": [
+          {
+            "id": "cell-public-a"
+          },
+          {
+            "id": "cell-public-b"
+          }
+        ],
+        "edges": [
+          {
+            "authority_cell_id": "cell-public-b",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "bwg"
+            },
+            "id": "bwg",
+            "labels": {
+              "country": "us",
+              "region": "us"
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-b",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "vps-591f4447"
+            },
+            "id": "vps-591f4447",
+            "labels": {
+              "country": "us",
+              "region": "us"
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-a",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "vps-84c8f0a9"
+            },
+            "id": "vps-84c8f0a9",
+            "labels": {
+              "country": "de",
+              "region": "de"
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          }
+        ],
         "schema_version": "edge-topology/v1",
+        "serving_pools": [
+          {
+            "id": "pool-public"
+          }
+        ]
+      },
+      "previous_topology": {
         "authority_cells": [
           {
             "id": "cell-public-a",
@@ -50,18 +262,9 @@
             "legacy_group_id": "edge-group-country-us"
           }
         ],
-        "serving_pools": [
-          {
-            "id": "pool-public"
-          }
-        ],
         "edges": [
           {
-            "id": "bwg",
             "authority_cell_id": "cell-public-b",
-            "serving_pool_ids": [
-              "pool-public"
-            ],
             "capabilities": [
               "http",
               "tls"
@@ -69,17 +272,17 @@
             "failure_domains": {
               "host": "bwg"
             },
+            "id": "bwg",
             "labels": {
               "country": "us",
               "region": "us"
-            }
-          },
-          {
-            "id": "vps-591f4447",
-            "authority_cell_id": "cell-public-b",
+            },
             "serving_pool_ids": [
               "pool-public"
-            ],
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-b",
             "capabilities": [
               "http",
               "tls"
@@ -87,17 +290,17 @@
             "failure_domains": {
               "host": "vps-591f4447"
             },
+            "id": "vps-591f4447",
             "labels": {
               "country": "us",
               "region": "us"
-            }
-          },
-          {
-            "id": "vps-84c8f0a9",
-            "authority_cell_id": "cell-public-a",
+            },
             "serving_pool_ids": [
               "pool-public"
-            ],
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-a",
             "capabilities": [
               "http",
               "tls"
@@ -105,237 +308,34 @@
             "failure_domains": {
               "host": "vps-84c8f0a9"
             },
+            "id": "vps-84c8f0a9",
             "labels": {
               "country": "de",
               "region": "de"
-            }
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
           }
-        ]
-      },
-      "next_topology": {
+        ],
         "schema_version": "edge-topology/v1",
-        "authority_cells": [
-          {
-            "id": "cell-public-a"
-          },
-          {
-            "id": "cell-public-b"
-          }
-        ],
         "serving_pools": [
           {
             "id": "pool-public"
           }
-        ],
-        "edges": [
-          {
-            "id": "bwg",
-            "authority_cell_id": "cell-public-b",
-            "serving_pool_ids": [
-              "pool-public"
-            ],
-            "capabilities": [
-              "http",
-              "tls"
-            ],
-            "failure_domains": {
-              "host": "bwg"
-            },
-            "labels": {
-              "country": "us",
-              "region": "us"
-            }
-          },
-          {
-            "id": "vps-591f4447",
-            "authority_cell_id": "cell-public-b",
-            "serving_pool_ids": [
-              "pool-public"
-            ],
-            "capabilities": [
-              "http",
-              "tls"
-            ],
-            "failure_domains": {
-              "host": "vps-591f4447"
-            },
-            "labels": {
-              "country": "us",
-              "region": "us"
-            }
-          },
-          {
-            "id": "vps-84c8f0a9",
-            "authority_cell_id": "cell-public-a",
-            "serving_pool_ids": [
-              "pool-public"
-            ],
-            "capabilities": [
-              "http",
-              "tls"
-            ],
-            "failure_domains": {
-              "host": "vps-84c8f0a9"
-            },
-            "labels": {
-              "country": "de",
-              "region": "de"
-            }
-          }
         ]
-      },
-      "constraints": [
-        {
-          "source": {
-            "id": "edge_route_policy_1786845813_a1ea665e43cb",
-            "hostname": "api.0-0.pro",
-            "app_id": "app_1778958829_7a965e0863ed",
-            "tenant_id": "tenant_1774393589_e35b60a6fc11",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-us",
-            "excluded_edge_ids": [
-              "vps-84c8f0a9"
-            ],
-            "excluded_edge_group_ids": [
-              "edge-group-country-de"
-            ],
-            "exclusion_reason": "traffic-safety-stage0",
-            "exclusion_expires_at": "2026-08-24T17:21:07.937326Z",
-            "exclusion_owner_digest": "sha256:5c0af92a99ba260ea8f2332eb55b8769f8fdc0f7872c8c6e4048bf5f4fb41075",
-            "exclusion_generation": 6,
-            "exclusion_fence": "edge_exclusion_fence_1786987268_580d4301aaab",
-            "min_healthy_edge_nodes": 1,
-            "route_policy": "edge_enabled",
-            "enabled": true
-          },
-          "source_digest": "sha256:56c10b0d46f5fa9c58f514f3ceb297aa02584d9525a1c861e9a3e3e45078e7a2"
-        },
-        {
-          "source": {
-            "id": "edge_route_policy_1779060088_9901565cf955",
-            "hostname": "argus.fugue.pro",
-            "app_id": "app_1776461431_3177b9d97f68",
-            "tenant_id": "tenant_1774495361_ceff207a44cc",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-us",
-            "route_policy": "edge_canary",
-            "enabled": true
-          },
-          "source_digest": "sha256:a120eba50b634707599789282791701fa019f02e1b2ff3e8b035250db6d9a99e"
-        },
-        {
-          "source": {
-            "id": "edge_route_policy_1778551190_bd49acca1b40",
-            "hostname": "canvas.fugue.pro",
-            "app_id": "app_1775641965_cfdd55d8ef9d",
-            "tenant_id": "tenant_1774720388_5c9ca0db3d42",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-us",
-            "route_policy": "edge_canary",
-            "enabled": true
-          },
-          "source_digest": "sha256:fdbb33bdc2ba5d91006a755167490c22ddf754cbcc3f00b9a4045304a55bd554"
-        },
-        {
-          "source": {
-            "id": "edge_route_policy_1778507020_bc374ff74000",
-            "hostname": "cerebr.fugue.pro",
-            "app_id": "app_1776061061_697d78e2ed55",
-            "tenant_id": "tenant_1774720388_5c9ca0db3d42",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-us",
-            "route_policy": "edge_canary",
-            "enabled": true
-          },
-          "source_digest": "sha256:abaf1d52cabf8745704f290cbbc5ab25476617377e2e3186e6bc1f0b72642212"
-        },
-        {
-          "source": {
-            "id": "edge_route_policy_1778527600_5a110006f512",
-            "hostname": "edge-protocol-canary.fugue.pro",
-            "app_id": "app_1778527450_64c2e9210bf7",
-            "tenant_id": "tenant_1774720388_5c9ca0db3d42",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-us",
-            "route_policy": "edge_canary",
-            "enabled": true
-          },
-          "source_digest": "sha256:da59dd0bd44ded97c2a59b60aa662929cc985e805d4041e1695f34c68bce1a54"
-        },
-        {
-          "source": {
-            "id": "edge_route_policy_1778546820_b89f4f667783",
-            "hostname": "env-maple.fugue.pro",
-            "app_id": "app_1776145116_41836e746787",
-            "tenant_id": "tenant_1774720388_5c9ca0db3d42",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-us",
-            "route_policy": "edge_canary",
-            "enabled": true
-          },
-          "source_digest": "sha256:e2de74059bee2d44ce1cecb728bc76ac566f7b2ce4afba41a53453657e48b076"
-        },
-        {
-          "source": {
-            "id": "edge_route_policy_1778551190_1c0e922538fc",
-            "hostname": "listening.fugue.pro",
-            "app_id": "app_1775999455_7c8ac1ac4919",
-            "tenant_id": "tenant_1774720388_5c9ca0db3d42",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-us",
-            "route_policy": "edge_canary",
-            "enabled": true
-          },
-          "source_digest": "sha256:bc7da44dfb741ac3caa6f5d89c5918e6194e4abdd5c7dafa84e064c925c0a9e0"
-        },
-        {
-          "source": {
-            "id": "edge_route_policy_1778693617_0f4fac816cb2",
-            "hostname": "music.chikai.de",
-            "app_id": "app_1774720664_ef855e625cae",
-            "tenant_id": "tenant_1774720388_5c9ca0db3d42",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-de",
-            "route_policy": "edge_enabled",
-            "enabled": true
-          },
-          "source_digest": "sha256:321ca8cc62083ccf88adcee5dcd3ce4a897a38ba3b0772ac41188dc6c78e4752"
-        },
-        {
-          "source": {
-            "id": "edge_route_policy_1778583012_2e33e722e728",
-            "hostname": "oaix.fugue.pro",
-            "app_id": "app_1776071893_eb3c67828c53",
-            "tenant_id": "tenant_1774393589_e35b60a6fc11",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-us",
-            "route_policy": "edge_canary",
-            "enabled": true
-          },
-          "source_digest": "sha256:90c7d3cdf184bd92a07a8e854303653fb05ce9696eae1097eda58e99e693d4b4"
-        },
-        {
-          "source": {
-            "id": "edge_route_policy_1786786324_9e21c7f72dc2",
-            "hostname": "uni-api-ember.fugue.pro",
-            "app_id": "app_1780014428_4ccd706744ad",
-            "tenant_id": "tenant_1774393589_e35b60a6fc11",
-            "match_scope": "tenant_hostname",
-            "edge_group_id": "edge-group-country-us",
-            "min_healthy_edge_nodes": 1,
-            "route_policy": "edge_enabled",
-            "enabled": true
-          },
-          "source_digest": "sha256:c2e0ee4d78b981bb354e95defa5e782a0cc356d5acaf9954951aff135f008450"
-        }
-      ]
+      }
     },
+    "schema_version": "fugue.platform.producer/v1",
     "serving": {
       "canary_rule_ref": "cohort=complete",
       "full_min_seconds": 60,
       "gray_min_seconds": 30,
       "rollout_timeout_seconds": 600,
       "single_publication": true
-    }
+    },
+    "static_intent_artifact_id": "artifact_1790687647_8586da2a59f3",
+    "static_intent_digest": "sha256:48b54f7e2bc8a9cce96ed9de1ba6147e3a54b6c748447f569eecbe98db81de78",
+    "target_scope": "authority-cell:cell-public-a"
   }
 }
