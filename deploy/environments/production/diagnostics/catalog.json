@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 40,
+    "generation": 41,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,79 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "node-memory-budget",
+        "description": "Read another node's bounded memory history and Pod health from cluster metrics without placing a diagnostic process on that node",
+        "image": "$runner",
+        "profile": "cluster-read",
+        "target_types": [
+          "platform_component"
+        ],
+        "max_duration_seconds": 120,
+        "parameters": {
+          "node_name": {
+            "required": true,
+            "max_length": 253,
+            "pattern": "^[a-z0-9][a-z0-9.-]*$"
+          }
+        },
+        "config": {
+          "collectors": [
+            {
+              "name": "container-memory",
+              "kind": "prometheus",
+              "interval_seconds": 15,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-observability-prometheus",
+                "port": "http"
+              },
+              "queries": {
+                "working_set_bytes": "sum by(namespace,pod,container)(container_memory_working_set_bytes{node={{param.node_name}},container!=\"\",container!=\"POD\"})",
+                "rss_bytes": "sum by(namespace,pod,container)(container_memory_rss{node={{param.node_name}},container!=\"\",container!=\"POD\"})",
+                "cache_bytes": "sum by(namespace,pod,container)(container_memory_cache{node={{param.node_name}},container!=\"\",container!=\"POD\"})",
+                "working_set_peak_6h": "max by(namespace,pod,container)(max_over_time(container_memory_working_set_bytes{node={{param.node_name}},container!=\"\",container!=\"POD\"}[6h]))",
+                "cpu_cores": "sum by(namespace,pod,container)(rate(container_cpu_usage_seconds_total{node={{param.node_name}},container!=\"\",container!=\"POD\"}[5m]))",
+                "oom_events_6h": "sum by(namespace,pod,container)(increase(container_oom_events_total{node={{param.node_name}},container!=\"\",container!=\"POD\"}[6h]))",
+                "requested_bytes": "sum by(namespace,pod,container)(kube_pod_container_resource_requests{node={{param.node_name}},resource=\"memory\",unit=\"byte\"})"
+              },
+              "required_queries": [
+                "working_set_bytes",
+                "rss_bytes",
+                "working_set_peak_6h"
+              ]
+            },
+            {
+              "name": "node-capacity",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 60,
+              "resource": "nodes",
+              "object_name": "{{param.node_name}}",
+              "fields": [
+                "status.allocatable",
+                "status.capacity",
+                "status.conditions",
+                "spec.unschedulable"
+              ]
+            },
+            {
+              "name": "pod-health",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 60,
+              "resource": "pods",
+              "namespace": "*",
+              "field_selector": "spec.nodeName={{param.node_name}}",
+              "fields": [
+                "spec.nodeName",
+                "status.phase",
+                "status.qosClass",
+                "status.containerStatuses",
+                "spec.overhead"
+              ]
+            }
+          ]
+        }
+      },
       {
         "id": "process-runqueue-latency",
         "description": "Bounded per-thread runnable wait from filtered scheduler events without changing schedstats",
