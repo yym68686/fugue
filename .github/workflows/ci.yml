@@ -436,6 +436,76 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  dns_authority_stage_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Admit only changed DNS transition declarations
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/dns-authority-stage; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  dns_authority_stage:
+    needs: dns_authority_stage_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dns_authority_stage_plan.outputs.selected == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-dns-authority-configuration, cancel-in-progress: false}
+    timeout-minutes: 20
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one explicit DNS shadow transition declaration
+        id: configuration
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/dns-authority-stage)
+          (( ${#declarations[@]} == 1 )) || { echo 'one DNS staging declaration per atom is required' >&2; exit 1; }
+          config="${declarations[0]}"
+          [[ "$config" =~ ^deploy/environments/production/dns-authority-stage/cell-[a-z0-9-]+\.json$ ]]
+          git fetch origin main
+          if git diff --quiet HEAD origin/main -- "$config" scripts/stage_dns_authority_transition.py scripts/test_stage_dns_authority_transition.py scripts/bootstrap_cell_producer.py scripts/observe_front_candidate.py scripts/publish_agent_edge_shadow.py; then
+            python3 -m unittest scripts.test_stage_dns_authority_transition
+            python3 -m scripts.stage_dns_authority_transition "$config" --validate-only
+            echo "config=$config" >> "$GITHUB_OUTPUT"
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compile retained sources and stage DNS without public transport
+        if: steps.configuration.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: python3 -m scripts.stage_dns_authority_transition "${{ steps.configuration.outputs.config }}" --evidence "$RUNNER_TEMP/dns-authority-stage.json"
+      - name: Retain exact DNS shadow publication evidence
+        if: always() && steps.configuration.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-dns-authority-stage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-authority-stage.json
+          if-no-files-found: warn
+          retention-days: 30
+
   cell_member_enrollment:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

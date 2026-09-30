@@ -49,8 +49,17 @@ candidate/preference order stays significant. TTL, nameserver, ECS, record-set,
 client-selection, ownership or candidate changes reject this gate. It does not
 replace the subsequent fresh-runtime and Service identity checks.
 
-Before adopting a new transition checkpoint, record a compatible API/DNS
+Before using a new transition checkpoint, record a compatible API/DNS
 predecessor in the code release chain. The first reader release retains the
 old predecessor only while no transition artifact exists. A separately accepted
 reader release then pins that compatible reader as its rollback target, so a
 later code rollback can still validate the currently serving signed artifact.
+
+The `dns-authority-stage` configuration lane accepts one explicit declaration
+at a time. It pins the neutral Cell full publications, previous topology and
+physical DNS membership, then waits for a fresh verified global full source.
+It retains the compiler request's exact immutable source references. The lane
+can only compile, publish shadow and prepare expected consumers. It refuses
+existing gray/full DNS authority and unrelated shadow predecessors. A retry of
+its own identical staging only re-prepares that exact shadow. A separate
+observed serving promotion and public transport handoff are still required.
