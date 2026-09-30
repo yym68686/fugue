@@ -1,0 +1,49 @@
+{
+  "schema": "fugue.worker-standby-observation/v1",
+  "generation": 1,
+  "namespace": "fugue-system",
+  "node": "bwg",
+  "authority": {
+    "config_map": "fugue-current-authority-edge-group-country-us",
+    "group_id": "edge-group-country-us",
+    "active_slot": "b",
+    "record_digest": "sha256:4119c48ec00ca00d63978c2302c791bcde0448d0824e1dde67956661437d6cd7",
+    "epoch": 40330
+  },
+  "release": {
+    "status_map": "fugue-release-status-edge-worker-us-us",
+    "desired_map": "fugue-desired-release-edge-worker-us-us",
+    "lease": "fugue-production-edge-worker-us",
+    "record_digest": "sha256:7ef54b1809c5efe18e591e634419775f6446ca5d3846a6066db4187026a7509b"
+  },
+  "worker": {
+    "daemonset": "fugue-fugue-edge-worker-a",
+    "slot": "a",
+    "source_sha": "715f47ede5930ffd0f0531ffc09a5367ae8d7012",
+    "image_digest": "sha256:3758cd3047982fd44bf2e59d891d42acaa754e3f3d37b614c56dbf7619e93058",
+    "container": "edge",
+    "ports": [
+      18080,
+      18443
+    ]
+  },
+  "front_selectors": [
+    {
+      "app.kubernetes.io/component": "edge-front",
+      "app.kubernetes.io/instance": "fugue",
+      "app.kubernetes.io/name": "fugue"
+    },
+    {
+      "app.kubernetes.io/component": "edge-client-front-public-b",
+      "app.kubernetes.io/instance": "fugue",
+      "app.kubernetes.io/name": "fugue"
+    },
+    {
+      "app.kubernetes.io/component": "edge-client-front-public-b-secondary",
+      "app.kubernetes.io/instance": "fugue",
+      "app.kubernetes.io/name": "fugue"
+    }
+  ],
+  "samples": 3,
+  "interval_seconds": 20
+}

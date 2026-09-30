@@ -672,6 +672,54 @@ jobs:
           python3 scripts/reconcile_agent_edge_trust.py "$config" --validator "$RUNNER_TEMP/fugue-agent-edge-keyring"
           python3 scripts/reconcile_agent_edge_trust.py "$config" --validator "$RUNNER_TEMP/fugue-agent-edge-keyring" --check
 
+  worker_standby_observation:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-worker-standby-observation, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one explicit read-only standby observation
+        id: observation
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/worker-standby-observation)
+          if (( ${#declarations[@]} > 1 )); then
+            echo 'one standby observation declaration per atom is required' >&2
+            exit 1
+          fi
+          if (( ${#declarations[@]} == 1 )); then
+            config="${declarations[0]}"
+            [[ "$config" =~ ^deploy/environments/production/worker-standby-observation/[a-z0-9-]+\.json$ ]]
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/observe_worker_standby.py scripts/observe_front_candidate.py; then
+              python3 -m unittest scripts.test_observe_worker_standby
+              python3 -m scripts.observe_worker_standby "$config" --validate-only
+              echo "config=$config" >> "$GITHUB_OUTPUT"
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Observe rollback reference and live connections without mutations
+        if: steps.observation.outputs.selected == 'true'
+        run: python3 -m scripts.observe_worker_standby "${{ steps.observation.outputs.config }}" --evidence "$RUNNER_TEMP/worker-standby-observation.json"
+      - name: Retain standby observation evidence
+        if: steps.observation.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-worker-standby-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/worker-standby-observation.json
+          if-no-files-found: error
+          retention-days: 30
+
   front_observation:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
