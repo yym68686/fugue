@@ -176,6 +176,10 @@
                   {
                     "name": "FUGUE_PLATFORM_ARTIFACT_SCOPE",
                     "value": "authority-cell:cell-public-a"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_DEFER_INVENTORY_EPOCH_WRITE",
+                    "value": "true"
                   }
                 ],
                 "image": "fugue-artifact://edge-control-public-a",

@@ -50,6 +50,7 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	root := t.TempDir()
 	values := map[string]string{
 		"FUGUE_EDGE_CONTROL_ENABLED":                          "true",
+		"FUGUE_EDGE_CONTROL_DEFER_INVENTORY_EPOCH_WRITE":      "true",
 		"FUGUE_EDGE_CONTROL_AUTHORITY_RUNTIME_ENABLED":        "true",
 		"FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR":              filepath.Join(root, "state"),
 		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL":                 "https://fugue-api-tls.fugue-system.svc:8443/v1/edge/route-intents",
@@ -75,12 +76,17 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.AuthorityRuntimeEnabled || !cfg.CandidateStaging || cfg.CandidateIdentity.SourceSHA != strings.Repeat("1", 40) ||
+	if !cfg.AuthorityRuntimeEnabled || !cfg.DeferInventoryEpochWrite || !cfg.CandidateStaging || cfg.CandidateIdentity.SourceSHA != strings.Repeat("1", 40) ||
 		cfg.AuthorityStateDir != values["FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"] ||
 		cfg.AuthorityPollInterval != 30*time.Second || cfg.GroupBundleValidity != 30*time.Minute ||
 		!reflect.DeepEqual(cfg.AuthorityGroupIDs, []string{"edge-group-country-us"}) {
 		t.Fatalf("unexpected authority config: %+v", cfg)
 	}
+	values["FUGUE_EDGE_CONTROL_DEFER_INVENTORY_EPOCH_WRITE"] = "maybe"
+	if _, err := configFromEnv(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("invalid durable-format option accepted")
+	}
+	values["FUGUE_EDGE_CONTROL_DEFER_INVENTORY_EPOCH_WRITE"] = "true"
 	runtime, handler, err := buildAuthorityProcess(cfg)
 	if err != nil {
 		t.Fatal(err)

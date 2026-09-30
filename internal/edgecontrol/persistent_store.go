@@ -57,11 +57,12 @@ type persistentGroupState struct {
 // and one CAS sequence per edge group. A corrupt group file cannot prevent any
 // other group from being read or advanced.
 type PersistentGroupStore struct {
-	root      string
-	summaryMu sync.RWMutex
-	summaries map[string]persistentGroupSummary
-	stateMu   sync.Mutex
-	validated map[string]validatedGroupState
+	root                     string
+	deferInventoryEpochWrite bool
+	summaryMu                sync.RWMutex
+	summaries                map[string]persistentGroupSummary
+	stateMu                  sync.Mutex
+	validated                map[string]validatedGroupState
 }
 
 type validatedGroupState struct {
@@ -74,7 +75,18 @@ type persistentGroupSummary struct {
 	stage  GroupCandidateStageSnapshot
 }
 
+// PersistentGroupStoreOptions controls a staged durable-format upgrade. It
+// changes no serving policy or positive publication. Deferral is only usable
+// for a single producer until the preceding code can read per-producer epochs.
+type PersistentGroupStoreOptions struct {
+	DeferInventoryEpochWrite bool
+}
+
 func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
+	return OpenPersistentGroupStoreWithOptions(root, PersistentGroupStoreOptions{})
+}
+
+func OpenPersistentGroupStoreWithOptions(root string, options PersistentGroupStoreOptions) (*PersistentGroupStore, error) {
 	root = strings.TrimSpace(root)
 	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return nil, errors.New("edge-control persistent state directory must be an absolute normalized path")
@@ -107,7 +119,7 @@ func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
 			}
 		}
 	}
-	return &PersistentGroupStore{root: root, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState)}, nil
+	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState)}, nil
 }
 
 func (store *PersistentGroupStore) StoreGroupInventoryCAS(ctx context.Context, groupID string, expectedSequence uint64, snapshot GroupInventorySnapshot) error {
@@ -141,7 +153,7 @@ func (store *PersistentGroupStore) ReadGroupInventory(ctx context.Context, group
 		if state.Inventory == nil {
 			return ErrGroupInventoryNotFound
 		}
-		inventory = inventoryWithProducer(*state.Inventory, state.InventoryProducer)
+		inventory = inventoryWithProducer(*state.Inventory, state.InventoryProducer, store.deferInventoryEpochWrite)
 		return nil
 	})
 	return inventory, err
@@ -173,6 +185,7 @@ func (store *PersistentGroupStore) AppendCAS(ctx context.Context, groupID string
 			// the compiler, while still holding the durable inventory writer lock.
 			inventory := *state.Inventory
 			inventory.verifiedProducer = state.InventoryProducer
+			inventory.allowLegacySingleProducer = store.deferInventoryEpochWrite
 			if entry.InventoryGeneration != strings.TrimSpace(inventory.Generation) || entry.InventoryDigest != groupInventorySemanticDigest(inventory) {
 				return ErrGroupShadowInputCAS
 			}
@@ -935,7 +948,7 @@ func (store *PersistentGroupStore) readGroupSummary(ctx context.Context, groupID
 	}
 	var summary persistentGroupSummary
 	err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {
-		summary = summarizePersistentGroupState(*state)
+		summary = store.summarizePersistentGroupState(*state)
 		// Publish under the group lock so a cold read cannot overwrite a
 		// newer writer's serving projection after releasing the lock.
 		store.summaryMu.Lock()
@@ -957,18 +970,18 @@ func (store *PersistentGroupStore) cachedGroupSummary(groupID string) (persisten
 }
 
 func (store *PersistentGroupStore) cacheGroupSummary(groupID string, state persistentGroupState) {
-	summary := summarizePersistentGroupState(state)
+	summary := store.summarizePersistentGroupState(state)
 	store.summaryMu.Lock()
 	store.summaries[groupID] = summary
 	store.summaryMu.Unlock()
 }
 
-func summarizePersistentGroupState(state persistentGroupState) persistentGroupSummary {
+func (store *PersistentGroupStore) summarizePersistentGroupState(state persistentGroupState) persistentGroupSummary {
 	var out persistentGroupSummary
 	if state.Inventory != nil {
-		out.status.Inventory = inventoryWithProducer(*state.Inventory, state.InventoryProducer)
+		out.status.Inventory = inventoryWithProducer(*state.Inventory, state.InventoryProducer, store.deferInventoryEpochWrite)
 		out.status.InventoryExists = true
-		out.stage.Inventory = inventoryWithProducer(*state.Inventory, state.InventoryProducer)
+		out.stage.Inventory = inventoryWithProducer(*state.Inventory, state.InventoryProducer, store.deferInventoryEpochWrite)
 		out.stage.InventoryExists = true
 	}
 	if state.InventoryProducer != nil {

@@ -70,7 +70,8 @@ type GroupInventorySnapshot struct {
 	// Populated only by the local authenticated producer store, never decoded
 	// from a heartbeat. Aggregation uses a content digest instead of the
 	// individual producer envelope generation.
-	verifiedProducer *GroupInventoryProducerState
+	verifiedProducer          *GroupInventoryProducerState
+	allowLegacySingleProducer bool
 }
 
 type GroupActiveEpoch struct {

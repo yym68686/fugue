@@ -35,27 +35,28 @@ const (
 var edgeGroupIDPattern = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 
 type config struct {
-	Enabled                 bool
-	BindAddr                string
-	ShutdownTimeout         time.Duration
-	RouteIntentURL          string
-	PlatformScopeKey        string
-	RouteIntentIssuerFile   string
-	RouteIntentPodTokenFile string
-	RouteIntentIdentityNode string
-	RouteIntentCAFile       string
-	RouteIntentServerName   string
-	InventoryKeyringDir     string
-	AuthorityRuntimeEnabled bool
-	AuthorityStateDir       string
-	AuthorityGroupIDs       []string
-	AuthorityPollInterval   time.Duration
-	GroupSigningKeyringDir  string
-	GroupReaderKeyringDir   string
-	GroupRecoveryKeyringDir string
-	GroupBundleValidity     time.Duration
-	CandidateStaging        bool
-	CandidateIdentity       edgecontrol.CandidateReleaseIdentity
+	Enabled                  bool
+	BindAddr                 string
+	ShutdownTimeout          time.Duration
+	RouteIntentURL           string
+	PlatformScopeKey         string
+	RouteIntentIssuerFile    string
+	RouteIntentPodTokenFile  string
+	RouteIntentIdentityNode  string
+	RouteIntentCAFile        string
+	RouteIntentServerName    string
+	InventoryKeyringDir      string
+	DeferInventoryEpochWrite bool
+	AuthorityRuntimeEnabled  bool
+	AuthorityStateDir        string
+	AuthorityGroupIDs        []string
+	AuthorityPollInterval    time.Duration
+	GroupSigningKeyringDir   string
+	GroupReaderKeyringDir    string
+	GroupRecoveryKeyringDir  string
+	GroupBundleValidity      time.Duration
+	CandidateStaging         bool
+	CandidateIdentity        edgecontrol.CandidateReleaseIdentity
 }
 
 func main() {
@@ -177,6 +178,10 @@ func configFromEnv(getenv func(string) string) (config, error) {
 	}
 	if authorityRuntimeEnabled {
 		cfg.InventoryKeyringDir = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_DIR"))
+		cfg.DeferInventoryEpochWrite, err = strictBool(getenv("FUGUE_EDGE_CONTROL_DEFER_INVENTORY_EPOCH_WRITE"))
+		if err != nil {
+			return config{}, fmt.Errorf("FUGUE_EDGE_CONTROL_DEFER_INVENTORY_EPOCH_WRITE: %w", err)
+		}
 		cfg.AuthorityStateDir = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"))
 		cfg.AuthorityGroupIDs, err = parseEdgeGroupIDs(getenv("FUGUE_EDGE_CONTROL_AUTHORITY_GROUP_IDS"))
 		if err != nil {
@@ -291,7 +296,7 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	if !cfg.AuthorityRuntimeEnabled {
 		return nil, nil, nil
 	}
-	store, err := edgecontrol.OpenPersistentGroupStore(cfg.AuthorityStateDir)
+	store, err := edgecontrol.OpenPersistentGroupStoreWithOptions(cfg.AuthorityStateDir, edgecontrol.PersistentGroupStoreOptions{DeferInventoryEpochWrite: cfg.DeferInventoryEpochWrite})
 	if err != nil {
 		return nil, nil, err
 	}

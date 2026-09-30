@@ -73,6 +73,14 @@ func (store *PersistentGroupStore) StoreGroupInventoryProducerHeartbeat(
 			}
 		}
 		epoch := heartbeat.Inventory.ActiveEpoch
+		deferEpoch := store.deferInventoryEpochWrite && !producerHasServingEpoch(producer)
+		// This reader-first stage cannot aggregate old, unbound observations.
+		// Keep a single original envelope, and reject membership expansion until
+		// the next release enables the durable per-producer writer.
+		if deferEpoch && (epoch.MinHealthyInstances != 1 || len(producer.Observations) > 1 ||
+			len(producer.Observations) == 1 && (producer.Observations[0].NodeID != identity.NodeID || producer.Observations[0].Slot != epoch.Slot)) {
+			return ErrGroupInventoryProducerEpoch
+		}
 		if producer.Generation > 0 {
 			switch {
 			case epoch.FenceSequence < producer.ActiveEpoch.FenceSequence:
@@ -92,6 +100,9 @@ func (store *PersistentGroupStore) StoreGroupInventoryProducerHeartbeat(
 		observation := GroupInventoryProducerObservation{
 			CredentialID: identity.CredentialID, TokenID: identity.TokenID, NodeID: identity.NodeID, Slot: instance.Slot,
 			ProducerGeneration: heartbeat.ProducerGeneration, ObservedAt: now, Instance: instance, ServingEpoch: &epoch,
+		}
+		if deferEpoch {
+			observation.ServingEpoch = nil
 		}
 		replaced := false
 		for index := range producer.Observations {
@@ -137,12 +148,14 @@ func (store *PersistentGroupStore) StoreGroupInventoryProducerHeartbeat(
 	})
 	if err == nil {
 		stored.verifiedProducer = &committedProducer
+		stored.allowLegacySingleProducer = store.deferInventoryEpochWrite
 	}
 	return cloneGroupInventorySnapshot(stored), err
 }
 
-func inventoryWithProducer(snapshot GroupInventorySnapshot, producer *GroupInventoryProducerState) GroupInventorySnapshot {
+func inventoryWithProducer(snapshot GroupInventorySnapshot, producer *GroupInventoryProducerState, allowLegacySingleProducer bool) GroupInventorySnapshot {
 	snapshot = cloneGroupInventorySnapshot(snapshot)
+	snapshot.allowLegacySingleProducer = allowLegacySingleProducer
 	if producer != nil {
 		copy := cloneGroupInventoryProducerState(*producer)
 		snapshot.verifiedProducer = &copy
@@ -260,9 +273,38 @@ func inventoryInstanceProducerBound(snapshot GroupInventorySnapshot, instance Gr
 	}
 	for _, observation := range producer.Observations {
 		if observation.NodeID == instance.EdgeID && observation.Slot == instance.Slot && reflect.DeepEqual(observation.Instance, instance) {
-			return observation, observation.ServingEpoch != nil && equalGroupServingEpoch(*observation.ServingEpoch, snapshot.ActiveEpoch) &&
+			epochBound := observation.ServingEpoch != nil && equalGroupServingEpoch(*observation.ServingEpoch, snapshot.ActiveEpoch)
+			if observation.ServingEpoch == nil && snapshot.allowLegacySingleProducer {
+				epochBound = legacySingleProducerBound(snapshot, observation)
+			}
+			return observation, epochBound &&
 				!observation.ObservedAt.After(snapshot.ObservedAt) && snapshot.ObservedAt.Sub(observation.ObservedAt) < maxInventoryHeartbeatTTL
 		}
 	}
 	return GroupInventoryProducerObservation{}, false
+}
+
+// Once any original epoch is durable, even the compatibility reader preserves
+// the extended format on rollback. It can never strip that evidence.
+func producerHasServingEpoch(producer *GroupInventoryProducerState) bool {
+	for _, observation := range producer.Observations {
+		if observation.ServingEpoch != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// The sole latest observation and aggregate were committed from the SAME
+// authenticated envelope. This does not infer epochs for older observations,
+// does not authorize more than one member, and is unavailable in normal mode.
+func legacySingleProducerBound(snapshot GroupInventorySnapshot, observation GroupInventoryProducerObservation) bool {
+	producer := snapshot.verifiedProducer
+	epoch := snapshot.ActiveEpoch
+	return producer != nil && len(producer.Observations) == 1 && len(snapshot.Instances) == 1 &&
+		epoch.MinHealthyInstances == 1 && producer.ActiveEpoch == epoch &&
+		observation.ProducerGeneration == producer.Generation && observation.ObservedAt.Equal(snapshot.ObservedAt) &&
+		observation.Instance.GroupID == epoch.GroupID && observation.Slot == epoch.Slot &&
+		observation.Instance.ReleaseEpoch == epoch.ReleaseEpoch && observation.Instance.FaultDomainID == epoch.FaultDomainID &&
+		observation.Instance.EdgePoolID == epoch.EdgePoolID
 }
