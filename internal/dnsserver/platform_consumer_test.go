@@ -37,6 +37,55 @@ func TestDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T) {
 	}
 }
 
+func TestBoundDNSDoesNotUseShadowOnServingErrorsOrRetainedState(t *testing.T) {
+	for _, mode := range []string{"unavailable", "unauthorized", "retained"} {
+		t.Run(mode, func(t *testing.T) {
+			shadowReads := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/platform-state/consumers/identity":
+					json.NewEncoder(w).Encode(map[string]any{"token": "component-token", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "dns-a", "authority_id": "cell-dns", "consumer_id": "dns-server:cell-dns:dns-a", "scope_key": "authority-cell:cell-dns", "artifact_kinds": []string{"dns_answer_bundle"}})
+				case "/v1/platform-state/consumers/assignment":
+					if r.URL.Query().Get("serving_only") != "true" {
+						shadowReads++
+					}
+					code := http.StatusServiceUnavailable
+					if mode == "unauthorized" {
+						code = http.StatusUnauthorized
+					}
+					if mode == "retained" {
+						code = http.StatusNotFound
+					}
+					w.WriteHeader(code)
+				default:
+					t.Error("unexpected request", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			dir := t.TempDir()
+			s := NewService(config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: "cell-dns", PlatformScopeKey: "authority-cell:cell-dns", CachePath: filepath.Join(dir, "cache")}, log.New(io.Discard, "", 0))
+			s.PlatformTokenFile = filepath.Join(dir, "token")
+			if err := os.WriteFile(s.PlatformTokenFile, []byte("pod-token"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s.platformServingBound.Store(true)
+			if mode == "retained" {
+				// No route probes are needed for this static retained-state guard.
+				// An unavailable assignment must not enroll a second shadow owner.
+				s.platformServing.Store(&dnsServingState{record: dnsServingCheckpoint{Positive: true}, payload: dnsServingPayload{Plan: &platformconfig.DNSReadinessPlan{}, Policy: platformconfig.PolicySnapshot{DNSReadiness: &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, MaxConcurrency: 1}}}})
+			}
+			s.syncPlatformConsumersOnce(context.Background())
+			if shadowReads != 0 || !s.platformServingBound.Load() {
+				t.Fatal("serving failure enabled shadow or ambient configuration", shadowReads)
+			}
+			if mode == "retained" && (s.platformServing.Load() == nil || !s.platformServing.Load().record.Positive) {
+				t.Fatal("retained state was removed")
+			}
+		})
+	}
+}
+
 func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, versioned bool, group string) {
 	const key = "synthetic-dns-platform-signing-key"
 	authority := platformcontrol.ConsumerAuthorityID(group)
@@ -100,6 +149,10 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 		}
 		switch r.URL.Path {
 		case "/v1/platform-state/consumers/assignment":
+			if r.URL.Query().Get("serving_only") == "true" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			current := assignment
 			if changeAssignmentDuringObservation && artifactFetched {
 				current.FencingToken++
@@ -162,8 +215,12 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	}
 	loadLegacyBeforeEnrollment(service)
 	before, _ := os.ReadFile(cfg.CachePath)
-	if err := service.SyncPlatformShadowOnce(context.Background()); err != nil {
-		t.Fatal(err)
+	if bound, err := service.loadDNSServingCache(); !bound || err == nil {
+		t.Fatal("fresh enrolled reader must keep artifact authority without a checkpoint", bound, err)
+	}
+	service.syncPlatformConsumersOnce(context.Background())
+	if !service.platformServingBound.Load() || service.platformServing.Load() != nil {
+		t.Fatal("shadow enrollment downgraded artifact authority or created serving state")
 	}
 	checkServing := func(s *Service) {
 		t.Helper()

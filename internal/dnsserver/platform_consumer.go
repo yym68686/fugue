@@ -61,25 +61,35 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
-		if err := s.SyncPlatformDNSServingOnce(ctx); err != nil && ctx.Err() == nil {
-			s.mu.Lock()
-			s.platformServingError = err.Error()
-			s.mu.Unlock()
-			s.Logger.Printf("DNS traffic serving sync failed: %v", err)
-		}
-		if !s.platformServingBound.Load() {
-			if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
-				s.mu.Lock()
-				s.platformCandidate.State = "failed"
-				s.platformCandidate.LastError = err.Error()
-				s.mu.Unlock()
-				s.Logger.Printf("dns platform candidate failed: %v", err)
-			}
-		}
+		s.syncPlatformConsumersOnce(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
+	servingErr := s.SyncPlatformDNSServingOnce(ctx)
+	if servingErr != nil && ctx.Err() == nil {
+		s.mu.Lock()
+		s.platformServingError = servingErr.Error()
+		s.mu.Unlock()
+		s.Logger.Printf("DNS traffic serving sync failed: %v", servingErr)
+	}
+	// Enrollment locks out ambient DNS even on a fresh disk. A reader with no
+	// selected serving assignment and no retained serving state must still
+	// verify its signed shadow and advertise capabilities for initial promotion.
+	// Keep the authority lock: shadow evidence never becomes serving state.
+	initialShadow := errors.Is(servingErr, platformconsumer.ErrNoServingAssignment) && s.platformServing.Load() == nil
+	if !s.platformServingBound.Load() || initialShadow {
+		if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
+			s.mu.Lock()
+			s.platformCandidate.State = "failed"
+			s.platformCandidate.LastError = err.Error()
+			s.mu.Unlock()
+			s.Logger.Printf("dns platform candidate failed: %v", err)
 		}
 	}
 }
