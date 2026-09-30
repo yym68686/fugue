@@ -1,6 +1,6 @@
 {
   "schema": "fugue.cell-member-enrollment/v1",
-  "generation": 1,
+  "generation": 2,
   "origin": "https://api.fugue.pro",
   "authority_cell_id": "cell-public-b",
   "namespace": "fugue-system",
@@ -54,7 +54,7 @@
     "state_file": "/var/lib/fugue-edge-control/group-fc4d37f408e2c85a87c7a38f75dbdd1db8a9c6228f504afe255cdedc34e656f9.json"
   },
   "admission_window": {
-    "not_before": "2026-09-30T17:22:10.280302+00:00",
-    "expires_at": "2026-09-30T17:37:05.280302+00:00"
+    "not_before": "2026-09-30T17:58:18.007323+00:00",
+    "expires_at": "2026-09-30T18:13:13.007323+00:00"
   }
 }
