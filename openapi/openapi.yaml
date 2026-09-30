@@ -34345,11 +34345,33 @@ components:
         target_confirmation:
           type: string
           description: Must exactly match the target artifact id or generation.
+    PlatformPublicationPrecondition:
+      type: object
+      additionalProperties: false
+      required: [artifact_id, content_hash, release_id, fencing_token]
+      properties:
+        artifact_id: {type: string, minLength: 1, maxLength: 256}
+        content_hash: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        release_id: {type: string, minLength: 1, maxLength: 256}
+        fencing_token: {type: integer, minimum: 1, format: int64}
+    PlatformProducerReconfiguration:
+      type: object
+      additionalProperties: false
+      required: [previous_policy, serving_full, verification_evidence_hash]
+      description: Transactional precondition for replacing an established neutral cell-routes producer's shadow or paused policy with a shadow policy. Checks the exact current producer publication, unchanged full route/TLS publication and its unexpired verified positive LKG while holding producer-before-target scope locks. Only generation and route_placement_transition may change; pinned inputs and scheduling remain identical. No traffic lane, runtime identity, input artifact or LKG is written. Optional for other release operations; when supplied it cannot be combined with overrides or a canary selector. Idempotency key must equal producer-reconfiguration/<digest>, where digest is sha256 of canonical sorted-key JSON {artifact_id,content_hash,precondition}; precondition is this object. A retry succeeds only while this exact successor remains current with the same serving baseline. Changed, frozen, expired or superseded state conflicts without writes. Rollback APIs retain their separate recovery contract.
+      properties:
+        previous_policy:
+          $ref: "#/components/schemas/PlatformPublicationPrecondition"
+        serving_full:
+          $ref: "#/components/schemas/PlatformPublicationPrecondition"
+        verification_evidence_hash: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
     PlatformArtifactReleaseRequest:
       type: object
       additionalProperties: false
       required: [release_channel]
       properties:
+        producer_reconfiguration:
+          $ref: "#/components/schemas/PlatformProducerReconfiguration"
         release_channel:
           type: string
           enum: [shadow, gray, full]

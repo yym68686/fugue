@@ -324,6 +324,9 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
+	if err := pgLockProducerReconfiguration(ctx, tx, id, req); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
 	if guard != nil {
 		if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -341,6 +344,9 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
 	if err := validateProducerPolicyPublication(artifact, channel); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if err := s.pgProducerReconfiguration(ctx, tx, artifact, req); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := s.pgProducerReleaseGuard(ctx, tx, artifact, req, principal, guard); err != nil {
@@ -493,6 +499,9 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		}
 	}
 	if err := validateLeasedTrafficAdmission(promotionSnapshot, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if err := s.pgProducerReconfiguration(ctx, tx, artifact, req); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := tx.Commit(); err != nil {

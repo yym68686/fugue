@@ -344,14 +344,28 @@ type PlatformArtifactValidateRequest struct {
 	DryRun bool `json:"dry_run"`
 }
 
+type PlatformPublicationPrecondition struct {
+	ArtifactID   string `json:"artifact_id"`
+	ContentHash  string `json:"content_hash"`
+	ReleaseID    string `json:"release_id"`
+	FencingToken int64  `json:"fencing_token"`
+}
+
+type PlatformProducerReconfiguration struct {
+	PreviousPolicy           PlatformPublicationPrecondition `json:"previous_policy"`
+	ServingFull              PlatformPublicationPrecondition `json:"serving_full"`
+	VerificationEvidenceHash string                          `json:"verification_evidence_hash"`
+}
+
 type PlatformArtifactReleaseRequest struct {
-	ReleaseChannel   string                           `json:"release_channel"`
-	CanaryRuleRef    string                           `json:"canary_rule_ref,omitempty"`
-	SoftOverride     bool                             `json:"soft_override,omitempty"`
-	ForcePublish     bool                             `json:"force_publish,omitempty"`
-	KernelBreakGlass *PlatformKernelBreakGlassRequest `json:"kernel_break_glass,omitempty"`
-	Reason           string                           `json:"reason,omitempty"`
-	IdempotencyKey   string                           `json:"idempotency_key,omitempty"`
+	ProducerReconfiguration *PlatformProducerReconfiguration `json:"producer_reconfiguration,omitempty"`
+	ReleaseChannel          string                           `json:"release_channel"`
+	CanaryRuleRef           string                           `json:"canary_rule_ref,omitempty"`
+	SoftOverride            bool                             `json:"soft_override,omitempty"`
+	ForcePublish            bool                             `json:"force_publish,omitempty"`
+	KernelBreakGlass        *PlatformKernelBreakGlassRequest `json:"kernel_break_glass,omitempty"`
+	Reason                  string                           `json:"reason,omitempty"`
+	IdempotencyKey          string                           `json:"idempotency_key,omitempty"`
 }
 
 type PlatformArtifactRollbackRequest struct {

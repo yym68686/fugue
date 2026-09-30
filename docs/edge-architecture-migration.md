@@ -865,3 +865,19 @@ The option is rejected for global and complete-traffic producers. It never
 changes business rows, runtime identity, publication selection or LKG by itself;
 activation and public handoff still require their own observed configuration
 transitions.
+
+Established Cell producer reconfiguration has its own configuration lane in
+`ci.yml`. A declaration pins the previous producer publication, the current
+route/TLS full publication, and the verification evidence hash of its positive
+LKG. The artifact release request carries `producer_reconfiguration`; the store
+checks these identities inside the file transaction or after PostgreSQL locks
+the producer scope followed by the target scope. Expiry and signatures are
+checked again before commit. The content-bound idempotency key permits a lost
+response retry only while the same successor and serving baseline remain
+current. Superseded successes and changed/frozen predecessors conflict.
+
+This lane only replaces a shadow/paused route-only producer with shadow mode
+and changes its generation and explicit route placement transition. Static and
+projection input references, schedules, membership and promotion settings cannot
+change through this operation. It neither mutates full traffic nor verifies or
+renews LKG. The initial bootstrap lane still refuses established serving Cells.

@@ -66,12 +66,30 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	reconfiguration := yamlMappingValue(t, jobs, "cell_producer_reconfiguration")
+	for _, key := range yamlMappingKeys(t, reconfiguration) {
+		if key == "needs" {
+			t.Fatal("existing Cell configuration must remain independent of code builds")
+		}
+	}
+	reconfigurationRaw, err := yaml.Marshal(reconfiguration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"deploy/environments/production/cell-producer-reconfiguration", "one existing Cell producer per configuration atom", "scripts.reconfigure_cell_producer", "selected == 'true'", "fugue-production-cell-producer-shadow"} {
+		if !strings.Contains(string(reconfigurationRaw), required) {
+			t.Fatalf("existing Cell configuration lacks scoped selection, CAS or serialization: %s", required)
+		}
+	}
+	if yamlMappingValue(t, reconfiguration, "environment").Value != "production" {
+		t.Fatal("existing Cell configuration requires production environment")
+	}
 	cellPromotion := yamlMappingValue(t, jobs, "cell_route_promotion")
 	cellPromotionPlan := yamlMappingValue(t, jobs, "cell_route_promotion_plan")
 	if yamlMappingValue(t, cellPromotion, "needs").Value != "cell_route_promotion_plan" || yamlMappingValue(t, cellPromotionPlan, "runs-on").Value != "ubuntu-latest" || !strings.Contains(yamlMappingValue(t, cellPromotion, "if").Value, "needs.cell_route_promotion_plan.outputs.selected == 'true'") {
