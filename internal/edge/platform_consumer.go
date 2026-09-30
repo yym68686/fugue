@@ -75,18 +75,25 @@ func probePlatformCandidateIndex(bundle model.EdgeRouteBundle, index *edgeRouteI
 		if !model.EdgeRoutePolicyAllowsTraffic(expected.RoutePolicy) {
 			continue
 		}
-		actual, ok, fallback, version, _ := index.routeForRequest(expected.Hostname, expected.PathPrefix)
-		if !ok || version != bundle.Version || (expected.Status == model.EdgeRouteStatusActive && fallback) {
-			return errors.New("candidate route index lookup failed")
-		}
 		want, err := routeproof.Digest(expected)
 		if err != nil {
 			return err
 		}
-		got, err := routeproof.Digest(actual)
-		if err != nil || want != got {
-			return errors.New("candidate route index behavior mismatch")
+		if err = probePlatformCandidateRoute(expected, index, bundle.Version, want); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func probePlatformCandidateRoute(expected model.EdgeRouteBinding, index *edgeRouteIndex, bundleVersion, wantDigest string) error {
+	actual, ok, fallback, version, _ := index.routeForRequest(expected.Hostname, expected.PathPrefix)
+	if !ok || version != bundleVersion || (expected.Status == model.EdgeRouteStatusActive && fallback) {
+		return errors.New("candidate route index lookup failed")
+	}
+	got, err := routeproof.Digest(actual)
+	if err != nil || wantDigest != got {
+		return errors.New("candidate route index behavior mismatch")
 	}
 	return nil
 }

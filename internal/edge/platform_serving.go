@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -167,7 +168,11 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 			result = errors.Join(result, reportErr)
 		}
 	}()
-	if err = s.validatePlatformServingBundle(bundle, projection); err != nil {
+	verifiedProjection, err := preparePlatformServingProjection(projection, s.Config.EdgeGroupID)
+	if err != nil {
+		return err
+	}
+	if err = s.validatePlatformServingBundle(bundle, verifiedProjection); err != nil {
 		return err
 	}
 	verifiedAt := time.Now().UTC()
@@ -208,7 +213,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	if err != nil || currentSelection != selection {
 		return errors.New("traffic serving activation changed")
 	}
-	if err = s.validatePlatformServingBundle(bundle, projection); err != nil {
+	if err = s.validatePlatformServingBundle(bundle, verifiedProjection); err != nil {
 		return err
 	}
 	path := s.Config.CachePath + ".platform-serving.json"
@@ -233,7 +238,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		if err != nil || currentSelection != selection {
 			return errors.New("traffic serving activation changed before report")
 		}
-		if err = s.validatePlatformServingBundle(bundle, projection); err != nil {
+		if err = s.validatePlatformServingBundle(bundle, verifiedProjection); err != nil {
 			return err
 		}
 		if err = client.CheckServingAssignment(ctx, id, assigned); err != nil {
@@ -359,41 +364,57 @@ func (s *Service) reportPlatformServingFact(ctx context.Context, client platform
 	return nil
 }
 
-func (s *Service) validatePlatformServingBundle(expected model.EdgeRouteBundle, projection model.EdgeRouteIntentSnapshot) error {
-	bundle, ok := s.Bundle()
-	status := s.Status()
-	index := s.currentRouteIndex()
-	if !ok || !s.Config.CaddyEnabled || !status.Healthy || status.StaleCache || status.MaxStaleExceeded || bundle.Version != expected.Version || !bundle.ValidUntil.After(time.Now()) || status.CaddyAppliedVersion != bundle.Version || status.CaddyLastError != "" || index == nil || index.publication.Candidate || index.bundleVersion != bundle.Version || !reflect.DeepEqual(bundle.TrafficRelease, projection.TrafficRelease) {
-		return errors.New("traffic artifact is not the healthy applied Caddy bundle")
-	}
-	want, err := routeartifact.MaterializeSnapshotForGroup(projection, s.Config.EdgeGroupID)
+// Reuse only expectations derived from the verified immutable projection during
+// one observation. Live bundle, route index and durable cache checks still run
+// before each report; no runtime fact is cached across those checks or cycles.
+type platformServingProjection struct {
+	bundle  model.EdgeRouteBundle
+	digests map[string]string
+}
+
+func preparePlatformServingProjection(projection model.EdgeRouteIntentSnapshot, group string) (platformServingProjection, error) {
+	want, err := routeartifact.MaterializeSnapshotForGroup(projection, group)
 	if err != nil {
-		return err
+		return platformServingProjection{}, err
 	}
-	if len(want.Routes) != len(bundle.Routes) || !reflect.DeepEqual(want.CachePolicies, bundle.CachePolicies) || !reflect.DeepEqual(want.TLSAllowlist, bundle.TLSAllowlist) {
-		return errors.New("traffic serving projection differs")
-	}
-	digests := map[string]string{}
+	digests := make(map[string]string, len(want.Routes))
 	for _, r := range want.Routes {
-		d, e := routeproof.Digest(r)
-		if e != nil {
-			return e
+		d, err := routeproof.Digest(r)
+		if err != nil {
+			return platformServingProjection{}, err
 		}
 		digests[r.Hostname+"\x00"+model.NormalizeAppRoutePathPrefix(r.PathPrefix)] = d
 	}
+	return platformServingProjection{bundle: want, digests: digests}, nil
+}
+
+func (s *Service) validatePlatformServingBundle(expected model.EdgeRouteBundle, projection platformServingProjection) error {
+	bundle, ok := s.Bundle()
+	status := s.Status()
+	index := s.currentRouteIndex()
+	if !ok || !s.Config.CaddyEnabled || !status.Healthy || status.StaleCache || status.MaxStaleExceeded || bundle.Version != expected.Version || !bundle.ValidUntil.After(time.Now()) || status.CaddyAppliedVersion != bundle.Version || status.CaddyLastError != "" || index == nil || index.publication.Candidate || index.bundleVersion != bundle.Version || !reflect.DeepEqual(bundle.TrafficRelease, projection.bundle.TrafficRelease) {
+		return errors.New("traffic artifact is not the healthy applied Caddy bundle")
+	}
+	want := projection.bundle
+	if len(want.Routes) != len(bundle.Routes) || !reflect.DeepEqual(want.CachePolicies, bundle.CachePolicies) || !reflect.DeepEqual(want.TLSAllowlist, bundle.TLSAllowlist) {
+		return errors.New("traffic serving projection differs")
+	}
+	digests := maps.Clone(projection.digests)
 	for _, r := range bundle.Routes {
 		key := r.Hostname + "\x00" + model.NormalizeAppRoutePathPrefix(r.PathPrefix)
 		d, e := routeproof.Digest(r)
 		if e != nil || digests[key] != d {
 			return errors.New("traffic serving route differs")
 		}
+		if model.EdgeRoutePolicyAllowsTraffic(r.RoutePolicy) {
+			if err := probePlatformCandidateRoute(r, index, bundle.Version, d); err != nil {
+				return err
+			}
+		}
 		delete(digests, key)
 	}
 	if len(digests) != 0 {
 		return errors.New("traffic serving route missing")
-	}
-	if err = probePlatformCandidateIndex(bundle, index); err != nil {
-		return err
 	}
 	raw, err := platformconsumer.ReadFile(s.Config.CachePath, 16<<20)
 	if err != nil {
