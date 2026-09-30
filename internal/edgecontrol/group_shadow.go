@@ -401,17 +401,27 @@ func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot, all
 		edgeID := normalizeEdgeIdentity(instance.EdgeID)
 		slot := normalizeSlot(instance.Slot)
 		releaseEpoch := strings.TrimSpace(instance.ReleaseEpoch)
-		if slot != epoch.Slot || releaseEpoch != epoch.ReleaseEpoch {
+		if slot != epoch.Slot {
 			// Inactive and legacy identities remain observable in the inventory
 			// snapshot, but cannot invalidate or contribute health to the exact
 			// active epoch for this group.
+			continue
+		}
+		if snapshot.verifiedProducer != nil {
+			observation, bound := inventoryInstanceProducerBound(snapshot, instance)
+			if !bound || !now.Before(observation.ObservedAt.Add(maxInventoryHeartbeatTTL)) {
+				continue
+			}
+		} else if releaseEpoch != epoch.ReleaseEpoch {
+			// Legacy inventory has no independently authenticated per-node epoch.
+			// It retains its original exact-release identity requirement.
 			continue
 		}
 		if instanceGroup != groupID || edgeID == "" || strings.TrimSpace(instance.InstanceUID) == "" || validateInventoryTopology(instance.FaultDomainID, instance.EdgePoolID) != nil {
 			return groupInventoryView{}, errGroupInventoryInvalid
 		}
 		if instance.FaultDomainID != snapshot.FaultDomainID || instance.EdgePoolID != snapshot.EdgePoolID {
-			if _, bound := inventoryInstanceProducerBound(snapshot, instance); !bound {
+			if snapshot.verifiedProducer == nil {
 				return groupInventoryView{}, errGroupInventoryInvalid
 			}
 		}
@@ -828,7 +838,14 @@ func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 	activeSlot := normalizeSlot(snapshot.ActiveEpoch.Slot)
 	activeReleaseEpoch := strings.TrimSpace(snapshot.ActiveEpoch.ReleaseEpoch)
 	for _, instance := range snapshot.Instances {
-		if normalizeSlot(instance.Slot) != activeSlot || strings.TrimSpace(instance.ReleaseEpoch) != activeReleaseEpoch {
+		if normalizeSlot(instance.Slot) != activeSlot {
+			continue
+		}
+		if snapshot.verifiedProducer != nil {
+			if _, bound := inventoryInstanceProducerBound(snapshot, instance); !bound {
+				continue
+			}
+		} else if strings.TrimSpace(instance.ReleaseEpoch) != activeReleaseEpoch {
 			continue
 		}
 		instances = append(instances, instanceIdentity{
@@ -860,6 +877,14 @@ func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 		FenceSequence      uint64 `json:"fence_sequence"`
 		MinHealthyInstance int    `json:"min_healthy_instances"`
 	}{normalizeGroupID(snapshot.ActiveEpoch.GroupID), strings.TrimSpace(snapshot.ActiveEpoch.FaultDomainID), strings.TrimSpace(snapshot.ActiveEpoch.EdgePoolID), normalizeSlot(snapshot.ActiveEpoch.Slot), strings.TrimSpace(snapshot.ActiveEpoch.ReleaseEpoch), snapshot.ActiveEpoch.FenceSequence, snapshot.ActiveEpoch.MinHealthyInstances}
+	faultDomain, pool := strings.TrimSpace(snapshot.FaultDomainID), strings.TrimSpace(snapshot.EdgePoolID)
+	if snapshot.verifiedProducer != nil {
+		// These fields describe only the latest producer envelope. Physical
+		// topology and code audit identity belong to the individual instances;
+		// changing heartbeat arrival order must not publish another route bundle.
+		epoch.FaultDomainID, epoch.EdgePoolID, epoch.ReleaseEpoch = "", "", ""
+		faultDomain, pool = "", ""
+	}
 	return digestJSON(struct {
 		Schema        string             `json:"schema"`
 		GroupID       string             `json:"edge_group_id"`
@@ -867,7 +892,7 @@ func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 		EdgePoolID    string             `json:"edge_pool_id,omitempty"`
 		Epoch         any                `json:"active_epoch"`
 		Instances     []instanceIdentity `json:"instances"`
-	}{snapshot.Schema, normalizeGroupID(snapshot.GroupID), strings.TrimSpace(snapshot.FaultDomainID), strings.TrimSpace(snapshot.EdgePoolID), epoch, instances})
+	}{snapshot.Schema, normalizeGroupID(snapshot.GroupID), faultDomain, pool, epoch, instances})
 }
 
 func inventoryProducerGeneration(generation uint64) string {

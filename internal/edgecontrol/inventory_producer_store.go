@@ -32,9 +32,10 @@ type GroupInventoryProducerObservation struct {
 	ProducerGeneration uint64        `json:"producer_generation"`
 	ObservedAt         time.Time     `json:"observed_at"`
 	Instance           GroupInstance `json:"instance"`
-	// Read compatibility for the original epoch of each authenticated producer.
-	// Writers start populating this only after this reader has been deployed,
-	// so the preceding code release can still recover the positive state.
+	// Captured from this authenticated producer's envelope. A newer heartbeat
+	// from another node cannot move an old observation into a new serving fence.
+	// Older persisted observations stay readable, but require a fresh heartbeat
+	// before contributing to compilation; their missing epoch is never inferred.
 	ServingEpoch *GroupActiveEpoch `json:"serving_epoch,omitempty"`
 }
 
@@ -45,6 +46,7 @@ func (store *PersistentGroupStore) StoreGroupInventoryProducerHeartbeat(
 	now time.Time,
 ) (GroupInventorySnapshot, error) {
 	var stored GroupInventorySnapshot
+	var committedProducer GroupInventoryProducerState
 	now = now.UTC()
 	if err := validateAuthorityInventoryProducerHeartbeat(heartbeat, identity, now); err != nil {
 		return GroupInventorySnapshot{}, err
@@ -89,7 +91,7 @@ func (store *PersistentGroupStore) StoreGroupInventoryProducerHeartbeat(
 		instance := heartbeat.Inventory.Instances[0]
 		observation := GroupInventoryProducerObservation{
 			CredentialID: identity.CredentialID, TokenID: identity.TokenID, NodeID: identity.NodeID, Slot: instance.Slot,
-			ProducerGeneration: heartbeat.ProducerGeneration, ObservedAt: now, Instance: instance,
+			ProducerGeneration: heartbeat.ProducerGeneration, ObservedAt: now, Instance: instance, ServingEpoch: &epoch,
 		}
 		replaced := false
 		for index := range producer.Observations {
@@ -130,9 +132,22 @@ func (store *PersistentGroupStore) StoreGroupInventoryProducerHeartbeat(
 		stored.Generation = groupInventoryProducerGeneration(producer.Generation, stored)
 		state.InventoryProducer = producer
 		state.Inventory = &stored
+		committedProducer = cloneGroupInventoryProducerState(*producer)
 		return nil
 	})
+	if err == nil {
+		stored.verifiedProducer = &committedProducer
+	}
 	return cloneGroupInventorySnapshot(stored), err
+}
+
+func inventoryWithProducer(snapshot GroupInventorySnapshot, producer *GroupInventoryProducerState) GroupInventorySnapshot {
+	snapshot = cloneGroupInventorySnapshot(snapshot)
+	if producer != nil {
+		copy := cloneGroupInventoryProducerState(*producer)
+		snapshot.verifiedProducer = &copy
+	}
+	return snapshot
 }
 
 func (store *PersistentGroupStore) ReadGroupInventoryProducerState(ctx context.Context, groupID string) (GroupInventoryProducerState, bool, error) {
@@ -245,7 +260,8 @@ func inventoryInstanceProducerBound(snapshot GroupInventorySnapshot, instance Gr
 	}
 	for _, observation := range producer.Observations {
 		if observation.NodeID == instance.EdgeID && observation.Slot == instance.Slot && reflect.DeepEqual(observation.Instance, instance) {
-			return observation, !observation.ObservedAt.After(snapshot.ObservedAt) && snapshot.ObservedAt.Sub(observation.ObservedAt) <= maxInventoryHeartbeatTTL
+			return observation, observation.ServingEpoch != nil && equalGroupServingEpoch(*observation.ServingEpoch, snapshot.ActiveEpoch) &&
+				!observation.ObservedAt.After(snapshot.ObservedAt) && snapshot.ObservedAt.Sub(observation.ObservedAt) < maxInventoryHeartbeatTTL
 		}
 	}
 	return GroupInventoryProducerObservation{}, false

@@ -141,11 +141,7 @@ func (store *PersistentGroupStore) ReadGroupInventory(ctx context.Context, group
 		if state.Inventory == nil {
 			return ErrGroupInventoryNotFound
 		}
-		inventory = cloneGroupInventorySnapshot(*state.Inventory)
-		if state.InventoryProducer != nil {
-			producer := cloneGroupInventoryProducerState(*state.InventoryProducer)
-			inventory.verifiedProducer = &producer
-		}
+		inventory = inventoryWithProducer(*state.Inventory, state.InventoryProducer)
 		return nil
 	})
 	return inventory, err
@@ -172,8 +168,14 @@ func (store *PersistentGroupStore) AppendCAS(ctx context.Context, groupID string
 			if entry.InventoryGeneration != "" || entry.InventoryDigest != "" {
 				return ErrGroupShadowInputCAS
 			}
-		} else if entry.InventoryGeneration != strings.TrimSpace(state.Inventory.Generation) || entry.InventoryDigest != groupInventorySemanticDigest(*state.Inventory) {
-			return ErrGroupShadowInputCAS
+		} else {
+			// Compare with the same locally authenticated provenance supplied to
+			// the compiler, while still holding the durable inventory writer lock.
+			inventory := *state.Inventory
+			inventory.verifiedProducer = state.InventoryProducer
+			if entry.InventoryGeneration != strings.TrimSpace(inventory.Generation) || entry.InventoryDigest != groupInventorySemanticDigest(inventory) {
+				return ErrGroupShadowInputCAS
+			}
 		}
 		var err error
 		appended, err = prepareGroupShadowLedgerAppend(state.GroupID, expectedSequence, state.Ledger, entry)
@@ -964,9 +966,9 @@ func (store *PersistentGroupStore) cacheGroupSummary(groupID string, state persi
 func summarizePersistentGroupState(state persistentGroupState) persistentGroupSummary {
 	var out persistentGroupSummary
 	if state.Inventory != nil {
-		out.status.Inventory = cloneGroupInventorySnapshot(*state.Inventory)
+		out.status.Inventory = inventoryWithProducer(*state.Inventory, state.InventoryProducer)
 		out.status.InventoryExists = true
-		out.stage.Inventory = cloneGroupInventorySnapshot(*state.Inventory)
+		out.stage.Inventory = inventoryWithProducer(*state.Inventory, state.InventoryProducer)
 		out.stage.InventoryExists = true
 	}
 	if state.InventoryProducer != nil {

@@ -25,6 +25,8 @@ func TestAggregatedBootstrapBindsAuthenticatedProducerObservations(t *testing.T)
 		serving := false
 		h.Inventory.ActiveEpoch.MinHealthyInstances = 2
 		instance := &h.Inventory.Instances[0]
+		h.Inventory.ActiveEpoch.ReleaseEpoch = strings.Repeat(string(rune('a'+i)), 40)
+		instance.ReleaseEpoch = h.Inventory.ActiveEpoch.ReleaseEpoch
 		instance.EffectiveHealthy, instance.ServingHealthy = false, &serving
 		instance.BootstrapEligibility = &GroupBootstrapEligibility{GroupID: group, ReleaseEpoch: instance.ReleaseEpoch, ProducerGeneration: uint64(i + 1), ValidUntil: now.Add(time.Minute)}
 		id := GroupInventoryProducerIdentity{CredentialID: "credential-" + node, TokenID: "token-" + node, NodeID: node, GroupID: group}
