@@ -1,32 +1,33 @@
 {
   "schema": "fugue.cell-producer-reconfiguration/v1",
-  "generation": 1,
+  "generation": 2,
   "origin": "https://api.fugue.pro",
   "authority_cell_id": "cell-public-b",
   "precondition": {
     "previous_policy": {
-      "artifact_id": "artifact_1790706134_d1154a4dedef",
-      "content_hash": "sha256:a608bfd92cc37c33049e2492ae54393714bb3145406dbc74ac4f7bd07f3c3c39",
-      "release_id": "artifactrel_1790706152_7ea30a197ae0",
-      "fencing_token": 1
+      "artifact_id": "artifact_1790738043_9727546e29b9",
+      "content_hash": "sha256:06a2ec054db92aa5e13a891bff4a28356a3b6d405affffda2bdb1a2839a5db8d",
+      "fencing_token": 2,
+      "release_id": "artifactrel_1790738059_d61dfcb9d5c8"
     },
     "serving_full": {
       "artifact_id": "artifact_1790706767_e617d4b7d3f3",
       "content_hash": "sha256:00757694914d3da5defa1bf77a07fc740fc186ca4f45057c7ff1bf7a892380ee",
-      "release_id": "artifactrel_1790708047_9595e05aec9d",
-      "fencing_token": 1
+      "fencing_token": 1,
+      "release_id": "artifactrel_1790708047_9595e05aec9d"
     },
-    "verification_evidence_hash": "sha256:362de38566b3e6314e5a438a71968c4fcb3cd5dea22a7351a86b10c0d8f6892a"
+    "verification_evidence_hash": "sha256:362de38566b3e6314e5a438a71968c4fcb3cd5dea22a7351a86b10c0d8f6892a",
+    "operation": "activate_serving"
   },
   "policy": {
     "authority_cell_id": "cell-public-b",
     "dns_policy_artifact_id": "artifact_1790706133_22b0b98ba6a7",
     "dns_policy_digest": "sha256:3fd738909fb49abbdfcbe3b6e4d31dcb7a6e7a4d2fb616b41557e34c7c1f7672",
-    "generation": "cell-public-b-placement-transition-1",
+    "generation": "cell-public-b-serving-once-1",
     "hosted_zone_templates": [],
     "input_source": "business-static-intent",
     "interval_seconds": 60,
-    "mode": "shadow",
+    "mode": "serving",
     "publication_role": "cell-routes",
     "refresh_seconds": 600,
     "require_application_domains": true,
@@ -328,6 +329,13 @@
           "source_digest": "sha256:c2e0ee4d78b981bb354e95defa5e782a0cc356d5acaf9954951aff135f008450"
         }
       ]
+    },
+    "serving": {
+      "canary_rule_ref": "cohort=complete",
+      "full_min_seconds": 60,
+      "gray_min_seconds": 30,
+      "rollout_timeout_seconds": 600,
+      "single_publication": true
     }
   }
 }
