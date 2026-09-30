@@ -461,7 +461,7 @@
                   "requests": {
                     "cpu": "25m",
                     "ephemeral-storage": "32Mi",
-                    "memory": "128Mi"
+                    "memory": "64Mi"
                   }
                 },
                 "securityContext": {
@@ -560,7 +560,7 @@
                   "requests": {
                     "cpu": "25m",
                     "ephemeral-storage": "32Mi",
-                    "memory": "128Mi"
+                    "memory": "64Mi"
                   }
                 },
                 "securityContext": {
@@ -1071,7 +1071,7 @@
                   "requests": {
                     "cpu": "25m",
                     "ephemeral-storage": "32Mi",
-                    "memory": "128Mi"
+                    "memory": "64Mi"
                   }
                 },
                 "securityContext": {
@@ -1170,7 +1170,7 @@
                   "requests": {
                     "cpu": "25m",
                     "ephemeral-storage": "32Mi",
-                    "memory": "128Mi"
+                    "memory": "64Mi"
                   }
                 },
                 "securityContext": {
