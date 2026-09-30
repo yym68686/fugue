@@ -1,29 +1,29 @@
 {
   "schema": "fugue.cell-producer-reconfiguration/v1",
-  "generation": 4,
+  "generation": 5,
   "origin": "https://api.fugue.pro",
   "authority_cell_id": "cell-public-b",
   "precondition": {
-    "operation": "activate_serving",
+    "operation": "refresh_serving",
     "previous_policy": {
-      "artifact_id": "artifact_1790760751_35955eb0a90a",
-      "content_hash": "sha256:3ef735a901262173ae02dde7f945d4269ebb38f08e8772a6da7211ddd522dc9f",
-      "release_id": "artifactrel_1790760761_360a0b80ed3e",
-      "fencing_token": 5
+      "artifact_id": "artifact_1790787120_5405f0e00369",
+      "content_hash": "sha256:edadd46c69b10a3a91245e6cf09be2601742e2d25a43775a441dde44ac833f6b",
+      "release_id": "artifactrel_1790787126_17496c6d59b7",
+      "fencing_token": 6
     },
     "serving_full": {
-      "artifact_id": "artifact_1790745686_aa24725f6f68",
-      "content_hash": "sha256:2a0a86d3261fb89aba3a795f66ad7e5dece792504cda0bc7f0906ed8255456a9",
-      "release_id": "artifactrel_1790745748_237e96a7580f",
-      "fencing_token": 3
+      "artifact_id": "artifact_1790788459_29b382ef63a2",
+      "content_hash": "sha256:baa5de9504f33bdbc59fd7c657c88824dc77e55dd77d564b0fa849cb522d01e7",
+      "release_id": "artifactrel_1790788653_c7cf98fb7495",
+      "fencing_token": 4
     },
-    "verification_evidence_hash": "sha256:d2ec6e6ff6ceb202f73aebea06a576576adde07460cec57b059bd24c389c9bb4"
+    "verification_evidence_hash": "sha256:07a3e87ff4029d73596ccc7dbf6817ba95f890ad0dc8af3c52afd71f015a0f9f"
   },
   "policy": {
     "authority_cell_id": "cell-public-b",
     "dns_policy_artifact_id": "artifact_1790760751_43a45c305317",
     "dns_policy_digest": "sha256:ae6be8c4d2a84e60b0b4b30e354eb72ffe7a75b67138c1c1bd2becd16184b5fb",
-    "generation": "cell-public-b-membership-serving-2",
+    "generation": "cell-public-b-serving-refresh-5",
     "hosted_zone_templates": [],
     "input_source": "business-static-intent",
     "interval_seconds": 60,
