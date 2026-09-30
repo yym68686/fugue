@@ -61,6 +61,41 @@ class Ledger(ArtifactAPI):
 
 
 class ReconfigurationTests(unittest.TestCase):
+    def test_continuous_only_changes_generation_and_repetition_flag(self):
+        for failure in [None, "bounds", "placement", "source", "schedule", "foreign", "operator", "unverified", "already continuous", "still once"]:
+            with self.subTest(failure=failure):
+                declaration, _ = fixture()
+                declaration["policy"].update(mode="serving", serving={"single_publication": True, "canary_rule_ref": "cohort=complete", "gray_min_seconds": 30, "full_min_seconds": 60, "rollout_timeout_seconds": 300})
+                old = copy.deepcopy(declaration["policy"])
+                if failure == "already continuous":
+                    old["serving"]["single_publication"] = False
+                declaration["precondition"]["previous_policy"]["content_hash"] = config.digest(old)
+                declaration["precondition"]["operation"] = "continuous_serving"
+                declaration["policy"]["generation"] = "continuous"
+                declaration["policy"]["serving"]["single_publication"] = False
+                api = Ledger(declaration, old)
+                full = api.authorities[("release_set", "authority-cell:cell-a", "full")]
+                full["artifact"]["metadata"] = {"producer_policy_release_id": "old-release"}
+                full["release"].update(released_by_type="bootstrap", released_by_id="platform-config-producer", verification_state="verified", verified_lkg_generation=full["artifact"]["generation"])
+                baseline = copy.deepcopy(full)
+                if failure == "bounds": declaration["policy"]["serving"]["full_min_seconds"] = 90
+                elif failure == "placement": declaration["policy"]["route_placement_transition"]["constraints"][0]["source"]["min_healthy_edge_nodes"] = 1
+                elif failure == "source": declaration["policy"]["static_intent_artifact_id"] = "other-input"
+                elif failure == "schedule": declaration["policy"]["refresh_seconds"] += 60
+                elif failure == "foreign": full["artifact"]["metadata"]["producer_policy_release_id"] = "other"
+                elif failure == "operator": full["release"]["released_by_id"] = "operator"
+                elif failure == "unverified": full["release"]["verification_state"] = "serving_unverified"
+                elif failure == "still once": declaration["policy"]["serving"]["single_publication"] = True
+                if failure:
+                    with self.assertRaises(ValueError): config.publish(declaration, api, lambda _: None)
+                    self.assertEqual([], api.release_bodies)
+                else:
+                    result = config.publish(declaration, api, lambda _: None)
+                    self.assertEqual("continuous_serving", result["operation"])
+                    self.assertTrue(result["serving_publication_authorized"])
+                    self.assertEqual(baseline, full)
+                    self.assertEqual(result["authority"], config.publish(declaration, api, lambda _: None)["authority"])
+
     def test_refresh_requires_completed_predecessor_and_identical_settings(self):
         for failure in [None, "bounds", "placement", "foreign", "operator", "unverified", "continuous", "activation"]:
             with self.subTest(failure=failure):

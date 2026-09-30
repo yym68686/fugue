@@ -38,7 +38,7 @@ def validate(config):
     precondition, policy = config["precondition"], config["policy"]
     required = {"previous_policy", "serving_full", "verification_evidence_hash"}
     operation = precondition.get("operation", "placement")
-    if not required.issubset(precondition) or set(precondition) - required - {"operation"} or operation not in ["placement", "activate_serving", "refresh_serving", "expand_membership"] or not DIGEST.fullmatch(precondition.get("verification_evidence_hash", "")):
+    if not required.issubset(precondition) or set(precondition) - required - {"operation"} or operation not in ["placement", "activate_serving", "refresh_serving", "continuous_serving", "expand_membership"] or not DIGEST.fullmatch(precondition.get("verification_evidence_hash", "")):
         raise ValueError("exact producer and verified serving baseline required")
     for field in ["previous_policy", "serving_full"]:
         validate_ref(precondition[field])
@@ -56,7 +56,7 @@ def validate(config):
     if operation != "placement":
         serving = policy.get("serving", {})
         limits = ["gray_min_seconds", "full_min_seconds", "rollout_timeout_seconds"]
-        if set(serving) != {"single_publication", "canary_rule_ref", *limits} or serving["single_publication"] is not True or not re.fullmatch(r"cohort=[a-z0-9][a-z0-9_-]{0,63}", serving["canary_rule_ref"]) or any(type(serving[k]) is not int for k in limits) or not all(1 <= serving[k] <= 1800 for k in limits[:2]) or not max(30, max(serving[k] for k in limits[:2]) + policy["interval_seconds"]) <= serving["rollout_timeout_seconds"] <= 3600:
+        if set(serving) != {"single_publication", "canary_rule_ref", *limits} or serving["single_publication"] is not (operation != "continuous_serving") or not re.fullmatch(r"cohort=[a-z0-9][a-z0-9_-]{0,63}", serving["canary_rule_ref"]) or any(type(serving[k]) is not int for k in limits) or not all(1 <= serving[k] <= 1800 for k in limits[:2]) or not max(30, max(serving[k] for k in limits[:2]) + policy["interval_seconds"]) <= serving["rollout_timeout_seconds"] <= 3600:
             raise ValueError("explicit bounded single serving publication required")
     transition = policy["route_placement_transition"]
     if not isinstance(transition, dict) or set(transition) != {"previous_topology", "next_topology", "constraints"}:
@@ -130,16 +130,18 @@ def publish(config, api, save):
     current = selected(api, scope, "shadow")
     old = api("GET", "/v1/admin/artifacts/" + config["precondition"]["previous_policy"]["artifact_id"])["artifact"]
     previous = old.get("content", {})
-    modes = ["serving"] if operation in ["refresh_serving", "expand_membership"] else ["shadow", "paused"]
+    modes = ["serving"] if operation in ["refresh_serving", "continuous_serving", "expand_membership"] else ["shadow", "paused"]
     if old.get("content_hash") != config["precondition"]["previous_policy"]["content_hash"] or digest(previous) != old.get("content_hash") or old.get("scope_key") != scope or old.get("status") != "validated" or previous.get("mode") not in modes:
         raise ValueError("previous producer policy is untrusted or has incompatible mode")
-    if operation in ["refresh_serving", "expand_membership"] and (previous.get("serving", {}).get("single_publication") is not True or full["artifact"].get("metadata", {}).get("producer_policy_release_id") != config["precondition"]["previous_policy"]["release_id"] or full["release"].get("released_by_type") != "bootstrap" or full["release"].get("released_by_id") != "platform-config-producer" or full["release"].get("verification_state") != "verified" or full["release"].get("verified_lkg_generation") != full["artifact"]["generation"]):
+    if operation in ["refresh_serving", "continuous_serving", "expand_membership"] and (previous.get("serving", {}).get("single_publication") is not True or full["artifact"].get("metadata", {}).get("producer_policy_release_id") != config["precondition"]["previous_policy"]["release_id"] or full["release"].get("released_by_type") != "bootstrap" or full["release"].get("released_by_id") != "platform-config-producer" or full["release"].get("verification_state") != "verified" or full["release"].get("verified_lkg_generation") != full["artifact"]["generation"]):
         raise ValueError("refresh requires the predecessor's own verified single full publication")
     prior, target = copy.deepcopy(previous), copy.deepcopy(config["policy"])
     for value in [prior, target]:
         fields = ["generation"]
         if operation == "expand_membership":
             fields.extend(["static_intent_artifact_id", "static_intent_digest", "dns_policy_artifact_id", "dns_policy_digest"])
+        elif operation == "continuous_serving":
+            value["serving"]["single_publication"] = False
         elif operation != "refresh_serving":
             fields.append("serving" if operation == "activate_serving" else "route_placement_transition")
         for field in fields:
@@ -173,7 +175,7 @@ def publish(config, api, save):
     if operation in ["placement", "expand_membership"]:
         baseline(config, api)
         evidence["serving_publication_changed"] = False
-    evidence.update(authority=authority_identity(current), completed_at=now().isoformat(), mode=config["policy"]["mode"], operation=operation, serving_publication_authorized=operation in ["activate_serving", "refresh_serving"])
+    evidence.update(authority=authority_identity(current), completed_at=now().isoformat(), mode=config["policy"]["mode"], operation=operation, serving_publication_authorized=operation in ["activate_serving", "refresh_serving", "continuous_serving"])
     save(evidence)
     return evidence
 

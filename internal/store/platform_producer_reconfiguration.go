@@ -45,6 +45,10 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
+	case "continuous_serving":
+		if p.Mode != "serving" || p.Serving == nil || p.Serving.SinglePublication {
+			return p, ErrInvalidInput
+		}
 	case "expand_membership":
 		if p.Mode != "shadow" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
@@ -108,7 +112,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	if err != nil || p.Generation == previous.Generation || a.GenerationSequence <= old.GenerationSequence {
 		return ErrConflict
 	}
-	if r.Operation == "refresh_serving" || r.Operation == "expand_membership" {
+	if r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" {
 		if previous.Mode != "serving" || previous.Serving == nil || !previous.Serving.SinglePublication {
 			return ErrConflict
 		}
@@ -126,6 +130,12 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	previous.Generation, p.Generation = "", ""
 	if r.Operation == "activate_serving" {
 		previous.Serving, p.Serving = nil, nil
+	} else if r.Operation == "continuous_serving" {
+		// The predecessor was verified above as a completed single cycle.
+		// Only its repetition flag changes; bounds and source policy stay exact.
+		copy := *previous.Serving
+		copy.SinglePublication = false
+		previous.Serving = &copy
 	} else if r.Operation == "expand_membership" {
 		previous.StaticIntentArtifactID, p.StaticIntentArtifactID = "", ""
 		previous.StaticIntentDigest, p.StaticIntentDigest = "", ""
@@ -158,7 +168,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	if _, err := platformconfig.ValidateReleaseComposition(full); err != nil {
 		return ErrConflict
 	}
-	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" || r.Operation == "expand_membership" {
+	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" {
 		// Resolve the cohort against the exact current baseline before enabling
 		// automatic publication; fresh candidate admission remains independent.
 		target, err := platformproducer.Decode(a)
@@ -171,7 +181,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		if release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.VerifiedLKGGeneration != full.Generation {
 			return ErrConflict
 		}
-		if (r.Operation == "refresh_serving" || r.Operation == "expand_membership") && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
+		if (r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership") && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
 			return ErrConflict
 		}
 		if r.Operation == "expand_membership" && (full.Metadata[platformproducer.StaticIntentIDMetadata] != oldSources.StaticIntentArtifactID || full.Metadata[platformproducer.StaticIntentDigestMetadata] != oldSources.StaticIntentDigest || full.Metadata[platformproducer.DNSPolicyIDMetadata] != oldSources.DNSPolicyArtifactID || full.Metadata[platformproducer.DNSPolicyDigestMetadata] != oldSources.DNSPolicyDigest) {
