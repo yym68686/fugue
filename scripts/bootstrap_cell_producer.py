@@ -89,8 +89,10 @@ def exact(a, kind, scope, content):
 def ensure_input(api, kind, scope, content):
     # Generation is immutable within kind/scope. Read full content before
     # reuse; metadata list views do not prove that a draft matches the intent.
-    query = urllib.parse.urlencode({"kind": kind, "scope": scope, "limit": 100})
+    query = urllib.parse.urlencode({"kind": kind, "scope": scope, "generation": content["generation"], "limit": 2})
     candidates = api("GET", "/v1/admin/artifacts?" + query).get("artifacts", [])
+    if len(candidates) > 2 or any(a.get("generation") != content["generation"] for a in candidates):
+        raise ValueError("artifact API did not honor exact generation lookup")
     matches = [a for a in candidates if a.get("generation") == content["generation"]]
     if len(matches) > 1:
         raise ValueError("ambiguous immutable input")

@@ -1,6 +1,6 @@
 {
   "schema": "fugue.cell-membership-expansion/v1",
-  "generation": 1,
+  "generation": 2,
   "origin": "https://api.fugue.pro",
   "authority_cell_id": "cell-public-b",
   "producer_generation": "cell-public-b-membership-shadow-1",

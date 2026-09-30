@@ -39,7 +39,8 @@ class ArtifactAPI:
             key = (path.rsplit("/", 1)[1], query["scope_key"][0], query["channel"][0])
             return copy.deepcopy(self.authorities.get(key, {}))
         if method == "GET" and path == "/v1/admin/artifacts":
-            return {"artifacts": [{k: a[k] for k in ["id", "generation"]} for a in self.artifacts.values() if a["artifact_kind"] == query["kind"][0] and a["scope_key"] == query["scope"][0]]}
+            candidates = [a for a in self.artifacts.values() if a["artifact_kind"] == query["kind"][0] and a["scope_key"] == query["scope"][0] and ("generation" not in query or a["generation"] == query["generation"][0])]
+            return {"artifacts": [{k: a[k] for k in ["id", "generation"]} for a in candidates[:int(query.get("limit", [100])[0])]]}
         if method == "GET" and path.startswith("/v1/admin/artifacts/"):
             return {"artifact": copy.deepcopy(self.artifacts[path.rsplit("/", 1)[1]])}
         if method == "GET" and path == "/v1/admin/platform-config/routes/project":
@@ -84,6 +85,44 @@ class ArtifactAPI:
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_exact_generation_lookup_avoids_history_and_retains_ambiguity_checks(self):
+        config = fixture()
+        content, scope, kind = config["static_intent"], config["static_intent"]["scope"], "platform_intent"
+        for scenario in ["existing", "missing", "ambiguous", "old API"]:
+            with self.subTest(scenario=scenario):
+                ledger = ArtifactAPI(config)
+                # Enough unrelated large inputs to overflow the bounded client
+                # if lookup fetches history instead of the exact generation.
+                for i in range(120):
+                    ledger.artifacts["history-" + str(i)] = {"id": "history-" + str(i), "artifact_kind": kind, "scope_key": scope, "generation": "history-" + str(i), "content": {"payload": "x" * 10000}}
+                target = {"id": "target", "artifact_kind": kind, "scope_key": scope, "generation": content["generation"], "content": copy.deepcopy(content), "content_hash": bootstrap.digest(content), "status": "validated"}
+                if scenario != "missing":
+                    ledger.artifacts["target"] = target
+                if scenario == "ambiguous":
+                    ledger.artifacts["duplicate"] = {**target, "id": "duplicate"}
+                reads = []
+                def api(method, path, body=None):
+                    if method == "GET" and path.startswith("/v1/admin/artifacts?"):
+                        query = urllib.parse.parse_qs(path.partition("?")[2])
+                        self.assertEqual(query, {"kind": [kind], "scope": [scope], "generation": [content["generation"]], "limit": ["2"]})
+                        if scenario == "old API":
+                            return {"artifacts": [ledger.artifacts["history-0"]]}
+                    if method == "GET":
+                        reads.append(path)
+                    result = ledger(method, path, body)
+                    self.assertLess(len(json.dumps(result)), 1 << 20)
+                    return result
+                if scenario in ["ambiguous", "old API"]:
+                    with self.assertRaisesRegex(ValueError, "ambiguous|exact generation"):
+                        bootstrap.ensure_input(api, kind, scope, content)
+                    self.assertEqual(ledger.writes, [])
+                else:
+                    artifact = bootstrap.ensure_input(api, kind, scope, content)
+                    self.assertEqual(artifact["content"], content)
+                    if scenario == "existing":
+                        self.assertEqual(ledger.writes, [])
+                        self.assertIn("/v1/admin/artifacts/target", reads)
+
     def test_explicit_route_only_inputs_have_no_dns_authority(self):
         config = fixture()
         for key in ["static_intent", "projection_policy", "producer"]:
