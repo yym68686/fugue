@@ -1378,6 +1378,24 @@ func ownershipConvergencePointers(release declarativerelease.PlanRelease, identi
 		}
 		addDeclaredContainerEnvValuePointers(desired, target.ContainerType, target.Container, add)
 	}
+	// A component may name a Front as its primary workload while declaring
+	// separate Worker workloads with a pinned sidecar. Their reviewed resource
+	// quantities still belong to this release, even when the sidecar's image is
+	// independent from the component artifact. Keep this bridge scalar-only;
+	// images and other fields retain their existing artifact-target boundary.
+	if releaseDeclaresResource(release, identity) {
+		containers := anySlice(mapField(mapField(mapField(desired, "spec"), "template"), "spec")["containers"])
+		counts := make(map[string]int)
+		for _, raw := range containers {
+			container, _ := raw.(map[string]any)
+			counts[stringValue(container["name"])]++
+		}
+		for name, count := range counts {
+			if name != "" && count == 1 {
+				addDeclaredContainerResourceQuantityPointers(desired, name, []string{"cpu", "memory"}, add)
+			}
+		}
+	}
 	if identity.Kind == "DaemonSet" && releaseDeclaresResource(release, identity) {
 		if _, ok := declaredCaddyDataHostPath(desired); ok {
 			add(caddyDataHostPathPointer)

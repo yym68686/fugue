@@ -2059,6 +2059,64 @@ func TestHelmMemoryOwnershipTransferKeepsExactScalarAndCASBoundary(t *testing.T)
 	}
 }
 
+func TestDeclaredSecondaryWorkloadResourceOwnershipIncludesPinnedSidecar(t *testing.T) {
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "system-test", Name: "worker-a"}
+	release := declarativerelease.PlanRelease{
+		Workload:        declarativerelease.Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "system-test", Name: "front", Container: "front", FieldManager: "worker-declarative"},
+		ArtifactTargets: []declarativerelease.ArtifactTarget{{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "system-test", Name: "worker-a", Container: "worker", ContainerType: "container"}},
+	}
+	container := func(name string) map[string]any {
+		return map[string]any{"name": name, "image": "registry.example/runtime@sha256:" + strings.Repeat("a", 64), "resources": map[string]any{"requests": map[string]any{"memory": "64Mi", "cpu": "25m", "ephemeral-storage": "32Mi"}}}
+	}
+	desired := map[string]any{"apiVersion": "apps/v1", "kind": "DaemonSet", "metadata": map[string]any{"name": identity.Name, "namespace": identity.Namespace, "uid": "worker-uid", "resourceVersion": "42"}, "spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{container("worker"), container("proxy")}}}}}
+	allowed := ownershipConvergencePointers(release, identity, desired)
+	for _, name := range []string{"worker", "proxy"} {
+		pointer := "/spec/template/spec/containers[name=" + name + "]/resources/requests/memory"
+		if !stringSubset([]string{pointer}, allowed) {
+			t.Fatalf("reviewed secondary resource omitted: %s", pointer)
+		}
+		live := deepCopyJSONMap(t, desired)
+		containers := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])
+		for _, raw := range containers {
+			c := raw.(map[string]any)
+			if c["name"] == name {
+				mapField(mapField(c, "resources"), "requests")["memory"] = "128Mi"
+			}
+		}
+		mapField(live, "metadata")["managedFields"] = []any{map[string]any{"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/template/spec/nodeSelector"})}}
+		failure := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: ` + ssaFieldForPointer(pointer))
+		patch, found, err := nextOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, failure)
+		if err != nil || !found || len(patch) != 5 || patch[0]["path"] != "/metadata/uid" || patch[1]["path"] != "/metadata/resourceVersion" || patch[3]["value"] != "128Mi" || patch[4]["value"] != "64Mi" {
+			t.Fatalf("secondary scalar transfer lost CAS boundary: %v %v %v", patch, found, err)
+		}
+		if stringSubset([]string{pointer}, emergencyOwnershipPointers(release, identity, desired)) {
+			t.Fatal("normal convergence widened emergency rollback")
+		}
+	}
+	for _, pointer := range []string{
+		"/spec/template/spec/containers[name=proxy]/image",
+		"/spec/template/spec/containers[name=proxy]/resources",
+		"/spec/template/spec/containers[name=proxy]/resources/requests/ephemeral-storage",
+		"/spec/template/spec/containers[name=unlisted]/resources/requests/memory",
+		"/spec/template/spec/nodeSelector",
+	} {
+		if stringSubset([]string{pointer}, allowed) {
+			t.Fatalf("resource convergence broadened unrelated field: %s", pointer)
+		}
+	}
+	other := identity
+	other.Name = "unreviewed-worker"
+	if got := ownershipConvergencePointers(release, other, desired); stringSubset([]string{"/spec/template/spec/containers[name=proxy]/resources/requests/memory"}, got) {
+		t.Fatal("unreviewed workload gained ownership")
+	}
+	ambiguous := deepCopyJSONMap(t, desired)
+	spec := mapField(mapField(mapField(ambiguous, "spec"), "template"), "spec")
+	spec["containers"] = append(anySlice(spec["containers"]), container("proxy"))
+	if got := ownershipConvergencePointers(release, identity, ambiguous); stringSubset([]string{"/spec/template/spec/containers[name=proxy]/resources/requests/memory"}, got) {
+		t.Fatal("ambiguous sidecar gained ownership")
+	}
+}
+
 func TestArtifactIdentityOwnershipTransfersFromBroadKubectlPatch(t *testing.T) {
 	desired := map[string]any{
 		"apiVersion": "apps/v1", "kind": "DaemonSet",
