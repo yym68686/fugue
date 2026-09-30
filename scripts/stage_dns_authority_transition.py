@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from scripts.bootstrap_cell_producer import digest, selected
+from scripts.bootstrap_cell_producer import authority_identity, digest, selected
 from scripts.observe_front_candidate import now, timestamp
 from scripts.publish_agent_edge_shadow import canonical, NoRedirect
 
@@ -57,8 +57,10 @@ class API:
 
 
 def validate(config):
-    required = {"schema", "generation", "origin", "authority_cell_id", "previous_topology", "route_publications", "dns_node_ids", "expected_previous_shadow", "capture"}
-    if set(config) != required or config["schema"] != "fugue.dns-authority-transition-stage/v1" or type(config["generation"]) is not int or config["generation"] < 1:
+    dynamic = config.get("schema") == "fugue.dns-authority-transition-stage/v2"
+    route_field = "route_sources" if dynamic else "route_publications"
+    required = {"schema", "generation", "origin", "authority_cell_id", "previous_topology", route_field, "dns_node_ids", "expected_previous_shadow", "capture"}
+    if set(config) != required or config["schema"] not in ["fugue.dns-authority-transition-stage/v1", "fugue.dns-authority-transition-stage/v2"] or type(config["generation"]) is not int or config["generation"] < 1:
         raise ValueError("explicit versioned DNS shadow staging declaration required")
     if not CELL.fullmatch(config.get("authority_cell_id", "")):
         raise ValueError("neutral DNS authority required")
@@ -83,9 +85,19 @@ def validate(config):
     aliases = {c["legacy_group_id"]: c["id"] for c in cells}
     if len(aliases) != len(cells) or len({c["id"] for c in cells}) != len(cells) or config["authority_cell_id"] in aliases.values():
         raise ValueError("routing and DNS authority must be unique and independent")
-    refs = config["route_publications"]
+    refs = config[route_field]
+    if dynamic:
+        if not isinstance(refs, list) or [r.get("authority_cell_id") for r in refs] != sorted(aliases.values()):
+            raise ValueError("each routing cell requires one explicit producer policy authority")
+        for source in refs:
+            if set(source) != {"authority_cell_id", "producer_policy"}:
+                raise ValueError("only exact producer policy authorities may select current full publications")
+            ref = source["producer_policy"]
+            if not isinstance(ref, dict) or set(ref) != {"artifact_id", "content_hash", "release_id", "fencing_token"} or any(not IDENTITY.fullmatch(ref.get(k, "")) for k in ["artifact_id", "release_id"]) or not HASH.fullmatch(ref.get("content_hash", "")) or type(ref["fencing_token"]) is not int or ref["fencing_token"] < 1:
+                raise ValueError("exact producer policy artifact, digest, release and fence required")
+        refs = []
     fields = {"authority_cell_id", "release_set_id", "release_set_digest", "release_id", "release_channel", "fencing_token", "route_artifact_id", "route_artifact_digest", "tls_artifact_id", "tls_artifact_digest"}
-    if not isinstance(refs, list) or len(refs) != len(cells) or [r.get("authority_cell_id") for r in refs] != sorted(aliases.values()):
+    if not dynamic and (not isinstance(refs, list) or len(refs) != len(cells) or [r.get("authority_cell_id") for r in refs] != sorted(aliases.values())):
         raise ValueError("each declared cell requires one sorted exact full publication")
     for ref in refs:
         if set(ref) != fields or ref["release_channel"] != "full" or type(ref["fencing_token"]) is not int or ref["fencing_token"] < 1 or any(not HASH.fullmatch(ref[k]) for k in ["release_set_digest", "route_artifact_digest", "tls_artifact_digest"]) or any(not IDENTITY.fullmatch(ref[k]) for k in ["release_set_id", "release_id", "route_artifact_id", "tls_artifact_id"]):
@@ -136,6 +148,34 @@ def reference(pub, cell=None):
     return out
 
 
+def authorize_route_source(api, source, parent):
+    cell, expected = source["authority_cell_id"], source["producer_policy"]
+    scope = "platform-config-producer:" + cell
+    current = selected(api, scope, "shadow", "policy_snapshot")
+    if authority_identity(current) != expected:
+        raise ValueError("Cell producer policy authority changed")
+    policy = artifact(api, expected["artifact_id"], "policy_snapshot", scope)
+    content = policy["content"]
+    if policy["content_hash"] != expected["content_hash"] or content.get("authority_cell_id") != cell or content.get("target_scope") != "authority-cell:" + cell or content.get("publication_role") != "cell-routes" or content.get("mode") != "serving" or content.get("serving", {}).get("single_publication") is not False:
+        raise ValueError("continuous serving producer authority is required")
+    if parent.get("scope_key") != "authority-cell:" + cell or parent.get("content", {}).get("publication_role") != "cell-routes" or parent.get("metadata", {}).get("producer_policy_release_id") != expected["release_id"]:
+        raise ValueError("Cell full publication is not owned by the declared producer policy")
+
+
+def resolve_route_publications(config, api):
+    """Resolve intent selectors to concrete immutable references on each attempt."""
+    cells = []
+    for source in config.get("route_sources", config.get("route_publications", [])):
+        cell = source["authority_cell_id"]
+        pub = publication(api, full_source(api, "authority-cell:" + cell))
+        if "route_sources" in config:
+            authorize_route_source(api, source, pub["parent"])
+        elif reference(pub, cell) != source:
+            raise ValueError("Cell full publication differs from pinned declaration")
+        cells.append(pub)
+    return cells
+
+
 def source_input(api, parent, kind, generation_key):
     generation = parent["content"]["lineage"][generation_key]
     rows = api("GET", "/v1/admin/artifacts?" + urllib.parse.urlencode({"kind": kind, "scope": parent["scope_key"], "generation": generation, "limit": 2})).get("artifacts", [])
@@ -167,6 +207,8 @@ def compose(config, previous, cells, source_intent, source_policy, snapshot):
         refs.append(ref)
         inputs.append({"reference": ref, "parent": pub["parent"], "route": pub["children"]["edge_route_bundle"], "tls": pub["children"]["caddy_route_config"]})
     intent["cell_route_publications"] = refs
+    if "route_sources" in config:
+        intent["generation"] = "dns-transition-intent-" + digest({"declaration": config, "previous": reference(previous), "route_publications": refs})[7:]
     prior = {"reference": reference(previous), "parent": previous["parent"], "route": previous["children"]["edge_route_bundle"], "tls": previous["children"]["caddy_route_config"], "dns": previous["children"]["dns_answer_bundle"]}
     intent["route_authority_transition"] = {"previous_topology": copy.deepcopy(config["previous_topology"]), "previous_publication": prior["reference"]}
     if sorted(c["node_id"] for c in intent.get("dns_consumers", [])) != config["dns_node_ids"]:
@@ -241,23 +283,31 @@ def stage(config, api, save):
         dns = artifact(api, parent["content"]["artifact_ids"][0], "dns_answer_bundle", scope)
         source = dns["content"].get("cell_dns_source", {}).get("intent", {})
         transition = source.get("route_authority_transition", {})
-        if source.get("authority_cell_id") != config["authority_cell_id"] or source.get("cell_route_publications") != config["route_publications"] or transition.get("previous_topology") != config["previous_topology"]:
+        refs = source.get("cell_route_publications", [])
+        if source.get("authority_cell_id") != config["authority_cell_id"] or transition.get("previous_topology") != config["previous_topology"]:
             raise ValueError("completed DNS staging differs from declaration")
+        if "route_sources" in config:
+            if [ref.get("authority_cell_id") for ref in refs] != [item["authority_cell_id"] for item in config["route_sources"]]:
+                raise ValueError("completed DNS staging has different routing authorities")
+            for item, ref in zip(config["route_sources"], refs):
+                route_parent = artifact(api, ref["release_set_id"], "release_set", "authority-cell:" + item["authority_cell_id"])
+                if route_parent["content_hash"] != ref["release_set_digest"]:
+                    raise ValueError("completed DNS route source digest differs")
+                authorize_route_source(api, item, route_parent)
+        elif refs != config["route_publications"]:
+            raise ValueError("completed DNS staging differs from pinned route publications")
         api("POST", "/v1/admin/platform-config/release-set/prepare-consumers", {"release_set_id": parent["id"], "artifact_release_id": before["release"]["id"]})
-        result = {"schema": "fugue.dns-authority-transition-stage-result/v1", "declaration_digest": digest(config), "release_set_id": parent["id"], "release_set_digest": parent["content_hash"], "dns_artifact_id": dns["id"], "dns_artifact_digest": dns["content_hash"], "shadow_release_id": before["release"]["id"], "fencing_token": before["release"]["fencing_token"], "previous_publication": transition["previous_publication"], "route_publications": config["route_publications"], "public_transport_changed": False, "serving_published": False, "completed_at": now().isoformat(), "resumed": True}
+        result = {"schema": "fugue.dns-authority-transition-stage-result/v1", "declaration_digest": digest(config), "release_set_id": parent["id"], "release_set_digest": parent["content_hash"], "dns_artifact_id": dns["id"], "dns_artifact_digest": dns["content_hash"], "shadow_release_id": before["release"]["id"], "fencing_token": before["release"]["fencing_token"], "previous_publication": transition["previous_publication"], "route_publications": refs, "public_transport_changed": False, "serving_published": False, "completed_at": now().isoformat(), "resumed": True}
         save(result)
         return result
     if identity(before) != config["expected_previous_shadow"]:
         raise ValueError("DNS shadow predecessor differs from declaration")
-    cells = []
-    for ref in config["route_publications"]:
-        pub = publication(api, full_source(api, "authority-cell:" + ref["authority_cell_id"]))
-        if reference(pub, ref["authority_cell_id"]) != ref:
-            raise ValueError("Cell full publication differs from pinned declaration")
-        cells.append(pub)
+    cells = None if "route_sources" in config else resolve_route_publications(config, api)
     deadline, last_error = time.monotonic() + config["capture"]["timeout_seconds"], "no fresh complete source"
     while time.monotonic() < deadline:
         try:
+            if "route_sources" in config:
+                cells = resolve_route_publications(config, api)
             source = full_source(api, "global")
             age = (now() - timestamp(source["release"]["released_at"])).total_seconds()
             if not 0 <= age <= config["capture"]["max_source_age_seconds"]:
@@ -265,11 +315,13 @@ def stage(config, api, save):
             previous = publication(api, source)
             inputs = api("GET", "/v1/admin/artifacts/" + previous["parent"]["id"] + "/compiler-input")
             request = compose(config, previous, cells, source_input(api, previous["parent"], "platform_intent", "intent_generation"), source_input(api, previous["parent"], "policy_snapshot", "policy_generation"), inputs["runtime_snapshot"])
+            save({"schema": "fugue.dns-authority-transition-stage-result/v1", "declaration_digest": digest(config), "previous_publication": request["previous_traffic_publication"]["reference"], "route_publications": request["intent"]["cell_route_publications"], "public_transport_changed": False, "serving_published": False, "captured_at": now().isoformat()})
             result = api("POST", "/v1/admin/platform-config/compile", request)
             break
         except (ValueError, RuntimeError) as error:
             last_error = str(error)
-            if isinstance(error, RuntimeError) and "HTTP 409" not in last_error:
+            source_mismatch = "route_sources" in config and "HTTP 400" in last_error and "authority transition changes compiled route behavior or hard constraints" in last_error
+            if isinstance(error, RuntimeError) and "HTTP 409" not in last_error and not source_mismatch:
                 raise
             time.sleep(config["capture"]["poll_seconds"])
     else:
@@ -277,11 +329,14 @@ def stage(config, api, save):
     parent, dns = result["release_artifact"], result["dns_artifact"]
     if result.get("route_artifact") or result.get("tls_artifact") or parent["content"].get("publication_role") != "cell-dns" or dns["content"].get("previous_traffic_publication") != request["previous_traffic_publication"]:
         raise ValueError("compiler output differs from DNS-only transition")
-    evidence = {"schema": "fugue.dns-authority-transition-stage-result/v1", "declaration_digest": digest(config), "previous_publication": request["previous_traffic_publication"]["reference"], "route_publications": config["route_publications"], "release_set_id": parent["id"], "release_set_digest": parent["content_hash"], "dns_artifact_id": dns["id"], "dns_artifact_digest": dns["content_hash"], "public_transport_changed": False, "serving_published": False}
+    evidence = {"schema": "fugue.dns-authority-transition-stage-result/v1", "declaration_digest": digest(config), "previous_publication": request["previous_traffic_publication"]["reference"], "route_publications": request["intent"]["cell_route_publications"], "release_set_id": parent["id"], "release_set_digest": parent["content_hash"], "dns_artifact_id": dns["id"], "dns_artifact_digest": dns["content_hash"], "public_transport_changed": False, "serving_published": False}
     save(evidence)
     no_serving_authority(config, api)
     if identity(selected(api, scope, "shadow", "release_set")) != identity(before):
         raise ValueError("DNS shadow authority changed while compiling")
+    if "route_sources" in config:
+        for item, pub in zip(config["route_sources"], cells):
+            authorize_route_source(api, item, pub["parent"])
     api("POST", "/v1/admin/artifacts/" + parent["id"] + "/release", {"release_channel": "shadow", "idempotency_key": "dns-transition-shadow/" + digest(config) + "/" + parent["content_hash"], "reason": "explicit DNS transition staging; no public transport or serving publication"})
     current = selected(api, scope, "shadow", "release_set")
     if current["artifact"]["id"] != parent["id"] or current["artifact"]["content_hash"] != parent["content_hash"]:

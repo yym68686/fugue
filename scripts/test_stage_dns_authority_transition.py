@@ -23,6 +23,83 @@ def fixture():
 
 
 class DNSAuthorityStageTest(unittest.TestCase):
+    def continuous_fixture(self):
+        cfg, old, cell, intent, policy, facts = fixture()
+        cfg["schema"] = "fugue.dns-authority-transition-stage/v2"
+        cfg.pop("route_publications")
+        pin = {"artifact_id": "producer", "content_hash": "sha256:" + "d" * 64, "release_id": "producer-release", "fencing_token": 4}
+        cfg["route_sources"] = [{"authority_cell_id": "cell-a", "producer_policy": pin}]
+        cell["parent"].update(scope_key="authority-cell:cell-a", metadata={"producer_policy_release_id": pin["release_id"]})
+        cell["parent"]["content"]["publication_role"] = "cell-routes"
+        producer = {"content_hash": pin["content_hash"], "content": {"authority_cell_id": "cell-a", "target_scope": "authority-cell:cell-a", "publication_role": "cell-routes", "mode": "serving", "serving": {"single_publication": False}}}
+        return cfg, old, cell, intent, policy, facts, producer
+
+    def test_continuous_sources_require_exact_current_policy_and_owned_full(self):
+        for change in ["valid", "replaced-policy", "foreign-owner", "wrong-cell", "single-publication", "shadow-policy"]:
+            with self.subTest(change=change):
+                cfg, _, cell, _, _, _, producer = self.continuous_fixture()
+                self.assertEqual(cfg, p.validate(cfg))
+                pin = copy.deepcopy(cfg["route_sources"][0]["producer_policy"])
+                if change == "replaced-policy": pin["fencing_token"] += 1
+                if change == "foreign-owner": cell["parent"]["metadata"]["producer_policy_release_id"] = "other"
+                if change == "wrong-cell": cell["parent"]["scope_key"] = "authority-cell:cell-other"
+                if change == "single-publication": producer["content"]["serving"]["single_publication"] = True
+                if change == "shadow-policy": producer["content"]["mode"] = "shadow"
+                with patch.object(p, "selected"), patch.object(p, "authority_identity", return_value=pin), patch.object(p, "artifact", return_value=producer):
+                    if change == "valid":
+                        p.authorize_route_source(None, cfg["route_sources"][0], cell["parent"])
+                    else:
+                        with self.assertRaises(ValueError):
+                            p.authorize_route_source(None, cfg["route_sources"][0], cell["parent"])
+
+    def test_dynamic_declaration_never_accepts_unbound_or_multiple_source_modes(self):
+        for change in [lambda c: c.update(route_publications=[]), lambda c: c["route_sources"][0]["producer_policy"].pop("release_id"), lambda c: c["route_sources"][0]["producer_policy"].update(fencing_token=True), lambda c: c["route_sources"].append(c["route_sources"][0]), lambda c: c["route_sources"][0].update(authority_cell_id="cell-foreign")]:
+            cfg, *_ = self.continuous_fixture()
+            change(cfg)
+            with self.assertRaises(ValueError): p.validate(cfg)
+
+    def test_continuous_capture_re_resolves_fences_after_conflict(self):
+        cfg, old, cell, intent, policy, facts, _ = self.continuous_fixture()
+        old["release"]["released_at"] = p.now().isoformat()
+        successor = copy.deepcopy(cell)
+        successor["parent"]["id"] = "successor-parent"
+        successor["release"].update(id="successor-full", fencing_token=2)
+        for error in ["HTTP 409 source changed", "HTTP 400: authority transition changes compiled route behavior or hard constraints"]:
+            with self.subTest(error=error):
+                calls, saved, requests = [], [], []
+                parent = {"id": "dns-parent", "content_hash": "sha256:" + "b" * 64, "content": {"publication_role": "cell-dns"}}
+                dns = {"id": "dns-child", "content_hash": "sha256:" + "c" * 64, "content": {}}
+                current = {"artifact": parent, "release": {"id": "dns-shadow", "fencing_token": 1}}
+                def api(method, path, body=None):
+                    if path.endswith("/compiler-input"): return {"runtime_snapshot": facts}
+                    if method == "POST": calls.append((path, body))
+                    if path.endswith("/compile"):
+                        self.assertEqual(saved[-1]["route_publications"], body["intent"]["cell_route_publications"])
+                        requests.append(copy.deepcopy(body))
+                        if len(requests) == 1: raise RuntimeError(error)
+                        dns["content"]["previous_traffic_publication"] = body["previous_traffic_publication"]
+                        return {"release_artifact": parent, "dns_artifact": dns}
+                    if path.endswith("/release"): self.assertEqual("shadow", body["release_channel"])
+                    return {}
+                with patch.object(p, "no_serving_authority"), patch.object(p, "selected", side_effect=[{}, {}, current]), patch.object(p, "resolve_route_publications", side_effect=[[cell], [successor]]), patch.object(p, "full_source", return_value=old), patch.object(p, "publication", return_value=old), patch.object(p, "source_input", side_effect=[intent, policy, intent, policy]), patch.object(p, "authorize_route_source") as authorize, patch.object(p.time, "sleep"):
+                    result = p.stage(cfg, api, saved.append)
+                self.assertEqual([p.reference(successor, "cell-a")], result["route_publications"])
+                self.assertNotEqual(requests[0]["intent"]["generation"], requests[1]["intent"]["generation"])
+                authorize.assert_called_once_with(api, cfg["route_sources"][0], successor["parent"])
+                self.assertEqual(1, sum(path.endswith("/release") for path, _ in calls))
+                self.assertFalse(result["serving_published"])
+
+    def test_continuous_capture_does_not_retry_other_compiler_rejections(self):
+        cfg, old, cell, intent, policy, facts, _ = self.continuous_fixture()
+        old["release"]["released_at"] = p.now().isoformat()
+        def api(method, path, body=None):
+            if path.endswith("/compiler-input"): return {"runtime_snapshot": facts}
+            if path.endswith("/compile"): raise RuntimeError("HTTP 400: invalid signature")
+            self.fail("unexpected mutation")
+        with patch.object(p, "no_serving_authority"), patch.object(p, "selected", return_value={}), patch.object(p, "resolve_route_publications", return_value=[cell]), patch.object(p, "full_source", return_value=old), patch.object(p, "publication", return_value=old), patch.object(p, "source_input", side_effect=[intent, policy]), patch.object(p.time, "sleep") as wait, self.assertRaisesRegex(RuntimeError, "invalid signature"):
+            p.stage(cfg, api, lambda _: None)
+        wait.assert_not_called()
+
     def test_projection_preserves_inputs_constraints_and_all_physical_members(self):
         cfg, old, cell, intent, policy, facts = fixture()
         p.validate(cfg)

@@ -63,3 +63,14 @@ can only compile, publish shadow and prepare expected consumers. It refuses
 existing gray/full DNS authority and unrelated shadow predecessors. A retry of
 its own identical staging only re-prepares that exact shadow. A separate
 observed serving promotion and public transport handoff are still required.
+
+Version 2 staging declarations bind each routing Cell's exact continuous
+producer policy artifact, digest, release and fence. The configuration runner
+resolves current verified full/LKG publications from only those authorities on
+each bounded capture attempt. It retains all concrete parent/child references
+before compiling; those exact references, rather than the selectors, enter the
+signed artifact and transactional checks. A changed producer, foreign lineage
+or incomplete full publication cannot authorize staging. Independent Cell
+refreshes can retry a compiler behavior mismatch within the capture deadline;
+other validation failures remain fatal. This keeps queued configuration intent
+separate from the immutable execution snapshot without inheriting newer fences.
