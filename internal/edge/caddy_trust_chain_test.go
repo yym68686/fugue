@@ -35,9 +35,21 @@ func TestBuildCaddyConfigOverwritesForwardedForAtLoopbackTrustBoundary(t *testin
 	servers := httpApp["servers"].(map[string]any)
 	server := servers["fugue_edge"].(map[string]any)
 	routes := server["routes"].([]any)
-	firstRoute := routes[0].(map[string]any)
-	handlers := firstRoute["handle"].([]any)
-	reverseProxy := handlers[0].(map[string]any)
+	var reverseProxy map[string]any
+	for _, route := range routes {
+		for _, raw := range route.(map[string]any)["handle"].([]any) {
+			handler := raw.(map[string]any)
+			if handler["handler"] == "reverse_proxy" {
+				if reverseProxy != nil {
+					t.Fatal("multiple local Worker connection pools")
+				}
+				reverseProxy = handler
+			}
+		}
+	}
+	if reverseProxy == nil {
+		t.Fatal("no local Worker proxy")
+	}
 	headers := reverseProxy["headers"].(map[string]any)
 	requestHeaders := headers["request"].(map[string]any)
 	setHeaders := requestHeaders["set"].(map[string]any)

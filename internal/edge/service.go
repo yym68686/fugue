@@ -114,7 +114,7 @@ type Service struct {
 	walMu                   sync.Mutex
 	walActionLast           map[string]time.Time
 	platformConsumerMu      sync.Mutex
-	platformServingEvidence *platformServingReceipt
+	platformServingEvidence *platformServingEvidence
 	platformServing         PlatformServingStatus
 	platformCandidate       PlatformCandidateStatus
 	platformTLSReadiness    *platformTLSReadinessReceipt

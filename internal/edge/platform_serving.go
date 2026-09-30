@@ -54,6 +54,18 @@ type platformServingReceipt struct {
 	VerifiedAt    time.Time             `json:"verified_at"`
 }
 
+// Keep only the facts needed during the signed probe interval. The complete
+// signed artifacts remain in the durable receipt, but retaining their decoded
+// maps here pins a second route/TLS configuration between observation cycles.
+type platformServingEvidence struct {
+	RouteAssignment model.PlatformConsumerAssignment
+	TLSAssignment   model.PlatformConsumerAssignment
+	TLSReadiness    *platformTLSReadinessReceipt
+	BundleVersion   string
+	Probes          []routeprobe.Proof
+	VerifiedAt      time.Time
+}
+
 // Serving observation is deliberately read-only with respect to Group
 // Authority, Caddy, and the existing bundle/LKG. Only that execution path applies
 // configurations. This observer reports what actually reached the executor.
@@ -157,16 +169,16 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	var probes []routeprobe.Proof
 	var tlsEvidence *platformTLSReadinessReceipt
 	previousEvidence := s.platformServingEvidence // guarded by platformConsumerMu
-	reuse := previousEvidence != nil && previousEvidence.BundleVersion == bundle.Version && reflect.DeepEqual(previousEvidence.Route.Assignment, a) && reflect.DeepEqual(previousEvidence.TLS.Assignment, ta) && !previousEvidence.VerifiedAt.After(verifiedAt) && verifiedAt.Sub(previousEvidence.VerifiedAt) < time.Duration(policy.ProbeIntervalSeconds)*time.Second
+	reuse := previousEvidence != nil && previousEvidence.BundleVersion == bundle.Version && reflect.DeepEqual(previousEvidence.RouteAssignment, a) && reflect.DeepEqual(previousEvidence.TLSAssignment, ta) && !previousEvidence.VerifiedAt.After(verifiedAt) && verifiedAt.Sub(previousEvidence.VerifiedAt) < time.Duration(policy.ProbeIntervalSeconds)*time.Second
 	if reuse {
-		summary := summarizePlatformTLSReadiness(previousEvidence.TLS.TLSReadiness, bundle.Version, verifiedAt)
+		summary := summarizePlatformTLSReadiness(previousEvidence.TLSReadiness, bundle.Version, verifiedAt)
 		reuse = summary != nil && summary.Probes > 0 && summary.Probes == summary.ReadyProbes && len(previousEvidence.Probes) > 0
 		for _, proof := range previousEvidence.Probes {
 			reuse = reuse && proof.ValidUntil.After(verifiedAt)
 		}
 	}
 	if reuse {
-		probes, tlsEvidence, verifiedAt = previousEvidence.Probes, previousEvidence.TLS.TLSReadiness, previousEvidence.VerifiedAt
+		probes, tlsEvidence, verifiedAt = previousEvidence.Probes, previousEvidence.TLSReadiness, previousEvidence.VerifiedAt
 	} else {
 		probes, err = s.observePlatformServingRoutes(ctx, bundle, policy, routeProbe)
 		if err != nil {
@@ -235,7 +247,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 			return err
 		}
 	}
-	s.platformServingEvidence = &receipt
+	s.platformServingEvidence = &platformServingEvidence{RouteAssignment: a, TLSAssignment: ta, TLSReadiness: tlsEvidence, BundleVersion: bundle.Version, Probes: probes, VerifiedAt: verifiedAt}
 	s.mu.Lock()
 	s.platformServing = PlatformServingStatus{State: "serving_verified", TrafficRelease: trafficbinding.Clone(b), BundleVersion: bundle.Version, RouteProbes: len(probes), TLSProbes: readiness.Probes, VerifiedAt: receipt.VerifiedAt, ReportedAt: time.Now().UTC()}
 	s.mu.Unlock()

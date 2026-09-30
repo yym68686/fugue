@@ -1996,8 +1996,9 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 		`"host":["demo.fugue.pro"]`,
 		`"host":["www.customer.com"]`,
 		`"dial":"127.0.0.1:7833"`,
-		`"X-Fugue-Edge-Route-Host":["demo.fugue.pro"]`,
-		`"X-Fugue-Edge-Route-Host":["www.customer.com"]`,
+		`"fugue_route_host":"demo.fugue.pro"`,
+		`"fugue_route_host":"www.customer.com"`,
+		`"X-Fugue-Edge-Route-Host":["{http.vars.fugue_route_host}"]`,
 		`"default_logger_name":"fugue_edge_access"`,
 		`"include":["http.log.access.fugue_edge_access"]`,
 	} {

@@ -247,14 +247,25 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 	tlsMode := s.normalizedCaddyTLSMode()
 
 	hosts := s.uniqueBundleHosts(bundle)
-	routes := make([]any, 0, len(hosts))
+	routes := make([]any, 0, len(hosts)+2)
 	for _, host := range hosts {
 		routes = append(routes, map[string]any{
+			// Preserve the first matching hostname, including wildcard precedence,
+			// without provisioning a reverse proxy and connection pool per host.
+			"group": "fugue_route_host",
 			"match": []any{
 				map[string]any{
 					"host": []string{host},
 				},
 			},
+			"handle": []any{
+				map[string]any{"handler": "vars", "fugue_route_host": host},
+			},
+		})
+	}
+	if len(hosts) > 0 {
+		routes = append(routes, map[string]any{
+			"match": []any{map[string]any{"vars": map[string][]string{"fugue_route_host": hosts}}},
 			"handle": []any{
 				map[string]any{
 					"handler": "reverse_proxy",
@@ -264,7 +275,7 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 					"headers": map[string]any{
 						"request": map[string]any{
 							"set": map[string][]string{
-								"X-Fugue-Edge-Route-Host":         []string{host},
+								"X-Fugue-Edge-Route-Host":         []string{"{http.vars.fugue_route_host}"},
 								"X-Fugue-Edge-Client-Remote-Addr": []string{"{http.request.remote.host}:{http.request.remote.port}"},
 								"X-Forwarded-For":                 []string{"{http.request.remote.host}"},
 								"X-Forwarded-Host":                []string{"{http.request.host}"},
@@ -555,6 +566,7 @@ func (s *Service) uniqueBundleHosts(bundle model.EdgeRouteBundle) []string {
 
 func (s *Service) caddyConfigSignature(bundle model.EdgeRouteBundle) (string, error) {
 	parts := []string{
+		"proxy_pool=shared-v1",
 		"hosts=" + strings.Join(s.uniqueBundleHosts(bundle), ","),
 		"listen=" + strings.TrimSpace(s.Config.CaddyListenAddr),
 		"protocols=" + strings.Join(caddyHTTPProtocols(), ","),

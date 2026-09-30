@@ -217,15 +217,19 @@ func (c Client) json(ctx context.Context, endpoint, token, method string, in, ou
 	if resp.StatusCode != http.StatusOK {
 		return &responseStatusError{Code: resp.StatusCode}
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
-	if err != nil || len(raw) > 8<<20 {
+	// Decode through one bounded buffer. Reading the entire artifact first
+	// retained both the growing transport buffer and the decoder's copy.
+	bodyLimit := &io.LimitedReader{R: resp.Body, N: (8 << 20) + 1}
+	dec := json.NewDecoder(bodyLimit)
+	if err := dec.Decode(out); err == nil {
+		if err := dec.Decode(&struct{}{}); err == io.EOF && bodyLimit.N > 0 {
+			return nil
+		}
+	}
+	if bodyLimit.N <= 0 {
 		return errors.New("platform response exceeds limit or is incomplete")
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	if dec.Decode(out) != nil || dec.Decode(&struct{}{}) != io.EOF {
-		return errors.New("platform response invalid")
-	}
-	return nil
+	return errors.New("platform response invalid")
 }
 
 type responseStatusError struct{ Code int }
