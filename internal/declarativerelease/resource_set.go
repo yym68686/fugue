@@ -363,7 +363,16 @@ func ResourceSetItem(manifest []byte, identity ResourceIdentity) (map[string]any
 }
 
 func ResourceDesiredSubset(desired, live map[string]any) bool {
-	return desiredSubset(desired, live, "")
+	return ResourceDesiredMismatch(desired, live) == ""
+}
+
+// ResourceDesiredMismatch returns the first differing declaration path, or an
+// empty string when the resource has converged. Values are never included, so
+// terminal receipts can locate drift after compensation without exposing
+// credentials or configuration content.
+func ResourceDesiredMismatch(desired, live map[string]any) string {
+	service := stringField(desired, "apiVersion") == "v1" && stringField(desired, "kind") == "Service"
+	return desiredMismatch(desired, live, "", service)
 }
 
 // RuntimeResourcesRollbackWitness removes only explicitly reviewed container
@@ -654,56 +663,65 @@ func RetryPredecessorConvergenceManifest(manifest []byte, release PlanRelease) (
 	return CanonicalJSON(set)
 }
 
-func desiredSubset(desired, live any, path string) bool {
+func desiredMismatch(desired, live any, path string, service bool) string {
 	switch typed := desired.(type) {
 	case map[string]any:
 		candidate, ok := live.(map[string]any)
 		if !ok {
-			return false
+			return path + ".type"
 		}
-		for key, value := range typed {
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			value := typed[key]
 			if path == "metadata" && (key == "uid" || key == "resourceVersion" || key == "generation" || key == "creationTimestamp" || key == "managedFields") {
 				continue
 			}
 			liveValue, exists := candidate[key]
 			if !exists {
-				if kubernetesDefaultedFieldMatches(path, key, value) {
+				// ServiceSpec's false zero value is omitted by Kubernetes JSON
+				// encoding. Other schemas and explicit null still indicate drift.
+				if service && path == "spec" && key == "publishNotReadyAddresses" && value == false {
 					continue
 				}
-				return false
+				return joinJSONPath(path, key)
 			}
-			if !desiredSubset(value, liveValue, joinJSONPath(path, key)) {
-				return false
+			if mismatch := desiredMismatch(value, liveValue, joinJSONPath(path, key), service); mismatch != "" {
+				return mismatch
 			}
 		}
-		return true
+		return ""
 	case []any:
 		candidate, ok := live.([]any)
-		if !ok || len(candidate) != len(typed) {
-			return false
+		if !ok {
+			return path + ".type"
+		}
+		if len(candidate) != len(typed) {
+			return path + ".length"
 		}
 		if key := kubernetesMapListKey(path); key != "" && mapListHasNonEmptyKey(typed, candidate, key) {
-			return desiredMapListSubset(typed, candidate, path, key)
+			return desiredMapListMismatch(typed, candidate, path, key, service)
 		}
 		for index := range typed {
-			if !desiredSubset(typed[index], candidate[index], fmt.Sprintf("%s[%d]", path, index)) {
-				return false
+			if mismatch := desiredMismatch(typed[index], candidate[index], fmt.Sprintf("%s[%d]", path, index), service); mismatch != "" {
+				return mismatch
 			}
 		}
-		return true
+		return ""
 	case json.Number:
 		candidate, ok := live.(json.Number)
-		return ok && candidate.String() == typed.String()
+		if !ok || candidate.String() != typed.String() {
+			return path
+		}
 	default:
-		return fmt.Sprint(live) == fmt.Sprint(desired)
+		if fmt.Sprint(live) != fmt.Sprint(desired) {
+			return path
+		}
 	}
-}
-
-// Kubernetes omits some fields when the declared value is the API default.
-// Keep subset comparison semantic rather than requiring the server to echo an
-// explicit false that it intentionally normalized away.
-func kubernetesDefaultedFieldMatches(path, key string, desired any) bool {
-	return path == "spec" && key == "publishNotReadyAddresses" && desired == false
+	return ""
 }
 
 func mapListHasNonEmptyKey(desired, live []any, key string) bool {
@@ -736,36 +754,40 @@ func kubernetesMapListKey(path string) string {
 	}
 }
 
-func desiredMapListSubset(desired, live []any, path, key string) bool {
+func desiredMapListMismatch(desired, live []any, path, key string, service bool) string {
 	indexed := make(map[string]map[string]any, len(live))
 	for _, raw := range live {
 		item, ok := raw.(map[string]any)
 		value, valueOK := item[key].(string)
 		if !ok || !valueOK || strings.TrimSpace(value) == "" {
-			return false
+			return path + ".key"
 		}
 		if _, duplicate := indexed[value]; duplicate {
-			return false
+			return path + ".duplicateKey"
 		}
 		indexed[value] = item
 	}
 	seen := make(map[string]struct{}, len(desired))
-	for _, raw := range desired {
+	for index, raw := range desired {
 		item, ok := raw.(map[string]any)
 		value, valueOK := item[key].(string)
 		if !ok || !valueOK || strings.TrimSpace(value) == "" {
-			return false
+			return path + ".key"
 		}
 		if _, duplicate := seen[value]; duplicate {
-			return false
+			return path + ".duplicateKey"
 		}
 		seen[value] = struct{}{}
 		candidate, exists := indexed[value]
-		if !exists || !desiredSubset(item, candidate, path+"["+key+"="+value+"]") {
-			return false
+		itemPath := fmt.Sprintf("%s[%d]", path, index)
+		if !exists {
+			return joinJSONPath(itemPath, key)
+		}
+		if mismatch := desiredMismatch(item, candidate, itemPath, service); mismatch != "" {
+			return mismatch
 		}
 	}
-	return len(seen) == len(indexed)
+	return ""
 }
 
 func joinJSONPath(parent, child string) string {

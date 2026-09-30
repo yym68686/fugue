@@ -2674,24 +2674,3 @@ func TestArtifactImageProofIgnoresHistoricalPodsButKeepsLiveAndJobChecks(t *test
 		t.Fatal("successful Job with a wrong image was accepted")
 	}
 }
-
-func TestResourceMismatchSummaryIdentifiesKeyedServicePortDifference(t *testing.T) {
-	desired := map[string]any{
-		"kind": "Service",
-		"spec": map[string]any{"ports": []any{
-			map[string]any{"name": "dns-udp", "port": json.Number("5353"), "protocol": "UDP"},
-			map[string]any{"name": "dns-tcp", "port": json.Number("5353"), "protocol": "TCP"},
-		}},
-	}
-	live := map[string]any{
-		"kind": "Service",
-		"spec": map[string]any{"ports": []any{
-			map[string]any{"name": "dns-tcp", "port": json.Number("5353"), "protocol": "SCTP"},
-			map[string]any{"name": "dns-udp", "port": json.Number("5353"), "protocol": "UDP"},
-		}},
-	}
-	got := resourceMismatchSummary(desired, live)
-	if !strings.Contains(got, "spec.ports[name=dns-tcp].protocol") || !strings.Contains(got, `expected="TCP"`) || !strings.Contains(got, `observed="SCTP"`) {
-		t.Fatalf("resource mismatch summary = %q", got)
-	}
-}

@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestResourceSetRequiresOrderedUniqueIdentitiesAndPrimary(t *testing.T) {
@@ -125,6 +127,98 @@ func TestResourceDesiredSubsetComparesServicePortsByName(t *testing.T) {
 	live["spec"].(map[string]any)["ports"].([]any)[0].(map[string]any)["protocol"] = "SCTP"
 	if ResourceDesiredSubset(desired, live) {
 		t.Fatal("Service port protocol drift was accepted")
+	}
+}
+
+func TestServiceDefaultConvergenceUsesKubernetesEncodingAndExactSchema(t *testing.T) {
+	var service corev1.Service
+	const declaration = `{"apiVersion":"v1","kind":"Service","spec":{"publishNotReadyAddresses":false,"ports":[{"name":"dns-udp","protocol":"UDP","port":5353,"targetPort":5353},{"name":"dns-tcp","protocol":"TCP","port":5353,"targetPort":5353}],"selector":{"app":"resolver"},"type":"ClusterIP"}}`
+	if err := json.Unmarshal([]byte(declaration), &service); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decode := func(raw []byte) map[string]any {
+		t.Helper()
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var object map[string]any
+		if err := decoder.Decode(&object); err != nil {
+			t.Fatal(err)
+		}
+		return object
+	}
+	desired, live := decode([]byte(declaration)), decode(encoded)
+	if _, present := live["spec"].(map[string]any)["publishNotReadyAddresses"]; present {
+		t.Fatal("Kubernetes encoding no longer omits false; revisit compatibility")
+	}
+	if mismatch := ResourceDesiredMismatch(desired, live); mismatch != "" || !ResourceDesiredSubset(desired, live) {
+		t.Fatalf("API default is treated as drift: %s", mismatch)
+	}
+	for _, scenario := range []string{"true", "null", "true omitted", "string false", "different kind", "different version", "no schema", "nested spec", "other false field"} {
+		t.Run(scenario, func(t *testing.T) {
+			want, got := deepCopyMap(desired), deepCopyMap(live)
+			d, l := want["spec"].(map[string]any), got["spec"].(map[string]any)
+			switch scenario {
+			case "true":
+				l["publishNotReadyAddresses"] = true
+			case "null":
+				l["publishNotReadyAddresses"] = nil
+			case "true omitted":
+				d["publishNotReadyAddresses"] = true
+			case "string false":
+				d["publishNotReadyAddresses"] = "false"
+			case "different kind":
+				want["kind"], got["kind"] = "OtherResource", "OtherResource"
+			case "different version":
+				want["apiVersion"], got["apiVersion"] = "example.test/v1", "example.test/v1"
+			case "no schema":
+				delete(want, "kind")
+				delete(want, "apiVersion")
+			case "nested spec":
+				d["template"] = map[string]any{"spec": map[string]any{"publishNotReadyAddresses": false}}
+				l["template"] = map[string]any{"spec": map[string]any{}}
+			case "other false field":
+				d["unknownDefault"] = false
+			}
+			if ResourceDesiredMismatch(want, got) == "" || ResourceDesiredSubset(want, got) {
+				t.Fatal("schema or desired-field drift was accepted")
+			}
+		})
+	}
+	// A normalized default must not mask another field's genuine drift.
+	live["spec"].(map[string]any)["selector"].(map[string]any)["app"] = "foreign"
+	if mismatch := ResourceDesiredMismatch(desired, live); mismatch != "spec.selector.app" {
+		t.Fatalf("wrong drift diagnostic after default normalization: %s", mismatch)
+	}
+}
+
+func TestResourceDesiredMismatchSharesComparisonWithoutLeakingValues(t *testing.T) {
+	desired := map[string]any{"spec": map[string]any{"ports": []any{
+		map[string]any{"name": "dns-udp", "protocol": "UDP"},
+		map[string]any{"name": "dns-tcp", "protocol": "TCP"},
+	}}}
+	live := map[string]any{"spec": map[string]any{"ports": []any{
+		map[string]any{"name": "dns-tcp", "protocol": "SCTP"},
+		map[string]any{"name": "dns-udp", "protocol": "UDP"},
+	}}}
+	if got := ResourceDesiredMismatch(desired, live); got != "spec.ports[1].protocol" {
+		t.Fatalf("keyed port diagnostic = %q", got)
+	}
+	live["spec"].(map[string]any)["ports"].([]any)[0].(map[string]any)["name"] = "dns-udp"
+	if got := ResourceDesiredMismatch(desired, live); got != "spec.ports.duplicateKey" || ResourceDesiredSubset(desired, live) {
+		t.Fatalf("duplicated map-list diagnostic = %q", got)
+	}
+	for _, objects := range [][2]map[string]any{
+		{{"data": map[string]any{"password": "private expected"}}, {"data": map[string]any{"password": "private observed"}}},
+		{{"spec": map[string]any{"containers": []any{map[string]any{"env": []any{map[string]any{"value": "private expected"}}}}}}, {"spec": map[string]any{"containers": []any{map[string]any{"env": []any{map[string]any{"value": "private observed"}}}}}}},
+	} {
+		got := ResourceDesiredMismatch(objects[0], objects[1])
+		if got == "" || strings.Contains(got, "private") || ResourceDesiredSubset(objects[0], objects[1]) {
+			t.Fatalf("diagnostic disclosed values or accepted drift: %q", got)
+		}
 	}
 }
 
