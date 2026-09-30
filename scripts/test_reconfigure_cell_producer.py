@@ -61,6 +61,48 @@ class Ledger(ArtifactAPI):
 
 
 class ReconfigurationTests(unittest.TestCase):
+    def test_refresh_requires_completed_predecessor_and_identical_settings(self):
+        for failure in [None, "bounds", "placement", "foreign", "operator", "unverified", "continuous", "activation"]:
+            with self.subTest(failure=failure):
+                declaration, _ = fixture()
+                declaration["policy"].update(mode="serving", serving={"single_publication": True, "canary_rule_ref": "cohort=complete", "gray_min_seconds": 30, "full_min_seconds": 60, "rollout_timeout_seconds": 300})
+                old = copy.deepcopy(declaration["policy"])
+                if failure == "continuous":
+                    old["serving"]["single_publication"] = False
+                declaration["precondition"]["previous_policy"]["content_hash"] = config.digest(old)
+                declaration["precondition"]["operation"] = "refresh_serving"
+                declaration["policy"]["generation"] = "refreshed"
+                api = Ledger(declaration, old)
+                full = api.authorities[("release_set", "authority-cell:cell-a", "full")]
+                full["artifact"]["metadata"] = {"producer_policy_release_id": "old-release"}
+                full["release"].update(released_by_type="bootstrap", released_by_id="platform-config-producer", verification_state="verified", verified_lkg_generation=full["artifact"]["generation"])
+                if failure == "bounds":
+                    declaration["policy"]["serving"]["full_min_seconds"] = 90
+                elif failure == "placement":
+                    pin = declaration["policy"]["route_placement_transition"]["constraints"][0]
+                    pin["source"]["min_healthy_edge_nodes"] = 1
+                    pin["source_digest"] = config.digest(pin["source"])
+                elif failure == "foreign":
+                    full["artifact"]["metadata"]["producer_policy_release_id"] = "another"
+                elif failure == "operator":
+                    full["release"]["released_by_id"] = "operator"
+                elif failure == "unverified":
+                    full["release"]["verification_state"] = "serving_unverified"
+                elif failure == "activation":
+                    declaration["precondition"]["operation"] = "activate_serving"
+                if failure:
+                    with self.assertRaises(ValueError):
+                        config.publish(declaration, api, lambda _: None)
+                    self.assertEqual(api.release_bodies, [])
+                else:
+                    api.lost_response = True
+                    with self.assertRaisesRegex(RuntimeError, "lost"):
+                        config.publish(declaration, api, lambda _: None)
+                    result = config.publish(declaration, api, lambda _: None)
+                    self.assertEqual(result["operation"], "refresh_serving")
+                    self.assertTrue(result["serving_publication_authorized"])
+                    self.assertEqual(api.release_bodies[0], api.release_bodies[1])
+
     def test_explicit_activation_preserves_sources_and_placement(self):
         for failure in [None, "implicit", "unbounded", "placement", "source", "timeout"]:
             with self.subTest(failure=failure):

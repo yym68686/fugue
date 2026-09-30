@@ -2,7 +2,8 @@
 """Reconfigure an established Cell producer with exact transactional pins.
 
 Placement remains observational. Explicit activate_serving enables one observed
-gray/full/LKG cycle; neither operation changes executable or public transport.
+gray/full/LKG cycle; refresh_serving permits another after its verified baseline.
+These operations change neither executable nor public transport.
 """
 import argparse
 import copy
@@ -37,22 +38,22 @@ def validate(config):
     precondition, policy = config["precondition"], config["policy"]
     required = {"previous_policy", "serving_full", "verification_evidence_hash"}
     operation = precondition.get("operation", "placement")
-    if not required.issubset(precondition) or set(precondition) - required - {"operation"} or operation not in ["placement", "activate_serving"] or not DIGEST.fullmatch(precondition.get("verification_evidence_hash", "")):
+    if not required.issubset(precondition) or set(precondition) - required - {"operation"} or operation not in ["placement", "activate_serving", "refresh_serving"] or not DIGEST.fullmatch(precondition.get("verification_evidence_hash", "")):
         raise ValueError("exact producer and verified serving baseline required")
     for field in ["previous_policy", "serving_full"]:
         validate_ref(precondition[field])
     fields = {"schema_version", "generation", "publication_role", "authority_cell_id", "mode", "input_source", "target_scope", "interval_seconds", "refresh_seconds", "require_application_domains", "require_route_defaults", "static_intent_artifact_id", "static_intent_digest", "dns_policy_artifact_id", "dns_policy_digest", "route_placement_transition"}
     allowed = {"require_dns_query_policy", "hosted_zone_templates"}
-    if operation == "activate_serving":
+    if operation != "placement":
         allowed.add("serving")
-    if not fields.issubset(policy) or set(policy) - fields - allowed or policy["schema_version"] != "fugue.platform.producer/v1" or policy["publication_role"] != "cell-routes" or policy["mode"] != ("serving" if operation == "activate_serving" else "shadow") or policy["input_source"] != "business-static-intent" or policy["authority_cell_id"] != cell or policy["target_scope"] != "authority-cell:" + cell or policy["require_application_domains"] is not True or policy["require_route_defaults"] is not True or policy.get("require_dns_query_policy", False) is not False or policy.get("hosted_zone_templates", []) != []:
+    if not fields.issubset(policy) or set(policy) - fields - allowed or policy["schema_version"] != "fugue.platform.producer/v1" or policy["publication_role"] != "cell-routes" or policy["mode"] != ("shadow" if operation == "placement" else "serving") or policy["input_source"] != "business-static-intent" or policy["authority_cell_id"] != cell or policy["target_scope"] != "authority-cell:" + cell or policy["require_application_domains"] is not True or policy["require_route_defaults"] is not True or policy.get("require_dns_query_policy", False) is not False or policy.get("hosted_zone_templates", []) != []:
         raise ValueError("only an explicitly authorized pinned route-only successor is allowed")
     for k in ["generation", "static_intent_artifact_id", "dns_policy_artifact_id"]:
         if not IDENTITY.fullmatch(policy[k]):
             raise ValueError("canonical immutable policy identity required")
     if any(not DIGEST.fullmatch(policy[k]) for k in ["static_intent_digest", "dns_policy_digest"]) or type(policy["interval_seconds"]) is not int or type(policy["refresh_seconds"]) is not int or not 30 <= policy["interval_seconds"] <= 900 or not max(120, policy["interval_seconds"]) <= policy["refresh_seconds"] <= 3600:
         raise ValueError("invalid source digest or schedule")
-    if operation == "activate_serving":
+    if operation != "placement":
         serving = policy.get("serving", {})
         limits = ["gray_min_seconds", "full_min_seconds", "rollout_timeout_seconds"]
         if set(serving) != {"single_publication", "canary_rule_ref", *limits} or serving["single_publication"] is not True or not re.fullmatch(r"cohort=[a-z0-9][a-z0-9_-]{0,63}", serving["canary_rule_ref"]) or any(type(serving[k]) is not int for k in limits) or not all(1 <= serving[k] <= 1800 for k in limits[:2]) or not max(30, max(serving[k] for k in limits[:2]) + policy["interval_seconds"]) <= serving["rollout_timeout_seconds"] <= 3600:
@@ -125,15 +126,21 @@ def publish(config, api, save):
     validate(config)
     operation = config["precondition"].get("operation", "placement")
     scope = "platform-config-producer:" + config["authority_cell_id"]
-    baseline(config, api)
+    full = baseline(config, api)
     current = selected(api, scope, "shadow")
     old = api("GET", "/v1/admin/artifacts/" + config["precondition"]["previous_policy"]["artifact_id"])["artifact"]
     previous = old.get("content", {})
-    if old.get("content_hash") != config["precondition"]["previous_policy"]["content_hash"] or digest(previous) != old.get("content_hash") or old.get("scope_key") != scope or old.get("status") != "validated" or previous.get("mode") not in ["shadow", "paused"]:
-        raise ValueError("previous producer policy is untrusted or not observational")
+    modes = ["serving"] if operation == "refresh_serving" else ["shadow", "paused"]
+    if old.get("content_hash") != config["precondition"]["previous_policy"]["content_hash"] or digest(previous) != old.get("content_hash") or old.get("scope_key") != scope or old.get("status") != "validated" or previous.get("mode") not in modes:
+        raise ValueError("previous producer policy is untrusted or has incompatible mode")
+    if operation == "refresh_serving" and (previous.get("serving", {}).get("single_publication") is not True or full["artifact"].get("metadata", {}).get("producer_policy_release_id") != config["precondition"]["previous_policy"]["release_id"] or full["release"].get("released_by_type") != "bootstrap" or full["release"].get("released_by_id") != "platform-config-producer" or full["release"].get("verification_state") != "verified" or full["release"].get("verified_lkg_generation") != full["artifact"]["generation"]):
+        raise ValueError("refresh requires the predecessor's own verified single full publication")
     prior, target = copy.deepcopy(previous), copy.deepcopy(config["policy"])
     for value in [prior, target]:
-        for field in ["generation", "serving" if operation == "activate_serving" else "route_placement_transition"]:
+        fields = ["generation"]
+        if operation != "refresh_serving":
+            fields.append("serving" if operation == "activate_serving" else "route_placement_transition")
+        for field in fields:
             value.pop(field, None)
         value["mode"] = "shadow"
     if prior != target:
@@ -155,7 +162,7 @@ def publish(config, api, save):
     if operation == "placement":
         baseline(config, api)
         evidence["serving_publication_changed"] = False
-    evidence.update(authority=authority_identity(current), completed_at=now().isoformat(), mode=config["policy"]["mode"], operation=operation, serving_publication_authorized=operation == "activate_serving")
+    evidence.update(authority=authority_identity(current), completed_at=now().isoformat(), mode=config["policy"]["mode"], operation=operation, serving_publication_authorized=operation != "placement")
     save(evidence)
     return evidence
 

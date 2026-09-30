@@ -899,3 +899,14 @@ restart, LKG expiry or a subsequent operator publication. Pending recovery is
 processed before this hold. The hold neither renews proof expiry nor grants
 authority to another policy; resuming production requires a separate policy
 publication. Omission retains continuous producer behavior.
+
+When live business configuration advances during this hold, the explicit
+`refresh_serving` operation authorizes a successor cycle. It changes only the
+producer generation. The predecessor must already use single publication, and
+the exact current verified full/LKG must belong to that predecessor policy
+publication and have been published by the producer. Inputs, placement,
+schedules and observation settings cannot change through refresh. Competing
+successors use the same transaction locks and exact predecessor checks; a
+changed, unverified or operator-owned baseline rejects without altering LKG.
+Refresh still captures current business configuration and requires new gray and
+full receipts. It does not attest route equivalence for a DNS handoff.

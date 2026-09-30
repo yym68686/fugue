@@ -394,8 +394,12 @@ func TestProducerReconfigurationQueuedPostgres(t *testing.T) {
 	}
 }
 
-func testSimultaneousProducerReconfiguration(t *testing.T, address string) {
-	f := newReconfigurationFixture(t, address)
+func testSimultaneousProducerReconfiguration(t *testing.T, address string, fixtures ...func(*testing.T, string) reconfigurationFixture) {
+	fixture := newReconfigurationFixture
+	if len(fixtures) > 0 {
+		fixture = fixtures[0]
+	}
+	f := fixture(t, address)
 	other := f
 	policy := f.policy
 	policy.Generation = "simultaneous-successor"

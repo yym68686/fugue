@@ -41,7 +41,7 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "shadow" {
 			return p, ErrInvalidInput
 		}
-	case "activate_serving":
+	case "activate_serving", "refresh_serving":
 		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
@@ -101,7 +101,14 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		return err
 	}
 	previous, err := platformproducer.Decode(old)
-	if err != nil || (previous.Mode != "shadow" && previous.Mode != "paused") || p.Generation == previous.Generation || a.GenerationSequence <= old.GenerationSequence {
+	if err != nil || p.Generation == previous.Generation || a.GenerationSequence <= old.GenerationSequence {
+		return ErrConflict
+	}
+	if r.Operation == "refresh_serving" {
+		if previous.Mode != "serving" || previous.Serving == nil || !previous.Serving.SinglePublication {
+			return ErrConflict
+		}
+	} else if previous.Mode != "shadow" && previous.Mode != "paused" {
 		return ErrConflict
 	}
 	// Each explicit operation has a disjoint change boundary. In particular,
@@ -109,7 +116,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	previous.Generation, p.Generation = "", ""
 	if r.Operation == "activate_serving" {
 		previous.Serving, p.Serving = nil, nil
-	} else {
+	} else if r.Operation != "refresh_serving" {
 		previous.RoutePlacementTransition, p.RoutePlacementTransition = nil, nil
 	}
 	previous.Mode = p.Mode
@@ -136,7 +143,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	if _, err := platformconfig.ValidateReleaseComposition(full); err != nil {
 		return ErrConflict
 	}
-	if r.Operation == "activate_serving" {
+	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" {
 		// Resolve the cohort against the exact current baseline before enabling
 		// automatic publication; fresh candidate admission remains independent.
 		target, err := platformproducer.Decode(a)
@@ -147,6 +154,9 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 			return ErrConflict
 		}
 		if release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.VerifiedLKGGeneration != full.Generation {
+			return ErrConflict
+		}
+		if r.Operation == "refresh_serving" && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
 			return ErrConflict
 		}
 	}
