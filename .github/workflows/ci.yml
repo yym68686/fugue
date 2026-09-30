@@ -276,7 +276,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
-      - name: Select one explicit initial cell trust declaration
+      - name: Select one explicit cell trust declaration and exact predecessor
         id: trust
         env:
           BASE_SHA: ${{ github.event.before }}
@@ -297,10 +297,20 @@ jobs:
             git fetch origin main
             if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_cell_trust.py scripts/reconcile_agent_edge_trust.py; then
               python3 -m unittest scripts.test_reconcile_cell_trust
-              python3 - "$config" >> "$GITHUB_OUTPUT" <<'PYTHON'
-          import json, sys
-          from scripts.reconcile_cell_trust import validate
+              python3 - "$config" "$base" "$RUNNER_TEMP/cell-trust-previous.json" >> "$GITHUB_OUTPUT" <<'PYTHON'
+          import json, subprocess, sys
+          from pathlib import Path
+          from scripts.reconcile_cell_trust import validate, digest, strict_json
           config = validate(json.load(open(sys.argv[1])))
+          if config['schema'] == 'fugue.cell-trust/v2':
+              raw = subprocess.check_output(['git', 'show', sys.argv[2] + ':' + sys.argv[1]])
+              if len(raw) > 65536:
+                  raise ValueError('preceding trust declaration exceeds bound')
+              previous = validate(strict_json(raw))
+              if digest(previous) != config['previousDigest'] or previous['generation'] != config['previousGeneration']:
+                  raise ValueError('trust successor must bind the exact preceding Git declaration')
+              Path(sys.argv[3]).write_bytes(raw)
+              print('requires_previous=true')
           print('material_secret=' + config.get('materialSecret', 'FUGUE_EDGE_CELL_TRUST'))
           PYTHON
               echo "config=$config" >> "$GITHUB_OUTPUT"
@@ -312,8 +322,13 @@ jobs:
         env:
           FUGUE_EDGE_CELL_TRUST: ${{ secrets[steps.trust.outputs.material_secret] }}
         run: |
-          python3 scripts/reconcile_cell_trust.py "${{ steps.trust.outputs.config }}"
-          python3 scripts/reconcile_cell_trust.py "${{ steps.trust.outputs.config }}" --check
+          set -euo pipefail
+          args=("${{ steps.trust.outputs.config }}")
+          if [[ "${{ steps.trust.outputs.requires_previous }}" == true ]]; then
+            args+=(--previous "$RUNNER_TEMP/cell-trust-previous.json")
+          fi
+          python3 scripts/reconcile_cell_trust.py "${args[@]}"
+          python3 scripts/reconcile_cell_trust.py "${args[@]}" --check
 
   cell_producer_shadow:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

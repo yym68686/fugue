@@ -156,6 +156,15 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	if yamlMappingValue(t, cellTrust, "environment").Value != "production" || !strings.Contains(source, "scripts/reconcile_cell_trust.py") || !strings.Contains(source, "secrets[steps.trust.outputs.material_secret]") {
 		t.Fatal("cell trust must use the explicit encrypted production declaration")
 	}
+	cellTrustRaw, err := yaml.Marshal(cellTrust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"fugue.cell-trust/v2", "'git', 'show'", "digest(previous) != config['previousDigest']", "previous['generation'] != config['previousGeneration']", "--previous", "cell-trust-previous.json", "git diff --quiet HEAD origin/main"} {
+		if !strings.Contains(string(cellTrustRaw), required) {
+			t.Fatal("reader addition lost its exact Git predecessor or current-main gate", required)
+		}
+	}
 	staticObservation := yamlMappingValue(t, jobs, "static_edge_observability")
 	if yamlMappingValue(t, staticObservation, "needs").Value != "prepush" || yamlMappingValue(t, staticObservation, "runs-on").Value != "ubuntu-latest" || !strings.Contains(source, "make test-static-edge-observability") || !strings.Contains(source, "scripts/package_static_edge_observability.sh") {
 		t.Fatal("independent static edge artifacts require isolated verification and the normal prepush gate")

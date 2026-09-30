@@ -92,6 +92,27 @@ overlap declaration that preserves the serving artifact's verification keys.
 Installing trust does not seed inventory, publish a bundle or authorize public
 transport.
 
+An established Cell can add exactly one bundle reader through an explicit
+`fugue.cell-trust/v2` declaration with `operation: add-reader`. Its generation
+increments by one and pins the exact preceding Git declaration's digest and
+generation. The complete encrypted package retains all signing, inventory,
+recovery and old reader-token bytes. Only the reader ring generation and one
+new credential may change; existing credential identities, lifetimes and
+revocations remain identical. This operation does not rotate keys.
+
+The same CI configuration lane loads that predecessor from the push base and
+validates every Secret before writing. A missing predecessor Secret, foreign
+owner, changed content or mixed declarations fail closed. It creates the new
+token first, then applies patches guarded by each existing Secret's UID and
+resourceVersion. Unchanged Secret data is not rewritten. New access must be
+within its declared credential lifetime both before preflight and immediately
+before the write. A partial update can resume with the same declaration and
+material; already completed access can be checked after expiry without granting
+access again. All old reader credentials remain usable throughout a partial
+update. Script changes alone do not replay trust declarations. Execution
+membership, inventory admission, node placement and public transport still need
+their own independently verified configuration transitions.
+
 The first neutral Worker is an isolated Deployment with a distinct retained
 PVC and stable physical Edge identity. Its projected heartbeat fence is true,
 and it mounts no legacy Edge token or host identity file. A missing legacy
