@@ -32,6 +32,7 @@ func (s *Server) handleListPlatformArtifacts(w http.ResponseWriter, r *http.Requ
 	filter := model.PlatformArtifactFilter{
 		ArtifactKind: r.URL.Query().Get("kind"),
 		ScopeKey:     r.URL.Query().Get("scope"),
+		Generation:   r.URL.Query().Get("generation"),
 		Status:       r.URL.Query().Get("status"),
 		Limit:        queryIntDefault(r, "limit", 100),
 	}

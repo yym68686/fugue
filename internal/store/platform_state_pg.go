@@ -250,6 +250,10 @@ FROM fugue_platform_artifacts WHERE true`
 		args = append(args, filter.Status)
 		query += " AND status = $" + formatStoreArgIndex(len(args))
 	}
+	if filter.Generation != "" {
+		args = append(args, filter.Generation)
+		query += " AND generation = $" + formatStoreArgIndex(len(args))
+	}
 	args = append(args, limit)
 	query += " ORDER BY updated_at DESC, id ASC LIMIT $" + formatStoreArgIndex(len(args))
 	rows, err := s.db.QueryContext(ctx, query, args...)

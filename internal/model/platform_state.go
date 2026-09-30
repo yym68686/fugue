@@ -327,6 +327,7 @@ type PlatformLKGSnapshot struct {
 type PlatformArtifactFilter struct {
 	ArtifactKind string
 	ScopeKey     string
+	Generation   string
 	Status       string
 	Limit        int
 }

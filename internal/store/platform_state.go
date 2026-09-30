@@ -276,6 +276,7 @@ func (s *Store) listPlatformArtifacts(filter model.PlatformArtifactFilter, inclu
 	filter.ArtifactKind = NormalizePlatformArtifactKind(filter.ArtifactKind)
 	filter.ScopeKey = strings.TrimSpace(strings.ToLower(filter.ScopeKey))
 	filter.Status = strings.TrimSpace(strings.ToLower(filter.Status))
+	filter.Generation = strings.TrimSpace(filter.Generation)
 	if s.usingDatabase() {
 		return s.pgListPlatformArtifactsView(filter, includeContent)
 	}
@@ -1328,6 +1329,9 @@ func upsertPlatformArtifactContent(contents []model.PlatformArtifactContent, con
 }
 
 func platformArtifactMatchesFilter(artifact model.PlatformArtifact, filter model.PlatformArtifactFilter) bool {
+	if filter.Generation != "" && artifact.Generation != filter.Generation {
+		return false
+	}
 	if filter.ArtifactKind != "" && artifact.ArtifactKind != filter.ArtifactKind {
 		return false
 	}

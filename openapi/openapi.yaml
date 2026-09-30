@@ -2694,6 +2694,7 @@ paths:
     get:
       operationId: listPlatformArtifacts
       summary: List Platform Artifacts
+      description: Filters are applied before the result limit. An exact generation with kind and scope locates an immutable input without downloading unrelated artifact history; multiple results remain visible for ambiguity checks.
       tags: [Admin]
       x-fugue-handler: handleListPlatformArtifacts
       security:
@@ -2707,6 +2708,12 @@ paths:
         - in: query
           name: scope
           required: false
+          schema:
+            type: string
+        - in: query
+          name: generation
+          required: false
+          description: Exact generation identity, combined with kind and scope. Surrounding whitespace is ignored; case is preserved.
           schema:
             type: string
         - in: query
