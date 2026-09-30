@@ -188,6 +188,10 @@ func dnsServingFixtureForGroup(t *testing.T, group string, consumerMode ...bool)
 }
 
 func dnsServingFixtureForScope(t *testing.T, group, scope string, consumerMode ...bool) (model.PlatformArtifact, dnsPlatformCandidate) {
+	return dnsServingFixtureWithIntent(t, group, scope, nil, consumerMode...)
+}
+
+func dnsServingFixtureWithIntent(t *testing.T, group, scope string, change func(*platformconfig.CompileRequest), consumerMode ...bool) (model.PlatformArtifact, dnsPlatformCandidate) {
 	t.Helper()
 	now := time.Now().UTC()
 	zone := "example.test"
@@ -209,6 +213,9 @@ func dnsServingFixtureForScope(t *testing.T, group, scope string, consumerMode .
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+	if change != nil {
+		change(&r)
 	}
 	routes, err := platformconfig.ResolveRouteOrigins(r.Intent.Routes, r.RuntimeSnapshot, r.Policy)
 	if err != nil {

@@ -175,7 +175,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// An applied candidate or an explicit negative readiness observation
 		// already replaced the runtime view and must not be overwritten here.
 		if syncErr != nil && ctx.Err() == nil && old != nil && s.platformServing.Load() == old {
-			s.refreshDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations)
+			if refreshed, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations); err == nil {
+				s.platformServing.Store(refreshed)
+			}
 		}
 	}()
 	client := s.platformConsumerClient()
@@ -261,6 +263,20 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			st.fallback = "readiness_incomplete"
 			s.platformServing.Store(st)
 			_ = s.reportDNSServingState(ctx, client, id, st, false)
+		} else if hosts := dnsTransitionRecords(old, bridge); len(hosts) > 0 {
+			retained, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations)
+			if err != nil {
+				return err
+			}
+			// Refresh may perform additional probes. Recheck authority after all
+			// observations and publish the retained and pending views atomically.
+			if err := client.CheckServingAssignment(ctx, id, a); err != nil {
+				return err
+			}
+			st.record.Positive = false
+			st.record.AppliedAt = old.record.AppliedAt
+			retained.transition = &dnsRecordTransition{state: st, hosts: hosts}
+			s.platformServing.Store(retained)
 		}
 		return fmt.Errorf("DNS candidate required readiness is incomplete: %s", dnsReadinessFailureSummary(p.Plan, p.Policy.DNSReadiness, facts, now))
 	}
@@ -324,7 +340,7 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	status := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, st.facts, "", st.checkedAt, now)
 	return status.ReadyRecords == status.Records
 }
-func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact) {
+func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact) (*dnsServingState, error) {
 	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe)
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe
@@ -343,8 +359,13 @@ func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingSta
 	st, err := buildDNSServingState(old.record, old.payload, old.routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, facts, now)
 	if err == nil {
 		st.fallback = reason
-		s.platformServing.Store(st)
+		if bridge == nil {
+			// Control-plane loss cannot renew pending evidence. Its original
+			// proof deadlines and retained checkpoint deadline still apply.
+			st.transition = old.transition
+		}
 	}
+	return st, err
 }
 
 // A failed candidate scan already contains current observations for unchanged

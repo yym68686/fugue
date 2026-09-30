@@ -21,15 +21,16 @@ type dnsServingZone struct {
 	records   map[string][]dnsServingRecord
 }
 type dnsServingState struct {
-	record    dnsServingCheckpoint
-	payload   dnsServingPayload
-	routeID   string
-	facts     []dnsReadinessFact
-	checkedAt time.Time
-	fallback  string
-	zones     map[string]dnsServingZone
-	zoneOrder []string
-	matcher   platformconfig.DNSClientMatcher
+	record     dnsServingCheckpoint
+	payload    dnsServingPayload
+	routeID    string
+	facts      []dnsReadinessFact
+	checkedAt  time.Time
+	fallback   string
+	zones      map[string]dnsServingZone
+	zoneOrder  []string
+	matcher    platformconfig.DNSClientMatcher
+	transition *dnsRecordTransition
 }
 
 func buildDNSServingState(record dnsServingCheckpoint, p dnsServingPayload, routeID, node, group string, facts []dnsReadinessFact, now time.Time) (*dnsServingState, error) {
@@ -148,9 +149,11 @@ func (st *dnsServingState) answer(req *dns.Msg, remote string, now time.Time) *d
 		}
 		return resp
 	}
-	rows, exists := z.records[name]
+	recordName := name
+	rows, exists := z.records[recordName]
 	if !exists {
-		rows, exists = z.records[edgeDNSWildcardName(name)]
+		recordName = edgeDNSWildcardName(name)
+		rows, exists = z.records[recordName]
 	}
 	hint := platformDNSHintForQuery(st.matcher, req, remote)
 	answer := func(kind string) {
@@ -187,6 +190,17 @@ func (st *dnsServingState) answer(req *dns.Msg, remote string, now time.Time) *d
 			resp.Rcode = dns.RcodeNameError
 		}
 		resp.Ns = []dns.RR{soa}
+	}
+	// A deployment may already have invalidated this record's old route proof
+	// while an unrelated record holds up whole-artifact activation. Use only a
+	// complete, fresh successor quorum with equivalent DNS authorization. SOA,
+	// negative responses and the persisted positive checkpoint remain unchanged.
+	if resp.Rcode == dns.RcodeServerFailure && st.transition != nil && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA) &&
+		st.transition.hosts[recordName] {
+		next := st.transition.state.answer(req, remote, now)
+		if next.Rcode == dns.RcodeSuccess && len(next.Answer) > 0 {
+			return next
+		}
 	}
 	applyPlatformECSScope(resp, req, hint)
 	return resp
