@@ -32,6 +32,10 @@ type GroupInventoryProducerObservation struct {
 	ProducerGeneration uint64        `json:"producer_generation"`
 	ObservedAt         time.Time     `json:"observed_at"`
 	Instance           GroupInstance `json:"instance"`
+	// Read compatibility for the original epoch of each authenticated producer.
+	// Writers start populating this only after this reader has been deployed,
+	// so the preceding code release can still recover the positive state.
+	ServingEpoch *GroupActiveEpoch `json:"serving_epoch,omitempty"`
 }
 
 func (store *PersistentGroupStore) StoreGroupInventoryProducerHeartbeat(
@@ -173,6 +177,14 @@ func validateGroupInventoryProducerState(value GroupInventoryProducerState, grou
 			observation.Instance.GroupID != groupID || strings.TrimSpace(observation.Instance.InstanceUID) == "" || strings.TrimSpace(observation.Instance.ReleaseEpoch) == "" {
 			return errors.New("edge-control persistent inventory producer observation is invalid")
 		}
+		if epoch := observation.ServingEpoch; epoch != nil {
+			if epoch.GroupID != groupID || epoch.Slot != observation.Slot || epoch.ReleaseEpoch != observation.Instance.ReleaseEpoch ||
+				epoch.FaultDomainID != observation.Instance.FaultDomainID || epoch.EdgePoolID != observation.Instance.EdgePoolID ||
+				epoch.FenceSequence == 0 || epoch.FenceSequence > value.ActiveEpoch.FenceSequence || epoch.MinHealthyInstances <= 0 ||
+				epoch.FenceSequence == value.ActiveEpoch.FenceSequence && !equalGroupServingEpoch(*epoch, value.ActiveEpoch) {
+				return errors.New("edge-control persistent inventory observation epoch is invalid")
+			}
+		}
 		previous = identity
 	}
 	return nil
@@ -183,6 +195,10 @@ func cloneGroupInventoryProducerState(value GroupInventoryProducerState) GroupIn
 	value.Observations = append([]GroupInventoryProducerObservation(nil), value.Observations...)
 	for i := range value.Observations {
 		value.Observations[i].Instance = cloneInventoryInstance(value.Observations[i].Instance)
+		if epoch := value.Observations[i].ServingEpoch; epoch != nil {
+			copy := *epoch
+			value.Observations[i].ServingEpoch = &copy
+		}
 	}
 	return value
 }
