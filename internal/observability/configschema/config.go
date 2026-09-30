@@ -1,0 +1,445 @@
+package configschema
+
+import (
+	"fmt"
+	"net/url"
+	"sort"
+	"strings"
+	"time"
+)
+
+const (
+	DefaultRetention                      = 24 * time.Hour
+	DefaultExportTimeout                  = 5 * time.Second
+	DefaultQueueSize                      = 32768
+	DefaultSampleRate                     = 1.0
+	DefaultScrapeInterval                 = 30 * time.Second
+	DefaultBatchSize                      = 512
+	DefaultMaxPayloadBytes                = 1 << 20
+	DefaultClickHouseQueryMaxPayloadBytes = 16 << 20
+	DefaultMemoryLimit                    = 128 << 20
+	DefaultRetryAttempts                  = 3
+	DefaultKubernetesLogPollInterval      = 15 * time.Second
+	DefaultKubernetesLogQPS               = 40.0
+	DefaultKubernetesLogBurst             = 80
+	DefaultKubernetesLogTailLines         = 2000
+	DefaultKubernetesLogMaxLineBytes      = 4 << 20
+	DefaultKubernetesLogMaxPods           = 500
+	DefaultKubernetesLogMaxLinesPerCycle  = 20000
+)
+
+type Config struct {
+	Enabled                        bool
+	Retention                      time.Duration
+	MetricsRemoteWriteURL          string
+	MetricsQueryURL                string
+	LokiURL                        string
+	ClickHouseDSN                  string
+	OTLPEndpoint                   string
+	ExportTimeout                  time.Duration
+	QueueSize                      int
+	SampleRate                     float64
+	RuntimeLogPaths                []string
+	PrometheusScrapeURLs           []string
+	ScrapeInterval                 time.Duration
+	KubernetesLogsEnabled          bool
+	KubernetesLogNamespaces        []string
+	KubernetesLogNamespacePrefixes []string
+	KubernetesLogLabelSelector     string
+	KubernetesLogPollInterval      time.Duration
+	KubernetesLogQPS               float64
+	KubernetesLogBurst             int
+	KubernetesLogTailLines         int64
+	KubernetesLogMaxLineBytes      int
+	KubernetesLogMaxPods           int
+	KubernetesLogMaxLinesPerCycle  int
+	BatchSize                      int
+	MaxPayloadBytes                int64
+	ClickHouseQueryMaxPayloadBytes int64
+	MemoryLimitBytes               int64
+	RetryMaxAttempts               int
+	TenantEventQuotaPerMinute      int
+	AppEventQuotaPerMinute         int
+	TenantEventQuotaOverrides      map[string]int
+	AppRetentionOverrides          map[string]time.Duration
+	Identity                       Identity
+}
+
+type Identity struct {
+	TenantID  string
+	ProjectID string
+	AppID     string
+	RuntimeID string
+	Component string
+}
+
+type Status struct {
+	Enabled                        bool     `json:"enabled"`
+	Mode                           string   `json:"mode"`
+	Retention                      string   `json:"retention"`
+	MetricsConfigured              bool     `json:"metrics_configured"`
+	MetricsQueryConfigured         bool     `json:"metrics_query_configured"`
+	LogsConfigured                 bool     `json:"logs_configured"`
+	AnalyticsConfigured            bool     `json:"analytics_configured"`
+	OTLPConfigured                 bool     `json:"otlp_configured"`
+	RuntimeLogPipelineConfigured   bool     `json:"runtime_log_pipeline_configured"`
+	PrometheusScrapeConfigured     bool     `json:"prometheus_scrape_configured"`
+	KubernetesLogsConfigured       bool     `json:"kubernetes_logs_configured"`
+	IdentityConfigured             bool     `json:"identity_configured"`
+	QueueSize                      int      `json:"queue_size"`
+	BatchSize                      int      `json:"batch_size"`
+	MaxPayloadBytes                int64    `json:"max_payload_bytes"`
+	ClickHouseQueryMaxPayloadBytes int64    `json:"clickhouse_query_max_payload_bytes"`
+	MemoryLimitBytes               int64    `json:"memory_limit_bytes"`
+	RetryMaxAttempts               int      `json:"retry_max_attempts"`
+	TenantEventQuotaPerMinute      int      `json:"tenant_event_quota_per_minute,omitempty"`
+	AppEventQuotaPerMinute         int      `json:"app_event_quota_per_minute,omitempty"`
+	TenantEventQuotaOverrideCount  int      `json:"tenant_event_quota_override_count,omitempty"`
+	AppRetentionOverrideCount      int      `json:"app_retention_override_count,omitempty"`
+	Exporters                      []string `json:"exporters,omitempty"`
+}
+
+func (c Config) Normalize() Config {
+	c.MetricsRemoteWriteURL = strings.TrimSpace(c.MetricsRemoteWriteURL)
+	c.MetricsQueryURL = strings.TrimSpace(c.MetricsQueryURL)
+	c.LokiURL = strings.TrimSpace(c.LokiURL)
+	c.ClickHouseDSN = strings.TrimSpace(c.ClickHouseDSN)
+	c.OTLPEndpoint = strings.TrimSpace(c.OTLPEndpoint)
+	c.RuntimeLogPaths = normalizeStringList(c.RuntimeLogPaths)
+	c.PrometheusScrapeURLs = normalizeStringList(c.PrometheusScrapeURLs)
+	c.KubernetesLogNamespaces = normalizeStringList(c.KubernetesLogNamespaces)
+	c.KubernetesLogNamespacePrefixes = normalizeStringList(c.KubernetesLogNamespacePrefixes)
+	c.KubernetesLogLabelSelector = strings.TrimSpace(c.KubernetesLogLabelSelector)
+	c.Identity = c.Identity.Normalize()
+	if c.Retention <= 0 {
+		c.Retention = DefaultRetention
+	}
+	if c.ExportTimeout <= 0 {
+		c.ExportTimeout = DefaultExportTimeout
+	}
+	if c.QueueSize <= 0 {
+		c.QueueSize = DefaultQueueSize
+	}
+	if c.SampleRate <= 0 || c.SampleRate > 1 {
+		c.SampleRate = DefaultSampleRate
+	}
+	if c.ScrapeInterval <= 0 {
+		c.ScrapeInterval = DefaultScrapeInterval
+	}
+	if c.KubernetesLogPollInterval <= 0 {
+		c.KubernetesLogPollInterval = DefaultKubernetesLogPollInterval
+	}
+	if c.KubernetesLogQPS <= 0 {
+		c.KubernetesLogQPS = DefaultKubernetesLogQPS
+	}
+	if c.KubernetesLogBurst <= 0 {
+		c.KubernetesLogBurst = DefaultKubernetesLogBurst
+	}
+	if c.KubernetesLogTailLines <= 0 {
+		c.KubernetesLogTailLines = DefaultKubernetesLogTailLines
+	}
+	if c.KubernetesLogMaxLineBytes <= 0 {
+		c.KubernetesLogMaxLineBytes = DefaultKubernetesLogMaxLineBytes
+	}
+	c.KubernetesLogMaxLineBytes = min(c.KubernetesLogMaxLineBytes, 8<<20)
+	if c.KubernetesLogMaxPods <= 0 {
+		c.KubernetesLogMaxPods = DefaultKubernetesLogMaxPods
+	}
+	if c.KubernetesLogMaxLinesPerCycle <= 0 {
+		c.KubernetesLogMaxLinesPerCycle = DefaultKubernetesLogMaxLinesPerCycle
+	}
+	if c.BatchSize <= 0 {
+		c.BatchSize = DefaultBatchSize
+	}
+	if c.BatchSize > c.QueueSize {
+		c.BatchSize = c.QueueSize
+	}
+	if c.MaxPayloadBytes <= 0 {
+		c.MaxPayloadBytes = DefaultMaxPayloadBytes
+	}
+	if c.ClickHouseQueryMaxPayloadBytes <= 0 {
+		c.ClickHouseQueryMaxPayloadBytes = DefaultClickHouseQueryMaxPayloadBytes
+	}
+	if c.MemoryLimitBytes <= 0 {
+		c.MemoryLimitBytes = DefaultMemoryLimit
+	}
+	if c.RetryMaxAttempts <= 0 {
+		c.RetryMaxAttempts = DefaultRetryAttempts
+	}
+	if c.TenantEventQuotaPerMinute < 0 {
+		c.TenantEventQuotaPerMinute = 0
+	}
+	if c.AppEventQuotaPerMinute < 0 {
+		c.AppEventQuotaPerMinute = 0
+	}
+	c.TenantEventQuotaOverrides = normalizePositiveIntMap(c.TenantEventQuotaOverrides)
+	c.AppRetentionOverrides = normalizeDurationMap(c.AppRetentionOverrides)
+	return c
+}
+
+func (c Config) Exporters() []string {
+	c = c.Normalize()
+	exporters := []string{}
+	if c.MetricsRemoteWriteURL != "" {
+		exporters = append(exporters, "metrics")
+	}
+	if c.LokiURL != "" {
+		exporters = append(exporters, "logs")
+	}
+	if c.ClickHouseDSN != "" {
+		exporters = append(exporters, "analytics")
+	}
+	sort.Strings(exporters)
+	return exporters
+}
+
+func (c Config) Backends() []string {
+	c = c.Normalize()
+	backends := []string{}
+	if c.MetricsRemoteWriteURL != "" || c.MetricsQueryURL != "" {
+		backends = append(backends, "metrics")
+	}
+	if c.LokiURL != "" {
+		backends = append(backends, "logs")
+	}
+	if c.ClickHouseDSN != "" {
+		backends = append(backends, "analytics")
+	}
+	if c.OTLPEndpoint != "" {
+		backends = append(backends, "otlp")
+	}
+	sort.Strings(backends)
+	return backends
+}
+
+func (c Config) HasExporters() bool {
+	return len(c.Exporters()) > 0
+}
+
+func (c Config) Status() Status {
+	c = c.Normalize()
+	return Status{
+		Enabled:                        c.Enabled,
+		Mode:                           c.Mode(),
+		Retention:                      c.Retention.String(),
+		MetricsConfigured:              c.MetricsRemoteWriteURL != "",
+		MetricsQueryConfigured:         c.MetricsQueryURL != "",
+		LogsConfigured:                 c.LokiURL != "",
+		AnalyticsConfigured:            c.ClickHouseDSN != "",
+		OTLPConfigured:                 c.OTLPEndpoint != "",
+		RuntimeLogPipelineConfigured:   len(c.RuntimeLogPaths) > 0,
+		PrometheusScrapeConfigured:     len(c.PrometheusScrapeURLs) > 0,
+		KubernetesLogsConfigured:       c.KubernetesLogsEnabled,
+		IdentityConfigured:             c.Identity.HasResourceIdentity(),
+		QueueSize:                      c.QueueSize,
+		BatchSize:                      c.BatchSize,
+		MaxPayloadBytes:                c.MaxPayloadBytes,
+		ClickHouseQueryMaxPayloadBytes: c.ClickHouseQueryMaxPayloadBytes,
+		MemoryLimitBytes:               c.MemoryLimitBytes,
+		RetryMaxAttempts:               c.RetryMaxAttempts,
+		TenantEventQuotaPerMinute:      c.TenantEventQuotaPerMinute,
+		AppEventQuotaPerMinute:         c.AppEventQuotaPerMinute,
+		TenantEventQuotaOverrideCount:  len(c.TenantEventQuotaOverrides),
+		AppRetentionOverrideCount:      len(c.AppRetentionOverrides),
+		Exporters:                      c.Exporters(),
+	}
+}
+
+func (c Config) RetentionForApp(appID string) time.Duration {
+	c = c.Normalize()
+	appID = strings.TrimSpace(appID)
+	if appID != "" {
+		if retention := c.AppRetentionOverrides[appID]; retention > 0 {
+			return retention
+		}
+	}
+	return c.Retention
+}
+
+func (c Config) TenantEventQuotaFor(tenantID string) int {
+	c = c.Normalize()
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID != "" {
+		if quota := c.TenantEventQuotaOverrides[tenantID]; quota > 0 {
+			return quota
+		}
+	}
+	return c.TenantEventQuotaPerMinute
+}
+
+func (c Config) Mode() string {
+	c = c.Normalize()
+	if !c.Enabled {
+		return "disabled"
+	}
+	if !c.HasExporters() {
+		return "enabled_without_exporters"
+	}
+	if c.ClickHouseDSN != "" {
+		return "instrumented"
+	}
+	return "baseline"
+}
+
+func (c Config) Validate() error {
+	c = c.Normalize()
+	if err := validateOptionalHTTPURL("metrics remote write URL", c.MetricsRemoteWriteURL); err != nil {
+		return err
+	}
+	if err := validateOptionalHTTPURL("metrics query URL", c.MetricsQueryURL); err != nil {
+		return err
+	}
+	if err := validateOptionalHTTPURL("Loki URL", c.LokiURL); err != nil {
+		return err
+	}
+	if err := validateOptionalClickHouseDSN("ClickHouse DSN", c.ClickHouseDSN); err != nil {
+		return err
+	}
+	if err := validateOptionalEndpoint("OTLP endpoint", c.OTLPEndpoint); err != nil {
+		return err
+	}
+	for _, raw := range c.PrometheusScrapeURLs {
+		if err := validateOptionalHTTPURL("Prometheus scrape URL", raw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (i Identity) Normalize() Identity {
+	return Identity{
+		TenantID:  strings.TrimSpace(i.TenantID),
+		ProjectID: strings.TrimSpace(i.ProjectID),
+		AppID:     strings.TrimSpace(i.AppID),
+		RuntimeID: strings.TrimSpace(i.RuntimeID),
+		Component: strings.TrimSpace(i.Component),
+	}
+}
+
+func (i Identity) HasResourceIdentity() bool {
+	i = i.Normalize()
+	return i.TenantID != "" || i.ProjectID != "" || i.AppID != "" || i.RuntimeID != "" || i.Component != ""
+}
+
+func (i Identity) Attributes() map[string]string {
+	i = i.Normalize()
+	attrs := map[string]string{}
+	if i.TenantID != "" {
+		attrs["tenant_id"] = i.TenantID
+	}
+	if i.ProjectID != "" {
+		attrs["project_id"] = i.ProjectID
+	}
+	if i.AppID != "" {
+		attrs["app_id"] = i.AppID
+	}
+	if i.RuntimeID != "" {
+		attrs["runtime_id"] = i.RuntimeID
+	}
+	if i.Component != "" {
+		attrs["component"] = i.Component
+	}
+	return attrs
+}
+
+func validateOptionalHTTPURL(name, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid %s", name)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("%s must use http or https", name)
+	}
+	return nil
+}
+
+func validateOptionalClickHouseDSN(name, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid %s", name)
+	}
+	switch parsed.Scheme {
+	case "http", "https", "clickhouse":
+		return nil
+	default:
+		return fmt.Errorf("%s must use http, https, or clickhouse", name)
+	}
+}
+
+func validateOptionalEndpoint(name, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if strings.Contains(raw, "://") {
+		return validateOptionalHTTPURL(name, raw)
+	}
+	if strings.Contains(raw, " ") || !strings.Contains(raw, ":") {
+		return fmt.Errorf("invalid %s", name)
+	}
+	return nil
+}
+
+func normalizeStringList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func normalizePositiveIntMap(values map[string]int) map[string]int {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" || value <= 0 {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeDurationMap(values map[string]time.Duration) map[string]time.Duration {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Duration, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" || value <= 0 {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"fugue/internal/observability"
+	observability "fugue/internal/observability/configschema"
 )
 
 // DefaultManagedAppRolloutTimeout is shared by the active control-plane and

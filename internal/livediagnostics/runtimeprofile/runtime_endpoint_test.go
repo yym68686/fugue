@@ -1,4 +1,4 @@
-package livediagnostics
+package runtimeprofile
 
 import (
 	"context"
