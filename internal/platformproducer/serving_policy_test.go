@@ -12,6 +12,7 @@ func TestServingPolicyHasExplicitBoundsAndPinnedSources(t *testing.T) {
 	for name, change := range map[string]func(*Policy){
 		"valid":                            func(*Policy) {},
 		"missing settings":                 func(p *Policy) { p.Serving = nil },
+		"single publication outside cell":  func(p *Policy) { p.Serving.SinglePublication = true },
 		"legacy input":                     func(p *Policy) { p.InputSource = "business-migration" },
 		"implicit domains":                 func(p *Policy) { p.RequireApplicationDomains = false },
 		"implicit route policy":            func(p *Policy) { p.RequireRouteDefaults = false },

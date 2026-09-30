@@ -271,6 +271,15 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 	if err != nil {
 		return ErrConflict
 	}
+	if guard.Phase == model.PlatformArtifactReleaseChannelGray && policy.Serving != nil && policy.Serving.SinglePublication {
+		done, err := pgHasVerifiedProducerPublication(ctx, tx, parent.ScopeKey, guard.PolicyReleaseID)
+		if err != nil {
+			return err
+		}
+		if done {
+			return ErrConflict
+		}
+	}
 	if policy.StaticIntentArtifactID != "" {
 		base, err := pgGetPlatformArtifactForUpdate(ctx, tx, policy.StaticIntentArtifactID, true)
 		if err != nil {

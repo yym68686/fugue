@@ -876,8 +876,26 @@ checked again before commit. The content-bound idempotency key permits a lost
 response retry only while the same successor and serving baseline remain
 current. Superseded successes and changed/frozen predecessors conflict.
 
-This lane only replaces a shadow/paused route-only producer with shadow mode
+The default `placement` operation replaces a shadow/paused route-only producer with shadow mode
 and changes its generation and explicit route placement transition. Static and
 projection input references, schedules, membership and promotion settings cannot
 change through this operation. It neither mutates full traffic nor verifies or
 renews LKG. The initial bootstrap lane still refuses established serving Cells.
+
+The separate, explicit `activate_serving` operation keeps the reviewed placement
+transition and all input references and schedules unchanged. It changes only
+generation, mode and bounded serving settings, requiring `single_publication:
+true`. The exact full baseline must already be verified and contain the declared
+canary cohort. Automatic candidate admission still validates pinned inputs,
+composition, real route/TLS capabilities and current publication fences; fresh
+gray evidence gates full, and fresh full evidence gates LKG. No public transport
+is selected by activation. Activate one Cell and observe its verified full before
+proceeding to another Cell or publishing DNS references.
+
+For route-only producers, `single_publication` stops capture after one verified
+full from that exact producer policy publication. The durable publication ledger
+also prevents a second automatic gray inside the transaction, including after
+restart, LKG expiry or a subsequent operator publication. Pending recovery is
+processed before this hold. The hold neither renews proof expiry nor grants
+authority to another policy; resuming production requires a separate policy
+publication. Omission retains continuous producer behavior.

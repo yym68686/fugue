@@ -93,6 +93,14 @@ func cellProducerRoleFixture(t *testing.T, s *Server, cell, role string) platfor
 }
 
 func TestCellRouteProducerPublishesAndPreparesOnlyItsRouteTLSAuthority(t *testing.T) {
+	testCellRouteProducer(t, false)
+}
+
+func TestCellRouteProducerSingleVerifiedPublication(t *testing.T) {
+	testCellRouteProducer(t, true)
+}
+
+func testCellRouteProducer(t *testing.T, single bool) {
 	st, s, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	verified := time.Now().UTC().Add(-time.Minute)
 	_, err := st.PutAppDomain(model.AppDomain{Hostname: "private.example.net", AppID: app.ID, TenantID: app.TenantID, Status: model.AppDomainStatusVerified, TLSStatus: model.AppDomainTLSStatusReady, VerifiedAt: &verified, TLSReadyAt: &verified})
@@ -248,6 +256,81 @@ func TestCellRouteProducerPublishesAndPreparesOnlyItsRouteTLSAuthority(t *testin
 	baseline, err := st.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, p.TargetScope)
 	if err != nil || baseline == nil {
 		t.Fatal("full LKG absent", err)
+	}
+	if single {
+		p.Generation, p.Mode = "producer-serving-once", "serving"
+		p.Serving = &platformproducer.ServingPolicy{SinglePublication: true, CanaryRuleRef: "cohort=complete", GrayMinSeconds: 1, FullMinSeconds: 1, RolloutTimeoutSeconds: 60}
+		raw, _ := json.Marshal(p)
+		var content map[string]any
+		json.Unmarshal(raw, &content)
+		a, err := st.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: scope}, Generation: p.Generation, Content: content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err = st.ValidatePlatformArtifact(a.ID, []model.PlatformArtifactValidationResult{{Name: "fixture", Pass: true}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, authority, _, _, err := st.ReleasePlatformArtifact(a.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, platformProducerPrincipal())
+		if err != nil {
+			t.Fatal(err)
+		}
+		reconcile := func() {
+			t.Helper()
+			if _, err := s.reconcilePlatformConfigurationScope(context.Background(), scope, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		reconcile()
+		parent, gray, found, err = st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, p.TargetScope, "gray")
+		if err != nil || !found || parent.ID == baseline.ArtifactID {
+			t.Fatal("new gray absent", err)
+		}
+		// Exercise actual minimum windows, without changing production clocks.
+		time.Sleep(1100 * time.Millisecond)
+		reconcile()
+		_, still, _, _ := st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, p.TargetScope, "full")
+		if still.ID != full.ID {
+			t.Fatal("stale baseline facts promoted candidate")
+		}
+		report(gray, caps, true)
+		reconcile()
+		_, full, found, err = st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, p.TargetScope, "full")
+		if err != nil || !found || full.ArtifactID != parent.ID {
+			t.Fatal("fresh gray did not promote", err)
+		}
+		time.Sleep(1100 * time.Millisecond)
+		reconcile()
+		lkg, err := st.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, p.TargetScope)
+		if err != nil || lkg.ArtifactID != baseline.ArtifactID {
+			t.Fatal("gray facts advanced full LKG", err)
+		}
+		report(full, caps, true)
+		reconcile()
+		lkg, err = st.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, p.TargetScope)
+		if err != nil || lkg.ArtifactID != parent.ID {
+			t.Fatal("full was not verified", err)
+		}
+		if done, err := st.HasVerifiedProducerPublication(p.TargetScope, authority.ID); err != nil || !done {
+			t.Fatal("verified publication was not recorded", err)
+		}
+		// The hold is reconstructed from the durable ledger by a fresh server.
+		restarted := NewServer(st, s.auth, nil, ServerConfig{BundleSigningKey: "platform-artifact-api-test-signing-key", BundleSigningKeyID: "platform-artifact-api-test"})
+		capture := func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
+			t.Fatal("single publication recaptured business after restart")
+			return platformIntentProjectionResponse{}, nil
+		}
+		if _, err := restarted.reconcilePlatformConfigurationScope(context.Background(), scope, capture); err != nil {
+			t.Fatal(err)
+		}
+		_, held, _, _ := st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, p.TargetScope, "full")
+		if held.ID != full.ID {
+			t.Fatal("hold changed full")
+		}
+		if _, _, _, _, err := st.ReleaseProducedTrafficArtifact(parent.ID, authority.ID, "gray", gray.ID, full.ID, parent.ID, p.Serving.CanaryRuleRef, platformProducerPrincipal()); err == nil {
+			t.Fatal("transaction admitted second gray under completed authority")
+		}
+		return
 	}
 	_, err = st.CreateAppWithRoute(app.TenantID, app.ProjectID, "next", "", model.AppSpec{Image: "registry.example.test/app:next", Ports: []int{8080}, Replicas: 1, RuntimeID: app.Spec.RuntimeID}, model.AppRoute{Hostname: "next.example.test", BaseDomain: "example.test", PublicURL: "https://next.example.test", ServicePort: 8080})
 	if err != nil {

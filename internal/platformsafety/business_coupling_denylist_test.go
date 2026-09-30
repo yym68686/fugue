@@ -2,6 +2,7 @@ package platformsafety
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -42,7 +43,7 @@ func TestTrackedPlatformSourcesContainNoBusinessCoupling(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := strings.ToLower(string(body))
+		text := strings.ToLower(string(businessCouplingSource(rawPath, body)))
 		for _, term := range terms {
 			for _, variant := range businessCouplingVariants(term) {
 				if strings.Contains(text, strings.ToLower(variant)) {
@@ -53,6 +54,61 @@ func TestTrackedPlatformSourcesContainNoBusinessCoupling(t *testing.T) {
 		if err := rejectBusinessAppToken(rawPath, text, zeroApp); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// Exact constraint transitions must carry the actual hostname in configuration
+// data. Exempt only that typed value, never an entire file or configuration tree:
+// executable fields, comments, unknown schema and adjacent strings stay scanned.
+func businessCouplingSource(path string, body []byte) []byte {
+	const directory = "deploy/environments/production/cell-producer-reconfiguration/"
+	if !strings.HasPrefix(path, directory) || strings.Contains(strings.TrimPrefix(path, directory), "/") || !strings.HasSuffix(path, ".json") {
+		return body
+	}
+	var declaration map[string]json.RawMessage
+	if json.Unmarshal(body, &declaration) != nil || string(declaration["schema"]) != `"fugue.cell-producer-reconfiguration/v1"` {
+		return body
+	}
+	var policy, transition map[string]json.RawMessage
+	var constraints []map[string]json.RawMessage
+	if json.Unmarshal(declaration["policy"], &policy) != nil || json.Unmarshal(policy["route_placement_transition"], &transition) != nil || json.Unmarshal(transition["constraints"], &constraints) != nil {
+		return body
+	}
+	for _, constraint := range constraints {
+		var source map[string]json.RawMessage
+		var hostname string
+		if json.Unmarshal(constraint["source"], &source) != nil || json.Unmarshal(source["hostname"], &hostname) != nil {
+			return body
+		}
+		source["hostname"] = json.RawMessage(`"configuration-hostname"`)
+		constraint["source"], _ = json.Marshal(source)
+	}
+	transition["constraints"], _ = json.Marshal(constraints)
+	policy["route_placement_transition"], _ = json.Marshal(transition)
+	declaration["policy"], _ = json.Marshal(policy)
+	out, err := json.Marshal(declaration)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func TestBusinessCouplingConfigExceptionOnlyCoversHostnameData(t *testing.T) {
+	const path = "deploy/environments/production/cell-producer-reconfiguration/cell-example.json"
+	const hostname = "tenant.example.test"
+	const body = `{"schema":"fugue.cell-producer-reconfiguration/v1","policy":{"route_placement_transition":{"constraints":[{"source":{"hostname":"` + hostname + `","command":"branch on tenant.example.test"}}]}}}`
+	masked := string(businessCouplingSource(path, []byte(body)))
+	if !strings.Contains(masked, `"hostname":"configuration-hostname"`) || !strings.Contains(masked, `"command":"branch on tenant.example.test"`) {
+		t.Fatal("configuration exception hid executable field")
+	}
+	for _, other := range []string{"internal/api/routing.go", path + ".go", strings.Replace(path, "/cell-example", "/nested/cell-example", 1)} {
+		if string(businessCouplingSource(other, []byte(body))) != body {
+			t.Fatal("exception applied outside typed declaration")
+		}
+	}
+	unknown := strings.Replace(body, "fugue.cell-producer-reconfiguration/v1", "arbitrary/v1", 1)
+	if string(businessCouplingSource(path, []byte(unknown))) != unknown {
+		t.Fatal("unknown schema exempted")
 	}
 }
 

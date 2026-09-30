@@ -402,7 +402,7 @@ jobs:
               echo 'selected=true' >> "$GITHUB_OUTPUT"
             fi
           fi
-      - name: Publish shadow policy with exact transactional preconditions
+      - name: Publish producer policy with exact transactional preconditions
         if: steps.configuration.outputs.selected == 'true'
         env:
           FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}

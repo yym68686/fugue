@@ -352,6 +352,7 @@ type PlatformPublicationPrecondition struct {
 }
 
 type PlatformProducerReconfiguration struct {
+	Operation                string                          `json:"operation,omitempty"`
 	PreviousPolicy           PlatformPublicationPrecondition `json:"previous_policy"`
 	ServingFull              PlatformPublicationPrecondition `json:"serving_full"`
 	VerificationEvidenceHash string                          `json:"verification_evidence_hash"`

@@ -32,10 +32,22 @@ func producerReconfigurationKey(a model.PlatformArtifact, precondition model.Pla
 
 func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.PlatformArtifactReleaseRequest) (platformproducer.Policy, error) {
 	p, err := platformproducer.Decode(a)
-	if err != nil || req.ProducerReconfiguration == nil || req.ReleaseChannel != "shadow" || req.CanaryRuleRef != "" || req.SoftOverride || req.ForcePublish || req.KernelBreakGlass != nil || p.Mode != "shadow" || p.PublicationRole != platformconfig.PublicationRoleCellRoutes || p.RoutePlacementTransition == nil {
+	if err != nil || req.ProducerReconfiguration == nil || req.ReleaseChannel != "shadow" || req.CanaryRuleRef != "" || req.SoftOverride || req.ForcePublish || req.KernelBreakGlass != nil || p.PublicationRole != platformconfig.PublicationRoleCellRoutes || p.RoutePlacementTransition == nil {
 		return p, ErrInvalidInput
 	}
 	r := req.ProducerReconfiguration
+	switch r.Operation {
+	case "", "placement":
+		if p.Mode != "shadow" {
+			return p, ErrInvalidInput
+		}
+	case "activate_serving":
+		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
+			return p, ErrInvalidInput
+		}
+	default:
+		return p, ErrInvalidInput
+	}
 	for _, ref := range []model.PlatformPublicationPrecondition{r.PreviousPolicy, r.ServingFull} {
 		if ref.ArtifactID == "" || len(ref.ArtifactID) > 256 || ref.ArtifactID != strings.TrimSpace(ref.ArtifactID) || ref.ReleaseID == "" || len(ref.ReleaseID) > 256 || ref.ReleaseID != strings.TrimSpace(ref.ReleaseID) || ref.FencingToken <= 0 || !platformproducer.ValidDigest(ref.ContentHash) {
 			return p, ErrInvalidInput
@@ -92,10 +104,14 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	if err != nil || (previous.Mode != "shadow" && previous.Mode != "paused") || p.Generation == previous.Generation || a.GenerationSequence <= old.GenerationSequence {
 		return ErrConflict
 	}
-	// Configuration may replace this one transformation, not silently switch
-	// business sources, schedules, membership or promotion mode.
+	// Each explicit operation has a disjoint change boundary. In particular,
+	// activation cannot also alter the already reviewed placement transition.
 	previous.Generation, p.Generation = "", ""
-	previous.RoutePlacementTransition, p.RoutePlacementTransition = nil, nil
+	if r.Operation == "activate_serving" {
+		previous.Serving, p.Serving = nil, nil
+	} else {
+		previous.RoutePlacementTransition, p.RoutePlacementTransition = nil, nil
+	}
 	previous.Mode = p.Mode
 	if !reflect.DeepEqual(previous, p) {
 		return ErrConflict
@@ -119,6 +135,20 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	}
 	if _, err := platformconfig.ValidateReleaseComposition(full); err != nil {
 		return ErrConflict
+	}
+	if r.Operation == "activate_serving" {
+		// Resolve the cohort against the exact current baseline before enabling
+		// automatic publication; fresh candidate admission remains independent.
+		target, err := platformproducer.Decode(a)
+		if err != nil {
+			return ErrConflict
+		}
+		if _, err := platformconfig.ResolveTrafficCanary(full, target.Serving.CanaryRuleRef); err != nil {
+			return ErrConflict
+		}
+		if release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.VerifiedLKGGeneration != full.Generation {
+			return ErrConflict
+		}
 	}
 	lkg := verifiedPlatformLKGSnapshotFromState(state, model.PlatformArtifactKindReleaseSet, p.TargetScope, now, keys)
 	if lkg == nil || lkg.ArtifactID != full.ID || lkg.ContentHash != full.ContentHash || lkg.VerifiedByReleaseID != release.ID || lkg.VerificationEvidenceHash != r.VerificationEvidenceHash {

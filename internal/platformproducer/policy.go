@@ -48,6 +48,7 @@ type Policy struct {
 }
 
 type ServingPolicy struct {
+	SinglePublication     bool   `json:"single_publication,omitempty"`
 	CanaryRuleRef         string `json:"canary_rule_ref"`
 	GrayMinSeconds        int    `json:"gray_min_seconds"`
 	FullMinSeconds        int    `json:"full_min_seconds"`
@@ -113,6 +114,9 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 		return p, fmt.Errorf("serving producer requires explicit promotion policy and complete pinned inputs")
 	}
 	if v := p.Serving; v != nil {
+		if v.SinglePublication && p.PublicationRole != platformconfig.PublicationRoleCellRoutes {
+			return p, fmt.Errorf("single publication requires route-only cell authority")
+		}
 		if !servingCohortRef.MatchString(v.CanaryRuleRef) || v.GrayMinSeconds < 1 || v.GrayMinSeconds > 1800 || v.FullMinSeconds < 1 || v.FullMinSeconds > 1800 || v.RolloutTimeoutSeconds < 30 || v.RolloutTimeoutSeconds > 3600 || v.RolloutTimeoutSeconds < max(v.GrayMinSeconds, v.FullMinSeconds)+p.IntervalSeconds {
 			return p, fmt.Errorf("producer serving policy is outside bounded limits")
 		}

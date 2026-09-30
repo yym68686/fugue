@@ -156,6 +156,12 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		if handled, err := s.reconcilePendingProducedTraffic(ctx, policy, authority); handled || err != nil {
 			return interval, err
 		}
+		if policy.Serving.SinglePublication {
+			done, err := s.store.HasVerifiedProducerPublication(policy.TargetScope, authority.ID)
+			if err != nil || done {
+				return interval, err
+			}
+		}
 	}
 	principal := platformProducerPrincipal()
 	current, previous, haveCurrent, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, policy.TargetScope, "shadow")

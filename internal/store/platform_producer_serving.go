@@ -74,6 +74,9 @@ func validateProducerServingPhase(state *model.State, parent model.PlatformArtif
 	settings := policy.Serving
 	switch guard.Phase {
 	case model.PlatformArtifactReleaseChannelGray:
+		if settings.SinglePublication && hasVerifiedProducerPublication(state, parent.ScopeKey, guard.PolicyReleaseID) {
+			return fail("single publication already verified")
+		}
 		if req.ReleaseChannel != model.PlatformArtifactReleaseChannelGray || req.CanaryRuleRef != settings.CanaryRuleRef || full.ArtifactID != lkg.ArtifactID || !hasShadow || !owned(shadow) {
 			return fail("gray must extend the verified full baseline with its current produced shadow")
 		}

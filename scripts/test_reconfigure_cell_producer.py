@@ -61,6 +61,38 @@ class Ledger(ArtifactAPI):
 
 
 class ReconfigurationTests(unittest.TestCase):
+    def test_explicit_activation_preserves_sources_and_placement(self):
+        for failure in [None, "implicit", "unbounded", "placement", "source", "timeout"]:
+            with self.subTest(failure=failure):
+                declaration, _ = fixture()
+                old = copy.deepcopy(declaration["policy"])
+                declaration["precondition"]["previous_policy"]["content_hash"] = config.digest(old)
+                declaration["precondition"]["operation"] = "activate_serving"
+                declaration["policy"].update(generation="serving-once", mode="serving", serving={"single_publication": True, "canary_rule_ref": "cohort=complete", "gray_min_seconds": 30, "full_min_seconds": 60, "rollout_timeout_seconds": 300})
+                if failure == "implicit":
+                    declaration["precondition"].pop("operation")
+                elif failure == "unbounded":
+                    declaration["policy"]["serving"]["single_publication"] = False
+                elif failure == "placement":
+                    source = declaration["policy"]["route_placement_transition"]["constraints"][0]
+                    source["source"]["min_healthy_edge_nodes"] = 1
+                    source["source_digest"] = config.digest(source["source"])
+                elif failure == "source":
+                    declaration["policy"]["static_intent_artifact_id"] = "other"
+                elif failure == "timeout":
+                    declaration["policy"]["serving"]["rollout_timeout_seconds"] = 60
+                api = Ledger(declaration, old)
+                if failure:
+                    with self.assertRaises(ValueError):
+                        config.publish(declaration, api, lambda _: None)
+                    self.assertEqual(api.release_bodies, [])
+                else:
+                    result = config.publish(declaration, api, lambda _: None)
+                    self.assertTrue(result["serving_publication_authorized"])
+                    self.assertEqual(result["mode"], "serving")
+                    self.assertNotIn("serving_publication_changed", result)
+                    self.assertEqual(config.publish(declaration, api, lambda _: None)["authority"], result["authority"])
+
     def test_publish_changes_only_shadow_policy_and_preserves_baseline(self):
         declaration, old = fixture()
         api = Ledger(declaration, old)
