@@ -42,7 +42,13 @@ class API:
             with self.opener.open(request, timeout=45) as response:
                 raw = response.read((16 << 20) + 1)
         except urllib.error.HTTPError as error:
-            raise RuntimeError("artifact API returned HTTP " + str(error.code)) from None
+            detail = error.read(8193).decode("utf-8", "replace")
+            if len(detail) > 8192:
+                detail = detail[:8192] + "…"
+            # The control plane error body contains typed validation details,
+            # not credentials. Keep it bounded so a rejected immutable compile
+            # is actionable without dumping a large artifact or token.
+            raise RuntimeError("artifact API returned HTTP " + str(error.code) + ": " + detail) from None
         except Exception:
             raise RuntimeError("artifact API transport unavailable") from None
         if len(raw) > 16 << 20:
