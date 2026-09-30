@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/edge"
+	"fugue/internal/livediagnostics"
 )
 
 func main() {
@@ -18,6 +19,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if err := livediagnostics.StartRuntimeEndpoint(ctx, "edge"); err != nil {
+		logger.Printf("live diagnostics runtime endpoint unavailable: %v", err)
+	}
 
 	service := edge.NewServiceWithEdgeSources(cfg, edge.RouteBundleSourceFromEnv(), edge.InventoryProducerConfigFromEnv(), logger)
 	service.PlatformTokenFile = os.Getenv("FUGUE_EDGE_PLATFORM_TOKEN_FILE")

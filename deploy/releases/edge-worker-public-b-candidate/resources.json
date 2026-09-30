@@ -299,6 +299,10 @@
                     "name": "cell-bootstrap",
                     "mountPath": "/var/run/fugue-cell-bootstrap",
                     "readOnly": true
+                  },
+                  {
+                    "name": "diagnostic-socket",
+                    "mountPath": "/tmp"
                   }
                 ]
               },
@@ -584,6 +588,12 @@
                   "name": "fugue-cell-public-b-inventory-bootstrap",
                   "optional": true,
                   "defaultMode": 292
+                }
+              },
+              {
+                "name": "diagnostic-socket",
+                "emptyDir": {
+                  "sizeLimit": "4Mi"
                 }
               }
             ]
