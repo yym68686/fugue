@@ -22,6 +22,7 @@ import (
 	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 	"fugue/internal/routeartifact"
@@ -31,7 +32,7 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
@@ -108,6 +109,9 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 						t.Error("serving observation used an unselected release lane")
 					}
 					items := []model.PlatformConsumerAssignment{ra, ta}
+					if mode == "missing-tls-assignment" {
+						items = items[:1]
+					}
 					if changed {
 						items[0].FencingToken++
 						if mode == "newer-full" {
@@ -261,6 +265,9 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				return
 			}
 			if mode != "valid" && !strings.HasPrefix(mode, "valid-cell") {
+				if mode == "missing-tls-assignment" && errors.Is(err, platformconsumer.ErrNoServingAssignment) {
+					t.Fatal("missing TLS assignment authorized shadow fallback for a selected route")
+				}
 				wantReports := 0
 				switch mode {
 				case "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied":

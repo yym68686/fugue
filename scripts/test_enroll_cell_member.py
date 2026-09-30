@@ -24,7 +24,9 @@ def authority(c):
 
 
 def facts(c,r,admitted=False):
-    h=initial_health(c,r);h["platform_serving"]["traffic_release"]["release_channel"]="full";h["inventory_producer_active"]=admitted;return h
+    h=initial_health(c,r);h["platform_serving"]["traffic_release"]["release_channel"]="full";h["inventory_producer_active"]=admitted
+    if not admitted:h.pop("inventory_heartbeat_at",None)
+    return h
 
 
 def converged(c,r):
@@ -98,11 +100,19 @@ class MemberEnrollmentTests(unittest.TestCase):
             elif kind=="wrong node":h["edge_id"]="foreign"
             elif kind=="stale":h["platform_serving"]["verified_at"]=(m.initial.now()-datetime.timedelta(minutes=2)).isoformat()
             elif kind=="tls":h["platform_serving"]["tls_probes"]=0
-            elif kind=="invented inventory":h["inventory_producer_active"]=True
+            elif kind=="invented inventory":h["inventory_heartbeat_at"]=m.initial.now().isoformat()
             with patch.object(m.initial,"kubectl",return_value=h):
                 if kind:
                     with self.assertRaises(ValueError):m.health(c,r,False)
                 else:m.health(c,r,False)
+        for kind in ["waiting for activation","acknowledged generation","acknowledged timestamp"]:
+            h=facts(c,r);h["inventory_producer_active"]=True;h["inventory_heartbeat_error"]="initial cell bootstrap authorization unavailable"
+            if kind=="acknowledged generation":h["inventory_heartbeat_generation"]=1
+            elif kind=="acknowledged timestamp":h["inventory_heartbeat_at"]=m.initial.now().isoformat()
+            with patch.object(m.initial,"kubectl",return_value=h):
+                if kind=="waiting for activation":m.health(c,r,False)
+                else:
+                    with self.assertRaises(ValueError):m.health(c,r,False)
         for kind in [None,"missing","duplicate","wrong Pod","foreign publication"]:
             d=converged(c,r)
             if kind=="missing":d["convergence"][0]["required_passing"]=1

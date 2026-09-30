@@ -123,6 +123,11 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	}
 	_, ta, tlsArtifact, tr, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindCaddyRouteConfig)
 	if err != nil {
+		if errors.Is(err, platformconsumer.ErrNoServingAssignment) {
+			// A selected route without its TLS assignment is an incomplete
+			// serving release, not a member eligible to resume shadow reporting.
+			return errors.New("traffic TLS serving assignment unavailable")
+		}
 		return err
 	}
 	member, memberKind := false, false

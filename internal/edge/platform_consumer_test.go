@@ -23,10 +23,11 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
+	"fugue/internal/routeartifact"
 )
 
 func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
-	for _, scenario := range []string{"legacy", "query strategy", "compiled placement", "compiled placement and cache", "compiled domain TLS", "shadow Edge selection"} {
+	for _, scenario := range []string{"legacy", "query strategy", "compiled placement", "compiled placement and cache", "compiled domain TLS", "shadow Edge selection", "unassigned member", "serving unavailable"} {
 		t.Run(scenario, func(t *testing.T) {
 			testEdgePlatformShadowPreservesServingAndChecksBindings(t, scenario)
 		})
@@ -231,6 +232,14 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 			if r.Header.Get("Authorization") != "Bearer component-token" {
 				t.Error("assignment credential mismatch")
 			}
+			if r.URL.Query().Get("serving_only") == "true" {
+				if scenario == "serving unavailable" {
+					w.WriteHeader(http.StatusServiceUnavailable)
+				} else {
+					w.WriteHeader(http.StatusNotFound)
+				}
+				return
+			}
 			json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{assignment}})
 		case "/v1/platform-state/consumers/artifacts/release-set-1":
 			json.NewEncoder(w).Encode(map[string]any{"artifact": parent, "assignment": candidate.Assignment, "release": candidate.Release})
@@ -286,6 +295,35 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 		return s
 	}
 	s := create()
+	if scenario == "unassigned member" || scenario == "serving unavailable" {
+		projection, err := routeartifact.ProjectRelease(parent, a, assignment, original.Release, keyring)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundle, _ := s.Bundle()
+		bundle.TrafficRelease = projection.TrafficRelease
+		bundle.TrafficRelease.ReleaseChannel = model.PlatformArtifactReleaseChannelFull
+		s.recordSyncSuccess(bundle, "etag", time.Now(), false)
+		index := s.currentRouteIndex()
+		s.syncPlatformConsumersOnce(context.Background())
+		want := 1
+		if scenario == "serving unavailable" {
+			want = 0
+		}
+		if reports != want {
+			t.Fatalf("consumer enrollment reports=%d want=%d", reports, want)
+		}
+		if scenario == "unassigned member" && s.Status().PlatformCandidate.State != "shadow_verified" {
+			t.Fatal("new member stopped capability enrollment after loading another member's group bundle")
+		}
+		if s.currentRouteIndex() != index {
+			t.Fatal("capability observation changed serving route index")
+		}
+		if got, err := os.ReadFile(cache); err != nil || !bytes.Equal(got, servingBytes) {
+			t.Fatal("capability observation changed positive cache")
+		}
+		return
+	}
 	servingIndex := s.currentRouteIndex()
 	ctx := context.Background()
 	if err := s.SyncPlatformShadowOnce(ctx); err != nil {

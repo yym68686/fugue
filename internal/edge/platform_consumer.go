@@ -98,40 +98,46 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
-		bundle, _ := s.Bundle()
-		// Runtime projection has one owner. Once a traffic release serves,
-		// an older shadow observation must not overwrite its applied receipt
-		// or move the consumer back to shadow's independent fence domain.
-		if bundle.TrafficRelease == nil {
-			if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
-				s.mu.Lock()
-				s.platformCandidate.State = "failed"
-				s.platformCandidate.LastError = err.Error()
-				s.mu.Unlock()
-				s.Logger.Printf("edge platform candidate failed: %v", err)
-			}
-			if err := s.SyncPlatformTLSShadowOnce(ctx); err != nil && ctx.Err() == nil {
-				s.mu.Lock()
-				s.platformTLSCandidate.State = "failed"
-				s.platformTLSReadiness = nil
-				s.platformTLSCandidate.TLSVerified = false
-				s.platformTLSCandidate.LastError = err.Error()
-				s.mu.Unlock()
-				s.Logger.Printf("edge platform TLS candidate failed: %v", err)
-			}
-		} else {
-			s.mu.Lock()
-			s.platformCandidate.State, s.platformTLSCandidate.State = "inactive", "inactive"
-			s.mu.Unlock()
-		}
-		if err := s.SyncPlatformServingOnce(ctx); err != nil && ctx.Err() == nil {
-			s.Logger.Printf("edge traffic serving verification failed: %v", err)
-		}
+		s.syncPlatformConsumersOnce(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+	}
+}
+
+func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
+	servingErr := s.SyncPlatformServingOnce(ctx)
+	bundle, _ := s.Bundle()
+	if servingErr != nil && ctx.Err() == nil {
+		s.Logger.Printf("edge traffic serving verification failed: %v", servingErr)
+	}
+	// A group bundle can predate this physical member. Keep capability
+	// observations alive until the API assigns serving to this exact consumer.
+	// All other serving errors retain the serving owner and never fall back
+	// to shadow's independent fence domain.
+	if bundle.TrafficRelease == nil || errors.Is(servingErr, platformconsumer.ErrNoServingAssignment) {
+		if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
+			s.mu.Lock()
+			s.platformCandidate.State = "failed"
+			s.platformCandidate.LastError = err.Error()
+			s.mu.Unlock()
+			s.Logger.Printf("edge platform candidate failed: %v", err)
+		}
+		if err := s.SyncPlatformTLSShadowOnce(ctx); err != nil && ctx.Err() == nil {
+			s.mu.Lock()
+			s.platformTLSCandidate.State = "failed"
+			s.platformTLSReadiness = nil
+			s.platformTLSCandidate.TLSVerified = false
+			s.platformTLSCandidate.LastError = err.Error()
+			s.mu.Unlock()
+			s.Logger.Printf("edge platform TLS candidate failed: %v", err)
+		}
+	} else {
+		s.mu.Lock()
+		s.platformCandidate.State, s.platformTLSCandidate.State = "inactive", "inactive"
+		s.mu.Unlock()
 	}
 }
 

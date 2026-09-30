@@ -110,7 +110,10 @@ def health(c, release, admitted):
         raise ValueError("member serving proofs are stale")
     if admitted and (h.get("inventory_producer_active") is not True or not datetime.timedelta(0) <= initial.now() - initial.timestamp(h["inventory_heartbeat_at"]) < datetime.timedelta(seconds=90)):
         raise ValueError("admitted member has not reported fresh real inventory")
-    if not admitted and h.get("inventory_producer_active"):
+    # The producer loop is active even when a missing activation prevents its
+    # first heartbeat. Successful heartbeat facts, not loop liveness, prove
+    # that an uninitialized member has already reported inventory.
+    if not admitted and (h.get("inventory_heartbeat_at") or h.get("inventory_heartbeat_generation", 0)):
         raise ValueError("uninitialized member unexpectedly reports inventory")
     return h
 
