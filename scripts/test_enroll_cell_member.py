@@ -142,6 +142,25 @@ class MemberEnrollmentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"proof failed"):m.enroll(c,lambda *_:None,lambda _:None)
             write.assert_not_called()
 
+    def test_declared_observation_deadline_prevents_activation(self):
+        c=config();worker={};facts={}
+        with patch.object(m.initial,"activation",return_value=None),patch.object(m,"observe",return_value=(worker,facts)),patch.object(m.time,"monotonic",side_effect=[0,0,c["observation"]["timeout_seconds"]]),patch.object(m.initial,"kubectl") as write:
+            with self.assertRaisesRegex(ValueError,"deadline"):m.enroll(c,lambda *_:None,lambda _:None)
+            write.assert_not_called()
+
+    def test_completed_initialization_retries_readonly_after_original_window(self):
+        c=config();applied=m.initial.now()-datetime.timedelta(minutes=2)
+        c["admission_window"]={"not_before":(applied-datetime.timedelta(minutes=1)).isoformat(),"expires_at":(applied+datetime.timedelta(minutes=1)).isoformat()}
+        actual={"schema":"edge-front-group-activation/v1","edge_group_id":c["authority_cell_id"],"generation":7,"active_slot":"a","worker_source_commit":c["worker"]["source_sha"],"worker_image_digest":c["worker"]["image_digest"],"authority":"edge-control","operation":"initialize","reason":"Verified isolated Cell member "+m.digest(c),"bundle_generation":"verified-bundle","updated_at":applied.isoformat()}
+        h={"bundle_version":"verified-bundle","platform_serving":{"route_probes":5,"tls_probes":5},"inventory_heartbeat_at":m.initial.now().isoformat()}
+        m.check_activation(c,actual)
+        with patch.object(m.initial,"isolated_worker",return_value={}),patch.object(m.initial,"resource",return_value=None),patch.object(m,"full",return_value={}),patch.object(m,"control_epoch"),patch.object(m,"health",return_value=h),patch.object(m,"convergence"),patch.object(m.initial,"activation",return_value=actual),patch.object(m.initial,"kubectl") as write,patch.object(m.time,"sleep"):
+            m.enroll(c,lambda *_:None,lambda _:None)
+            write.assert_not_called()
+            with self.assertRaisesRegex(ValueError,"window"):m.observe(c,lambda *_:None,False)
+        actual["updated_at"]=m.initial.now().isoformat()
+        with self.assertRaisesRegex(ValueError,"outside"):m.check_activation(c,actual)
+
 
 if __name__ == "__main__":
     unittest.main()

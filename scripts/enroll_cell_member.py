@@ -139,10 +139,14 @@ def check_activation(c, actual, bundle=None):
     expected = {"schema": "edge-front-group-activation/v1", "edge_group_id": c["authority_cell_id"], "generation": c["serving_epoch"]["fence_sequence"], "active_slot": w["slot"], "worker_source_commit": w["source_sha"], "worker_image_digest": w["image_digest"], "authority": "edge-control", "operation": "initialize", "reason": "Verified isolated Cell member " + digest(c)}
     if not isinstance(actual, dict) or any(actual.get(k) != v for k, v in expected.items()) or not actual.get("bundle_generation") or bundle is not None and actual["bundle_generation"] != bundle:
         raise ValueError("member activation differs from this declaration")
+    applied = initial.timestamp(actual.get("updated_at", ""))
+    if not initial.timestamp(c["admission_window"]["not_before"]) <= applied < initial.timestamp(c["admission_window"]["expires_at"]):
+        raise ValueError("member activation occurred outside its admission window")
 
 
 def observe(c, api, admitted):
-    window_open(c)
+    if not admitted:
+        window_open(c)
     worker = initial.isolated_worker(initial_projection(c))
     # Established admission never supplies the first-publication permission.
     if initial.resource(c, "configmap", c["bootstrap_config_map"]) is not None:
@@ -155,7 +159,8 @@ def observe(c, api, admitted):
     # Re-read both authorities before the caller can initialize local state.
     full(c, api)
     control_epoch(c)
-    window_open(c)
+    if not admitted:
+        window_open(c)
     return worker, facts
 
 
@@ -171,12 +176,20 @@ def enrollment_job(c, worker, facts):
 
 def enroll(c, api, save):
     validate(c)
+    deadline = time.monotonic() + c["observation"]["timeout_seconds"]
+    def bounded_observe(admitted):
+        if time.monotonic() >= deadline:
+            raise ValueError("member observation deadline exceeded")
+        result = observe(c, api, admitted)
+        if time.monotonic() >= deadline:
+            raise ValueError("member observation deadline exceeded")
+        return result
     actual = initial.activation(c)
     if actual is not None:
         check_activation(c, actual)
     evidence = {"schema": "fugue.cell-member-enrollment-result/v1", "declaration_digest": digest(c), "public_transport_changed": False, "artifacts_published": False, "observations": []}
     for index in range(c["observation"]["samples"]):
-        worker, facts = observe(c, api, actual is not None)
+        worker, facts = bounded_observe(actual is not None)
         if initial.activation(c) != actual:
             raise ValueError("member activation changed during verification")
         evidence["observations"].append({"at": initial.now().isoformat(), "bundle_version": facts["bundle_version"], "route_probes": facts["platform_serving"]["route_probes"], "tls_probes": facts["platform_serving"]["tls_probes"]})
@@ -184,11 +197,13 @@ def enroll(c, api, save):
         if index + 1 < c["observation"]["samples"]:
             time.sleep(c["observation"]["interval_seconds"])
     if actual is None:
-        worker, facts = observe(c, api, False)
+        worker, facts = bounded_observe(False)
         if initial.activation(c) is not None:
             raise ValueError("activation appeared before member CAS")
         initial.kubectl("create", "-f", "-", "-o", "json", "--field-manager=" + MANAGER, body=canonical(enrollment_job(c, worker, facts)))
         for _ in range(12):
+            if time.monotonic() >= deadline:
+                raise ValueError("member activation observation deadline exceeded")
             actual = initial.activation(c)
             if actual is not None:
                 check_activation(c, actual, facts["bundle_version"])
@@ -198,7 +213,7 @@ def enroll(c, api, save):
             raise ValueError("member activation CAS did not complete")
     for _ in range(3):
         time.sleep(30)
-        _, facts = observe(c, api, True)
+        _, facts = bounded_observe(True)
         if initial.activation(c) != actual or initial.timestamp(facts["inventory_heartbeat_at"]) <= initial.timestamp(actual["updated_at"]):
             raise ValueError("fresh inventory did not follow exact member activation")
     evidence.update(activation=actual, completed_at=initial.now().isoformat())

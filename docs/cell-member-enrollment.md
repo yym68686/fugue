@@ -51,5 +51,8 @@ promotion and rollback continue monotonically from the initialized fence.
 
 If a check fails, CI retains observation evidence and stops. A retry reconciles
 an already completed initialization only when every declaration-bound identity
-matches. Missing proof, capacity or an expired window is never a reason to
+matches and the recorded initialization occurred inside its original window.
+That completed operation can be verified read-only after its window closes;
+it cannot create another activation. Each run also observes its declared
+`observation.timeout_seconds` deadline. Missing proof, capacity or an expired window is never a reason to
 weaken quorum, synthesize health, or modify the retained positive artifact.
