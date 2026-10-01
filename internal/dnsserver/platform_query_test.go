@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,5 +148,30 @@ func TestDNSQueryMaterializationPreservesPartialTXTExpiryAcrossRepeatedReads(t *
 	}
 	if _, exists := records[1].ValueExpirations["expired"]; exists {
 		t.Fatal("expired value retained stale lease reference")
+	}
+}
+
+func TestDNSQueryShadowReportsBoundedReadinessFailuresWithoutServing(t *testing.T) {
+	view, plan, policy, facts, _ := queryExecutionFixture()
+	s := &Service{Config: config.DNSConfig{DNSNodeID: view.NodeID, EdgeGroupID: view.EdgeGroupID}}
+	p := platformconfig.PolicySnapshot{MaxStaleSeconds: 3600, DNSReadiness: &policy,
+		DNSAuthorities:    []platformconfig.DNSAuthorityPolicy{{NodeID: view.NodeID, Zone: view.Zone, Nameservers: []string{"ns.example.test"}, TTLSeconds: 60}},
+		DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: view.NodeID}},
+	}
+	c := dnsPlatformCandidate{Artifact: model.PlatformArtifact{ID: "artifact", ContentHash: "digest", Content: map[string]any{"query_views": []platformconfig.DNSQueryView{view}, "readiness_plan": plan, "policy": p}}}
+	a := model.PlatformConsumerAssignment{ReleaseSetID: "release", ExpectedConsumerSetID: "expected", FencingToken: 7}
+	r := dnsReadinessReceipt{ArtifactID: c.Artifact.ID, ArtifactDigest: c.Artifact.ContentHash, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, NodeID: view.NodeID, Facts: append([]dnsReadinessFact(nil), facts...)}
+	r.Facts[0].Ready, r.Facts[0].Reason = false, "not_observed"
+	receipt, err := s.evaluatePlatformDNSQueries(c, a, &r)
+	if receipt != nil || err == nil || !strings.Contains(err.Error(), "DNS artifact wire probe failed") || !strings.Contains(err.Error(), "not_observed=1") || !strings.Contains(err.Error(), "ready_records=0/1") {
+		t.Fatalf("wire rejection lost readiness diagnostics: %+v %v", receipt, err)
+	}
+	if strings.Contains(err.Error(), view.Records[0].Name) || s.platformServing.Load() != nil {
+		t.Fatal("failed shadow exposed record identity or acquired serving state")
+	}
+	r.Facts = facts
+	receipt, err = s.evaluatePlatformDNSQueries(c, a, &r)
+	if err != nil || receipt == nil || receipt.Status.Serving || receipt.Status.WireSnapshotProbes == 0 || s.platformServing.Load() != nil {
+		t.Fatalf("recovered shadow changed serving behavior: %+v %v", receipt, err)
 	}
 }

@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sort"
@@ -161,7 +162,9 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 			return nil, err
 		}
 		if err = probeDNSServingSnapshot(st); err != nil {
-			return nil, err
+			checked := time.Now().UTC()
+			status := summarizeDNSReadiness(payload.Plan, payload.Policy.DNSReadiness, readiness.Facts, readiness.Status.PlanDigest, now, checked)
+			return nil, fmt.Errorf("%w (readiness: ready_probes=%d/%d ready_records=%d/%d; %s)", err, status.ReadyProbes, status.Probes, status.ReadyRecords, status.Records, dnsReadinessFailureSummary(payload.Plan, payload.Policy.DNSReadiness, readiness.Facts, checked))
 		}
 		receipt.Status.AuthorityPolicies = len(st.zones)
 		for _, z := range st.zones {
