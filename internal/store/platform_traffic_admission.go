@@ -81,6 +81,10 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 		}
 		seen[child.ArtifactKind] = true
 		authorityTransition := child.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && child.Content["previous_traffic_publication"] != nil
+		sources, sourceErr := platformconfig.DNSRouteSourceAuthorizations(child)
+		if sourceErr != nil {
+			return fail("DNS routing source authorization invalid")
+		}
 		for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
 			if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
 				return fail("member lineage differs")
@@ -122,7 +126,7 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 				if fact.ConsumerID != expected.ConsumerID || fact.ArtifactKind != child.ArtifactKind || fact.ScopeKey != parent.ScopeKey {
 					continue
 				}
-				if found || !trafficCapabilityFactFresh(expected, fact, now) || cellRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) || cellDNS && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellDNSCapabilityV1) || authorityTransition && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAuthorityTransitionCapabilityV1) {
+				if found || !trafficCapabilityFactFresh(expected, fact, now) || cellRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) || cellDNS && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellDNSCapabilityV1) || authorityTransition && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAuthorityTransitionCapabilityV1) || len(sources) > 0 && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSRouteSourcesCapabilityV1) {
 					return fail("fresh authenticated traffic capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
 				found = true

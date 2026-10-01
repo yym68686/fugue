@@ -33150,6 +33150,12 @@ components:
             cache_policies: {type: array, maxItems: 0, items: {}}
             dns_consumers: {type: array, minItems: 1, items: {}}
       properties:
+        dns_route_sources:
+          type: array
+          minItems: 1
+          maxItems: 32
+          description: Optional cell-dns-only authorization for independently advancing signed routing sources. Each entry approves one immutable producer policy artifact by ID and digest in a referenced routing scope. Exact policy activation and traffic release IDs/channels/fences remain separate observed bindings; they are never inferred from this approval. Baseline inputs retain those bindings and must belong to an approved policy. Source observations never add DNS records, owners, physical candidates or pools; they must satisfy the DNS artifact's own constraints and fresh exact-publication HTTPS proofs. A global source requires the explicit previous-authority transition. A future policy can be approved before activation; a different policy artifact requires new signed DNS configuration. Gray/full activation additionally requires dns_route_sources_v1 from every required DNS consumer. Omission retains exact embedded-reference behavior.
+          items: {$ref: "#/components/schemas/PlatformDNSRouteSourceAuthorization"}
         route_authority_transition:
           $ref: "#/components/schemas/PlatformRouteAuthorityTransition"
         cell_route_publications:
@@ -33883,6 +33889,8 @@ components:
       additionalProperties: false
       required: [reference, parent, route, tls, dns]
       properties:
+        producer_policy:
+          $ref: "#/components/schemas/PlatformPublicationPrecondition"
         reference: {$ref: "#/components/schemas/PlatformPreviousTrafficPublicationReference"}
         parent: {$ref: "#/components/schemas/PlatformArtifact"}
         route: {$ref: "#/components/schemas/PlatformArtifact"}
@@ -33896,6 +33904,17 @@ components:
       properties:
         previous_topology: {$ref: "#/components/schemas/PlatformEdgeTopology"}
         previous_publication: {$ref: "#/components/schemas/PlatformPreviousTrafficPublicationReference"}
+    PlatformDNSRouteSourceAuthorization:
+      type: object
+      additionalProperties: false
+      required: [scope_key, policy_artifact_id, policy_digest]
+      properties:
+        scope_key:
+          type: string
+          pattern: '^(global|authority-cell:cell-[a-z0-9]+(?:-[a-z0-9]+)*)$'
+          maxLength: 143
+        policy_artifact_id: {type: string, minLength: 1, maxLength: 256}
+        policy_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
     PlatformCellRoutePublicationReference:
       type: object
       additionalProperties: false
@@ -33918,6 +33937,8 @@ components:
       required: [reference, parent, route, tls]
       description: Retained immutable compiler inputs, embedded in the signed DNS artifact for offline recovery. All artifact signatures, exact membership and reference pins are checked. Compilation and serving publication also require the exact currently selected Cell publication; a shadow or stale release cannot authorize DNS.
       properties:
+        producer_policy:
+          $ref: "#/components/schemas/PlatformPublicationPrecondition"
         reference: {$ref: "#/components/schemas/PlatformCellRoutePublicationReference"}
         parent: {$ref: "#/components/schemas/PlatformArtifact"}
         route: {$ref: "#/components/schemas/PlatformArtifact"}

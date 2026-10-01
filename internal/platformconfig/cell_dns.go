@@ -33,7 +33,7 @@ func validateCellDNSIntent(in PlatformIntent) error {
 			return fmt.Errorf("DNS topology must use exact neutral routing Cells")
 		}
 	}
-	return nil
+	return validateDNSRouteSourceDeclarations(in)
 }
 
 func validateCellDNSInputs(intent PlatformIntent, publications []CellRoutePublicationInput, snapshot RuntimeSnapshot) error {
@@ -96,6 +96,9 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 		return nil, err
 	}
 	if err := validateRouteAuthorityTransitionInputs(intent, publications, previous); err != nil {
+		return nil, err
+	}
+	if err := validateDNSRouteSourceBindings(intent, publications, previous); err != nil {
 		return nil, err
 	}
 	if policy.DNSReadiness == nil || ValidateDNSReadinessPolicy(policy.DNSReadiness) != nil || validateDNSEdgeEndpoints(snapshot.DNSEdgeEndpoints, snapshot.CapturedAt) != nil {

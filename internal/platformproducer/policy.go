@@ -17,7 +17,7 @@ const (
 	Schema                     = "fugue.platform.producer/v1"
 	Scope                      = "platform-config-producer"
 	Actor                      = "platform-config-producer"
-	PolicyReleaseMetadata      = "producer_policy_release_id"
+	PolicyReleaseMetadata      = platformconfig.ProducerPolicyReleaseMetadata
 	SourceDigestMetadata       = "producer_source_digest"
 	StaticIntentIDMetadata     = "producer_static_intent_id"
 	StaticIntentDigestMetadata = "producer_static_intent_digest"

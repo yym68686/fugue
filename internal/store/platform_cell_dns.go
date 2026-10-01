@@ -9,6 +9,7 @@ import (
 	"fugue/internal/cellpublication"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
 )
 
@@ -18,6 +19,9 @@ func validateCellDNSReferencesInState(state *model.State, child model.PlatformAr
 	_, err := cellpublication.VerifyDNSArtifact(child, keys)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrConflict, err)
+	}
+	if err := validateDNSRouteProducerBindings(state, child, keys); err != nil {
+		return err
 	}
 	fail := func() error { return fmt.Errorf("%w: referenced Cell publication is no longer selected", ErrConflict) }
 	dependencies, err := platformconfig.DNSRouteDependencies(child)
@@ -71,6 +75,69 @@ func validateCellDNSReferencesInState(state *model.State, child model.PlatformAr
 				return fail()
 			}
 		}
+	}
+	return nil
+}
+
+func validateDNSRouteProducerBindings(state *model.State, child model.PlatformArtifact, keys bundleauth.Keyring) error {
+	sources, err := platformconfig.DNSRouteSourceAuthorizations(child)
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrConflict, err)
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	fail := func() error { return fmt.Errorf("%w: DNS routing source producer policy binding invalid", ErrConflict) }
+	for _, source := range sources {
+		index := platformArtifactIndex(state.PlatformArtifacts, source.PolicyArtifactID)
+		if index < 0 {
+			return fail()
+		}
+		artifact := state.PlatformArtifacts[index]
+		policy, err := platformproducer.Decode(artifact)
+		role := platformconfig.PublicationRoleCellRoutes
+		if source.ScopeKey == platformconfig.GlobalScopeKey {
+			role = ""
+		}
+		if err != nil || artifact.ContentHash != source.PolicyDigest || artifact.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass || policy.TargetScope != source.ScopeKey || policy.PublicationRole != role || policy.Mode != "serving" || policy.Serving.SinglePublication {
+			return fail()
+		}
+	}
+	check := func(parent model.PlatformArtifact, binding *model.PlatformPublicationPrecondition) error {
+		if binding == nil {
+			return fail()
+		}
+		index := platformArtifactReleaseIndex(state.PlatformArtifactReleases, binding.ReleaseID)
+		if index < 0 {
+			return fail()
+		}
+		release := state.PlatformArtifactReleases[index]
+		scope, err := platformproducer.PolicyScopeForTarget(parent.ScopeKey)
+		policyIndex := platformArtifactIndex(state.PlatformArtifacts, binding.ArtifactID)
+		if policyIndex < 0 {
+			return fail()
+		}
+		artifact := state.PlatformArtifacts[policyIndex]
+		if err != nil || release.ArtifactID != binding.ArtifactID || artifact.ContentHash != binding.ContentHash || release.Generation != artifact.Generation || release.ScopeKey != scope || release.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || release.ReleaseChannel != "shadow" || release.FencingToken != binding.FencingToken || (release.Status != model.PlatformArtifactReleaseStatusActive && release.Status != model.PlatformArtifactReleaseStatusSuperseded) || parent.Metadata[platformproducer.PolicyReleaseMetadata] != release.ID {
+			return fail()
+		}
+		return nil
+	}
+	cells, err := platformconfig.DecodeCellRoutePublications(child)
+	if err != nil {
+		return fail()
+	}
+	for _, cell := range cells {
+		if err := check(cell.Parent, cell.ProducerPolicy); err != nil {
+			return err
+		}
+	}
+	previous, err := platformconfig.DecodePreviousTrafficPublication(child)
+	if err != nil {
+		return fail()
+	}
+	if previous != nil {
+		return check(previous.Parent, previous.ProducerPolicy)
 	}
 	return nil
 }

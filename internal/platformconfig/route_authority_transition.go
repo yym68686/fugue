@@ -31,11 +31,12 @@ type PreviousTrafficPublicationReference struct {
 }
 
 type PreviousTrafficPublicationInput struct {
-	Reference PreviousTrafficPublicationReference `json:"reference"`
-	Parent    model.PlatformArtifact              `json:"parent"`
-	Route     model.PlatformArtifact              `json:"route"`
-	TLS       model.PlatformArtifact              `json:"tls"`
-	DNS       model.PlatformArtifact              `json:"dns"`
+	ProducerPolicy *model.PlatformPublicationPrecondition `json:"producer_policy,omitempty"`
+	Reference      PreviousTrafficPublicationReference    `json:"reference"`
+	Parent         model.PlatformArtifact                 `json:"parent"`
+	Route          model.PlatformArtifact                 `json:"route"`
+	TLS            model.PlatformArtifact                 `json:"tls"`
+	DNS            model.PlatformArtifact                 `json:"dns"`
 }
 
 type RouteAuthorityTransition struct {

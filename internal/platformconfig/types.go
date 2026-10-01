@@ -22,6 +22,7 @@ const (
 // PlatformIntent is the versioned description of what Fugue should serve.
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
+	DNSRouteSources          []DNSRouteSourceAuthorization   `json:"dns_route_sources,omitempty"`
 	RouteAuthorityTransition *RouteAuthorityTransition       `json:"route_authority_transition,omitempty"`
 	CellRoutePublications    []CellRoutePublicationReference `json:"cell_route_publications,omitempty"`
 	PublicationRole          string                          `json:"publication_role,omitempty"`
@@ -539,6 +540,11 @@ func Compile(req CompileRequest) (CompileResult, error) {
 
 func normalizeIntent(in PlatformIntent) PlatformIntent {
 	out := in
+	out.DNSRouteSources = append([]DNSRouteSourceAuthorization(nil), in.DNSRouteSources...)
+	sort.Slice(out.DNSRouteSources, func(i, j int) bool {
+		a, b := out.DNSRouteSources[i], out.DNSRouteSources[j]
+		return a.ScopeKey+"\x00"+a.PolicyArtifactID < b.ScopeKey+"\x00"+b.PolicyArtifactID
+	})
 	out.CellRoutePublications = append([]CellRoutePublicationReference(nil), in.CellRoutePublications...)
 	sort.Slice(out.CellRoutePublications, func(i, j int) bool {
 		return out.CellRoutePublications[i].AuthorityCellID < out.CellRoutePublications[j].AuthorityCellID

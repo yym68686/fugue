@@ -31,10 +31,11 @@ type CellRoutePublicationReference struct {
 // and recovery. Callers verify every embedded signature with their current
 // keyring. A publisher additionally checks current Cell authority transactionally.
 type CellRoutePublicationInput struct {
-	Reference CellRoutePublicationReference `json:"reference"`
-	Parent    model.PlatformArtifact        `json:"parent"`
-	Route     model.PlatformArtifact        `json:"route"`
-	TLS       model.PlatformArtifact        `json:"tls"`
+	ProducerPolicy *model.PlatformPublicationPrecondition `json:"producer_policy,omitempty"`
+	Reference      CellRoutePublicationReference          `json:"reference"`
+	Parent         model.PlatformArtifact                 `json:"parent"`
+	Route          model.PlatformArtifact                 `json:"route"`
+	TLS            model.PlatformArtifact                 `json:"tls"`
 }
 
 func (r CellRoutePublicationReference) Validate() error {

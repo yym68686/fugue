@@ -17,3 +17,7 @@ const CellDNSCapabilityV1 = "cell_dns_v1"
 // DNSAuthorityTransitionCapabilityV1 verifies signed previous global sources,
 // explicit alias equivalence and coherent per-physical-target proof alternatives.
 const DNSAuthorityTransitionCapabilityV1 = "dns_authority_transition_v1"
+
+// DNSRouteSourcesCapabilityV1 verifies approved source configuration separately
+// from exact observed serving publication bindings and DNS candidate policy.
+const DNSRouteSourcesCapabilityV1 = "dns_route_sources_v1"
