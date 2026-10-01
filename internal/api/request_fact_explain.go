@@ -95,7 +95,42 @@ func (s *Server) explainRecordedRequest(ctx context.Context, id string, since, n
 		}
 	}
 	result.ErrorClass, result.FailurePlane = "none", "none"
+	streamFallback, _ := summary["request_body_buffer_stream_fallback"].(bool)
+	bufferFailure := result.StatusCode >= 500 && !streamFallback && stringField(summary, "request_body_buffer_error") != ""
+	// Copy only bounded typed evidence. Raw error messages can contain local
+	// paths or credentials; historical records may lack all budget fields.
+	for _, key := range []string{"request_body_buffer_reason"} {
+		if value := requestEvidenceToken(stringField(summary, key)); value != "" {
+			result.Evidence[key] = value
+		}
+	}
+	for _, key := range []string{"request_body_buffer_budget_bytes", "request_body_buffer_used_bytes", "request_body_buffer_active_requests", "request_body_limit_bytes"} {
+		if value, ok := appObservabilitySummaryMilliseconds(summary, key); ok {
+			result.Evidence[key] = fmt.Sprint(value)
+		}
+	}
+	if value, ok := summary["request_body_buffer_stream_fallback"].(bool); ok {
+		result.Evidence["request_body_buffer_stream_fallback"] = fmt.Sprint(value)
+	}
+	if snapshot, ok := summary["request_body_buffer_budget_snapshot"].(map[string]any); ok {
+		for _, key := range []string{"available_bytes", "reserve_bytes", "requested_bytes", "budget_bytes", "used_bytes", "active_requests"} {
+			if value, ok := appObservabilitySummaryMilliseconds(snapshot, key); ok {
+				result.Evidence["buffer_decision_"+key] = fmt.Sprint(value)
+			}
+		}
+		for _, key := range []string{"sampled_at", "mode", "path_errno", "parent_errno", "reason"} {
+			if value := requestEvidenceToken(stringField(snapshot, key)); value != "" {
+				result.Evidence["buffer_decision_"+key] = value
+			}
+		}
+	}
 	switch {
+	case bufferFailure:
+		result.ErrorClass, result.FailurePlane = "edge.body_buffer_error", "data_plane"
+	case streamFallback && result.StatusCode >= 400 && summary["origin_connected"] == true:
+		// An origin may reject authentication before consuming the upload.
+		// Partial client reads then describe timing, not the source of the 4xx.
+		result.ErrorClass, result.FailurePlane = "http.error_response", "unknown"
 	case stringField(summary, "request_body_read_error") != "":
 		result.BodyReadErrorCount = 1
 		result.ErrorClass, result.FailurePlane = "edge.body_read_error", "data_plane"
@@ -115,6 +150,10 @@ func (s *Server) explainRecordedRequest(ctx context.Context, id string, since, n
 		OriginTTFBMS: result.OriginTTFBMS, OriginResponseWaitMS: result.OriginResponseWaitMS,
 	})
 	result.FailureContracts = requestFailureContractsFromAttribution(result.Attribution)
+	if bufferFailure {
+		result.Attribution = []string{"edge_request_body_buffer"}
+		result.FailureContracts = []string{"edge_worker"}
+	}
 	return result
 }
 

@@ -11,6 +11,7 @@ const (
 	PlatformErrorClassOriginDNS             = "origin_dns"
 	PlatformErrorClassOriginConnect         = "origin_connect"
 	PlatformErrorClassOriginUnavailable     = "origin_unavailable"
+	PlatformErrorClassEdgeBodyBuffer        = "edge_body_buffer"
 	PlatformErrorClassDecisionMissing       = "decision_missing"
 	PlatformErrorClassEvidenceUnknown       = "evidence_unknown"
 	PlatformErrorClassLatencyRegression     = "latency_regression"
@@ -26,6 +27,7 @@ var platformErrorClasses = map[string]struct{}{
 	PlatformErrorClassOriginDNS:             {},
 	PlatformErrorClassOriginConnect:         {},
 	PlatformErrorClassOriginUnavailable:     {},
+	PlatformErrorClassEdgeBodyBuffer:        {},
 	PlatformErrorClassDecisionMissing:       {},
 	PlatformErrorClassEvidenceUnknown:       {},
 	PlatformErrorClassLatencyRegression:     {},

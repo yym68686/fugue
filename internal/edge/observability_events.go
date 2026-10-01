@@ -123,6 +123,18 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 	if errText := logSafeValue(observed.RequestBodyReadError); errText != "-" {
 		summary["request_body_read_error"] = errText
 	}
+	if observed.RequestBodyBufferAttempted {
+		summary["request_body_buffer_attempted"] = true
+		summary["request_body_buffer_stream_fallback"] = observed.RequestBodyStreamFallback
+		summary["request_body_buffer_reason"] = observed.RequestBodyBufferReason
+		summary["request_body_limit_bytes"] = observed.RequestBodyLimit
+		summary["request_body_buffer_budget_bytes"] = observed.RequestBodyBufferBudget
+		summary["request_body_buffer_used_bytes"] = observed.RequestBodyBufferUsed
+		summary["request_body_buffer_active_requests"] = observed.RequestBodyBufferActive
+		if observed.RequestBodyBudgetSnapshot != nil {
+			summary["request_body_buffer_budget_snapshot"] = observed.RequestBodyBudgetSnapshot
+		}
+	}
 	if observed.RequestBodyBuffered {
 		summary["request_body_buffered"] = true
 		summary["request_body_buffer_bytes"] = nonNegativeInt64(observed.RequestBodyBufferBytes)
@@ -235,6 +247,9 @@ func edgePlatformErrorClass(observed edgeProxyObservation) string {
 	}
 	if class := model.PlatformErrorClassForRouteStatus(observed.Route.Status, observed.Route.StatusReason); class != model.PlatformErrorClassNone {
 		return class
+	}
+	if observed.StatusCode >= 500 && !observed.RequestBodyStreamFallback && observed.RequestBodyBufferError != "" {
+		return model.PlatformErrorClassEdgeBodyBuffer
 	}
 	if strings.TrimSpace(observed.OriginDNSError) != "" {
 		return model.PlatformErrorClassOriginDNS

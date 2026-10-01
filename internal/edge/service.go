@@ -334,6 +334,12 @@ type platformReleaseMetricKey struct {
 }
 
 type edgeProxyObservation struct {
+	RequestBodyBufferAttempted bool
+	RequestBodyStreamFallback  bool
+	RequestBodyBufferReason    string
+	RequestBodyLimit           int64
+	RequestBodyBudgetSnapshot  *edgeBodyBudgetSnapshot
+
 	originTraceMu           *sync.RWMutex
 	ReceivedAt              time.Time
 	Host                    string
@@ -1253,14 +1259,14 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	observed.CacheKeyHash = cacheDecision.KeyHash
 	observed.AssetClass = cacheDecision.AssetClass
 	defer func() {
-		observed = observed.originTraceSnapshot()
-		observed.Duration = time.Since(startedAt)
-		if !observed.InternalWarmup {
-			s.recordProxyObservation(observed)
+		completed := observed.originTraceSnapshot()
+		completed.Duration = time.Since(startedAt)
+		if !completed.InternalWarmup {
+			s.recordProxyObservation(completed)
 		}
-		s.logProxyObservation(observed)
-		if s.Logger != nil && (observed.HealthProbe || observed.InternalWarmup) {
-			s.Logger.Printf("edge_request_audit request_source=%s probe_id=%s cache_warmup_id=%s hostname=%s target_ip=%s source_node=%s path=%s user_agent=%s reached_app=%t status=%d request_count=1", edgeRequestSourceForObservation(observed), logSafeValue(observed.HealthProbeID), logSafeValue(observed.CacheWarmupID), logSafeValue(observed.Host), logSafeValue(observed.HealthProbeTargetIP), logSafeValue(firstNonEmpty(observed.HealthProbeSource, s.Config.EdgeID)), logSafeValue(observed.Path), logSafeValue(observed.HealthProbeUserAgent), observed.HealthProbe && observed.OriginWroteRequest, observed.StatusCode)
+		s.logProxyObservation(completed)
+		if s.Logger != nil && (completed.HealthProbe || completed.InternalWarmup) {
+			s.Logger.Printf("edge_request_audit request_source=%s probe_id=%s cache_warmup_id=%s hostname=%s target_ip=%s source_node=%s path=%s user_agent=%s reached_app=%t status=%d request_count=1", edgeRequestSourceForObservation(completed), logSafeValue(completed.HealthProbeID), logSafeValue(completed.CacheWarmupID), logSafeValue(completed.Host), logSafeValue(completed.HealthProbeTargetIP), logSafeValue(firstNonEmpty(completed.HealthProbeSource, s.Config.EdgeID)), logSafeValue(completed.Path), logSafeValue(completed.HealthProbeUserAgent), completed.HealthProbe && completed.OriginWroteRequest, completed.StatusCode)
 		}
 	}()
 
@@ -1643,6 +1649,7 @@ func observeEdgeProxyRequestBody(r *http.Request, observed *edgeProxyObservation
 	if r == nil || r.Body == nil || observed == nil {
 		return
 	}
+	observed.initializeOriginTrace()
 	r.Body = &edgeProxyObservedRequestBody{
 		ReadCloser:  r.Body,
 		observation: observed,
@@ -1655,12 +1662,15 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 	}
 	manager := s.edgeRequestBodyBufferManager()
 	maxBytes := s.requestBodyBufferMaxBytes(manager)
+	observed.RequestBodyBufferAttempted = true
+	observed.RequestBodyLimit = maxBytes
 	if maxBytes <= 0 {
 		return false, 0
 	}
 	if r.ContentLength > maxBytes {
 		err := fmt.Errorf("request body exceeds edge buffer limit: content_length=%d max_bytes=%d", r.ContentLength, maxBytes)
 		observed.RequestBodyBufferError = err.Error()
+		observed.RequestBodyBufferReason = "request_too_large"
 		observed.RequestBodyBufferPath = manager.path
 		observed.RequestBodyBufferBudget, observed.RequestBodyBufferUsed, observed.RequestBodyBufferActive = manager.stats()
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
@@ -1672,12 +1682,14 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 	}
 	reservation, err := manager.reserve(reservationBytes)
 	if err != nil {
-		observed.RequestBodyBufferError = err.Error()
-		observed.RequestBodyBufferPath = manager.path
-		observed.RequestBodyBufferBudget, observed.RequestBodyBufferUsed, observed.RequestBodyBufferActive = manager.stats()
-		http.Error(w, "edge request body buffer unavailable", http.StatusServiceUnavailable)
-		return true, http.StatusServiceUnavailable
+		observed.captureBodyBufferError(err, "reservation_failed")
+		manager.recordStreamFallback(observed.RequestBodyBufferReason)
+		streamUnconsumedRequestBody(r, observed, maxBytes)
+		return false, 0
 	}
+	snapshot := reservation.snapshot
+	observed.RequestBodyBudgetSnapshot = &snapshot
+
 	keepReservation := false
 	defer func() {
 		if reservation != nil && !keepReservation {
@@ -1685,20 +1697,24 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 		}
 	}()
 	started := time.Now()
-	observed.RequestBodyBuffered = true
 	observed.RequestBodyBufferPath = manager.path
 	observed.RequestBodyBufferBudget, observed.RequestBodyBufferUsed, observed.RequestBodyBufferActive = manager.stats()
 	if err := os.MkdirAll(observed.RequestBodyBufferPath, 0o700); err != nil {
-		observed.RequestBodyBufferError = err.Error()
-		http.Error(w, "edge request body buffer unavailable", http.StatusServiceUnavailable)
-		return true, http.StatusServiceUnavailable
+		observed.captureBodyBufferError(err, "directory_create_failed")
+		manager.recordStreamFallback(observed.RequestBodyBufferReason)
+		streamUnconsumedRequestBody(r, observed, maxBytes)
+		return false, 0
 	}
 	file, err := os.CreateTemp(observed.RequestBodyBufferPath, "edge-request-body-*")
 	if err != nil {
-		observed.RequestBodyBufferError = err.Error()
-		http.Error(w, "edge request body buffer unavailable", http.StatusServiceUnavailable)
-		return true, http.StatusServiceUnavailable
+		observed.captureBodyBufferError(err, "file_create_failed")
+		manager.recordStreamFallback(observed.RequestBodyBufferReason)
+		streamUnconsumedRequestBody(r, observed, maxBytes)
+		return false, 0
 	}
+	observed.RequestBodyBuffered = true
+	observed.RequestBodyBufferReason = "buffered"
+
 	path := file.Name()
 	cleanup := func() {
 		_ = file.Close()
@@ -1735,13 +1751,14 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 	s.logRequestBodyBufferSlowIfNeeded(*observed, activeID)
 	closeErr := r.Body.Close()
 	var tooLargeErr edgeRequestBodyBufferTooLargeError
-	if errors.As(copyErr, &tooLargeErr) {
+	if errors.As(copyErr, &tooLargeErr) || edgeRequestBodyPolicyErrorIsTooLarge(copyErr) {
 		cleanup()
-		err := fmt.Errorf("request body exceeds edge buffer limit: read_bytes=%d max_bytes=%d", tooLargeErr.readBytes, tooLargeErr.maxBytes)
-		observed.RequestBodyBufferError = err.Error()
+		observed.RequestBodyBufferReason = "request_too_large"
+		observed.RequestBodyBufferError = copyErr.Error()
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return true, http.StatusRequestEntityTooLarge
 	}
+
 	if reservation != nil {
 		reservation.resize(written)
 		observed.RequestBodyBufferBudget, observed.RequestBodyBufferUsed, observed.RequestBodyBufferActive = manager.stats()
@@ -1752,13 +1769,25 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 			err = closeErr
 		}
 		cleanup()
-		observed.RequestBodyBufferError = err.Error()
+		observed.captureBodyBufferError(err, "body_read_failed")
+		if edgeRequestBodyPolicyErrorIsTimeout(r, err) {
+			observed.RequestBodyBufferReason = "request_timeout"
+			http.Error(w, "request timeout", http.StatusRequestTimeout)
+			return true, http.StatusRequestTimeout
+		}
+		var writeErr *edgeBodyBufferWriteError
+		if errors.As(err, &writeErr) {
+			observed.captureBodyBufferError(err, "file_write_failed")
+			http.Error(w, "edge request body buffer unavailable", http.StatusServiceUnavailable)
+			return true, http.StatusServiceUnavailable
+		}
 		observed.ClientCanceled = true
 		if w != nil {
 			w.WriteHeader(edgeStatusClientClosedRequest)
 		}
 		return true, edgeStatusClientClosedRequest
 	}
+
 	if r.ContentLength >= 0 && written != r.ContentLength {
 		cleanup()
 		err := fmt.Errorf("request body length mismatch: read %d of %d bytes", written, r.ContentLength)
@@ -1771,9 +1800,9 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		cleanup()
-		observed.RequestBodyBufferError = err.Error()
-		http.Error(w, "edge request body buffer unavailable", http.StatusInternalServerError)
-		return true, http.StatusInternalServerError
+		observed.captureBodyBufferError(err, "file_seek_failed")
+		http.Error(w, "edge request body buffer unavailable", http.StatusServiceUnavailable)
+		return true, http.StatusServiceUnavailable
 	}
 	r.Body = &edgeBufferedRequestBody{
 		file:        file,
@@ -1863,7 +1892,7 @@ func (s *Service) copyRequestBodyToBuffer(ctx context.Context, writer io.Writer,
 			}
 			s.updateActiveRequestBodyBufferRead(activeID, result, lastReadAt)
 			if writeErr != nil {
-				return result, writeErr
+				return result, &edgeBodyBufferWriteError{err: writeErr}
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
@@ -1973,14 +2002,16 @@ func (s *Service) requestBodyBufferEligible(r *http.Request, observed *edgeProxy
 func (b *edgeProxyObservedRequestBody) Read(data []byte) (int, error) {
 	n, err := b.ReadCloser.Read(data)
 	if b.observation != nil {
-		if n > 0 {
-			b.observation.RequestBodyReadBytes += int64(n)
-		}
-		if errors.Is(err, io.EOF) {
-			b.observation.RequestBodyEOF = true
-		} else if err != nil && strings.TrimSpace(b.observation.RequestBodyReadError) == "" {
-			b.observation.RequestBodyReadError = err.Error()
-		}
+		b.observation.withOriginTraceUpdate(func(o *edgeProxyObservation) {
+			if n > 0 {
+				o.RequestBodyReadBytes += int64(n)
+			}
+			if errors.Is(err, io.EOF) {
+				o.RequestBodyEOF = true
+			} else if err != nil && strings.TrimSpace(o.RequestBodyReadError) == "" {
+				o.RequestBodyReadError = err.Error()
+			}
+		})
 	}
 	return n, err
 }
@@ -2084,14 +2115,17 @@ type edgeRequestBodyBufferManager struct {
 	diskRatio    float64
 	used         int64
 	active       int64
+	sample       edgeBodyBudgetSnapshot
+	fallbacks    map[string]uint64
 	disabled     bool
 	reason       string
 }
 
 type edgeRequestBodyBufferReservation struct {
-	manager *edgeRequestBodyBufferManager
-	bytes   int64
-	once    sync.Once
+	manager  *edgeRequestBodyBufferManager
+	bytes    int64
+	snapshot edgeBodyBudgetSnapshot
+	once     sync.Once
 }
 
 func newEdgeRequestBodyBufferManager(cfg config.EdgeConfig) *edgeRequestBodyBufferManager {
@@ -2099,44 +2133,13 @@ func newEdgeRequestBodyBufferManager(cfg config.EdgeConfig) *edgeRequestBodyBuff
 	if path == "" {
 		path = "/var/lib/fugue/edge/request-body-buffer"
 	}
-	dynamic := cfg.RequestBodyBufferTotalMaxBytes <= 0
-	budget := cfg.RequestBodyBufferTotalMaxBytes
-	if dynamic {
-		budget = dynamicEdgeRequestBodyBufferBudget(path, cfg.RequestBodyBufferReserveBytes, cfg.RequestBodyBufferDiskRatio)
-	}
-	manager := &edgeRequestBodyBufferManager{
-		path:         path,
-		budget:       budget,
-		dynamic:      dynamic,
-		reserveBytes: cfg.RequestBodyBufferReserveBytes,
-		diskRatio:    cfg.RequestBodyBufferDiskRatio,
-	}
-	if !dynamic && budget <= 0 {
-		manager.disabled = true
-		manager.reason = "no request body buffer budget available"
-	}
-	return manager
+	m := &edgeRequestBodyBufferManager{path: path, budget: cfg.RequestBodyBufferTotalMaxBytes, dynamic: cfg.RequestBodyBufferTotalMaxBytes <= 0, reserveBytes: cfg.RequestBodyBufferReserveBytes, diskRatio: cfg.RequestBodyBufferDiskRatio}
+	m.refreshBudgetLocked()
+	return m
 }
 
 func dynamicEdgeRequestBodyBufferBudget(path string, reserveBytes int64, ratio float64) int64 {
-	if reserveBytes < 0 {
-		reserveBytes = 0
-	}
-	if ratio <= 0 || ratio > 1 {
-		ratio = 0.25
-	}
-	available, err := filesystemAvailableBytes(path)
-	if err != nil {
-		parent := filepath.Dir(strings.TrimSpace(path))
-		if parent == "" || parent == "." {
-			parent = "/"
-		}
-		available, err = filesystemAvailableBytes(parent)
-	}
-	if err != nil || available <= reserveBytes {
-		return 0
-	}
-	return int64(float64(available-reserveBytes) * ratio)
+	return sampleEdgeBodyBudget(path, reserveBytes, ratio).Budget
 }
 
 func filesystemAvailableBytes(path string) (int64, error) {
@@ -2172,23 +2175,22 @@ func (m *edgeRequestBodyBufferManager) reserve(bytes int64) (*edgeRequestBodyBuf
 	defer m.mu.Unlock()
 	m.refreshBudgetLocked()
 	if m.disabled || m.budget <= 0 {
-		reason := strings.TrimSpace(m.reason)
-		if reason == "" {
-			reason = "edge request body buffer disabled"
-		}
-		return nil, fmt.Errorf("%s", reason)
+		return nil, m.unavailableLocked(bytes, m.sample.Reason)
 	}
 	if bytes > m.budget {
-		return nil, fmt.Errorf("request body buffer reservation exceeds budget: bytes=%d budget=%d", bytes, m.budget)
+		return nil, m.unavailableLocked(bytes, "reservation_exceeds_budget")
 	}
-	if m.used+bytes > m.budget {
-		return nil, fmt.Errorf("request body buffer budget exhausted: requested=%d used=%d budget=%d active=%d", bytes, m.used, m.budget, m.active)
+	if bytes > m.budget-m.used {
+		return nil, m.unavailableLocked(bytes, "budget_in_use")
 	}
+	snapshot := m.decisionLocked(bytes)
+
 	m.used += bytes
 	m.active++
 	return &edgeRequestBodyBufferReservation{
-		manager: m,
-		bytes:   bytes,
+		manager:  m,
+		bytes:    bytes,
+		snapshot: snapshot,
 	}, nil
 }
 
@@ -2203,15 +2205,16 @@ func (m *edgeRequestBodyBufferManager) currentBudget() int64 {
 }
 
 func (m *edgeRequestBodyBufferManager) refreshBudgetLocked() {
-	if m == nil || !m.dynamic {
+	if m == nil {
 		return
 	}
-	m.budget = dynamicEdgeRequestBodyBufferBudget(m.path, m.reserveBytes, m.diskRatio)
-	if m.budget <= 0 {
-		m.reason = "no request body buffer budget available"
+	if !m.dynamic {
+		m.sample = edgeBodyBudgetSnapshot{Mode: "fixed", Budget: m.budget, SampledAt: time.Now().UTC(), Reason: "available"}
 		return
 	}
-	m.reason = ""
+	m.sample = sampleEdgeBodyBudget(m.path, m.reserveBytes, m.diskRatio)
+	m.budget = m.sample.Budget
+	m.reason = m.sample.Reason
 }
 
 func (r *edgeRequestBodyBufferReservation) resize(bytes int64) {
@@ -2239,19 +2242,16 @@ func (r *edgeRequestBodyBufferReservation) grow(bytes int64) error {
 	defer r.manager.mu.Unlock()
 	r.manager.refreshBudgetLocked()
 	if r.manager.disabled || r.manager.budget <= 0 {
-		reason := strings.TrimSpace(r.manager.reason)
-		if reason == "" {
-			reason = "edge request body buffer disabled"
-		}
-		return fmt.Errorf("%s", reason)
+		return r.manager.unavailableLocked(bytes, r.manager.sample.Reason)
 	}
 	if bytes > r.manager.budget {
-		return fmt.Errorf("request body buffer reservation exceeds budget: bytes=%d budget=%d", bytes, r.manager.budget)
+		return r.manager.unavailableLocked(bytes, "reservation_exceeds_budget")
 	}
 	delta := bytes - r.bytes
-	if r.manager.used+delta > r.manager.budget {
-		return fmt.Errorf("request body buffer budget exhausted: requested=%d used=%d budget=%d active=%d", delta, r.manager.used, r.manager.budget, r.manager.active)
+	if delta > r.manager.budget-r.manager.used {
+		return r.manager.unavailableLocked(delta, "budget_in_use")
 	}
+
 	r.manager.used += delta
 	r.bytes = bytes
 	return nil
@@ -2758,6 +2758,7 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	snapshot := s.metricSnapshot()
 	status := snapshot.Status
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	s.edgeRequestBodyBufferManager().writeMetrics(w)
 	fmt.Fprintln(w, "# HELP fugue_edge_info Static low-cardinality fugue-edge identity labels.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_info gauge")
 	fmt.Fprintf(w, "fugue_edge_info{component=\"worker\",group=\"%s\",slot=\"%s\",release_epoch=\"%s\"} 1\n", prometheusLabelValue(status.EdgeGroupID), prometheusLabelValue(s.Config.EdgeSlot), prometheusLabelValue(s.Config.EdgeReleaseEpoch))

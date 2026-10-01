@@ -13,6 +13,52 @@ import (
 	"fugue/internal/observability"
 )
 
+func TestRequestExplainBufferFailureAndSuccessfulFallback(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		status   int
+		fallback bool
+		want     string
+	}{
+		{"historical-buffer-rejection", 503, false, "edge.body_buffer_error"},
+		{"recovered", 200, true, "none"},
+		{"origin-early-auth", 401, true, "http.error_response"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, server, _, adminKey, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+			at := time.Now().UTC().Add(-time.Minute)
+			summary := map[string]any{"edge_request_id": "edge_example", "request_body_complete": tc.status != 503 && tc.status != 401, "request_body_buffer_error": "/private/credential secret", "request_body_buffer_budget_bytes": 0}
+			if tc.fallback {
+				summary["request_body_buffer_stream_fallback"] = true
+				summary["origin_connected"] = true
+				summary["request_body_buffer_budget_snapshot"] = map[string]any{"available_bytes": 17, "reserve_bytes": 20, "budget_bytes": 0, "reason": "disk_reserve_threshold", "sampled_at": at.Format(time.RFC3339Nano)}
+			}
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := json.Marshal(summary)
+				json.NewEncoder(w).Encode(map[string]any{"ts": at.Format(time.RFC3339Nano), "status_code": tc.status, "evidence_source": "request_facts", "summary_json": string(b)})
+			}))
+			defer backend.Close()
+			server.observabilityConfig = observability.Config{Enabled: true, ClickHouseDSN: backend.URL}.Normalize()
+			response := performJSONRequest(t, server, http.MethodGet, "/v1/admin/requests/edge_example/explain?since=1h", adminKey, nil)
+			var result model.RequestExplainResponseEnvelope
+			mustDecodeJSON(t, response, &result)
+			if result.Explain.ErrorClass != tc.want || result.Explain.Evidence["request_body_buffer_budget_bytes"] != "0" {
+				t.Fatalf("explain=%+v", result.Explain)
+			}
+			if !tc.fallback && (len(result.Explain.Attribution) != 1 || result.Explain.Attribution[0] != "edge_request_body_buffer") {
+				t.Fatalf("attribution=%v", result.Explain.Attribution)
+			}
+			if tc.fallback && result.Explain.Evidence["buffer_decision_available_bytes"] != "17" {
+				t.Fatal("snapshot lost")
+			}
+			if strings.Contains(response.Body.String(), "private") || strings.Contains(response.Body.String(), "credential") {
+				t.Fatal("raw error leaked")
+			}
+		})
+	}
+}
+
 func TestRequestExplainQueriesRealIDsAcrossRequestFactsAndPlatformEvents(t *testing.T) {
 	t.Parallel()
 	for _, source := range []string{"request_facts", "app_events"} {

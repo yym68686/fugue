@@ -7,6 +7,28 @@ info:
     Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
 servers:
   - url: /
+x-fugue-edge-request-body-buffer:
+  semantics: >-
+    SSE JSON request spooling is an optimization, not serving authority or an
+    application authentication boundary. If reservation or temporary-file setup
+    fails before any body is consumed or origin contacted, the worker streams
+    the original body with the same selected body-size limit and existing signed
+    route concurrency and timeout constraints. It never retries or replays a
+    POST. Failure after consuming body bytes cannot fall back; size violations
+    return 413, policy deadlines 408, client cancellation 499, and buffer storage
+    failures 503 with platform_error_class=edge_body_buffer. Stream fallback
+    alone is not a platform request failure. Request facts include
+    request_body_buffer_attempted, request_body_buffer_stream_fallback,
+    request_body_buffer_reason, request_body_limit_bytes, and an immutable
+    request_body_buffer_budget_snapshot captured at the reservation decision.
+    The snapshot reports mode, budget/used/active, requested bytes, reserve,
+    disk ratio, filesystem sampling time, available bytes when observed,
+    parent fallback and errno when present; absent values mean unknown.
+    Buffer rejection evidence is emitted even when buffering never began.
+    Request explain reports edge.body_buffer_error before generic incomplete
+    body attribution, including historical failures without snapshot fields;
+    successful stream fallbacks retain their real origin outcome. No route,
+    configuration artifact, readiness authorization or positive LKG is changed.
 x-fugue-authority-identity-labels:
   semantics: >-
     Explicit runtime authority labels accept canonical edge-group-* and cell-*
