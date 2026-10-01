@@ -115,10 +115,27 @@ func TestAgentCapacityUsesOriginalAuthenticatedFactsAndRejectsUnknowns(t *testin
 			}))
 			defer server.Close()
 			client := &clusterNodeClient{baseURL: server.URL, client: server.Client(), bearerToken: "synthetic-capacity-token"}
-			e, err := readAgentCapacity(context.Background(), client, "edge-a", "8.8.8.8", agentedge.CapacityPolicy{MaxNodeCPUPercent: 85, MaxNodeMemoryPercent: 85, FactMaxAgeSeconds: 120}, clockNow)
+			var failures []string
+			e, err := readAgentCapacityWithObserver(context.Background(), client, "edge-a", "8.8.8.8", agentedge.CapacityPolicy{MaxNodeCPUPercent: 85, MaxNodeMemoryPercent: 85, FactMaxAgeSeconds: 120}, clockNow, func(stage string) { failures = append(failures, stage) })
 			if scenario != "fresh" && scenario != "collected during read" {
 				if err == nil {
 					t.Fatal("invalid capacity authorized an Edge")
+				}
+				want := "agent-capacity-node-unavailable"
+				switch scenario {
+				case "expired during recheck", "old cpu":
+					want = "agent-capacity-expired"
+				case "clock moved backwards", "future memory", "previous node metrics":
+					want = "agent-capacity-time-invalid"
+				case "missing cpu", "missing memory", "foreign summary":
+					want = "agent-capacity-summary-unavailable"
+				case "cpu saturated", "memory saturated":
+					want = "agent-capacity-pressure"
+				case "changed uid", "changed allocatable", "drained during observation":
+					want = "agent-capacity-node-changed"
+				}
+				if len(failures) != 1 || failures[0] != want {
+					t.Fatalf("wrong bounded failure observation: %v, want %s", failures, want)
 				}
 				return
 			}
@@ -126,7 +143,7 @@ func TestAgentCapacityUsesOriginalAuthenticatedFactsAndRejectsUnknowns(t *testin
 			if scenario == "collected during read" {
 				wantObserved = now.Add(time.Second)
 			}
-			if err != nil || !e.ObservedAt.Equal(wantObserved) || !e.ValidUntil.Equal(wantObserved.Add(120*time.Second)) || e.NodeUID != "edge-a-uid" || reads != 2 {
+			if err != nil || len(failures) != 0 || !e.ObservedAt.Equal(wantObserved) || !e.ValidUntil.Equal(wantObserved.Add(120*time.Second)) || e.NodeUID != "edge-a-uid" || reads != 2 {
 				t.Fatalf("original capacity identity/lifetime was lost: %+v %v", e, err)
 			}
 		})

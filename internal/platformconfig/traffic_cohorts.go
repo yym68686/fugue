@@ -94,11 +94,25 @@ func TrafficCanaryContains(groups []string, group string) bool {
 // the complete policy signed inside a child artifact. Legacy artifacts without
 // cohorts remain readable, but cannot authorize a new gray TrafficReleaseSet.
 func ValidateTrafficCohortProjection(parent, child model.PlatformArtifact) error {
-	var policy PolicySnapshot
 	raw, err := json.Marshal(child.Content["policy"])
 	if err != nil {
 		return err
 	}
+	key, cacheable := trafficProjectionKey(parent, child, raw)
+	if cacheable && trafficProjectionCached(key) {
+		return nil
+	}
+	if err := validateTrafficCohortPolicy(parent, child, raw); err != nil {
+		return err
+	}
+	if cacheable {
+		cacheTrafficProjection(key)
+	}
+	return nil
+}
+
+func validateTrafficCohortPolicy(parent, child model.PlatformArtifact, raw []byte) error {
+	var policy PolicySnapshot
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&policy) != nil || decoder.Decode(&struct{}{}) != io.EOF {

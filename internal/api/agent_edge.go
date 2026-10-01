@@ -173,8 +173,12 @@ func (s *Server) agentTopology(p agentedge.AuthorityPolicy) (edgetopology.Intent
 }
 
 func (s *Server) agentCellAuthorization(p agentedge.AuthorityPolicy, topology edgetopology.Intent, cell edgetopology.AuthorityCell) (agentCellSource, error) {
+	return s.agentCellAuthorizationWithReader(p, topology, cell, newConsumerArtifactReader(s.store.GetPlatformArtifact))
+}
+
+func (s *Server) agentCellAuthorizationWithReader(p agentedge.AuthorityPolicy, topology edgetopology.Intent, cell edgetopology.AuthorityCell, readArtifact func(string) (model.PlatformArtifact, error)) (agentCellSource, error) {
 	group := cell.ServingGroupID()
-	snapshot, found, err := s.edgeRouteIntentSnapshotFromTrafficRelease(group)
+	snapshot, found, err := s.edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group, readArtifact)
 	if err != nil || !found || snapshot.TrafficRelease == nil {
 		return agentCellSource{}, errAgentEdgeUnavailable
 	}
@@ -183,7 +187,7 @@ func (s *Server) agentCellAuthorization(p agentedge.AuthorityPolicy, topology ed
 	if err != nil || !found || parent.ID != b.ReleaseSetID || parent.ContentHash != b.ReleaseSetDigest || release.ID != b.ReleaseID || release.FencingToken != b.FencingToken {
 		return agentCellSource{}, errAgentEdgeUnavailable
 	}
-	route, err := s.store.GetPlatformArtifact(b.RouteArtifactID)
+	route, err := readArtifact(b.RouteArtifactID)
 	if err != nil || route.ContentHash != b.RouteArtifactDigest || s.store.VerifyPlatformArtifactIntegrity(route) != nil {
 		return agentCellSource{}, errAgentEdgeUnavailable
 	}
@@ -340,12 +344,13 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 	}
 	defer client.closeIdleConnections()
 	sources := map[string]agentCellSource{}
+	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
 	for _, cell := range topology.Cells {
 		if ctx.Err() != nil {
 			return result, p, diagnostics, ctx.Err()
 		}
 		observed := s.observeOperation("agent-cell-authorization")
-		source, e := s.agentCellAuthorization(p, topology, cell)
+		source, e := s.agentCellAuthorizationWithReader(p, topology, cell, readArtifact)
 		observed()
 		if e == nil {
 			sources[cell.ID] = source
@@ -432,7 +437,9 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 				return
 			}
 			observed := s.observeOperation("agent-observation")
-			value, reason := captureAgentEdgeObservation(ctx, client, p, edge, node, source, prober)
+			value, reason := captureAgentEdgeObservationWithObserver(ctx, client, p, edge, node, source, prober, func(stage string) {
+				s.operationObservations().Observe(stage, 0)
+			})
 			observed()
 			mu.Lock()
 			defer mu.Unlock()
@@ -518,6 +525,13 @@ func captureAgentEdgeObservation(ctx context.Context, client *clusterNodeClient,
 	candidate agentedge.Candidate
 	fact      edgetopology.RouteFact
 }, string) {
+	return captureAgentEdgeObservationWithObserver(ctx, client, p, edge, node, source, probe, nil)
+}
+
+func captureAgentEdgeObservationWithObserver(ctx context.Context, client *clusterNodeClient, p agentedge.AuthorityPolicy, edge edgetopology.Edge, node model.EdgeNode, source agentCellSource, probe agentEdgeProbeFunc, observe func(string)) (struct {
+	candidate agentedge.Candidate
+	fact      edgetopology.RouteFact
+}, string) {
 	type resultType = struct {
 		candidate agentedge.Candidate
 		fact      edgetopology.RouteFact
@@ -528,12 +542,15 @@ func captureAgentEdgeObservation(ctx context.Context, client *clusterNodeClient,
 		if err != nil || !platformconfig.PublicDNSFlattenIP(ip) {
 			continue
 		}
-		capacity, err := readAgentCapacity(ctx, client, node.ID, address, p.Capacity, time.Now)
+		capacity, err := readAgentCapacityWithObserver(ctx, client, node.ID, address, p.Capacity, time.Now, observe)
 		if err != nil {
 			continue
 		}
 		observed, until := capacity.ObservedAt, capacity.ValidUntil
 		if node.LastHeartbeatAt == nil || node.LastHeartbeatAt.After(time.Now()) {
+			if observe != nil {
+				observe("agent-heartbeat-unavailable")
+			}
 			return fail("heartbeat_unavailable")
 		}
 		if node.LastHeartbeatAt.Before(observed) {
@@ -559,6 +576,13 @@ func captureAgentEdgeObservation(ctx context.Context, client *clusterNodeClient,
 				b.ReleaseSetID != source.parent.ID || b.ReleaseSetDigest != source.parent.ContentHash || b.RouteArtifactID != source.route.ID || b.RouteArtifactDigest != source.route.ContentHash ||
 				b.ReleaseID != source.release.ID || b.ReleaseChannel != source.release.ReleaseChannel || b.FencingToken != source.release.FencingToken || b.ScopeKey != source.publication.ScopeKey ||
 				b.PolicyDigest != source.publication.PolicyDigest || b.IntentDigest != source.publication.IntentDigest || b.InputSnapshotDigest != source.publication.InputSnapshotDigest {
+				if observe != nil {
+					if err != nil {
+						observe("agent-route-proof-unavailable")
+					} else {
+						observe("agent-route-binding-mismatch")
+					}
+				}
 				valid = false
 				break
 			}
@@ -576,6 +600,9 @@ func captureAgentEdgeObservation(ctx context.Context, client *clusterNodeClient,
 			until = bound
 		}
 		if !valid || until.Sub(time.Now()) < p.MinimumLease() {
+			if valid && observe != nil {
+				observe("agent-observation-lease-short")
+			}
 			continue
 		}
 		sort.Strings(digests)

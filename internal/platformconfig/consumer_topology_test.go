@@ -11,7 +11,7 @@ import (
 	"fugue/internal/model"
 )
 
-func declaredCellCompileFixture(t *testing.T) CompileRequest {
+func declaredCellCompileFixture(t testing.TB) CompileRequest {
 	t.Helper()
 	intent := PlatformIntent{AuthorityCellID: "cell-a", SchemaVersion: SchemaVersion, Scope: AuthorityCellScope("cell-a"), Generation: "intent-a", EdgeTopology: &edgetopology.Intent{SchemaVersion: edgetopology.SchemaVersion, Cells: []edgetopology.AuthorityCell{{ID: "cell-a"}}, Pools: []edgetopology.ServingPool{{ID: "pool-public"}}, Edges: []edgetopology.Edge{{ID: "node-a", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "node-a"}}}}, DNSConsumers: []DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: "cell-a", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}}, Routes: []RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: false}}}
 	topology, err := TrafficConsumerTopologyFromIntent(intent)

@@ -152,7 +152,8 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 
 func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsumerInstance, claims platformcontrol.PlatformComponentIdentityClaims) (dnsFactSource, error) {
 	fail := func() (dnsFactSource, error) { return dnsFactSource{}, errDNSRuntimeFacts }
-	resolved, err := s.resolvePlatformConsumerAssignments(claims)
+	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil {
 		return fail()
 	}
@@ -236,7 +237,7 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 				candidateSource.cellBindings[digest] = b
 			}
 		} else {
-			projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, newConsumerArtifactReader(s.store.GetPlatformArtifact))
+			projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, readArtifact)
 			if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
 				return fail()
 			}

@@ -857,6 +857,10 @@ func EvaluateLKGPromotion(release model.PlatformArtifactRelease, req model.Platf
 }
 
 func artifactContentHash(content map[string]any) string {
+	return artifactContentHashes.digest(content)
+}
+
+func canonicalArtifactContentHash(content map[string]any) string {
 	if content == nil {
 		return ""
 	}

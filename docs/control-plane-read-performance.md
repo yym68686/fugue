@@ -61,3 +61,44 @@ latency, 5xx, restarts and signed consumer convergence after the declarative
 release. Short diagnostic windows and rollout intervals must be identified
 separately from steady traffic. Configuration artifacts and positive LKG are
 independent of this code release.
+
+## Canonical hash reuse
+
+After removing full-child policy decoding, production CPU sampling still
+attributed about 24% of samples to artifact integrity, dominated by canonical
+JSON encoding. The canonical hash implementation now memoizes successful
+hashes for up to 256 complete content fingerprints. It stores only fingerprints
+and digest strings, not content or integrity decisions.
+
+Each call still walks and hashes every actual JSON value. A domain-separated,
+length-delimited encoding with distinct type tags, sorted object keys and
+ordered arrays fingerprints JSON decoder values without reflection or string
+escaping. A mutation anywhere in the tree changes this key. The returned
+artifact hash always comes from the original `encoding/json` representation;
+unsupported/custom Go types, deep structures and small contents use that
+implementation directly. Failed encoding is not cached. Signature, schema,
+generation, current key revocation and release status checks still run.
+
+Tests cover warm-cache content mutation, array order, claimed hash changes,
+schema/signature changes, key revocation, draft status, concurrent calls,
+eviction, nil containers, invalid numbers, escaping, deep values and cycles.
+A 15-second fuzz run compared 1.49 million inputs against canonical JSON.
+Synthetic structured-content hashing fell from 4.75 ms to 1.75 ms, with
+allocation falling from roughly 3.6 MB to 128 KB per operation. Small-content
+fallback adds about 0.1 microseconds in the benchmark; production measurements
+remain the acceptance criterion.
+
+Agent and DNS source preparation now share artifact reads only within their
+pre-probe request phase. No reader survives the network probe. Additional fixed
+diagnostic counters separate capacity identity, sample age/clock, pressure,
+route transport, route binding and minimum evidence lease failures without
+changing the grant API or weakening acceptance rules.
+
+Large policy projection checks also memoize up to 256 successful results.
+Keys include the actual policy JSON, complete parent content and both artifact
+envelopes, so changing policy, topology, cohorts, scopes, generation or metadata
+forces validation again. Errors and small policies bypass the cache. This is a
+pure projection cache, not a release or authorization cache. A synthetic policy
+with 64 cohorts of 64 groups took 9–11 ms without memoization and 0.86 ms with
+a warm cache; allocation fell from about 4.15 MB to 0.47 MB. Tests warm the cache
+before substituting each binding input and verify rejection and boundedness.

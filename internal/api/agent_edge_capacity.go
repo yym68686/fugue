@@ -45,37 +45,44 @@ func agentCapacityNodeReady(node corev1.Node, address string) bool {
 }
 
 func readAgentCapacity(ctx context.Context, c *clusterNodeClient, nodeID, address string, p agentedge.CapacityPolicy, clockNow func() time.Time) (agentCapacityEvidence, error) {
-	fail := func() (agentCapacityEvidence, error) {
+	return readAgentCapacityWithObserver(ctx, c, nodeID, address, p, clockNow, nil)
+}
+
+func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, nodeID, address string, p agentedge.CapacityPolicy, clockNow func() time.Time, observe func(string)) (agentCapacityEvidence, error) {
+	fail := func(stage string) (agentCapacityEvidence, error) {
+		if observe != nil {
+			observe(stage)
+		}
 		return agentCapacityEvidence{}, errors.New("fresh authenticated node capacity unavailable")
 	}
 	started := clockNow().UTC()
 	var node corev1.Node
 	path := "/api/v1/nodes/" + url.PathEscape(nodeID)
 	if c.doJSON(ctx, http.MethodGet, path, &node) != nil || node.Name != nodeID || !agentCapacityNodeReady(node, address) {
-		return fail()
+		return fail("agent-capacity-node-unavailable")
 	}
 	summary, err := c.getNodeSummary(ctx, nodeID)
 	if err != nil || summary == nil || summary.Node.NodeName != nodeID || summary.Node.CPU.UsageNanoCores == nil {
-		return fail()
+		return fail("agent-capacity-summary-unavailable")
 	}
 	used := summary.Node.Memory.WorkingSetBytes
 	if used == nil {
 		used = summary.Node.Memory.UsageBytes
 	}
 	if used == nil {
-		return fail()
+		return fail("agent-capacity-summary-unavailable")
 	}
 	// Kubelet may collect a sample while this authenticated request is in
 	// flight. Compare it with read completion, never with request start. The
 	// observation and expiry below remain the original metric timestamps.
 	now := clockNow().UTC()
 	if now.Before(started) {
-		return fail()
+		return fail("agent-capacity-time-invalid")
 	}
 	cpuAt, e1 := time.Parse(time.RFC3339Nano, summary.Node.CPU.Time)
 	memoryAt, e2 := time.Parse(time.RFC3339Nano, summary.Node.Memory.Time)
 	if e1 != nil || e2 != nil || cpuAt.After(now) || memoryAt.After(now) || cpuAt.Before(node.CreationTimestamp.Time) || memoryAt.Before(node.CreationTimestamp.Time) {
-		return fail()
+		return fail("agent-capacity-time-invalid")
 	}
 	observed := cpuAt
 	if memoryAt.Before(observed) {
@@ -83,22 +90,22 @@ func readAgentCapacity(ctx context.Context, c *clusterNodeClient, nodeID, addres
 	}
 	until := observed.Add(time.Duration(p.FactMaxAgeSeconds) * time.Second)
 	if !until.After(now) {
-		return fail()
+		return fail("agent-capacity-expired")
 	}
 	cpu := node.Status.Allocatable.Cpu().MilliValue()
 	memory := node.Status.Allocatable.Memory().Value()
 	if cpu <= 0 || memory <= 0 || float64(*summary.Node.CPU.UsageNanoCores)/1e6/float64(cpu)*100 > float64(p.MaxNodeCPUPercent) ||
 		float64(*used)/float64(memory)*100 > float64(p.MaxNodeMemoryPercent) {
-		return fail()
+		return fail("agent-capacity-pressure")
 	}
 	var current corev1.Node
 	if c.doJSON(ctx, http.MethodGet, path, &current) != nil || current.UID != node.UID || !agentCapacityNodeReady(current, address) ||
 		current.Status.Allocatable.Cpu().MilliValue() != cpu || current.Status.Allocatable.Memory().Value() != memory {
-		return fail()
+		return fail("agent-capacity-node-changed")
 	}
 	finished := clockNow().UTC()
 	if finished.Before(now) || !until.After(finished) {
-		return fail()
+		return fail("agent-capacity-expired")
 	}
 	return agentCapacityEvidence{NodeID: nodeID, NodeUID: string(node.UID), Address: address, ObservedAt: observed, ValidUntil: until,
 		CPUUsageNanoCores: *summary.Node.CPU.UsageNanoCores, CPUAllocatableMilliCores: cpu, MemoryWorkingSetBytes: *used, MemoryAllocatableBytes: memory}, nil
