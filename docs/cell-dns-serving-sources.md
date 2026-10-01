@@ -75,3 +75,28 @@ The implementation is incomplete until the following are wired and tested:
 
 This document describes pending work. No source delegation or public handoff is
 enabled merely by the existing shadow artifact or the proof-lease bridge.
+
+The configuration approval and private source observation interfaces are now
+implemented. `GET /v1/platform-state/consumers/artifacts/{artifact_id}/route-sources`
+requires a scoped DNS component identity and its current expected consumer set.
+It reads only approved scopes in one read-only repeatable-read transaction,
+returns current gray/full lane cursors and the current verified full LKG, and
+rechecks the DNS assignment before disclosure. A failed candidate is excluded
+without removing an independently valid LKG. Responses are private, no-store and
+bounded to 16 MiB. Their selection digest excludes observation time; a reader
+must compare a second observation after collecting route proofs.
+
+The shared verifier authenticates source policy, parent, route/TLS children and
+the optional signed LKG, then checks consistency of the activation, publication
+and lane bindings returned by the private API. The selection digest is a change
+detector, not a signature of the mutable release ledger. A response must come
+from the authenticated API; saved source context must additionally be protected
+by the DNS checkpoint signature. Foreign scopes, mismatched fences, unselected
+releases, invalid artifact signatures and mismatched DNS assignments are rejected
+even if their selection digest is recomputed. Verification of a saved snapshot
+alone does not prove current selection or create readiness.
+
+The runtime DNS consumer, dynamic readiness intersection, independent DNS
+configuration producer and public handoff remain required. Readers do not yet
+advertise `dns_route_sources_v1`, and existing DNS artifacts retain exact source
+references until those implementations are deployed and observed.

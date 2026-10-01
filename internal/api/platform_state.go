@@ -1336,12 +1336,12 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 						break
 					}
 				}
-				projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, readArtifact)
+				isSelected, err := s.consumerAssignmentIsSelected(item, group, readArtifact)
 				if err != nil {
 					httpx.WriteError(w, http.StatusServiceUnavailable, "serving release unavailable")
 					return
 				}
-				if found && projection.TrafficRelease.ReleaseID == item.Release.ID {
+				if isSelected {
 					selected = append(selected, item)
 				}
 			}
@@ -1358,6 +1358,25 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	httpx.WriteJSON(w, http.StatusOK, model.PlatformConsumerAssignmentResponse{Assignments: assignments, GeneratedAt: time.Now().UTC()})
+}
+
+// Membership, signatures and child ownership were already verified by the
+// assignment resolver. DNS-only authority has no route projection; select its
+// exact parent and fence without manufacturing an Edge route assignment.
+func (s *Server) consumerAssignmentIsSelected(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error)) (bool, error) {
+	parent, err := readArtifact(item.Assignment.ReleaseSetID)
+	if err != nil {
+		return false, err
+	}
+	if parent.Content["publication_role"] == platformconfig.PublicationRoleCellDNS {
+		if item.Artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
+			return false, errors.New("DNS-only assignment has a non-DNS child")
+		}
+		current, release, found, err := s.selectTrafficRouteReleaseInScope(group, item.Assignment.ScopeKey)
+		return found && current.ID == parent.ID && current.ContentHash == parent.ContentHash && release.ID == item.Release.ID && release.FencingToken == item.Assignment.FencingToken, err
+	}
+	projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, item.Assignment.ScopeKey, readArtifact)
+	return found && projection.TrafficRelease != nil && projection.TrafficRelease.ReleaseID == item.Release.ID && projection.TrafficRelease.FencingToken == item.Assignment.FencingToken, err
 }
 
 func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *http.Request) {

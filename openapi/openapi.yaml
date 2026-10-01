@@ -3708,7 +3708,7 @@ paths:
     get:
       operationId: getPlatformConsumerAssignment
       summary: Get the expected ReleaseSet assignments for a trusted consumer
-      description: Returns the latest expected set revision for each authorized artifact kind in each active ReleaseSet channel. Assignments are bound to the signed child artifact and the active release fencing token. Shadow assignments authorize validation only and must not replace serving state. Superseded releases and unrelated topology are excluded.
+      description: Returns the latest expected set revision for each authorized artifact kind in each active ReleaseSet channel. Assignments are bound to the signed child artifact and the active release fencing token. Shadow assignments authorize validation only and must not replace serving state. Superseded releases and unrelated topology are excluded. Serving-only selection honors the signed publication role; cell-dns requires its prepared DNS membership and selected parent/fence without requiring a route child.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerAssignment
       security:
@@ -3771,6 +3771,37 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/platform-state/consumers/artifacts/{artifact_id}/route-sources:
+    get:
+      operationId: getPlatformConsumerDNSRouteSources
+      summary: Read approved routing publications for an assigned DNS artifact
+      description: Read-only private observation for a trusted cell DNS identity in the exact current artifact and expected consumer set. Only immutable producer policies approved by dns_route_sources can supply route/TLS publications. Each scope includes its current gray/full lane cursors and approved selected publications, plus the unexpired verified full LKG when available. Failed or rolled-back publications and arbitrary history are excluded. The API authenticates all artifacts and producer activation bindings in one coherent source snapshot, then rechecks the DNS assignment before disclosure. The selection digest excludes observation time and changes when any returned authority binding changes. Readers must re-read and compare it after probing; neither this response nor a matching digest grants readiness, renews a proof deadline or selects public transport. Response encoding is bounded to 16 MiB. A source update cannot widen the signed DNS record, owner, candidate or failure-domain policy.
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformConsumerDNSRouteSources
+      security:
+        - PlatformComponentBearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema: {type: string, minLength: 1}
+        - in: query
+          name: expected_consumer_set_id
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Assignment-bound source observation; no serving or readiness grant.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PlatformConsumerDNSRouteSourcesResponse"}
+        '400': {$ref: "#/components/responses/ErrorResponse"}
+        '401': {$ref: "#/components/responses/ErrorResponse"}
+        '403': {$ref: "#/components/responses/ErrorResponse"}
+        '404': {$ref: "#/components/responses/ErrorResponse"}
+        '409': {$ref: "#/components/responses/ErrorResponse"}
+        '503': {$ref: "#/components/responses/ErrorResponse"}
+        default: {$ref: "#/components/responses/ErrorResponse"}
   /v1/platform-state/consumers/artifacts/{artifact_id}/tls/{hostname}:
     get:
       operationId: getPlatformConsumerTLSCertificate
@@ -34988,6 +35019,70 @@ components:
         generated_at:
           type: string
           format: date-time
+    PlatformConsumerDNSRouteSourcesResponse:
+      type: object
+      additionalProperties: false
+      required: [assignment, release, snapshot]
+      properties:
+        assignment: {$ref: "#/components/schemas/PlatformConsumerAssignment"}
+        release: {$ref: "#/components/schemas/PlatformArtifactRelease"}
+        snapshot: {$ref: "#/components/schemas/PlatformDNSRouteSourceSnapshot"}
+    PlatformDNSRouteSourceSnapshot:
+      type: object
+      additionalProperties: false
+      required: [dns_artifact_id, dns_artifact_digest, selection_digest, observed_at, scopes]
+      properties:
+        dns_artifact_id: {type: string}
+        dns_artifact_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        selection_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        observed_at: {type: string, format: date-time}
+        scopes:
+          type: array
+          minItems: 1
+          maxItems: 17
+          items: {$ref: "#/components/schemas/PlatformDNSRouteSourceScope"}
+    PlatformDNSRouteSourceScope:
+      type: object
+      additionalProperties: false
+      required: [scope_key, lanes, publications]
+      properties:
+        scope_key: {type: string}
+        lanes:
+          type: array
+          maxItems: 2
+          description: Existing gray/full lane cursors, including lanes whose current publication is not approved. Such a cursor grants no access to that publication. A frozen lane rejects the observation.
+          items:
+            type: object
+            additionalProperties: false
+            required: [release_channel, fencing_token, version, active_release_id]
+            properties:
+              release_channel: {type: string, enum: [gray, full]}
+              fencing_token: {type: integer, format: int64, minimum: 1}
+              version: {type: integer, format: int64, minimum: 1}
+              active_release_id: {type: string}
+        publications:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items: {$ref: "#/components/schemas/PlatformDNSRouteSourcePublication"}
+    PlatformDNSRouteSourcePublication:
+      type: object
+      additionalProperties: false
+      required: [selections, parent, route, tls, release, producer_policy, producer_release]
+      properties:
+        selections:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items: {type: string, enum: [gray, full, lkg]}
+        parent: {$ref: "#/components/schemas/PlatformArtifact"}
+        route: {$ref: "#/components/schemas/PlatformArtifact"}
+        tls: {$ref: "#/components/schemas/PlatformArtifact"}
+        release: {$ref: "#/components/schemas/PlatformArtifactRelease"}
+        producer_policy: {$ref: "#/components/schemas/PlatformArtifact"}
+        producer_release: {$ref: "#/components/schemas/PlatformArtifactRelease"}
+        lkg: {$ref: "#/components/schemas/PlatformLKGSnapshot"}
     PlatformConsumerArtifactResponse:
       type: object
       additionalProperties: false

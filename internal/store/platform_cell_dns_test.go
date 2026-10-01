@@ -318,6 +318,33 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 			t.Fatal("DNS recovery members incomplete", kind)
 		}
 	}
+	if withSources {
+		snapshot, err := s.ObserveDNSRouteSources(context.Background(), child)
+		if err != nil || len(snapshot.Scopes) != len(req.Intent.DNSRouteSources) || snapshot.SelectionDigest == "" {
+			t.Fatal("coherent source observation failed", err)
+		}
+		for _, scope := range snapshot.Scopes {
+			if len(scope.Publications) != 1 || scope.Publications[0].Selections[0] != "full" {
+				t.Fatal("source observation lost selected full publication")
+			}
+		}
+		if s.db != nil {
+			tx, err := s.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pgGetPlatformArtifactForUpdate(context.Background(), tx, req.CellRoutePublications[0].Parent.ID, true); err != nil {
+				tx.Rollback()
+				t.Fatal(err)
+			}
+			started := time.Now()
+			_, err = s.ObserveDNSRouteSources(context.Background(), child)
+			tx.Rollback()
+			if err != nil || time.Since(started) > 2*time.Second {
+				t.Fatal("read-only source observation waited on a publication row lock", err)
+			}
+		}
+	}
 }
 
 func TestCellDNSAdmissionRejectsChangedReferencedAuthority(t *testing.T) {
