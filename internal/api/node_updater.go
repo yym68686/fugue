@@ -156,6 +156,7 @@ func (s *Server) handleGetNodeUpdaterDesiredState(w http.ResponseWriter, r *http
 }
 
 func (s *Server) nodeUpdaterDesiredState(ctx context.Context, r *http.Request, principal model.Principal) (model.NodeUpdaterDesiredState, error) {
+	defer s.observeOperation("node-desired-state")()
 	updater, err := s.nodeUpdaterByPrincipal(principal)
 	if err != nil {
 		return model.NodeUpdaterDesiredState{}, err

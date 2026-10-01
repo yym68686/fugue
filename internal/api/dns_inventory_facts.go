@@ -13,6 +13,7 @@ import (
 // bound artifact-consumer identity, the selected backend owns serving health.
 // A failing read must not downgrade authority to the old inventory writer.
 func (s *Server) dnsInventoryServingFacts(ctx context.Context, nodes []model.DNSNode) ([]model.DNSNode, error) {
+	defer s.observeOperation("dns-serving-facts")()
 	if len(nodes) == 0 {
 		return nodes, nil
 	}

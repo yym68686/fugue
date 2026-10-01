@@ -133,7 +133,7 @@ func main() {
 	if err := livediagnostics.StartRuntimeEndpoint(ctx, "api"); err != nil {
 		logger.Printf("live diagnostics runtime endpoint unavailable: %v", err)
 	}
-	if err := runtimeobservation.Start(ctx, "api", map[string]runtimeobservation.Provider{"http-client": kubeauth.HTTPObservations.Snapshot}); err != nil {
+	if err := runtimeobservation.Start(ctx, "api", map[string]runtimeobservation.Provider{"http-client": kubeauth.HTTPObservations.Snapshot, "operations": server.OperationSnapshot}); err != nil {
 		logger.Printf("runtime observations unavailable: %v", err)
 	}
 	warmersDone := server.StartBackgroundWarmers(ctx)

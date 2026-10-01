@@ -71,6 +71,7 @@ func (s *Server) handleGetClusterNodePolicyStatus(w http.ResponseWriter, r *http
 }
 
 func (s *Server) loadClusterNodePolicyStatuses(ctx context.Context, principal model.Principal) ([]model.ClusterNodePolicyStatus, error) {
+	defer s.observeOperation("node-policy")()
 	snapshots, err := s.loadClusterNodeInventory(ctx)
 	if err != nil {
 		return nil, err

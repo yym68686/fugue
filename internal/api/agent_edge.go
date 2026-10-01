@@ -301,6 +301,7 @@ func cloneAgentMinimums(m map[string]int) map[string]int {
 }
 
 func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred string) (agentedge.Grant, agentedge.AuthorityPolicy, map[string]string, error) {
+	defer s.observeOperation("agent-grant")()
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	diagnostics := map[string]string{}
@@ -343,9 +344,13 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 		if ctx.Err() != nil {
 			return result, p, diagnostics, ctx.Err()
 		}
+		observed := s.observeOperation("agent-cell-authorization")
 		source, e := s.agentCellAuthorization(p, topology, cell)
+		observed()
 		if e == nil {
 			sources[cell.ID] = source
+		} else {
+			s.operationObservations().Observe("agent-cell-unavailable", 0)
 		}
 	}
 	type observation struct {
@@ -426,10 +431,13 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 			case <-ctx.Done():
 				return
 			}
+			observed := s.observeOperation("agent-observation")
 			value, reason := captureAgentEdgeObservation(ctx, client, p, edge, node, source, prober)
+			observed()
 			mu.Lock()
 			defer mu.Unlock()
 			if reason != "" {
+				s.operationObservations().Observe("agent-observation-unavailable", 0)
 				diagnostics[edge.ID] = reason
 			} else {
 				observations = append(observations, value)
@@ -491,8 +499,16 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 	}
 	sort.Slice(result.Candidates, func(i, j int) bool { return result.Candidates[i].EdgeID < result.Candidates[j].EdgeID })
 	_, current, currentRelease, err := s.currentAgentAuthority()
-	if err != nil || current.ID != policyArtifact.ID || current.ContentHash != policyArtifact.ContentHash || currentRelease.ID != policyRelease.ID || currentRelease.FencingToken != policyRelease.FencingToken ||
-		result.ValidUntil.Sub(time.Now()) < p.MinimumLease() || result.Validate() != nil {
+	if err != nil || current.ID != policyArtifact.ID || current.ContentHash != policyArtifact.ContentHash || currentRelease.ID != policyRelease.ID || currentRelease.FencingToken != policyRelease.FencingToken {
+		s.operationObservations().Observe("agent-authority-changed", 0)
+		return result, p, diagnostics, errAgentEdgeUnavailable
+	}
+	if result.ValidUntil.Sub(time.Now()) < p.MinimumLease() {
+		s.operationObservations().Observe("agent-evidence-expired", 0)
+		return result, p, diagnostics, errAgentEdgeUnavailable
+	}
+	if result.Validate() != nil {
+		s.operationObservations().Observe("agent-grant-constraint-unmet", 0)
 		return result, p, diagnostics, errAgentEdgeUnavailable
 	}
 	return result, p, diagnostics, nil

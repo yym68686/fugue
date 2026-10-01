@@ -185,24 +185,28 @@ func TrafficConsumersFromRelease(parent model.PlatformArtifact) (*TrafficConsume
 }
 
 func ValidateTrafficConsumerTopologyProjection(parent, child model.PlatformArtifact) error {
+	var policy PolicySnapshot
+	// Only the policy participates in this projection. Route, DNS and TLS
+	// payloads can be megabytes and are verified separately by the caller.
+	raw, err := json.Marshal(child.Content["policy"])
+	if err != nil || json.Unmarshal(raw, &policy) != nil {
+		return fmt.Errorf("child consumer policy unavailable")
+	}
+	return validateTrafficConsumerTopologyPolicy(parent, child, policy)
+}
+
+func validateTrafficConsumerTopologyPolicy(parent, child model.PlatformArtifact, policy PolicySnapshot) error {
 	topology, err := TrafficConsumersFromRelease(parent)
 	if err != nil {
 		return err
 	}
-	var p struct {
-		Policy PolicySnapshot `json:"policy"`
-	}
-	raw, err := json.Marshal(child.Content)
-	if err != nil || json.Unmarshal(raw, &p) != nil {
-		return fmt.Errorf("child consumer policy unavailable")
-	}
 	if topology == nil {
-		if p.Policy.PublicationRole != "" || p.Policy.AuthorityCellID != "" || p.Policy.ConsumerTopologyDigest != "" || child.Metadata["consumer_topology_digest"] != "" {
+		if policy.PublicationRole != "" || policy.AuthorityCellID != "" || policy.ConsumerTopologyDigest != "" || child.Metadata["consumer_topology_digest"] != "" {
 			return fmt.Errorf("child consumer topology has no parent authority")
 		}
 		return nil
 	}
-	if child.ScopeKey != parent.ScopeKey || validateConsumerTopologyPolicy(p.Policy) != nil || p.Policy.PublicationRole != topology.PublicationRole || p.Policy.AuthorityCellID != topology.AuthorityCellID || p.Policy.ConsumerTopologyDigest != parent.Metadata["consumer_topology_digest"] || child.Metadata["consumer_topology_digest"] != p.Policy.ConsumerTopologyDigest {
+	if child.ScopeKey != parent.ScopeKey || validateConsumerTopologyPolicy(policy) != nil || policy.PublicationRole != topology.PublicationRole || policy.AuthorityCellID != topology.AuthorityCellID || policy.ConsumerTopologyDigest != parent.Metadata["consumer_topology_digest"] || child.Metadata["consumer_topology_digest"] != policy.ConsumerTopologyDigest {
 		return fmt.Errorf("child consumer topology differs from parent or policy")
 	}
 	return nil

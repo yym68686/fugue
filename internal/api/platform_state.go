@@ -1225,6 +1225,7 @@ func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.Platf
 }
 
 func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcontrol.PlatformComponentIdentityClaims, readArtifact func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, error) {
+	defer s.observeOperation("consumer-resolve")()
 	assignments := make([]consumerArtifactLookup, 0)
 	for _, channel := range []string{model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull} {
 		releaseSet, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, claims.ScopeKey, channel)
@@ -1300,12 +1301,14 @@ func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcon
 }
 
 func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *http.Request) {
+	defer s.observeOperation("consumer-assignment")()
 	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
 	if !ok {
 		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
 		return
 	}
-	resolved, err := s.resolvePlatformConsumerAssignments(claims)
+	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -1333,7 +1336,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 						break
 					}
 				}
-				projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, newConsumerArtifactReader(s.store.GetPlatformArtifact))
+				projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, readArtifact)
 				if err != nil {
 					httpx.WriteError(w, http.StatusServiceUnavailable, "serving release unavailable")
 					return
@@ -1358,6 +1361,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 }
 
 func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *http.Request) {
+	defer s.observeOperation("consumer-artifact")()
 	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
 	if !ok {
 		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")

@@ -28,6 +28,7 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group strin
 }
 
 func (s *Server) edgeRouteIntentSnapshotFromTrafficScope(group, scope string, readArtifact func(string) (model.PlatformArtifact, error)) (model.EdgeRouteIntentSnapshot, bool, error) {
+	defer s.observeOperation("traffic-source")()
 	parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, scope)
 	if err != nil || !found {
 		return model.EdgeRouteIntentSnapshot{}, found, err

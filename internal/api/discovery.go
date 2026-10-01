@@ -38,6 +38,7 @@ func (s *Server) handleDiscoveryBundle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deriveDiscoveryBundle(r *http.Request, principal model.Principal) (model.DiscoveryBundle, error) {
+	defer s.observeOperation("discovery-bundle")()
 	now := time.Now().UTC()
 	edgeNodes, edgeGroups, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {

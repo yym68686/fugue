@@ -2091,7 +2091,7 @@ func scanPlatformArtifact(scanner sqlScanner) (model.PlatformArtifact, error) {
 	if err != nil {
 		return model.PlatformArtifact{}, err
 	}
-	content, err := decodeJSONValue[map[string]any](contentRaw)
+	content, err := platformContentDecodings.decode(contentRaw)
 	if err != nil {
 		return model.PlatformArtifact{}, err
 	}
@@ -2127,7 +2127,7 @@ func scanPlatformArtifactContent(scanner sqlScanner) (model.PlatformArtifactCont
 	); err != nil {
 		return model.PlatformArtifactContent{}, mapDBErr(err)
 	}
-	decoded, err := decodeJSONValue[map[string]any](contentRaw)
+	decoded, err := platformContentDecodings.decode(contentRaw)
 	if err != nil {
 		return model.PlatformArtifactContent{}, err
 	}

@@ -28,11 +28,14 @@ import (
 	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
 	"fugue/internal/runtime"
+	"fugue/internal/runtimeobservation"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
 type Server struct {
+	operationOnce                          sync.Once
+	operations                             *runtimeobservation.Operations
 	certificateImportRoots                 *x509.CertPool
 	newObjectStorageClient                 func(string, string) *objectstorage.Client
 	store                                  *store.Store
