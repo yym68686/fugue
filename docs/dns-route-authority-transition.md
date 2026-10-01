@@ -40,6 +40,18 @@ requires fresh transport observations, complete DNS behavior validation and the
 existing UID/resource-version selector CAS. A continuously changing source needs
 new exact references; a previous proof never silently inherits a newer fence.
 
+While an independently published routing source renews, an already serving
+`cell-dns` reader can keep its original, still-valid proof until that proof's
+original deadline. A fresh observation must confirm the exact same route digest,
+state, physical Edge, group and source scope. Its unrecognized release binding is
+not accepted or copied into the retained proof. The original timestamps, positive
+checkpoint and maximum stale deadline remain unchanged. Negative observations,
+changed routes/scopes, missing bindings, expired or unbound original facts cannot
+use this path. It applies only while refreshing the same DNS assignment or when
+no successor DNS assignment is available; a new DNS candidate still needs fresh
+evidence bound to its own signed inputs. Continuous DNS publication must replace
+the source references before the original proof lease expires.
+
 The immutable-input handoff gate also authenticates both DNS artifacts and
 compares each physical DNS node's complete consumer/query views, zone policy,
 client matching and answer rules. Only the declared routing aliases and the

@@ -231,6 +231,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	now := time.Now().UTC()
 	if same {
 		facts = retainValidDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, old.facts, facts, now)
+		facts = retainDNSFactsForSourceRenewal(old, facts, now)
 	}
 	for i := range facts {
 		if !dnsProofMatchesRelease(facts[i].Proof, parent, candidate, routeID, p) {
@@ -348,6 +349,9 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 	// candidate releases never use this path and therefore still require fresh
 	// evidence for every probe.
 	facts = retainValidDNSReadinessFacts(old.payload.Plan, old.payload.Policy.DNSReadiness, old.facts, facts, now)
+	if bridge == nil || reflect.DeepEqual(old.record.Candidate.Assignment, bridge.candidate.Assignment) {
+		facts = retainDNSFactsForSourceRenewal(old, facts, now)
+	}
 	bridgeAllowed := compatibleDNSReleaseProbes(old, bridge)
 	for i := range facts {
 		if !dnsProofMatchesRelease(facts[i].Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) &&

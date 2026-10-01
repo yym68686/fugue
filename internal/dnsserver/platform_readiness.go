@@ -15,6 +15,7 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/routeprobe"
+	"fugue/internal/trafficbinding"
 )
 
 type DNSReadinessStatus struct {
@@ -164,6 +165,40 @@ func retainValidDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy 
 			fact.Reason = "retained_valid_proof"
 			retained[i] = fact
 		}
+	}
+	return retained
+}
+
+// A routing source can advance before its independently published DNS candidate
+// arrives. That does not renew DNS authority or invalidate an original proof's
+// remaining lease. Keep only the already-authorized original observation when
+// the fresh probe confirms identical route behavior in the same source scope.
+// The unrecognized binding is never admitted. Missing/negative proofs, changed
+// routes or scopes, new candidates and expired original facts cannot use this.
+func retainDNSFactsForSourceRenewal(old *dnsServingState, current []dnsReadinessFact, now time.Time) []dnsReadinessFact {
+	if old == nil || !old.record.Positive || old.payload.Policy.PublicationRole != platformconfig.PublicationRoleCellDNS {
+		return current
+	}
+	previous := validDNSReadinessFacts(old.payload.Plan, old.payload.Policy.DNSReadiness, old.facts, now)
+	observed := validDNSReadinessFacts(old.payload.Plan, old.payload.Policy.DNSReadiness, current, now)
+	retained := append([]dnsReadinessFact(nil), current...)
+	for i, fact := range retained {
+		original, exists := previous[fact.ProbeID]
+		if _, valid := observed[fact.ProbeID]; !valid || !exists ||
+			!dnsProofMatchesRelease(original.Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) ||
+			dnsProofMatchesRelease(fact.Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) {
+			continue
+		}
+		before, after := original.Proof, fact.Proof
+		if before.TrafficRelease == nil || after.TrafficRelease == nil ||
+			trafficbinding.ValidateGroup(after.TrafficRelease, after.GroupID, true) != nil ||
+			before.TrafficRelease.ScopeKey != after.TrafficRelease.ScopeKey ||
+			before.GroupID != after.GroupID || before.EdgeID != after.EdgeID ||
+			before.Digest != after.Digest || before.State != after.State {
+			continue
+		}
+		original.Reason = "retained_valid_proof"
+		retained[i] = original
 	}
 	return retained
 }
