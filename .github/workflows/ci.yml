@@ -471,6 +471,64 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  dns_probe_egress_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select changed DNS probe network intent
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/dns-probe-egress scripts/reconcile_dns_probe_egress.py scripts/test_reconcile_dns_probe_egress.py; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  dns_probe_egress:
+    needs: dns_probe_egress_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dns_probe_egress_plan.outputs.selected == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-dns-probe-egress, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Validate current exact public Service and DNS network declarations
+        id: configuration
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/dns-probe-egress/policy.json
+          git fetch origin main
+          if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_dns_probe_egress.py scripts/test_reconcile_dns_probe_egress.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py; then
+            python3 -m unittest scripts.test_reconcile_dns_probe_egress
+            python3 -m scripts.reconcile_dns_probe_egress "$config" --validate-only
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Reconcile only DNS HTTPS probe egress
+        if: steps.configuration.outputs.selected == 'true'
+        run: python3 -m scripts.reconcile_dns_probe_egress deploy/environments/production/dns-probe-egress/policy.json --apply --evidence "$RUNNER_TEMP/dns-probe-egress.json"
+      - name: Retain exact network policy evidence
+        if: always() && steps.configuration.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-dns-probe-egress-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-probe-egress.json
+          if-no-files-found: warn
+          retention-days: 30
+
   dns_authority_stage_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest

@@ -494,6 +494,8 @@ def main() -> int:
         non_go_tasks["cell-inventory-bootstrap-tests"] = ["python3", "-m", "unittest", "scripts.test_bootstrap_cell_inventory"]
     if any(name in {"scripts/stage_dns_authority_transition.py", "scripts/test_stage_dns_authority_transition.py"} or name.startswith("deploy/environments/production/dns-authority-stage/") for name in paths):
         non_go_tasks["dns-authority-stage-tests"] = ["python3", "-m", "unittest", "scripts.test_stage_dns_authority_transition"]
+    if any(name in {"scripts/reconcile_dns_probe_egress.py", "scripts/test_reconcile_dns_probe_egress.py"} or name.startswith("deploy/environments/production/dns-probe-egress/") for name in paths):
+        non_go_tasks["dns-probe-egress-tests"] = ["python3", "-m", "unittest", "scripts.test_reconcile_dns_probe_egress"]
     if any(name in {"scripts/enroll_cell_member.py", "scripts/test_enroll_cell_member.py", "scripts/bootstrap_cell_inventory.py"} or name.startswith("deploy/environments/production/cell-member-enrollment/") for name in paths):
         non_go_tasks["cell-member-enrollment-tests"] = ["python3", "-m", "unittest", "scripts.test_enroll_cell_member", "scripts.test_bootstrap_cell_inventory"]
     if any(name in {"scripts/promote_cell_routes.py", "scripts/test_promote_cell_routes.py", "scripts/bootstrap_cell_inventory.py"} or name.startswith("deploy/environments/production/cell-route-promotion/") for name in paths):

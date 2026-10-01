@@ -1,0 +1,27 @@
+{
+  "schema": "fugue.dns-probe-egress/v1",
+  "generation": 1,
+  "namespace": "fugue-system",
+  "policy_name": "fugue-dns-cell-public-probes",
+  "authority_cell_id": "cell-dns-public",
+  "services": [
+    {
+      "name": "fugue-front-serving-public-a",
+      "uid": "935d3d0b-7a46-434e-9054-185fa8f3a017",
+      "generation": 2,
+      "digest": "sha256:44ec8ad5bc502301e5b5e40096437705ff55eda43133b5ff382870109637beac"
+    },
+    {
+      "name": "fugue-front-serving-public-b-primary",
+      "uid": "50247fef-fbe9-43db-b5c4-5cf6f09e146f",
+      "generation": 2,
+      "digest": "sha256:2906faa6bc59581d63ee7f1486c9e96f62078dda14997d51eb95736716d87a83"
+    },
+    {
+      "name": "fugue-front-serving-public-b-secondary",
+      "uid": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c",
+      "generation": 2,
+      "digest": "sha256:873f20c07b4d39817a0aedf02e609ac26b25708566ffa166760ecca521f7b27c"
+    }
+  ]
+}

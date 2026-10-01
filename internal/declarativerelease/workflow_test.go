@@ -67,11 +67,30 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_probe_egress", "dns_probe_egress_plan", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	dnsProbeEgress := yamlMappingValue(t, jobs, "dns_probe_egress")
+	dnsProbePlan := yamlMappingValue(t, jobs, "dns_probe_egress_plan")
+	if yamlMappingValue(t, dnsProbePlan, "runs-on").Value != "ubuntu-latest" || yamlMappingValue(t, dnsProbeEgress, "needs").Value != "dns_probe_egress_plan" || !strings.Contains(yamlMappingValue(t, dnsProbeEgress, "if").Value, "needs.dns_probe_egress_plan.outputs.selected == 'true'") || yamlMappingValue(t, dnsProbeEgress, "environment").Value != "production" {
+		t.Fatal("DNS probe egress requires independent changed-intent admission and production scope")
+	}
+	for _, key := range yamlMappingKeys(t, dnsProbePlan) {
+		if key == "needs" {
+			t.Fatal("DNS network configuration recovery cannot depend on code release jobs")
+		}
+	}
+	dnsProbeRaw, err := yaml.Marshal(dnsProbeEgress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"git fetch origin main", "scripts.test_reconcile_dns_probe_egress", "scripts.reconcile_dns_probe_egress", "--validate-only", "--apply --evidence", "fugue-production-dns-probe-egress", "dns-probe-egress.json"} {
+		if !strings.Contains(string(dnsProbeRaw), required) {
+			t.Fatal("DNS egress configuration lost validation or retained evidence", required)
+		}
+	}
 	dnsStage := yamlMappingValue(t, jobs, "dns_authority_stage")
 	dnsStagePlan := yamlMappingValue(t, jobs, "dns_authority_stage_plan")
 	if yamlMappingValue(t, dnsStage, "needs").Value != "dns_authority_stage_plan" || yamlMappingValue(t, dnsStagePlan, "runs-on").Value != "ubuntu-latest" || !strings.Contains(yamlMappingValue(t, dnsStage, "if").Value, "needs.dns_authority_stage_plan.outputs.selected == 'true'") {

@@ -74,3 +74,14 @@ or incomplete full publication cannot authorize staging. Independent Cell
 refreshes can retry a compiler behavior mismatch within the capture deadline;
 other validation failures remain fatal. This keeps queued configuration intent
 separate from the immutable execution snapshot without inheriting newer fences.
+
+DNS route probes need public HTTPS connectivity from their actual Pod network.
+After Kubernetes translates a public Front Service address to its Pod backend,
+an IP-block rule excluding private ranges is insufficient. The independent
+`dns-probe-egress` configuration lane pins each public Service UID, declared
+generation and logical spec digest. It adds only TCP 443 permission from the
+declared DNS authority to those exact backend selectors in the same namespace.
+Private/staged Services, management-port translations, foreign ownership and
+concurrent Service changes reject the update. NetworkPolicy updates use their
+own generation and UID/resource-version CAS; neither Pods, public Services,
+traffic artifacts nor code images are changed.
