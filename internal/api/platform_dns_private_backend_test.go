@@ -256,7 +256,7 @@ func TestPrivateDNSBackendNeverReplacesPublicAuthority(t *testing.T) {
 			case "private lookup failed":
 				want = http.StatusServiceUnavailable
 			}
-			publicLists, privateLists, nodeReads := 0, 0, 0
+			publicLists, privateLists, nodeReads, podLists := 0, 0, 0, 0
 			kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer metadata-only-reader" {
 					t.Error("metadata-only observation required")
@@ -266,6 +266,10 @@ func TestPrivateDNSBackendNeverReplacesPublicAuthority(t *testing.T) {
 				base := "/api/v1/namespaces/" + pod.Namespace
 				switch r.URL.Path {
 				case base + "/pods":
+					podLists++
+					if podLists == 1 && scenario != "public facts stay public" && r.URL.Query().Get("fieldSelector") != "spec.nodeName="+pod.Spec.NodeName {
+						t.Error("private validation must retain public backends under other service accounts")
+					}
 					json.NewEncoder(w).Encode(corev1.PodList{Items: []corev1.Pod{pod, publicPod}})
 				case base + "/pods/" + pod.Name:
 					p := *pod.DeepCopy()

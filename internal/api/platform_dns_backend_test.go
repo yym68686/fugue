@@ -68,8 +68,9 @@ func (f *dnsBackendFixture) install(t *testing.T, server *Server) {
 		switch r.URL.Path {
 		case base + "/pods":
 			time.Sleep(f.podListDelay)
-			if r.URL.Query().Get("fieldSelector") != "spec.nodeName="+f.claims.NodeID {
-				t.Error("node selector missing")
+			identity := strings.Split(f.claims.CredentialID, ":")
+			if len(identity) != 4 || r.URL.Query().Get("fieldSelector") != "spec.nodeName="+f.claims.NodeID+",spec.serviceAccountName="+identity[2] {
+				t.Error("public observation must narrow by both node and authenticated service account")
 			}
 			json.NewEncoder(w).Encode(corev1.PodList{Items: append([]corev1.Pod{f.pod}, f.extraPods...)})
 		case base + "/pods/" + f.pod.Name:

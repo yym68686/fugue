@@ -102,3 +102,13 @@ pure projection cache, not a release or authorization cache. A synthetic policy
 with 64 cohorts of 64 groups took 9–11 ms without memoization and 0.86 ms with
 a warm cache; allocation fell from about 4.15 MB to 0.47 MB. Tests warm the cache
 before substituting each binding input and verify rejection and boundedness.
+
+## Narrow DNS transport observations
+
+Public DNS backend observations list Pods by both the authenticated node and
+ServiceAccount. Pod UID, namespace, service account, identity policy, readiness,
+Service selector, EndpointSlice ownership and the final resource-version
+recheck are unchanged. Private candidate validation retains the complete node
+Pod list because it must also examine the public backend under another account.
+The live public node queries fell from 15 Pods / about 389 KB to 1 Pod / about
+19 KB. This changes query volume, not the freshness or authority of the result.

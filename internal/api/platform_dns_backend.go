@@ -67,6 +67,12 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	base := "/api/v1/namespaces/" + url.PathEscape(identity[1])
 	var pods corev1.PodList
 	query := url.Values{"fieldSelector": {"spec.nodeName=" + claims.NodeID}, "limit": {"256"}}
+	if !allowPrivate {
+		// A public observation can only authorize the claimed service account.
+		// Private candidate validation also inspects the public backend, which
+		// may use another account, so that path retains the full node inventory.
+		query.Set("fieldSelector", query.Get("fieldSelector")+",spec.serviceAccountName="+identity[2])
+	}
 	if client.doJSON(ctx, http.MethodGet, base+"/pods?"+query.Encode(), &pods) != nil || pods.Continue != "" {
 		return http.StatusServiceUnavailable
 	}
