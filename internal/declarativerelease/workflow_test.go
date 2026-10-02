@@ -66,7 +66,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_image_gc", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_probe_egress", "dns_probe_egress_plan", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
@@ -451,4 +451,51 @@ func yamlMappingKeys(t *testing.T, mapping *yaml.Node) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func TestEveryRegisteredComponentHasDeploymentJob(t *testing.T) {
+	file, err := os.Open("../../deploy/releases/components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	registry, err := DecodeRegistry(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			If    string `yaml:"if"`
+			Steps []struct {
+				Uses string            `yaml:"uses"`
+				With map[string]string `yaml:"with"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	deployed := map[string]bool{}
+	for _, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses == "./.github/actions/deploy-declarative-component" {
+				component := step.With["component"]
+				if strings.Contains(job.If, "'"+component+"'") {
+					deployed[component] = true
+				}
+			}
+		}
+	}
+	for _, component := range registry.Components {
+		if strings.HasPrefix(component.ID, "edge-worker-") || strings.HasPrefix(component.ID, "edge-control-") || strings.HasPrefix(component.ID, "edge-client-") {
+			continue
+		} // Existing typed matrices cover these lanes.
+		if !deployed[component.ID] {
+			t.Fatalf("component %q builds without a selected deployment job", component.ID)
+		}
+	}
 }
