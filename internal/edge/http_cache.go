@@ -76,6 +76,7 @@ type edgeHTTPCacheEntry struct {
 	Version    int         `json:"version"`
 	StoredAt   time.Time   `json:"stored_at"`
 	ExpiresAt  time.Time   `json:"expires_at"`
+	StaleUntil time.Time   `json:"stale_until"`
 	Namespace  string      `json:"namespace"`
 	Key        string      `json:"key"`
 	PolicyID   string      `json:"policy_id"`
@@ -481,14 +482,12 @@ func (s *Service) edgeCacheStore(decision edgeHTTPCacheDecision, entry edgeHTTPC
 	if entry.Header != nil {
 		entry.Header.Del("Server-Timing")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	entry.Version = 1
 	entry.StoredAt = time.Now().UTC()
 	if entry.ExpiresAt.IsZero() {
 		entry.ExpiresAt = entry.StoredAt.Add(decision.TTL)
 	}
+	entry.StaleUntil = entry.ExpiresAt.Add(time.Duration(decision.Policy.StaleWhileRevalidateSeconds) * time.Second)
 	entry.Namespace = decision.Namespace
 	entry.Key = decision.Key
 	entry.PolicyID = decision.PolicyID
@@ -497,11 +496,7 @@ func (s *Service) edgeCacheStore(decision edgeHTTPCacheDecision, entry edgeHTTPC
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return s.storeHTTPCacheFile(path, data)
 }
 
 func (d *edgeHTTPCacheDecision) observeOriginResponse(resp *http.Response) {

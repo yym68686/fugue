@@ -1,0 +1,252 @@
+{
+  "apiVersion": "release.fugue.dev/v2",
+  "kind": "ComponentResourceSet",
+  "items": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "metadata": {
+        "name": "fugue-edge-image-gc",
+        "namespace": "fugue-system",
+        "labels": {
+          "app.kubernetes.io/name": "fugue",
+          "app.kubernetes.io/instance": "fugue",
+          "app.kubernetes.io/component": "edge-image-gc"
+        }
+      },
+      "spec": {
+        "revisionHistoryLimit": 2,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "fugue",
+            "app.kubernetes.io/instance": "fugue",
+            "app.kubernetes.io/component": "edge-image-gc"
+          }
+        },
+        "updateStrategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxUnavailable": 1
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "fugue",
+              "app.kubernetes.io/instance": "fugue",
+              "app.kubernetes.io/component": "edge-image-gc"
+            },
+            "annotations": {
+              "fugue.pro/source-commit": "git-source",
+              "prometheus.io/scrape": "true",
+              "prometheus.io/port": "7842"
+            }
+          },
+          "spec": {
+            "serviceAccountName": "fugue-edge-image-gc",
+            "nodeSelector": {
+              "fugue.io/role.edge": "true"
+            },
+            "tolerations": [
+              {
+                "operator": "Exists",
+                "effect": "NoSchedule"
+              }
+            ],
+            "terminationGracePeriodSeconds": 30,
+            "containers": [
+              {
+                "name": "edge-image-gc",
+                "image": "ghcr.io/yym68686/fugue-edge-image-gc:git-source",
+                "imagePullPolicy": "IfNotPresent",
+                "args": [
+                  "--apply",
+                  "--repositories=ghcr.io/yym68686/fugue-edge,ghcr.io/yym68686/fugue-api",
+                  "--minimum-unused-age=24h",
+                  "--interval=1h",
+                  "--maximum-deletes=4"
+                ],
+                "securityContext": {
+                  "runAsUser": 0,
+                  "privileged": true
+                },
+                "ports": [
+                  {
+                    "name": "health",
+                    "containerPort": 7842
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/readyz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 30
+                },
+                "resources": {
+                  "requests": {
+                    "cpu": "5m",
+                    "memory": "32Mi"
+                  },
+                  "limits": {
+                    "cpu": "100m",
+                    "memory": "192Mi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "host",
+                    "mountPath": "/host",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "state",
+                    "mountPath": "/state"
+                  }
+                ]
+              }
+            ],
+            "volumes": [
+              {
+                "name": "host",
+                "hostPath": {
+                  "path": "/",
+                  "type": "Directory"
+                }
+              },
+              {
+                "name": "state",
+                "hostPath": {
+                  "path": "/var/lib/fugue/edge-image-gc",
+                  "type": "DirectoryOrCreate"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "fugue-edge-image-gc"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods"
+          ],
+          "verbs": [
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments",
+            "daemonsets",
+            "statefulsets",
+            "replicasets",
+            "controllerrevisions"
+          ],
+          "verbs": [
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "batch"
+          ],
+          "resources": [
+            "jobs",
+            "cronjobs"
+          ],
+          "verbs": [
+            "list"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "fugue-edge-image-gc"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "fugue-edge-image-gc"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "fugue-edge-image-gc",
+          "namespace": "fugue-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "fugue-edge-image-gc",
+        "namespace": "fugue-system"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps"
+          ],
+          "verbs": [
+            "list"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "fugue-edge-image-gc",
+        "namespace": "fugue-system"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "fugue-edge-image-gc"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "fugue-edge-image-gc",
+          "namespace": "fugue-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "fugue-edge-image-gc",
+        "namespace": "fugue-system"
+      }
+    }
+  ]
+}

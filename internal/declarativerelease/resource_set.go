@@ -806,7 +806,12 @@ func resourceIdentity(value map[string]any) (ResourceIdentity, error) {
 		APIVersion: stringField(value, "apiVersion"), Kind: stringField(value, "kind"),
 		Namespace: stringField(metadata, "namespace"), Name: stringField(metadata, "name"),
 	}
-	if identity.APIVersion == "" || identity.Kind == "" || !componentIDPattern.MatchString(identity.Namespace) ||
+	clusterRBAC := identity.APIVersion == "rbac.authorization.k8s.io/v1" && (identity.Kind == "ClusterRole" || identity.Kind == "ClusterRoleBinding")
+	validNamespace := componentIDPattern.MatchString(identity.Namespace)
+	if clusterRBAC {
+		validNamespace = identity.Namespace == ""
+	}
+	if identity.APIVersion == "" || identity.Kind == "" || !validNamespace ||
 		!componentIDPattern.MatchString(identity.Name) {
 		return ResourceIdentity{}, errors.New("Kubernetes resource identity is invalid")
 	}

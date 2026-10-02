@@ -2732,3 +2732,12 @@ func TestArtifactImageProofIgnoresHistoricalPodsButKeepsLiveAndJobChecks(t *test
 		t.Fatal("successful Job with a wrong image was accepted")
 	}
 }
+
+func TestRBACResourcesSupportExactRollbackDeletion(t *testing.T) {
+	for _, kind := range []string{"Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding"} {
+		gvr, err := resourceGVR(declarativerelease.ResourceIdentity{APIVersion: "rbac.authorization.k8s.io/v1", Kind: kind})
+		if err != nil || gvr.Group != "rbac.authorization.k8s.io" || gvr.Resource == "" {
+			t.Fatalf("%s rollback mapping: %+v %v", kind, gvr, err)
+		}
+	}
+}

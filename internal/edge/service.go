@@ -89,6 +89,8 @@ type Service struct {
 	proxyTransportActiveKeys      map[string]struct{}
 	proxyTransportBundleSet       bool
 	bodyBuffer                    *edgeRequestBodyBufferManager
+	httpCacheOnce                 sync.Once
+	httpCache                     *edgeHTTPCacheDisk
 	requestBodyPolicyMu           sync.Mutex
 	requestBodyPolicyGuards       map[string]*edgeRequestBodyPolicyGuard
 	caddyWarmupMu                 sync.Mutex
@@ -628,6 +630,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.startHeartbeatLoop(ctx)
 	s.startInventoryProducerLoop(ctx)
 	go s.runPlatformShadowConsumer(ctx)
+	go s.runHTTPCacheGC(ctx)
 
 	ticker := time.NewTicker(s.syncInterval())
 	defer ticker.Stop()
@@ -2759,6 +2762,7 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	status := snapshot.Status
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	s.edgeRequestBodyBufferManager().writeMetrics(w)
+	s.writeHTTPCacheMetrics(w)
 	fmt.Fprintln(w, "# HELP fugue_edge_info Static low-cardinality fugue-edge identity labels.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_info gauge")
 	fmt.Fprintf(w, "fugue_edge_info{component=\"worker\",group=\"%s\",slot=\"%s\",release_epoch=\"%s\"} 1\n", prometheusLabelValue(status.EdgeGroupID), prometheusLabelValue(s.Config.EdgeSlot), prometheusLabelValue(s.Config.EdgeReleaseEpoch))

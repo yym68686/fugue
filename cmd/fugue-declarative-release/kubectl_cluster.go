@@ -902,14 +902,18 @@ func createdResourceDeletions(identities []declarativerelease.ResourceIdentity, 
 
 func resourceGVR(identity declarativerelease.ResourceIdentity) (schema.GroupVersionResource, error) {
 	known := map[string]schema.GroupVersionResource{
-		"apps/v1/DaemonSet":                  {Group: "apps", Version: "v1", Resource: "daemonsets"},
-		"apps/v1/Deployment":                 {Group: "apps", Version: "v1", Resource: "deployments"},
-		"batch/v1/Job":                       {Group: "batch", Version: "v1", Resource: "jobs"},
-		"networking.k8s.io/v1/NetworkPolicy": {Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"},
-		"policy/v1/PodDisruptionBudget":      {Group: "policy", Version: "v1", Resource: "poddisruptionbudgets"},
-		"v1/PersistentVolumeClaim":           {Version: "v1", Resource: "persistentvolumeclaims"},
-		"v1/Service":                         {Version: "v1", Resource: "services"},
-		"v1/ServiceAccount":                  {Version: "v1", Resource: "serviceaccounts"},
+		"rbac.authorization.k8s.io/v1/ClusterRole":        {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"},
+		"rbac.authorization.k8s.io/v1/ClusterRoleBinding": {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"},
+		"rbac.authorization.k8s.io/v1/Role":               {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"},
+		"rbac.authorization.k8s.io/v1/RoleBinding":        {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"},
+		"apps/v1/DaemonSet":                               {Group: "apps", Version: "v1", Resource: "daemonsets"},
+		"apps/v1/Deployment":                              {Group: "apps", Version: "v1", Resource: "deployments"},
+		"batch/v1/Job":                                    {Group: "batch", Version: "v1", Resource: "jobs"},
+		"networking.k8s.io/v1/NetworkPolicy":              {Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"},
+		"policy/v1/PodDisruptionBudget":                   {Group: "policy", Version: "v1", Resource: "poddisruptionbudgets"},
+		"v1/PersistentVolumeClaim":                        {Version: "v1", Resource: "persistentvolumeclaims"},
+		"v1/Service":                                      {Version: "v1", Resource: "services"},
+		"v1/ServiceAccount":                               {Version: "v1", Resource: "serviceaccounts"},
 	}
 	gvr, exists := known[identity.APIVersion+"/"+identity.Kind]
 	if !exists {

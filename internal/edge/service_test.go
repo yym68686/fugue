@@ -3637,6 +3637,9 @@ func TestProxyHandlerCachesStaticAssets(t *testing.T) {
 		AssetCachePath:     filepath.Join(t.TempDir(), "http-cache"),
 		AssetCacheMaxBytes: 1024 * 1024,
 	}, log.New(ioDiscard{}, "", 0))
+	if err := service.collectHTTPCache(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	service.recordSyncSuccess(bundle, `"routegen_cache"`, time.Now().UTC(), false)
 
 	first := httptest.NewRecorder()
@@ -3979,6 +3982,9 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 		AssetCachePath:     filepath.Join(t.TempDir(), "http-cache"),
 		AssetCacheMaxBytes: 1024 * 1024,
 	}, log.New(ioDiscard{}, "", 0))
+	if err := service.collectHTTPCache(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	service.recordSyncSuccess(bundle, `"routegen_html_cache"`, time.Now().UTC(), false)
 
 	first := httptest.NewRecorder()
@@ -4149,6 +4155,9 @@ func TestProxyHandlerDoesNotCacheNoStoreHTMLDocuments(t *testing.T) {
 		AssetCachePath:     filepath.Join(t.TempDir(), "http-cache"),
 		AssetCacheMaxBytes: 1024 * 1024,
 	}, log.New(ioDiscard{}, "", 0))
+	if err := service.collectHTTPCache(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	service.recordSyncSuccess(bundle, `"routegen_html_no_store"`, time.Now().UTC(), false)
 
 	first := httptest.NewRecorder()

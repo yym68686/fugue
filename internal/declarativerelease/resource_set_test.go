@@ -448,3 +448,17 @@ func TestReferencedRequiredSecretsReturnsNamesOnlyAndSkipsOptionalRefs(t *testin
 		t.Fatal("Secret key/value material escaped the name-only inventory")
 	}
 }
+
+func TestClusterRBACResourceScopeIsExplicit(t *testing.T) {
+	for _, tc := range []struct {
+		kind, namespace string
+		valid           bool
+	}{
+		{"ClusterRole", "", true}, {"ClusterRoleBinding", "", true}, {"ClusterRole", "control", false}, {"Role", "", false}, {"Role", "control", true}, {"Secret", "", false},
+	} {
+		_, err := resourceIdentity(map[string]any{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": tc.kind, "metadata": map[string]any{"name": "cache-maintenance", "namespace": tc.namespace}})
+		if (err == nil) != tc.valid {
+			t.Fatalf("%s namespace=%q validity=%v: %v", tc.kind, tc.namespace, tc.valid, err)
+		}
+	}
+}
