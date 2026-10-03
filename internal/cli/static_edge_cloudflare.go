@@ -28,19 +28,20 @@ var staticEdgeDNSName = regexp.MustCompile("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])
 var staticEdgeCutoverOperation = regexp.MustCompile("^fse_[0-9a-f]{32}$")
 
 type staticEdgeCutoverOptions struct {
-	Zone      string        `json:"zone"`
-	ZoneID    string        `json:"zone_id"`
-	Hostnames []string      `json:"hostnames"`
-	FromIP    string        `json:"from_ip"`
-	ToIP      string        `json:"to_ip"`
-	Candidate string        `json:"candidate"`
-	ProbePath string        `json:"probe_path"`
-	ProbeSSH  string        `json:"probe_ssh,omitempty"`
-	Checks    []string      `json:"checks"`
-	Observe   time.Duration `json:"observe_ns"`
-	Timeout   time.Duration `json:"timeout_ns"`
-	Execute   bool          `json:"execute"`
-	Operation string        `json:"operation,omitempty"`
+	DNSProvider string        `json:"dns_provider,omitempty"`
+	Zone        string        `json:"zone"`
+	ZoneID      string        `json:"zone_id"`
+	Hostnames   []string      `json:"hostnames"`
+	FromIP      string        `json:"from_ip"`
+	ToIP        string        `json:"to_ip"`
+	Candidate   string        `json:"candidate"`
+	ProbePath   string        `json:"probe_path"`
+	ProbeSSH    string        `json:"probe_ssh,omitempty"`
+	Checks      []string      `json:"checks"`
+	Observe     time.Duration `json:"observe_ns"`
+	Timeout     time.Duration `json:"timeout_ns"`
+	Execute     bool          `json:"execute"`
+	Operation   string        `json:"operation,omitempty"`
 }
 type staticEdgeDNSRecord map[string]json.RawMessage
 
@@ -58,6 +59,9 @@ func (r staticEdgeDNSRecord) clone() staticEdgeDNSRecord {
 func (r staticEdgeDNSRecord) withIP(ip string) staticEdgeDNSRecord {
 	v := r.clone()
 	v["content"], _ = json.Marshal(ip)
+	if _, ok := v["values"]; ok {
+		v["values"], _ = json.Marshal([]string{ip})
+	}
 	return v
 }
 func staticEdgeRecordEqual(a, b staticEdgeDNSRecord) bool {
@@ -214,8 +218,9 @@ func (cli *CLI) newStaticEdgeCutoverCommand() *cobra.Command {
 			return cli.runStaticEdgeCutover(cmd.Context(), o)
 		}}
 		f := x.Flags()
+		f.StringVar(&o.DNSProvider, "dns-provider", "", "DNS backend: cloudflare (default) or fugue")
 		f.StringVar(&o.Zone, "zone", "", "Exact DNS zone")
-		f.StringVar(&o.ZoneID, "zone-id", "", "Zone ID; avoids Zone Read permission")
+		f.StringVar(&o.ZoneID, "zone-id", "", "Zone ID; avoids Zone Read permission for Cloudflare")
 		f.StringSliceVar(&o.Hostnames, "hostname", nil, "Exact managed hostname; repeat as needed")
 		f.StringVar(&o.FromIP, "from-ip", "", "Expected old IPv4")
 		f.StringVar(&o.ToIP, "to-ip", "", "Candidate IPv4")
@@ -235,6 +240,15 @@ func normalizeStaticEdgeCutover(o staticEdgeCutoverOptions) (staticEdgeCutoverOp
 	o.Zone = normalizeDNSName(o.Zone)
 	if e := validateStaticEdgeZone(o.Zone); e != nil {
 		return o, e
+	}
+	if provider := staticEdgeDNSProvider(o); provider != staticEdgeDNSProviderCloudflare && provider != staticEdgeDNSProviderFugue {
+		return o, fmt.Errorf("unsupported DNS provider %q; use %q or %q", o.DNSProvider, staticEdgeDNSProviderCloudflare, staticEdgeDNSProviderFugue)
+	}
+	if strings.TrimSpace(o.DNSProvider) != "" {
+		o.DNSProvider = staticEdgeDNSProvider(o)
+	}
+	if staticEdgeDNSProvider(o) == staticEdgeDNSProviderFugue && strings.TrimSpace(o.ZoneID) != "" {
+		return o, errors.New("--zone-id is only supported with the Cloudflare DNS provider")
 	}
 	if len(o.Hostnames) == 0 || len(o.Hostnames) > 16 {
 		return o, errors.New("1-16 exact hostnames required")
@@ -393,14 +407,20 @@ func (cli *CLI) runStaticEdgeCutoverWithChecks(ctx context.Context, o staticEdge
 		return e
 	}
 	defer unlock()
-	client, e := newStaticEdgeCloudflareClient(o.Zone, o.Timeout)
+	client, e := cli.newStaticEdgeDNSBackend(o)
 	if e != nil {
 		return e
 	}
-	client.zoneID = o.ZoneID
 	zid, e := client.ensureZoneID(ctx, o.Zone)
 	if e != nil {
 		return e
+	}
+	if o.Execute {
+		if ready, ok := client.(interface{ requirePublicCutoverReady() error }); ok {
+			if e := ready.requirePublicCutoverReady(); e != nil {
+				return e
+			}
+		}
 	}
 	id := staticEdgeCutoverID(o)
 	j, e := readStaticEdgeCutoverJournal(id)
@@ -630,11 +650,12 @@ func (cli *CLI) staticEdgeExistingCutover(ctx context.Context, o staticEdgeCutov
 		return e
 	}
 	defer unlock()
-	client, e := newStaticEdgeCloudflareClient(j.Options.Zone, o.Timeout)
+	backendOptions := j.Options
+	backendOptions.Timeout = o.Timeout
+	client, e := cli.newStaticEdgeDNSBackend(backendOptions)
 	if e != nil {
 		return e
 	}
-	client.zoneID = j.Options.ZoneID
 	zid, e := client.ensureZoneID(ctx, j.Options.Zone)
 	if e != nil {
 		return e
@@ -648,6 +669,11 @@ func (cli *CLI) staticEdgeExistingCutover(ctx context.Context, o staticEdgeCutov
 	}
 	if op == "status" || !o.Execute {
 		return cli.writeJSON(map[string]any{"journal": j, "current_records": current, "dry_run": op == "rollback"})
+	}
+	if ready, ok := client.(interface{ requirePublicCutoverReady() error }); ok {
+		if e := ready.requirePublicCutoverReady(); e != nil {
+			return e
+		}
 	}
 	probes := j.Options
 	probes.Timeout = o.Timeout

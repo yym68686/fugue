@@ -95,6 +95,24 @@ fugue static-edge cloudflare auth import --zone example.com --token-stdin
 fugue static-edge cloudflare auth show --zone example.com
 ```
 
+The cutover command also supports Fugue hosted DNS. Select it explicitly with
+`--dns-provider fugue`; this uses the authenticated Fugue API credential and does
+not read or require a Cloudflare token:
+
+```sh
+fugue static-edge cutover plan --dns-provider fugue --zone example.com \
+  --hostname example.com --from-ip 192.0.2.10 --to-ip 192.0.2.20 \
+  --candidate entry-next --probe-ssh entry-next
+```
+
+Fugue hosted DNS cutover requires the zone to report `active` with delegation
+status `ready`. The CLI reads the exact hosted record, requires one active IPv4 A
+value with flattening disabled, patches only that record's values, reads the
+result back, and keeps the same journal, overlap probes, drift checks and
+rollback behavior as the Cloudflare backend. A zone that is only registered in
+Fugue but still reports `pending_delegation` is deliberately rejected because a
+record update there cannot prove a public DNS cutover.
+
 The import reads a single token from stdin and saves it with mode `0600`. It does
 not echo the token or put it in process arguments. The default state directory is
 the OS user configuration directory under `fugue/static-edge`; override with
