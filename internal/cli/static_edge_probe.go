@@ -14,18 +14,20 @@ import (
 )
 
 type staticEdgeProbeRequest struct {
-	IP      string  `json:"ip"`
-	Host    string  `json:"host"`
-	Path    string  `json:"path"`
-	Status  int     `json:"status"`
-	EdgeID  string  `json:"edge_id"`
-	Timeout float64 `json:"timeout"`
+	IP                      string  `json:"ip"`
+	Host                    string  `json:"host"`
+	Path                    string  `json:"path"`
+	Status                  int     `json:"status"`
+	EdgeID                  string  `json:"edge_id"`
+	Timeout                 float64 `json:"timeout"`
+	RequireProtocolCoverage bool    `json:"require_protocol_coverage,omitempty"`
 }
 type staticEdgeProbeResult struct {
 	Status    int    `json:"status"`
 	EdgeID    string `json:"edge_id"`
 	PeerIP    string `json:"peer_ip"`
 	BodyBytes int    `json:"body_bytes"`
+	AltSvc    string `json:"alt_svc,omitempty"`
 }
 
 func verifyStaticEdgeProbe(req staticEdgeProbeRequest, result staticEdgeProbeResult) error {
@@ -38,11 +40,23 @@ func verifyStaticEdgeProbe(req staticEdgeProbeRequest, result staticEdgeProbeRes
 	if req.EdgeID != "" && result.EdgeID != req.EdgeID {
 		return fmt.Errorf("probe reached edge identity %q, expected %q; local TLS/SNI may be intercepted", result.EdgeID, req.EdgeID)
 	}
+	if req.RequireProtocolCoverage {
+		for _, alternative := range strings.Split(result.AltSvc, ",") {
+			protocol, _, ok := strings.Cut(strings.TrimSpace(alternative), "=")
+			protocol = strings.Trim(strings.TrimSpace(protocol), "\"")
+			if ok && (protocol == "h3" || strings.HasPrefix(protocol, "h3-")) {
+				return fmt.Errorf("%s via %s advertises HTTP/3; the HTTPS/TCP probe cannot verify cached QUIC paths; refusing DNS cutover", req.Host, req.IP)
+			}
+		}
+	}
 	return nil
 }
 
-func probeStaticEdgeVerified(ctx context.Context, sshAlias, ip, host, path string, status int, edgeID string, timeout time.Duration) error {
-	req := staticEdgeProbeRequest{ip, host, path, status, edgeID, timeout.Seconds()}
+func probeStaticEdgeVerified(ctx context.Context, sshAlias, ip, host, path string, status int, edgeID string, timeout time.Duration, protocolCoverage ...bool) error {
+	req := staticEdgeProbeRequest{IP: ip, Host: host, Path: path, Status: status, EdgeID: edgeID, Timeout: timeout.Seconds()}
+	if len(protocolCoverage) > 0 {
+		req.RequireProtocolCoverage = protocolCoverage[0]
+	}
 	if sshAlias != "" {
 		payload, e := json.Marshal(req)
 		if e != nil {
@@ -85,7 +99,7 @@ func probeStaticEdgeVerified(ctx context.Context, sshAlias, ip, host, path strin
 	if n > 65536 {
 		return errors.New("non-billable probe response exceeds 64KiB")
 	}
-	return verifyStaticEdgeProbe(req, staticEdgeProbeResult{response.StatusCode, response.Header.Get("X-Fugue-Static-Edge"), peer, int(n)})
+	return verifyStaticEdgeProbe(req, staticEdgeProbeResult{Status: response.StatusCode, EdgeID: response.Header.Get("X-Fugue-Static-Edge"), PeerIP: peer, BodyBytes: int(n), AltSvc: strings.Join(response.Header.Values("Alt-Svc"), ",")})
 }
 
 // Fixed, read-only probe code. All variable input travels through JSON stdin,
@@ -103,5 +117,5 @@ with c.wrap_socket(s,server_hostname=r["host"]) as t:
  response.begin()
  body=response.read(65537)
  if len(body)>65536: raise ValueError("probe body exceeds 64KiB")
- print(json.dumps({"status":response.status,"edge_id":response.getheader("X-Fugue-Static-Edge", ""),"peer_ip":peer,"body_bytes":len(body)}))
+ print(json.dumps({"status":response.status,"edge_id":response.getheader("X-Fugue-Static-Edge", ""),"peer_ip":peer,"body_bytes":len(body),"alt_svc":", ".join(response.headers.get_all("Alt-Svc", []))}))
 `

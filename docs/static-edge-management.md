@@ -108,10 +108,17 @@ fugue static-edge cutover plan --dns-provider fugue --zone example.com \
 Fugue hosted DNS cutover requires the zone to report `active` with delegation
 status `ready`. The CLI reads the exact hosted record, requires one active IPv4 A
 value with flattening disabled, patches only that record's values, reads the
-result back, and keeps the same journal, overlap probes, drift checks and
+result back, waits for every expected authoritative nameserver to answer the
+intended A record over both UDP and TCP, and keeps the same journal, overlap probes, drift checks and
 rollback behavior as the Cloudflare backend. A zone that is only registered in
 Fugue but still reports `pending_delegation` is deliberately rejected because a
-record update there cannot prove a public DNS cutover.
+record update there cannot prove a public DNS cutover. `plan` checks this readiness
+too. After an API write, `dns_propagating` (or `rollback_dns_propagating`) remains
+resumable until authority convergence is verified. A bounded ten-minute timeout
+retains both servers and does not report completion. Per-query timeouts are capped
+at five seconds. `authoritative_dns_verified` is true only after those reads;
+Cloudflare retains its existing API-only verification and reports false. This
+does not prove that every recursive cache has expired.
 
 The import reads a single token from stdin and saves it with mode `0600`. It does
 not echo the token or put it in process arguments. The default state directory is
@@ -176,7 +183,13 @@ fugue static-edge cutover run --zone example.com --zone-id ZONE_ID \
 
 Only non-billable GET endpoints should be passed as checks. The default primary
 probe is `/_static-edge/health` and must return 200 with normal public TLS
-verification and exact SNI. There is no production skip-probe flag. Extra checks
+verification and exact SNI. The current cutover probe covers HTTPS over TCP,
+not QUIC. If either endpoint advertises HTTP/3 through `Alt-Svc`, a new cutover
+fails closed before any DNS write because cached alternate ports are not
+verified. Removing an advertisement does not flush client caches and must not
+be used to bypass this limitation. Recovery rollback still permits the TCP
+probe so this coverage guard cannot trap an already-started migration.
+There is no production skip-probe flag. Extra checks
 are constrained to the hostname allowlist. The candidate must have an active,
 healthy, non-draining bundle whose runtime/startup state matches the manager.
 Candidate responses must include the exact edge identity. A local VPN or proxy
@@ -204,8 +217,9 @@ fugue static-edge cutover rollback --operation fse_OPERATION_ID --execute
 Rollback also verifies both endpoints, preserves record attributes and refuses
 external drift. It keeps both servers running. A DNS update is not globally
 atomic, and existing connections/cached old addresses still need the old server.
-Completion means `completed_old_retained`, with bounded probe evidence and API
-record verification, not proof about every client or permission to retire the
+Completion means `completed_old_retained`, with bounded probe evidence, API
+record verification and (for Fugue hosted DNS) authoritative UDP/TCP convergence,
+not proof about every client or permission to retire the
 old server. No drain/restart/stop/kill operation is part of DNS cutover. Natural
 business traffic and authoritative/recursive DNS should also be reviewed before
 declaring the production migration accepted.

@@ -69,6 +69,8 @@ func TestStaticEdgePythonProbeParsesRealTLSHTTP(t *testing.T) {
 			t.Error(r.Host, r.URL.Path)
 		}
 		w.Header().Set("X-Fugue-Static-Edge", "candidate")
+		w.Header().Add("Alt-Svc", `h2=":443"`)
+		w.Header().Add("Alt-Svc", `h3=":443"`)
 		w.Write([]byte("ok"))
 	}))
 	defer server.Close()
@@ -88,7 +90,27 @@ func TestStaticEdgePythonProbeParsesRealTLSHTTP(t *testing.T) {
 	if e = json.Unmarshal(output, &result); e != nil {
 		t.Fatal(e, string(output))
 	}
-	if result.Status != 200 || result.EdgeID != "candidate" || result.BodyBytes != 2 {
+	if result.Status != 200 || result.EdgeID != "candidate" || result.BodyBytes != 2 || result.AltSvc != `h2=":443", h3=":443"` {
 		t.Fatal(result)
+	}
+}
+
+func TestStaticEdgeProbeFailsClosedOnUnverifiedHTTP3(t *testing.T) {
+	req := staticEdgeProbeRequest{IP: "192.0.2.20", Host: "example.test", Path: "/health", Status: 200, EdgeID: "candidate", RequireProtocolCoverage: true}
+	for _, alt := range []string{`h3=":443"; ma=2592000`, `h2=":443", h3=":31443"; ma=60`, `h3-29=":443"`} {
+		result := staticEdgeProbeResult{Status: 200, EdgeID: "candidate", PeerIP: req.IP, AltSvc: alt}
+		if err := verifyStaticEdgeProbe(req, result); err == nil || !strings.Contains(err.Error(), "cannot verify cached QUIC paths") {
+			t.Fatalf("unverified protocol accepted: %q %v", alt, err)
+		}
+		req.RequireProtocolCoverage = false
+		if err := verifyStaticEdgeProbe(req, result); err != nil {
+			t.Fatalf("TCP recovery probe blocked: %v", err)
+		}
+		req.RequireProtocolCoverage = true
+	}
+	for _, alt := range []string{"", `clear`, `h2=":443"`} {
+		if err := verifyStaticEdgeProbe(req, staticEdgeProbeResult{Status: 200, EdgeID: "candidate", PeerIP: req.IP, AltSvc: alt}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

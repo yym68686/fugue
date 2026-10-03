@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +15,7 @@ import (
 )
 
 func TestStaticEdgeCutoverUsesFugueDNSBackend(t *testing.T) {
-	zone := model.HostedZone{ID: "dnszone_test", ZoneName: "example.test", Status: model.HostedZoneStatusActive, DelegationStatus: model.HostedZoneDelegationStatusReady}
+	zone := model.HostedZone{ID: "dnszone_test", ZoneName: "example.test", Status: model.HostedZoneStatusActive, DelegationStatus: model.HostedZoneDelegationStatusReady, ExpectedNameservers: []string{"ns1.example.test"}}
 	record := model.DNSRecord{ID: "dnsrec_test", ZoneID: zone.ID, Name: "@", FQDN: "example.test", Type: model.DNSRecordTypeA, Values: []string{"192.0.2.10"}, TTL: 60, FlattenMode: model.DNSRecordFlattenModeNone, Source: model.DNSRecordSourceUser, Status: model.DNSRecordStatusActive}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -40,16 +41,71 @@ func TestStaticEdgeCutoverUsesFugueDNSBackend(t *testing.T) {
 	t.Setenv("FUGUE_STATIC_EDGE_STATE_DIR", t.TempDir())
 	cli := newCLI(&bytes.Buffer{}, &bytes.Buffer{})
 	o := staticEdgeCutoverOptions{DNSProvider: staticEdgeDNSProviderFugue, Zone: zone.ZoneName, Hostnames: []string{zone.ZoneName}, FromIP: "192.0.2.10", ToIP: "192.0.2.20", Candidate: "candidate", ProbePath: "/health", Observe: 5 * time.Second, Timeout: time.Second, Execute: true}
-	if err := cli.runStaticEdgeCutoverWithChecks(context.Background(), o, goodCutoverCheck, goodCutoverCheck, goodCutoverCheck); err != nil {
+	waitErr := errors.New("authoritative server still serves predecessor")
+	wait := func(ctx context.Context, backend staticEdgeDNSBackend, options staticEdgeCutoverOptions, target string) (bool, error) {
+		if staticEdgeDNSProvider(options) != staticEdgeDNSProviderFugue || target != o.ToIP {
+			t.Fatal("wrong authoritative verification target")
+		}
+		return waitErr == nil, waitErr
+	}
+	if err := cli.runStaticEdgeCutoverWithDNSChecks(context.Background(), o, goodCutoverCheck, goodCutoverCheck, goodCutoverCheck, wait); !errors.Is(err, waitErr) {
+		t.Fatalf("API echo incorrectly completed cutover: %v", err)
+	}
+	normalized, err := normalizeStaticEdgeCutover(o)
+	if err != nil {
 		t.Fatal(err)
+	}
+	journal, err := readStaticEdgeCutoverJournal(staticEdgeCutoverID(normalized))
+	if err != nil || journal.Phase != "dns_propagating" {
+		t.Fatalf("missing resumable propagation state: %v %+v", err, journal)
+	}
+	waitErr = nil
+	if err := cli.runStaticEdgeCutoverWithDNSChecks(context.Background(), o, goodCutoverCheck, goodCutoverCheck, goodCutoverCheck, wait); err != nil {
+		t.Fatal(err)
+	}
+	journal, err = readStaticEdgeCutoverJournal(staticEdgeCutoverID(normalized))
+	if err != nil || journal.Phase != "completed_old_retained" {
+		t.Fatalf("did not resume after convergence: %v %+v", err, journal)
 	}
 	if got := record.Values; len(got) != 1 || got[0] != "192.0.2.20" {
 		t.Fatalf("unexpected patched values: %v", got)
 	}
+	rollbackWaitErr := errors.New("authoritative rollback still propagating")
+	rollbackWait := func(_ context.Context, _ staticEdgeDNSBackend, _ staticEdgeCutoverOptions, target string) (bool, error) {
+		if target != o.FromIP {
+			t.Fatalf("rollback verified wrong target: %s", target)
+		}
+		return rollbackWaitErr == nil, rollbackWaitErr
+	}
+	recoveryProbe := func(_ context.Context, _ staticEdgeCutoverOptions, coverage bool) error {
+		if coverage {
+			t.Fatal("recovery blocked by new cutover coverage gate")
+		}
+		return nil
+	}
+	rollback := staticEdgeCutoverOptions{Operation: journal.Operation, Execute: true, Timeout: time.Second}
+	if err := cli.staticEdgeExistingCutoverWithChecks(context.Background(), rollback, "rollback", recoveryProbe, rollbackWait); !errors.Is(err, rollbackWaitErr) {
+		t.Fatalf("rollback completed before authority: %v", err)
+	}
+	journal, err = readStaticEdgeCutoverJournal(journal.Operation)
+	if err != nil || journal.Phase != "rollback_dns_propagating" {
+		t.Fatalf("rollback is not resumable: %v %+v", err, journal)
+	}
+	if record.Values[0] != o.FromIP {
+		t.Fatal("rollback intent not restored")
+	}
+	rollbackWaitErr = nil
+	if err := cli.staticEdgeExistingCutoverWithChecks(context.Background(), rollback, "rollback", recoveryProbe, rollbackWait); err != nil {
+		t.Fatal(err)
+	}
+	journal, err = readStaticEdgeCutoverJournal(journal.Operation)
+	if err != nil || journal.Phase != "rolled_back" {
+		t.Fatalf("rollback did not complete: %v %+v", err, journal)
+	}
 }
 
 func TestHostedDNSStaticEdgeBackendReadPatch(t *testing.T) {
-	zone := model.HostedZone{ID: "dnszone_test", ZoneName: "example.test", Status: model.HostedZoneStatusActive, DelegationStatus: model.HostedZoneDelegationStatusReady}
+	zone := model.HostedZone{ID: "dnszone_test", ZoneName: "example.test", Status: model.HostedZoneStatusActive, DelegationStatus: model.HostedZoneDelegationStatusReady, ExpectedNameservers: []string{"ns1.example.test"}}
 	record := model.DNSRecord{ID: "dnsrec_test", ZoneID: zone.ID, Name: "@", FQDN: "example.test", Type: model.DNSRecordTypeA, Values: []string{"192.0.2.10"}, TTL: 60, FlattenMode: model.DNSRecordFlattenModeNone, Source: model.DNSRecordSourceUser, Status: model.DNSRecordStatusActive}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer token" {
@@ -109,7 +165,7 @@ func TestHostedDNSStaticEdgeBackendRejectsUnreadyZone(t *testing.T) {
 }
 
 func TestHostedDNSStaticEdgeBackendIgnoresNonRoutingRecords(t *testing.T) {
-	zone := model.HostedZone{ID: "dnszone_test", ZoneName: "example.test", Status: model.HostedZoneStatusActive, DelegationStatus: model.HostedZoneDelegationStatusReady}
+	zone := model.HostedZone{ID: "dnszone_test", ZoneName: "example.test", Status: model.HostedZoneStatusActive, DelegationStatus: model.HostedZoneDelegationStatusReady, ExpectedNameservers: []string{"ns1.example.test"}}
 	records := []model.DNSRecord{
 		{ID: "txt", ZoneID: zone.ID, Name: "@", FQDN: "example.test", Type: model.DNSRecordTypeTXT, Values: []string{"v=spf1"}, Status: model.DNSRecordStatusActive},
 		{ID: "a", ZoneID: zone.ID, Name: "@", FQDN: "example.test", Type: model.DNSRecordTypeA, Values: []string{"192.0.2.10"}, Status: model.DNSRecordStatusActive},
@@ -158,5 +214,36 @@ func TestStaticEdgeCutoverCloudflareProviderKeepsLegacyOperationIdentity(t *test
 	}
 	if normalExplicit.DNSProvider != "" || staticEdgeCutoverID(normalBase) != staticEdgeCutoverID(normalExplicit) {
 		t.Fatalf("explicit Cloudflare changed legacy operation identity: base=%q explicit=%q", staticEdgeCutoverID(normalBase), staticEdgeCutoverID(normalExplicit))
+	}
+}
+
+func TestHostedDNSStaticEdgeRequiresAuthorityMetadata(t *testing.T) {
+	for _, nameservers := range [][]string{nil, {"https://invalid.test"}} {
+		b := &fugueHostedDNSClient{publicCutoverReady: true, expectedNameservers: nameservers}
+		if e := b.requirePublicCutoverReady(); e == nil {
+			t.Fatal("missing or malformed authority accepted")
+		}
+	}
+	b := &fugueHostedDNSClient{publicCutoverReady: true, expectedNameservers: []string{"ns1.example.test."}}
+	if e := b.requirePublicCutoverReady(); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestHostedDNSStaticEdgeHonorsOperationCancellation(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(500) }))
+	defer server.Close()
+	client, e := newClientWithOptions(server.URL, "token", clientOptions{RequireToken: true, ReadRetryCount: -1})
+	if e != nil {
+		t.Fatal(e)
+	}
+	backend := &fugueHostedDNSClient{client: client}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, e := backend.ensureZoneID(ctx, "example.test"); e == nil {
+		t.Fatal("canceled operation proceeded")
+	}
+	if calls != 0 {
+		t.Fatal("canceled operation sent network request")
 	}
 }

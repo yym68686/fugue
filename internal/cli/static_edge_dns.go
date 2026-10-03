@@ -43,6 +43,9 @@ func (cli *CLI) newStaticEdgeDNSBackend(o staticEdgeCutoverOptions) (staticEdgeD
 		if err != nil {
 			return nil, err
 		}
+		if o.Timeout > 0 {
+			client.httpClient.Timeout = o.Timeout
+		}
 		return &fugueHostedDNSClient{client: client}, nil
 	default:
 		return nil, fmt.Errorf("unsupported DNS provider %q; use %q or %q", o.DNSProvider, staticEdgeDNSProviderCloudflare, staticEdgeDNSProviderFugue)
@@ -50,21 +53,24 @@ func (cli *CLI) newStaticEdgeDNSBackend(o staticEdgeCutoverOptions) (staticEdgeD
 }
 
 type fugueHostedDNSClient struct {
-	client             *Client
-	zoneName           string
-	zoneStatus         string
-	delegationStatus   string
-	publicCutoverReady bool
+	client              *Client
+	zoneName            string
+	zoneStatus          string
+	delegationStatus    string
+	publicCutoverReady  bool
+	expectedNameservers []string
 }
 
-func (x *fugueHostedDNSClient) ensureZoneID(_ context.Context, zoneName string) (string, error) {
-	zone, err := x.client.GetHostedDNSZone(zoneName)
+func (x *fugueHostedDNSClient) ensureZoneID(ctx context.Context, zoneName string) (string, error) {
+	client := x.withContext(ctx)
+	zone, err := client.GetHostedDNSZone(zoneName)
 	if err != nil {
 		return "", err
 	}
 	if normalizeDNSName(zone.ZoneName) != normalizeDNSName(zoneName) {
 		return "", errors.New("hosted DNS API returned a different zone")
 	}
+	x.expectedNameservers = append([]string(nil), zone.ExpectedNameservers...)
 	x.zoneName = normalizeDNSName(zoneName)
 	x.zoneStatus = zone.Status
 	x.delegationStatus = zone.DelegationStatus
@@ -77,6 +83,14 @@ func (x *fugueHostedDNSClient) ensureZoneID(_ context.Context, zoneName string) 
 
 func (x *fugueHostedDNSClient) requirePublicCutoverReady() error {
 	if x.publicCutoverReady {
+		if len(x.expectedNameservers) == 0 || len(x.expectedNameservers) > 16 {
+			return errors.New("hosted DNS requires 1-16 expected authoritative nameservers")
+		}
+		for _, ns := range x.expectedNameservers {
+			if err := validateStaticEdgeZone(strings.TrimSuffix(strings.TrimSpace(ns), ".")); err != nil {
+				return fmt.Errorf("invalid authoritative nameserver %q: %w", ns, err)
+			}
+		}
 		return nil
 	}
 	return fmt.Errorf("hosted DNS zone %s is not ready for public cutover (status=%s delegation=%s)", x.zoneName, x.zoneStatus, x.delegationStatus)
@@ -144,12 +158,13 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-func (x *fugueHostedDNSClient) staticEdgeA(_ context.Context, _ string, host string) (staticEdgeDNSRecord, error) {
+func (x *fugueHostedDNSClient) staticEdgeA(ctx context.Context, _ string, host string) (staticEdgeDNSRecord, error) {
 	zoneName := x.zoneName
 	if zoneName == "" {
 		return nil, errors.New("hosted DNS zone is not initialized")
 	}
-	records, err := x.client.ListHostedDNSRecords(zoneName)
+	client := x.withContext(ctx)
+	records, err := client.ListHostedDNSRecords(zoneName)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +192,7 @@ func (x *fugueHostedDNSClient) staticEdgeA(_ context.Context, _ string, host str
 	return hostedDNSRecordToStatic(found)
 }
 
-func (x *fugueHostedDNSClient) staticEdgePatch(_ context.Context, _ string, old staticEdgeDNSRecord, ip string) error {
+func (x *fugueHostedDNSClient) staticEdgePatch(ctx context.Context, _ string, old staticEdgeDNSRecord, ip string) error {
 	if x.zoneName == "" {
 		return errors.New("hosted DNS zone is not initialized")
 	}
@@ -185,7 +200,8 @@ func (x *fugueHostedDNSClient) staticEdgePatch(_ context.Context, _ string, old 
 	if id == "" {
 		return errors.New("hosted DNS record has no ID")
 	}
-	got, err := x.client.PatchHostedDNSRecord(x.zoneName, id, patchHostedDNSRecordClientRequest{Values: []string{ip}})
+	client := x.withContext(ctx)
+	got, err := client.PatchHostedDNSRecord(x.zoneName, id, patchHostedDNSRecordClientRequest{Values: []string{ip}})
 	if err != nil {
 		return err
 	}
@@ -197,4 +213,17 @@ func (x *fugueHostedDNSClient) staticEdgePatch(_ context.Context, _ string, old 
 		return errors.New("PATCH response differs from expected hosted DNS record")
 	}
 	return nil
+}
+
+func (x *fugueHostedDNSClient) staticEdgeAuthoritativeNS() []string {
+	return append([]string(nil), x.expectedNameservers...)
+}
+
+// Keep per-operation cancellation without mutating a shared client's context.
+func (x *fugueHostedDNSClient) withContext(ctx context.Context) *Client {
+	client := *x.client
+	if ctx != nil {
+		client.context = ctx
+	}
+	return &client
 }

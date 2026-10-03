@@ -404,6 +404,9 @@ func (cli *CLI) runStaticEdgeCutover(ctx context.Context, o staticEdgeCutoverOpt
 	return cli.runStaticEdgeCutoverWithChecks(ctx, o, verifyStaticEdgeCandidate, probeStaticEdgeBoth, observeStaticEdgeOverlap)
 }
 func (cli *CLI) runStaticEdgeCutoverWithChecks(ctx context.Context, o staticEdgeCutoverOptions, verify func(context.Context, staticEdgeCutoverOptions) error, probe func(context.Context, staticEdgeCutoverOptions) error, observe func(context.Context, staticEdgeCutoverOptions) error) error {
+	return cli.runStaticEdgeCutoverWithDNSChecks(ctx, o, verify, probe, observe, waitStaticEdgeAuthoritative)
+}
+func (cli *CLI) runStaticEdgeCutoverWithDNSChecks(ctx context.Context, o staticEdgeCutoverOptions, verify, probe, observe func(context.Context, staticEdgeCutoverOptions) error, waitDNS staticEdgeDNSWaiter) error {
 	o, e := normalizeStaticEdgeCutover(o)
 	if e != nil {
 		return e
@@ -421,11 +424,9 @@ func (cli *CLI) runStaticEdgeCutoverWithChecks(ctx context.Context, o staticEdge
 	if e != nil {
 		return e
 	}
-	if o.Execute {
-		if ready, ok := client.(interface{ requirePublicCutoverReady() error }); ok {
-			if e := ready.requirePublicCutoverReady(); e != nil {
-				return e
-			}
+	if ready, ok := client.(interface{ requirePublicCutoverReady() error }); ok {
+		if e := ready.requirePublicCutoverReady(); e != nil {
+			return e
 		}
 	}
 	id := staticEdgeCutoverID(o)
@@ -446,7 +447,7 @@ func (cli *CLI) runStaticEdgeCutoverWithChecks(ctx context.Context, o staticEdge
 			j.Records[h] = r
 		}
 	}
-	if j.Phase == "rolled_back" || j.Phase == "rollback_pending" {
+	if j.Phase == "rolled_back" || j.Phase == "rollback_pending" || j.Phase == "rollback_dns_propagating" {
 		return errors.New("intent was rolled back or rollback pending; inspect it before a new cutover")
 	}
 	if e = verify(ctx, o); e != nil {
@@ -517,6 +518,17 @@ func (cli *CLI) runStaticEdgeCutoverWithChecks(ctx context.Context, o staticEdge
 	if e = observe(ctx, o); e != nil {
 		return fail(e)
 	}
+	j.Phase = "dns_propagating"
+	if e = saveStaticEdgeCutoverJournal(&j); e != nil {
+		return e
+	}
+	authoritative, e := waitDNS(ctx, client, o, o.ToIP)
+	if e != nil {
+		return fail(e)
+	}
+	if e = probe(ctx, o); e != nil {
+		return fail(e)
+	}
 	if e = verify(ctx, o); e != nil {
 		return fail(e)
 	}
@@ -534,7 +546,7 @@ func (cli *CLI) runStaticEdgeCutoverWithChecks(ctx context.Context, o staticEdge
 	if e = saveStaticEdgeCutoverJournal(&j); e != nil {
 		return e
 	}
-	return cli.writeJSON(map[string]any{"operation": id, "phase": j.Phase, "hostnames": o.Hostnames, "authoritative_target": o.ToIP, "dns_api_verified": true, "both_endpoints_healthy": true, "old_server_must_remain_serving": true, "unmanaged_records_not_written": true})
+	return cli.writeJSON(map[string]any{"operation": id, "phase": j.Phase, "hostnames": o.Hostnames, "authoritative_target": o.ToIP, "dns_api_verified": true, "authoritative_dns_verified": authoritative, "both_endpoints_healthy": true, "old_server_must_remain_serving": true, "unmanaged_records_not_written": true})
 }
 func observeStaticEdgeOverlap(ctx context.Context, o staticEdgeCutoverOptions) error {
 	deadline := time.Now().Add(o.Observe)
@@ -576,6 +588,9 @@ func verifyStaticEdgeCandidate(ctx context.Context, o staticEdgeCutoverOptions) 
 	return nil
 }
 func probeStaticEdgeBoth(ctx context.Context, o staticEdgeCutoverOptions) error {
+	return probeStaticEdgeBothWithCoverage(ctx, o, true)
+}
+func probeStaticEdgeBothWithCoverage(ctx context.Context, o staticEdgeCutoverOptions, protocolCoverage bool) error {
 	cfg, e := loadStaticEdgeContext(o.Candidate)
 	if e != nil {
 		return e
@@ -586,7 +601,7 @@ func probeStaticEdgeBoth(ctx context.Context, o staticEdgeCutoverOptions) error 
 			expectedEdge = cfg.EdgeID
 		}
 		for _, h := range o.Hostnames {
-			if e := probeStaticEdgeVerified(ctx, o.ProbeSSH, ip, h, o.ProbePath, 200, expectedEdge, o.Timeout); e != nil {
+			if e := probeStaticEdgeVerified(ctx, o.ProbeSSH, ip, h, o.ProbePath, 200, expectedEdge, o.Timeout, protocolCoverage); e != nil {
 				return e
 			}
 		}
@@ -595,7 +610,7 @@ func probeStaticEdgeBoth(ctx context.Context, o staticEdgeCutoverOptions) error 
 			if e != nil {
 				return e
 			}
-			if e = probeStaticEdgeVerified(ctx, o.ProbeSSH, ip, host, path, status, expectedEdge, o.Timeout); e != nil {
+			if e = probeStaticEdgeVerified(ctx, o.ProbeSSH, ip, host, path, status, expectedEdge, o.Timeout, protocolCoverage); e != nil {
 				return e
 			}
 		}
@@ -647,6 +662,9 @@ func probeStaticEdgeEndpointStatus(ctx context.Context, ip, hostname string, por
 	return e
 }
 func (cli *CLI) staticEdgeExistingCutover(ctx context.Context, o staticEdgeCutoverOptions, op string) error {
+	return cli.staticEdgeExistingCutoverWithChecks(ctx, o, op, probeStaticEdgeBothWithCoverage, waitStaticEdgeAuthoritative)
+}
+func (cli *CLI) staticEdgeExistingCutoverWithChecks(ctx context.Context, o staticEdgeCutoverOptions, op string, probe func(context.Context, staticEdgeCutoverOptions, bool) error, waitDNS staticEdgeDNSWaiter) error {
 	j, e := readStaticEdgeCutoverJournal(o.Operation)
 	if e != nil {
 		return e
@@ -683,7 +701,8 @@ func (cli *CLI) staticEdgeExistingCutover(ctx context.Context, o staticEdgeCutov
 	}
 	probes := j.Options
 	probes.Timeout = o.Timeout
-	if e = probeStaticEdgeBoth(ctx, probes); e != nil {
+	// Recovery must not be blocked by the failed candidate protocol coverage.
+	if e = probe(ctx, probes, false); e != nil {
 		return e
 	}
 	for _, h := range j.Options.Hostnames {
@@ -715,10 +734,31 @@ func (cli *CLI) staticEdgeExistingCutover(ctx context.Context, o staticEdgeCutov
 			return fmt.Errorf("rollback verification failed for %s: %v", h, writeErr)
 		}
 	}
+	j.Phase = "rollback_dns_propagating"
+	if e = saveStaticEdgeCutoverJournal(&j); e != nil {
+		return e
+	}
+	authoritative, e := waitDNS(ctx, client, probes, j.Options.FromIP)
+	if e != nil {
+		j.Error = e.Error()
+		if saveErr := saveStaticEdgeCutoverJournal(&j); saveErr != nil {
+			return fmt.Errorf("%v; journal: %w", e, saveErr)
+		}
+		return fmt.Errorf("rollback %s DNS propagation pending; both servers retained: %w", j.Operation, e)
+	}
+	for _, h := range j.Options.Hostnames {
+		r, readErr := client.staticEdgeA(ctx, zid, h)
+		if readErr != nil {
+			return readErr
+		}
+		if !staticEdgeRecordEqual(r, j.Records[h]) {
+			return fmt.Errorf("final rollback DNS drift for %s", h)
+		}
+	}
 	j.Phase = "rolled_back"
 	j.Error = ""
 	if e = saveStaticEdgeCutoverJournal(&j); e != nil {
 		return e
 	}
-	return cli.writeJSON(map[string]any{"operation": j.Operation, "phase": j.Phase, "both_servers_retained": true})
+	return cli.writeJSON(map[string]any{"operation": j.Operation, "phase": j.Phase, "both_servers_retained": true, "authoritative_dns_verified": authoritative})
 }
