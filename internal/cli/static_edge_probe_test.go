@@ -114,3 +114,29 @@ func TestStaticEdgeProbeFailsClosedOnUnverifiedHTTP3(t *testing.T) {
 		}
 	}
 }
+
+func TestAdvertisedHTTP3Port(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		alt  string
+		port int
+		ok   bool
+	}{
+		{name: "origin form", alt: `h3=":443"; ma=86400`, port: 443, ok: true},
+		{name: "alternate port", alt: `h2=":443", h3=":31443"; ma=60`, port: 31443, ok: true},
+		{name: "versioned h3", alt: `h3-29=":443"`, port: 443, ok: true},
+		{name: "no h3", alt: `h2=":443"`, ok: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			port, ok, err := advertisedHTTP3Port(test.alt)
+			if err != nil || ok != test.ok || port != test.port {
+				t.Fatalf("advertisedHTTP3Port(%q) = (%d, %t, %v), want (%d, %t, nil)", test.alt, port, ok, err, test.port, test.ok)
+			}
+		})
+	}
+	for _, alt := range []string{`h3="bad"`, `h3=":0"`, `h3=":65536"`} {
+		if _, _, err := advertisedHTTP3Port(alt); err == nil {
+			t.Fatalf("advertisedHTTP3Port(%q) accepted malformed value", alt)
+		}
+	}
+}

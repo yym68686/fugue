@@ -595,13 +595,33 @@ func probeStaticEdgeBothWithCoverage(ctx context.Context, o staticEdgeCutoverOpt
 	if e != nil {
 		return e
 	}
+	probe := func(ip, host, path string, status int, expectedEdge string) error {
+		result, e := probeStaticEdgeVerifiedResult(ctx, o.ProbeSSH, ip, host, path, status, expectedEdge, o.Timeout)
+		if e != nil {
+			return e
+		}
+		if !protocolCoverage {
+			return nil
+		}
+		port, advertised, e := advertisedHTTP3Port(result.AltSvc)
+		if e != nil {
+			return e
+		}
+		if !advertised {
+			return nil
+		}
+		if o.ProbeSSH != "" {
+			return fmt.Errorf("%s via %s advertises HTTP/3; an SSH TCP vantage cannot verify QUIC", host, ip)
+		}
+		return probeStaticEdgeHTTP3(ctx, ip, host, port, status, expectedEdge, path, o.Timeout)
+	}
 	for _, ip := range []string{o.FromIP, o.ToIP} {
 		expectedEdge := ""
 		if ip == o.ToIP {
 			expectedEdge = cfg.EdgeID
 		}
 		for _, h := range o.Hostnames {
-			if e := probeStaticEdgeVerified(ctx, o.ProbeSSH, ip, h, o.ProbePath, 200, expectedEdge, o.Timeout, protocolCoverage); e != nil {
+			if e := probe(ip, h, o.ProbePath, 200, expectedEdge); e != nil {
 				return e
 			}
 		}
@@ -610,7 +630,7 @@ func probeStaticEdgeBothWithCoverage(ctx context.Context, o staticEdgeCutoverOpt
 			if e != nil {
 				return e
 			}
-			if e = probeStaticEdgeVerified(ctx, o.ProbeSSH, ip, host, path, status, expectedEdge, o.Timeout, protocolCoverage); e != nil {
+			if e = probe(ip, host, path, status, expectedEdge); e != nil {
 				return e
 			}
 		}

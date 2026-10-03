@@ -9,8 +9,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 type staticEdgeProbeRequest struct {
@@ -53,6 +57,11 @@ func verifyStaticEdgeProbe(req staticEdgeProbeRequest, result staticEdgeProbeRes
 }
 
 func probeStaticEdgeVerified(ctx context.Context, sshAlias, ip, host, path string, status int, edgeID string, timeout time.Duration, protocolCoverage ...bool) error {
+	_, err := probeStaticEdgeVerifiedResult(ctx, sshAlias, ip, host, path, status, edgeID, timeout, protocolCoverage...)
+	return err
+}
+
+func probeStaticEdgeVerifiedResult(ctx context.Context, sshAlias, ip, host, path string, status int, edgeID string, timeout time.Duration, protocolCoverage ...bool) (staticEdgeProbeResult, error) {
 	req := staticEdgeProbeRequest{IP: ip, Host: host, Path: path, Status: status, EdgeID: edgeID, Timeout: timeout.Seconds()}
 	if len(protocolCoverage) > 0 {
 		req.RequireProtocolCoverage = protocolCoverage[0]
@@ -60,18 +69,18 @@ func probeStaticEdgeVerified(ctx context.Context, sshAlias, ip, host, path strin
 	if sshAlias != "" {
 		payload, e := json.Marshal(req)
 		if e != nil {
-			return e
+			return staticEdgeProbeResult{}, e
 		}
 		command := "python3 -c '" + strings.ReplaceAll(staticEdgePythonProbe, "'", "'\"'\"'") + "'"
 		raw, e := staticEdgeSSHOutput(ctx, sshAlias, payload, command)
 		if e != nil {
-			return fmt.Errorf("probe from SSH vantage %s: %w", sshAlias, e)
+			return staticEdgeProbeResult{}, fmt.Errorf("probe from SSH vantage %s: %w", sshAlias, e)
 		}
 		var result staticEdgeProbeResult
 		if e = json.Unmarshal(raw, &result); e != nil {
-			return errors.New("invalid remote probe result")
+			return result, errors.New("invalid remote probe result")
 		}
-		return verifyStaticEdgeProbe(req, result)
+		return result, verifyStaticEdgeProbe(req, result)
 	}
 	var peer string
 	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -85,21 +94,86 @@ func probeStaticEdgeVerified(ctx context.Context, sshAlias, ip, host, path strin
 	client := &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	request, e := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+path, nil)
 	if e != nil {
-		return e
+		return staticEdgeProbeResult{}, e
 	}
 	response, e := client.Do(request)
 	if e != nil {
-		return e
+		return staticEdgeProbeResult{}, e
 	}
 	defer response.Body.Close()
 	n, e := io.Copy(io.Discard, io.LimitReader(response.Body, 65537))
 	if e != nil {
-		return e
+		return staticEdgeProbeResult{}, e
 	}
 	if n > 65536 {
-		return errors.New("non-billable probe response exceeds 64KiB")
+		return staticEdgeProbeResult{}, errors.New("non-billable probe response exceeds 64KiB")
 	}
-	return verifyStaticEdgeProbe(req, staticEdgeProbeResult{Status: response.StatusCode, EdgeID: response.Header.Get("X-Fugue-Static-Edge"), PeerIP: peer, BodyBytes: int(n), AltSvc: strings.Join(response.Header.Values("Alt-Svc"), ",")})
+	result := staticEdgeProbeResult{Status: response.StatusCode, EdgeID: response.Header.Get("X-Fugue-Static-Edge"), PeerIP: peer, BodyBytes: int(n), AltSvc: strings.Join(response.Header.Values("Alt-Svc"), ",")}
+	return result, verifyStaticEdgeProbe(req, result)
+}
+
+func advertisedHTTP3Port(altSvc string) (int, bool, error) {
+	for _, alternative := range strings.Split(altSvc, ",") {
+		protocol, address, ok := strings.Cut(strings.TrimSpace(alternative), "=")
+		protocol = strings.Trim(strings.TrimSpace(protocol), "\"")
+		if !ok || (protocol != "h3" && !strings.HasPrefix(protocol, "h3-")) {
+			continue
+		}
+		address = strings.TrimSpace(strings.SplitN(address, ";", 2)[0])
+		address = strings.Trim(address, "\"")
+		_, portText, err := net.SplitHostPort(address)
+		if err != nil {
+			if strings.HasPrefix(address, ":") {
+				portText = strings.TrimPrefix(address, ":")
+			} else {
+				return 0, false, fmt.Errorf("invalid HTTP/3 Alt-Svc address %q", address)
+			}
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return 0, false, fmt.Errorf("invalid HTTP/3 Alt-Svc port %q", portText)
+		}
+		return port, true, nil
+	}
+	return 0, false, nil
+}
+
+func probeStaticEdgeHTTP3(ctx context.Context, ip, host string, port, status int, edgeID, path string, timeout time.Duration) error {
+	address := net.JoinHostPort(ip, strconv.Itoa(port))
+	transport := &http3.Transport{
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host, NextProtos: []string{"h3"}},
+		Dial: func(ctx context.Context, _ string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+			config := tlsConfig.Clone()
+			config.ServerName = host
+			config.NextProtos = []string{"h3"}
+			return quic.DialAddrEarly(ctx, address, config, quicConfig)
+		},
+	}
+	defer transport.Close()
+	client := &http.Client{Transport: transport, Timeout: timeout}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+path, nil)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("HTTP/3 probe %s via %s:%d: %w", host, ip, port, err)
+	}
+	defer response.Body.Close()
+	n, err := io.Copy(io.Discard, io.LimitReader(response.Body, 65537))
+	if err != nil {
+		return err
+	}
+	if n > 65536 {
+		return errors.New("HTTP/3 probe response exceeds 64KiB")
+	}
+	if response.StatusCode != status {
+		return fmt.Errorf("HTTP/3 probe %s via %s:%d returned HTTP %d, expected %d", host, ip, port, response.StatusCode, status)
+	}
+	if edgeID != "" && response.Header.Get("X-Fugue-Static-Edge") != edgeID {
+		return fmt.Errorf("HTTP/3 probe reached edge identity %q, expected %q", response.Header.Get("X-Fugue-Static-Edge"), edgeID)
+	}
+	return nil
 }
 
 // Fixed, read-only probe code. All variable input travels through JSON stdin,
