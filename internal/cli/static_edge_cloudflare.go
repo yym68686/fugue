@@ -245,7 +245,13 @@ func normalizeStaticEdgeCutover(o staticEdgeCutoverOptions) (staticEdgeCutoverOp
 		return o, fmt.Errorf("unsupported DNS provider %q; use %q or %q", o.DNSProvider, staticEdgeDNSProviderCloudflare, staticEdgeDNSProviderFugue)
 	}
 	if strings.TrimSpace(o.DNSProvider) != "" {
-		o.DNSProvider = staticEdgeDNSProvider(o)
+		if provider := staticEdgeDNSProvider(o); provider == staticEdgeDNSProviderCloudflare {
+			// Keep the legacy operation identity for the default Cloudflare backend,
+			// including when callers spell it explicitly.
+			o.DNSProvider = ""
+		} else {
+			o.DNSProvider = staticEdgeDNSProvider(o)
+		}
 	}
 	if staticEdgeDNSProvider(o) == staticEdgeDNSProviderFugue && strings.TrimSpace(o.ZoneID) != "" {
 		return o, errors.New("--zone-id is only supported with the Cloudflare DNS provider")

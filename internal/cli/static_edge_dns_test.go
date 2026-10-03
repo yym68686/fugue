@@ -143,3 +143,20 @@ func TestHostedDNSStaticEdgeBackendRejectsMultipleValues(t *testing.T) {
 		t.Fatalf("expected single-value error, got %v", err)
 	}
 }
+
+func TestStaticEdgeCutoverCloudflareProviderKeepsLegacyOperationIdentity(t *testing.T) {
+	base := staticEdgeCutoverOptions{Zone: "example.test", Hostnames: []string{"example.test"}, FromIP: "192.0.2.10", ToIP: "192.0.2.20", Candidate: "candidate", ProbePath: "/health", Observe: 5 * time.Second, Timeout: time.Second}
+	explicit := base
+	explicit.DNSProvider = staticEdgeDNSProviderCloudflare
+	normalBase, err := normalizeStaticEdgeCutover(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalExplicit, err := normalizeStaticEdgeCutover(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalExplicit.DNSProvider != "" || staticEdgeCutoverID(normalBase) != staticEdgeCutoverID(normalExplicit) {
+		t.Fatalf("explicit Cloudflare changed legacy operation identity: base=%q explicit=%q", staticEdgeCutoverID(normalBase), staticEdgeCutoverID(normalExplicit))
+	}
+}
