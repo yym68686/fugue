@@ -45,3 +45,28 @@ through the pool's existing single writer. Switch only the explicit authorized
 records after both paths pass. Retain old paths for caches and existing flows;
 elapsed TTL alone does not establish safe retirement. This staging mechanism
 does not claim arbitrary TCP/QUIC state migration or automatic retirement.
+
+## Client address across proxy hops
+
+Observation correlation trust does not configure Caddy's forwarded-header trust.
+An observed chain can correlate correctly while losing the client IP. A public
+listener normally accepts no incoming forwarded-address claims: its reverse
+proxy replaces client-supplied `X-Forwarded-For` with the socket peer. Every
+subsequent internal reverse proxy must explicitly trust its immediate predecessor
+to preserve that sanitized chain. Otherwise Caddy replaces the header again,
+and applications see a loopback or edge address as their client.
+
+Declare the appropriate `trusted_proxies` in each internal server's native Caddy
+configuration. Use the exact loopback address for a dedicated local hop and the
+explicit egress addresses of authorized edges for the origin. Keep origin mTLS
+authentication and network admission in place. Do not extend this trust to the
+public listener, use a catch-all CIDR, or infer trust from a correlation field.
+Do not let an untrusted application share a trusted loopback boundary.
+
+Before activation, test the entire chain with distinct client/proxy addresses,
+including forged and repeated `X-Forwarded-For` headers at the public listener.
+Changing only the final origin is insufficient if an earlier hop has already
+discarded the address. Check a new application's request fact against the
+ingress source after activation, and retain the previous signed configuration
+as LKG. Previously stored incorrect source addresses cannot be reconstructed
+without independent request-bound evidence.
