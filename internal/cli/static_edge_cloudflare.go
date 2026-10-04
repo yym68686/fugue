@@ -595,44 +595,57 @@ func probeStaticEdgeBothWithCoverage(ctx context.Context, o staticEdgeCutoverOpt
 	if e != nil {
 		return e
 	}
-	probe := func(ip, host, path string, status int, expectedEdge string) error {
-		result, e := probeStaticEdgeVerifiedResult(ctx, o.ProbeSSH, ip, host, path, status, expectedEdge, o.Timeout)
-		if e != nil {
-			return e
+	probe := func(host, path string, status int) error {
+		var advertisements []string
+		for _, ip := range []string{o.FromIP, o.ToIP} {
+			expectedEdge := ""
+			if ip == o.ToIP {
+				expectedEdge = cfg.EdgeID
+			}
+			result, err := probeStaticEdgeVerifiedResult(ctx, o.ProbeSSH, ip, host, path, status, expectedEdge, o.Timeout)
+			if err != nil {
+				return err
+			}
+			advertisements = append(advertisements, result.AltSvc)
 		}
 		if !protocolCoverage {
 			return nil
 		}
-		port, advertised, e := advertisedHTTP3Port(result.AltSvc)
+		ports, e := staticEdgeHTTP3Ports(host, advertisements...)
 		if e != nil {
 			return e
 		}
-		if !advertised {
+		if len(ports) == 0 {
 			return nil
 		}
 		if o.ProbeSSH != "" {
-			return fmt.Errorf("%s via %s advertises HTTP/3; an SSH TCP vantage cannot verify QUIC", host, ip)
+			return fmt.Errorf("%s advertises HTTP/3; an SSH TCP vantage cannot verify QUIC", host)
 		}
-		return probeStaticEdgeHTTP3(ctx, ip, host, port, status, expectedEdge, path, o.Timeout)
+		for _, ip := range []string{o.FromIP, o.ToIP} {
+			expectedEdge := ""
+			if ip == o.ToIP {
+				expectedEdge = cfg.EdgeID
+			}
+			for _, port := range ports {
+				if err := probeStaticEdgeHTTP3(ctx, ip, host, port, status, expectedEdge, path, o.Timeout); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	}
-	for _, ip := range []string{o.FromIP, o.ToIP} {
-		expectedEdge := ""
-		if ip == o.ToIP {
-			expectedEdge = cfg.EdgeID
+	for _, h := range o.Hostnames {
+		if e := probe(h, o.ProbePath, 200); e != nil {
+			return e
 		}
-		for _, h := range o.Hostnames {
-			if e := probe(ip, h, o.ProbePath, 200, expectedEdge); e != nil {
-				return e
-			}
+	}
+	for _, spec := range o.Checks {
+		host, path, status, e := parseStaticEdgeCheck(spec)
+		if e != nil {
+			return e
 		}
-		for _, spec := range o.Checks {
-			host, path, status, e := parseStaticEdgeCheck(spec)
-			if e != nil {
-				return e
-			}
-			if e = probe(ip, host, path, status, expectedEdge); e != nil {
-				return e
-			}
+		if e = probe(host, path, status); e != nil {
+			return e
 		}
 	}
 	return nil

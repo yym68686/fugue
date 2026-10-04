@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -112,30 +113,45 @@ func probeStaticEdgeVerifiedResult(ctx context.Context, sshAlias, ip, host, path
 	return result, verifyStaticEdgeProbe(req, result)
 }
 
-func advertisedHTTP3Port(altSvc string) (int, bool, error) {
-	for _, alternative := range strings.Split(altSvc, ",") {
-		protocol, address, ok := strings.Cut(strings.TrimSpace(alternative), "=")
-		protocol = strings.Trim(strings.TrimSpace(protocol), "\"")
-		if !ok || (protocol != "h3" && !strings.HasPrefix(protocol, "h3-")) {
-			continue
-		}
-		address = strings.TrimSpace(strings.SplitN(address, ";", 2)[0])
-		address = strings.Trim(address, "\"")
-		_, portText, err := net.SplitHostPort(address)
-		if err != nil {
-			if strings.HasPrefix(address, ":") {
-				portText = strings.TrimPrefix(address, ":")
-			} else {
-				return 0, false, fmt.Errorf("invalid HTTP/3 Alt-Svc address %q", address)
+// Both addresses must serve the union of advertised ports: an Alt-Svc cache
+// survives a DNS change, including a rollback to the previous address.
+func staticEdgeHTTP3Ports(host string, advertisements ...string) ([]int, error) {
+	ports := map[int]bool{}
+	for _, altSvc := range advertisements {
+		for _, alternative := range strings.Split(altSvc, ",") {
+			protocol, address, ok := strings.Cut(strings.TrimSpace(alternative), "=")
+			protocol = strings.Trim(strings.TrimSpace(protocol), "\"")
+			if !ok || (protocol != "h3" && !strings.HasPrefix(protocol, "h3-")) {
+				continue
 			}
+			if protocol != "h3" {
+				return nil, fmt.Errorf("cannot verify advertised HTTP/3 protocol %q", protocol)
+			}
+			address = strings.TrimSpace(strings.SplitN(address, ";", 2)[0])
+			if len(address) < 2 || address[0] != '"' || address[len(address)-1] != '"' {
+				return nil, fmt.Errorf("invalid HTTP/3 Alt-Svc address %q", address)
+			}
+			address = address[1 : len(address)-1]
+			altHost, portText, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, fmt.Errorf("invalid HTTP/3 Alt-Svc address %q", address)
+			}
+			if altHost != "" && !strings.EqualFold(altHost, host) {
+				return nil, fmt.Errorf("cannot verify HTTP/3 Alt-Svc on a different host %q", altHost)
+			}
+			port, err := strconv.Atoi(portText)
+			if err != nil || port < 1 || port > 65535 {
+				return nil, fmt.Errorf("invalid HTTP/3 Alt-Svc port %q", portText)
+			}
+			ports[port] = true
 		}
-		port, err := strconv.Atoi(portText)
-		if err != nil || port < 1 || port > 65535 {
-			return 0, false, fmt.Errorf("invalid HTTP/3 Alt-Svc port %q", portText)
-		}
-		return port, true, nil
 	}
-	return 0, false, nil
+	var result []int
+	for port := range ports {
+		result = append(result, port)
+	}
+	sort.Ints(result)
+	return result, nil
 }
 
 func probeStaticEdgeHTTP3(ctx context.Context, ip, host string, port, status int, edgeID, path string, timeout time.Duration) error {
@@ -150,7 +166,7 @@ func probeStaticEdgeHTTP3(ctx context.Context, ip, host string, port, status int
 		},
 	}
 	defer transport.Close()
-	client := &http.Client{Transport: transport, Timeout: timeout}
+	client := &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+path, nil)
 	if err != nil {
 		return err

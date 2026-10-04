@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -115,28 +116,29 @@ func TestStaticEdgeProbeFailsClosedOnUnverifiedHTTP3(t *testing.T) {
 	}
 }
 
-func TestAdvertisedHTTP3Port(t *testing.T) {
+func TestStaticEdgeHTTP3CachedPorts(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		alt  string
-		port int
-		ok   bool
+		name  string
+		alt   []string
+		ports []int
 	}{
-		{name: "origin form", alt: `h3=":443"; ma=86400`, port: 443, ok: true},
-		{name: "alternate port", alt: `h2=":443", h3=":31443"; ma=60`, port: 31443, ok: true},
-		{name: "versioned h3", alt: `h3-29=":443"`, port: 443, ok: true},
-		{name: "no h3", alt: `h2=":443"`, ok: false},
+		{name: "origin form", alt: []string{`h3=":443"; ma=86400`}, ports: []int{443}},
+		{name: "cached port survives DNS switch", alt: []string{`h3=":443"`, `h3=":31443"`}, ports: []int{443, 31443}},
+		{name: "multiple alternatives", alt: []string{`h3=":31443", h3=":443"`, `h3=":443"`}, ports: []int{443, 31443}},
+		{name: "candidate clear retains old cached path", alt: []string{`h3=":443"`, `clear`}, ports: []int{443}},
+		{name: "explicit same host", alt: []string{`h3="example.test:443"`}, ports: []int{443}},
+		{name: "no h3", alt: []string{`h2=":443"`}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			port, ok, err := advertisedHTTP3Port(test.alt)
-			if err != nil || ok != test.ok || port != test.port {
-				t.Fatalf("advertisedHTTP3Port(%q) = (%d, %t, %v), want (%d, %t, nil)", test.alt, port, ok, err, test.port, test.ok)
+			ports, err := staticEdgeHTTP3Ports("example.test", test.alt...)
+			if err != nil || !reflect.DeepEqual(ports, test.ports) {
+				t.Fatalf("cached ports for %q = %v, %v; want %v", test.alt, ports, err, test.ports)
 			}
 		})
 	}
-	for _, alt := range []string{`h3="bad"`, `h3=":0"`, `h3=":65536"`} {
-		if _, _, err := advertisedHTTP3Port(alt); err == nil {
-			t.Fatalf("advertisedHTTP3Port(%q) accepted malformed value", alt)
+	for _, alt := range []string{`h3="bad"`, `h3=":0"`, `h3=":65536"`, `h3=:443`, `h3="other.test:443"`, `h3-29=":443"`} {
+		if _, err := staticEdgeHTTP3Ports("example.test", alt); err == nil {
+			t.Fatalf("accepted unverified alternative %q", alt)
 		}
 	}
 }
