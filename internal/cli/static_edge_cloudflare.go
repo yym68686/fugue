@@ -28,20 +28,21 @@ var staticEdgeDNSName = regexp.MustCompile("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])
 var staticEdgeCutoverOperation = regexp.MustCompile("^fse_[0-9a-f]{32}$")
 
 type staticEdgeCutoverOptions struct {
-	DNSProvider string        `json:"dns_provider,omitempty"`
-	Zone        string        `json:"zone"`
-	ZoneID      string        `json:"zone_id"`
-	Hostnames   []string      `json:"hostnames"`
-	FromIP      string        `json:"from_ip"`
-	ToIP        string        `json:"to_ip"`
-	Candidate   string        `json:"candidate"`
-	ProbePath   string        `json:"probe_path"`
-	ProbeSSH    string        `json:"probe_ssh,omitempty"`
-	Checks      []string      `json:"checks"`
-	Observe     time.Duration `json:"observe_ns"`
-	Timeout     time.Duration `json:"timeout_ns"`
-	Execute     bool          `json:"execute"`
-	Operation   string        `json:"operation,omitempty"`
+	RequiredHTTP3Ports []int         `json:"required_http3_ports,omitempty"`
+	DNSProvider        string        `json:"dns_provider,omitempty"`
+	Zone               string        `json:"zone"`
+	ZoneID             string        `json:"zone_id"`
+	Hostnames          []string      `json:"hostnames"`
+	FromIP             string        `json:"from_ip"`
+	ToIP               string        `json:"to_ip"`
+	Candidate          string        `json:"candidate"`
+	ProbePath          string        `json:"probe_path"`
+	ProbeSSH           string        `json:"probe_ssh,omitempty"`
+	Checks             []string      `json:"checks"`
+	Observe            time.Duration `json:"observe_ns"`
+	Timeout            time.Duration `json:"timeout_ns"`
+	Execute            bool          `json:"execute"`
+	Operation          string        `json:"operation,omitempty"`
 }
 type staticEdgeDNSRecord map[string]json.RawMessage
 
@@ -227,6 +228,7 @@ func (cli *CLI) newStaticEdgeCutoverCommand() *cobra.Command {
 		f.StringVar(&o.Candidate, "candidate", "", "Independent candidate manager context")
 		f.StringVar(&o.ProbePath, "probe-path", o.ProbePath, "Non-billable GET path expected to return HTTP 200")
 		f.StringVar(&o.ProbeSSH, "probe-ssh", "", "Explicit trusted SSH probe vantage when local networking intercepts TLS/SNI")
+		f.IntSliceVar(&o.RequiredHTTP3Ports, "require-http3-port", nil, "Also verify previously advertised QUIC ports on both endpoints; repeat or comma-separate")
 		f.StringSliceVar(&o.Checks, "check", nil, "Additional non-billable check hostname/path=status; repeat as needed")
 		f.DurationVar(&o.Observe, "observe", o.Observe, "Overlap observation duration (5s-10m)")
 		f.DurationVar(&o.Timeout, "timeout", o.Timeout, "Per-request timeout")
@@ -237,6 +239,21 @@ func (cli *CLI) newStaticEdgeCutoverCommand() *cobra.Command {
 	return cmd
 }
 func normalizeStaticEdgeCutover(o staticEdgeCutoverOptions) (staticEdgeCutoverOptions, error) {
+	if len(o.RequiredHTTP3Ports) > 16 {
+		return o, errors.New("at most 16 historical HTTP/3 ports allowed")
+	}
+	o.RequiredHTTP3Ports = append([]int(nil), o.RequiredHTTP3Ports...)
+	sort.Ints(o.RequiredHTTP3Ports)
+	ports := o.RequiredHTTP3Ports[:0]
+	for _, port := range o.RequiredHTTP3Ports {
+		if port < 1 || port > 65535 {
+			return o, errors.New("required HTTP/3 ports must be 1-65535")
+		}
+		if len(ports) == 0 || ports[len(ports)-1] != port {
+			ports = append(ports, port)
+		}
+	}
+	o.RequiredHTTP3Ports = ports
 	o.Zone = normalizeDNSName(o.Zone)
 	if e := validateStaticEdgeZone(o.Zone); e != nil {
 		return o, e
@@ -595,14 +612,20 @@ func probeStaticEdgeBothWithCoverage(ctx context.Context, o staticEdgeCutoverOpt
 	if e != nil {
 		return e
 	}
+	return probeStaticEdgeEndpoints(ctx, o, cfg.EdgeID, protocolCoverage, probeStaticEdgeVerifiedResult, probeStaticEdgeHTTP3)
+}
+
+func probeStaticEdgeEndpoints(ctx context.Context, o staticEdgeCutoverOptions, edgeID string, protocolCoverage bool,
+	tcpProbe func(context.Context, string, string, string, string, int, string, time.Duration, ...bool) (staticEdgeProbeResult, error),
+	quicProbe func(context.Context, string, string, int, int, string, string, time.Duration) error) error {
 	probe := func(host, path string, status int) error {
 		var advertisements []string
 		for _, ip := range []string{o.FromIP, o.ToIP} {
 			expectedEdge := ""
 			if ip == o.ToIP {
-				expectedEdge = cfg.EdgeID
+				expectedEdge = edgeID
 			}
-			result, err := probeStaticEdgeVerifiedResult(ctx, o.ProbeSSH, ip, host, path, status, expectedEdge, o.Timeout)
+			result, err := tcpProbe(ctx, o.ProbeSSH, ip, host, path, status, expectedEdge, o.Timeout)
 			if err != nil {
 				return err
 			}
@@ -610,6 +633,11 @@ func probeStaticEdgeBothWithCoverage(ctx context.Context, o staticEdgeCutoverOpt
 		}
 		if !protocolCoverage {
 			return nil
+		}
+		// Cached alternatives remain in scope even after Alt-Svc is removed
+		// or replaced. Explicit historical requirements are saved in the intent.
+		for _, port := range o.RequiredHTTP3Ports {
+			advertisements = append(advertisements, fmt.Sprintf(`h3=":%d"`, port))
 		}
 		ports, e := staticEdgeHTTP3Ports(host, advertisements...)
 		if e != nil {
@@ -619,15 +647,15 @@ func probeStaticEdgeBothWithCoverage(ctx context.Context, o staticEdgeCutoverOpt
 			return nil
 		}
 		if o.ProbeSSH != "" {
-			return fmt.Errorf("%s advertises HTTP/3; an SSH TCP vantage cannot verify QUIC", host)
+			return fmt.Errorf("%s requires HTTP/3 coverage; an SSH TCP vantage cannot verify QUIC", host)
 		}
 		for _, ip := range []string{o.FromIP, o.ToIP} {
 			expectedEdge := ""
 			if ip == o.ToIP {
-				expectedEdge = cfg.EdgeID
+				expectedEdge = edgeID
 			}
 			for _, port := range ports {
-				if err := probeStaticEdgeHTTP3(ctx, ip, host, port, status, expectedEdge, path, o.Timeout); err != nil {
+				if err := quicProbe(ctx, ip, host, port, status, expectedEdge, path, o.Timeout); err != nil {
 					return err
 				}
 			}

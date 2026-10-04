@@ -899,12 +899,19 @@ func appDomainDNSRecordName(hostname, zoneName string) string {
 }
 
 func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.App, domain model.AppDomain) (model.AppDomain, bool, error) {
+	updated, observation, err := s.evaluateAppDomainDNS(ctx, app, domain)
+	return updated, observation.Verified, err
+}
+
+// Return the evidence from the same evaluation that produced the state, so
+// diagnosis cannot substitute historical record metadata for current DNS.
+func (s *Server) evaluateAppDomainDNS(ctx context.Context, app model.App, domain model.AppDomain) (model.AppDomain, appDomainDNSObservation, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	target := s.primaryCustomDomainTarget(app)
 	if target == "" {
-		return domain, false, store.ErrInvalidInput
+		return domain, appDomainDNSObservation{}, store.ErrInvalidInput
 	}
 
 	now := time.Now().UTC()
@@ -931,14 +938,16 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 
 	switch updated.DNSMode {
 	case model.AppDomainDNSModeManaged:
-		return s.evaluateManagedAppDomainVerification(ctx, app, updated, wasVerified, now)
+		evaluated, verified, err := s.evaluateManagedAppDomainVerification(ctx, app, updated, wasVerified, now)
+		return evaluated, appDomainDNSObservation{Verified: verified, RecordKind: evaluated.DNSRecordKind,
+			MatchedTarget: evaluated.DNSRecordID, Message: evaluated.DNSLastMessage}, err
 	case model.AppDomainDNSModeManual:
 		return s.evaluateManualAppDomainVerification(ctx, app, updated, wasVerified, now)
 	}
 
 	observation, err := s.inspectCustomDomainDNS(ctx, updated.Hostname, s.customDomainTargets(app, legacyTarget))
 	if err != nil {
-		return domain, false, err
+		return domain, appDomainDNSObservation{}, err
 	}
 	verified := observation.Verified
 	if verified {
@@ -965,7 +974,7 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 		updated.DNSLastMessage = observation.Message
 		updated.LastMessage = observation.Message
 	}
-	return updated, verified, nil
+	return updated, observation, nil
 }
 
 func (s *Server) evaluateManagedAppDomainVerification(ctx context.Context, app model.App, domain model.AppDomain, wasVerified bool, now time.Time) (model.AppDomain, bool, error) {
@@ -1094,7 +1103,10 @@ func (s *Server) findOwnedAppDomainDNSRecord(app model.App, hostname string) (mo
 	return model.HostedZone{}, model.DNSRecord{}, false
 }
 
-func (s *Server) evaluateManualAppDomainVerification(ctx context.Context, app model.App, domain model.AppDomain, wasVerified bool, now time.Time) (model.AppDomain, bool, error) {
+func (s *Server) evaluateManualAppDomainVerification(ctx context.Context, app model.App, domain model.AppDomain, wasVerified bool, now time.Time) (model.AppDomain, appDomainDNSObservation, error) {
+	// A previous FUGUE_APP relationship may have been replaced by user DNS.
+	// Only a currently matching record may populate DNSRecordID.
+	domain.DNSRecordID = ""
 	zone, err := s.appDomainHostedZone(app, domain)
 	if err != nil || zone.Status != model.HostedZoneStatusActive {
 		domain.Status = model.AppDomainStatusPending
@@ -1102,7 +1114,7 @@ func (s *Server) evaluateManualAppDomainVerification(ctx context.Context, app mo
 		domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
 		domain.LastMessage = "hosted DNS zone is not active"
 		domain.DNSLastMessage = domain.LastMessage
-		return domain, false, nil
+		return domain, appDomainDNSObservation{Message: domain.DNSLastMessage}, nil
 	}
 	domain.DNSZoneID = zone.ID
 	if record, ok := s.manualFUGUEAppDNSRecord(zone, domain, app); ok {
@@ -1121,11 +1133,12 @@ func (s *Server) evaluateManualAppDomainVerification(ctx context.Context, app mo
 			domain.TLSLastCheckedAt = nil
 			domain.TLSReadyAt = nil
 		}
-		return domain, true, nil
+		return domain, appDomainDNSObservation{Verified: true, RecordKind: domain.DNSRecordKind,
+			MatchedTarget: record.ID}, nil
 	}
 	observation, err := s.inspectCustomDomainDNS(ctx, domain.Hostname, s.customDomainTargets(app, domain.RouteTarget))
 	if err != nil {
-		return domain, false, err
+		return domain, observation, err
 	}
 	if observation.Verified {
 		domain.Status = model.AppDomainStatusVerified
@@ -1142,14 +1155,14 @@ func (s *Server) evaluateManualAppDomainVerification(ctx context.Context, app mo
 			domain.TLSLastCheckedAt = nil
 			domain.TLSReadyAt = nil
 		}
-		return domain, true, nil
+		return domain, observation, nil
 	}
 	domain.Status = model.AppDomainStatusPending
 	domain.DNSStatus = model.AppDomainDNSStatusPending
 	domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
 	domain.LastMessage = observation.Message
 	domain.DNSLastMessage = observation.Message
-	return domain, false, nil
+	return domain, observation, nil
 }
 
 func (s *Server) manualFUGUEAppDNSRecord(zone model.HostedZone, domain model.AppDomain, app model.App) (model.DNSRecord, bool) {
@@ -1172,6 +1185,21 @@ func (s *Server) verifyAndPersistAppDomain(ctx context.Context, app model.App, d
 	updated, verified, err := s.evaluateAppDomainVerification(ctx, app, domain)
 	if err != nil {
 		return domain, false, err
+	}
+	// Verification can restore a previously known domain after a DNS transition.
+	// Cell workers report artifact readiness rather than legacy domain TLS state,
+	// so a reusable shared certificate must not wait for a legacy worker report.
+	// This is configuration readiness only; live serving gates remain separate.
+	if verified && updated.Status == model.AppDomainStatusVerified && updated.TLSStatus != model.AppDomainTLSStatusReady {
+		now := time.Now().UTC()
+		if certErr := s.usableSharedTLSCertificate(updated, now); certErr == nil {
+			updated.TLSStatus = model.AppDomainTLSStatusReady
+			updated.TLSLastMessage = ""
+			updated.TLSLastCheckedAt = &now
+			updated.TLSReadyAt = &now
+		} else if !errors.Is(certErr, store.ErrNotFound) && !errors.Is(certErr, tlscertificate.ErrInvalid) {
+			return domain, false, certErr
+		}
 	}
 	updated, err = s.store.PutAppDomain(updated)
 	if err != nil {
@@ -1272,6 +1300,7 @@ func (s *Server) inspectCustomDomainDNS(ctx context.Context, hostname string, ta
 			observation.TargetIPs = ipAddrStrings(targetIPs)
 		}
 		if ipListsIntersect(hostIPs, targetIPs) {
+			observation.TargetIPs = ipAddrStrings(targetIPs)
 			observation.Verified = true
 			observation.RecordKind = model.AppDomainDNSRecordKindFlattened
 			observation.MatchedTarget = target
@@ -1334,17 +1363,12 @@ func (s *Server) buildAppDomainDiagnosis(ctx context.Context, app model.App, dom
 	observation := appDomainDNSObservation{}
 	switch model.NormalizeAppDomainDNSMode(domain.DNSMode) {
 	case model.AppDomainDNSModeManaged, model.AppDomainDNSModeManual:
-		evaluated, verified, err := s.evaluateAppDomainVerification(ctx, app, domain)
+		evaluated, evaluatedObservation, err := s.evaluateAppDomainDNS(ctx, app, domain)
 		if err != nil {
 			observation = appDomainDNSObservation{Message: err.Error()}
 		} else {
 			domain = evaluated
-			observation = appDomainDNSObservation{
-				Verified:      verified,
-				RecordKind:    domain.DNSRecordKind,
-				MatchedTarget: domain.DNSRecordID,
-				Message:       domain.DNSLastMessage,
-			}
+			observation = evaluatedObservation
 		}
 	default:
 		var err error

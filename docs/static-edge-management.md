@@ -183,12 +183,21 @@ fugue static-edge cutover run --zone example.com --zone-id ZONE_ID \
 
 Only non-billable GET endpoints should be passed as checks. The default primary
 probe is `/_static-edge/health` and must return 200 with normal public TLS
-verification and exact SNI. The current cutover probe covers HTTPS over TCP,
-not QUIC. If either endpoint advertises HTTP/3 through `Alt-Svc`, a new cutover
-fails closed before any DNS write because cached alternate ports are not
-verified. Removing an advertisement does not flush client caches and must not
-be used to bypass this limitation. Recovery rollback still permits the TCP
-probe so this coverage guard cannot trap an already-started migration.
+verification and exact SNI. Local cutover probes verify HTTP/3 on the union of
+Alt-Svc ports advertised by either endpoint, including nonstandard ports. Any
+required QUIC path failure blocks DNS writes. The SSH probe supports TCP only
+and refuses a cutover that requires QUIC coverage.
+
+Current headers cannot reveal all alternatives still cached by clients. Pass
+`--require-http3-port 443 --require-http3-port 31443` (using the actual historical
+ports) for earlier advertisements whose maximum cache lifetime has not elapsed.
+These requirements are saved in the operation intent and apply to both old and
+new addresses on initial execution and resume. They also change the operation ID,
+so a weaker previous plan cannot be reused. The CLI cannot infer advertisements
+that it never observed; operators must supply known history. Removing an
+advertisement or sending `Alt-Svc: clear` does not establish that every client
+has discarded its cache. Recovery rollback still permits TCP probes so failed
+candidate QUIC coverage cannot trap an already-started migration.
 There is no production skip-probe flag. Extra checks
 are constrained to the hostname allowlist. The candidate must have an active,
 healthy, non-draining bundle whose runtime/startup state matches the manager.
