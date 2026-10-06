@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 )
+
+const serviceAccountCAPath = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
 // executeManagedDatabaseColdMigration moves a stopped/disk-full PostgreSQL
 // primary to a destination storage class without allocating space in the
@@ -206,7 +209,10 @@ func execColdPostgresTar(ctx context.Context, client *kubeClient, namespace, pod
 	query.Set("stderr", "true")
 	query.Set("tty", "false")
 	base.RawQuery = query.Encode()
-	config := &rest.Config{Host: strings.TrimRight(client.baseURL, "/"), BearerToken: client.bearerToken, Transport: client.client.Transport}
+	config := &rest.Config{Host: strings.TrimRight(client.baseURL, "/"), BearerToken: client.bearerToken}
+	if ca, readErr := os.ReadFile(serviceAccountCAPath); readErr == nil {
+		config.TLSClientConfig.CAData = ca
+	}
 	executor, err := remotecommand.NewSPDYExecutor(config, http.MethodPost, base)
 	if err != nil {
 		return "", err
