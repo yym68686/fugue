@@ -137,7 +137,18 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 			return err
 		}
 		if verified.FileDigest != ev.FileDigest || verified.ControlDigest != ev.ControlDigest || verified.SystemID != ev.SystemID {
-			return fmt.Errorf("destination seed physical data differs from fenced source")
+			detail := ""
+			switch {
+			case verified.ContentDigest != ev.ContentDigest && verified.MetadataDigest != ev.MetadataDigest:
+				detail = "content and metadata"
+			case verified.ContentDigest != ev.ContentDigest:
+				detail = "file content"
+			case verified.MetadataDigest != ev.MetadataDigest:
+				detail = "ownership, mode, path, or size metadata"
+			default:
+				detail = "manifest"
+			}
+			return fmt.Errorf("destination seed physical data differs from fenced source (%s)", detail)
 		}
 		st.FileDigest, st.StreamDigest, st.Phase = ev.FileDigest, digest, "copied"
 		if err := saveColdState(ctx, c, ns, st, &rv); err != nil {

@@ -20,7 +20,7 @@ if not identifier or not wal or not os.path.isfile(os.path.join(data,'pg_wal',wa
 # Hash every database/WAL byte, permission and symlink; exclude only mutable
 # instance configuration and runtime markers, never relation or WAL files.
 ignore={'postmaster.pid','postmaster.opts','postgresql.conf','postgresql.auto.conf','custom.conf','pg_hba.conf','pg_ident.conf'}
-h=hashlib.sha256();count=0;size=0
+h=hashlib.sha256();content_h=hashlib.sha256();metadata_h=hashlib.sha256();count=0;size=0
 for root,dirs,files in os.walk(data,followlinks=False):
  dirs.sort();files.sort()
  for name in sorted(dirs+files):
@@ -39,7 +39,10 @@ for root,dirs,files in os.walk(data,followlinks=False):
    content=fhash.hexdigest();size+=s.st_size;count+=1
   elif stat.S_ISLNK(s.st_mode):content=os.readlink(p)
   entry=[relative,s.st_mode,s.st_uid,s.st_gid,s.st_size if stat.S_ISREG(s.st_mode) else 0,content]
-  h.update(json.dumps(entry,separators=(',',':'),ensure_ascii=True).encode()+b'\n')
+  encoded=json.dumps(entry,separators=(',',':'),ensure_ascii=True).encode()+b'\n'
+  h.update(encoded)
+  metadata_h.update(json.dumps([relative,s.st_mode,s.st_uid,s.st_gid,s.st_size if stat.S_ISREG(s.st_mode) else 0,os.readlink(p) if stat.S_ISLNK(s.st_mode) else ''],separators=(',',':'),ensure_ascii=True).encode()+b'\n')
+  content_h.update(json.dumps([relative,content],separators=(',',':'),ensure_ascii=True).encode()+b'\n')
 with open(os.path.join(data,'global','pg_control'),'rb') as f:control_hash=hashlib.sha256(f.read()).hexdigest()
 owner=os.stat(data)
-print(json.dumps({'system_id':identifier[1],'file_digest':h.hexdigest(),'control_digest':control_hash,'files':count,'bytes':size,'data_path':data,'uid':owner.st_uid,'gid':owner.st_gid,'version':open(os.path.join(data,'PG_VERSION')).read().strip()}))
+print(json.dumps({'system_id':identifier[1],'file_digest':h.hexdigest(),'content_digest':content_h.hexdigest(),'metadata_digest':metadata_h.hexdigest(),'control_digest':control_hash,'files':count,'bytes':size,'data_path':data,'uid':owner.st_uid,'gid':owner.st_gid,'version':open(os.path.join(data,'PG_VERSION')).read().strip()}))

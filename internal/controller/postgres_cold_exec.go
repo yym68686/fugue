@@ -24,15 +24,17 @@ import (
 var coldProbeProgram string
 
 type coldFileEvidence struct {
-	SystemID      string `json:"system_id"`
-	FileDigest    string `json:"file_digest"`
-	ControlDigest string `json:"control_digest"`
-	DataPath      string `json:"data_path"`
-	Version       string `json:"version"`
-	Files         int    `json:"files"`
-	Bytes         int64  `json:"bytes"`
-	UID           int64  `json:"uid"`
-	GID           int64  `json:"gid"`
+	SystemID       string `json:"system_id"`
+	FileDigest     string `json:"file_digest"`
+	ControlDigest  string `json:"control_digest"`
+	ContentDigest  string `json:"content_digest"`
+	MetadataDigest string `json:"metadata_digest"`
+	DataPath       string `json:"data_path"`
+	Version        string `json:"version"`
+	Files          int    `json:"files"`
+	Bytes          int64  `json:"bytes"`
+	UID            int64  `json:"uid"`
+	GID            int64  `json:"gid"`
 }
 
 func coldExecConfig(c *kubeClient) (*rest.Config, error) {
