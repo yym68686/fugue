@@ -67,10 +67,7 @@ func (s *Service) executeManagedDatabaseColdMigration(
 	if err := patchRecoverySourceFence(ctx, client, namespace, sourceCluster); err != nil {
 		return err
 	}
-	if err := fenceColdPostgresSourcePod(ctx, client, namespace, primary); err != nil {
-		return err
-	}
-	if err := waitColdPostgresSourceQuiescent(ctx, client, namespace, sourcePVC.Metadata.Name, 10*time.Minute); err != nil {
+	if err := waitColdPostgresSourceFenced(ctx, client, namespace, sourceClusterName, primary, sourcePVC.Metadata.Name, 10*time.Minute); err != nil {
 		return err
 	}
 
@@ -151,27 +148,6 @@ func (s *Service) executeManagedDatabaseColdMigration(
 	return err
 }
 
-func fenceColdPostgresSourcePod(ctx context.Context, client *kubeClient, namespace, podName string) error {
-	pod, found, err := client.getPod(ctx, namespace, podName)
-	if err != nil || !found {
-		return err
-	}
-	if strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Succeeded") || strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Failed") {
-		return nil
-	}
-	if strings.TrimSpace(pod.ObservedUID) == "" {
-		return fmt.Errorf("cold database migration source pod %s/%s has no UID precondition", namespace, podName)
-	}
-	if err := client.deletePodWithUID(ctx, namespace, podName, pod.ObservedUID); err != nil {
-		return fmt.Errorf("fence cold database migration source pod %s/%s: %w", namespace, podName, err)
-	}
-	return nil
-}
-
-func patchRecoverySourceHibernation(ctx context.Context, client *kubeClient, namespace string, cluster kubeCloudNativePGCluster, value string) error {
-	return client.patchCloudNativePGHibernation(ctx, namespace, cluster.Metadata.Name, value, cluster.Metadata.UID, cluster.Metadata.ResourceVersion)
-}
-
 func patchRecoverySourceFence(ctx context.Context, client *kubeClient, namespace string, cluster kubeCloudNativePGCluster) error {
 	body := map[string]any{"metadata": map[string]any{
 		"uid": cluster.Metadata.UID, "resourceVersion": cluster.Metadata.ResourceVersion,
@@ -184,12 +160,29 @@ func patchRecoverySourceFence(ctx context.Context, client *kubeClient, namespace
 	return err
 }
 
-func waitColdPostgresSourceQuiescent(ctx context.Context, client *kubeClient, namespace, claim string, timeout time.Duration) error {
+func waitColdPostgresSourceFenced(ctx context.Context, client *kubeClient, namespace, clusterName, primary, claim string, timeout time.Duration) error {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for {
-		if err := ensureMovableRWOSourceQuiescent(waitCtx, client, namespace, claim); err == nil {
-			return nil
+		cluster, found, clusterErr := client.getCloudNativePGCluster(waitCtx, namespace, clusterName)
+		if clusterErr == nil && found && strings.TrimSpace(cluster.Metadata.Annotations["cnpg.io/fencedInstances"]) == `["*"]` {
+			pods, err := client.listPodsBySelector(waitCtx, namespace, "")
+			if err == nil {
+				busy := false
+				for _, pod := range pods {
+					if pod.Metadata.Name == primary || pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
+						continue
+					}
+					for _, volume := range pod.Spec.Volumes {
+						if volume.PersistentVolumeClaim != nil && strings.TrimSpace(volume.PersistentVolumeClaim.ClaimName) == claim {
+							busy = true
+						}
+					}
+				}
+				if !busy {
+					return nil
+				}
+			}
 		}
 		select {
 		case <-waitCtx.Done():
