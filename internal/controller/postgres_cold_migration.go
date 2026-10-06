@@ -22,6 +22,7 @@ import (
 
 const serviceAccountCAPath = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
+// Cold-copy source fencing and pod-exec streaming keep source LocalPV untouched.
 // executeManagedDatabaseColdMigration moves a stopped/disk-full PostgreSQL
 // primary to a destination storage class without allocating space in the
 // source LocalPV pool. The source cluster remains hibernated after the copy;
