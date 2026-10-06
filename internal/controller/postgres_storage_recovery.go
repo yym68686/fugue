@@ -83,43 +83,12 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 		return err
 	}
 	if cluster.Status.ReadyInstances == 0 && strings.EqualFold(strings.TrimSpace(cluster.Status.Phase), "Not enough disk space") {
-		primary := cluster.Status.CurrentPrimary
-		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, primary)
-		if err != nil {
-			return err
-		}
-		if !found || pvc.Spec.VolumeName == "" || pvc.Metadata.Labels["cnpg.io/cluster"] != name {
-			return fmt.Errorf("recovery primary has no verified bound data claim")
-		}
-		sourceClass := pvc.Spec.StorageClassName
-		if sourceClass == pg.StorageClassName {
-			return fmt.Errorf("disk-pressure recovery requires a distinct declared destination storage class; configure a storage migration first")
-		}
-		// Record the rescue target before mutation. Retrying the operation must not
-		// keep adding increments to an already expanded source.
-		sourceSize, err := s.recoverySourceTarget(op, app, pvc)
-		if err != nil {
-			return err
-		}
-		if err := s.ensureRecoveryPoolCapacity(ctx, client, op, namespace, pvc, sourceSize); err != nil {
-			return err
-		}
-		if err := s.ensureOperationStillActive(op.ID); err != nil {
-			return err
-		}
-		// Freeze only after the source claim, pool reserve, and operation have
-		// been verified. Retain the distinct destination class for localization.
-		if err := freezeRecoverySourceExpansion(ctx, client, namespace, name, cluster.Metadata.UID, primary); err != nil {
-			return err
-		}
-		rescue := managedPostgresStorageTarget{StorageClassName: sourceClass, StorageSize: sourceSize}
-		if err := s.prepareManagedPostgresInPlaceStorageExpansionForExistingCluster(ctx, client, namespace, name, rescue); err != nil {
-			return err
-		}
-		s.updateManagedPostgresTransitionProgress(op.ID, "waiting for rescued source filesystem and writable primary before migration")
-		if err := s.waitRecoverySourceStorage(ctx, client, op, namespace, name, primary, pvc.Metadata.UID, rescue, target.Postgres); err != nil {
-			return err
-		}
+		// A disk-full source cannot be rescued by expanding its source LocalPV
+		// when the requested operation is an offline move. Copy the fenced source
+		// directly to the declared target storage class instead. The old source
+		// rescue path is intentionally not reachable from this operation: it would
+		// mutate the source node before the target database exists.
+		return s.executeManagedDatabaseColdMigration(ctx, op, app, cluster, *pg, targetRuntime)
 	}
 	return s.executeManagedDatabaseLocalizeOperation(ctx, op, app)
 }
