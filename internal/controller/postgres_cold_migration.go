@@ -66,6 +66,9 @@ func (s *Service) executeManagedDatabaseColdMigration(
 	if err := patchRecoverySourceHibernation(ctx, client, namespace, sourceCluster, runtimepkg.CloudNativePGHibernationOn); err != nil {
 		return err
 	}
+	if err := fenceColdPostgresSourcePod(ctx, client, namespace, primary); err != nil {
+		return err
+	}
 	if err := waitColdPostgresSourceQuiescent(ctx, client, namespace, sourcePVC.Metadata.Name, 10*time.Minute); err != nil {
 		return err
 	}
@@ -145,6 +148,23 @@ func (s *Service) executeManagedDatabaseColdMigration(
 	}
 	_, err = s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, fmt.Sprintf("cold database migrated to runtime %s on target storage", desiredPostgres.RuntimeID), &finalApp.Spec, nil)
 	return err
+}
+
+func fenceColdPostgresSourcePod(ctx context.Context, client *kubeClient, namespace, podName string) error {
+	pod, found, err := client.getPod(ctx, namespace, podName)
+	if err != nil || !found {
+		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Succeeded") || strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Failed") {
+		return nil
+	}
+	if strings.TrimSpace(pod.ObservedUID) == "" {
+		return fmt.Errorf("cold database migration source pod %s/%s has no UID precondition", namespace, podName)
+	}
+	if err := client.deletePodWithUID(ctx, namespace, podName, pod.ObservedUID); err != nil {
+		return fmt.Errorf("fence cold database migration source pod %s/%s: %w", namespace, podName, err)
+	}
+	return nil
 }
 
 func patchRecoverySourceHibernation(ctx context.Context, client *kubeClient, namespace string, cluster kubeCloudNativePGCluster, value string) error {
