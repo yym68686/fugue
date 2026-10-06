@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -63,7 +64,7 @@ func (s *Service) executeManagedDatabaseColdMigration(
 
 	// Fence first, then prove that no live or terminating workload still mounts
 	// the source claim. This is the cold-copy boundary.
-	if err := patchRecoverySourceHibernation(ctx, client, namespace, sourceCluster, runtimepkg.CloudNativePGHibernationOn); err != nil {
+	if err := patchRecoverySourceFence(ctx, client, namespace, sourceCluster); err != nil {
 		return err
 	}
 	if err := fenceColdPostgresSourcePod(ctx, client, namespace, primary); err != nil {
@@ -169,6 +170,18 @@ func fenceColdPostgresSourcePod(ctx context.Context, client *kubeClient, namespa
 
 func patchRecoverySourceHibernation(ctx context.Context, client *kubeClient, namespace string, cluster kubeCloudNativePGCluster, value string) error {
 	return client.patchCloudNativePGHibernation(ctx, namespace, cluster.Metadata.Name, value, cluster.Metadata.UID, cluster.Metadata.ResourceVersion)
+}
+
+func patchRecoverySourceFence(ctx context.Context, client *kubeClient, namespace string, cluster kubeCloudNativePGCluster) error {
+	body := map[string]any{"metadata": map[string]any{
+		"uid": cluster.Metadata.UID, "resourceVersion": cluster.Metadata.ResourceVersion,
+		"annotations": map[string]string{
+			runtimepkg.CloudNativePGHibernationAnno: runtimepkg.CloudNativePGHibernationOn,
+			"cnpg.io/fencedInstances":               `["*"]`,
+		},
+	}}
+	_, err := client.doRequest(ctx, http.MethodPatch, cloudNativePGClusterAPIPath(client.effectiveNamespace(namespace), cluster.Metadata.Name), "application/merge-patch+json", body, nil)
+	return err
 }
 
 func waitColdPostgresSourceQuiescent(ctx context.Context, client *kubeClient, namespace, claim string, timeout time.Duration) error {
