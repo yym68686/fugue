@@ -15,11 +15,12 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
+	"fugue/internal/storagerecovery"
 	"fugue/internal/store"
 )
 
 const (
-	nodeUpdaterScriptVersion        = model.NodeUpdaterCurrentVersion
+	nodeUpdaterScriptVersion        = storagerecovery.NodeUpdaterVersion
 	staleNodeUpdateTaskTimeout      = 2 * time.Hour
 	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
 	nodeRepairTaskMaxAge            = 45 * time.Minute
@@ -192,7 +193,7 @@ func (s *Server) nodeUpdaterDesiredState(ctx context.Context, r *http.Request, p
 	warnings = append(warnings, rejoinWarnings...)
 	return model.NodeUpdaterDesiredState{
 		GeneratedAt:           time.Now().UTC(),
-		NodeUpdaterGeneration: nodeUpdaterScriptVersion,
+		NodeUpdaterGeneration: model.NodeUpdaterCurrentVersion,
 		NodeUpdater:           updater,
 		DiscoveryBundle:       discovery,
 		NodePolicy:            nodePolicy,
@@ -5646,13 +5647,20 @@ expand_lvm_localpv() {
   export FUGUE_NODE_UPDATE_TASK_IMAGE_PATH FUGUE_NODE_UPDATE_TASK_VG_NAME
   export FUGUE_NODE_UPDATE_TASK_EXPECTED_IMAGE_SIZE_BYTES FUGUE_NODE_UPDATE_TASK_TARGET_IMAGE_SIZE_BYTES
   export FUGUE_NODE_UPDATE_TASK_DRY_RUN
-  python3 - <<'FUGUE_LOCALPV_EXPAND_PY'
+  local output="" rc=0
+  output="$(python3 - 2>&1 <<'FUGUE_LOCALPV_EXPAND_PY'
 __FUGUE_LOCALPV_EXPAND_PYTHON__
 FUGUE_LOCALPV_EXPAND_PY
-  local rc=$?
+  )" || rc=$?
+  output="$(printf '%s' "${output}" | tail -c 6000)"
+  log_task "${output}"
   if [ "${rc}" -ne 0 ]; then
-    FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE="LocalPV expansion refused or did not converge; see task logs"
+    FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE="LocalPV capacity check or expansion failed: $(printf '%s' "${output}" | tail -n 1)"
     return "${rc}"
+  fi
+  if [ "${FUGUE_NODE_UPDATE_TASK_DRY_RUN:-true}" != "false" ]; then
+    FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="LocalPV capacity preflight passed; no pool mutation performed"
+    return 0
   fi
   report_lvm_localpv_inventory || return $?
   FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="LocalPV pool expansion verified and inventory refreshed"

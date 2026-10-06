@@ -1355,7 +1355,7 @@ func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([
 			case model.OperationStatusFailed, "superseded":
 				return nil, c.operationFailure(client, current)
 			case "canceled", "cancelled":
-				return nil, fmt.Errorf("operation %s was canceled", current.ID)
+				return nil, c.operationFailure(client, current)
 			default:
 				pending[id] = base
 			}
@@ -1381,6 +1381,13 @@ func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([
 }
 
 func (c *CLI) operationFailure(client *Client, op model.Operation) error {
+	// Database, project and maintenance commands use the shared operation wait
+	// loop, but do not have deployment/build state. Preserve the terminal
+	// operation and its reported reason rather than converting it to a generic
+	// "Deployment failed" message and an unknown outcome.
+	if c.deployment == nil {
+		return newOperationCommandFailure(op)
+	}
 	return &deploymentResultError{Result: c.deploymentFailureResult(client, op), code: ExitCodeSystemFault}
 }
 

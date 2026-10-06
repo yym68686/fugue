@@ -42,7 +42,14 @@ func describeCommandError(err error) commandErrorDescription {
 	return result
 }
 func (c *CLI) renderCommandError(err error) error {
-	if outputErr := c.writeJSON(map[string]any{"schema_version": 1, "outcome": "unknown", "error": describeCommandError(err)}); outputErr != nil {
+	payload := map[string]any{"schema_version": 1, "outcome": "unknown", "error": describeCommandError(err)}
+	var operationFailure *operationCommandFailure
+	if errors.As(err, &operationFailure) {
+		payload["outcome"] = "failed"
+		payload["operation"] = operationFailure.Operation
+		payload["next_actions"] = operationFailure.NextActions
+	}
+	if outputErr := c.writeJSON(payload); outputErr != nil {
 		return fmt.Errorf("%w; write error result: %v", err, outputErr)
 	}
 	return err

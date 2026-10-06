@@ -91,3 +91,26 @@ func TestRecoveryPoolIncludesReserveAfterGrowth(t *testing.T) {
 		t.Fatal("unbounded recovery growth accepted")
 	}
 }
+
+func TestRecoveryPoolPreflightFailureNeverQueuesAllocation(t *testing.T) {
+	failure := errors.New("insufficient host filesystem headroom: available_bytes=10 growth_bytes=8 reserve_bytes=5")
+	var calls []bool
+	err := runRecoveryPoolStages(func(dryRun bool) error {
+		calls = append(calls, dryRun)
+		return failure
+	})
+	if !errors.Is(err, failure) || len(calls) != 1 || !calls[0] {
+		t.Fatalf("allocation queued after failed preflight: calls=%v err=%v", calls, err)
+	}
+	calls = nil
+	err = runRecoveryPoolStages(func(dryRun bool) error {
+		calls = append(calls, dryRun)
+		if !dryRun {
+			return failure
+		}
+		return nil
+	})
+	if !errors.Is(err, failure) || len(calls) != 2 || !calls[0] || calls[1] {
+		t.Fatalf("mutation-time failure or order lost: calls=%v err=%v", calls, err)
+	}
+}

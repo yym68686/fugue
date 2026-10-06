@@ -26113,6 +26113,11 @@ components:
           format: date-time
         node_updater_generation:
           type: string
+          description: >-
+            Global minimum updater rollout generation. Optional storage-recovery
+            script releases do not advance this baseline. A participating node
+            can explicitly upgrade to a newer supported generation without
+            changing the baseline or upgrading other nodes.
         node_updater:
           $ref: "#/components/schemas/NodeUpdater"
         discovery_bundle:

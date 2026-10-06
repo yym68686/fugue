@@ -291,13 +291,18 @@ func (s *Service) ensureRecoveryPoolCapacity(ctx context.Context, client *kubeCl
 			return err
 		}
 	}
-	task, err := s.Store.CreateNodeUpdateTask(principal, inventory.ReportedByNodeUpdaterID, node, "", storagerecovery.ExpandPoolTask, map[string]string{
-		"image_path": inventory.ImagePath, "vg_name": vg, "expected_image_size_bytes": strconv.FormatInt(inventory.ImageSizeBytes, 10), "target_image_size_bytes": strconv.FormatInt(imageSize, 10), "dry_run": "false",
+	// Perform a separate read-only host capacity check before queuing any
+	// allocation. The executor checks again under its lock during application;
+	// passing preflight never substitutes for fresh mutation-time evidence.
+	return runRecoveryPoolStages(func(dryRun bool) error {
+		task, err := s.Store.CreateNodeUpdateTask(principal, inventory.ReportedByNodeUpdaterID, node, "", storagerecovery.ExpandPoolTask, map[string]string{
+			"image_path": inventory.ImagePath, "vg_name": vg, "expected_image_size_bytes": strconv.FormatInt(inventory.ImageSizeBytes, 10), "target_image_size_bytes": strconv.FormatInt(imageSize, 10), "dry_run": strconv.FormatBool(dryRun),
+		})
+		if err != nil {
+			return err
+		}
+		return s.waitRecoveryHostTask(ctx, op.ID, task)
 	})
-	if err != nil {
-		return err
-	}
-	return s.waitRecoveryHostTask(ctx, op.ID, task)
 }
 
 func (s *Service) recoveryUpdaterReady(id, node string) (bool, error) {
@@ -403,4 +408,11 @@ func (s *Service) waitRecoveryHostTask(ctx context.Context, opID string, task mo
 			return err
 		}
 	}
+}
+
+func runRecoveryPoolStages(run func(dryRun bool) error) error {
+	if err := run(true); err != nil {
+		return fmt.Errorf("source pool capacity preflight failed; no pool expansion queued: %w", err)
+	}
+	return run(false)
 }
