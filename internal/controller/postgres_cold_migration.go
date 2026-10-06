@@ -1,14 +1,26 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 )
+
+const serviceAccountCAPath = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
 // executeManagedDatabaseColdMigration moves a stopped/disk-full PostgreSQL
 // primary to a destination storage class without allocating space in the
@@ -63,13 +75,10 @@ func (s *Service) executeManagedDatabaseColdMigration(
 
 	// Fence first, then prove that no live or terminating workload still mounts
 	// the source claim. This is the cold-copy boundary.
-	if err := patchRecoverySourceHibernation(ctx, client, namespace, sourceCluster, runtimepkg.CloudNativePGHibernationOn); err != nil {
+	if err := patchRecoverySourceFence(ctx, client, namespace, sourceCluster); err != nil {
 		return err
 	}
-	if err := fenceColdPostgresSourcePod(ctx, client, namespace, primary); err != nil {
-		return err
-	}
-	if err := waitColdPostgresSourceQuiescent(ctx, client, namespace, sourcePVC.Metadata.Name, 10*time.Minute); err != nil {
+	if err := waitColdPostgresSourceFenced(ctx, client, namespace, sourceClusterName, primary, sourcePVC.Metadata.Name, 10*time.Minute); err != nil {
 		return err
 	}
 
@@ -81,7 +90,6 @@ func (s *Service) executeManagedDatabaseColdMigration(
 		return err
 	}
 
-	sourceScheduling := runtimepkg.SchedulingConstraints{NodeSelector: map[string]string{kubeHostnameLabelKey: sourceNode}}
 	targetScheduling := runtimepkg.SchedulingForRuntime(targetRuntime)
 	if targetScheduling.NodeSelector == nil {
 		targetScheduling.NodeSelector = map[string]string{}
@@ -89,8 +97,7 @@ func (s *Service) executeManagedDatabaseColdMigration(
 	targetScheduling.NodeSelector[kubeHostnameLabelKey] = targetNode
 	copyApp := model.App{ID: "cold-" + op.ID, Name: "postgres-cold-migration"}
 	names := movableRWOMigrationResourceNames(copyApp, stagingClaim)
-	plan := movableRWOCopyPlan{sourceClaimName: primary, targetClaimName: stagingClaim, sourceCopyPath: ".", targetCopyPath: "."}
-	if err := s.copyMovableRWOVolumeViaTransferPods(ctx, client, namespace, names, plan, sourceScheduling, targetScheduling); err != nil {
+	if err := s.copyColdPostgresVolumeViaExec(ctx, client, namespace, primary, stagingClaim, names, targetScheduling); err != nil {
 		return fmt.Errorf("copy fenced postgres source pvc to target storage: %w", err)
 	}
 	if err := verifyColdPostgresStagingClaim(ctx, client, namespace, stagingClaim, desiredPostgres.StorageClassName); err != nil {
@@ -150,33 +157,127 @@ func (s *Service) executeManagedDatabaseColdMigration(
 	return err
 }
 
-func fenceColdPostgresSourcePod(ctx context.Context, client *kubeClient, namespace, podName string) error {
-	pod, found, err := client.getPod(ctx, namespace, podName)
-	if err != nil || !found {
+func (s *Service) copyColdPostgresVolumeViaExec(ctx context.Context, client *kubeClient, namespace, sourcePod, targetClaim string, names movableRWOMigrationNames, targetScheduling runtimepkg.SchedulingConstraints) error {
+	cleanup := func() {
+		_ = client.deletePod(context.Background(), namespace, names.targetPod)
+		_ = client.deleteService(context.Background(), namespace, names.service)
+	}
+	defer cleanup()
+	if err := client.applyObject(ctx, buildMovableRWOTargetPod(namespace, names.targetPod, names.labels, targetClaim, ".", targetScheduling), nil); err != nil {
 		return err
 	}
-	if strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Succeeded") || strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Failed") {
-		return nil
+	if err := waitForMovableRWOPodReady(ctx, client, namespace, names.targetPod, 20*time.Minute); err != nil {
+		return err
 	}
-	if strings.TrimSpace(pod.ObservedUID) == "" {
-		return fmt.Errorf("cold database migration source pod %s/%s has no UID precondition", namespace, podName)
+	targetIP, found, err := client.getPodIP(ctx, namespace, names.targetPod)
+	if err != nil || !found || targetIP == "" {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("cold postgres target pod has no IP")
 	}
-	if err := client.deletePodWithUID(ctx, namespace, podName, pod.ObservedUID); err != nil {
-		return fmt.Errorf("fence cold database migration source pod %s/%s: %w", namespace, podName, err)
+	sourceDigest, err := execColdPostgresTar(ctx, client, namespace, sourcePod, targetIP)
+	if err != nil {
+		return err
+	}
+	if err := waitForMovableRWOPodSucceeded(ctx, client, namespace, names.targetPod, 20*time.Minute); err != nil {
+		return err
+	}
+	targetDigest, err := movableRWOTransferDigest(ctx, client, namespace, names.targetPod, "receiver")
+	if err != nil {
+		return err
+	}
+	if sourceDigest != targetDigest {
+		return fmt.Errorf("cold postgres source and target stream SHA-256 differ")
 	}
 	return nil
 }
 
-func patchRecoverySourceHibernation(ctx context.Context, client *kubeClient, namespace string, cluster kubeCloudNativePGCluster, value string) error {
-	return client.patchCloudNativePGHibernation(ctx, namespace, cluster.Metadata.Name, value, cluster.Metadata.UID, cluster.Metadata.ResourceVersion)
+func execColdPostgresTar(ctx context.Context, client *kubeClient, namespace, podName, targetIP string) (string, error) {
+	base, err := url.Parse(strings.TrimRight(client.baseURL, "/"))
+	if err != nil {
+		return "", err
+	}
+	base.Path = "/api/v1/namespaces/" + url.PathEscape(client.effectiveNamespace(namespace)) + "/pods/" + url.PathEscape(podName) + "/exec"
+	query := base.Query()
+	for _, command := range []string{"sh", "-lc", "tar -cpf - -C /var/lib/postgresql/data ."} {
+		query.Add("command", command)
+	}
+	query.Set("container", "postgres")
+	query.Set("stdin", "false")
+	query.Set("stdout", "true")
+	query.Set("stderr", "true")
+	query.Set("tty", "false")
+	base.RawQuery = query.Encode()
+	config := &rest.Config{Host: strings.TrimRight(client.baseURL, "/"), BearerToken: client.bearerToken}
+	if ca, readErr := os.ReadFile(serviceAccountCAPath); readErr == nil {
+		config.TLSClientConfig.CAData = ca
+	}
+	executor, err := remotecommand.NewSPDYExecutor(config, http.MethodPost, base)
+	if err != nil {
+		return "", err
+	}
+	pipeReader, pipeWriter := io.Pipe()
+	hash := sha256.New()
+	var stderr bytes.Buffer
+	copyErr := make(chan error, 1)
+	go func() {
+		conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(targetIP, "8730"), 30*time.Second)
+		if dialErr != nil {
+			_ = pipeReader.CloseWithError(dialErr)
+			copyErr <- dialErr
+			return
+		}
+		_, copyErrValue := io.Copy(conn, pipeReader)
+		_ = conn.Close()
+		copyErr <- copyErrValue
+	}()
+	streamErr := executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: io.MultiWriter(pipeWriter, hash), Stderr: &stderr})
+	_ = pipeWriter.Close()
+	if err := <-copyErr; err != nil {
+		return "", fmt.Errorf("stream fenced postgres source to target: %w", err)
+	}
+	if streamErr != nil {
+		return "", fmt.Errorf("exec fenced postgres tar: %w: %s", streamErr, strings.TrimSpace(stderr.String()))
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func waitColdPostgresSourceQuiescent(ctx context.Context, client *kubeClient, namespace, claim string, timeout time.Duration) error {
+func patchRecoverySourceFence(ctx context.Context, client *kubeClient, namespace string, cluster kubeCloudNativePGCluster) error {
+	body := map[string]any{"metadata": map[string]any{
+		"uid": cluster.Metadata.UID, "resourceVersion": cluster.Metadata.ResourceVersion,
+		"annotations": map[string]string{
+			runtimepkg.CloudNativePGHibernationAnno: runtimepkg.CloudNativePGHibernationOn,
+			"cnpg.io/fencedInstances":               `["*"]`,
+		},
+	}}
+	_, err := client.doRequest(ctx, http.MethodPatch, cloudNativePGClusterAPIPath(client.effectiveNamespace(namespace), cluster.Metadata.Name), "application/merge-patch+json", body, nil)
+	return err
+}
+
+func waitColdPostgresSourceFenced(ctx context.Context, client *kubeClient, namespace, clusterName, primary, claim string, timeout time.Duration) error {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for {
-		if err := ensureMovableRWOSourceQuiescent(waitCtx, client, namespace, claim); err == nil {
-			return nil
+		cluster, found, clusterErr := client.getCloudNativePGCluster(waitCtx, namespace, clusterName)
+		if clusterErr == nil && found && strings.TrimSpace(cluster.Metadata.Annotations["cnpg.io/fencedInstances"]) == `["*"]` {
+			pods, err := client.listPodsBySelector(waitCtx, namespace, "")
+			if err == nil {
+				busy := false
+				for _, pod := range pods {
+					if pod.Metadata.Name == primary || pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
+						continue
+					}
+					for _, volume := range pod.Spec.Volumes {
+						if volume.PersistentVolumeClaim != nil && strings.TrimSpace(volume.PersistentVolumeClaim.ClaimName) == claim {
+							busy = true
+						}
+					}
+				}
+				if !busy {
+					return nil
+				}
+			}
 		}
 		select {
 		case <-waitCtx.Done():
