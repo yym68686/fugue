@@ -120,6 +120,12 @@ func backupArtifactEvidenceComplete(artifacts []model.BackupArtifact) bool {
 // no local graph to inspect until the image is imported.  Once an image row is
 // present, however, a manifest-only row is never considered deployable.
 func (s *Server) appMoveImageBlobEvidence(app model.App) (bool, string, error) {
+	// The controller preserves disabled state and does not pull a workload
+	// image for a zero-replica move. Match that contract without asserting
+	// that missing blobs are present or allowing a later start to skip checks.
+	if app.Spec.Replicas == 0 && app.Status.CurrentReplicas == 0 {
+		return true, "image replication is not required while desired and current replicas are zero; image reference is preserved", nil
+	}
 	imageRef := strings.TrimSpace(app.Spec.Image)
 	if imageRef == "" {
 		return true, "app has no container image", nil

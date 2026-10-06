@@ -576,6 +576,9 @@ func TestMigrateAppOfflineDedicatedVolumeKeepsSourceAndStoppedState(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.UpsertImage(model.Image{TenantID: tenant.ID, AppID: app.ID, ImageRef: app.Spec.Image, CanonicalDigest: "sha256:" + strings.Repeat("a", 64), LifecycleState: model.ImageLifecycleAvailable}); err != nil {
+		t.Fatal(err)
+	}
 	stopped := app.Spec
 	stopped.Replicas = 0
 	app, err = s.SyncObservedManagedAppBaseline(app.ID, stopped, nil)
