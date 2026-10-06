@@ -20,7 +20,10 @@ func (c *CLI) moveProjectWithOfflineRecovery(client *Client, project model.Proje
 	}
 	result := projectMoveResult{Project: project, TargetRuntimeID: targetRuntimeID, DryRun: opts.DryRun}
 	for _, service := range services {
-		if strings.TrimSpace(backingServiceRuntimeID(service)) == targetRuntimeID {
+		// A cold migration can persist its target before endpoint verification.
+		// Always let the durable server-side plan verify/resume that cutover.
+		coldCutover := service.Spec.Postgres != nil && service.Spec.Postgres.EndpointServiceName != ""
+		if strings.TrimSpace(backingServiceRuntimeID(service)) == targetRuntimeID && !coldCutover {
 			result.SkippedServices = append(result.SkippedServices, projectMoveSkippedService{Service: service, Reason: "already on target runtime"})
 			continue
 		}

@@ -50,7 +50,7 @@ func TestPGCreateAppDatabaseImportJobRejectsUnavailableManagedPostgresUnderAppLo
 				),
 			)
 			if !testCase.persistedSuspended {
-				mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3\).*status IN \(\$4, \$5, \$6\).*app_id = \$7`).
+				mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3, 'database-recover'\).*status IN \(\$4, \$5, \$6\).*app_id = \$7`).
 					WithArgs(
 						model.OperationTypeDatabaseSuspend,
 						model.OperationTypeDatabaseResume,
@@ -143,7 +143,7 @@ WHERE id = $1
 			nil,
 			nil,
 		))
-	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3\).*status IN \(\$4, \$5, \$6\).*app_id = \$7`).
+	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3, 'database-recover'\).*status IN \(\$4, \$5, \$6\).*app_id = \$7`).
 		WithArgs(
 			model.OperationTypeDatabaseSuspend,
 			model.OperationTypeDatabaseResume,

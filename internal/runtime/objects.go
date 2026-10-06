@@ -532,11 +532,15 @@ func buildPostgresServiceObject(namespace, resourceName string, labels map[strin
 
 func buildManagedPostgresObjects(namespace string, resource postgresRuntimeResource) []map[string]any {
 	labels := postgresLabels(resource)
-	return []map[string]any{
+	objects := []map[string]any{
 		buildPostgresSecretObject(namespace, resource.secretName, labels, resource.spec),
 		buildPostgresServiceObject(namespace, resource.resourceName, labels, resource.spec),
 		buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, labels, resource.spec, resource.placements),
 	}
+	if alias := strings.TrimSpace(resource.spec.EndpointServiceName); alias != "" && alias != resource.resourceName {
+		objects = append(objects, buildPostgresServiceObject(namespace, alias, labels, resource.spec))
+	}
+	return objects
 }
 
 func buildAppDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource) map[string]any {
@@ -3247,7 +3251,7 @@ func runtimeBackingServiceBaseName(serviceName, fallback string) string {
 func defaultRuntimePostgresEnv(spec model.AppPostgresSpec) map[string]string {
 	return map[string]string{
 		"DB_TYPE":     "postgres",
-		"DB_HOST":     strings.TrimSpace(spec.ServiceName),
+		"DB_HOST":     model.PostgresEndpointName(spec),
 		"DB_PORT":     "5432",
 		"DB_USER":     spec.User,
 		"DB_PASSWORD": spec.Password,

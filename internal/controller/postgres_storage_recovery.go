@@ -19,9 +19,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// Recovery first makes the existing primary writable. Replication cannot rescue
-// a stopped source. No source PVC is removed, and normal localization remains
-// responsible for verifying catch-up, promotion, and the final write probe.
+// Cold recovery never allocates capacity on the source node. Healthy sources
+// use normal localization; durable cold state resumes regardless of CNPG phase.
 type recoveryOperationContextKey struct{}
 
 func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, op model.Operation, app model.App) error {
@@ -82,7 +81,11 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 	if err != nil {
 		return err
 	}
-	if cluster.Status.ReadyInstances == 0 && strings.EqualFold(strings.TrimSpace(cluster.Status.Phase), "Not enough disk space") {
+	coldState, _, err := loadColdState(ctx, client, namespace, op.ServiceID)
+	if err != nil {
+		return err
+	}
+	if coldState != nil || (cluster.Status.ReadyInstances == 0 && (strings.EqualFold(strings.TrimSpace(cluster.Status.Phase), "Not enough disk space") || cluster.Metadata.Annotations["cnpg.io/fencedInstances"] == `["*"]`)) {
 		// A disk-full source cannot be rescued by expanding its source LocalPV
 		// when the requested operation is an offline move. Copy the fenced source
 		// directly to the declared target storage class instead. The old source

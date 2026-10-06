@@ -8224,9 +8224,12 @@ paths:
       description: |-
         Platform administrator only. An offline source is never copied without
         an observed primary and verified bound data claim. The controller checks
-        live storage capacity before bounded source rescue and retains the source
-        through replica catch-up, switchover, and write-read verification. Dry run
-        returns intent only; live preflight occurs before each mutation.
+        destination capacity before a disk-full source is fenced. Cold recovery
+        streams from the stopped source directly into destination storage, verifies
+        copied files and PostgreSQL system identity, and preserves the application
+        Service address. Source storage is never expanded. Durable phase records
+        prevent recopying an activated destination. Dry run describes intent only;
+        live preflight occurs before each mutation.
       tags: [Backing Services]
       x-fugue-handler: handleRecoverBackingService
       security:
@@ -20734,6 +20737,10 @@ components:
           type: string
         service_name:
           type: string
+        endpoint_service_name:
+          type: string
+          readOnly: true
+          description: Stable application-facing Service retained during a verified cold migration. Ordinary configuration updates preserve this controller-owned identity; service_name identifies the selected CNPG cluster.
         credential_secret_name:
           type: string
           readOnly: true

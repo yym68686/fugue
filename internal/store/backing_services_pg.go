@@ -419,7 +419,7 @@ func (s *Store) pgHasInFlightManagedPostgresExclusiveMutationTx(ctx context.Cont
 SELECT EXISTS (
 	SELECT 1
 	FROM fugue_operations
-	WHERE type IN ($1, $2, $3)
+	WHERE type IN ($1, $2, $3, 'database-recover')
 	  AND status IN ($4, $5, $6)
 `
 	args := []any{

@@ -107,3 +107,11 @@ func postgresImageRepository(image string) string {
 	}
 	return image
 }
+
+// PostgresEndpointName preserves application hostnames across physical cluster replacement.
+func PostgresEndpointName(spec AppPostgresSpec) string {
+	if name := strings.TrimSpace(spec.EndpointServiceName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(spec.ServiceName)
+}

@@ -106,3 +106,40 @@ func TestProjectOfflineMovePreflightsThenWaitsForDatabaseAndCopiesStoppedApp(t *
 		})
 	}
 }
+
+func TestOfflineMoveResumesColdEndpointAfterTargetWasPersisted(t *testing.T) {
+	service := model.BackingService{ID: "service_db", Name: "database", Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{RuntimeID: "target", ServiceName: "restored-db", EndpointServiceName: "original-db"}}}
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/backing-services/service_db/recover":
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["dry_run"] == true {
+				calls = append(calls, "preflight")
+				w.Write([]byte(`{"dry_run":true}`))
+				return
+			}
+			calls = append(calls, "resume")
+			w.Write([]byte(`{"operation":{"id":"op_resume","status":"pending"}}`))
+		case "/v1/operations/op_resume":
+			calls = append(calls, "verify")
+			w.Write([]byte(`{"operation":{"id":"op_resume","status":"completed"}}`))
+		case "/v1/backing-services/service_db":
+			json.NewEncoder(w).Encode(map[string]any{"backing_service": service})
+		default:
+			t.Errorf("unexpected %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	var out, errout bytes.Buffer
+	c := &CLI{stdout: &out, stderr: &errout, root: rootOptions{JSONOutput: true}}
+	client := &Client{baseURL: server.URL, httpClient: server.Client()}
+	if err := c.moveProjectWithOfflineRecovery(client, model.Project{ID: "project_test", Name: "demo"}, nil, []model.BackingService{service}, "target", projectMoveCommandOptions{Wait: true, RecoverOffline: true, StorageClass: "cloneable"}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(calls, []string{"preflight", "resume", "verify"}) {
+		t.Fatalf("skipped incomplete cutover: %v", calls)
+	}
+}

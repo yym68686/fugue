@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/storagerecovery"
 )
 
 func hasInFlightOperationForApp(ops []model.Operation, appID string) bool {
@@ -122,7 +123,7 @@ func cloneOperation(op model.Operation) model.Operation {
 // suspension state, while resize completion persists only RuntimeResources.
 func isManagedPostgresExclusiveMutationOperationType(operationType string) bool {
 	return isManagedPostgresLifecycleOperationType(operationType) ||
-		operationType == model.OperationTypeDatabaseResize
+		operationType == model.OperationTypeDatabaseResize || operationType == storagerecovery.OperationType
 }
 
 func hasInFlightManagedPostgresExclusiveMutationForApp(ops []model.Operation, appID string) bool {

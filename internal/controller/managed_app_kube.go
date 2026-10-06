@@ -359,6 +359,12 @@ func (c *kubeClient) shouldSkipApply(ctx context.Context, apiPath string, obj ma
 	if err != nil || !found {
 		return "", false, err
 	}
+	if cloudNativePGObject(obj) && coldFencedSource(current) {
+		return "apply_skipped_cold_fenced_source", true, nil
+	}
+	if cloudNativePGObject(obj) {
+		preserveColdMigrationAnnotation(current, obj)
+	}
 	preservePostgresBootstrap(current, obj)
 	if cloudNativePGObject(obj) && skipExistingCloudNativePGWrites(ctx) {
 		return "apply_skipped_existing", true, nil
@@ -899,6 +905,9 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 			return err
 		}
 		if found {
+			if cloudNativePGObject(obj) && coldFencedSource(current) {
+				return nil
+			}
 			if cloudNativePGObject(obj) && skipExistingCloudNativePGWrites(ctx) {
 				c.writeStats.record("replace_spec_skipped_existing", obj)
 				return nil
@@ -1938,4 +1947,21 @@ func deploymentAPIPath(namespace, name string) string {
 
 func deploymentCollectionAPIPath(namespace string) string {
 	return "/apis/apps/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/deployments"
+}
+
+func coldFencedSource(obj map[string]any) bool {
+	a := normalizeKubeMap(normalizeKubeMap(obj["metadata"])["annotations"])
+	return objectStringField(a, coldMigrationAnnotation) != "" && objectStringField(a, "cnpg.io/fencedInstances") == `["*"]`
+}
+
+func preserveColdMigrationAnnotation(current, desired map[string]any) {
+	identity := objectStringField(normalizeKubeMap(normalizeKubeMap(current["metadata"])["annotations"]), coldMigrationAnnotation)
+	if identity == "" {
+		return
+	}
+	m := normalizeKubeMap(desired["metadata"])
+	a := normalizeKubeMap(m["annotations"])
+	a[coldMigrationAnnotation] = identity
+	m["annotations"] = a
+	desired["metadata"] = m
 }

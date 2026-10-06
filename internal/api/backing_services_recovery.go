@@ -89,7 +89,7 @@ func (s *Server) handleRecoverBackingService(w http.ResponseWriter, r *http.Requ
 		"target_runtime_id": runtimeID, "target_node_name": pg.PrimaryNodeName,
 		"storage_class_name": storageClass, "storage_size": pg.StorageSize,
 		"live_preflight_pending": true,
-		"stages":                 []string{"verify source cluster and bound primary data claim", "preserve the largest observed storage size", "reserve capacity before bounded source rescue", "verify writable source", "replicate and verify destination before promotion"},
+		"stages":                 []string{"verify source cluster and bound primary data claim", "preserve the largest observed storage size", "fence and verify stopped source without expanding it", "copy and verify physical files on target storage", "recover and verify matching system identity before stable endpoint cutover"},
 	}
 	ops, err := s.store.ListOperationsByApp(app.TenantID, true, app.ID)
 	if err != nil {

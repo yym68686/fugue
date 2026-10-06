@@ -340,9 +340,22 @@ func (s *Service) executeBoundManagedDatabaseSwitchoverOperation(
 	return nil
 }
 
-func (s *Service) updateAppBackingServicePostgres(serviceID string, app model.App, postgres model.AppPostgresSpec) (model.App, error) {
+func (s *Service) updateAppBackingServicePostgres(serviceID string, app model.App, postgres model.AppPostgresSpec, operations ...model.Operation) (model.App, error) {
 	spec := model.BackingServiceSpec{Postgres: &postgres}
-	updated, err := s.Store.UpdateBackingServiceSpec(serviceID, spec)
+	var updated model.BackingService
+	var err error
+	if len(operations) == 1 && operations[0].Type == storagerecovery.OperationType {
+		current, readErr := s.Store.GetBackingService(serviceID)
+		if readErr != nil {
+			return model.App{}, readErr
+		}
+		if current.Spec.Postgres == nil {
+			return model.App{}, fmt.Errorf("recovery service is not PostgreSQL")
+		}
+		updated, err = s.Store.UpdateRecoveryPostgresSpec(operations[0].ID, store.PostgresSpecFingerprint(*current.Spec.Postgres), postgres)
+	} else {
+		updated, err = s.Store.UpdateBackingServiceSpec(serviceID, spec)
+	}
 	if err != nil {
 		return model.App{}, err
 	}
@@ -405,7 +418,7 @@ func (s *Service) rollbackBoundManagedPostgresStage(
 	cause error,
 ) error {
 	return s.rollbackManagedPostgresStage(ctx, op, cause, func(rollbackCtx context.Context) error {
-		stableApp, err := s.updateAppBackingServicePostgres(serviceID, app, *model.CloneAppPostgresSpec(stablePostgres))
+		stableApp, err := s.updateAppBackingServicePostgres(serviceID, app, *model.CloneAppPostgresSpec(stablePostgres), op)
 		if err != nil {
 			return fmt.Errorf("restore managed postgres service %s persisted state: %w", serviceID, err)
 		}
@@ -806,7 +819,7 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		if storageMigrationRequired {
 			ensureDatabaseLocalizeStorageMigrationCapacity(&stagePostgres, currentDatabase)
 		}
-		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres)
+		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres, op)
 		if err != nil {
 			return fmt.Errorf("prepare localized managed postgres service %s state: %w", target.ServiceID, err)
 		}
@@ -854,7 +867,7 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	}
 
 	finalPostgres := databaseLocalizePostgresSpec(desiredDatabase, targetRuntimeID, targetNodeName, true, false)
-	finalApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, finalPostgres)
+	finalApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, finalPostgres, op)
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("finalization", fmt.Errorf("finalize localized managed postgres service %s state: %w", target.ServiceID, err))
 	}

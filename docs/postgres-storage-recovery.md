@@ -1,115 +1,63 @@
-# Managed PostgreSQL storage recovery
+# Managed PostgreSQL cold migration
 
-Platform administrators can run `fugue app db recover <app> --apply`. The CLI
-waits for the operation by default; `--wait=false` returns the operation ID.
-Without `--apply`, the response describes recovery stages and explicitly marks
-live preflight as pending. It is not a capacity approval.
+`fugue project move <project> --to <runtime> --recover-offline --storage-class <class>`
+coordinates an independent managed PostgreSQL service with exactly one bound app,
+then moves the project apps. `--dry-run` checks intent; `live_preflight_pending`
+means it does not certify live storage, fencing, or recovery readiness. Execution
+requires platform administrator authority, `--wait`, and no `--skip-blocked`.
 
-The controller preserves the largest persisted, CNPG-declared, or requested
-PVC size. A stopped disk-full source with an already declared migration to a
-different storage class is rescued before replication. Its two-GiB rescue
-target is recorded durably. The source claim is retained, automatic expansion
-is frozen on that cluster with a resource-version precondition, and actual
-filesystem capacity plus writable SQL must converge before migration starts.
-The source check ignores unrelated destination claims that have not started.
-For Longhorn, recovery selects a ready attachment node within the target
-runtime's scheduling constraints; CSI registration alone is insufficient.
-An unstarted join Job pinned to an incompatible node is removed after applying
-the corrected placement. An abandoned initializing replica PVC with no Pod or
-Job references is retained with a recovery annotation, outside CNPG discovery
-and garbage collection, allowing CNPG to bootstrap a fresh replica. No PVC is
-deleted and an uninitialized claim is never marked ready. Whole-spec writes
-preserve the explicitly observed CNPG in-use resize policy.
+For a disk-full, stopped source the controller does not expand source storage:
 
-File-backed OpenEBS LVM pools can grow through the authenticated node updater.
-The optional task requires updater protocol v43; only participating nodes need
-the upgrade. A separate read-only task checks capacity before allocation is queued. The
-executor repeats the same checks under its lock when applying. Its complete
-bounded output is stored in task logs, and the exact failure reason is propagated
-to the operation and CLI. A failed preflight never queues an expansion.
-The task verifies the exact backing file, loop device and sole PV,
-allocates at most 64 GiB, preserves at least 10%/5 GiB of host filesystem space,
-and verifies loop/PV capacity. It reserves only the newly appended file interval;
-existing sparse holes created by filesystem discard remain unchanged. The controller also preserves the LocalPV pool's
-10%/5 GiB free reserve after the requested PVC growth. No LVs are deleted.
+1. Record source cluster, Pod and PVC/PV UIDs, immutable PostgreSQL image, target
+   node/class/capacity and original service configuration fingerprint. A separate
+   ConfigMap persists these facts across operations and code releases.
+2. Fence the source via CNPG. Verify the instance-manager fencing metric and
+   `pg_ctl` stopped status. Read `pg_control` identity and checkpoint WAL directly;
+   a desired annotation or empty CNPG status field is not sufficient evidence.
+3. Stream PGDATA read-only through authenticated Kubernetes exec, using the
+   Kubernetes CA, into an isolated destination seed PVC. The existing source Pod
+   is used because some RWO drivers cannot mount the same PVC in another Pod.
+   Allocate destination recovery headroom only. Source capacity is unchanged.
+4. Compare stream SHA-256 and a per-file manifest of data, WAL, modes, ownership,
+   and checksums. Recheck the source after copying. Only continuously maintained
+   instance configuration and process markers are excluded from the manifest.
+5. Bootstrap an isolated CNPG cluster through supported PVC clone recovery,
+   preserving database, owner, credentials and the exact PostgreSQL image.
+   Require matching PostgreSQL system ID, target placement, ready primary Pod,
+   writable SQL and matching service endpoints before selecting the target.
+6. Commit the exact service configuration under the running operation's lease
+   and a configuration compare-and-swap. Preserve the original application-facing
+   Service hostname and reconcile its selector to the validated target. Verify
+   SQL through that stable hostname before completing the operation.
 
-Existing localization checks still gate replica readiness, replication catch-up,
-promotion and SQL service identity. An interrupted recovery does not perform a
-blind rollback. Repeating the same active request returns its operation; a
-conflicting target or another app mutation returns 409. Failed tasks and
-operation progress identify the precise failed prerequisite.
+A copied seed is never overwritten after target bootstrap begins. A resumed
+operation must match persisted UIDs and target intent. After target selection,
+retries finish endpoint verification; they never revert to the old source. The
+source remains fenced and its PVC is retained for separately authorized cleanup.
+Source recovery uses one PGDATA volume. External WAL, tablespaces, standby or
+backup recovery markers are rejected. The target storage driver must support
+PVC cloning. A failed bootstrap leaves serving selection unchanged.
 
-Unknown primary identity, missing or stale capacity evidence, insufficient host
-space, and unsupported storage layouts fail before the corresponding mutation.
-This command cannot manufacture disk space or recover data from a lost volume.
-
-## Project move with an offline database
-
-Use `fugue project move <project> --to <runtime> --recover-offline --storage-class <class>`
-for an independent managed PostgreSQL service bound to one app, together with
-stopped dedicated application PVCs. `--dry-run` validates intent without queuing
-operations; the response does not certify live storage capacity. The controller
-validates source identity, storage capacity, and destination placement before
-rescue. The command requires waiting and rejects `--skip-blocked`.
-
-The CLI submits database recovery first, waits for verified localization, then
-refreshes each application preflight before submitting its move. Stopped apps
-remain stopped. Dedicated PVCs are copied to a new operation-specific movable
-RWO claim in the explicitly selected storage class. Actual live consumers of the
-source volume must be absent, both transfer pipelines must succeed, and their
-SHA-256 digests must match before the application references the new claim.
-Source claims are retained. A rerun skips resources already on the destination
-and resumes an identical active offline operation; conflicting operations fail.
-A later failure may leave earlier resources already migrated. Repeating the same
-command continues from that durable state; it does not reverse completed moves.
-
+Healthy sources use the existing replication/localization flow. Ordinary moves
+remain available through `fugue project move` without `--recover-offline`.
 `fugue service postgres recover <service> --to <runtime> --storage-class <class>`
-exposes the same independent service recovery separately. Add `--apply` to queue
-it. Platform administrator authority is required because source rescue may
-require a guarded host storage task. Normal healthy moves remain available via
-`fugue project move` without `--recover-offline`.
+exposes the same service recovery flow; add `--apply` to queue it.
 
-## Known limitation and cold recovery prerequisite
+The CLI waits for database validation before refreshing application preflights.
+Stopped apps retain zero replicas. Dedicated application volumes are copied to
+new movable RWO claims only after live source consumers are absent and matching
+stream digests are recorded. Source claims are retained. Repeating the same
+command continues from durable resource state, including an interrupted database
+endpoint cutover; already completed app moves are skipped.
 
-`--recover-offline` currently rescues a disk-full source and then uses normal
-replication. It is not a direct physical cold-copy restore. When host headroom
-cannot satisfy both pool growth and the existing reserves, recovery must stop;
-this failure does not permit reserve reduction, deleting unrelated volumes, or
-editing CNPG runtime status to make a copied claim appear ready.
+After migration, `fugue service localize <service> --to <runtime> --storage-size
+10Gi --wait` expands the target PVC in place. It verifies filesystem convergence,
+SQL readiness, Pod UID/restarts and PostgreSQL process identity. It must not be
+used as a prerequisite to expand a stopped migration source.
 
-The deployed CNPG source supports `bootstrap.recovery.volumeSnapshots.storage`
-with `kind: PersistentVolumeClaim` for a fenced cold copy. Implementing this safely
-requires a durable migration resource independent of code releases:
-
-1. Record source cluster, primary, PVC/PV UIDs, PostgreSQL image digest, system
-   identifier, placement, target storage intent and source resource versions.
-   Reject separate WAL/tablespaces unless every volume is included atomically.
-2. Acquire an exclusive service-and-binding mutation lease. Fence all source
-   instances through declared CNPG hibernation and wait until no live or
-   terminating Pod references any source volume. Keep fencing persistent across
-   reconciler restarts and releases.
-3. Mount source claims read-only. Copy to operation-owned destination claims,
-   verify filesystem manifests and ownership, and record immutable digests.
-   Never mark an uninitialized CNPG claim ready or overwrite the source.
-4. Bootstrap an isolated replacement cluster using the supported recovery API,
-   preserving the original credentials. Verify actual SQL recovery, system ID,
-   schema/row invariants, WAL/checkpoint state and destination placement. A copy
-   digest alone is not proof of a recoverable database.
-5. Atomically persist the selected replacement cluster and all affected bindings
-   only after validation. Reconciliation must preserve this selection, stable
-   service identity, the recovery bootstrap, and the fenced source. Any write
-   after cutover prohibits automatic rollback to the old copy.
-6. Persist every phase and resource UID before acting. Retry must adopt the same
-   resources, resume interruption safely, and never recopy over an activated
-   destination. Retain source claims for explicit later cleanup.
-
-Required validation before enabling execution includes a real operator/CSI test
-with a disk-full, unclean PostgreSQL shutdown, a cross-class cold copy, an
-interruption at each phase, concurrent configuration changes, missing WAL,
-corrupted copy, failed bootstrap, and writes immediately after cutover. The
-current implementation deliberately does not enable this unverified path.
-
-Non-deployment CLI waits return a terminal `outcome: failed`, operation identity,
-status, redacted server-reported reason, and commands to inspect operation facts.
-Missing evidence remains explicitly missing; it is never converted into a
-successful or hypothetical migration result.
+Tests include guarded target bootstrap, source reconciliation fencing, exact
+service CAS/lease and retry behavior, stable endpoint rendering, and an opt-in
+isolated PostgreSQL crash/copy/replay rehearsal in
+`scripts/tests/cold_postgres_rehearsal.py`. That rehearsal also detects a deliberate
+WAL bit flip and verifies committed rows after replay; it does not replace live
+operator/CSI readiness checks during execution.
