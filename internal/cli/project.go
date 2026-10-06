@@ -45,11 +45,13 @@ Pass --tenant only when you are acting across multiple visible tenants.
 }
 
 type projectMoveCommandOptions struct {
-	RuntimeName string
-	RuntimeID   string
-	Wait        bool
-	SkipBlocked bool
-	DryRun      bool
+	RuntimeName    string
+	RuntimeID      string
+	Wait           bool
+	SkipBlocked    bool
+	DryRun         bool
+	RecoverOffline bool
+	StorageClass   string
 }
 
 type projectMoveSkippedApp struct {
@@ -66,6 +68,7 @@ type projectMoveResult struct {
 	Project         model.Project               `json:"project"`
 	TargetRuntimeID string                      `json:"target_runtime_id"`
 	DryRun          bool                        `json:"dry_run,omitempty"`
+	Blocked         bool                        `json:"blocked"`
 	Apps            []model.App                 `json:"apps,omitempty"`
 	AppImpacts      []model.AppMoveImpact       `json:"app_impacts,omitempty"`
 	Services        []model.BackingService      `json:"services,omitempty"`
@@ -90,6 +93,11 @@ operations. By default, any resource that cannot be safely migrated blocks the
 whole project move so the project is not left half-moved. Pass --skip-blocked
 only when you intentionally want to move eligible resources and leave blocked
 resources behind.
+
+For an offline independent Postgres service and stopped dedicated PVCs, use
+--recover-offline --storage-class <class>. This waits for database recovery and
+then copies stopped volumes, preserving their stopped state and source claims.
+A dry run validates intent; live capacity is checked by the controller.
 `),
 		Example: strings.TrimSpace(`
 fugue project move marketing --to runtime-b
@@ -134,6 +142,10 @@ fugue project move argus --to v2202605354515455529 --dry-run
 				return strings.TrimSpace(projectServices[i].Name) < strings.TrimSpace(projectServices[j].Name)
 			})
 
+			if opts.RecoverOffline {
+				return c.moveProjectWithOfflineRecovery(client, project, projectApps, projectServices, targetRuntimeID, opts)
+			}
+
 			candidates, skipped := planProjectMove(projectApps, targetRuntimeID)
 			serviceCandidates, skippedServices := planProjectMoveServices(projectServices, targetRuntimeID)
 			serviceCandidates, skippedServices = applyProjectMoveDependencies(
@@ -164,8 +176,11 @@ fugue project move argus --to v2202605354515455529 --dry-run
 				if err != nil {
 					return err
 				}
+				serviceSkipped := c.preflightProjectMoveServices(client, serviceCandidates, targetRuntimeID)
 				result.AppImpacts = impacts
 				result.Skipped = append(result.Skipped, impactSkipped...)
+				result.SkippedServices = append(result.SkippedServices, serviceSkipped...)
+				result.Blocked = hasBlockedProjectMoveApps(result.Skipped) || hasBlockedProjectMoveServices(result.SkippedServices)
 				return c.renderProjectMoveResult(result)
 			}
 			hasOwnedDatabaseDependency := false
@@ -188,7 +203,6 @@ fugue project move argus --to v2202605354515455529 --dry-run
 				return err
 			}
 			result.AppImpacts = initialImpacts
-			result.Skipped = append(result.Skipped, impactSkipped...)
 			hardImpactSkipped := make([]projectMoveSkippedApp, 0, len(impactSkipped))
 			for _, item := range impactSkipped {
 				if !appMoveSkippedForDatabaseDependency(item, initialImpacts) {
@@ -201,7 +215,12 @@ fugue project move argus --to v2202605354515455529 --dry-run
 				}
 				candidates = removeSkippedProjectMoveApps(candidates, hardImpactSkipped)
 			}
-			serviceCandidates, skippedServices = applyProjectMoveDependencies(candidates, skipped, serviceCandidates, skippedServices)
+			result.Skipped = append(result.Skipped, hardImpactSkipped...)
+			serviceCandidates, skippedServices = applyProjectMoveDependencies(candidates, result.Skipped, serviceCandidates, skippedServices)
+			servicePreflightSkipped := c.preflightProjectMoveServices(client, serviceCandidates, targetRuntimeID)
+			if len(servicePreflightSkipped) > 0 {
+				return projectMoveBlockedError(project.Name, nil, servicePreflightSkipped)
+			}
 
 			localizedApps := make(map[string]struct{})
 			for _, service := range serviceCandidates {
@@ -322,6 +341,7 @@ fugue project move argus --to v2202605354515455529 --dry-run
 			result.Services = serviceCandidates
 			result.SkippedServices = skippedServices
 			result.Operations = operations
+			result.Blocked = hasBlockedProjectMoveApps(result.Skipped) || hasBlockedProjectMoveServices(result.SkippedServices)
 			return c.renderProjectMoveResult(result)
 		},
 	}
@@ -330,6 +350,8 @@ fugue project move argus --to v2202605354515455529 --dry-run
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
 	cmd.Flags().BoolVar(&opts.SkipBlocked, "skip-blocked", false, "Move eligible apps and leave blocked apps on their current runtime")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Show the project move plan without queueing operations")
+	cmd.Flags().BoolVar(&opts.RecoverOffline, "recover-offline", false, "Recover an offline independent Postgres service and copy stopped dedicated volumes before moving the project")
+	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Explicit expandable destination storage class for offline recovery and stopped volume copies")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	return cmd
 }
@@ -452,6 +474,28 @@ func (c *CLI) preflightProjectMoveApps(
 		skipped = append(skipped, projectMoveSkippedApp{App: app, Reason: "blocked by " + reason})
 	}
 	return impacts, skipped, nil
+}
+
+// The API dry-run checks metadata and authorization, but not source health.
+// A known unhealthy source cannot complete a normal live switchover.
+func (c *CLI) preflightProjectMoveServices(client *Client, services []model.BackingService, targetRuntimeID string) []projectMoveSkippedService {
+	skipped := make([]projectMoveSkippedService, 0)
+	for _, service := range services {
+		if status := service.RuntimeStatus; status != nil && status.DesiredInstances > 0 && status.ReadyInstances == 0 {
+			skipped = append(skipped, projectMoveSkippedService{
+				Service: service,
+				Reason:  "blocked by source database has no ready instances (phase: " + strings.TrimSpace(status.Phase) + "); recover the source before live migration",
+			})
+			continue
+		}
+		if _, err := client.MigrateBackingServiceDryRun(service.ID, targetRuntimeID); err != nil {
+			skipped = append(skipped, projectMoveSkippedService{
+				Service: service,
+				Reason:  "blocked by service move preflight: " + err.Error(),
+			})
+		}
+	}
+	return skipped
 }
 
 func projectMoveAppNeedsDatabaseLocalization(appID string, impacts []model.AppMoveImpact) bool {
@@ -644,6 +688,7 @@ func (c *CLI) renderProjectMoveResult(result projectMoveResult) error {
 		kvPair{Key: "project", Value: formatDisplayName(result.Project.Name, result.Project.ID, c.showIDs())},
 		kvPair{Key: "target_runtime_id", Value: result.TargetRuntimeID},
 		kvPair{Key: "dry_run", Value: fmt.Sprintf("%t", result.DryRun)},
+		kvPair{Key: "blocked", Value: fmt.Sprintf("%t", result.Blocked)},
 		kvPair{Key: "candidate_apps", Value: fmt.Sprintf("%d", len(result.Apps))},
 		kvPair{Key: "app_preflights", Value: fmt.Sprintf("%d", len(result.AppImpacts))},
 		kvPair{Key: "candidate_services", Value: fmt.Sprintf("%d", len(result.Services))},

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path"
@@ -63,10 +64,23 @@ func (s *Service) prepareMovableRWOStorageForOperation(
 		return desiredApp, changed, fmt.Errorf("initialize kubernetes movable RWO migration client: %w", err)
 	}
 	namespace := runtimepkg.NamespaceForTenant(desiredApp.TenantID)
-	if _, found, err := client.getPersistentVolumeClaim(ctx, namespace, plan.sourceClaimName); err != nil {
+	sourcePVC, found, err := client.getPersistentVolumeClaim(ctx, namespace, plan.sourceClaimName)
+	if err != nil {
 		return desiredApp, changed, fmt.Errorf("read movable RWO source pvc %s/%s: %w", namespace, plan.sourceClaimName, err)
-	} else if !found {
+	}
+	if !found {
+		if op.Type == model.OperationTypeMigrate {
+			return desiredApp, changed, fmt.Errorf("refusing movable RWO migration: source pvc %s/%s is missing", namespace, plan.sourceClaimName)
+		}
 		return desiredApp, changed, nil
+	}
+	if op.Type == model.OperationTypeMigrate {
+		if strings.TrimSpace(sourcePVC.Status.Phase) != "Bound" || strings.TrimSpace(sourcePVC.Spec.VolumeName) == "" {
+			return desiredApp, changed, fmt.Errorf("refusing movable RWO migration: source pvc %s/%s is not bound", namespace, plan.sourceClaimName)
+		}
+		if err := validateMovableRWOPVCOwner(sourcePVC, currentApp); err != nil {
+			return desiredApp, changed, fmt.Errorf("refusing movable RWO migration: %w", err)
+		}
 	}
 
 	if currentApp.Spec.Replicas > 0 {
@@ -90,10 +104,45 @@ func (s *Service) prepareMovableRWOStorageForOperation(
 		}
 	}
 
+	if op.Type == model.OperationTypeMigrate && !plan.sourceSharedProject {
+		if err := ensureMovableRWOSourceQuiescent(ctx, client, namespace, plan.sourceClaimName); err != nil {
+			return desiredApp, changed, err
+		}
+	}
 	if err := s.copyMovableRWOVolume(ctx, client, namespace, currentApp, desiredApp, targetScheduling, *plan); err != nil {
 		return desiredApp, changed, err
 	}
 	return desiredApp, changed, nil
+}
+
+func validateMovableRWOPVCOwner(pvc kubePersistentVolumeClaim, app model.App) error {
+	for label, expected := range map[string]string{
+		runtimepkg.FugueLabelAppID:    app.ID,
+		runtimepkg.FugueLabelTenantID: app.TenantID,
+	} {
+		if actual := strings.TrimSpace(pvc.Metadata.Labels[label]); actual != "" && actual != expected {
+			return fmt.Errorf("source pvc %s has unexpected %s label %q", pvc.Metadata.Name, label, actual)
+		}
+	}
+	return nil
+}
+
+func ensureMovableRWOSourceQuiescent(ctx context.Context, client *kubeClient, namespace, claimName string) error {
+	pods, err := client.listPodsBySelector(ctx, namespace, "")
+	if err != nil {
+		return fmt.Errorf("verify source pvc %s/%s is quiescent: %w", namespace, claimName, err)
+	}
+	for _, pod := range pods {
+		if pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
+			continue
+		}
+		for _, volume := range pod.Spec.Volumes {
+			if volume.PersistentVolumeClaim != nil && strings.TrimSpace(volume.PersistentVolumeClaim.ClaimName) == claimName {
+				return fmt.Errorf("refusing movable RWO migration: source pvc %s/%s is still mounted by pod %s (phase %s)", namespace, claimName, pod.Metadata.Name, pod.Status.Phase)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Service) restoreMovableRWOScaledSource(ctx context.Context, currentApp model.App, desiredApp model.App, cause error) {
@@ -285,6 +334,17 @@ func (s *Service) copyMovableRWOVolume(
 	}
 
 	targetPVC := buildMovableRWOTargetPVC(namespace, desiredApp, plan.targetClaimName)
+	previousTarget, found, err := client.getPersistentVolumeClaim(ctx, namespace, plan.targetClaimName)
+	if err != nil {
+		return fmt.Errorf("read movable RWO target pvc %s/%s: %w", namespace, plan.targetClaimName, err)
+	}
+	if found {
+		if previousTarget.Metadata.Labels[runtimepkg.FugueLabelAppID] != desiredApp.ID ||
+			previousTarget.Metadata.Labels[runtimepkg.FugueLabelTenantID] != desiredApp.TenantID ||
+			previousTarget.Spec.StorageClassName != desiredApp.Spec.PersistentStorage.StorageClassName {
+			return fmt.Errorf("refusing movable RWO migration: target pvc %s/%s belongs to another app or storage class", namespace, plan.targetClaimName)
+		}
+	}
 	if err := client.applyObject(ctx, targetPVC, nil); err != nil {
 		return fmt.Errorf("apply movable RWO target pvc %s/%s: %w", namespace, plan.targetClaimName, err)
 	}
@@ -360,8 +420,46 @@ func (s *Service) copyMovableRWOVolumeViaTransferPods(
 	if err := waitForMovableRWOPodSucceeded(ctx, client, namespace, names.targetPod, s.movableRWOWaitTimeout()); err != nil {
 		return fmt.Errorf("wait for movable RWO target pod %s/%s: %w", namespace, names.targetPod, err)
 	}
-
+	sourceDigest, err := movableRWOTransferDigest(ctx, client, namespace, names.sourcePod, "sender")
+	if err != nil {
+		return err
+	}
+	targetDigest, err := movableRWOTransferDigest(ctx, client, namespace, names.targetPod, "receiver")
+	if err != nil {
+		return err
+	}
+	if sourceDigest != targetDigest {
+		return fmt.Errorf("refusing movable RWO migration: source and target stream SHA-256 differ")
+	}
 	return nil
+}
+
+func movableRWOTransferDigest(ctx context.Context, client *kubeClient, namespace, podName, containerName string) (string, error) {
+	logs, found, err := client.getPodLogs(ctx, namespace, podName, containerName, false, 5)
+	if err != nil {
+		return "", fmt.Errorf("verify movable RWO transfer digest from pod %s: %w", podName, err)
+	}
+	if !found {
+		return "", fmt.Errorf("verify movable RWO transfer digest: pod %s logs unavailable", podName)
+	}
+	const prefix = "FUGUE_STREAM_SHA256="
+	var digest string
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		if digest != "" {
+			return "", fmt.Errorf("verify movable RWO transfer digest: pod %s reported multiple digests", podName)
+		}
+		digest = strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	}
+	if len(digest) != 64 {
+		return "", fmt.Errorf("verify movable RWO transfer digest: pod %s reported no valid SHA-256", podName)
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return "", fmt.Errorf("verify movable RWO transfer digest: pod %s reported invalid SHA-256", podName)
+	}
+	return digest, nil
 }
 
 func sharedWorkspaceNFSServerScheduling(ctx context.Context, client *kubeClient) (runtimepkg.SchedulingConstraints, bool, error) {
@@ -539,14 +637,27 @@ func buildMovableRWOTargetPod(namespace, name string, labels map[string]string, 
 					"sh",
 					"-lc",
 					`set -eu
+set -o pipefail
 target="$1"
 mkdir -p "$target"
-nc -l -p 8730 | tar -xpf - -C "$target"`,
+# A retry with the same operation must not retain files from a partial copy.
+find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+mkdir -p /tmp/fugue-digest
+mkfifo /tmp/fugue-digest/stream
+sha256sum < /tmp/fugue-digest/stream > /tmp/fugue-digest/hash &
+hash_pid=$!
+nc -l -p 8730 | tee /tmp/fugue-digest/stream | tar -xpf - -C "$target"
+wait "$hash_pid"
+printf 'FUGUE_STREAM_SHA256=%s\n' "$(cut -d ' ' -f 1 /tmp/fugue-digest/hash)"`,
 					"sh",
 					path.Join("/dst", cleanRelativeCopyPath(targetPath)),
 				},
 				"ports": []map[string]any{
 					{"containerPort": movableRWOCopyPort, "protocol": "TCP"},
+				},
+				"readinessProbe": map[string]any{
+					"exec":          map[string]any{"command": []string{"sh", "-c", "netstat -ln | grep -q ':8730 '"}},
+					"periodSeconds": 1,
 				},
 				"volumeMounts": []map[string]any{
 					{"name": "data", "mountPath": "/dst"},
@@ -646,23 +757,20 @@ func buildMovableRWOSourcePod(namespace, name string, labels map[string]string, 
 					"sh",
 					"-lc",
 					`set -eu
+set -o pipefail
 source="$1"
 target="$2"
 if [ ! -d "$source" ]; then
   mkdir -p /tmp/fugue-empty
   source=/tmp/fugue-empty
 fi
-attempt=1
-while [ "$attempt" -le 30 ]; do
-  if tar -cpf - -C "$source" . | nc "$target" 8730; then
-    exit 0
-  fi
-  echo "waiting for movable RWO receiver $target:8730 attempt $attempt" >&2
-  attempt=$((attempt + 1))
-  sleep 1
-done
-echo "movable RWO receiver $target:8730 did not become reachable" >&2
-exit 1`,
+mkdir -p /tmp/fugue-digest
+mkfifo /tmp/fugue-digest/stream
+sha256sum < /tmp/fugue-digest/stream > /tmp/fugue-digest/hash &
+hash_pid=$!
+tar -cpf - -C "$source" . | tee /tmp/fugue-digest/stream | nc "$target" 8730
+wait "$hash_pid"
+printf 'FUGUE_STREAM_SHA256=%s\n' "$(cut -d ' ' -f 1 /tmp/fugue-digest/hash)"`,
 					"sh",
 					path.Join("/src", cleanRelativeCopyPath(plan.sourceCopyPath)),
 					targetServiceName,

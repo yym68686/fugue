@@ -542,3 +542,134 @@ func TestMigrateAppRecoversFailedImportedAppBaseline(t *testing.T) {
 		t.Fatalf("expected recovered source image ref %q, got %q", recoveredSource.ResolvedImageRef, got)
 	}
 }
+
+func TestMigrateAppOfflineDedicatedVolumeKeepsSourceAndStoppedState(t *testing.T) {
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := s.CreateTenant("offline-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, _, err := s.CreateRuntime(tenant.ID, "source", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _, err := s.CreateRuntime(tenant.ID, "target", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, key, err := s.CreateAPIKey(tenant.ID, "migrator", []string{"app.migrate", "app.write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "worker", "", model.AppSpec{
+		Image: "example.test/worker:v1", RuntimeID: source.ID, Replicas: 1,
+		PersistentStorage: &model.AppPersistentStorageSpec{Mode: model.AppPersistentStorageModeDedicatedPVC, StorageClassName: "source-local", StorageSize: "10Gi", Mounts: []model.AppPersistentStorageMount{{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := app.Spec
+	stopped.Replicas = 0
+	app, err = s.SyncObservedManagedAppBaseline(app.ID, stopped, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	path := "/v1/apps/" + app.ID + "/migrate"
+	request := map[string]any{"target_runtime_id": target.ID, "offline_storage_class_name": "target-network", "dry_run": true}
+	rec := performJSONRequest(t, server, http.MethodPost, path, key, request)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dry run: %d %s", rec.Code, rec.Body.String())
+	}
+	var preflight struct {
+		Impact model.AppMoveImpact `json:"impact"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preflight); err != nil {
+		t.Fatal(err)
+	}
+	if !preflight.Impact.Pass {
+		t.Fatalf("offline preflight blocked: %+v", preflight.Impact)
+	}
+	unchanged, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Spec.PersistentStorage.Mode != model.AppPersistentStorageModeDedicatedPVC || unchanged.Spec.PersistentStorage.StorageClassName != "source-local" {
+		t.Fatal("dry run changed source volume")
+	}
+	request["dry_run"] = false
+	rec = performJSONRequest(t, server, http.MethodPost, path, key, request)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("apply: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = performJSONRequest(t, server, http.MethodPost, path, key, request)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("resume: %d %s", rec.Code, rec.Body.String())
+	}
+	ops, err := s.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || ops[0].DesiredSpec == nil {
+		t.Fatalf("expected one operation: %+v", ops)
+	}
+	desired := ops[0].DesiredSpec
+	if desired.Replicas != 0 || desired.PersistentStorage.Mode != model.AppPersistentStorageModeMovableRWO || desired.PersistentStorage.StorageClassName != "target-network" || desired.PersistentStorage.StorageSize != "10Gi" {
+		t.Fatalf("unexpected desired state: %+v", desired)
+	}
+	unchanged, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Spec.RuntimeID != source.ID || unchanged.Spec.PersistentStorage.StorageClassName != "source-local" {
+		t.Fatal("queued operation changed source app")
+	}
+}
+
+func TestMigrateAppOfflineVolumeRejectsRunningApp(t *testing.T) {
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := s.CreateTenant("offline-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, _, err := s.CreateRuntime(tenant.ID, "source", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _, err := s.CreateRuntime(tenant.ID, "target", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, key, err := s.CreateAPIKey(tenant.ID, "migrator", []string{"app.migrate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "worker", "", model.AppSpec{
+		Image: "example.test/worker:v1", RuntimeID: source.ID, Replicas: 1,
+		PersistentStorage: &model.AppPersistentStorageSpec{Mode: model.AppPersistentStorageModeDedicatedPVC, StorageClassName: "source-local", StorageSize: "1Gi", Mounts: []model.AppPersistentStorageMount{{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	rec := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/migrate", key, map[string]any{"target_runtime_id": target.ID, "offline_storage_class_name": "target-network", "dry_run": true})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("running app accepted: %d %s", rec.Code, rec.Body.String())
+	}
+}

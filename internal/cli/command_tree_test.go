@@ -1327,6 +1327,10 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode service migrate body: %v", err)
 			}
+			if dryRun, _ := body["dry_run"].(bool); dryRun {
+				_, _ = w.Write([]byte(`{"backing_service":{"id":"service_db"},"dry_run":true,"target_runtime_id":"runtime_b"}`))
+				break
+			}
 			serviceMigrateBodies = append(serviceMigrateBodies, body)
 			_, _ = w.Write([]byte(`{"backing_service":{"id":"service_db","tenant_id":"tenant_123","project_id":"project_123","name":"main-db","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_a","database":"demo","user":"demo","service_name":"demo-postgres"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"already_current":false,"operation":{"id":"op_service_db","tenant_id":"tenant_123","app_id":"app_web","service_id":"service_db","type":"database-switchover","status":"pending","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_service_db":
@@ -1389,6 +1393,92 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
+	}
+}
+
+func TestRunProjectMoveBlocksOnServicePreflightBeforeMutations(t *testing.T) {
+	t.Parallel()
+
+	mutations := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"managed-owned","status":"active"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_web","tenant_id":"tenant_123","project_id":"project_123","name":"web","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"current_runtime_id":"runtime_a"}}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backing-services":
+			_, _ = w.Write([]byte(`{"backing_services":[{"id":"service_db","tenant_id":"tenant_123","project_id":"project_123","name":"main-db","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_a","database":"demo","user":"demo"}}}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_web/migrate":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode app move: %v", err)
+			}
+			if body["dry_run"] != true {
+				mutations++
+				t.Fatalf("app migration submitted before service preflight completed")
+			}
+			_, _ = w.Write([]byte(`{"impact":{"app_id":"app_web","target_runtime_id":"runtime_b","dry_run":true,"pass":true}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/backing-services/service_db/migrate":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode service move: %v", err)
+			}
+			if body["dry_run"] != true {
+				mutations++
+				t.Fatalf("service migration submitted despite failed preflight")
+			}
+			http.Error(w, `{"error":"target runtime lacks a database node"}`, http.StatusConflict)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	args := []string{"--base-url", server.URL, "--token", "token", "project", "move", "demo", "--to", "runtime-b"}
+	var stdout, stderr bytes.Buffer
+	if err := runWithStreams(append(append([]string(nil), args...), "--dry-run", "--json"), &stdout, &stderr); err != nil {
+		t.Fatalf("dry-run project move: %v", err)
+	}
+	var result projectMoveResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode dry-run result: %v", err)
+	}
+	if !result.Blocked || len(result.SkippedServices) != 1 || !strings.Contains(result.SkippedServices[0].Reason, "target runtime lacks a database node") {
+		t.Fatalf("expected blocked service preflight, got %+v", result)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runWithStreams(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "target runtime lacks a database node") {
+		t.Fatalf("expected project move to stop on service preflight, got %v", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("submitted %d mutations before a blocked preflight", mutations)
+	}
+}
+
+func TestProjectMovePreflightRejectsUnhealthyDatabaseWithoutSubmittingMigration(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected request for unhealthy database: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	client := &Client{baseURL: server.URL}
+	cli := &CLI{}
+	services := []model.BackingService{{
+		ID:   "service_db",
+		Name: "main-db",
+		RuntimeStatus: &model.BackingServiceRuntimeStatus{
+			Phase: "error", DesiredInstances: 1, ReadyInstances: 0,
+		},
+	}}
+	skipped := cli.preflightProjectMoveServices(client, services, "runtime_b")
+	if len(skipped) != 1 || !strings.Contains(skipped[0].Reason, "source database has no ready instances") {
+		t.Fatalf("expected unhealthy database to block migration, got %+v", skipped)
 	}
 }
 

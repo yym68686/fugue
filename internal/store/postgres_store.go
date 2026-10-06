@@ -3566,7 +3566,7 @@ LIMIT 1
 		if !visible {
 			return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 		}
-		if hasMigrationBlockingPersistentWorkspace(app) || (op.DesiredSpec != nil && appSpecHasMigrationBlockingPersistentWorkspace(*op.DesiredSpec)) {
+		if (hasMigrationBlockingPersistentWorkspace(app) && !PermitsStoppedDedicatedPVCMigration(app, op.DesiredSpec)) || (op.DesiredSpec != nil && appSpecHasMigrationBlockingPersistentWorkspace(*op.DesiredSpec)) {
 			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		if appHasManagedPostgresService(app) {

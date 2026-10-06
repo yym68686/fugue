@@ -956,6 +956,18 @@ func (c *Client) MigrateApp(id, targetRuntimeID string) (operationResponse, erro
 	return response, nil
 }
 
+func (c *Client) MigrateAppWithOfflineStorage(id, targetRuntimeID, storageClass string) (operationResponse, error) {
+	var response operationResponse
+	err := c.doJSON(http.MethodPost, "/v1/apps/"+id+"/migrate", map[string]any{"target_runtime_id": targetRuntimeID, "offline_storage_class_name": storageClass}, &response)
+	return response, err
+}
+
+func (c *Client) MigrateAppWithOfflineStorageDryRun(id, targetRuntimeID, storageClass string) (model.AppMoveDryRunResponse, error) {
+	var response model.AppMoveDryRunResponse
+	err := c.doJSON(http.MethodPost, "/v1/apps/"+id+"/migrate", map[string]any{"target_runtime_id": targetRuntimeID, "offline_storage_class_name": storageClass, "dry_run": true}, &response)
+	return response, err
+}
+
 func (c *Client) MigrateAppDryRun(id, targetRuntimeID string) (model.AppMoveDryRunResponse, error) {
 	var response model.AppMoveDryRunResponse
 	req := map[string]any{

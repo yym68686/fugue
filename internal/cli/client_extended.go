@@ -1048,6 +1048,26 @@ type appDatabaseRecoveryResponse struct {
 	Plan      map[string]any   `json:"plan,omitempty"`
 }
 
+type backingServiceRecoveryResponse struct {
+	BackingService model.BackingService `json:"backing_service"`
+	Operation      *model.Operation     `json:"operation,omitempty"`
+	Plan           map[string]any       `json:"plan,omitempty"`
+}
+
+func (c *Client) RecoverBackingService(id string, dryRun bool, opts databaseLocalizeRequest) (backingServiceRecoveryResponse, error) {
+	request := map[string]any{
+		"dry_run": dryRun, "target_runtime_id": strings.TrimSpace(opts.TargetRuntimeID),
+		"target_node_name":   strings.TrimSpace(opts.TargetNodeName),
+		"storage_size":       strings.TrimSpace(opts.StorageSize),
+		"storage_class_name": strings.TrimSpace(opts.StorageClassName),
+	}
+	var response backingServiceRecoveryResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services", id, "recover"), request, &response); err != nil {
+		return backingServiceRecoveryResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) RecoverAppDatabase(id string, dryRun bool, targetRuntimeID, targetNodeName string) (appDatabaseRecoveryResponse, error) {
 	request := map[string]any{"dry_run": dryRun}
 	if strings.TrimSpace(targetRuntimeID) != "" {

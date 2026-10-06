@@ -1,6 +1,7 @@
 package store
 
 import (
+	"reflect"
 	"strings"
 
 	"fugue/internal/model"
@@ -142,6 +143,30 @@ func appSpecHasMigrationBlockingPersistentWorkspace(spec model.AppSpec) bool {
 		return true
 	}
 	return spec.PersistentStorage != nil && !model.AppPersistentStorageSpecIsMigratable(spec.PersistentStorage)
+}
+
+// A stopped dedicated PVC can cross runtimes only through the guarded
+// movable-RWO copy path. Require an otherwise identical volume declaration so
+// migration cannot silently drop mounts, shrink storage, or replace a claim.
+func PermitsStoppedDedicatedPVCMigration(app model.App, desired *model.AppSpec) bool {
+	if desired == nil || app.Spec.Workspace != nil || desired.Workspace != nil ||
+		app.Spec.Replicas != 0 || app.Status.CurrentReplicas != 0 || desired.Replicas != 0 ||
+		app.Spec.PersistentStorage == nil || desired.PersistentStorage == nil {
+		return false
+	}
+	sourceMode, err := model.NormalizeAppPersistentStorageMode(app.Spec.PersistentStorage.Mode)
+	if err != nil || sourceMode != model.AppPersistentStorageModeDedicatedPVC ||
+		!model.AppPersistentStorageSpecUsesMovableRWO(desired.PersistentStorage) {
+		return false
+	}
+	source := *app.Spec.PersistentStorage
+	target := *desired.PersistentStorage
+	if strings.TrimSpace(source.StorageClassName) == "" || strings.TrimSpace(target.StorageClassName) == "" {
+		return false
+	}
+	source.Mode = model.AppPersistentStorageModeMovableRWO
+	source.StorageClassName = target.StorageClassName
+	return reflect.DeepEqual(source, target)
 }
 
 func validateVolumeReplicationSpec(spec model.AppSpec) error {

@@ -38,3 +38,29 @@ operation progress identify the precise failed prerequisite.
 Unknown primary identity, missing or stale capacity evidence, insufficient host
 space, and unsupported storage layouts fail before the corresponding mutation.
 This command cannot manufacture disk space or recover data from a lost volume.
+
+## Project move with an offline database
+
+Use `fugue project move <project> --to <runtime> --recover-offline --storage-class <class>`
+for an independent managed PostgreSQL service bound to one app, together with
+stopped dedicated application PVCs. `--dry-run` validates intent without queuing
+operations; the response does not certify live storage capacity. The controller
+validates source identity, storage capacity, and destination placement before
+rescue. The command requires waiting and rejects `--skip-blocked`.
+
+The CLI submits database recovery first, waits for verified localization, then
+refreshes each application preflight before submitting its move. Stopped apps
+remain stopped. Dedicated PVCs are copied to a new operation-specific movable
+RWO claim in the explicitly selected storage class. Actual live consumers of the
+source volume must be absent, both transfer pipelines must succeed, and their
+SHA-256 digests must match before the application references the new claim.
+Source claims are retained. A rerun skips resources already on the destination
+and resumes an identical active offline operation; conflicting operations fail.
+A later failure may leave earlier resources already migrated. Repeating the same
+command continues from that durable state; it does not reverse completed moves.
+
+`fugue service postgres recover <service> --to <runtime> --storage-class <class>`
+exposes the same independent service recovery separately. Add `--apply` to queue
+it. Platform administrator authority is required because source rescue may
+require a guarded host storage task. Normal healthy moves remain available via
+`fugue project move` without `--recover-offline`.

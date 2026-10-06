@@ -36,8 +36,8 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 	if err != nil {
 		return err
 	}
-	if target == nil || !target.AppOwned {
-		return fmt.Errorf("storage recovery requires an app-owned database")
+	if target == nil {
+		return fmt.Errorf("storage recovery requires a managed database")
 	}
 	client, err := s.kubeClient()
 	if err != nil {
@@ -54,9 +54,6 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 	if cluster.Status.CurrentPrimary == "" {
 		return fmt.Errorf("recovery requires an observed primary; refusing to choose a data source")
 	}
-	if err := freezeRecoverySourceExpansion(ctx, client, namespace, name, cluster.Metadata.UID, cluster.Status.CurrentPrimary); err != nil {
-		return err
-	}
 	pg := model.CloneAppPostgresSpec(&target.Postgres)
 	if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
 		pg = model.CloneAppPostgresSpec(op.DesiredSpec.Postgres)
@@ -70,13 +67,21 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 	if err != nil {
 		return err
 	}
-	if cluster.Spec.Storage.StorageClass != "" {
+	if strings.TrimSpace(pg.StorageClassName) == "" {
 		pg.StorageClassName = cluster.Spec.Storage.StorageClass
 	}
 	desired := app.Spec
 	desired.Postgres = pg
 	op.DesiredSpec = &desired
 
+	targetRuntime, err := s.Store.GetRuntime(pg.RuntimeID)
+	if err != nil {
+		return err
+	}
+	pg.PrimaryNodeName, err = recoveryStorageTargetNode(ctx, client, targetRuntime, pg.StorageClassName, pg.PrimaryNodeName)
+	if err != nil {
+		return err
+	}
 	if cluster.Status.ReadyInstances == 0 && strings.EqualFold(strings.TrimSpace(cluster.Status.Phase), "Not enough disk space") {
 		primary := cluster.Status.CurrentPrimary
 		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, primary)
@@ -102,8 +107,8 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 		if err := s.ensureOperationStillActive(op.ID); err != nil {
 			return err
 		}
-		// Freeze only this cluster's automatic growth while the small source rescue
-		// completes. The final target size remains unchanged and is never shrunk.
+		// Freeze only after the source claim, pool reserve, and operation have
+		// been verified. Retain the distinct destination class for localization.
 		if err := freezeRecoverySourceExpansion(ctx, client, namespace, name, cluster.Metadata.UID, primary); err != nil {
 			return err
 		}
@@ -115,14 +120,6 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 		if err := s.waitRecoverySourceStorage(ctx, client, op, namespace, name, primary, pvc.Metadata.UID, rescue, target.Postgres); err != nil {
 			return err
 		}
-	}
-	targetRuntime, err := s.Store.GetRuntime(pg.RuntimeID)
-	if err != nil {
-		return err
-	}
-	pg.PrimaryNodeName, err = recoveryStorageTargetNode(ctx, client, targetRuntime, pg.StorageClassName, pg.PrimaryNodeName)
-	if err != nil {
-		return err
 	}
 	return s.executeManagedDatabaseLocalizeOperation(ctx, op, app)
 }

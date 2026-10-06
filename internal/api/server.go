@@ -1573,13 +1573,30 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
+	sourceSpecHash := model.AppSpecSHA256(app.Spec)
 	var req struct {
-		TargetRuntimeID string `json:"target_runtime_id"`
-		DryRun          bool   `json:"dry_run,omitempty"`
+		TargetRuntimeID         string `json:"target_runtime_id"`
+		DryRun                  bool   `json:"dry_run,omitempty"`
+		OfflineStorageClassName string `json:"offline_storage_class_name,omitempty"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if storageClass := strings.TrimSpace(req.OfflineStorageClassName); storageClass != "" {
+		if app.Spec.Replicas != 0 || app.Status.CurrentReplicas != 0 || app.Spec.PersistentStorage == nil || app.Spec.Workspace != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "offline storage migration requires a stopped app with zero current replicas and an explicit persistent volume")
+			return
+		}
+		mode, err := model.NormalizeAppPersistentStorageMode(app.Spec.PersistentStorage.Mode)
+		if err != nil || mode != model.AppPersistentStorageModeDedicatedPVC {
+			httpx.WriteError(w, http.StatusBadRequest, "offline storage migration requires a dedicated PVC")
+			return
+		}
+		storage := *app.Spec.PersistentStorage
+		storage.Mode = model.AppPersistentStorageModeMovableRWO
+		storage.StorageClassName = storageClass
+		app.Spec.PersistentStorage = &storage
 	}
 	if !req.DryRun {
 		if blockerMessage := failover.MigrationBlockerMessage(app); blockerMessage != "" {
@@ -1605,8 +1622,14 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if strings.TrimSpace(req.OfflineStorageClassName) != "" {
+		storage := *app.Spec.PersistentStorage
+		spec.PersistentStorage = &storage
+		// Recovering a historic release baseline must not restart a disabled app.
+		spec.Replicas = 0
+	}
 	prepareMigrateDesiredSpec(app, &spec, targetRuntimeID)
-	op, err := s.store.CreateOperation(model.Operation{
+	requested := model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeMigrate,
 		RequestedByType:     principal.ActorType,
@@ -1616,7 +1639,30 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		DesiredSpec:         &spec,
 		DesiredSource:       source,
 		DesiredOriginSource: model.AppOriginSource(app),
-	})
+	}
+	var op model.Operation
+	if strings.TrimSpace(req.OfflineStorageClassName) != "" {
+		active, listErr := s.store.ListOperationsByApp(app.TenantID, true, app.ID)
+		if listErr != nil {
+			s.writeStoreError(w, listErr)
+			return
+		}
+		for _, existing := range active {
+			if existing.Status != model.OperationStatusPending && existing.Status != model.OperationStatusRunning && existing.Status != model.OperationStatusWaitingAgent {
+				continue
+			}
+			if existing.Type == model.OperationTypeMigrate && existing.TargetRuntimeID == targetRuntimeID && existing.DesiredSpec != nil && existing.DesiredSpec.Replicas == 0 &&
+				model.AppPersistentStorageSpecUsesMovableRWO(existing.DesiredSpec.PersistentStorage) && existing.DesiredSpec.PersistentStorage.StorageClassName == strings.TrimSpace(req.OfflineStorageClassName) {
+				httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(existing)})
+				return
+			}
+			httpx.WriteError(w, http.StatusConflict, "a conflicting app operation is active")
+			return
+		}
+		op, err = s.store.CreateOperationForAppSpec(requested, sourceSpecHash)
+	} else {
+		op, err = s.store.CreateOperation(requested)
+	}
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

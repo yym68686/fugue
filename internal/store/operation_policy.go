@@ -123,7 +123,7 @@ func operationAppSourcesEqual(left, right *model.AppSource) bool {
 // plan. The hash check and active-operation check run under the same app lock
 // as operation creation; read-then-restart in the CLI cannot provide this.
 func (s *Store) CreateOperationForAppSpec(op model.Operation, expected string) (model.Operation, error) {
-	if len(expected) != 64 || (op.Type != model.OperationTypeDeploy && op.Type != model.OperationTypeScale) {
+	if len(expected) != 64 || (op.Type != model.OperationTypeDeploy && op.Type != model.OperationTypeScale && op.Type != model.OperationTypeMigrate) {
 		return model.Operation{}, ErrInvalidInput
 	}
 	created, _, err := s.createOperationWithPolicy(op, operationCreatePolicy{ExpectedAppSpecHash: expected})

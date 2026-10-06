@@ -111,6 +111,7 @@ func (c *CLI) newServicePostgresCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newServicePostgresCreateCommand(),
 		c.newServicePostgresResizeCommand(),
+		c.newServicePostgresRecoverCommand(),
 		c.newServicePostgresOrphanCommand(),
 	)
 	return cmd

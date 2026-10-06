@@ -738,6 +738,14 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
+	if liveSize, liveErr := managedPostgresLiveStorageSize(ctx, client, namespace, clusterName); liveErr != nil {
+		return liveErr
+	} else if liveSize != "" {
+		desiredDatabase.StorageSize, err = maximumRecoveryStorageSize(desiredDatabase.StorageSize, currentDatabase.StorageSize, liveSize)
+		if err != nil {
+			return err
+		}
+	}
 	storageMigrationRequired = managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
 	storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 	if !storageMigrationRequired {
@@ -806,6 +814,12 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 			cause := fmt.Errorf("prepare localized managed postgres service %s standby on runtime %s: %w", target.ServiceID, targetRuntimeID, err)
 			return s.rollbackBoundManagedPostgresStage(ctx, op, app, target.ServiceID, currentDatabase, cause)
 		}
+		if op.Type == storagerecovery.OperationType {
+			if err := rescheduleUnstartedRecoveryJoins(ctx, client, namespace, clusterName, targetNodeName, storageTarget); err != nil {
+				return err
+			}
+		}
+
 		if targetNodeName != "" {
 			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID, storageTarget)
 		} else {

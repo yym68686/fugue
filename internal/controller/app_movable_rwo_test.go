@@ -254,7 +254,7 @@ func TestBuildMovableRWOCopyPodMountsSharedSourceAndTarget(t *testing.T) {
 	}
 }
 
-func TestBuildMovableRWOSourcePodRetriesReceiverConnection(t *testing.T) {
+func TestBuildMovableRWOSourcePodChecksPipelineAndEmitsDigest(t *testing.T) {
 	pod := buildMovableRWOSourcePod("tenant-a", "source", map[string]string{"fugue.pro/volume-migration": "demo"}, movableRWOCopyPlan{
 		sourceClaimName: "app-workspace",
 		sourceCopyPath:  ".",
@@ -265,10 +265,10 @@ func TestBuildMovableRWOSourcePodRetriesReceiverConnection(t *testing.T) {
 	command := containers[0]["command"].([]string)
 	script := command[2]
 	for _, want := range []string{
-		`while [ "$attempt" -le 30 ]; do`,
-		`tar -cpf - -C "$source" . | nc "$target" 8730`,
-		`waiting for movable RWO receiver`,
-		`did not become reachable`,
+		`set -o pipefail`,
+		`tar -cpf - -C "$source" . | tee /tmp/fugue-digest/stream | nc "$target" 8730`,
+		`wait "$hash_pid"`,
+		`FUGUE_STREAM_SHA256=`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected source pod script to contain %q, got:\n%s", want, script)
@@ -398,5 +398,80 @@ func TestMigrateDesiredSpecPreservesManagedPostgresRuntime(t *testing.T) {
 	}
 	if prepared.Resources == nil || prepared.Resources.CPUMilliCores != 65 {
 		t.Fatalf("expected latest right-sized resources to survive queued migration, got %#v", prepared.Resources)
+	}
+}
+
+func TestMovableRWOSourceQuiescenceChecksActualVolumeConsumers(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		wantErr    bool
+	}{
+		{"empty", `{"items":[]}`, false},
+		{"running", `{"items":[{"metadata":{"name":"writer"},"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"source"}}]},"status":{"phase":"Running"}}]}`, true},
+		{"terminating", `{"items":[{"metadata":{"name":"writer","deletionTimestamp":"2026-01-01T00:00:00Z"},"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"source"}}]},"status":{"phase":"Running"}}]}`, true},
+		{"pending", `{"items":[{"metadata":{"name":"writer"},"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"source"}}]},"status":{"phase":"Pending"}}]}`, true},
+		{"completed", `{"items":[{"metadata":{"name":"writer"},"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"source"}}]},"status":{"phase":"Succeeded"}}]}`, false},
+		{"unrelated", `{"items":[{"metadata":{"name":"writer"},"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"other"}}]},"status":{"phase":"Running"}}]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("unexpected mutation: %s", r.Method)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			client := &kubeClient{client: server.Client(), baseURL: server.URL}
+			err := ensureMovableRWOSourceQuiescent(context.Background(), client, "tenant", "source")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("quiescent err=%v", err)
+			}
+		})
+	}
+}
+
+func TestMovableRWOTransferDigestFailsClosed(t *testing.T) {
+	valid := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name, logs string
+		wantErr    bool
+	}{
+		{"valid", "FUGUE_STREAM_SHA256=" + valid + "\n", false},
+		{"missing", "copied", true},
+		{"invalid", "FUGUE_STREAM_SHA256=" + strings.Repeat("z", 64), true},
+		{"duplicate", "FUGUE_STREAM_SHA256=" + valid + "\nFUGUE_STREAM_SHA256=" + valid, true},
+		{"truncated", "FUGUE_STREAM_SHA256=abc", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(tc.logs)) }))
+			defer server.Close()
+			client := &kubeClient{client: server.Client(), baseURL: server.URL}
+			digest, err := movableRWOTransferDigest(context.Background(), client, "tenant", "transfer", "sender")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("digest=%q err=%v", digest, err)
+			}
+			if !tc.wantErr && digest != valid {
+				t.Fatal("wrong digest")
+			}
+		})
+	}
+}
+
+func TestOfflineMigrateRebaseRetainsCopyIntentAndCurrentConfiguration(t *testing.T) {
+	current := model.App{Spec: model.AppSpec{RuntimeID: "source", Replicas: 0, Image: "image-current", PersistentStorage: &model.AppPersistentStorageSpec{Mode: model.AppPersistentStorageModeDedicatedPVC, StorageClassName: "source-local", StorageSize: "10Gi", ClaimName: "source-claim"}}}
+	desired := current.Spec
+	storage := *current.Spec.PersistentStorage
+	storage.Mode = model.AppPersistentStorageModeMovableRWO
+	storage.StorageClassName = "target-network"
+	desired.PersistentStorage = &storage
+	desired.RuntimeID = "target"
+	desired.Image = "image-stale"
+	prepared := migrateDesiredSpecForManagedOperation(current, desired)
+	if prepared.PersistentStorage.Mode != model.AppPersistentStorageModeMovableRWO || prepared.PersistentStorage.StorageClassName != "target-network" || prepared.Image != "image-current" || prepared.Replicas != 0 {
+		t.Fatalf("lost copy intent or current configuration: %+v", prepared)
+	}
+	if current.Spec.PersistentStorage.Mode != model.AppPersistentStorageModeDedicatedPVC {
+		t.Fatal("mutated original volume")
 	}
 }

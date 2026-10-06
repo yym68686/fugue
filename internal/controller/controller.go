@@ -990,6 +990,11 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	case model.OperationTypeDelete:
 	case model.OperationTypeMigrate:
 		if op.DesiredSpec != nil {
+			if model.AppPersistentStorageSpecUsesMovableRWO(op.DesiredSpec.PersistentStorage) &&
+				currentApp.Spec.PersistentStorage != nil && !model.AppPersistentStorageSpecIsMigratable(currentApp.Spec.PersistentStorage) &&
+				!store.PermitsStoppedDedicatedPVCMigration(currentApp, op.DesiredSpec) {
+				return fmt.Errorf("offline migration source changed since preflight; refusing volume copy")
+			}
 			app.Spec = migrateDesiredSpecForManagedOperation(currentApp, *op.DesiredSpec)
 			completionDesiredSpec = cloneControllerAppSpec(&app.Spec)
 		} else {
@@ -1325,10 +1330,14 @@ func (s *Service) recordOperationControllerTiming(operationID string, segments [
 }
 
 func migrateDesiredSpecForManagedOperation(currentApp model.App, desired model.AppSpec) model.AppSpec {
-	// A move request only owns RuntimeID. All other desired state may have
-	// legitimately advanced while the operation waited behind another lane.
+	// A move owns placement and the explicit stopped-volume copy intent.
+	// Other state may have advanced while the operation waited in the queue.
 	rebased := *cloneControllerAppSpec(&currentApp.Spec)
 	rebased.RuntimeID = strings.TrimSpace(desired.RuntimeID)
+	if store.PermitsStoppedDedicatedPVCMigration(currentApp, &desired) {
+		storage := *desired.PersistentStorage
+		rebased.PersistentStorage = &storage
+	}
 	return rebased
 }
 

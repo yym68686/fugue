@@ -3141,7 +3141,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			if targetRuntimeID == "" || !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
 				return ErrNotFound
 			}
-			if hasMigrationBlockingPersistentWorkspace(app) || (op.DesiredSpec != nil && appSpecHasMigrationBlockingPersistentWorkspace(*op.DesiredSpec)) {
+			if (hasMigrationBlockingPersistentWorkspace(app) && !PermitsStoppedDedicatedPVCMigration(app, op.DesiredSpec)) || (op.DesiredSpec != nil && appSpecHasMigrationBlockingPersistentWorkspace(*op.DesiredSpec)) {
 				return ErrInvalidInput
 			}
 			if appHasManagedPostgresService(app) {

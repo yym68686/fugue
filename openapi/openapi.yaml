@@ -8217,6 +8217,55 @@ paths:
                 $ref: "#/components/schemas/BackingServiceMigrateResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/recover:
+    post:
+      operationId: recoverBackingService
+      summary: Recover Managed Postgres Backing Service
+      description: |-
+        Platform administrator only. An offline source is never copied without
+        an observed primary and verified bound data claim. The controller checks
+        live storage capacity before bounded source rescue and retains the source
+        through replica catch-up, switchover, and write-read verification. Dry run
+        returns intent only; live preflight occurs before each mutation.
+      tags: [Backing Services]
+      x-fugue-handler: handleRecoverBackingService
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [target_runtime_id, storage_class_name]
+              properties:
+                dry_run: {type: boolean, default: true}
+                target_runtime_id: {type: string, minLength: 1}
+                target_node_name: {type: string}
+                storage_size: {type: string}
+                storage_class_name: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Intent plan; live source evidence is not yet verified
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceRecoveryResponse"
+        '202':
+          description: Recovery operation accepted or exact active operation resumed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceRecoveryResponse"
+        '403':
+          description: Platform administrator permission is required.
+        '409':
+          description: Another database operation or different recovery intent is active.
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/bindings:
     get:
       operationId: listAppBindings
@@ -27496,6 +27545,22 @@ components:
           type: string
         operation:
           $ref: "#/components/schemas/Operation"
+    BackingServiceRecoveryResponse:
+      type: object
+      additionalProperties: false
+      required: [backing_service]
+      properties:
+        backing_service:
+          $ref: "#/components/schemas/BackingService"
+        operation:
+          $ref: "#/components/schemas/Operation"
+        plan:
+          type: object
+          additionalProperties: true
+        dry_run:
+          type: boolean
+        resumed:
+          type: boolean
     AppListResponse:
       type: object
       additionalProperties: false
@@ -29856,6 +29921,9 @@ components:
           type: string
         dry_run:
           type: boolean
+        offline_storage_class_name:
+          type: string
+          description: Explicit destination class for copying a stopped dedicated PVC into a new movable RWO PVC. Only accepted when desired replicas are zero; the controller verifies that no source workload pod remains before copying. Source PVCs are retained.
     AppMoveVolumeImpact:
       type: object
       additionalProperties: false
