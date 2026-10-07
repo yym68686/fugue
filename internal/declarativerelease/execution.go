@@ -521,8 +521,8 @@ func sameResourceSpecIdentity(left, right ResourceObservation) bool {
 }
 
 func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, forwardManifest, lkgManifest []byte) (Observation, error) {
-	if !release.ExpectedPreviousPresent || !lkg.Present {
-		return Observation{}, errors.New("degraded predecessor recovery is not authorized")
+	if !degradedPredecessorAuthorized(release) || !lkg.Present {
+		return Observation{}, errors.New("degraded predecessor recovery requires an explicit same-LKG retry or failed-release successor")
 	}
 	if verifyErr := cluster.VerifyTarget(ctx, lkg); verifyErr != nil {
 		return Observation{}, fmt.Errorf("verify degraded predecessor artifact: %w", verifyErr)
@@ -588,6 +588,9 @@ func prepareControlledEdgeRecoveryPredecessor(ctx context.Context, cluster Clust
 }
 
 func prepareOwnedDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, forwardManifest []byte, lkgDrift error) (Observation, error) {
+	if !degradedPredecessorAuthorized(release) {
+		return Observation{}, errors.New("degraded predecessor recovery requires an explicit same-LKG retry or failed-release successor")
+	}
 	witness, err := RetryPredecessorConvergenceManifest(forwardManifest, release)
 	if err != nil {
 		return Observation{}, err
@@ -1128,9 +1131,7 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 		return errors.New("absent execution LKG carries runtime identity")
 	}
 	if plan.DegradedPredecessor {
-		failedAtomSuccessor := shaPattern.MatchString(release.SupersedesFailedConfigSHA)
-		if !release.ExpectedPreviousPresent || plan.AlreadyConverged ||
-			(!release.RetrySameLKG && !failedAtomSuccessor) {
+		if !degradedPredecessorAuthorized(release) || plan.AlreadyConverged {
 			return errors.New("degraded predecessor execution is not authorized")
 		}
 		if err := plan.Prewrite.ValidateDegradedPredecessor(release); err != nil {
@@ -1159,6 +1160,13 @@ func releaseHasHealthProbe(release PlanRelease, probeType string) bool {
 		}
 	}
 	return false
+}
+
+// Preparation and replay must admit exactly the same reviewed recovery intent.
+// An unhealthy workload alone does not authorize replacing a failed release.
+func degradedPredecessorAuthorized(release PlanRelease) bool {
+	return release.ExpectedPreviousPresent &&
+		(release.RetrySameLKG || shaPattern.MatchString(release.SupersedesFailedConfigSHA))
 }
 
 func (observation Observation) ValidateDegradedPredecessor(release PlanRelease) error {

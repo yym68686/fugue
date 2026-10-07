@@ -812,23 +812,20 @@ func TestPrepareFailedAtomSuccessorRejectsUntypedReadyCountMismatch(t *testing.T
 	}
 }
 
-func TestExecuteDegradedPredecessorRejectsIndependentNonRetryWithoutFailedAtom(t *testing.T) {
+func TestPrepareDegradedPredecessorRejectsIndependentNonRetryWithoutFailedAtom(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixture(t)
 	degraded := casOnlyObservation(lkg)
 	fake := &fakeCluster{
 		observations: []Observation{lkg},
-		healthErrors: []error{
-			fmt.Errorf("%w: ready workload pod count mismatch: got=0 want=1", ErrDegradedPredecessorHealth),
-		},
-		cas: []Observation{degraded, degraded},
+		healthErrors: []error{fmt.Errorf("%w: ready workload pod count mismatch: got=0 want=1", ErrDegradedPredecessorHealth)},
+		cas:          []Observation{degraded, degraded},
 	}
-	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
-	if err != nil || !prepared.DegradedPredecessor || plan.Releases[0].RetrySameLKG || plan.Releases[0].SupersedesFailedConfigSHA != "" {
-		t.Fatalf("fixture is not an ordinary independent non-retry: plan=%+v prepared=%+v err=%v", plan.Releases[0], prepared, err)
+	_, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err == nil || !strings.Contains(err.Error(), "requires an explicit same-LKG retry or failed-release successor") {
+		t.Fatalf("ordinary independent release must fail at preparation with actionable recovery intent: %v", err)
 	}
-	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
-	if result.Status != "recovery-required" || result.Reason != "execution-plan-invalid" || result.ForwardApplyCount != 0 || fake.applies != 0 {
-		t.Fatalf("ordinary independent non-retry entered degraded execution: result=%+v applies=%d", result, fake.applies)
+	if len(fake.verifiedTargets) != 0 || len(fake.casManifests) != 0 || fake.dryRuns != 0 || fake.applies != 0 {
+		t.Fatalf("unauthorized recovery reached artifact/CAS/dry-run/apply: %+v", fake)
 	}
 }
 
