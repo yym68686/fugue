@@ -86,6 +86,62 @@ func TestBoundDNSDoesNotUseShadowOnServingErrorsOrRetainedState(t *testing.T) {
 	}
 }
 
+func TestDNSShadowWithoutAssignmentWaitsWithoutServing(t *testing.T) {
+	for _, mode := range []string{"empty", "other-lane", "identity-missing", "artifact-missing", "unavailable", "forbidden"} {
+		t.Run(mode, func(t *testing.T) {
+			a := model.PlatformConsumerAssignment{ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ArtifactID: "candidate", ScopeKey: "authority-cell:cell-dns", ReleaseChannel: "shadow", ExpectedConsumerSetID: "set"}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/platform-state/consumers/identity":
+					if mode == "identity-missing" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					json.NewEncoder(w).Encode(map[string]any{"token": "component-token", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "dns-a", "authority_id": "cell-dns", "consumer_id": "dns-server:cell-dns:dns-a", "scope_key": a.ScopeKey, "artifact_kinds": []string{a.ArtifactKind}})
+				case "/v1/platform-state/consumers/assignment":
+					if r.URL.Query().Get("serving_only") == "true" || mode == "empty" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					if mode == "unavailable" {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+					if mode == "forbidden" {
+						w.WriteHeader(http.StatusForbidden)
+						return
+					}
+					current := a
+					if mode == "other-lane" {
+						current.ReleaseChannel = "full"
+					}
+					json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{current}})
+				case "/v1/platform-state/consumers/artifacts/candidate":
+					w.WriteHeader(http.StatusNotFound)
+				default:
+					t.Error("unexpected request", r.URL.Path)
+					w.WriteHeader(http.StatusForbidden)
+				}
+			}))
+			defer server.Close()
+			dir := t.TempDir()
+			s := NewService(config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: "cell-dns", PlatformScopeKey: a.ScopeKey, CachePath: filepath.Join(dir, "cache")}, log.New(io.Discard, "", 0))
+			s.PlatformTokenFile = filepath.Join(dir, "token")
+			if err := os.WriteFile(s.PlatformTokenFile, []byte("pod-token"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s.syncPlatformConsumersOnce(context.Background())
+			want := "failed"
+			if mode == "empty" || mode == "other-lane" {
+				want = "awaiting_release"
+			}
+			if s.platformCandidate.State != want || s.platformServing.Load() != nil {
+				t.Fatalf("state=%s want=%s serving=%v", s.platformCandidate.State, want, s.platformServing.Load())
+			}
+		})
+	}
+}
+
 func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, versioned bool, group string) {
 	const key = "synthetic-dns-platform-signing-key"
 	authority := platformcontrol.ConsumerAuthorityID(group)

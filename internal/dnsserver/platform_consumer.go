@@ -108,12 +108,12 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 		if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
 			s.mu.Lock()
 			s.platformCandidate.State = "failed"
-			if errors.Is(err, platformconsumer.ErrAssignmentChanged) {
+			if errors.Is(err, platformconsumer.ErrAssignmentChanged) || errors.Is(err, platformconsumer.ErrNoShadowAssignment) {
 				s.platformCandidate.State = "awaiting_release"
 			}
 			s.platformCandidate.LastError = err.Error()
 			s.mu.Unlock()
-			if errors.Is(err, platformconsumer.ErrAssignmentChanged) {
+			if errors.Is(err, platformconsumer.ErrAssignmentChanged) || errors.Is(err, platformconsumer.ErrNoShadowAssignment) {
 				s.Logger.Printf("DNS candidate convergence pending: %v", err)
 			} else {
 				s.Logger.Printf("dns platform candidate failed: %v", err)

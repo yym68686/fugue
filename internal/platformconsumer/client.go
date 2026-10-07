@@ -34,6 +34,10 @@ var ErrDNSBackendNotSelected = errors.New("DNS backend is not selected by public
 
 var ErrNoServingAssignment = errors.New("no serving traffic assignment")
 
+// ErrNoShadowAssignment is returned only after authenticated assignment
+// discovery finds no shadow lane. Artifact and identity failures stay errors.
+var ErrNoShadowAssignment = errors.New("no shadow traffic assignment")
+
 // ErrAssignmentChanged identifies a publication race, not negative serving
 // evidence. Consumers may reread the assignment before observing again.
 var ErrAssignmentChanged = errors.New("platform assignment changed during observation")
@@ -101,6 +105,9 @@ func (c Client) syncChannel(ctx context.Context, component, nodeID, scope, kind,
 		if channel == "serving" && errors.As(err, &status) && status.Code == http.StatusNotFound {
 			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoServingAssignment
 		}
+		if channel == model.PlatformArtifactReleaseChannelShadow && errors.As(err, &status) && status.Code == http.StatusNotFound {
+			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoShadowAssignment
+		}
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
 	}
 	var chosen *model.PlatformConsumerAssignment
@@ -116,6 +123,9 @@ func (c Client) syncChannel(ctx context.Context, component, nodeID, scope, kind,
 	if chosen == nil {
 		if channel == "serving" {
 			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoServingAssignment
+		}
+		if channel == model.PlatformArtifactReleaseChannelShadow {
+			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoShadowAssignment
 		}
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform release assignment unavailable")
 	}
