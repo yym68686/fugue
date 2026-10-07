@@ -10,12 +10,18 @@
     "vps-84c8f0a9"
   ],
   "expected_previous_shadow": {
-    "artifact_id": "artifact_1790816149_08262a8dd111",
-    "content_hash": "sha256:89d7c2a534fe3d7f45d72fd346d4c740ec9638545c073adb1c43f3dfcf1a71d0",
-    "release_id": "artifactrel_1790816153_bef4291d7f3a",
-    "fencing_token": 2
+    "artifact_id": "artifact_1791337160_321464087557",
+    "content_hash": "sha256:8bf0273864b2884e87a622d6cffc91d2a5a53c7f8fd7a704c218af7c4b88bb52",
+    "fencing_token": 3,
+    "release_id": "artifactrel_1791337161_1a3b25ea7bd4"
   },
-  "generation": 4,
+  "generation": 5,
+  "global_producer_policy": {
+    "artifact_id": "artifact_1791166678_6e935267f4a3",
+    "content_hash": "sha256:169fd21560bd2f59b096f42939a9dbe92d4d9cbd8e7442afe9b0e94e8e5e6852",
+    "fencing_token": 30,
+    "release_id": "artifactrel_1791166766_3d8c45ad6eea"
+  },
   "origin": "https://api.fugue.pro",
   "previous_topology": {
     "authority_cells": [
@@ -111,5 +117,5 @@
       }
     }
   ],
-  "schema": "fugue.dns-authority-transition-stage/v2"
+  "schema": "fugue.dns-authority-transition-stage/v3"
 }

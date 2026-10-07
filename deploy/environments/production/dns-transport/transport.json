@@ -1,6 +1,6 @@
 {
   "apiVersion": "transport.fugue.dev/v1",
-  "generation": 18,
+  "generation": 19,
   "kind": "DNSLocalTransport",
   "listeners": [
     {
