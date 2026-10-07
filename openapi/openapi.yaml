@@ -958,6 +958,49 @@ paths:
                 $ref: "#/components/schemas/EdgeNodeQualityResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/quality-shadow/{hostname}:
+    get:
+      operationId: getEdgeQualityShadow
+      summary: Capture a replayable physical-edge network quality shadow
+      description: >-
+        Platform-admin-only read. Does not change DNS, publish artifacts, execute
+        probes or authorize promotion. Uses exact hostname, traffic class and scope;
+        legacy timings without segment provenance remain diagnostic-only. Missing
+        metrics and hostname-specific route/TLS proofs block promotion. This is a
+        captured counterfactual, not a receipt of an actual DNS answer. Resolver/ECS
+        scope cannot establish a particular terminal's current network path.
+      tags: [Edge]
+      x-fugue-handler: handleGetEdgeQualityShadow
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema: {type: string}
+        - in: query
+          name: traffic_class
+          required: true
+          schema: {type: string}
+        - in: query
+          name: scope
+          description: Exact scope; no country filtering or cross-scope sample fallback.
+          schema: {type: string, default: global}
+      responses:
+        '200':
+          description: Bounded, digest-protected shadow snapshot and deterministic result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PhysicalEdgeQualityReceipt'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
   /v1/edge/quality-rank/{hostname}:
     get:
       operationId: getEdgeQualityRank
@@ -19005,6 +19048,153 @@ components:
         generated_at:
           type: string
           format: date-time
+    PhysicalEdgeQualityPolicy:
+      type: object
+      additionalProperties: false
+      required: [version, window_seconds, bucket_seconds, required_buckets, minimum_records, cooldown_seconds, evidence_max_age_seconds, advantage_ms, advantage_ratio, unknown_cost_ms, uncertainty_ms, failure_cost_ms, capacity_cost_ms, throughput_cost_ms, throughput_target_bps, probe_interval_seconds, probe_budget_per_interval]
+      properties:
+        version: {type: string}
+        window_seconds: {type: integer}
+        bucket_seconds: {type: integer}
+        required_buckets: {type: integer}
+        minimum_records: {type: integer}
+        cooldown_seconds: {type: integer}
+        evidence_max_age_seconds: {type: integer}
+        advantage_ms: {type: number}
+        advantage_ratio: {type: number}
+        unknown_cost_ms: {type: number}
+        uncertainty_ms: {type: number}
+        failure_cost_ms: {type: number}
+        capacity_cost_ms: {type: number}
+        throughput_cost_ms: {type: number}
+        throughput_target_bps: {type: number}
+        probe_interval_seconds: {type: integer}
+        probe_budget_per_interval: {type: integer}
+    PhysicalEdgeQualityCandidate:
+      type: object
+      additionalProperties: false
+      required: [edge_id, edge_group_id, route_generation, route_proof_verified, proof_observed_at, hard_gates]
+      properties:
+        edge_id: {type: string}
+        edge_group_id: {type: string}
+        route_generation: {type: string}
+        route_proof_verified: {type: boolean}
+        proof_observed_at: {type: string, nullable: true, format: date-time}
+        hard_gates:
+          type: array
+          items: {type: string}
+    PhysicalEdgeQualityObservation:
+      type: object
+      additionalProperties: false
+      required: [id, edge_id, hostname, traffic_class, scope, route_generation, observed_at, client_network_ms, service_network_ms, client_source, service_source, upload_bps, download_bps, client_failure_rate, service_failure_rate, capacity_utilization, diagnostics]
+      properties:
+        id: {type: string}
+        edge_id: {type: string}
+        hostname: {type: string}
+        traffic_class: {type: string}
+        scope: {type: string}
+        route_generation: {type: string}
+        observed_at: {type: string, format: date-time}
+        client_network_ms: {type: number, nullable: true}
+        service_network_ms: {type: number, nullable: true}
+        client_source: {type: string}
+        service_source: {type: string}
+        upload_bps: {type: number, nullable: true}
+        download_bps: {type: number, nullable: true}
+        client_failure_rate: {type: number, nullable: true}
+        service_failure_rate: {type: number, nullable: true}
+        capacity_utilization: {type: number, nullable: true}
+        diagnostics:
+          type: object
+          description: Never used in the network score. Includes app/model wait, connection lifetime and unverified legacy measurements.
+          additionalProperties: {type: number}
+    PhysicalEdgeQualitySnapshot:
+      type: object
+      additionalProperties: false
+      required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
+      properties:
+        schema: {type: string, enum: ['fugue.physical-edge-quality-shadow/v1']}
+        captured_at: {type: string, format: date-time}
+        hostname: {type: string}
+        traffic_class: {type: string}
+        scope: {type: string}
+        policy: {$ref: '#/components/schemas/PhysicalEdgeQualityPolicy'}
+        current_edge_id: {type: string}
+        last_switch_at: {type: string, nullable: true, format: date-time}
+        candidates:
+          type: array
+          maxItems: 256
+          items: {$ref: '#/components/schemas/PhysicalEdgeQualityCandidate'}
+        observations:
+          type: array
+          maxItems: 4096
+          items: {$ref: '#/components/schemas/PhysicalEdgeQualityObservation'}
+        blockers:
+          type: array
+          items: {type: string}
+    PhysicalEdgeQualityMetric:
+      type: object
+      additionalProperties: false
+      required: [state, value, records]
+      properties:
+        state: {type: string, enum: [observed, unknown]}
+        value: {type: number}
+        records: {type: integer}
+    PhysicalEdgeQualityAssessment:
+      type: object
+      additionalProperties: false
+      required: [edge_id, edge_group_id, score, lower, upper, metrics, missing, hard_gates, ready, record_count, bucket_count]
+      properties:
+        edge_id: {type: string}
+        edge_group_id: {type: string}
+        score: {type: number}
+        lower: {type: number}
+        upper: {type: number}
+        metrics:
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/PhysicalEdgeQualityMetric'}
+        missing:
+          type: array
+          items: {type: string}
+        hard_gates:
+          type: array
+          items: {type: string}
+        ready: {type: boolean}
+        record_count: {type: integer}
+        bucket_count: {type: integer}
+    PhysicalEdgeQualityResult:
+      type: object
+      additionalProperties: false
+      required: [mode, dns_unchanged, promotion_ready, hypothesis, proposed_edge_id, probe_edge_ids, probe_executed, sustained_buckets, candidates, rejected_records, blockers]
+      properties:
+        mode: {type: string, enum: [shadow]}
+        dns_unchanged: {type: boolean, enum: [true]}
+        promotion_ready: {type: boolean, enum: [false]}
+        hypothesis: {type: string, enum: [hold, switch, failover]}
+        proposed_edge_id: {type: string}
+        probe_edge_ids:
+          type: array
+          maxItems: 2
+          items: {type: string}
+        probe_executed: {type: boolean, enum: [false]}
+        sustained_buckets: {type: integer}
+        candidates:
+          type: array
+          items: {$ref: '#/components/schemas/PhysicalEdgeQualityAssessment'}
+        rejected_records:
+          type: object
+          additionalProperties: {type: integer}
+        blockers:
+          type: array
+          items: {type: string}
+    PhysicalEdgeQualityReceipt:
+      type: object
+      additionalProperties: false
+      required: [snapshot, result, digest]
+      properties:
+        snapshot: {$ref: '#/components/schemas/PhysicalEdgeQualitySnapshot'}
+        result: {$ref: '#/components/schemas/PhysicalEdgeQualityResult'}
+        digest: {type: string}
     EdgeQualityRankResponse:
       type: object
       additionalProperties: false

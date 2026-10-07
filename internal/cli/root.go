@@ -284,6 +284,12 @@ Environment variables:
 				}
 				return nil
 			}
+			if commandPath == "fugue admin edge quality-shadow replay" {
+				if c.root.SaveToken {
+					return fmt.Errorf("--save-token is not supported for offline quality shadow replay")
+				}
+				return nil
+			}
 			isStaticEdgeDirect := strings.HasPrefix(commandPath, "fugue static-edge ") && commandPath != "fugue static-edge registry" && !strings.HasPrefix(commandPath, "fugue static-edge registry ")
 			if isStaticEdgeDirect {
 				if c.root.SaveToken {

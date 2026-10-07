@@ -23,6 +23,7 @@ func (c *CLI) newAdminEdgeCommand() *cobra.Command {
 	cmd.AddCommand(c.newAdminEdgeRouteCheckCommand())
 	cmd.AddCommand(c.newAdminEdgeCacheCheckCommand())
 	cmd.AddCommand(c.newAdminEdgeQualityRankCommand())
+	cmd.AddCommand(c.newAdminEdgeQualityShadowCommand())
 	cmd.AddCommand(c.newAdminEdgeNodesCommand())
 	cmd.AddCommand(c.newAdminEdgeReleaseEvidenceCommand())
 	return cmd
