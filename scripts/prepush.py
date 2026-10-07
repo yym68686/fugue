@@ -486,6 +486,8 @@ def main() -> int:
             go_dependent_tasks["affected-vet"] = vet_task
     if any(name in {"scripts/reconcile_dns_transport.py", "scripts/test_reconcile_dns_transport.py"} or name.startswith("deploy/environments/production/dns-transport/") for name in paths):
         non_go_tasks["dns-transport-tests"] = ["python3", "-m", "unittest", "scripts.test_reconcile_dns_transport"]
+    if any(name in {"scripts/renew_producer_publication.py", "scripts/test_renew_producer_publication.py"} or name.startswith("deploy/environments/production/producer-renewal/") for name in paths):
+        non_go_tasks["producer-renewal-tests"] = ["python3", "-m", "unittest", "scripts.test_renew_producer_publication"]
     if any(name in {"scripts/bootstrap_cell_producer.py", "scripts/test_bootstrap_cell_producer.py"} or name.startswith("deploy/environments/production/cell-producers/") for name in paths):
         non_go_tasks["cell-producer-bootstrap-tests"] = ["python3", "-m", "unittest", "scripts.test_bootstrap_cell_producer"]
     if any(name in {"scripts/reconfigure_cell_producer.py", "scripts/test_reconfigure_cell_producer.py", "scripts/expand_cell_membership.py", "scripts/test_expand_cell_membership.py"} or name.startswith(("deploy/environments/production/cell-producer-reconfiguration/", "deploy/environments/production/cell-membership-expansion/")) for name in paths):

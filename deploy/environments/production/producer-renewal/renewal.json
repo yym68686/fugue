@@ -1,0 +1,58 @@
+{
+  "generation": 1,
+  "origin": "https://api.fugue.pro",
+  "producers": [
+    {
+      "failed_release_id": "artifactrel_1791395442_c1f07296c8d3",
+      "full": {
+        "artifact_id": "artifact_1791394776_b31cf7d17684",
+        "content_hash": "sha256:f54ce3c71fba389b79c4de42a7bb35961762ff7a549f58495ba5a76ba88b40df",
+        "fencing_token": 1146,
+        "release_id": "artifactrel_1791396080_2d22d8e13c3d"
+      },
+      "policy": {
+        "artifact_id": "artifact_1790808001_252cf75fb198",
+        "content_hash": "sha256:3d0931956839d52fec7cbef872389f1001e04827ca68951494fefa5173ca3937",
+        "fencing_token": 7,
+        "release_id": "artifactrel_1790808021_1124aae0c5d3"
+      },
+      "scope": "authority-cell:cell-public-a",
+      "verification_evidence_hash": "sha256:33521fec410c78de9ff5959f0973c0e7f97dd1d5e00ff57b0f4b8552ca604521"
+    },
+    {
+      "failed_release_id": "artifactrel_1791395442_85a81d0a6c3e",
+      "full": {
+        "artifact_id": "artifact_1791394778_6387fce7b963",
+        "content_hash": "sha256:9e615ad7d3d38ffd28bfadf380048fbc0809af9e4129ffe405e938124311ec20",
+        "fencing_token": 1112,
+        "release_id": "artifactrel_1791396079_ee9c4cdc949a"
+      },
+      "policy": {
+        "artifact_id": "artifact_1790809415_bc07602a94d9",
+        "content_hash": "sha256:4913d94b5e561562deb074fa0eeb01f4b053b9f541d4c2d2fc555f8cb89e71c6",
+        "fencing_token": 8,
+        "release_id": "artifactrel_1790809424_b2ba6bbb5c57"
+      },
+      "scope": "authority-cell:cell-public-b",
+      "verification_evidence_hash": "sha256:2bb2adba483c0b3eb84e2d62ca54ca379cab8804a6c2893e478a6944fab948ec"
+    },
+    {
+      "failed_release_id": "artifactrel_1791395390_f714ad06f2c8",
+      "full": {
+        "artifact_id": "artifact_1791394783_8cb6a7a9d8be",
+        "content_hash": "sha256:618361923429bb2a7d1b985d252bfca0646e12eaa44990733c8e12d02bc20ec3",
+        "fencing_token": 2522,
+        "release_id": "artifactrel_1791396036_b460b448f83b"
+      },
+      "policy": {
+        "artifact_id": "artifact_1791166678_6e935267f4a3",
+        "content_hash": "sha256:169fd21560bd2f59b096f42939a9dbe92d4d9cbd8e7442afe9b0e94e8e5e6852",
+        "fencing_token": 30,
+        "release_id": "artifactrel_1791166766_3d8c45ad6eea"
+      },
+      "scope": "global",
+      "verification_evidence_hash": "sha256:832779fadc094b1a2084133a36115d7ca12cd33b009ebdc2ce1a8d3984c23644"
+    }
+  ],
+  "schema": "fugue.producer-publication-renewal/v1"
+}

@@ -330,6 +330,47 @@ jobs:
           python3 scripts/reconcile_cell_trust.py "${args[@]}"
           python3 scripts/reconcile_cell_trust.py "${args[@]}" --check
 
+  producer_publication_renewal:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select exact unchanged producer renewal declaration
+        id: renewal
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/producer-renewal/renewal.json
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config"; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/renew_producer_publication.py; then
+              python3 -m unittest scripts.test_renew_producer_publication
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Renew unchanged policies against verified recovery baselines
+        if: steps.renewal.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: python3 -m scripts.renew_producer_publication deploy/environments/production/producer-renewal/renewal.json --evidence "$RUNNER_TEMP/producer-renewal.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.renewal.outputs.selected == 'true'
+        with:
+          name: fugue-producer-renewal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/producer-renewal.json
+          if-no-files-found: warn
+          retention-days: 30
+
   cell_producer_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
