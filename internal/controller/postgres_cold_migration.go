@@ -402,16 +402,33 @@ func verifyColdSeedFiles(ctx context.Context, c *kubeClient, ns string, st *cold
 	if err := c.applyObject(ctx, obj, nil); err != nil {
 		return ev, err
 	}
-	defer deleteColdPod(context.Background(), c, ns, name, plan)
 	if err := waitForMovableRWOPodSucceeded(ctx, c, ns, name, 5*time.Minute); err != nil {
 		return ev, err
 	}
-	logs, found, err := c.getPodLogs(ctx, ns, name, "verify", false, 5)
-	if err != nil || !found {
-		return ev, fmt.Errorf("seed verification logs missing")
+	ev, err := readColdSeedEvidence(ctx, c, ns, name)
+	if err != nil {
+		// Keep the owned, read-only verifier for diagnosis. The next attempt
+		// replaces only this exact Pod using its UID precondition.
+		return ev, err
 	}
-	err = json.Unmarshal([]byte(strings.TrimSpace(logs)), &ev)
-	return ev, err
+	if err := deleteColdPod(context.Background(), c, ns, name, plan); err != nil {
+		return ev, err
+	}
+	return ev, nil
+}
+
+func readColdSeedEvidence(ctx context.Context, c *kubeClient, ns, name string) (coldFileEvidence, error) {
+	var ev coldFileEvidence
+	// This is one structured receipt, not a diagnostic log tail. CRI splits
+	// long JSON lines into records, so tailLines can discard its beginning.
+	logs, found, err := c.getPodLogs(ctx, ns, name, "verify", false, 0)
+	if err != nil || !found {
+		return ev, fmt.Errorf("seed verification receipt unavailable for %s/%s: %v", ns, name, err)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(logs)), &ev); err != nil {
+		return ev, fmt.Errorf("invalid seed verification receipt for %s/%s (%d bytes; verifier retained): %w", ns, name, len(logs), err)
+	}
+	return ev, nil
 }
 func (s *Service) ensureColdTarget(ctx context.Context, c *kubeClient, ns string, st *coldPostgresState, app model.App, pg model.AppPostgresSpec, scheduling runtimepkg.SchedulingConstraints) error {
 	if st.FileDigest == "" || st.SystemID == "" || st.SeedUID == "" {

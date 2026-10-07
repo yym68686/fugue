@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 	"net/http"
@@ -10,6 +11,34 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestColdSeedEvidenceReadsCompleteLargeReceipt(t *testing.T) {
+	want := coldFileEvidence{SystemID: "123", FileDigest: strings.Repeat("a", 64)}
+	for i := 0; i < 2000; i++ {
+		want.MetadataEntries = append(want.MetadataEntries, coldMetadataEntry{Path: fmt.Sprintf("base/42/%d", i), Mode: 0600, UID: 26, GID: 26, Size: 8192})
+	}
+	body, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) <= 5*16384 {
+		t.Fatal("receipt must span more than five CRI records")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/namespaces/ns/pods/seed-verify/log" || r.URL.Query().Get("container") != "verify" {
+			t.Errorf("unexpected evidence request: %s", r.URL)
+		}
+		if r.URL.Query().Has("tailLines") {
+			t.Error("structured receipt requested as truncated log tail")
+		}
+		w.Write(body)
+	}))
+	defer server.Close()
+	ev, err := readColdSeedEvidence(context.Background(), &kubeClient{baseURL: server.URL, client: server.Client()}, "ns", "seed-verify")
+	if err != nil || ev.FileDigest != want.FileDigest || len(ev.MetadataEntries) != len(want.MetadataEntries) || ev.MetadataEntries[1999] != want.MetadataEntries[1999] {
+		t.Fatalf("incomplete evidence: entries=%d err=%v", len(ev.MetadataEntries), err)
+	}
+}
 
 func TestColdTargetBootstrapNeverTouchesSourceOrServingEndpoint(t *testing.T) {
 	var writes []map[string]any
