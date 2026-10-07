@@ -164,7 +164,7 @@
                   },
                   {
                     "name": "FUGUE_EDGE_CADDY_TLS_MODE",
-                    "value": "public-on-demand"
+                    "value": "shared-only"
                   },
                   {
                     "name": "FUGUE_EDGE_CADDY_TLS_ASK_URL",
