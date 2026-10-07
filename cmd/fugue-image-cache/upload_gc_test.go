@@ -1,12 +1,35 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 )
+
+// These tests own files only in this process. Observe real descriptors without
+// requiring permission to inspect unrelated processes on a shared CI host.
+func testUploadOpenFiles() (map[string]bool, error) {
+	dir := "/proc/self/fd"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]bool{}
+	for _, entry := range entries {
+		target, err := os.Readlink(filepath.Join(dir, entry.Name()))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		result[target] = true
+	}
+	return result, nil
+}
 
 func TestImageCacheUploadGCRemovesExpiredLegacyAndResumableFiles(t *testing.T) {
 	t.Parallel()
@@ -15,7 +38,7 @@ func TestImageCacheUploadGCRemovesExpiredLegacyAndResumableFiles(t *testing.T) {
 	}
 
 	storeDir := t.TempDir()
-	cache := &imageCache{storeDir: storeDir, uploadTTL: time.Hour}
+	cache := &imageCache{storeDir: storeDir, uploadTTL: time.Hour, uploadOpenFiles: testUploadOpenFiles}
 	if err := os.MkdirAll(cache.blobUploadDir(), 0o755); err != nil {
 		t.Fatalf("mkdir upload dir: %v", err)
 	}
@@ -61,7 +84,7 @@ func TestImageCacheUploadGCDoesNotRemoveOpenUpload(t *testing.T) {
 	}
 
 	storeDir := t.TempDir()
-	cache := &imageCache{storeDir: storeDir, uploadTTL: time.Hour}
+	cache := &imageCache{storeDir: storeDir, uploadTTL: time.Hour, uploadOpenFiles: testUploadOpenFiles}
 	path := filepath.Join(storeDir, "upload-active")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -81,5 +104,25 @@ func TestImageCacheUploadGCDoesNotRemoveOpenUpload(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("active upload was removed: %v", err)
+	}
+}
+
+func TestImageCacheUploadGCRetainsFilesWhenObservationDenied(t *testing.T) {
+	storeDir := t.TempDir()
+	cache := &imageCache{storeDir: storeDir, uploadTTL: time.Hour, uploadOpenFiles: func() (map[string]bool, error) { return nil, os.ErrPermission }}
+	name := filepath.Join(storeDir, "upload-retained")
+	if err := os.WriteFile(name, []byte("retained"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(name, old, old); err != nil {
+		t.Fatal(err)
+	}
+	result, err := cache.cleanupStaleBlobUploads(time.Now())
+	if !errors.Is(err, os.ErrPermission) || len(result.Deleted) != 0 {
+		t.Fatalf("uncertain observation allowed deletion: %+v %v", result, err)
+	}
+	if _, err := os.Stat(name); err != nil {
+		t.Fatal("protected upload missing", err)
 	}
 }
