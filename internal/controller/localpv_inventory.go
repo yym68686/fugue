@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/storagerecovery"
 	"fugue/internal/store"
 )
 
@@ -44,6 +45,24 @@ func (s *Service) scheduleLocalPVInventoryReports(ctx context.Context) error {
 		}
 		if !supported {
 			continue
+		}
+
+		if controllerNodeUpdaterNeedsUpgrade(updater.UpdaterVersion, storagerecovery.NodeUpdaterVersion) {
+			upgradeOK, err := s.Store.NodeUpdaterTargetSupportsTask(updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypeUpgradeUpdater)
+			if err != nil {
+				return err
+			}
+			if upgradeOK {
+				active, err := s.controllerNodeUpdaterHasActiveTask(updater.ID, model.NodeUpdateTaskTypeUpgradeUpdater)
+				if err != nil {
+					return err
+				}
+				if !active {
+					if _, err = s.Store.CreateNodeUpdateTask(principal, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypeUpgradeUpdater, map[string]string{"target_version": storagerecovery.NodeUpdaterVersion, "reason": "localpv-ownership-evidence"}); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		if _, err := s.Store.CreateNodeUpdateTask(
 			principal,

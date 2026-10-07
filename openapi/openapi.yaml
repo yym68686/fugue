@@ -5,6 +5,24 @@ info:
   description: |-
     Authoritative API contract for Fugue.
     Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
+x-fugue-image-cache-retirement:
+  semantics: >-
+    API preview, controller classification and claim-time revalidation share
+    one versioned retirement evaluator. Missing lifecycle metadata remains
+    quarantined and never authorizes deletion based on age or absent references
+    alone. Completed operations can restore historical attribution only through
+    an exact immutable digest and verified physical graph. Independently retained
+    image generation retirement records survive business metadata removal;
+    live generations, pins, migration and workload references still win.
+    Plans expose their policy version, content hash and positive retirement
+    evidence. Changed eligibility cancels a pending destructive task with
+    deferred_plan_changed rather than reporting a disk deletion failure.
+    The node-local image-cache inventory additionally reports upload_temp
+    observations. Upload expiry is a separate configured policy and never
+    runs implicitly as part of a targeted manifest prune. Active uploads,
+    uncertain open-file observations, changed files, unknown layouts and
+    malformed upload state remain protected. Interrupted writes persist their
+    actual byte count for resumption. No serving configuration or LKG changes.
 servers:
   - url: /
 x-fugue-edge-request-body-buffer:
@@ -25706,6 +25724,20 @@ components:
       additionalProperties: false
       required: [repo, target, protected]
       properties:
+        lifecycle_state:
+          type: string
+          enum: [protected, quarantined, delete_eligible]
+          description: Derived from the current protection snapshot; age alone never retires an unattributed artifact.
+        retirement_evidence:
+          type: array
+          items:
+            type: string
+          description: Durable image or replica identities authorizing retirement, revalidated before execution.
+        first_seen_at:
+          type: string
+          format: date-time
+        policy_version:
+          type: string
         image_ref:
           type: string
         node_name:
@@ -25792,6 +25824,11 @@ components:
       required:
         [id, mode, candidate_manifest_count, protected_manifest_count, created_at, status]
       properties:
+        policy_version:
+          type: string
+        plan_hash:
+          type: string
+          description: Digest of policy, node, budget and classified content identities; execution always revalidates current evidence.
         id:
           type: string
         node_id:
@@ -25955,6 +25992,8 @@ components:
         bound_pv_count:
           type: integer
           format: int32
+          minimum: -1
+          description: Bound LocalPV count; -1 explicitly represents unavailable ownership evidence.
         bound_pv_count_known:
           type: boolean
           description: Whether Kubernetes PV enumeration completed successfully; false means the count is unknown.

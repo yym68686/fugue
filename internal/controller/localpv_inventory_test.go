@@ -49,11 +49,21 @@ func TestScheduleLocalPVInventoryReportsRequiresCapabilityAndDeduplicates(t *tes
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
-	if len(tasks) != 1 ||
-		tasks[0].Type != model.NodeUpdateTaskTypeReportLocalPV ||
-		tasks[0].ClusterNodeName != "worker-1" {
-		t.Fatalf("unexpected tasks: %+v", tasks)
+
+	if len(tasks) != 2 {
+		t.Fatalf("expected inventory and protocol upgrade, got %+v", tasks)
 	}
+	kinds := map[string]int{}
+	for _, task := range tasks {
+		if task.ClusterNodeName != "worker-1" {
+			t.Fatalf("upgraded a node without inventory capability: %+v", task)
+		}
+		kinds[task.Type]++
+	}
+	if kinds[model.NodeUpdateTaskTypeReportLocalPV] != 1 || kinds[model.NodeUpdateTaskTypeUpgradeUpdater] != 1 {
+		t.Fatalf("missing or duplicate inventory/upgrade task: %+v", kinds)
+	}
+
 }
 
 func TestControllerLocalPVInventoryHasStorageDoesNotInventVolumeGroup(t *testing.T) {

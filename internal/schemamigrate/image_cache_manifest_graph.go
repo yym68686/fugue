@@ -11,7 +11,6 @@ import (
 const (
 	imageCacheManifestGraphLockID = int64(315609238744284)
 	imageCacheManifestGraphSQL    = `ALTER TABLE fugue_image_cache_manifests ADD COLUMN IF NOT EXISTS referenced_manifests_json JSONB NULL`
-	imageCacheLocalPVKnownSQL     = `ALTER TABLE fugue_localpv_inventories ADD COLUMN IF NOT EXISTS bound_pv_count_known BOOLEAN NOT NULL DEFAULT TRUE`
 )
 
 var ErrImageCacheManifestGraphMigrationRequired = errors.New("image-cache manifest graph schema migration is required")
@@ -34,9 +33,7 @@ func MigrateImageCacheManifestGraph(ctx context.Context, databaseURL string) err
 	if err := applyImageCacheManifestGraph(migrateCtx, database); err != nil {
 		return err
 	}
-	if _, err := database.ExecContext(migrateCtx, imageCacheLocalPVKnownSQL); err != nil {
-		return fmt.Errorf("apply LocalPV evidence schema migration: %w", err)
-	}
+
 	return verifyImageCacheManifestGraph(migrateCtx, database)
 }
 

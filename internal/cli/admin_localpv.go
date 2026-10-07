@@ -121,7 +121,7 @@ func writeLocalPVInventoryDetail(w io.Writer, inventory model.LocalPVInventory) 
 		kvPair{Key: "pv_free", Value: formatBytes(inventory.PVFreeBytes)},
 		kvPair{Key: "lv_count", Value: formatInt(inventory.LVCount)},
 		kvPair{Key: "active_lv_count", Value: formatInt(inventory.ActiveLVCount)},
-		kvPair{Key: "bound_pv_count", Value: formatInt(inventory.BoundPVCount)},
+		kvPair{Key: "bound_pv_count", Value: localPVBoundCount(inventory)},
 		kvPair{Key: "observed_at", Value: formatTime(inventory.ObservedAt)},
 		kvPair{Key: "unsafe_reasons", Value: firstNonEmpty(strings.Join(inventory.UnsafeReasons, ","), "-")},
 	); err != nil {
@@ -165,4 +165,11 @@ func localPVEligibility(inventory model.LocalPVInventory) string {
 		return "eligible"
 	}
 	return "not eligible"
+}
+
+func localPVBoundCount(in model.LocalPVInventory) string {
+	if in.BoundPVCount < 0 {
+		return "unknown"
+	}
+	return formatInt(in.BoundPVCount)
 }

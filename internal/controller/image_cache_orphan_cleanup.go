@@ -12,6 +12,7 @@ import (
 
 	"fugue/internal/imagecachegraph"
 	"fugue/internal/imagecachekeys"
+	"fugue/internal/imagecachepolicy"
 	"fugue/internal/imagecacheusage"
 	"fugue/internal/model"
 	"fugue/internal/store"
@@ -37,6 +38,9 @@ func (s *Service) runImageCacheStorageMaintenance(ctx context.Context) error {
 	}
 	if err := s.reconcileLegacyDistributedImageMetadata(ctx); err != nil {
 		return fmt.Errorf("reconcile legacy distributed image metadata: %w", err)
+	}
+	if err := s.reconcileHistoricalImageProvenance(ctx); err != nil {
+		return err
 	}
 	if err := s.scheduleOrphanImageCachePrune(ctx); err != nil {
 		return fmt.Errorf("schedule orphan image-cache prune: %w", err)
@@ -226,6 +230,8 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		allowDelete := mode == model.ImageCachePruneModeDelete
 		if _, err := s.Store.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{
 			"prune_plan_id":              plan.ID,
+			"plan_hash":                  plan.PlanHash,
+			"policy_version":             plan.PolicyVersion,
 			"dry_run":                    fmt.Sprintf("%t", dryRun),
 			"allow_delete":               fmt.Sprintf("%t", allowDelete),
 			"targets_json":               string(targetsRaw),
@@ -525,8 +531,7 @@ func (s *Service) computeControllerImageCachePrunePlan(ctx context.Context, node
 	for _, manifest := range manifests {
 		classified = append(classified, s.controllerImageCacheCandidate(manifest, protected, now))
 	}
-	classified = protectControllerImageCacheSharedDigestAliases(classified)
-	classified = imagecachegraph.ProtectManifestGraph(manifests, classified)
+	classified = imagecachepolicy.Finalize(manifests, classified, mode)
 	for _, candidate := range classified {
 		if candidate.Protected {
 			plan.ProtectedManifestCount++
@@ -549,65 +554,12 @@ func (s *Service) computeControllerImageCachePrunePlan(ctx context.Context, node
 		return plan.ProtectedManifests[i].PlannedDeleteBytes > plan.ProtectedManifests[j].PlannedDeleteBytes
 	})
 	_ = ctx
+	imagecachepolicy.Seal(&plan)
 	return plan, nil
 }
 
 func protectControllerImageCacheSharedDigestAliases(candidates []model.ImageCachePruneCandidate) []model.ImageCachePruneCandidate {
-	protectedByDigest := map[string][]model.ImageCachePruneCandidate{}
-	for _, candidate := range candidates {
-		if !candidate.Protected {
-			continue
-		}
-		key := controllerImageCacheDigestGroupKey(candidate.Repo, candidate.Digest)
-		if key == "" {
-			continue
-		}
-		protectedByDigest[key] = append(protectedByDigest[key], candidate)
-	}
-	for key := range protectedByDigest {
-		sort.SliceStable(protectedByDigest[key], func(i, j int) bool {
-			left := protectedByDigest[key][i]
-			right := protectedByDigest[key][j]
-			if left.Target != right.Target {
-				return left.Target < right.Target
-			}
-			return left.SkipReason < right.SkipReason
-		})
-	}
-	for idx := range candidates {
-		candidate := &candidates[idx]
-		if candidate.Protected {
-			continue
-		}
-		protectors := protectedByDigest[controllerImageCacheDigestGroupKey(candidate.Repo, candidate.Digest)]
-		if len(protectors) == 0 {
-			continue
-		}
-		protector := protectors[0]
-		candidate.Protected = true
-		candidate.Reason = ""
-		candidate.SkipReason = "shared_digest_protected_alias"
-		candidate.SkipDetails = []string{fmt.Sprintf(
-			"same repository digest is protected by target %q (%s)",
-			protector.Target,
-			protector.SkipReason,
-		)}
-		candidate.MatchedImageIDs = dedupeControllerStrings(append(candidate.MatchedImageIDs, protector.MatchedImageIDs...))
-		candidate.MatchedPinIDs = dedupeControllerStrings(append(candidate.MatchedPinIDs, protector.MatchedPinIDs...))
-		candidate.MatchedTaskIDs = dedupeControllerStrings(append(candidate.MatchedTaskIDs, protector.MatchedTaskIDs...))
-		candidate.MatchedWorkloadRefs = dedupeControllerStrings(append(candidate.MatchedWorkloadRefs, protector.MatchedWorkloadRefs...))
-		candidate.MatchedReplicaIDs = dedupeControllerStrings(append(candidate.MatchedReplicaIDs, protector.MatchedReplicaIDs...))
-	}
-	return candidates
-}
-
-func controllerImageCacheDigestGroupKey(repo, digest string) string {
-	repo = strings.ToLower(strings.Trim(strings.TrimSpace(repo), "/"))
-	digest = normalizeControllerImageCacheDigest(digest)
-	if repo == "" || digest == "" {
-		return ""
-	}
-	return repo + "\x00" + digest
+	return imagecachepolicy.ProtectSharedDigestAliases(candidates)
 }
 
 type controllerImageCacheProtectedSet struct {
@@ -656,7 +608,7 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 		replicaCandidateRefs: map[string][]controllerImageCacheReplicaCandidate{},
 		protectedBlobDigests: map[string]struct{}{},
 	}
-	images, err := s.Store.ListImages(model.ImageFilter{PlatformAdmin: true})
+	images, err := s.Store.ListImagesWithRetirementAuthority()
 	if err != nil {
 		return protected, err
 	}
@@ -940,114 +892,12 @@ func (s *Service) populateControllerImageReplicaCandidateRefs(protected *control
 
 func (s *Service) controllerImageCacheCandidate(manifest model.ImageCacheManifest, protected controllerImageCacheProtectedSet, now time.Time) model.ImageCachePruneCandidate {
 	keys := controllerManifestReferenceKeys(manifest.Repo, manifest.Target, manifest.Digest, manifest.ImageRef)
-	out := model.ImageCachePruneCandidate{
-		ImageRef:            manifest.ImageRef,
-		NodeName:            firstNonEmptyImageCacheControllerString(manifest.ClusterNodeName, manifest.NodeID, manifest.RuntimeID),
-		Repo:                manifest.Repo,
-		Target:              manifest.Target,
-		Digest:              manifest.Digest,
-		ReferencedBlobs:     append([]string(nil), manifest.ReferencedBlobs...),
-		ReferencedManifests: append([]string(nil), manifest.ReferencedManifests...),
-		PlannedDeleteBytes:  firstNonZeroControllerInt64(manifest.TotalBlobBytes, manifest.ManifestSizeBytes),
-		ReferencedBlobCount: len(manifest.ReferencedBlobs),
-		ReferencedBlobBytes: manifest.TotalBlobBytes,
-		LastSeenAt:          manifest.LastSeenAt.UTC().Format(time.RFC3339),
-	}
-	if manifest.CreatedAtObserved != nil {
-		out.CreatedAtObserved = manifest.CreatedAtObserved.UTC().Format(time.RFC3339)
-	}
-	if digest := store.CanonicalImageDigest(manifest.Digest); digest != "" {
-		if _, active := protected.protectedBlobDigests[digest]; active {
-			out.Protected = true
-			out.SkipReason = "active_image_digest"
-			out.SkipDetails = []string{"canonical digest is used by an active workload or pin"}
-			return out
-		}
-	}
-	for _, rule := range []struct {
-		refs   map[string]struct{}
-		reason string
-	}{
-		{protected.migrationRefs, "migration_cutover_pending"},
-		{protected.liveRefs, "current_workload"},
-		{protected.pinnedRefs, "active_pin"},
-		{protected.taskRefs, "active_task"},
-	} {
-		if controllerKeySetContainsAny(rule.refs, keys...) {
-			out.Protected = true
-			out.SkipReason = rule.reason
-			switch rule.reason {
-			case "migration_cutover_pending":
-				out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
-				out.SkipDetails = []string{"migration cutover evidence is not verified; old image artifacts remain protected"}
-			case "current_workload":
-				out.MatchedWorkloadRefs = controllerImageDetailsForKeys(protected.workloadRefsByRef, keys)
-				out.SkipDetails = []string{"exact image generation is used by a live workload"}
-			case "active_pin":
-				out.MatchedPinIDs = controllerImageDetailsForKeys(protected.pinIDsByRef, keys)
-				out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
-				out.SkipDetails = []string{"exact image generation has an active image pin"}
-			case "active_task":
-				out.MatchedTaskIDs = controllerImageDetailsForKeys(protected.taskIDsByRef, keys)
-				out.SkipDetails = []string{"exact image generation is referenced by an active node/image replication task"}
-			case "minimum_replica_count":
-				out.MatchedReplicaIDs = controllerImageDetailsForKeys(protected.replicaIDsByRef, keys)
-				out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
-				out.SkipDetails = []string{"node-aware minimum replica keeper protects this local copy"}
-			}
-			return out
-		}
-	}
-	if manifest.PinnedLocally {
-		out.Protected = true
-		out.SkipReason = "local_pin"
-		out.SkipDetails = []string{"manifest is pinned locally on the node"}
-		return out
-	}
-	if ids := controllerImageCacheReplicaIDsForManifest(protected.minReplicaKeeperRefs, manifest, keys); len(ids) > 0 {
-		out.Protected = true
-		out.SkipReason = "minimum_replica_count"
-		out.MatchedReplicaIDs = ids
-		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
-		out.SkipDetails = []string{"node-aware minimum replica keeper protects this local copy"}
-		return out
-	}
-	ageBase := manifest.LastSeenAt
-	if manifest.CreatedAtObserved != nil {
-		ageBase = *manifest.CreatedAtObserved
-	}
-	if !ageBase.IsZero() && now.Sub(ageBase) < s.controllerImageCacheGracePeriod() {
-		out.Protected = true
-		out.SkipReason = "recent_manifest"
-		out.SkipDetails = []string{"manifest is newer than the configured minimum age"}
-		return out
-	}
-	if controllerKeySetContainsAny(protected.lostRefs, keys...) {
-		out.Reason = "lost_image"
-		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
-		return out
-	}
-	if controllerKeySetContainsAny(protected.deletedRefs, keys...) {
-		out.Reason = "deleted_image_generation"
-		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
-		return out
-	}
-	if reason, ok := controllerImageCacheReplicaCandidateForManifest(protected.replicaCandidateRefs, manifest, keys); ok {
-		out.Reason = reason
-		out.MatchedReplicaIDs = controllerImageCacheReplicaIDsForManifest(protected.replicaCandidateRefs, manifest, keys)
-		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
-		return out
-	}
-	if controllerKeySetContainsAny(protected.minReplicaRefs, keys...) {
-		out.Protected = true
-		out.SkipReason = "minimum_replica_count"
-		out.MatchedReplicaIDs = controllerImageDetailsForKeys(protected.replicaIDsByRef, keys)
-		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
-		out.SkipDetails = []string{"no healthy replica exists; keep one exact image generation until repair or retention marks it removable"}
-		return out
-	}
-	out.Reason = "missing_control_plane_image"
-	return out
+	_, active := protected.protectedBlobDigests[imagecachekeys.NormalizeDigest(manifest.Digest)]
+	reason, _ := controllerImageCacheReplicaCandidateForManifest(protected.replicaCandidateRefs, manifest, keys)
+	return imagecachepolicy.Evaluate(manifest, imagecachepolicy.Facts{
+		ActiveDigest: active, Migration: controllerKeySetContainsAny(protected.migrationRefs, keys...), Live: controllerKeySetContainsAny(protected.liveRefs, keys...), Pin: controllerKeySetContainsAny(protected.pinnedRefs, keys...), Task: controllerKeySetContainsAny(protected.taskRefs, keys...), Lost: controllerKeySetContainsAny(protected.lostRefs, keys...), Deleted: controllerKeySetContainsAny(protected.deletedRefs, keys...), MinimumReplica: controllerKeySetContainsAny(protected.minReplicaRefs, keys...),
+		ImageIDs: controllerImageDetailsForKeys(protected.imageIDsByRef, keys), WorkloadRefs: controllerImageDetailsForKeys(protected.workloadRefsByRef, keys), PinIDs: controllerImageDetailsForKeys(protected.pinIDsByRef, keys), TaskIDs: controllerImageDetailsForKeys(protected.taskIDsByRef, keys), ReplicaIDs: controllerImageDetailsForKeys(protected.replicaIDsByRef, keys), KeeperIDs: controllerImageCacheReplicaIDsForManifest(protected.minReplicaKeeperRefs, manifest, keys), CandidateReplicaIDs: controllerImageCacheReplicaIDsForManifest(protected.replicaCandidateRefs, manifest, keys), ReplicaReason: reason,
+	}, now, s.controllerImageCacheGracePeriod())
 }
 
 func controllerImageCacheReplicaCandidateReason(status string) string {

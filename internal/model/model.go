@@ -2784,6 +2784,10 @@ type ImageCacheManifestFilter struct {
 }
 
 type ImageCachePruneCandidate struct {
+	LifecycleState      string   `json:"lifecycle_state,omitempty"`
+	RetirementEvidence  []string `json:"retirement_evidence,omitempty"`
+	FirstSeenAt         string   `json:"first_seen_at,omitempty"`
+	PolicyVersion       string   `json:"policy_version,omitempty"`
 	ImageRef            string   `json:"image_ref,omitempty"`
 	NodeName            string   `json:"node_name,omitempty"`
 	Repo                string   `json:"repo"`
@@ -2817,6 +2821,8 @@ type ImageCachePruneBlobCandidate struct {
 }
 
 type ImageCachePrunePlan struct {
+	PolicyVersion          string                         `json:"policy_version,omitempty"`
+	PlanHash               string                         `json:"plan_hash,omitempty"`
 	ID                     string                         `json:"id"`
 	NodeID                 string                         `json:"node_id,omitempty"`
 	ClusterNodeName        string                         `json:"cluster_node_name,omitempty"`
@@ -3446,6 +3452,7 @@ func MachinePolicyDedicatedMode(policy MachinePolicy) string {
 }
 
 type State struct {
+	ImageRetirements           []Image                        `json:"image_retirements,omitempty"`
 	ObjectStorage              ObjectStorageState             `json:"object_storage,omitempty"`
 	DatabaseMigrations         []DatabaseMigration            `json:"database_migrations,omitempty"`
 	SourceUploadSessions       []SourceUploadSession          `json:"source_upload_sessions,omitempty"`

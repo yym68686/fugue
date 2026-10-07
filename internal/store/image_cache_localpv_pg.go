@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/imagecacheevidence"
+	"fugue/internal/imagecachepolicy"
 	"fugue/internal/model"
 )
 
@@ -734,6 +735,7 @@ func scanImageCachePrunePlan(scanner sqlScanner) (model.ImageCachePrunePlan, err
 	if executedAt.Valid {
 		out.ExecutedAt = &executedAt.Time
 	}
+	imagecachepolicy.Seal(&out)
 	return out, nil
 }
 
@@ -785,5 +787,5 @@ func scanLocalPVInventory(scanner sqlScanner) (model.LocalPVInventory, error) {
 	out.LVNames = normalizeStringList(out.LVNames)
 	out.BoundPVCRefs = normalizeStringList(out.BoundPVCRefs)
 	out.UnsafeReasons = normalizeStringList(out.UnsafeReasons)
-	return out, nil
+	return normalizeLocalPVInventory(out), nil
 }

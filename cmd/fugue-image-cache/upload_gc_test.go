@@ -33,12 +33,13 @@ func testUploadOpenFiles() (map[string]bool, error) {
 
 func TestImageCacheUploadGCRemovesExpiredLegacyAndResumableFiles(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS != "linux" {
-		t.Skip("open-file protection is exercised on the Linux deployment host")
-	}
 
 	storeDir := t.TempDir()
-	cache := &imageCache{storeDir: storeDir, uploadTTL: time.Hour, uploadOpenFiles: testUploadOpenFiles}
+	probe := testUploadOpenFiles
+	if runtime.GOOS != "linux" {
+		probe = func() (map[string]bool, error) { return map[string]bool{}, nil }
+	}
+	cache := &imageCache{storeDir: storeDir, uploadTTL: time.Hour, uploadOpenFiles: probe}
 	if err := os.MkdirAll(cache.blobUploadDir(), 0o755); err != nil {
 		t.Fatalf("mkdir upload dir: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestImageCacheUploadGCDoesNotRemoveOpenUpload(t *testing.T) {
 	}
 	cleanup, err := cache.cleanupStaleBlobUploads(time.Now())
 	if err != nil {
-		t.Fatalf("cleanup active upload: %v", err)
+		t.Fatal(err)
 	}
 	if len(cleanup.Deleted) != 0 || len(cleanup.Skipped) != 1 || cleanup.Skipped[0].Reason != "active_upload" {
 		t.Fatalf("active upload cleanup = %+v", cleanup)

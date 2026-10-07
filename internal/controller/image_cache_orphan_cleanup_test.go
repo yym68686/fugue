@@ -204,7 +204,7 @@ func TestScheduleOrphanImageCachePruneDeleteRefusesUntrackedManifest(t *testing.
 	if err != nil {
 		t.Fatalf("list plans: %v", err)
 	}
-	if len(plans) != 1 || plans[0].CandidateSummary["missing_control_plane_image"] != 1 {
+	if len(plans) != 1 || plans[0].ProtectionSummary["unsafe candidate reason missing_control_plane_image"] != 1 {
 		t.Fatalf("expected an observable but non-deletable untracked candidate, got %+v", plans)
 	}
 }

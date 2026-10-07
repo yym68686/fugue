@@ -212,7 +212,7 @@ func main() {
 		directReplication:    envBool("FUGUE_IMAGE_CACHE_DIRECT_REPLICATION", false),
 		sourceTTL:            envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
 		uploadTTL:            envDuration("FUGUE_IMAGE_CACHE_UPLOAD_TTL", defaultImageCacheUploadTTL),
-		uploadGCMode:         env("FUGUE_IMAGE_CACHE_UPLOAD_GC_MODE", "delete"),
+		uploadGCMode:         env("FUGUE_IMAGE_CACHE_UPLOAD_GC_MODE", "observe"),
 		uploadGCInterval:     envDuration("FUGUE_IMAGE_CACHE_UPLOAD_GC_INTERVAL", 15*time.Minute),
 		uploadGCMaxBytes:     envBytes("FUGUE_IMAGE_CACHE_UPLOAD_GC_MAX_BYTES", 1<<30),
 		diskLimit: imageCacheDiskLimit{
@@ -1153,6 +1153,9 @@ func manifestMatchesPruneTarget(record imageCacheManifestRecord, req imageCacheP
 	}
 	target := strings.TrimSpace(req.target)
 	digest := normalizeImageCacheDigest(req.digest)
+	if digest != "" && normalizeImageCacheDigest(record.Digest) != digest {
+		return false
+	}
 	switch {
 	case target != "" && record.Target == target:
 		return true

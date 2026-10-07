@@ -513,12 +513,12 @@ func TestNodeUpdaterClaimRefusesProtectedImageCacheDeleteTask(t *testing.T) {
 	if !strings.Contains(claim.Body.String(), "not present in the latest prune plan") {
 		t.Fatalf("expected latest plan refusal, got %s", claim.Body.String())
 	}
-	failed, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusFailed)
+	failed, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusCanceled)
 	if err != nil {
 		t.Fatalf("list failed tasks: %v", err)
 	}
-	if len(failed) != 1 || failed[0].ID != task.ID || !strings.Contains(failed[0].ErrorMessage, "latest prune plan") {
-		t.Fatalf("expected task to be failed by claim guard, got %+v", failed)
+	if len(failed) != 1 || failed[0].ID != task.ID || !strings.Contains(failed[0].ResultMessage, "latest prune plan") {
+		t.Fatalf("expected task to be deferred by claim guard, got %+v", failed)
 	}
 }
 
@@ -1961,7 +1961,7 @@ PY
 	}
 }
 
-func TestNodeUpdaterLocalPVInventoryOnlyCountsOpenEBSLVMVolumes(t *testing.T) {
+func TestNodeUpdaterLocalPVInventoryLeavesBindingsToControlPlane(t *testing.T) {
 	t.Parallel()
 
 	if _, err := exec.LookPath("bash"); err != nil {
@@ -2061,19 +2061,10 @@ localpv_inventory_json >"${TEST_OUTPUT_PATH}"
 	if err := json.Unmarshal(raw, &report); err != nil {
 		t.Fatalf("decode LocalPV inventory output: %v\n%s", err, raw)
 	}
-	if report.Inventory.BoundPVCount != 3 {
-		t.Fatalf("bound LVM PV count = %d, want 3: %+v", report.Inventory.BoundPVCount, report.Inventory)
+	if report.Inventory.BoundPVCount != -1 || len(report.Inventory.BoundPVCRefs) != 0 || report.Inventory.SafeToDecommission || !containsNodeUpdaterTestString(report.Inventory.UnsafeReasons, "bound_pv_count_unknown") {
+		t.Fatalf("agent invented ownership without control-plane evidence: %+v", report.Inventory)
 	}
-	wantRefs := []string{"apps/ambiguous-pvc", "apps/lvm-pvc", "apps/multi-pvc"}
-	if strings.Join(report.Inventory.BoundPVCRefs, ",") != strings.Join(wantRefs, ",") {
-		t.Fatalf("bound LVM PVC refs = %+v, want %+v", report.Inventory.BoundPVCRefs, wantRefs)
-	}
-	if report.Inventory.SafeToDecommission {
-		t.Fatalf("inventory with a bound LVM PV must be unsafe: %+v", report.Inventory)
-	}
-	if !containsNodeUpdaterTestString(report.Inventory.UnsafeReasons, "bound_pvs_present") {
-		t.Fatalf("unsafe reasons = %+v, want bound_pvs_present", report.Inventory.UnsafeReasons)
-	}
+
 }
 
 func writeFakeNodeUpdaterCommand(t *testing.T, dir, name, body string) {

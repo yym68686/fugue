@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"fugue/internal/imagecacheevidence"
+	"fugue/internal/imagecachepolicy"
 	"fugue/internal/model"
 )
 
@@ -320,6 +321,7 @@ func normalizeImageCachePrunePlan(in model.ImageCachePrunePlan) model.ImageCache
 	if in.Status == "" {
 		in.Status = model.ImageCachePrunePlanStatusPlanned
 	}
+	imagecachepolicy.Seal(&in)
 	return in
 }
 
@@ -373,6 +375,12 @@ func normalizeLocalPVInventory(in model.LocalPVInventory) model.LocalPVInventory
 	in.LVNames = normalizeStringList(in.LVNames)
 	in.BoundPVCRefs = normalizeStringList(in.BoundPVCRefs)
 	in.UnsafeReasons = normalizeStringList(in.UnsafeReasons)
+	for _, reason := range in.UnsafeReasons {
+		if reason == "kubectl_pv_unavailable" || reason == "bound_pv_count_unknown" {
+			in.BoundPVCount = -1
+			break
+		}
+	}
 	if in.BoundPVCount < 0 {
 		in.BoundPVCountKnown = false
 	} else if !in.BoundPVCountKnown {

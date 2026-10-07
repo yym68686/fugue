@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/appimages"
 	"fugue/internal/httpx"
+	"fugue/internal/imagecachegraph"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/storagerecovery"
@@ -509,6 +510,18 @@ func (s *Server) handleNodeUpdaterClaimTask(w http.ResponseWriter, r *http.Reque
 		s.writeStoreError(w, err)
 		return
 	} else if reason != "" {
+
+		// Changed eligibility is an expected replan outcome, not an I/O failure.
+		if current.Type == model.NodeUpdateTaskTypePruneImageCache && (strings.Contains(reason, "latest prune plan") || strings.Contains(reason, "recompute a fresh plan") || strings.Contains(reason, "protected by")) {
+			canceled, err := s.store.CancelNodeUpdateTask(current.ID, principal.ActorID, "deferred_plan_changed: "+reason)
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			s.appendNodeUpdateTaskMaintenanceAudit(principal, canceled)
+			httpx.WriteError(w, http.StatusConflict, reason)
+			return
+		}
 		failed, failErr := s.store.FailNodeUpdateTask(current.ID, principal.ActorID, "node update task refused before execution", reason)
 		if failErr != nil {
 			s.writeStoreError(w, failErr)
@@ -737,6 +750,9 @@ func imageCachePrunePlanCandidateForTaskTarget(candidates []model.ImageCachePrun
 		targetKeys = imageReferenceKeys(target.ImageRef, target.Digest)
 	}
 	for _, candidate := range candidates {
+		if target.Digest != "" && candidate.Digest != target.Digest {
+			continue
+		}
 		candidateKeys := manifestReferenceKeys(candidate.Repo, candidate.Target, candidate.Digest, candidate.ImageRef)
 		if keySetContainsAny(keySetFromValues(candidateKeys), targetKeys...) {
 			return candidate, true
@@ -758,10 +774,10 @@ func keySetFromValues(values []string) map[string]struct{} {
 }
 
 func imageCacheAutomaticDeleteUnsafeCandidateReason(reason string) string {
-	switch strings.TrimSpace(reason) {
-	case "deleted_image_generation", "stale_replica", "excess_replica":
+	switch {
+	case imagecachegraph.AutomaticDeleteReasonSafe(reason):
 		return ""
-	case "":
+	case strings.TrimSpace(reason) == "":
 		return "missing candidate reason"
 	default:
 		return "unsafe candidate reason " + reason
@@ -5098,94 +5114,10 @@ else:
 if loop_device and real(loop_backing_file) != real(image_path):
     unsafe.append("loop_backing_mismatch")
 
-node_raw = run(["kubectl", "get", "node", cluster_node, "-o", "json"]) if cluster_node else None
-node_data = load_json(node_raw)
-if node_data:
-    labels = (node_data.get("metadata") or {}).get("labels") or {}
-    for key, value in labels.items():
-        if key.startswith("node-role.kubernetes.io/"):
-            role = key.split("/", 1)[1]
-            if role:
-                node_roles.append(role)
-        if key in ("fugue.io/node-role", "fugue.io/roles", "fugue.dev/node-role", "fugue.dev/roles"):
-            node_roles.extend([part.strip() for part in str(value).replace(";", ",").split(",") if part.strip()])
-
-pv_raw = run(["kubectl", "get", "pv", "-o", "json"])
-pv_data = load_json(pv_raw)
-pvc_data = load_json(run(["kubectl", "get", "pvc", "-A", "-o", "json"]))
-bound_pv_count_known = pv_data is not None
-if pv_data is None:
-    unsafe.append("kubectl_pv_unavailable")
-else:
-    pvc_lookup = {}
-    if pvc_data:
-        for pvc in pvc_data.get("items") or []:
-            meta = pvc.get("metadata") or {}
-            spec = pvc.get("spec") or {}
-            volume = spec.get("volumeName")
-            if volume:
-                pvc_lookup[volume] = f"{meta.get('namespace', '')}/{meta.get('name', '')}".strip("/")
-
-    def pv_targets_node(pv):
-        if not cluster_node:
-            return False
-        affinity = (((pv.get("spec") or {}).get("nodeAffinity") or {}).get("required") or {})
-        terms = affinity.get("nodeSelectorTerms") or []
-        if not terms:
-            return True
-        identity_keys = ("kubernetes.io/hostname", "node.kubernetes.io/instance", "openebs.io/nodename")
-        for term in terms:
-            could_target = True
-            for expr in term.get("matchExpressions") or []:
-                key = expr.get("key")
-                operator = str(expr.get("operator") or "")
-                values = [str(v) for v in (expr.get("values") or [])]
-                if key not in identity_keys:
-                    continue
-                if operator == "In" and cluster_node not in values:
-                    could_target = False
-                elif operator == "NotIn" and cluster_node in values:
-                    could_target = False
-            for field in term.get("matchFields") or []:
-                if field.get("key") != "metadata.name":
-                    continue
-                operator = str(field.get("operator") or "")
-                values = [str(v) for v in (field.get("values") or [])]
-                if operator == "In" and cluster_node not in values:
-                    could_target = False
-                elif operator == "NotIn" and cluster_node in values:
-                    could_target = False
-            if could_target:
-                return True
-        return False
-
-    for pv in pv_data.get("items") or []:
-        spec = pv.get("spec") or {}
-        status = pv.get("status") or {}
-        phase = str(status.get("phase") or "")
-        csi = spec.get("csi") or {}
-        csi_driver = str(csi.get("driver") or "").strip()
-        volume_attributes = csi.get("volumeAttributes") or {}
-        volume_group = str(
-            volume_attributes.get("openebs.io/volgroup")
-            or volume_attributes.get("volgroup")
-            or volume_attributes.get("vgname")
-            or ""
-        ).strip()
-        if phase != "Bound":
-            continue
-        if csi_driver != "local.csi.openebs.io":
-            continue
-        if volume_group and volume_group != vg_name:
-            continue
-        if cluster_node and not pv_targets_node(pv):
-            continue
-        name = (pv.get("metadata") or {}).get("name") or ""
-        ref = pvc_lookup.get(name)
-        if not ref:
-            claim = spec.get("claimRef") or {}
-            ref = f"{claim.get('namespace', '')}/{claim.get('name', '')}".strip("/")
-        bound_pvc_refs.append(ref or name)
+# Kubernetes ownership is collected by the authenticated control plane. Host
+# agents intentionally do not need an admin kubeconfig to report LVM facts.
+bound_pv_count_known = False
+unsafe.append("bound_pv_count_unknown")
 
 if lv_names:
     unsafe.append("active_lvs_present")
@@ -5338,7 +5270,7 @@ decommission_lvm_localpv() {
   decision_file="$(mktemp)"
   payload="$(localpv_inventory_json)"
   printf '%s' "${payload}" >"${inventory_file}"
-  api_json POST /v1/node-updater/localpv/inventory "${payload}" >/dev/null || true
+  api_json POST /v1/node-updater/localpv/inventory "${payload}" >"${inventory_file}" || { rm -f "${inventory_file}" "${decision_file}"; return 1; }
   localpv_decommission_decision_json "${inventory_file}" "${dry_run}" "${allow_delete}" "${allow_policy}" "${expected_image_size}" "${expected_lv_count}" "${expected_bound_pv_count}" >"${decision_file}"
   if ! grep -Eq '"safe"[[:space:]]*:[[:space:]]*true' "${decision_file}"; then
     log_task "LocalPV decommission refused $(cat "${decision_file}")"

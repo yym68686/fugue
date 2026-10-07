@@ -27,6 +27,7 @@ func (s *Store) UpsertImage(image model.Image) (model.Image, error) {
 	var out model.Image
 	err := s.withLockedState(true, func(state *model.State) error {
 		now := time.Now().UTC()
+
 		index := findImage(state.Images, image)
 		if index >= 0 {
 			current := state.Images[index]
@@ -42,6 +43,7 @@ func (s *Store) UpsertImage(image model.Image) (model.Image, error) {
 				image.SourceOperationID = current.SourceOperationID
 			}
 			image.UpdatedAt = now
+			retainImageRetirement(state, image)
 			state.Images[index] = image
 			out = image
 			return nil
@@ -49,6 +51,7 @@ func (s *Store) UpsertImage(image model.Image) (model.Image, error) {
 		image.ID = firstNonEmptyImageString(image.ID, model.NewID("img"))
 		image.CreatedAt = now
 		image.UpdatedAt = now
+		retainImageRetirement(state, image)
 		state.Images = append(state.Images, image)
 		out = image
 		return nil

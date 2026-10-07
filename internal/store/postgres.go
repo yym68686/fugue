@@ -558,6 +558,7 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_image_replication_tasks_status ON fugue_image_replication_tasks (status, priority, updated_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_image_replication_tasks_image ON fugue_image_replication_tasks (tenant_id, image_id, status)`,
+	schemamigrate.ImageRetirementSQL,
 	`CREATE TABLE IF NOT EXISTS fugue_image_cache_nodes (
 		id TEXT PRIMARY KEY,
 		node_id TEXT NOT NULL DEFAULT '',
