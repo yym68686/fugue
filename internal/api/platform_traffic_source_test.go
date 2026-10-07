@@ -201,11 +201,22 @@ func TestTrafficRouteSourceRequiresPreparedReleaseAndPreservesOtherGroups(t *tes
 	if unselected.Code != 503 || unselected.Header().Get("X-Fugue-Route-Intent-Generation") != "" {
 		t.Fatal("gray verification changed unselected serving", unselected.Body.String())
 	}
-	_, full, _, _, err := state.ReleasePlatformArtifact(compiled.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full", IdempotencyKey: "full"}, principal)
-	if err != nil {
-		t.Fatal("full release failed", err)
+	var full model.PlatformArtifactRelease
+	readsDuringPromotion := 0
+	observed, found, err := server.edgeRouteIntentSnapshotFromTrafficReleaseWithReader("edge-group-test-a", func(id string) (model.PlatformArtifact, error) {
+		readsDuringPromotion++
+		if full.ID == "" {
+			_, full, _, _, err = state.ReleasePlatformArtifact(compiled.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full", IdempotencyKey: "full"}, principal)
+			if err != nil {
+				t.Fatal("full release failed", err)
+			}
+			prepare(full, "edge-group-test-a", false)
+		}
+		return state.GetPlatformArtifact(id)
+	})
+	if err != nil || !found || observed.TrafficRelease == nil || observed.TrafficRelease.ReleaseID != full.ID || readsDuringPromotion < 6 {
+		t.Fatal("publication change returned stale source or did not revalidate", err, observed, readsDuringPromotion)
 	}
-	prepare(full, "edge-group-test-a", false)
 	assertSource(full)
 	compiled = compile("next-candidate", "next.example.test")
 	_, newGray, _, _, err := state.ReleasePlatformArtifact(compiled.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=first", IdempotencyKey: "new-canary"}, principal)

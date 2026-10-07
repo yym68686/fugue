@@ -14,6 +14,7 @@ import (
 )
 
 var trafficSourceGroup = regexp.MustCompile(edgetopology.AuthorityIDPattern)
+var errTrafficSourceChanged = errors.New("traffic release changed during route observation")
 
 // A release selection is authoritative even when it cannot yet be consumed.
 // Returning an error preserves the consumer's serving artifact instead of
@@ -28,6 +29,15 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group strin
 }
 
 func (s *Server) edgeRouteIntentSnapshotFromTrafficScope(group, scope string, readArtifact func(string) (model.PlatformArtifact, error)) (model.EdgeRouteIntentSnapshot, bool, error) {
+	for attempt := 0; ; attempt++ {
+		snapshot, found, err := s.observeTrafficRouteSource(group, scope, readArtifact)
+		if !errors.Is(err, errTrafficSourceChanged) || attempt == 2 {
+			return snapshot, found, err
+		}
+	}
+}
+
+func (s *Server) observeTrafficRouteSource(group, scope string, readArtifact func(string) (model.PlatformArtifact, error)) (model.EdgeRouteIntentSnapshot, bool, error) {
 	defer s.observeOperation("traffic-source")()
 	parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, scope)
 	if err != nil || !found {
@@ -94,8 +104,11 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficScope(group, scope string, re
 	// Publication/rollback can supersede an assignment while its artifacts
 	// are read. Never return a mixed release snapshot to the executor.
 	current, active, found, err := s.selectTrafficRouteReleaseInScope(group, scope)
-	if err != nil || !found || current.ID != parent.ID || current.ContentHash != parent.ContentHash || active.ID != release.ID || active.FencingToken != release.FencingToken || active.CanaryRuleRef != release.CanaryRuleRef || active.Status != model.PlatformArtifactReleaseStatusActive {
+	if err != nil || !found || active.Status != model.PlatformArtifactReleaseStatusActive {
 		return fail()
+	}
+	if current.ID != parent.ID || current.ContentHash != parent.ContentHash || active.ID != release.ID || active.FencingToken != release.FencingToken || active.CanaryRuleRef != release.CanaryRuleRef {
+		return model.EdgeRouteIntentSnapshot{}, true, errTrafficSourceChanged
 	}
 	return snapshot, true, nil
 }
