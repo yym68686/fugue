@@ -408,12 +408,13 @@ ORDER BY CASE
 	WHEN task_type = 'expand-lvm-localpv' THEN 1
 	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') AND created_at <= $3 THEN 1
 	WHEN task_type = 'replicate-app-image' AND COALESCE(payload_json->>'priority', '') = 'deploy_blocking' THEN 2
+	WHEN task_type = 'prune-image-cache' AND created_at <= $5 THEN 3
 	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') THEN 3
 	WHEN task_type IN ('prune-image-cache', 'decommission-lvm-localpv') THEN 4
 	ELSE 5
 END, created_at ASC, id ASC
 LIMIT $4
-`, strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusPending, inventoryOverdueBefore, limit)
+`, strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusPending, inventoryOverdueBefore, limit, time.Now().UTC().Add(-nodeUpdateTaskPruneMaxWait))
 	if err != nil {
 		return nil, mapDBErr(err)
 	}

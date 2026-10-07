@@ -11,6 +11,7 @@ import (
 )
 
 const nodeUpdateTaskInventoryMaxWait = 30 * time.Minute
+const nodeUpdateTaskPruneMaxWait = 10 * time.Minute
 
 func (s *Store) EnrollNodeUpdater(secret, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint, updaterVersion, joinScriptVersion string, capabilities []string) (model.NodeUpdater, string, error) {
 	key, machine, runtimeObj, err := s.BootstrapClusterAttachment(secret, nodeName, endpoint, labels, machineName, machineFingerprint)
@@ -443,6 +444,12 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask, now time.Time) in
 	if task.Type == model.NodeUpdateTaskTypeReplicateAppImage &&
 		strings.EqualFold(strings.TrimSpace(task.Payload["priority"]), model.ImageReplicationPriorityDeployBlocking) {
 		return 2
+	}
+	// With one task per polling cycle, replenished inventories can otherwise
+	// starve a safe prune forever. Age only changes delivery priority: claim-time
+	// inventory, policy, workload and graph validation still decides permission.
+	if task.Type == model.NodeUpdateTaskTypePruneImageCache && !task.CreatedAt.IsZero() && !task.CreatedAt.After(now.Add(-nodeUpdateTaskPruneMaxWait)) {
+		return 3
 	}
 	switch task.Type {
 	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:

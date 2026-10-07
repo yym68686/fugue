@@ -40,6 +40,9 @@ func TestPostgresStorageRescueDeliveryOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err = db.Exec(`UPDATE fugue_node_update_tasks SET created_at=now()-interval '11 minutes' WHERE id='prune'`); err != nil {
+		t.Fatal(err)
+	}
 	s := &Store{databaseURL: address, db: db, dbReady: true}
 	tasks, err := s.ListPendingNodeUpdateTasks("test", 6)
 	if err != nil {
@@ -48,7 +51,7 @@ func TestPostgresStorageRescueDeliveryOrder(t *testing.T) {
 	if len(tasks) != 6 {
 		t.Fatalf("missing tasks: %+v", tasks)
 	}
-	for i, want := range []string{"upgrade", "capacity", "rescue", "inventory", "prune", "refresh"} {
+	for i, want := range []string{"upgrade", "capacity", "rescue", "prune", "inventory", "refresh"} {
 		if tasks[i].ID != want {
 			t.Fatalf("Postgres order %d: got %s want %s", i, tasks[i].ID, want)
 		}
@@ -75,6 +78,7 @@ ORDER BY CASE
 	WHEN task_type = 'expand-lvm-localpv' THEN 1
 	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') AND created_at <= $3 THEN 1
 	WHEN task_type = 'replicate-app-image' AND COALESCE(payload_json->>'priority', '') = 'deploy_blocking' THEN 2
+	WHEN task_type = 'prune-image-cache' AND created_at <= $5 THEN 3
 	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') THEN 3
 	WHEN task_type IN ('prune-image-cache', 'decommission-lvm-localpv') THEN 4
 	ELSE 5
@@ -82,7 +86,7 @@ END, created_at ASC, id ASC
 LIMIT $4
 `)
 	mock.ExpectQuery(query).
-		WithArgs("nodeupdater_test", model.NodeUpdateTaskStatusPending, sqlmock.AnyArg(), 1).
+		WithArgs("nodeupdater_test", model.NodeUpdateTaskStatusPending, sqlmock.AnyArg(), 1, sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "tenant_id", "node_updater_id", "machine_id", "runtime_id", "node_key_id",
 			"cluster_node_name", "task_type", "status", "payload_json", "result_message",
