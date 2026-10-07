@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -135,15 +137,37 @@ func (c *CLI) moveProjectWithOfflineRecovery(client *Client, project model.Proje
 			return err
 		}
 		result.Operations = append(result.Operations, final...)
-		updated, err := client.GetApp(app.ID)
+		parent := client.context
+		if parent == nil {
+			parent = context.Background()
+		}
+		waitCtx, cancel := context.WithTimeout(parent, 2*time.Minute)
+		err = waitOfflineProjectAppConvergence(waitCtx, client, app.ID, targetRuntimeID, app.Spec.Replicas, time.Second)
+		cancel()
 		if err != nil {
 			return err
 		}
-		if !offlineProjectAppConverged(updated, targetRuntimeID) || updated.Spec.Replicas != app.Spec.Replicas {
-			return fmt.Errorf("app %s completed without target runtime or replica-state convergence", app.ID)
-		}
 	}
 	return c.renderProjectMoveResult(result)
+}
+
+func waitOfflineProjectAppConvergence(ctx context.Context, client *Client, id, target string, replicas int, interval time.Duration) error {
+	boundedClient := *client
+	boundedClient.context = ctx
+	var observed model.App
+	for {
+		app, err := boundedClient.GetApp(id)
+		if err != nil {
+			return err
+		}
+		observed = app
+		if offlineProjectAppConverged(app, target) && app.Spec.Replicas == replicas {
+			return nil
+		}
+		if err := waitRequestRetry(ctx, interval); err != nil {
+			return fmt.Errorf("app %s operation completed but convergence was not observed: desired_runtime=%s observed_runtime=%s desired_replicas=%d observed_replicas=%d target_runtime=%s target_replicas=%d: %w", id, observed.Spec.RuntimeID, observed.Status.CurrentRuntimeID, observed.Spec.Replicas, observed.Status.CurrentReplicas, target, replicas, err)
+		}
+	}
 }
 
 func offlineProjectAppConverged(app model.App, target string) bool {

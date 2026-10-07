@@ -2,15 +2,42 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
+
+func TestOfflineMoveWaitsForDelayedReadModelConvergence(t *testing.T) {
+	reads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatal("convergence wait mutated state")
+		}
+		reads++
+		app := model.App{ID: "app_fixture", Spec: model.AppSpec{RuntimeID: "target", Replicas: 1}, Status: model.AppStatus{CurrentRuntimeID: "source", CurrentReplicas: 0}}
+		if reads >= 3 {
+			app.Status.CurrentRuntimeID = "target"
+			app.Status.CurrentReplicas = 1
+		}
+		json.NewEncoder(w).Encode(map[string]any{"app": app})
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitOfflineProjectAppConvergence(ctx, &Client{baseURL: server.URL, httpClient: server.Client()}, "app_fixture", "target", 1, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if reads != 3 {
+		t.Fatal("did not wait for the observed replica", reads)
+	}
+}
 
 func TestProjectOfflineMovePreflightsThenWaitsForDatabaseAndCopiesStoppedApp(t *testing.T) {
 	for _, blocked := range []bool{false, true} {
