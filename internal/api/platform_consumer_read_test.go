@@ -68,6 +68,55 @@ func TestConsumerArtifactReadReusePreservesReferenceValidation(t *testing.T) {
 	}
 }
 
+func TestServingAssignmentSelectionRereadsOnlyAnEmptyServingIntersection(t *testing.T) {
+	old := consumerArtifactLookup{Release: model.PlatformArtifactRelease{ID: "previous", ReleaseChannel: "full"}}
+	next := consumerArtifactLookup{Release: model.PlatformArtifactRelease{ID: "next", ReleaseChannel: "gray"}}
+	for _, mode := range []string{"advanced", "removed", "persistent", "error", "shadow"} {
+		t.Run(mode, func(t *testing.T) {
+			reads, selections := 0, 0
+			initial := old
+			if mode == "shadow" {
+				initial.Release.ReleaseChannel = "shadow"
+			}
+			got, err := selectServingConsumerAssignments([]consumerArtifactLookup{initial}, func() ([]consumerArtifactLookup, error) {
+				reads++
+				if mode == "removed" {
+					return nil, nil
+				}
+				return []consumerArtifactLookup{next}, nil
+			}, func(item consumerArtifactLookup) (bool, error) {
+				selections++
+				if mode == "error" {
+					return false, store.ErrConflict
+				}
+				return mode == "advanced" && item.Release.ID == next.Release.ID, nil
+			})
+			switch mode {
+			case "advanced":
+				if err != nil || reads != 1 || selections != 2 || len(got) != 1 || got[0].Release.ID != next.Release.ID {
+					t.Fatal("new assignment lost", got, err, reads, selections)
+				}
+			case "removed":
+				if err != nil || reads != 1 || len(got) != 0 {
+					t.Fatal("removed assignment resurrected", got, err, reads)
+				}
+			case "persistent":
+				if err != nil || reads != 2 || selections != 3 || len(got) != 0 {
+					t.Fatal("selection retry unbounded", got, err, reads, selections)
+				}
+			case "error":
+				if !errors.Is(err, store.ErrConflict) || reads != 0 || len(got) != 0 {
+					t.Fatal("stable error retried or accepted", got, err, reads)
+				}
+			case "shadow":
+				if err != nil || reads != 0 || selections != 0 || len(got) != 0 {
+					t.Fatal("shadow became serving", got, err, reads)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkConsumerArtifactRepeatedReads(b *testing.B) {
 	// Each request still loads and validates its current artifacts. Only repeated
 	// reads within that request are shared; JSON-rich child size is represented.

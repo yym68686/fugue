@@ -1323,15 +1323,15 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 			return
 		}
 		if values[0] == "true" {
-			selected := []consumerArtifactLookup{}
-			for _, item := range resolved {
+			selected, selectErr := selectServingConsumerAssignments(resolved, func() ([]consumerArtifactLookup, error) {
+				return s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
+			}, func(item consumerArtifactLookup) (bool, error) {
 				if item.Release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
-					continue
+					return false, nil
 				}
 				set, err := s.store.GetPlatformExpectedConsumerSet(item.Assignment.ExpectedConsumerSetID)
 				if err != nil {
-					httpx.WriteError(w, http.StatusServiceUnavailable, "serving topology unavailable")
-					return
+					return false, errors.New("serving topology unavailable")
 				}
 				group := ""
 				for _, c := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
@@ -1342,12 +1342,13 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 				}
 				isSelected, err := s.consumerAssignmentIsSelected(item, group, readArtifact)
 				if err != nil {
-					httpx.WriteError(w, http.StatusServiceUnavailable, "serving release unavailable")
-					return
+					return false, errors.New("serving release unavailable")
 				}
-				if isSelected {
-					selected = append(selected, item)
-				}
+				return isSelected, nil
+			})
+			if selectErr != nil {
+				httpx.WriteError(w, http.StatusServiceUnavailable, selectErr.Error())
+				return
 			}
 			resolved = selected
 		}
@@ -1362,6 +1363,37 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	httpx.WriteJSON(w, http.StatusOK, model.PlatformConsumerAssignmentResponse{Assignments: assignments, GeneratedAt: time.Now().UTC()})
+}
+
+// Selection may advance after discovery. An empty intersection with previously
+// discovered serving releases is not yet proof of absent authority; reread the
+// complete discovery/selection pair within a bound. Errors never grant fallback.
+func selectServingConsumerAssignments(resolved []consumerArtifactLookup, resolve func() ([]consumerArtifactLookup, error), selected func(consumerArtifactLookup) (bool, error)) ([]consumerArtifactLookup, error) {
+	for attempt := 0; ; attempt++ {
+		out := []consumerArtifactLookup{}
+		hadServing := false
+		for _, item := range resolved {
+			if item.Release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
+				continue
+			}
+			hadServing = true
+			ok, err := selected(item)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				out = append(out, item)
+			}
+		}
+		if len(out) > 0 || !hadServing || attempt == 2 {
+			return out, nil
+		}
+		var err error
+		resolved, err = resolve()
+		if err != nil {
+			return nil, err
+		}
+	}
 }
 
 // Membership, signatures and child ownership were already verified by the
