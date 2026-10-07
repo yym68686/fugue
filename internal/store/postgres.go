@@ -1004,6 +1004,16 @@ var postgresSchemaStatements = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`CREATE TABLE IF NOT EXISTS fugue_edge_network_samples (
+		edge_id TEXT NOT NULL,
+		id TEXT NOT NULL,
+		hostname TEXT NOT NULL,
+		observed_at TIMESTAMPTZ NOT NULL,
+		sample_json JSONB NOT NULL CHECK (jsonb_typeof(sample_json) = 'object'),
+		PRIMARY KEY (edge_id, id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_network_samples_hostname_time ON fugue_edge_network_samples (hostname, observed_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_network_samples_time ON fugue_edge_network_samples (observed_at)`,
 	`CREATE TABLE IF NOT EXISTS fugue_edge_performance_samples (
 		id TEXT PRIMARY KEY,
 		edge_id TEXT NOT NULL DEFAULT '',

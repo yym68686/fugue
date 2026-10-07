@@ -3515,6 +3515,7 @@ type State struct {
 	DNSACMEChallenges          []DNSACMEChallenge             `json:"dns_acme_challenges,omitempty"`
 	EdgeRoutePolicies          []EdgeRoutePolicy              `json:"edge_route_policies,omitempty"`
 	EdgePerformanceSamples     []EdgePerformanceSample        `json:"edge_performance_samples,omitempty"`
+	EdgeNetworkSamples         []EdgeNetworkSample            `json:"edge_network_samples,omitempty"`
 	EdgeQualityRollups         []EdgeQualityRollup            `json:"edge_quality_rollups,omitempty"`
 	EdgeQualityWatermarks      map[string]time.Time           `json:"edge_quality_rollup_watermarks,omitempty"`
 	EdgeDNSRoutingDecisions    []EdgeDNSRoutingDecision       `json:"edge_dns_routing_decisions,omitempty"`

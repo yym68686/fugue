@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +34,10 @@ func TestPhysicalQualityShadowReadOnlyAndLegacyUnknown(t *testing.T) {
 	}, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	rtt := 2.5
+	if err := state.RecordEdgeNetworkSamples(context.Background(), []model.EdgeNetworkSample{{ID: "network-a", EdgeID: "edge-a", EdgeGroupID: "shared", Hostname: "app.example.test", PathPrefix: "/", TrafficClass: "streaming", RouteDigest: "sha256:" + strings.Repeat("a", 64), BundleVersion: "bundle-1", ServiceTarget: "app.tenant.svc.cluster.local:3000", Source: "service_endpoint_tcp_info_v1", ServiceRTTMS: &rtt, ObservedAt: now}}, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	before, _ := os.ReadFile(filename)
 	response := performJSONRequest(t, server, http.MethodGet, "/v1/edge/quality-shadow/app.example.test?traffic_class=streaming", "shadow-admin", nil)
 	if response.Code != 200 {
@@ -44,6 +50,9 @@ func TestPhysicalQualityShadowReadOnlyAndLegacyUnknown(t *testing.T) {
 	if len(receipt.Snapshot.Observations) != 1 || len(receipt.Result.Candidates) != 2 || receipt.Result.PromotionReady || !receipt.Result.DNSUnchanged {
 		t.Fatal(receipt)
 	}
+	if len(receipt.Snapshot.NetworkSamples) != 1 || *receipt.Snapshot.NetworkSamples[0].ServiceRTTMS != rtt {
+		t.Fatal("captured socket evidence missing", receipt.Snapshot.NetworkSamples)
+	}
 	for _, candidate := range receipt.Result.Candidates {
 		if candidate.Ready || candidate.Metrics["client_network_ms"].State != "unknown" || candidate.Metrics["service_network_ms"].State != "unknown" {
 			t.Fatal(candidate)
@@ -51,6 +60,10 @@ func TestPhysicalQualityShadowReadOnlyAndLegacyUnknown(t *testing.T) {
 	}
 	if _, err := edgequality.Replay(receipt); err != nil {
 		t.Fatal(err)
+	}
+	receipt.Snapshot.NetworkSamples[0].ID = "tampered-network-record"
+	if _, err := edgequality.Replay(receipt); err == nil {
+		t.Fatal("network evidence was not covered by the receipt digest")
 	}
 	after, _ := os.ReadFile(filename)
 	if string(before) != string(after) {

@@ -66,6 +66,7 @@ type edgeHeartbeatRequest struct {
 	Draining               bool                          `json:"draining"`
 	LastError              string                        `json:"last_error,omitempty"`
 	PerformanceSamples     []model.EdgePerformanceSample `json:"performance_samples,omitempty"`
+	NetworkSamples         []model.EdgeNetworkSample     `json:"network_samples,omitempty"`
 }
 
 type edgeNodeDesiredStateResponse struct {
@@ -616,6 +617,14 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.recordEdgeRouteSourceHeartbeat(req.RouteBundleSource)
+	if samples := sanitizeEdgeNetworkSamples(req, servingActive, now); len(samples) > 0 {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		err := s.store.RecordEdgeNetworkSamples(ctx, samples, now.Add(-time.Hour))
+		cancel()
+		if err != nil && s.log != nil {
+			s.log.Printf("edge network observation ingest failed; edge_id=%s error=%v", req.EdgeID, err)
+		}
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":             instance.Node,
 		"instance":         instance,

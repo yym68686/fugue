@@ -109,6 +109,8 @@ type Service struct {
 	routePublication        routePublicationMetadata
 	metrics                 telemetry
 	performanceBaseline     telemetry
+	networkSampleMu         sync.Mutex
+	networkSamples          []model.EdgeNetworkSample
 	cacheRevalidating       map[string]struct{}
 	bodyBufferActiveMu      sync.Mutex
 	activeBodyBufferReads   map[string]edgeActiveRequestBodyBuffer
@@ -2407,6 +2409,7 @@ func normalizeEdgeClientScopeValue(value string) string {
 type edgeProxyTransport struct {
 	base        http.RoundTripper
 	observation *edgeProxyObservation
+	service     *Service
 }
 
 func (s *Service) newEdgeProxyTransport(observation *edgeProxyObservation) http.RoundTripper {
@@ -2423,6 +2426,7 @@ func (s *Service) newEdgeProxyTransport(observation *edgeProxyObservation) http.
 	return &edgeProxyTransport{
 		base:        base,
 		observation: observation,
+		service:     s,
 	}
 }
 
@@ -2582,6 +2586,9 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 						observed.OriginLocalAddr = info.Conn.LocalAddr().String()
 					}
 				})
+				if t.service != nil {
+					t.service.observeOriginNetwork(t.observation, info.Conn, time.Now().UTC())
+				}
 			},
 			ConnectStart: func(_, _ string) {
 				t.observation.withOriginTraceUpdate(func(*edgeProxyObservation) {
@@ -3084,7 +3091,7 @@ func (s *Service) HeartbeatOnce(ctx context.Context) error {
 		s.logHeartbeatFailure(err)
 		return err
 	}
-	resp, err := s.HTTPClient.Do(req)
+	resp, err := s.sendHeartbeatWithOptionalNetworkSamples(req)
 	if err != nil {
 		err = fmt.Errorf("send edge heartbeat: %s", s.redact(err.Error()))
 		s.logHeartbeatFailure(err)
@@ -3167,6 +3174,9 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, telem
 	}
 	if len(performanceSamples) > 0 {
 		body["performance_samples"] = performanceSamples
+	}
+	if samples := s.originNetworkSamples(); len(samples) > 0 {
+		body["network_samples"] = samples
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {

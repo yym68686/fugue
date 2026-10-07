@@ -9,6 +9,8 @@ import (
 	"math"
 	"sort"
 	"time"
+
+	"fugue/internal/model"
 )
 
 const Schema = "fugue.physical-edge-quality-shadow/v1"
@@ -71,17 +73,18 @@ type Observation struct {
 }
 
 type Snapshot struct {
-	Schema        string        `json:"schema"`
-	CapturedAt    time.Time     `json:"captured_at"`
-	Hostname      string        `json:"hostname"`
-	TrafficClass  string        `json:"traffic_class"`
-	Scope         string        `json:"scope"`
-	Policy        Policy        `json:"policy"`
-	CurrentEdgeID string        `json:"current_edge_id"`
-	LastSwitchAt  *time.Time    `json:"last_switch_at"`
-	Candidates    []Candidate   `json:"candidates"`
-	Observations  []Observation `json:"observations"`
-	Blockers      []string      `json:"blockers"`
+	NetworkSamples []model.EdgeNetworkSample `json:"network_samples,omitempty"`
+	Schema         string                    `json:"schema"`
+	CapturedAt     time.Time                 `json:"captured_at"`
+	Hostname       string                    `json:"hostname"`
+	TrafficClass   string                    `json:"traffic_class"`
+	Scope          string                    `json:"scope"`
+	Policy         Policy                    `json:"policy"`
+	CurrentEdgeID  string                    `json:"current_edge_id"`
+	LastSwitchAt   *time.Time                `json:"last_switch_at"`
+	Candidates     []Candidate               `json:"candidates"`
+	Observations   []Observation             `json:"observations"`
+	Blockers       []string                  `json:"blockers"`
 }
 
 type Metric struct {
@@ -383,8 +386,13 @@ func validate(snapshot Snapshot) error {
 			return errors.New("invalid shadow cost")
 		}
 	}
-	if policy.AdvantageRatio >= 1 || len(snapshot.Observations) > MaxObservations || len(snapshot.Candidates) > 256 {
+	if policy.AdvantageRatio >= 1 || len(snapshot.Observations) > MaxObservations || len(snapshot.NetworkSamples) > MaxObservations || len(snapshot.Candidates) > 256 {
 		return errors.New("shadow input exceeds bounds")
+	}
+	for _, sample := range snapshot.NetworkSamples {
+		if err := model.ValidateEdgeNetworkSample(sample); err != nil {
+			return err
+		}
 	}
 	if snapshot.LastSwitchAt != nil && snapshot.LastSwitchAt.After(snapshot.CapturedAt) {
 		return errors.New("future switch time")

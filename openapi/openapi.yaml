@@ -19113,6 +19113,11 @@ components:
       additionalProperties: false
       required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
       properties:
+        network_samples:
+          type: array
+          maxItems: 4096
+          description: Captured origin-socket observations. Not promoted into scoring until independently bound to the current route proof; does not assert client-path, throughput, capacity or failure-rate evidence.
+          items: {$ref: '#/components/schemas/EdgeNetworkSample'}
         schema: {type: string, enum: ['fugue.physical-edge-quality-shadow/v1']}
         captured_at: {type: string, format: date-time}
         hostname: {type: string}
@@ -19470,6 +19475,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EdgePerformanceSample"
+        network_samples:
+          type: array
+          maxItems: 32
+          description: Isolated network observations from the serving worker; never merged into legacy HTTP quality scores.
+          items:
+            $ref: "#/components/schemas/EdgeNetworkSample"
     EdgeHeartbeatResponse:
       type: object
       additionalProperties: false
@@ -19530,6 +19541,43 @@ components:
           type: string
           format: date-time
         updated_at:
+          type: string
+          format: date-time
+    EdgeNetworkSample:
+      type: object
+      additionalProperties: false
+      required: [id, edge_id, edge_group_id, hostname, path_prefix, traffic_class, route_digest, bundle_version, service_target, source, observed_at]
+      properties:
+        id:
+          type: string
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        hostname:
+          type: string
+        path_prefix:
+          type: string
+        traffic_class:
+          type: string
+          enum: [streaming, dynamic_api]
+        route_digest:
+          type: string
+        bundle_version:
+          type: string
+        service_target:
+          type: string
+          description: Exact configured TCP destination, without credentials or HTTP path.
+        source:
+          type: string
+          enum: [service_endpoint_tcp_info_v1]
+        service_rtt_ms:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 60000
+          description: Kernel TCP RTT on the direct origin connection at GotConn, including reused connections. Null means unknown. This success-conditioned sample cannot establish a network failure rate.
+        observed_at:
           type: string
           format: date-time
     EdgePerformanceSample:

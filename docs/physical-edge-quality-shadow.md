@@ -16,6 +16,40 @@ cooldown remain unchanged. In particular, deploying this API does not fix an
 existing detour. Do not report a candidate SERVFAIL, an API read, or a successful
 shadow replay as public DNS or application acceptance.
 
+## Origin socket evidence
+
+Serving workers now sample kernel TCP RTT at the origin transport's `GotConn`,
+before application response wait. Collection is passive: it opens no additional
+connections and sends no business requests. It admits only direct, single-origin
+Kubernetes Service routes, excludes peer fallback and loopback/link-local hops,
+and binds each record to the physical edge, hostname, path, route-proof digest,
+loaded bundle version and configured destination. Reused origin connections are
+allowed; unavailable or zero kernel RTT remains unknown, never zero-cost proof.
+The declared route determines the traffic class, not cache lookup activity.
+
+The observer uses a nonblocking lock, a one-second process budget, a one-minute
+route interval and a 32-record ring. It does not wait for telemetry persistence
+on the proxy path. Heartbeat ingest checks the authenticated physical identity,
+active worker declaration, loaded bundle and timestamp without rebinding foreign
+records. Records are immutable on retry, retained for an hour, and stored apart
+from legacy HTTP performance samples. Ingest errors do not reject an otherwise
+accepted heartbeat or alter DNS. No serving artifacts, LKG or business policy
+are modified by the observer.
+
+During mixed-version rollout or API rollback, an exact old-API rejection of
+the unknown `network_samples` field retries the same heartbeat once with only
+that optional field removed. Identity, authentication, health and existing
+performance data are preserved. Authentication failures, other validation
+failures and server errors are never converted into a successful heartbeat.
+
+Shadow receipts include these captured records as optional `network_samples`;
+replay covers them in the receipt digest. They are deliberately not promoted to
+scores merely because a worker reported them. Current public route proof still
+has to bind the digest independently. Success-conditioned RTT observations do
+not establish a failure rate, throughput, terminal-to-edge path or capacity
+limit. None of those missing signals is fabricated. Old receipts without the
+optional field retain their original digest and replay behavior.
+
 ## Verified measurement gaps
 
 The existing `edgeDNSLatencyScore` includes HTTP TTFB, upstream duration, total

@@ -52,6 +52,19 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+	networkSamples, err := s.store.ListEdgeNetworkSamples(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), edgequality.MaxObservations)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	for _, sample := range networkSamples {
+		if sample.TrafficClass == trafficClass {
+			snapshot.NetworkSamples = append(snapshot.NetworkSamples, sample)
+		}
+	}
+	if len(networkSamples) == edgequality.MaxObservations {
+		snapshot.Blockers = append(snapshot.Blockers, "network_observation_limit_reached")
+	}
 	limitReached := errors.New("shadow observation limit reached")
 	visited := 0
 	err = s.store.WalkEdgePerformanceSamples(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), func(sample model.EdgePerformanceSample) error {
