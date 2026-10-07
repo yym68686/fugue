@@ -10,12 +10,12 @@
     "vps-84c8f0a9"
   ],
   "expected_previous_shadow": {
-    "artifact_id": "artifact_1790811694_eb22729a8113",
-    "content_hash": "sha256:b35c9879041d3ef33b97795b602a0ba0b3d0185c4549b2823598e4cc8feb447d",
-    "fencing_token": 1,
-    "release_id": "artifactrel_1790811698_af58d18df268"
+    "artifact_id": "artifact_1790816149_08262a8dd111",
+    "content_hash": "sha256:89d7c2a534fe3d7f45d72fd346d4c740ec9638545c073adb1c43f3dfcf1a71d0",
+    "release_id": "artifactrel_1790816153_bef4291d7f3a",
+    "fencing_token": 2
   },
-  "generation": 3,
+  "generation": 4,
   "origin": "https://api.fugue.pro",
   "previous_topology": {
     "authority_cells": [
