@@ -336,26 +336,41 @@ func TestBodyBufferRecoveryStreamingStartsBeforeUploadCompletes(t *testing.T) {
 
 func TestBodyBufferRecoverySSEFlushesBeforeOriginFinishes(t *testing.T) {
 	release := make(chan struct{})
+	originResult := make(chan string, 1)
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.Copy(io.Discard, r.Body)
+		read, readErr := io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: first\n\n")
+		firstBytes, firstErr := fmt.Fprint(w, "data: first\n\n")
 		w.(http.Flusher).Flush()
 		<-release
-		fmt.Fprint(w, "data: last\n\n")
+		lastBytes, lastErr := fmt.Fprint(w, "data: last\n\n")
+		originResult <- fmt.Sprintf("request_bytes=%d request_error=%v first_bytes=%d first_error=%v last_bytes=%d last_error=%v context_error=%v", read, readErr, firstBytes, firstErr, lastBytes, lastErr, r.Context().Err())
 	}))
 	defer origin.Close()
 	defer unblock()
 	cfg := recoveryConfig(t)
 	// Retain spooling configuration: zero budget must recover into bounded streaming.
-	s, _ := recoveryService(t, cfg, origin.URL)
+	s, observed := recoveryService(t, cfg, origin.URL)
 	edge := httptest.NewServer(s.ProxyHandler())
 	defer edge.Close()
 	defer unblock()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	defer func() {
+		if !t.Failed() {
+			return
+		}
+		unblock()
+		t.Logf("SSE failure client_context=%v edge_observation=%s", ctx.Err(), observed.String())
+		select {
+		case result := <-originResult:
+			t.Logf("SSE origin result: %s", result)
+		case <-time.After(time.Second):
+			t.Log("SSE origin had not completed one second after release")
+		}
+	}()
 	r, _ := http.NewRequestWithContext(ctx, "POST", edge.URL+"/v1/tasks", strings.NewReader(`{}`))
 	r.Host = "app.example.test"
 	r.Header.Set("Content-Type", "application/json")
