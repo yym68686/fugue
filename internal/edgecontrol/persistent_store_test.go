@@ -3,6 +3,7 @@ package edgecontrol
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -759,4 +760,70 @@ func privateStateDir(t *testing.T) string {
 
 func (source staticRouteIntentSource) FetchRouteIntents(context.Context) (model.EdgeRouteIntentSnapshot, error) {
 	return source.snapshot, source.err
+}
+
+func TestPersistentGroupCacheFingerprintReadsSameSizeMutation(t *testing.T) {
+	ctx := context.Background()
+	group := "edge-group-fingerprint"
+	store, _, _, _ := groupPromotionFixture(t, group, time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC))
+	path := store.groupStatePath(group)
+	if _, err := store.readGroupStateSnapshot(path, group, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Preserve size and mtime: metadata-only cache validation would miss this.
+	needle := []byte(`"revision":`)
+	index := bytes.Index(raw, needle) + len(needle)
+	if index < len(needle) || raw[index] < '0' || raw[index] > '9' {
+		t.Fatal("revision not found")
+	}
+	if raw[index] == '9' {
+		raw[index] = '8'
+	} else {
+		raw[index]++
+	}
+	if err = os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.withGroupState(ctx, group, false, func(*persistentGroupState) error { return nil }); err == nil {
+		t.Fatal("same-size durable corruption bypassed validation")
+	}
+}
+
+func BenchmarkPersistentGroupReadFingerprint(b *testing.B) {
+	// Exercise bounded bytes hashing directly, independently of route count.
+	root := b.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		b.Fatal(err)
+	}
+	path := filepath.Join(root, "state")
+	raw := bytes.Repeat([]byte(" "), 8<<20)
+	raw[0] = '{'
+	raw[len(raw)-1] = '}'
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		b.Fatal(err)
+	}
+	store, err := OpenPersistentGroupStore(root)
+	if err != nil {
+		b.Fatal(err)
+	}
+	store.cacheValidatedGroupState("group", sha256.Sum256(raw), persistentGroupState{GroupID: "group"})
+	b.ReportAllocs()
+	b.SetBytes(int64(len(raw)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.readGroupStateSnapshot(path, "group", false); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

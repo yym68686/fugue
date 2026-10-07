@@ -66,8 +66,8 @@ type PersistentGroupStore struct {
 }
 
 type validatedGroupState struct {
-	data  []byte
-	state persistentGroupState
+	fingerprint [sha256.Size]byte
+	state       persistentGroupState
 }
 
 type persistentGroupSummary struct {
@@ -1048,30 +1048,45 @@ func (store *PersistentGroupStore) readGroupState(path, groupID string) (persist
 // checks permissions and reads the durable bytes. Equality preserves detection
 // of in-place corruption, atomic replacements and writes from another process.
 func (store *PersistentGroupStore) readGroupStateSnapshot(path, groupID string, mutable bool) (persistentGroupState, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return persistentGroupState{Schema: persistentGroupStateSchemaV1, GroupID: groupID}, nil
 		}
 		return persistentGroupState{}, fmt.Errorf("read edge-control group state: %w", err)
 	}
-	if len(data) == 0 || len(data) > maxPersistentGroupStateBytes {
-		return persistentGroupState{}, errors.New("edge-control group state size is invalid")
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o007 != 0 {
+	defer file.Close()
+	info, err := file.Stat()
+	link, linkErr := os.Lstat(path)
+	if err != nil || linkErr != nil || !info.Mode().IsRegular() || link.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o007 != 0 || !os.SameFile(info, link) {
 		return persistentGroupState{}, errors.New("edge-control group state must be a private regular file")
 	}
+	if info.Size() == 0 || info.Size() > maxPersistentGroupStateBytes {
+		return persistentGroupState{}, errors.New("edge-control group state size is invalid")
+	}
+	// Hash durable bytes with constant auxiliary memory. Holding both a raw
+	// 96 MiB file and its decoded ledger made routine writes exceed pod limits.
+	hash := sha256.New()
+	count, err := io.Copy(hash, io.LimitReader(file, maxPersistentGroupStateBytes+1))
+	if err != nil || count != info.Size() {
+		return persistentGroupState{}, errors.New("edge-control group state changed while reading")
+	}
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], hash.Sum(nil))
 	store.stateMu.Lock()
 	cached, found := store.validated[groupID]
 	store.stateMu.Unlock()
-	if found && bytes.Equal(data, cached.data) {
+	if found && fingerprint == cached.fingerprint {
 		if mutable {
 			return clonePersistentGroupState(cached.state), nil
 		}
 		return cached.state, nil
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		return persistentGroupState{}, err
+	}
+	hash.Reset()
+	decoder := json.NewDecoder(io.TeeReader(io.LimitReader(file, maxPersistentGroupStateBytes+1), hash))
 	decoder.DisallowUnknownFields()
 	var state persistentGroupState
 	if err := decoder.Decode(&state); err != nil {
@@ -1080,19 +1095,22 @@ func (store *PersistentGroupStore) readGroupStateSnapshot(path, groupID string, 
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return persistentGroupState{}, errors.New("edge-control group state contains trailing data")
 	}
+	if !bytes.Equal(hash.Sum(nil), fingerprint[:]) {
+		return persistentGroupState{}, errors.New("edge-control group state changed while decoding")
+	}
 	if err := validatePersistentGroupState(state, groupID); err != nil {
 		return persistentGroupState{}, err
 	}
-	store.cacheValidatedGroupState(groupID, data, state)
 	if mutable {
-		return clonePersistentGroupState(state), nil
+		return state, nil
 	}
+	store.cacheValidatedGroupState(groupID, fingerprint, state)
 	return state, nil
 }
 
-func (store *PersistentGroupStore) cacheValidatedGroupState(groupID string, data []byte, state persistentGroupState) {
+func (store *PersistentGroupStore) cacheValidatedGroupState(groupID string, fingerprint [sha256.Size]byte, state persistentGroupState) {
 	store.stateMu.Lock()
-	store.validated[groupID] = validatedGroupState{data: data, state: state}
+	store.validated[groupID] = validatedGroupState{fingerprint: fingerprint, state: state}
 	store.stateMu.Unlock()
 }
 
@@ -1261,7 +1279,7 @@ func (store *PersistentGroupStore) writeGroupState(path string, state persistent
 	if err := directory.Close(); err != nil {
 		return fmt.Errorf("close edge-control state directory: %w", err)
 	}
-	store.cacheValidatedGroupState(state.GroupID, data, clonePersistentGroupState(state))
+	store.cacheValidatedGroupState(state.GroupID, sha256.Sum256(data), clonePersistentGroupState(state))
 	return nil
 }
 
@@ -1291,7 +1309,6 @@ func validatePersistentGroupStateContents(state persistentGroupState, groupID st
 			return errors.New("edge-control persistent inventory is not bound to its producer cursor")
 		}
 	}
-	validated := make([]GroupShadowLedgerEntry, 0, len(state.Ledger))
 	for index, persisted := range state.Ledger {
 		if persisted.BundleArchived {
 			if persisted.Schema != GroupShadowLedgerSchemaV1 || normalizeGroupID(persisted.GroupID) != groupID ||
@@ -1302,7 +1319,6 @@ func validatePersistentGroupStateContents(state persistentGroupState, groupID st
 				persisted.LastSuccessfulBundleGeneration != persisted.BundleGeneration {
 				return errors.New("edge-control archived group candidate is invalid")
 			}
-			validated = append(validated, persisted)
 			continue
 		}
 		candidate := cloneGroupShadowLedgerEntry(persisted)
@@ -1310,11 +1326,10 @@ func validatePersistentGroupStateContents(state persistentGroupState, groupID st
 			return errors.New("edge-control persistent group ledger sequence is invalid")
 		}
 		candidate.Sequence = 0
-		appended, err := prepareGroupShadowLedgerAppend(groupID, uint64(index), validated, candidate)
+		appended, err := prepareGroupShadowLedgerAppend(groupID, uint64(index), state.Ledger[:index], candidate)
 		if err != nil || appended.Sequence != persisted.Sequence {
 			return errors.New("edge-control persistent group ledger transition is invalid")
 		}
-		validated = append(validated, persisted)
 	}
 	lastPublishedGeneration := ""
 	lastPublishedSequence := uint64(0)
