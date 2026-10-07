@@ -3471,6 +3471,50 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-state/dns-decisions/{node_id}:
+    get:
+      operationId: getPlatformDNSDecisions
+      summary: Read recorded answers from the selected public DNS backend
+      description: >-
+        Platform admin with artifact.read only. Reads bounded, retained actual
+        DNS decision receipts through the Kubernetes Pod proxy, binding the Pod
+        UID and public Service backend before and after the read. Does not run
+        a query, recompute current rankings, authorize serving, or renew proofs.
+        desired and loaded publications may differ. A receipt records the
+        response submitted to the DNS writer, not delivery to the end client.
+        Retention, queue drops, persistence failures and process identity are
+        explicit; absence is not evidence that a query did not occur. Raw client
+        addresses and ECS prefixes are not retained. Replay inputs are bounded,
+        versioned local evidence, not signed serving artifacts. Query filters
+        apply to the selected backend's retained receipts, including its
+        recovered previous-process records. An unavailable or ambiguous backend
+        returns 503, never another node's observations.
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformDNSDecisions
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: node_id
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 253}
+        - in: query
+          name: hostname
+          schema: {type: string, maxLength: 253}
+        - in: query
+          name: decision_id
+          schema: {type: string, maxLength: 128}
+        - in: query
+          name: limit
+          schema: {type: integer, minimum: 1, maximum: 20, default: 5}
+      responses:
+        '200':
+          description: Recorded answers and separate current publication observations
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DNSDecisionResponse'}
+        default:
+          $ref: '#/components/responses/ErrorResponse'
   /v1/admin/platform-state/dns-runtime-facts/{node_id}:
     get:
       operationId: getPlatformDNSRuntimeFacts
@@ -19647,6 +19691,143 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EdgeDNSRecord"
+    DNSDecisionPublication:
+      type: object
+      additionalProperties: false
+      properties:
+        release_set_id: {type: string}
+        parent_digest: {type: string}
+        artifact_id: {type: string}
+        digest: {type: string}
+        generation: {type: string}
+        fencing_token: {type: integer, format: int64}
+        policy_digest: {type: string}
+        input_snapshot_digest: {type: string}
+        release_channel: {type: string}
+    DNSDecisionPublicationState:
+      type: object
+      additionalProperties: false
+      required: [observed_at, desired_known, serving_lkg, rejected]
+      properties:
+        observed_at: {type: string, format: date-time}
+        desired_known: {type: boolean}
+        desired: {$ref: '#/components/schemas/DNSDecisionPublication'}
+        loaded: {$ref: '#/components/schemas/DNSDecisionPublication'}
+        lkg: {$ref: '#/components/schemas/DNSDecisionPublication'}
+        serving_lkg: {type: boolean}
+        rejected: {type: boolean}
+        outcome: {type: string}
+        fallback_reason: {type: string}
+    DNSDecisionRecord:
+      type: object
+      additionalProperties: false
+      required: [record_name, policy, input_candidates, materialized_candidates, ranking, filtered, selection_at, selected_edge_group_id, selection_result, exploration_kind, cooldown_result, scope_source, scope_resolution, matched_scope_key, answered]
+      properties:
+        record_name: {type: string}
+        policy: {$ref: '#/components/schemas/DNSAnswerPolicy'}
+        input_candidates:
+          type: array
+          items: {$ref: '#/components/schemas/EdgeDNSAnswerCandidate'}
+        materialized_candidates:
+          type: array
+          items: {$ref: '#/components/schemas/EdgeDNSAnswerCandidate'}
+        ranking:
+          type: array
+          description: Actual stable-sort order and effective score before incumbent or exploration promotion. Lower scores rank first; candidate fields retain tie-break inputs.
+          items:
+            type: object
+            additionalProperties: false
+            required: [candidate, sort_score]
+            properties:
+              candidate: {$ref: '#/components/schemas/EdgeDNSAnswerCandidate'}
+              sort_score: {type: integer}
+        filtered:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [edge_id, ip, reason]
+            properties:
+              edge_id: {type: string}
+              ip: {type: string}
+              reason: {type: string}
+        selection_at: {type: string, format: date-time}
+        selected_edge_group_id: {type: string}
+        selection_result: {type: string}
+        exploration_kind: {type: string}
+        cooldown_until: {type: string, format: date-time}
+        cooldown_result:
+          type: string
+          enum: [active, expired, not_active, not_recorded]
+          description: Published scoped cooldown window at selection time, not a new cooldown decision. Global profiles do not carry a deadline and report not_recorded.
+        scope_source: {type: string}
+        scope_resolution: {type: string}
+        matched_scope_key: {type: string}
+        answered:
+          type: array
+          items: {$ref: '#/components/schemas/EdgeDNSAnswerCandidate'}
+    DNSDecisionReceipt:
+      type: object
+      additionalProperties: false
+      required: [schema, decision_id, process_id, node_id, observed_at, hostname, qtype, query_id, transport, rcode, rrset, authority, additional, write_succeeded, publication, records, replay_input, evidence_digest]
+      properties:
+        schema: {type: string, enum: [fugue.dns-decision/v1]}
+        decision_id: {type: string}
+        process_id: {type: string}
+        node_id: {type: string}
+        observed_at: {type: string, format: date-time}
+        hostname: {type: string}
+        qtype: {type: integer}
+        query_id: {type: integer}
+        transport: {type: string}
+        rcode: {type: integer}
+        rrset: {type: array, items: {type: string}}
+        authority: {type: array, items: {type: string}}
+        additional: {type: array, items: {type: string}}
+        write_succeeded: {type: boolean}
+        publication: {$ref: '#/components/schemas/DNSDecisionPublicationState'}
+        answer_publication: {$ref: '#/components/schemas/DNSDecisionPublication'}
+        records: {type: array, items: {$ref: '#/components/schemas/DNSDecisionRecord'}}
+        replay_input:
+          type: string
+          format: byte
+          maxLength: 349528
+          description: Versioned, address-redacted replay input containing original record/proof inputs, captured clocks, selection hints, exploration buckets and publication references. Offline execution only; not serving authorization.
+        evidence_digest: {type: string}
+    DNSDecisionSnapshot:
+      type: object
+      additionalProperties: false
+      required: [node_id, process_id, captured_at, publication, receipts, retained, dropped, evicted, persistence_errors, recovery_errors, retention_limit, max_receipt_bytes]
+      properties:
+        node_id: {type: string}
+        process_id: {type: string}
+        captured_at: {type: string, format: date-time}
+        publication: {$ref: '#/components/schemas/DNSDecisionPublicationState'}
+        receipts: {type: array, items: {$ref: '#/components/schemas/DNSDecisionReceipt'}}
+        retained: {type: integer}
+        dropped: {type: integer, format: int64}
+        evicted: {type: integer, format: int64}
+        persistence_errors: {type: integer, format: int64}
+        recovery_errors: {type: integer, format: int64}
+        retention_limit: {type: integer}
+        max_receipt_bytes: {type: integer}
+    DNSDecisionResponse:
+      type: object
+      additionalProperties: false
+      required: [backend, snapshot, evaluated_at]
+      properties:
+        backend:
+          type: object
+          additionalProperties: false
+          required: [namespace, pod_name, pod_uid, service_name, service_uid]
+          properties:
+            namespace: {type: string}
+            pod_name: {type: string}
+            pod_uid: {type: string}
+            service_name: {type: string}
+            service_uid: {type: string}
+        snapshot: {$ref: '#/components/schemas/DNSDecisionSnapshot'}
+        evaluated_at: {type: string, format: date-time}
     EdgeDNSRecord:
       type: object
       additionalProperties: false

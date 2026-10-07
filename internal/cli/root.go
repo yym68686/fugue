@@ -278,6 +278,12 @@ Environment variables:
 			// Static-edge management must work with the Fugue API disconnected,
 			// invalid API credentials and a broken control-plane context.
 			commandPath := cmd.CommandPath()
+			if commandPath == "fugue admin dns decisions replay" {
+				if c.root.SaveToken {
+					return fmt.Errorf("--save-token is not supported for offline DNS replay")
+				}
+				return nil
+			}
 			isStaticEdgeDirect := strings.HasPrefix(commandPath, "fugue static-edge ") && commandPath != "fugue static-edge registry" && !strings.HasPrefix(commandPath, "fugue static-edge registry ")
 			if isStaticEdgeDirect {
 				if c.root.SaveToken {

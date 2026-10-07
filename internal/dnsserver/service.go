@@ -32,7 +32,6 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
-	"fugue/internal/weightedselector"
 )
 
 const cacheFileVersion = 1
@@ -64,6 +63,8 @@ type edgeDNSLiveHealthFunc func(string, string) bool
 type edgeDNSPeerHealthFunc func(model.EdgeDNSAnswerCandidate) string
 
 type Service struct {
+	decisionAudit           atomic.Pointer[dnsDecisionJournal]
+	decisionPublication     atomic.Pointer[DNSDecisionPublicationState]
 	listenerFailed          atomic.Bool
 	udpListening            atomic.Bool
 	tcpListening            atomic.Bool
@@ -202,6 +203,7 @@ type edgeDNSAnswerAudit struct {
 	SelectedEdgeGroupID   string
 	SelectionResult       string
 	ExplorationKind       string
+	Ranking               []DNSDecisionRank
 	Answered              []model.EdgeDNSAnswerCandidate
 	Filtered              []edgeDNSFilteredCandidate
 }
@@ -216,6 +218,7 @@ type edgeDNSCandidateOrderDecision struct {
 	SelectedCandidateKey      string
 	ExplorationKind           string
 	ExplorationCandidateKey   string
+	Ranking                   []DNSDecisionRank
 }
 
 type dnsQueryMetricKey struct {
@@ -574,6 +577,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.validateConfig(); err != nil {
 		return err
 	}
+	s.startDNSDecisionJournal(ctx)
 	if s.Logger == nil {
 		s.Logger = log.Default()
 	}
@@ -759,6 +763,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /runtime-facts", s.handleRuntimeFacts)
+	mux.HandleFunc("GET /decisions", s.handleDNSDecisions)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	return mux
 }
@@ -785,6 +790,12 @@ func (s *Service) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	snapshot := s.metricSnapshot()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	journal := s.decisionAudit.Load()
+	fmt.Fprintln(w, "# TYPE fugue_dns_decision_audit_enabled gauge")
+	fmt.Fprintf(w, "fugue_dns_decision_audit_enabled %d\n", dnsBoolGauge(journal != nil))
+	if journal != nil {
+		fmt.Fprintf(w, "fugue_dns_decision_audit_dropped_total %d\nfugue_dns_decision_audit_evicted_total %d\nfugue_dns_decision_audit_persistence_errors_total %d\nfugue_dns_decision_audit_recovery_errors_total %d\nfugue_dns_decision_audit_queue_depth %d\n", journal.dropped.Load(), journal.evicted.Load(), journal.persistenceErrors.Load(), journal.recoveryErrors.Load(), len(journal.queue))
+	}
 	fmt.Fprintln(w, "# HELP fugue_dns_health Whether fugue-dns has a usable DNS bundle.")
 	fmt.Fprintln(w, "# TYPE fugue_dns_health gauge")
 	if snapshot.Status.Healthy {
@@ -854,20 +865,43 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		if st == nil {
 			reply := new(miekgdns.Msg)
 			reply.SetRcode(r, miekgdns.RcodeServerFailure)
-			_ = w.WriteMsg(reply)
+			queryAt := time.Now().UTC()
+			writeErr := w.WriteMsg(reply)
+			if journal := s.decisionAudit.Load(); journal != nil {
+				capture := &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema, NoServingState: true}, records: []DNSDecisionRecord{}}
+				transport := "unknown"
+				if w.RemoteAddr() != nil {
+					transport = w.RemoteAddr().Network()
+				}
+				journal.enqueue(r, reply, capture, decisionPublicationState(nil, s.decisionPublication.Load()), transport, queryAt, writeErr == nil)
+			}
 			return
 		}
 		remote := ""
 		if w.RemoteAddr() != nil {
 			remote = w.RemoteAddr().String()
 		}
-		reply := st.answer(r, remote, time.Now().UTC())
+		var capture *dnsDecisionCapture
+		journal := s.decisionAudit.Load()
+		if journal != nil {
+			capture = &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}, records: []DNSDecisionRecord{}}
+		}
+		observed := s.decisionPublication.Load()
+		queryAt := time.Now().UTC()
+		reply := st.answerObserved(r, remote, queryAt, capture)
 		qtype := "unknown"
 		if len(r.Question) > 0 {
 			qtype = miekgdns.TypeToString[r.Question[0].Qtype]
 		}
 		s.recordQuery(qtype, miekgdns.RcodeToString[reply.Rcode])
-		_ = w.WriteMsg(reply)
+		writeErr := w.WriteMsg(reply)
+		if journal != nil {
+			transport := "unknown"
+			if w.RemoteAddr() != nil {
+				transport = w.RemoteAddr().Network()
+			}
+			journal.enqueue(r, reply, capture, decisionPublicationState(st, observed), transport, queryAt, writeErr == nil)
+		}
 		return
 	}
 	resp := new(miekgdns.Msg)
@@ -2712,12 +2746,13 @@ func rrForEdgeDNSRecordAt(record model.EdgeDNSRecord, ownerName string, now time
 }
 
 type dnsGeoHint struct {
-	IP          string
-	Country     string
-	Region      string
-	ASN         string
-	EdgeGroupID string
-	Source      string
+	decisionEntropy *dnsDecisionEntropy
+	IP              string
+	Country         string
+	Region          string
+	ASN             string
+	EdgeGroupID     string
+	Source          string
 }
 
 func (s *Service) geoHintForQuery(msg *miekgdns.Msg, writer miekgdns.ResponseWriter) dnsGeoHint {
@@ -2849,7 +2884,14 @@ func rrForEdgeDNSRecordWithGeoAudit(record model.EdgeDNSRecord, ownerName string
 	if len(record.Candidates) == 0 || (qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA) {
 		return rrForEdgeDNSRecord(record, ownerName), edgeDNSAnswerAudit{}, false
 	}
-	ordered, filteredCandidates, decision := edgeDNSAnswerCandidateDecision(record, hint, time.Now().UTC(), liveHealth, peerHealth)
+	return rrForEdgeDNSRecordWithGeoAuditAt(record, ownerName, qtype, hint, liveHealth, peerHealth, time.Now().UTC())
+}
+
+func rrForEdgeDNSRecordWithGeoAuditAt(record model.EdgeDNSRecord, ownerName string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc, now time.Time) ([]miekgdns.RR, edgeDNSAnswerAudit, bool) {
+	if len(record.Candidates) == 0 || (qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA) {
+		return rrForEdgeDNSRecordAt(record, ownerName, now), edgeDNSAnswerAudit{}, false
+	}
+	ordered, filteredCandidates, decision := edgeDNSAnswerCandidateDecision(record, hint, now, liveHealth, peerHealth)
 	ownerName = normalizeName(firstNonEmpty(ownerName, record.Name))
 	audit := edgeDNSAnswerAudit{
 		OwnerName:             ownerName,
@@ -2865,6 +2907,7 @@ func rrForEdgeDNSRecordWithGeoAudit(record model.EdgeDNSRecord, ownerName string
 		SelectedEdgeGroupID:   decision.SelectedEdgeGroupID,
 		SelectionResult:       edgeDNSSelectionResult(decision, ordered, filteredCandidates),
 		ExplorationKind:       decision.ExplorationKind,
+		Ranking:               decision.Ranking,
 		Answered:              append([]model.EdgeDNSAnswerCandidate(nil), ordered...),
 		Filtered:              append([]edgeDNSFilteredCandidate(nil), filteredCandidates...),
 	}
@@ -3054,6 +3097,12 @@ func edgeDNSOrderedCandidatesWithDecision(record model.EdgeDNSRecord, hint dnsGe
 		}
 		return candidates[i].IP < candidates[j].IP
 	})
+	if hint.decisionEntropy != nil {
+		decision.Ranking = make([]DNSDecisionRank, 0, len(candidates))
+		for _, candidate := range candidates {
+			decision.Ranking = append(decision.Ranking, DNSDecisionRank{Candidate: candidate, SortScore: edgeDNSCandidateSortScore(candidate, policy, hint, hasLatencyScore)})
+		}
+	}
 	if index := edgeDNSSelectedCandidateIndex(candidates, decision.SelectedEdgeGroupID); index >= 0 {
 		decision.SelectedCandidateEligible = true
 		if index > 0 {
@@ -3211,14 +3260,14 @@ func edgeDNSMaybePromoteExploration(record model.EdgeDNSRecord, policy model.DNS
 		return candidates
 	}
 	percent := edgeDNSExplorationPercent(policy)
-	if weightedselector.Bucket(seed, 100) >= percent {
+	if dnsDecisionBucketValue(hint, seed, 100, "exploration_percent") >= percent {
 		return candidates
 	}
 	rest := len(candidates) - 1
 	if rest <= 0 {
 		return candidates
 	}
-	index := 1 + weightedselector.Bucket(seed+"|cross-group", rest)
+	index := 1 + dnsDecisionBucketValue(hint, seed+"|cross-group", rest, "cross_group_index")
 	if index <= 0 || index >= len(candidates) {
 		return candidates
 	}
@@ -3251,10 +3300,10 @@ func edgeDNSMaybePromoteNodeExploration(record model.EdgeDNSRecord, policy model
 		return candidates, false
 	}
 	percent := edgeDNSExplorationPercent(policy)
-	if weightedselector.Bucket(seed, 100) >= percent {
+	if dnsDecisionBucketValue(hint, seed, 100, "exploration_percent") >= percent {
 		return candidates, false
 	}
-	index := siblingIndexes[weightedselector.Bucket(seed+"|same-group", len(siblingIndexes))]
+	index := siblingIndexes[dnsDecisionBucketValue(hint, seed+"|same-group", len(siblingIndexes), "same_group_index")]
 	out := append([]model.EdgeDNSAnswerCandidate(nil), candidates...)
 	explorer := out[index]
 	copy(out[1:index+1], out[0:index])

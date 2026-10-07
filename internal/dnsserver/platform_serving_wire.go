@@ -110,6 +110,10 @@ func buildDNSServingState(record dnsServingCheckpoint, p dnsServingPayload, rout
 }
 
 func (st *dnsServingState) answer(req *dns.Msg, remote string, now time.Time) *dns.Msg {
+	return st.answerObserved(req, remote, now, nil)
+}
+
+func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.Time, capture *dnsDecisionCapture) *dns.Msg {
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	resp.Authoritative = true
@@ -117,6 +121,14 @@ func (st *dnsServingState) answer(req *dns.Msg, remote string, now time.Time) *d
 		resp.Rcode = dns.RcodeFormatError
 		return resp
 	}
+	stage, hint := capture.begin(st, req, remote, now)
+	returnedTransition := false
+	defer func() {
+		if capture != nil && !returnedTransition && stage != nil {
+			publication := stage.Publication
+			capture.answerPublication = &publication
+		}
+	}()
 	q := req.Question[0]
 	name := normalizeName(q.Name)
 	zone := ""
@@ -155,7 +167,6 @@ func (st *dnsServingState) answer(req *dns.Msg, remote string, now time.Time) *d
 		recordName = edgeDNSWildcardName(name)
 		rows, exists = z.records[recordName]
 	}
-	hint := platformDNSHintForQuery(st.matcher, req, remote)
 	answer := func(kind string) {
 		for _, entry := range rows {
 			if entry.record.Type != kind {
@@ -163,16 +174,20 @@ func (st *dnsServingState) answer(req *dns.Msg, remote string, now time.Time) *d
 			}
 			records, err := materializeDNSQueries(platformconfig.DNSQueryView{Records: []model.EdgeDNSRecord{entry.record}}, &entry.plan, st.payload.Policy.DNSReadiness, entry.facts, now)
 			if err != nil || len(records) != 1 {
+				capture.record(entry, nil, hint, now, edgeDNSAnswerAudit{}, "materialization_failed")
 				resp.Rcode = dns.RcodeServerFailure
 				resp.Answer = nil
 				return
 			}
 			if len(entry.plan.Records) > 0 && len(entry.plan.Records[0].Targets) > 0 && len(entry.record.Candidates) > 0 && len(records[0].Values) == 0 {
+				capture.record(entry, &records[0], hint, now, edgeDNSAnswerAudit{}, "readiness_quorum_unavailable")
 				resp.Rcode = dns.RcodeServerFailure
 				resp.Answer = nil
 				return
 			}
-			rrs, _, _ := rrForEdgeDNSRecordWithGeoAudit(records[0], name, q.Qtype, hint, nil, nil)
+			selectionAt, selectionHint := capture.selection(stage, hint)
+			rrs, audit, _ := rrForEdgeDNSRecordWithGeoAuditAt(records[0], name, q.Qtype, selectionHint, nil, nil, selectionAt)
+			capture.record(entry, &records[0], hint, selectionAt, audit, "")
 			resp.Answer = append(resp.Answer, rrs...)
 		}
 	}
@@ -197,8 +212,9 @@ func (st *dnsServingState) answer(req *dns.Msg, remote string, now time.Time) *d
 	// negative responses and the persisted positive checkpoint remain unchanged.
 	if resp.Rcode == dns.RcodeServerFailure && st.transition != nil && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA) &&
 		st.transition.hosts[recordName] {
-		next := st.transition.state.answer(req, remote, now)
+		next := st.transition.state.answerObserved(req, remote, now, capture)
 		if next.Rcode == dns.RcodeSuccess && len(next.Answer) > 0 {
+			returnedTransition = true
 			return next
 		}
 	}

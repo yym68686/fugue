@@ -162,6 +162,35 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
 	old := s.platformServing.Load()
+	publicationObservation := &DNSDecisionPublicationState{ObservedAt: time.Now().UTC(), Outcome: "publication_unavailable"}
+	if previous := s.decisionPublication.Load(); previous != nil {
+		publicationObservation.LKG = previous.LKG
+	}
+	if old != nil && old.record.Positive {
+		lkg := dnsPublication(old.record)
+		publicationObservation.LKG = &lkg
+	}
+	defer func() {
+		publicationObservation.ObservedAt = time.Now().UTC()
+		loaded := s.platformServing.Load()
+		if loaded != nil && loaded.record.Positive {
+			lkg := dnsPublication(loaded.record)
+			publicationObservation.LKG = &lkg
+		}
+		if syncErr == nil {
+			publicationObservation.Outcome = "sync_succeeded"
+		} else if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) {
+			publicationObservation.Outcome = "assignment_changed"
+		} else if errors.Is(syncErr, platformconsumer.ErrDNSBackendNotSelected) {
+			publicationObservation.Outcome = "backend_not_selected"
+		} else if loaded != nil && loaded.record.Positive && loaded.fallback == "" && publicationObservation.Desired != nil && loaded.record.Candidate.Artifact.ContentHash == publicationObservation.Desired.Digest {
+			publicationObservation.Outcome = "serving_observation_failed"
+		} else if publicationObservation.DesiredKnown {
+			publicationObservation.Outcome = "candidate_rejected"
+			publicationObservation.Rejected = true
+		}
+		s.decisionPublication.Store(publicationObservation)
+	}()
 	fallbackReason := "candidate_rejected"
 	var bridge *dnsReleaseBridge
 	var observations []dnsReadinessFact
@@ -195,11 +224,14 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		return err
 	}
+	candidate := dnsPlatformCandidate{Artifact: artifact, Assignment: a, Release: release}
+	desired := dnsPublication(dnsServingCheckpoint{Candidate: candidate})
+	publicationObservation.Desired, publicationObservation.DesiredKnown = &desired, true
 	parent, err := client.ReleaseSet(ctx, id, a, release)
 	if err != nil {
 		return err
 	}
-	candidate := dnsPlatformCandidate{Artifact: artifact, Assignment: a, Release: release}
+	desired.ParentDigest = parent.ContentHash
 	p, routeID, err := s.verifyDNSServingRelease(parent, candidate)
 	if err != nil {
 		return err

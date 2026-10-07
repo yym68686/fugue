@@ -32,6 +32,7 @@ func (c *CLI) newAdminDNSCommand() *cobra.Command {
 	cmd.AddCommand(c.newAdminDNSAnswerCheckCommand())
 	cmd.AddCommand(c.newAdminDNSDelegationCommand())
 	cmd.AddCommand(c.newAdminDNSFullZoneCommand())
+	cmd.AddCommand(c.newAdminDNSDecisionsCommand())
 	return cmd
 }
 

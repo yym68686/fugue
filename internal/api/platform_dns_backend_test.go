@@ -108,7 +108,7 @@ func (f *dnsBackendFixture) install(t *testing.T, server *Server) {
 				items.Items[0].Endpoints = nil
 			}
 			json.NewEncoder(w).Encode(items)
-		case base + "/pods/" + f.pod.Name + ":8081/proxy/runtime-facts":
+		case base + "/pods/" + f.pod.Name + ":8081/proxy/runtime-facts", base + "/pods/" + f.pod.Name + ":8081/proxy/decisions":
 			if f.proxyHandler == nil {
 				t.Error("unexpected Pod proxy request")
 				w.WriteHeader(500)

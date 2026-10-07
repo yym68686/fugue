@@ -360,6 +360,10 @@ func dnsBackendObservationPort(pod corev1.Pod, svc corev1.Service) (int32, bool)
 }
 
 func readDNSPodSnapshot(ctx context.Context, client *clusterNodeClient, path string, out *dnsfacts.Snapshot) error {
+	return readDNSPodObservation(ctx, client, path, out, 32<<20)
+}
+
+func readDNSPodObservation(ctx context.Context, client *clusterNodeClient, path string, out any, maximum int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, client.baseURL+path, nil)
 	if err != nil {
 		return errDNSRuntimeFacts
@@ -376,8 +380,8 @@ func readDNSPodSnapshot(ctx context.Context, client *clusterNodeClient, path str
 	if resp.StatusCode != http.StatusOK {
 		return errDNSRuntimeFacts
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, (32<<20)+1))
-	if err != nil || len(raw) > 32<<20 {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maximum+1))
+	if err != nil || int64(len(raw)) > maximum {
 		return errDNSRuntimeFacts
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
