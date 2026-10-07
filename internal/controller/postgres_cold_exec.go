@@ -23,6 +23,10 @@ import (
 //go:embed postgres_cold_probe.py
 var coldProbeProgram string
 
+// Numeric ownership is required across images: the same group name can have
+// different GIDs in PostgreSQL's Debian image and the BusyBox receiver.
+const coldTarCommand = `data="$1"; rc=0; pg_ctl -D "$data" status >/dev/null 2>&1 || rc=$?; test "$rc" = 3; tar --numeric-owner -cpf - -C "$(dirname "$data")" "$(basename "$data")"`
+
 type coldFileEvidence struct {
 	SystemID        string              `json:"system_id"`
 	FileDigest      string              `json:"file_digest"`
@@ -104,7 +108,7 @@ func execColdPostgresTar(ctx context.Context, c *kubeClient, ns, pod, dataPath, 
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
 	digest := sha256.New()
 	// PGDATA is passed as an argv value, never interpolated into shell code.
-	command := []string{"sh", "-ec", `data="$1"; rc=0; pg_ctl -D "$data" status >/dev/null 2>&1 || rc=$?; test "$rc" = 3; tar -cpf - -C "$(dirname "$data")" "$(basename "$data")"`, "cold-copy", dataPath}
+	command := []string{"sh", "-ec", coldTarCommand, "cold-copy", dataPath}
 	if err := coldExec(ctx, c, ns, pod, "postgres", command, io.MultiWriter(conn, digest)); err != nil {
 		return "", err
 	}

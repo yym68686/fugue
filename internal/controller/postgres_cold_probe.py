@@ -43,7 +43,7 @@ for root,dirs,files in os.walk(data,followlinks=False):
   encoded=json.dumps(entry,separators=(',',':'),ensure_ascii=True).encode()+b'\n'
   h.update(encoded)
   metadata=[relative,s.st_mode,s.st_uid,s.st_gid,s.st_size if stat.S_ISREG(s.st_mode) else 0,link]
-  metadata_entries.append(metadata)
+  metadata_entries.append(dict(zip(['path','mode','uid','gid','size','link'],metadata)))
   metadata_h.update(json.dumps(metadata,separators=(',',':'),ensure_ascii=True).encode()+b'\n')
   content_h.update(json.dumps([relative,content],separators=(',',':'),ensure_ascii=True).encode()+b'\n')
 with open(os.path.join(data,'global','pg_control'),'rb') as f:control_hash=hashlib.sha256(f.read()).hexdigest()
