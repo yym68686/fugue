@@ -506,6 +506,11 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 			now,
 		)
 		release = entry.Release
+		expectations, err := producedReleaseExpectations(state, artifact, release, guard, now)
+		if err != nil {
+			return err
+		}
+		state.ExpectedConsumerSets = append(state.ExpectedConsumerSets, expectations...)
 		state.PlatformArtifactReleases = supersedePlatformReleases(state.PlatformArtifactReleases, artifact.ArtifactKind, artifact.ScopeKey, channel, release.ID, now)
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 		lane.ActiveReleaseID = release.ID

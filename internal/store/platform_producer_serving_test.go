@@ -196,6 +196,35 @@ func ageProducerPublication(t *testing.T, s *Store, id string, age time.Duration
 }
 
 func TestProducedTrafficLifecycle(t *testing.T) { testProducedTrafficLifecycle(t, "") }
+
+func assertProducedExpectationsPublished(t *testing.T, s *Store, parent model.PlatformArtifact, release model.PlatformArtifactRelease) {
+	t.Helper()
+	kinds, err := platformconfig.ValidateReleaseComposition(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sets, err := s.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID})
+	if err != nil || len(sets) != len(kinds) {
+		t.Fatal("active release exposed incomplete topology", len(sets), len(kinds), err)
+	}
+	seen := map[string]bool{}
+	for _, set := range sets {
+		if seen[set.ArtifactKind] || set.ScopeKey != parent.ScopeKey || set.CreatedAt.Before(release.ReleasedAt.Add(-time.Millisecond)) || !set.ConvergenceDeadline.After(release.ReleasedAt) || platformcontrol.ValidateDeclaredTrafficConsumerSet(parent, set) != nil {
+			t.Fatal("publication expectation identity or observation window differs", set)
+		}
+		seen[set.ArtifactKind] = true
+		observed, err := s.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fact := range observed {
+			if fact.ExpectedConsumerSetID == set.ID {
+				t.Fatal("promotion fabricated evidence for its new expectation")
+			}
+		}
+	}
+}
+
 func TestProducedTrafficLifecyclePostgres(t *testing.T) {
 	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -236,10 +265,29 @@ func testProducedTrafficLifecycle(t *testing.T, dsn string) {
 		t.Fatal(err)
 	}
 	reportProducedPublication(t, s, candidate, shadow, true)
+	if s.db != nil {
+		// Failure to persist even one expectation must roll back the release,
+		// its supersession and lane pointer in the same PostgreSQL transaction.
+		if _, err := s.db.Exec(`CREATE FUNCTION fugue_test_reject_expectation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected expectation failure'; END $$`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`CREATE TRIGGER fugue_test_reject_expectation BEFORE INSERT ON fugue_platform_expected_consumer_sets FOR EACH ROW EXECUTE FUNCTION fugue_test_reject_expectation()`); err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, _, failed := s.ReleaseProducedTrafficArtifact(candidate.ID, f.authority.ID, "gray", baseline.release.ID, full.ID, lkg.ArtifactID, "cohort=test", p)
+		if _, err := s.db.Exec(`DROP TRIGGER fugue_test_reject_expectation ON fugue_platform_expected_consumer_sets; DROP FUNCTION fugue_test_reject_expectation()`); err != nil {
+			t.Fatal(err)
+		}
+		_, unchanged, found, err := s.GetActivePlatformArtifact(candidate.ArtifactKind, candidate.ScopeKey, "gray")
+		if failed == nil || err != nil || !found || unchanged.ID != baseline.release.ID {
+			t.Fatal("failed expectation insert exposed a new release", failed, unchanged, err)
+		}
+	}
 	_, gray, _, _, err := s.ReleaseProducedTrafficArtifact(candidate.ID, f.authority.ID, "gray", baseline.release.ID, full.ID, lkg.ArtifactID, "cohort=test", p)
 	if err != nil {
 		t.Fatal("gray", err)
 	}
+	assertProducedExpectationsPublished(t, s, candidate, gray)
 	if _, _, _, _, err = s.ReleaseProducedTrafficArtifact(candidate.ID, f.authority.ID, "full", full.ID, full.ID, lkg.ArtifactID, "", p); !errors.Is(err, ErrConflict) {
 		t.Fatal("gray age or missing applied facts accepted", err)
 	}
@@ -252,6 +300,7 @@ func testProducedTrafficLifecycle(t *testing.T, dsn string) {
 	if err != nil {
 		t.Fatal("full", err)
 	}
+	assertProducedExpectationsPublished(t, s, candidate, next)
 	request := completePlatformVerificationRequest(next.FencingToken, false)
 	if _, _, _, _, err = s.VerifyProducedTrafficLKG(next.ID, f.authority.ID, lkg.ArtifactID, request, p); !errors.Is(err, ErrConflict) {
 		t.Fatal("old gray facts verified full", err)

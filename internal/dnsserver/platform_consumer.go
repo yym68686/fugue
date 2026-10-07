@@ -76,7 +76,10 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	// A newly enrolled shadow reader has no serving publication by design.
 	// Only the absence of both an assignment and retained state permits this
 	// path; serving failures must still preserve and report the current LKG.
-	initialShadow := errors.Is(servingErr, platformconsumer.ErrNoServingAssignment) && s.platformServing.Load() == nil
+	s.mu.Lock()
+	initialShadow := errors.Is(servingErr, platformconsumer.ErrNoServingAssignment) && s.platformServing.Load() == nil && !s.platformServingRecoveryFailed
+	s.platformServingUnassigned = initialShadow && ctx.Err() == nil
+	s.mu.Unlock()
 	if initialShadow && ctx.Err() == nil {
 		s.mu.Lock()
 		s.platformServingError = ""

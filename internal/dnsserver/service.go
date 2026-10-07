@@ -63,23 +63,25 @@ type edgeDNSLiveHealthFunc func(string, string) bool
 type edgeDNSPeerHealthFunc func(model.EdgeDNSAnswerCandidate) string
 
 type Service struct {
-	decisionAudit           atomic.Pointer[dnsDecisionJournal]
-	decisionPublication     atomic.Pointer[DNSDecisionPublicationState]
-	listenerFailed          atomic.Bool
-	udpListening            atomic.Bool
-	tcpListening            atomic.Bool
-	platformServing         atomic.Pointer[dnsServingState]
-	platformServingBound    atomic.Bool
-	platformServingReported time.Time
-	platformServingError    string
-	platformParent          *Service
-	PlatformTokenFile       string
-	platformConsumerMu      sync.Mutex
-	platformCandidate       PlatformCandidateStatus
-	platformDNSRouteFacts   []dnsReadinessFact // guarded by platformConsumerMu; never persisted
-	Config                  config.DNSConfig
-	HTTPClient              *http.Client
-	Logger                  *log.Logger
+	decisionAudit                 atomic.Pointer[dnsDecisionJournal]
+	decisionPublication           atomic.Pointer[DNSDecisionPublicationState]
+	listenerFailed                atomic.Bool
+	udpListening                  atomic.Bool
+	tcpListening                  atomic.Bool
+	platformServing               atomic.Pointer[dnsServingState]
+	platformServingBound          atomic.Bool
+	platformServingReported       time.Time
+	platformServingError          string
+	platformServingUnassigned     bool
+	platformServingRecoveryFailed bool
+	platformParent                *Service
+	PlatformTokenFile             string
+	platformConsumerMu            sync.Mutex
+	platformCandidate             PlatformCandidateStatus
+	platformDNSRouteFacts         []dnsReadinessFact // guarded by platformConsumerMu; never persisted
+	Config                        config.DNSConfig
+	HTTPClient                    *http.Client
+	Logger                        *log.Logger
 
 	mu          sync.Mutex
 	snapshot    Status
@@ -1111,6 +1113,12 @@ func (s *Service) statusLocked() Status {
 		status.Status = "degraded"
 		status.StaleCache = true
 		if st == nil {
+			if s.platformServingUnassigned && !s.platformServingRecoveryFailed {
+				status.LastError = ""
+				status.StaleCache = false
+				status.PlatformServing = &DNSServingStatus{State: "awaiting_release"}
+				return status
+			}
 			status.LastError = "DNS positive serving checkpoint unavailable"
 			status.PlatformServing = &DNSServingStatus{State: "recovery_failed", LastError: status.LastError}
 			return status

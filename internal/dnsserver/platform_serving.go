@@ -100,7 +100,16 @@ func (s *Service) decodeDNSCheckpoint(raw []byte) (dnsServingCheckpoint, error) 
 	return c, nil
 }
 
-func (s *Service) loadDNSServingCache() (bool, error) {
+var errDNSCheckpointMissing = errors.New("DNS positive serving checkpoint missing")
+
+func (s *Service) loadDNSServingCache() (loaded bool, resultErr error) {
+	defer func() {
+		if loaded {
+			s.mu.Lock()
+			s.platformServingRecoveryFailed = resultErr != nil && !errors.Is(resultErr, errDNSCheckpointMissing)
+			s.mu.Unlock()
+		}
+	}()
 	if s.PlatformTokenFile == "" {
 		return false, nil
 	}
@@ -116,7 +125,7 @@ func (s *Service) loadDNSServingCache() (bool, error) {
 	candidates := []lkgcache.Candidate{{Path: path, Data: raw}}
 	candidates = append(candidates, lkgcache.FallbackCandidates(path)...)
 	if missing && len(candidates) == 1 {
-		return true, errors.New("DNS positive serving checkpoint missing")
+		return true, errDNSCheckpointMissing
 	}
 	for _, item := range candidates {
 		c, e := s.decodeDNSCheckpoint(item.Data)

@@ -38,7 +38,7 @@ func TestDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T) {
 }
 
 func TestBoundDNSDoesNotUseShadowOnServingErrorsOrRetainedState(t *testing.T) {
-	for _, mode := range []string{"unavailable", "unauthorized", "retained"} {
+	for _, mode := range []string{"unavailable", "unauthorized", "retained", "corrupt-checkpoint"} {
 		t.Run(mode, func(t *testing.T) {
 			shadowReads := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +53,7 @@ func TestBoundDNSDoesNotUseShadowOnServingErrorsOrRetainedState(t *testing.T) {
 					if mode == "unauthorized" {
 						code = http.StatusUnauthorized
 					}
-					if mode == "retained" {
+					if mode == "retained" || mode == "corrupt-checkpoint" {
 						code = http.StatusNotFound
 					}
 					w.WriteHeader(code)
@@ -70,6 +70,14 @@ func TestBoundDNSDoesNotUseShadowOnServingErrorsOrRetainedState(t *testing.T) {
 				t.Fatal(err)
 			}
 			s.platformServingBound.Store(true)
+			if mode == "corrupt-checkpoint" {
+				if err := os.WriteFile(s.Config.CachePath+".platform-serving.json", []byte("corrupt"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.LoadCache(); err == nil {
+					t.Fatal("corrupt checkpoint accepted")
+				}
+			}
 			if mode == "retained" {
 				// No route probes are needed for this static retained-state guard.
 				// An unavailable assignment must not enroll a second shadow owner.
@@ -81,6 +89,9 @@ func TestBoundDNSDoesNotUseShadowOnServingErrorsOrRetainedState(t *testing.T) {
 			}
 			if mode == "retained" && (s.platformServing.Load() == nil || !s.platformServing.Load().record.Positive) {
 				t.Fatal("retained state was removed")
+			}
+			if mode == "corrupt-checkpoint" && s.Status().PlatformServing.State != "recovery_failed" {
+				t.Fatal("corrupt checkpoint was disguised as initial enrollment")
 			}
 		})
 	}
@@ -130,13 +141,26 @@ func TestDNSShadowWithoutAssignmentWaitsWithoutServing(t *testing.T) {
 			if err := os.WriteFile(s.PlatformTokenFile, []byte("pod-token"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			if err := s.LoadCache(); err == nil {
+				t.Fatal("fresh enrollment must remain unready without serving state")
+			}
 			s.syncPlatformConsumersOnce(context.Background())
 			want := "failed"
+			if mode == "identity-missing" {
+				want = "" // Identity failure cannot authorize a shadow read.
+			}
 			if mode == "empty" || mode == "other-lane" {
 				want = "awaiting_release"
 			}
 			if s.platformCandidate.State != want || s.platformServing.Load() != nil {
 				t.Fatalf("state=%s want=%s serving=%v", s.platformCandidate.State, want, s.platformServing.Load())
+			}
+			status := s.Status()
+			if mode != "identity-missing" && status.PlatformServing.State != "awaiting_release" {
+				t.Fatal("confirmed absent serving assignment reported as recovery failure", status)
+			}
+			if status.Healthy || !s.platformServingRequired() {
+				t.Fatal("shadow-only enrollment granted serving readiness")
 			}
 		})
 	}

@@ -474,11 +474,20 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		now,
 	)
 	release := entry.Release
+	expectations, err := producedReleaseExpectations(promotionSnapshot, artifact, release, guard, now)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
 	if err := pgSupersedePlatformReleases(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, channel, now); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if _, err := pgInsertPlatformArtifactRelease(ctx, tx, release); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	for _, set := range expectations {
+		if _, err := pgInsertPlatformExpectedConsumerSet(ctx, tx, set); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
 	}
 	message := entry.Message
 	if _, err := pgInsertPlatformReleaseMessage(ctx, tx, message); err != nil {
@@ -1450,14 +1459,6 @@ WHERE artifact_kind = $1 AND scope_key = $2`
 func (s *Store) pgCreatePlatformExpectedConsumerSet(set model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	scopeJSON, err := marshalJSON(set.Scope)
-	if err != nil {
-		return model.PlatformExpectedConsumerSet{}, err
-	}
-	consumersJSON, err := marshalJSON(set.Consumers)
-	if err != nil {
-		return model.PlatformExpectedConsumerSet{}, err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.PlatformExpectedConsumerSet{}, err
@@ -1466,7 +1467,26 @@ func (s *Store) pgCreatePlatformExpectedConsumerSet(set model.PlatformExpectedCo
 	if err := pgLockPromotionScope(ctx, tx, set.ScopeKey, false); err != nil {
 		return model.PlatformExpectedConsumerSet{}, err
 	}
-	out, err := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, `
+	out, err := pgInsertPlatformExpectedConsumerSet(ctx, tx, set)
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	return out, nil
+}
+
+func pgInsertPlatformExpectedConsumerSet(ctx context.Context, db platformStateDB, set model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
+	scopeJSON, err := marshalJSON(set.Scope)
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	consumersJSON, err := marshalJSON(set.Consumers)
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	out, err := scanPlatformExpectedConsumerSet(db.QueryRowContext(ctx, `
 INSERT INTO fugue_platform_expected_consumer_sets (
 	id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
 	expected_generation, topology_revision, revision, requires_consumers,
@@ -1489,9 +1509,6 @@ RETURNING id, release_set_id, artifact_release_id, artifact_kind, scope_key, sco
 	))
 	if err != nil {
 		return model.PlatformExpectedConsumerSet{}, mapDBErr(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return model.PlatformExpectedConsumerSet{}, err
 	}
 	return out, nil
 }

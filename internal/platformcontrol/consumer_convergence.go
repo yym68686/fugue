@@ -251,6 +251,29 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 	}, nil
 }
 
+// RebindExpectedConsumerSet retains prepared membership while opening a new
+// publication's observation window. It transfers no runtime facts or ACKs.
+func RebindExpectedConsumerSet(prior model.PlatformExpectedConsumerSet, releaseID string, revision int64, preparedAt time.Time) (model.PlatformExpectedConsumerSet, error) {
+	if releaseID == "" || releaseID == prior.ArtifactReleaseID || revision <= prior.Revision || prior.CreatedAt.IsZero() || preparedAt.Before(prior.CreatedAt) || prior.HeartbeatDeadline.Before(prior.CreatedAt) || prior.ConvergenceDeadline.Before(prior.HeartbeatDeadline) {
+		return model.PlatformExpectedConsumerSet{}, fmt.Errorf("invalid consumer expectation publication transition")
+	}
+	next := prior
+	next.ArtifactReleaseID, next.Revision = releaseID, revision
+	next.CreatedAt, next.UpdatedAt = preparedAt.UTC(), preparedAt.UTC()
+	idSeed := strings.Join([]string{next.ReleaseSetID, next.ArtifactReleaseID, next.ArtifactKind, next.ScopeKey, next.ExpectedGeneration, next.TopologyRevision, strconv.FormatInt(next.Revision, 10)}, "|")
+	idHash := sha256.Sum256([]byte(idSeed))
+	next.ID = "expectedconsumerset_" + hex.EncodeToString(idHash[:8])
+	shift := preparedAt.Sub(prior.CreatedAt)
+	next.HeartbeatDeadline = prior.HeartbeatDeadline.Add(shift)
+	next.ConvergenceDeadline = prior.ConvergenceDeadline.Add(shift)
+	next.Consumers = append([]model.PlatformExpectedConsumer(nil), prior.Consumers...)
+	for i := range next.Consumers {
+		next.Consumers[i].HeartbeatDeadline = next.Consumers[i].HeartbeatDeadline.Add(shift)
+		next.Consumers[i].ConvergenceDeadline = next.Consumers[i].ConvergenceDeadline.Add(shift)
+	}
+	return next, nil
+}
+
 func EvaluateConsumerConvergence(set model.PlatformExpectedConsumerSet, observed []model.PlatformConsumerInstance, now time.Time, bindings ...*ConsumerReleaseBinding) model.PlatformConsumerConvergenceStatus {
 	set = ProjectExpectedConsumerOwners(set)
 	var binding *ConsumerReleaseBinding
