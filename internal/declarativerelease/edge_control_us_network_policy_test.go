@@ -70,6 +70,20 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 			}
 			copyUS := cloneJSONMap(t, usItems[index])
 			copyContainer := copyUS["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+			var copiedEnv []any
+			memoryBudget := ""
+			for _, raw := range copyContainer["env"].([]any) {
+				env := raw.(map[string]any)
+				if env["name"] == "GOMEMLIMIT" {
+					memoryBudget, _ = env["value"].(string)
+					continue
+				}
+				copiedEnv = append(copiedEnv, raw)
+			}
+			if memoryBudget != "1400MiB" {
+				t.Fatalf("US Go memory budget=%q", memoryBudget)
+			}
+			copyContainer["env"] = copiedEnv
 			copyResources := copyContainer["resources"].(map[string]any)
 			copyResources["limits"].(map[string]any)["cpu"] = sharedResources["limits"].(map[string]any)["cpu"]
 			copyResources["requests"].(map[string]any)["cpu"] = sharedResources["requests"].(map[string]any)["cpu"]
