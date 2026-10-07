@@ -38,7 +38,7 @@ func (c *CLI) moveProjectWithOfflineRecovery(client *Client, project model.Proje
 		result.Services = append(result.Services, service)
 	}
 	for _, app := range apps {
-		if strings.TrimSpace(appEffectiveRuntimeID(app)) == targetRuntimeID {
+		if offlineProjectAppConverged(app, targetRuntimeID) {
 			result.Skipped = append(result.Skipped, projectMoveSkippedApp{App: app, Reason: "already on target runtime"})
 			continue
 		}
@@ -139,11 +139,19 @@ func (c *CLI) moveProjectWithOfflineRecovery(client *Client, project model.Proje
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(appEffectiveRuntimeID(updated)) != targetRuntimeID || updated.Spec.Replicas != app.Spec.Replicas {
+		if !offlineProjectAppConverged(updated, targetRuntimeID) || updated.Spec.Replicas != app.Spec.Replicas {
 			return fmt.Errorf("app %s completed without target runtime or replica-state convergence", app.ID)
 		}
 	}
 	return c.renderProjectMoveResult(result)
+}
+
+func offlineProjectAppConverged(app model.App, target string) bool {
+	// A timed-out Deployment can later become ready without the operation
+	// committing its AppSpec. Runtime facts alone must not skip that commit.
+	return strings.TrimSpace(app.Spec.RuntimeID) == target &&
+		strings.TrimSpace(app.Status.CurrentRuntimeID) == target &&
+		app.Status.CurrentReplicas == app.Spec.Replicas
 }
 
 func offlineProjectMoveVolume(app model.App) (bool, error) {

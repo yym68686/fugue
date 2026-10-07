@@ -414,8 +414,15 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 			s.captureManagedAppRolloutFailureEvidence(waitCtx, app, operationID, namespace, managed, failureMessage)
 			return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
 		}
-		if strings.TrimSpace(message) != "" {
-			lastMessage = strings.TrimSpace(message)
+		if message = strings.TrimSpace(message); message != "" && message != lastMessage {
+			lastMessage = message
+			if s.Store != nil && operationID != "" {
+				if _, err := s.Store.UpdateOperationProgress(operationID, message); err != nil {
+					if s.Logger != nil {
+						s.Logger.Printf("publish rollout progress operation=%s failed: %v", operationID, err)
+					}
+				}
+			}
 		}
 
 		if err := waitForNextSignal(watchTargets); err != nil {
@@ -1143,7 +1150,7 @@ func deploymentRolloutReady(deployment kubeDeployment, found bool, desiredReplic
 	}
 	// Aggregate readyReplicas can belong to the old revision; report the unavailable replacement first.
 	if deployment.Status.UnavailableReplicas > 0 {
-		return false, fmt.Sprintf("waiting for deployment %s unavailable replicas to drain (%d)", deploymentName, deployment.Status.UnavailableReplicas), nil
+		return false, fmt.Sprintf("waiting for deployment %s replacement readiness (updated=%d available=%d total=%d unavailable=%d)", deploymentName, deployment.Status.UpdatedReplicas, deployment.Status.AvailableReplicas, deployment.Status.Replicas, deployment.Status.UnavailableReplicas), nil
 	}
 	if deployment.Status.Replicas > desiredReplicas {
 		return false, fmt.Sprintf("waiting for deployment %s old replicas to terminate (%d total, desired=%d)", deploymentName, deployment.Status.Replicas, desiredReplicas), nil

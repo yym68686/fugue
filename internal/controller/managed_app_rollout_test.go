@@ -890,7 +890,7 @@ func TestDeploymentRolloutReportsUnavailableReplacementBeforeOldReplicaDrain(t *
 	if err != nil || ready {
 		t.Fatalf("replacement must not be considered ready: ready=%t err=%v", ready, err)
 	}
-	if !strings.Contains(message, "unavailable replicas to drain") {
+	if !strings.Contains(message, "replacement readiness") {
 		t.Fatalf("message concealed the unavailable replacement: %q", message)
 	}
 }

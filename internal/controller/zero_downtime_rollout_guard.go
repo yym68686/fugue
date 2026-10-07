@@ -875,7 +875,7 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 		if err != nil {
 			return managedAppRecoveredDeploySnapshot{}, false, fmt.Errorf("read active deploy while recovering pending live release: %w", err)
 		}
-		if candidate.Type != model.OperationTypeDeploy || candidate.Status != model.OperationStatusRunning ||
+		if !managedOperationHasRolloutSnapshot(candidate) || candidate.Status != model.OperationStatusRunning ||
 			candidate.AppID != current.ID || candidate.TenantID != current.TenantID {
 			return managedAppRecoveredDeploySnapshot{}, false, nil
 		}
@@ -903,16 +903,33 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 	var recovered managedAppRecoveredDeploySnapshot
 	var recoveredAt time.Time
 	for _, candidate := range operations {
-		if (active != nil && candidate.ID == active.ID) || candidate.Type != model.OperationTypeDeploy ||
-			candidate.Status != model.OperationStatusFailed || candidate.DesiredSpec == nil ||
-			candidate.CompletedAt == nil || (active != nil && !candidate.CompletedAt.Before(active.CreatedAt)) {
+		if !managedOperationHasRolloutSnapshot(candidate) || candidate.DesiredSpec == nil || candidate.AppID != current.ID || candidate.TenantID != current.TenantID {
 			continue
+		}
+		// A retained migration candidate is resumed or rolled back only by an
+		// explicit operation. Background reconciliation must not erase ongoing
+		// initialization after the migration's observation deadline.
+		if candidate.Type == model.OperationTypeMigrate && active == nil {
+			continue
+		}
+		// Rollback runs before the active operation becomes terminal. Its own
+		// staged snapshot is valid provenance only for the exact pending key;
+		// timestamp, full-spec and ready-LKG checks still apply below/at call site.
+		activePending := active != nil && candidate.ID == active.ID && candidate.Status == model.OperationStatusRunning && pendingKey == liveKey
+		var attemptEndedAt time.Time
+		if activePending {
+			attemptEndedAt = time.Now().UTC()
+		} else {
+			if candidate.Status != model.OperationStatusFailed || candidate.CompletedAt == nil || (active != nil && !candidate.CompletedAt.Before(active.CreatedAt)) {
+				continue
+			}
+			attemptEndedAt = *candidate.CompletedAt
 		}
 		attemptStartedAt := candidate.CreatedAt
 		if candidate.StartedAt != nil {
 			attemptStartedAt = *candidate.StartedAt
 		}
-		if recoveryStartedAt.Before(attemptStartedAt) || recoveryStartedAt.After(*candidate.CompletedAt) {
+		if recoveryStartedAt.Before(attemptStartedAt) || recoveryStartedAt.After(attemptEndedAt) {
 			continue
 		}
 
@@ -932,6 +949,9 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 		}
 		snapshot = s.appWithResolvedLaunchOverride(ctx, snapshot)
 		snapshot.Spec.RolloutIntent = rolloutIntentForManagedOperation(candidate, current, snapshot)
+		if err := s.applyManagedMigrationOnlineRolloutIntent(candidate, current, &snapshot); err != nil {
+			return managedAppRecoveredDeploySnapshot{}, false, err
+		}
 		snapshot = s.Renderer.PrepareApp(snapshot)
 		candidateScheduling := managed.Spec.Scheduling
 		// A failed deploy created by a runtime move is rendered with the
@@ -956,19 +976,23 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 		if candidateKey != liveKey {
 			continue
 		}
-		if recovered.App.ID == "" || candidate.CompletedAt.After(recoveredAt) {
+		if recovered.App.ID == "" || attemptEndedAt.After(recoveredAt) {
 			recovered = managedAppRecoveredDeploySnapshot{
 				App:        snapshot,
 				Operation:  candidate,
 				Scheduling: candidateScheduling,
 			}
-			recoveredAt = *candidate.CompletedAt
+			recoveredAt = attemptEndedAt
 		}
 	}
 	if recovered.App.ID == "" {
 		return managedAppRecoveredDeploySnapshot{}, false, nil
 	}
 	return recovered, true, nil
+}
+
+func managedOperationHasRolloutSnapshot(op model.Operation) bool {
+	return op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate
 }
 
 // managedAppAllowsUnavailableRecovery breaks a deadlock where a terminally

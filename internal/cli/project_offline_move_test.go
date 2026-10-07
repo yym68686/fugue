@@ -143,3 +143,32 @@ func TestOfflineMoveResumesColdEndpointAfterTargetWasPersisted(t *testing.T) {
 		t.Fatalf("skipped incomplete cutover: %v", calls)
 	}
 }
+
+func TestOfflineMoveDoesNotSkipObservedTargetWithUncommittedIntent(t *testing.T) {
+	app := model.App{ID: "app_fixture", Spec: model.AppSpec{RuntimeID: "source", Replicas: 1}, Status: model.AppStatus{CurrentRuntimeID: "target", CurrentReplicas: 1}}
+	preflights := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/apps/app_fixture/migrate" {
+			t.Errorf("unexpected request %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		if body["dry_run"] != true {
+			t.Fatal("dry-run queued a mutation")
+		}
+		preflights++
+		json.NewEncoder(w).Encode(map[string]any{"impact": model.AppMoveImpact{AppID: app.ID, Pass: true}})
+	}))
+	defer server.Close()
+	var out, errs bytes.Buffer
+	c := &CLI{stdout: &out, stderr: &errs, root: rootOptions{JSONOutput: true}}
+	opts := projectMoveCommandOptions{Wait: true, DryRun: true, RecoverOffline: true, StorageClass: "cloneable"}
+	if err := c.moveProjectWithOfflineRecovery(&Client{baseURL: server.URL, httpClient: server.Client()}, model.Project{ID: "project_fixture"}, []model.App{app}, nil, "target", opts); err != nil {
+		t.Fatal(err)
+	}
+	if preflights != 1 {
+		t.Fatal("uncommitted target was skipped", out.String())
+	}
+}
