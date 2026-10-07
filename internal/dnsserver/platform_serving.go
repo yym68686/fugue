@@ -248,7 +248,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		facts = retainDNSFactsForSourceRenewal(old, facts, now)
 	}
 	for i := range facts {
-		if !dnsProofMatchesRelease(facts[i].Proof, parent, candidate, routeID, p) {
+		if !dnsFactMatchesRelease(facts[i], parent, candidate, routeID, p) {
 			facts[i].Ready = false
 			facts[i].Reason = "traffic_release_mismatch"
 		}
@@ -376,8 +376,8 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 	}
 	bridgeAllowed := compatibleDNSReleaseProbes(old, bridge)
 	for i := range facts {
-		if !dnsProofMatchesRelease(facts[i].Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) &&
-			!(bridgeAllowed[facts[i].ProbeID] && facts[i].Ready && dnsProofMatchesRelease(facts[i].Proof, bridge.parent, bridge.candidate, bridge.routeID, bridge.payload)) {
+		if !dnsFactMatchesRelease(facts[i], old.record.Parent, old.record.Candidate, old.routeID, old.payload) &&
+			!(bridgeAllowed[facts[i].ProbeID] && facts[i].Ready && dnsFactMatchesRelease(facts[i], bridge.parent, bridge.candidate, bridge.routeID, bridge.payload)) {
 			facts[i].Ready = false
 			facts[i].Reason = "traffic_release_mismatch"
 		}
@@ -421,8 +421,8 @@ func collectRetainedDNSReadinessFacts(ctx context.Context, old *dnsServingState,
 	facts := make([]dnsReadinessFact, len(old.payload.Plan.Probes))
 	for i, requirement := range old.payload.Plan.Probes {
 		fact, found := byID[requirement.ID]
-		usable := !fact.Ready || dnsProofMatchesRelease(fact.Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) ||
-			bridgeAllowed[requirement.ID] && dnsProofMatchesRelease(fact.Proof, bridge.parent, bridge.candidate, bridge.routeID, bridge.payload)
+		usable := !fact.Ready || dnsFactMatchesRelease(fact, old.record.Parent, old.record.Candidate, old.routeID, old.payload) ||
+			bridgeAllowed[requirement.ID] && dnsFactMatchesRelease(fact, bridge.parent, bridge.candidate, bridge.routeID, bridge.payload)
 		if observedRequirements[requirement.ID] == requirement && found && !duplicates[requirement.ID] && usable {
 			limit := fact.Proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, old.payload.Policy.DNSReadiness)) * time.Second)
 			if limit.Before(fact.Proof.ValidUntil) {

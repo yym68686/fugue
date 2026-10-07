@@ -17,6 +17,7 @@ import (
 type dnsServingPayload struct {
 	routeSources               *dnsroutesource.Context
 	sourceBindings             map[string]*model.TrafficReleaseBinding
+	sourceRequirements         map[string]platformconfig.DNSReadinessProbe
 	PreviousTrafficPublication *platformconfig.PreviousTrafficPublicationInput `json:"previous_traffic_publication,omitempty"`
 	previousBindings           map[string]*model.TrafficReleaseBinding
 	previousCells              map[string]string
@@ -239,4 +240,30 @@ func (p dnsServingPayload) dnsSourceApprovals() []platformconfig.DNSRouteSourceA
 		return nil
 	}
 	return p.CellDNSSource.Intent.DNSRouteSources
+}
+
+// Match the exact requirement, not another record's otherwise valid source.
+func dnsFactMatchesRelease(f dnsReadinessFact, parent model.PlatformArtifact, c dnsPlatformCandidate, routeID string, p dnsServingPayload) bool {
+	if p.routeSources == nil {
+		return dnsProofMatchesRelease(f.Proof, parent, c, routeID, p)
+	}
+	requirement, ok := p.sourceRequirements[f.ProbeID]
+	if !ok {
+		return false
+	}
+	for _, ref := range platformconfig.DNSReadinessProofReferences(requirement, f.Proof.EdgeID, f.Proof.GroupID, f.Proof.Digest) {
+		if b := p.sourceBindings[ref]; b != nil && reflect.DeepEqual(b, f.Proof.TrafficRelease) {
+			return true
+		}
+	}
+	return false
+}
+func (p *dnsServingPayload) indexSourceRequirements() {
+	if p.routeSources == nil {
+		return
+	}
+	p.sourceRequirements = make(map[string]platformconfig.DNSReadinessProbe, len(p.Plan.Probes))
+	for _, r := range p.Plan.Probes {
+		p.sourceRequirements[r.ID] = r
+	}
 }

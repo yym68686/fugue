@@ -30,7 +30,7 @@ func dnsRuntimeFacts(st *dnsServingState, now time.Time) (dnsfacts.Snapshot, err
 	filtered := make([]dnsReadinessFact, 0, len(st.facts))
 	for _, fact := range st.facts {
 		_, fresh := valid[fact.ProbeID]
-		fact.Ready = fresh && now.Before(until) && dnsProofMatchesRelease(fact.Proof, st.record.Parent, st.record.Candidate, st.routeID, st.payload)
+		fact.Ready = fresh && now.Before(until) && dnsFactMatchesRelease(fact, st.record.Parent, st.record.Candidate, st.routeID, st.payload)
 		filtered = append(filtered, fact)
 		// Raw probe errors may contain hostnames or upstream details. The shared
 		// response carries only opaque requirements and their original proof.

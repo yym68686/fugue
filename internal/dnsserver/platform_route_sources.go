@@ -33,6 +33,7 @@ func (s *Service) replayDNSRouteContext(p dnsServingPayload, c dnsPlatformCandid
 		return p, err
 	}
 	p.routeSources, p.sourceBindings = source, plans.Bindings
+	p.indexSourceRequirements()
 	return p, nil
 }
 
@@ -82,6 +83,7 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 		return p, nil, err
 	}
 	p.routeSources, p.sourceBindings = selection, plans.Bindings
+	p.indexSourceRequirements()
 	selected := make([]dnsReadinessFact, 0, len(p.Plan.Probes))
 	for _, requirement := range p.Plan.Probes {
 		selected = append(selected, byID[requirement.ID])

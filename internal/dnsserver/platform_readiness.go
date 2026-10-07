@@ -177,7 +177,7 @@ func retainValidDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy 
 // The unrecognized binding is never admitted. Missing/negative proofs, changed
 // routes or scopes, new candidates and expired original facts cannot use this.
 func retainDNSFactsForSourceRenewal(old *dnsServingState, current []dnsReadinessFact, now time.Time) []dnsReadinessFact {
-	if old == nil || !old.record.Positive || old.payload.Policy.PublicationRole != platformconfig.PublicationRoleCellDNS {
+	if old == nil || old.payload.routeSources != nil || !old.record.Positive || old.payload.Policy.PublicationRole != platformconfig.PublicationRoleCellDNS {
 		return current
 	}
 	previous := validDNSReadinessFacts(old.payload.Plan, old.payload.Policy.DNSReadiness, old.facts, now)
@@ -186,8 +186,8 @@ func retainDNSFactsForSourceRenewal(old *dnsServingState, current []dnsReadiness
 	for i, fact := range retained {
 		original, exists := previous[fact.ProbeID]
 		if _, valid := observed[fact.ProbeID]; !valid || !exists ||
-			!dnsProofMatchesRelease(original.Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) ||
-			dnsProofMatchesRelease(fact.Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) {
+			!dnsFactMatchesRelease(original, old.record.Parent, old.record.Candidate, old.routeID, old.payload) ||
+			dnsFactMatchesRelease(fact, old.record.Parent, old.record.Candidate, old.routeID, old.payload) {
 			continue
 		}
 		before, after := original.Proof, fact.Proof

@@ -173,3 +173,22 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeSourceFactCannotBorrowAnotherRecordsBinding(t *testing.T) {
+	bindingA := &model.TrafficReleaseBinding{ReleaseID: "publication-a", FencingToken: 1}
+	bindingB := &model.TrafficReleaseBinding{ReleaseID: "publication-b", FencingToken: 2}
+	requirement := platformconfig.DNSReadinessProbe{ID: "a", EdgeID: "edge-a", EdgeGroupID: "cell-a", RouteDigest: "digest", CellPublicationDigest: "reference-a"}
+	other := requirement
+	other.ID = "b"
+	other.CellPublicationDigest = "reference-b"
+	payload := dnsServingPayload{routeSources: &dnsroutesource.Context{}, Plan: &platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{requirement, other}}, sourceBindings: map[string]*model.TrafficReleaseBinding{"reference-a": bindingA, "reference-b": bindingB}}
+	payload.indexSourceRequirements()
+	fact := dnsReadinessFact{ProbeID: "a", Proof: routeprobe.Proof{EdgeID: "edge-a", GroupID: "cell-a", Digest: "digest", TrafficRelease: bindingB}}
+	if dnsFactMatchesRelease(fact, model.PlatformArtifact{}, dnsPlatformCandidate{}, "", payload) {
+		t.Fatal("same behavior from another record's publication accepted")
+	}
+	fact.Proof.TrafficRelease = bindingA
+	if !dnsFactMatchesRelease(fact, model.PlatformArtifact{}, dnsPlatformCandidate{}, "", payload) {
+		t.Fatal("exact requirement rejected")
+	}
+}
