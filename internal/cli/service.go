@@ -290,9 +290,14 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 			}
 			service = response.BackingService
 			if response.Operation != nil && opts.Wait {
-				if _, err := c.waitForOperations(client, []model.Operation{*response.Operation}); err != nil {
+				final, err := c.waitForOperations(client, []model.Operation{*response.Operation})
+				if err != nil {
 					return err
 				}
+				if len(final) != 1 {
+					return fmt.Errorf("service operation returned no completed operation")
+				}
+				response.Operation = &final[0]
 				service, err = client.GetBackingService(service.ID)
 				if err != nil {
 					return err
@@ -304,7 +309,7 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 					"already_current": response.AlreadyCurrent,
 				}
 				if response.Operation != nil {
-					payload["operation"] = response.Operation
+					payload["operation"] = redactOperationForOutput(*response.Operation)
 				}
 				return c.writeJSON(payload)
 			}
@@ -376,9 +381,14 @@ func (c *CLI) newServiceLocalizeCommand() *cobra.Command {
 			}
 			service = response.BackingService
 			if response.Operation != nil && opts.Wait {
-				if _, err := c.waitForOperations(client, []model.Operation{*response.Operation}); err != nil {
+				final, err := c.waitForOperations(client, []model.Operation{*response.Operation})
+				if err != nil {
 					return err
 				}
+				if len(final) != 1 {
+					return fmt.Errorf("service operation returned no completed operation")
+				}
+				response.Operation = &final[0]
 				service, err = client.GetBackingService(service.ID)
 				if err != nil {
 					return err
@@ -393,7 +403,7 @@ func (c *CLI) newServiceLocalizeCommand() *cobra.Command {
 					"storage_class":    strings.TrimSpace(opts.StorageClassName),
 				}
 				if response.Operation != nil {
-					payload["operation"] = response.Operation
+					payload["operation"] = redactOperationForOutput(*response.Operation)
 				}
 				return c.writeJSON(payload)
 			}

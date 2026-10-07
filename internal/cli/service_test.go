@@ -5,8 +5,123 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"fugue/internal/model"
 )
+
+func TestServiceMigrationWaitReportsFinalOperation(t *testing.T) {
+	for _, command := range []string{"localize", "move"} {
+		for _, outcome := range []string{"completed", "failed", "no-wait"} {
+			t.Run(command+"/"+outcome, func(t *testing.T) {
+				service := model.BackingService{ID: "svc_fixture", TenantID: "tenant_fixture", Name: "database", Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{RuntimeID: "runtime_target", StorageSize: "4Gi"}}}
+				op := model.Operation{ID: "op_fixture", TenantID: service.TenantID, ServiceID: service.ID, Type: model.OperationTypeDatabaseLocalize, Status: model.OperationStatusPending, DesiredSpec: &model.AppSpec{Env: map[string]string{"SECRET_TOKEN": "sensitive-operation-value"}}}
+				polls, mutations := 0, 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch {
+					case r.URL.Path == "/v1/backing-services":
+						_ = json.NewEncoder(w).Encode(map[string]any{"backing_services": []model.BackingService{service}})
+					case r.URL.Path == "/v1/backing-services/svc_fixture":
+						_ = json.NewEncoder(w).Encode(map[string]any{"backing_service": service})
+					case r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/localize") || strings.HasSuffix(r.URL.Path, "/migrate")):
+						mutations++
+						_ = json.NewEncoder(w).Encode(map[string]any{"backing_service": service, "operation": op})
+					case r.URL.Path == "/v1/operations/op_fixture":
+						polls++
+						op.Status = outcome
+						if outcome == "failed" {
+							op.ErrorMessage = "resize failed"
+						}
+						service.Spec.Postgres.StorageSize = "10Gi"
+						_ = json.NewEncoder(w).Encode(map[string]any{"operation": op})
+					default:
+						t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+						http.NotFound(w, r)
+					}
+				}))
+				defer server.Close()
+				args := []string{"--base-url", server.URL, "--token", "fixture", "--json", "service", command, "database", "--runtime-id", "runtime_target"}
+				if outcome == "no-wait" {
+					args = append(args, "--wait=false")
+				}
+				var stdout, stderr bytes.Buffer
+				err := runWithStreams(args, &stdout, &stderr)
+				if mutations != 1 {
+					t.Fatalf("expected exactly one request, got %d", mutations)
+				}
+				if outcome == "failed" {
+					if err == nil || !strings.Contains(err.Error(), "resize failed") {
+						t.Fatalf("failed operation not propagated: %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				var result struct {
+					Operation      model.Operation      `json:"operation"`
+					BackingService model.BackingService `json:"backing_service"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				wantStatus, wantSize, wantPolls := "completed", "10Gi", 1
+				if outcome == "no-wait" {
+					wantStatus, wantSize, wantPolls = "pending", "4Gi", 0
+				}
+				if result.Operation.Status != wantStatus || result.BackingService.Spec.Postgres.StorageSize != wantSize || polls != wantPolls {
+					t.Fatalf("stale or unwanted wait result: %+v polls=%d", result, polls)
+				}
+				if strings.Contains(stdout.String(), "sensitive-operation-value") {
+					t.Fatal("operation secret leaked")
+				}
+			})
+		}
+	}
+}
+
+func TestAppDatabaseLocalizeWaitReportsFinalOperation(t *testing.T) {
+	app := model.App{ID: "app_fixture", Name: "application", Spec: model.AppSpec{Postgres: &model.AppPostgresSpec{StorageSize: "4Gi"}}}
+	polled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/apps":
+			_ = json.NewEncoder(w).Encode(map[string]any{"apps": []model.App{app}})
+		case "/v1/apps/app_fixture":
+			if polled {
+				app.Spec.Postgres.StorageSize = "10Gi"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": app})
+		case "/v1/apps/app_fixture/database/localize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"operation": model.Operation{ID: "op_fixture", Type: model.OperationTypeDatabaseLocalize, Status: model.OperationStatusPending}})
+		case "/v1/operations/op_fixture":
+			polled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"operation": model.Operation{ID: "op_fixture", Type: model.OperationTypeDatabaseLocalize, Status: model.OperationStatusCompleted}})
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	err := runWithStreams([]string{"--base-url", server.URL, "--token", "fixture", "--json", "app", "db", "localize", "application", "--storage-size", "10Gi"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Operation model.Operation `json:"operation"`
+		App       model.App       `json:"app"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !polled || result.Operation.Status != model.OperationStatusCompleted || result.App.Spec.Postgres.StorageSize != "10Gi" {
+		t.Fatalf("stale localization result: %+v", result)
+	}
+}
 
 func TestRunServiceLocalizeUsesBackingServiceLocalizeEndpoint(t *testing.T) {
 	t.Parallel()

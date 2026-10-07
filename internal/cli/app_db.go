@@ -496,12 +496,17 @@ func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
 			}
 			finalApp := app
 			if opts.Wait {
-				waitedApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+				final, err := c.waitForOperations(client, []model.Operation{response.Operation})
 				if err != nil {
 					return err
 				}
-				if waitedApp != nil {
-					finalApp = *waitedApp
+				if len(final) != 1 {
+					return fmt.Errorf("database localize returned no completed operation")
+				}
+				response.Operation = final[0]
+				finalApp, err = client.GetApp(app.ID)
+				if err != nil {
+					return err
 				}
 			}
 			if c.wantsJSON() {
