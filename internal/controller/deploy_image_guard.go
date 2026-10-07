@@ -851,8 +851,19 @@ func (s *Service) restoreLostDistributedImageFromLocations(image model.Image, lo
 	if strings.TrimSpace(image.LifecycleState) != model.ImageLifecycleLost {
 		return
 	}
-	image.LifecycleState = model.ImageLifecycleAvailable
-	if _, err := s.Store.UpsertImage(image); err != nil && s.Logger != nil {
+	proven := false
+	for _, location := range locations {
+		if location.Status == model.ImageLocationStatusPresent && location.TenantID == image.TenantID &&
+			store.CanonicalImageDigest(location.Digest) == store.CanonicalImageDigest(image.CanonicalDigest) &&
+			s.imageLocationEvidenceFresh(location) {
+			proven = true
+			break
+		}
+	}
+	if !proven {
+		return
+	}
+	if err := s.Store.RestoreLostImageAvailability(image.ID, image.TenantID, image.CanonicalDigest); err != nil && s.Logger != nil {
 		s.Logger.Printf("restore lost distributed image from present location failed image=%s ref=%s: %v", image.ID, image.ImageRef, err)
 	}
 }

@@ -73,7 +73,7 @@ func (s *Service) reconcileImageReplication(ctx context.Context) error {
 			return err
 		}
 		switch strings.TrimSpace(image.LifecycleState) {
-		case "", model.ImageLifecycleAvailable, model.ImageLifecycleImporting:
+		case "", model.ImageLifecycleAvailable, model.ImageLifecycleImporting, model.ImageLifecycleLost:
 		default:
 			continue
 		}
@@ -107,6 +107,11 @@ func (s *Service) ensureImageReplicaPolicyWithEligibility(ctx context.Context, i
 		return err
 	}
 	healthy := healthyImageReplicas(replicas, time.Now().UTC())
+	if len(healthy) > 0 {
+		// Verification can renew replicas after their leases expired. Recover
+		// the image before the satisfied replica-count fast path returns.
+		s.restoreLostDistributedImageFromLocations(image, imageLocationsFromReplicas(image, healthy))
+	}
 	if len(healthy) >= target {
 		return nil
 	}
