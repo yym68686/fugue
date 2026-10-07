@@ -32,7 +32,7 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-bundle-renewal", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
@@ -227,10 +227,34 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				if mode == "bundle-changed" {
 					s.bundle.Version = "changed"
 				}
+				if mode == "valid-bundle-renewal" && tlsCalls == 1 {
+					bundle.Version += "-renewed"
+					installCurrent()
+					raw, _ := json.Marshal(cacheFile{Version: cacheFileVersion, Bundle: bundle})
+					if err := os.WriteFile(cache, raw, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				leaf := &x509.Certificate{Raw: []byte("certificate"), DNSNames: []string{host}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}
 				return &platformTLSCertificate{Leaf: leaf, ValidUntil: leaf.NotAfter}, nil
 			}
 			err = s.syncPlatformServing(context.Background(), probe, tlsProbe)
+			if mode == "valid-bundle-renewal" {
+				if err != nil || len(reports) != 2 || routeCalls != 2 || tlsCalls != 2 {
+					t.Fatal("renewal failed to re-observe without negative or stale reports", err, reports, routeCalls, tlsCalls)
+				}
+				for _, h := range reports {
+					if h.ApplyStatus != "applied" || h.ProbeStatus != "passed" {
+						t.Fatal("renewal reported a false failure", h)
+					}
+				}
+				var receipt platformServingReceipt
+				raw, err := os.ReadFile(cache + ".platform-serving.json")
+				if err != nil || json.Unmarshal(raw, &receipt) != nil || receipt.BundleVersion != bundle.Version {
+					t.Fatal("stale renewed bundle receipt", err)
+				}
+				return
+			}
 			if mode == "tls-parent-race" || mode == "tls-parent-invalid" {
 				wantReads := 2
 				if mode == "tls-parent-race" {
@@ -312,7 +336,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				}
 				wantReports := 0
 				switch mode {
-				case "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied":
+				case "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "bundle-changed":
 					wantReports = 2
 				}
 				if err == nil || len(reports) != wantReports {

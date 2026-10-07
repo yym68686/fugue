@@ -118,7 +118,7 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	servingErr := s.SyncPlatformServingOnce(ctx)
 	bundle, _ := s.Bundle()
 	if servingErr != nil && ctx.Err() == nil {
-		if errors.Is(servingErr, errServingTrafficReleaseMismatch) || errors.Is(servingErr, platformconsumer.ErrAssignmentChanged) {
+		if servingObservationChanged(servingErr) {
 			s.Logger.Printf("edge traffic serving convergence pending: %v", servingErr)
 		} else {
 			s.Logger.Printf("edge traffic serving verification failed: %v", servingErr)

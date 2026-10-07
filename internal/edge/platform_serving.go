@@ -69,6 +69,11 @@ type platformServingEvidence struct {
 }
 
 var errServingTrafficReleaseMismatch = errors.New("serving group bundle belongs to another traffic release")
+var errServingBundleChanged = errors.New("applied serving bundle changed during observation")
+
+func servingObservationChanged(err error) bool {
+	return errors.Is(err, errServingTrafficReleaseMismatch) || errors.Is(err, platformconsumer.ErrAssignmentChanged) || errors.Is(err, errServingBundleChanged)
+}
 
 const platformServingBindingRetryAttempts = 3
 
@@ -83,7 +88,7 @@ func (s *Service) syncPlatformServing(ctx context.Context, routeProbe platformSe
 	var err error
 	for attempt := 0; attempt < platformServingBindingRetryAttempts; attempt++ {
 		err = s.syncPlatformServingOnce(ctx, routeProbe, tlsProbe)
-		if (!errors.Is(err, errServingTrafficReleaseMismatch) && !errors.Is(err, platformconsumer.ErrAssignmentChanged)) || ctx.Err() != nil || attempt == platformServingBindingRetryAttempts-1 {
+		if !servingObservationChanged(err) || ctx.Err() != nil || attempt == platformServingBindingRetryAttempts-1 {
 			return err
 		}
 		delay := time.Duration(attempt+1) * 100 * time.Millisecond
@@ -111,7 +116,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 			if ctx.Err() != nil {
 				return
 			}
-			if errors.Is(result, errServingTrafficReleaseMismatch) || errors.Is(result, platformconsumer.ErrAssignmentChanged) {
+			if servingObservationChanged(result) {
 				s.mu.Lock()
 				s.platformServing.State, s.platformServing.LastError = "awaiting_release", result.Error()
 				s.mu.Unlock()
@@ -221,7 +226,11 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		if result == nil {
 			return
 		}
-		if ctx.Err() != nil || errors.Is(result, errServingTrafficReleaseMismatch) || errors.Is(result, platformconsumer.ErrAssignmentChanged) {
+		if ctx.Err() != nil || servingObservationChanged(result) {
+			return
+		}
+		if current, exists := s.Bundle(); exists && current.Version != bundle.Version {
+			result = errServingBundleChanged
 			return
 		}
 		if reportErr := s.reportPlatformServingFailure(ctx, client, id, bundle, selection, []model.PlatformConsumerAssignment{a, ta}); reportErr != nil {
@@ -450,9 +459,15 @@ func preparePlatformServingProjection(projection model.EdgeRouteIntentSnapshot, 
 
 func (s *Service) validatePlatformServingBundle(expected model.EdgeRouteBundle, projection platformServingProjection) error {
 	bundle, ok := s.Bundle()
+	// A renewed bundle makes this observation obsolete even when the traffic
+	// release is unchanged. Reread and reprobe it; never report the old snapshot
+	// as negative evidence against the new executor state.
+	if ok && bundle.Version != expected.Version {
+		return errServingBundleChanged
+	}
 	status := s.Status()
 	index := s.currentRouteIndex()
-	if !ok || !s.Config.CaddyEnabled || !status.Healthy || status.StaleCache || status.MaxStaleExceeded || bundle.Version != expected.Version || !bundle.ValidUntil.After(time.Now()) || status.CaddyAppliedVersion != bundle.Version || status.CaddyLastError != "" || index == nil || index.publication.Candidate || index.bundleVersion != bundle.Version || !reflect.DeepEqual(bundle.TrafficRelease, projection.bundle.TrafficRelease) {
+	if !ok || !s.Config.CaddyEnabled || !status.Healthy || status.StaleCache || status.MaxStaleExceeded || !bundle.ValidUntil.After(time.Now()) || status.CaddyAppliedVersion != bundle.Version || status.CaddyLastError != "" || index == nil || index.publication.Candidate || index.bundleVersion != bundle.Version || !reflect.DeepEqual(bundle.TrafficRelease, projection.bundle.TrafficRelease) {
 		return errors.New("traffic artifact is not the healthy applied Caddy bundle")
 	}
 	want := projection.bundle
