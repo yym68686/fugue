@@ -5,7 +5,6 @@ import (
 	"errors"
 	"reflect"
 	"sort"
-	"sync"
 	"time"
 
 	"fugue/internal/dnsroutesource"
@@ -62,7 +61,7 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 		union.Probes = append(union.Probes, requirement)
 	}
 	sort.Slice(union.Probes, func(i, j int) bool { return union.Probes[i].ID < union.Probes[j].ID })
-	facts := collectDNSReadinessFacts(ctx, union, p.Policy.DNSReadiness, memoizedDNSRouteProbe(probe))
+	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe)
 	boundDNSRouteSourceFacts(dnsServingPayload{routeSources: &dnsroutesource.Context{Snapshot: snapshot}}, facts, time.Now().UTC())
 	valid := validDNSReadinessFacts(union, p.Policy.DNSReadiness, facts, time.Now().UTC())
 	byID := map[string]dnsReadinessFact{}
@@ -110,37 +109,48 @@ func (s *Service) checkDNSRouteSources(ctx context.Context, client platformconsu
 	return nil
 }
 
-// Different allowed releases often share a physical probe. One observation is
-// reused with its original timestamps; no network fan-out per release occurs.
-func memoizedDNSRouteProbe(probe dnsReadinessProbeFunc) dnsReadinessProbeFunc {
-	type result struct {
-		done  chan struct{}
+// Schedule each physical target once, then evaluate its unchanged observation
+// against every authorized publication. Waiting duplicates must not occupy the
+// bounded network worker pool or starve other targets during the probe window.
+func collectDNSRouteSourceFacts(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc) []dnsReadinessFact {
+	physical := &platformconfig.DNSReadinessPlan{}
+	representatives := map[string]string{}
+	for _, requirement := range plan.Probes {
+		key := dnsroutesource.ProbeKey(requirement)
+		if _, exists := representatives[key]; !exists {
+			representatives[key] = requirement.ID
+			physical.Probes = append(physical.Probes, requirement)
+		}
+	}
+	// Transport results must be retained separately: a proof may mismatch the
+	// representative's digest while satisfying another authorized publication.
+	type observation struct {
 		proof routeprobe.Proof
 		err   error
 	}
-	var mu sync.Mutex
-	cache := map[string]*result{}
-	return func(ctx context.Context, host, path, address, state string, timeout time.Duration) (routeprobe.Proof, error) {
-		key := address + "\x00" + host + "\x00" + path + "\x00" + state
-		mu.Lock()
-		r, exists := cache[key]
-		if !exists {
-			r = &result{done: make(chan struct{})}
-			cache[key] = r
-		}
-		mu.Unlock()
-		if exists {
-			select {
-			case <-ctx.Done():
-				return routeprobe.Proof{}, ctx.Err()
-			case <-r.done:
-				return r.proof, r.err
-			}
-		}
-		r.proof, r.err = probe(ctx, host, path, address, state, timeout)
-		close(r.done)
-		return r.proof, r.err
+	results := make([]observation, len(physical.Probes))
+	indices := map[string]int{}
+	for i, p := range physical.Probes {
+		indices[dnsroutesource.ProbeKey(p)] = i
 	}
+	wrapped := func(ctx context.Context, host, path, address, state string, timeout time.Duration) (routeprobe.Proof, error) {
+		proof, err := probe(ctx, host, path, address, state, timeout)
+		key := address + "\x00" + host + "\x00" + path + "\x00" + state
+		results[indices[key]] = observation{proof, err}
+		return proof, err
+	}
+	physicalFacts := collectDNSReadinessFacts(ctx, physical, policy, wrapped)
+	facts := make([]dnsReadinessFact, 0, len(plan.Probes))
+	for _, requirement := range plan.Probes {
+		i := indices[dnsroutesource.ProbeKey(requirement)]
+		if physicalFacts[i].Reason == "not_observed" {
+			facts = append(facts, dnsReadinessFact{ProbeID: requirement.ID, Reason: "not_observed"})
+			continue
+		}
+		observed := results[i]
+		facts = append(facts, evaluateDNSReadinessFact(requirement, policy, observed.proof, observed.err, time.Now().UTC()))
+	}
+	return facts
 }
 
 func dnsSameSourceContext(a, b *dnsroutesource.Context) bool {

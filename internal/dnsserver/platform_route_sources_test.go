@@ -192,3 +192,51 @@ func TestRuntimeSourceFactCannotBorrowAnotherRecordsBinding(t *testing.T) {
 		t.Fatal("exact requirement rejected")
 	}
 }
+
+func TestDNSRouteSourceVariantsDoNotOccupyNetworkWorkers(t *testing.T) {
+	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 1, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 30, MaxConcurrency: 2, MaxProbes: 4}
+	plan := &platformconfig.DNSReadinessPlan{}
+	for _, host := range []string{"one.example.test", "two.example.test"} {
+		for _, variant := range []string{"old", "current", "future"} {
+			plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{ID: host + variant, Hostname: host, Path: "/", Address: "192.0.2.9", State: "ready", RouteDigest: variant, EdgeID: "edge-a", EdgeGroupID: "cell-a"})
+		}
+	}
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	finished := make(chan []dnsReadinessFact, 1)
+	checked := time.Now().Add(-time.Second)
+	go func() {
+		finished <- collectDNSRouteSourceFacts(context.Background(), plan, policy, func(ctx context.Context, host, path, address, state string, timeout time.Duration) (routeprobe.Proof, error) {
+			started <- host
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return routeprobe.Proof{}, ctx.Err()
+			}
+			return routeprobe.Proof{EdgeID: "edge-a", GroupID: "cell-a", Digest: "current", State: state, Version: "v1", CheckedAt: checked, ValidUntil: checked.Add(10 * time.Second)}, nil
+		})
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(500 * time.Millisecond):
+			close(release)
+			t.Fatal("duplicate variants starved a distinct physical target")
+		}
+	}
+	close(release)
+	facts := <-finished
+	if len(facts) != 6 {
+		t.Fatal("lost source variants", len(facts))
+	}
+	for _, f := range facts {
+		if f.Ready != strings.HasSuffix(f.ProbeID, "current") || !f.Proof.CheckedAt.Equal(checked) {
+			t.Fatal("proof identity, original time, or digest evaluation changed", f)
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("physical probe duplicated")
+	default:
+	}
+}

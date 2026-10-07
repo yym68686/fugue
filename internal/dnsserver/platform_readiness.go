@@ -117,38 +117,42 @@ func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadi
 				}
 				requirement := plan.Probes[i]
 				proof, err := probe(ctx, requirement.Hostname, requirement.Path, requirement.Address, requirement.State, time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
-				fact := dnsReadinessFact{ProbeID: requirement.ID, Proof: proof}
-				now := time.Now().UTC()
-				switch {
-				case errors.Is(err, routeprobe.ErrUnavailable):
-					fact.Reason = "probe_unavailable"
-				case err != nil:
-					fact.Reason = "probe_failed"
-				case proof.Digest != requirement.RouteDigest && (requirement.PreviousAuthority == nil || proof.Digest != requirement.PreviousAuthority.RouteDigest):
-					fact.Reason = "route_digest_mismatch"
-				case !platformconfig.DNSReadinessProofMatches(requirement, proof.EdgeID, proof.GroupID, proof.Digest):
-					fact.Reason = "endpoint_identity_mismatch"
-				case proof.State != requirement.State:
-					fact.Reason = "route_state_mismatch"
-				case proof.Version == "" || proof.CheckedAt.IsZero() || proof.CheckedAt.After(now) || !proof.ValidUntil.After(now):
-					fact.Reason = "proof_not_fresh"
-				default:
-					expiry := proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy)) * time.Second)
-					if expiry.Before(fact.Proof.ValidUntil) {
-						fact.Proof.ValidUntil = expiry
-					}
-					if fact.Proof.ValidUntil.After(now) {
-						fact.Ready = true
-					} else {
-						fact.Reason = "proof_not_fresh"
-					}
-				}
+				fact := evaluateDNSReadinessFact(requirement, policy, proof, err, time.Now().UTC())
 				facts[i] = fact
 			}
 		}()
 	}
 	wg.Wait()
 	return facts
+}
+
+func evaluateDNSReadinessFact(requirement platformconfig.DNSReadinessProbe, policy *platformconfig.DNSReadinessPolicy, proof routeprobe.Proof, err error, now time.Time) dnsReadinessFact {
+	fact := dnsReadinessFact{ProbeID: requirement.ID, Proof: proof}
+	switch {
+	case errors.Is(err, routeprobe.ErrUnavailable):
+		fact.Reason = "probe_unavailable"
+	case err != nil:
+		fact.Reason = "probe_failed"
+	case proof.Digest != requirement.RouteDigest && (requirement.PreviousAuthority == nil || proof.Digest != requirement.PreviousAuthority.RouteDigest):
+		fact.Reason = "route_digest_mismatch"
+	case !platformconfig.DNSReadinessProofMatches(requirement, proof.EdgeID, proof.GroupID, proof.Digest):
+		fact.Reason = "endpoint_identity_mismatch"
+	case proof.State != requirement.State:
+		fact.Reason = "route_state_mismatch"
+	case proof.Version == "" || proof.CheckedAt.IsZero() || proof.CheckedAt.After(now) || !proof.ValidUntil.After(now):
+		fact.Reason = "proof_not_fresh"
+	default:
+		expiry := proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy)) * time.Second)
+		if expiry.Before(fact.Proof.ValidUntil) {
+			fact.Proof.ValidUntil = expiry
+		}
+		if fact.Proof.ValidUntil.After(now) {
+			fact.Ready = true
+		} else {
+			fact.Reason = "proof_not_fresh"
+		}
+	}
+	return fact
 }
 
 // retainValidDNSReadinessFacts carries a still-valid proof across a transient
