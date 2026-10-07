@@ -78,6 +78,9 @@ func TestColdTargetBootstrapNeverTouchesSourceOrServingEndpoint(t *testing.T) {
 	if seed["kind"] != "PersistentVolumeClaim" || seed["name"] != "seed" {
 		t.Fatal(seed)
 	}
+	if group, ok := seed["apiGroup"].(string); !ok || group != "" {
+		t.Fatal("core PVC API group must survive CNPG defaulting as a string", seed)
+	}
 	if spec["imageName"] != pg.Image {
 		t.Fatal("recovery changed PostgreSQL binary")
 	}

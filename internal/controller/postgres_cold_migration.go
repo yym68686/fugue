@@ -462,7 +462,9 @@ func (s *Service) ensureColdTarget(ctx context.Context, c *kubeClient, ns string
 		}
 		spec := normalizeKubeMap(obj["spec"])
 		cred := runtimepkg.ManagedPostgresCredentialSecretName(st.ServiceID, app.ID, pg)
-		spec["bootstrap"] = map[string]any{"recovery": map[string]any{"database": pg.Database, "owner": pg.User, "secret": map[string]string{"name": cred}, "volumeSnapshots": map[string]any{"storage": map[string]string{"kind": "PersistentVolumeClaim", "name": st.SeedName}}}}
+		// Keep the core API group explicit. CNPG's defaulting round trip can
+		// serialize an omitted group as null, which its CRD rejects.
+		spec["bootstrap"] = map[string]any{"recovery": map[string]any{"database": pg.Database, "owner": pg.User, "secret": map[string]string{"name": cred}, "volumeSnapshots": map[string]any{"storage": map[string]string{"apiGroup": "", "kind": "PersistentVolumeClaim", "name": st.SeedName}}}}
 		spec["storage"] = map[string]any{"size": st.TargetSize, "storageClass": st.TargetClass, "resizeInUseVolumes": true}
 		obj["spec"] = spec
 		m := normalizeKubeMap(obj["metadata"])
