@@ -124,6 +124,12 @@ func (s *Service) ensureImageReplicaPolicyWithEligibility(ctx context.Context, i
 			s.restoreLostDistributedImageFromLocations(image, locations)
 			return nil
 		}
+		// A lost generation without verified source evidence cannot be repaired.
+		// Scheduling it here only creates work canceled as obsolete on the next
+		// pass. Keep checking evidence so renewed replicas can restore availability.
+		if strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleLost {
+			return nil
+		}
 		if s.imageStoreStrictDistributedMode() && strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleAvailable {
 			image.LifecycleState = model.ImageLifecycleLost
 			if _, err := s.Store.UpsertImage(image); err != nil && s.Logger != nil {

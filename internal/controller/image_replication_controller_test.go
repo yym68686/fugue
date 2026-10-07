@@ -312,3 +312,72 @@ func TestCancelObsoletePendingNodeImageUpdateTasksCancelsOrphanReplicationLinks(
 		t.Fatalf("expected pending-linked task preserved, got %+v", got)
 	}
 }
+
+func TestLostImageRepairWaitsForVerifiedSource(t *testing.T) {
+	for _, mode := range []string{"distributed", "distributed-with-registry-fallback"} {
+		t.Run(mode, func(t *testing.T) {
+			stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+			if err := stateStore.Init(); err != nil {
+				t.Fatal(err)
+			}
+			_, secret, err := stateStore.CreateScopedNodeKey("", "platform", model.NodeKeyScopePlatformNode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			updater, _, err := stateStore.EnrollNodeUpdater(secret, "worker-target", "https://worker-target.example.com", map[string]string{runtimepkg.AppRuntimeRoleLabelKey: runtimepkg.NodeRoleLabelValue}, "worker-target", "worker-fingerprint", "v1", "join-v1", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypeReplicateAppImage})
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := stateStore.UpsertImage(model.Image{TenantID: "tenant_fixture", AppID: "app_fixture", ImageRef: "registry.example/project:v1", CanonicalDigest: "sha256:" + strings.Repeat("a", 64), LifecycleState: model.ImageLifecycleLost, RequiredReplicaCount: 3})
+			if err != nil {
+				t.Fatal(err)
+			}
+			svc := &Service{Store: stateStore, Config: config.ControllerConfig{ImageStoreMode: mode}}
+			for pass := 0; pass < 3; pass++ {
+				if err := svc.reconcileImageReplication(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tasks, err := stateStore.ListNodeUpdateTasks("", true, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(tasks) != 0 {
+				t.Fatalf("lost image without a source created %d node tasks across reconciliation passes", len(tasks))
+			}
+			replicationTasks, err := stateStore.ListImageReplicationTasks(model.ImageReplicationTaskFilter{ImageID: image.ID, PlatformAdmin: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(replicationTasks) != 0 {
+				t.Fatalf("lost image without a source created %d replication tasks", len(replicationTasks))
+			}
+
+			now := time.Now().UTC()
+			lease := now.Add(time.Hour)
+			source, err := stateStore.UpsertImageReplica(model.ImageReplica{ImageID: image.ID, TenantID: image.TenantID, Digest: image.CanonicalDigest, ClusterNodeName: "worker-source", CacheEndpoint: "http://worker-source:5000", Status: model.ImageReplicaStatusPresent, LastVerifiedAt: &now, LeaseExpiresAt: &lease})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for pass := 0; pass < 3; pass++ {
+				if err := svc.reconcileImageReplication(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			restored, err := stateStore.GetImage(image.ID, "", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restored.LifecycleState != model.ImageLifecycleAvailable {
+				t.Fatalf("verified source did not restore image: %s", restored.LifecycleState)
+			}
+			tasks, err = stateStore.ListNodeUpdateTasks("", true, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(tasks) != 1 || tasks[0].Status != model.NodeUpdateTaskStatusPending || tasks[0].NodeUpdaterID != updater.ID || tasks[0].Payload["source_replica_id"] != source.ID {
+				t.Fatalf("expected one stable pending repair with verified source, got %+v", tasks)
+			}
+		})
+	}
+}
