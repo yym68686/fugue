@@ -205,6 +205,26 @@ func (s *Service) verifyManagedAppMigrationCutover(ctx context.Context, op model
 		if physicalReplicas < desiredReplicas {
 			invariants = append(invariants, "desired_replicas_unready")
 		}
+	} else {
+		// A disabled app must remain disabled across migration. Zero Ready
+		// replicas alone cannot prove this: a starting or terminating pod may
+		// still be a writer while controller status has already reached zero.
+		if managed.Spec.AppSpec.Replicas != 0 || managed.Status.DesiredReplicas != 0 || managed.Status.ReadyReplicas != 0 {
+			invariants = append(invariants, "disabled_managed_app_not_zero")
+		}
+		if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 0 || !managedAppOrphanDeploymentAtZero(deployment, true) {
+			invariants = append(invariants, "disabled_deployment_not_zero")
+		}
+		pods, podsErr := client.listPodsBySelector(readCtx, namespace, managedAppPodLabelSelector(app))
+		if podsErr != nil {
+			return model.AppMigrationLedger{}, fmt.Errorf("verify disabled app has no active pods: %w", podsErr)
+		}
+		for _, pod := range pods {
+			if pod.Metadata.DeletionTimestamp != "" || (pod.Status.Phase != "Succeeded" && pod.Status.Phase != "Failed") {
+				invariants = append(invariants, "disabled_app_has_active_pods")
+				break
+			}
+		}
 	}
 	if managed.Metadata.Generation <= 0 || managed.Status.ObservedGeneration < managed.Metadata.Generation {
 		invariants = append(invariants, "generation_not_observed")
@@ -251,34 +271,47 @@ func (s *Service) verifyManagedAppMigrationCutover(ctx context.Context, op model
 	}
 	objectStatus := model.AppMigrationEvidenceVerified
 	objectResult := "ManagedApp and Deployment exist with current generations observed"
-	if !strings.EqualFold(strings.TrimSpace(managed.Status.Phase), runtime.ManagedAppPhaseReady) {
+	expectedPhase := runtime.ManagedAppPhaseReady
+	if desiredReplicas == 0 {
+		expectedPhase = runtime.ManagedAppPhaseDisabled
+		objectResult = "disabled ManagedApp and Deployment have observed target generations and no active pods"
+	}
+	if !strings.EqualFold(strings.TrimSpace(managed.Status.Phase), expectedPhase) {
 		objectStatus = model.AppMigrationEvidenceMissing
-		objectResult = "ManagedApp is not ready: " + strings.TrimSpace(managed.Status.Phase)
+		objectResult = fmt.Sprintf("ManagedApp phase is %s, expected %s", strings.TrimSpace(managed.Status.Phase), expectedPhase)
 		invariants = append(invariants, "managed_app_unready")
 	}
-	endpointRequired := model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec)
+	hasService := model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec)
+	endpointRequired := hasService && desiredReplicas > 0
 	endpointStatus := model.AppMigrationEvidenceNotApplicable
 	endpointResult := "app has no cluster Service endpoint"
 	var endpointReady *bool
-	if endpointRequired {
+	if hasService {
 		serviceName := runtime.RuntimeAppServiceName(app)
 		servicePresent, serviceErr := client.getService(readCtx, namespace, serviceName)
 		if serviceErr != nil {
 			return model.AppMigrationLedger{}, fmt.Errorf("read target service: %w", serviceErr)
 		}
-		if !servicePresent {
+		if !servicePresent && endpointRequired {
 			endpointStatus = model.AppMigrationEvidenceMissing
 			endpointResult = "target Service is missing"
 			falseValue := false
 			endpointReady = &falseValue
 			invariants = append(invariants, "endpoint_missing")
-		} else {
+		} else if servicePresent {
 			ready, readyErr := migrationEndpointReady(readCtx, client, namespace, serviceName)
 			if readyErr != nil {
 				return model.AppMigrationLedger{}, fmt.Errorf("read target endpoint: %w", readyErr)
 			}
 			endpointReady = &ready
-			if ready {
+			if desiredReplicas == 0 {
+				endpointResult = "disabled app has no ready endpoint addresses"
+				if ready {
+					endpointStatus = model.AppMigrationEvidenceMissing
+					endpointResult = "disabled app still has ready endpoint addresses"
+					invariants = append(invariants, "disabled_app_has_ready_endpoint")
+				}
+			} else if ready {
 				endpointStatus = model.AppMigrationEvidenceReady
 				endpointResult = "target endpoint has ready addresses"
 			} else {

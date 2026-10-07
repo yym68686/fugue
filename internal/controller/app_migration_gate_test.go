@@ -2,16 +2,167 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
+
+func TestDisabledMigrationCutoverRequiresQuiescentTarget(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		violation string
+	}{
+		{name: "disabled"},
+		{name: "completed_pod"},
+		{name: "running_pod", violation: "disabled_app_has_active_pods"},
+		{name: "pending_pod", violation: "disabled_app_has_active_pods"},
+		{name: "terminating_pod", violation: "disabled_app_has_active_pods"},
+		{name: "pod_read_failure", violation: "verify disabled app has no active pods"},
+		{name: "ready_endpoint", violation: "disabled_app_has_ready_endpoint"},
+		{name: "managed_not_disabled", violation: "managed_app_unready"},
+		{name: "managed_not_zero", violation: "disabled_managed_app_not_zero"},
+		{name: "deployment_not_zero", violation: "disabled_deployment_not_zero"},
+		{name: "replicas_not_observed", violation: "disabled_deployment_not_zero"},
+		{name: "wrong_runtime", violation: "managed_app_runtime_mismatch"},
+		{name: "stale_generation", violation: "generation_not_observed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			if err := state.Init(); err != nil {
+				t.Fatal(err)
+			}
+			tenant, err := state.CreateTenant("disabled-migration")
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := state.CreateProject(tenant.ID, "project", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			app, err := state.CreateApp(tenant.ID, project.ID, "disabled", "", model.AppSpec{Image: "registry.example/app:v1", Ports: []int{8080}, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, _, err := state.CreateRuntime(tenant.ID, "target", model.RuntimeTypeExternalOwned, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired := app.Spec
+			desired.Replicas = 0
+			desired.RuntimeID = target.ID
+			op, err := state.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeMigrate, AppID: app.ID, TargetRuntimeID: target.ID, DesiredSpec: &desired})
+			if err != nil {
+				t.Fatal(err)
+			}
+			app.Spec = desired
+			managed := runtime.ManagedAppObject{}
+			managed.Metadata.Generation = 2
+			managed.Spec.AppID = app.ID
+			managed.Spec.AppSpec = desired
+			managed.Status.ObservedGeneration = 2
+			managed.Status.Phase = runtime.ManagedAppPhaseDisabled
+			deployment := kubeDeployment{}
+			zero := 0
+			deployment.Spec.Replicas = &zero
+			deployment.Metadata.Generation = 3
+			deployment.Status.ObservedGeneration = 3
+			pod := kubePod{}
+			pod.Status.Phase = "Succeeded"
+			switch test.name {
+			case "running_pod":
+				pod.Status.Phase = "Running"
+			case "pending_pod":
+				pod.Status.Phase = "Pending"
+			case "terminating_pod":
+				pod.Metadata.DeletionTimestamp = "2026-01-01T00:00:00Z"
+			case "managed_not_disabled":
+				managed.Status.Phase = runtime.ManagedAppPhaseReady
+			case "managed_not_zero":
+				managed.Spec.AppSpec.Replicas = 1
+			case "deployment_not_zero":
+				one := 1
+				deployment.Spec.Replicas = &one
+			case "replicas_not_observed":
+				deployment.Status.Replicas = 1
+			case "wrong_runtime":
+				managed.Spec.AppSpec.RuntimeID = "other"
+			case "stale_generation":
+				managed.Status.ObservedGeneration = 1
+			}
+			namespace := runtime.NamespaceForTenant(app.TenantID)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("cutover verification mutated Kubernetes: %s", r.Method)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/v1/namespaces/kube-system":
+					_, _ = w.Write([]byte(`{"metadata":{"uid":"cluster"}}`))
+				case "/api/v1/namespaces/" + namespace, "/api/v1/namespaces/" + namespace + "/services/" + runtime.RuntimeAppServiceName(app):
+					_, _ = w.Write([]byte(`{}`))
+				case managedAppAPIPath(namespace, runtime.ManagedAppResourceName(app)):
+					_ = json.NewEncoder(w).Encode(managed)
+				case "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + runtime.RuntimeAppResourceName(app):
+					_ = json.NewEncoder(w).Encode(deployment)
+				case "/api/v1/namespaces/" + namespace + "/pods":
+					if test.name == "pod_read_failure" {
+						http.Error(w, "unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					if r.URL.Query().Get("labelSelector") != managedAppPodLabelSelector(app) {
+						t.Error("unscoped pod lookup")
+					}
+					pods := []kubePod{pod}
+					if test.name == "disabled" {
+						pods = nil
+					}
+					_ = json.NewEncoder(w).Encode(kubePodList{Items: pods})
+				case "/apis/discovery.k8s.io/v1/namespaces/" + namespace + "/endpointslices":
+					if test.name == "ready_endpoint" {
+						_, _ = w.Write([]byte(`{"items":[{"endpoints":[{"addresses":["10.0.0.1"],"conditions":{"ready":true}}]}]}`))
+					} else {
+						_, _ = w.Write([]byte(`{"items":[]}`))
+					}
+				default:
+					t.Errorf("unexpected Kubernetes request: %s", r.URL)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			svc := &Service{Store: state, newKubeClient: func(ns string) (*kubeClient, error) {
+				return &kubeClient{client: server.Client(), baseURL: server.URL, namespace: ns}, nil
+			}}
+			ledger, err := svc.verifyManagedAppMigrationCutover(context.Background(), op, app, false)
+			if test.violation != "" {
+				if err == nil || !strings.Contains(err.Error(), test.violation) {
+					t.Fatalf("want %s, got %v", test.violation, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ledger.EndpointRequired || ledger.EndpointStatus != model.AppMigrationEvidenceNotApplicable || ledger.PhysicalReplicas == nil || *ledger.PhysicalReplicas != 0 || !ledger.OldArtifactsProtected {
+				t.Fatalf("unsafe disabled cutover: %+v", ledger)
+			}
+			persisted, found, err := state.LatestAppMigrationLedger(op.ID)
+			if err != nil || !found || persisted.CutoverStatus != model.AppMigrationCutoverVerified {
+				t.Fatalf("cutover proof not persisted: %+v %v", persisted, err)
+			}
+		})
+	}
+}
 
 func migrationImageEvidenceFixture(t *testing.T, strict bool) (*Service, model.App, model.Operation, string) {
 	t.Helper()
