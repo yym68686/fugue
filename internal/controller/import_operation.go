@@ -269,6 +269,15 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	finalSpec.Env = mergeImportEnv(finalSpec.Env, output.ImportResult.SuggestedEnv, composeSuggestion.SourceKind == sourceimport.TopologySourceKindFugue)
 	finalSpec.Command = mergeImportCommand(finalSpec.Command, finalSpec.Args, output.ImportResult.SuggestedStartupCommand)
 	finalSpec.RestartToken = model.NewID("restart")
+	// A shared runtime need not choose an application node before a build. In
+	// that case the builder's successful Pod identifies the local registry that
+	// actually received the image; the deployment placement is not that evidence.
+	if s.imageStoreStrictDistributedMode() && imageDestination.CacheEndpoint == "" && output.ImportResult.BuildJobName != "" {
+		imageDestination, err = s.completedBuilderImageDestination(importCtx, app, op, output.ImportResult)
+		if err != nil {
+			return fmt.Errorf("resolve completed builder image destination: %w", err)
+		}
+	}
 	// Materialize the distributed image identity before publishing any
 	// node-local Present location. A location report may identify a tag, but it
 	// must be enriched from the verified image record rather than creating an

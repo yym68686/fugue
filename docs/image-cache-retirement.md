@@ -19,6 +19,15 @@ Objects without affirmative provenance remain quarantined. Their current
 plans provide a reviewable inventory; age or an absent database row never
 creates a retirement decision.
 
+Shared-runtime builds may choose their node only during builder scheduling.
+When there was no explicit cache destination, import registration reads the
+completed Job's tenant/app/operation labels and its successful Pod's Job UID
+ownership to locate the actual node-local push. Failed or superseded Pods,
+ambiguous nodes, and remote pushes cannot establish a location. The normal
+complete-graph verification still precedes image/replica publication. This
+prevents successful builds from leaving unregistered images merely because
+the application had no fixed deployment node before the build.
+
 Upload expiry is separate from manifest retirement. The image-cache defaults
 to observation; production intent explicitly enables it. Configuration:
 
