@@ -327,11 +327,28 @@ def reconcile(config, apply=False):
         planned.append((command, body, listener, current, witness))
     if apply:
         for command, body, listener, current, witness in planned:
-            if witness is not None and handoff_witness(config, listener, current) != witness:
-                raise ValueError("DNS handoff identity or assignment changed before selector CAS")
+            if witness is not None:
+                revalidate_handoff_witness(config, listener, current, witness)
             kubectl(*command, body=body)
             print("reconciled Service/" + listener["name"], flush=True)
     return len(planned)
+
+
+def revalidate_handoff_witness(config, listener, current, witness):
+    # Planning several listeners may span a publication. Require two complete
+    # matching observations of the latest assignment before this selector CAS;
+    # Pod/node replacement or Service CAS failure is never retried here.
+    identities = {k: witness[k] for k in ["node_uid", "old_uid", "candidate_uid"]}
+    for attempt in range(HANDOFF_ATTEMPTS):
+        fresh = handoff_witness(config, listener, current)
+        if fresh is None or any(fresh.get(k) != v for k, v in identities.items()):
+            raise ValueError("DNS handoff identity changed before selector CAS")
+        if fresh == witness:
+            return
+        witness = fresh
+        if attempt + 1 < HANDOFF_ATTEMPTS:
+            time.sleep(HANDOFF_RETRY_SECONDS)
+    raise ValueError("DNS handoff assignment did not stabilize before selector CAS")
 
 
 if __name__ == "__main__":

@@ -210,7 +210,8 @@ class TransportTests(unittest.TestCase):
             self.fail(args)
         for drift in [False,True]:
             writes.clear()
-            observations=[{'candidate_uid':'first'},{'candidate_uid':'changed' if drift else 'first'}]
+            observations=[{'node_uid':'node','old_uid':'old','candidate_uid':'first'},
+                          {'node_uid':'node','old_uid':'old','candidate_uid':'changed' if drift else 'first'}]
             with patch.object(transport,'kubectl',fake),patch.object(transport,'handoff_witness',side_effect=observations):
                 if drift:
                     with self.assertRaises(ValueError):transport.reconcile(config,apply=True)
@@ -220,6 +221,20 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(len(writes),1)
                     self.assertIn({'op':'test','path':'/metadata/resourceVersion','value':'10'},writes[0])
                     self.assertIn({'op':'add','path':'/spec/selector','value':{'app':'candidate'}},writes[0])
+
+    def test_assignment_refresh_requires_stable_complete_witness_and_same_identity(self):
+        initial = {'node_uid':'node','old_uid':'old','candidate_uid':'candidate','assignment':{'fencing_token':1}}
+        advanced = dict(initial, assignment={'fencing_token':2})
+        with patch.object(transport, 'handoff_witness', side_effect=[advanced, advanced]) as read, patch.object(transport.time, 'sleep'):
+            transport.revalidate_handoff_witness({}, {}, {}, initial)
+            self.assertEqual(read.call_count, 2)
+        changing = [dict(initial, assignment={'fencing_token':i+2}) for i in range(transport.HANDOFF_ATTEMPTS)]
+        with patch.object(transport, 'handoff_witness', side_effect=changing), patch.object(transport.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'did not stabilize'):
+                transport.revalidate_handoff_witness({}, {}, {}, initial)
+        with patch.object(transport, 'handoff_witness', return_value=dict(advanced, old_uid='replacement')):
+            with self.assertRaisesRegex(ValueError, 'identity changed'):
+                transport.revalidate_handoff_witness({}, {}, {}, initial)
 
     def test_runtime_fact_identity_race_is_retried(self):
         config = self.config()
