@@ -21,6 +21,10 @@ HANDOFF_ATTEMPTS = 6
 HANDOFF_RETRY_SECONDS = 5
 
 
+class ObservationUnavailable(RuntimeError):
+    """A read-only Kubernetes observation is temporarily unavailable."""
+
+
 def load_config(path):
     config = json.loads(Path(path).read_text())
     if set(config) != {"apiVersion", "kind", "generation", "namespace", "listeners"}:
@@ -118,6 +122,8 @@ def update_patch(current, desired):
 def kubectl(*args, body=None):
     result = subprocess.run(["kubectl", *args], input=body, capture_output=True, text=True, timeout=45)
     if result.returncode:
+        if args and args[0] == "get" and result.stderr.strip().startswith("Error from server (ServiceUnavailable)"):
+            raise ObservationUnavailable("DNS handoff observation temporarily unavailable")
         raise RuntimeError(result.stderr.strip())
     return result.stdout
 
@@ -238,10 +244,10 @@ def handoff_witness(config, listener, current):
                     "candidate_uid": candidate["pod"]["metadata"]["uid"],
                     "assignment": candidate["snapshot"]["assignment"], "parent_digest": candidate["snapshot"]["parent_digest"],
                     "plan_digest": candidate["snapshot"]["plan_digest"]}
-        except ValueError as error:
+        except (ValueError, ObservationUnavailable) as error:
             last_error = error
             message = str(error)
-            retryable = any(fragment in message for fragment in [
+            retryable = isinstance(error, ObservationUnavailable) or any(fragment in message for fragment in [
                 "exactly one live Ready backend", "runtime snapshot is not ready", "requires unique positive proofs",
                 "different artifact assignments", "different probe membership", "expired or future observations",
                 "proof is expired or from the future",

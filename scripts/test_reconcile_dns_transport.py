@@ -1,6 +1,7 @@
 import copy
 import datetime
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -268,6 +269,37 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(result['candidate_uid'], 'new')
                     self.assertEqual(backend.call_count, 4)
                     sleep.assert_called_once_with(transport.HANDOFF_RETRY_SECONDS)
+
+    def test_only_read_unavailability_is_retryable(self):
+        for command, error, expected in [
+            ('get', 'Error from server (ServiceUnavailable): try again', transport.ObservationUnavailable),
+            ('patch', 'Error from server (ServiceUnavailable): try again', RuntimeError),
+            ('get', 'Error from server (Forbidden): denied', RuntimeError),
+        ]:
+            result = subprocess.CompletedProcess([], 1, stdout='', stderr=error)
+            with patch.object(transport.subprocess, 'run', return_value=result):
+                with self.assertRaises(expected) as caught:
+                    transport.kubectl(command, 'service', 'listener')
+                self.assertIs(type(caught.exception), expected)
+
+    def test_temporarily_unavailable_snapshot_is_read_again(self):
+        config = self.config()
+        current = transport.service(config, config['listeners'][0])
+        listener = copy.deepcopy(config['listeners'][0])
+        listener['selector'] = {'app': 'candidate'}
+        snapshot = self.snapshot()
+        observations = [transport.ObservationUnavailable('temporarily unavailable'),
+                        {'pod': {'metadata': {'uid': 'old'}}, 'snapshot': snapshot},
+                        {'pod': {'metadata': {'uid': 'new'}}, 'snapshot': copy.deepcopy(snapshot)}]
+        nodes = {'items': [{'metadata': {'name': 'node', 'uid': 'node-uid'},
+                           'status': {'addresses': [{'address': listener['address']}]}}]}
+        with patch.object(transport, 'handoff_backend', side_effect=observations) as backend, \
+             patch.object(transport, 'read_json', return_value=nodes), \
+             patch.object(transport, 'validate_handoff_endpoints'), \
+             patch.object(transport.time, 'sleep') as sleep:
+            self.assertEqual(transport.handoff_witness(config, listener, current)['candidate_uid'], 'new')
+            self.assertEqual(backend.call_count, 3)
+            sleep.assert_called_once_with(transport.HANDOFF_RETRY_SECONDS)
 
 
 if __name__ == "__main__":

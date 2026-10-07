@@ -192,12 +192,23 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		}
 	}
 	if !member || !memberKind {
+		// Route and TLS assignments are fetched separately. A publication may
+		// advance between them; only a fresh assignment read may classify that
+		// mismatch as retryable. An unchanged inconsistent parent still fails.
+		if err := client.CheckServingAssignment(ctx, id, a); err != nil {
+			return err
+		}
 		return errors.New("TLS serving artifact is not a ReleaseSet member")
 	}
 	routeCandidate := edgePlatformCandidate{Artifact: artifact, Assignment: a, Release: release, ReleaseSet: &parent, TrafficRelease: b}
 	tlsCandidate := edgePlatformCandidate{Artifact: tlsArtifact, Assignment: ta, Release: tr}
 	payload, err := s.verifyPlatformTLSCandidate(tlsCandidate, routeCandidate)
 	if err != nil {
+		for _, selected := range []model.PlatformConsumerAssignment{a, ta} {
+			if changed := client.CheckServingAssignment(ctx, id, selected); changed != nil {
+				return changed
+			}
+		}
 		return err
 	}
 	policy := payload.Policy.TLSReadiness

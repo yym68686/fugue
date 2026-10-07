@@ -32,7 +32,7 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
@@ -70,6 +70,9 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			}
 			route := sign(compiled.RouteArtifact, "route")
 			tlsArtifact := sign(compiled.TLSArtifact, "tls")
+			if mode == "tls-parent-race" || mode == "tls-parent-invalid" {
+				tlsArtifact = sign(compiled.TLSArtifact, "tls-other")
+			}
 			ids := []string{"route", "dns", "tls"}
 			if mode == "valid-cell-routes" {
 				ids = []string{"route", "tls"}
@@ -127,7 +130,10 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 					json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: items})
 				case "/v1/platform-state/consumers/artifacts/route":
 					json.NewEncoder(w).Encode(map[string]any{"artifact": route, "assignment": ra, "release": release})
-				case "/v1/platform-state/consumers/artifacts/tls":
+				case "/v1/platform-state/consumers/artifacts/tls", "/v1/platform-state/consumers/artifacts/tls-other":
+					if mode == "tls-parent-race" {
+						ra.Revision++
+					}
 					json.NewEncoder(w).Encode(map[string]any{"artifact": tlsArtifact, "assignment": ta, "release": release})
 				case "/v1/platform-state/consumers/artifacts/parent":
 					json.NewEncoder(w).Encode(map[string]any{"artifact": parent, "assignment": ra, "release": release})
@@ -225,6 +231,16 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				return &platformTLSCertificate{Leaf: leaf, ValidUntil: leaf.NotAfter}, nil
 			}
 			err = s.syncPlatformServing(context.Background(), probe, tlsProbe)
+			if mode == "tls-parent-race" || mode == "tls-parent-invalid" {
+				wantReads := 2
+				if mode == "tls-parent-race" {
+					wantReads = 6
+				}
+				if err == nil || errors.Is(err, platformconsumer.ErrAssignmentChanged) != (mode == "tls-parent-race") || identityReads != wantReads || len(reports) != 0 || routeCalls != 0 || tlsCalls != 0 {
+					t.Fatal("sibling mismatch was accepted or retried without assignment change", err, identityReads, reports)
+				}
+				return
+			}
 			if mode == "persistent-binding-mismatch" {
 				if !errors.Is(err, errServingTrafficReleaseMismatch) || identityReads != 3 || len(reports) != 0 || routeCalls != 0 || tlsCalls != 0 {
 					t.Fatal("mismatch was acknowledged or retry was unbounded", err, identityReads, reports)
