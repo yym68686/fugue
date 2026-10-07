@@ -238,6 +238,25 @@ func TestServingProducerProgressesRecoversAndDoesNotRetryFailedSource(t *testing
 	if still.ID != badGray.ID {
 		t.Fatal("same source retried")
 	}
+	_, pendingRecovery := active("full")
+	if pendingRecovery.VerificationState != model.PlatformArtifactVerificationStateServingUnverified {
+		t.Fatal("historical baseline facts verified a new recovery fence")
+	}
+	age(recovered.ID, 61)
+	report(candidate, recovered)
+	// The durable publication cursor survives restart and can finish after the
+	// failed candidate's rollout deadline, but only with the recovery's facts.
+	server = NewServer(state, auth.New(state, ""), nil, config)
+	seedInventory()
+	reconcile()
+	_, verifiedRecovery := active("full")
+	if verifiedRecovery.ID != recovered.ID || verifiedRecovery.VerificationState != model.PlatformArtifactVerificationStateVerified {
+		t.Fatal("recovery publication remained unverified", verifiedRecovery.VerificationState)
+	}
+	lkg, err = state.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
+	if err != nil || lkg == nil || lkg.VerifiedByReleaseID != recovered.ID {
+		t.Fatal("recovery LKG was not bound to the new publication", err)
+	}
 	p.Generation = "producer-three"
 	activate()
 	reconcile()

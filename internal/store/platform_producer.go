@@ -44,6 +44,10 @@ func validateProducerPolicyPublication(a model.PlatformArtifact, channel string)
 	return nil
 }
 
+func producerRecoveryPhase(guard *platformProducerReleaseGuard) bool {
+	return guard.Phase == "rollback" || guard.Phase == "verify-recovery"
+}
+
 func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, keys bundleauth.Keyring, guard *platformProducerReleaseGuard) error {
 	if guard == nil {
 		return nil
@@ -55,7 +59,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 		}
 		req.ReleaseChannel = state.PlatformArtifactReleases[i].ReleaseChannel
 	}
-	if (guard.Phase == "" && req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow) || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || principal.ActorType != model.ActorTypeBootstrap || principal.ActorID != platformproducer.Actor || guard.PolicyReleaseID == "" || (guard.Phase != "rollback" && parent.Metadata[platformproducer.PolicyReleaseMetadata] != guard.PolicyReleaseID) || parent.Metadata[platformproducer.SourceDigestMetadata] == "" || (guard.Phase != "rollback" && (parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass)) {
+	if (guard.Phase == "" && req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow) || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || principal.ActorType != model.ActorTypeBootstrap || principal.ActorID != platformproducer.Actor || guard.PolicyReleaseID == "" || (!producerRecoveryPhase(guard) && parent.Metadata[platformproducer.PolicyReleaseMetadata] != guard.PolicyReleaseID) || parent.Metadata[platformproducer.SourceDigestMetadata] == "" || (guard.Phase != "rollback" && (parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass)) {
 		return ErrConflict
 	}
 	policyScope, err := platformproducer.PolicyScopeForTarget(parent.ScopeKey)
@@ -85,7 +89,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 	}
 	// Recovery authorizes only the separately verified baseline. A broken
 	// candidate or revoked source cannot block undoing its publication.
-	if guard.Phase != "rollback" {
+	if !producerRecoveryPhase(guard) {
 		if policy.InputSource == "business-static-intent" {
 			index := platformArtifactIndex(state.PlatformArtifacts, policy.StaticIntentArtifactID)
 			if index < 0 {
@@ -264,7 +268,7 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 	}
 	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
-	if guard.Phase == "rollback" {
+	if producerRecoveryPhase(guard) {
 		return validateProducerReleaseGuard(state, parent, req, principal, s.platformArtifactSigningKeyring(), guard)
 	}
 	policy, err := platformproducer.Decode(artifact)

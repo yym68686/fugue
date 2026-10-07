@@ -361,6 +361,7 @@ func testProducedTrafficLifecycle(t *testing.T, dsn string) {
 		if _, err := rollback(f.authority.ID); !errors.Is(err, ErrConflict) {
 			t.Fatal("premature automatic rollback", err)
 		}
+		recoveryPreviousAuthority := f.authority
 		if phase == "policy revision" {
 			oldAuthority := f.authority
 			f.policy.Generation = model.NewID("revised-producer")
@@ -411,7 +412,26 @@ func testProducedTrafficLifecycle(t *testing.T, dsn string) {
 		if _, err = rollback(f.authority.ID); !errors.Is(err, ErrConflict) {
 			t.Fatal("stale rollback duplicated mutation", err)
 		}
+		// A recovered full is a new fence. Historical positive facts cannot
+		// verify it, including when the source policy has since been revoked.
+		request := completePlatformVerificationRequest(restored.FencingToken, false)
+		ageProducerPublication(t, s, badGray.ID, 121*time.Second)
+		ageProducerPublication(t, s, badRelease.ID, 120*time.Second)
+		ageProducerPublication(t, s, restored.ID, 61*time.Second)
+		if _, _, _, _, err := s.VerifyProducedTrafficRecoveryLKG(restored.ID, f.authority.ID, positive.ArtifactID, request, p); !errors.Is(err, ErrConflict) {
+			t.Fatal("recovery accepted historical facts", phase, err)
+		}
 		reportProducedPublication(t, s, candidate, restored, true)
+		if recoveryPreviousAuthority.ID != f.authority.ID {
+			if _, _, _, _, err := s.VerifyProducedTrafficRecoveryLKG(restored.ID, recoveryPreviousAuthority.ID, positive.ArtifactID, request, p); !errors.Is(err, ErrConflict) {
+				t.Fatal("recovery accepted superseded policy authority", phase, err)
+			}
+		}
+		_, restored, _, recoveredLKG, err := s.VerifyProducedTrafficRecoveryLKG(restored.ID, f.authority.ID, positive.ArtifactID, request, p)
+		if err != nil || recoveredLKG == nil || restored.VerificationState != "verified" || recoveredLKG.VerifiedByReleaseID != restored.ID || recoveredLKG.ArtifactID != positive.ArtifactID {
+			t.Fatal("recovery did not verify exact positive baseline", phase, err)
+		}
+		positive = recoveredLKG
 		next = restored
 	}
 }

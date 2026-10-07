@@ -63,6 +63,21 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 			if _, err := s.preparePlatformReleaseSetConsumers(ctx, principal, state.fullArtifact, state.full); err != nil {
 				return true, err
 			}
+			if state.full.VerificationState == model.PlatformArtifactVerificationStateServingUnverified {
+				if time.Since(state.full.ReleasedAt) < time.Duration(policy.Serving.FullMinSeconds)*time.Second ||
+					!s.validateReleaseSetConvergence(ctx, state.fullArtifact).Pass {
+					return true, nil
+				}
+				if err := ctx.Err(); err != nil {
+					return true, err
+				}
+				_, _, _, _, err := s.store.VerifyProducedTrafficRecoveryLKG(state.full.ID, authority.ID, state.lkg.ArtifactID,
+					model.PlatformArtifactVerifyLKGRequest{FencingToken: state.full.FencingToken, Reason: "producer recovery verified by fresh actual consumer evidence", Evidence: model.PlatformArtifactVerificationEvidence{ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true, BaselineMonotonic: true, DatabaseRollbackCompatible: true, EvidenceRefs: []string{state.fullArtifact.ID, state.full.ID}}}, principal)
+				if err == nil {
+					s.appendAudit(principal, "platform_config.recovery_verified", "platform_release_set", state.fullArtifact.ID, "", map[string]string{"policy_release_id": authority.ID, "release_id": state.full.ID})
+				}
+				return true, err
+			}
 		}
 		return false, nil
 	}

@@ -18,6 +18,15 @@ func (s *Store) VerifyProducedTrafficLKG(releaseID, policyReleaseID, baselineArt
 	return s.verifyPlatformArtifactReleaseLKG(releaseID, request, principal, &platformProducerReleaseGuard{PolicyReleaseID: policyReleaseID, PreviousReleaseID: releaseID, PreviousFullReleaseID: releaseID, BaselineArtifactID: baselineArtifactID, Phase: "verify"})
 }
 
+// VerifyProducedTrafficRecoveryLKG verifies a new full publication of the exact
+// positive baseline, using new consumer evidence and the current policy fence.
+func (s *Store) VerifyProducedTrafficRecoveryLKG(releaseID, policyReleaseID, baselineArtifactID string, request model.PlatformArtifactVerifyLKGRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+	if request.AllowInitialLKG {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
+	}
+	return s.verifyPlatformArtifactReleaseLKG(releaseID, request, principal, &platformProducerReleaseGuard{PolicyReleaseID: policyReleaseID, PreviousReleaseID: releaseID, PreviousFullReleaseID: releaseID, BaselineArtifactID: baselineArtifactID, Phase: "verify-recovery"})
+}
+
 func (s *Store) RollbackProducedTraffic(id, failedReleaseID, policyReleaseID, previousFullReleaseID, baselineArtifactID string, req model.PlatformArtifactRollbackRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	if req.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || req.SoftOverride || req.ForcePublish || req.KernelBreakGlass != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
@@ -100,6 +109,16 @@ func validateProducerServingPhase(state *model.State, parent model.PlatformArtif
 		if req.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || !owned(full) || full.PinnedRollbackGeneration != lkg.Generation || now.Before(full.ReleasedAt.Add(time.Duration(settings.FullMinSeconds)*time.Second)) {
 			return fail("current full publication and minimum age required")
 		}
+	case "verify-recovery":
+		if req.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || !owned(full) ||
+			parent.ID != lkg.ArtifactID || full.PinnedRollbackGeneration != lkg.Generation ||
+			full.VerificationState != model.PlatformArtifactVerificationStateServingUnverified ||
+			(hasGray && gray.ReleasedAt.After(full.ReleasedAt) && gray.VerificationState != model.PlatformArtifactVerificationStateFailed) ||
+			now.Before(full.ReleasedAt.Add(time.Duration(settings.FullMinSeconds)*time.Second)) {
+			return fail("recovery must verify the current exact positive baseline with no newer serving candidate")
+		}
+		// Recovery can outlast a rollout timeout while its predecessor is
+		// repaired. Actual current-fence consumer proofs remain mandatory.
 	case "rollback":
 		i := platformArtifactReleaseIndex(state.PlatformArtifactReleases, guard.FailedReleaseID)
 		if i < 0 {
