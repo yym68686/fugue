@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -869,4 +871,13 @@ func enrollImageCacheTestUpdater(t *testing.T, server *Server, nodeSecret string
 		t.Fatalf("missing updater token in %q", recorder.Body.String())
 	}
 	return token
+}
+
+func TestImageCacheInventoryAcceptsUploadDiagnosticsFromLegacyForwarder(t *testing.T) {
+	body := `{"cluster_node":"worker","manifest_total_count":0,"chunk_count":1,"chunk_index":0,"manifests":[],"disk":{"enabled":true,"cache_bytes":10},"pins":[],"unreferenced_blobs":[],"upload_temp":{"candidate_bytes":0,"deleted_bytes":0,"total_bytes":42,"state_mismatches":1,"skipped":[{"path":"upload-file","size_bytes":42,"modified_at":"2026-01-01T00:00:00Z","reason":"active_upload"}]}}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/node-updater/image-cache/inventory", strings.NewReader(body))
+	n, _, err := decodeImageCacheInventoryReport(r, model.NodeUpdater{ClusterNodeName: "worker", MachineID: "machine"})
+	if err != nil || !n.SnapshotComplete {
+		t.Fatalf("local upload diagnostics rejected entire inventory: %+v %v", n, err)
+	}
 }

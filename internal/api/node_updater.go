@@ -4840,7 +4840,10 @@ free_bytes = as_int(disk.get("free_bytes"))
 chunk_size = 500
 chunk_count = max(1, (len(normalized) + chunk_size - 1) // chunk_size)
 
-base = copy.deepcopy(inventory)
+# Local diagnostics may evolve independently of the control-plane contract.
+# Only explicit wire fields are forwarded; copying the entire local response
+# made a new upload_temp metric reject every inventory with HTTP 400.
+base = {"disk": disk, "pins": pins}
 base["endpoint"] = (inventory.get("endpoint") or endpoint).rstrip("/")
 base["cluster_node"] = inventory.get("cluster_node") or cluster_node
 base["observed_at"] = observed_at

@@ -25809,17 +25809,137 @@ components:
       type: object
       additionalProperties: false
       properties:
+        upload_temp:
+          $ref: '#/components/schemas/ImageCacheUploadObservation'
+        manifest_total_count: {type: integer, minimum: 0}
+        chunk_index: {type: integer, minimum: 0}
+        chunk_count: {type: integer, minimum: 1}
+        endpoint: {type: string}
+        cluster_node: {type: string}
+        pins:
+          type: array
+          items: {type: object, additionalProperties: true}
+        disk:
+          $ref: '#/components/schemas/ImageCacheInventoryDiskReport'
         node:
           $ref: "#/components/schemas/ImageCacheNodeInventory"
         manifests:
           type: array
           items:
-            $ref: "#/components/schemas/ImageCacheManifest"
+            $ref: "#/components/schemas/ImageCacheManifestReport"
         unreferenced_blobs:
           type: array
           items:
             $ref: "#/components/schemas/ImageCacheInventoryBlobReport"
         observed_at:
+          type: string
+          format: date-time
+    ImageCacheUploadEntry:
+      type: object
+      additionalProperties: false
+      properties:
+        path: {type: string}
+        size_bytes: {type: integer, format: int64}
+        modified_at: {type: string}
+        reason: {type: string}
+    ImageCacheUploadObservation:
+      type: object
+      additionalProperties: false
+      properties:
+        candidates: {type: array, items: {$ref: '#/components/schemas/ImageCacheUploadEntry'}}
+        skipped: {type: array, items: {$ref: '#/components/schemas/ImageCacheUploadEntry'}}
+        deleted: {type: array, items: {$ref: '#/components/schemas/ImageCacheUploadEntry'}}
+        candidate_bytes: {type: integer, format: int64}
+        deleted_bytes: {type: integer, format: int64}
+        total_bytes: {type: integer, format: int64}
+        state_mismatches: {type: integer}
+        error: {type: string}
+    ImageCacheInventoryDiskReport:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled: {type: boolean}
+        over_high_watermark: {type: boolean}
+        below_min_free: {type: boolean}
+        total_bytes: {type: integer, format: int64}
+        used_bytes: {type: integer, format: int64}
+        free_bytes: {type: integer, format: int64}
+        cache_bytes: {type: integer, format: int64}
+        min_free_bytes: {type: integer, format: int64}
+        max_delete_bytes_per_run: {type: integer, format: int64}
+        needed_delete_bytes: {type: integer, format: int64}
+        used_percent: {type: number}
+        high_watermark_percent: {type: number}
+        low_watermark_percent: {type: number}
+    ImageCacheManifestReport:
+      type: object
+      additionalProperties: false
+      required: [repo, target]
+      properties:
+        content_type: {type: string}
+        size_bytes: {type: integer, format: int64}
+        referenced_blob_bytes: {type: integer, format: int64}
+        unique_blob_bytes_observed: {type: integer, format: int64}
+        modified_at: {type: string}
+        id:
+          type: string
+        node_id:
+          type: string
+        cluster_node_name:
+          type: string
+        runtime_id:
+          type: string
+        image_ref:
+          type: string
+        repo:
+          type: string
+        target:
+          type: string
+        digest:
+          type: string
+        media_type:
+          type: string
+        manifest_size_bytes:
+          type: integer
+          format: int64
+        total_blob_bytes:
+          type: integer
+          format: int64
+        referenced_blobs:
+          type: array
+          items:
+            type: string
+        referenced_manifests:
+          type: array
+          description: Child manifest digests referenced by an OCI index or Docker manifest list.
+          items:
+            type: string
+        graph_status:
+          type: string
+          description: >-
+            Whether the node-local manifest graph was completely verified.
+            Legacy reports that omit this field are treated as complete.
+          enum: [complete, incomplete]
+        graph_failure_reason:
+          description: >-
+            Bounded, machine-readable attribution for an incomplete graph.
+            Raw filesystem paths, registry responses, and manifest bodies are
+            never reported through this field.
+          $ref: "#/components/schemas/ImageMeasurementReason"
+        created_at_observed:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        pinned_locally:
+          type: boolean
+        present:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
           type: string
           format: date-time
     ImageCacheInventoryBlobReport:

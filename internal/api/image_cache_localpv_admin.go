@@ -359,7 +359,24 @@ func (s *Server) handleAdminListLocalPVInventory(w http.ResponseWriter, r *http.
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"inventories": inventories})
 }
 
+type imageCacheUploadEntry struct {
+	Path       string `json:"path"`
+	SizeBytes  int64  `json:"size_bytes"`
+	ModifiedAt string `json:"modified_at"`
+	Reason     string `json:"reason"`
+}
+type imageCacheUploadObservation struct {
+	Candidates      []imageCacheUploadEntry `json:"candidates"`
+	Skipped         []imageCacheUploadEntry `json:"skipped"`
+	Deleted         []imageCacheUploadEntry `json:"deleted"`
+	CandidateBytes  int64                   `json:"candidate_bytes"`
+	DeletedBytes    int64                   `json:"deleted_bytes"`
+	TotalBytes      int64                   `json:"total_bytes"`
+	StateMismatches int                     `json:"state_mismatches"`
+	Error           string                  `json:"error"`
+}
 type imageCacheInventoryReport struct {
+	UploadTemp        *imageCacheUploadObservation        `json:"upload_temp"`
 	Node              model.ImageCacheNodeInventory       `json:"node"`
 	Manifests         []imageCacheInventoryManifestReport `json:"manifests"`
 	UnreferencedBlobs []imageCacheInventoryBlobReport     `json:"unreferenced_blobs"`

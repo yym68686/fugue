@@ -971,6 +971,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`image-cache inventory posted ${posted_chunks} chunks, expected ${expected_chunks}`,
 		`raw_unreferenced_blobs = inventory.get("unreferenced_blobs") or []`,
 		`base["unreferenced_blobs"] = unreferenced_blobs`,
+		`base = {"disk": disk, "pins": pins}`,
 		`"unreferenced_blob_count": unreferenced_blob_count`,
 		`"unreferenced_blob_bytes": unreferenced_blob_bytes`,
 		`"planned_delete_bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)`,
