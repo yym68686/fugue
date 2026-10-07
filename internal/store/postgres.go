@@ -671,6 +671,7 @@ var postgresSchemaStatements = []string{
 		lv_names_json JSONB NULL,
 		active_lv_count INTEGER NOT NULL DEFAULT 0,
 		bound_pv_count INTEGER NOT NULL DEFAULT 0,
+		bound_pv_count_known BOOLEAN NOT NULL DEFAULT TRUE,
 		bound_pvc_refs_json JSONB NULL,
 		safe_to_decommission BOOLEAN NOT NULL DEFAULT FALSE,
 		unsafe_reasons_json JSONB NULL,
@@ -679,6 +680,7 @@ var postgresSchemaStatements = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_localpv_inventories ADD COLUMN IF NOT EXISTS bound_pv_count_known BOOLEAN NOT NULL DEFAULT TRUE`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_localpv_inventories_node ON fugue_localpv_inventories (node_id) WHERE node_id <> ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_localpv_inventories_cluster ON fugue_localpv_inventories (cluster_node_name) WHERE node_id = '' AND cluster_node_name <> ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_localpv_inventories_observed ON fugue_localpv_inventories (observed_at DESC)`,

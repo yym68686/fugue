@@ -601,6 +601,7 @@ func (s *Service) writeImageCacheLocalPVMetrics(ctx context.Context, w io.Writer
 		observability.WriteMetricHeader(w, "fugue_localpv_capacity_headroom", "Whether the LocalPV volume group retains its minimum free-space reserve.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_localpv_active_lv_count", "Active LVM LV count reported by each node.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_localpv_bound_pv_count", "Bound Kubernetes PV count reported by each node.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_localpv_bound_pv_count_known", "Whether Kubernetes PV enumeration completed for each node.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_localpv_decommission_eligible", "Whether the latest LVM LocalPV inventory is eligible for explicit decommission.", "gauge")
 		for _, inventory := range inventories {
 			labels := imageCacheMetricNodeLabels(inventory.NodeID, inventory.ClusterNodeName, inventory.RuntimeID)
@@ -622,7 +623,14 @@ func (s *Service) writeImageCacheLocalPVMetrics(ctx context.Context, w io.Writer
 				observability.WriteMetricSample(w, "fugue_localpv_capacity_headroom", labels, boolGauge(fresh && localpvsafety.HasCapacityHeadroom(inventory.PVSizeBytes, inventory.PVFreeBytes)))
 			}
 			observability.WriteMetricSample(w, "fugue_localpv_active_lv_count", labels, float64(inventory.ActiveLVCount))
-			observability.WriteMetricSample(w, "fugue_localpv_bound_pv_count", labels, float64(inventory.BoundPVCount))
+			boundKnown := inventory.BoundPVCount >= 0
+			if inventory.BoundPVCountKnown {
+				boundKnown = true
+			}
+			observability.WriteMetricSample(w, "fugue_localpv_bound_pv_count_known", labels, boolGauge(boundKnown))
+			if boundKnown && inventory.BoundPVCount >= 0 {
+				observability.WriteMetricSample(w, "fugue_localpv_bound_pv_count", labels, float64(inventory.BoundPVCount))
+			}
 			observability.WriteMetricSample(w, "fugue_localpv_decommission_eligible", labels, boolGauge(fresh && inventory.SafeToDecommission))
 		}
 	}

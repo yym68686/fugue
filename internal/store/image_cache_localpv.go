@@ -373,6 +373,14 @@ func normalizeLocalPVInventory(in model.LocalPVInventory) model.LocalPVInventory
 	in.LVNames = normalizeStringList(in.LVNames)
 	in.BoundPVCRefs = normalizeStringList(in.BoundPVCRefs)
 	in.UnsafeReasons = normalizeStringList(in.UnsafeReasons)
+	if in.BoundPVCount < 0 {
+		in.BoundPVCountKnown = false
+	} else if !in.BoundPVCountKnown {
+		// Legacy callers did not have the explicit known bit. A non-negative
+		// count from those callers is a real observation; -1 is the unknown
+		// sentinel emitted when kubectl was unavailable.
+		in.BoundPVCountKnown = true
+	}
 	in.ReportedByNodeUpdaterID = strings.TrimSpace(in.ReportedByNodeUpdaterID)
 	if in.ObservedAt.IsZero() {
 		in.ObservedAt = time.Now().UTC()

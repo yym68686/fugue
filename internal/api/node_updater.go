@@ -5113,6 +5113,7 @@ if node_data:
 pv_raw = run(["kubectl", "get", "pv", "-o", "json"])
 pv_data = load_json(pv_raw)
 pvc_data = load_json(run(["kubectl", "get", "pvc", "-A", "-o", "json"]))
+bound_pv_count_known = pv_data is not None
 if pv_data is None:
     unsafe.append("kubectl_pv_unavailable")
 else:
@@ -5209,7 +5210,11 @@ inventory = {
     "lv_count": len(lv_names),
     "lv_names": sorted(lv_names),
     "active_lv_count": active_lv_count,
-    "bound_pv_count": len(bound_pvc_refs),
+    # A failed Kubernetes read must remain unknown.  Reporting an empty list
+    # as zero made a failed control-plane connection look like a safe
+    # decommission precondition.
+    "bound_pv_count": len(bound_pvc_refs) if bound_pv_count_known else -1,
+    "bound_pv_count_known": bound_pv_count_known,
     "bound_pvc_refs": sorted(set(bound_pvc_refs)),
     "safe_to_decommission": not unsafe,
     "unsafe_reasons": unsafe,
@@ -5262,7 +5267,12 @@ unsafe = list(inventory.get("unsafe_reasons") or [])
 
 if int(inventory.get("lv_count") or 0) != 0:
     unsafe.append("active_lvs_present")
-if int(inventory.get("bound_pv_count") or 0) != 0:
+bound_count_known = inventory.get("bound_pv_count_known")
+if bound_count_known is None:
+    bound_count_known = int(inventory.get("bound_pv_count") or 0) >= 0
+if bound_count_known is not True:
+    unsafe.append("bound_pv_count_unknown")
+elif int(inventory.get("bound_pv_count") or 0) != 0:
     unsafe.append("bound_pvs_present")
 if not inventory.get("image_path"):
     unsafe.append("image_path_missing")
@@ -5288,7 +5298,9 @@ if not dry_run:
             unsafe.append("expected_image_size_mismatch")
         if expected_lv != int(inventory.get("lv_count") or 0):
             unsafe.append("expected_lv_count_mismatch")
-        if expected_bound != int(inventory.get("bound_pv_count") or 0):
+        if bound_count_known is not True:
+            unsafe.append("bound_pv_count_unknown")
+        elif expected_bound != int(inventory.get("bound_pv_count") or 0):
             unsafe.append("expected_bound_pv_count_mismatch")
 
 unsafe = sorted(set(reason for reason in unsafe if reason))

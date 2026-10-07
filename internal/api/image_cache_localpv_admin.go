@@ -79,6 +79,14 @@ func (s *Server) handleNodeUpdaterReportLocalPVInventory(w http.ResponseWriter, 
 		return
 	}
 	inventory := req.Inventory
+	// Older node updaters did not send the explicit known bit. A non-negative
+	// count from those agents remains a valid observation; the new -1 sentinel
+	// is reserved for an unavailable Kubernetes read.
+	if inventory.BoundPVCount < 0 {
+		inventory.BoundPVCountKnown = false
+	} else if !inventory.BoundPVCountKnown {
+		inventory.BoundPVCountKnown = true
+	}
 	inventory.ReportedByNodeUpdaterID = updater.ID
 	inventory.NodeID = firstNonEmptyImageAPIString(inventory.NodeID, updater.MachineID)
 	inventory.ClusterNodeName = firstNonEmptyImageAPIString(inventory.ClusterNodeName, updater.ClusterNodeName)
@@ -100,6 +108,7 @@ func (s *Server) handleNodeUpdaterReportLocalPVInventory(w http.ResponseWriter, 
 		"lv_count":             fmt.Sprintf("%d", inventory.LVCount),
 		"active_lv_count":      fmt.Sprintf("%d", inventory.ActiveLVCount),
 		"bound_pv_count":       fmt.Sprintf("%d", inventory.BoundPVCount),
+		"bound_pv_count_known": fmt.Sprintf("%t", inventory.BoundPVCountKnown || inventory.BoundPVCount >= 0),
 		"safe_to_decommission": fmt.Sprintf("%t", inventory.SafeToDecommission),
 	})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"inventory": inventory})
@@ -640,6 +649,7 @@ type imageCacheProtectedSet struct {
 	pinnedRefs           map[string]struct{}
 	liveRefs             map[string]struct{}
 	taskRefs             map[string]struct{}
+	migrationRefs        map[string]struct{}
 	minReplicaRefs       map[string]struct{}
 	imageIDsByRef        map[string][]string
 	pinIDsByRef          map[string][]string
@@ -674,6 +684,7 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 	protected.pinnedRefs = map[string]struct{}{}
 	protected.liveRefs = map[string]struct{}{}
 	protected.taskRefs = map[string]struct{}{}
+	protected.migrationRefs = map[string]struct{}{}
 	protected.minReplicaRefs = map[string]struct{}{}
 	protected.imageIDsByRef = map[string][]string{}
 	protected.pinIDsByRef = map[string][]string{}
@@ -719,6 +730,34 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 			addKeys(protected.lostRefs, keys...)
 		case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted:
 			addKeys(protected.deletedRefs, keys...)
+		}
+	}
+	latestMigrationByApp, err := s.store.LatestAppMigrationLedgersByApp()
+	if err != nil {
+		return err
+	}
+	for _, image := range images {
+		ledger, pending := latestMigrationByApp[strings.TrimSpace(image.AppID)]
+		if !pending || ledger.CutoverStatus == model.AppMigrationCutoverVerified || ledger.CutoverStatus == model.AppMigrationCutoverCompleted {
+			continue
+		}
+		keys := exactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		addKeys(protected.migrationRefs, keys...)
+		addImageCacheDetail(protected.imageIDsByRef, keys, image.ID)
+		if digest := managedImageDigest(image.CanonicalDigest); digest != "" {
+			protected.protectedBlobDigests[digest] = struct{}{}
+		}
+	}
+	for _, ledger := range latestMigrationByApp {
+		if ledger.CutoverStatus == model.AppMigrationCutoverVerified || ledger.CutoverStatus == model.AppMigrationCutoverCompleted {
+			continue
+		}
+		if imageRef := strings.TrimSpace(ledger.ImageRef); imageRef != "" {
+			keys := exactImageReferenceKeys(imageRef, "")
+			addKeys(protected.migrationRefs, keys...)
+			if digest := managedImageDigest(imageRef); digest != "" {
+				protected.protectedBlobDigests[digest] = struct{}{}
+			}
 		}
 	}
 	pins, err := s.store.ListImagePins(model.ImagePinFilter{PlatformAdmin: true})
@@ -961,6 +1000,13 @@ func imageCachePruneCandidateForManifest(manifest model.ImageCacheManifest, prot
 		out.SkipDetails = []string{"exact image generation is used by a live workload"}
 		return out
 	}
+	if keySetContainsAny(protected.migrationRefs, keys...) {
+		out.Protected = true
+		out.SkipReason = "migration_cutover_pending"
+		out.MatchedImageIDs = imageCacheDetailsForKeys(protected.imageIDsByRef, keys)
+		out.SkipDetails = []string{"migration cutover evidence is not verified; old image artifacts remain protected"}
+		return out
+	}
 	if keySetContainsAny(protected.pinnedRefs, keys...) {
 		out.Protected = true
 		out.SkipReason = "active_pin"
@@ -1189,7 +1235,9 @@ func evaluateLocalPVDecommissionSafety(in model.LocalPVInventory) (bool, []strin
 	if in.ActiveLVCount != 0 {
 		reasons = append(reasons, "active_lvs_present")
 	}
-	if in.BoundPVCount != 0 {
+	if in.BoundPVCount < 0 {
+		reasons = append(reasons, "bound_pv_count_unknown")
+	} else if in.BoundPVCount != 0 {
 		reasons = append(reasons, "bound_pvs_present")
 	}
 	if strings.TrimSpace(in.ImagePath) == "" {

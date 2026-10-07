@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/imagecachekeys"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -235,6 +236,13 @@ func (s *Service) scheduleDistributedImagePruneAfterMigrationGate(ctx context.Co
 		if !supported {
 			continue
 		}
+		tooYoung, err := s.distributedImagePruneTargetTooYoung(image, updater)
+		if err != nil {
+			return err
+		}
+		if tooYoung {
+			continue
+		}
 		dryRun := "true"
 		allowDelete := "false"
 		if s.Config.ImageStorePruneEnabled {
@@ -263,6 +271,55 @@ func (s *Service) scheduleDistributedImagePruneAfterMigrationGate(ctx context.Co
 		}
 	}
 	return nil
+}
+
+func (s *Service) distributedImagePruneTargetTooYoung(image model.Image, updater model.NodeUpdater) (bool, error) {
+	if s == nil || s.Store == nil {
+		return false, nil
+	}
+	gracePeriod := s.Config.ImageStoreOrphanPruneGracePeriod
+	if gracePeriod <= 0 {
+		gracePeriod = 24 * time.Hour
+	}
+	manifests, err := s.Store.ListImageCacheManifests(model.ImageCacheManifestFilter{
+		NodeID:            updater.MachineID,
+		ClusterNodeName:   updater.ClusterNodeName,
+		RuntimeID:         updater.RuntimeID,
+		PresentOnly:       true,
+		IncludeIncomplete: true,
+	})
+	if err != nil {
+		return false, err
+	}
+	imageKeys := imagecachekeys.ExactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+	now := time.Now().UTC()
+	for _, manifest := range manifests {
+		manifestKeys := imagecachekeys.ExactManifestReferenceKeys(manifest.Repo, manifest.Target, manifest.Digest, manifest.ImageRef)
+		if !keysIntersect(imageKeys, manifestKeys) {
+			continue
+		}
+		ageBase := manifest.LastSeenAt
+		if manifest.CreatedAtObserved != nil {
+			ageBase = manifest.CreatedAtObserved.UTC()
+		}
+		if !ageBase.IsZero() && now.Sub(ageBase) < gracePeriod {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func keysIntersect(left, right []string) bool {
+	set := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		set[value] = struct{}{}
+	}
+	for _, value := range right {
+		if _, ok := set[value]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func distributedImageReplicaTargetKey(nodeID, runtimeID, clusterNodeName string) string {

@@ -45,6 +45,7 @@ const (
 	defaultImageCacheLowWatermarkPercent  = 45
 	defaultImageCacheMinFreeBytes         = int64(50 * 1024 * 1024 * 1024)
 	defaultImageCacheMaxDeleteBytesPerRun = int64(10 * 1024 * 1024 * 1024)
+	defaultImageCacheUploadTTL            = 24 * time.Hour
 	imageCacheUploadDirName               = "_uploads"
 )
 
@@ -75,6 +76,7 @@ type imageCache struct {
 	replicationChunkSize int64
 	directReplication    bool
 	diskLimit            imageCacheDiskLimit
+	uploadTTL            time.Duration
 	hydrateMu            sync.Mutex
 	hydrateCalls         map[string]*hydrateCall
 	sourceMu             sync.RWMutex
@@ -203,6 +205,7 @@ func main() {
 		replicationChunkSize: envBytes("FUGUE_IMAGE_CACHE_REPLICATION_CHUNK_SIZE", 64*1024*1024),
 		directReplication:    envBool("FUGUE_IMAGE_CACHE_DIRECT_REPLICATION", false),
 		sourceTTL:            envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
+		uploadTTL:            envDuration("FUGUE_IMAGE_CACHE_UPLOAD_TTL", defaultImageCacheUploadTTL),
 		diskLimit: imageCacheDiskLimit{
 			Enabled:              envBool("FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED", true),
 			HighWatermarkPercent: envFloat("FUGUE_IMAGE_CACHE_HIGH_WATERMARK_PERCENT", defaultImageCacheHighWatermarkPercent),
@@ -220,7 +223,7 @@ func main() {
 	if err := cache.loadPersistedManifests(); err != nil {
 		log.Printf("load persisted image cache manifests failed: %v", err)
 	}
-	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s hydrate_concurrency=%d proxy_concurrency=%d copy_jobs=%d disk_limit_enabled=%t high_watermark=%.2f low_watermark=%.2f min_free_bytes=%d max_delete_bytes_per_run=%d", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase, cap(cache.hydrateSlots), cap(cache.proxySlots), cache.copyJobs, cache.diskLimit.Enabled, cache.diskLimit.HighWatermarkPercent, cache.diskLimit.LowWatermarkPercent, cache.diskLimit.MinFreeBytes, cache.diskLimit.MaxDeleteBytesPerRun)
+	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s hydrate_concurrency=%d proxy_concurrency=%d copy_jobs=%d upload_ttl=%s disk_limit_enabled=%t high_watermark=%.2f low_watermark=%.2f min_free_bytes=%d max_delete_bytes_per_run=%d", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase, cap(cache.hydrateSlots), cap(cache.proxySlots), cache.copyJobs, cache.uploadTTL, cache.diskLimit.Enabled, cache.diskLimit.HighWatermarkPercent, cache.diskLimit.LowWatermarkPercent, cache.diskLimit.MinFreeBytes, cache.diskLimit.MaxDeleteBytesPerRun)
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           cache,
@@ -412,6 +415,7 @@ func (c *imageCache) handleManagementInventory(w http.ResponseWriter, _ *http.Re
 		"unreferenced_blobs": unreferenced,
 		"pins":               pins.Pins,
 		"disk":               disk,
+		"upload_temp":        c.inspectBlobUploads(time.Now().UTC()),
 	})
 }
 
@@ -735,6 +739,12 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !dryRun && req.AllowDelete {
+		uploadCleanup, cleanupErr := c.cleanupStaleBlobUploads(time.Now().UTC())
+		if cleanupErr != nil {
+			http.Error(w, cleanupErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		plan.UploadCleanup = uploadCleanup
 		if err := c.executeImageCachePrunePlan(&plan); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -758,6 +768,7 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		"needed_delete_bytes":  plan.NeededDeleteBytes,
 		"budget_exhausted":     plan.BudgetExhausted,
 		"skipped_reason":       plan.SkippedReason,
+		"upload_cleanup":       plan.UploadCleanup,
 		"disk":                 plan.Disk,
 		"target_repo":          repo,
 		"target":               target,
@@ -798,9 +809,25 @@ type imageCachePrunePlan struct {
 	DeletedManifests   []imageCacheManifestEntry `json:"deleted_manifests"`
 	DeletedBlobs       []imageCacheBlobEntry     `json:"deleted_blobs"`
 	SkippedReason      string                    `json:"skipped_reason,omitempty"`
+	UploadCleanup      imageCacheUploadCleanup   `json:"upload_cleanup,omitempty"`
 
 	deleteManifests []imageCacheManifestRecord
 	deleteBlobs     []imageCacheBlobRecord
+}
+
+type imageCacheUploadEntry struct {
+	Path       string `json:"path"`
+	SizeBytes  int64  `json:"size_bytes"`
+	ModifiedAt string `json:"modified_at,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+type imageCacheUploadCleanup struct {
+	Candidates     []imageCacheUploadEntry `json:"candidates,omitempty"`
+	Skipped        []imageCacheUploadEntry `json:"skipped,omitempty"`
+	Deleted        []imageCacheUploadEntry `json:"deleted,omitempty"`
+	CandidateBytes int64                   `json:"candidate_bytes"`
+	DeletedBytes   int64                   `json:"deleted_bytes"`
 }
 
 type imageCacheDiskStats struct {

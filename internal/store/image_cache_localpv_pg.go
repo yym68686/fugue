@@ -25,7 +25,7 @@ func imageCachePrunePlanColumns() string {
 }
 
 func localPVInventoryColumns() string {
-	return `id, node_id, cluster_node_name, runtime_id, node_roles_json, vg_name, image_path, image_size_bytes, loop_device, loop_backing_file, pv_size_bytes, pv_free_bytes, lv_count, lv_names_json, active_lv_count, bound_pv_count, bound_pvc_refs_json, safe_to_decommission, unsafe_reasons_json, observed_at, reported_by_node_updater_id, created_at, updated_at`
+	return `id, node_id, cluster_node_name, runtime_id, node_roles_json, vg_name, image_path, image_size_bytes, loop_device, loop_backing_file, pv_size_bytes, pv_free_bytes, lv_count, lv_names_json, active_lv_count, bound_pv_count, bound_pv_count_known, bound_pvc_refs_json, safe_to_decommission, unsafe_reasons_json, observed_at, reported_by_node_updater_id, created_at, updated_at`
 }
 
 func (s *Store) pgUpsertImageCacheInventory(node model.ImageCacheNodeInventory, manifests []model.ImageCacheManifest) (model.ImageCacheNodeInventory, error) {
@@ -500,16 +500,16 @@ INSERT INTO fugue_localpv_inventories (
 	id, node_id, cluster_node_name, runtime_id, node_roles_json, vg_name,
 	image_path, image_size_bytes, loop_device, loop_backing_file,
 	pv_size_bytes, pv_free_bytes, lv_count, lv_names_json, active_lv_count,
-	bound_pv_count, bound_pvc_refs_json, safe_to_decommission,
+	bound_pv_count, bound_pv_count_known, bound_pvc_refs_json, safe_to_decommission,
 	unsafe_reasons_json, observed_at, reported_by_node_updater_id,
 	created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6,
 	$7, $8, $9, $10,
 	$11, $12, $13, $14, $15,
-	$16, $17, $18,
-	$19, $20, $21,
-	$22, $23
+	$16, $17, $18, $19,
+	$20, $21, $22,
+	$23, $24
 )
 ON CONFLICT (id) DO UPDATE SET
 	node_id = EXCLUDED.node_id,
@@ -527,13 +527,14 @@ ON CONFLICT (id) DO UPDATE SET
 	lv_names_json = EXCLUDED.lv_names_json,
 	active_lv_count = EXCLUDED.active_lv_count,
 	bound_pv_count = EXCLUDED.bound_pv_count,
+	bound_pv_count_known = EXCLUDED.bound_pv_count_known,
 	bound_pvc_refs_json = EXCLUDED.bound_pvc_refs_json,
 	safe_to_decommission = EXCLUDED.safe_to_decommission,
 	unsafe_reasons_json = EXCLUDED.unsafe_reasons_json,
 	observed_at = EXCLUDED.observed_at,
 	reported_by_node_updater_id = EXCLUDED.reported_by_node_updater_id,
 	updated_at = EXCLUDED.updated_at
-RETURNING `+localPVInventoryColumns(), in.ID, in.NodeID, in.ClusterNodeName, in.RuntimeID, nodeRolesJSON, in.VGName, in.ImagePath, in.ImageSizeBytes, in.LoopDevice, in.LoopBackingFile, in.PVSizeBytes, in.PVFreeBytes, in.LVCount, lvNamesJSON, in.ActiveLVCount, in.BoundPVCount, boundPVCJSON, in.SafeToDecommission, unsafeJSON, in.ObservedAt, in.ReportedByNodeUpdaterID, in.CreatedAt, in.UpdatedAt))
+	RETURNING `+localPVInventoryColumns(), in.ID, in.NodeID, in.ClusterNodeName, in.RuntimeID, nodeRolesJSON, in.VGName, in.ImagePath, in.ImageSizeBytes, in.LoopDevice, in.LoopBackingFile, in.PVSizeBytes, in.PVFreeBytes, in.LVCount, lvNamesJSON, in.ActiveLVCount, in.BoundPVCount, in.BoundPVCountKnown, boundPVCJSON, in.SafeToDecommission, unsafeJSON, in.ObservedAt, in.ReportedByNodeUpdaterID, in.CreatedAt, in.UpdatedAt))
 	if err != nil {
 		return model.LocalPVInventory{}, mapDBErr(err)
 	}
@@ -756,6 +757,7 @@ func scanLocalPVInventory(scanner sqlScanner) (model.LocalPVInventory, error) {
 		&lvNamesRaw,
 		&out.ActiveLVCount,
 		&out.BoundPVCount,
+		&out.BoundPVCountKnown,
 		&pvcRefsRaw,
 		&out.SafeToDecommission,
 		&unsafeRaw,

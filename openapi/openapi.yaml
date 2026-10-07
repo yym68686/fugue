@@ -25949,6 +25949,9 @@ components:
         bound_pv_count:
           type: integer
           format: int32
+        bound_pv_count_known:
+          type: boolean
+          description: Whether Kubernetes PV enumeration completed successfully; false means the count is unknown.
         bound_pvc_refs:
           type: array
           items:

@@ -2870,6 +2870,7 @@ type LocalPVInventory struct {
 	LVNames                 []string  `json:"lv_names,omitempty"`
 	ActiveLVCount           int       `json:"active_lv_count"`
 	BoundPVCount            int       `json:"bound_pv_count"`
+	BoundPVCountKnown       bool      `json:"bound_pv_count_known"`
 	BoundPVCRefs            []string  `json:"bound_pvc_refs,omitempty"`
 	SafeToDecommission      bool      `json:"safe_to_decommission"`
 	UnsafeReasons           []string  `json:"unsafe_reasons,omitempty"`
