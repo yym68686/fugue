@@ -1145,6 +1145,10 @@ func (s *Service) handleBundle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
+	if s.normalizedCaddyTLSMode() == caddyTLSModeSharedOnly {
+		http.Error(w, "this executor only consumes shared certificates", http.StatusForbidden)
+		return
+	}
 	host := normalizeRouteHost(r.URL.Query().Get("domain"))
 	if host == "" {
 		http.Error(w, "domain is required", http.StatusBadRequest)
@@ -3664,6 +3668,8 @@ func (s *Service) edgeTLSHeartbeatStatus(status Status) (string, string, *time.T
 	case caddyTLSModePublicOnDemand:
 		now := time.Now().UTC()
 		return model.EdgeTLSStatusReady, "public on-demand TLS serving is configured", &now
+	case caddyTLSModeSharedOnly:
+		return model.EdgeTLSStatusPending, "shared TLS requires per-host runtime proof", nil
 	case caddyTLSModeOff:
 		return model.EdgeTLSStatusPending, "TLS is disabled", nil
 	default:
@@ -3753,8 +3759,12 @@ func (s *Service) validateConfig() error {
 			if _, err := s.normalizedCaddyTLSAskURL(); err != nil {
 				return err
 			}
+		case caddyTLSModeSharedOnly:
+			if !s.caddySharedTLSEnabled() {
+				return fmt.Errorf("shared-only TLS requires shared certificate synchronization and a data directory")
+			}
 		default:
-			return fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, or public-on-demand")
+			return fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, public-on-demand, or shared-only")
 		}
 		if staticTLSCertFile != "" && s.normalizedCaddyTLSMode() == caddyTLSModeOff {
 			return fmt.Errorf("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE requires FUGUE_EDGE_CADDY_TLS_MODE to be internal or public-on-demand")

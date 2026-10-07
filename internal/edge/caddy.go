@@ -33,6 +33,7 @@ const (
 	caddyTLSModeOff            = "off"
 	caddyTLSModeInternal       = "internal"
 	caddyTLSModePublicOnDemand = "public-on-demand"
+	caddyTLSModeSharedOnly     = "shared-only"
 )
 
 func (s *Service) applyCurrentCaddyConfig(ctx context.Context) error {
@@ -360,8 +361,14 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 				},
 			},
 		}
+	case caddyTLSModeSharedOnly:
+		// A certificate consumer has no issuance authority. Load the validated
+		// shared material as unmanaged certificates, so a probe cannot start
+		// ACME account registration, renewal or ARI refresh on this executor.
+		server["tls_connection_policies"] = []any{map[string]any{}}
+		server["automatic_https"] = map[string]any{"disable_certificates": true, "disable_redirects": true}
 	default:
-		return nil, 0, fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, or public-on-demand")
+		return nil, 0, fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, public-on-demand, or shared-only")
 	}
 	loadFiles := make([]any, 0, 1)
 	if certFile, keyFile := strings.TrimSpace(s.Config.CaddyStaticTLSCertFile), strings.TrimSpace(s.Config.CaddyStaticTLSKeyFile); certFile != "" || keyFile != "" {
@@ -373,9 +380,9 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 		}
 		loadFiles = append(loadFiles, map[string]any{"certificate": certFile, "key": keyFile})
 	}
-	if tlsMode == caddyTLSModePublicOnDemand {
+	if tlsMode == caddyTLSModePublicOnDemand || tlsMode == caddyTLSModeSharedOnly {
 		for _, host := range s.customDomainTLSHosts(bundle) {
-			certFile, keyFile, _, ok := s.importedCaddyTLSFiles(host)
+			certFile, keyFile, _, ok := s.loadedCaddyTLSFiles(host)
 			if ok {
 				loadFiles = append(loadFiles, map[string]any{"certificate": certFile, "key": keyFile})
 			}
@@ -599,9 +606,9 @@ func (s *Service) caddyConfigSignature(bundle model.EdgeRouteBundle) (string, er
 		}
 		parts = append(parts, "static_tls="+fingerprint)
 	}
-	if s.normalizedCaddyTLSMode() == caddyTLSModePublicOnDemand {
+	if s.normalizedCaddyTLSMode() == caddyTLSModePublicOnDemand || s.normalizedCaddyTLSMode() == caddyTLSModeSharedOnly {
 		for _, host := range s.customDomainTLSHosts(bundle) {
-			_, _, fingerprint, ok := s.importedCaddyTLSFiles(host)
+			_, _, fingerprint, ok := s.loadedCaddyTLSFiles(host)
 			if ok {
 				parts = append(parts, "imported_tls="+host+":"+fingerprint)
 			}
@@ -652,6 +659,31 @@ func (s *Service) importedCaddyTLSFiles(host string) (certFile, keyFile, fingerp
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write(keyPEM)
 	return certFile, keyFile, hex.EncodeToString(h.Sum(nil)), true
+}
+
+func (s *Service) loadedCaddyTLSFiles(host string) (certFile, keyFile, fingerprint string, ok bool) {
+	if s.normalizedCaddyTLSMode() != caddyTLSModeSharedOnly {
+		return s.importedCaddyTLSFiles(host)
+	}
+	host = normalizeRouteHost(host)
+	if !validCaddyStorageSegment(host) {
+		return "", "", "", false
+	}
+	bundle, err := s.readLocalCaddyTLSCertificate(host)
+	if err != nil || !validCaddyStorageSegment(bundle.IssuerStorage) {
+		return "", "", "", false
+	}
+	if bundle.IssuerStorage == tlscertificate.ImportedIssuerStorage {
+		_, err = tlscertificate.ValidatePublic(host, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC(), s.caddyImportedTLSRoots)
+	} else {
+		_, err = tlscertificate.Validate(host, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC())
+	}
+	if err != nil {
+		return "", "", "", false
+	}
+	dir := filepath.Join(s.caddyDataDir(), "certificates", bundle.IssuerStorage, host)
+	sum := sha256.Sum256([]byte(bundle.CertificatePEM + "\x00" + bundle.PrivateKeyPEM))
+	return filepath.Join(dir, host+".crt"), filepath.Join(dir, host+".key"), hex.EncodeToString(sum[:]), true
 }
 
 func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.EdgeRouteBundle, configSignature string) error {
@@ -742,7 +774,7 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 }
 
 func (s *Service) caddyTLSWarmupSignature(bundle model.EdgeRouteBundle, configSignature string) string {
-	if s == nil || s.normalizedCaddyTLSMode() != caddyTLSModePublicOnDemand {
+	if s == nil || (s.normalizedCaddyTLSMode() != caddyTLSModePublicOnDemand && s.normalizedCaddyTLSMode() != caddyTLSModeSharedOnly) {
 		return ""
 	}
 	hosts := s.caddyWarmupHosts(bundle)

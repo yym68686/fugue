@@ -87,8 +87,9 @@ The broader migration also includes:
 - Public handoff using the existing whole-node DNS behavior and live transport
   checks, followed by source authorization and legacy identity retirement.
 
-This document describes pending work. No source delegation or public handoff is
-enabled merely by the existing shadow artifact or the proof-lease bridge.
+The runtime and source-verification portions above are implemented. The remaining
+independent DNS producer and public migration still require explicit configuration
+and observed promotion; a shadow artifact alone does not enable public handoff.
 
 The configuration approval and private source observation interfaces are now
 implemented. `GET /v1/platform-state/consumers/artifacts/{artifact_id}/route-sources`
@@ -110,7 +111,8 @@ releases, invalid artifact signatures and mismatched DNS assignments are rejecte
 even if their selection digest is recomputed. Verification of a saved snapshot
 alone does not prove current selection or create readiness.
 
-The runtime DNS consumer, dynamic readiness intersection, independent DNS
-configuration producer and public handoff remain required. Readers do not yet
-advertise `dns_route_sources_v1`, and existing DNS artifacts retain exact source
-references until those implementations are deployed and observed.
+The runtime DNS consumer advertises `dns_route_sources_v1` and implements dynamic
+readiness intersection and bounded checkpoint recovery. Existing artifacts without
+source approvals retain exact-reference semantics. The independent DNS
+configuration producer, observed public handoff to neutral Cells and retirement
+of legacy sources remain separate migration steps.
