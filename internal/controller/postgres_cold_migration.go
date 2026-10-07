@@ -144,7 +144,7 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 			case verified.ContentDigest != ev.ContentDigest:
 				detail = "file content"
 			case verified.MetadataDigest != ev.MetadataDigest:
-				detail = "ownership, mode, path, or size metadata"
+				detail = coldMetadataMismatchDetail(ev.MetadataEntries, verified.MetadataEntries)
 			default:
 				detail = "manifest"
 			}
@@ -255,6 +255,27 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 	}
 	_, err = s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, "verified cold database migration to "+st.TargetRuntime, &fresh.Spec, nil)
 	return err
+}
+
+func coldMetadataMismatchDetail(source, target []coldMetadataEntry) string {
+	byPath := make(map[string]coldMetadataEntry, len(source))
+	for _, entry := range source {
+		byPath[entry.Path] = entry
+	}
+	for _, entry := range target {
+		want, ok := byPath[entry.Path]
+		if !ok {
+			return fmt.Sprintf("unexpected target entry %s", entry.Path)
+		}
+		if want.Mode != entry.Mode || want.UID != entry.UID || want.GID != entry.GID || want.Size != entry.Size || want.Link != entry.Link {
+			return fmt.Sprintf("metadata %s source(mode=%o uid=%d gid=%d size=%d link=%q) target(mode=%o uid=%d gid=%d size=%d link=%q)", entry.Path, want.Mode, want.UID, want.GID, want.Size, want.Link, entry.Mode, entry.UID, entry.GID, entry.Size, entry.Link)
+		}
+		delete(byPath, entry.Path)
+	}
+	for path := range byPath {
+		return "missing target entry " + path
+	}
+	return "metadata digest"
 }
 
 func (s *Service) verifyColdSourceIdentity(ctx context.Context, c *kubeClient, ns string, st *coldPostgresState) error {
