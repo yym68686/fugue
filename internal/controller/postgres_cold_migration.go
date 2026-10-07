@@ -233,12 +233,12 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 	if err != nil {
 		return err
 	}
-	finalApp, err := appWithBackingServicePostgres(op.ServiceID, fresh, pg)
-	if err != nil {
+	// Database cutover must not reconcile the consumer's Deployment or adopt
+	// unrelated app/Cluster drift. The subsequent app move owns its rollout.
+	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
 	}
-	bundle, err := s.applyManagedDesiredAppState(ctx, op.ID, finalApp, finalApp.Spec)
-	if err != nil {
+	if err := switchColdStableService(ctx, c, ns, st); err != nil {
 		return err
 	}
 	// The stable application Service must select the exact validated primary.
@@ -253,7 +253,39 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 	if err := saveColdState(ctx, c, ns, st, &rv); err != nil {
 		return err
 	}
-	_, err = s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, "verified cold database migration to "+st.TargetRuntime, &fresh.Spec, nil)
+	_, err = s.Store.CompleteManagedOperationWithResult(op.ID, "", "verified cold database migration to "+st.TargetRuntime, &fresh.Spec, nil)
+	return err
+}
+
+func switchColdStableService(ctx context.Context, c *kubeClient, ns string, st *coldPostgresState) error {
+	apiPath := "/api/v1/namespaces/" + url.PathEscape(ns) + "/services/" + url.PathEscape(st.Endpoint)
+	live, found, err := c.getRawObject(ctx, apiPath)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("stable database Service missing; refusing to create a replacement")
+	}
+	m := normalizeKubeMap(live["metadata"])
+	uid, rv := objectStringField(m, "uid"), objectStringField(m, "resourceVersion")
+	selector := normalizeKubeMap(normalizeKubeMap(live["spec"])["selector"])
+	want := map[string]string{"cnpg.io/cluster": st.TargetName, "cnpg.io/instanceRole": "primary"}
+	if uid == "" || rv == "" || len(selector) != 2 || selector["cnpg.io/instanceRole"] != "primary" {
+		return fmt.Errorf("stable database Service identity/selector is not an identified CNPG primary")
+	}
+	if selector["cnpg.io/cluster"] == st.TargetName {
+		return nil
+	}
+	if selector["cnpg.io/cluster"] != st.SourceName {
+		return fmt.Errorf("stable database Service selects an unrelated cluster")
+	}
+	patch := []map[string]any{
+		{"op": "test", "path": "/metadata/uid", "value": uid},
+		{"op": "test", "path": "/metadata/resourceVersion", "value": rv},
+		{"op": "test", "path": "/spec/selector", "value": selector},
+		{"op": "replace", "path": "/spec/selector", "value": want},
+	}
+	_, err = c.doRequest(ctx, http.MethodPatch, apiPath, "application/json-patch+json", patch, nil)
 	return err
 }
 

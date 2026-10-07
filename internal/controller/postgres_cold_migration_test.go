@@ -40,6 +40,53 @@ func TestColdSeedEvidenceReadsCompleteLargeReceipt(t *testing.T) {
 	}
 }
 
+func TestColdCutoverOnlyChangesStableServiceSelector(t *testing.T) {
+	for _, cluster := range []string{"source", "target", "unrelated"} {
+		t.Run(cluster, func(t *testing.T) {
+			writes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/v1/namespaces/ns/services/stable" {
+					t.Errorf("cutover touched non-endpoint resource: %s", r.URL.Path)
+				}
+				if r.Method == http.MethodGet {
+					json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]string{"uid": "service-uid", "resourceVersion": "42"}, "spec": map[string]any{"selector": map[string]string{"cnpg.io/cluster": cluster, "cnpg.io/instanceRole": "primary"}}})
+					return
+				}
+				writes++
+				if r.Method != http.MethodPatch || r.Header.Get("Content-Type") != "application/json-patch+json" {
+					t.Fatal("cutover must use compare-and-swap selector patch")
+				}
+				var patch []map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+					t.Fatal(err)
+				}
+				if len(patch) != 4 || patch[0]["op"] != "test" || patch[0]["path"] != "/metadata/uid" || patch[0]["value"] != "service-uid" || patch[1]["op"] != "test" || patch[1]["path"] != "/metadata/resourceVersion" || patch[1]["value"] != "42" || patch[2]["op"] != "test" || patch[2]["path"] != "/spec/selector" || patch[3]["op"] != "replace" || patch[3]["path"] != "/spec/selector" {
+					t.Fatal("cutover lost CAS or changed non-selector state", patch)
+				}
+				if normalizeKubeMap(patch[2]["value"])["cnpg.io/cluster"] != "source" || normalizeKubeMap(patch[3]["value"])["cnpg.io/cluster"] != "target" {
+					t.Fatal("wrong cluster identity", patch)
+				}
+				w.Write([]byte(`{}`))
+			}))
+			defer server.Close()
+			err := switchColdStableService(context.Background(), &kubeClient{baseURL: server.URL, client: server.Client()}, "ns", &coldPostgresState{SourceName: "source", TargetName: "target", Endpoint: "stable"})
+			if cluster == "unrelated" {
+				if err == nil || writes != 0 {
+					t.Fatal("unrelated endpoint mutated", err, writes)
+				}
+				return
+			}
+			wantWrites := 0
+			if cluster == "source" {
+				wantWrites = 1
+			}
+			if err != nil || writes != wantWrites {
+				t.Fatal("cutover not safely idempotent", err, writes)
+			}
+		})
+	}
+}
+
 func TestColdTargetBootstrapNeverTouchesSourceOrServingEndpoint(t *testing.T) {
 	var writes []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
