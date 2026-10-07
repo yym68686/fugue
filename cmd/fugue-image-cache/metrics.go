@@ -19,6 +19,11 @@ type imageCacheMetrics struct {
 	bytesSkippedTotal     atomic.Uint64
 	bytesTransferredTotal atomic.Uint64
 	diskPressureTotal     atomic.Uint64
+	uploadGCErrors        atomic.Uint64
+	uploadTempBytes       atomic.Uint64
+	uploadExpiredBytes    atomic.Uint64
+	uploadStateMismatches atomic.Uint64
+	uploadDeletedBytes    atomic.Uint64
 }
 
 func (m *imageCacheMetrics) writePrometheus(w io.Writer) {
@@ -38,4 +43,14 @@ func (m *imageCacheMetrics) writePrometheus(w io.Writer) {
 	write("fugue_image_cache_bytes_skipped_total", "Blob bytes skipped because the destination already had the required digest.", m.bytesSkippedTotal.Load())
 	write("fugue_image_cache_bytes_transferred_total", "Blob bytes received during digest-aware replication.", m.bytesTransferredTotal.Load())
 	write("fugue_image_cache_disk_pressure_total", "Inventory observations where the configured disk pressure guard was active.", m.diskPressureTotal.Load())
+	write("fugue_image_cache_upload_gc_errors_total", "Failed upload maintenance passes.", m.uploadGCErrors.Load())
+	write("fugue_image_cache_upload_deleted_bytes_total", "Expired temporary upload bytes removed.", m.uploadDeletedBytes.Load())
+	for name, value := range map[string]uint64{
+		"fugue_image_cache_upload_tmp_bytes":            m.uploadTempBytes.Load(),
+		"fugue_image_cache_upload_expired_bytes":        m.uploadExpiredBytes.Load(),
+		"fugue_image_cache_upload_state_mismatch_count": m.uploadStateMismatches.Load(),
+	} {
+		fmt.Fprintf(w, "# TYPE %s gauge\n%s %d\n", name, name, value)
+	}
+
 }

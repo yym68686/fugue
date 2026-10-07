@@ -77,6 +77,10 @@ type kubePersistentVolume struct {
 			Server string `json:"server,omitempty"`
 			Path   string `json:"path,omitempty"`
 		} `json:"nfs,omitempty"`
+		CSI *struct {
+			Driver           string            `json:"driver,omitempty"`
+			VolumeAttributes map[string]string `json:"volumeAttributes,omitempty"`
+		} `json:"csi,omitempty"`
 	} `json:"spec"`
 	Status struct {
 		Phase string `json:"phase,omitempty"`

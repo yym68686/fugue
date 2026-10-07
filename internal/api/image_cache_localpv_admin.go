@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -91,6 +92,49 @@ func (s *Server) handleNodeUpdaterReportLocalPVInventory(w http.ResponseWriter, 
 	inventory.NodeID = firstNonEmptyImageAPIString(inventory.NodeID, updater.MachineID)
 	inventory.ClusterNodeName = firstNonEmptyImageAPIString(inventory.ClusterNodeName, updater.ClusterNodeName)
 	inventory.RuntimeID = firstNonEmptyImageAPIString(inventory.RuntimeID, updater.RuntimeID)
+	// Kubernetes is control-plane authority for PV ownership. The node updater
+	// reports host facts, while this handler enriches the snapshot by matching
+	// the reported LV identities against Bound LocalPV objects. If the control
+	// plane read fails, retain an explicit unknown instead of trusting a zero.
+	if inventory.BoundPVCount < 0 {
+		if client, clientErr := s.requireClusterNodeClient(); clientErr == nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			pvs, pvErr := client.listPersistentVolumes(ctx)
+			cancel()
+			client.closeIdleConnections()
+			if pvErr == nil {
+				lvNames := map[string]struct{}{}
+				for _, name := range inventory.LVNames {
+					lvNames[strings.TrimSpace(name)] = struct{}{}
+				}
+				refs := []string{}
+				for _, pv := range pvs {
+					if pv.Status.Phase != "Bound" || pv.Spec.CSI == nil || pv.Spec.CSI.Driver != "local.csi.openebs.io" {
+						continue
+					}
+					if _, ok := lvNames[strings.TrimSpace(pv.Metadata.Name)]; !ok {
+						continue
+					}
+					if pv.Spec.ClaimRef != nil {
+						refs = append(refs, strings.Trim(pv.Spec.ClaimRef.Namespace+"/"+pv.Spec.ClaimRef.Name, "/"))
+					} else {
+						refs = append(refs, pv.Metadata.Name)
+					}
+				}
+				inventory.BoundPVCRefs = uniqueNonEmptyStrings(refs)
+				inventory.BoundPVCount = len(inventory.BoundPVCRefs)
+				inventory.BoundPVCountKnown = true
+			} else {
+				inventory.BoundPVCount = -1
+				inventory.BoundPVCountKnown = false
+				inventory.UnsafeReasons = uniqueNonEmptyStrings(append(inventory.UnsafeReasons, "kubectl_pv_unavailable"))
+			}
+		} else {
+			inventory.BoundPVCount = -1
+			inventory.BoundPVCountKnown = false
+			inventory.UnsafeReasons = uniqueNonEmptyStrings(append(inventory.UnsafeReasons, "kubectl_pv_unavailable"))
+		}
+	}
 	if inventory.ObservedAt.IsZero() {
 		inventory.ObservedAt = time.Now().UTC()
 	}

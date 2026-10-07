@@ -77,6 +77,12 @@ type imageCache struct {
 	directReplication    bool
 	diskLimit            imageCacheDiskLimit
 	uploadTTL            time.Duration
+	uploadGCMode         string
+	uploadGCInterval     time.Duration
+	uploadGCMaxBytes     int64
+	uploadBarrier        sync.RWMutex
+	uploadLocks          [64]sync.Mutex
+	uploadOpenFiles      func() (map[string]bool, error)
 	hydrateMu            sync.Mutex
 	hydrateCalls         map[string]*hydrateCall
 	sourceMu             sync.RWMutex
@@ -206,6 +212,9 @@ func main() {
 		directReplication:    envBool("FUGUE_IMAGE_CACHE_DIRECT_REPLICATION", false),
 		sourceTTL:            envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
 		uploadTTL:            envDuration("FUGUE_IMAGE_CACHE_UPLOAD_TTL", defaultImageCacheUploadTTL),
+		uploadGCMode:         env("FUGUE_IMAGE_CACHE_UPLOAD_GC_MODE", "delete"),
+		uploadGCInterval:     envDuration("FUGUE_IMAGE_CACHE_UPLOAD_GC_INTERVAL", 15*time.Minute),
+		uploadGCMaxBytes:     envBytes("FUGUE_IMAGE_CACHE_UPLOAD_GC_MAX_BYTES", 1<<30),
 		diskLimit: imageCacheDiskLimit{
 			Enabled:              envBool("FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED", true),
 			HighWatermarkPercent: envFloat("FUGUE_IMAGE_CACHE_HIGH_WATERMARK_PERCENT", defaultImageCacheHighWatermarkPercent),
@@ -224,6 +233,7 @@ func main() {
 		log.Printf("load persisted image cache manifests failed: %v", err)
 	}
 	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s hydrate_concurrency=%d proxy_concurrency=%d copy_jobs=%d upload_ttl=%s disk_limit_enabled=%t high_watermark=%.2f low_watermark=%.2f min_free_bytes=%d max_delete_bytes_per_run=%d", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase, cap(cache.hydrateSlots), cap(cache.proxySlots), cache.copyJobs, cache.uploadTTL, cache.diskLimit.Enabled, cache.diskLimit.HighWatermarkPercent, cache.diskLimit.LowWatermarkPercent, cache.diskLimit.MinFreeBytes, cache.diskLimit.MaxDeleteBytesPerRun)
+	go cache.runUploadMaintenance(context.Background())
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           cache,
@@ -738,13 +748,9 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Upload maintenance has its own independently configured expiry policy.
+	// A targeted manifest prune cannot implicitly broaden its deletion scope.
 	if !dryRun && req.AllowDelete {
-		uploadCleanup, cleanupErr := c.cleanupStaleBlobUploads(time.Now().UTC())
-		if cleanupErr != nil {
-			http.Error(w, cleanupErr.Error(), http.StatusInternalServerError)
-			return
-		}
-		plan.UploadCleanup = uploadCleanup
 		if err := c.executeImageCachePrunePlan(&plan); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -768,7 +774,6 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		"needed_delete_bytes":  plan.NeededDeleteBytes,
 		"budget_exhausted":     plan.BudgetExhausted,
 		"skipped_reason":       plan.SkippedReason,
-		"upload_cleanup":       plan.UploadCleanup,
 		"disk":                 plan.Disk,
 		"target_repo":          repo,
 		"target":               target,
@@ -809,25 +814,9 @@ type imageCachePrunePlan struct {
 	DeletedManifests   []imageCacheManifestEntry `json:"deleted_manifests"`
 	DeletedBlobs       []imageCacheBlobEntry     `json:"deleted_blobs"`
 	SkippedReason      string                    `json:"skipped_reason,omitempty"`
-	UploadCleanup      imageCacheUploadCleanup   `json:"upload_cleanup,omitempty"`
 
 	deleteManifests []imageCacheManifestRecord
 	deleteBlobs     []imageCacheBlobRecord
-}
-
-type imageCacheUploadEntry struct {
-	Path       string `json:"path"`
-	SizeBytes  int64  `json:"size_bytes"`
-	ModifiedAt string `json:"modified_at,omitempty"`
-	Reason     string `json:"reason,omitempty"`
-}
-
-type imageCacheUploadCleanup struct {
-	Candidates     []imageCacheUploadEntry `json:"candidates,omitempty"`
-	Skipped        []imageCacheUploadEntry `json:"skipped,omitempty"`
-	Deleted        []imageCacheUploadEntry `json:"deleted,omitempty"`
-	CandidateBytes int64                   `json:"candidate_bytes"`
-	DeletedBytes   int64                   `json:"deleted_bytes"`
 }
 
 type imageCacheDiskStats struct {
@@ -2031,6 +2020,14 @@ func (c *imageCache) serveBlobUpload(w http.ResponseWriter, r *http.Request) boo
 	if !ok {
 		return false
 	}
+	// A GC pass takes the exclusive side only while no uploads are running.
+	// Striped locks also serialize PATCH/PUT/DELETE for the same session.
+	c.uploadBarrier.RLock()
+	defer c.uploadBarrier.RUnlock()
+	key := sha256.Sum256([]byte(uploadID))
+	lock := &c.uploadLocks[int(key[0])%len(c.uploadLocks)]
+	lock.Lock()
+	defer lock.Unlock()
 	switch r.Method {
 	case http.MethodPost:
 		if uploadID != "" {
@@ -2177,21 +2174,24 @@ func (c *imageCache) appendBlobUpload(repo, uploadID string, body io.Reader) (im
 	if err != nil {
 		return state, err
 	}
+	// Recover length from disk, including bytes written by a previously
+	// interrupted request. Persist partial progress even when io.Copy fails.
+	var copyErr error
 	if body != nil {
-		written, copyErr := io.Copy(file, body)
-		state.SizeBytes += written
-		if copyErr != nil {
-			_ = file.Close()
-			return state, copyErr
-		}
+		_, copyErr = io.Copy(file, body)
 	}
-	if err := file.Close(); err != nil {
-		return state, err
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		return state, errors.Join(copyErr, statErr, closeErr)
 	}
+	state.SizeBytes = info.Size()
 	state.UpdatedAt = time.Now().UTC()
-	if err := c.writeBlobUploadState(state); err != nil {
+	stateErr := c.writeBlobUploadState(state)
+	if err := errors.Join(copyErr, closeErr, stateErr); err != nil {
 		return state, err
 	}
+
 	return state, nil
 }
 
