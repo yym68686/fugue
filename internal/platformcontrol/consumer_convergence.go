@@ -270,6 +270,15 @@ func RebindExpectedConsumerSet(prior model.PlatformExpectedConsumerSet, releaseI
 	for i := range next.Consumers {
 		next.Consumers[i].HeartbeatDeadline = next.Consumers[i].HeartbeatDeadline.Add(shift)
 		next.Consumers[i].ConvergenceDeadline = next.Consumers[i].ConvergenceDeadline.Add(shift)
+		// PostgreSQL rounds aggregate timestamps to microseconds while member
+		// JSON retains nanoseconds. Rebuild the bounds from the actual members
+		// rather than allowing that encoding difference to reject publication.
+		if next.Consumers[i].HeartbeatDeadline.After(next.HeartbeatDeadline) {
+			next.HeartbeatDeadline = next.Consumers[i].HeartbeatDeadline
+		}
+		if next.Consumers[i].ConvergenceDeadline.After(next.ConvergenceDeadline) {
+			next.ConvergenceDeadline = next.Consumers[i].ConvergenceDeadline
+		}
 	}
 	return next, nil
 }

@@ -21,13 +21,21 @@ func TestProducedExpectationsRequireCompleteCurrentPhaseAndPreserveMembership(t 
 	if err := f.s.withLockedState(false, func(st *model.State) error { raw, err = json.Marshal(st); return err }); err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"complete", "missing-kind", "foreign-generation", "failed-source", "frozen-lane"} {
+	for _, scenario := range []string{"complete", "postgres-precision", "missing-kind", "foreign-generation", "failed-source", "frozen-lane"} {
 		t.Run(scenario, func(t *testing.T) {
 			var state model.State
 			if err := json.Unmarshal(raw, &state); err != nil {
 				t.Fatal(err)
 			}
 			switch scenario {
+			case "postgres-precision":
+				for i := range state.ExpectedConsumerSets {
+					set := &state.ExpectedConsumerSets[i]
+					set.CreatedAt = set.CreatedAt.Truncate(time.Microsecond)
+					set.UpdatedAt = set.UpdatedAt.Truncate(time.Microsecond)
+					set.HeartbeatDeadline = set.HeartbeatDeadline.Truncate(time.Microsecond)
+					set.ConvergenceDeadline = set.ConvergenceDeadline.Truncate(time.Microsecond)
+				}
 			case "missing-kind":
 				state.ExpectedConsumerSets = state.ExpectedConsumerSets[1:]
 			case "foreign-generation":
@@ -46,7 +54,7 @@ func TestProducedExpectationsRequireCompleteCurrentPhaseAndPreserveMembership(t 
 			next.ID = "next-gray"
 			next.ReleaseChannel = "gray"
 			sets, err := producedReleaseExpectations(&state, parent, next, &platformProducerReleaseGuard{Phase: "gray"}, now)
-			if scenario != "complete" {
+			if scenario != "complete" && scenario != "postgres-precision" {
 				if err == nil {
 					t.Fatal("invalid prior phase admitted")
 				}
