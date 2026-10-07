@@ -340,3 +340,36 @@ func TestDNSBackendRejectionDoesNotAdvanceFactsOrAudit(t *testing.T) {
 		t.Fatalf("rejected cursor was consumed: %d %s", response.Code, response.Body.String())
 	}
 }
+
+func TestDNSStandbyClassificationRequiresVerifiedUnselectedTransport(t *testing.T) {
+	for _, scenario := range []string{"selected", "standby", "foreign identity", "unready", "ambiguous", "changed pod", "changed service", "lookup failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newDNSBackendFixture(t)
+			server := &Server{}
+			switch scenario {
+			case "standby", "changed pod", "changed service", "lookup failure":
+				f.pod.Labels["app"] = "standby"
+			case "foreign identity":
+				f.claims.CredentialID += "invalid"
+			case "unready":
+				f.pod.Status.Conditions = nil
+			case "ambiguous":
+				f.extraService = true
+			}
+			switch scenario {
+			case "changed pod":
+				f.changePath = "pod"
+			case "changed service":
+				f.changePath = "service"
+			case "lookup failure":
+				f.failPath = "/services/" + f.svc.Name
+			}
+			f.install(t, server)
+			standby := false
+			status := server.inspectDNSBackendTransport(context.Background(), f.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{ApplyStatus: "applied", ProbeStatus: "passed"}, nil, false, &standby)
+			if standby != (scenario == "standby") || standby && status != http.StatusConflict || scenario == "selected" && status != http.StatusOK {
+				t.Fatalf("status=%d standby=%t", status, standby)
+			}
+		})
+	}
+}

@@ -3,6 +3,8 @@ package platformconsumer
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -144,6 +146,48 @@ func TestSyncRejectsInvalidReleaseChannel(t *testing.T) {
 	}
 }
 
+func TestDownloadConflictRetriesOnlyAfterObservedAssignmentChange(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusConflict, http.StatusForbidden, http.StatusServiceUnavailable} {
+		for _, changed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%d/changed=%t", code, changed), func(t *testing.T) {
+				a := model.PlatformConsumerAssignment{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ArtifactID: "child", ReleaseSetID: "parent", ScopeKey: "global", ReleaseChannel: "full", ExpectedConsumerSetID: "set", FencingToken: 1}
+				reads := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/v1/platform-state/consumers/identity":
+						json.NewEncoder(w).Encode(Identity{Token: "identity", Component: "edge-worker", NodeID: "node", ScopeKey: "global", ArtifactKinds: []string{a.ArtifactKind}, ExpiresAt: time.Now().Add(time.Minute)})
+					case "/v1/platform-state/consumers/assignment":
+						reads++
+						current := a
+						if changed && reads > 1 {
+							current.FencingToken++
+						}
+						json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{current}})
+					default:
+						w.WriteHeader(code)
+					}
+				}))
+				defer server.Close()
+				token := filepath.Join(t.TempDir(), "token")
+				if err := os.WriteFile(token, []byte("pod-token"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				client := Client{BaseURL: server.URL, TokenFile: token}
+				_, _, _, _, err := client.SyncServing(context.Background(), "edge-worker", "node", "global", a.ArtifactKind)
+				wantRace := changed && (code == 404 || code == 409)
+				if err == nil || errors.Is(err, ErrAssignmentChanged) != wantRace {
+					t.Fatalf("child: race=%t err=%v", wantRace, err)
+				}
+				reads = 1
+				_, err = client.ReleaseSet(context.Background(), Identity{Token: "identity", ScopeKey: "global", ArtifactKinds: []string{a.ArtifactKind}}, a, model.PlatformArtifactRelease{})
+				if err == nil || errors.Is(err, ErrAssignmentChanged) != wantRace {
+					t.Fatalf("parent: race=%t err=%v", wantRace, err)
+				}
+			})
+		}
+	}
+}
+
 func TestCheckAssignmentRejectsChangedMissingAndDuplicateAuthority(t *testing.T) {
 	want := model.PlatformConsumerAssignment{ScopeKey: "global", ArtifactKind: "edge_route_bundle", ReleaseChannel: "shadow", ExpectedConsumerSetID: "expected", ArtifactID: "artifact", FencingToken: 5}
 	for _, scenario := range []string{"same", "other lanes", "missing", "new fence", "new revision", "duplicate", "unavailable"} {
@@ -178,6 +222,36 @@ func TestCheckAssignmentRejectsChangedMissingAndDuplicateAuthority(t *testing.T)
 			err := client.CheckAssignment(context.Background(), Identity{Token: "identity-token"}, want)
 			if (err == nil) != (scenario == "same" || scenario == "other lanes") {
 				t.Fatalf("unexpected assignment result: %v", err)
+			}
+		})
+	}
+}
+
+func TestHeartbeatConflictsKeepStandbyAndAssignmentRacesDistinct(t *testing.T) {
+	for _, tc := range []struct {
+		code   string
+		status int
+		want   error
+	}{
+		{"dns_backend_not_selected", 409, ErrDNSBackendNotSelected},
+		{"platform_assignment_changed", 409, ErrAssignmentChanged},
+		{"conflict", 409, nil}, {"dns_backend_not_selected", 403, nil},
+	} {
+		t.Run(fmt.Sprintf("%s/%d", tc.code, tc.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				json.NewEncoder(w).Encode(map[string]string{"code": tc.code, "error": "untrusted server detail secret"})
+			}))
+			defer server.Close()
+			client := Client{BaseURL: server.URL}
+			var reply any
+			err := client.PostJSON(context.Background(), "/v1/platform-state/consumers/trusted-heartbeat", "identity", struct{}{}, &reply)
+			if err == nil || tc.want != nil && !errors.Is(err, tc.want) || tc.want == nil && (errors.Is(err, ErrDNSBackendNotSelected) || errors.Is(err, ErrAssignmentChanged)) || strings.Contains(err.Error(), "secret") {
+				t.Fatal("incorrect conflict classification", err)
+			}
+			err = client.GetJSON(context.Background(), "/v1/platform-state/consumers/assignment", "identity", &reply)
+			if errors.Is(err, ErrDNSBackendNotSelected) || errors.Is(err, ErrAssignmentChanged) {
+				t.Fatal("another endpoint granted heartbeat semantics", err)
 			}
 		})
 	}

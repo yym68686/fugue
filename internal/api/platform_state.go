@@ -1155,7 +1155,7 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 	if set.ArtifactReleaseID != "" {
 		binding := s.platformConvergenceBinding(set)
 		if binding == nil || !platformcontrol.TrafficCanaryConsumerAllowed(set, claims.ConsumerID(), binding) || heartbeat.FencingToken != binding.FencingToken || heartbeat.GenerationSequence != binding.GenerationSequence {
-			httpx.WriteError(w, http.StatusConflict, "heartbeat release or artifact binding is not current")
+			httpx.WriteJSON(w, http.StatusConflict, httpx.ErrorResponse{Error: "heartbeat release or artifact binding is not current", Code: "platform_assignment_changed", Category: "conflict", Retryable: true})
 			return
 		}
 		sets, listErr := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: set.ReleaseSetID, ArtifactReleaseID: set.ArtifactReleaseID, ArtifactKind: set.ArtifactKind, ScopeKey: set.ScopeKey})
@@ -1165,12 +1165,16 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 		}
 		for _, newer := range sets {
 			if newer.Revision > set.Revision {
-				httpx.WriteError(w, http.StatusConflict, "heartbeat expected consumer set is superseded")
+				httpx.WriteJSON(w, http.StatusConflict, httpx.ErrorResponse{Error: "heartbeat expected consumer set is superseded", Code: "platform_assignment_changed", Category: "conflict", Retryable: true})
 				return
 			}
 		}
 	}
-	if status := s.validateDNSHeartbeatBackend(r.Context(), claims, heartbeat, set); status != http.StatusOK {
+	if status, standby := s.validateDNSHeartbeatBackendSelection(r.Context(), claims, heartbeat, set); status != http.StatusOK {
+		if standby {
+			httpx.WriteJSON(w, status, httpx.ErrorResponse{Error: "DNS backend is not selected by public transport", Code: "dns_backend_not_selected", Category: "conflict"})
+			return
+		}
 		httpx.WriteError(w, status, "DNS heartbeat declared backend identity could not be verified")
 		return
 	}

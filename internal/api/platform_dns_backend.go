@@ -30,11 +30,18 @@ const dnsTransportManager = "fugue-dns-transport"
 // selection without overwriting the serving instance's receipt. This is an
 // observation of Kubernetes transport, never a source of DNS serving config.
 func (s *Server) validateDNSHeartbeatBackend(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, sets ...model.PlatformExpectedConsumerSet) int {
+	status, _ := s.validateDNSHeartbeatBackendSelection(ctx, claims, h, sets...)
+	return status
+}
+
+func (s *Server) validateDNSHeartbeatBackendSelection(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, sets ...model.PlatformExpectedConsumerSet) (int, bool) {
+	notSelected := false
 	private, status := s.privateDNSReceiptMember(claims, h, sets)
 	if status != http.StatusOK {
-		return status
+		return status, false
 	}
-	return s.inspectDNSBackendTransport(ctx, claims, h, nil, private)
+	status = s.inspectDNSBackendTransport(ctx, claims, h, nil, private, &notSelected)
+	return status, notSelected
 }
 
 // A reader runs only after transport identity validation and before the final
@@ -43,7 +50,7 @@ func (s *Server) inspectDNSBackend(ctx context.Context, claims platformcontrol.P
 	return s.inspectDNSBackendTransport(ctx, claims, h, read, false)
 }
 
-func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, read func(context.Context, *clusterNodeClient, corev1.Pod, corev1.Service, bool) int, allowPrivate bool) int {
+func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, read func(context.Context, *clusterNodeClient, corev1.Pod, corev1.Service, bool) int, allowPrivate bool, notSelected ...*bool) int {
 	if claims.Component != model.PlatformConsumerComponentDNSServer {
 		return http.StatusOK
 	}
@@ -121,6 +128,18 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	var privateGuard *dnsPrivatePublicGuard
 	if selected == nil || !dnsServiceSelectsPod(*selected, *pod) {
 		if !allowPrivate {
+			// Distinguish a verified standby from malformed/missing transport.
+			// This remains a rejection; never accept or persist a serving fact.
+			if selected != nil && len(notSelected) == 1 && notSelected[0] != nil {
+				var currentPod corev1.Pod
+				var currentService corev1.Service
+				if client.doJSON(ctx, http.MethodGet, base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil || client.doJSON(ctx, http.MethodGet, base+"/services/"+url.PathEscape(selected.Name), &currentService) != nil {
+					return http.StatusServiceUnavailable
+				}
+				if currentPod.UID == pod.UID && currentPod.ResourceVersion == pod.ResourceVersion && currentService.UID == selected.UID && currentService.ResourceVersion == selected.ResourceVersion {
+					*notSelected[0] = true
+				}
+			}
 			return http.StatusConflict
 		}
 		var status int

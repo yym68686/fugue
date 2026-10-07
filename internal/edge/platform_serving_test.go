@@ -32,7 +32,7 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
@@ -96,9 +96,15 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			rejectReport := false
 			routeCalls := 0
 			tlsCalls := 0
+			var installCurrent func()
+			identityReads := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v1/platform-state/consumers/identity":
+					identityReads++
+					if (mode == "valid-bundle-reread" && identityReads == 1) || (mode == "valid-bundle-retry" && identityReads == 2) {
+						installCurrent()
+					}
 					identity := map[string]any{"token": "token", "component": "edge-worker", "node_id": "edge", "scope_key": scope, "artifact_kinds": []string{route.ArtifactKind, tlsArtifact.ArtifactKind}, "expires_at": time.Now().Add(time.Minute)}
 					if strings.HasPrefix(mode, "valid-cell") {
 						identity["authority_id"], identity["consumer_id"] = "cell-a", "edge-worker:cell-a:edge"
@@ -163,6 +169,17 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			s.recordCaddyApply(bundle.Version, len(bundle.Routes), "config", nil)
 			raw, _ := json.Marshal(cacheFile{Version: cacheFileVersion, Bundle: bundle})
 			os.WriteFile(cache, raw, 0600)
+			installCurrent = func() {
+				s.recordSyncSuccess(bundle, "", now, false)
+				s.recordCaddyApply(bundle.Version, len(bundle.Routes), "config", nil)
+			}
+			if mode == "valid-bundle-reread" || mode == "valid-bundle-retry" || mode == "persistent-binding-mismatch" {
+				old := bundle
+				old.TrafficRelease = trafficbinding.Clone(bundle.TrafficRelease)
+				old.TrafficRelease.ReleaseID = "previous-release"
+				s.recordSyncSuccess(old, "", now, false)
+				s.Config.SyncInterval = time.Millisecond
+			}
 			switch mode {
 			case "cache-missing":
 				os.Remove(cache)
@@ -207,7 +224,16 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				leaf := &x509.Certificate{Raw: []byte("certificate"), DNSNames: []string{host}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}
 				return &platformTLSCertificate{Leaf: leaf, ValidUntil: leaf.NotAfter}, nil
 			}
-			err = s.syncPlatformServingOnce(context.Background(), probe, tlsProbe)
+			err = s.syncPlatformServing(context.Background(), probe, tlsProbe)
+			if mode == "persistent-binding-mismatch" {
+				if !errors.Is(err, errServingTrafficReleaseMismatch) || identityReads != 3 || len(reports) != 0 || routeCalls != 0 || tlsCalls != 0 {
+					t.Fatal("mismatch was acknowledged or retry was unbounded", err, identityReads, reports)
+				}
+				if _, e := os.Stat(cache + ".platform-serving.json"); !os.IsNotExist(e) {
+					t.Fatal("unmatched release persisted a positive receipt", e)
+				}
+				return
+			}
 			if mode == "inactive" {
 				if err != nil || len(reports) != 0 || routeCalls != 0 || tlsCalls != 0 {
 					t.Fatal("inactive worker reported serving", err, reports)
@@ -264,7 +290,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				}
 				return
 			}
-			if mode != "valid" && !strings.HasPrefix(mode, "valid-cell") {
+			if !strings.HasPrefix(mode, "valid") {
 				if mode == "missing-tls-assignment" && errors.Is(err, platformconsumer.ErrNoServingAssignment) {
 					t.Fatal("missing TLS assignment authorized shadow fallback for a selected route")
 				}

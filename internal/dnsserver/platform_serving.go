@@ -168,7 +168,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// just downloaded. Do not replace still-valid serving facts with probes
 		// checked against that superseded publication. The bounded outer retry
 		// rereads authority; existing proof deadlines continue to expire normally.
-		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) {
+		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) || errors.Is(syncErr, platformconsumer.ErrDNSBackendNotSelected) {
 			return
 		}
 		// Rejection must not starve the retained artifact's independent probes.

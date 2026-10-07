@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"math"
@@ -67,11 +68,39 @@ type platformServingEvidence struct {
 	VerifiedAt      time.Time
 }
 
+var errServingTrafficReleaseMismatch = errors.New("serving group bundle belongs to another traffic release")
+
+const platformServingBindingRetryAttempts = 3
+
 // Serving observation is deliberately read-only with respect to Group
 // Authority, Caddy, and the existing bundle/LKG. Only that execution path applies
 // configurations. This observer reports what actually reached the executor.
 func (s *Service) SyncPlatformServingOnce(ctx context.Context) error {
-	return s.syncPlatformServingOnce(ctx, s.probePlatformServingRoute, probePlatformTLS)
+	return s.syncPlatformServing(ctx, s.probePlatformServingRoute, probePlatformTLS)
+}
+
+func (s *Service) syncPlatformServing(ctx context.Context, routeProbe platformServingRouteProbe, tlsProbe platformTLSProbe) error {
+	var err error
+	for attempt := 0; attempt < platformServingBindingRetryAttempts; attempt++ {
+		err = s.syncPlatformServingOnce(ctx, routeProbe, tlsProbe)
+		if (!errors.Is(err, errServingTrafficReleaseMismatch) && !errors.Is(err, platformconsumer.ErrAssignmentChanged)) || ctx.Err() != nil || attempt == platformServingBindingRetryAttempts-1 {
+			return err
+		}
+		delay := time.Duration(attempt+1) * 100 * time.Millisecond
+		if errors.Is(err, errServingTrafficReleaseMismatch) {
+			// Give the independent route loop a chance to apply the publication.
+			// This observer must never download or apply serving configuration.
+			delay = min(s.syncInterval(), 30*time.Second)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return err
 }
 
 func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platformServingRouteProbe, tlsProbe platformTLSProbe) (result error) {
@@ -79,6 +108,15 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	defer s.platformConsumerMu.Unlock()
 	defer func() {
 		if result != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if errors.Is(result, errServingTrafficReleaseMismatch) || errors.Is(result, platformconsumer.ErrAssignmentChanged) {
+				s.mu.Lock()
+				s.platformServing.State, s.platformServing.LastError = "awaiting_release", result.Error()
+				s.mu.Unlock()
+				return
+			}
 			s.platformServingEvidence = nil
 			if ctx.Err() == nil {
 				s.mu.Lock()
@@ -117,7 +155,18 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		return err
 	}
 	if !reflect.DeepEqual(b, projection.TrafficRelease) {
-		return errors.New("serving group bundle belongs to another traffic release")
+		// Route synchronization and platform assignment publication are
+		// independent loops. The bundle can be replaced after the initial
+		// snapshot but before the assignment read completes. Re-read the local
+		// applied bundle once before treating that publication race as serving
+		// evidence; validatePlatformServingBundle below still rechecks the live
+		// Caddy state and durable cache before reporting anything.
+		if refreshed, ok := s.Bundle(); ok && reflect.DeepEqual(refreshed.TrafficRelease, projection.TrafficRelease) {
+			bundle = refreshed
+			b = refreshed.TrafficRelease
+		} else {
+			return fmt.Errorf("%w: bundle_release_set=%s assignment_release_set=%s bundle_route_generation=%s assignment_route_generation=%s bundle_release=%s bundle_channel=%s bundle_fence=%d assignment_release=%s assignment_channel=%s assignment_fence=%d", errServingTrafficReleaseMismatch, b.ReleaseSetID, projection.TrafficRelease.ReleaseSetID, b.RouteArtifactGeneration, projection.TrafficRelease.RouteArtifactGeneration, b.ReleaseID, b.ReleaseChannel, b.FencingToken, projection.TrafficRelease.ReleaseID, projection.TrafficRelease.ReleaseChannel, projection.TrafficRelease.FencingToken)
+		}
 	}
 	if _, err = s.verifyPlatformRouteCandidate(artifact, a, release); err != nil {
 		return err
@@ -161,7 +210,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		if result == nil {
 			return
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || errors.Is(result, errServingTrafficReleaseMismatch) || errors.Is(result, platformconsumer.ErrAssignmentChanged) {
 			return
 		}
 		if reportErr := s.reportPlatformServingFailure(ctx, client, id, bundle, selection, []model.PlatformConsumerAssignment{a, ta}); reportErr != nil {

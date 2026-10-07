@@ -28,6 +28,10 @@ type Client struct {
 	AuthorityID string
 }
 
+// ErrDNSBackendNotSelected rejects standby reporting without changing local
+// DNS serving state or claiming an accepted public receipt.
+var ErrDNSBackendNotSelected = errors.New("DNS backend is not selected by public transport")
+
 var ErrNoServingAssignment = errors.New("no serving traffic assignment")
 
 // ErrAssignmentChanged identifies a publication race, not negative serving
@@ -122,10 +126,10 @@ func (c Client) syncChannel(ctx context.Context, component, nodeID, scope, kind,
 	}
 	endpoint := base.String() + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(chosen.ArtifactID) + "?expected_consumer_set_id=" + url.QueryEscape(chosen.ExpectedConsumerSetID)
 	if err := c.json(ctx, endpoint, id.Token, http.MethodGet, nil, &envelope); err != nil {
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
+		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, c.classifyAssignmentReadError(ctx, id, *chosen, err)
 	}
 	if !reflect.DeepEqual(envelope.Assignment, *chosen) {
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform artifact assignment mismatch")
+		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrAssignmentChanged
 	}
 	return id, *chosen, envelope.Artifact, envelope.Release, nil
 }
@@ -145,6 +149,10 @@ func (c Client) checkAssignment(ctx context.Context, identity Identity, assignme
 		path += "?serving_only=true"
 	}
 	if err := c.requestJSON(ctx, path, identity.Token, http.MethodGet, nil, &current); err != nil {
+		var status *responseStatusError
+		if errors.As(err, &status) && status.Code == http.StatusNotFound {
+			return ErrAssignmentChanged
+		}
 		return err
 	}
 	matches := 0
@@ -215,7 +223,22 @@ func (c Client) json(ctx context.Context, endpoint, token, method string, in, ou
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return &responseStatusError{Code: resp.StatusCode}
+		status := &responseStatusError{Code: resp.StatusCode}
+		if resp.StatusCode == http.StatusConflict && req.URL.Path == "/v1/platform-state/consumers/trusted-heartbeat" {
+			var body struct {
+				Code string `json:"code"`
+			}
+			raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 4097))
+			if readErr == nil && len(raw) <= 4096 && json.Unmarshal(raw, &body) == nil {
+				switch body.Code {
+				case "dns_backend_not_selected":
+					return ErrDNSBackendNotSelected
+				case "platform_assignment_changed":
+					return ErrAssignmentChanged
+				}
+			}
+		}
+		return status
 	}
 	// Decode through one bounded buffer. Reading the entire artifact first
 	// retained both the growing transport buffer and the decoder's copy.
@@ -251,6 +274,19 @@ func ReadFile(path string, limit int64) ([]byte, error) {
 	return raw, nil
 }
 
+// A download can lose its assignment between discovery and retrieval. A
+// 404/409 is retryable only when a fresh read proves that exact assignment
+// changed; authorization and integrity conflicts remain hard failures.
+func (c Client) classifyAssignmentReadError(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, original error) error {
+	var status *responseStatusError
+	if errors.As(original, &status) && (status.Code == http.StatusNotFound || status.Code == http.StatusConflict) {
+		if err := c.CheckAssignment(ctx, id, a); errors.Is(err, ErrAssignmentChanged) {
+			return ErrAssignmentChanged
+		}
+	}
+	return original
+}
+
 // ReleaseSet downloads the exact signed parent through an existing child
 // assignment; this never broadens the caller's scope or artifact capability.
 func (c Client) ReleaseSet(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease) (model.PlatformArtifact, error) {
@@ -269,7 +305,7 @@ func (c Client) ReleaseSet(ctx context.Context, id Identity, a model.PlatformCon
 		Release    model.PlatformArtifactRelease    `json:"release"`
 	}
 	if err := c.json(ctx, endpoint, id.Token, http.MethodGet, nil, &reply); err != nil {
-		return model.PlatformArtifact{}, err
+		return model.PlatformArtifact{}, c.classifyAssignmentReadError(ctx, id, a, err)
 	}
 	if !reflect.DeepEqual(reply.Assignment, a) || !reflect.DeepEqual(reply.Release, r) || reply.Artifact.ID != a.ReleaseSetID || reply.Artifact.ArtifactKind != model.PlatformArtifactKindReleaseSet || reply.Artifact.ScopeKey != a.ScopeKey {
 		return model.PlatformArtifact{}, errors.New("parent release binding changed")

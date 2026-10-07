@@ -15,6 +15,7 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+	"fugue/internal/platformconsumer"
 	"fugue/internal/routeprobe"
 	"github.com/miekg/dns"
 )
@@ -37,7 +38,8 @@ func TestUnselectedDNSCandidateKeepsVerifiedServingWithoutInventoryCredential(t 
 			json.NewEncoder(w).Encode(map[string]any{"artifact": parent, "assignment": candidate.Assignment, "release": candidate.Release})
 		case "/v1/platform-state/consumers/trusted-heartbeat":
 			reports.Add(1)
-			http.Error(w, "consumer is not the selected public backend", http.StatusConflict)
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"code": "dns_backend_not_selected", "error": "consumer is not the selected public backend"})
 		default:
 			unexpected.Add(1)
 			w.WriteHeader(http.StatusNotFound)
@@ -89,8 +91,8 @@ func TestUnselectedDNSCandidateKeepsVerifiedServingWithoutInventoryCredential(t 
 	defer tcpServer.Shutdown()
 	ctx := context.Background()
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := s.syncPlatformDNSServingOnce(ctx, probe, s.probeDNSServingListener); err == nil {
-			t.Fatal("unselected candidate hid rejected trusted heartbeat")
+		if err := s.syncPlatformDNSServingOnce(ctx, probe, s.probeDNSServingListener); !errors.Is(err, platformconsumer.ErrDNSBackendNotSelected) {
+			t.Fatal("unselected candidate hid rejected trusted heartbeat", err)
 		}
 		if !s.Status().Healthy || !s.Status().PlatformServing.ReportedAt.IsZero() || reports.Load() != int32(attempt+1) {
 			t.Fatal("rejected heartbeat destroyed serving or claimed an accepted receipt", s.Status())

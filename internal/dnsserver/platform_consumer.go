@@ -72,11 +72,24 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 
 func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	servingErr := s.SyncPlatformDNSServingOnce(ctx)
-	if servingErr != nil && ctx.Err() == nil {
+	if errors.Is(servingErr, platformconsumer.ErrDNSBackendNotSelected) && ctx.Err() == nil {
+		s.mu.Lock()
+		previous := s.platformServingError
+		s.platformServingError = servingErr.Error()
+		s.platformServingReported = time.Time{}
+		s.mu.Unlock()
+		if previous != servingErr.Error() {
+			s.Logger.Printf("DNS local validation ready; public receipt not selected")
+		}
+	} else if servingErr != nil && ctx.Err() == nil {
 		s.mu.Lock()
 		s.platformServingError = servingErr.Error()
 		s.mu.Unlock()
-		s.Logger.Printf("DNS traffic serving sync failed: %v", servingErr)
+		if errors.Is(servingErr, platformconsumer.ErrAssignmentChanged) {
+			s.Logger.Printf("DNS traffic serving convergence pending: %v", servingErr)
+		} else {
+			s.Logger.Printf("DNS traffic serving sync failed: %v", servingErr)
+		}
 	}
 	// Enrollment locks out ambient DNS even on a fresh disk. A reader with no
 	// selected serving assignment and no retained serving state must still

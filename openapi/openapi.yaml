@@ -3639,6 +3639,12 @@ paths:
         public runtime-facts and public selection still require the public transport.
         Kubernetes lookup failure returns 503; binding mismatch
         returns 403 or 409 without advancing the heartbeat cursor or audit log.
+        A valid DNS Pod that is not selected by an existing managed public
+        Service receives HTTP 409 with code dns_backend_not_selected. This is a
+        standby observation, not a successful heartbeat or an assignment retry;
+        local validation continues and no public receipt is accepted. Other
+        backend validation failures retain their normal error codes. A superseded
+        release or expected consumer set receives code platform_assignment_changed.
         This check does not change artifacts, serving configuration or local
         readiness. Independently provisioned non-Kubernetes component identities
         retain their existing authentication contract.

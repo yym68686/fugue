@@ -118,7 +118,11 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	servingErr := s.SyncPlatformServingOnce(ctx)
 	bundle, _ := s.Bundle()
 	if servingErr != nil && ctx.Err() == nil {
-		s.Logger.Printf("edge traffic serving verification failed: %v", servingErr)
+		if errors.Is(servingErr, errServingTrafficReleaseMismatch) || errors.Is(servingErr, platformconsumer.ErrAssignmentChanged) {
+			s.Logger.Printf("edge traffic serving convergence pending: %v", servingErr)
+		} else {
+			s.Logger.Printf("edge traffic serving verification failed: %v", servingErr)
+		}
 	}
 	// A group bundle can predate this physical member. Keep capability
 	// observations alive until the API assigns serving to this exact consumer.
