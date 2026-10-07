@@ -97,7 +97,10 @@ func (s *Service) observePlatformDNSReadiness(ctx context.Context, c dnsPlatform
 }
 
 func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc) []dnsReadinessFact {
-	ctx, cancel := context.WithTimeout(ctx, min(20*time.Second, time.Duration(policy.ProbeIntervalSeconds)*time.Second))
+	// The signed policy bounds both concurrency and the observation window.
+	// An additional shorter code constant can starve valid plans even when
+	// every target fits within their configured interval.
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(policy.ProbeIntervalSeconds)*time.Second)
 	defer cancel()
 	facts := make([]dnsReadinessFact, len(plan.Probes))
 	jobs := make(chan int, len(plan.Probes))

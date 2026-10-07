@@ -35,6 +35,28 @@ func readinessTestPlan() (platformconfig.DNSReadinessPlan, platformconfig.DNSRea
 	return plan, policy
 }
 
+func TestDNSReadinessUsesPolicyWindowAndEarlierCallerDeadline(t *testing.T) {
+	for _, callerBound := range []bool{false, true} {
+		plan, policy := readinessTestPlan()
+		ctx := context.Background()
+		window := 30 * time.Second
+		if callerBound {
+			window = 5 * time.Second
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, window)
+			defer cancel()
+		}
+		collectDNSReadinessFacts(ctx, &plan, &policy, func(ctx context.Context, _, _, _, _ string, timeout time.Duration) (routeprobe.Proof, error) {
+			deadline, ok := ctx.Deadline()
+			remaining := time.Until(deadline)
+			if !ok || remaining < window-time.Second || remaining > window || timeout != time.Second {
+				t.Errorf("window=%s remaining=%s timeout=%s", window, remaining, timeout)
+			}
+			return routeprobe.Proof{}, routeprobe.ErrUnavailable
+		})
+	}
+}
+
 func TestDNSReadinessFreshFactsExpireAndRequireEveryPathAndQuorum(t *testing.T) {
 	plan, policy := readinessTestPlan()
 	now := time.Now().UTC()
