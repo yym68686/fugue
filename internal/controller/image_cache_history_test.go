@@ -14,11 +14,13 @@ import (
 func TestHistoricalImageAttributionRequiresCompletedImmutableReference(t *testing.T) {
 	for _, tc := range []struct {
 		name, status, ref string
+		receipt           bool
 		want              int
 	}{
-		{"completed digest", model.OperationStatusCompleted, "registry.example/fugue-apps/sample@sha256:" + strings.Repeat("a", 64), 1},
-		{"mutable tag", model.OperationStatusCompleted, "registry.example/fugue-apps/sample:old", 0},
-		{"failed operation", model.OperationStatusFailed, "registry.example/fugue-apps/sample@sha256:" + strings.Repeat("a", 64), 0},
+		{"completed digest", model.OperationStatusCompleted, "registry.example/fugue-apps/sample@sha256:" + strings.Repeat("a", 64), false, 1},
+		{"mutable tag", model.OperationStatusCompleted, "registry.example/fugue-apps/sample:old", false, 0},
+		{"failed operation", model.OperationStatusFailed, "registry.example/fugue-apps/sample@sha256:" + strings.Repeat("a", 64), false, 0},
+		{"failed deployment with receipt", model.OperationStatusFailed, "registry.example/fugue-apps/sample:old", true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := store.New(filepath.Join(t.TempDir(), "state.json"))
@@ -57,6 +59,12 @@ func TestHistoricalImageAttributionRequiresCompletedImmutableReference(t *testin
 			_, err = s.UpsertImageCacheInventory(model.ImageCacheNodeInventory{NodeID: "node", ClusterNodeName: "worker", ObservedAt: now}, []model.ImageCacheManifest{{Repo: "fugue-apps/sample", Target: "old", Digest: "sha256:" + strings.Repeat("a", 64), Present: true, TotalBlobBytes: 100, ReferencedBlobs: []string{"sha256:" + strings.Repeat("b", 64)}, LastSeenAt: now, CreatedAtObserved: &old}})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tc.receipt {
+				_, err = s.SaveBuildArtifact(model.BuildArtifact{TenantID: tenant.ID, AppID: app.ID, OperationID: op.ID, JobName: "build", ImageRef: tc.ref, Digest: "sha256:" + strings.Repeat("a", 64), CacheEndpoint: "http://worker:5000", ClusterNodeName: "worker", VerifiedAt: &now})
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			svc := &Service{Store: s, registryPushBase: "registry.example", Config: config.ControllerConfig{ImageStoreMode: "distributed"}}
 			if err := svc.reconcileHistoricalImageProvenance(context.Background()); err != nil {

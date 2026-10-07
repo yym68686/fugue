@@ -341,9 +341,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			imageReplicationTicker = time.NewTicker(s.Config.ImageStoreSchedulerInterval)
 			defer imageReplicationTicker.Stop()
 		}
+		var lastImageCacheMaintenance time.Time
 		var imageCacheMaintenanceTicker *time.Ticker
 		if s.Config.ImageCacheInventoryInterval > 0 {
-			imageCacheMaintenanceTicker = time.NewTicker(s.Config.ImageCacheInventoryInterval)
+			imageCacheMaintenanceTicker = time.NewTicker(min(time.Minute, s.Config.ImageCacheInventoryInterval))
 			defer imageCacheMaintenanceTicker.Stop()
 		}
 		var localPVInventoryTicker *time.Ticker
@@ -383,7 +384,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 					s.Logger.Printf("image replication reconcile error: %v", err)
 				}
 			case <-githubTickerChan(imageCacheMaintenanceTicker):
-				if err := s.runImageCacheStorageMaintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				if err := s.runScheduledImageCacheMaintenance(ctx, &lastImageCacheMaintenance); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("image-cache storage maintenance error: %v", err)
 				}
 			case <-githubTickerChan(localPVInventoryTicker):
@@ -471,9 +472,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		imageReplicationTicker = time.NewTicker(s.Config.ImageStoreSchedulerInterval)
 		defer imageReplicationTicker.Stop()
 	}
+	var lastImageCacheMaintenance time.Time
 	var imageCacheMaintenanceTicker *time.Ticker
 	if s.Config.ImageCacheInventoryInterval > 0 {
-		imageCacheMaintenanceTicker = time.NewTicker(s.Config.ImageCacheInventoryInterval)
+		imageCacheMaintenanceTicker = time.NewTicker(min(time.Minute, s.Config.ImageCacheInventoryInterval))
 		defer imageCacheMaintenanceTicker.Stop()
 	}
 	var localPVInventoryTicker *time.Ticker
@@ -530,7 +532,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				s.Logger.Printf("image replication reconcile error: %v", err)
 			}
 		case <-githubTickerChan(imageCacheMaintenanceTicker):
-			if err := s.runImageCacheStorageMaintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := s.runScheduledImageCacheMaintenance(ctx, &lastImageCacheMaintenance); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("image-cache storage maintenance error: %v", err)
 			}
 		case <-githubTickerChan(localPVInventoryTicker):

@@ -54,7 +54,7 @@ func MigrateImageRetirement(ctx context.Context, databaseURL string) error {
 	if _, err = tx.ExecContext(ctx, `ALTER TABLE fugue_localpv_inventories ADD COLUMN IF NOT EXISTS bound_pv_count_known BOOLEAN NOT NULL DEFAULT TRUE`); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, ImageRetirementSQL); err != nil {
+	if _, err = tx.ExecContext(ctx, ImageRetirementSQL+ImageOrphanSQL); err != nil {
 		return fmt.Errorf("migrate image retirement: %w", err)
 	}
 	return tx.Commit()

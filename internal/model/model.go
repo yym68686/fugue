@@ -2737,7 +2737,7 @@ type ImageCacheNodeInventory struct {
 	LastError               string                         `json:"last_error,omitempty"`
 	CreatedAt               time.Time                      `json:"created_at"`
 	UpdatedAt               time.Time                      `json:"updated_at"`
-	SnapshotComplete        bool                           `json:"-"`
+	SnapshotComplete        bool                           `json:"snapshot_complete"`
 }
 
 type ImageCacheNodeInventoryFilter struct {
@@ -3452,6 +3452,10 @@ func MachinePolicyDedicatedMode(policy MachinePolicy) string {
 }
 
 type State struct {
+	ImageOrphanPolicy          *ImageOrphanPolicy             `json:"image_orphan_policy,omitempty"`
+	ImageOrphanPolicyHistory   []ImageOrphanPolicy            `json:"image_orphan_policy_history,omitempty"`
+	ImageOrphanDecisions       []ImageOrphanDecision          `json:"image_orphan_decisions,omitempty"`
+	BuildArtifacts             []BuildArtifact                `json:"build_artifacts,omitempty"`
 	ImageRetirements           []Image                        `json:"image_retirements,omitempty"`
 	ObjectStorage              ObjectStorageState             `json:"object_storage,omitempty"`
 	DatabaseMigrations         []DatabaseMigration            `json:"database_migrations,omitempty"`

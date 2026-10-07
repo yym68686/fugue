@@ -53,6 +53,9 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 		return fmt.Errorf("builder job runner is nil")
 	}
 
+	if err := recordBuildArtifact(ctx, jobName, imageRef, false); err != nil {
+		return fmt.Errorf("register build artifact: %w", err)
+	}
 	var lastErr error
 	oomRetryCount := 0
 	ephemeralRetryCount := 0
@@ -69,6 +72,9 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 		err := run(ctx, currentAttempt)
 		recordBuilderAttempt(ctx, jobName, currentAttempt, started, err)
 		if err == nil {
+			if err := recordBuildArtifact(ctx, jobName, imageRef, true); err != nil {
+				return fmt.Errorf("commit build artifact receipt: %w", err)
+			}
 			return nil
 		}
 		lastErr = err

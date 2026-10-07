@@ -39,7 +39,13 @@ func (s *Service) runImageCacheStorageMaintenance(ctx context.Context) error {
 	if err := s.reconcileLegacyDistributedImageMetadata(ctx); err != nil {
 		return fmt.Errorf("reconcile legacy distributed image metadata: %w", err)
 	}
+	if err := s.reconcileBuildArtifacts(ctx); err != nil {
+		return err
+	}
 	if err := s.reconcileHistoricalImageProvenance(ctx); err != nil {
+		return err
+	}
+	if err := s.reconcileImageOrphans(ctx); err != nil {
 		return err
 	}
 	if err := s.scheduleOrphanImageCachePrune(ctx); err != nil {
@@ -218,7 +224,11 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 			}
 			candidates = controllerImageCacheAutomaticDeleteCandidates(plan.Candidates)
 		}
-		targets := controllerImageCachePruneTargets(candidates, s.Config.ImageStoreOrphanPruneMaxTargetsPerNode)
+		targetLimit := s.Config.ImageStoreOrphanPruneMaxTargetsPerNode
+		if protected.orphanPolicy.Mode == "retire" && protected.orphanPolicy.MaxTargetsPerNode > 0 {
+			targetLimit = protected.orphanPolicy.MaxTargetsPerNode
+		}
+		targets := controllerImageCachePruneTargets(candidates, targetLimit)
 		if len(targets) == 0 && plan.CandidateBlobCount == 0 {
 			continue
 		}
@@ -432,7 +442,17 @@ func (s *Service) controllerImageCacheNodePruneCoolingDown(updaterID string) (bo
 				continue
 			}
 			finished := controllerImageCachePruneTaskFinishedAt(task)
-			cooldownUntil := finished.UTC().Add(defaultImageCachePruneNodeCooldown)
+			cooldown := defaultImageCachePruneNodeCooldown
+			if status == model.NodeUpdateTaskStatusCompleted {
+				p, err := s.Store.GetImageOrphanPolicy()
+				if err != nil {
+					return false, time.Time{}, err
+				}
+				if p.Mode == "retire" && p.NodeCooldownSeconds >= 60 {
+					cooldown = time.Duration(p.NodeCooldownSeconds) * time.Second
+				}
+			}
+			cooldownUntil := finished.UTC().Add(cooldown)
 			if cooldownUntil.After(now) {
 				return true, cooldownUntil, nil
 			}
@@ -563,6 +583,9 @@ func protectControllerImageCacheSharedDigestAliases(candidates []model.ImageCach
 }
 
 type controllerImageCacheProtectedSet struct {
+	orphanPolicy         model.ImageOrphanPolicy
+	orphanDecisions      map[string]model.ImageOrphanDecision
+	orphanCoverage       bool
 	availableRefs        map[string]struct{}
 	lostRefs             map[string]struct{}
 	deletedRefs          map[string]struct{}
@@ -749,6 +772,22 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 	if err := s.populateControllerImageReplicaCandidateRefs(&protected, images, replicasByImageID); err != nil {
 		return protected, err
 	}
+	artifacts, artifactErr := s.Store.ListBuildArtifacts()
+	if artifactErr != nil {
+		return protected, artifactErr
+	}
+	for _, a := range artifacts {
+		if a.VerifiedAt == nil && time.Since(a.RegisteredAt) < 7*24*time.Hour {
+			keys := controllerImageReferenceKeys(a.ImageRef, "")
+			addControllerImageKeys(protected.taskRefs, keys...)
+			addControllerImageDetails(protected.taskIDsByRef, keys, a.ID)
+		}
+	}
+	p, decisions, coverage, _, err := s.Store.ImageOrphanContext(time.Now().UTC())
+	if err != nil {
+		return protected, err
+	}
+	protected.orphanPolicy, protected.orphanDecisions, protected.orphanCoverage = p, decisions, coverage
 	return protected, nil
 }
 
@@ -894,10 +933,11 @@ func (s *Service) controllerImageCacheCandidate(manifest model.ImageCacheManifes
 	keys := controllerManifestReferenceKeys(manifest.Repo, manifest.Target, manifest.Digest, manifest.ImageRef)
 	_, active := protected.protectedBlobDigests[imagecachekeys.NormalizeDigest(manifest.Digest)]
 	reason, _ := controllerImageCacheReplicaCandidateForManifest(protected.replicaCandidateRefs, manifest, keys)
-	return imagecachepolicy.Evaluate(manifest, imagecachepolicy.Facts{
+	candidate := imagecachepolicy.Evaluate(manifest, imagecachepolicy.Facts{
 		ActiveDigest: active, Migration: controllerKeySetContainsAny(protected.migrationRefs, keys...), Live: controllerKeySetContainsAny(protected.liveRefs, keys...), Pin: controllerKeySetContainsAny(protected.pinnedRefs, keys...), Task: controllerKeySetContainsAny(protected.taskRefs, keys...), Lost: controllerKeySetContainsAny(protected.lostRefs, keys...), Deleted: controllerKeySetContainsAny(protected.deletedRefs, keys...), MinimumReplica: controllerKeySetContainsAny(protected.minReplicaRefs, keys...),
 		ImageIDs: controllerImageDetailsForKeys(protected.imageIDsByRef, keys), WorkloadRefs: controllerImageDetailsForKeys(protected.workloadRefsByRef, keys), PinIDs: controllerImageDetailsForKeys(protected.pinIDsByRef, keys), TaskIDs: controllerImageDetailsForKeys(protected.taskIDsByRef, keys), ReplicaIDs: controllerImageDetailsForKeys(protected.replicaIDsByRef, keys), KeeperIDs: controllerImageCacheReplicaIDsForManifest(protected.minReplicaKeeperRefs, manifest, keys), CandidateReplicaIDs: controllerImageCacheReplicaIDsForManifest(protected.replicaCandidateRefs, manifest, keys), ReplicaReason: reason,
 	}, now, s.controllerImageCacheGracePeriod())
+	return imagecachepolicy.ApplyOrphanDecision(candidate, manifest, protected.orphanPolicy, protected.orphanDecisions[imagecachepolicy.OrphanKey(manifest)], protected.orphanCoverage, now)
 }
 
 func controllerImageCacheReplicaCandidateReason(status string) string {

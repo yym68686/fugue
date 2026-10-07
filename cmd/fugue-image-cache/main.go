@@ -1982,7 +1982,13 @@ func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	rec := &statusRecordingWriter{ResponseWriter: w}
+	var committed *memoryResponseWriter
+	response := w
+	if len(manifestBody) > 0 {
+		committed = &memoryResponseWriter{header: http.Header{}}
+		response = committed
+	}
+	rec := &statusRecordingWriter{ResponseWriter: response}
 	c.serveObservedRegistry(rec, r)
 	status := rec.statusCode()
 	if status >= 200 && status < 300 && len(manifestBody) > 0 {
@@ -2000,17 +2006,25 @@ func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) 
 					// Persisting it makes a later restart replay the same broken
 					// parent/child graph and turns a transient write error into
 					// permanent catalog drift.
-					continue
+					http.Error(w, "manifest journal alias commit failed", http.StatusServiceUnavailable)
+					return
 				}
 			}
 			if err := c.persistManifest(manifestRepo, target, manifestContentType, manifestBody); err != nil {
 				log.Printf("persist manifest repo=%s target=%s failed: %v", manifestRepo, target, err)
+				http.Error(w, "manifest journal commit failed", http.StatusServiceUnavailable)
+				return
 			}
 		}
 	} else if status >= 200 && status < 300 && r.Method == http.MethodDelete && manifestRepo != "" && manifestTarget != "" {
 		if err := c.deletePersistedManifest(manifestRepo, manifestTarget); err != nil {
 			log.Printf("delete persisted manifest repo=%s target=%s failed: %v", manifestRepo, manifestTarget, err)
 		}
+	}
+	if committed != nil {
+		copyHeader(w.Header(), committed.Header())
+		w.WriteHeader(status)
+		_, _ = w.Write(committed.body.Bytes())
 	}
 	c.reportRegistryWrite(r, status, manifestBody)
 }
@@ -2453,11 +2467,25 @@ func (c *imageCache) persistManifest(repo, target, contentType string, body []by
 		_ = os.Remove(tmpName)
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	dir, err := os.Open(c.manifestDir)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func manifestPersistTargets(target string, body []byte) []string {

@@ -69,6 +69,9 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 	if isInsecureRegistryHost(registryHostFromImageRef(destinationImageRef)) {
 		copyOptions = append(copyOptions, crane.Insecure)
 	}
+	if err := recordBuildArtifact(ctx, "image-copy", logicalImageRef, false); err != nil {
+		return GitHubSourceImportOutput{}, fmt.Errorf("register copied artifact: %w", err)
+	}
 	if !alreadyMirrored {
 		if err := crane.Copy(sourceImageRef, destinationImageRef, copyOptions...); err != nil {
 			return GitHubSourceImportOutput{}, fmt.Errorf("mirror image into internal registry: %w", err)
@@ -76,6 +79,9 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 		if err := validateMirroredImageReference(destinationImageRef, digest, destOptions...); err != nil {
 			return GitHubSourceImportOutput{}, fmt.Errorf("validate mirrored image in internal registry: %w", err)
 		}
+	}
+	if err := recordBuildArtifact(ctx, "image-copy", logicalImageRef, true); err != nil {
+		return GitHubSourceImportOutput{}, fmt.Errorf("commit copied artifact: %w", err)
 	}
 	detectedPort := 80
 	exposesPublicService := false

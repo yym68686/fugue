@@ -65,6 +65,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	placementNodeSelector := s.importBuildPlacementNodeSelector(ctx, app, op)
 	builderMemoryCeiling := s.importBuilderMemoryCeilingBytes(app.TenantID)
 	imageDestination := s.importImageDestination(importCtx, app, op)
+	importCtx = sourceimport.WithBuildArtifactRecorder(importCtx, func(buildCtx context.Context, job, ref string, complete bool) error {
+		return s.recordBuildArtifact(buildCtx, app, op, job, ref, complete, imageDestination)
+	})
 	if strings.TrimSpace(imageDestination.RegistryPushBase) == "" {
 		if running, checkErr := s.registryGCInProgress(ctx); checkErr != nil {
 			return fmt.Errorf("check registry garbage collection state: %w", checkErr)

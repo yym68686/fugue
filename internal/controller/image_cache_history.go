@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// Historical attribution only accepts a completed operation with an immutable
-// digest reference matching a complete physical graph. A name/tag, old mtime,
-// absent app, or failed build is never promoted into retirement authority.
+// Historical attribution accepts completed immutable operation references or
+// independently verified build receipts matching a complete physical graph.
+// A name/tag, old mtime, absent app or failed build alone grants no authority.
 // Recovered generations enter Lost; ordinary retention decides whether they
 // must be kept for rollback or explicitly retired. This never changes serving.
 func (s *Service) reconcileHistoricalImageProvenance(ctx context.Context) error {
@@ -116,6 +116,32 @@ func (s *Service) reconcileHistoricalImageProvenance(ctx context.Context) error 
 			}
 		}
 	}
+	// Independent authenticated build receipts also cover failed deployment
+	// operations. Mutable historical operation references remain insufficient.
+	artifacts, err := s.Store.ListBuildArtifacts()
+	if err != nil {
+		return err
+	}
+	for _, a := range artifacts {
+		if a.VerifiedAt == nil || store.CanonicalImageDigest(a.Digest) == "" {
+			continue
+		}
+		ref := s.managedImageRefFromRuntimeValue(a.ImageRef)
+		repo, _, ok := imagecachekeys.SplitRepoTarget(imagecachekeys.StripRegistry(ref))
+		if !ok {
+			continue
+		}
+		key := repo + "@" + a.Digest
+		m, ok := groups[key]
+		if !ok {
+			continue
+		}
+		if prev, ok := claims[key]; ok && (prev.op.AppID != a.AppID || prev.op.TenantID != a.TenantID) {
+			ambiguous[key] = true
+			continue
+		}
+		claims[key] = claim{op: model.Operation{ID: a.OperationID, AppID: a.AppID, TenantID: a.TenantID}, ref: imageRefWithDigest(a.ImageRef, a.Digest), manifest: m}
+	}
 	recovered := 0
 	for key, c := range claims {
 		if err := ctx.Err(); err != nil {
@@ -131,7 +157,7 @@ func (s *Service) reconcileHistoricalImageProvenance(ctx context.Context) error 
 		recovered++
 	}
 	if recovered > 0 && s.Logger != nil {
-		s.Logger.Printf("recovered %d historical image generation(s) from completed immutable operation references; retention remains independently gated", recovered)
+		s.Logger.Printf("recovered %d historical image generation(s) from immutable operation/build receipts; retention remains independently gated", recovered)
 	}
 	return nil
 }

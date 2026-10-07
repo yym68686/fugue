@@ -11,7 +11,7 @@ import (
 
 func AutomaticDeleteReasonSafe(reason string) bool {
 	switch strings.TrimSpace(reason) {
-	case "deleted_image_generation", "stale_replica", "excess_replica":
+	case "deleted_image_generation", "stale_replica", "excess_replica", "orphan_retirement":
 		return true
 	default:
 		return false
@@ -258,6 +258,7 @@ func applyParentDisposition(child *model.ImageCachePruneCandidate, parent model.
 		return false
 	}
 	child.Reason = parent.Reason
+	child.RetirementEvidence = appendUnique(child.RetirementEvidence, parent.RetirementEvidence...)
 	child.SkipDetails = appendUnique(child.SkipDetails, "delete with authorized parent manifest graph")
 	child.MatchedImageIDs = appendUnique(child.MatchedImageIDs, parent.MatchedImageIDs...)
 	child.MatchedPinIDs = appendUnique(child.MatchedPinIDs, parent.MatchedPinIDs...)

@@ -14,7 +14,7 @@ import (
 )
 
 func imageCacheNodeColumns() string {
-	return `id, node_id, cluster_node_name, runtime_id, cache_endpoint, store_path, filesystem_total_bytes, filesystem_free_bytes, filesystem_used_percent, cache_bytes, manifest_count, blob_count, unreferenced_blob_count, unreferenced_blob_bytes, unreferenced_blobs_json, pin_count, observed_at, reported_by_node_updater_id, status, last_error, created_at, updated_at`
+	return `id, node_id, cluster_node_name, runtime_id, cache_endpoint, store_path, filesystem_total_bytes, filesystem_free_bytes, filesystem_used_percent, cache_bytes, manifest_count, blob_count, unreferenced_blob_count, unreferenced_blob_bytes, unreferenced_blobs_json, pin_count, observed_at, reported_by_node_updater_id, status, last_error, created_at, updated_at, snapshot_complete`
 }
 
 func imageCacheManifestColumns() string {
@@ -50,6 +50,9 @@ LIMIT 1
 FOR UPDATE
 `, node.NodeID, node.ClusterNodeName))
 	if err == nil {
+		if node.ObservedAt.Before(existing.ObservedAt) {
+			return model.ImageCacheNodeInventory{}, ErrConflict
+		}
 		node.ID = existing.ID
 		node.CreatedAt = existing.CreatedAt
 		node.UpdatedAt = now
@@ -65,9 +68,9 @@ SET node_id = $2, cluster_node_name = $3, runtime_id = $4, cache_endpoint = $5,
 	blob_count = $12, unreferenced_blob_count = $13, unreferenced_blob_bytes = $14,
 	unreferenced_blobs_json = $15, pin_count = $16, observed_at = $17,
 	reported_by_node_updater_id = $18, status = $19, last_error = $20,
-	updated_at = $21
+	updated_at = $21, snapshot_complete = $22
 WHERE id = $1
-RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.UnreferencedBlobCount, node.UnreferencedBlobBytes, unreferencedBlobsJSON, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.UpdatedAt))
+RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.UnreferencedBlobCount, node.UnreferencedBlobBytes, unreferencedBlobsJSON, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.UpdatedAt, node.SnapshotComplete))
 		if updateErr != nil {
 			return model.ImageCacheNodeInventory{}, mapDBErr(updateErr)
 		}
@@ -86,15 +89,15 @@ INSERT INTO fugue_image_cache_nodes (
 	filesystem_total_bytes, filesystem_free_bytes, filesystem_used_percent,
 	cache_bytes, manifest_count, blob_count, unreferenced_blob_count,
 	unreferenced_blob_bytes, unreferenced_blobs_json, pin_count, observed_at,
-	reported_by_node_updater_id, status, last_error, created_at, updated_at
+	reported_by_node_updater_id, status, last_error, created_at, updated_at, snapshot_complete
 ) VALUES (
 	$1, $2, $3, $4, $5, $6,
 	$7, $8, $9,
 	$10, $11, $12, $13,
 	$14, $15, $16, $17,
-	$18, $19, $20, $21, $22
+	$18, $19, $20, $21, $22, $23
 )
-RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.UnreferencedBlobCount, node.UnreferencedBlobBytes, unreferencedBlobsJSON, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.CreatedAt, node.UpdatedAt))
+RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.UnreferencedBlobCount, node.UnreferencedBlobBytes, unreferencedBlobsJSON, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.CreatedAt, node.UpdatedAt, node.SnapshotComplete))
 		if insertErr != nil {
 			return model.ImageCacheNodeInventory{}, mapDBErr(insertErr)
 		}
@@ -139,6 +142,17 @@ RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName,
 			return model.ImageCacheNodeInventory{}, err
 		}
 	}
+	if node.SnapshotComplete {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM fugue_image_cache_manifests WHERE node_id=$1 AND cluster_node_name=$2 AND present AND last_seen_at=$3`, node.NodeID, node.ClusterNodeName, node.ObservedAt).Scan(&count); err != nil {
+			return model.ImageCacheNodeInventory{}, err
+		}
+		node.SnapshotComplete = count == node.ManifestCount
+		if _, err := tx.ExecContext(ctx, `UPDATE fugue_image_cache_nodes SET snapshot_complete=$2 WHERE id=$1`, node.ID, node.SnapshotComplete); err != nil {
+			return model.ImageCacheNodeInventory{}, err
+		}
+	}
+
 	if node.SnapshotComplete {
 		if err := pgMarkMissingImageCacheManifestsAbsent(ctx, tx, node, now); err != nil {
 			return model.ImageCacheNodeInventory{}, err
@@ -613,6 +627,7 @@ func scanImageCacheNodeInventory(scanner sqlScanner) (model.ImageCacheNodeInvent
 		&out.LastError,
 		&out.CreatedAt,
 		&out.UpdatedAt,
+		&out.SnapshotComplete,
 	); err != nil {
 		return model.ImageCacheNodeInventory{}, err
 	}

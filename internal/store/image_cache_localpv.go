@@ -12,6 +12,9 @@ import (
 
 func (s *Store) UpsertImageCacheInventory(node model.ImageCacheNodeInventory, manifests []model.ImageCacheManifest) (model.ImageCacheNodeInventory, error) {
 	node = normalizeImageCacheNodeInventory(node)
+	if node.ManifestCount == 0 {
+		node.ManifestCount = len(manifests)
+	}
 	if node.NodeID == "" && node.ClusterNodeName == "" {
 		return model.ImageCacheNodeInventory{}, ErrInvalidInput
 	}
@@ -24,6 +27,9 @@ func (s *Store) UpsertImageCacheInventory(node model.ImageCacheNodeInventory, ma
 		index := findImageCacheNodeInventory(state.ImageCacheNodes, node)
 		if index >= 0 {
 			current := state.ImageCacheNodes[index]
+			if node.ObservedAt.Before(current.ObservedAt) {
+				return ErrConflict
+			}
 			node.ID = current.ID
 			node.CreatedAt = current.CreatedAt
 			node.UpdatedAt = now
@@ -63,6 +69,18 @@ func (s *Store) UpsertImageCacheInventory(node model.ImageCacheNodeInventory, ma
 				state.ImageCacheManifests = append(state.ImageCacheManifests, manifest)
 			}
 		}
+		if node.SnapshotComplete {
+			count := 0
+			for _, m := range state.ImageCacheManifests {
+				if imageCacheManifestBelongsToNode(m, node) && m.Present && m.LastSeenAt.Equal(node.ObservedAt) {
+					count++
+				}
+			}
+			node.SnapshotComplete = count == node.ManifestCount
+			state.ImageCacheNodes[findImageCacheNodeInventory(state.ImageCacheNodes, node)] = node
+			out = node
+		}
+
 		if node.SnapshotComplete {
 			for idx, manifest := range state.ImageCacheManifests {
 				if !imageCacheManifestBelongsToNode(manifest, node) || !manifest.Present {

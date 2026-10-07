@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const Version = "image-cache-retirement/v1"
+const Version = "image-cache-retirement/v2"
 const DefaultGracePeriod = 24 * time.Hour
 
 // Facts are observations, not authority supplied by the caller of a delete API.
@@ -31,6 +31,7 @@ func Evaluate(manifest model.ImageCacheManifest, facts Facts, now time.Time, gra
 		gracePeriod = DefaultGracePeriod
 	}
 	out = model.ImageCachePruneCandidate{
+		MatchedImageIDs:     facts.ImageIDs,
 		ImageRef:            manifest.ImageRef,
 		NodeName:            firstNonEmpty(manifest.ClusterNodeName, manifest.NodeID, manifest.RuntimeID),
 		Repo:                manifest.Repo,
@@ -157,6 +158,8 @@ func Describe(out *model.ImageCachePruneCandidate) {
 		return
 	}
 	switch out.Reason {
+	case "orphan_retirement":
+		out.LifecycleState = "delete_eligible"
 	case "deleted_image_generation", "stale_replica", "excess_replica":
 		out.LifecycleState = "delete_eligible"
 		out.RetirementEvidence = append(append([]string(nil), out.MatchedImageIDs...), out.MatchedReplicaIDs...)

@@ -22,6 +22,7 @@ func Seal(plan *model.ImageCachePrunePlan) {
 	for _, set := range [][]model.ImageCachePruneCandidate{plan.Candidates, plan.ProtectedManifests} {
 		for _, c := range set {
 			ev := append(append([]string{}, c.MatchedImageIDs...), c.MatchedReplicaIDs...)
+			ev = append(ev, c.RetirementEvidence...)
 			sort.Strings(ev)
 			rows = append(rows, row{c.Repo, c.Target, c.Digest, c.Reason, c.SkipReason, c.Protected, ev})
 		}

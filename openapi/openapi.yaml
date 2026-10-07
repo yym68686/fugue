@@ -10,7 +10,10 @@ x-fugue-image-cache-retirement:
     API preview, controller classification and claim-time revalidation share
     one versioned retirement evaluator. Missing lifecycle metadata remains
     quarantined and never authorizes deletion based on age or absent references
-    alone. Completed operations can restore historical attribution only through
+    alone. An independently configured, administrator-authorized orphan policy
+    can retire an exact physical generation after multiple complete authenticated
+    fleet inventories and fresh protection checks. Ownership remains unknown.
+    Policy changes or incomplete coverage suspend that authority. Completed operations can restore historical attribution only through
     an exact immutable digest and verified physical graph. Independently retained
     image generation retirement records survive business metadata removal;
     live generations, pins, migration and workload references still win.
@@ -1600,6 +1603,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PlatformDomainBindingListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/image-cache/orphan-policy:
+    get:
+      operationId: adminGetImageOrphanPolicy
+      summary: adminGetImageOrphanPolicy
+      tags: [Admin]
+      x-fugue-handler: handleAdminGetImageOrphanPolicy
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Durable orphan retirement policy or observations. Platform administrator required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageOrphanPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: adminPutImageOrphanPolicy
+      summary: adminPutImageOrphanPolicy
+      tags: [Admin]
+      x-fugue-handler: handleAdminPutImageOrphanPolicy
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageOrphanPolicyUpdate"
+      responses:
+        '200':
+          description: Durable orphan retirement policy or observations. Platform administrator required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageOrphanPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/image-cache/orphans:
+    get:
+      operationId: adminListImageOrphans
+      summary: adminListImageOrphans
+      tags: [Admin]
+      x-fugue-handler: handleAdminListImageOrphans
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Durable orphan retirement policy or observations. Platform administrator required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageOrphanListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/image-cache/inventory:
@@ -14351,6 +14410,81 @@ components:
       schema:
         type: string
   schemas:
+    ImageOrphanPolicy:
+      type: object
+      required: [generation, mode, repository_prefixes, quarantine_seconds, minimum_observations, inventory_max_age_seconds, updated_at, updated_by]
+      properties:
+        generation: {type: integer, format: int64, minimum: 0}
+        mode: {type: string, enum: [observe, retire]}
+        repository_prefixes:
+          type: array
+          items: {type: string}
+        excluded_nodes:
+          description: Explicitly excluded offline or decommissioned nodes; deletion on these nodes remains forbidden.
+          type: array
+          items: {type: string}
+        quarantine_seconds: {type: integer, minimum: 600}
+        minimum_observations: {type: integer, minimum: 2}
+        inventory_max_age_seconds: {type: integer, minimum: 60, maximum: 7200}
+        sweep_interval_seconds: {type: integer, minimum: 60, maximum: 3600, default: 1800}
+        max_targets_per_node: {type: integer, minimum: 1, maximum: 500, default: 50}
+        node_cooldown_seconds: {type: integer, minimum: 60, maximum: 3600, default: 1800}
+        updated_at: {type: string, format: date-time}
+        updated_by: {type: string}
+    ImageOrphanPolicyUpdate:
+      type: object
+      additionalProperties: false
+      required: [expected_generation, mode, repository_prefixes, quarantine_seconds, minimum_observations, inventory_max_age_seconds]
+      properties:
+        expected_generation: {type: integer, format: int64, minimum: 0}
+        mode: {type: string, enum: [observe, retire]}
+        repository_prefixes:
+          type: array
+          minItems: 1
+          items: {type: string}
+        excluded_nodes:
+          description: Explicitly excluded offline or decommissioned nodes; deletion on these nodes remains forbidden.
+          type: array
+          items: {type: string}
+        quarantine_seconds: {type: integer, minimum: 600}
+        minimum_observations: {type: integer, minimum: 2}
+        inventory_max_age_seconds: {type: integer, minimum: 60, maximum: 7200}
+        sweep_interval_seconds: {type: integer, minimum: 60, maximum: 3600, default: 1800}
+        max_targets_per_node: {type: integer, minimum: 1, maximum: 500, default: 50}
+        node_cooldown_seconds: {type: integer, minimum: 60, maximum: 3600, default: 1800}
+    ImageOrphanPolicyResponse:
+      type: object
+      required: [policy]
+      properties:
+        policy: {$ref: '#/components/schemas/ImageOrphanPolicy'}
+    ImageOrphanDecision:
+      type: object
+      required: [id, node, repo, target, digest, ownership, state, policy_generation, observations, first_observed_at, last_observed_at, reason]
+      properties:
+        id: {type: string}
+        node: {type: string}
+        repo: {type: string}
+        target: {type: string}
+        digest: {type: string}
+        ownership: {type: string, enum: [unknown]}
+        state: {type: string, enum: [quarantined, retirement_authorized, protected, absent]}
+        policy_generation: {type: integer, format: int64}
+        observations: {type: integer}
+        first_observed_at: {type: string, format: date-time}
+        last_observed_at: {type: string, format: date-time}
+        reason: {type: string}
+        graph_hash: {type: string}
+    ImageOrphanListResponse:
+      type: object
+      required: [policy, coverage_complete, coverage_reason, decisions]
+      properties:
+        policy: {$ref: '#/components/schemas/ImageOrphanPolicy'}
+        coverage_complete: {type: boolean}
+        coverage_reason: {type: string}
+        decisions:
+          type: array
+          items: {$ref: '#/components/schemas/ImageOrphanDecision'}
+
     AgentEdgeSelectionPolicy:
       type: "object"
       additionalProperties: false
@@ -25546,6 +25680,7 @@ components:
       additionalProperties: false
       required: [id, observed_at, created_at, updated_at]
       properties:
+        snapshot_complete: {type: boolean, description: Complete authenticated inventory persisted with this observation.}
         id:
           type: string
         node_id:

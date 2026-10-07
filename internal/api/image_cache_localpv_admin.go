@@ -47,6 +47,18 @@ func (s *Server) handleNodeUpdaterReportImageCacheInventory(w http.ResponseWrite
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	for _, pair := range [][2]string{{node.NodeID, updater.MachineID}, {node.ClusterNodeName, updater.ClusterNodeName}, {node.RuntimeID, updater.RuntimeID}} {
+		if pair[1] != "" && pair[0] != "" && pair[0] != pair[1] {
+			httpx.WriteError(w, http.StatusBadRequest, "inventory identity does not match authenticated updater")
+			return
+		}
+	}
+	for i := range manifests {
+		manifests[i].NodeID = node.NodeID
+		manifests[i].ClusterNodeName = node.ClusterNodeName
+		manifests[i].RuntimeID = node.RuntimeID
+		manifests[i].LastSeenAt = node.ObservedAt
+	}
 	node.ReportedByNodeUpdaterID = updater.ID
 	node.NodeID = firstNonEmptyImageAPIString(node.NodeID, updater.MachineID)
 	node.ClusterNodeName = firstNonEmptyImageAPIString(node.ClusterNodeName, updater.ClusterNodeName)
@@ -640,6 +652,9 @@ func applyImageCachePrunePlanBudget(plan *model.ImageCachePrunePlan) {
 }
 
 type imageCacheProtectedSet struct {
+	orphanPolicy         model.ImageOrphanPolicy
+	orphanDecisions      map[string]model.ImageOrphanDecision
+	orphanCoverage       bool
 	availableRefs        map[string]struct{}
 	lostRefs             map[string]struct{}
 	deletedRefs          map[string]struct{}
@@ -859,6 +874,22 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 	if err := s.populateImageCacheMinimumReplicaRefs(protected, images); err != nil {
 		return err
 	}
+	artifacts, artifactErr := s.store.ListBuildArtifacts()
+	if artifactErr != nil {
+		return artifactErr
+	}
+	for _, a := range artifacts {
+		if a.VerifiedAt == nil && time.Since(a.RegisteredAt) < 7*24*time.Hour {
+			keys := exactImageReferenceKeys(a.ImageRef, "")
+			addKeys(protected.taskRefs, keys...)
+			addImageCacheDetail(protected.taskIDsByRef, keys, a.ID)
+		}
+	}
+	p, decisions, coverage, _, err := s.store.ImageOrphanContext(time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	protected.orphanPolicy, protected.orphanDecisions, protected.orphanCoverage = p, decisions, coverage
 	return nil
 }
 
@@ -962,10 +993,11 @@ func imageCachePruneCandidateForManifest(manifest model.ImageCacheManifest, prot
 	keys := exactManifestReferenceKeys(manifest.Repo, manifest.Target, manifest.Digest, manifest.ImageRef)
 	_, active := protected.protectedBlobDigests[imagecachekeys.NormalizeDigest(manifest.Digest)]
 	reason, _ := imageCacheReplicaCandidateForManifest(protected.replicaCandidateRefs, manifest, keys)
-	return imagecachepolicy.Evaluate(manifest, imagecachepolicy.Facts{
+	candidate := imagecachepolicy.Evaluate(manifest, imagecachepolicy.Facts{
 		ActiveDigest: active, Migration: keySetContainsAny(protected.migrationRefs, keys...), Live: keySetContainsAny(protected.liveRefs, keys...), Pin: keySetContainsAny(protected.pinnedRefs, keys...), Task: keySetContainsAny(protected.taskRefs, keys...), Lost: keySetContainsAny(protected.lostRefs, keys...), Deleted: keySetContainsAny(protected.deletedRefs, keys...), MinimumReplica: keySetContainsAny(protected.minReplicaRefs, keys...),
 		ImageIDs: imageCacheDetailsForKeys(protected.imageIDsByRef, keys), WorkloadRefs: imageCacheDetailsForKeys(protected.workloadRefsByRef, keys), PinIDs: imageCacheDetailsForKeys(protected.pinIDsByRef, keys), TaskIDs: imageCacheDetailsForKeys(protected.taskIDsByRef, keys), ReplicaIDs: imageCacheDetailsForKeys(protected.replicaIDsByRef, keys), KeeperIDs: imageCacheReplicaIDsForManifest(protected.minReplicaKeeperRefs, manifest, keys), CandidateReplicaIDs: imageCacheReplicaIDsForManifest(protected.replicaCandidateRefs, manifest, keys), ReplicaReason: reason,
 	}, now, defaultImageCacheOrphanGracePeriod)
+	return imagecachepolicy.ApplyOrphanDecision(candidate, manifest, protected.orphanPolicy, protected.orphanDecisions[imagecachepolicy.OrphanKey(manifest)], protected.orphanCoverage, now)
 }
 
 func protectImageCacheSharedDigestAliases(candidates []model.ImageCachePruneCandidate) []model.ImageCachePruneCandidate {

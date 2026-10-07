@@ -589,6 +589,7 @@ var postgresSchemaStatements = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_image_cache_nodes_node ON fugue_image_cache_nodes (node_id) WHERE node_id <> ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_image_cache_nodes_cluster ON fugue_image_cache_nodes (cluster_node_name) WHERE node_id = '' AND cluster_node_name <> ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_image_cache_nodes_observed ON fugue_image_cache_nodes (observed_at DESC)`,
+	schemamigrate.ImageOrphanSQL,
 	`CREATE TABLE IF NOT EXISTS fugue_image_cache_manifests (
 		id TEXT PRIMARY KEY,
 		node_id TEXT NOT NULL DEFAULT '',
