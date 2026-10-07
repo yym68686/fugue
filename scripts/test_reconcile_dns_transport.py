@@ -238,8 +238,36 @@ class TransportTests(unittest.TestCase):
              patch.object(transport, 'validate_handoff_snapshots'), \
              patch.object(transport.time, 'sleep') as sleep:
             result = transport.handoff_witness(config, candidate_listener, current)
-        self.assertEqual(result['candidate_uid'], 'new')
+            self.assertEqual(result['candidate_uid'], 'new')
         sleep.assert_called_once_with(transport.HANDOFF_RETRY_SECONDS)
+
+    def test_proof_expiry_during_observation_requires_a_fresh_bounded_retry(self):
+        config = self.config()
+        current = transport.service(config, config['listeners'][0])
+        candidate_listener = copy.deepcopy(config['listeners'][0])
+        candidate_listener['selector'] = {'app': 'candidate'}
+        old = {'pod': {'metadata': {'uid': 'old'}}, 'snapshot': self.snapshot()}
+        candidate = {'pod': {'metadata': {'uid': 'new'}}, 'snapshot': copy.deepcopy(old['snapshot'])}
+        expired = ValueError('DNS handoff proof is expired or from the future')
+        nodes = {'items': [{'metadata': {'name': 'node', 'uid': 'node-uid'},
+                           'status': {'addresses': [{'address': config['listeners'][0]['address']}]}}]}
+        for persistent in [False, True]:
+            with self.subTest(persistent=persistent), \
+                 patch.object(transport, 'handoff_backend', side_effect=[old, candidate] * transport.HANDOFF_ATTEMPTS) as backend, \
+                 patch.object(transport, 'read_json', return_value=nodes), \
+                 patch.object(transport, 'validate_handoff_endpoints'), \
+                 patch.object(transport, 'validate_handoff_snapshots', side_effect=([expired] * transport.HANDOFF_ATTEMPTS if persistent else [expired, None])), \
+                 patch.object(transport.time, 'sleep') as sleep:
+                if persistent:
+                    with self.assertRaisesRegex(ValueError, 'proof is expired'):
+                        transport.handoff_witness(config, candidate_listener, current)
+                    self.assertEqual(backend.call_count, 2 * transport.HANDOFF_ATTEMPTS)
+                    self.assertEqual(sleep.call_count, transport.HANDOFF_ATTEMPTS - 1)
+                else:
+                    result = transport.handoff_witness(config, candidate_listener, current)
+                    self.assertEqual(result['candidate_uid'], 'new')
+                    self.assertEqual(backend.call_count, 4)
+                    sleep.assert_called_once_with(transport.HANDOFF_RETRY_SECONDS)
 
 
 if __name__ == "__main__":
