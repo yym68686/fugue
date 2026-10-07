@@ -147,6 +147,8 @@ func (s *Service) SyncPlatformDNSServingOnce(ctx context.Context) error {
 	return s.syncPlatformDNSServing(ctx, routeprobe.Probe, s.probeDNSServingListener)
 }
 
+var errDNSReleaseConverging = errors.New("DNS release is waiting for exact route proofs")
+
 func (s *Service) syncPlatformDNSServing(ctx context.Context, probe dnsReadinessProbeFunc, wireProbe func(*dnsServingState) error) error {
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -326,7 +328,12 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			retained.transition = &dnsRecordTransition{state: st, hosts: hosts}
 			s.platformServing.Store(retained)
 		}
-		return fmt.Errorf("DNS candidate required readiness is incomplete: %s", dnsReadinessFailureSummary(p.Plan, p.Policy.DNSReadiness, facts, now))
+		summary := dnsReadinessFailureSummary(p.Plan, p.Policy.DNSReadiness, facts, now)
+		if !same && old != nil && old.record.Positive && a.ConvergenceDeadline.After(now) &&
+			dnsServingReady(s.platformServing.Load(), now) && dnsKnownReleaseOverlap(old, p, observations, facts, now) {
+			return fmt.Errorf("%w: %s", errDNSReleaseConverging, summary)
+		}
+		return fmt.Errorf("DNS candidate required readiness is incomplete: %s", summary)
 	}
 	if err = probeDNSServingSnapshot(st); err != nil {
 		return err

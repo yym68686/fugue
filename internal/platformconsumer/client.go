@@ -321,8 +321,35 @@ func (c Client) ReleaseSet(ctx context.Context, id Identity, a model.PlatformCon
 	if err := c.json(ctx, endpoint, id.Token, http.MethodGet, nil, &reply); err != nil {
 		return model.PlatformArtifact{}, c.classifyAssignmentReadError(ctx, id, a, err)
 	}
-	if !reflect.DeepEqual(reply.Assignment, a) || !reflect.DeepEqual(reply.Release, r) || reply.Artifact.ID != a.ReleaseSetID || reply.Artifact.ArtifactKind != model.PlatformArtifactKindReleaseSet || reply.Artifact.ScopeKey != a.ScopeKey {
+	if !reflect.DeepEqual(reply.Assignment, a) || !sameReleaseAuthority(r, reply.Release) || reply.Artifact.ID != a.ReleaseSetID || reply.Artifact.ArtifactKind != model.PlatformArtifactKindReleaseSet || reply.Artifact.ScopeKey != a.ScopeKey {
+		if err := c.CheckAssignment(ctx, id, a); errors.Is(err, ErrAssignmentChanged) {
+			return model.PlatformArtifact{}, ErrAssignmentChanged
+		}
 		return model.PlatformArtifact{}, errors.New("parent release binding changed")
 	}
 	return reply.Artifact, nil
+}
+
+func sameReleaseAuthority(before, after model.PlatformArtifactRelease) bool {
+	if reflect.DeepEqual(before, after) {
+		return true
+	}
+	// Completing positive verification changes runtime metadata, not the
+	// publication's identity. Admit only that forward transition; failed,
+	// rolled-back, foreign or otherwise changed authority remains rejected.
+	if before.VerificationState != model.PlatformArtifactVerificationStateServingUnverified ||
+		after.VerificationState != model.PlatformArtifactVerificationStateVerified ||
+		after.VerifiedLKGGeneration != before.Generation || after.ServingUnverifiedGeneration != "" ||
+		after.VerifiedAt == nil || after.VerifiedAt.Before(before.ReleasedAt) ||
+		after.Version != before.Version+1 || after.UpdatedAt.Before(before.UpdatedAt) {
+		return false
+	}
+	after.VerificationState = before.VerificationState
+	after.VerificationEvidence = before.VerificationEvidence
+	after.VerifiedLKGGeneration = before.VerifiedLKGGeneration
+	after.ServingUnverifiedGeneration = before.ServingUnverifiedGeneration
+	after.VerifiedAt = before.VerifiedAt
+	after.Version = before.Version
+	after.UpdatedAt = before.UpdatedAt
+	return reflect.DeepEqual(before, after)
 }

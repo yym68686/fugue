@@ -453,9 +453,33 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	candidate.Release.FencingToken++
 	candidate.Release.ID = "next"
 	candidate.Assignment.ArtifactReleaseID = "next"
+	oldProbe := func(_ context.Context, host, path, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
+		for _, p := range old.payload.Plan.Probes {
+			if p.Hostname == host && p.Path == path && p.Address == address {
+				for _, f := range old.facts {
+					if f.ProbeID == p.ID {
+						return f.Proof, nil
+					}
+				}
+			}
+		}
+		return routeprobe.Proof{}, errors.New("unknown old probe")
+	}
+	candidate.Assignment.ConvergenceDeadline = time.Now().Add(time.Minute)
+	if err = s.syncPlatformDNSServingOnce(ctx, oldProbe, s.probeDNSServingListener); !errors.Is(err, errDNSReleaseConverging) {
+		t.Fatal("fresh exact previous release not classified as bounded convergence", err)
+	}
+	if !reflect.DeepEqual(s.platformServing.Load().record, old.record) {
+		t.Fatal("pending release replaced positive checkpoint")
+	}
+	candidate.Assignment.ConvergenceDeadline = time.Now().Add(-time.Second)
+	if err = s.syncPlatformDNSServingOnce(ctx, oldProbe, s.probeDNSServingListener); err == nil || errors.Is(err, errDNSReleaseConverging) {
+		t.Fatal("past-deadline mismatch was not a failure", err)
+	}
+	candidate.Assignment.ConvergenceDeadline = time.Now().Add(time.Minute)
 	if err = s.syncPlatformDNSServingOnce(ctx, func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
 		return routeprobe.Proof{}, errors.New("offline")
-	}, s.probeDNSServingListener); err == nil {
+	}, s.probeDNSServingListener); err == nil || errors.Is(err, errDNSReleaseConverging) {
 		t.Fatal("bad candidate applied")
 	}
 	if !reflect.DeepEqual(s.platformServing.Load().record, old.record) {

@@ -2,9 +2,49 @@ package dnsserver
 
 import (
 	"slices"
+	"time"
 
+	"fugue/internal/dnsroutesource"
 	"fugue/internal/platformconfig"
 )
+
+// This affects diagnostics only: no proof is rebound and no readiness is
+// granted. Every pending requirement must have a fresh exact old-publication
+// observation; unknown, negative and missing observations remain failures.
+func dnsKnownReleaseOverlap(old *dnsServingState, candidate dnsServingPayload, observations, filtered []dnsReadinessFact, now time.Time) bool {
+	if old.payload.routeSources != nil || candidate.routeSources != nil {
+		return false
+	}
+	previous := map[string]platformconfig.DNSReadinessProbe{}
+	for _, p := range old.payload.Plan.Probes {
+		previous[dnsroutesource.ProbeKey(p)] = p
+	}
+	observed := map[string]dnsReadinessFact{}
+	for _, f := range observations {
+		observed[f.ProbeID] = f
+	}
+	valid := validDNSReadinessFacts(candidate.Plan, candidate.Policy.DNSReadiness, filtered, now)
+	pending := false
+	for _, requirement := range candidate.Plan.Probes {
+		if _, ok := valid[requirement.ID]; ok {
+			continue
+		}
+		prior, ok := previous[dnsroutesource.ProbeKey(requirement)]
+		if !ok {
+			return false
+		}
+		fact, ok := observed[requirement.ID]
+		if !ok || (!fact.Ready && fact.Reason != "route_digest_mismatch") || !dnsProofMatchesRelease(fact.Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) {
+			return false
+		}
+		fact = evaluateDNSReadinessFact(prior, old.payload.Policy.DNSReadiness, fact.Proof, nil, now)
+		if !fact.Ready {
+			return false
+		}
+		pending = true
+	}
+	return pending
+}
 
 // A transition is volatile query evidence, never a positive checkpoint. Each
 // record uses one complete signed plan and its exact publication's proofs;

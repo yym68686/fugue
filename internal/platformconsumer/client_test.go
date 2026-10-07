@@ -146,6 +146,58 @@ func TestSyncRejectsInvalidReleaseChannel(t *testing.T) {
 	}
 }
 
+func TestParentReadAllowsVerificationCompletionButRejectsAuthorityChanges(t *testing.T) {
+	for _, scenario := range []string{"unchanged", "verified", "new-fence", "new-cohort", "failed", "rolled-back", "foreign-parent", "assignment-race", "verification-replay"} {
+		t.Run(scenario, func(t *testing.T) {
+			now := time.Now().UTC()
+			a := model.PlatformConsumerAssignment{ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ArtifactID: "dns", ReleaseSetID: "parent", ArtifactReleaseID: "release", ScopeKey: "global", ReleaseChannel: "full", ExpectedConsumerSetID: "set", FencingToken: 2}
+			r := model.PlatformArtifactRelease{ID: "release", ArtifactID: "parent", ArtifactKind: model.PlatformArtifactKindReleaseSet, ScopeKey: "global", Generation: "generation", ReleaseChannel: "full", Status: model.PlatformArtifactReleaseStatusActive, FencingToken: 2, Version: 1, VerificationState: model.PlatformArtifactVerificationStateServingUnverified, ServingUnverifiedGeneration: "generation", ReleasedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute)}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Path == "/v1/platform-state/consumers/assignment" {
+					next := a
+					if scenario == "assignment-race" {
+						next.FencingToken++
+					}
+					json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{next}})
+					return
+				}
+				after := r
+				parent := model.PlatformArtifact{ID: "parent", ArtifactKind: model.PlatformArtifactKindReleaseSet, ScopeKey: "global"}
+				if scenario != "unchanged" {
+					after.VerificationState, after.VerifiedLKGGeneration, after.ServingUnverifiedGeneration = model.PlatformArtifactVerificationStateVerified, r.Generation, ""
+					after.VerifiedAt, after.UpdatedAt, after.Version = &now, now, 2
+					after.VerificationEvidence = map[string]string{"consumer_convergence": "true"}
+				}
+				switch scenario {
+				case "new-fence", "assignment-race":
+					after.FencingToken++
+				case "new-cohort":
+					after.CanaryRuleRef = "cohort=other"
+				case "failed":
+					after.VerificationState = model.PlatformArtifactVerificationStateFailed
+				case "rolled-back":
+					after.Status = model.PlatformArtifactReleaseStatusRolledBack
+				case "foreign-parent":
+					parent.ID = "foreign"
+				case "verification-replay":
+					after.Version = 1
+				}
+				json.NewEncoder(w).Encode(map[string]any{"assignment": a, "artifact": parent, "release": after})
+			}))
+			defer server.Close()
+			client := Client{BaseURL: server.URL}
+			parent, err := client.ReleaseSet(context.Background(), Identity{Token: "identity", ScopeKey: a.ScopeKey, ArtifactKinds: []string{a.ArtifactKind}}, a, r)
+			if scenario == "verified" || scenario == "unchanged" {
+				if err != nil || parent.ID != "parent" {
+					t.Fatal("same publication rejected", err)
+				}
+			} else if err == nil || errors.Is(err, ErrAssignmentChanged) != (scenario == "assignment-race") {
+				t.Fatal("authority change incorrectly classified", err)
+			}
+		})
+	}
+}
+
 func TestDownloadConflictRetriesOnlyAfterObservedAssignmentChange(t *testing.T) {
 	for _, code := range []int{http.StatusNotFound, http.StatusConflict, http.StatusForbidden, http.StatusServiceUnavailable} {
 		for _, changed := range []bool{false, true} {

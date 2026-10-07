@@ -94,7 +94,7 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 		s.mu.Lock()
 		s.platformServingError = servingErr.Error()
 		s.mu.Unlock()
-		if errors.Is(servingErr, platformconsumer.ErrAssignmentChanged) {
+		if errors.Is(servingErr, platformconsumer.ErrAssignmentChanged) || errors.Is(servingErr, errDNSReleaseConverging) {
 			s.Logger.Printf("DNS traffic serving convergence pending: %v", servingErr)
 		} else {
 			s.Logger.Printf("DNS traffic serving sync failed: %v", servingErr)
