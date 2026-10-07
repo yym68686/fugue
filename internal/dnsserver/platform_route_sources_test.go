@@ -22,7 +22,7 @@ import (
 )
 
 func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
-	for _, scenario := range []string{"success", "selection-race", "negative-probe", "wrong-binding", "mixed-publications", "old-fence", "forged-checkpoint"} {
+	for _, scenario := range []string{"success", "selection-race", "negative-probe", "wrong-binding", "mixed-publications", "old-fence", "forged-checkpoint", "transient-refresh", "expired-refresh", "negative-refresh"} {
 		t.Run(scenario, func(t *testing.T) {
 			req, policies, activations := celldns.SourceAuthorizedRequest(t, true)
 			compiled := celldns.Compile(t, req)
@@ -117,6 +117,42 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatal(err)
+			}
+			if strings.HasSuffix(scenario, "-refresh") {
+				original := map[string]dnsReadinessFact{}
+				for _, f := range facts {
+					original[f.ProbeID] = f
+				}
+				if scenario == "expired-refresh" {
+					for i := range s.platformDNSRouteFacts {
+						s.platformDNSRouteFacts[i].Proof.ValidUntil = time.Now().Add(-time.Second)
+					}
+				}
+				refreshError := routeprobe.ErrUnavailable
+				if scenario == "negative-refresh" {
+					refreshError = errors.New("authenticated negative response")
+				}
+				_, refreshed, err := s.observeDNSRouteSources(context.Background(), client, platformconsumer.Identity{Token: "test"}, candidate, payload, nil,
+					func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+						return routeprobe.Proof{}, refreshError
+					})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, f := range refreshed {
+					if scenario == "transient-refresh" {
+						old := original[f.ProbeID]
+						if f.Ready != old.Ready || !f.Proof.CheckedAt.Equal(old.Proof.CheckedAt) || !f.Proof.ValidUntil.Equal(old.Proof.ValidUntil) {
+							t.Fatal("transient refresh renewed or lost actual proof", f)
+						}
+					} else if f.Ready {
+						t.Fatal("expired or negative proof retained", f)
+					}
+				}
+				if scenario != "transient-refresh" && len(s.platformDNSRouteFacts) != 0 {
+					t.Fatal("invalid proof remained cached")
+				}
+				return
 			}
 			record := dnsServingCheckpoint{Schema: "fugue.dns.positive-checkpoint/v1", NodeID: "dns-a", GroupID: "cell-dns", Parent: compiled.ReleaseArtifact, Candidate: candidate, AppliedAt: now, Positive: true, RouteSources: effective.routeSources}
 			if err := s.signDNSCheckpoint(&record); err != nil {

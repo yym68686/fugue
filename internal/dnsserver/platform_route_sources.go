@@ -62,6 +62,7 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 	}
 	sort.Slice(union.Probes, func(i, j int) bool { return union.Probes[i].ID < union.Probes[j].ID })
 	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe)
+	facts = retainValidDNSReadinessFacts(union, p.Policy.DNSReadiness, s.platformDNSRouteFacts, facts, time.Now().UTC())
 	boundDNSRouteSourceFacts(dnsServingPayload{routeSources: &dnsroutesource.Context{Snapshot: snapshot}}, facts, time.Now().UTC())
 	valid := validDNSReadinessFacts(union, p.Policy.DNSReadiness, facts, time.Now().UTC())
 	byID := map[string]dnsReadinessFact{}
@@ -72,6 +73,14 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 			delete(valid, f.ProbeID)
 		}
 		byID[f.ProbeID] = f
+	}
+	// Cache only current, authenticated source matches. A failed or revoked
+	// physical proof cannot be revived on the next refresh.
+	s.platformDNSRouteFacts = s.platformDNSRouteFacts[:0]
+	for _, f := range byID {
+		if _, ok := valid[f.ProbeID]; ok {
+			s.platformDNSRouteFacts = append(s.platformDNSRouteFacts, f)
+		}
 	}
 	selection := plans.Choose(func(id string) bool { _, ok := valid[id]; return ok })
 	p.Plan, err = plans.Replay(selection)

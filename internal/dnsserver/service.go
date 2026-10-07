@@ -75,6 +75,7 @@ type Service struct {
 	PlatformTokenFile       string
 	platformConsumerMu      sync.Mutex
 	platformCandidate       PlatformCandidateStatus
+	platformDNSRouteFacts   []dnsReadinessFact // guarded by platformConsumerMu; never persisted
 	Config                  config.DNSConfig
 	HTTPClient              *http.Client
 	Logger                  *log.Logger
