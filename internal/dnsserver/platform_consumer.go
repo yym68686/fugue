@@ -72,14 +72,22 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 
 func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	servingErr := s.SyncPlatformDNSServingOnce(ctx)
-	if errors.Is(servingErr, platformconsumer.ErrDNSBackendNotSelected) && ctx.Err() == nil {
+	// A newly enrolled shadow reader has no serving publication by design.
+	// Only the absence of both an assignment and retained state permits this
+	// path; serving failures must still preserve and report the current LKG.
+	initialShadow := errors.Is(servingErr, platformconsumer.ErrNoServingAssignment) && s.platformServing.Load() == nil
+	if initialShadow && ctx.Err() == nil {
+		s.mu.Lock()
+		s.platformServingError = ""
+		s.mu.Unlock()
+	} else if errors.Is(servingErr, platformconsumer.ErrDNSBackendNotSelected) && ctx.Err() == nil {
 		s.mu.Lock()
 		previous := s.platformServingError
 		s.platformServingError = servingErr.Error()
 		s.platformServingReported = time.Time{}
 		s.mu.Unlock()
 		if previous != servingErr.Error() {
-			s.Logger.Printf("DNS local validation ready; public receipt not selected")
+			s.Logger.Printf("DNS standby backend; public receipt not selected")
 		}
 	} else if servingErr != nil && ctx.Err() == nil {
 		s.mu.Lock()
@@ -95,7 +103,6 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	// selected serving assignment and no retained serving state must still
 	// verify its signed shadow and advertise capabilities for initial promotion.
 	// Keep the authority lock: shadow evidence never becomes serving state.
-	initialShadow := errors.Is(servingErr, platformconsumer.ErrNoServingAssignment) && s.platformServing.Load() == nil
 	if !s.platformServingBound.Load() || initialShadow {
 		if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
 			s.mu.Lock()

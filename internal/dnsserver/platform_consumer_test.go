@@ -209,6 +209,8 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 		s.PlatformTokenFile = tokenPath
 	}
 	service := create()
+	var consumerLogs bytes.Buffer
+	service.Logger = log.New(&consumerLogs, "", 0)
 	legacy := bundleauth.SignEdgeDNSBundle(model.EdgeDNSBundle{Version: "legacy-generation", Generation: "legacy-generation", GeneratedAt: time.Now(), Zone: cfg.Zone, Records: []model.EdgeDNSRecord{{Name: "app.example.test", Type: "A", Values: []string{"192.0.2.1"}, TTL: 60, Status: "active"}}}, key, "signer", time.Hour)
 	if err := service.writeCache(cacheFile{Version: cacheFileVersion, Bundle: legacy, CachedAt: time.Now()}); err != nil {
 		t.Fatal(err)
@@ -219,6 +221,9 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 		t.Fatal("fresh enrolled reader must keep artifact authority without a checkpoint", bound, err)
 	}
 	service.syncPlatformConsumersOnce(context.Background())
+	if strings.Contains(consumerLogs.String(), "serving sync failed") || service.platformServingError != "" {
+		t.Fatal("shadow-only enrollment was reported as a serving failure", consumerLogs.String(), service.platformServingError)
+	}
 	if !service.platformServingBound.Load() || service.platformServing.Load() != nil {
 		t.Fatal("shadow enrollment downgraded artifact authority or created serving state")
 	}
