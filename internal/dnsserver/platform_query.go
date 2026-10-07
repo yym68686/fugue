@@ -57,6 +57,10 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 	if err = json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
 	}
+	if readiness != nil && readiness.payload != nil {
+		payload.Plan = readiness.payload.Plan
+		payload.Policy = readiness.payload.Policy
+	}
 	if len(payload.Views) == 0 {
 		return nil, nil
 	}

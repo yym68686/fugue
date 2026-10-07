@@ -34,6 +34,19 @@ class DNSAuthorityStageTest(unittest.TestCase):
         producer = {"content_hash": pin["content_hash"], "content": {"authority_cell_id": "cell-a", "target_scope": "authority-cell:cell-a", "publication_role": "cell-routes", "mode": "serving", "serving": {"single_publication": False}}}
         return cfg, old, cell, intent, policy, facts, producer
 
+    def test_runtime_sources_are_explicit_signed_approvals_not_inferred(self):
+        cfg, old, cell, intent, policy, facts, _ = self.continuous_fixture()
+        cfg["schema"] = "fugue.dns-authority-transition-stage/v3"
+        cfg["global_producer_policy"] = {"artifact_id": "global-producer", "content_hash": "sha256:" + "e" * 64, "release_id": "global-producer-release", "fencing_token": 3}
+        self.assertEqual(cfg, p.validate(cfg))
+        result = p.compose(cfg, old, [cell], intent, policy, facts)
+        self.assertEqual(result["intent"]["dns_route_sources"], p.runtime_source_approvals(cfg))
+        self.assertEqual(result["cell_route_publications"][0]["producer_policy"], cfg["route_sources"][0]["producer_policy"])
+        self.assertEqual(result["previous_traffic_publication"]["producer_policy"], cfg["global_producer_policy"])
+        self.assertEqual(result["intent"]["dns"][0]["ttl"], intent["dns"][0]["ttl"])
+        del cfg["global_producer_policy"]
+        with self.assertRaises(ValueError): p.validate(cfg)
+
     def test_continuous_sources_require_exact_current_policy_and_owned_full(self):
         for change in ["valid", "replaced-policy", "foreign-owner", "wrong-cell", "single-publication", "shadow-policy"]:
             with self.subTest(change=change):

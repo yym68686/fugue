@@ -57,10 +57,13 @@ class API:
 
 
 def validate(config):
-    dynamic = config.get("schema") == "fugue.dns-authority-transition-stage/v2"
+    dynamic = config.get("schema") in ["fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3"]
+    runtime_sources = config.get("schema") == "fugue.dns-authority-transition-stage/v3"
     route_field = "route_sources" if dynamic else "route_publications"
     required = {"schema", "generation", "origin", "authority_cell_id", "previous_topology", route_field, "dns_node_ids", "expected_previous_shadow", "capture"}
-    if set(config) != required or config["schema"] not in ["fugue.dns-authority-transition-stage/v1", "fugue.dns-authority-transition-stage/v2"] or type(config["generation"]) is not int or config["generation"] < 1:
+    if runtime_sources:
+        required.add("global_producer_policy")
+    if set(config) != required or config["schema"] not in ["fugue.dns-authority-transition-stage/v1", "fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3"] or type(config["generation"]) is not int or config["generation"] < 1:
         raise ValueError("explicit versioned DNS shadow staging declaration required")
     if not CELL.fullmatch(config.get("authority_cell_id", "")):
         raise ValueError("neutral DNS authority required")
@@ -95,6 +98,10 @@ def validate(config):
             ref = source["producer_policy"]
             if not isinstance(ref, dict) or set(ref) != {"artifact_id", "content_hash", "release_id", "fencing_token"} or any(not IDENTITY.fullmatch(ref.get(k, "")) for k in ["artifact_id", "release_id"]) or not HASH.fullmatch(ref.get("content_hash", "")) or type(ref["fencing_token"]) is not int or ref["fencing_token"] < 1:
                 raise ValueError("exact producer policy artifact, digest, release and fence required")
+        if runtime_sources:
+            ref = config["global_producer_policy"]
+            if not isinstance(ref, dict) or set(ref) != {"artifact_id", "content_hash", "release_id", "fencing_token"} or any(not IDENTITY.fullmatch(ref.get(k, "")) for k in ["artifact_id", "release_id"]) or not HASH.fullmatch(ref.get("content_hash", "")) or type(ref["fencing_token"]) is not int or ref["fencing_token"] < 1:
+                raise ValueError("exact transitional global producer policy required")
         refs = []
     fields = {"authority_cell_id", "release_set_id", "release_set_digest", "release_id", "release_channel", "fencing_token", "route_artifact_id", "route_artifact_digest", "tls_artifact_id", "tls_artifact_digest"}
     if not dynamic and (not isinstance(refs, list) or len(refs) != len(cells) or [r.get("authority_cell_id") for r in refs] != sorted(aliases.values())):
@@ -162,6 +169,26 @@ def authorize_route_source(api, source, parent):
         raise ValueError("Cell full publication is not owned by the declared producer policy")
 
 
+def authorize_global_source(api, expected, parent):
+    current = selected(api, "platform-config-producer", "shadow", "policy_snapshot")
+    if authority_identity(current) != expected:
+        raise ValueError("global producer policy authority changed")
+    policy = artifact(api, expected["artifact_id"], "policy_snapshot", "platform-config-producer")
+    content = policy["content"]
+    if policy["content_hash"] != expected["content_hash"] or content.get("target_scope") != "global" or content.get("publication_role", "") != "" or content.get("mode") != "serving" or content.get("serving", {}).get("single_publication", False) is not False:
+        raise ValueError("continuous global serving producer required")
+    if parent.get("scope_key") != "global" or parent.get("metadata", {}).get("producer_policy_release_id") != expected["release_id"]:
+        raise ValueError("global publication is not owned by declared producer")
+
+
+def runtime_source_approvals(config):
+    if "global_producer_policy" not in config:
+        return []
+    bindings = [("authority-cell:" + item["authority_cell_id"], item["producer_policy"]) for item in config["route_sources"]]
+    bindings.append(("global", config["global_producer_policy"]))
+    return [{"scope_key": scope, "policy_artifact_id": pin["artifact_id"], "policy_digest": pin["content_hash"]} for scope, pin in bindings]
+
+
 def resolve_route_publications(config, api):
     """Resolve intent selectors to concrete immutable references on each attempt."""
     cells = []
@@ -206,10 +233,17 @@ def compose(config, previous, cells, source_intent, source_policy, snapshot):
         ref = reference(pub, authority)
         refs.append(ref)
         inputs.append({"reference": ref, "parent": pub["parent"], "route": pub["children"]["edge_route_bundle"], "tls": pub["children"]["caddy_route_config"]})
+    if "global_producer_policy" in config:
+        bindings = {item["authority_cell_id"]: item["producer_policy"] for item in config["route_sources"]}
+        for item in inputs:
+            item["producer_policy"] = copy.deepcopy(bindings[item["reference"]["authority_cell_id"]])
+        intent["dns_route_sources"] = runtime_source_approvals(config)
     intent["cell_route_publications"] = refs
     if "route_sources" in config:
         intent["generation"] = "dns-transition-intent-" + digest({"declaration": config, "previous": reference(previous), "route_publications": refs})[7:]
     prior = {"reference": reference(previous), "parent": previous["parent"], "route": previous["children"]["edge_route_bundle"], "tls": previous["children"]["caddy_route_config"], "dns": previous["children"]["dns_answer_bundle"]}
+    if "global_producer_policy" in config:
+        prior["producer_policy"] = copy.deepcopy(config["global_producer_policy"])
     intent["route_authority_transition"] = {"previous_topology": copy.deepcopy(config["previous_topology"]), "previous_publication": prior["reference"]}
     if sorted(c["node_id"] for c in intent.get("dns_consumers", [])) != config["dns_node_ids"]:
         raise ValueError("DNS physical membership differs from explicit declaration")
@@ -282,6 +316,8 @@ def stage(config, api, save):
             raise ValueError("completed DNS staging has foreign composition")
         dns = artifact(api, parent["content"]["artifact_ids"][0], "dns_answer_bundle", scope)
         source = dns["content"].get("cell_dns_source", {}).get("intent", {})
+        if source.get("dns_route_sources", []) != runtime_source_approvals(config):
+            raise ValueError("completed DNS runtime source approval differs")
         transition = source.get("route_authority_transition", {})
         refs = source.get("cell_route_publications", [])
         if source.get("authority_cell_id") != config["authority_cell_id"] or transition.get("previous_topology") != config["previous_topology"]:
@@ -313,6 +349,8 @@ def stage(config, api, save):
             if not 0 <= age <= config["capture"]["max_source_age_seconds"]:
                 raise ValueError("waiting for a fresh verified full source")
             previous = publication(api, source)
+            if "global_producer_policy" in config:
+                authorize_global_source(api, config["global_producer_policy"], previous["parent"])
             inputs = api("GET", "/v1/admin/artifacts/" + previous["parent"]["id"] + "/compiler-input")
             request = compose(config, previous, cells, source_input(api, previous["parent"], "platform_intent", "intent_generation"), source_input(api, previous["parent"], "policy_snapshot", "policy_generation"), inputs["runtime_snapshot"])
             save({"schema": "fugue.dns-authority-transition-stage-result/v1", "declaration_digest": digest(config), "previous_publication": request["previous_traffic_publication"]["reference"], "route_publications": request["intent"]["cell_route_publications"], "public_transport_changed": False, "serving_published": False, "captured_at": now().isoformat()})
@@ -337,6 +375,8 @@ def stage(config, api, save):
     if "route_sources" in config:
         for item, pub in zip(config["route_sources"], cells):
             authorize_route_source(api, item, pub["parent"])
+    if "global_producer_policy" in config:
+        authorize_global_source(api, config["global_producer_policy"], previous["parent"])
     api("POST", "/v1/admin/artifacts/" + parent["id"] + "/release", {"release_channel": "shadow", "idempotency_key": "dns-transition-shadow/" + digest(config) + "/" + parent["content_hash"], "reason": "explicit DNS transition staging; no public transport or serving publication"})
     current = selected(api, scope, "shadow", "release_set")
     if current["artifact"]["id"] != parent["id"] or current["artifact"]["content_hash"] != parent["content_hash"]:

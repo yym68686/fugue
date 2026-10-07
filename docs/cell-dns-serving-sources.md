@@ -55,7 +55,21 @@ then retire the old global publication/inventory/Lease/LKG through observed
 configuration steps. This avoids depending on continued legacy DNS convergence
 after public Fronts have stopped returning legacy authority proofs.
 
-The implementation is incomplete until the following are wired and tested:
+Implementation status: the DNS runtime now verifies and follows explicitly
+approved sources through the private assignment-bound API. It derives a bounded
+intersection plan, probes each physical endpoint once, selects a complete
+publication per target, rechecks source selection after probing and applying,
+and authenticates both checkpoint context and monotonic source cursors. Restart
+requires fresh observations. The runtime-facts reader independently replays the
+same requirements and verifies current selection. Artifacts without explicit
+approvals retain their original exact-reference behavior.
+
+The v3 staging declaration explicitly pins both neutral producer policies and
+the transitional global producer. Enabling it is a configuration release; the
+runtime deployment is separate. DNS record ownership, new hostnames, candidates
+and source-policy changes continue to require signed DNS configuration.
+
+The broader migration also includes:
 
 - OpenAPI source-authorization and private source-observation contracts, with
   generated backend and frontend consumers.

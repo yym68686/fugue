@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/dnsroutesource"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -26,15 +27,16 @@ import (
 )
 
 type dnsServingCheckpoint struct {
-	Schema    string                 `json:"schema"`
-	NodeID    string                 `json:"node_id"`
-	GroupID   string                 `json:"group_id"`
-	Parent    model.PlatformArtifact `json:"parent"`
-	Candidate dnsPlatformCandidate   `json:"candidate"`
-	AppliedAt time.Time              `json:"applied_at"`
-	Positive  bool                   `json:"positive"`
-	KeyID     string                 `json:"key_id"`
-	Signature string                 `json:"signature,omitempty"`
+	RouteSources *dnsroutesource.Context `json:"route_sources,omitempty"`
+	Schema       string                  `json:"schema"`
+	NodeID       string                  `json:"node_id"`
+	GroupID      string                  `json:"group_id"`
+	Parent       model.PlatformArtifact  `json:"parent"`
+	Candidate    dnsPlatformCandidate    `json:"candidate"`
+	AppliedAt    time.Time               `json:"applied_at"`
+	Positive     bool                    `json:"positive"`
+	KeyID        string                  `json:"key_id"`
+	Signature    string                  `json:"signature,omitempty"`
 }
 type DNSServingStatus struct {
 	State          string              `json:"state"`
@@ -76,7 +78,7 @@ func (s *Service) signDNSCheckpoint(c *dnsServingCheckpoint) error {
 }
 func (s *Service) decodeDNSCheckpoint(raw []byte) (dnsServingCheckpoint, error) {
 	var c dnsServingCheckpoint
-	if len(raw) > 16<<20 || json.Unmarshal(raw, &c) != nil || c.Schema != "fugue.dns.positive-checkpoint/v1" || !c.Positive || c.NodeID != s.Config.DNSNodeID || c.GroupID != s.Config.EdgeGroupID || c.AppliedAt.IsZero() || c.AppliedAt.After(time.Now().Add(time.Second)) {
+	if len(raw) > 32<<20 || json.Unmarshal(raw, &c) != nil || c.Schema != "fugue.dns.positive-checkpoint/v1" || !c.Positive || c.NodeID != s.Config.DNSNodeID || c.GroupID != s.Config.EdgeGroupID || c.AppliedAt.IsZero() || c.AppliedAt.After(time.Now().Add(time.Second)) {
 		return c, errors.New("DNS positive checkpoint invalid")
 	}
 	k := s.platformDNSKeys()
@@ -92,7 +94,7 @@ func (s *Service) decodeDNSCheckpoint(raw []byte) (dnsServingCheckpoint, error) 
 	if key == "" || !hmac.Equal([]byte(c.Signature), []byte(checkpointMAC(c, key))) {
 		return c, errors.New("DNS checkpoint signature invalid")
 	}
-	if _, _, err := s.verifyDNSServingRelease(c.Parent, c.Candidate); err != nil {
+	if _, _, err := s.verifiedDNSCheckpointPayload(c); err != nil {
 		return c, err
 	}
 	return c, nil
@@ -109,7 +111,7 @@ func (s *Service) loadDNSServingCache() (bool, error) {
 		return true, errors.New("DNS serving cache path unavailable")
 	}
 	path := s.Config.CachePath + ".platform-serving.json"
-	raw, err := platformconsumer.ReadFile(path, 16<<20)
+	raw, err := platformconsumer.ReadFile(path, 32<<20)
 	missing := errors.Is(err, os.ErrNotExist)
 	candidates := []lkgcache.Candidate{{Path: path, Data: raw}}
 	candidates = append(candidates, lkgcache.FallbackCandidates(path)...)
@@ -122,7 +124,7 @@ func (s *Service) loadDNSServingCache() (bool, error) {
 			err = e
 			continue
 		}
-		p, routeID, e := s.verifyDNSServingRelease(c.Parent, c.Candidate)
+		p, routeID, e := s.verifiedDNSCheckpointPayload(c)
 		if e != nil {
 			err = e
 			continue
@@ -215,7 +217,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	// Same-release observations use only volatile fresh proof cache. Persisted
 	// checkpoint readiness is never reused after restart.
 	same := old != nil && reflect.DeepEqual(old.record.Candidate.Assignment, a)
-	if same && !old.checkedAt.After(time.Now()) && time.Since(old.checkedAt) < time.Duration(p.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second && dnsServingReady(old, time.Now()) {
+	if same && old.record.RouteSources == nil && len(p.dnsSourceApprovals()) == 0 && !old.checkedAt.After(time.Now()) && time.Since(old.checkedAt) < time.Duration(p.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second && dnsServingReady(old, time.Now()) {
 		if old.fallback != "" {
 			recovered := *old
 			recovered.fallback = ""
@@ -224,12 +226,24 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		return s.reportDNSServing(ctx, client, id, old)
 	}
-	facts := collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe)
+	var previousSources *dnsroutesource.Context
+	if old != nil {
+		previousSources = old.record.RouteSources
+	}
+	p, sourceFacts, err := s.observeDNSRouteSources(ctx, client, id, candidate, p, previousSources, probe)
+	if err != nil {
+		return err
+	}
+	bridge.payload = p
+	facts := sourceFacts
+	if p.routeSources == nil {
+		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe)
+	}
 	// Keep the original observations for the retained release. Candidate
 	// assignment filtering below must not erase a valid old-release proof.
 	observations = append([]dnsReadinessFact(nil), facts...)
 	now := time.Now().UTC()
-	if same {
+	if same && dnsSameSourceContext(old.record.RouteSources, p.routeSources) {
 		facts = retainValidDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, old.facts, facts, now)
 		facts = retainDNSFactsForSourceRenewal(old, facts, now)
 	}
@@ -239,7 +253,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			facts[i].Reason = "traffic_release_mismatch"
 		}
 	}
-	checkpoint := dnsServingCheckpoint{Schema: "fugue.dns.positive-checkpoint/v1", NodeID: s.Config.DNSNodeID, GroupID: s.Config.EdgeGroupID, Parent: parent, Candidate: candidate, AppliedAt: now, Positive: true}
+	checkpoint := dnsServingCheckpoint{Schema: "fugue.dns.positive-checkpoint/v1", NodeID: s.Config.DNSNodeID, GroupID: s.Config.EdgeGroupID, Parent: parent, Candidate: candidate, AppliedAt: now, Positive: true, RouteSources: p.routeSources}
 	if same {
 		for _, fact := range facts {
 			if fact.Reason == "retained_valid_proof" {
@@ -260,7 +274,8 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			return err
 		}
 		if same {
-			st.record = old.record
+			st.record.AppliedAt = old.record.AppliedAt
+			st.record.Positive = false
 			st.fallback = "readiness_incomplete"
 			s.platformServing.Store(st)
 			_ = s.reportDNSServingState(ctx, client, id, st, false)
@@ -287,6 +302,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	if err = client.CheckServingAssignment(ctx, id, a); err != nil {
 		return err
 	}
+	if err = s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
+		return err
+	}
 	if err = s.signDNSCheckpoint(&st.record); err != nil {
 		return err
 	}
@@ -304,6 +322,10 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		return err
 	}
 	if err = client.CheckServingAssignment(ctx, id, a); err != nil {
+		rollback()
+		return err
+	}
+	if err = s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
 		rollback()
 		return err
 	}
@@ -360,6 +382,7 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 			facts[i].Reason = "traffic_release_mismatch"
 		}
 	}
+	boundDNSRouteSourceFacts(old.payload, facts, now)
 	st, err := buildDNSServingState(old.record, old.payload, old.routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, facts, now)
 	if err == nil {
 		st.fallback = reason
@@ -519,7 +542,7 @@ func (s *Service) reportDNSServingState(ctx context.Context, client platformcons
 		return err
 	}
 	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: a.GenerationSequence, DesiredGeneration: a.ExpectedGeneration, ActualGeneration: a.ExpectedGeneration, LKGGeneration: a.ExpectedGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
-	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.DNSAuthorityTransitionCapabilityV1}
+	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.DNSAuthorityTransitionCapabilityV1, platformcontrol.DNSRouteSourcesCapabilityV1}
 	if !positive {
 		h.ProbeStatus = "failed"
 		h.LastError = "DNS serving readiness or listener probe failed"

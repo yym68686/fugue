@@ -35067,6 +35067,17 @@ components:
           maxItems: 4096
           uniqueItems: true
           items: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+    DNSRuntimeRouteContext:
+      type: object
+      additionalProperties: false
+      required: [snapshot, selections]
+      description: Authenticated routing observation and one publication per physical DNS target. This context grants no readiness; readers replay constraints and validate fresh proofs and current selection independently.
+      properties:
+        snapshot: {$ref: "#/components/schemas/PlatformDNSRouteSourceSnapshot"}
+        selections:
+          type: object
+          maxProperties: 8192
+          additionalProperties: {type: string}
     DNSServingRuntimeFacts:
       type: object
       additionalProperties: false
@@ -35080,6 +35091,8 @@ components:
         parent_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
         route_artifact_id: {type: string, description: "Route member for complete traffic publications; empty for cell-dns, where each fact binds an independently referenced Cell route artifact."}
         plan_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        route_sources:
+          $ref: "#/components/schemas/DNSRuntimeRouteContext"
         observed_at: {type: string, format: date-time}
         evaluated_at: {type: string, format: date-time}
         checkpoint_valid_until: {type: string, format: date-time}

@@ -22,6 +22,7 @@ import (
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
+	"fugue/internal/routeprobe"
 	dns "github.com/miekg/dns"
 )
 
@@ -107,9 +108,16 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 		if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
 			s.mu.Lock()
 			s.platformCandidate.State = "failed"
+			if errors.Is(err, platformconsumer.ErrAssignmentChanged) {
+				s.platformCandidate.State = "awaiting_release"
+			}
 			s.platformCandidate.LastError = err.Error()
 			s.mu.Unlock()
-			s.Logger.Printf("dns platform candidate failed: %v", err)
+			if errors.Is(err, platformconsumer.ErrAssignmentChanged) {
+				s.Logger.Printf("DNS candidate convergence pending: %v", err)
+			} else {
+				s.Logger.Printf("dns platform candidate failed: %v", err)
+			}
 		}
 	}
 }
@@ -130,18 +138,35 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var sourcePayload *dnsServingPayload
 	if policy, ok := artifact.Content["policy"].(map[string]any); ok && policy["publication_role"] == platformconfig.PublicationRoleCellDNS {
 		parent, err := client.ReleaseSet(ctx, identity, assignment, release)
 		if err != nil {
 			return err
 		}
-		if _, _, err := s.verifyDNSRelease(parent, candidate, false); err != nil {
+		p, _, err := s.verifyDNSRelease(parent, candidate, false)
+		if err != nil {
 			return err
 		}
+		if len(p.dnsSourceApprovals()) > 0 {
+			sourcePayload = &p
+		}
 	}
-	readiness, err := s.observePlatformDNSReadiness(ctx, candidate, *chosen)
-	if err != nil {
-		return err
+	var readiness *dnsReadinessReceipt
+	if sourcePayload != nil {
+		p, facts, err := s.observeDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, nil, routeprobe.Probe)
+		if err != nil {
+			return err
+		}
+		sourcePayload = &p
+		now := time.Now().UTC()
+		digest, _ := platformconfig.Digest(p.Plan)
+		readiness = &dnsReadinessReceipt{ArtifactID: artifact.ID, ArtifactDigest: artifact.ContentHash, ReleaseSetID: chosen.ReleaseSetID, ExpectedConsumerSetID: chosen.ExpectedConsumerSetID, FencingToken: chosen.FencingToken, NodeID: s.Config.DNSNodeID, Facts: facts, payload: &p, Status: summarizeDNSReadiness(p.Plan, p.Policy.DNSReadiness, facts, digest, now, now)}
+	} else {
+		readiness, err = s.observePlatformDNSReadiness(ctx, candidate, *chosen)
+		if err != nil {
+			return err
+		}
 	}
 	query, err := s.evaluatePlatformDNSQueries(candidate, *chosen, readiness)
 	if err != nil {
@@ -149,6 +174,11 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	}
 	if err = client.CheckAssignment(ctx, identity, assignment); err != nil {
 		return err
+	}
+	if sourcePayload != nil {
+		if err = s.checkDNSRouteSources(ctx, client, identity, candidate, sourcePayload.routeSources); err != nil {
+			return err
+		}
 	}
 	// Persist a monotonic cursor before sending it. A lost response consumes the
 	// sequence; a restart cannot replay it. Corrupt state is never reset silently.
@@ -205,7 +235,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		DesiredGeneration: chosen.ExpectedGeneration, ActualGeneration: status.ServingGeneration, LKGGeneration: status.LKGGeneration,
 		ApplyStatus: "staged", ProbeStatus: "shadow_validated", ServingLKG: status.StaleCache, LKGExpired: status.MaxStaleExceeded,
 	}
-	heartbeat.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.DNSAuthorityTransitionCapabilityV1}
+	heartbeat.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.DNSAuthorityTransitionCapabilityV1, platformcontrol.DNSRouteSourcesCapabilityV1}
 	heartbeat.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat)
 	if err != nil {
 		return errors.New("encode platform heartbeat evidence failed")

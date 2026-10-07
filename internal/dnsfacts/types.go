@@ -5,6 +5,7 @@ package dnsfacts
 import (
 	"time"
 
+	"fugue/internal/dnsroutesource"
 	"fugue/internal/model"
 	"fugue/internal/routeprobe"
 )
@@ -18,6 +19,7 @@ type Probe struct {
 }
 
 type Snapshot struct {
+	RouteSources         *dnsroutesource.Context          `json:"route_sources,omitempty"`
 	Schema               string                           `json:"schema"`
 	NodeID               string                           `json:"node_id"`
 	EdgeGroupID          string                           `json:"edge_group_id"`

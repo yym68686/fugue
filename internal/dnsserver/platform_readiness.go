@@ -38,6 +38,7 @@ type dnsReadinessFact struct {
 }
 
 type dnsReadinessReceipt struct {
+	payload               *dnsServingPayload
 	ArtifactID            string             `json:"artifact_id"`
 	ArtifactDigest        string             `json:"artifact_digest"`
 	ReleaseSetID          string             `json:"release_set_id"`

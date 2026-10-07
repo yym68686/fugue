@@ -101,6 +101,12 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 	if err := validateDNSRouteSourceBindings(intent, publications, previous); err != nil {
 		return nil, err
 	}
+	return compileCellDNSReadinessProjection(intent, publications, snapshot, policy, previous, false)
+}
+
+// Runtime source projections are intersections of already authenticated inputs.
+// Missing routes and insufficient quorum remain negative runtime evidence.
+func compileCellDNSReadinessProjection(intent PlatformIntent, publications []CellRoutePublicationInput, snapshot RuntimeSnapshot, policy PolicySnapshot, previous *PreviousTrafficPublicationInput, runtime bool) (*DNSReadinessPlan, error) {
 	if policy.DNSReadiness == nil || ValidateDNSReadinessPolicy(policy.DNSReadiness) != nil || validateDNSEdgeEndpoints(snapshot.DNSEdgeEndpoints, snapshot.CapturedAt) != nil {
 		return nil, fmt.Errorf("DNS Cell readiness policy or endpoint observations invalid")
 	}
@@ -240,7 +246,7 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 			}
 		}
 	}
-	if len(usedConstraints) != len(constraints) {
+	if !runtime && len(usedConstraints) != len(constraints) {
 		return nil, fmt.Errorf("DNS Edge selection constraint lacks a referenced route")
 	}
 	out := &DNSReadinessPlan{Probes: []DNSReadinessProbe{}, Records: []DNSReadinessRecord{}}
@@ -249,7 +255,7 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 	}
 	for _, r := range intent.DNS {
 		if DNSPlacementOptions(r) != nil && (r.Status == "" || r.Status == model.EdgeRouteStatusActive) {
-			if !completeDependencies[r.Hostname] {
+			if !runtime && !completeDependencies[r.Hostname] {
 				return nil, fmt.Errorf("DNS record %s has no complete referenced Cell routes", r.Hostname)
 			}
 		}
@@ -258,7 +264,7 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 		sort.Slice(r.Targets, func(i, j int) bool {
 			return r.Targets[i].EdgeID+"\x00"+r.Targets[i].Address < r.Targets[j].EdgeID+"\x00"+r.Targets[j].Address
 		})
-		if !DNSReadinessQuorum(r, func(DNSReadinessTarget) bool { return true }) {
+		if !runtime && !DNSReadinessQuorum(r, func(DNSReadinessTarget) bool { return true }) {
 			return nil, fmt.Errorf("DNS record %s cannot meet physical Edge and failure domain minimums", r.Hostname)
 		}
 		out.Records = append(out.Records, r)

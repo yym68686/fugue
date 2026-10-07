@@ -6,6 +6,7 @@ import (
 	"reflect"
 
 	"fugue/internal/bundleauth"
+	"fugue/internal/dnsroutesource"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformsafety"
@@ -14,6 +15,8 @@ import (
 )
 
 type dnsServingPayload struct {
+	routeSources               *dnsroutesource.Context
+	sourceBindings             map[string]*model.TrafficReleaseBinding
 	PreviousTrafficPublication *platformconfig.PreviousTrafficPublicationInput `json:"previous_traffic_publication,omitempty"`
 	previousBindings           map[string]*model.TrafficReleaseBinding
 	previousCells              map[string]string
@@ -164,6 +167,16 @@ func dnsProofMatchesRelease(proof routeprobe.Proof, parent model.PlatformArtifac
 			return false
 		}
 		p := payload[0]
+		if p.routeSources != nil {
+			for _, requirement := range p.Plan.Probes {
+				for _, ref := range platformconfig.DNSReadinessProofReferences(requirement, proof.EdgeID, proof.GroupID, proof.Digest) {
+					if b := p.sourceBindings[ref]; b != nil && reflect.DeepEqual(b, proof.TrafficRelease) {
+						return true
+					}
+				}
+			}
+			return false
+		}
 		cell := p.cellNodes[proof.EdgeID]
 		if cell == proof.GroupID {
 			if b := p.cellBindings[cell]; b != nil && reflect.DeepEqual(b, proof.TrafficRelease) {
@@ -219,4 +232,11 @@ func populateDNSCellBindings(p *dnsServingPayload) error {
 		}
 	}
 	return nil
+}
+
+func (p dnsServingPayload) dnsSourceApprovals() []platformconfig.DNSRouteSourceAuthorization {
+	if p.CellDNSSource == nil {
+		return nil
+	}
+	return p.CellDNSSource.Intent.DNSRouteSources
 }

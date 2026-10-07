@@ -22,7 +22,7 @@ func dnsRuntimeFacts(st *dnsServingState, now time.Time) (dnsfacts.Snapshot, err
 		return dnsfacts.Snapshot{}, err
 	}
 	until := st.record.AppliedAt.Add(time.Duration(st.payload.Policy.MaxStaleSeconds) * time.Second)
-	out := dnsfacts.Snapshot{Schema: dnsfacts.Schema, NodeID: st.record.NodeID, EdgeGroupID: st.record.GroupID,
+	out := dnsfacts.Snapshot{Schema: dnsfacts.Schema, RouteSources: st.record.RouteSources, NodeID: st.record.NodeID, EdgeGroupID: st.record.GroupID,
 		Assignment: st.record.Candidate.Assignment, ParentDigest: st.record.Parent.ContentHash,
 		RouteArtifactID: st.routeID, PlanDigest: digest, ObservedAt: st.checkedAt,
 		EvaluatedAt: now, CheckpointValidUntil: until, Facts: []dnsfacts.Probe{}}
@@ -53,7 +53,7 @@ func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
 	}
 	// Validate against the current trust keys even if this checkpoint was
 	// accepted before a key was revoked. No assignment or cache is changed.
-	payload, routeID, err := s.verifyDNSServingRelease(st.record.Parent, st.record.Candidate)
+	payload, routeID, err := s.verifiedDNSCheckpointPayload(st.record)
 	if err != nil || routeID != st.routeID || !reflect.DeepEqual(payload.Plan, st.payload.Plan) || !reflect.DeepEqual(payload.Policy, st.payload.Policy) || !st.record.Positive || st.record.NodeID != s.Config.DNSNodeID || st.record.GroupID != s.Config.EdgeGroupID {
 		fail()
 		return
@@ -66,7 +66,7 @@ func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
 	listenerFailed := s.listenerFailed.Load()
 	observed.Ready = observed.Ready && !listenerFailed
 	raw, err := json.Marshal(observed)
-	if err != nil || len(raw) > 8<<20 || r.Context().Err() != nil || s.platformServing.Load() != st || s.listenerFailed.Load() != listenerFailed {
+	if err != nil || len(raw) > 32<<20 || r.Context().Err() != nil || s.platformServing.Load() != st || s.listenerFailed.Load() != listenerFailed {
 		fail()
 		return
 	}

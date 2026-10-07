@@ -16,6 +16,7 @@ import (
 
 	"fugue/internal/cellpublication"
 	"fugue/internal/dnsfacts"
+	"fugue/internal/dnsroutesource"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -284,6 +285,23 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	if err != nil || current.consumer.CredentialID != source.consumer.CredentialID || current.parent.ContentHash != source.parent.ContentHash || !reflect.DeepEqual(current.lookup.Assignment, source.lookup.Assignment) || current.group != source.group || ctx.Err() != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
+	if response.Snapshot.RouteSources != nil {
+		observed, err := s.store.ObserveDNSRouteSources(ctx, current.lookup.Artifact)
+		if err != nil || observed.SelectionDigest != response.Snapshot.RouteSources.Snapshot.SelectionDigest {
+			return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
+		}
+		plans, err := dnsroutesource.Build(current.lookup.Artifact, response.Snapshot.RouteSources.Snapshot, s.bundleKeyring(), time.Now().UTC())
+		if err != nil {
+			return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
+		}
+		current.payload.ReadinessPlan, err = plans.Replay(response.Snapshot.RouteSources)
+		if err != nil {
+			return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
+		}
+		current.cellBindings = plans.Bindings
+	} else if approvals, err := platformconfig.DNSRouteSourceAuthorizations(current.lookup.Artifact); err != nil || len(approvals) > 0 {
+		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
+	}
 	response.EvaluatedAt = time.Now().UTC()
 	response.ReadyProbeIDs, response.Ready, err = evaluateDNSRuntimeSnapshot(response.Snapshot, current, response.EvaluatedAt)
 	response.Ready = response.Ready && transportReady
@@ -358,8 +376,8 @@ func readDNSPodSnapshot(ctx context.Context, client *clusterNodeClient, path str
 	if resp.StatusCode != http.StatusOK {
 		return errDNSRuntimeFacts
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
-	if err != nil || len(raw) > 8<<20 {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, (32<<20)+1))
+	if err != nil || len(raw) > 32<<20 {
 		return errDNSRuntimeFacts
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -397,6 +415,9 @@ func evaluateDNSRuntimeSnapshot(snapshot dnsfacts.Snapshot, source dnsFactSource
 			continue
 		}
 		p, b := fact.Proof, fact.Proof.TrafficRelease
+		if until := snapshot.RouteSources.ProofDeadline(b); !until.IsZero() && p.ValidUntil.After(until) {
+			return fail()
+		}
 		bindingMatches := source.trafficBinding != nil && reflect.DeepEqual(b, source.trafficBinding)
 		if source.payload.Policy.PublicationRole == platformconfig.PublicationRoleCellDNS {
 			bindingMatches = false

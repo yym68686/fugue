@@ -194,6 +194,10 @@ func (c Client) requestJSON(ctx context.Context, path, token, method string, in,
 }
 
 func (c Client) json(ctx context.Context, endpoint, token, method string, in, out any) error {
+	return c.jsonLimit(ctx, endpoint, token, method, in, out, 8<<20)
+}
+
+func (c Client) jsonLimit(ctx context.Context, endpoint, token, method string, in, out any, limit int64) error {
 	var body io.Reader
 	if in != nil {
 		raw, err := json.Marshal(in)
@@ -242,7 +246,7 @@ func (c Client) json(ctx context.Context, endpoint, token, method string, in, ou
 	}
 	// Decode through one bounded buffer. Reading the entire artifact first
 	// retained both the growing transport buffer and the decoder's copy.
-	bodyLimit := &io.LimitedReader{R: resp.Body, N: (8 << 20) + 1}
+	bodyLimit := &io.LimitedReader{R: resp.Body, N: limit + 1}
 	dec := json.NewDecoder(bodyLimit)
 	if err := dec.Decode(out); err == nil {
 		if err := dec.Decode(&struct{}{}); err == io.EOF && bodyLimit.N > 0 {
