@@ -1,5 +1,6 @@
 import copy
 import unittest
+from pathlib import Path
 
 from scripts import publish_agent_edge_shadow as policy
 
@@ -44,6 +45,12 @@ class FakeAPI:
 
 
 class ShadowPolicyTests(unittest.TestCase):
+    def test_initial_shadow_lane_requires_an_explicit_configuration_change(self):
+        workflow = Path(".github/workflows/ci.yml").read_text()
+        lane = workflow.split("\n  agent_edge_shadow_policy:", 1)[1].split("\n  cell_trust_plan:", 1)[0]
+        self.assertIn('if ! git diff --quiet "$base" HEAD -- "$config"; then', lane)
+        self.assertNotIn('HEAD -- "$config" scripts/publish_agent_edge_shadow.py', lane)
+
     def test_publish_only_shadow_without_verification_or_full_mutations(self):
         config = policy.validate(fixture())
         api = FakeAPI(config)

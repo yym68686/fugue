@@ -72,6 +72,9 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	if strings.Contains(source, `git diff --quiet "$base" HEAD -- "$config" scripts/publish_agent_edge_shadow.py scripts/test_publish_agent_edge_shadow.py; then`) {
+		t.Fatal("shared API client code must not replay an initial Agent shadow configuration")
+	}
 	renewal := yamlMappingValue(t, jobs, "producer_publication_renewal")
 	for _, key := range yamlMappingKeys(t, renewal) {
 		if key == "needs" {

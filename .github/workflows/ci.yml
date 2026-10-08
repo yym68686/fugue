@@ -228,7 +228,7 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/publish_agent_edge_shadow.py scripts/test_publish_agent_edge_shadow.py; then
+          if ! git diff --quiet "$base" HEAD -- "$config"; then
             git fetch origin main
             if git diff --quiet HEAD origin/main -- "$config" scripts/publish_agent_edge_shadow.py; then
               python3 -m unittest scripts.test_publish_agent_edge_shadow
