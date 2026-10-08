@@ -1,9 +1,13 @@
 package declarativerelease
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
 )
 
 func TestPublicFrontObservationMountsDoNotGrantWorkerActivationAuthority(t *testing.T) {
@@ -52,7 +56,8 @@ func TestPublicFrontObservationMountsDoNotGrantWorkerActivationAuthority(t *test
 			for _, rawMount := range container["volumeMounts"].([]any) {
 				mount := rawMount.(map[string]any)
 				if stringField(mount, "name") == "network-observations" {
-					mounted = stringField(mount, "mountPath") == "/var/run/fugue-network" && mount["readOnly"] == (name == "edge")
+					readOnly, _ := mount["readOnly"].(bool)
+					mounted = stringField(mount, "mountPath") == "/var/run/fugue-network" && readOnly == (name == "edge")
 				}
 			}
 			if !enabled || !mounted {
@@ -63,5 +68,41 @@ func TestPublicFrontObservationMountsDoNotGrantWorkerActivationAuthority(t *test
 	}
 	if checked != 3 {
 		t.Fatal("incomplete Front and worker-slot coverage", checked)
+	}
+}
+
+func TestPublicFrontObservationManifestSurvivesKubernetesSerialization(t *testing.T) {
+	raw, err := os.ReadFile("../../internal/edge/component/resources.inventory-producer.group.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := edgeGroupFixture("gamma", "edge-group-metro-gamma")
+	materialized, err := MaterializeManifestTemplate(raw, group.Worker.ManifestVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := DecodeResourceSet(bytes.NewReader(materialized))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, desired := range set.Items {
+		if desired["kind"] != "DaemonSet" {
+			continue
+		}
+		encoded, _ := json.Marshal(desired)
+		var typed appsv1.DaemonSet
+		if err := json.Unmarshal(encoded, &typed); err != nil {
+			t.Fatal(err)
+		}
+		returned, _ := json.Marshal(typed)
+		var actual map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(returned))
+		decoder.UseNumber()
+		if err := decoder.Decode(&actual); err != nil {
+			t.Fatal(err)
+		}
+		if mismatch := ResourceDesiredMismatch(desired, actual); mismatch != "" {
+			t.Fatal("server serialization creates false convergence failure", mismatch)
+		}
 	}
 }

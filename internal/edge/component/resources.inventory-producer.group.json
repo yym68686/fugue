@@ -194,8 +194,7 @@
                   },
                   {
                     "name": "network-observations",
-                    "mountPath": "/var/run/fugue-network",
-                    "readOnly": false
+                    "mountPath": "/var/run/fugue-network"
                   }
                 ]
               }
