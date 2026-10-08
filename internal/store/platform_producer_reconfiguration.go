@@ -32,10 +32,17 @@ func producerReconfigurationKey(a model.PlatformArtifact, precondition model.Pla
 
 func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.PlatformArtifactReleaseRequest) (platformproducer.Policy, error) {
 	p, err := platformproducer.Decode(a)
-	if err != nil || req.ProducerReconfiguration == nil || req.ReleaseChannel != "shadow" || req.CanaryRuleRef != "" || req.SoftOverride || req.ForcePublish || req.KernelBreakGlass != nil || p.PublicationRole != platformconfig.PublicationRoleCellRoutes || p.RoutePlacementTransition == nil {
+	if err != nil || req.ProducerReconfiguration == nil || req.ReleaseChannel != "shadow" || req.CanaryRuleRef != "" || req.SoftOverride || req.ForcePublish || req.KernelBreakGlass != nil {
 		return p, ErrInvalidInput
 	}
 	r := req.ProducerReconfiguration
+	if r.Operation == "physical_dns" {
+		if p.PublicationRole != "" || p.TargetScope != "global" || p.RoutePlacementTransition != nil || !p.RequireDNSQueryPolicy {
+			return p, ErrInvalidInput
+		}
+	} else if p.PublicationRole != platformconfig.PublicationRoleCellRoutes || p.RoutePlacementTransition == nil {
+		return p, ErrInvalidInput
+	}
 	switch r.Operation {
 	case "", "placement":
 		if p.Mode != "shadow" {
@@ -45,7 +52,7 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
-	case "continuous_serving":
+	case "continuous_serving", "physical_dns":
 		if p.Mode != "serving" || p.Serving == nil || p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
@@ -112,7 +119,11 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	if err != nil || p.Generation == previous.Generation || a.GenerationSequence <= old.GenerationSequence {
 		return ErrConflict
 	}
-	if r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" {
+	if r.Operation == "physical_dns" {
+		if previous.Mode != "serving" || previous.Serving == nil || previous.Serving.SinglePublication {
+			return ErrConflict
+		}
+	} else if r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" {
 		if previous.Mode != "serving" || previous.Serving == nil || !previous.Serving.SinglePublication {
 			return ErrConflict
 		}
@@ -120,6 +131,11 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		return ErrConflict
 	}
 	oldSources := previous
+	if r.Operation == "physical_dns" {
+		if err := validateProducerPhysicalDNSInputs(state, previous, p, keys); err != nil {
+			return err
+		}
+	}
 	if r.Operation == "expand_membership" {
 		if err := validateProducerMembershipInputs(state, previous, p, keys); err != nil {
 			return err
@@ -139,6 +155,9 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	} else if r.Operation == "expand_membership" {
 		previous.StaticIntentArtifactID, p.StaticIntentArtifactID = "", ""
 		previous.StaticIntentDigest, p.StaticIntentDigest = "", ""
+		previous.DNSPolicyArtifactID, p.DNSPolicyArtifactID = "", ""
+		previous.DNSPolicyDigest, p.DNSPolicyDigest = "", ""
+	} else if r.Operation == "physical_dns" {
 		previous.DNSPolicyArtifactID, p.DNSPolicyArtifactID = "", ""
 		previous.DNSPolicyDigest, p.DNSPolicyDigest = "", ""
 	} else if r.Operation != "refresh_serving" {
@@ -162,13 +181,13 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		return err
 	}
 	full, release, err := exactPublication(state, r.ServingFull, model.PlatformArtifactKindReleaseSet, p.TargetScope, "full", keys, true)
-	if err != nil || full.Content["publication_role"] != platformconfig.PublicationRoleCellRoutes {
+	if err != nil || r.Operation != "physical_dns" && full.Content["publication_role"] != platformconfig.PublicationRoleCellRoutes || r.Operation == "physical_dns" && full.Content["publication_role"] != nil && full.Content["publication_role"] != "" {
 		return ErrConflict
 	}
 	if _, err := platformconfig.ValidateReleaseComposition(full); err != nil {
 		return ErrConflict
 	}
-	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" {
+	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" || r.Operation == "physical_dns" {
 		// Resolve the cohort against the exact current baseline before enabling
 		// automatic publication; fresh candidate admission remains independent.
 		target, err := platformproducer.Decode(a)
@@ -181,14 +200,19 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		if release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.VerifiedLKGGeneration != full.Generation {
 			return ErrConflict
 		}
-		if (r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership") && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
+		if (r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" || r.Operation == "physical_dns") && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
 			return ErrConflict
 		}
-		if r.Operation == "expand_membership" && (full.Metadata[platformproducer.StaticIntentIDMetadata] != oldSources.StaticIntentArtifactID || full.Metadata[platformproducer.StaticIntentDigestMetadata] != oldSources.StaticIntentDigest || full.Metadata[platformproducer.DNSPolicyIDMetadata] != oldSources.DNSPolicyArtifactID || full.Metadata[platformproducer.DNSPolicyDigestMetadata] != oldSources.DNSPolicyDigest) {
+		if (r.Operation == "expand_membership" || r.Operation == "physical_dns") && (full.Metadata[platformproducer.StaticIntentIDMetadata] != oldSources.StaticIntentArtifactID || full.Metadata[platformproducer.StaticIntentDigestMetadata] != oldSources.StaticIntentDigest || full.Metadata[platformproducer.DNSPolicyIDMetadata] != oldSources.DNSPolicyArtifactID || full.Metadata[platformproducer.DNSPolicyDigestMetadata] != oldSources.DNSPolicyDigest) {
 			return ErrConflict
 		}
 		if r.Operation == "expand_membership" {
 			if err := validateMembershipBaseline(state, oldSources, full, release); err != nil {
+				return err
+			}
+		}
+		if r.Operation == "physical_dns" {
+			if err := validatePhysicalDNSGrayBaseline(state, oldSources, release); err != nil {
 				return err
 			}
 		}
@@ -245,7 +269,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 		state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	}
-	if r.Operation == "expand_membership" {
+	if r.Operation == "expand_membership" || r.Operation == "physical_dns" {
 		index := platformArtifactIndex(state.PlatformArtifacts, r.PreviousPolicy.ArtifactID)
 		if index < 0 {
 			return ErrConflict
@@ -264,7 +288,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 		platformsafety.ReleaseLaneKey(a.ArtifactKind, a.ScopeKey, "full"),
 		platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, p.TargetScope, "full"),
 	}
-	if r.Operation == "expand_membership" {
+	if r.Operation == "expand_membership" || r.Operation == "physical_dns" {
 		laneKeys = append(laneKeys, platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, p.TargetScope, "gray"))
 	}
 	for _, key := range laneKeys {
@@ -276,7 +300,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 			return err
 		}
 		state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, lane)
-		if r.Operation == "expand_membership" && lane.ArtifactKind == model.PlatformArtifactKindReleaseSet && lane.ReleaseChannel == "gray" && lane.ActiveReleaseID != "" {
+		if (r.Operation == "expand_membership" || r.Operation == "physical_dns") && lane.ArtifactKind == model.PlatformArtifactKindReleaseSet && lane.ReleaseChannel == "gray" && lane.ActiveReleaseID != "" {
 			gray, err := pgGetPlatformArtifactRelease(ctx, tx, lane.ActiveReleaseID, false)
 			if err != nil {
 				return err
