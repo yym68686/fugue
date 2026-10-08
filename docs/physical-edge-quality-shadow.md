@@ -318,6 +318,31 @@ PostgreSQL tests verify that success, rejection and idempotent retry do not rewr
 the serving full publication or its LKG. Candidate publication remains subject to
 the independent evidence compiler and normal canary/readiness gates.
 
+`scripts/reconfigure_physical_dns.py` is the bounded configuration executor for
+this transaction. A single explicit declaration under
+`deploy/environments/production/routing-physical-dns/` goes through the separate
+`physical_dns_reconfiguration` lane in the normal CI entrypoint. That lane does
+not depend on a component build or deploy, and does not run when only code
+changes. Superseded declarations or executor changes stop an older run. The
+executor preserves the exact predecessor's static source, controls and schedule;
+creates and validates immutable DNS/producer inputs; and requires an actual bound
+physical projection before attempting the transactional release. It rechecks the
+full publication and positive LKG immediately before that attempt. A hold can
+establish the physical primary's observation clock, but neither activation nor a
+successful preview is no-detour acceptance. DNS receipts, offline replay and
+production validation of the subsequently published order remain separate.
+
+The declaration schema is `fugue.physical-dns-reconfiguration/v1`, with integer
+`generation`, canonical HTTPS `origin`, one `hostname`, `producer_generation`,
+the full successor `projection_policy`, and a `precondition` containing
+`operation: physical_dns`, exact `previous_policy` and `serving_full` publication
+references, and `verification_evidence_hash`. Each publication reference includes
+artifact ID, content hash, release ID and fencing token. No recovery, override,
+country exclusion, source invention or direct LKG write is available in this
+executor. A rejected attempt may leave validated immutable draft inputs, but
+cannot change the active producer or serving publication. No business hostname is
+enabled merely by installing this executor.
+
 The returned receipt includes the complete captured inputs, policy, result and
 SHA-256 digest. Offline replay verifies the digest and exact result without an
 API, credentials, current rankings, current clocks or external state. The digest

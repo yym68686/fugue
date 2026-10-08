@@ -46,8 +46,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class API:
-    def __init__(self, origin, token):
+    def __init__(self, origin, token, response_limit=1 << 20):
+        if type(response_limit) is not int or not 1 <= response_limit <= 16 << 20:
+            raise ValueError("invalid bounded API response size")
         self.origin, self.token = origin, token
+        self.response_limit = response_limit
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def __call__(self, method, path, body=None):
@@ -56,12 +59,12 @@ class API:
         request = urllib.request.Request(self.origin + path, method=method, data=None if body is None else canonical(body).encode(), headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
         try:
             with self.opener.open(request, timeout=30) as response:
-                raw = response.read((1 << 20) + 1)
+                raw = response.read(self.response_limit + 1)
         except urllib.error.HTTPError as error:
             raise RuntimeError("artifact API returned HTTP " + str(error.code)) from None
         except Exception:
             raise RuntimeError("artifact API transport unavailable") from None
-        if len(raw) > 1 << 20:
+        if len(raw) > self.response_limit:
             raise ValueError("artifact API response exceeds bound")
         return json.loads(raw)
 
