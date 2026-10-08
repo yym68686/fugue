@@ -19,14 +19,15 @@ type QualityRouteProof struct {
 }
 
 type QualityAnswerEvidence struct {
-	ReceiptID   string
-	Hostname    string
-	Scope       string
-	EdgeID      string
-	Publication DNSDecisionPublication
-	ObservedAt  time.Time
-	Candidates  []model.EdgeDNSAnswerCandidate
-	Proofs      []QualityRouteProof
+	ReceiptID    string
+	Hostname     string
+	Scope        string
+	EdgeID       string
+	Publication  DNSDecisionPublication
+	ObservedAt   time.Time
+	PrimarySince *time.Time
+	Candidates   []model.EdgeDNSAnswerCandidate
+	Proofs       []QualityRouteProof
 }
 
 func QualityEvidenceFromDNSDecision(receipt DNSDecisionReceipt, now time.Time, maximumAge time.Duration) (QualityAnswerEvidence, error) {
@@ -54,6 +55,15 @@ func QualityEvidenceFromDNSDecision(receipt DNSDecisionReceipt, now time.Time, m
 	evidence := QualityAnswerEvidence{ReceiptID: receipt.DecisionID, Hostname: receipt.Hostname, Scope: selected.MatchedScopeKey,
 		EdgeID: selected.Answered[0].EdgeID, Publication: *receipt.AnswerPublication, ObservedAt: receipt.ObservedAt,
 		Candidates: append([]model.EdgeDNSAnswerCandidate(nil), selected.MaterializedCandidates...)}
+	if selection := selected.Policy.PhysicalSelection; selected.Policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalQuality && selection != nil {
+		if model.ValidateDNSPhysicalSelection(selection) != nil || selection.CapturedAt.After(receipt.ObservedAt) {
+			return QualityAnswerEvidence{}, errors.New("actual DNS physical assignment is invalid")
+		}
+		if selection.PrimaryEdgeID == evidence.EdgeID && selection.Scope == evidence.Scope && selection.PrimarySince != nil {
+			primarySince := *selection.PrimarySince
+			evidence.PrimarySince = &primarySince
+		}
+	}
 	var input dnsDecisionReplay
 	if err := json.Unmarshal(receipt.ReplayInput, &input); err != nil {
 		return QualityAnswerEvidence{}, err

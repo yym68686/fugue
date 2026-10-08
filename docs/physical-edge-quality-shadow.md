@@ -267,11 +267,43 @@ physical edge, including a sibling in the same group, without waiting for normal
 quality-switch cooldown. Neither a failed compilation nor an audit failure writes
 a new publication or clears an existing LKG.
 
-This is a migration prerequisite, not production routing acceptance. The live
-producer still needs verified two-segment collection, capacity/failure inputs,
-an immutable evidence store and an explicitly scoped canary before it can emit
-the new contract. Removing the legacy execution path before that cutover would
-break the currently published artifact compatibility boundary.
+This is a migration prerequisite, not production routing acceptance. Production
+activation requires a separately published query policy and an explicitly scoped
+canary. Removing the legacy execution path before that cutover would break the
+currently published artifact compatibility boundary.
+
+### Explicit physical publication adapter
+
+The query policy may opt individual owned dynamic hostnames into `physical_routes`.
+Each entry declares the traffic class and every v2 cost, window, capacity gate,
+cooldown and probing budget; the serving binary does not fill missing configuration
+with its shadow defaults. Country preferences are not a part of this contract.
+No production hostname is opted in by a code release. The initial adapter supports
+IPv4 global answers only; static records, pinned placement, shared aliases and
+unmeasured IPv6 assignments are rejected rather than silently changed.
+
+For each opted-in hostname and DNS consumer, the producer captures a real answer
+from the selected public DNS backend. Before compiling an order it independently
+replays that answer and reconstructs the network observations from captured raw
+samples and exact route witnesses. A recalculated shadow digest cannot substitute
+an invented measurement, omitted unfavorable record, desired publication or
+caller-supplied successful-replay flag. The complete receipt travels in the
+immutable runtime input's `physical_evidence`, separately from configuration intent
+and the compact signed execution order. Missing evidence rejects the new
+compilation; it neither changes the serving pointer nor clears the positive LKG.
+
+The optional signed `primary_since` records a conservative assignment start.
+Renewing evidence for the same primary preserves it, changing primary resets it,
+and first enabling the physical policy starts it at capture time rather than guessing past
+residence. Actual DNS evidence may expose it only when the answer is the signed
+physical primary. Legacy scoring, readiness fallback and old artifacts lacking
+this field do not manufacture a physical cooldown history. This timestamp is not
+proof that an endpoint stayed healthy or every terminal used it continuously.
+
+The adapter strips group ranking, geography, exploration and candidate weights
+from opted-in queries. Other query rules and static DNS intent remain unchanged.
+Code rollout, an adapter unit test or a signed order preserving the existing
+primary is not evidence that a production detour has been eliminated.
 
 The returned receipt includes the complete captured inputs, policy, result and
 SHA-256 digest. Offline replay verifies the digest and exact result without an

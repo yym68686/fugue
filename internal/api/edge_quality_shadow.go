@@ -33,21 +33,31 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusForbidden, "artifact.read scope required to bind actual DNS evidence")
 		return
 	}
-	now := time.Now().UTC()
-	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: hostname, TrafficClass: trafficClass,
-		Scope: scope.key(), Policy: edgequality.DefaultNetworkPolicy(), Candidates: []edgequality.Candidate{}, Observations: []edgequality.Observation{},
-		Blockers: []string{"actual_dns_receipt_not_bound"}, Limitations: []string{"dns_resolver_scope_is_not_terminal_path", "common_tcp_cohorts_do_not_cover_every_terminal", "node_capacity_is_not_link_or_application_capacity", "uncertainty_budget_is_not_statistical_confidence"}}
-	nodes, _, err := s.store.ListActiveEdgeNodes("")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	receipt, err := s.capturePhysicalQuality(ctx, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultNetworkPolicy())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	httpx.WriteJSON(w, http.StatusOK, receipt)
+}
+
+func (s *Server) capturePhysicalQuality(ctx context.Context, hostname, trafficClass string, scope edgeQualityRankScope, dnsNodeID string, networkPolicy edgequality.Policy) (edgequality.Receipt, error) {
+	now := time.Now().UTC()
+	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: hostname, TrafficClass: trafficClass,
+		Scope: scope.key(), Policy: networkPolicy, Candidates: []edgequality.Candidate{}, Observations: []edgequality.Observation{},
+		Blockers: []string{"actual_dns_receipt_not_bound"}, Limitations: []string{"dns_resolver_scope_is_not_terminal_path", "common_tcp_cohorts_do_not_cover_every_terminal", "node_capacity_is_not_link_or_application_capacity", "uncertainty_budget_is_not_statistical_confidence"}}
+	nodes, _, err := s.store.ListActiveEdgeNodes("")
+	if err != nil {
+		return edgequality.Receipt{}, err
 	}
 	var policy model.EdgeRoutePolicy
 	if loaded, loadErr := s.store.GetEdgeRoutePolicy(hostname); loadErr == nil {
 		policy = loaded
 	} else if !errors.Is(loadErr, store.ErrNotFound) {
-		s.writeStoreError(w, loadErr)
-		return
+		return edgequality.Receipt{}, loadErr
 	}
 	quarantine := s.activeNodeQuarantineByName()
 	for _, node := range nodes {
@@ -58,12 +68,9 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 		}
 		snapshot.Candidates = append(snapshot.Candidates, candidate)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
 	networkSamples, err := s.store.ListEdgeNetworkSamples(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), edgequality.MaxObservations)
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
+		return edgequality.Receipt{}, err
 	}
 	for _, sample := range networkSamples {
 		if sample.TrafficClass == trafficClass {
@@ -75,8 +82,7 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	}
 	witnesses, err := s.store.ListEdgeNetworkRouteWitnesses(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), 256)
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
+		return edgequality.Receipt{}, err
 	}
 	if len(witnesses) == 256 {
 		snapshot.Blockers = append(snapshot.Blockers, "route_witness_limit_reached")
@@ -109,8 +115,7 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	if errors.Is(err, limitReached) {
 		snapshot.Blockers = append(snapshot.Blockers, "observation_limit_reached")
 	} else if err != nil {
-		s.writeStoreError(w, err)
-		return
+		return edgequality.Receipt{}, err
 	}
 	if dnsNodeID != "" {
 		decisions, readErr := s.readPlatformDNSDecisions(ctx, dnsNodeID, hostname, "", 1)
@@ -120,13 +125,7 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 			snapshot.Blockers = append(snapshot.Blockers, "actual_dns_evidence_unbound")
 		}
 	}
-	receipt, err := edgequality.Capture(snapshot)
-	if err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "shadow snapshot evaluation failed")
-		return
-	}
-	w.Header().Set("Cache-Control", "private, no-store")
-	httpx.WriteJSON(w, http.StatusOK, receipt)
+	return edgequality.Capture(snapshot)
 }
 
 func bindPhysicalQualityDNS(snapshot *edgequality.Snapshot, receipt dnsserver.DNSDecisionReceipt) error {
@@ -148,6 +147,11 @@ func bindPhysicalQualityDNS(snapshot *edgequality.Snapshot, receipt dnsserver.DN
 
 func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsserver.QualityAnswerEvidence) {
 	snapshot.CurrentEdgeID = evidence.EdgeID
+	snapshot.LastSwitchAt = nil
+	if evidence.PrimarySince != nil {
+		primarySince := *evidence.PrimarySince
+		snapshot.LastSwitchAt = &primarySince
+	}
 	blockers := []string{}
 	for _, blocker := range snapshot.Blockers {
 		if blocker != "actual_dns_receipt_not_bound" {

@@ -51,6 +51,11 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 	selection := &model.DNSPhysicalSelection{Version: model.DNSPhysicalSelectionVersion, PrimaryEdgeID: primary.EdgeID,
 		OrderedEdgeIDs: []string{primary.EdgeID}, EvidenceDigest: receipt.Digest, DNSReceiptID: binding.ReceiptID,
 		LoadedDigest: binding.LoadedDigest, PolicyDigest: binding.PolicyDigest, Scope: snapshot.Scope, CapturedAt: snapshot.CapturedAt}
+	primarySince := snapshot.CapturedAt
+	if primary.EdgeID == snapshot.CurrentEdgeID && snapshot.LastSwitchAt != nil {
+		primarySince = *snapshot.LastSwitchAt
+	}
+	selection.PrimarySince = &primarySince
 	for _, candidate := range result.Candidates {
 		if candidate.EdgeID != primary.EdgeID && candidate.Ready && len(candidate.HardGates) == 0 {
 			selection.OrderedEdgeIDs = append(selection.OrderedEdgeIDs, candidate.EdgeID)

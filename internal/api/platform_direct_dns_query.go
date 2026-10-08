@@ -63,7 +63,10 @@ func (s *Server) captureDirectDNSQueriesWithNodes(ctx context.Context, result *p
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return projectDirectDNSQueries(result, policy, eligible, catalog, now)
+	if err := projectDirectDNSQueries(result, policy, eligible, catalog, now); err != nil {
+		return err
+	}
+	return s.capturePhysicalDNSQueries(ctx, result, policy)
 }
 
 func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy platformconfig.DNSQueryPolicy, nodes []model.EdgeNode, catalog edgeDNSLatencyProfileCatalog, observed time.Time) error {
@@ -72,6 +75,10 @@ func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy 
 	}
 	if observed.IsZero() {
 		return fmt.Errorf("DNS selection observation time required")
+	}
+	physicalHosts := map[string]bool{}
+	for _, route := range strategy.PhysicalRoutes {
+		physicalHosts[route.Hostname] = true
 	}
 	// Restrict inventory to the already frozen authoritative endpoint topology.
 	endpoints := map[string]platformconfig.DNSEdgeEndpoint{}
@@ -171,6 +178,17 @@ func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy 
 					if len(memberIPs) == 0 {
 						records = nil
 						break
+					}
+					if physicalHosts[owner.Hostname] {
+						ttl := max(strategy.MinimumTTLSeconds, min(strategy.MaximumTTLSeconds, record.TTL))
+						value := model.EdgeDNSRecord{Name: record.Hostname, Type: family, Values: memberIPs, TTL: ttl, RecordKind: record.RecordKind, Status: record.Status,
+							AnswerPolicy: model.DNSAnswerPolicy{PolicyKind: model.DNSAnswerPolicyKindPhysicalQuality, TTLSeconds: ttl}}
+						for _, address := range memberIPs {
+							candidate := candidates[address]
+							value.Candidates = append(value.Candidates, model.EdgeDNSAnswerCandidate{IP: address, EdgeID: candidate.EdgeID, EdgeGroupID: candidate.EdgeGroupID})
+						}
+						records = append(records, value)
+						continue
 					}
 
 					// Shared target routing chooses among member profiles using the same

@@ -103,3 +103,37 @@ func TestCompilePhysicalSelectionPreservesCooldownAndFastFailure(t *testing.T) {
 		t.Fatal("failure did not bypass comparative cooldown", selection, err)
 	}
 }
+
+func TestCompilePhysicalSelectionPrimarySinceIsStableAcrossHoldRenewal(t *testing.T) {
+	receipt, binding := selectionFixture(t)
+	now := receipt.Snapshot.CapturedAt
+	primarySince := now.Add(-time.Minute)
+	receipt.Snapshot.LastSwitchAt = &primarySince
+	held, err := Capture(receipt.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := CompileSelection(held, binding, now)
+	if err != nil || selection.PrimarySince == nil || !selection.PrimarySince.Equal(primarySince) {
+		t.Fatal("evidence renewal reset signed primary history", selection, err)
+	}
+	receipt.Snapshot.LastSwitchAt = nil
+	held, err = Capture(receipt.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err = CompileSelection(held, binding, now)
+	if err != nil || selection.PrimarySince == nil || !selection.PrimarySince.Equal(now) {
+		t.Fatal("initial adoption invented past residence", selection, err)
+	}
+	receipt.Snapshot.Candidates[0].HardGates = []string{"route_unready"}
+	receipt.Snapshot.LastSwitchAt = &primarySince
+	failed, err := Capture(receipt.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err = CompileSelection(failed, binding, now)
+	if err != nil || selection.PrimarySince == nil || !selection.PrimarySince.Equal(now) {
+		t.Fatal("new physical primary retained previous primary history", selection, err)
+	}
+}

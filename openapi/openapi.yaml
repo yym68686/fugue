@@ -20349,6 +20349,10 @@ components:
         policy_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
         scope: {type: string, maxLength: 512}
         captured_at: {type: string, format: date-time}
+        primary_since:
+          type: string
+          format: date-time
+          description: Conservative start of this signed physical primary assignment. Preserved when evidence is refreshed without changing the primary; reset on a new assignment. Absent on older artifacts means unknown cooldown history, never zero elapsed time. This is not proof of uninterrupted endpoint health or terminal traffic.
     EdgeDNSAnswerCandidate:
       type: object
       additionalProperties: false
@@ -34240,6 +34244,12 @@ components:
       required: [ranking_mode, preference_mode, ecs_enabled, exploration_percent, switch_cooldown_seconds, minimum_ttl_seconds, maximum_ttl_seconds]
       description: Producer query strategy, independent of runtime ranking, locality and candidate eligibility. The producer observes inventory and ranking directly, expands concrete DNSAnswerRules, and never reads legacy DNS bundles when this policy is present. Readiness remains independently proven.
       properties:
+        physical_routes:
+          type: array
+          maxItems: 64
+          description: Explicit opt-in hostnames for physical network selection. No country preferences apply. Missing evidence rejects new compilation and cannot invalidate a positive serving artifact. Static records and shared targets without unanimous ownership are not eligible.
+          items:
+            $ref: '#/components/schemas/PlatformPhysicalQualityRoute'
         ranking_mode: {type: string, enum: [active, shadow, disabled]}
         preference_mode: {type: string, enum: [runtime_locality]}
         ecs_enabled: {type: boolean}
@@ -34247,6 +34257,20 @@ components:
         switch_cooldown_seconds: {type: integer, minimum: 0, maximum: 86400}
         minimum_ttl_seconds: {type: integer, minimum: 1, maximum: 3600}
         maximum_ttl_seconds: {type: integer, minimum: 1, maximum: 3600}
+    PlatformPhysicalQualityRoute:
+      type: object
+      additionalProperties: false
+      required: [hostname, traffic_class, policy]
+      properties:
+        hostname: {type: string, maxLength: 253}
+        traffic_class: {type: string, enum: [large_body_api, small_api, dynamic_api, static_cacheable, streaming, sse, websocket, html_dynamic]}
+        policy:
+          allOf:
+            - $ref: '#/components/schemas/PhysicalEdgeQualityPolicy'
+            - type: object
+              required: [maximum_node_utilization]
+              properties:
+                version: {type: string, enum: [physical-network-cohort-v2]}
     PlatformDNSAuthorityPolicy:
       type: object
       additionalProperties: false
@@ -34321,6 +34345,8 @@ components:
       additionalProperties: false
       required: [node_id, hostname, type, source_generation, source_digest, observed_at, candidates]
       properties:
+        physical_evidence:
+          $ref: '#/components/schemas/PhysicalEdgeQualityReceipt'
         physical_selection:
           $ref: '#/components/schemas/DNSPhysicalSelection'
         node_id: {type: string}

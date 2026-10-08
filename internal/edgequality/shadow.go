@@ -20,26 +20,7 @@ const Schema = "fugue.physical-edge-quality-shadow/v1"
 const MaxObservations = 4096
 const ReceiptDigestFormat = "embedded-json-sorted-v1"
 
-type Policy struct {
-	MaximumNodeUtilization float64 `json:"maximum_node_utilization,omitempty"`
-	Version                string  `json:"version"`
-	WindowSeconds          int     `json:"window_seconds"`
-	BucketSeconds          int     `json:"bucket_seconds"`
-	RequiredBuckets        int     `json:"required_buckets"`
-	MinimumRecords         int     `json:"minimum_records"`
-	CooldownSeconds        int     `json:"cooldown_seconds"`
-	EvidenceMaxAgeSeconds  int     `json:"evidence_max_age_seconds"`
-	AdvantageMS            float64 `json:"advantage_ms"`
-	AdvantageRatio         float64 `json:"advantage_ratio"`
-	UnknownCostMS          float64 `json:"unknown_cost_ms"`
-	UncertaintyMS          float64 `json:"uncertainty_ms"`
-	FailureCostMS          float64 `json:"failure_cost_ms"`
-	CapacityCostMS         float64 `json:"capacity_cost_ms"`
-	ThroughputCostMS       float64 `json:"throughput_cost_ms"`
-	ThroughputTargetBPS    float64 `json:"throughput_target_bps"`
-	ProbeIntervalSeconds   int     `json:"probe_interval_seconds"`
-	ProbeBudgetPerInterval int     `json:"probe_budget_per_interval"`
-}
+type Policy = model.PhysicalEdgeQualityPolicy
 
 func DefaultShadowPolicy() Policy {
 	return Policy{Version: "network-only-experiment-v1", WindowSeconds: 1800, BucketSeconds: 300,
@@ -415,8 +396,10 @@ func validate(snapshot Snapshot) error {
 		return errors.New("invalid shadow schema or context")
 	}
 	policy := snapshot.Policy
-	if policy.Version == NetworkPolicyVersion && (math.IsNaN(policy.MaximumNodeUtilization) || math.IsInf(policy.MaximumNodeUtilization, 0) || policy.MaximumNodeUtilization <= 0 || policy.MaximumNodeUtilization > 1) {
-		return errors.New("invalid explicit network node capacity limit")
+	if policy.Version == NetworkPolicyVersion {
+		if err := model.ValidatePhysicalEdgeQualityPolicy(policy); err != nil {
+			return err
+		}
 	}
 	if policy.EvidenceMaxAgeSeconds < 60 || policy.EvidenceMaxAgeSeconds > policy.WindowSeconds {
 		return errors.New("invalid evidence age bound")

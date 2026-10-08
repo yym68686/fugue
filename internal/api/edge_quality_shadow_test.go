@@ -118,6 +118,26 @@ func TestQualityNetworkSampleBindingRequiresExactPhysicalRouteProof(t *testing.T
 	}
 }
 
+func TestQualityBindingReplacesRatherThanInheritsUnverifiedCooldown(t *testing.T) {
+	now := time.Now().UTC()
+	previous := now.Add(-time.Hour)
+	snapshot := edgequality.Snapshot{LastSwitchAt: &previous}
+	evidence := dnsserver.QualityAnswerEvidence{EdgeID: "edge-a"}
+	bindPhysicalQualityEvidence(&snapshot, evidence)
+	if snapshot.LastSwitchAt != nil {
+		t.Fatal("legacy answer inherited unrelated physical cooldown")
+	}
+	evidence.PrimarySince = &previous
+	bindPhysicalQualityEvidence(&snapshot, evidence)
+	if snapshot.LastSwitchAt == nil || !snapshot.LastSwitchAt.Equal(previous) {
+		t.Fatal("signed primary assignment not retained")
+	}
+	*snapshot.LastSwitchAt = now
+	if !evidence.PrimarySince.Equal(previous) {
+		t.Fatal("mutable snapshot aliased original evidence")
+	}
+}
+
 func TestQualityClientNetworkBindingPreservesMissingMetricsAndScope(t *testing.T) {
 	now := time.Now().UTC()
 	rtt := 180.5

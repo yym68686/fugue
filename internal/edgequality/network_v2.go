@@ -6,9 +6,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"fugue/internal/model"
 )
 
-const NetworkPolicyVersion = "physical-network-cohort-v2"
+const NetworkPolicyVersion = model.PhysicalNetworkPolicyVersion
 
 type NetworkComparison struct {
 	EdgeID           string  `json:"edge_id"`

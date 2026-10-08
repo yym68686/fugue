@@ -626,6 +626,8 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out := in
 	if in.DNSQueryPolicy != nil {
 		p := *in.DNSQueryPolicy
+		p.PhysicalRoutes = append([]PhysicalQualityRoute(nil), p.PhysicalRoutes...)
+		sort.Slice(p.PhysicalRoutes, func(left, right int) bool { return p.PhysicalRoutes[left].Hostname < p.PhysicalRoutes[right].Hostname })
 		out.DNSQueryPolicy = &p
 	}
 	out.DNSAuthorities = normalizeDNSAuthorities(in.DNSAuthorities)
