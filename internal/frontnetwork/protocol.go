@@ -22,6 +22,22 @@ const Schema = "fugue.public-front-network/v1"
 const Path = "/connection"
 const Timeout = 300 * time.Millisecond
 
+type readFailure struct {
+	reason string
+	cause  error
+}
+
+func (failure readFailure) Error() string { return failure.reason + ": " + failure.cause.Error() }
+func (failure readFailure) Unwrap() error { return failure.cause }
+
+func FailureReason(err error) string {
+	var failure readFailure
+	if errors.As(err, &failure) {
+		return failure.reason
+	}
+	return "unknown"
+}
+
 type Request struct {
 	Schema     string `json:"schema"`
 	Nonce      string `json:"nonce"`
@@ -69,15 +85,15 @@ func ValidateRequest(request Request) error {
 
 func Read(ctx context.Context, socketPath, edgeID, groupID, slot, remote string) (Response, error) {
 	if !filepath.IsAbs(socketPath) || len(socketPath) > 100 {
-		return Response{}, errors.New("bounded absolute Front socket path required")
+		return Response{}, readFailure{"socket_path_invalid", errors.New("bounded absolute Front socket path required")}
 	}
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
-		return Response{}, err
+		return Response{}, readFailure{"nonce_failed", err}
 	}
 	query := Request{Schema: Schema, Nonce: hex.EncodeToString(nonce), EdgeID: edgeID, GroupID: groupID, Slot: slot, RemoteAddr: remote}
 	if err := ValidateRequest(query); err != nil {
-		return Response{}, err
+		return Response{}, readFailure{"request_invalid", err}
 	}
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
@@ -89,31 +105,42 @@ func Read(ctx context.Context, socketPath, edgeID, groupID, slot, remote string)
 	raw, _ := json.Marshal(query)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://front"+Path, bytes.NewReader(raw))
 	if err != nil {
-		return Response{}, err
+		return Response{}, readFailure{"request_invalid", err}
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return Response{}, err
+		return Response{}, readFailure{"transport_failed", err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return Response{}, errors.New("Front connection evidence unavailable")
+		reason := "http_rejected"
+		switch response.StatusCode {
+		case http.StatusBadRequest:
+			reason = "request_rejected"
+		case http.StatusNotFound:
+			reason = "connection_missing"
+		case http.StatusTooManyRequests:
+			reason = "rate_limited"
+		case http.StatusServiceUnavailable:
+			reason = "unavailable"
+		}
+		return Response{}, readFailure{reason, errors.New("Front connection evidence unavailable")}
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, 4097))
 	if err != nil || len(payload) > 4096 {
-		return Response{}, errors.New("Front connection evidence exceeds bound")
+		return Response{}, readFailure{"response_unreadable", errors.New("Front connection evidence exceeds bound")}
 	}
 	var result Response
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil || !json.Valid(payload) {
-		return Response{}, errors.New("invalid Front connection response")
+		return Response{}, readFailure{"response_invalid", errors.New("invalid Front connection response")}
 	}
 	peer, _ := ParseRemote(remote)
 	now := time.Now().UTC()
 	if result.Schema != Schema || result.Nonce != query.Nonce || result.EdgeID != edgeID || result.GroupID != groupID || result.Sample.Slot != slot ||
 		result.Sample.Scope != Scope(peer.Addr()) || result.Sample.ObservedAt.After(now) || now.Sub(result.Sample.ObservedAt) > time.Second || model.ValidateEdgeClientNetworkSample(&result.Sample) != nil {
-		return Response{}, errors.New("Front connection binding mismatch")
+		return Response{}, readFailure{"binding_mismatch", errors.New("Front connection binding mismatch")}
 	}
 	return result, nil
 }

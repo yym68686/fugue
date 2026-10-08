@@ -111,6 +111,8 @@ type Service struct {
 	performanceBaseline     telemetry
 	networkSampleMu         sync.Mutex
 	networkSamples          []model.EdgeNetworkSample
+	frontNetworkDiagMu      sync.Mutex
+	frontNetworkDiag        FrontNetworkObservationStatus
 	frontNetworkInFlight    atomic.Bool
 	frontNetworkLast        atomic.Int64
 	cacheRevalidating       map[string]struct{}
@@ -128,46 +130,55 @@ type Service struct {
 }
 
 type Status struct {
-	PlatformServing              *PlatformServingStatus     `json:"platform_serving,omitempty"`
-	Status                       string                     `json:"status"`
-	Healthy                      bool                       `json:"healthy"`
-	EdgeID                       string                     `json:"edge_id,omitempty"`
-	EdgeGroupID                  string                     `json:"edge_group_id,omitempty"`
-	BundleVersion                string                     `json:"bundle_version,omitempty"`
-	RouteBundleSource            string                     `json:"route_bundle_source,omitempty"`
-	PublicationSequence          uint64                     `json:"publication_sequence,omitempty"`
-	RecoveryEpoch                uint64                     `json:"recovery_epoch,omitempty"`
-	ServingGeneration            string                     `json:"serving_generation,omitempty"`
-	LKGGeneration                string                     `json:"lkg_generation,omitempty"`
-	LastGoodGeneration           string                     `json:"last_good_generation,omitempty"`
-	CacheCorruptGeneration       string                     `json:"cache_corrupt_generation,omitempty"`
-	BundleValidUntil             *time.Time                 `json:"bundle_valid_until,omitempty"`
-	RouteCount                   int                        `json:"route_count"`
-	TLSAllowlistCount            int                        `json:"tls_allowlist_count"`
-	LastSyncAt                   *time.Time                 `json:"last_sync_at,omitempty"`
-	LastSuccessAt                *time.Time                 `json:"last_success_at,omitempty"`
-	LastError                    string                     `json:"last_error,omitempty"`
-	DegradedReason               string                     `json:"degraded_reason,omitempty"`
-	StaleCache                   bool                       `json:"stale_cache"`
-	MaxStaleExceeded             bool                       `json:"max_stale_exceeded,omitempty"`
-	FailureClass                 string                     `json:"failure_class,omitempty"`
-	CachePath                    string                     `json:"cache_path,omitempty"`
-	CaddyEnabled                 bool                       `json:"caddy_enabled,omitempty"`
-	CaddyListenAddr              string                     `json:"caddy_listen_addr,omitempty"`
-	CaddyTLSMode                 string                     `json:"caddy_tls_mode,omitempty"`
-	CaddyAppliedVersion          string                     `json:"caddy_applied_version,omitempty"`
-	CaddyLastApplyAt             *time.Time                 `json:"caddy_last_apply_at,omitempty"`
-	CaddyLastError               string                     `json:"caddy_last_error,omitempty"`
-	InventoryProducerActive      bool                       `json:"inventory_producer_active,omitempty"`
-	InventoryHeartbeatAt         *time.Time                 `json:"inventory_heartbeat_at,omitempty"`
-	InventoryHeartbeatGeneration uint64                     `json:"inventory_heartbeat_generation,omitempty"`
-	InventoryHeartbeatError      string                     `json:"inventory_heartbeat_error,omitempty"`
-	CandidateBundleLoaded        bool                       `json:"candidate_bundle_loaded,omitempty"`
-	CandidateRecordDigest        string                     `json:"candidate_record_digest,omitempty"`
-	CandidateReleaseRecordDigest string                     `json:"candidate_release_record_digest,omitempty"`
-	CandidateWorkerSlot          string                     `json:"candidate_worker_slot,omitempty"`
-	PlatformCandidate            PlatformCandidateStatus    `json:"platform_candidate,omitempty"`
-	PlatformTLSCandidate         PlatformTLSCandidateStatus `json:"platform_tls_candidate,omitempty"`
+	PlatformServing              *PlatformServingStatus        `json:"platform_serving,omitempty"`
+	Status                       string                        `json:"status"`
+	Healthy                      bool                          `json:"healthy"`
+	EdgeID                       string                        `json:"edge_id,omitempty"`
+	EdgeGroupID                  string                        `json:"edge_group_id,omitempty"`
+	BundleVersion                string                        `json:"bundle_version,omitempty"`
+	RouteBundleSource            string                        `json:"route_bundle_source,omitempty"`
+	PublicationSequence          uint64                        `json:"publication_sequence,omitempty"`
+	RecoveryEpoch                uint64                        `json:"recovery_epoch,omitempty"`
+	ServingGeneration            string                        `json:"serving_generation,omitempty"`
+	LKGGeneration                string                        `json:"lkg_generation,omitempty"`
+	LastGoodGeneration           string                        `json:"last_good_generation,omitempty"`
+	CacheCorruptGeneration       string                        `json:"cache_corrupt_generation,omitempty"`
+	BundleValidUntil             *time.Time                    `json:"bundle_valid_until,omitempty"`
+	RouteCount                   int                           `json:"route_count"`
+	TLSAllowlistCount            int                           `json:"tls_allowlist_count"`
+	LastSyncAt                   *time.Time                    `json:"last_sync_at,omitempty"`
+	LastSuccessAt                *time.Time                    `json:"last_success_at,omitempty"`
+	LastError                    string                        `json:"last_error,omitempty"`
+	DegradedReason               string                        `json:"degraded_reason,omitempty"`
+	StaleCache                   bool                          `json:"stale_cache"`
+	MaxStaleExceeded             bool                          `json:"max_stale_exceeded,omitempty"`
+	FailureClass                 string                        `json:"failure_class,omitempty"`
+	CachePath                    string                        `json:"cache_path,omitempty"`
+	CaddyEnabled                 bool                          `json:"caddy_enabled,omitempty"`
+	CaddyListenAddr              string                        `json:"caddy_listen_addr,omitempty"`
+	CaddyTLSMode                 string                        `json:"caddy_tls_mode,omitempty"`
+	CaddyAppliedVersion          string                        `json:"caddy_applied_version,omitempty"`
+	CaddyLastApplyAt             *time.Time                    `json:"caddy_last_apply_at,omitempty"`
+	CaddyLastError               string                        `json:"caddy_last_error,omitempty"`
+	InventoryProducerActive      bool                          `json:"inventory_producer_active,omitempty"`
+	InventoryHeartbeatAt         *time.Time                    `json:"inventory_heartbeat_at,omitempty"`
+	InventoryHeartbeatGeneration uint64                        `json:"inventory_heartbeat_generation,omitempty"`
+	InventoryHeartbeatError      string                        `json:"inventory_heartbeat_error,omitempty"`
+	CandidateBundleLoaded        bool                          `json:"candidate_bundle_loaded,omitempty"`
+	CandidateRecordDigest        string                        `json:"candidate_record_digest,omitempty"`
+	CandidateReleaseRecordDigest string                        `json:"candidate_release_record_digest,omitempty"`
+	CandidateWorkerSlot          string                        `json:"candidate_worker_slot,omitempty"`
+	PlatformCandidate            PlatformCandidateStatus       `json:"platform_candidate,omitempty"`
+	PlatformTLSCandidate         PlatformTLSCandidateStatus    `json:"platform_tls_candidate,omitempty"`
+	FrontNetworkObservation      FrontNetworkObservationStatus `json:"front_network_observation,omitempty"`
+}
+
+type FrontNetworkObservationStatus struct {
+	Attempts      uint64            `json:"attempts"`
+	Successes     uint64            `json:"successes"`
+	LastAttemptAt *time.Time        `json:"last_attempt_at,omitempty"`
+	LastSuccessAt *time.Time        `json:"last_success_at,omitempty"`
+	Rejections    map[string]uint64 `json:"rejections,omitempty"`
 }
 
 type edgeDesiredStateEnvelope struct {
@@ -999,6 +1010,23 @@ func (s *Service) Status() Status {
 	out.PlatformTLSCandidate.Readiness = summarizePlatformTLSReadiness(s.platformTLSReadiness, bundleVersion, time.Now().UTC())
 	if readiness := out.PlatformTLSCandidate.Readiness; readiness != nil {
 		out.PlatformTLSCandidate.TLSVerified = readiness.Probes > 0 && readiness.ReadyProbes == readiness.Probes
+	}
+	out.FrontNetworkObservation = s.frontNetworkObservationStatus()
+	return out
+}
+
+func (s *Service) frontNetworkObservationStatus() FrontNetworkObservationStatus {
+	if s == nil {
+		return FrontNetworkObservationStatus{}
+	}
+	s.frontNetworkDiagMu.Lock()
+	defer s.frontNetworkDiagMu.Unlock()
+	out := s.frontNetworkDiag
+	if s.frontNetworkDiag.Rejections != nil {
+		out.Rejections = make(map[string]uint64, len(s.frontNetworkDiag.Rejections))
+		for reason, count := range s.frontNetworkDiag.Rejections {
+			out.Rejections[reason] = count
+		}
 	}
 	return out
 }

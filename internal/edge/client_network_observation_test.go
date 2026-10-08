@@ -76,21 +76,30 @@ func TestPublicClientSamplerNeverBlocksBusinessAndBindsExactRequest(t *testing.T
 	if service.frontNetworkInFlight.Load() || calls.Load() != 1 {
 		t.Fatal("same route bypassed passive sample interval")
 	}
+	status := service.frontNetworkObservationStatus()
+	if status.Attempts != 1 || status.Successes != 1 || status.LastAttemptAt == nil || status.LastSuccessAt == nil || status.Rejections["in_flight"] != 1 || status.Rejections["same_route_recent"] != 1 {
+		t.Fatal("passive observation accounting incomplete", status)
+	}
+	status.Rejections["same_route_recent"] = 99
+	if service.frontNetworkObservationStatus().Rejections["same_route_recent"] != 1 {
+		t.Fatal("diagnostic snapshot aliased mutable state")
+	}
 }
 
 func TestPublicClientSamplerRejectsUntrustedHeadersAndDisabledConfiguration(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		edit func(*Service, *http.Request)
+		name   string
+		reason string
+		edit   func(*Service, *http.Request)
 	}{
-		{"external", func(_ *Service, request *http.Request) { request.RemoteAddr = "203.0.113.2:80" }},
-		{"absent_header", func(_ *Service, request *http.Request) { request.Header.Del(edgeClientRemoteAddrHeader) }},
-		{"loopback_peer", func(_ *Service, request *http.Request) {
+		{"external", "worker_peer_not_loopback", func(_ *Service, request *http.Request) { request.RemoteAddr = "203.0.113.2:80" }},
+		{"absent_header", "client_remote_header_missing", func(_ *Service, request *http.Request) { request.Header.Del(edgeClientRemoteAddrHeader) }},
+		{"loopback_peer", "client_remote_invalid", func(_ *Service, request *http.Request) {
 			request.Header.Set(edgeClientRemoteAddrHeader, "127.0.0.1:80")
 		}},
-		{"disabled", func(service *Service, _ *http.Request) { service.Config.FrontNetworkSocket = "" }},
-		{"no_caddy", func(service *Service, _ *http.Request) { service.Config.CaddyEnabled = false }},
-		{"no_proxy_protocol", func(service *Service, _ *http.Request) { service.Config.CaddyProxyProtocolEnabled = false }},
+		{"disabled", "socket_disabled", func(service *Service, _ *http.Request) { service.Config.FrontNetworkSocket = "" }},
+		{"no_caddy", "caddy_disabled", func(service *Service, _ *http.Request) { service.Config.CaddyEnabled = false }},
+		{"no_proxy_protocol", "proxy_protocol_disabled", func(service *Service, _ *http.Request) { service.Config.CaddyProxyProtocolEnabled = false }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service := &Service{Config: config.EdgeConfig{EdgeID: "edge-a", EdgeGroupID: "group-a", EdgeSlot: "b", CaddyEnabled: true, CaddyProxyProtocolEnabled: true, FrontNetworkSocket: "/tmp/does-not-exist.sock"}}
@@ -102,6 +111,9 @@ func TestPublicClientSamplerRejectsUntrustedHeadersAndDisabledConfiguration(t *t
 			service.observePublicClientNetwork(request, observation.Route, observation.BundleVersion, time.Now())
 			if service.frontNetworkInFlight.Load() || service.frontNetworkLast.Load() != 0 || len(service.originNetworkSamples()) != 0 {
 				t.Fatal("untrusted request entered observation queue")
+			}
+			if status := service.frontNetworkObservationStatus(); status.Attempts != 0 || status.Successes != 0 || status.Rejections[test.reason] != 1 {
+				t.Fatal("missing exact rejection reason", status)
 			}
 		})
 	}

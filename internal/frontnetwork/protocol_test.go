@@ -69,3 +69,40 @@ func TestFrontNetworkPublicPeerBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestFrontNetworkFailureReasonsAreBounded(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "front-errors-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(directory) })
+	for _, test := range []struct {
+		status int
+		reason string
+	}{
+		{http.StatusBadRequest, "request_rejected"},
+		{http.StatusNotFound, "connection_missing"},
+		{http.StatusTooManyRequests, "rate_limited"},
+		{http.StatusServiceUnavailable, "unavailable"},
+		{http.StatusForbidden, "http_rejected"},
+		{http.StatusOK, "response_invalid"},
+	} {
+		t.Run(test.reason, func(t *testing.T) {
+			path := filepath.Join(directory, test.reason+".sock")
+			listener, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.WriteHeader(test.status)
+				writer.Write([]byte("sensitive response must not become a metric label"))
+			})}
+			go server.Serve(listener)
+			defer server.Close()
+			_, err = Read(context.Background(), path, "edge-a", "group-a", "b", "203.0.113.1:41000")
+			if err == nil || FailureReason(err) != test.reason {
+				t.Fatal("unbounded or missing rejection reason", err)
+			}
+		})
+	}
+}
