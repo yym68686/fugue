@@ -252,6 +252,38 @@ endpoint writes no configuration, artifacts, assignments or LKG state.
 
 ## Remaining production gates
 
+### Historical network evidence across bundle renewal
+
+An identity-accepted active worker heartbeat can trigger one independent TLS
+nonce HEAD route observation per physical edge per minute per API replica, with
+at most four concurrent observations and a four-second total deadline. The
+target IP comes from registered node inventory, not the reported sample. The
+existing route-proof endpoint answers without forwarding to the application.
+The heartbeat never waits for this observation, and failure cannot affect DNS,
+business requests, configuration or positive LKG.
+
+The retained `route_tls_witness_v1` record is not a latency or availability
+measurement. It binds an exact physical edge, group, hostname, path, class,
+bundle version and route digest. A heartbeat caller cannot submit this source.
+Witnesses use a separate observation collection and database hostname-key
+namespace; rolling-upgrade or rollback readers of the original network-sample
+collection never receive an unsupported source. No database migration or
+serving-artifact update is required.
+It can link an immutable measurement only within two minutes of the TLS
+observation and before its certificate/route validity deadline. A historical
+bundle is accepted into shadow only if this original witness is captured and
+a fresh actual DNS receipt independently proves the same current route content
+on that same physical edge. Publication renewal alone is not a route change;
+a changed digest, foreign edge/path/class, missing witness or missing current
+proof still prevents binding. An expired historical witness never renews live
+readiness. Original versions and sample times remain intact for offline replay.
+
+Derived observations identify `route_witness_id`; replay validates the exact
+raw measurement and witness rather than trusting the derived metric. This
+removes the evidence-window reset at each bundle renewal without relaxing
+promotion gates or making old samples current. It does not supply missing
+failure denominators, capacity, throughput or terminal-path coverage.
+
 1. Establish a tested no-interruption public DNS code release path and deploy
    actual-answer receipts to the real public processes. Bind each observation
    to the actual final RRset, loaded digest, physical edge and serving LKG.

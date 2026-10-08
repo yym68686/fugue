@@ -12,6 +12,9 @@ func sanitizeEdgeNetworkSamples(req edgeHeartbeatRequest, servingActive *bool, n
 	}
 	samples := []model.EdgeNetworkSample{}
 	for _, sample := range req.NetworkSamples {
+		if sample.Source != "service_endpoint_tcp_info_v1" && sample.Source != "public_front_tcp_info_v1" {
+			continue
+		}
 		if sample.EdgeID != req.EdgeID || sample.EdgeGroupID != req.EdgeGroupID || sample.BundleVersion != req.RouteBundleVersion || sample.ObservedAt.After(now) || sample.ObservedAt.Before(now.Add(-time.Hour)) || model.ValidateEdgeNetworkSample(sample) != nil {
 			continue
 		}

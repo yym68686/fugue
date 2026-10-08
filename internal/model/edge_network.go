@@ -12,6 +12,7 @@ import (
 )
 
 type EdgeNetworkSample struct {
+	RouteWitness  *EdgeNetworkRouteWitness `json:"route_witness,omitempty"`
 	ClientNetwork *EdgeClientNetworkSample `json:"client_network,omitempty"`
 	ID            string                   `json:"id"`
 	EdgeID        string                   `json:"edge_id"`
@@ -27,6 +28,23 @@ type EdgeNetworkSample struct {
 	ObservedAt    time.Time                `json:"observed_at"`
 }
 
+type EdgeNetworkRouteWitness struct {
+	Address    string    `json:"address"`
+	ValidUntil time.Time `json:"valid_until"`
+}
+
+func EdgeNetworkWitnessMatches(sample, witness EdgeNetworkSample) bool {
+	if ValidateEdgeNetworkSample(sample) != nil || ValidateEdgeNetworkSample(witness) != nil ||
+		(sample.Source != "service_endpoint_tcp_info_v1" && sample.Source != "public_front_tcp_info_v1") || witness.Source != "route_tls_witness_v1" ||
+		sample.EdgeID != witness.EdgeID || sample.EdgeGroupID != witness.EdgeGroupID || sample.Hostname != witness.Hostname ||
+		sample.PathPrefix != witness.PathPrefix || sample.TrafficClass != witness.TrafficClass ||
+		sample.RouteDigest != witness.RouteDigest || sample.BundleVersion != witness.BundleVersion {
+		return false
+	}
+	return !sample.ObservedAt.Before(witness.ObservedAt.Add(-2*time.Minute)) &&
+		!sample.ObservedAt.After(witness.ObservedAt.Add(2*time.Minute)) && sample.ObservedAt.Before(witness.RouteWitness.ValidUntil)
+}
+
 func ValidateEdgeNetworkSample(sample EdgeNetworkSample) error {
 	digest, digestErr := hex.DecodeString(strings.TrimPrefix(sample.RouteDigest, "sha256:"))
 	host, port, targetErr := net.SplitHostPort(sample.ServiceTarget)
@@ -40,12 +58,19 @@ func ValidateEdgeNetworkSample(sample EdgeNetworkSample) error {
 		!sample.ObservedAt.IsZero()
 	switch sample.Source {
 	case "service_endpoint_tcp_info_v1":
-		valid = valid && sample.ClientNetwork == nil && targetErr == nil && portErr == nil && portNumber > 0 && portNumber <= 65535 &&
+		valid = valid && sample.RouteWitness == nil && sample.ClientNetwork == nil && targetErr == nil && portErr == nil && portNumber > 0 && portNumber <= 65535 &&
 			strings.HasSuffix(host, ".svc.cluster.local") && !strings.ContainsAny(host, "/:@?# \t\r\n") && len(sample.ServiceTarget) <= 512
 	case "public_front_tcp_info_v1":
-		valid = valid && sample.ServiceTarget == "" && sample.ServiceRTTMS == nil && ValidateEdgeClientNetworkSample(sample.ClientNetwork) == nil
+		valid = valid && sample.RouteWitness == nil && sample.ServiceTarget == "" && sample.ServiceRTTMS == nil && ValidateEdgeClientNetworkSample(sample.ClientNetwork) == nil
 		if sample.ClientNetwork != nil {
 			valid = valid && sample.ObservedAt.Equal(sample.ClientNetwork.ObservedAt)
+		}
+	case "route_tls_witness_v1":
+		valid = valid && sample.RouteWitness != nil && sample.ClientNetwork == nil && sample.ServiceTarget == "" && sample.ServiceRTTMS == nil
+		if witness := sample.RouteWitness; witness != nil {
+			address, err := netip.ParseAddr(witness.Address)
+			valid = valid && err == nil && address.IsGlobalUnicast() && !address.IsPrivate() && !address.Is4In6() &&
+				witness.Address == address.String() && witness.ValidUntil.After(sample.ObservedAt)
 		}
 	default:
 		valid = false

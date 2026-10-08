@@ -11,10 +11,21 @@ import (
 )
 
 func (s *Store) RecordEdgeNetworkSamples(ctx context.Context, samples []model.EdgeNetworkSample, pruneBefore time.Time) error {
+	return s.recordEdgeNetworkSamples(ctx, samples, pruneBefore, false)
+}
+
+func (s *Store) RecordEdgeNetworkRouteWitnesses(ctx context.Context, samples []model.EdgeNetworkSample, pruneBefore time.Time) error {
+	return s.recordEdgeNetworkSamples(ctx, samples, pruneBefore, true)
+}
+
+func (s *Store) recordEdgeNetworkSamples(ctx context.Context, samples []model.EdgeNetworkSample, pruneBefore time.Time, witnesses bool) error {
 	if len(samples) > 32 {
 		return fmt.Errorf("network observation batch exceeds bound")
 	}
 	for _, sample := range samples {
+		if (sample.Source == "route_tls_witness_v1") != witnesses {
+			return fmt.Errorf("network evidence source differs from collection")
+		}
 		if err := model.ValidateEdgeNetworkSample(sample); err != nil {
 			return err
 		}
@@ -35,7 +46,7 @@ func (s *Store) RecordEdgeNetworkSamples(ctx context.Context, samples []model.Ed
 			if err != nil {
 				return err
 			}
-			if _, err := transaction.ExecContext(ctx, `INSERT INTO fugue_edge_network_samples (edge_id, id, hostname, observed_at, sample_json) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (edge_id, id) DO NOTHING`, sample.EdgeID, sample.ID, sample.Hostname, sample.ObservedAt, raw); err != nil {
+			if _, err := transaction.ExecContext(ctx, `INSERT INTO fugue_edge_network_samples (edge_id, id, hostname, observed_at, sample_json) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (edge_id, id) DO NOTHING`, sample.EdgeID, sample.ID, networkObservationHostnameKey(sample.Hostname, witnesses), sample.ObservedAt, raw); err != nil {
 				return err
 			}
 		}
@@ -47,7 +58,11 @@ func (s *Store) RecordEdgeNetworkSamples(ctx context.Context, samples []model.Ed
 		}
 		retained := []model.EdgeNetworkSample{}
 		seen := map[string]bool{}
-		for _, sample := range state.EdgeNetworkSamples {
+		collection := &state.EdgeNetworkSamples
+		if witnesses {
+			collection = &state.EdgeNetworkRouteWitnesses
+		}
+		for _, sample := range *collection {
 			if !pruneBefore.IsZero() && sample.ObservedAt.Before(pruneBefore) {
 				continue
 			}
@@ -61,18 +76,33 @@ func (s *Store) RecordEdgeNetworkSamples(ctx context.Context, samples []model.Ed
 				seen[key] = true
 			}
 		}
-		state.EdgeNetworkSamples = retained
+		*collection = retained
 		return nil
 	})
 }
 
 func (s *Store) ListEdgeNetworkSamples(ctx context.Context, hostname string, since time.Time, limit int) ([]model.EdgeNetworkSample, error) {
+	return s.listEdgeNetworkSamples(ctx, hostname, since, limit, false)
+}
+
+func (s *Store) ListEdgeNetworkRouteWitnesses(ctx context.Context, hostname string, since time.Time, limit int) ([]model.EdgeNetworkSample, error) {
+	return s.listEdgeNetworkSamples(ctx, hostname, since, limit, true)
+}
+
+func networkObservationHostnameKey(hostname string, witnesses bool) string {
+	if witnesses {
+		return "route-witness:" + hostname
+	}
+	return hostname
+}
+
+func (s *Store) listEdgeNetworkSamples(ctx context.Context, hostname string, since time.Time, limit int, witnesses bool) ([]model.EdgeNetworkSample, error) {
 	if hostname == "" || limit < 1 || limit > 4096 || since.IsZero() {
 		return nil, fmt.Errorf("bounded hostname network observation query required")
 	}
 	samples := []model.EdgeNetworkSample{}
 	if s.usingDatabase() {
-		rows, err := s.db.QueryContext(ctx, `SELECT sample_json FROM fugue_edge_network_samples WHERE hostname = $1 AND observed_at >= $2 ORDER BY observed_at DESC, edge_id, id LIMIT $3`, hostname, since, limit)
+		rows, err := s.db.QueryContext(ctx, `SELECT sample_json FROM fugue_edge_network_samples WHERE hostname = $1 AND observed_at >= $2 ORDER BY observed_at DESC, edge_id, id LIMIT $3`, networkObservationHostnameKey(hostname, witnesses), since, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +124,11 @@ func (s *Store) ListEdgeNetworkSamples(ctx context.Context, hostname string, sin
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		for _, sample := range state.EdgeNetworkSamples {
+		collection := state.EdgeNetworkSamples
+		if witnesses {
+			collection = state.EdgeNetworkRouteWitnesses
+		}
+		for _, sample := range collection {
 			if sample.Hostname == hostname && !sample.ObservedAt.Before(since) {
 				samples = append(samples, sample)
 			}

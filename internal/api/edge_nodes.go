@@ -624,6 +624,9 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		if err != nil && s.log != nil {
 			s.log.Printf("edge network observation ingest failed; edge_id=%s error=%v", req.EdgeID, err)
 		}
+		if err == nil {
+			s.observeNetworkRouteWitness(controlNode, samples, now)
+		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":             instance.Node,

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -55,6 +57,7 @@ type Candidate struct {
 }
 
 type Observation struct {
+	RouteWitnessID      string             `json:"route_witness_id,omitempty"`
 	ID                  string             `json:"id"`
 	EdgeID              string             `json:"edge_id"`
 	Hostname            string             `json:"hostname"`
@@ -418,10 +421,16 @@ func validate(snapshot Snapshot) error {
 	if policy.AdvantageRatio >= 1 || len(snapshot.Observations) > MaxObservations || len(snapshot.NetworkSamples) > MaxObservations || len(snapshot.Candidates) > 256 {
 		return errors.New("shadow input exceeds bounds")
 	}
+	networkSamples := map[string]model.EdgeNetworkSample{}
 	for _, sample := range snapshot.NetworkSamples {
 		if err := model.ValidateEdgeNetworkSample(sample); err != nil {
 			return err
 		}
+		key := sample.EdgeID + "\x00" + sample.ID
+		if _, found := networkSamples[key]; found {
+			return errors.New("duplicate raw network sample identity")
+		}
+		networkSamples[key] = sample
 	}
 	if snapshot.LastSwitchAt != nil && snapshot.LastSwitchAt.After(snapshot.CapturedAt) {
 		return errors.New("future switch time")
@@ -437,6 +446,15 @@ func validate(snapshot Snapshot) error {
 		if observation.ID == "" {
 			return errors.New("observation id required")
 		}
+		if observation.RouteWitnessID != "" {
+			witness, found := networkSamples[observation.EdgeID+"\x00"+observation.RouteWitnessID]
+			sample, sampled := networkSamples[observation.EdgeID+"\x00"+strings.TrimPrefix(observation.ID, "network:"+observation.EdgeID+":")]
+			if !found || !sampled || observation.ID != "network:"+sample.EdgeID+":"+sample.ID || !model.EdgeNetworkWitnessMatches(sample, witness) || witness.ObservedAt.After(snapshot.CapturedAt) ||
+				observation.Hostname != sample.Hostname || observation.TrafficClass != sample.TrafficClass || observation.RouteGeneration != sample.RouteDigest ||
+				!observation.ObservedAt.Equal(sample.ObservedAt) || !networkWitnessMeasurementMatches(observation, sample) {
+				return errors.New("historical observation lacks matching captured route witness")
+			}
+		}
 		for _, value := range []*float64{observation.ClientNetworkMS, observation.ServiceNetworkMS, observation.UploadBPS, observation.DownloadBPS, observation.ClientFailureRate, observation.ServiceFailureRate, observation.CapacityUtilization} {
 			if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0 || *value > 1e12) {
 				return fmt.Errorf("invalid measurement in %s", observation.ID)
@@ -449,4 +467,15 @@ func validate(snapshot Snapshot) error {
 		}
 	}
 	return nil
+}
+
+func networkWitnessMeasurementMatches(observation Observation, sample model.EdgeNetworkSample) bool {
+	if observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.ServiceFailureRate != nil || observation.CapacityUtilization != nil {
+		return false
+	}
+	if sample.Source == "service_endpoint_tcp_info_v1" {
+		return observation.ServiceSource == "service_endpoint_tcp" && observation.ClientSource == "" && observation.ClientNetworkMS == nil && reflect.DeepEqual(observation.ServiceNetworkMS, sample.ServiceRTTMS)
+	}
+	return sample.ClientNetwork != nil && observation.ClientSource == "public_tcp_info" && observation.ServiceSource == "" && observation.ServiceNetworkMS == nil &&
+		(observation.Scope == "global" || observation.Scope == sample.ClientNetwork.Scope) && reflect.DeepEqual(observation.ClientNetworkMS, sample.ClientNetwork.RTTMS)
 }

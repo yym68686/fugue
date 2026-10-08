@@ -73,6 +73,23 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	if len(networkSamples) == edgequality.MaxObservations {
 		snapshot.Blockers = append(snapshot.Blockers, "network_observation_limit_reached")
 	}
+	witnesses, err := s.store.ListEdgeNetworkRouteWitnesses(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), 256)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if len(witnesses) == 256 {
+		snapshot.Blockers = append(snapshot.Blockers, "route_witness_limit_reached")
+	}
+	for _, witness := range witnesses {
+		if len(snapshot.NetworkSamples) == edgequality.MaxObservations {
+			snapshot.Blockers = append(snapshot.Blockers, "network_observation_limit_reached")
+			break
+		}
+		if witness.TrafficClass == trafficClass {
+			snapshot.NetworkSamples = append(snapshot.NetworkSamples, witness)
+		}
+	}
 	limitReached := errors.New("shadow observation limit reached")
 	visited := 0
 	err = s.store.WalkEdgePerformanceSamples(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), func(sample model.EdgePerformanceSample) error {
@@ -138,6 +155,13 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 		}
 	}
 	snapshot.Blockers = blockers
+	witnesses := map[string][]model.EdgeNetworkSample{}
+	for _, sample := range snapshot.NetworkSamples {
+		if sample.Source == "route_tls_witness_v1" && !sample.ObservedAt.After(snapshot.CapturedAt) && model.ValidateEdgeNetworkSample(sample) == nil {
+			key := sample.EdgeID + "\x00" + sample.BundleVersion
+			witnesses[key] = append(witnesses[key], sample)
+		}
+	}
 	for index := range snapshot.Candidates {
 		candidate := &snapshot.Candidates[index]
 		proofs := []dnsserver.QualityRouteProof{}
@@ -158,8 +182,19 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 		for _, sample := range snapshot.NetworkSamples {
 			if model.ValidateEdgeNetworkSample(sample) != nil || sample.EdgeID != candidate.EdgeID || sample.EdgeGroupID != candidate.EdgeGroupID ||
 				sample.Hostname != proof.Hostname || sample.PathPrefix != proof.Path || sample.TrafficClass != snapshot.TrafficClass ||
-				sample.RouteDigest != proof.Proof.Digest || sample.BundleVersion != proof.Proof.Version || sample.ObservedAt.After(snapshot.CapturedAt) {
+				sample.RouteDigest != proof.Proof.Digest || sample.ObservedAt.After(snapshot.CapturedAt) || sample.Source == "route_tls_witness_v1" {
 				continue
+			}
+			witnessID := ""
+			if sample.BundleVersion != proof.Proof.Version {
+				for _, witness := range witnesses[sample.EdgeID+"\x00"+sample.BundleVersion] {
+					if model.EdgeNetworkWitnessMatches(sample, witness) && (witnessID == "" || witness.ID < witnessID) {
+						witnessID = witness.ID
+					}
+				}
+				if witnessID == "" {
+					continue
+				}
 			}
 			if len(snapshot.Observations) >= edgequality.MaxObservations {
 				snapshot.Blockers = append(snapshot.Blockers, "observation_limit_reached")
@@ -167,7 +202,7 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 			}
 			observation := edgequality.Observation{ID: "network:" + sample.EdgeID + ":" + sample.ID, EdgeID: sample.EdgeID,
 				Hostname: sample.Hostname, TrafficClass: sample.TrafficClass, Scope: snapshot.Scope, RouteGeneration: sample.RouteDigest,
-				ObservedAt: sample.ObservedAt}
+				ObservedAt: sample.ObservedAt, RouteWitnessID: witnessID}
 			if sample.Source == "service_endpoint_tcp_info_v1" {
 				observation.ServiceNetworkMS, observation.ServiceSource = sample.ServiceRTTMS, "service_endpoint_tcp"
 			} else if sample.Source == "public_front_tcp_info_v1" && sample.ClientNetwork != nil && (snapshot.Scope == "global" || snapshot.Scope == sample.ClientNetwork.Scope) {
