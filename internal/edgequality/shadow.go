@@ -1,6 +1,7 @@
 package edgequality
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 
 const Schema = "fugue.physical-edge-quality-shadow/v1"
 const MaxObservations = 4096
+const ReceiptDigestFormat = "embedded-json-sorted-v1"
 
 type Policy struct {
 	Version                string  `json:"version"`
@@ -123,9 +125,10 @@ type Result struct {
 }
 
 type Receipt struct {
-	Snapshot Snapshot `json:"snapshot"`
-	Result   Result   `json:"result"`
-	Digest   string   `json:"digest"`
+	Snapshot     Snapshot `json:"snapshot"`
+	Result       Result   `json:"result"`
+	Digest       string   `json:"digest"`
+	DigestFormat string   `json:"digest_format,omitempty"`
 }
 
 func Capture(snapshot Snapshot) (Receipt, error) {
@@ -134,6 +137,9 @@ func Capture(snapshot Snapshot) (Receipt, error) {
 		return Receipt{}, err
 	}
 	receipt := Receipt{Snapshot: snapshot, Result: result}
+	if len(snapshot.ActualDNSReceipt) > 0 {
+		receipt.DigestFormat = ReceiptDigestFormat
+	}
 	receipt.Digest, err = receiptDigest(receipt)
 	return receipt, err
 }
@@ -156,6 +162,28 @@ func Replay(receipt Receipt) (Result, error) {
 }
 
 func receiptDigest(receipt Receipt) (string, error) {
+	switch receipt.DigestFormat {
+	case "":
+	case ReceiptDigestFormat:
+		if len(receipt.Snapshot.ActualDNSReceipt) > 0 {
+			decoder := json.NewDecoder(bytes.NewReader(receipt.Snapshot.ActualDNSReceipt))
+			decoder.UseNumber()
+			var embedded any
+			if err := decoder.Decode(&embedded); err != nil {
+				return "", err
+			}
+			if !json.Valid(receipt.Snapshot.ActualDNSReceipt) {
+				return "", errors.New("invalid embedded DNS receipt")
+			}
+			normalized, err := json.Marshal(embedded)
+			if err != nil {
+				return "", err
+			}
+			receipt.Snapshot.ActualDNSReceipt = normalized
+		}
+	default:
+		return "", errors.New("unsupported shadow digest format")
+	}
 	receipt.Digest = ""
 	raw, err := json.Marshal(receipt)
 	if err != nil {

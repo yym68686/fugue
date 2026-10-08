@@ -187,6 +187,13 @@ artifact. This counterfactual must not be confused with Phase 1 actual-answer
 receipts (`admin dns decisions explain/replay`). Export both when correlating
 an incident.
 
+New bound receipts declare `digest_format: embedded-json-sorted-v1`. Embedded actual
+DNS JSON is normalized by object-key order without converting integer values to
+floating point, so CLI redaction/formatting does not change evidence identity.
+Receipts without the field retain their original digest algorithm; their exact
+original encoding remains verifiable. Reordered exports of the original embedded
+receipt format must be recaptured rather than silently accepting a bad digest.
+
 The API uses an exact traffic class and explicit scope; it does not silently
 fall back to platform or group averages. It bounds retained observations at
 4096, scanned observations at 16384, and the data read at five seconds. Reaching

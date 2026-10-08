@@ -88,6 +88,42 @@ func TestPhysicalQualityNeverScoresApplicationWait(t *testing.T) {
 	}
 }
 
+func TestPhysicalQualityReceiptSurvivesEmbeddedJSONReordering(t *testing.T) {
+	snapshot := fixture()
+	snapshot.ActualDNSReceipt = json.RawMessage(`{"schema":"answer-v1","publication":{"fencing_token":9007199254740993,"digest":"expected"},"decision_id":"decision-a"}`)
+	receipt, err := Capture(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.Snapshot.ActualDNSReceipt = json.RawMessage(`{"decision_id":"decision-a","publication":{"digest":"expected","fencing_token":9007199254740993},"schema":"answer-v1"}`)
+	if _, err := Replay(receipt); err != nil {
+		t.Fatal("JSON presentation changed the evidence identity", err)
+	}
+	receipt.Snapshot.ActualDNSReceipt = json.RawMessage(`{"decision_id":"decision-a","publication":{"digest":"expected","fencing_token":9007199254740992},"schema":"answer-v1"}`)
+	if _, err := Replay(receipt); err == nil {
+		t.Fatal("large integer evidence was rounded or tampered")
+	}
+}
+
+func TestPhysicalQualityLegacyDigestRemainsReplayable(t *testing.T) {
+	receipt, err := Capture(fixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.DigestFormat = ""
+	receipt.Digest, err = receiptDigest(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Replay(receipt); err != nil {
+		t.Fatal("original receipt stopped replaying", err)
+	}
+	receipt.DigestFormat = "future-unknown"
+	if _, err := Replay(receipt); err == nil {
+		t.Fatal("unknown digest algorithm accepted")
+	}
+}
+
 func TestPhysicalQualityUnknownBoundedAndProbesRotate(t *testing.T) {
 	snapshot := fixture()
 	snapshot.Observations = nil

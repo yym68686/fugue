@@ -19206,6 +19206,10 @@ components:
         snapshot: {$ref: '#/components/schemas/PhysicalEdgeQualitySnapshot'}
         result: {$ref: '#/components/schemas/PhysicalEdgeQualityResult'}
         digest: {type: string}
+        digest_format:
+          type: string
+          enum: [embedded-json-sorted-v1]
+          description: New captures sort embedded JSON object keys with exact JSON numbers before hashing. An absent value identifies the original byte-order-sensitive digest and remains replayable from its original encoding.
     EdgeQualityRankResponse:
       type: object
       additionalProperties: false
