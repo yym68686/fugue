@@ -371,6 +371,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/edge/domains/{hostname}/tls-bundle", http.HandlerFunc(s.handleGetEdgeTLSCertificateBundle))
 	mux.Handle("PUT /v1/edge/domains/{hostname}/tls-bundle", http.HandlerFunc(s.handlePutEdgeTLSCertificateBundle))
 	mux.Handle("POST /v1/edge/heartbeat", http.HandlerFunc(s.handleEdgeHeartbeat))
+	mux.Handle("POST /v1/edge/network-observation", http.HandlerFunc(s.handleReadEdgePublicNetworkObservation))
 	mux.Handle("GET /v1/edge/nodes", s.auth.RequireAPI(http.HandlerFunc(s.handleListEdgeNodes)))
 	mux.Handle("GET /v1/edge/nodes/{edge_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetEdgeNode)))
 	mux.Handle("GET /v1/edge/nodes/{edge_id}/desired-state", http.HandlerFunc(s.handleGetEdgeNodeDesiredState))

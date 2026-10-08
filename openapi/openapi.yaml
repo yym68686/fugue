@@ -1498,6 +1498,30 @@ paths:
                 $ref: "#/components/schemas/CreateEdgeNodeTokenResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/network-observation:
+    post:
+      operationId: readEdgePublicNetworkObservation
+      summary: Read an exact live connection from the transport-selected public Front
+      description: Read-only bounded diagnostic for a node-scoped Edge credential. Resolves the actual public Service and EndpointSlice owner, rechecks runtime identities, and returns only one coarse peer sample. Does not probe applications or change routing. Raw peer endpoints are transient and are not persisted in the result.
+      tags: [Edge]
+      x-fugue-handler: handleReadEdgePublicNetworkObservation
+      security:
+        - EdgeToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EdgePublicNetworkObservationRequest'
+      responses:
+        '200':
+          description: Exact connection evidence from an unchanged public transport
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgePublicNetworkObservationResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
   /v1/edge/heartbeat:
     post:
       operationId: edgeHeartbeat
@@ -19592,11 +19616,46 @@ components:
         observed_at:
           type: string
           format: date-time
+    EdgePublicNetworkObservationRequest:
+      type: object
+      additionalProperties: false
+      required: [schema, nonce, edge_id, edge_group_id, slot, remote_addr]
+      properties:
+        schema: {type: string, enum: [fugue.public-front-network/v1]}
+        nonce: {type: string, pattern: '^[0-9a-f]{32}$'}
+        edge_id: {type: string, maxLength: 128}
+        edge_group_id: {type: string, maxLength: 128}
+        slot: {type: string, enum: [a, b]}
+        remote_addr: {type: string, maxLength: 128, description: Transient public TCP peer endpoint observed by trusted local Caddy. Never retained in the response.}
+    EdgePublicNetworkObservationResponse:
+      type: object
+      additionalProperties: false
+      required: [schema, nonce, edge_id, edge_group_id, sample]
+      properties:
+        schema: {type: string, enum: [fugue.public-front-network/v1]}
+        nonce: {type: string, pattern: '^[0-9a-f]{32}$'}
+        edge_id: {type: string}
+        edge_group_id: {type: string}
+        sample:
+          $ref: '#/components/schemas/EdgeClientNetworkSample'
+    EdgeClientNetworkBackend:
+      type: object
+      additionalProperties: false
+      required: [namespace, pod_name, pod_uid, pod_version, service_name, service_uid, service_version, endpoints_digest]
+      properties:
+        namespace: {type: string, maxLength: 128}
+        pod_name: {type: string, maxLength: 253}
+        pod_uid: {type: string, maxLength: 128}
+        pod_version: {type: string, maxLength: 128}
+        service_name: {type: string, maxLength: 253}
+        service_uid: {type: string, maxLength: 128}
+        service_version: {type: string, maxLength: 128}
+        endpoints_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
     EdgeClientNetworkSample:
       type: object
       additionalProperties: false
       required: [connection_id, slot, scope, started_at, observed_at, tcp_info_available, rtt_ms, min_rtt_ms, rtt_variance_ms, segments_out, retransmitted_segments, bytes_sent, bytes_retransmitted]
-      description: Public Front TCP peer measurement joined to an exact live connection over a node-local Unix socket. Success-conditioned; retransmissions are not connection failure rates. Scope describes the TCP peer prefix, not a DNS resolver, country, or claimed original terminal. No raw client address or port is retained.
+      description: Public Front TCP peer measurement joined to an exact live connection over a node-local Unix socket or a fenced read of the transport-selected public Front. Success-conditioned; retransmissions are not connection failure rates. Scope describes the TCP peer prefix, not a DNS resolver, country, or claimed original terminal. No raw client address or port is retained.
       properties:
         connection_id: {type: string, maxLength: 128}
         slot: {type: string, enum: [a, b]}
@@ -19611,6 +19670,8 @@ components:
         retransmitted_segments: {type: integer, format: int64, minimum: 0}
         bytes_sent: {type: integer, format: int64, minimum: 0}
         bytes_retransmitted: {type: integer, format: int64, minimum: 0}
+        backend:
+          $ref: '#/components/schemas/EdgeClientNetworkBackend'
     EdgePerformanceSample:
       type: object
       additionalProperties: false

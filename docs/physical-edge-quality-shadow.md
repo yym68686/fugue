@@ -113,6 +113,22 @@ of the current evidence pipeline, not proof of any historical user's detour.
 
 ## Input and cost model
 
+### Transport-selected Front sampling
+
+The node-local observation socket is not proof that its process owns the public
+listener. A separately published public Service can forward traffic to a
+different retained Front while the old process remains Ready. When the local
+socket cannot bind the request, the worker can asynchronously query
+`POST /v1/edge/network-observation` using its exact node-scoped credential.
+The API resolves the declared public Service, validates its digest, local
+EndpointSlice and running Pod identity, reads that process's existing live TCP
+inventory, then rechecks Service, Pod and EndpointSlice versions. Only a unique
+established HTTPS connection with the same peer endpoint and worker slot can
+produce a sample. The retained sample includes the transport identities but
+never the raw client endpoint. An unavailable or changed transport yields no
+sample and does not block the business request or DNS. This diagnostic fallback
+does not restart, replace or reconfigure the serving Front.
+
 The pure evaluator in `internal/edgequality` consumes a captured snapshot:
 
 - Explicit versioned policy, capture clock, hostname, traffic class, client scope.

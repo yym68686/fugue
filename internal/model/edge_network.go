@@ -66,25 +66,48 @@ func ValidateEdgeNetworkSample(sample EdgeNetworkSample) error {
 }
 
 type EdgeClientNetworkSample struct {
-	ConnectionID          string    `json:"connection_id"`
-	Slot                  string    `json:"slot"`
-	Scope                 string    `json:"scope"`
-	StartedAt             time.Time `json:"started_at"`
-	ObservedAt            time.Time `json:"observed_at"`
-	TCPInfoAvailable      bool      `json:"tcp_info_available"`
-	RTTMS                 *float64  `json:"rtt_ms"`
-	MinRTTMS              *float64  `json:"min_rtt_ms"`
-	RTTVarianceMS         *float64  `json:"rtt_variance_ms"`
-	SegmentsOut           uint32    `json:"segments_out"`
-	RetransmittedSegments uint32    `json:"retransmitted_segments"`
-	BytesSent             uint64    `json:"bytes_sent"`
-	BytesRetransmitted    uint64    `json:"bytes_retransmitted"`
+	ConnectionID          string                    `json:"connection_id"`
+	Slot                  string                    `json:"slot"`
+	Scope                 string                    `json:"scope"`
+	StartedAt             time.Time                 `json:"started_at"`
+	ObservedAt            time.Time                 `json:"observed_at"`
+	TCPInfoAvailable      bool                      `json:"tcp_info_available"`
+	RTTMS                 *float64                  `json:"rtt_ms"`
+	MinRTTMS              *float64                  `json:"min_rtt_ms"`
+	RTTVarianceMS         *float64                  `json:"rtt_variance_ms"`
+	SegmentsOut           uint32                    `json:"segments_out"`
+	RetransmittedSegments uint32                    `json:"retransmitted_segments"`
+	BytesSent             uint64                    `json:"bytes_sent"`
+	BytesRetransmitted    uint64                    `json:"bytes_retransmitted"`
+	Backend               *EdgeClientNetworkBackend `json:"backend,omitempty"`
+}
+
+type EdgeClientNetworkBackend struct {
+	Namespace       string `json:"namespace"`
+	PodName         string `json:"pod_name"`
+	PodUID          string `json:"pod_uid"`
+	PodVersion      string `json:"pod_version"`
+	ServiceName     string `json:"service_name"`
+	ServiceUID      string `json:"service_uid"`
+	ServiceVersion  string `json:"service_version"`
+	EndpointsDigest string `json:"endpoints_digest"`
 }
 
 func ValidateEdgeClientNetworkSample(sample *EdgeClientNetworkSample) error {
 	if sample == nil || sample.ConnectionID == "" || len(sample.ConnectionID) > 128 || strings.ContainsAny(sample.ConnectionID, " \t\r\n\x00") ||
 		(sample.Slot != "a" && sample.Slot != "b") || sample.StartedAt.IsZero() || sample.ObservedAt.Before(sample.StartedAt) {
 		return errors.New("invalid public Front connection observation")
+	}
+	if backend := sample.Backend; backend != nil {
+		for _, value := range []string{backend.Namespace, backend.PodName, backend.PodUID, backend.PodVersion, backend.ServiceName, backend.ServiceUID, backend.ServiceVersion} {
+			if value == "" || len(value) > 253 || strings.ContainsAny(value, " \t\r\n\x00/\\") {
+				return errors.New("invalid public Front backend identity")
+			}
+		}
+		digest, err := hex.DecodeString(strings.TrimPrefix(backend.EndpointsDigest, "sha256:"))
+		if err != nil || len(digest) != 32 || len(backend.EndpointsDigest) != 71 || !strings.HasPrefix(backend.EndpointsDigest, "sha256:") {
+			return errors.New("invalid public Front endpoint identity")
+		}
 	}
 	prefix, err := netip.ParsePrefix(strings.TrimPrefix(sample.Scope, "tcp_peer:"))
 	if err != nil || !strings.HasPrefix(sample.Scope, "tcp_peer:") || prefix != prefix.Masked() ||

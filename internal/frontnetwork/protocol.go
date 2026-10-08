@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -87,6 +88,30 @@ func Read(ctx context.Context, socketPath, edgeID, groupID, slot, remote string)
 	if !filepath.IsAbs(socketPath) || len(socketPath) > 100 {
 		return Response{}, readFailure{"socket_path_invalid", errors.New("bounded absolute Front socket path required")}
 	}
+	ctx, cancel := context.WithTimeout(ctx, Timeout)
+	defer cancel()
+	transport := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return read(ctx, client, "http://front"+Path, "", edgeID, groupID, slot, remote, false)
+}
+
+func ReadAPI(ctx context.Context, client *http.Client, baseURL, token, edgeID, groupID, slot, remote string) (Response, error) {
+	target, err := url.Parse(baseURL)
+	if err != nil || client == nil || token == "" || target.Host == "" || target.User != nil || target.RawQuery != "" || target.Fragment != "" || (target.Scheme != "https" && target.Scheme != "http") {
+		return Response{}, readFailure{"api_config_invalid", errors.New("invalid Front observation API")}
+	}
+	target.Path = strings.TrimSuffix(target.Path, "/") + "/v1/edge/network-observation"
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	reader := *client
+	reader.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return read(ctx, &reader, target.String(), token, edgeID, groupID, slot, remote, true)
+}
+
+func read(ctx context.Context, client *http.Client, target, token, edgeID, groupID, slot, remote string, requireBackend bool) (Response, error) {
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		return Response{}, readFailure{"nonce_failed", err}
@@ -95,17 +120,14 @@ func Read(ctx context.Context, socketPath, edgeID, groupID, slot, remote string)
 	if err := ValidateRequest(query); err != nil {
 		return Response{}, readFailure{"request_invalid", err}
 	}
-	ctx, cancel := context.WithTimeout(ctx, Timeout)
-	defer cancel()
-	transport := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
-	}}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	raw, _ := json.Marshal(query)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://front"+Path, bytes.NewReader(raw))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(raw))
 	if err != nil {
 		return Response{}, readFailure{"request_invalid", err}
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -139,7 +161,7 @@ func Read(ctx context.Context, socketPath, edgeID, groupID, slot, remote string)
 	peer, _ := ParseRemote(remote)
 	now := time.Now().UTC()
 	if result.Schema != Schema || result.Nonce != query.Nonce || result.EdgeID != edgeID || result.GroupID != groupID || result.Sample.Slot != slot ||
-		result.Sample.Scope != Scope(peer.Addr()) || result.Sample.ObservedAt.After(now) || now.Sub(result.Sample.ObservedAt) > time.Second || model.ValidateEdgeClientNetworkSample(&result.Sample) != nil {
+		result.Sample.Scope != Scope(peer.Addr()) || result.Sample.ObservedAt.After(now) || now.Sub(result.Sample.ObservedAt) > time.Second || model.ValidateEdgeClientNetworkSample(&result.Sample) != nil || requireBackend && result.Sample.Backend == nil {
 		return Response{}, readFailure{"binding_mismatch", errors.New("Front connection binding mismatch")}
 	}
 	return result, nil

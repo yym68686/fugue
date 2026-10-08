@@ -119,6 +119,8 @@ type Server struct {
 	appProxyServiceHostCache               expiringResponseCache[string]
 	managedSharedLocationSync              managedSharedLocationSyncState
 	newClusterNodeClient                   func() (*clusterNodeClient, error)
+	frontNetworkObservationMu              sync.Mutex
+	frontNetworkObservationLast            map[string]time.Time
 	newManagedAppStatusClient              func() (*managedAppStatusClient, error)
 	managedAppStatusCache                  managedAppStatusCache
 	edgeRouteDecisionMu                    sync.Mutex

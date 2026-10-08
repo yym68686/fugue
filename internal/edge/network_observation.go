@@ -121,7 +121,7 @@ func (s *Service) sendHeartbeatWithOptionalNetworkSamples(request *http.Request)
 	var failure struct {
 		Error string `json:"error"`
 	}
-	if readErr != nil || json.Unmarshal(body, &failure) != nil || (failure.Error != `json: unknown field "network_samples"` && failure.Error != `json: unknown field "client_network"`) {
+	if readErr != nil || json.Unmarshal(body, &failure) != nil || (failure.Error != `json: unknown field "network_samples"` && failure.Error != `json: unknown field "client_network"` && failure.Error != `json: unknown field "backend"`) {
 		return response, nil
 	}
 	original, err := request.GetBody()

@@ -95,6 +95,9 @@ func (s *Service) observePublicClientNetwork(request *http.Request, route model.
 	go func() {
 		defer s.frontNetworkInFlight.Store(false)
 		result, err := frontnetwork.Read(context.Background(), socketPath, sample.EdgeID, sample.EdgeGroupID, slot, remote)
+		if err != nil && (frontnetwork.FailureReason(err) == "connection_missing" || frontnetwork.FailureReason(err) == "transport_failed") && s.Config.APIURL != "" && s.Config.EdgeToken != "" {
+			result, err = frontnetwork.ReadAPI(context.Background(), s.HTTPClient, s.Config.APIURL, s.Config.EdgeToken, sample.EdgeID, sample.EdgeGroupID, slot, remote)
+		}
 		if err != nil {
 			reject("front_" + frontnetwork.FailureReason(err))
 			return
