@@ -563,26 +563,27 @@ type CachePolicy struct {
 }
 
 type DNSAnswerPolicy struct {
-	PolicyKind                string   `json:"policy_kind"`
-	AllowedEdgeGroups         []string `json:"allowed_edge_groups,omitempty"`
-	PreferredEdgeGroups       []string `json:"preferred_edge_groups,omitempty"`
-	FallbackEdgeGroups        []string `json:"fallback_edge_groups,omitempty"`
-	TTLSeconds                int      `json:"ttl_seconds,omitempty"`
-	ECSEnabled                bool     `json:"ecs_enabled,omitempty"`
-	HealthRequired            bool     `json:"health_required,omitempty"`
-	RouteReadyRequired        bool     `json:"route_ready_required,omitempty"`
-	ExplorationPercent        int      `json:"exploration_percent,omitempty"`
-	SwitchCooldownSec         int      `json:"switch_cooldown_seconds,omitempty"`
-	RankingVersion            string   `json:"ranking_version,omitempty"`
-	RankingScope              string   `json:"ranking_scope,omitempty"`
-	Region                    string   `json:"region,omitempty"`
-	Country                   string   `json:"country,omitempty"`
-	Priority                  int      `json:"priority,omitempty"`
-	Weight                    int      `json:"weight,omitempty"`
-	Reason                    string   `json:"reason,omitempty"`
-	SelectedEdgeGroupID       string   `json:"selected_edge_group_id,omitempty"`
-	ShadowSelectedEdgeGroupID string   `json:"shadow_selected_edge_group_id,omitempty"`
-	ShadowReason              string   `json:"shadow_reason,omitempty"`
+	PhysicalSelection         *DNSPhysicalSelection `json:"physical_selection,omitempty"`
+	PolicyKind                string                `json:"policy_kind"`
+	AllowedEdgeGroups         []string              `json:"allowed_edge_groups,omitempty"`
+	PreferredEdgeGroups       []string              `json:"preferred_edge_groups,omitempty"`
+	FallbackEdgeGroups        []string              `json:"fallback_edge_groups,omitempty"`
+	TTLSeconds                int                   `json:"ttl_seconds,omitempty"`
+	ECSEnabled                bool                  `json:"ecs_enabled,omitempty"`
+	HealthRequired            bool                  `json:"health_required,omitempty"`
+	RouteReadyRequired        bool                  `json:"route_ready_required,omitempty"`
+	ExplorationPercent        int                   `json:"exploration_percent,omitempty"`
+	SwitchCooldownSec         int                   `json:"switch_cooldown_seconds,omitempty"`
+	RankingVersion            string                `json:"ranking_version,omitempty"`
+	RankingScope              string                `json:"ranking_scope,omitempty"`
+	Region                    string                `json:"region,omitempty"`
+	Country                   string                `json:"country,omitempty"`
+	Priority                  int                   `json:"priority,omitempty"`
+	Weight                    int                   `json:"weight,omitempty"`
+	Reason                    string                `json:"reason,omitempty"`
+	SelectedEdgeGroupID       string                `json:"selected_edge_group_id,omitempty"`
+	ShadowSelectedEdgeGroupID string                `json:"shadow_selected_edge_group_id,omitempty"`
+	ShadowReason              string                `json:"shadow_reason,omitempty"`
 }
 
 type EdgeDNSAnswerCandidate struct {

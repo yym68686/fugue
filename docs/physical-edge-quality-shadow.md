@@ -5,11 +5,20 @@
 This is the first executable part of the second phase, not completion of the
 production routing migration. `GET /v1/edge/quality-shadow/{hostname}` and
 `fugue admin edge quality-shadow capture` are platform-admin-only, read-only
-observations. The evaluator is not called by DNS answer generation, the existing
-quality ranker, artifact compilation, publication, or LKG recovery. It has no
-active mode and no probe executor. `promotion_ready` and `probe_executed` are
+observations. The evaluator is not called by DNS answer generation or the
+automatic publication producer. It has no probe executor. `promotion_ready` and `probe_executed` are
 always false; `dns_unchanged` is always true. A hypothetical switch is not a
 serving authorization.
+
+An explicit `physical_quality` query contract now supports a signed immutable
+physical-edge order. Its compiler adapter requires replay-verified, fresh network
+evidence and a matching actual DNS binding. DNS execution only filters this order
+through independently proven readiness; group weights, country preferences,
+application timings and random exploration cannot override it. This contract is
+not automatically emitted or enabled by deploying the code. Existing published
+policies remain readable until their replacement is accepted. The legacy producer
+and selector must not be declared retired while those publications still depend
+on them.
 
 The existing serving score, group policy, country behavior, exploration and
 cooldown remain unchanged. In particular, deploying this API does not fix an
@@ -116,6 +125,43 @@ fugue admin edge quality-shadow capture app.example.test \
   --traffic-class streaming --scope global --json > shadow.json
 fugue admin edge quality-shadow replay shadow.json
 ```
+
+To bind the capture to an actual public process answer, add
+`--dns-node-id <node-id>`. The authenticated backend reader captures a recent
+real receipt, replays its exact input, and retains it as `actual_dns_receipt`.
+It uses the answer's actual publication, never the currently desired publication
+or a newly computed ranking. Offline CLI replay verifies both receipts without
+network access. Failed writes, expired route proofs, future observations,
+ambiguous selection stages and mismatched hostname/scope remain blockers.
+
+An origin socket record contributes only its service-side RTT when its physical
+edge, group, hostname, path, declared traffic class, route digest and loaded bundle
+version match that answer's still-fresh route proof. Multiple service-route proofs
+are not silently collapsed into one route. This binding does not invent client
+network cost, throughput, capacity, network failure denominators or switch time.
+Unavailable audit backends affect this read only; they cannot block DNS serving.
+
+## Physical selection artifact contract
+
+`DNSPhysicalSelection` records the primary edge, ordered eligible fallback edges,
+network evidence digest, actual answer ID, loaded digest, policy digest, exact
+scope and capture time. The initial contract supports an explicit global query
+view only; it rejects an unbound ASN/ECS scope instead of pretending it can infer
+the requesting terminal's path. The order cannot include an unauthorized endpoint,
+duplicate physical identity, legacy group override or live exploration budget.
+
+Evidence age is checked when compiling a replacement. It is not a timer that
+invalidates an already positive LKG. Fresh route/TLS readiness still independently
+filters each answer. Failure immediately selects the next authorized ready
+physical edge, including a sibling in the same group, without waiting for normal
+quality-switch cooldown. Neither a failed compilation nor an audit failure writes
+a new publication or clears an existing LKG.
+
+This is a migration prerequisite, not production routing acceptance. The live
+producer still needs verified two-segment collection, capacity/failure inputs,
+an immutable evidence store and an explicitly scoped canary before it can emit
+the new contract. Removing the legacy execution path before that cutover would
+break the currently published artifact compatibility boundary.
 
 The returned receipt includes the complete captured inputs, policy, result and
 SHA-256 digest. Offline replay verifies the digest and exact result without an

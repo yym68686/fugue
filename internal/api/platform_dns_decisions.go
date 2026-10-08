@@ -46,12 +46,24 @@ func (s *Server) handleGetPlatformDNSDecisions(writer http.ResponseWriter, reque
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
-	claims, err := s.dnsDecisionBackendIdentity(ctx, node)
+	response, err := s.readPlatformDNSDecisions(ctx, node, query.Get("hostname"), query.Get("decision_id"), limit)
 	if err != nil {
-		httpx.WriteError(writer, http.StatusServiceUnavailable, "selected DNS decision backend unavailable")
+		httpx.WriteError(writer, http.StatusServiceUnavailable, "selected DNS decision backend changed or unavailable")
 		return
 	}
-	query = url.Values{"limit": {strconv.Itoa(limit)}, "hostname": {query.Get("hostname")}, "decision_id": {query.Get("decision_id")}}
+	writer.Header().Set("Cache-Control", "private, no-store")
+	httpx.WriteJSON(writer, http.StatusOK, response)
+}
+
+func (s *Server) readPlatformDNSDecisions(ctx context.Context, node, hostname, decisionID string, limit int) (platformDNSDecisionResponse, error) {
+	if len(validation.IsDNS1123Subdomain(node)) != 0 || dnsserver.ValidateDNSDecisionFilter(hostname, decisionID, limit) != nil {
+		return platformDNSDecisionResponse{}, errors.New("invalid DNS decision query")
+	}
+	claims, err := s.dnsDecisionBackendIdentity(ctx, node)
+	if err != nil {
+		return platformDNSDecisionResponse{}, err
+	}
+	query := url.Values{"limit": {strconv.Itoa(limit)}, "hostname": {hostname}, "decision_id": {decisionID}}
 	var response platformDNSDecisionResponse
 	status := s.inspectDNSBackend(ctx, claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, func(ctx context.Context, client *clusterNodeClient, pod corev1.Pod, service corev1.Service, ready bool) int {
 		port, ok := dnsBackendObservationPort(pod, service)
@@ -71,12 +83,10 @@ func (s *Server) handleGetPlatformDNSDecisions(writer http.ResponseWriter, reque
 		return http.StatusOK
 	})
 	if status != http.StatusOK {
-		httpx.WriteError(writer, http.StatusServiceUnavailable, "selected DNS decision backend changed or unavailable")
-		return
+		return platformDNSDecisionResponse{}, errors.New("selected DNS decision backend changed or unavailable")
 	}
 	response.EvaluatedAt = time.Now().UTC()
-	writer.Header().Set("Cache-Control", "private, no-store")
-	httpx.WriteJSON(writer, http.StatusOK, response)
+	return response, nil
 }
 
 func (s *Server) dnsDecisionBackendIdentity(ctx context.Context, node string) (platformcontrol.PlatformComponentIdentityClaims, error) {

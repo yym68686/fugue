@@ -1,0 +1,63 @@
+package edgequality
+
+import (
+	"errors"
+	"time"
+
+	"fugue/internal/model"
+)
+
+type DNSBinding struct {
+	ReceiptID      string
+	LoadedDigest   string
+	PolicyDigest   string
+	Hostname       string
+	Scope          string
+	CurrentEdgeID  string
+	ObservedAt     time.Time
+	ReplayMatched  bool
+	WriteSucceeded bool
+}
+
+func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*model.DNSPhysicalSelection, error) {
+	result, err := Replay(receipt)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := receipt.Snapshot
+	maximumAge := time.Duration(snapshot.Policy.EvidenceMaxAgeSeconds) * time.Second
+	if maximumAge <= 0 || maximumAge > time.Duration(snapshot.Policy.WindowSeconds)*time.Second ||
+		now.Before(snapshot.CapturedAt) || now.Sub(snapshot.CapturedAt) > maximumAge ||
+		binding.ObservedAt.IsZero() || binding.ObservedAt.After(snapshot.CapturedAt) || snapshot.CapturedAt.Sub(binding.ObservedAt) > maximumAge ||
+		!binding.ReplayMatched || !binding.WriteSucceeded || binding.Hostname != snapshot.Hostname || binding.Scope != snapshot.Scope || binding.CurrentEdgeID != snapshot.CurrentEdgeID {
+		return nil, errors.New("physical selection lacks fresh matching actual DNS evidence")
+	}
+	if len(snapshot.Blockers) != 0 {
+		return nil, errors.New("physical selection evidence is incomplete")
+	}
+	var primary *Assessment
+	for index := range result.Candidates {
+		candidate := &result.Candidates[index]
+		if candidate.EdgeID == result.ProposedEdgeID {
+			primary = candidate
+		}
+	}
+	if primary == nil || !primary.Ready || len(primary.HardGates) != 0 {
+		return nil, errors.New("physical selection primary lacks complete network evidence")
+	}
+	if result.Hypothesis != "hold" && result.Hypothesis != "switch" && result.Hypothesis != "failover" {
+		return nil, errors.New("physical selection hypothesis is unsupported")
+	}
+	selection := &model.DNSPhysicalSelection{Version: model.DNSPhysicalSelectionVersion, PrimaryEdgeID: primary.EdgeID,
+		OrderedEdgeIDs: []string{primary.EdgeID}, EvidenceDigest: receipt.Digest, DNSReceiptID: binding.ReceiptID,
+		LoadedDigest: binding.LoadedDigest, PolicyDigest: binding.PolicyDigest, Scope: snapshot.Scope, CapturedAt: snapshot.CapturedAt}
+	for _, candidate := range result.Candidates {
+		if candidate.EdgeID != primary.EdgeID && candidate.Ready && len(candidate.HardGates) == 0 {
+			selection.OrderedEdgeIDs = append(selection.OrderedEdgeIDs, candidate.EdgeID)
+		}
+	}
+	if err := model.ValidateDNSPhysicalSelection(selection); err != nil {
+		return nil, err
+	}
+	return selection, nil
+}

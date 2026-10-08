@@ -986,6 +986,10 @@ paths:
           name: scope
           description: Exact scope; no country filtering or cross-scope sample fallback.
           schema: {type: string, default: global}
+        - in: query
+          name: dns_node_id
+          description: Optionally bind to a recent successful, replay-verified actual answer from this public DNS process. Missing or conflicting evidence remains an explicit blocker; this never queries a current ranking as a substitute.
+          schema: {type: string, maxLength: 253}
       responses:
         '200':
           description: Bounded, digest-protected shadow snapshot and deterministic result.
@@ -19113,6 +19117,8 @@ components:
       additionalProperties: false
       required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
       properties:
+        actual_dns_receipt:
+          $ref: '#/components/schemas/DNSDecisionReceipt'
         network_samples:
           type: array
           maxItems: 4096
@@ -20129,7 +20135,9 @@ components:
       properties:
         policy_kind:
           type: string
-          enum: [global, geo, weighted, latency_aware, pinned, disabled]
+          enum: [global, geo, weighted, latency_aware, physical_quality, pinned, disabled]
+        physical_selection:
+          $ref: '#/components/schemas/DNSPhysicalSelection'
         allowed_edge_groups:
           type: array
           items:
@@ -20181,6 +20189,21 @@ components:
           type: string
         shadow_reason:
           type: string
+    DNSPhysicalSelection:
+      type: object
+      additionalProperties: false
+      required: [version, primary_edge_id, ordered_edge_ids, evidence_digest, dns_receipt_id, loaded_digest, policy_digest, scope, captured_at]
+      description: Immutable physical-edge order compiled from verified network evidence. Query execution only removes endpoints lacking current route/TLS readiness; it never re-ranks by group, country, business duration, or random exploration. Evidence age gates compilation, not the validity of a positive serving LKG.
+      properties:
+        version: {type: string, enum: [physical-edge-network-v1]}
+        primary_edge_id: {type: string, maxLength: 128}
+        ordered_edge_ids: {type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 128}}
+        evidence_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        dns_receipt_id: {type: string, maxLength: 256}
+        loaded_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        policy_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        scope: {type: string, maxLength: 512}
+        captured_at: {type: string, format: date-time}
     EdgeDNSAnswerCandidate:
       type: object
       additionalProperties: false
@@ -34140,7 +34163,7 @@ components:
         node_id: {type: string}
         hostname: {type: string}
         type: {type: string, enum: [A, AAAA]}
-        selection_mode: {type: string, enum: [geo, latency_aware, global, weighted, pinned, disabled]}
+        selection_mode: {type: string, enum: [geo, latency_aware, physical_quality, global, weighted, pinned, disabled]}
         scoped_selection_mode: {type: string, enum: [geo, latency_aware, global, weighted, pinned, disabled]}
         preferred_edge_groups: {type: array, maxItems: 4096, items: {type: string}}
         fallback_edge_groups: {type: array, maxItems: 4096, items: {type: string}}
@@ -34153,6 +34176,8 @@ components:
       additionalProperties: false
       required: [node_id, hostname, type, source_generation, source_digest, observed_at, candidates]
       properties:
+        physical_selection:
+          $ref: '#/components/schemas/DNSPhysicalSelection'
         node_id: {type: string}
         hostname: {type: string}
         type: {type: string, enum: [A, AAAA]}

@@ -73,18 +73,19 @@ type Observation struct {
 }
 
 type Snapshot struct {
-	NetworkSamples []model.EdgeNetworkSample `json:"network_samples,omitempty"`
-	Schema         string                    `json:"schema"`
-	CapturedAt     time.Time                 `json:"captured_at"`
-	Hostname       string                    `json:"hostname"`
-	TrafficClass   string                    `json:"traffic_class"`
-	Scope          string                    `json:"scope"`
-	Policy         Policy                    `json:"policy"`
-	CurrentEdgeID  string                    `json:"current_edge_id"`
-	LastSwitchAt   *time.Time                `json:"last_switch_at"`
-	Candidates     []Candidate               `json:"candidates"`
-	Observations   []Observation             `json:"observations"`
-	Blockers       []string                  `json:"blockers"`
+	ActualDNSReceipt json.RawMessage           `json:"actual_dns_receipt,omitempty"`
+	NetworkSamples   []model.EdgeNetworkSample `json:"network_samples,omitempty"`
+	Schema           string                    `json:"schema"`
+	CapturedAt       time.Time                 `json:"captured_at"`
+	Hostname         string                    `json:"hostname"`
+	TrafficClass     string                    `json:"traffic_class"`
+	Scope            string                    `json:"scope"`
+	Policy           Policy                    `json:"policy"`
+	CurrentEdgeID    string                    `json:"current_edge_id"`
+	LastSwitchAt     *time.Time                `json:"last_switch_at"`
+	Candidates       []Candidate               `json:"candidates"`
+	Observations     []Observation             `json:"observations"`
+	Blockers         []string                  `json:"blockers"`
 }
 
 type Metric struct {

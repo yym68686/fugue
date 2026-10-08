@@ -54,21 +54,22 @@ type DNSSelectionScope struct {
 }
 
 type DNSSelectionObservation struct {
-	NodeID                    string                  `json:"node_id"`
-	Hostname                  string                  `json:"hostname"`
-	Type                      string                  `json:"type"`
-	SourceGeneration          string                  `json:"source_generation"`
-	SourceDigest              string                  `json:"source_digest"`
-	ObservedAt                time.Time               `json:"observed_at"`
-	SelectedEdgeGroupID       string                  `json:"selected_edge_group_id,omitempty"`
-	ShadowSelectedEdgeGroupID string                  `json:"shadow_selected_edge_group_id,omitempty"`
-	RankingVersion            string                  `json:"ranking_version,omitempty"`
-	RankingScope              string                  `json:"ranking_scope,omitempty"`
-	Reason                    string                  `json:"reason,omitempty"`
-	ShadowReason              string                  `json:"shadow_reason,omitempty"`
-	Weight                    int                     `json:"weight,omitempty"`
-	Candidates                []DNSSelectionCandidate `json:"candidates"`
-	ScopedCandidates          []DNSSelectionScope     `json:"scoped_candidates,omitempty"`
+	PhysicalSelection         *model.DNSPhysicalSelection `json:"physical_selection,omitempty"`
+	NodeID                    string                      `json:"node_id"`
+	Hostname                  string                      `json:"hostname"`
+	Type                      string                      `json:"type"`
+	SourceGeneration          string                      `json:"source_generation"`
+	SourceDigest              string                      `json:"source_digest"`
+	ObservedAt                time.Time                   `json:"observed_at"`
+	SelectedEdgeGroupID       string                      `json:"selected_edge_group_id,omitempty"`
+	ShadowSelectedEdgeGroupID string                      `json:"shadow_selected_edge_group_id,omitempty"`
+	RankingVersion            string                      `json:"ranking_version,omitempty"`
+	RankingScope              string                      `json:"ranking_scope,omitempty"`
+	Reason                    string                      `json:"reason,omitempty"`
+	ShadowReason              string                      `json:"shadow_reason,omitempty"`
+	Weight                    int                         `json:"weight,omitempty"`
+	Candidates                []DNSSelectionCandidate     `json:"candidates"`
+	ScopedCandidates          []DNSSelectionScope         `json:"scoped_candidates,omitempty"`
 }
 
 // Query views are authorized selection inputs, separate from finite historical
@@ -83,7 +84,7 @@ type DNSQueryView struct {
 
 func dnsQueryKey(node, hostname, kind string) string { return node + "\x00" + hostname + "\x00" + kind }
 func dnsSelectionModeValid(mode string) bool {
-	return slices.Contains([]string{"geo", "latency_aware", "global", "weighted", "pinned", "disabled"}, mode)
+	return slices.Contains([]string{"geo", "latency_aware", model.DNSAnswerPolicyKindPhysicalQuality, "global", "weighted", "pinned", "disabled"}, mode)
 }
 func ValidateDNSAnswerRules(rules []DNSAnswerRule) error {
 	if len(rules) > 20000 {
@@ -96,6 +97,12 @@ func ValidateDNSAnswerRules(rules []DNSAnswerRule) error {
 			return fmt.Errorf("invalid DNS answer rule")
 		}
 		seen[key] = true
+		if r.SelectionMode == model.DNSAnswerPolicyKindPhysicalQuality && (r.ExplorationPercent != 0 || r.ScopedSelectionMode != "" || len(r.PreferredEdgeGroups) != 0 || len(r.FallbackEdgeGroups) != 0) {
+			return fmt.Errorf("physical-edge selection cannot inherit legacy preferences or exploration")
+		}
+		if r.ScopedSelectionMode == model.DNSAnswerPolicyKindPhysicalQuality {
+			return fmt.Errorf("physical-edge selection requires an explicit bound query view")
+		}
 		for _, groups := range [][]string{r.PreferredEdgeGroups, r.FallbackEdgeGroups} {
 			if len(groups) > 4096 {
 				return fmt.Errorf("too many DNS preferred groups")
@@ -124,6 +131,9 @@ func normalizeDNSAnswerRules(in []DNSAnswerRule) []DNSAnswerRule {
 }
 func normalizeDNSSelections(in []DNSSelectionObservation) []DNSSelectionObservation {
 	out := append([]DNSSelectionObservation(nil), in...)
+	for index := range out {
+		out[index].PhysicalSelection = model.CloneDNSPhysicalSelection(in[index].PhysicalSelection)
+	}
 	clone := func(candidates []DNSSelectionCandidate) []DNSSelectionCandidate {
 		out := append([]DNSSelectionCandidate(nil), candidates...)
 		for i := range out {
@@ -279,6 +289,7 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 				}
 				sort.Strings(record.Values)
 				record.AnswerPolicy = model.DNSAnswerPolicy{PolicyKind: rule.SelectionMode, AllowedEdgeGroups: uniqueSorted(groups), PreferredEdgeGroups: rule.PreferredEdgeGroups, FallbackEdgeGroups: rule.FallbackEdgeGroups, TTLSeconds: rule.TTLSeconds, ECSEnabled: rule.ECSEnabled, HealthRequired: true, RouteReadyRequired: true, ExplorationPercent: rule.ExplorationPercent, SwitchCooldownSec: rule.SwitchCooldownSeconds, RankingVersion: fact.RankingVersion, RankingScope: fact.RankingScope, Reason: fact.Reason, ShadowReason: fact.ShadowReason, Weight: fact.Weight}
+				record.AnswerPolicy.PhysicalSelection = model.CloneDNSPhysicalSelection(fact.PhysicalSelection)
 				candidateGroups := []string{}
 				for _, c := range candidates {
 					candidateGroups = append(candidateGroups, c.EdgeGroupID)
@@ -304,6 +315,12 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 						}
 					}
 					record.ScopedCandidates = append(record.ScopedCandidates, scoped)
+				}
+				if err := validateDNSPhysicalQuery(record); err != nil {
+					return nil, err
+				}
+				if fact.PhysicalSelection != nil && !fact.PhysicalSelection.CapturedAt.Equal(fact.ObservedAt) {
+					return nil, fmt.Errorf("physical-edge selection capture differs from ranking observation")
 				}
 			} else if _, exists := rules[key]; exists {
 				return nil, fmt.Errorf("DNS query rule has no readiness authorization")
@@ -416,6 +433,9 @@ func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNS
 			if err := validate(r.Candidates); err != nil {
 				return err
 			}
+			if err := validateDNSPhysicalQuery(r); err != nil {
+				return err
+			}
 			if len(r.Candidates) != len(r.Values) {
 				return fmt.Errorf("DNS query address lacks candidate authorization")
 			}
@@ -436,6 +456,35 @@ func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNS
 	}
 	if len(used) != len(rules) {
 		return fmt.Errorf("orphan DNS answer rule")
+	}
+	return nil
+}
+
+func validateDNSPhysicalQuery(record model.EdgeDNSRecord) error {
+	policy := record.AnswerPolicy
+	selection := policy.PhysicalSelection
+	if policy.PolicyKind != model.DNSAnswerPolicyKindPhysicalQuality {
+		if selection != nil {
+			return fmt.Errorf("physical-edge evidence cannot authorize a legacy selector")
+		}
+		return nil
+	}
+	if err := model.ValidateDNSPhysicalSelection(selection); err != nil {
+		return err
+	}
+	if selection.Scope != "global" || policy.RankingScope != selection.Scope || policy.RankingVersion != selection.Version ||
+		policy.SelectedEdgeGroupID != "" || policy.ShadowSelectedEdgeGroupID != "" || len(record.ScopedCandidates) != 0 ||
+		len(policy.PreferredEdgeGroups) != 0 || len(policy.FallbackEdgeGroups) != 0 || policy.ExplorationPercent != 0 || policy.Weight != 0 || policy.Priority != 0 {
+		return fmt.Errorf("physical-edge query contains unbound scope or legacy selection authority")
+	}
+	edges := make(map[string]bool, len(record.Candidates))
+	for _, candidate := range record.Candidates {
+		edges[candidate.EdgeID] = true
+	}
+	for _, edgeID := range selection.OrderedEdgeIDs {
+		if !edges[edgeID] {
+			return fmt.Errorf("physical-edge order contains unauthorized endpoint")
+		}
 	}
 	return nil
 }

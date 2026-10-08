@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/dnsserver"
 	"fugue/internal/edgequality"
 	"fugue/internal/model"
+	"fugue/internal/routeprobe"
 	"fugue/internal/store"
 )
 
@@ -76,5 +78,42 @@ func TestPhysicalQualityShadowReadOnlyAndLegacyUnknown(t *testing.T) {
 	}
 	if response := performJSONRequest(t, server, http.MethodGet, "/v1/edge/quality-shadow/app.example.test?traffic_class=streaming", "invalid", nil); response.Code != 401 {
 		t.Fatal(response.Code)
+	}
+}
+
+func TestQualityNetworkSampleBindingRequiresExactPhysicalRouteProof(t *testing.T) {
+	now := time.Now().UTC()
+	rtt := 150.0
+	digest := "sha256:" + strings.Repeat("a", 64)
+	sample := model.EdgeNetworkSample{ID: "sample-a", EdgeID: "edge-a", EdgeGroupID: "shared", Hostname: "app.example.test", PathPrefix: "/", TrafficClass: "streaming",
+		RouteDigest: digest, BundleVersion: "serving-bundle", ServiceTarget: "app.tenant.svc.cluster.local:3000", Source: "service_endpoint_tcp_info_v1", ServiceRTTMS: &rtt, ObservedAt: now.Add(-time.Second)}
+	evidence := dnsserver.QualityAnswerEvidence{EdgeID: "edge-a", Hostname: sample.Hostname, Scope: "global", Proofs: []dnsserver.QualityRouteProof{{EdgeID: "edge-a", EdgeGroupID: "shared", Hostname: sample.Hostname, Path: "/",
+		Proof: routeprobe.Proof{Digest: digest, Version: "serving-bundle", CheckedAt: now}}}}
+	for _, test := range []struct {
+		name string
+		edit func(*model.EdgeNetworkSample)
+		want int
+	}{
+		{"exact", func(sample *model.EdgeNetworkSample) {}, 1},
+		{"sibling", func(sample *model.EdgeNetworkSample) { sample.EdgeID = "edge-b" }, 0},
+		{"old_bundle", func(sample *model.EdgeNetworkSample) { sample.BundleVersion = "old" }, 0},
+		{"wrong_route", func(sample *model.EdgeNetworkSample) { sample.RouteDigest = "sha256:" + strings.Repeat("b", 64) }, 0},
+		{"wrong_path", func(sample *model.EdgeNetworkSample) { sample.PathPrefix = "/other" }, 0},
+		{"different_class", func(sample *model.EdgeNetworkSample) { sample.TrafficClass = "dynamic_api" }, 0},
+		{"future", func(sample *model.EdgeNetworkSample) { sample.ObservedAt = now.Add(time.Hour) }, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			modified := sample
+			test.edit(&modified)
+			snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: sample.Hostname, TrafficClass: sample.TrafficClass, Scope: "global", Policy: edgequality.DefaultShadowPolicy(),
+				Candidates: []edgequality.Candidate{{EdgeID: "edge-a", EdgeGroupID: "shared"}}, NetworkSamples: []model.EdgeNetworkSample{modified}, Blockers: []string{"actual_dns_receipt_not_bound", "capacity_limit_unknown"}}
+			bindPhysicalQualityEvidence(&snapshot, evidence)
+			if snapshot.CurrentEdgeID != "edge-a" || len(snapshot.Observations) != test.want || !snapshot.Candidates[0].RouteProofVerified || len(snapshot.Blockers) != 1 || snapshot.Blockers[0] != "capacity_limit_unknown" {
+				t.Fatal(snapshot)
+			}
+			if test.want > 0 && (snapshot.Observations[0].ClientNetworkMS != nil || snapshot.Observations[0].ServiceFailureRate != nil || snapshot.Observations[0].CapacityUtilization != nil) {
+				t.Fatal("origin socket invented missing metrics")
+			}
+		})
 	}
 }
