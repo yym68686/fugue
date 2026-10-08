@@ -117,3 +117,40 @@ func TestQualityNetworkSampleBindingRequiresExactPhysicalRouteProof(t *testing.T
 		})
 	}
 }
+
+func TestQualityClientNetworkBindingPreservesMissingMetricsAndScope(t *testing.T) {
+	now := time.Now().UTC()
+	rtt := 180.5
+	digest := "sha256:" + strings.Repeat("a", 64)
+	sample := model.EdgeNetworkSample{ID: "client-a", EdgeID: "edge-a", EdgeGroupID: "shared", Hostname: "app.example.test", PathPrefix: "/", TrafficClass: "streaming",
+		RouteDigest: digest, BundleVersion: "serving-bundle", Source: "public_front_tcp_info_v1", ObservedAt: now.Add(-time.Second),
+		ClientNetwork: &model.EdgeClientNetworkSample{ConnectionID: "connection-a", Slot: "b", Scope: "tcp_peer:203.0.113.0/24", StartedAt: now.Add(-time.Minute), ObservedAt: now.Add(-time.Second), TCPInfoAvailable: true, RTTMS: &rtt}}
+	evidence := dnsserver.QualityAnswerEvidence{EdgeID: "edge-a", Hostname: sample.Hostname, Scope: "global", Proofs: []dnsserver.QualityRouteProof{{EdgeID: "edge-a", EdgeGroupID: "shared", Hostname: sample.Hostname, Path: "/",
+		Proof: routeprobe.Proof{Digest: digest, Version: "serving-bundle", CheckedAt: now}}}}
+	for _, scope := range []string{"global", "tcp_peer:203.0.113.0/24", "tcp_peer:198.51.100.0/24", "asn:64500"} {
+		for _, available := range []bool{true, false} {
+			modified := sample
+			client := *sample.ClientNetwork
+			modified.ClientNetwork = &client
+			if !available {
+				client.TCPInfoAvailable, client.RTTMS = false, nil
+			}
+			snapshot := edgequality.Snapshot{CapturedAt: now, Hostname: sample.Hostname, TrafficClass: sample.TrafficClass, Scope: scope,
+				Candidates: []edgequality.Candidate{{EdgeID: "edge-a", EdgeGroupID: "shared"}}, NetworkSamples: []model.EdgeNetworkSample{modified}}
+			bindPhysicalQualityEvidence(&snapshot, evidence)
+			if scope != "global" && scope != client.Scope {
+				if len(snapshot.Observations) != 0 {
+					t.Fatal("TCP peer scope attributed to unrelated cohort", scope)
+				}
+				continue
+			}
+			if len(snapshot.Observations) != 1 {
+				t.Fatal("exact client socket evidence not bound", snapshot)
+			}
+			observation := snapshot.Observations[0]
+			if observation.ClientSource != "public_tcp_info" || observation.ServiceNetworkMS != nil || observation.ClientFailureRate != nil || observation.CapacityUtilization != nil || (observation.ClientNetworkMS != nil) != available {
+				t.Fatal("client RTT fabricated missing metrics", observation)
+			}
+		}
+	}
+}

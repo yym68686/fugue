@@ -19577,10 +19577,12 @@ components:
           type: string
         service_target:
           type: string
-          description: Exact configured TCP destination, without credentials or HTTP path.
+          description: Exact configured origin TCP destination, without credentials or HTTP path. Empty for public Front samples.
         source:
           type: string
-          enum: [service_endpoint_tcp_info_v1]
+          enum: [service_endpoint_tcp_info_v1, public_front_tcp_info_v1]
+        client_network:
+          $ref: '#/components/schemas/EdgeClientNetworkSample'
         service_rtt_ms:
           type: number
           nullable: true
@@ -19590,6 +19592,25 @@ components:
         observed_at:
           type: string
           format: date-time
+    EdgeClientNetworkSample:
+      type: object
+      additionalProperties: false
+      required: [connection_id, slot, scope, started_at, observed_at, tcp_info_available, rtt_ms, min_rtt_ms, rtt_variance_ms, segments_out, retransmitted_segments, bytes_sent, bytes_retransmitted]
+      description: Public Front TCP peer measurement joined to an exact live connection over a node-local Unix socket. Success-conditioned; retransmissions are not connection failure rates. Scope describes the TCP peer prefix, not a DNS resolver, country, or claimed original terminal. No raw client address or port is retained.
+      properties:
+        connection_id: {type: string, maxLength: 128}
+        slot: {type: string, enum: [a, b]}
+        scope: {type: string, maxLength: 128}
+        started_at: {type: string, format: date-time}
+        observed_at: {type: string, format: date-time}
+        tcp_info_available: {type: boolean}
+        rtt_ms: {type: number, nullable: true, minimum: 0, maximum: 60000}
+        min_rtt_ms: {type: number, nullable: true, minimum: 0, maximum: 60000}
+        rtt_variance_ms: {type: number, nullable: true, minimum: 0, maximum: 60000}
+        segments_out: {type: integer, format: int64, minimum: 0}
+        retransmitted_segments: {type: integer, format: int64, minimum: 0}
+        bytes_sent: {type: integer, format: int64, minimum: 0}
+        bytes_retransmitted: {type: integer, format: int64, minimum: 0}
     EdgePerformanceSample:
       type: object
       additionalProperties: false

@@ -165,9 +165,17 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 				snapshot.Blockers = append(snapshot.Blockers, "observation_limit_reached")
 				break
 			}
-			snapshot.Observations = append(snapshot.Observations, edgequality.Observation{ID: "origin:" + sample.EdgeID + ":" + sample.ID, EdgeID: sample.EdgeID,
+			observation := edgequality.Observation{ID: "network:" + sample.EdgeID + ":" + sample.ID, EdgeID: sample.EdgeID,
 				Hostname: sample.Hostname, TrafficClass: sample.TrafficClass, Scope: snapshot.Scope, RouteGeneration: sample.RouteDigest,
-				ObservedAt: sample.ObservedAt, ServiceNetworkMS: sample.ServiceRTTMS, ServiceSource: "service_endpoint_tcp"})
+				ObservedAt: sample.ObservedAt}
+			if sample.Source == "service_endpoint_tcp_info_v1" {
+				observation.ServiceNetworkMS, observation.ServiceSource = sample.ServiceRTTMS, "service_endpoint_tcp"
+			} else if sample.Source == "public_front_tcp_info_v1" && sample.ClientNetwork != nil && (snapshot.Scope == "global" || snapshot.Scope == sample.ClientNetwork.Scope) {
+				observation.ClientNetworkMS, observation.ClientSource = sample.ClientNetwork.RTTMS, "public_tcp_info"
+			} else {
+				continue
+			}
+			snapshot.Observations = append(snapshot.Observations, observation)
 		}
 	}
 }

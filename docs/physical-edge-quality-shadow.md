@@ -59,6 +59,40 @@ not establish a failure rate, throughput, terminal-to-edge path or capacity
 limit. None of those missing signals is fabricated. Old receipts without the
 optional field retain their original digest and replay behavior.
 
+## Public Front connection evidence
+
+`public_front_tcp_info_v1` records are a separate optional network observation.
+Their `client_network` payload contains kernel RTT, minimum RTT, variance and
+raw retransmission counters from the public Front's downstream TCP socket, not
+the worker's loopback connection to Caddy. A missing TCP_INFO snapshot remains
+explicitly unavailable; successful connections alone do not establish a network
+failure denominator, available throughput or a capacity ceiling.
+
+Collection requires an explicitly configured `FUGUE_EDGE_FRONT_NETWORK_SOCKET`
+on both Front and worker. The default is disabled. The node-local Unix socket is
+0600, uses an exclusive ownership lock, and never exposes an HTTP network port.
+An exact live remote address/port, physical edge, group and worker slot must
+match uniquely. Only the trusted loopback Caddy hop with PROXY protocol enabled
+can supply the overwritten connection identity. Nonces and bounded freshness
+prevent response reuse. Raw peer endpoints are transient, not retained: stored
+scope is IPv4 /24 or IPv6 /48, explicitly labelled `tcp_peer`, not an assertion
+about the original terminal, recursive resolver or ECS prefix.
+
+The lookup is asynchronous, allows only one in-flight request per worker, times
+out after 300 ms, and observes process and per-route rate limits. Front refuses
+over-budget scans or contended locks instead of delaying traffic. The bounded
+32-record queue reserves capacity for both network segments under one-sided
+traffic. Socket errors and missing connections affect observations only. An
+older API's exact rejection of `client_network` also retries the heartbeat once
+without the optional `network_samples`, preserving ordinary heartbeat fields.
+
+Receipt binding still requires the exact current hostname, route digest, path,
+bundle version and physical identity. Global shadow aggregation is not proof
+that different edges saw the same client population. A scoped observation can
+only use the same recorded TCP-peer cohort; no ASN, terminal or ECS mapping is
+invented. These observations do not authorize routing, remove missing-capacity
+or missing-provenance gates, publish configuration, or modify LKG.
+
 ## Verified measurement gaps
 
 The existing `edgeDNSLatencyScore` includes HTTP TTFB, upstream duration, total
