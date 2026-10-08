@@ -143,6 +143,22 @@ Unavailable audit backends affect this read only; they cannot block DNS serving.
 
 ## Physical selection artifact contract
 
+An independent observer can capture a bounded client-side diagnostic without API
+credentials or application requests:
+
+```sh
+fugue admin edge quality-probe app.example.test \
+  --vantage affected-terminal --target edge-a=8.8.8.8 --rounds 3 --json
+```
+
+Use the actual configured edge address in place of the example. The command sends
+only TLS nonce HEAD route proofs, verifies the returned physical identity and
+records TCP connection timing separately from TLS/proof failure. Missing timings
+remain null. The capture is explicitly `observer_local` and never routing
+authorization. Transparent proxies can terminate the measured TCP connection;
+neither a verified HTTPS proof nor a vantage label proves a direct terminal TCP
+path. Do not import such measurements as population-wide DNS evidence.
+
 `DNSPhysicalSelection` records the primary edge, ordered eligible fallback edges,
 network evidence digest, actual answer ID, loaded digest, policy digest, exact
 scope and capture time. The initial contract supports an explicit global query
