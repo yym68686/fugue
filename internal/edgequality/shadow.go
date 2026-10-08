@@ -39,6 +39,7 @@ type Candidate struct {
 }
 
 type Observation struct {
+	NodeCapacityID      string             `json:"node_capacity_id,omitempty"`
 	ClientCohort        string             `json:"client_cohort,omitempty"`
 	CapacitySource      string             `json:"capacity_source,omitempty"`
 	RouteWitnessID      string             `json:"route_witness_id,omitempty"`
@@ -62,20 +63,21 @@ type Observation struct {
 }
 
 type Snapshot struct {
-	Limitations      []string                  `json:"limitations,omitempty"`
-	ActualDNSReceipt json.RawMessage           `json:"actual_dns_receipt,omitempty"`
-	NetworkSamples   []model.EdgeNetworkSample `json:"network_samples,omitempty"`
-	Schema           string                    `json:"schema"`
-	CapturedAt       time.Time                 `json:"captured_at"`
-	Hostname         string                    `json:"hostname"`
-	TrafficClass     string                    `json:"traffic_class"`
-	Scope            string                    `json:"scope"`
-	Policy           Policy                    `json:"policy"`
-	CurrentEdgeID    string                    `json:"current_edge_id"`
-	LastSwitchAt     *time.Time                `json:"last_switch_at"`
-	Candidates       []Candidate               `json:"candidates"`
-	Observations     []Observation             `json:"observations"`
-	Blockers         []string                  `json:"blockers"`
+	NodeCapacitySamples []NodeCapacitySample      `json:"node_capacity_samples,omitempty"`
+	Limitations         []string                  `json:"limitations,omitempty"`
+	ActualDNSReceipt    json.RawMessage           `json:"actual_dns_receipt,omitempty"`
+	NetworkSamples      []model.EdgeNetworkSample `json:"network_samples,omitempty"`
+	Schema              string                    `json:"schema"`
+	CapturedAt          time.Time                 `json:"captured_at"`
+	Hostname            string                    `json:"hostname"`
+	TrafficClass        string                    `json:"traffic_class"`
+	Scope               string                    `json:"scope"`
+	Policy              Policy                    `json:"policy"`
+	CurrentEdgeID       string                    `json:"current_edge_id"`
+	LastSwitchAt        *time.Time                `json:"last_switch_at"`
+	Candidates          []Candidate               `json:"candidates"`
+	Observations        []Observation             `json:"observations"`
+	Blockers            []string                  `json:"blockers"`
 }
 
 type Metric struct {
@@ -412,8 +414,18 @@ func validate(snapshot Snapshot) error {
 			return errors.New("invalid shadow cost")
 		}
 	}
-	if policy.AdvantageRatio >= 1 || len(snapshot.Observations) > MaxObservations || len(snapshot.NetworkSamples) > MaxObservations || len(snapshot.Candidates) > 256 {
+	if policy.AdvantageRatio >= 1 || len(snapshot.Observations) > MaxObservations || len(snapshot.NetworkSamples) > MaxObservations || len(snapshot.Candidates) > 256 || len(snapshot.NodeCapacitySamples) > 8 {
 		return errors.New("shadow input exceeds bounds")
+	}
+	capacitySamples := map[string]NodeCapacitySample{}
+	for _, sample := range snapshot.NodeCapacitySamples {
+		if err := ValidateNodeCapacitySample(sample, snapshot.CapturedAt); err != nil {
+			return err
+		}
+		if _, exists := capacitySamples[sample.EdgeID]; exists {
+			return errors.New("duplicate physical-node capacity identity")
+		}
+		capacitySamples[sample.EdgeID] = sample
 	}
 	networkSamples := map[string]model.EdgeNetworkSample{}
 	for _, sample := range snapshot.NetworkSamples {
@@ -439,6 +451,13 @@ func validate(snapshot Snapshot) error {
 	for _, observation := range snapshot.Observations {
 		if observation.ID == "" {
 			return errors.New("observation id required")
+		}
+		if observation.NodeCapacityID != "" {
+			sample, found := capacitySamples[observation.EdgeID]
+			if !found || !NodeCapacityObservationMatches(snapshot, observation, sample) {
+				return errors.New("capacity observation differs from captured physical-node facts")
+			}
+			continue
 		}
 		if observation.RouteWitnessID != "" {
 			witness, found := networkSamples[observation.EdgeID+"\x00"+observation.RouteWitnessID]

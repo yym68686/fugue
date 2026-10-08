@@ -969,6 +969,11 @@ paths:
         metrics and hostname-specific route/TLS proofs block promotion. This is a
         captured counterfactual, not a receipt of an actual DNS answer. Resolver/ECS
         scope cannot establish a particular terminal's current network path.
+        When binding a real DNS receipt, capacity may additionally be read from
+        authenticated Kubernetes observations for at most eight exact physical
+        candidates, four concurrently with a two-second total deadline. These
+        reads do not invoke business requests or manufacture network samples;
+        missing capacity remains unknown and original metric timestamps are kept.
       tags: [Edge]
       x-fugue-handler: handleGetEdgeQualityShadow
       security:
@@ -19120,6 +19125,7 @@ components:
         client_cohort: {type: string, description: Coarse observed public TCP peer network. Never equated with the recursive DNS resolver or every terminal.}
         capacity_source: {type: string, description: Explicit capacity provenance; node capacity is not inferred from application concurrency.}
         route_witness_id: {type: string, description: Exact captured TLS witness used to bind a historical measurement or node-capacity observation. Replay requires the original raw facts; never a substitute for fresh current DNS route proof.}
+        node_capacity_id: {type: string, description: Exact separately captured physical-node capacity observation. Mutually exclusive with route_witness_id; never fills historical network buckets or invents RTT.}
         id: {type: string}
         edge_id: {type: string}
         hostname: {type: string}
@@ -19140,6 +19146,17 @@ components:
           type: object
           description: Never used in the network score. Includes app/model wait, connection lifetime and unverified legacy measurements.
           additionalProperties: {type: number}
+    PhysicalNodeCapacitySample:
+      type: object
+      additionalProperties: false
+      required: [id, edge_id, edge_group_id, address, capacity]
+      description: Read-only authenticated node facts, independent of business traffic or route witness scheduling. Address and physical identity must match the actual DNS candidate; Kubernetes node UID, limits and pressure are checked before and after collection. Current facts cannot replace missing historical capacity observations.
+      properties:
+        id: {type: string, maxLength: 128}
+        edge_id: {type: string, maxLength: 128}
+        edge_group_id: {type: string, maxLength: 128}
+        address: {type: string, maxLength: 45}
+        capacity: {$ref: '#/components/schemas/EdgeNetworkNodeCapacity'}
     PhysicalEdgeQualitySnapshot:
       type: object
       additionalProperties: false
@@ -19151,6 +19168,10 @@ components:
           description: Interpretation boundaries, not fabricated measurements or authority to publish.
         actual_dns_receipt:
           $ref: '#/components/schemas/DNSDecisionReceipt'
+        node_capacity_samples:
+          type: array
+          maxItems: 8
+          items: {$ref: '#/components/schemas/PhysicalNodeCapacitySample'}
         network_samples:
           type: array
           maxItems: 4096

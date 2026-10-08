@@ -121,8 +121,12 @@ func (s *Server) capturePhysicalQuality(ctx context.Context, hostname, trafficCl
 		decisions, readErr := s.readPlatformDNSDecisions(ctx, dnsNodeID, hostname, "", 1)
 		if readErr != nil || len(decisions.Snapshot.Receipts) != 1 {
 			snapshot.Blockers = append(snapshot.Blockers, "actual_dns_backend_unavailable")
-		} else if err := bindPhysicalQualityDNS(&snapshot, decisions.Snapshot.Receipts[0]); err != nil {
-			snapshot.Blockers = append(snapshot.Blockers, "actual_dns_evidence_unbound")
+		} else {
+			s.captureQualityCapacity(ctx, &snapshot, decisions.Snapshot.Receipts[0], nodes)
+			snapshot.CapturedAt = time.Now().UTC()
+			if err := bindPhysicalQualityDNS(&snapshot, decisions.Snapshot.Receipts[0]); err != nil {
+				snapshot.Blockers = append(snapshot.Blockers, "actual_dns_evidence_unbound")
+			}
 		}
 	}
 	return edgequality.Capture(snapshot)
@@ -226,6 +230,18 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 				continue
 			}
 			snapshot.Observations = append(snapshot.Observations, observation)
+		}
+		for _, sample := range snapshot.NodeCapacitySamples {
+			if !physicalCapacityAddressMatches(sample, evidence) {
+				continue
+			}
+			if observation, ok := edgequality.NodeCapacityObservation(*snapshot, *candidate, sample); ok {
+				if len(snapshot.Observations) >= edgequality.MaxObservations {
+					snapshot.Blockers = append(snapshot.Blockers, "observation_limit_reached")
+					break
+				}
+				snapshot.Observations = append(snapshot.Observations, observation)
+			}
 		}
 	}
 }

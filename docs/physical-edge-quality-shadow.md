@@ -5,16 +5,19 @@
 This is the first executable part of the second phase, not completion of the
 production routing migration. `GET /v1/edge/quality-shadow/{hostname}` and
 `fugue admin edge quality-shadow capture` are platform-admin-only, read-only
-observations. The evaluator is not called by DNS answer generation or the
-automatic publication producer. It has no probe executor. `promotion_ready` and `probe_executed` are
-always false; `dns_unchanged` is always true. A hypothetical switch is not a
-serving authorization.
+observations. DNS answer generation never runs the shadow evaluator. An explicitly
+opted-in publication producer can capture and independently validate its inputs
+through the evidence compiler described below; installing the code alone does not
+opt in a hostname. The evaluator has no probe executor. In shadow receipts,
+`promotion_ready` and `probe_executed` are always false; `dns_unchanged` is always
+true. A hypothetical switch is not itself a serving authorization.
 
 ## Cohort network evaluator v2
 
 New captures use `physical-network-cohort-v2`. Older receipts continue to replay
 with their captured v1 evaluator; this is historical replay compatibility, not
-the production legacy DNS ranking path. The v2 evaluator is still shadow-only.
+the production legacy DNS ranking path. Its capture API remains shadow-only;
+serving publication requires the separate explicit policy and evidence compiler.
 
 V2 compares candidates within common observed TCP-peer /24 or /48 networks.
 It never treats unrelated client populations, a DNS resolver address, country
@@ -423,6 +426,18 @@ does not discard the independently valid route witness. This describes only
 physical-node resource headroom, not a measured link bandwidth, a worker's
 concurrency limit or the origin application's capacity. These raw observations
 do not by themselves remove production-promotion gates.
+
+A capture bound to a replay-verified real DNS answer also reads current node
+capacity independently of route-witness scheduling and business request volume.
+The read targets only registered physical nodes whose public address, group and
+unique route proof match that answer. At most eight nodes, four concurrent
+workers and a two-second total Kubernetes deadline bound the observation work.
+The original raw facts are retained in `node_capacity_samples`; derived
+observations reference `node_capacity_id` and are reconstructed during publication
+and offline replay. Missing or expired capacity remains unknown. These current
+facts cannot fill historical comparison buckets, create client/service RTT or
+authorize a network switch on their own. Collection never runs on the DNS answer
+path and cannot change a serving artifact or LKG.
 
 1. Establish a tested no-interruption public DNS code release path and deploy
    actual-answer receipts to the real public processes. Bind each observation
