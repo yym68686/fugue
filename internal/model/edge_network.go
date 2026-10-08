@@ -29,8 +29,47 @@ type EdgeNetworkSample struct {
 }
 
 type EdgeNetworkRouteWitness struct {
-	Address    string    `json:"address"`
-	ValidUntil time.Time `json:"valid_until"`
+	Address      string                   `json:"address"`
+	ValidUntil   time.Time                `json:"valid_until"`
+	NodeCapacity *EdgeNetworkNodeCapacity `json:"node_capacity,omitempty"`
+}
+
+type EdgeNetworkNodeCapacity struct {
+	Source                   string    `json:"source"`
+	NodeUID                  string    `json:"node_uid"`
+	ObservedAt               time.Time `json:"observed_at"`
+	ValidUntil               time.Time `json:"valid_until"`
+	CPUObservedAt            time.Time `json:"cpu_observed_at"`
+	MemoryObservedAt         time.Time `json:"memory_observed_at"`
+	CPUUsageNanoCores        uint64    `json:"cpu_usage_nanocores"`
+	CPUAllocatableMilliCores int64     `json:"cpu_allocatable_millicores"`
+	MemoryWorkingSetBytes    uint64    `json:"memory_working_set_bytes"`
+	MemoryAllocatableBytes   int64     `json:"memory_allocatable_bytes"`
+	Pressure                 []string  `json:"pressure"`
+}
+
+func ValidateEdgeNetworkNodeCapacity(capacity *EdgeNetworkNodeCapacity) error {
+	if capacity == nil || capacity.Source != "kubelet_node_allocatable_v1" || capacity.NodeUID == "" || len(capacity.NodeUID) > 253 ||
+		strings.ContainsAny(capacity.NodeUID, " \t\r\n\x00") || capacity.CPUObservedAt.IsZero() || capacity.MemoryObservedAt.IsZero() ||
+		capacity.CPUAllocatableMilliCores <= 0 || capacity.MemoryAllocatableBytes <= 0 {
+		return errors.New("invalid node capacity identity or denominator")
+	}
+	oldest := capacity.CPUObservedAt
+	if capacity.MemoryObservedAt.Before(oldest) {
+		oldest = capacity.MemoryObservedAt
+	}
+	if !capacity.ObservedAt.Equal(oldest) || !capacity.ValidUntil.Equal(oldest.Add(2*time.Minute)) ||
+		!capacity.CPUObservedAt.Before(capacity.ValidUntil) || !capacity.MemoryObservedAt.Before(capacity.ValidUntil) {
+		return errors.New("invalid node capacity observation times")
+	}
+	seen := map[string]bool{}
+	for _, condition := range capacity.Pressure {
+		if (condition != "MemoryPressure" && condition != "DiskPressure" && condition != "PIDPressure") || seen[condition] {
+			return errors.New("invalid node capacity pressure state")
+		}
+		seen[condition] = true
+	}
+	return nil
 }
 
 func EdgeNetworkWitnessMatches(sample, witness EdgeNetworkSample) bool {
@@ -71,6 +110,9 @@ func ValidateEdgeNetworkSample(sample EdgeNetworkSample) error {
 			address, err := netip.ParseAddr(witness.Address)
 			valid = valid && err == nil && address.IsGlobalUnicast() && !address.IsPrivate() && !address.Is4In6() &&
 				witness.Address == address.String() && witness.ValidUntil.After(sample.ObservedAt)
+			if witness.NodeCapacity != nil {
+				valid = valid && ValidateEdgeNetworkNodeCapacity(witness.NodeCapacity) == nil
+			}
 		}
 	default:
 		valid = false

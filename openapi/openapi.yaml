@@ -19627,6 +19627,29 @@ components:
       properties:
         address: {type: string, maxLength: 45}
         valid_until: {type: string, format: date-time}
+        node_capacity:
+          $ref: '#/components/schemas/EdgeNetworkNodeCapacity'
+    EdgeNetworkNodeCapacity:
+      type: object
+      additionalProperties: false
+      required: [source, node_uid, observed_at, valid_until, cpu_observed_at, memory_observed_at, cpu_usage_nanocores, cpu_allocatable_millicores, memory_working_set_bytes, memory_allocatable_bytes, pressure]
+      description: Authenticated physical-node CPU and working-set memory usage against Kubernetes allocatable limits. Node identity and limits are rechecked. Not a request-concurrency, bandwidth, application or model capacity claim. Absent means unknown; saturated values remain observations, not zero or missing.
+      properties:
+        source: {type: string, enum: [kubelet_node_allocatable_v1]}
+        node_uid: {type: string, maxLength: 253}
+        observed_at: {type: string, format: date-time}
+        valid_until: {type: string, format: date-time}
+        cpu_observed_at: {type: string, format: date-time}
+        memory_observed_at: {type: string, format: date-time}
+        cpu_usage_nanocores: {type: integer, format: int64, minimum: 0}
+        cpu_allocatable_millicores: {type: integer, format: int64, minimum: 1}
+        memory_working_set_bytes: {type: integer, format: int64, minimum: 0}
+        memory_allocatable_bytes: {type: integer, format: int64, minimum: 1}
+        pressure:
+          type: array
+          uniqueItems: true
+          maxItems: 3
+          items: {type: string, enum: [MemoryPressure, DiskPressure, PIDPressure]}
     EdgePublicNetworkObservationRequest:
       type: object
       additionalProperties: false

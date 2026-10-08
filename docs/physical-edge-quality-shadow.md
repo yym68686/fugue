@@ -284,6 +284,18 @@ removes the evidence-window reset at each bundle renewal without relaxing
 promotion gates or making old samples current. It does not supply missing
 failure denominators, capacity, throughput or terminal-path coverage.
 
+The witness collector also attempts a bounded authenticated Kubernetes node
+capacity read. It records Kubelet CPU nanocores and memory working-set bytes
+against the same physical node's allocatable CPU and memory, with the original
+metric timestamps, node UID and pressure conditions. Identity, readiness,
+limits and pressure are reread before accepting; absent, stale, future or
+foreign metrics remain unknown. Over-limit values and known pressure are
+retained rather than concealed as absent or zero. A capacity-read failure
+does not discard the independently valid route witness. This describes only
+physical-node resource headroom, not a measured link bandwidth, a worker's
+concurrency limit or the origin application's capacity. These raw observations
+do not by themselves remove production-promotion gates.
+
 1. Establish a tested no-interruption public DNS code release path and deploy
    actual-answer receipts to the real public processes. Bind each observation
    to the actual final RRset, loaded digest, physical edge and serving LKG.

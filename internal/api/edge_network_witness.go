@@ -82,6 +82,16 @@ func (s *Server) observeNetworkRouteWitness(node model.EdgeNode, samples []model
 			var witness model.EdgeNetworkSample
 			witness, err = networkRouteWitnessSample(sample, address, proof, time.Now().UTC())
 			if err == nil {
+				if client, clientErr := s.newClusterNodeClient(); clientErr == nil {
+					capacityContext, capacityCancel := context.WithTimeout(ctx, time.Second)
+					var capacityErr error
+					witness.RouteWitness.NodeCapacity, capacityErr = readNetworkNodeCapacity(capacityContext, client, sample.EdgeID, address, time.Now)
+					capacityCancel()
+					client.closeIdleConnections()
+					if capacityErr != nil && s.log != nil {
+						s.log.Printf("edge network node capacity unavailable; edge_id=%s error=%v", node.ID, capacityErr)
+					}
+				}
 				err = s.store.RecordEdgeNetworkRouteWitnesses(ctx, []model.EdgeNetworkSample{witness}, time.Now().UTC().Add(-time.Hour))
 			}
 		}
