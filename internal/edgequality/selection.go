@@ -56,6 +56,19 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 			selection.OrderedEdgeIDs = append(selection.OrderedEdgeIDs, candidate.EdgeID)
 		}
 	}
+	if snapshot.Policy.Version == NetworkPolicyVersion {
+		for _, candidate := range result.Candidates {
+			if candidate.EdgeID == primary.EdgeID || candidate.Ready || len(candidate.HardGates) != 0 {
+				continue
+			}
+			for _, input := range snapshot.Candidates {
+				if input.EdgeID == candidate.EdgeID && proofFresh(input, snapshot.Policy, now) {
+					selection.OrderedEdgeIDs = append(selection.OrderedEdgeIDs, candidate.EdgeID)
+					break
+				}
+			}
+		}
+	}
 	if err := model.ValidateDNSPhysicalSelection(selection); err != nil {
 		return nil, err
 	}

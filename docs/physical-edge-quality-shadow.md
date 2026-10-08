@@ -10,6 +10,49 @@ automatic publication producer. It has no probe executor. `promotion_ready` and 
 always false; `dns_unchanged` is always true. A hypothetical switch is not a
 serving authorization.
 
+## Cohort network evaluator v2
+
+New captures use `physical-network-cohort-v2`. Older receipts continue to replay
+with their captured v1 evaluator; this is historical replay compatibility, not
+the production legacy DNS ranking path. The v2 evaluator is still shadow-only.
+
+V2 compares candidates within common observed TCP-peer /24 or /48 networks.
+It never treats unrelated client populations, a DNS resolver address, country
+labels or an observer-local probe as the same terminal path. Every shared
+cohort used for a proposed switch must show sustained advantage in the last
+three complete five-minute buckets. A pair with no common cohort cannot win a
+normal switch; it is eligible for a bounded probe recommendation. This is
+evidence about those observed networks, not a guarantee for every unobserved
+terminal sharing the global DNS answer.
+
+The core gates require current route/TLS proof, measured client and service
+network RTT, and fresh authenticated physical-node CPU/memory headroom. The
+score does not consume HTTP TTFB, inference wait, application queueing or
+connection duration. Latency bands use observed P10/P90 variation plus an
+explicit margin, without pretending repeated observations are independent
+confidence samples. Optional throughput and failure rates remain unknown until
+their denominators and provenance exist. Missing optional fields share one
+finite uncertainty budget instead of multiplying an overwhelming penalty or
+permanently excluding a node. That budget is configured risk tolerance, not a
+physical bound on unknown behavior or a statistical confidence interval.
+
+The experiment defaults use a total 30ms optional-uncertainty budget, a 5ms
+margin per latency segment, at least 20ms and 15% band-separated improvement,
+a 15-minute switch cooldown and a maximum 85% node resource utilization. These
+are explicit captured experiment parameters, not serving policy owned by code.
+Production publication must consume an independently signed policy and its
+approval gates. Unknown switch history prevents a normal switch; actual hard
+failure can bypass comparative cooldown. Unknown but freshly route-ready
+physical edges remain last-resort fallback candidates after the quality-ready
+set. They cannot displace a healthy primary solely because their measurements
+are absent. No country is hardcoded or excluded by this evaluator.
+
+Receipts include per-cohort comparisons, original capacity denominators and
+bounded probe recommendations. No probe is executed by this evaluator. Node
+capacity failure, missing shared cohorts and stale core samples remain visible
+in candidate metrics and gates rather than being hidden behind unconditional
+legacy-observation blockers.
+
 An explicit `physical_quality` query contract now supports a signed immutable
 physical-edge order. Its compiler adapter requires replay-verified, fresh network
 evidence and a matching actual DNS binding. DNS execution only filters this order
@@ -86,8 +129,9 @@ traffic. Socket errors and missing connections affect observations only. An
 older API's exact rejection of `client_network` also retries the heartbeat once
 without the optional `network_samples`, preserving ordinary heartbeat fields.
 
-Receipt binding still requires the exact current hostname, route digest, path,
-bundle version and physical identity. Global shadow aggregation is not proof
+Receipt binding still requires the exact hostname, route digest, path and
+physical identity, with either the current bundle or an independently witnessed
+historical bundle as described below. Global shadow aggregation is not proof
 that different edges saw the same client population. A scoped observation can
 only use the same recorded TCP-peer cohort; no ASN, terminal or ECS mapping is
 invented. These observations do not authorize routing, remove missing-capacity
@@ -265,6 +309,11 @@ business requests, configuration or positive LKG.
 The retained `route_tls_witness_v1` record is not a latency or availability
 measurement. It binds an exact physical edge, group, hostname, path, class,
 bundle version and route digest. A heartbeat caller cannot submit this source.
+If an unchanged route is republished between the triggering measurement and
+TLS lookup, the collector retains the actual new bundle version reported by
+TLS. It does not relabel the triggering old measurement; that measurement
+still needs its own exact-version witness. A later matching measurement may
+use the independently recorded new-version witness.
 Witnesses use a separate observation collection and database hostname-key
 namespace; rolling-upgrade or rollback readers of the original network-sample
 collection never receive an unsupported source. No database migration or

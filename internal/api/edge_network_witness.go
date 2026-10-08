@@ -103,15 +103,16 @@ func (s *Server) observeNetworkRouteWitness(node model.EdgeNode, samples []model
 
 func networkRouteWitnessSample(sample model.EdgeNetworkSample, address string, proof routeprobe.Proof, now time.Time) (model.EdgeNetworkSample, error) {
 	if proof.EdgeID != sample.EdgeID || proof.GroupID != sample.EdgeGroupID || proof.Digest != sample.RouteDigest ||
-		proof.Version != sample.BundleVersion || proof.State != "" || proof.CheckedAt.IsZero() || proof.CheckedAt.After(now) || now.Sub(proof.CheckedAt) > 5*time.Second {
+		proof.State != "" || proof.CheckedAt.IsZero() || proof.CheckedAt.After(now) || now.Sub(proof.CheckedAt) > 5*time.Second || model.ValidateEdgeNetworkSample(sample) != nil ||
+		sample.ObservedAt.After(now) || now.Sub(sample.ObservedAt) > 2*time.Minute {
 		return model.EdgeNetworkSample{}, errors.New("route witness does not match observed immutable bundle")
 	}
 	witness := model.EdgeNetworkSample{ID: model.NewID("route_witness"), EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID,
 		Hostname: sample.Hostname, PathPrefix: sample.PathPrefix, TrafficClass: sample.TrafficClass, RouteDigest: proof.Digest,
 		BundleVersion: proof.Version, Source: "route_tls_witness_v1", ObservedAt: proof.CheckedAt,
 		RouteWitness: &model.EdgeNetworkRouteWitness{Address: address, ValidUntil: proof.ValidUntil}}
-	if !model.EdgeNetworkWitnessMatches(sample, witness) {
-		return model.EdgeNetworkSample{}, errors.New("route witness is outside the bounded observation interval")
+	if model.ValidateEdgeNetworkSample(witness) != nil {
+		return model.EdgeNetworkSample{}, errors.New("current route witness invalid")
 	}
 	return witness, nil
 }

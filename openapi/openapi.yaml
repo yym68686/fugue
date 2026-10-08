@@ -19081,6 +19081,7 @@ components:
       additionalProperties: false
       required: [version, window_seconds, bucket_seconds, required_buckets, minimum_records, cooldown_seconds, evidence_max_age_seconds, advantage_ms, advantage_ratio, unknown_cost_ms, uncertainty_ms, failure_cost_ms, capacity_cost_ms, throughput_cost_ms, throughput_target_bps, probe_interval_seconds, probe_budget_per_interval]
       properties:
+        maximum_node_utilization: {type: number, minimum: 0, maximum: 1, description: Explicit v2 node CPU/memory headroom gate. Does not declare link or application capacity.}
         version: {type: string}
         window_seconds: {type: integer}
         bucket_seconds: {type: integer}
@@ -19090,8 +19091,8 @@ components:
         evidence_max_age_seconds: {type: integer}
         advantage_ms: {type: number}
         advantage_ratio: {type: number}
-        unknown_cost_ms: {type: number}
-        uncertainty_ms: {type: number}
+        unknown_cost_ms: {type: number, description: 'In physical-network-cohort-v2 this is one total optional-metric uncertainty budget, not a per-missing-field penalty. It is configured risk tolerance, not a physical worst-case bound.'}
+        uncertainty_ms: {type: number, description: In v2 this widens observed latency quantile bands; it is not a statistical confidence claim.}
         failure_cost_ms: {type: number}
         capacity_cost_ms: {type: number}
         throughput_cost_ms: {type: number}
@@ -19116,7 +19117,9 @@ components:
       additionalProperties: false
       required: [id, edge_id, hostname, traffic_class, scope, route_generation, observed_at, client_network_ms, service_network_ms, client_source, service_source, upload_bps, download_bps, client_failure_rate, service_failure_rate, capacity_utilization, diagnostics]
       properties:
-        route_witness_id: {type: string, description: Exact captured TLS witness used to bind a historical bundle. Replay requires the original sample and witness; never a substitute for fresh current DNS route proof.}
+        client_cohort: {type: string, description: Coarse observed public TCP peer network. Never equated with the recursive DNS resolver or every terminal.}
+        capacity_source: {type: string, description: Explicit capacity provenance; node capacity is not inferred from application concurrency.}
+        route_witness_id: {type: string, description: Exact captured TLS witness used to bind a historical measurement or node-capacity observation. Replay requires the original raw facts; never a substitute for fresh current DNS route proof.}
         id: {type: string}
         edge_id: {type: string}
         hostname: {type: string}
@@ -19142,6 +19145,10 @@ components:
       additionalProperties: false
       required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
       properties:
+        limitations:
+          type: array
+          items: {type: string}
+          description: Interpretation boundaries, not fabricated measurements or authority to publish.
         actual_dns_receipt:
           $ref: '#/components/schemas/DNSDecisionReceipt'
         network_samples:
@@ -19203,6 +19210,10 @@ components:
       additionalProperties: false
       required: [mode, dns_unchanged, promotion_ready, hypothesis, proposed_edge_id, probe_edge_ids, probe_executed, sustained_buckets, candidates, rejected_records, blockers]
       properties:
+        comparisons:
+          type: array
+          maxItems: 1024
+          items: {$ref: '#/components/schemas/PhysicalEdgeQualityComparison'}
         mode: {type: string, enum: [shadow]}
         dns_unchanged: {type: boolean, enum: [true]}
         promotion_ready: {type: boolean, enum: [false]}
@@ -19223,6 +19234,20 @@ components:
         blockers:
           type: array
           items: {type: string}
+    PhysicalEdgeQualityComparison:
+      type: object
+      additionalProperties: false
+      required: [edge_id, incumbent_edge_id, cohort, incumbent_lower, challenger_upper, sustained_buckets, ready, advantageous]
+      description: Comparison within one actually observed common TCP peer network. Bands combine observed variation and a configured uncertainty budget, not a statistical confidence interval or a worst-case bound for unobserved terminals.
+      properties:
+        edge_id: {type: string}
+        incumbent_edge_id: {type: string}
+        cohort: {type: string}
+        incumbent_lower: {type: number}
+        challenger_upper: {type: number}
+        sustained_buckets: {type: integer}
+        ready: {type: boolean}
+        advantageous: {type: boolean}
     PhysicalEdgeQualityReceipt:
       type: object
       additionalProperties: false

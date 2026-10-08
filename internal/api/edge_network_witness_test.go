@@ -28,7 +28,7 @@ func TestNetworkWitnessRequiresExactPublicTLSProof(t *testing.T) {
 	}{
 		{"physical_edge", func(sample *model.EdgeNetworkSample, proof *routeprobe.Proof) { proof.EdgeID = "edge-b" }},
 		{"group", func(sample *model.EdgeNetworkSample, proof *routeprobe.Proof) { proof.GroupID = "group-b" }},
-		{"bundle", func(sample *model.EdgeNetworkSample, proof *routeprobe.Proof) { proof.Version = "bundle-b" }},
+		{"bundle_missing", func(sample *model.EdgeNetworkSample, proof *routeprobe.Proof) { proof.Version = "" }},
 		{"digest", func(sample *model.EdgeNetworkSample, proof *routeprobe.Proof) {
 			proof.Digest = "sha256:" + strings.Repeat("b", 64)
 		}},
@@ -59,6 +59,21 @@ func TestNetworkWitnessRequiresExactPublicTLSProof(t *testing.T) {
 	request := edgeHeartbeatRequest{EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID, RouteBundleVersion: sample.BundleVersion, NetworkSamples: []model.EdgeNetworkSample{witness}}
 	if len(sanitizeEdgeNetworkSamples(request, &active, now)) != 0 {
 		t.Fatal("heartbeat caller forged independent witness")
+	}
+}
+
+func TestNetworkWitnessRenewalRecordsActualVersionWithoutRebindingOldSample(t *testing.T) {
+	now := time.Now().UTC()
+	sample, proof := networkWitnessFixture(now)
+	proof.Version = "renewed-bundle"
+	witness, err := networkRouteWitnessSample(sample, "203.0.113.5", proof, now)
+	if err != nil || witness.BundleVersion != proof.Version || witness.BundleVersion == sample.BundleVersion || model.EdgeNetworkWitnessMatches(sample, witness) {
+		t.Fatal("bundle renewal relabeled an old measurement", witness, err)
+	}
+	next := sample
+	next.ID, next.BundleVersion, next.ObservedAt = "subsequent-real-sample", proof.Version, now.Add(time.Second)
+	if !model.EdgeNetworkWitnessMatches(next, witness) {
+		t.Fatal("actual renewed-bundle witness cannot bind a subsequent matching measurement")
 	}
 }
 

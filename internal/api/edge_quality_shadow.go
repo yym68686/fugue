@@ -35,8 +35,8 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	}
 	now := time.Now().UTC()
 	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: hostname, TrafficClass: trafficClass,
-		Scope: scope.key(), Policy: edgequality.DefaultShadowPolicy(), Candidates: []edgequality.Candidate{}, Observations: []edgequality.Observation{},
-		Blockers: []string{"legacy_samples_lack_segment_provenance", "capacity_limit_unknown", "actual_dns_receipt_not_bound", "client_scope_not_terminal_path"}}
+		Scope: scope.key(), Policy: edgequality.DefaultNetworkPolicy(), Candidates: []edgequality.Candidate{}, Observations: []edgequality.Observation{},
+		Blockers: []string{"actual_dns_receipt_not_bound"}, Limitations: []string{"dns_resolver_scope_is_not_terminal_path", "common_tcp_cohorts_do_not_cover_every_terminal", "node_capacity_is_not_link_or_application_capacity", "uncertainty_budget_is_not_statistical_confidence"}}
 	nodes, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -182,7 +182,17 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 		for _, sample := range snapshot.NetworkSamples {
 			if model.ValidateEdgeNetworkSample(sample) != nil || sample.EdgeID != candidate.EdgeID || sample.EdgeGroupID != candidate.EdgeGroupID ||
 				sample.Hostname != proof.Hostname || sample.PathPrefix != proof.Path || sample.TrafficClass != snapshot.TrafficClass ||
-				sample.RouteDigest != proof.Proof.Digest || sample.ObservedAt.After(snapshot.CapturedAt) || sample.Source == "route_tls_witness_v1" {
+				sample.RouteDigest != proof.Proof.Digest || sample.ObservedAt.After(snapshot.CapturedAt) {
+				continue
+			}
+			if sample.Source == "route_tls_witness_v1" {
+				if observation, ok := physicalQualityCapacityObservation(sample, snapshot.Scope, snapshot.CapturedAt); ok {
+					if len(snapshot.Observations) >= edgequality.MaxObservations {
+						snapshot.Blockers = append(snapshot.Blockers, "observation_limit_reached")
+						break
+					}
+					snapshot.Observations = append(snapshot.Observations, observation)
+				}
 				continue
 			}
 			witnessID := ""
@@ -207,12 +217,27 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 				observation.ServiceNetworkMS, observation.ServiceSource = sample.ServiceRTTMS, "service_endpoint_tcp"
 			} else if sample.Source == "public_front_tcp_info_v1" && sample.ClientNetwork != nil && (snapshot.Scope == "global" || snapshot.Scope == sample.ClientNetwork.Scope) {
 				observation.ClientNetworkMS, observation.ClientSource = sample.ClientNetwork.RTTMS, "public_tcp_info"
+				observation.ClientCohort = sample.ClientNetwork.Scope
 			} else {
 				continue
 			}
 			snapshot.Observations = append(snapshot.Observations, observation)
 		}
 	}
+}
+
+func physicalQualityCapacityObservation(sample model.EdgeNetworkSample, scope string, now time.Time) (edgequality.Observation, bool) {
+	if sample.Source != "route_tls_witness_v1" || sample.RouteWitness == nil || sample.RouteWitness.NodeCapacity == nil || model.ValidateEdgeNetworkSample(sample) != nil {
+		return edgequality.Observation{}, false
+	}
+	capacity := sample.RouteWitness.NodeCapacity
+	value, err := model.EdgeNetworkNodeUtilization(capacity)
+	if err != nil || capacity.CPUObservedAt.After(now) || capacity.MemoryObservedAt.After(now) {
+		return edgequality.Observation{}, false
+	}
+	return edgequality.Observation{ID: "capacity:" + sample.EdgeID + ":" + sample.ID, EdgeID: sample.EdgeID, Hostname: sample.Hostname, TrafficClass: sample.TrafficClass,
+		Scope: scope, RouteGeneration: sample.RouteDigest, ObservedAt: capacity.ObservedAt, RouteWitnessID: sample.ID,
+		CapacitySource: capacity.Source, CapacityUtilization: &value}, true
 }
 
 func legacyPhysicalEdgeObservation(sample model.EdgePerformanceSample, scope string) edgequality.Observation {

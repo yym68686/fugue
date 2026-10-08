@@ -21,6 +21,7 @@ const MaxObservations = 4096
 const ReceiptDigestFormat = "embedded-json-sorted-v1"
 
 type Policy struct {
+	MaximumNodeUtilization float64 `json:"maximum_node_utilization,omitempty"`
 	Version                string  `json:"version"`
 	WindowSeconds          int     `json:"window_seconds"`
 	BucketSeconds          int     `json:"bucket_seconds"`
@@ -57,6 +58,8 @@ type Candidate struct {
 }
 
 type Observation struct {
+	ClientCohort        string             `json:"client_cohort,omitempty"`
+	CapacitySource      string             `json:"capacity_source,omitempty"`
 	RouteWitnessID      string             `json:"route_witness_id,omitempty"`
 	ID                  string             `json:"id"`
 	EdgeID              string             `json:"edge_id"`
@@ -78,6 +81,7 @@ type Observation struct {
 }
 
 type Snapshot struct {
+	Limitations      []string                  `json:"limitations,omitempty"`
 	ActualDNSReceipt json.RawMessage           `json:"actual_dns_receipt,omitempty"`
 	NetworkSamples   []model.EdgeNetworkSample `json:"network_samples,omitempty"`
 	Schema           string                    `json:"schema"`
@@ -114,17 +118,18 @@ type Assessment struct {
 }
 
 type Result struct {
-	Mode             string         `json:"mode"`
-	DNSUnchanged     bool           `json:"dns_unchanged"`
-	PromotionReady   bool           `json:"promotion_ready"`
-	Hypothesis       string         `json:"hypothesis"`
-	ProposedEdgeID   string         `json:"proposed_edge_id"`
-	ProbeEdgeIDs     []string       `json:"probe_edge_ids"`
-	ProbeExecuted    bool           `json:"probe_executed"`
-	SustainedBuckets int            `json:"sustained_buckets"`
-	Candidates       []Assessment   `json:"candidates"`
-	RejectedRecords  map[string]int `json:"rejected_records"`
-	Blockers         []string       `json:"blockers"`
+	Comparisons      []NetworkComparison `json:"comparisons,omitempty"`
+	Mode             string              `json:"mode"`
+	DNSUnchanged     bool                `json:"dns_unchanged"`
+	PromotionReady   bool                `json:"promotion_ready"`
+	Hypothesis       string              `json:"hypothesis"`
+	ProposedEdgeID   string              `json:"proposed_edge_id"`
+	ProbeEdgeIDs     []string            `json:"probe_edge_ids"`
+	ProbeExecuted    bool                `json:"probe_executed"`
+	SustainedBuckets int                 `json:"sustained_buckets"`
+	Candidates       []Assessment        `json:"candidates"`
+	RejectedRecords  map[string]int      `json:"rejected_records"`
+	Blockers         []string            `json:"blockers"`
 }
 
 type Receipt struct {
@@ -199,6 +204,9 @@ func receiptDigest(receipt Receipt) (string, error) {
 func Evaluate(snapshot Snapshot) (Result, error) {
 	if err := validate(snapshot); err != nil {
 		return Result{}, err
+	}
+	if snapshot.Policy.Version == NetworkPolicyVersion {
+		return evaluateNetwork(snapshot), nil
 	}
 	result := Result{Mode: "shadow", DNSUnchanged: true, Hypothesis: "hold", ProposedEdgeID: snapshot.CurrentEdgeID,
 		ProbeEdgeIDs: []string{}, Candidates: []Assessment{}, RejectedRecords: map[string]int{},
@@ -407,6 +415,9 @@ func validate(snapshot Snapshot) error {
 		return errors.New("invalid shadow schema or context")
 	}
 	policy := snapshot.Policy
+	if policy.Version == NetworkPolicyVersion && (math.IsNaN(policy.MaximumNodeUtilization) || math.IsInf(policy.MaximumNodeUtilization, 0) || policy.MaximumNodeUtilization <= 0 || policy.MaximumNodeUtilization > 1) {
+		return errors.New("invalid explicit network node capacity limit")
+	}
 	if policy.EvidenceMaxAgeSeconds < 60 || policy.EvidenceMaxAgeSeconds > policy.WindowSeconds {
 		return errors.New("invalid evidence age bound")
 	}
@@ -448,6 +459,12 @@ func validate(snapshot Snapshot) error {
 		}
 		if observation.RouteWitnessID != "" {
 			witness, found := networkSamples[observation.EdgeID+"\x00"+observation.RouteWitnessID]
+			if observation.CapacitySource != "" {
+				if !found || !networkWitnessCapacityMatches(observation, witness, snapshot.CapturedAt) {
+					return errors.New("capacity observation lacks matching captured node witness")
+				}
+				continue
+			}
 			sample, sampled := networkSamples[observation.EdgeID+"\x00"+strings.TrimPrefix(observation.ID, "network:"+observation.EdgeID+":")]
 			if !found || !sampled || observation.ID != "network:"+sample.EdgeID+":"+sample.ID || !model.EdgeNetworkWitnessMatches(sample, witness) || witness.ObservedAt.After(snapshot.CapturedAt) ||
 				observation.Hostname != sample.Hostname || observation.TrafficClass != sample.TrafficClass || observation.RouteGeneration != sample.RouteDigest ||
@@ -477,5 +494,19 @@ func networkWitnessMeasurementMatches(observation Observation, sample model.Edge
 		return observation.ServiceSource == "service_endpoint_tcp" && observation.ClientSource == "" && observation.ClientNetworkMS == nil && reflect.DeepEqual(observation.ServiceNetworkMS, sample.ServiceRTTMS)
 	}
 	return sample.ClientNetwork != nil && observation.ClientSource == "public_tcp_info" && observation.ServiceSource == "" && observation.ServiceNetworkMS == nil &&
+		(observation.ClientCohort == "" || observation.ClientCohort == sample.ClientNetwork.Scope) &&
 		(observation.Scope == "global" || observation.Scope == sample.ClientNetwork.Scope) && reflect.DeepEqual(observation.ClientNetworkMS, sample.ClientNetwork.RTTMS)
+}
+
+func networkWitnessCapacityMatches(observation Observation, witness model.EdgeNetworkSample, now time.Time) bool {
+	if witness.Source != "route_tls_witness_v1" || witness.RouteWitness == nil || witness.RouteWitness.NodeCapacity == nil || witness.ObservedAt.After(now) ||
+		observation.ID != "capacity:"+witness.EdgeID+":"+witness.ID || observation.EdgeID != witness.EdgeID || observation.Hostname != witness.Hostname ||
+		observation.TrafficClass != witness.TrafficClass || observation.RouteGeneration != witness.RouteDigest || observation.ClientSource != "" || observation.ServiceSource != "" ||
+		observation.ClientNetworkMS != nil || observation.ServiceNetworkMS != nil || observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.ServiceFailureRate != nil {
+		return false
+	}
+	capacity := witness.RouteWitness.NodeCapacity
+	value, err := model.EdgeNetworkNodeUtilization(capacity)
+	return err == nil && observation.CapacitySource == capacity.Source && observation.ObservedAt.Equal(capacity.ObservedAt) &&
+		!capacity.CPUObservedAt.After(now) && !capacity.MemoryObservedAt.After(now) && observation.CapacityUtilization != nil && *observation.CapacityUtilization == value
 }

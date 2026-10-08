@@ -72,6 +72,17 @@ func ValidateEdgeNetworkNodeCapacity(capacity *EdgeNetworkNodeCapacity) error {
 	return nil
 }
 
+func EdgeNetworkNodeUtilization(capacity *EdgeNetworkNodeCapacity) (float64, error) {
+	if err := ValidateEdgeNetworkNodeCapacity(capacity); err != nil {
+		return 0, err
+	}
+	value := math.Max(float64(capacity.CPUUsageNanoCores)/1e6/float64(capacity.CPUAllocatableMilliCores), float64(capacity.MemoryWorkingSetBytes)/float64(capacity.MemoryAllocatableBytes))
+	if len(capacity.Pressure) != 0 {
+		value = math.Max(1, value)
+	}
+	return math.Min(1, value), nil
+}
+
 func EdgeNetworkWitnessMatches(sample, witness EdgeNetworkSample) bool {
 	if ValidateEdgeNetworkSample(sample) != nil || ValidateEdgeNetworkSample(witness) != nil ||
 		(sample.Source != "service_endpoint_tcp_info_v1" && sample.Source != "public_front_tcp_info_v1") || witness.Source != "route_tls_witness_v1" ||

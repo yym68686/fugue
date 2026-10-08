@@ -154,3 +154,47 @@ func TestQualityClientNetworkBindingPreservesMissingMetricsAndScope(t *testing.T
 		}
 	}
 }
+
+func TestQualityCapacityUsesWitnessDenominatorsAndOfflineBinding(t *testing.T) {
+	now := time.Now().UTC()
+	sample, proof := networkWitnessFixture(now)
+	witness, err := networkRouteWitnessSample(sample, "203.0.113.5", proof, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	witness.RouteWitness.NodeCapacity = &model.EdgeNetworkNodeCapacity{Source: "kubelet_node_allocatable_v1", NodeUID: "node-uid-a", ObservedAt: now.Add(-5 * time.Second),
+		ValidUntil: now.Add(115 * time.Second), CPUObservedAt: now.Add(-2 * time.Second), MemoryObservedAt: now.Add(-5 * time.Second),
+		CPUUsageNanoCores: 250_000_000, CPUAllocatableMilliCores: 1000, MemoryWorkingSetBytes: 128 << 20, MemoryAllocatableBytes: 1 << 30, Pressure: []string{}}
+	evidence := dnsserver.QualityAnswerEvidence{EdgeID: sample.EdgeID, Hostname: sample.Hostname, Scope: "global",
+		Proofs: []dnsserver.QualityRouteProof{{EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID, Hostname: sample.Hostname, Path: sample.PathPrefix, Proof: proof}}}
+	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: sample.Hostname, TrafficClass: sample.TrafficClass, Scope: "global",
+		Policy: edgequality.DefaultNetworkPolicy(), Candidates: []edgequality.Candidate{{EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID}}, NetworkSamples: []model.EdgeNetworkSample{witness}}
+	bindPhysicalQualityEvidence(&snapshot, evidence)
+	if len(snapshot.Observations) != 1 || snapshot.Observations[0].CapacityUtilization == nil || *snapshot.Observations[0].CapacityUtilization != 0.25 ||
+		!snapshot.Observations[0].ObservedAt.Equal(witness.RouteWitness.NodeCapacity.ObservedAt) {
+		t.Fatal("capacity denominator or metric time lost", snapshot.Observations)
+	}
+	receipt, err := edgequality.Capture(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := edgequality.Replay(receipt); err != nil {
+		t.Fatal(err)
+	}
+	for _, edit := range []func(*edgequality.Snapshot){
+		func(value *edgequality.Snapshot) { value.NetworkSamples = nil },
+		func(value *edgequality.Snapshot) {
+			value.Observations[0].CapacityUtilization = func() *float64 { changed := 0.01; return &changed }()
+		},
+		func(value *edgequality.Snapshot) { value.Observations[0].ObservedAt = now },
+		func(value *edgequality.Snapshot) { value.Observations[0].RouteGeneration = "foreign" },
+		func(value *edgequality.Snapshot) { value.Observations[0].Hostname = "other.example.test" },
+	} {
+		modified := snapshot
+		modified.Observations = append([]edgequality.Observation(nil), snapshot.Observations...)
+		edit(&modified)
+		if _, err := edgequality.Capture(modified); err == nil {
+			t.Fatal("capacity derivation trusted without original raw witness")
+		}
+	}
+}
