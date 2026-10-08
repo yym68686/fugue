@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"sort"
 	"sync"
 	"time"
 
@@ -14,38 +15,70 @@ import (
 
 type networkRouteWitnessState struct {
 	mu       sync.Mutex
-	last     map[string]time.Time
+	last     map[string]networkRouteWitnessCursor
 	inFlight int
 }
 
-func (state *networkRouteWitnessState) reserve(edgeID string, now time.Time) bool {
-	if !state.mu.TryLock() {
-		return false
-	}
-	defer state.mu.Unlock()
-	if state.inFlight >= 4 || now.Sub(state.last[edgeID]) < time.Minute {
-		return false
-	}
-	if state.last == nil {
-		state.last = map[string]time.Time{}
-	}
-	for key, previous := range state.last {
-		if now.Sub(previous) >= time.Minute {
-			delete(state.last, key)
-		}
-	}
-	if len(state.last) >= 256 {
-		return false
-	}
-	state.last[edgeID] = now
-	state.inFlight++
-	return true
+type networkRouteWitnessCursor struct {
+	at  time.Time
+	key string
 }
 
 func (state *networkRouteWitnessState) release() {
 	state.mu.Lock()
 	state.inFlight--
 	state.mu.Unlock()
+}
+
+func (state *networkRouteWitnessState) selectSample(node model.EdgeNode, samples []model.EdgeNetworkSample, now time.Time) (model.EdgeNetworkSample, bool) {
+	eligible := map[string]model.EdgeNetworkSample{}
+	for index := range samples {
+		sample := &samples[index]
+		if sample.EdgeID != node.ID || sample.EdgeGroupID != node.EdgeGroupID || sample.ObservedAt.After(now) ||
+			now.Sub(sample.ObservedAt) > 90*time.Second || model.ValidateEdgeNetworkSample(*sample) != nil ||
+			(sample.Source != "service_endpoint_tcp_info_v1" && sample.Source != "public_front_tcp_info_v1") {
+			continue
+		}
+		key := sample.Hostname + "\x00" + sample.PathPrefix + "\x00" + sample.TrafficClass
+		previous, found := eligible[key]
+		if !found || sample.ObservedAt.After(previous.ObservedAt) || sample.ObservedAt.Equal(previous.ObservedAt) && sample.ID < previous.ID {
+			eligible[key] = *sample
+		}
+	}
+	if len(eligible) == 0 || !state.mu.TryLock() {
+		return model.EdgeNetworkSample{}, false
+	}
+	defer state.mu.Unlock()
+	previous, found := state.last[node.ID]
+	if state.inFlight >= 4 || found && now.Sub(previous.at) < time.Minute {
+		return model.EdgeNetworkSample{}, false
+	}
+	if state.last == nil {
+		state.last = map[string]networkRouteWitnessCursor{}
+	}
+	for edgeID, cursor := range state.last {
+		if now.Sub(cursor.at) >= 10*time.Minute {
+			delete(state.last, edgeID)
+		}
+	}
+	if _, exists := state.last[node.ID]; !exists && len(state.last) >= 256 {
+		return model.EdgeNetworkSample{}, false
+	}
+	keys := make([]string, 0, len(eligible))
+	for key := range eligible {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	selected := keys[0]
+	for _, key := range keys {
+		if key > previous.key {
+			selected = key
+			break
+		}
+	}
+	state.last[node.ID] = networkRouteWitnessCursor{at: now, key: selected}
+	state.inFlight++
+	return eligible[selected], true
 }
 
 func (s *Server) observeNetworkRouteWitness(node model.EdgeNode, samples []model.EdgeNetworkSample, now time.Time) {
@@ -57,22 +90,10 @@ func (s *Server) observeNetworkRouteWitness(node model.EdgeNode, samples []model
 	if err != nil || !platformconfig.PublicDNSFlattenIP(ip) {
 		return
 	}
-	var selected *model.EdgeNetworkSample
-	for index := range samples {
-		sample := &samples[index]
-		if sample.EdgeID != node.ID || sample.EdgeGroupID != node.EdgeGroupID || sample.ObservedAt.After(now) ||
-			now.Sub(sample.ObservedAt) > 90*time.Second || model.ValidateEdgeNetworkSample(*sample) != nil ||
-			(sample.Source != "service_endpoint_tcp_info_v1" && sample.Source != "public_front_tcp_info_v1") {
-			continue
-		}
-		if selected == nil || sample.ObservedAt.After(selected.ObservedAt) {
-			selected = sample
-		}
-	}
-	if selected == nil || !s.networkRouteWitness.reserve(node.ID, now) {
+	sample, ok := s.networkRouteWitness.selectSample(node, samples, now)
+	if !ok {
 		return
 	}
-	sample := *selected
 	go func() {
 		defer s.networkRouteWitness.release()
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)

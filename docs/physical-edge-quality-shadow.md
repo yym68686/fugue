@@ -376,6 +376,15 @@ existing route-proof endpoint answers without forwarding to the application.
 The heartbeat never waits for this observation, and failure cannot affect DNS,
 business requests, configuration or positive LKG.
 
+Eligible routes rotate by hostname, path and traffic class within that unchanged
+per-edge budget. The latest sample is used within each route, not across all
+routes; otherwise a busy hostname can indefinitely displace every less recent
+eligible hostname. Rotation does not bypass freshness or identity checks, and
+does not increase the four-probe in-flight bound. Per-edge cursors are capped at
+256 and expire after ten idle minutes; a contended observer never blocks the
+heartbeat. This improves proof scheduling, not terminal path coverage: absent
+client measurements remain unknown.
+
 The retained `route_tls_witness_v1` record is not a latency or availability
 measurement. It binds an exact physical edge, group, hostname, path, class,
 bundle version and route digest. A heartbeat caller cannot submit this source.
