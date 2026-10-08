@@ -154,6 +154,7 @@ func TestNetworkHeartbeatFallbackOnlyRetriesExactUnsupportedField(t *testing.T) 
 	}{
 		{http.StatusForbidden, `{"error":"json: unknown field \"network_samples\""}`},
 		{http.StatusBadRequest, `{"error":"invalid edge identity"}`},
+		{http.StatusBadRequest, `{"error":"json: unknown field \"client_network\""}`},
 		{http.StatusInternalServerError, `{"error":"database unavailable"}`},
 	} {
 		attempts := 0
@@ -177,5 +178,40 @@ func TestNetworkHeartbeatFallbackOnlyRetriesExactUnsupportedField(t *testing.T) 
 		if err != nil || attempts != 1 || response.StatusCode != test.status || string(body) != test.body {
 			t.Fatal("unrelated failure retried or hidden", attempts, string(body), err)
 		}
+	}
+}
+
+func TestClientNetworkExtensionDoesNotBreakHeartbeatAgainstOriginOnlyAPI(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempts++
+		var fields map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&fields); err != nil {
+			t.Error(err)
+		}
+		if string(fields["edge_id"]) != `"edge-a"` || string(fields["performance_samples"]) != `[{"id":"ordinary-sample"}]` {
+			t.Error("normal heartbeat fields changed")
+		}
+		if _, exists := fields["network_samples"]; exists {
+			writer.WriteHeader(http.StatusBadRequest)
+			io.WriteString(writer, `{"error":"json: unknown field \"client_network\""}`)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	service := &Service{HTTPClient: server.Client()}
+	payload := []byte(`{"edge_id":"edge-a","performance_samples":[{"id":"ordinary-sample"}],"network_samples":[{"id":"network-sample","client_network":{}}]}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.sendHeartbeatWithOptionalNetworkSamples(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || attempts != 2 {
+		t.Fatal("origin-only API compatibility failed", response.StatusCode, attempts)
 	}
 }

@@ -112,6 +112,10 @@
                   {
                     "name": "FUGUE_EDGE_FRONT_SLOT_B_HTTPS_PORT",
                     "value": "28443"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_NETWORK_SOCKET",
+                    "value": "/var/run/fugue-network/front.sock"
                   }
                 ],
                 "image": "fugue-artifact://edge-worker",
@@ -187,6 +191,11 @@
                   {
                     "mountPath": "/var/lib/fugue-edge-front",
                     "name": "activation-state"
+                  },
+                  {
+                    "name": "network-observations",
+                    "mountPath": "/var/run/fugue-network",
+                    "readOnly": false
                   }
                 ]
               }
@@ -219,6 +228,13 @@
                   "type": "DirectoryOrCreate"
                 },
                 "name": "activation-state"
+              },
+              {
+                "name": "network-observations",
+                "hostPath": {
+                  "path": "/var/lib/fugue/edge-owned/@@GROUP_ID@@/network-observations",
+                  "type": "DirectoryOrCreate"
+                }
               }
             ]
           }
@@ -422,6 +438,10 @@
                   {
                     "name": "FUGUE_EDGE_PLATFORM_TOKEN_FILE",
                     "value": "/var/run/secrets/fugue-platform-consumer/token"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_NETWORK_SOCKET",
+                    "value": "/var/run/fugue-network/front.sock"
                   }
                 ],
                 "image": "fugue-artifact://edge-worker",
@@ -519,6 +539,11 @@
                   {
                     "name": "platform-consumer-identity",
                     "mountPath": "/var/run/secrets/fugue-platform-consumer",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "network-observations",
+                    "mountPath": "/var/run/fugue-network",
                     "readOnly": true
                   }
                 ]
@@ -819,6 +844,13 @@
                     }
                   ]
                 }
+              },
+              {
+                "name": "network-observations",
+                "hostPath": {
+                  "path": "/var/lib/fugue/edge-owned/@@GROUP_ID@@/network-observations",
+                  "type": "DirectoryOrCreate"
+                }
               }
             ]
           }
@@ -1022,6 +1054,10 @@
                   {
                     "name": "FUGUE_EDGE_PLATFORM_TOKEN_FILE",
                     "value": "/var/run/secrets/fugue-platform-consumer/token"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_NETWORK_SOCKET",
+                    "value": "/var/run/fugue-network/front.sock"
                   }
                 ],
                 "image": "fugue-artifact://edge-worker",
@@ -1119,6 +1155,11 @@
                   {
                     "name": "platform-consumer-identity",
                     "mountPath": "/var/run/secrets/fugue-platform-consumer",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "network-observations",
+                    "mountPath": "/var/run/fugue-network",
                     "readOnly": true
                   }
                 ]
@@ -1418,6 +1459,13 @@
                       }
                     }
                   ]
+                }
+              },
+              {
+                "name": "network-observations",
+                "hostPath": {
+                  "path": "/var/lib/fugue/edge-owned/@@GROUP_ID@@/network-observations",
+                  "type": "DirectoryOrCreate"
                 }
               }
             ]

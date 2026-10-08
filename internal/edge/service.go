@@ -111,6 +111,8 @@ type Service struct {
 	performanceBaseline     telemetry
 	networkSampleMu         sync.Mutex
 	networkSamples          []model.EdgeNetworkSample
+	frontNetworkInFlight    atomic.Bool
+	frontNetworkLast        atomic.Int64
 	cacheRevalidating       map[string]struct{}
 	bodyBufferActiveMu      sync.Mutex
 	activeBodyBufferReads   map[string]edgeActiveRequestBodyBuffer
@@ -1257,6 +1259,9 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		observed.RequestBytes = r.ContentLength
 	}
 	observed.Streaming = observed.WebSocket || observed.SSE
+	if ok {
+		s.observePublicClientNetwork(r, selectedRoute, bundleVersion, startedAt)
+	}
 	cacheDecision := s.edgeCacheDecision(r, selectedRoute)
 	if len(route.Upstreams) > 0 {
 		cacheDecision.Enabled = false

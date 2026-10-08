@@ -18,6 +18,7 @@ func ConfigFromEnv() Config {
 		HTTPListenAddr:     envValue("FUGUE_EDGE_FRONT_HTTP_LISTEN_ADDR", ":80"),
 		HTTPSListenAddr:    envValue("FUGUE_EDGE_FRONT_HTTPS_LISTEN_ADDR", ":443"),
 		HealthAddr:         envValue("FUGUE_EDGE_FRONT_HEALTH_LISTEN_ADDR", ":7831"),
+		NetworkSocket:      envValue("FUGUE_EDGE_FRONT_NETWORK_SOCKET", ""),
 		EdgeID:             envValue("FUGUE_EDGE_FRONT_EDGE_ID", nodeHost),
 		EdgeGroupID:        envFileValue(nodeEnv, "FUGUE_EDGE_FRONT_EDGE_GROUP_ID", envFileValue(nodeEnv, "FUGUE_EDGE_GROUP_ID", "")),
 		NodeHost:           nodeHost,

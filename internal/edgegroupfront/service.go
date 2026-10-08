@@ -39,6 +39,7 @@ type Config struct {
 	HTTPListenAddr         string
 	HTTPSListenAddr        string
 	HealthAddr             string
+	NetworkSocket          string
 	EdgeID                 string
 	EdgeGroupID            string
 	NodeHost               string
@@ -63,6 +64,7 @@ type Service struct {
 	active         map[string]edgeFrontActiveTCPConnection
 	metrics        edgeFrontMetrics
 	sequence       uint64
+	networkLast    time.Time
 }
 
 type tcpCopyResult = tcpproxy.CopyResult
@@ -128,6 +130,14 @@ func (s *Service) Run(ctx context.Context) error {
 
 	var wg sync.WaitGroup
 	shutdowns := make([]func(context.Context) error, 0, 3)
+	if cfg.NetworkSocket != "" {
+		shutdown, err := s.startNetworkObservation(cfg)
+		if err != nil {
+			s.Logger.Printf("public Front network observation unavailable: %v", err)
+		} else {
+			shutdowns = append(shutdowns, shutdown)
+		}
+	}
 
 	if strings.TrimSpace(cfg.HealthAddr) != "" {
 		shutdown, err := s.startHealthServer(cfg, &wg)

@@ -277,7 +277,7 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 						"request": map[string]any{
 							"set": map[string][]string{
 								"X-Fugue-Edge-Route-Host":         []string{"{http.vars.fugue_route_host}"},
-								"X-Fugue-Edge-Client-Remote-Addr": []string{"{http.request.remote.host}:{http.request.remote.port}"},
+								"X-Fugue-Edge-Client-Remote-Addr": []string{"{http.request.remote}"},
 								"X-Forwarded-For":                 []string{"{http.request.remote.host}"},
 								"X-Forwarded-Host":                []string{"{http.request.host}"},
 							},

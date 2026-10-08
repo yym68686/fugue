@@ -276,6 +276,7 @@ type EdgeConfig struct {
 	CaddyTLSMode                    string
 	CaddyTLSAskURL                  string
 	CaddyProxyListenAddr            string
+	FrontNetworkSocket              string
 	CaddyProxyProtocolEnabled       bool
 	CaddyProxyProtocolTrustedCIDRs  []string
 	CaddyDataDir                    string
@@ -681,6 +682,7 @@ func EdgeFromEnv() EdgeConfig {
 		CaddyTLSMode:              getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
 		CaddyTLSAskURL:            strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
 		CaddyProxyListenAddr:      getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
+		FrontNetworkSocket:        getenv("FUGUE_EDGE_FRONT_NETWORK_SOCKET", ""),
 		CaddyProxyProtocolEnabled: getenvBool("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_ENABLED", true),
 		CaddyProxyProtocolTrustedCIDRs: getenvListDefault("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_TRUSTED_CIDRS", []string{
 			"127.0.0.1/32",

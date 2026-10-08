@@ -20,11 +20,9 @@ func (s *Service) observeOriginNetwork(observed *edgeProxyObservation, connectio
 		return
 	}
 	defer s.networkSampleMu.Unlock()
-	if len(s.networkSamples) > 0 && now.Sub(s.networkSamples[len(s.networkSamples)-1].ObservedAt) < time.Second {
-		return
-	}
 	for _, previous := range s.networkSamples {
-		if previous.Hostname == observed.Route.Hostname && previous.PathPrefix == model.NormalizeAppRoutePathPrefix(observed.Route.PathPrefix) && now.Sub(previous.ObservedAt) < time.Minute {
+		if previous.Source == "service_endpoint_tcp_info_v1" && (now.Sub(previous.ObservedAt) < time.Second ||
+			(previous.Hostname == observed.Route.Hostname && previous.PathPrefix == model.NormalizeAppRoutePathPrefix(observed.Route.PathPrefix) && now.Sub(previous.ObservedAt) < time.Minute)) {
 			return
 		}
 	}
@@ -38,9 +36,32 @@ func (s *Service) observeOriginNetwork(observed *edgeProxyObservation, connectio
 	if !ok {
 		return
 	}
+	s.appendNetworkSampleLocked(sample)
+}
+
+func (s *Service) appendNetworkSampleLocked(sample model.EdgeNetworkSample) {
 	if len(s.networkSamples) >= 32 {
-		copy(s.networkSamples, s.networkSamples[1:])
-		s.networkSamples = s.networkSamples[:31]
+		oldest, count := -1, 0
+		for index, previous := range s.networkSamples {
+			if previous.Source == sample.Source {
+				if oldest < 0 {
+					oldest = index
+				}
+				count++
+			}
+		}
+		if count < 16 {
+			for index, previous := range s.networkSamples {
+				if previous.Source != sample.Source {
+					oldest = index
+					break
+				}
+			}
+		}
+		if oldest < 0 {
+			oldest = 0
+		}
+		s.networkSamples = append(s.networkSamples[:oldest], s.networkSamples[oldest+1:]...)
 	}
 	s.networkSamples = append(s.networkSamples, sample)
 }
@@ -100,7 +121,7 @@ func (s *Service) sendHeartbeatWithOptionalNetworkSamples(request *http.Request)
 	var failure struct {
 		Error string `json:"error"`
 	}
-	if readErr != nil || json.Unmarshal(body, &failure) != nil || failure.Error != `json: unknown field "network_samples"` {
+	if readErr != nil || json.Unmarshal(body, &failure) != nil || (failure.Error != `json: unknown field "network_samples"` && failure.Error != `json: unknown field "client_network"`) {
 		return response, nil
 	}
 	original, err := request.GetBody()
@@ -114,6 +135,21 @@ func (s *Service) sendHeartbeatWithOptionalNetworkSamples(request *http.Request)
 	}
 	if _, exists := fields["network_samples"]; !exists {
 		return response, nil
+	}
+	if failure.Error == `json: unknown field "client_network"` {
+		var samples []map[string]json.RawMessage
+		if json.Unmarshal(fields["network_samples"], &samples) != nil {
+			return response, nil
+		}
+		found := false
+		for _, sample := range samples {
+			if _, exists := sample["client_network"]; exists {
+				found = true
+			}
+		}
+		if !found {
+			return response, nil
+		}
 	}
 	delete(fields, "network_samples")
 	payload, err := json.Marshal(fields)
