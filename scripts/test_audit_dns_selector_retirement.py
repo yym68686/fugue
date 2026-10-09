@@ -27,6 +27,27 @@ def seal(artifact):
 
 
 class RetirementAuditTests(unittest.TestCase):
+    def test_explicit_order_is_separate_from_measured_quality(self):
+        artifact = fixture("physical_order")
+        rule = artifact["content"]["policy"]["dns_answer_rules"][0]
+        policy = artifact["content"]["query_views"][0]["records"][0]["answer_policy"]
+        rule["physical_order"] = {"version": "physical-order-v1", "ordered_edge_ids": ["edge-a"]}
+        policy["physical_order"] = copy.deepcopy(rule["physical_order"])
+        seal(artifact)
+        result = audit_artifact(artifact)
+        self.assertTrue(result["query_policy_compatible_with_legacy_removal"])
+        self.assertEqual(result["ordered_query_count"], 1)
+        self.assertEqual(result["physical_query_count"], 0)
+        for scenario in ["unknown", "different_rule", "ecs", "exploration", "measurement"]:
+            changed = copy.deepcopy(artifact)
+            policy = changed["content"]["query_views"][0]["records"][0]["answer_policy"]
+            if scenario == "unknown": policy["physical_order"]["ordered_edge_ids"] = ["foreign"]
+            elif scenario == "different_rule": changed["content"]["policy"]["dns_answer_rules"][0].pop("physical_order")
+            elif scenario == "ecs": policy["ecs_enabled"] = True
+            elif scenario == "exploration": policy["exploration_percent"] = 5
+            elif scenario == "measurement": policy["physical_selection"] = {"primary_edge_id": "edge-a"}
+            with self.assertRaises(ValueError): audit_artifact(seal(changed))
+
     def test_legacy_artifact_blocks_removal_without_inferring_live_state(self):
         for kind in ["geo", "latency_aware", "weighted", "unrecognized"]:
             result = audit_artifact({"artifact": fixture(kind)})

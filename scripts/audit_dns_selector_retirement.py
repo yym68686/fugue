@@ -28,7 +28,7 @@ def audit_artifact(document):
         if not all(key) or key in declared or not rule.get("selection_mode"):
             raise ValueError("duplicate or incomplete DNS rule")
         declared[key] = rule
-    dependencies, physical, static, seen = [], [], [], set()
+    dependencies, physical, ordered, static, seen = [], [], [], [], set()
     for view in views:
         if not view.get("node_id") or not view.get("zone") or not isinstance(view.get("records"), list):
             raise ValueError("incomplete DNS query view")
@@ -51,10 +51,25 @@ def audit_artifact(document):
             candidates = record.get("candidates")
             if not isinstance(candidates, list) or not candidates:
                 raise ValueError("dynamic query lacks candidates")
-            if kind != "physical_quality":
+            if kind not in ["physical_quality", "physical_order"]:
                 dependencies.append(dict(identity, policy_kind=kind,
                     scoped_profiles=len(record.get("scoped_candidates", [])),
                     exploration_percent=rule.get("exploration_percent")))
+                continue
+            if kind == "physical_order":
+                declared_order = policy.get("physical_order", {})
+                order = declared_order.get("ordered_edge_ids", [])
+                authorized = {candidate.get("edge_id") for candidate in candidates}
+                if (declared_order.get("version") != "physical-order-v1" or
+                        declared_order != rule.get("physical_order") or not order or
+                        len(set(order)) != len(order) or not set(order).issubset(authorized) or
+                        record.get("scoped_candidates") or policy.get("physical_selection") or
+                        rule.get("exploration_percent", 0) or rule.get("scoped_selection_mode") or
+                        policy.get("ecs_enabled") or rule.get("ecs_enabled") or
+                        policy.get("exploration_percent", 0) or policy.get("selected_edge_group_id") or
+                        policy.get("preferred_edge_groups") or policy.get("fallback_edge_groups")):
+                    raise ValueError("ordered query contains legacy or ambiguous selection authority")
+                ordered.append(identity)
                 continue
             selection = policy.get("physical_selection", {})
             order = selection.get("ordered_edge_ids", [])
@@ -76,7 +91,7 @@ def audit_artifact(document):
         "serving_state_verified": False, "positive_lkg_verified": False,
         "legacy_queries": dependencies,
         "legacy_hostname_count": len({entry["hostname"] for entry in dependencies}),
-        "physical_query_count": len(physical), "static_query_count": len(static),
+        "physical_query_count": len(physical), "ordered_query_count": len(ordered), "static_query_count": len(static),
         "query_policy_compatible_with_legacy_removal": not dependencies,
     }
 
