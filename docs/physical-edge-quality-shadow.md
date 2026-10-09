@@ -392,6 +392,17 @@ from opted-in queries. Other query rules and static DNS intent remain unchanged.
 Code rollout, an adapter unit test or a signed order preserving the existing
 primary is not evidence that a production detour has been eliminated.
 
+The separate `physical_order` contract is an explicit configuration order for
+queries whose measured-quality migration is not yet complete. Its
+`physical-order-v1` list is part of the signed answer rule and must exactly match
+the compiled query policy. It does not carry or manufacture quality evidence.
+DNS removes endpoints lacking current readiness and selects the first remaining
+physical endpoint; candidate scores, weights, country hints and exploration do
+not override the declared list. Deploying support does not rewrite any legacy
+artifact. Publication requires `physical_order_v1` capability from the required
+traffic executors. Migrating current configuration and recovery artifacts remains
+a separate operation before retiring the old selector.
+
 The `physical_dns` producer reconfiguration operation is a separate configuration
 transaction. It accepts only a continuously serving global predecessor, an exact
 current full publication produced by that predecessor, and its unexpired verified

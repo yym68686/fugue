@@ -23,3 +23,4 @@ const DNSAuthorityTransitionCapabilityV1 = "dns_authority_transition_v1"
 const DNSRouteSourcesCapabilityV1 = "dns_route_sources_v1"
 
 const PhysicalNetworkBoundedCapabilityV3 = "physical_network_bounded_v3"
+const PhysicalOrderCapabilityV1 = "physical_order_v1"

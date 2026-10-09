@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -15,17 +16,18 @@ import (
 )
 
 type DNSAnswerRule struct {
-	NodeID                string   `json:"node_id"`
-	Hostname              string   `json:"hostname"`
-	Type                  string   `json:"type"`
-	SelectionMode         string   `json:"selection_mode"`
-	ScopedSelectionMode   string   `json:"scoped_selection_mode,omitempty"`
-	PreferredEdgeGroups   []string `json:"preferred_edge_groups,omitempty"`
-	FallbackEdgeGroups    []string `json:"fallback_edge_groups,omitempty"`
-	TTLSeconds            int      `json:"ttl_seconds"`
-	ECSEnabled            bool     `json:"ecs_enabled"`
-	ExplorationPercent    int      `json:"exploration_percent"`
-	SwitchCooldownSeconds int      `json:"switch_cooldown_seconds"`
+	PhysicalOrder         *model.DNSPhysicalOrder `json:"physical_order,omitempty"`
+	NodeID                string                  `json:"node_id"`
+	Hostname              string                  `json:"hostname"`
+	Type                  string                  `json:"type"`
+	SelectionMode         string                  `json:"selection_mode"`
+	ScopedSelectionMode   string                  `json:"scoped_selection_mode,omitempty"`
+	PreferredEdgeGroups   []string                `json:"preferred_edge_groups,omitempty"`
+	FallbackEdgeGroups    []string                `json:"fallback_edge_groups,omitempty"`
+	TTLSeconds            int                     `json:"ttl_seconds"`
+	ECSEnabled            bool                    `json:"ecs_enabled"`
+	ExplorationPercent    int                     `json:"exploration_percent"`
+	SwitchCooldownSeconds int                     `json:"switch_cooldown_seconds"`
 }
 
 type DNSSelectionCandidate struct {
@@ -85,7 +87,7 @@ type DNSQueryView struct {
 
 func dnsQueryKey(node, hostname, kind string) string { return node + "\x00" + hostname + "\x00" + kind }
 func dnsSelectionModeValid(mode string) bool {
-	return slices.Contains([]string{"geo", "latency_aware", model.DNSAnswerPolicyKindPhysicalQuality, "global", "weighted", "pinned", "disabled"}, mode)
+	return slices.Contains([]string{"geo", "latency_aware", model.DNSAnswerPolicyKindPhysicalQuality, model.DNSAnswerPolicyKindPhysicalOrder, "global", "weighted", "pinned", "disabled"}, mode)
 }
 func ValidateDNSAnswerRules(rules []DNSAnswerRule) error {
 	if len(rules) > 20000 {
@@ -98,6 +100,16 @@ func ValidateDNSAnswerRules(rules []DNSAnswerRule) error {
 			return fmt.Errorf("invalid DNS answer rule")
 		}
 		seen[key] = true
+		if r.SelectionMode == model.DNSAnswerPolicyKindPhysicalOrder {
+			if model.ValidateDNSPhysicalOrder(r.PhysicalOrder) != nil || r.ECSEnabled || r.ExplorationPercent != 0 || r.ScopedSelectionMode != "" || len(r.PreferredEdgeGroups) != 0 || len(r.FallbackEdgeGroups) != 0 {
+				return fmt.Errorf("physical order requires explicit order without legacy authority")
+			}
+		} else if r.PhysicalOrder != nil {
+			return fmt.Errorf("physical order cannot authorize another selection mode")
+		}
+		if r.ScopedSelectionMode == model.DNSAnswerPolicyKindPhysicalOrder {
+			return fmt.Errorf("physical order cannot be scoped")
+		}
 		if r.SelectionMode == model.DNSAnswerPolicyKindPhysicalQuality && (r.ExplorationPercent != 0 || r.ScopedSelectionMode != "" || len(r.PreferredEdgeGroups) != 0 || len(r.FallbackEdgeGroups) != 0) {
 			return fmt.Errorf("physical-edge selection cannot inherit legacy preferences or exploration")
 		}
@@ -122,6 +134,7 @@ func ValidateDNSAnswerRules(rules []DNSAnswerRule) error {
 func normalizeDNSAnswerRules(in []DNSAnswerRule) []DNSAnswerRule {
 	out := append([]DNSAnswerRule(nil), in...)
 	for i := range out {
+		out[i].PhysicalOrder = model.CloneDNSPhysicalOrder(in[i].PhysicalOrder)
 		out[i].PreferredEdgeGroups = append([]string(nil), in[i].PreferredEdgeGroups...)
 		out[i].FallbackEdgeGroups = append([]string(nil), in[i].FallbackEdgeGroups...)
 	}
@@ -295,6 +308,7 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 				sort.Strings(record.Values)
 				record.AnswerPolicy = model.DNSAnswerPolicy{PolicyKind: rule.SelectionMode, AllowedEdgeGroups: uniqueSorted(groups), PreferredEdgeGroups: rule.PreferredEdgeGroups, FallbackEdgeGroups: rule.FallbackEdgeGroups, TTLSeconds: rule.TTLSeconds, ECSEnabled: rule.ECSEnabled, HealthRequired: true, RouteReadyRequired: true, ExplorationPercent: rule.ExplorationPercent, SwitchCooldownSec: rule.SwitchCooldownSeconds, RankingVersion: fact.RankingVersion, RankingScope: fact.RankingScope, Reason: fact.Reason, ShadowReason: fact.ShadowReason, Weight: fact.Weight}
 				record.AnswerPolicy.PhysicalSelection = model.CloneDNSPhysicalSelection(fact.PhysicalSelection)
+				record.AnswerPolicy.PhysicalOrder = model.CloneDNSPhysicalOrder(rule.PhysicalOrder)
 				candidateGroups := []string{}
 				for _, c := range candidates {
 					candidateGroups = append(candidateGroups, c.EdgeGroupID)
@@ -408,6 +422,9 @@ func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNS
 			if r.AppID != original.AppID || r.TenantID != original.TenantID || r.RecordKind != original.RecordKind || r.Status != original.Status || r.StatusReason != original.StatusReason || r.EdgeGroupID != original.EdgeGroupID || r.FallbackEdgeGroupID != original.FallbackEdgeGroupID {
 				return fmt.Errorf("DNS query record ownership differs")
 			}
+			if !reflect.DeepEqual(r.AnswerPolicy.PhysicalOrder, rule.PhysicalOrder) {
+				return fmt.Errorf("DNS physical order differs from explicit rule")
+			}
 			used[dnsQueryKey(view.NodeID, r.Name, r.Type)] = true
 			allowed := map[string]DNSReadinessTarget{}
 			for _, t := range ready.Targets {
@@ -468,6 +485,26 @@ func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNS
 func validateDNSPhysicalQuery(record model.EdgeDNSRecord) error {
 	policy := record.AnswerPolicy
 	selection := policy.PhysicalSelection
+	if policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalOrder {
+		if model.ValidateDNSPhysicalOrder(policy.PhysicalOrder) != nil || selection != nil || policy.ECSEnabled ||
+			policy.ExplorationPercent != 0 || policy.SelectedEdgeGroupID != "" || policy.ShadowSelectedEdgeGroupID != "" ||
+			len(policy.PreferredEdgeGroups) != 0 || len(policy.FallbackEdgeGroups) != 0 || len(record.ScopedCandidates) != 0 || policy.Weight != 0 || policy.Priority != 0 {
+			return fmt.Errorf("physical order contains conflicting selection authority")
+		}
+		available := map[string]bool{}
+		for _, candidate := range record.Candidates {
+			available[candidate.EdgeID] = true
+		}
+		for _, edgeID := range policy.PhysicalOrder.OrderedEdgeIDs {
+			if !available[edgeID] {
+				return fmt.Errorf("physical order contains unauthorized endpoint")
+			}
+		}
+		return nil
+	}
+	if policy.PhysicalOrder != nil {
+		return fmt.Errorf("physical order cannot authorize another selector")
+	}
 	if policy.PolicyKind != model.DNSAnswerPolicyKindPhysicalQuality {
 		if selection != nil {
 			return fmt.Errorf("physical-edge evidence cannot authorize a legacy selector")

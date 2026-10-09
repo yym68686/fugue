@@ -563,6 +563,7 @@ type CachePolicy struct {
 }
 
 type DNSAnswerPolicy struct {
+	PhysicalOrder             *DNSPhysicalOrder     `json:"physical_order,omitempty"`
 	PhysicalSelection         *DNSPhysicalSelection `json:"physical_selection,omitempty"`
 	PolicyKind                string                `json:"policy_kind"`
 	AllowedEdgeGroups         []string              `json:"allowed_edge_groups,omitempty"`

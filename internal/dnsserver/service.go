@@ -2991,6 +2991,15 @@ func edgeDNSAnswerCandidateDecision(record model.EdgeDNSRecord, hint dnsGeoHint,
 }
 
 func edgeDNSSelectionResult(decision edgeDNSCandidateOrderDecision, answered []model.EdgeDNSAnswerCandidate, filtered []edgeDNSFilteredCandidate) string {
+	if decision.Policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalOrder {
+		if len(answered) == 0 {
+			return "physical_order_no_ready_endpoint"
+		}
+		if order := decision.Policy.PhysicalOrder; order != nil && len(order.OrderedEdgeIDs) > 0 && answered[0].EdgeID == order.OrderedEdgeIDs[0] {
+			return "physical_order_primary"
+		}
+		return "physical_order_readiness_failover"
+	}
 	if decision.Policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalQuality {
 		if len(answered) == 0 {
 			return "physical_no_ready_endpoint"
@@ -3066,6 +3075,9 @@ func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, now t
 }
 
 func edgeDNSOrderedCandidatesWithDecision(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time, liveTLSProbeEnabled bool) ([]model.EdgeDNSAnswerCandidate, edgeDNSCandidateOrderDecision) {
+	if record.AnswerPolicy.PolicyKind == model.DNSAnswerPolicyKindPhysicalOrder {
+		return declaredPhysicalEdgeOrder(record, hint, liveTLSProbeEnabled)
+	}
 	if record.AnswerPolicy.PolicyKind == model.DNSAnswerPolicyKindPhysicalQuality {
 		return physicalEdgeOrderedCandidates(record, hint, liveTLSProbeEnabled)
 	}

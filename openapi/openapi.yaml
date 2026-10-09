@@ -261,6 +261,9 @@ x-fugue-traffic-consumer-capability:
     physical_network_bounded_v3 capability on every required route, DNS and TLS
     consumer before gray or full publication. It covers policy decoding and
     immutable physical DNS order execution, not measurement quality or apply.
+    A physical_order answer rule additionally requires physical_order_v1 on
+    every required traffic consumer before gray or full publication. This
+    declares decoding and execution support, not network quality evidence.
 x-fugue-traffic-consumer-rollback:
   semantics: >-
     A trusted traffic consumer can report an older artifact generation only
@@ -20312,7 +20315,9 @@ components:
       properties:
         policy_kind:
           type: string
-          enum: [global, geo, weighted, latency_aware, physical_quality, pinned, disabled]
+          enum: [global, geo, weighted, latency_aware, physical_quality, physical_order, pinned, disabled]
+        physical_order:
+          $ref: '#/components/schemas/DNSPhysicalOrder'
         physical_selection:
           $ref: '#/components/schemas/DNSPhysicalSelection'
         allowed_edge_groups:
@@ -20366,6 +20371,14 @@ components:
           type: string
         shadow_reason:
           type: string
+    DNSPhysicalOrder:
+      type: object
+      additionalProperties: false
+      required: [version, ordered_edge_ids]
+      description: Explicit immutable physical-edge order. This is configuration authority, not a claim of measured network superiority. The first currently route/TLS-ready endpoint wins. Geography, numeric candidate scores, group weights and exploration cannot reorder it. Deploying support does not convert an existing signed policy.
+      properties:
+        version: {type: string, enum: [physical-order-v1]}
+        ordered_edge_ids: {type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
     DNSPhysicalSelection:
       type: object
       additionalProperties: false
@@ -34364,7 +34377,9 @@ components:
         node_id: {type: string}
         hostname: {type: string}
         type: {type: string, enum: [A, AAAA]}
-        selection_mode: {type: string, enum: [geo, latency_aware, physical_quality, global, weighted, pinned, disabled]}
+        selection_mode: {type: string, enum: [geo, latency_aware, physical_quality, physical_order, global, weighted, pinned, disabled]}
+        physical_order:
+          $ref: '#/components/schemas/DNSPhysicalOrder'
         scoped_selection_mode: {type: string, enum: [geo, latency_aware, global, weighted, pinned, disabled]}
         preferred_edge_groups: {type: array, maxItems: 4096, items: {type: string}}
         fallback_edge_groups: {type: array, maxItems: 4096, items: {type: string}}

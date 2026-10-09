@@ -8,7 +8,34 @@ import (
 )
 
 const DNSAnswerPolicyKindPhysicalQuality = "physical_quality"
+const DNSAnswerPolicyKindPhysicalOrder = "physical_order"
 const DNSPhysicalSelectionVersion = "physical-edge-network-v1"
+
+type DNSPhysicalOrder struct {
+	Version        string   `json:"version"`
+	OrderedEdgeIDs []string `json:"ordered_edge_ids"`
+}
+
+func ValidateDNSPhysicalOrder(order *DNSPhysicalOrder) error {
+	if order == nil || order.Version != "physical-order-v1" || len(order.OrderedEdgeIDs) == 0 || len(order.OrderedEdgeIDs) > 256 {
+		return errors.New("invalid physical-edge order")
+	}
+	seen := map[string]bool{}
+	for _, edgeID := range order.OrderedEdgeIDs {
+		if edgeID == "" || len(edgeID) > 128 || strings.ContainsAny(edgeID, " \t\r\n\x00") || seen[edgeID] {
+			return errors.New("invalid physical-edge order identity")
+		}
+		seen[edgeID] = true
+	}
+	return nil
+}
+
+func CloneDNSPhysicalOrder(order *DNSPhysicalOrder) *DNSPhysicalOrder {
+	if order == nil {
+		return nil
+	}
+	return &DNSPhysicalOrder{Version: order.Version, OrderedEdgeIDs: append([]string(nil), order.OrderedEdgeIDs...)}
+}
 
 type DNSPhysicalSelection struct {
 	Version        string     `json:"version"`

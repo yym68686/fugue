@@ -103,6 +103,10 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		if err != nil {
 			return fail("physical network policy cannot be decoded")
 		}
+		orderRequired, err := physicalOrderCapabilityRequired(child)
+		if err != nil {
+			return fail("physical order policy cannot be decoded")
+		}
 		for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
 			if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
 				return fail("member lineage differs")
@@ -152,6 +156,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
 					return fail("physical network v3 capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
+				if orderRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalOrderCapabilityV1) {
+					return fail("physical order capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
+				}
 				if found || !trafficCapabilityFactFresh(expected, fact, now) || cellRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) || cellDNS && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellDNSCapabilityV1) || authorityTransition && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAuthorityTransitionCapabilityV1) || len(sources) > 0 && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSRouteSourcesCapabilityV1) {
 					return fail("fresh authenticated traffic capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
@@ -193,6 +200,27 @@ func physicalNetworkCapabilityRequired(artifact model.PlatformArtifact) (bool, e
 			if route.Policy.Version == model.PhysicalBoundedNetworkPolicyVersion {
 				return true, nil
 			}
+		}
+	}
+	return false, nil
+}
+
+func physicalOrderCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {
+	var payload struct {
+		Policy struct {
+			Rules []platformconfig.DNSAnswerRule `json:"dns_answer_rules"`
+		} `json:"policy"`
+	}
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false, err
+	}
+	for _, rule := range payload.Policy.Rules {
+		if rule.SelectionMode == model.DNSAnswerPolicyKindPhysicalOrder {
+			return true, nil
 		}
 	}
 	return false, nil
