@@ -34289,6 +34289,8 @@ components:
       required: [ranking_mode, preference_mode, ecs_enabled, exploration_percent, switch_cooldown_seconds, minimum_ttl_seconds, maximum_ttl_seconds]
       description: Producer query strategy, independent of runtime ranking, locality and candidate eligibility. The producer observes inventory and ranking directly, expands concrete DNSAnswerRules, and never reads legacy DNS bundles when this policy is present. Readiness remains independently proven.
       properties:
+        ordered_projection:
+          $ref: '#/components/schemas/PlatformDNSOrderedProjection'
         physical_routes:
           type: array
           maxItems: 64
@@ -34302,6 +34304,25 @@ components:
         switch_cooldown_seconds: {type: integer, minimum: 0, maximum: 86400}
         minimum_ttl_seconds: {type: integer, minimum: 1, maximum: 3600}
         maximum_ttl_seconds: {type: integer, minimum: 1, maximum: 3600}
+    PlatformDNSOrderedProjection:
+      type: object
+      additionalProperties: false
+      required: [default_order, overrides]
+      description: Explicit physical order configuration for dynamic queries outside measured physical_routes. The default handles new owned queries; exact node/hostname/type overrides preserve reviewed existing orders. Existing ownership, family, pinned placement and edge exclusion constraints still filter the order. Does not modify static records or claim network quality evidence.
+      properties:
+        default_order: {$ref: '#/components/schemas/DNSPhysicalOrder'}
+        overrides:
+          type: array
+          maxItems: 20000
+          items:
+            type: object
+            additionalProperties: false
+            required: [node_id, hostname, type, order]
+            properties:
+              node_id: {type: string, minLength: 1, maxLength: 128}
+              hostname: {type: string, minLength: 1, maxLength: 253}
+              type: {type: string, enum: [A, AAAA]}
+              order: {$ref: '#/components/schemas/DNSPhysicalOrder'}
     PlatformPhysicalQualityRoute:
       type: object
       additionalProperties: false
@@ -35540,9 +35561,9 @@ components:
       properties:
         operation:
           type: string
-          enum: [placement, activate_serving, refresh_serving, continuous_serving, expand_membership, physical_dns]
+          enum: [placement, activate_serving, refresh_serving, continuous_serving, expand_membership, physical_dns, retire_dns_selector]
           default: placement
-          description: activate_serving requires a shadow or paused predecessor and bounded serving settings with single_publication=true. refresh_serving requires a serving predecessor with single_publication=true, permits only a new generation and requires the exact baseline full/LKG to have been produced by that predecessor policy publication. continuous_serving requires that same completed single-publication predecessor and only clears single_publication while retaining every other setting. expand_membership requires the same completed serving predecessor and preserves its positive full/LKG while moving the producer to shadow with new pinned input artifacts. Static input may only change generation and add exactly one Edge already declared identically in route_placement_transition.next_topology; projection policy may only change generation and the matching topology digest. physical_dns applies only to an existing continuously serving global producer with no placement transition. It changes only generation and the pinned DNS policy, whose sole strategy change must add exactly one physical_routes hostname while preserving every existing entry. Both input signatures, unchanged static intent, exact predecessor-owned full/LKG and its source metadata are checked transactionally; in-flight gray publications conflict. It does not directly publish a DNS answer. Existing members, pools, labels, failure domains, routes, ownership, constraints, schedules and serving settings remain identical. All input signatures and old full input metadata are checked in the transaction. Activation and refresh require the cohort in the exact full baseline; candidate publication independently revalidates pinned inputs, membership and fresh runtime gates. Placement and membership expansion cannot activate serving, enroll a process or select public transport.
+          description: activate_serving requires a shadow or paused predecessor and bounded serving settings with single_publication=true. refresh_serving requires a serving predecessor with single_publication=true, permits only a new generation and requires the exact baseline full/LKG to have been produced by that predecessor policy publication. continuous_serving requires that same completed single-publication predecessor and only clears single_publication while retaining every other setting. expand_membership requires the same completed serving predecessor and preserves its positive full/LKG while moving the producer to shadow with new pinned input artifacts. Static input may only change generation and add exactly one Edge already declared identically in route_placement_transition.next_topology; projection policy may only change generation and the matching topology digest. physical_dns applies only to an existing continuously serving global producer with no placement transition. It changes only generation and the pinned DNS policy, whose sole strategy change must add exactly one physical_routes hostname while preserving every existing entry. Both input signatures, unchanged static intent, exact predecessor-owned full/LKG and its source metadata are checked transactionally; in-flight gray publications conflict. It does not directly publish a DNS answer. Existing members, pools, labels, failure domains, routes, ownership, constraints, schedules and serving settings remain identical. All input signatures and old full input metadata are checked in the transaction. Activation and refresh require the cohort in the exact full baseline; candidate publication independently revalidates pinned inputs, membership and fresh runtime gates. Placement and membership expansion cannot activate serving, enroll a process or select public transport. retire_dns_selector applies only to that same continuous global producer with an unmapped, unscoped legacy DNS baseline. It adds an explicit ordered_projection, disables ECS and exploration, and preserves every existing measured physical route and all other policy. Each override must exactly retain the signed current full DNS member's normal global physical order and complete candidate membership. Static records cannot receive overrides. The default order must contain the existing physical candidate set. Signed input and member integrity, lineage, exact full/LKG, source metadata and no pending gray are checked under the same locks. It changes producer configuration only; compatible consumer admission and positive LKG remain independent.
         previous_policy:
           $ref: "#/components/schemas/PlatformPublicationPrecondition"
         serving_full:

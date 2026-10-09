@@ -50,6 +50,32 @@ a newly verified LKG.
 
 ## Release boundary
 
+An explicit `ordered_projection` can replace remaining unmeasured dynamic
+queries with configured `physical_order` policies. The producer then bypasses
+the legacy scoring catalog and country/group ranking. These configured orders
+do not claim network optimality; measurement state stays unknown. Existing
+`physical_routes` continue through the evidence compiler. Static DNS records,
+route ownership and candidate constraints retain their separate authority.
+
+The `retire_dns_selector` reconfiguration operation checks the exact signed
+producer, source inputs and current full DNS member under the publication locks.
+It requires no client mappings or scoped legacy profiles. Every existing dynamic
+query needs a per-consumer override identical to the signed baseline's normal
+global physical order, including all candidates. The explicit default covers
+that candidate inventory for newly created records; route constraints still
+apply. ECS and random exploration are disabled. Measured policies, TTL, static
+intent, schedules and serving bounds cannot change in the same operation.
+Changed order, membership, lineage, pending gray or expired LKG rejects the
+transaction without changing serving publication or positive LKG.
+
+Declarations in `deploy/environments/production/routing-dns-retirement` run via
+the independent CI configuration lane and `scripts/retire_dns_selector.py`.
+Code deployment alone cannot activate this projection. Every required executor
+must support `physical_order_v1` and `physical_order_projection_v1` before
+candidate admission. Legacy execution
+cannot be removed until serving and recovery artifacts have actually migrated.
+The frozen-order converter is for migration validation, never DNS request ranking.
+
 This is the first executable part of the second phase, not completion of the
 production routing migration. `GET /v1/edge/quality-shadow/{hostname}` and
 `fugue admin edge quality-shadow capture` are platform-admin-only, read-only

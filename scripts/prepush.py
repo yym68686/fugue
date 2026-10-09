@@ -494,6 +494,8 @@ def main() -> int:
         non_go_tasks["cell-producer-reconfiguration-tests"] = ["python3", "-m", "unittest", "scripts.test_reconfigure_cell_producer", "scripts.test_expand_cell_membership"]
     if any(name in {"scripts/reconfigure_physical_dns.py", "scripts/test_reconfigure_physical_dns.py", "scripts/publish_agent_edge_shadow.py", "scripts/bootstrap_cell_producer.py", "scripts/reconfigure_cell_producer.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/routing-physical-dns/") for name in paths):
         non_go_tasks["physical-dns-reconfiguration-tests"] = ["python3", "-m", "unittest", "scripts.test_reconfigure_physical_dns"]
+    if any(name in {"scripts/retire_dns_selector.py", "scripts/test_retire_dns_selector.py", "scripts/reconfigure_physical_dns.py", "scripts/audit_dns_selector_retirement.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/routing-dns-retirement/") for name in paths):
+        non_go_tasks["dns-selector-retirement-tests"] = ["python3", "-m", "unittest", "scripts.test_retire_dns_selector", "scripts.test_reconfigure_physical_dns", "scripts.test_audit_dns_selector_retirement"]
     if any(name in {"scripts/bootstrap_cell_inventory.py", "scripts/test_bootstrap_cell_inventory.py"} or name.startswith("deploy/environments/production/cell-inventory/") for name in paths):
         non_go_tasks["cell-inventory-bootstrap-tests"] = ["python3", "-m", "unittest", "scripts.test_bootstrap_cell_inventory"]
     if any(name in {"scripts/stage_dns_authority_transition.py", "scripts/test_stage_dns_authority_transition.py"} or name.startswith("deploy/environments/production/dns-authority-stage/") for name in paths):

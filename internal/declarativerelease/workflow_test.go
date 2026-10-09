@@ -67,7 +67,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_image_gc", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_probe_egress", "dns_probe_egress_plan", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_probe_egress", "dns_probe_egress_plan", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -91,6 +91,19 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	for _, required := range []string{"deploy/environments/production/producer-renewal/renewal.json", "git fetch origin main", "scripts.test_renew_producer_publication", "scripts.renew_producer_publication", "fugue-production-cell-producer-shadow", "--evidence", "selected == 'true'"} {
 		if !strings.Contains(string(renewalRaw), required) {
 			t.Fatal("producer recovery lost declaration gate", required)
+		}
+	}
+	retirement := yamlMappingValue(t, jobs, "dns_selector_retirement")
+	if yamlMappingValue(t, retirement, "needs").Value != "dns_selector_retirement_plan" || yamlMappingValue(t, retirement, "environment").Value != "production" {
+		t.Fatal("retirement configuration must remain independent of code release")
+	}
+	retirementRaw, err := yaml.Marshal(retirement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"git fetch origin main", "scripts.test_retire_dns_selector", "scripts.retire_dns_selector", "fugue-production-cell-producer-shadow", "--evidence", "selected == 'true'"} {
+		if !strings.Contains(string(retirementRaw), required) {
+			t.Fatal("retirement lost transactional declaration gate", required)
 		}
 	}
 	dnsProbeEgress := yamlMappingValue(t, jobs, "dns_probe_egress")

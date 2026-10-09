@@ -78,7 +78,7 @@ func (s *Server) reconcileDNSObservations(ctx context.Context, now time.Time) er
 	s.dnsObservation.mu.Lock()
 	s.dnsObservation.mode = policy.RankingMode
 	s.dnsObservation.mu.Unlock()
-	if policy.RankingMode == "disabled" {
+	if policy.RankingMode == "disabled" || policy.OrderedProjection != nil {
 		return nil
 	}
 	builder, _, err := s.loadEdgeDNSLatencyProfileBuilder(ctx, now, false)

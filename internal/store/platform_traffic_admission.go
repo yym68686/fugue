@@ -107,6 +107,10 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		if err != nil {
 			return fail("physical order policy cannot be decoded")
 		}
+		projectionRequired, err := physicalOrderProjectionCapabilityRequired(child)
+		if err != nil {
+			return fail("physical order projection cannot be decoded")
+		}
 		for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
 			if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
 				return fail("member lineage differs")
@@ -159,6 +163,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if orderRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalOrderCapabilityV1) {
 					return fail("physical order capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
+				if projectionRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalOrderProjectionCapabilityV1) {
+					return fail("physical order projection capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
+				}
 				if found || !trafficCapabilityFactFresh(expected, fact, now) || cellRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) || cellDNS && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellDNSCapabilityV1) || authorityTransition && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAuthorityTransitionCapabilityV1) || len(sources) > 0 && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSRouteSourcesCapabilityV1) {
 					return fail("fresh authenticated traffic capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
@@ -203,6 +210,22 @@ func physicalNetworkCapabilityRequired(artifact model.PlatformArtifact) (bool, e
 		}
 	}
 	return false, nil
+}
+
+func physicalOrderProjectionCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {
+	var payload struct {
+		Policy struct {
+			Query *platformconfig.DNSQueryPolicy `json:"dns_query_policy"`
+		} `json:"policy"`
+	}
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false, err
+	}
+	return payload.Policy.Query != nil && payload.Policy.Query.OrderedProjection != nil, nil
 }
 
 func physicalOrderCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {

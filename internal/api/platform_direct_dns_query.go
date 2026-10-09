@@ -48,7 +48,7 @@ func (s *Server) captureDirectDNSQueriesWithNodes(ctx context.Context, result *p
 		}
 	}
 	catalog := edgeDNSLatencyProfileCatalog{}
-	if policy.RankingMode != "disabled" {
+	if policy.RankingMode != "disabled" && policy.OrderedProjection == nil {
 		builder, severe, err := s.loadEdgeDNSLatencyProfileBuilder(ctx, now, true)
 		if err != nil {
 			return err
@@ -75,6 +75,9 @@ func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy 
 	}
 	if observed.IsZero() {
 		return fmt.Errorf("DNS selection observation time required")
+	}
+	if strategy.OrderedProjection != nil {
+		return projectOrderedDNSQueries(result, strategy, nodes, observed)
 	}
 	physicalHosts := map[string]bool{}
 	for _, route := range strategy.PhysicalRoutes {
