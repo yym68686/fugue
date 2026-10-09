@@ -371,6 +371,15 @@ establish the physical primary's observation clock, but neither activation nor a
 successful preview is no-detour acceptance. DNS receipts, offline replay and
 production validation of the subsequently published order remain separate.
 
+For opted-in producer captures, the collector issues one nonrecursive TCP A
+query to each declared DNS consumer's fresh public endpoint. It binds only the
+real retained answer with the same query ID, node, hostname, transport, observation
+time and exact RRset, then verifies offline replay. Journal reads have a bounded
+retry for asynchronous persistence. An unavailable or mismatching receipt blocks
+the candidate without changing serving DNS. These control-plane queries prove
+the authoritative execution path, not an end user's network latency. The admin
+shadow capture endpoint remains passive and issues no DNS queries.
+
 An explicit `baseline_mode: latest_verified_same_policy` allows a queued
 configuration run to resolve a later full publication from the exact declared
 producer policy. The fence must advance, the current full release must have its

@@ -45,6 +45,10 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) capturePhysicalQuality(ctx context.Context, hostname, trafficClass string, scope edgeQualityRankScope, dnsNodeID string, networkPolicy edgequality.Policy) (edgequality.Receipt, error) {
+	return s.capturePhysicalQualityWithAnswer(ctx, hostname, trafficClass, scope, dnsNodeID, networkPolicy, nil)
+}
+
+func (s *Server) capturePhysicalQualityWithAnswer(ctx context.Context, hostname, trafficClass string, scope edgeQualityRankScope, dnsNodeID string, networkPolicy edgequality.Policy, answer *dnsserver.DNSDecisionReceipt) (edgequality.Receipt, error) {
 	now := time.Now().UTC()
 	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: hostname, TrafficClass: trafficClass,
 		Scope: scope.key(), Policy: networkPolicy, Candidates: []edgequality.Candidate{}, Observations: []edgequality.Observation{},
@@ -118,7 +122,16 @@ func (s *Server) capturePhysicalQuality(ctx context.Context, hostname, trafficCl
 		return edgequality.Receipt{}, err
 	}
 	if dnsNodeID != "" {
-		decisions, readErr := s.readPlatformDNSDecisions(ctx, dnsNodeID, hostname, "", 1)
+		var decisions platformDNSDecisionResponse
+		var readErr error
+		if answer != nil {
+			if answer.NodeID != dnsNodeID || answer.Hostname != hostname {
+				return edgequality.Receipt{}, errors.New("physical DNS probe identity differs")
+			}
+			decisions.Snapshot.Receipts = []dnsserver.DNSDecisionReceipt{*answer}
+		} else {
+			decisions, readErr = s.readPlatformDNSDecisions(ctx, dnsNodeID, hostname, "", 1)
+		}
 		if readErr != nil {
 			snapshot.Blockers = append(snapshot.Blockers, "actual_dns_backend_unavailable")
 		} else if len(decisions.Snapshot.Receipts) != 1 {

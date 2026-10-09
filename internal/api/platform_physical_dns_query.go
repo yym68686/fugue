@@ -32,8 +32,13 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 			if selections[key].Selection != nil {
 				continue
 			}
-			captureContext, cancel := context.WithTimeout(ctx, 5*time.Second)
-			receipt, err := s.capturePhysicalQuality(captureContext, route.Hostname, route.TrafficClass, edgeQualityRankScope{}, fact.NodeID, route.Policy)
+			captureContext, cancel := context.WithTimeout(ctx, 8*time.Second)
+			answer, err := s.observePhysicalDNSAnswer(captureContext, projection.RuntimeSnapshot.DNSConsumers, fact.NodeID, route.Hostname)
+			if err != nil {
+				cancel()
+				return fmt.Errorf("physical DNS actual answer capture: %w", err)
+			}
+			receipt, err := s.capturePhysicalQualityWithAnswer(captureContext, route.Hostname, route.TrafficClass, edgeQualityRankScope{}, fact.NodeID, route.Policy, &answer)
 			cancel()
 			if err != nil {
 				return fmt.Errorf("physical DNS evidence capture: %w", err)
