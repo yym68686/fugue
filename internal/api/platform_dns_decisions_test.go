@@ -1,14 +1,17 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/dnsserver"
+	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/store"
@@ -87,6 +90,23 @@ func TestDNSDecisionsBackendBindingAndNoPublicationSubstitution(t *testing.T) {
 	after, _ := os.ReadFile(filename)
 	if string(before) != string(after) {
 		t.Fatal("read changed stored publication")
+	}
+	fixture.proxyHandler = func(writer http.ResponseWriter, request *http.Request) {
+		json.NewEncoder(writer).Encode(snapshot)
+	}
+	quality, err := server.capturePhysicalQuality(context.Background(), "target.example.test", "streaming", edgeQualityRankScope{}, fixture.claims.NodeID, edgequality.DefaultNetworkPolicy())
+	if err != nil || !slices.Contains(quality.Snapshot.Blockers, "actual_dns_receipt_not_retained") || slices.Contains(quality.Snapshot.Blockers, "actual_dns_backend_unavailable") {
+		t.Fatal("empty real journal mislabeled as backend outage", quality.Snapshot.Blockers, err)
+	}
+	fixture.proxyHandler = func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusServiceUnavailable)
+	}
+	quality, err = server.capturePhysicalQuality(context.Background(), "target.example.test", "streaming", edgeQualityRankScope{}, fixture.claims.NodeID, edgequality.DefaultNetworkPolicy())
+	if err != nil || !slices.Contains(quality.Snapshot.Blockers, "actual_dns_backend_unavailable") || slices.Contains(quality.Snapshot.Blockers, "actual_dns_receipt_not_retained") {
+		t.Fatal("backend outage mislabeled as empty journal", quality.Snapshot.Blockers, err)
+	}
+	fixture.proxyHandler = func(writer http.ResponseWriter, request *http.Request) {
+		json.NewEncoder(writer).Encode(snapshot)
 	}
 	for _, suffix := range []string{"?limit=0", "?limit=21", "?limit=oops", "?hostname=bad%20name"} {
 		response = performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-state/dns-decisions/"+fixture.claims.NodeID+suffix, "decision-admin", nil)

@@ -117,7 +117,7 @@ func (s *Server) observeNetworkRouteWitness(node model.EdgeNode, samples []model
 			}
 		}
 		if err != nil && s.log != nil {
-			s.log.Printf("edge network route witness unavailable; edge_id=%s error=%v", node.ID, err)
+			s.log.Printf("edge network route witness unavailable; edge_id=%s hostname=%s path=%s traffic_class=%s sample_id=%s sample_bundle=%s sample_digest=%s proof_bundle=%s proof_digest=%s error=%v", node.ID, sample.Hostname, sample.PathPrefix, sample.TrafficClass, sample.ID, sample.BundleVersion, sample.RouteDigest, proof.Version, proof.Digest, err)
 		}
 	}()
 }

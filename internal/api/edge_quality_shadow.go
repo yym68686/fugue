@@ -119,8 +119,10 @@ func (s *Server) capturePhysicalQuality(ctx context.Context, hostname, trafficCl
 	}
 	if dnsNodeID != "" {
 		decisions, readErr := s.readPlatformDNSDecisions(ctx, dnsNodeID, hostname, "", 1)
-		if readErr != nil || len(decisions.Snapshot.Receipts) != 1 {
+		if readErr != nil {
 			snapshot.Blockers = append(snapshot.Blockers, "actual_dns_backend_unavailable")
+		} else if len(decisions.Snapshot.Receipts) != 1 {
+			snapshot.Blockers = append(snapshot.Blockers, "actual_dns_receipt_not_retained")
 		} else {
 			s.captureQualityCapacity(ctx, &snapshot, decisions.Snapshot.Receipts[0], nodes)
 			snapshot.CapturedAt = time.Now().UTC()

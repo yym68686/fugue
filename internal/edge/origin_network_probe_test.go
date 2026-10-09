@@ -75,6 +75,25 @@ func TestOriginProbeConnectsWithoutApplicationBytes(t *testing.T) {
 	}
 }
 
+func TestOriginProbeScheduledCadenceDoesNotLoseTicksToWakeupJitter(t *testing.T) {
+	service := originProbeService(t)
+	attempts := 0
+	start := time.Now().UTC()
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		attempts++
+		return &originProbeConn{}, nil
+	}
+	inspect := func(net.Conn) tcpdiag.Snapshot { return tcpdiag.Snapshot{Available: true, RTTUsec: 22000} }
+	for tick := 0; tick < 4; tick++ {
+		scheduledAt := start.Add(time.Duration(tick) * service.Config.OriginNetworkProbeInterval)
+		service.probeOriginNetworkOnce(context.Background(), scheduledAt, dial, inspect)
+		service.probeOriginNetworkOnce(context.Background(), scheduledAt.Add(time.Millisecond), dial, inspect)
+	}
+	if attempts != 4 || len(service.originNetworkSamples()) != 4 {
+		t.Fatal("scheduled cadence lost a tick or allowed an extra probe", attempts)
+	}
+}
+
 func TestOriginProbeFailuresAndUnavailableKernelRemainUnknown(t *testing.T) {
 	for _, failed := range []bool{true, false} {
 		service := originProbeService(t)

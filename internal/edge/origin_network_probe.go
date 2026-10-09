@@ -30,8 +30,8 @@ func (s *Service) runOriginNetworkProbes(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			s.probeOriginNetworkOnce(ctx, time.Now().UTC(), dialer.DialContext, tcpdiag.SnapshotFromConn)
+		case scheduledAt := <-ticker.C:
+			s.probeOriginNetworkOnce(ctx, scheduledAt.UTC(), dialer.DialContext, tcpdiag.SnapshotFromConn)
 		}
 	}
 }
