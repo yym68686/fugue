@@ -32,7 +32,45 @@ an incompatible new candidate never replaces the retained positive checkpoint.
 Do not treat a successful migration transaction or offline artifact audit as
 proof that the new code is already serving.
 
-## Production migration evidence, 2026-10-09
+## Production retirement acceptance, 2026-10-09 13:39 UTC
+
+Retired execution revision `b23b29b72dbc9cf2696960201e9fbe04916a454b`
+passed CI `37932433261` and runs in both public B DNS processes and both API
+replicas. Transport generation 26 selected B through CI `37934792960`.
+Standby revision `e90f6c76c6aa062ad288156e05daf72058609a70` passed CI
+`37936290212`; both A DNS processes now contain the same retirement code.
+All four DNS processes and both API replicas were Ready with zero restarts;
+the declared image receipts matched their actual immutable image references.
+
+At 13:35 UTC all four DNS instances loaded full fence 2819, DNS artifact
+`artifact_1791552310_1c61f0899c84`, with matching serving/LKG generations,
+494 ready probes and no failed probes. Its exported content audit found zero
+legacy query dependencies, 502 explicit ordered queries, two measured physical
+queries and 28 unchanged static records. Configured orders preserve the
+unmeasured queries' prior normal order; they do not claim measured optimality.
+
+For the opted-in hostname, the production compiler input recorded a sustained
+normal switch to `15.204.94.71` at 13:01 UTC. The 13:25 input retained that
+primary with service TCP RTTs 0.448 ms, 22.599 ms and 156.823 ms for the primary,
+other US edge and European edge respectively. All three remained ready. The
+actual frozen production evidence replayed successfully. Actual public TCP
+receipts at 13:39:46 UTC were
+`80827a78a21adc40807094a81d6d362d-2043` and
+`2bc356b3d614276e0804014046d4f26e-1755`: both returned the US primary with
+`physical_quality`, `physical_selected_primary`, `sync_succeeded` and
+`serving_lkg=false`. Query IDs matched the wire requests, and both receipts
+replayed successfully. Earlier UDP checks returned the same primary.
+
+This establishes retirement of the live selector and the observed production
+route, not a guarantee about every terminal or future Internet path. Client
+measurements remained unknown under the explicit V3 uncertainty policy. The
+observer-local TLS probe proves endpoint identity only. Runtime-facts API reads
+also returned intermittent 503 responses during this observation period;
+direct process facts and actual-answer receipts remained separately readable.
+A successful full US API observation was captured at 13:34 UTC. These checks
+must not be conflated with uninterrupted availability of every diagnostic API.
+
+## Earlier production migration evidence, 2026-10-09
 
 The first opted-in production hostname now executes `physical_quality` from a
 signed traffic publication. Both public DNS transports selected the compatible
