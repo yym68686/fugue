@@ -20,8 +20,10 @@ type networkRouteWitnessState struct {
 }
 
 type networkRouteWitnessCursor struct {
-	at  time.Time
-	key string
+	at         time.Time
+	key        string
+	probeKey   string
+	probeFirst bool
 }
 
 func (state *networkRouteWitnessState) release() {
@@ -32,6 +34,7 @@ func (state *networkRouteWitnessState) release() {
 
 func (state *networkRouteWitnessState) selectSample(node model.EdgeNode, samples []model.EdgeNetworkSample, now time.Time) (model.EdgeNetworkSample, bool) {
 	eligible := map[string]model.EdgeNetworkSample{}
+	probes := map[string]model.EdgeNetworkSample{}
 	for index := range samples {
 		sample := &samples[index]
 		if sample.EdgeID != node.ID || sample.EdgeGroupID != node.EdgeGroupID || sample.ObservedAt.After(now) ||
@@ -40,12 +43,16 @@ func (state *networkRouteWitnessState) selectSample(node model.EdgeNode, samples
 			continue
 		}
 		key := sample.Hostname + "\x00" + sample.PathPrefix + "\x00" + sample.TrafficClass
-		previous, found := eligible[key]
+		target := eligible
+		if sample.Source == "service_endpoint_tcp_probe_v1" {
+			target = probes
+		}
+		previous, found := target[key]
 		if !found || sample.ObservedAt.After(previous.ObservedAt) || sample.ObservedAt.Equal(previous.ObservedAt) && sample.ID < previous.ID {
-			eligible[key] = *sample
+			target[key] = *sample
 		}
 	}
-	if len(eligible) == 0 || !state.mu.TryLock() {
+	if len(eligible)+len(probes) == 0 || !state.mu.TryLock() {
 		return model.EdgeNetworkSample{}, false
 	}
 	defer state.mu.Unlock()
@@ -64,21 +71,32 @@ func (state *networkRouteWitnessState) selectSample(node model.EdgeNode, samples
 	if _, exists := state.last[node.ID]; !exists && len(state.last) >= 256 {
 		return model.EdgeNetworkSample{}, false
 	}
-	keys := make([]string, 0, len(eligible))
-	for key := range eligible {
+	target, cursor := eligible, previous.key
+	useProbe := len(probes) > 0 && (len(eligible) == 0 || !previous.probeFirst)
+	if useProbe {
+		target, cursor = probes, previous.probeKey
+	}
+	keys := make([]string, 0, len(target))
+	for key := range target {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	selected := keys[0]
 	for _, key := range keys {
-		if key > previous.key {
+		if key > cursor {
 			selected = key
 			break
 		}
 	}
-	state.last[node.ID] = networkRouteWitnessCursor{at: now, key: selected}
+	previous.at, previous.probeFirst = now, useProbe
+	if useProbe {
+		previous.probeKey = selected
+	} else {
+		previous.key = selected
+	}
+	state.last[node.ID] = previous
 	state.inFlight++
-	return eligible[selected], true
+	return target[selected], true
 }
 
 func (s *Server) observeNetworkRouteWitness(node model.EdgeNode, samples []model.EdgeNetworkSample, now time.Time) {

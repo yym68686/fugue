@@ -380,6 +380,12 @@ the candidate without changing serving DNS. These control-plane queries prove
 the authoritative execution path, not an end user's network latency. The admin
 shadow capture endpoint remains passive and issues no DNS queries.
 
+The route witness scheduler alternates controlled origin-probe records with
+passive records when both are present. Each queue keeps its own hostname/path
+cursor. This reserves half of the existing per-node witness budget for configured
+network probes, so unrelated busy hostnames cannot consume their entire retention
+window. The one-per-minute and four-in-flight bounds remain unchanged.
+
 An explicit `baseline_mode: latest_verified_same_policy` allows a queued
 configuration run to resolve a later full publication from the exact declared
 producer policy. The fence must advance, the current full release must have its

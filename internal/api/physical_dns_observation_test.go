@@ -2,14 +2,74 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"fugue/internal/dnsserver"
+	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"github.com/miekg/dns"
 )
+
+func TestPhysicalDNSProbeBindsReplayedRealAnswerAfterJournalDelay(t *testing.T) {
+	var receipt dnsserver.DNSDecisionReceipt
+	reads := 0
+	exchange := func(ctx context.Context, query *dns.Msg, address string) (*dns.Msg, time.Duration, error) {
+		now := time.Now().UTC()
+		wire, err := query.Pack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stage := map[string]any{"publication": dnsserver.DNSDecisionPublication{}, "applied_at": now, "max_stale_seconds": 3600,
+			"authorities": []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60}},
+			"zone":        "example.test", "record_name": "app.example.test", "exists": true, "query_at": now,
+			"entries":    []map[string]any{{"record": model.EdgeDNSRecord{Name: "app.example.test", Type: "A", Values: []string{"192.0.2.1"}, TTL: 60}}},
+			"selections": []map[string]any{{"at": now, "entropy": map[string]any{"buckets": []any{}}}}}
+		replay, _ := json.Marshal(map[string]any{"version": dnsserver.DNSDecisionSchema, "query": wire, "stages": []any{stage}})
+		receipt = dnsserver.DNSDecisionReceipt{Schema: dnsserver.DNSDecisionSchema, NodeID: "dns-a", Hostname: "app.example.test", QueryID: query.Id, QType: dns.TypeA, Transport: "tcp", ObservedAt: now, WriteSucceeded: true,
+			DecisionID: "real-process-1", ProcessID: "real-process", ReplayInput: replay, Authority: []string{}, Additional: []string{}, AnswerPublication: &dnsserver.DNSDecisionPublication{}}
+		sign := func() {
+			receipt.EvidenceDigest = ""
+			raw, _ := json.Marshal(receipt)
+			digest := sha256.Sum256(raw)
+			receipt.EvidenceDigest = "sha256:" + hex.EncodeToString(digest[:])
+		}
+		sign()
+		result, _ := dnsserver.ReplayDNSDecision(receipt)
+		receipt.RRSet, receipt.Records = result.RRSet, result.Records
+		sign()
+		if result, err := dnsserver.ReplayDNSDecision(receipt); err != nil || !result.Matched {
+			t.Fatal("neutral real-answer fixture does not replay", result, err)
+		}
+		response := new(dns.Msg)
+		response.SetReply(query)
+		response.Authoritative = true
+		for _, raw := range receipt.RRSet {
+			record, err := dns.NewRR(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Answer = append(response.Answer, record)
+		}
+		return response, 0, nil
+	}
+	read := func(context.Context) (platformDNSDecisionResponse, error) {
+		reads++
+		response := platformDNSDecisionResponse{}
+		if reads == 2 {
+			response.Snapshot.Receipts = []dnsserver.DNSDecisionReceipt{receipt}
+		}
+		return response, nil
+	}
+	actual, err := observePhysicalDNSQuery(context.Background(), "dns-a", "app.example.test", "8.8.4.4:53", exchange, read)
+	if err != nil || actual.DecisionID != receipt.DecisionID || reads != 2 {
+		t.Fatal("real answer lost to asynchronous journal persistence", actual.DecisionID, err, reads)
+	}
+}
 
 func TestPhysicalDNSProbeRequiresFreshUniquePublicConsumer(t *testing.T) {
 	now := time.Now().UTC()

@@ -242,3 +242,35 @@ func TestNetworkWitnessRotationDoesNotStarveLessRecentRoutes(t *testing.T) {
 		t.Fatalf("freshest route starves an eligible lower-traffic route: %v", counts)
 	}
 }
+
+func TestNetworkWitnessReservesControlledProbeShareWithoutIncreasingBudget(t *testing.T) {
+	var state networkRouteWitnessState
+	now := time.Now().UTC()
+	counts := map[string]int{}
+	for interval := 0; interval < 12; interval++ {
+		at := now.Add(time.Duration(interval) * time.Minute)
+		sample, _ := networkWitnessFixture(at)
+		sample.Source, sample.Hostname = "service_endpoint_tcp_probe_v1", "probe.example.test"
+		failed := false
+		sample.ServiceConnectFailed = &failed
+		samples := []model.EdgeNetworkSample{sample}
+		for host := 0; host < 12; host++ {
+			passive, _ := networkWitnessFixture(at)
+			passive.ID, passive.Hostname = fmt.Sprintf("passive-%d", host), fmt.Sprintf("busy-%02d.example.test", host)
+			samples = append(samples, passive)
+		}
+		node := model.EdgeNode{ID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID}
+		selected, ok := state.selectSample(node, samples, at)
+		if !ok || interval%2 == 0 && selected.Source != "service_endpoint_tcp_probe_v1" || interval%2 == 1 && selected.Source == "service_endpoint_tcp_probe_v1" {
+			t.Fatal("controlled probe or passive rotation starved", interval, selected)
+		}
+		counts[selected.Hostname]++
+		state.release()
+		if _, ok := state.selectSample(node, samples, at.Add(30*time.Second)); ok {
+			t.Fatal("reserved share increased the per-node probe budget")
+		}
+	}
+	if counts["probe.example.test"] != 6 || len(counts) != 7 {
+		t.Fatal("two queues did not retain independent progress", counts)
+	}
+}

@@ -24,14 +24,15 @@ func (s *Service) runOriginNetworkProbes(ctx context.Context) {
 		return
 	}
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
-	ticker := time.NewTicker(s.Config.OriginNetworkProbeInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(s.Config.OriginNetworkProbeInterval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case scheduledAt := <-ticker.C:
-			s.probeOriginNetworkOnce(ctx, scheduledAt.UTC(), dialer.DialContext, tcpdiag.SnapshotFromConn)
+		case <-timer.C:
+			s.probeOriginNetworkOnce(ctx, time.Now(), dialer.DialContext, tcpdiag.SnapshotFromConn)
+			timer.Reset(s.Config.OriginNetworkProbeInterval)
 		}
 	}
 }
