@@ -50,9 +50,12 @@ def baseline_orders(artifact):
 
 def validate(config):
     fields = {"schema", "generation", "origin", "producer_generation", "precondition", "projection_policy", "baseline_mode"}
-    if not isinstance(config, dict) or set(config) != fields or config["schema"] != "fugue.dns-selector-retirement/v1" or not physical.bounded_json(config):
+    if not isinstance(config, dict) or set(config) not in [fields, fields | {"order_baseline_mode"}] or config["schema"] != "fugue.dns-selector-retirement/v1" or not physical.bounded_json(config):
         raise ValueError("explicit retirement declaration required")
+    if config.get("order_baseline_mode", "declared") not in ["declared", "latest_verified_same_policy"] or config.get("order_baseline_mode") == "latest_verified_same_policy" and config["baseline_mode"] != "latest_verified_same_policy":
+        raise ValueError("order renewal requires the same verified producer baseline")
     probe = copy.deepcopy(config)
+    probe.pop("order_baseline_mode", None)
     probe["schema"] = "fugue.physical-dns-reconfiguration/v1"
     routes = config["projection_policy"].get("dns_query_policy", {}).get("physical_routes", [])
     if not routes:
@@ -118,6 +121,24 @@ def check_orders(config, artifact):
     return expected
 
 
+def resolve_orders(config, artifact):
+    if config.get("order_baseline_mode", "declared") == "declared":
+        return config
+    expected, allowed = baseline_orders(artifact)
+    projection = config["projection_policy"]["dns_query_policy"]["ordered_projection"]
+    def membership(entries):
+        return {(entry["node_id"], entry["hostname"], entry["type"]): set(entry["order"]["ordered_edge_ids"]) for entry in entries}
+    if membership(expected) != membership(projection["overrides"]) or set(projection["default_order"]["ordered_edge_ids"]) != allowed:
+        raise ValueError("renewed order changed declared records or physical membership")
+    resolved = copy.deepcopy(config)
+    resolved["projection_policy"]["dns_query_policy"]["ordered_projection"]["overrides"] = expected
+    generation = config["producer_generation"] + "-" + digest(expected).split(":")[1][:12]
+    resolved["producer_generation"] = generation
+    resolved["projection_policy"]["generation"] = generation
+    validate(resolved)
+    return resolved
+
+
 def validate_preview(config, preview, previous):
     if not preview.get("business_snapshot_revision") or preview["business_snapshot_revision"] != previous.get("business_snapshot_revision") or not previous.get("intent") or previous["intent"] != preview.get("intent"):
         raise ValueError("retirement requires one unchanged business and static intent snapshot")
@@ -147,6 +168,7 @@ def publish(config, api, save):
     config = physical.resolve_baseline(config, api)
     full = physical.baseline(config, api)
     baseline = dns_baseline(api, full)
+    config = resolve_orders(config, baseline)
     orders = check_orders(config, baseline)
     precondition = config["precondition"]
     current = selected(api, physical.SCOPE, "shadow")
@@ -169,7 +191,7 @@ def publish(config, api, save):
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
     summaries = validate_preview(config, preview, previous_preview)
     physical.baseline(config, api)
-    evidence = {"schema": "fugue.dns-selector-retirement-result/v1", "declaration_digest": declaration, "resolved_precondition": precondition, "baseline_dns_artifact_id": baseline["id"], "baseline_dns_digest": baseline["content_hash"], "preserved_order_count": len(orders), "selections": summaries, "artifact_id": artifact["id"], "producer_activated": False, "routing_acceptance_complete": False}
+    evidence = {"schema": "fugue.dns-selector-retirement-result/v1", "declaration_digest": declaration, "resolved_precondition": precondition, "baseline_dns_artifact_id": baseline["id"], "baseline_dns_digest": baseline["content_hash"], "preserved_order_count": len(orders), "resolved_orders_digest": digest(orders), "resolved_source_artifact_id": source["id"], "resolved_source_digest": source["content_hash"], "selections": summaries, "artifact_id": artifact["id"], "producer_activated": False, "routing_acceptance_complete": False}
     save(evidence)
     key = "producer-reconfiguration/" + digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": precondition})
     api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/release", {"release_channel": "shadow", "producer_reconfiguration": precondition, "idempotency_key": key, "reason": "Retire legacy selector using preserved signed physical orders and unchanged measured policies"})

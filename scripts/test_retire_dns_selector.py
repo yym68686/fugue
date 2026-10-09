@@ -51,6 +51,35 @@ class Ledger(PhysicalLedger):
 
 
 class RetirementTests(unittest.TestCase):
+    def test_explicit_order_renewal_preserves_exact_current_full_membership(self):
+        config, _, baseline = fixture()
+        record = baseline["content"]["query_views"][0]["records"][0]
+        record["candidates"].append({"edge_id": "edge-b", "edge_group_id": "group-b", "ip": "9.9.9.9", "priority": 1})
+        seal(baseline)
+        original, allowed = retirement.baseline_orders(baseline)
+        projection = config["projection_policy"]["dns_query_policy"]["ordered_projection"]
+        projection["overrides"] = original
+        projection["default_order"]["ordered_edge_ids"] = sorted(allowed)
+        record["candidates"][1]["priority"] = -1
+        seal(baseline)
+        with self.assertRaises(ValueError): retirement.check_orders(config, baseline)
+        config.update(baseline_mode="latest_verified_same_policy", order_baseline_mode="latest_verified_same_policy")
+        before = copy.deepcopy(config)
+        resolved = retirement.resolve_orders(config, baseline)
+        expected = retirement.check_orders(resolved, baseline)
+        self.assertEqual(expected[0]["order"]["ordered_edge_ids"], ["edge-b", "edge-a"])
+        self.assertEqual(config, before)
+        self.assertNotEqual(config["producer_generation"], resolved["producer_generation"])
+        self.assertEqual(resolved, retirement.resolve_orders(config, baseline))
+        before_query = copy.deepcopy(config["projection_policy"]["dns_query_policy"])
+        after_query = copy.deepcopy(resolved["projection_policy"]["dns_query_policy"])
+        before_query.pop("ordered_projection")
+        after_query.pop("ordered_projection")
+        self.assertEqual(before_query, after_query)
+        record["candidates"][1]["edge_id"] = "foreign"
+        seal(baseline)
+        with self.assertRaises(ValueError): retirement.resolve_orders(config, baseline)
+
     def test_fenced_publish_and_retry_preserve_full_lkg(self):
         config, source, baseline = fixture()
         ledger = Ledger(config, source, baseline)
