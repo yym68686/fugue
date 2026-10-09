@@ -445,6 +445,20 @@ func testProducedTrafficLifecycle(t *testing.T, dsn string) {
 			t.Fatal(err)
 		}
 		before := trafficLKGState(t, s, "global")
+		if address := os.Getenv("FUGUE_TEST_DATABASE_URL"); dsn != "" && address == dsn {
+			if _, err := s.db.Exec(`UPDATE fugue_platform_consumer_instances SET last_heartbeat_at=now()-interval '1 hour' WHERE scope_key='global'`); err != nil {
+				t.Fatal(err)
+			}
+		} else if dsn == "" {
+			if err := s.withLockedState(true, func(state *model.State) error {
+				for index := range state.PlatformConsumerInstances {
+					state.PlatformConsumerInstances[index].LastHeartbeatAt = time.Now().Add(-time.Hour)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
 		restored, err := rollback(f.authority.ID)
 		if err != nil {
 			t.Fatal("rollback of invalid source", phase, err)

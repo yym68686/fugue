@@ -16,6 +16,19 @@ import (
 // In particular, recovery may use fresh negative facts from the currently
 // serving release. The caller holds the publication transaction through commit.
 func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time) error {
+	return validateLeasedTrafficAdmissionWithRecovery(state, parent, channel, canaryRef, keys, now, false)
+}
+
+func validateVerifiedTrafficRecoveryAdmission(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) error {
+	recovery := guard != nil && guard.Phase == "rollback" && guard.BaselineArtifactID == parent.ID &&
+		channel == model.PlatformArtifactReleaseChannelFull && parent.ArtifactKind == model.PlatformArtifactKindReleaseSet && lkg != nil &&
+		lkg.ArtifactID == parent.ID && lkg.ContentHash == parent.ContentHash && lkg.Generation == parent.Generation &&
+		lkg.ScopeKey == parent.ScopeKey && lkg.ArtifactKind == parent.ArtifactKind && lkg.VerifiedByReleaseID != "" &&
+		lkg.VerificationEvidenceHash != "" && lkg.ExpiresAt.After(now)
+	return validateLeasedTrafficAdmissionWithRecovery(state, parent, channel, canaryRef, keys, now, recovery)
+}
+
+func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, verifiedRecovery bool) error {
 	if channel == model.PlatformArtifactReleaseChannelShadow {
 		return nil
 	}
@@ -120,6 +133,11 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 			claims := platformcontrol.PlatformComponentIdentityClaims{Component: component, NodeID: expected.NodeID, AuthorityID: expected.AuthorityID}
 			if !platformcontrol.ExpectedConsumerIdentityMatches(expected, claims) || expected.ArtifactKind != child.ArtifactKind || expected.ScopeKey != parent.ScopeKey || expected.ExpectedGeneration != child.Generation || expected.Cohort == "" {
 				return fail("required consumer ownership invalid")
+			}
+			if verifiedRecovery {
+				count++
+				cohorts[expected.Cohort] = true
+				continue
 			}
 			found := false
 			for _, fact := range state.PlatformConsumerInstances {
