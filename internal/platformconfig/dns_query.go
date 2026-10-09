@@ -322,7 +322,7 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 					record.ScopedCandidates = append(record.ScopedCandidates, scoped)
 				}
 				if err := validateDNSPhysicalQuery(record); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("compile physical query %s/%s/%s: %w", view.NodeID, r.Hostname, r.Type, err)
 				}
 				if fact.PhysicalSelection != nil && !fact.PhysicalSelection.CapturedAt.Equal(fact.ObservedAt) {
 					return nil, fmt.Errorf("physical-edge selection capture differs from ranking observation")
@@ -439,7 +439,7 @@ func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNS
 				return err
 			}
 			if err := validateDNSPhysicalQuery(r); err != nil {
-				return err
+				return fmt.Errorf("validate physical query %s/%s/%s: %w", view.NodeID, r.Name, r.Type, err)
 			}
 			if len(r.Candidates) != len(r.Values) {
 				return fmt.Errorf("DNS query address lacks candidate authorization")

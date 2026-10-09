@@ -56,6 +56,35 @@ func TestPhysicalDNSPublicationReplacesOnlyExplicitDynamicQueries(t *testing.T) 
 	}
 }
 
+func TestPhysicalDNSOptInDoesNotAuthorizeAnUnboundManagedAlias(t *testing.T) {
+	projection, nodes, policy, now := directQueryFixture()
+	alias := projection.Intent.DNS[0]
+	alias.Hostname, alias.RecordKind = "alias.example.test", model.EdgeDNSRecordKindCustomDomainTarget
+	projection.Intent.DNS = append(projection.Intent.DNS, alias)
+	baseline := projection
+	if err := projectDirectDNSQueries(&baseline, policy, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
+		t.Fatal(err)
+	}
+	policy.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{{Hostname: "app.example.test", TrafficClass: "streaming", Policy: edgequality.DefaultNetworkPolicy()}}
+	if err := projectDirectDNSQueries(&projection, policy, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
+		t.Fatal(err)
+	}
+	for index, rule := range projection.Policy.DNSAnswerRules {
+		if rule.Hostname == alias.Hostname {
+			if !reflect.DeepEqual(rule, baseline.Policy.DNSAnswerRules[index]) {
+				t.Fatal("explicit physical host leaked into the managed alias", rule)
+			}
+		} else if rule.SelectionMode != model.DNSAnswerPolicyKindPhysicalQuality {
+			t.Fatal("explicit physical hostname not selected", rule)
+		}
+	}
+	for index, fact := range projection.RuntimeSnapshot.DNSSelections {
+		if fact.Hostname == alias.Hostname && !reflect.DeepEqual(fact, baseline.RuntimeSnapshot.DNSSelections[index]) {
+			t.Fatal("alias observation changed without its own binding", fact)
+		}
+	}
+}
+
 func TestPhysicalDNSPublicationRejectsUnsafeProjectionAtomically(t *testing.T) {
 	for _, test := range []struct {
 		name string

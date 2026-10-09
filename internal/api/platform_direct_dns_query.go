@@ -179,7 +179,7 @@ func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy 
 						records = nil
 						break
 					}
-					if physicalHosts[owner.Hostname] {
+					if physicalHosts[record.Hostname] && physicalHosts[owner.Hostname] {
 						ttl := max(strategy.MinimumTTLSeconds, min(strategy.MaximumTTLSeconds, record.TTL))
 						value := model.EdgeDNSRecord{Name: record.Hostname, Type: family, Values: memberIPs, TTL: ttl, RecordKind: record.RecordKind, Status: record.Status,
 							AnswerPolicy: model.DNSAnswerPolicy{PolicyKind: model.DNSAnswerPolicyKindPhysicalQuality, TTLSeconds: ttl}}
