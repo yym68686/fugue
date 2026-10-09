@@ -2306,6 +2306,9 @@ func typedPrewritePredecessorHealth(ctx context.Context, release declarativerele
 	if errors.Is(err, errServiceHTTPHealth) {
 		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
 	}
+	if errors.Is(err, errPodHTTPHealth) {
+		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
+	}
 	if errors.Is(err, errPublicRouteHTTPHealth) {
 		return fmt.Errorf("%w: %w: %v", declarativerelease.ErrDegradedPredecessorHealth, declarativerelease.ErrPublicRouteHealth, err)
 	}
@@ -2621,7 +2624,7 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			for _, pod := range pods {
 				body, err := readPodHTTP(ctx, pod, probe.Path)
 				if err != nil || (probe.Expected != "" && !bytes.Contains(body, []byte(probe.Expected))) {
-					return "", fmt.Errorf("pod health probe %q failed", pod.Name)
+					return "", fmt.Errorf("%w: pod health probe %q failed", errPodHTTPHealth, pod.Name)
 				}
 				evidence = append(evidence, probe.Type+":"+pod.Name+":"+digestBytesLocal(body))
 			}
@@ -2774,6 +2777,8 @@ var errWorkloadOriginatedServiceHealth = errors.New("workload-originated service
 // when the target is the exact immutable LKG in the bounded prewrite context.
 // Forward targets and ordinary successors therefore remain fail-closed.
 var errServiceHTTPHealth = errors.New("service-http health is degraded")
+
+var errPodHTTPHealth = errors.New("pod-http health is degraded")
 
 // errPublicRouteHTTPHealth marks a failure of an existing public route canary.
 // It is promoted only for the exact immutable predecessor during the bounded
