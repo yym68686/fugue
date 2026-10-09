@@ -1,5 +1,53 @@
 # Physical-edge network quality shadow
 
+## Production migration evidence, 2026-10-09
+
+The first opted-in production hostname now executes `physical_quality` from a
+signed traffic publication. Both public DNS transports selected the compatible
+A processes through independently declared transport generations 22 and 23.
+The worker revision was `9bd81f51720446319ddd54660d963b94f00df678`; standby
+DNS recovery then completed in CI run `37899891120` at revision
+`66f1b335e46c40a3d7c1fa389728be5913cc7a7d`. Four DNS instances reported Ready
+with zero restarts after that release. This observation does not retire the
+legacy selector used by other published queries.
+
+The immutable input for DNS artifact `artifact_1791530684_0048f1d1ccd6`
+records a normal physical switch at 07:24:39 UTC: three complete comparison
+buckets supported the US candidate, with challenger upper cost 138.10 and
+incumbent lower cost 218.94. Both public authorities subsequently returned
+`15.204.94.71`; the actual-answer bindings replayed successfully. Source
+socket RTT samples were approximately 0.5 ms for that candidate, 23 ms for
+the other US candidate and 156 ms for the European candidate. Client-path
+measurements remained unknown, so this is evidence of the configured bounded
+service-network comparison, not proof of every terminal's end-to-end route.
+
+At 07:35:53 UTC, the immutable input for
+`artifact_1791531355_aac959dbbe87` records a capacity-gated failover to the
+other US edge. Its original evidence replays as `failover`, not a normal
+quality switch. Subsequent public answers returned `95.169.10.156`; the
+European endpoint remained eligible as fallback. No geography exclusion was
+introduced. The full HTTP application behavior and every future route still
+require their own validation; successful DNS answers alone do not establish
+those properties.
+
+Before removing execution code, audit every serving and recovery DNS artifact
+with `python3 scripts/audit_dns_selector_retirement.py ARTIFACT_EXPORT...`.
+The offline audit verifies exported content digests and exact query-rule
+membership. Exit status 2 means nonphysical selector dependencies remain;
+malformed or incomplete exports fail. The audit deliberately does not verify
+signatures, live assignments or LKG, and never authorizes production retirement.
+The artifact above still contained 251 distinct nonphysical dynamic hostnames,
+so deleting its selector would break the serving artifact compatibility contract.
+
+An earlier premature configuration activation exposed an executor-version
+compatibility failure and caused DNS SERVFAIL. Recovery now restores the exact
+verified positive LKG without requiring the failing candidate's live capability
+facts. New physical publications require authenticated v3 executor capability.
+Unselected incompatible standby DNS can be upgraded through the existing exact
+predecessor recovery path; forward health checks and the public transport guard
+remain mandatory. These safeguards do not turn an incompatible predecessor into
+a newly verified LKG.
+
 ## Release boundary
 
 This is the first executable part of the second phase, not completion of the
