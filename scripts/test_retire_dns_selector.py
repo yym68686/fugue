@@ -51,6 +51,19 @@ class Ledger(PhysicalLedger):
 
 
 class RetirementTests(unittest.TestCase):
+    def test_identical_content_across_distinct_mvcc_snapshots(self):
+        config, source, baseline = fixture()
+        ledger = Ledger(config, source, baseline)
+        counter = [10]
+        def advance_snapshot(api):
+            counter[0] += 1
+            api.preview["business_snapshot_revision"] = "postgres:" + str(counter[0])
+        ledger.on_capture = advance_snapshot
+        result = retirement.publish(config, ledger, lambda _: None)
+        self.assertTrue(result["producer_activated"])
+        self.assertNotEqual(result["business_snapshots"]["previous_revision"], result["business_snapshots"]["successor_revision"])
+        self.assertEqual(result["business_snapshots"]["unchanged_intent_digest"], retirement.digest(ledger.preview["intent"]))
+
     def test_explicit_order_renewal_preserves_exact_current_full_membership(self):
         config, _, baseline = fixture()
         record = baseline["content"]["query_views"][0]["records"][0]

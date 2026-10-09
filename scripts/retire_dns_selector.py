@@ -140,8 +140,8 @@ def resolve_orders(config, artifact):
 
 
 def validate_preview(config, preview, previous):
-    if not preview.get("business_snapshot_revision") or preview["business_snapshot_revision"] != previous.get("business_snapshot_revision") or not previous.get("intent") or previous["intent"] != preview.get("intent"):
-        raise ValueError("retirement requires one unchanged business and static intent snapshot")
+    if not preview.get("business_snapshot_revision") or not previous.get("business_snapshot_revision") or not previous.get("intent") or previous["intent"] != preview.get("intent"):
+        raise ValueError("retirement requires unchanged business and static intent content from identified snapshots")
     for issue in preview.get("issues", []):
         if issue.get("code") not in ["dns_output_equivalence_not_verified", "release_target_equivalence_not_verified", "origin_observation_not_fresh"] or issue not in previous.get("issues", []):
             raise ValueError("new or unrecognized projection issue")
@@ -192,6 +192,7 @@ def publish(config, api, save):
     summaries = validate_preview(config, preview, previous_preview)
     physical.baseline(config, api)
     evidence = {"schema": "fugue.dns-selector-retirement-result/v1", "declaration_digest": declaration, "resolved_precondition": precondition, "baseline_dns_artifact_id": baseline["id"], "baseline_dns_digest": baseline["content_hash"], "preserved_order_count": len(orders), "resolved_orders_digest": digest(orders), "resolved_source_artifact_id": source["id"], "resolved_source_digest": source["content_hash"], "selections": summaries, "artifact_id": artifact["id"], "producer_activated": False, "routing_acceptance_complete": False}
+    evidence["business_snapshots"] = {"previous_revision": previous_preview["business_snapshot_revision"], "successor_revision": preview["business_snapshot_revision"], "unchanged_intent_digest": digest(preview["intent"])}
     save(evidence)
     key = "producer-reconfiguration/" + digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": precondition})
     api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/release", {"release_channel": "shadow", "producer_reconfiguration": precondition, "idempotency_key": key, "reason": "Retire legacy selector using preserved signed physical orders and unchanged measured policies"})
