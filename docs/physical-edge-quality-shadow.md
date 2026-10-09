@@ -401,6 +401,11 @@ New issues, target-host issues and validation failures still reject activation;
 the evidence records the retained advisories. Normal compilation and gray/full
 readiness independently validate the successor before it can serve.
 
+Physical primary, ordered fallback identities and assignment start time are part
+of the producer's change fingerprint. A changed physical decision triggers normal
+publication before the periodic refresh; a new receipt ID or measurement timestamp
+alone does not. Nonphysical source fingerprints retain their previous encoding.
+
 The declaration schema is `fugue.physical-dns-reconfiguration/v1`, with integer
 `generation`, canonical HTTPS `origin`, one `hostname`, `producer_generation`,
 the full successor `projection_policy`, and a `precondition` containing

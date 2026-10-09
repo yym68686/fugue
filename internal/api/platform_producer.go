@@ -284,12 +284,46 @@ func platformProducerSourceDigest(projection platformIntentProjectionResponse, a
 		}
 		return routes[i].PathPrefix < routes[j].PathPrefix
 	})
-	return platformconfig.Digest(struct {
+	source := struct {
 		Intent    platformconfig.PlatformIntent
 		Policy    platformconfig.PolicySnapshot
 		Authority string
 		Routes    []platformconfig.CompiledRoute
-	}{projection.Intent, projection.Policy, authority, routes})
+	}{projection.Intent, projection.Policy, authority, routes}
+	type assignment struct {
+		NodeID         string
+		Hostname       string
+		Type           string
+		Version        string
+		PrimaryEdgeID  string
+		OrderedEdgeIDs []string
+		Scope          string
+		PrimarySince   *time.Time
+	}
+	assignments := []assignment{}
+	for _, fact := range projection.RuntimeSnapshot.DNSSelections {
+		selection := fact.PhysicalSelection
+		if selection == nil {
+			continue
+		}
+		if err := model.ValidateDNSPhysicalSelection(selection); err != nil {
+			return "", err
+		}
+		assignments = append(assignments, assignment{NodeID: fact.NodeID, Hostname: fact.Hostname, Type: fact.Type,
+			Version: selection.Version, PrimaryEdgeID: selection.PrimaryEdgeID, OrderedEdgeIDs: selection.OrderedEdgeIDs,
+			Scope: selection.Scope, PrimarySince: selection.PrimarySince})
+	}
+	if len(assignments) == 0 {
+		return platformconfig.Digest(source)
+	}
+	sort.Slice(assignments, func(left, right int) bool {
+		first, second := assignments[left], assignments[right]
+		return first.NodeID+"\x00"+first.Hostname+"\x00"+first.Type < second.NodeID+"\x00"+second.Hostname+"\x00"+second.Type
+	})
+	return platformconfig.Digest(struct {
+		Source              any
+		PhysicalAssignments []assignment
+	}{source, assignments})
 }
 
 func (s *Server) loadStaticPlatformIntent(id, digest string) (platformproducer.StaticIntentInput, error) {
