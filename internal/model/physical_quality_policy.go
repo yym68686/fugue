@@ -6,6 +6,7 @@ import (
 )
 
 const PhysicalNetworkPolicyVersion = "physical-network-cohort-v2"
+const PhysicalBoundedNetworkPolicyVersion = "physical-network-bounded-v3"
 
 type PhysicalEdgeQualityPolicy struct {
 	MaximumNodeUtilization float64 `json:"maximum_node_utilization,omitempty"`
@@ -29,7 +30,7 @@ type PhysicalEdgeQualityPolicy struct {
 }
 
 func ValidatePhysicalEdgeQualityPolicy(policy PhysicalEdgeQualityPolicy) error {
-	if policy.Version != PhysicalNetworkPolicyVersion || math.IsNaN(policy.MaximumNodeUtilization) || math.IsInf(policy.MaximumNodeUtilization, 0) || policy.MaximumNodeUtilization <= 0 || policy.MaximumNodeUtilization > 1 {
+	if (policy.Version != PhysicalNetworkPolicyVersion && policy.Version != PhysicalBoundedNetworkPolicyVersion) || math.IsNaN(policy.MaximumNodeUtilization) || math.IsInf(policy.MaximumNodeUtilization, 0) || policy.MaximumNodeUtilization <= 0 || policy.MaximumNodeUtilization > 1 {
 		return errors.New("unsupported physical network policy or node utilization limit")
 	}
 	if policy.WindowSeconds < 60 || policy.WindowSeconds > 86400 || policy.BucketSeconds < 60 || policy.BucketSeconds > policy.WindowSeconds || policy.RequiredBuckets < 2 || policy.RequiredBuckets > 12 || policy.RequiredBuckets*policy.BucketSeconds > policy.WindowSeconds || policy.MinimumRecords < 2 || policy.MinimumRecords > 10000 || policy.CooldownSeconds < 0 || policy.CooldownSeconds > 86400 || policy.ProbeIntervalSeconds < 60 || policy.ProbeIntervalSeconds > 86400 || policy.ProbeBudgetPerInterval < 0 || policy.ProbeBudgetPerInterval > 2 || policy.EvidenceMaxAgeSeconds < 60 || policy.EvidenceMaxAgeSeconds > policy.WindowSeconds {

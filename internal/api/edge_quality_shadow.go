@@ -223,6 +223,13 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 				ObservedAt: sample.ObservedAt, RouteWitnessID: witnessID}
 			if model.EdgeNetworkServiceSource(sample.Source) {
 				observation.ServiceNetworkMS, observation.ServiceSource = sample.ServiceRTTMS, "service_endpoint_tcp"
+				if snapshot.Policy.Version == edgequality.BoundedNetworkPolicyVersion && sample.ServiceConnectFailed != nil {
+					value := 0.0
+					if *sample.ServiceConnectFailed {
+						value = 1
+					}
+					observation.ServiceFailureRate = &value
+				}
 			} else if sample.Source == "public_front_tcp_info_v1" && sample.ClientNetwork != nil && (snapshot.Scope == "global" || snapshot.Scope == sample.ClientNetwork.Scope) {
 				observation.ClientNetworkMS, observation.ClientSource = sample.ClientNetwork.RTTMS, "public_tcp_info"
 				observation.ClientCohort = sample.ClientNetwork.Scope

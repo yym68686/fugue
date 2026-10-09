@@ -126,6 +126,27 @@ func TestQualityNetworkSampleBindingRequiresExactPhysicalRouteProof(t *testing.T
 	}
 }
 
+func TestBoundedQualityBindingRetainsProbeFailureWithoutFabricatedRTT(t *testing.T) {
+	now := time.Now().UTC()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	failed := true
+	sample := model.EdgeNetworkSample{ID: "probe-failed", EdgeID: "edge-a", EdgeGroupID: "shared", Hostname: "app.example.test", PathPrefix: "/", TrafficClass: "streaming",
+		RouteDigest: digest, BundleVersion: "serving-bundle", ServiceTarget: "app.tenant.svc.cluster.local:3000", Source: "service_endpoint_tcp_probe_v1", ServiceConnectFailed: &failed, ObservedAt: now.Add(-time.Second)}
+	evidence := dnsserver.QualityAnswerEvidence{EdgeID: sample.EdgeID, Hostname: sample.Hostname, Scope: "global", Proofs: []dnsserver.QualityRouteProof{{EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID, Hostname: sample.Hostname, Path: sample.PathPrefix,
+		Proof: routeprobe.Proof{Digest: digest, Version: sample.BundleVersion, CheckedAt: now}}}}
+	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: sample.Hostname, TrafficClass: sample.TrafficClass, Scope: "global", Policy: edgequality.DefaultNetworkPolicy(),
+		Candidates: []edgequality.Candidate{{EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID}}, NetworkSamples: []model.EdgeNetworkSample{sample}}
+	bindPhysicalQualityEvidence(&snapshot, evidence)
+	if len(snapshot.Observations) != 1 || snapshot.Observations[0].ServiceNetworkMS != nil || snapshot.Observations[0].ServiceFailureRate == nil || *snapshot.Observations[0].ServiceFailureRate != 1 {
+		t.Fatal("failed connection lost its outcome or fabricated RTT", snapshot.Observations)
+	}
+	if receipt, err := edgequality.Capture(snapshot); err != nil {
+		t.Fatal(err)
+	} else if _, err := edgequality.Replay(receipt); err != nil {
+		t.Fatal("raw probe outcome failed offline replay", err)
+	}
+}
+
 func TestQualityBindingReplacesRatherThanInheritsUnverifiedCooldown(t *testing.T) {
 	now := time.Now().UTC()
 	previous := now.Add(-time.Hour)

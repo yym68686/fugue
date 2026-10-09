@@ -12,10 +12,10 @@ opt in a hostname. The evaluator has no probe executor. In shadow receipts,
 `promotion_ready` and `probe_executed` are always false; `dns_unchanged` is always
 true. A hypothetical switch is not itself a serving authorization.
 
-## Cohort network evaluator v2
+## Versioned network evaluators
 
-New captures use `physical-network-cohort-v2`. Older receipts continue to replay
-with their captured v1 evaluator; this is historical replay compatibility, not
+New captures use `physical-network-bounded-v3`. Older receipts continue to replay
+with their captured v1/v2 evaluator; this is historical replay compatibility, not
 the production legacy DNS ranking path. Its capture API remains shadow-only;
 serving publication requires the separate explicit policy and evidence compiler.
 
@@ -28,8 +28,19 @@ normal switch; it is eligible for a bounded probe recommendation. This is
 evidence about those observed networks, not a guarantee for every unobserved
 terminal sharing the global DNS answer.
 
-The core gates require current route/TLS proof, measured client and service
-network RTT, and fresh authenticated physical-node CPU/memory headroom. The
+V3 keeps existing V2 receipts replayable and uses the same common-cohort
+comparison when measured client populations overlap. If one side has no client
+cohort, it compares service-network and node-capacity evidence only;
+client latency remains explicitly unknown and receives the single bounded
+unknown-cost budget. It never averages distinct measured client populations
+into one global path, and distinct measured populations remain incomparable.
+A switch still needs a sustained band-separated
+advantage and a known cooldown. This fallback is a policy risk decision, not
+a measurement of the missing user-to-edge path.
+
+The core gates require current route/TLS proof, measured service network RTT,
+and fresh authenticated physical-node CPU/memory headroom. Common-cohort
+comparisons also require measured client network RTT. The
 score does not consume HTTP TTFB, inference wait, application queueing or
 connection duration. Latency bands use observed P10/P90 variation plus an
 explicit margin, without pretending repeated observations are independent

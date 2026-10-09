@@ -19096,7 +19096,7 @@ components:
         evidence_max_age_seconds: {type: integer}
         advantage_ms: {type: number}
         advantage_ratio: {type: number}
-        unknown_cost_ms: {type: number, description: 'In physical-network-cohort-v2 this is one total optional-metric uncertainty budget, not a per-missing-field penalty. It is configured risk tolerance, not a physical worst-case bound.'}
+        unknown_cost_ms: {type: number, description: 'One total unknown-metric cost budget in network v2/v3. V3 can compare sustained service network evidence when client cohorts are unavailable, without crediting unmatched client RTT. This is configured risk tolerance, not a measured or physical worst-case bound.'}
         uncertainty_ms: {type: number, description: In v2 this widens observed latency quantile bands; it is not a statistical confidence claim.}
         failure_cost_ms: {type: number}
         capacity_cost_ms: {type: number}
@@ -34294,7 +34294,7 @@ components:
             - type: object
               required: [maximum_node_utilization]
               properties:
-                version: {type: string, enum: [physical-network-cohort-v2]}
+                version: {type: string, enum: [physical-network-cohort-v2, physical-network-bounded-v3]}
     PlatformDNSAuthorityPolicy:
       type: object
       additionalProperties: false

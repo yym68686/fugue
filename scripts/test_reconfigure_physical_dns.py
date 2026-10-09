@@ -64,6 +64,15 @@ class Ledger(ArtifactAPI):
 
 
 class PhysicalDNSConfigurationTests(unittest.TestCase):
+    def test_bounded_network_policy_requires_exact_shape(self):
+        config, _, _ = fixture()
+        policy = config["projection_policy"]["dns_query_policy"]["physical_routes"][0]["policy"]
+        policy["version"] = "physical-network-bounded-v3"
+        self.assertEqual(config, routing.validate(config))
+        policy["unknown_cost_ms"] = None
+        with self.assertRaises(ValueError):
+            routing.validate(config)
+
     def test_success_and_idempotent_retry_never_claim_routing_acceptance(self):
         config, old, source = fixture()
         ledger = Ledger(config, old, source)

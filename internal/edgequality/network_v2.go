@@ -11,6 +11,11 @@ import (
 )
 
 const NetworkPolicyVersion = model.PhysicalNetworkPolicyVersion
+const BoundedNetworkPolicyVersion = model.PhysicalBoundedNetworkPolicyVersion
+
+func IsNetworkPolicy(version string) bool {
+	return version == NetworkPolicyVersion || version == BoundedNetworkPolicyVersion
+}
 
 type NetworkComparison struct {
 	EdgeID           string  `json:"edge_id"`
@@ -25,7 +30,7 @@ type NetworkComparison struct {
 
 func DefaultNetworkPolicy() Policy {
 	policy := DefaultShadowPolicy()
-	policy.Version = NetworkPolicyVersion
+	policy.Version = BoundedNetworkPolicyVersion
 	policy.UnknownCostMS, policy.UncertaintyMS = 30, 5
 	policy.MaximumNodeUtilization = 0.85
 	return policy
@@ -129,6 +134,10 @@ func selectNetworkChallenger(snapshot Snapshot, nodes map[string]Candidate, obse
 			continue
 		}
 		cohorts := networkSharedCohorts(observations[current.EdgeID], observations[candidate.EdgeID])
+		if snapshot.Policy.Version == BoundedNetworkPolicyVersion && len(cohorts) == 0 &&
+			(!hasClientNetworkCohort(observations[current.EdgeID]) || !hasClientNetworkCohort(observations[candidate.EdgeID])) {
+			cohorts = []string{""}
+		}
 		if len(cohorts) == 0 || len(cohorts) > 16 {
 			continue
 		}
@@ -163,7 +172,20 @@ func selectNetworkChallenger(snapshot Snapshot, nodes map[string]Candidate, obse
 		result.Hypothesis, result.ProposedEdgeID, result.SustainedBuckets = "switch", candidate.EdgeID, minimumBuckets
 		return
 	}
-	result.Blockers = append(result.Blockers, "no_sustained_advantage_in_common_client_cohorts")
+	if snapshot.Policy.Version == BoundedNetworkPolicyVersion {
+		result.Blockers = append(result.Blockers, "no_sustained_advantage_in_comparable_network_evidence")
+	} else {
+		result.Blockers = append(result.Blockers, "no_sustained_advantage_in_common_client_cohorts")
+	}
+}
+
+func hasClientNetworkCohort(observations []Observation) bool {
+	for _, observation := range observations {
+		if observation.ClientSource == "public_tcp_info" && observation.ClientNetworkMS != nil && validNetworkCohort(observation.ClientCohort) {
+			return true
+		}
+	}
+	return false
 }
 
 func networkSharedCohorts(current, challenger []Observation) []string {
@@ -193,6 +215,7 @@ func assessNetwork(candidate Candidate, observations []Observation, policy Polic
 
 func assessNetworkAt(candidate Candidate, observations []Observation, policy Policy, now, metricNow time.Time, cohort string) Assessment {
 	assessment := Assessment{EdgeID: candidate.EdgeID, EdgeGroupID: candidate.EdgeGroupID, HardGates: append([]string{}, candidate.HardGates...), Metrics: map[string]Metric{}, Missing: []string{}}
+	compareClient := policy.Version != BoundedNetworkPolicyVersion || cohort != ""
 	values := map[string][]float64{}
 	latest := map[string]time.Time{}
 	latestValue := map[string]float64{}
@@ -215,7 +238,7 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 	}
 	for _, observation := range observations {
 		assessment.RecordCount++
-		if observation.ClientSource == "public_tcp_info" && validNetworkCohort(observation.ClientCohort) && (cohort == "" || cohort == observation.ClientCohort) {
+		if compareClient && observation.ClientSource == "public_tcp_info" && validNetworkCohort(observation.ClientCohort) && (cohort == "" || cohort == observation.ClientCohort) {
 			collect("client_network_ms", observation.ClientNetworkMS, observation.ObservedAt)
 			collect("upload_bps", observation.UploadBPS, observation.ObservedAt)
 			collect("download_bps", observation.DownloadBPS, observation.ObservedAt)
@@ -237,7 +260,7 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 	for _, name := range []string{"client_network_ms", "service_network_ms", "upload_bps", "download_bps", "client_failure_rate", "service_failure_rate", "capacity_utilization"} {
 		measured := values[name]
 		sort.Float64s(measured)
-		core := name == "client_network_ms" || name == "service_network_ms" || name == "capacity_utilization"
+		core := name == "client_network_ms" && compareClient || name == "service_network_ms" || name == "capacity_utilization"
 		minimum := policy.MinimumRecords
 		if name == "capacity_utilization" {
 			minimum = 1
@@ -254,6 +277,12 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 			continue
 		}
 		value := networkQuantile(measured, 0.5)
+		if policy.Version == BoundedNetworkPolicyVersion && (name == "client_failure_rate" || name == "service_failure_rate") {
+			value = 0
+			for _, measuredValue := range measured {
+				value += measuredValue / float64(len(measured))
+			}
+		}
 		if name == "capacity_utilization" {
 			value = latestValue[name]
 		}
@@ -288,6 +317,9 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 		assessment.Upper += policy.UnknownCostMS
 	}
 	assessment.BucketCount = min(len(buckets["client_network_ms"]), len(buckets["service_network_ms"]))
+	if !compareClient {
+		assessment.BucketCount = len(buckets["service_network_ms"])
+	}
 	assessment.Ready = coreReady && len(assessment.HardGates) == 0
 	return assessment
 }

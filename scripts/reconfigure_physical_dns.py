@@ -52,7 +52,7 @@ def validate(config):
     if query.get("ranking_mode") != "active" or not 1 <= len(routes) <= 64 or len({route.get("hostname") for route in routes}) != len(routes) or sum(route.get("hostname") == hostname for route in routes) != 1:
         raise ValueError("explicit active physical route policy required")
     for route in routes:
-        if set(route) != {"hostname", "traffic_class", "policy"} or set(route["policy"]) != POLICY_FIELDS or route["policy"].get("version") != "physical-network-cohort-v2":
+        if set(route) != {"hostname", "traffic_class", "policy"} or set(route["policy"]) != POLICY_FIELDS or route["policy"].get("version") not in ["physical-network-cohort-v2", "physical-network-bounded-v3"] or any(route["policy"][field] is None for field in POLICY_FIELDS):
             raise ValueError("physical route must declare complete versioned network policy")
     return config
 

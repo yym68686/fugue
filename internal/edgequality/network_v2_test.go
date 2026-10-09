@@ -11,6 +11,7 @@ import (
 func networkFixture() Snapshot {
 	snapshot := fixture()
 	snapshot.Policy = DefaultNetworkPolicy()
+	snapshot.Policy.Version = NetworkPolicyVersion
 	for index := range snapshot.Observations {
 		observation := &snapshot.Observations[index]
 		observation.ObservedAt = observation.ObservedAt.Add(4*time.Minute + 20*time.Second)
@@ -71,6 +72,76 @@ func TestNetworkV2CannotCompareUnrelatedClientPopulations(t *testing.T) {
 		}
 		if result := evaluateTest(t, snapshot); result.Hypothesis != "hold" {
 			t.Fatal("unsupported or identifying cohort accepted", cohort, result)
+		}
+	}
+}
+
+func TestBoundedNetworkV3ComparesMissingClientWithoutInventingAPath(t *testing.T) {
+	snapshot := networkFixture()
+	snapshot.Policy.Version = BoundedNetworkPolicyVersion
+	for index := range snapshot.Observations {
+		if snapshot.Observations[index].EdgeID == "edge-b" {
+			snapshot.Observations[index].ClientNetworkMS = nil
+			snapshot.Observations[index].ClientCohort = ""
+		}
+	}
+	receipt, err := Capture(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := receipt.Result
+	if result.Hypothesis != "switch" || result.ProposedEdgeID != "edge-b" || result.SustainedBuckets != snapshot.Policy.RequiredBuckets ||
+		len(result.Comparisons) != 1 || result.Comparisons[0].Cohort != "" {
+		t.Fatal("unknown client path permanently excluded a service-network winner", result)
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.Metrics["client_network_ms"].State != "unknown" || candidate.Metrics["client_network_ms"].Records != 0 {
+			t.Fatal("global comparison claimed a measured terminal path", candidate)
+		}
+	}
+	if replay, err := Replay(receipt); err != nil || !reflect.DeepEqual(replay, result) {
+		t.Fatal("v3 replay changed the captured decision", replay, err)
+	}
+}
+
+func TestBoundedNetworkV3UsesSharedCohortsAndPreservesV2Receipts(t *testing.T) {
+	snapshot := networkFixture()
+	v2Receipt, err := Capture(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v3Snapshot := networkFixture()
+	v3Snapshot.Policy.Version = BoundedNetworkPolicyVersion
+	for index := range v3Snapshot.Observations {
+		if v3Snapshot.Observations[index].EdgeID == "edge-b" {
+			v3Snapshot.Observations[index].ClientCohort = "tcp_peer:198.51.100.0/24"
+		}
+	}
+	if result := evaluateTest(t, v3Snapshot); result.Hypothesis != "hold" || len(result.Comparisons) != 0 {
+		t.Fatal("unrelated measured client paths were averaged", result)
+	}
+	if replay, err := Replay(v2Receipt); err != nil || !reflect.DeepEqual(replay, v2Receipt.Result) {
+		t.Fatal("v3 changed an existing v2 receipt", replay, err)
+	}
+}
+
+func TestBoundedNetworkV3MeasuredServiceFailureOverridesRTTAdvantage(t *testing.T) {
+	snapshot := networkFixture()
+	snapshot.Policy.Version = BoundedNetworkPolicyVersion
+	for index := range snapshot.Observations {
+		if snapshot.Observations[index].EdgeID == "edge-b" {
+			snapshot.Observations[index].ServiceFailureRate = number(1)
+		} else {
+			snapshot.Observations[index].ServiceFailureRate = number(0)
+		}
+	}
+	result := evaluateTest(t, snapshot)
+	if result.Hypothesis != "hold" || result.ProposedEdgeID != "edge-a" {
+		t.Fatal("failed service connection won on RTT alone", result)
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.Metrics["service_failure_rate"].State != "observed" {
+			t.Fatal("measured connection outcome became an unknown prior", candidate)
 		}
 	}
 }

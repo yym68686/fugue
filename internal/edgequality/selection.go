@@ -61,7 +61,7 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 			selection.OrderedEdgeIDs = append(selection.OrderedEdgeIDs, candidate.EdgeID)
 		}
 	}
-	if snapshot.Policy.Version == NetworkPolicyVersion {
+	if IsNetworkPolicy(snapshot.Policy.Version) {
 		for _, candidate := range result.Candidates {
 			if candidate.EdgeID == primary.EdgeID || candidate.Ready || len(candidate.HardGates) != 0 {
 				continue

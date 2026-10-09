@@ -13,7 +13,7 @@ import (
 )
 
 func compileBoundPhysicalQualitySelection(receipt edgequality.Receipt, now time.Time) (*model.DNSPhysicalSelection, error) {
-	if receipt.Snapshot.Policy.Version != edgequality.NetworkPolicyVersion {
+	if !edgequality.IsNetworkPolicy(receipt.Snapshot.Policy.Version) {
 		return nil, errors.New("physical publication requires the supported network policy")
 	}
 	if _, err := edgequality.Replay(receipt); err != nil {

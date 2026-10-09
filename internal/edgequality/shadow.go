@@ -188,7 +188,7 @@ func Evaluate(snapshot Snapshot) (Result, error) {
 	if err := validate(snapshot); err != nil {
 		return Result{}, err
 	}
-	if snapshot.Policy.Version == NetworkPolicyVersion {
+	if IsNetworkPolicy(snapshot.Policy.Version) {
 		return evaluateNetwork(snapshot), nil
 	}
 	result := Result{Mode: "shadow", DNSUnchanged: true, Hypothesis: "hold", ProposedEdgeID: snapshot.CurrentEdgeID,
@@ -398,7 +398,7 @@ func validate(snapshot Snapshot) error {
 		return errors.New("invalid shadow schema or context")
 	}
 	policy := snapshot.Policy
-	if policy.Version == NetworkPolicyVersion {
+	if IsNetworkPolicy(policy.Version) {
 		if err := model.ValidatePhysicalEdgeQualityPolicy(policy); err != nil {
 			return err
 		}
@@ -470,7 +470,7 @@ func validate(snapshot Snapshot) error {
 			sample, sampled := networkSamples[observation.EdgeID+"\x00"+strings.TrimPrefix(observation.ID, "network:"+observation.EdgeID+":")]
 			if !found || !sampled || observation.ID != "network:"+sample.EdgeID+":"+sample.ID || !model.EdgeNetworkWitnessMatches(sample, witness) || witness.ObservedAt.After(snapshot.CapturedAt) ||
 				observation.Hostname != sample.Hostname || observation.TrafficClass != sample.TrafficClass || observation.RouteGeneration != sample.RouteDigest ||
-				!observation.ObservedAt.Equal(sample.ObservedAt) || !networkWitnessMeasurementMatches(observation, sample) {
+				!observation.ObservedAt.Equal(sample.ObservedAt) || !networkWitnessMeasurementMatches(observation, sample, policy.Version) {
 				return errors.New("historical observation lacks matching captured route witness")
 			}
 		}
@@ -488,8 +488,19 @@ func validate(snapshot Snapshot) error {
 	return nil
 }
 
-func networkWitnessMeasurementMatches(observation Observation, sample model.EdgeNetworkSample) bool {
-	if observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.ServiceFailureRate != nil || observation.CapacityUtilization != nil {
+func networkWitnessMeasurementMatches(observation Observation, sample model.EdgeNetworkSample, policyVersion string) bool {
+	if observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.CapacityUtilization != nil {
+		return false
+	}
+	var serviceFailure *float64
+	if policyVersion == BoundedNetworkPolicyVersion && model.EdgeNetworkServiceSource(sample.Source) && sample.ServiceConnectFailed != nil {
+		value := 0.0
+		if *sample.ServiceConnectFailed {
+			value = 1
+		}
+		serviceFailure = &value
+	}
+	if !reflect.DeepEqual(observation.ServiceFailureRate, serviceFailure) {
 		return false
 	}
 	if model.EdgeNetworkServiceSource(sample.Source) {
