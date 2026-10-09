@@ -12,20 +12,25 @@ import (
 )
 
 type EdgeNetworkSample struct {
-	RouteWitness  *EdgeNetworkRouteWitness `json:"route_witness,omitempty"`
-	ClientNetwork *EdgeClientNetworkSample `json:"client_network,omitempty"`
-	ID            string                   `json:"id"`
-	EdgeID        string                   `json:"edge_id"`
-	EdgeGroupID   string                   `json:"edge_group_id"`
-	Hostname      string                   `json:"hostname"`
-	PathPrefix    string                   `json:"path_prefix"`
-	TrafficClass  string                   `json:"traffic_class"`
-	RouteDigest   string                   `json:"route_digest"`
-	BundleVersion string                   `json:"bundle_version"`
-	ServiceTarget string                   `json:"service_target"`
-	Source        string                   `json:"source"`
-	ServiceRTTMS  *float64                 `json:"service_rtt_ms"`
-	ObservedAt    time.Time                `json:"observed_at"`
+	ServiceConnectFailed *bool                    `json:"service_connect_failed,omitempty"`
+	RouteWitness         *EdgeNetworkRouteWitness `json:"route_witness,omitempty"`
+	ClientNetwork        *EdgeClientNetworkSample `json:"client_network,omitempty"`
+	ID                   string                   `json:"id"`
+	EdgeID               string                   `json:"edge_id"`
+	EdgeGroupID          string                   `json:"edge_group_id"`
+	Hostname             string                   `json:"hostname"`
+	PathPrefix           string                   `json:"path_prefix"`
+	TrafficClass         string                   `json:"traffic_class"`
+	RouteDigest          string                   `json:"route_digest"`
+	BundleVersion        string                   `json:"bundle_version"`
+	ServiceTarget        string                   `json:"service_target"`
+	Source               string                   `json:"source"`
+	ServiceRTTMS         *float64                 `json:"service_rtt_ms"`
+	ObservedAt           time.Time                `json:"observed_at"`
+}
+
+func EdgeNetworkServiceSource(source string) bool {
+	return source == "service_endpoint_tcp_info_v1" || source == "service_endpoint_tcp_probe_v1"
 }
 
 type EdgeNetworkRouteWitness struct {
@@ -85,7 +90,7 @@ func EdgeNetworkNodeUtilization(capacity *EdgeNetworkNodeCapacity) (float64, err
 
 func EdgeNetworkWitnessMatches(sample, witness EdgeNetworkSample) bool {
 	if ValidateEdgeNetworkSample(sample) != nil || ValidateEdgeNetworkSample(witness) != nil ||
-		(sample.Source != "service_endpoint_tcp_info_v1" && sample.Source != "public_front_tcp_info_v1") || witness.Source != "route_tls_witness_v1" ||
+		(!EdgeNetworkServiceSource(sample.Source) && sample.Source != "public_front_tcp_info_v1") || witness.Source != "route_tls_witness_v1" ||
 		sample.EdgeID != witness.EdgeID || sample.EdgeGroupID != witness.EdgeGroupID || sample.Hostname != witness.Hostname ||
 		sample.PathPrefix != witness.PathPrefix || sample.TrafficClass != witness.TrafficClass ||
 		sample.RouteDigest != witness.RouteDigest || sample.BundleVersion != witness.BundleVersion {
@@ -107,9 +112,12 @@ func ValidateEdgeNetworkSample(sample EdgeNetworkSample) error {
 		sample.BundleVersion != "" && len(sample.BundleVersion) <= 256 &&
 		!sample.ObservedAt.IsZero()
 	switch sample.Source {
-	case "service_endpoint_tcp_info_v1":
+	case "service_endpoint_tcp_info_v1", "service_endpoint_tcp_probe_v1":
 		valid = valid && sample.RouteWitness == nil && sample.ClientNetwork == nil && targetErr == nil && portErr == nil && portNumber > 0 && portNumber <= 65535 &&
 			strings.HasSuffix(host, ".svc.cluster.local") && !strings.ContainsAny(host, "/:@?# \t\r\n") && len(sample.ServiceTarget) <= 512
+		if sample.Source == "service_endpoint_tcp_probe_v1" {
+			valid = valid && sample.ServiceConnectFailed != nil && (!*sample.ServiceConnectFailed || sample.ServiceRTTMS == nil)
+		}
 	case "public_front_tcp_info_v1":
 		valid = valid && sample.RouteWitness == nil && sample.ServiceTarget == "" && sample.ServiceRTTMS == nil && ValidateEdgeClientNetworkSample(sample.ClientNetwork) == nil
 		if sample.ClientNetwork != nil {
@@ -126,6 +134,9 @@ func ValidateEdgeNetworkSample(sample EdgeNetworkSample) error {
 			}
 		}
 	default:
+		valid = false
+	}
+	if sample.Source != "service_endpoint_tcp_probe_v1" && sample.ServiceConnectFailed != nil {
 		valid = false
 	}
 	switch sample.TrafficClass {

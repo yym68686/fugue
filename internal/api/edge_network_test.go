@@ -39,3 +39,21 @@ func TestNetworkIngestCannotRebindForeignOrStaleEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkIngestPreservesConfiguredProbeOutcomes(t *testing.T) {
+	now := time.Now().UTC()
+	sample, _ := networkWitnessFixture(now)
+	failed := true
+	sample.Source, sample.ServiceConnectFailed, sample.ServiceRTTMS = "service_endpoint_tcp_probe_v1", &failed, nil
+	request := edgeHeartbeatRequest{EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID, RouteBundleVersion: sample.BundleVersion,
+		NetworkSamples: []model.EdgeNetworkSample{sample}}
+	active := true
+	got := sanitizeEdgeNetworkSamples(request, &active, now)
+	if len(got) != 1 || got[0].ServiceConnectFailed == nil || !*got[0].ServiceConnectFailed || got[0].ServiceRTTMS != nil {
+		t.Fatal("failed probe disappeared or became zero RTT", got)
+	}
+	request.NetworkSamples[0].EdgeID = "foreign"
+	if len(sanitizeEdgeNetworkSamples(request, &active, now)) != 0 {
+		t.Fatal("probe source bypassed authenticated edge identity")
+	}
+}

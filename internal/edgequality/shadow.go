@@ -492,7 +492,7 @@ func networkWitnessMeasurementMatches(observation Observation, sample model.Edge
 	if observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.ServiceFailureRate != nil || observation.CapacityUtilization != nil {
 		return false
 	}
-	if sample.Source == "service_endpoint_tcp_info_v1" {
+	if model.EdgeNetworkServiceSource(sample.Source) {
 		return observation.ServiceSource == "service_endpoint_tcp" && observation.ClientSource == "" && observation.ClientNetworkMS == nil && reflect.DeepEqual(observation.ServiceNetworkMS, sample.ServiceRTTMS)
 	}
 	return sample.ClientNetwork != nil && observation.ClientSource == "public_tcp_info" && observation.ServiceSource == "" && observation.ServiceNetworkMS == nil &&

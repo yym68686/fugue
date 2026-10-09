@@ -32,3 +32,31 @@ func TestClientNetworkSampleNeverInventsUnknownRTTOrRawPeerIdentity(t *testing.T
 		}
 	}
 }
+
+func TestServiceProbeOutcomeCannotFabricatePassiveOrFailedRTT(t *testing.T) {
+	failed := false
+	rtt := 22.0
+	base := EdgeNetworkSample{ID: "probe-a", EdgeID: "edge-a", EdgeGroupID: "group-a", Hostname: "app.example.test", PathPrefix: "/",
+		TrafficClass: "streaming", RouteDigest: "sha256:" + strings.Repeat("a", 64), BundleVersion: "bundle-a",
+		Source: "service_endpoint_tcp_probe_v1", ServiceTarget: "app.tenant.svc.cluster.local:3000", ServiceConnectFailed: &failed,
+		ServiceRTTMS: &rtt, ObservedAt: time.Now().UTC()}
+	if err := ValidateEdgeNetworkSample(base); err != nil {
+		t.Fatal(err)
+	}
+	for _, edit := range []func(*EdgeNetworkSample){
+		func(sample *EdgeNetworkSample) { sample.ServiceConnectFailed = nil },
+		func(sample *EdgeNetworkSample) { value := true; sample.ServiceConnectFailed = &value },
+		func(sample *EdgeNetworkSample) { sample.Source = "service_endpoint_tcp_info_v1" },
+	} {
+		sample := base
+		edit(&sample)
+		if ValidateEdgeNetworkSample(sample) == nil {
+			t.Fatal("ambiguous probe provenance accepted", sample)
+		}
+	}
+	failed = true
+	base.ServiceRTTMS = nil
+	if err := ValidateEdgeNetworkSample(base); err != nil {
+		t.Fatal("failed connection lost instead of retaining unknown RTT", err)
+	}
+}

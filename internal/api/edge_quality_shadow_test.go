@@ -95,6 +95,14 @@ func TestQualityNetworkSampleBindingRequiresExactPhysicalRouteProof(t *testing.T
 		want int
 	}{
 		{"exact", func(sample *model.EdgeNetworkSample) {}, 1},
+		{"tcp_probe", func(sample *model.EdgeNetworkSample) {
+			failed := false
+			sample.Source, sample.ServiceConnectFailed = "service_endpoint_tcp_probe_v1", &failed
+		}, 1},
+		{"tcp_probe_failed", func(sample *model.EdgeNetworkSample) {
+			failed := true
+			sample.Source, sample.ServiceConnectFailed, sample.ServiceRTTMS = "service_endpoint_tcp_probe_v1", &failed, nil
+		}, 1},
 		{"sibling", func(sample *model.EdgeNetworkSample) { sample.EdgeID = "edge-b" }, 0},
 		{"old_bundle", func(sample *model.EdgeNetworkSample) { sample.BundleVersion = "old" }, 0},
 		{"wrong_route", func(sample *model.EdgeNetworkSample) { sample.RouteDigest = "sha256:" + strings.Repeat("b", 64) }, 0},

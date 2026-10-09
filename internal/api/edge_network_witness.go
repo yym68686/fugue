@@ -36,7 +36,7 @@ func (state *networkRouteWitnessState) selectSample(node model.EdgeNode, samples
 		sample := &samples[index]
 		if sample.EdgeID != node.ID || sample.EdgeGroupID != node.EdgeGroupID || sample.ObservedAt.After(now) ||
 			now.Sub(sample.ObservedAt) > 90*time.Second || model.ValidateEdgeNetworkSample(*sample) != nil ||
-			(sample.Source != "service_endpoint_tcp_info_v1" && sample.Source != "public_front_tcp_info_v1") {
+			(!model.EdgeNetworkServiceSource(sample.Source) && sample.Source != "public_front_tcp_info_v1") {
 			continue
 		}
 		key := sample.Hostname + "\x00" + sample.PathPrefix + "\x00" + sample.TrafficClass
@@ -123,10 +123,27 @@ func (s *Server) observeNetworkRouteWitness(node model.EdgeNode, samples []model
 }
 
 func networkRouteWitnessSample(sample model.EdgeNetworkSample, address string, proof routeprobe.Proof, now time.Time) (model.EdgeNetworkSample, error) {
-	if proof.EdgeID != sample.EdgeID || proof.GroupID != sample.EdgeGroupID || proof.Digest != sample.RouteDigest ||
-		proof.State != "" || proof.CheckedAt.IsZero() || proof.CheckedAt.After(now) || now.Sub(proof.CheckedAt) > 5*time.Second || model.ValidateEdgeNetworkSample(sample) != nil ||
-		sample.ObservedAt.After(now) || now.Sub(sample.ObservedAt) > 2*time.Minute {
-		return model.EdgeNetworkSample{}, errors.New("route witness does not match observed immutable bundle")
+	reason := ""
+	switch {
+	case model.ValidateEdgeNetworkSample(sample) != nil:
+		reason = "invalid_network_sample"
+	case proof.EdgeID != sample.EdgeID || proof.GroupID != sample.EdgeGroupID:
+		reason = "physical_identity_mismatch"
+	case proof.Digest != sample.RouteDigest:
+		reason = "route_digest_mismatch"
+	case proof.State != "":
+		reason = "route_not_serving"
+	case proof.CheckedAt.IsZero() || proof.CheckedAt.After(now):
+		reason = "invalid_proof_time"
+	case now.Sub(proof.CheckedAt) > 5*time.Second:
+		reason = "stale_proof"
+	case sample.ObservedAt.After(now):
+		reason = "future_sample"
+	case now.Sub(sample.ObservedAt) > 2*time.Minute:
+		reason = "stale_sample"
+	}
+	if reason != "" {
+		return model.EdgeNetworkSample{}, errors.New("route witness rejected: " + reason)
 	}
 	witness := model.EdgeNetworkSample{ID: model.NewID("route_witness"), EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID,
 		Hostname: sample.Hostname, PathPrefix: sample.PathPrefix, TrafficClass: sample.TrafficClass, RouteDigest: proof.Digest,
