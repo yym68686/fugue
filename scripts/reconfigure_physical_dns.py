@@ -104,9 +104,15 @@ def resolve_baseline(config, api):
     return resolved
 
 
-def validate_preview(config, preview):
-    if not preview.get("business_snapshot_revision") or preview.get("issues") or preview.get("policy", {}).get("scope") != "global":
+def validate_preview(config, preview, previous=None):
+    if not preview.get("business_snapshot_revision") or preview.get("policy", {}).get("scope") != "global":
         raise ValueError("physical projection lacks a ready fixed business snapshot")
+    for issue in preview.get("issues", []):
+        code, hostname = issue.get("code"), issue.get("hostname", "")
+        advisory = code in ["dns_output_equivalence_not_verified", "release_target_equivalence_not_verified"] and not hostname
+        unchanged_origin = code == "origin_observation_not_fresh" and hostname and hostname != config["hostname"]
+        if not (advisory or unchanged_origin) or previous is None or not previous.get("business_snapshot_revision") or not previous.get("intent") or previous["intent"] != preview.get("intent") or issue not in previous.get("issues", []):
+            raise ValueError("physical projection has new, target-specific or unverified issues")
     facts = [fact for fact in preview.get("runtime_snapshot", {}).get("dns_selections", []) if fact.get("hostname") == config["hostname"]]
     if not facts or len({(fact.get("node_id"), fact.get("type")) for fact in facts}) != len(facts):
         raise ValueError("unique actual per-consumer DNS evidence required")
@@ -150,10 +156,11 @@ def publish(config, api, save):
     if authority_identity(current) != precondition["previous_policy"] and not exact(current.get("artifact", {}), "policy_snapshot", SCOPE, successor):
         raise ValueError("successor publication differs from declaration")
     artifact = ensure_input(api, "policy_snapshot", SCOPE, successor)
+    previous_preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"])
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
-    summaries = validate_preview(config, preview)
+    summaries = validate_preview(config, preview, previous_preview)
     baseline(config, api)
-    evidence = {"schema": "fugue.physical-dns-reconfiguration-result/v1", "declaration_digest": declaration_digest, "declared_precondition": declared_precondition, "resolved_precondition": precondition, "artifact_id": artifact["id"], "hostname": config["hostname"], "business_snapshot_revision": preview["business_snapshot_revision"], "selections": summaries, "serving_full_precondition": precondition["serving_full"], "routing_acceptance_complete": False, "producer_activated": False}
+    evidence = {"schema": "fugue.physical-dns-reconfiguration-result/v1", "declaration_digest": declaration_digest, "declared_precondition": declared_precondition, "resolved_precondition": precondition, "artifact_id": artifact["id"], "hostname": config["hostname"], "business_snapshot_revision": preview["business_snapshot_revision"], "unchanged_projection_issues": preview.get("issues", []), "selections": summaries, "serving_full_precondition": precondition["serving_full"], "routing_acceptance_complete": False, "producer_activated": False}
     save(evidence)
     key = "producer-reconfiguration/" + digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": precondition})
     api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/release", {"release_channel": "shadow", "producer_reconfiguration": precondition, "idempotency_key": key, "reason": "Declarative single-host physical DNS opt-in with bound runtime evidence"})

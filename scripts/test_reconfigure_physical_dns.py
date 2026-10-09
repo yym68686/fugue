@@ -65,6 +65,25 @@ class Ledger(ArtifactAPI):
 
 
 class PhysicalDNSConfigurationTests(unittest.TestCase):
+    def test_existing_projection_advisories_do_not_block_unrelated_route_opt_in(self):
+        config, old, source = fixture()
+        ledger = Ledger(config, old, source)
+        ledger.preview["intent"] = {"generation": "unchanged-intent", "routes": [{"hostname": config["hostname"]}]}
+        ledger.preview["issues"] = [{"code": "dns_output_equivalence_not_verified"}, {"code": "release_target_equivalence_not_verified"}, {"code": "origin_observation_not_fresh", "hostname": "idle.example.test", "path_prefix": "/"}]
+        result = routing.publish(config, ledger, lambda _: None)
+        self.assertTrue(result["producer_activated"])
+        self.assertEqual(ledger.preview["issues"], result["unchanged_projection_issues"])
+        previous = copy.deepcopy(ledger.preview)
+        for scenario in ["new issue", "target origin", "hard issue", "changed intent"]:
+            with self.subTest(scenario=scenario):
+                changed = copy.deepcopy(previous)
+                if scenario == "new issue": changed["issues"][2]["hostname"] = "new.example.test"
+                elif scenario == "target origin": changed["issues"][2]["hostname"] = config["hostname"]
+                elif scenario == "hard issue": changed["issues"].append({"code": "intent_requires_validation_repair"})
+                elif scenario == "changed intent": changed["intent"]["generation"] = "changed"
+                with self.assertRaises(ValueError):
+                    routing.validate_preview(config, changed, previous)
+
     def test_queue_delay_resolves_only_verified_renewal_under_same_policy(self):
         config, old, source = fixture()
         config["baseline_mode"] = "latest_verified_same_policy"

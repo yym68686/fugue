@@ -394,6 +394,13 @@ preconditions. Compilation and the final atomic release use that one resolved
 reference; subsequent changes still fail closed. The default `declared` mode
 requires the original exact reference throughout.
 
+The executor compares projection diagnostics with a fresh predecessor preview.
+Existing migration equivalence advisories and an unchanged unrelated origin
+observation may remain only when the complete configuration intent is identical.
+New issues, target-host issues and validation failures still reject activation;
+the evidence records the retained advisories. Normal compilation and gray/full
+readiness independently validate the successor before it can serve.
+
 The declaration schema is `fugue.physical-dns-reconfiguration/v1`, with integer
 `generation`, canonical HTTPS `origin`, one `hostname`, `producer_generation`,
 the full successor `projection_policy`, and a `precondition` containing
