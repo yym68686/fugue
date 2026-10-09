@@ -107,6 +107,31 @@ optional field retain their original digest and replay behavior.
 
 ## Public Front connection evidence
 
+### Configured origin TCP-only probes
+
+`FUGUE_EDGE_ORIGIN_NETWORK_PROBE_INTERVAL` (30 seconds through five minutes) and
+`FUGUE_EDGE_ORIGIN_NETWORK_PROBE_HOSTNAMES` (at most eight explicit hostnames)
+enable a separate background sampler. By default it is disabled. Each process
+attempts at most one destination per interval, rotating hostname/path entries,
+with a two-second deadline and no application bytes. The sampler reads only the
+currently applied, healthy, unexpired serving index and rechecks active-slot
+authority before retaining results. Candidates, exclusions,
+peer/mesh fallback, weighted origins and external destinations are not probed.
+An index change during the attempt discards its result rather than relabeling it.
+An invalid observation configuration disables this sampler without disabling DNS
+or the worker. Observational configuration never replaces signed serving intent.
+
+`service_endpoint_tcp_probe_v1` preserves its distinct active provenance and the
+raw `service_connect_failed` outcome. Failed connection/destination resolution
+and unavailable TCP_INFO have null RTT. A successful connection reports only
+kernel RTT, not resolution time, connect-wall-clock duration or HTTP wait. Probe
+failures are retained for subsequent denominator-aware evaluation; v2 does not
+invent a failure rate from them. Current public TLS proof and historical witnesses
+must still bind the exact physical edge, route digest and bundle. Mixed-version
+API rollback strips only the optional network extension on its exact unsupported
+field rejection, preserving the ordinary heartbeat. The sampler changes no DNS
+answers and does not provide terminal-to-edge evidence.
+
 `public_front_tcp_info_v1` records are a separate optional network observation.
 Their `client_network` payload contains kernel RTT, minimum RTT, variance and
 raw retransmission counters from the public Front's downstream TCP socket, not

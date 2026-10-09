@@ -147,6 +147,40 @@ func TestNetworkExtensionDoesNotBreakHeartbeatAgainstOldAPI(t *testing.T) {
 	}
 }
 
+func TestProbeExtensionRetriesOnlyItsActualUnsupportedField(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempts++
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if string(body["edge_id"]) != `"edge-a"` {
+			t.Fatal("ordinary identity lost")
+		}
+		if _, exists := body["network_samples"]; exists {
+			writer.WriteHeader(http.StatusBadRequest)
+			io.WriteString(writer, `{"error":"json: unknown field \"service_connect_failed\""}`)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	service := &Service{HTTPClient: server.Client()}
+	request, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(`{"edge_id":"edge-a","network_samples":[{"service_connect_failed":false}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.sendHeartbeatWithOptionalNetworkSamples(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || attempts != 2 {
+		t.Fatal("old API compatibility lost", response.StatusCode, attempts)
+	}
+}
+
 func TestNetworkHeartbeatFallbackOnlyRetriesExactUnsupportedField(t *testing.T) {
 	for _, test := range []struct {
 		status int
@@ -155,6 +189,7 @@ func TestNetworkHeartbeatFallbackOnlyRetriesExactUnsupportedField(t *testing.T) 
 		{http.StatusForbidden, `{"error":"json: unknown field \"network_samples\""}`},
 		{http.StatusBadRequest, `{"error":"invalid edge identity"}`},
 		{http.StatusBadRequest, `{"error":"json: unknown field \"client_network\""}`},
+		{http.StatusBadRequest, `{"error":"json: unknown field \"service_connect_failed\""}`},
 		{http.StatusInternalServerError, `{"error":"database unavailable"}`},
 	} {
 		attempts := 0

@@ -269,6 +269,8 @@ type EdgeConfig struct {
 	ListenAddr                      string
 	SyncInterval                    time.Duration
 	HeartbeatInterval               time.Duration
+	OriginNetworkProbeInterval      time.Duration
+	OriginNetworkProbeHostnames     []string
 	HTTPTimeout                     time.Duration
 	CaddyEnabled                    bool
 	CaddyAdminURL                   string
@@ -665,25 +667,27 @@ func EdgeFromEnv() EdgeConfig {
 			"FUGUE_EDGE_REQUEST_BODY_BUFFER_PROGRESS_EVERY",
 			10*time.Second,
 		),
-		CacheWarmupEnabled:        getenvBool("FUGUE_EDGE_CACHE_WARMUP_ENABLED", true),
-		CacheWarmupTimeout:        getenvDuration("FUGUE_EDGE_CACHE_WARMUP_TIMEOUT", 15*time.Second),
-		CacheWarmupMaxTargets:     getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_TARGETS", 24),
-		CacheWarmupMaxDepth:       getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_DEPTH", 2),
-		MaxStale:                  getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
-		PeerFallbackEnabled:       getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
-		AutonomyWALPath:           getenv("FUGUE_EDGE_AUTONOMY_WAL_PATH", "/var/lib/fugue/edge/autonomy.wal"),
-		ListenAddr:                getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
-		SyncInterval:              getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
-		HeartbeatInterval:         getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
-		HTTPTimeout:               getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
-		CaddyEnabled:              getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
-		CaddyAdminURL:             getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
-		CaddyListenAddr:           getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
-		CaddyTLSMode:              getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
-		CaddyTLSAskURL:            strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
-		CaddyProxyListenAddr:      getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
-		FrontNetworkSocket:        getenv("FUGUE_EDGE_FRONT_NETWORK_SOCKET", ""),
-		CaddyProxyProtocolEnabled: getenvBool("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_ENABLED", true),
+		CacheWarmupEnabled:          getenvBool("FUGUE_EDGE_CACHE_WARMUP_ENABLED", true),
+		CacheWarmupTimeout:          getenvDuration("FUGUE_EDGE_CACHE_WARMUP_TIMEOUT", 15*time.Second),
+		CacheWarmupMaxTargets:       getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_TARGETS", 24),
+		CacheWarmupMaxDepth:         getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_DEPTH", 2),
+		MaxStale:                    getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
+		PeerFallbackEnabled:         getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
+		AutonomyWALPath:             getenv("FUGUE_EDGE_AUTONOMY_WAL_PATH", "/var/lib/fugue/edge/autonomy.wal"),
+		ListenAddr:                  getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
+		SyncInterval:                getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
+		HeartbeatInterval:           getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
+		OriginNetworkProbeInterval:  getenvDuration("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_INTERVAL", 0),
+		OriginNetworkProbeHostnames: getenvList("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_HOSTNAMES"),
+		HTTPTimeout:                 getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
+		CaddyEnabled:                getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
+		CaddyAdminURL:               getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
+		CaddyListenAddr:             getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
+		CaddyTLSMode:                getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
+		CaddyTLSAskURL:              strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
+		CaddyProxyListenAddr:        getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
+		FrontNetworkSocket:          getenv("FUGUE_EDGE_FRONT_NETWORK_SOCKET", ""),
+		CaddyProxyProtocolEnabled:   getenvBool("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_ENABLED", true),
 		CaddyProxyProtocolTrustedCIDRs: getenvListDefault("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_TRUSTED_CIDRS", []string{
 			"127.0.0.1/32",
 			"::1/128",

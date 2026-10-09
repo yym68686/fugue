@@ -399,6 +399,14 @@
                     "value": "30s"
                   },
                   {
+                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_INTERVAL",
+                    "value": "60s"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_HOSTNAMES",
+                    "value": "wdwdl.fugue.pro"
+                  },
+                  {
                     "name": "FUGUE_EDGE_HTTP_TIMEOUT",
                     "value": "10s"
                   },
@@ -1013,6 +1021,14 @@
                   {
                     "name": "FUGUE_EDGE_HEARTBEAT_INTERVAL",
                     "value": "30s"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_INTERVAL",
+                    "value": "60s"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_HOSTNAMES",
+                    "value": "wdwdl.fugue.pro"
                   },
                   {
                     "name": "FUGUE_EDGE_HTTP_TIMEOUT",

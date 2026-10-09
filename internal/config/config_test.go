@@ -378,6 +378,21 @@ func TestControllerFromEnvLocalPVInventorySchedule(t *testing.T) {
 	}
 }
 
+func TestOriginNetworkProbeRequiresExplicitConfiguration(t *testing.T) {
+	t.Setenv("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_INTERVAL", "")
+	t.Setenv("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_HOSTNAMES", "")
+	defaults := EdgeFromEnv()
+	if defaults.OriginNetworkProbeInterval != 0 || len(defaults.OriginNetworkProbeHostnames) != 0 {
+		t.Fatal("origin probes enabled implicitly")
+	}
+	t.Setenv("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_INTERVAL", "30s")
+	t.Setenv("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_HOSTNAMES", "app.example.test,other.example.test")
+	configured := EdgeFromEnv()
+	if configured.OriginNetworkProbeInterval != 30*time.Second || len(configured.OriginNetworkProbeHostnames) != 2 || configured.OriginNetworkProbeHostnames[0] != "app.example.test" {
+		t.Fatal("explicit observation configuration lost", configured.OriginNetworkProbeInterval, configured.OriginNetworkProbeHostnames)
+	}
+}
+
 func TestControllerFromEnvManagedAppRolloutTimeout(t *testing.T) {
 	t.Setenv("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", "")
 

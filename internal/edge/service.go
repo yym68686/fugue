@@ -100,33 +100,36 @@ type Service struct {
 	caddyWarmupIdentity           string
 	caddyWarmupSequence           uint64
 
-	mu                      sync.Mutex
-	snapshot                Status
-	bundle                  *model.EdgeRouteBundle
-	routeIndex              atomic.Pointer[edgeRouteIndex]
-	routeHealthMode         edgeRouteHealthMode
-	etag                    string
-	routePublication        routePublicationMetadata
-	metrics                 telemetry
-	performanceBaseline     telemetry
-	networkSampleMu         sync.Mutex
-	networkSamples          []model.EdgeNetworkSample
-	frontNetworkDiagMu      sync.Mutex
-	frontNetworkDiag        FrontNetworkObservationStatus
-	frontNetworkInFlight    atomic.Bool
-	frontNetworkLast        atomic.Int64
-	cacheRevalidating       map[string]struct{}
-	bodyBufferActiveMu      sync.Mutex
-	activeBodyBufferReads   map[string]edgeActiveRequestBodyBuffer
-	activeProxyRequests     int64
-	walMu                   sync.Mutex
-	walActionLast           map[string]time.Time
-	platformConsumerMu      sync.Mutex
-	platformServingEvidence *platformServingEvidence
-	platformServing         PlatformServingStatus
-	platformCandidate       PlatformCandidateStatus
-	platformTLSReadiness    *platformTLSReadinessReceipt
-	platformTLSCandidate    PlatformTLSCandidateStatus
+	mu                       sync.Mutex
+	snapshot                 Status
+	bundle                   *model.EdgeRouteBundle
+	routeIndex               atomic.Pointer[edgeRouteIndex]
+	routeHealthMode          edgeRouteHealthMode
+	etag                     string
+	routePublication         routePublicationMetadata
+	metrics                  telemetry
+	performanceBaseline      telemetry
+	networkSampleMu          sync.Mutex
+	networkSamples           []model.EdgeNetworkSample
+	originNetworkProbeMu     sync.Mutex
+	originNetworkProbeLast   time.Time
+	originNetworkProbeCursor string
+	frontNetworkDiagMu       sync.Mutex
+	frontNetworkDiag         FrontNetworkObservationStatus
+	frontNetworkInFlight     atomic.Bool
+	frontNetworkLast         atomic.Int64
+	cacheRevalidating        map[string]struct{}
+	bodyBufferActiveMu       sync.Mutex
+	activeBodyBufferReads    map[string]edgeActiveRequestBodyBuffer
+	activeProxyRequests      int64
+	walMu                    sync.Mutex
+	walActionLast            map[string]time.Time
+	platformConsumerMu       sync.Mutex
+	platformServingEvidence  *platformServingEvidence
+	platformServing          PlatformServingStatus
+	platformCandidate        PlatformCandidateStatus
+	platformTLSReadiness     *platformTLSReadinessReceipt
+	platformTLSCandidate     PlatformTLSCandidateStatus
 }
 
 type Status struct {
@@ -646,6 +649,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.startInventoryProducerLoop(ctx)
 	go s.runPlatformShadowConsumer(ctx)
 	go s.runHTTPCacheGC(ctx)
+	go s.runOriginNetworkProbes(ctx)
 
 	ticker := time.NewTicker(s.syncInterval())
 	defer ticker.Stop()

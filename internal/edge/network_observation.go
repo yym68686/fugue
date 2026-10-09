@@ -121,7 +121,7 @@ func (s *Service) sendHeartbeatWithOptionalNetworkSamples(request *http.Request)
 	var failure struct {
 		Error string `json:"error"`
 	}
-	if readErr != nil || json.Unmarshal(body, &failure) != nil || (failure.Error != `json: unknown field "network_samples"` && failure.Error != `json: unknown field "client_network"` && failure.Error != `json: unknown field "backend"`) {
+	if readErr != nil || json.Unmarshal(body, &failure) != nil || (failure.Error != `json: unknown field "network_samples"` && failure.Error != `json: unknown field "client_network"` && failure.Error != `json: unknown field "backend"` && failure.Error != `json: unknown field "service_connect_failed"`) {
 		return response, nil
 	}
 	original, err := request.GetBody()
@@ -136,14 +136,18 @@ func (s *Service) sendHeartbeatWithOptionalNetworkSamples(request *http.Request)
 	if _, exists := fields["network_samples"]; !exists {
 		return response, nil
 	}
-	if failure.Error == `json: unknown field "client_network"` {
+	if failure.Error == `json: unknown field "client_network"` || failure.Error == `json: unknown field "service_connect_failed"` {
+		unsupported := "client_network"
+		if failure.Error == `json: unknown field "service_connect_failed"` {
+			unsupported = "service_connect_failed"
+		}
 		var samples []map[string]json.RawMessage
 		if json.Unmarshal(fields["network_samples"], &samples) != nil {
 			return response, nil
 		}
 		found := false
 		for _, sample := range samples {
-			if _, exists := sample["client_network"]; exists {
+			if _, exists := sample[unsupported]; exists {
 				found = true
 			}
 		}
