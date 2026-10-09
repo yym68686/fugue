@@ -406,6 +406,11 @@ of the producer's change fingerprint. A changed physical decision triggers norma
 publication before the periodic refresh; a new receipt ID or measurement timestamp
 alone does not. Nonphysical source fingerprints retain their previous encoding.
 
+Runtime input digests normalize object ordering inside embedded physical evidence
+before hashing. JSONB storage may reorder keys; it must not change input identity.
+The normalization preserves numeric tokens and all evidence values. Stored input
+is still checked against its original digest, so changed measurements fail closed.
+
 The declaration schema is `fugue.physical-dns-reconfiguration/v1`, with integer
 `generation`, canonical HTTPS `origin`, one `hostname`, `producer_generation`,
 the full successor `projection_policy`, and a `precondition` containing

@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"encoding/json"
 	"net/url"
 	"os"
 	"strings"
@@ -9,9 +11,65 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/schemamigrate"
 )
 
 func TestCompilerInputRetention(t *testing.T) { testCompilerInputRetention(t, "") }
+
+func TestCompilerInputPhysicalEvidenceSurvivesJSONStorageOrder(t *testing.T) {
+	testCompilerPhysicalEvidence(t, "")
+}
+
+func TestCompilerInputPhysicalEvidenceSurvivesPostgresJSONB(t *testing.T) {
+	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("disposable PostgreSQL not configured")
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil || parsed.Hostname() != "127.0.0.1" || !strings.Contains(parsed.Path, "fugue_test") {
+		t.Fatal("requires disposable loopback PostgreSQL")
+	}
+	testCompilerPhysicalEvidence(t, dsn)
+}
+
+func testCompilerPhysicalEvidence(t *testing.T, dsn string) {
+	t.Helper()
+	if dsn != "" {
+		for _, migrate := range []func(context.Context, string) error{schemamigrate.MigratePlatformState, schemamigrate.MigrateImageCacheManifestGraph, schemamigrate.MigrateEdgeInstanceFencing, schemamigrate.MigrateSourceUploadSessions} {
+			if err := migrate(context.Background(), dsn); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	state := New(t.TempDir()+"/state.json", dsn)
+	if err := state.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if dsn != "" {
+		defer state.db.Close()
+	}
+	snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: "intent-a", DNSSelections: []platformconfig.DNSSelectionObservation{{
+		NodeID: "dns-a", Hostname: "app.example.test", PhysicalEvidence: json.RawMessage(`{"snapshot":{"z":1,"a":{"z":2,"a":3}},"result":{"z":4,"a":5}}`),
+	}}}
+	digest, err := platformconfig.RuntimeSnapshotDigest(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal("JSON object ordering prevented retaining physical input", err)
+	}
+	stored, err := state.GetPlatformArtifactContent(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual, err := platformconfig.RuntimeSnapshotContentDigest(stored.Content); err != nil || actual != digest {
+		t.Fatal("stored physical input digest changed", actual, err)
+	}
+	snapshot.DNSSelections[0].PhysicalEvidence = json.RawMessage(`{"snapshot":{"z":9,"a":{"z":2,"a":3}},"result":{"z":4,"a":5}}`)
+	if err := state.EnsurePlatformCompilerInput(snapshot, digest); err == nil {
+		t.Fatal("modified physical input retained under an unrelated digest")
+	}
+}
 func TestCompilerInputRetentionPostgres(t *testing.T) {
 	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if dsn == "" {

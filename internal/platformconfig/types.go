@@ -961,7 +961,21 @@ func Digest(value any) (string, error) {
 
 // RuntimeSnapshotDigest is the canonical digest used by compiler lineage and
 // the digest-addressed content store. It hashes the typed snapshot directly.
-func RuntimeSnapshotDigest(snapshot RuntimeSnapshot) (string, error) { return Digest(snapshot) }
+func RuntimeSnapshotDigest(snapshot RuntimeSnapshot) (string, error) {
+	snapshot.DNSSelections = append([]DNSSelectionObservation(nil), snapshot.DNSSelections...)
+	for index := range snapshot.DNSSelections {
+		fact := &snapshot.DNSSelections[index]
+		if len(fact.PhysicalEvidence) == 0 {
+			continue
+		}
+		canonical, err := canonicalPhysicalEvidence(fact.PhysicalEvidence)
+		if err != nil {
+			return "", err
+		}
+		fact.PhysicalEvidence = canonical
+	}
+	return Digest(snapshot)
+}
 
 func LineageFromArtifact(artifact model.PlatformArtifact) Lineage {
 	return Lineage{
