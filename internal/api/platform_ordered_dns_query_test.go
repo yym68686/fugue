@@ -22,7 +22,7 @@ func TestOrderedProjectionPreservesStaticAndOwnedAliasConstraints(t *testing.T) 
 	static := platformconfig.DNSIntent{Hostname: "static.example.test", Type: "A", Values: []string{"1.1.1.1"}, TTL: 300}
 	projection.Intent.DNS = append(projection.Intent.DNS, alias, static)
 	before, _ := json.Marshal(projection.Intent)
-	if err := projectDirectDNSQueries(&projection, strategy, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
+	if err := projectDirectDNSQueries(&projection, strategy, nodes, now); err != nil {
 		t.Fatal(err)
 	}
 	if len(projection.Policy.DNSAnswerRules) != 2 || projection.Policy.DNSQueryPolicy.OrderedProjection == nil {
@@ -58,7 +58,7 @@ func TestOrderedProjectionStillRequiresExactQualityOptIn(t *testing.T) {
 	strategy.ECSEnabled, strategy.ExplorationPercent = false, 0
 	strategy.OrderedProjection = &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}}
 	strategy.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{{Hostname: "app.example.test", TrafficClass: "streaming", Policy: edgequality.DefaultNetworkPolicy()}}
-	if err := projectDirectDNSQueries(&projection, strategy, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
+	if err := projectDirectDNSQueries(&projection, strategy, nodes, now); err != nil {
 		t.Fatal(err)
 	}
 	if projection.Policy.DNSAnswerRules[0].SelectionMode != model.DNSAnswerPolicyKindPhysicalQuality || projection.Policy.DNSAnswerRules[0].PhysicalOrder != nil || projection.RuntimeSnapshot.DNSSelections[0].PhysicalSelection != nil {

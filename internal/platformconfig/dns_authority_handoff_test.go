@@ -21,11 +21,18 @@ func TestDNSAuthorityHandoffPreservesWholeNodeAnswerBehavior(t *testing.T) {
 		"nameserver": func(r *platformconfig.CompileRequest) {
 			r.Policy.DNSAuthorities[0].Nameservers = []string{"other.example.test"}
 		},
-		"ecs": func(r *platformconfig.CompileRequest) { r.Policy.DNSAnswerRules[0].ECSEnabled = true },
+		"ecs": func(r *platformconfig.CompileRequest) {
+			r.Policy.DNSAnswerRules[0].PhysicalOrder = nil
+			r.Policy.DNSAnswerRules[0].SelectionMode = "global"
+			r.Policy.DNSAnswerRules[0].ECSEnabled = true
+		},
 		"extra record": func(r *platformconfig.CompileRequest) {
 			r.Intent.DNS = append(r.Intent.DNS, platformconfig.DNSIntent{Hostname: "extra.example.test", Type: "TXT", Values: []string{"new"}, TTL: 60})
 		},
-		"selection": func(r *platformconfig.CompileRequest) { r.Policy.DNSAnswerRules[0].SelectionMode = "weighted" },
+		"selection": func(r *platformconfig.CompileRequest) {
+			r.Policy.DNSAnswerRules[0].PhysicalOrder = nil
+			r.Policy.DNSAnswerRules[0].SelectionMode = "weighted"
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := celldns.TransitionRequest(t)

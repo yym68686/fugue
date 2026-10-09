@@ -1,11 +1,45 @@
 package cli
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"fugue/internal/dnsserver"
 	"fugue/internal/model"
 )
+
+func TestDNSAnswerExplanationReadsReceiptsWithoutRankingAndToleratesAuditFailure(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.Method != http.MethodGet || request.URL.Query().Get("hostname") != "alias.example.test" || request.URL.Query().Get("limit") != "1" {
+			t.Error("invalid receipt query", request.URL)
+		}
+		switch request.URL.Path {
+		case "/v1/admin/platform-state/dns-decisions/dns-a":
+			json.NewEncoder(writer).Encode(map[string]any{"snapshot": dnsserver.DNSDecisionSnapshot{NodeID: "dns-a", Receipts: []dnsserver.DNSDecisionReceipt{{DecisionID: "recorded"}}}})
+		case "/v1/admin/platform-state/dns-decisions/dns-b":
+			http.Error(writer, "audit unavailable", http.StatusServiceUnavailable)
+		default:
+			t.Error("retired ranking endpoint queried", request.URL.Path)
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.readRetryCount = 0
+	report := dnsAnswerCheckReport{Hostname: "app.example.test", QueryName: "alias.example.test", Pass: true, Nodes: []dnsAnswerCheckNode{{DNSNodeID: "dns-a"}, {DNSNodeID: "dns-a"}, {DNSNodeID: "dns-b"}}}
+	addDNSDecisionExplanation(client, &report)
+	if requests != 2 || !report.Pass || len(report.ExplanationErrors) != 1 || len(report.DNSDecisions) != 1 || report.DNSDecisions[0].Receipts[0].DecisionID != "recorded" {
+		t.Fatal("audit failure changed business check or lost evidence", report)
+	}
+}
 
 func TestDNSAnswerEdgeReadyAllowsDNSTargetInventoryCheck(t *testing.T) {
 	t.Parallel()

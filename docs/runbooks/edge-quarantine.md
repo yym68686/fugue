@@ -9,7 +9,7 @@ it is unhealthy, draining, route-not-ready, TLS-not-ready, or node-quarantined.
 
 ```bash
 fugue admin edge nodes --json
-fugue admin edge quality-rank <hostname> --json
+fugue admin edge quality-shadow capture <hostname> --dns-node-id <dns-node-id> --json
 fugue admin traffic-safety explain <hostname> --json
 fugue admin robustness status --json
 ```
@@ -41,5 +41,5 @@ count, and quarantine reason.
 ## Verification
 
 - `traffic-safety explain` shows the edge group as healthy.
-- `quality-rank` no longer marks the edge as excluded for quarantine.
+- The quality receipt no longer records a quarantine hard gate for the edge.
 - DNS answers contain only healthy, route-ready, TLS-ready edges.

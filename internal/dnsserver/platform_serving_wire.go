@@ -34,6 +34,9 @@ type dnsServingState struct {
 }
 
 func buildDNSServingState(record dnsServingCheckpoint, p dnsServingPayload, routeID, node, group string, facts []dnsReadinessFact, now time.Time) (*dnsServingState, error) {
+	if err := validateServingDNSSelectors(p.Queries); err != nil {
+		return nil, err
+	}
 	st := &dnsServingState{record: record, payload: p, routeID: routeID, facts: facts, checkedAt: now, zones: map[string]dnsServingZone{}}
 	clientFound := false
 	for _, policy := range p.Policy.DNSClientPolicies {

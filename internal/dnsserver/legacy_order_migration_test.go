@@ -27,7 +27,7 @@ func TestLegacyMigrationFreezesOnlyNormalGlobalOrder(t *testing.T) {
 					t.Fatal("migration modified signed configuration", err)
 				}
 				record.AnswerPolicy.ExplorationPercent = 0
-				candidates, _ := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, time.Time{}, false)
+				candidates, _ := replayLegacyDNSCandidateOrder(record, dnsGeoHint{}, time.Time{}, false)
 				actual := []string{}
 				for _, candidate := range candidates {
 					actual = append(actual, candidate.EdgeID)

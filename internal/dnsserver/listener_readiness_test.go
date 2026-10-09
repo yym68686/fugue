@@ -23,6 +23,7 @@ func TestListenerReadinessDoesNotSpreadOneRecordFailure(t *testing.T) {
 	target.ProbeIDs = []string{missing}
 	plan.Records = append(plan.Records, platformconfig.DNSReadinessRecord{Hostname: probe.Hostname, MinimumHealthyEdges: 1, Targets: []platformconfig.DNSReadinessTarget{target}})
 	view.Records = append(view.Records, model.EdgeDNSRecord{Name: probe.Hostname, Type: target.Family, Values: []string{target.Address}, TTL: 60, Candidates: []model.EdgeDNSAnswerCandidate{{IP: target.Address, EdgeID: target.EdgeID, EdgeGroupID: target.EdgeGroupID}}})
+	view.Records[len(view.Records)-1] = physicalRecordForTest(view.Records[len(view.Records)-1])
 	payload := dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}, Policy: platformconfig.PolicySnapshot{MaxStaleSeconds: 3600, DNSReadiness: &policy,
 		DNSAuthorities:    []platformconfig.DNSAuthorityPolicy{{NodeID: view.NodeID, Zone: view.Zone, Nameservers: []string{"ns.example.test"}, TTLSeconds: 60}},
 		DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: view.NodeID}},

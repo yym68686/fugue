@@ -71,36 +71,16 @@ func (s *Server) reconcileDNSObservations(ctx context.Context, now time.Time) er
 	if _, err := s.reconcileHostedDNSFlattenRecords(ctx, now); err != nil {
 		return err
 	}
-	artifact, policy, err := s.verifiedDNSObservationPolicy()
+	_, policy, err := s.verifiedDNSObservationPolicy()
 	if err != nil {
 		return err
 	}
 	s.dnsObservation.mu.Lock()
-	s.dnsObservation.mode = policy.RankingMode
+	s.dnsObservation.mode = "retired"
 	s.dnsObservation.mu.Unlock()
-	if policy.RankingMode == "disabled" || policy.OrderedProjection != nil {
-		return nil
+	if policy.RankingMode != "disabled" && policy.OrderedProjection == nil {
+		return errors.New("legacy DNS ranking retired; serving configuration requires ordered projection")
 	}
-	builder, _, err := s.loadEdgeDNSLatencyProfileBuilder(ctx, now, false)
-	if err != nil {
-		return err
-	}
-	previous, err := s.store.ListEdgeDNSRoutingDecisions("")
-	if err != nil {
-		return err
-	}
-	_, updates := builder.finishWithCooldown(previous, now, time.Duration(policy.SwitchCooldownSeconds)*time.Second, true)
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	latest, _, err := s.verifiedDNSObservationPolicy()
-	if err != nil || latest.ID != artifact.ID || latest.ContentHash != artifact.ContentHash {
-		return errors.New("DNS observation policy changed during capture")
-	}
-	if err := s.store.UpsertEdgeDNSRoutingDecisions(updates); err != nil {
-		return err
-	}
-	s.log.Printf("DNS observations refreshed; policy_digest=%s ranking=%s cooldown_seconds=%d decisions=%d", artifact.ContentHash, policy.RankingMode, policy.SwitchCooldownSeconds, len(updates))
 	return nil
 }
 

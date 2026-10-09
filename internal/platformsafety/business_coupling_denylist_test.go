@@ -61,6 +61,10 @@ func TestTrackedPlatformSourcesContainNoBusinessCoupling(t *testing.T) {
 // data. Exempt only that typed value, never an entire file or configuration tree:
 // executable fields, comments, unknown schema and adjacent strings stay scanned.
 func businessCouplingSource(path string, body []byte) []byte {
+	const retirementDirectory = "deploy/environments/production/routing-dns-retirement/"
+	if strings.HasPrefix(path, retirementDirectory) && !strings.Contains(strings.TrimPrefix(path, retirementDirectory), "/") && strings.HasSuffix(path, ".json") {
+		return retirementHostnameSource(body)
+	}
 	const directory = "deploy/environments/production/cell-producer-reconfiguration/"
 	if !strings.HasPrefix(path, directory) || strings.Contains(strings.TrimPrefix(path, directory), "/") || !strings.HasSuffix(path, ".json") {
 		return body
@@ -91,6 +95,52 @@ func businessCouplingSource(path string, body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+func retirementHostnameSource(body []byte) []byte {
+	var declaration map[string]json.RawMessage
+	if json.Unmarshal(body, &declaration) != nil || string(declaration["schema"]) != `"fugue.dns-selector-retirement/v1"` {
+		return body
+	}
+	var policy, query, projection map[string]json.RawMessage
+	var overrides []map[string]json.RawMessage
+	if json.Unmarshal(declaration["projection_policy"], &policy) != nil || json.Unmarshal(policy["dns_query_policy"], &query) != nil || json.Unmarshal(query["ordered_projection"], &projection) != nil || json.Unmarshal(projection["overrides"], &overrides) != nil {
+		return body
+	}
+	for _, override := range overrides {
+		var hostname string
+		if json.Unmarshal(override["hostname"], &hostname) != nil || hostname == "" {
+			return body
+		}
+		override["hostname"] = json.RawMessage(`"configuration-hostname"`)
+	}
+	projection["overrides"], _ = json.Marshal(overrides)
+	query["ordered_projection"], _ = json.Marshal(projection)
+	policy["dns_query_policy"], _ = json.Marshal(query)
+	declaration["projection_policy"], _ = json.Marshal(policy)
+	encoded, err := json.Marshal(declaration)
+	if err != nil {
+		return body
+	}
+	return encoded
+}
+
+func TestRetirementConfigExceptionOnlyCoversTypedHostnameValues(t *testing.T) {
+	const path = "deploy/environments/production/routing-dns-retirement/physical-order.json"
+	const body = `{"schema":"fugue.dns-selector-retirement/v1","projection_policy":{"dns_query_policy":{"ordered_projection":{"overrides":[{"hostname":"tenant.example.test","command":"branch on tenant.example.test"}]}}}}`
+	masked := string(businessCouplingSource(path, []byte(body)))
+	if !strings.Contains(masked, `"hostname":"configuration-hostname"`) || !strings.Contains(masked, `"command":"branch on tenant.example.test"`) {
+		t.Fatal("retirement exception hid executable data")
+	}
+	for _, other := range []string{"internal/api/routing.go", path + ".go", strings.Replace(path, "/physical-order", "/nested/physical-order", 1)} {
+		if string(businessCouplingSource(other, []byte(body))) != body {
+			t.Fatal("exception escaped typed declaration")
+		}
+	}
+	unknown := strings.Replace(body, "fugue.dns-selector-retirement/v1", "unknown/v1", 1)
+	if string(businessCouplingSource(path, []byte(unknown))) != unknown {
+		t.Fatal("unknown schema exempted")
+	}
 }
 
 func TestBusinessCouplingConfigExceptionOnlyCoversHostnameData(t *testing.T) {

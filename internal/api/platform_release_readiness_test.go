@@ -365,7 +365,7 @@ func TestCaptureReleaseRuntimeReadinessAllowsCanaryBeforeServing(t *testing.T) {
 
 				dnsPolicy, consumers, nodes := pinnedDNSFixture()
 				dnsPolicy.DNSPlacementMode = platformconfig.DNSPlacementConsumerReadiness
-				dnsPolicy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "disabled", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
+				dnsPolicy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120, OrderedProjection: &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a"}}, Overrides: []platformconfig.DNSOrderOverride{}}}
 				if _, _, err := state.CreateEdgeNodeToken(model.EdgeNode{ID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8"}); err != nil {
 					t.Fatal(err)
 				}

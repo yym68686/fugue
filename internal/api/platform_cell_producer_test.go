@@ -62,7 +62,7 @@ func cellProducerRoleFixture(t *testing.T, s *Server, cell, role string) platfor
 	dns.Generation = "dns-" + cell
 	dns.Cohorts = []platformconfig.TrafficRolloutCohort{{ID: "complete", EdgeGroupIDs: []string{cell}}}
 	dns.DNSPlacementMode = platformconfig.DNSPlacementConsumerReadiness
-	dns.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "disabled", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
+	dns.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120, OrderedProjection: &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}, Overrides: []platformconfig.DNSOrderOverride{}}}
 	minimum, stale := 1, 300
 	rules := []platformconfig.RoutePolicyConstraint{}
 	states := []platformconfig.DNSRouteStateConstraint{}
@@ -446,6 +446,11 @@ func TestCellProducerUsesDeclaredMembershipAndCurrentBusinessWithoutLegacyReceip
 	forged.Policy.Generation, _ = platformconfig.PolicySnapshotGeneration(forged.Policy)
 	forged.RuntimeSnapshot.IntentGeneration, forged.RuntimeSnapshot.PolicyGeneration = forged.Intent.Generation, forged.Policy.Generation
 	forged.RuntimeSnapshot.DNSEdgeEndpoints[0].EdgeID = "edge-other"
+	for index := range forged.Policy.DNSAnswerRules {
+		forged.Policy.DNSAnswerRules[index].PhysicalOrder.OrderedEdgeIDs = []string{"edge-other"}
+	}
+	forged.Policy.Generation, _ = platformconfig.PolicySnapshotGeneration(forged.Policy)
+	forged.RuntimeSnapshot.PolicyGeneration = forged.Policy.Generation
 	for i := range forged.RuntimeSnapshot.DNSSelections {
 		for j := range forged.RuntimeSnapshot.DNSSelections[i].Candidates {
 			forged.RuntimeSnapshot.DNSSelections[i].Candidates[j].EdgeID = "edge-other"

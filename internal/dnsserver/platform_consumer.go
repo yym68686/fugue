@@ -347,6 +347,9 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	if err := platformconfig.ValidateDNSQueryViews(payload.QueryViews, payload.Records, payload.ConsumerViews, payload.ReadinessPlan, payload.Policy); err != nil {
 		return dnsCandidateCounts{}, errors.New("DNS query view invalid")
 	}
+	if err := validateServingDNSSelectors(payload.QueryViews); err != nil {
+		return dnsCandidateCounts{}, err
+	}
 	active, err := platformconfig.DNSRecordsAt(payload.Records, time.Now().UTC())
 	if err != nil {
 		return dnsCandidateCounts{}, errors.New("DNS candidate expiry invalid")

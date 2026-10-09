@@ -1,0 +1,477 @@
+[
+  {
+    "schema": "fugue.dns-decision/v1",
+    "decision_id": "test-process-1",
+    "process_id": "test-process",
+    "node_id": "dns-a",
+    "observed_at": "2026-10-09T11:56:41.980451Z",
+    "hostname": "history.example.test",
+    "qtype": 1,
+    "query_id": 36803,
+    "transport": "udp",
+    "rcode": 0,
+    "rrset": [
+      "history.example.test.\t60\tIN\tA\t192.0.2.2"
+    ],
+    "authority": [],
+    "additional": [],
+    "write_succeeded": true,
+    "publication": {
+      "observed_at": "2026-10-09T11:56:40.98157Z",
+      "desired_known": false,
+      "loaded": {
+        "artifact_id": "artifact-a",
+        "digest": "sha256:loaded"
+      },
+      "lkg": {
+        "artifact_id": "artifact-a",
+        "digest": "sha256:loaded"
+      },
+      "serving_lkg": false,
+      "rejected": false,
+      "outcome": "not_observed"
+    },
+    "answer_publication": {
+      "artifact_id": "artifact-a",
+      "digest": "sha256:loaded"
+    },
+    "records": [
+      {
+        "record_name": "history.example.test",
+        "policy": {
+          "policy_kind": "latency_aware",
+          "health_required": true,
+          "exploration_percent": 50,
+          "switch_cooldown_seconds": 300,
+          "selected_edge_group_id": "group-a"
+        },
+        "input_candidates": [
+          {
+            "ip": "192.0.2.1",
+            "edge_id": "edge-a",
+            "edge_group_id": "group-a",
+            "score": 50,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.2",
+            "edge_id": "edge-b",
+            "edge_group_id": "group-a",
+            "score": 100,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.3",
+            "edge_id": "edge-c",
+            "edge_group_id": "group-b",
+            "score": 200,
+            "healthy": true,
+            "tls_ready": true
+          }
+        ],
+        "materialized_candidates": [
+          {
+            "ip": "192.0.2.1",
+            "edge_id": "edge-a",
+            "edge_group_id": "group-a",
+            "score": 50,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.2",
+            "edge_id": "edge-b",
+            "edge_group_id": "group-a",
+            "score": 100,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.3",
+            "edge_id": "edge-c",
+            "edge_group_id": "group-b",
+            "score": 200,
+            "healthy": true,
+            "tls_ready": true
+          }
+        ],
+        "ranking": [
+          {
+            "candidate": {
+              "ip": "192.0.2.1",
+              "edge_id": "edge-a",
+              "edge_group_id": "group-a",
+              "score": 50,
+              "healthy": true,
+              "tls_ready": true
+            },
+            "sort_score": 50
+          },
+          {
+            "candidate": {
+              "ip": "192.0.2.2",
+              "edge_id": "edge-b",
+              "edge_group_id": "group-a",
+              "score": 100,
+              "healthy": true,
+              "tls_ready": true
+            },
+            "sort_score": 100
+          },
+          {
+            "candidate": {
+              "ip": "192.0.2.3",
+              "edge_id": "edge-c",
+              "edge_group_id": "group-b",
+              "score": 200,
+              "healthy": true,
+              "tls_ready": true
+            },
+            "sort_score": 200
+          }
+        ],
+        "filtered": [
+          {
+            "edge_id": "edge-a",
+            "ip": "192.0.2.1",
+            "reason": "not_selected_by_answer_limit"
+          },
+          {
+            "edge_id": "edge-c",
+            "ip": "192.0.2.3",
+            "reason": "not_selected_by_answer_limit"
+          }
+        ],
+        "selection_at": "2026-10-09T11:56:40.980989Z",
+        "selected_edge_group_id": "group-a",
+        "selection_result": "selected_same_group_exploration",
+        "exploration_kind": "same_group",
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "cooldown_result": "not_recorded",
+        "scope_source": "remote_addr",
+        "scope_resolution": "remote_addr_unmapped_global_fallback",
+        "matched_scope_key": "global",
+        "answered": [
+          {
+            "ip": "192.0.2.2",
+            "edge_id": "edge-b",
+            "edge_group_id": "group-a",
+            "score": 100,
+            "healthy": true,
+            "tls_ready": true
+          }
+        ]
+      }
+    ],
+    "replay_input": "eyJ2ZXJzaW9uIjoiZnVndWUuZG5zLWRlY2lzaW9uL3YxIiwicXVlcnkiOiJqOE1CQUFBQkFBQUFBQUFBQjJocGMzUnZjbmtIWlhoaGJYQnNaUVIwWlhOMEFBQUJBQUU9Iiwic3RhZ2VzIjpbeyJwdWJsaWNhdGlvbiI6eyJhcnRpZmFjdF9pZCI6ImFydGlmYWN0LWEiLCJkaWdlc3QiOiJzaGEyNTY6bG9hZGVkIn0sImFwcGxpZWRfYXQiOiIyMDI2LTEwLTA5VDExOjU2OjQwLjk4MDQ1MVoiLCJnZW5lcmF0aW9uX3NlcXVlbmNlIjoxMiwibWF4X3N0YWxlX3NlY29uZHMiOjM2MDAsInJlYWRpbmVzcyI6eyJwcm9iZV9pbnRlcnZhbF9zZWNvbmRzIjozMCwicHJvYmVfdGltZW91dF9zZWNvbmRzIjoxLCJmYWN0X2ZyZXNobmVzc19zZWNvbmRzIjo2MCwibWF4X2NvbmN1cnJlbmN5IjoyLCJtYXhfcHJvYmVzIjoxMH0sImF1dGhvcml0aWVzIjpbeyJub2RlX2lkIjoiZG5zLWEiLCJ6b25lIjoiZXhhbXBsZS50ZXN0IiwibmFtZXNlcnZlcnMiOlsibnMuZXhhbXBsZS50ZXN0Il0sInR0bF9zZWNvbmRzIjo2MCwicmVmcmVzaF9zZWNvbmRzIjozMDAsInJldHJ5X3NlY29uZHMiOjYwLCJleHBpcmVfc2Vjb25kcyI6MzYwMH1dLCJ6b25lIjoiZXhhbXBsZS50ZXN0IiwicmVjb3JkX25hbWUiOiJoaXN0b3J5LmV4YW1wbGUudGVzdCIsImV4aXN0cyI6dHJ1ZSwiZW50cmllcyI6W3sicmVjb3JkIjp7Im5hbWUiOiJoaXN0b3J5LmV4YW1wbGUudGVzdCIsInR5cGUiOiJBIiwidmFsdWVzIjpbIjE5Mi4wLjIuMSIsIjE5Mi4wLjIuMiIsIjE5Mi4wLjIuMyJdLCJ0dGwiOjYwLCJyZWNvcmRfa2luZCI6IiIsInN0YXR1cyI6IiIsInJlY29yZF9nZW5lcmF0aW9uIjoiIiwiYW5zd2VyX3BvbGljeSI6eyJwb2xpY3lfa2luZCI6ImxhdGVuY3lfYXdhcmUiLCJoZWFsdGhfcmVxdWlyZWQiOnRydWUsImV4cGxvcmF0aW9uX3BlcmNlbnQiOjUwLCJzd2l0Y2hfY29vbGRvd25fc2Vjb25kcyI6MzAwLCJzZWxlY3RlZF9lZGdlX2dyb3VwX2lkIjoiZ3JvdXAtYSJ9LCJjYW5kaWRhdGVzIjpbeyJpcCI6IjE5Mi4wLjIuMSIsImVkZ2VfaWQiOiJlZGdlLWEiLCJlZGdlX2dyb3VwX2lkIjoiZ3JvdXAtYSIsInNjb3JlIjo1MCwiaGVhbHRoeSI6dHJ1ZSwidGxzX3JlYWR5Ijp0cnVlfSx7ImlwIjoiMTkyLjAuMi4yIiwiZWRnZV9pZCI6ImVkZ2UtYiIsImVkZ2VfZ3JvdXBfaWQiOiJncm91cC1hIiwic2NvcmUiOjEwMCwiaGVhbHRoeSI6dHJ1ZSwidGxzX3JlYWR5Ijp0cnVlfSx7ImlwIjoiMTkyLjAuMi4zIiwiZWRnZV9pZCI6ImVkZ2UtYyIsImVkZ2VfZ3JvdXBfaWQiOiJncm91cC1iIiwic2NvcmUiOjIwMCwiaGVhbHRoeSI6dHJ1ZSwidGxzX3JlYWR5Ijp0cnVlfV19LCJwbGFuIjp7InByb2JlcyI6bnVsbCwicmVjb3JkcyI6bnVsbH0sImZhY3RzIjpudWxsfV0sImhpbnQiOnsic291cmNlIjoicmVtb3RlX2FkZHIifSwic2VsZWN0aW9ucyI6W3siYXQiOiIyMDI2LTEwLTA5VDExOjU2OjQwLjk4MDk4OVoiLCJlbnRyb3B5Ijp7ImJ1Y2tldHMiOlt7InB1cnBvc2UiOiJleHBsb3JhdGlvbl9wZXJjZW50IiwibW9kdWx1cyI6MTAwLCJ2YWx1ZSI6Mzd9LHsicHVycG9zZSI6InNhbWVfZ3JvdXBfaW5kZXgiLCJtb2R1bHVzIjoxLCJ2YWx1ZSI6MH1dfX1dLCJxdWVyeV9hdCI6IjIwMjYtMTAtMDlUMTE6NTY6NDEuOTgwNDUxWiJ9XX0=",
+    "evidence_digest": "sha256:92c5c3df61f8af527bb1bb2f04dc49063fc2e8cfe6acbf8dcbf46929174c76e2"
+  },
+  {
+    "schema": "fugue.dns-decision/v1",
+    "decision_id": "test-process-1",
+    "process_id": "test-process",
+    "node_id": "dns-a",
+    "observed_at": "2026-10-09T11:56:42.980451Z",
+    "hostname": "history.example.test",
+    "qtype": 1,
+    "query_id": 36803,
+    "transport": "udp",
+    "rcode": 0,
+    "rrset": [
+      "history.example.test.\t60\tIN\tA\t192.0.2.1"
+    ],
+    "authority": [],
+    "additional": [],
+    "write_succeeded": true,
+    "publication": {
+      "observed_at": "2026-10-09T11:56:40.982329Z",
+      "desired_known": false,
+      "loaded": {
+        "artifact_id": "artifact-a",
+        "digest": "sha256:loaded"
+      },
+      "lkg": {
+        "artifact_id": "artifact-a",
+        "digest": "sha256:loaded"
+      },
+      "serving_lkg": false,
+      "rejected": false,
+      "outcome": "not_observed"
+    },
+    "answer_publication": {
+      "artifact_id": "artifact-a",
+      "digest": "sha256:loaded"
+    },
+    "records": [
+      {
+        "record_name": "history.example.test",
+        "policy": {
+          "policy_kind": "latency_aware",
+          "health_required": true,
+          "exploration_percent": 50,
+          "switch_cooldown_seconds": 300,
+          "selected_edge_group_id": "group-a"
+        },
+        "input_candidates": [
+          {
+            "ip": "192.0.2.1",
+            "edge_id": "edge-a",
+            "edge_group_id": "group-a",
+            "score": 50,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.2",
+            "edge_id": "edge-b",
+            "edge_group_id": "group-a",
+            "score": 100,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.3",
+            "edge_id": "edge-c",
+            "edge_group_id": "group-b",
+            "score": 200,
+            "healthy": true,
+            "tls_ready": true
+          }
+        ],
+        "materialized_candidates": [
+          {
+            "ip": "192.0.2.1",
+            "edge_id": "edge-a",
+            "edge_group_id": "group-a",
+            "score": 50,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.2",
+            "edge_id": "edge-b",
+            "edge_group_id": "group-a",
+            "score": 100,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.3",
+            "edge_id": "edge-c",
+            "edge_group_id": "group-b",
+            "score": 200,
+            "healthy": true,
+            "tls_ready": true
+          }
+        ],
+        "ranking": [
+          {
+            "candidate": {
+              "ip": "192.0.2.1",
+              "edge_id": "edge-a",
+              "edge_group_id": "group-a",
+              "score": 50,
+              "healthy": true,
+              "tls_ready": true
+            },
+            "sort_score": 50
+          },
+          {
+            "candidate": {
+              "ip": "192.0.2.2",
+              "edge_id": "edge-b",
+              "edge_group_id": "group-a",
+              "score": 100,
+              "healthy": true,
+              "tls_ready": true
+            },
+            "sort_score": 100
+          },
+          {
+            "candidate": {
+              "ip": "192.0.2.3",
+              "edge_id": "edge-c",
+              "edge_group_id": "group-b",
+              "score": 200,
+              "healthy": true,
+              "tls_ready": true
+            },
+            "sort_score": 200
+          }
+        ],
+        "filtered": [
+          {
+            "edge_id": "edge-b",
+            "ip": "192.0.2.2",
+            "reason": "not_selected_by_answer_limit"
+          },
+          {
+            "edge_id": "edge-c",
+            "ip": "192.0.2.3",
+            "reason": "not_selected_by_answer_limit"
+          }
+        ],
+        "selection_at": "2026-10-09T11:56:40.982252Z",
+        "selected_edge_group_id": "group-a",
+        "selection_result": "selected_primary",
+        "exploration_kind": "",
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "cooldown_result": "not_recorded",
+        "scope_source": "remote_addr",
+        "scope_resolution": "remote_addr_unmapped_global_fallback",
+        "matched_scope_key": "global",
+        "answered": [
+          {
+            "ip": "192.0.2.1",
+            "edge_id": "edge-a",
+            "edge_group_id": "group-a",
+            "score": 50,
+            "healthy": true,
+            "tls_ready": true
+          }
+        ]
+      }
+    ],
+    "replay_input": "eyJ2ZXJzaW9uIjoiZnVndWUuZG5zLWRlY2lzaW9uL3YxIiwicXVlcnkiOiJqOE1CQUFBQkFBQUFBQUFBQjJocGMzUnZjbmtIWlhoaGJYQnNaUVIwWlhOMEFBQUJBQUU9Iiwic3RhZ2VzIjpbeyJwdWJsaWNhdGlvbiI6eyJhcnRpZmFjdF9pZCI6ImFydGlmYWN0LWEiLCJkaWdlc3QiOiJzaGEyNTY6bG9hZGVkIn0sImFwcGxpZWRfYXQiOiIyMDI2LTEwLTA5VDExOjU2OjQwLjk4MDQ1MVoiLCJnZW5lcmF0aW9uX3NlcXVlbmNlIjoxMiwibWF4X3N0YWxlX3NlY29uZHMiOjM2MDAsInJlYWRpbmVzcyI6eyJwcm9iZV9pbnRlcnZhbF9zZWNvbmRzIjozMCwicHJvYmVfdGltZW91dF9zZWNvbmRzIjoxLCJmYWN0X2ZyZXNobmVzc19zZWNvbmRzIjo2MCwibWF4X2NvbmN1cnJlbmN5IjoyLCJtYXhfcHJvYmVzIjoxMH0sImF1dGhvcml0aWVzIjpbeyJub2RlX2lkIjoiZG5zLWEiLCJ6b25lIjoiZXhhbXBsZS50ZXN0IiwibmFtZXNlcnZlcnMiOlsibnMuZXhhbXBsZS50ZXN0Il0sInR0bF9zZWNvbmRzIjo2MCwicmVmcmVzaF9zZWNvbmRzIjozMDAsInJldHJ5X3NlY29uZHMiOjYwLCJleHBpcmVfc2Vjb25kcyI6MzYwMH1dLCJ6b25lIjoiZXhhbXBsZS50ZXN0IiwicmVjb3JkX25hbWUiOiJoaXN0b3J5LmV4YW1wbGUudGVzdCIsImV4aXN0cyI6dHJ1ZSwiZW50cmllcyI6W3sicmVjb3JkIjp7Im5hbWUiOiJoaXN0b3J5LmV4YW1wbGUudGVzdCIsInR5cGUiOiJBIiwidmFsdWVzIjpbIjE5Mi4wLjIuMSIsIjE5Mi4wLjIuMiIsIjE5Mi4wLjIuMyJdLCJ0dGwiOjYwLCJyZWNvcmRfa2luZCI6IiIsInN0YXR1cyI6IiIsInJlY29yZF9nZW5lcmF0aW9uIjoiIiwiYW5zd2VyX3BvbGljeSI6eyJwb2xpY3lfa2luZCI6ImxhdGVuY3lfYXdhcmUiLCJoZWFsdGhfcmVxdWlyZWQiOnRydWUsImV4cGxvcmF0aW9uX3BlcmNlbnQiOjUwLCJzd2l0Y2hfY29vbGRvd25fc2Vjb25kcyI6MzAwLCJzZWxlY3RlZF9lZGdlX2dyb3VwX2lkIjoiZ3JvdXAtYSJ9LCJjYW5kaWRhdGVzIjpbeyJpcCI6IjE5Mi4wLjIuMSIsImVkZ2VfaWQiOiJlZGdlLWEiLCJlZGdlX2dyb3VwX2lkIjoiZ3JvdXAtYSIsInNjb3JlIjo1MCwiaGVhbHRoeSI6dHJ1ZSwidGxzX3JlYWR5Ijp0cnVlfSx7ImlwIjoiMTkyLjAuMi4yIiwiZWRnZV9pZCI6ImVkZ2UtYiIsImVkZ2VfZ3JvdXBfaWQiOiJncm91cC1hIiwic2NvcmUiOjEwMCwiaGVhbHRoeSI6dHJ1ZSwidGxzX3JlYWR5Ijp0cnVlfSx7ImlwIjoiMTkyLjAuMi4zIiwiZWRnZV9pZCI6ImVkZ2UtYyIsImVkZ2VfZ3JvdXBfaWQiOiJncm91cC1iIiwic2NvcmUiOjIwMCwiaGVhbHRoeSI6dHJ1ZSwidGxzX3JlYWR5Ijp0cnVlfV19LCJwbGFuIjp7InByb2JlcyI6bnVsbCwicmVjb3JkcyI6bnVsbH0sImZhY3RzIjpudWxsfV0sImhpbnQiOnsic291cmNlIjoicmVtb3RlX2FkZHIifSwic2VsZWN0aW9ucyI6W3siYXQiOiIyMDI2LTEwLTA5VDExOjU2OjQwLjk4MjI1MloiLCJlbnRyb3B5Ijp7ImJ1Y2tldHMiOlt7InB1cnBvc2UiOiJleHBsb3JhdGlvbl9wZXJjZW50IiwibW9kdWx1cyI6MTAwLCJ2YWx1ZSI6Nzl9LHsicHVycG9zZSI6ImV4cGxvcmF0aW9uX3BlcmNlbnQiLCJtb2R1bHVzIjoxMDAsInZhbHVlIjo3OX1dfX1dLCJxdWVyeV9hdCI6IjIwMjYtMTAtMDlUMTE6NTY6NDIuOTgwNDUxWiJ9XX0=",
+    "evidence_digest": "sha256:a9df3ecac908af355d377104a75732a7eef224d4662e74acee8e6054b6dcafc3"
+  },
+  {
+    "schema": "fugue.dns-decision/v1",
+    "decision_id": "test-process-1",
+    "process_id": "test-process",
+    "node_id": "dns-a",
+    "observed_at": "2026-10-09T11:56:41.980451Z",
+    "hostname": "history.example.test",
+    "qtype": 1,
+    "query_id": 36803,
+    "transport": "udp",
+    "rcode": 0,
+    "rrset": [
+      "history.example.test.\t60\tIN\tA\t192.0.2.3"
+    ],
+    "authority": [],
+    "additional": [],
+    "write_succeeded": true,
+    "publication": {
+      "observed_at": "2026-10-09T11:56:40.982645Z",
+      "desired_known": false,
+      "loaded": {
+        "artifact_id": "artifact-a",
+        "digest": "sha256:loaded"
+      },
+      "lkg": {
+        "artifact_id": "artifact-a",
+        "digest": "sha256:loaded"
+      },
+      "serving_lkg": false,
+      "rejected": false,
+      "outcome": "not_observed"
+    },
+    "answer_publication": {
+      "artifact_id": "artifact-a",
+      "digest": "sha256:loaded"
+    },
+    "records": [
+      {
+        "record_name": "history.example.test",
+        "policy": {
+          "policy_kind": "latency_aware",
+          "health_required": true,
+          "exploration_percent": 50,
+          "switch_cooldown_seconds": 300,
+          "selected_edge_group_id": "group-a"
+        },
+        "input_candidates": [
+          {
+            "ip": "192.0.2.1",
+            "edge_id": "edge-a",
+            "edge_group_id": "group-a",
+            "score": 50,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.3",
+            "edge_id": "edge-c",
+            "edge_group_id": "group-b",
+            "score": 200,
+            "healthy": true,
+            "tls_ready": true
+          }
+        ],
+        "materialized_candidates": [
+          {
+            "ip": "192.0.2.1",
+            "edge_id": "edge-a",
+            "edge_group_id": "group-a",
+            "score": 50,
+            "healthy": true,
+            "tls_ready": true
+          },
+          {
+            "ip": "192.0.2.3",
+            "edge_id": "edge-c",
+            "edge_group_id": "group-b",
+            "score": 200,
+            "healthy": true,
+            "tls_ready": true
+          }
+        ],
+        "ranking": [
+          {
+            "candidate": {
+              "ip": "192.0.2.1",
+              "edge_id": "edge-a",
+              "edge_group_id": "group-a",
+              "score": 50,
+              "healthy": true,
+              "tls_ready": true
+            },
+            "sort_score": 50
+          },
+          {
+            "candidate": {
+              "ip": "192.0.2.3",
+              "edge_id": "edge-c",
+              "edge_group_id": "group-b",
+              "score": 200,
+              "healthy": true,
+              "tls_ready": true
+            },
+            "sort_score": 200
+          }
+        ],
+        "filtered": [
+          {
+            "edge_id": "edge-a",
+            "ip": "192.0.2.1",
+            "reason": "not_selected_by_answer_limit"
+          }
+        ],
+        "selection_at": "2026-10-09T11:56:40.982574Z",
+        "selected_edge_group_id": "group-a",
+        "selection_result": "selected_cross_group_exploration",
+        "exploration_kind": "cross_group",
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "cooldown_result": "not_recorded",
+        "scope_source": "remote_addr",
+        "scope_resolution": "remote_addr_unmapped_global_fallback",
+        "matched_scope_key": "global",
+        "answered": [
+          {
+            "ip": "192.0.2.3",
+            "edge_id": "edge-c",
+            "edge_group_id": "group-b",
+            "score": 200,
+            "healthy": true,
+            "tls_ready": true
+          }
+        ]
+      }
+    ],
+    "replay_input": "eyJ2ZXJzaW9uIjoiZnVndWUuZG5zLWRlY2lzaW9uL3YxIiwicXVlcnkiOiJqOE1CQUFBQkFBQUFBQUFBQjJocGMzUnZjbmtIWlhoaGJYQnNaUVIwWlhOMEFBQUJBQUU9Iiwic3RhZ2VzIjpbeyJwdWJsaWNhdGlvbiI6eyJhcnRpZmFjdF9pZCI6ImFydGlmYWN0LWEiLCJkaWdlc3QiOiJzaGEyNTY6bG9hZGVkIn0sImFwcGxpZWRfYXQiOiIyMDI2LTEwLTA5VDExOjU2OjQwLjk4MDQ1MVoiLCJnZW5lcmF0aW9uX3NlcXVlbmNlIjoxMiwibWF4X3N0YWxlX3NlY29uZHMiOjM2MDAsInJlYWRpbmVzcyI6eyJwcm9iZV9pbnRlcnZhbF9zZWNvbmRzIjozMCwicHJvYmVfdGltZW91dF9zZWNvbmRzIjoxLCJmYWN0X2ZyZXNobmVzc19zZWNvbmRzIjo2MCwibWF4X2NvbmN1cnJlbmN5IjoyLCJtYXhfcHJvYmVzIjoxMH0sImF1dGhvcml0aWVzIjpbeyJub2RlX2lkIjoiZG5zLWEiLCJ6b25lIjoiZXhhbXBsZS50ZXN0IiwibmFtZXNlcnZlcnMiOlsibnMuZXhhbXBsZS50ZXN0Il0sInR0bF9zZWNvbmRzIjo2MCwicmVmcmVzaF9zZWNvbmRzIjozMDAsInJldHJ5X3NlY29uZHMiOjYwLCJleHBpcmVfc2Vjb25kcyI6MzYwMH1dLCJ6b25lIjoiZXhhbXBsZS50ZXN0IiwicmVjb3JkX25hbWUiOiJoaXN0b3J5LmV4YW1wbGUudGVzdCIsImV4aXN0cyI6dHJ1ZSwiZW50cmllcyI6W3sicmVjb3JkIjp7Im5hbWUiOiJoaXN0b3J5LmV4YW1wbGUudGVzdCIsInR5cGUiOiJBIiwidmFsdWVzIjpbIjE5Mi4wLjIuMSIsIjE5Mi4wLjIuMiIsIjE5Mi4wLjIuMyJdLCJ0dGwiOjYwLCJyZWNvcmRfa2luZCI6IiIsInN0YXR1cyI6IiIsInJlY29yZF9nZW5lcmF0aW9uIjoiIiwiYW5zd2VyX3BvbGljeSI6eyJwb2xpY3lfa2luZCI6ImxhdGVuY3lfYXdhcmUiLCJoZWFsdGhfcmVxdWlyZWQiOnRydWUsImV4cGxvcmF0aW9uX3BlcmNlbnQiOjUwLCJzd2l0Y2hfY29vbGRvd25fc2Vjb25kcyI6MzAwLCJzZWxlY3RlZF9lZGdlX2dyb3VwX2lkIjoiZ3JvdXAtYSJ9LCJjYW5kaWRhdGVzIjpbeyJpcCI6IjE5Mi4wLjIuMSIsImVkZ2VfaWQiOiJlZGdlLWEiLCJlZGdlX2dyb3VwX2lkIjoiZ3JvdXAtYSIsInNjb3JlIjo1MCwiaGVhbHRoeSI6dHJ1ZSwidGxzX3JlYWR5Ijp0cnVlfSx7ImlwIjoiMTkyLjAuMi4zIiwiZWRnZV9pZCI6ImVkZ2UtYyIsImVkZ2VfZ3JvdXBfaWQiOiJncm91cC1iIiwic2NvcmUiOjIwMCwiaGVhbHRoeSI6dHJ1ZSwidGxzX3JlYWR5Ijp0cnVlfV19LCJwbGFuIjp7InByb2JlcyI6bnVsbCwicmVjb3JkcyI6bnVsbH0sImZhY3RzIjpudWxsfV0sImhpbnQiOnsic291cmNlIjoicmVtb3RlX2FkZHIifSwic2VsZWN0aW9ucyI6W3siYXQiOiIyMDI2LTEwLTA5VDExOjU2OjQwLjk4MjU3NFoiLCJlbnRyb3B5Ijp7ImJ1Y2tldHMiOlt7InB1cnBvc2UiOiJleHBsb3JhdGlvbl9wZXJjZW50IiwibW9kdWx1cyI6MTAwLCJ2YWx1ZSI6Mzd9LHsicHVycG9zZSI6ImNyb3NzX2dyb3VwX2luZGV4IiwibW9kdWx1cyI6MSwidmFsdWUiOjB9XX19XSwicXVlcnlfYXQiOiIyMDI2LTEwLTA5VDExOjU2OjQxLjk4MDQ1MVoifV19",
+    "evidence_digest": "sha256:4d2cd86567fa59347a1cb42be74c841a68e235ac4690766c7249fe48f8cd22ad"
+  }
+]

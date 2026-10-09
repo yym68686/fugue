@@ -9,7 +9,7 @@ Use this when `service.healthy_edge_count_zero` fires or
 
 ```bash
 fugue admin traffic-safety explain <hostname> --json
-fugue admin edge quality-rank <hostname> --json
+fugue admin edge quality-shadow capture <hostname> --dns-node-id <dns-node-id> --json
 fugue admin edge nodes --json
 ```
 

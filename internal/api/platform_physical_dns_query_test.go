@@ -15,8 +15,10 @@ import (
 func physicalQueryProjectionFixture(t *testing.T) (platformIntentProjectionResponse, platformconfig.DNSQueryPolicy, map[string]compiledPhysicalDNSSelection, time.Time) {
 	t.Helper()
 	projection, nodes, policy, now := directQueryFixture()
+	policy.ECSEnabled, policy.ExplorationPercent = false, 0
+	policy.OrderedProjection = &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}}
 	policy.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{{Hostname: "app.example.test", TrafficClass: "streaming", Policy: edgequality.DefaultNetworkPolicy()}}
-	if err := projectDirectDNSQueries(&projection, policy, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
+	if err := projectDirectDNSQueries(&projection, policy, nodes, now); err != nil {
 		t.Fatal(err)
 	}
 	digest := "sha256:" + strings.Repeat("a", 64)
@@ -58,15 +60,17 @@ func TestPhysicalDNSPublicationReplacesOnlyExplicitDynamicQueries(t *testing.T) 
 
 func TestPhysicalDNSOptInDoesNotAuthorizeAnUnboundManagedAlias(t *testing.T) {
 	projection, nodes, policy, now := directQueryFixture()
+	policy.ECSEnabled, policy.ExplorationPercent = false, 0
+	policy.OrderedProjection = &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}}
 	alias := projection.Intent.DNS[0]
 	alias.Hostname, alias.RecordKind = "alias.example.test", model.EdgeDNSRecordKindCustomDomainTarget
 	projection.Intent.DNS = append(projection.Intent.DNS, alias)
 	baseline := projection
-	if err := projectDirectDNSQueries(&baseline, policy, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
+	if err := projectDirectDNSQueries(&baseline, policy, nodes, now); err != nil {
 		t.Fatal(err)
 	}
 	policy.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{{Hostname: "app.example.test", TrafficClass: "streaming", Policy: edgequality.DefaultNetworkPolicy()}}
-	if err := projectDirectDNSQueries(&projection, policy, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
+	if err := projectDirectDNSQueries(&projection, policy, nodes, now); err != nil {
 		t.Fatal(err)
 	}
 	for index, rule := range projection.Policy.DNSAnswerRules {

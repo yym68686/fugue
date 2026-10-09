@@ -31,7 +31,7 @@ func TestDirectDNSQueriesMatchLegacyFixedObservationsWithoutBundle(t *testing.T)
 	sourcePolicy := edgeDNSAnswerPolicy(edgeDNSBundleOptions{EdgeGroupID: "edge-group-a"}, "edge-group-b", "", ips, candidateByIP, profiles.globalProfile("app.example.test"), 60, true)
 	sourceCandidates := edgeDNSCandidatesForAnswerIPs(ips, candidateByIP, nil, "edge-group-b", "", profiles.globalProfile("app.example.test"), true)
 	before, _ := json.Marshal(result.Intent)
-	if err := projectDirectDNSQueries(&result, p, nodes, profiles, now); err != nil {
+	if err := projectLegacyDNSQueries(&result, p, nodes, profiles, now); err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Policy.DNSAnswerRules) != 1 || len(result.RuntimeSnapshot.DNSSelections) != 1 {
@@ -58,7 +58,7 @@ func TestDirectDNSQueriesMatchLegacyFixedObservationsWithoutBundle(t *testing.T)
 	// runtime inventory cannot authorize candidates, so downstream compilation fails.
 	empty, _, disabled, _ := directQueryFixture()
 	disabled.RankingMode = "disabled"
-	if err := server.captureDirectDNSQueries(context.Background(), &empty, disabled); err != nil {
+	if err := server.captureLegacyDirectDNSQueries(context.Background(), &empty, disabled); err != nil {
 		t.Fatal("collector consulted missing legacy DNS source", err)
 	}
 	if len(empty.RuntimeSnapshot.DNSSelections) != 0 {
@@ -85,7 +85,7 @@ func TestConsumerPlacementCaptureDoesNotNeedAnyServingBundle(t *testing.T) {
 	if err := projectDNSReadinessWithPolicy(&r, edges, time.Now().UTC(), &input); err != nil {
 		t.Fatal(err)
 	}
-	if err := server.captureDirectDNSQueries(context.Background(), &r, strategy); err != nil {
+	if err := server.captureLegacyDirectDNSQueries(context.Background(), &r, strategy); err != nil {
 		t.Fatal(err)
 	}
 	// A server with no store cannot perform the old network/inventory capture.
@@ -114,7 +114,7 @@ func TestDirectDNSQueriesPolicyChangesAndNewNames(t *testing.T) {
 	p.ExplorationPercent = 0
 	p.MinimumTTLSeconds = 180
 	p.MaximumTTLSeconds = 300
-	if err := projectDirectDNSQueries(&r, p, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
+	if err := projectLegacyDNSQueries(&r, p, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.Policy.DNSAnswerRules) != 2 {
@@ -127,7 +127,7 @@ func TestDirectDNSQueriesPolicyChangesAndNewNames(t *testing.T) {
 	}
 	// Removing a desired name removes both rules and facts, regardless of past publications.
 	r.Intent.DNS = r.Intent.DNS[:1]
-	if err := projectDirectDNSQueries(&r, p, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil || len(r.Policy.DNSAnswerRules) != 1 || len(r.RuntimeSnapshot.DNSSelections) != 1 {
+	if err := projectLegacyDNSQueries(&r, p, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil || len(r.Policy.DNSAnswerRules) != 1 || len(r.RuntimeSnapshot.DNSSelections) != 1 {
 		t.Fatal("deleted name persisted", err)
 	}
 }
@@ -144,7 +144,7 @@ func TestDirectDNSQueriesRejectOwnershipWithoutPartialMutation(t *testing.T) {
 			case "invalid policy":
 				p.MaximumTTLSeconds = 0
 			}
-			if err := projectDirectDNSQueries(&r, p, nodes, edgeDNSLatencyProfileCatalog{}, now); err == nil {
+			if err := projectLegacyDNSQueries(&r, p, nodes, edgeDNSLatencyProfileCatalog{}, now); err == nil {
 				t.Fatal("invalid direct observation accepted")
 			}
 			after, _ := json.Marshal(r)
@@ -174,7 +174,7 @@ func TestDirectDNSQueriesCompileReplayAndRequireIndependentReadiness(t *testing.
 	r, nodes, p, now := directQueryFixture()
 	r.Policy.DNSReadiness = &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
 	r.RuntimeSnapshot.DNSConsumers = []platformconfig.DNSConsumerObservation{{NodeID: "dns-a", EdgeGroupID: "edge-group-a", ObservedAt: now, A: []string{"1.1.1.1"}}}
-	if err := projectDirectDNSQueries(&r, p, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
+	if err := projectLegacyDNSQueries(&r, p, nodes, edgeDNSLatencyProfileCatalog{}, now); err != nil {
 		t.Fatal(err)
 	}
 	request := platformconfig.CompileRequest{Intent: r.Intent, Policy: r.Policy, RuntimeSnapshot: r.RuntimeSnapshot}
@@ -231,7 +231,7 @@ func TestDirectDNSQueriesSingleTargetPreservesPreferredGroupsAndOwnerRanking(t *
 	profiles := edgeDNSLatencyProfileCatalog{Global: map[string]*edgeDNSLatencyProfile{"app.example.test": {Hostname: "app.example.test", Enabled: true, BestEdgeGroupID: "edge-group-b", Candidates: map[string]edgeDNSLatencyCandidateProfile{"edge-group-a": {Weight: 20, Score: 200}, "edge-group-b": {Weight: 200, Score: 100}}}}}
 	r.Intent.DNS[0].Hostname = "target.example.test"
 	r.Intent.DNS[0].RecordKind = model.EdgeDNSRecordKindCustomDomainTarget
-	if err := projectDirectDNSQueries(&r, p, nodes, profiles, now); err != nil {
+	if err := projectLegacyDNSQueries(&r, p, nodes, profiles, now); err != nil {
 		t.Fatal(err)
 	}
 	rule := r.Policy.DNSAnswerRules[0]
@@ -284,7 +284,7 @@ func TestDirectDNSSharedTargetChoosesMemberBeforeIntersectingAddresses(t *testin
 		"app.example.test":   {Hostname: "app.example.test", Enabled: true, BestEdgeGroupID: "edge-group-b", Candidates: map[string]edgeDNSLatencyCandidateProfile{"edge-group-a": {Weight: 20, Score: 200, TrafficClass: "small_api"}, "edge-group-b": {Weight: 200, Score: 100, TrafficClass: "static_cacheable"}}},
 		"alias.example.test": {Hostname: "alias.example.test", Enabled: true, BestEdgeGroupID: "edge-group-b", Candidates: map[string]edgeDNSLatencyCandidateProfile{"edge-group-b": {Weight: 200, Score: 300, TrafficClass: "static_cacheable"}}},
 	}}
-	if err := projectDirectDNSQueries(&r, p, nodes, catalog, now); err != nil {
+	if err := projectLegacyDNSQueries(&r, p, nodes, catalog, now); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.RuntimeSnapshot.DNSSelections) != 1 {

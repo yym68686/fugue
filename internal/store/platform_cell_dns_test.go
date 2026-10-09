@@ -229,7 +229,7 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		}
 	}
 	legacyCaps := []string{platformcontrol.TrafficReleaseCapabilityV1}
-	fullCaps := []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1}
+	fullCaps := []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.PhysicalOrderCapabilityV1}
 	if transition {
 		legacyCaps = append([]string(nil), fullCaps...)
 		fullCaps = append(fullCaps, platformcontrol.DNSAuthorityTransitionCapabilityV1)

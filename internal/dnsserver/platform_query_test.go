@@ -2,7 +2,6 @@ package dnsserver
 
 import (
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +20,7 @@ func queryExecutionFixture() (platformconfig.DNSQueryView, platformconfig.DNSRea
 	for _, p := range plan.Probes {
 		facts = append(facts, dnsReadinessFact{ProbeID: p.ID, Ready: true, Proof: routeprobe.Proof{Digest: p.RouteDigest, Version: "serving", EdgeID: p.EdgeID, GroupID: p.EdgeGroupID, CheckedAt: now.Add(-time.Second), ValidUntil: now.Add(30 * time.Second)}})
 	}
-	record := model.EdgeDNSRecord{Name: plan.Records[0].Hostname, Type: "A", Values: []string{"8.8.8.8", "9.9.9.9"}, TTL: 60, AnswerPolicy: model.DNSAnswerPolicy{PolicyKind: "geo", ECSEnabled: true, HealthRequired: true, RouteReadyRequired: true}, Candidates: []model.EdgeDNSAnswerCandidate{
+	record := model.EdgeDNSRecord{Name: plan.Records[0].Hostname, Type: "A", Values: []string{"8.8.8.8", "9.9.9.9"}, TTL: 60, AnswerPolicy: model.DNSAnswerPolicy{PolicyKind: model.DNSAnswerPolicyKindPhysicalOrder, PhysicalOrder: &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}, HealthRequired: true, RouteReadyRequired: true}, Candidates: []model.EdgeDNSAnswerCandidate{
 		{IP: "8.8.8.8", EdgeID: "edge-a", EdgeGroupID: "edge-group-a", Country: "aa", Weight: 100},
 		{IP: "9.9.9.9", EdgeID: "edge-b", EdgeGroupID: "edge-group-b", Country: "bb", Weight: 100},
 	}}
@@ -39,8 +38,8 @@ func TestDNSQueryExecutionRequiresFreshAllPathFactsAndPreservesStaticExpiry(t *t
 		t.Fatal("fresh lease bound or ACME expiry lost")
 	}
 	answers, err := executeDNSQueryRecord(records[0], dnsGeoHint{Country: "bb", Source: "ecs"}, now)
-	if err != nil || len(answers) != 1 || answers[0].(*dns.A).A.String() != "9.9.9.9" {
-		t.Fatal("production geo selector not applied", err)
+	if err != nil || len(answers) != 1 || answers[0].(*dns.A).A.String() != "8.8.8.8" {
+		t.Fatal("client geography overrode declared physical order", err)
 	}
 	records[0].AnswerPolicy.ECSEnabled = false
 	answers, err = executeDNSQueryRecord(records[0], dnsGeoHint{Country: "bb", Source: "ecs"}, now)
@@ -66,43 +65,6 @@ func TestDNSQueryExecutionRequiresFreshAllPathFactsAndPreservesStaticExpiry(t *t
 	after, _ := json.Marshal(view)
 	if string(before) != string(after) {
 		t.Fatal("query mutated signed authorization")
-	}
-}
-
-func TestDNSQueryUsesExistingLatencyScopedAndExplorationSelection(t *testing.T) {
-	view, plan, policy, facts, now := queryExecutionFixture()
-	records, err := materializeDNSQueries(view, &plan, &policy, facts, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	record := records[0]
-	record.AnswerPolicy.PolicyKind = "latency_aware"
-	record.AnswerPolicy.SelectedEdgeGroupID = "edge-group-b"
-	record.Candidates[0].Score = 200
-	record.Candidates[1].Score = 100
-	for _, percent := range []int{0, 5, 50} {
-		record.AnswerPolicy.ExplorationPercent = percent
-		for step := 0; step < 20; step++ {
-			at := now.Add(time.Duration(step) * 10 * time.Minute)
-			hint := dnsGeoHint{Country: "aa", Source: "ecs"}
-			expected, _, _ := edgeDNSAnswerCandidateDecision(record, hint, at, nil, nil)
-			answers, err := executeDNSQueryRecord(record, hint, at)
-			if err != nil || len(answers) != len(expected) {
-				t.Fatal("selector output cardinality changed", err)
-			}
-			for i, answer := range answers {
-				if answer.(*dns.A).A.String() != expected[i].IP {
-					t.Fatal("latency/exploration order drift")
-				}
-			}
-		}
-	}
-	record.AnswerPolicy.ExplorationPercent = 0
-	record.ScopedCandidates = []model.EdgeDNSScopedAnswerCandidates{{ScopeKey: "country:aa", Country: "aa", PolicyKind: "latency_aware", SelectedEdgeGroupID: "edge-group-a", Candidates: record.Candidates}}
-	expected, _, _ := edgeDNSAnswerCandidateDecision(record, dnsGeoHint{Country: "aa", Source: "ecs"}, now, nil, nil)
-	answers, err := executeDNSQueryRecord(record, dnsGeoHint{Country: "aa", Source: "ecs"}, now)
-	if err != nil || len(expected) == 0 || !reflect.DeepEqual(answers[0].(*dns.A).A.String(), expected[0].IP) {
-		t.Fatal("scoped selection lost", err)
 	}
 }
 

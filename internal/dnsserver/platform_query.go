@@ -281,6 +281,9 @@ func materializeDNSQueries(view platformconfig.DNSQueryView, plan *platformconfi
 }
 
 func executeDNSQueryRecord(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time) ([]dns.RR, error) {
+	if err := validateServingDNSSelectors([]platformconfig.DNSQueryView{{Records: []model.EdgeDNSRecord{record}}}); err != nil {
+		return nil, err
+	}
 	if hint.Source == "ecs" && !record.AnswerPolicy.ECSEnabled {
 		hint = dnsGeoHint{Source: "ecs_disabled"}
 	}

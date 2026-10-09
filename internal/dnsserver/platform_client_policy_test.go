@@ -52,8 +52,8 @@ func TestDNSClientPacketHintsUseSignedPolicy(t *testing.T) {
 			}
 			if test.country == "bb" {
 				answers, err := executeDNSQueryRecord(records[0], hint, now)
-				if err != nil || len(answers) != 1 || answers[0].(*dns.A).A.String() != "9.9.9.9" {
-					t.Fatal("signed client mapping not used", answers, err)
+				if err != nil || len(answers) != 1 || answers[0].(*dns.A).A.String() != "8.8.8.8" {
+					t.Fatal("client mapping changed declared physical order", answers, err)
 				}
 			}
 		})

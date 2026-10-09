@@ -70,9 +70,10 @@ func (c *CLI) newAdminEdgeQualityRankCommand() *cobra.Command {
 		Window: "30m",
 	}
 	cmd := &cobra.Command{
-		Use:   "quality-rank <hostname>",
-		Short: "Rank edge nodes for a hostname and client scope",
-		Args:  cobra.ExactArgs(1),
+		Use:        "quality-rank <hostname>",
+		Short:      "Retired composite scorer; use quality-shadow and DNS decisions",
+		Deprecated: "use quality-shadow capture and admin dns decisions explain; the legacy scorer is retired",
+		Args:       cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {

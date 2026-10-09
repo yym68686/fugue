@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"fugue/internal/dnsserver"
 	"fugue/internal/model"
 
 	miekgdns "github.com/miekg/dns"
@@ -152,11 +153,7 @@ func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 				return err
 			}
 			if opts.Explain {
-				quality, err := client.GetEdgeQualityRank(opts.Hostname, "", "", "", "", "global", "30m", "")
-				if err != nil {
-					return err
-				}
-				report.QualityRank = &quality
+				addDNSDecisionExplanation(client, &report)
 			}
 			if c.wantsJSON() {
 				return c.writeJSON(report)
@@ -166,7 +163,7 @@ func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.QueryName, "query-name", "", "Authoritative Fugue name to query while preserving <hostname> as TLS SNI and HTTP Host")
 	cmd.Flags().StringVar(&opts.ClientIP, "client-ip", "", "EDNS client subnet IP to use when probing authoritative answers")
-	cmd.Flags().BoolVar(&opts.Explain, "explain", false, "Include scoped edge quality ranking explanation")
+	cmd.Flags().BoolVar(&opts.Explain, "explain", false, "Include retained actual DNS receipts, not a fresh ranking or a guaranteed match to this probe")
 	return cmd
 }
 
@@ -309,21 +306,22 @@ func writeDNSFullZonePreflight(w io.Writer, response model.DNSFullZonePreflightR
 }
 
 type dnsAnswerCheckReport struct {
-	Hostname                string                         `json:"hostname"`
-	QueryName               string                         `json:"query_name,omitempty"`
-	ClientIP                string                         `json:"client_ip,omitempty"`
-	PolicyReason            string                         `json:"policy_reason,omitempty"`
-	GeneratedAt             time.Time                      `json:"generated_at"`
-	Pass                    bool                           `json:"pass"`
-	AuthoritativeConsistent bool                           `json:"authoritative_consistent"`
-	AuthoritativeAnswerSets []dnsAuthoritativeAnswerSet    `json:"authoritative_answer_sets"`
-	FailureReasons          []string                       `json:"failure_reasons,omitempty"`
-	RouteExplain            model.RouteExplainResponse     `json:"route_explain"`
-	QualityRank             *model.EdgeQualityRankResponse `json:"quality_rank,omitempty"`
-	RouteReadyEdgeGroups    []string                       `json:"route_ready_edge_groups,omitempty"`
-	RouteGenerations        map[string]string              `json:"route_generations,omitempty"`
-	HostProbes              []dnsAnswerCheckHostProbe      `json:"host_probes,omitempty"`
-	Nodes                   []dnsAnswerCheckNode           `json:"nodes"`
+	Hostname                string                          `json:"hostname"`
+	QueryName               string                          `json:"query_name,omitempty"`
+	ClientIP                string                          `json:"client_ip,omitempty"`
+	PolicyReason            string                          `json:"policy_reason,omitempty"`
+	GeneratedAt             time.Time                       `json:"generated_at"`
+	Pass                    bool                            `json:"pass"`
+	AuthoritativeConsistent bool                            `json:"authoritative_consistent"`
+	AuthoritativeAnswerSets []dnsAuthoritativeAnswerSet     `json:"authoritative_answer_sets"`
+	FailureReasons          []string                        `json:"failure_reasons,omitempty"`
+	RouteExplain            model.RouteExplainResponse      `json:"route_explain"`
+	DNSDecisions            []dnsserver.DNSDecisionSnapshot `json:"retained_dns_receipts,omitempty"`
+	ExplanationErrors       []string                        `json:"explanation_errors,omitempty"`
+	RouteReadyEdgeGroups    []string                        `json:"route_ready_edge_groups,omitempty"`
+	RouteGenerations        map[string]string               `json:"route_generations,omitempty"`
+	HostProbes              []dnsAnswerCheckHostProbe       `json:"host_probes,omitempty"`
+	Nodes                   []dnsAnswerCheckNode            `json:"nodes"`
 }
 
 type dnsAnswerCheckNode struct {
@@ -567,12 +565,6 @@ func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
 		return err
 	}
 	if len(report.Nodes) == 0 {
-		if report.QualityRank != nil {
-			if _, err := fmt.Fprintln(w); err != nil {
-				return err
-			}
-			return writeEdgeQualityRank(w, *report.QualityRank)
-		}
 		return nil
 	}
 	if _, err := fmt.Fprintln(w); err != nil {
@@ -593,13 +585,38 @@ func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
 	if err := writeDNSAnswerCheckTable(w, report.Nodes); err != nil {
 		return err
 	}
-	if report.QualityRank == nil {
-		return nil
+	for _, snapshot := range report.DNSDecisions {
+		for _, receipt := range snapshot.Receipts {
+			if _, err := fmt.Fprintf(w, "\nRetained DNS receipt: %s node=%s observed=%s rrset=%s\n", receipt.DecisionID, receipt.NodeID, formatTime(receipt.ObservedAt), strings.Join(receipt.RRSet, "; ")); err != nil {
+				return err
+			}
+		}
 	}
-	if _, err := fmt.Fprintln(w, "\nQuality rank:"); err != nil {
-		return err
+	for _, message := range report.ExplanationErrors {
+		if _, err := fmt.Fprintf(w, "\nDNS explanation unavailable: %s\n", message); err != nil {
+			return err
+		}
 	}
-	return writeEdgeQualityRank(w, *report.QualityRank)
+	return nil
+}
+
+func addDNSDecisionExplanation(client *Client, report *dnsAnswerCheckReport) {
+	seen := map[string]bool{}
+	for _, node := range report.Nodes {
+		if node.DNSNodeID == "" || seen[node.DNSNodeID] {
+			continue
+		}
+		seen[node.DNSNodeID] = true
+		query := url.Values{"hostname": {firstNonEmpty(report.QueryName, report.Hostname)}, "limit": {"1"}}
+		var response struct {
+			Snapshot dnsserver.DNSDecisionSnapshot `json:"snapshot"`
+		}
+		if err := client.doJSON(http.MethodGet, "/v1/admin/platform-state/dns-decisions/"+url.PathEscape(node.DNSNodeID)+"?"+query.Encode(), nil, &response); err != nil {
+			report.ExplanationErrors = append(report.ExplanationErrors, node.DNSNodeID+": "+err.Error())
+			continue
+		}
+		report.DNSDecisions = append(report.DNSDecisions, response.Snapshot)
+	}
 }
 
 func writeDNSAnswerCheckTable(w io.Writer, nodes []dnsAnswerCheckNode) error {

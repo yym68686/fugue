@@ -152,9 +152,9 @@ func (s *Server) writeEdgeQualityRollupMetrics(w io.Writer) {
 	lastError := s.edgeQualityRollupLastError
 	s.edgeQualityRollupMu.Unlock()
 
-	labels := map[string]string{"mode": strings.TrimSpace(s.edgeQualityRankingMode)}
-	observability.WriteGaugeMetric(w, "fugue_edge_quality_ranking_active", "Whether scoped edge quality ranking actively changes DNS answers.", labels, boolMetric(s.edgeQualityRankingActive()))
-	observability.WriteGaugeMetric(w, "fugue_edge_quality_ranking_shadow", "Whether scoped edge quality ranking only records shadow decisions.", labels, boolMetric(s.edgeQualityRankingShadow()))
+	labels := map[string]string{"mode": "retired"}
+	observability.WriteGaugeMetric(w, "fugue_edge_quality_ranking_active", "Whether scoped edge quality ranking actively changes DNS answers.", labels, 0)
+	observability.WriteGaugeMetric(w, "fugue_edge_quality_ranking_shadow", "Whether scoped edge quality ranking only records shadow decisions.", labels, 0)
 	observability.WriteCounterMetric(w, "fugue_edge_quality_rollup_runs_total", "Total edge quality rollup builder runs.", nil, float64(runCount))
 	observability.WriteCounterMetric(w, "fugue_edge_quality_rollup_errors_total", "Total edge quality rollup builder errors.", nil, float64(errorCount))
 	observability.WriteGaugeMetric(w, "fugue_edge_quality_rollup_last_duration_seconds", "Duration of the last edge quality rollup builder run.", nil, lastDuration.Seconds())
@@ -550,7 +550,7 @@ func accumulateEdgeQualityRollupScalars(accumulator *edgeQualityRollupAccumulato
 	accumulator.addAverage(sample.OriginResponseWaitMS, requestCount, &accumulator.OriginWaitWeightedMS, &accumulator.OriginWaitSampleCount)
 	accumulator.addAverage(sample.OriginTTFBMS, requestCount, &accumulator.OriginTTFBWeightedMS, &accumulator.OriginTTFBSampleCount)
 	accumulator.addAverage(sample.OriginTotalMS, requestCount, &accumulator.OriginTotalWeightedMS, &accumulator.OriginTotalSampleCount)
-	uploadBPS := edgeDNSPerformanceUploadBPS(sample)
+	uploadBPS := edgeQualityPerformanceUploadBPS(sample)
 	if uploadBPS > 0 {
 		accumulator.UploadWeightedBPS += float64(uploadBPS) * float64(requestCount)
 		accumulator.UploadSampleCount += requestCount
@@ -676,54 +676,7 @@ func (a *edgeQualityRollupAccumulator) rollup(percentiles store.EdgeQualityPerce
 		rollup.CacheHitRate = float64(a.CacheHitCount) / float64(a.CacheObservationCount)
 	}
 	rollup.Confidence = edgeQualityRollupConfidence(rollup)
-	rollup.Score, rollup.ScoreBreakdown = scoreEdgeQualityRollup(rollup)
 	return rollup
-}
-
-func scoreEdgeQualityRollup(rollup model.EdgeQualityRollup) (float64, map[string]float64) {
-	profile := edgeDNSLatencyCandidateProfile{
-		EdgeGroupID:               rollup.EdgeGroupID,
-		EdgeID:                    rollup.EdgeID,
-		ScoreBreakdown:            map[string]float64{},
-		TrafficClass:              rollup.TrafficClass,
-		TTFBMS:                    firstPositiveFloat(rollup.P95TTFBMS, rollup.P50TTFBMS),
-		UpstreamMS:                rollup.AvgUpstreamMS,
-		TotalMS:                   rollup.AvgTotalMS,
-		HitRatio:                  rollup.CacheHitRate,
-		ErrorRate:                 rollup.ErrorRate,
-		UploadBPS:                 firstPositiveFloat(rollup.P10UploadEffectiveBPS, rollup.AvgUploadEffectiveBPS),
-		BodyReadMS:                rollup.AvgBodyReadBlockMS,
-		MaxReadGapMS:              rollup.P95MaxReadGapMS,
-		BodyIncompleteRate:        rollup.BodyIncompleteRate,
-		BodyReadErrorRate:         rollup.BodyReadErrorRate,
-		ResponseEgressBPS:         firstPositiveFloat(rollup.P10ResponseEgressBPS, rollup.AvgResponseEgressBPS),
-		ResponseWriteMS:           rollup.P95ResponseWriteMS,
-		OriginConnectMS:           rollup.AvgOriginConnectMS,
-		OriginWriteMS:             rollup.AvgOriginRequestWriteMS,
-		OriginWaitMS:              rollup.AvgOriginResponseWaitMS,
-		OriginTTFBMS:              rollup.AvgOriginTTFBMS,
-		OriginTotalMS:             rollup.AvgOriginTotalMS,
-		ActiveRequests:            rollup.AvgActiveRequests,
-		ActiveBodyBuffers:         rollup.AvgActiveBodyBuffers,
-		ClientTCPRTTMS:            rollup.AvgClientTCPRTTMS,
-		ClientTCPMinRTTMS:         rollup.AvgClientTCPMinRTTMS,
-		ClientTCPRTTVarMS:         rollup.AvgClientTCPRTTVarMS,
-		ClientTCPRetransRate:      rollup.ClientTCPRetransRate,
-		ClientTCPBytesRetransRate: rollup.ClientTCPBytesRetransRate,
-		ClientTCPRTORate:          rollup.ClientTCPRTORate,
-		ClientTCPDeliveryBPS:      rollup.AvgClientTCPDeliveryBPS,
-		Confidence:                rollup.Confidence,
-		ConfidencePenalty:         edgeDNSLatencyConfidencePenalty(rollup.Confidence),
-		SampleCount:               rollup.RequestCount,
-		BodySampleCount:           rollup.RequestCount,
-	}
-	score := edgeDNSLatencyScore(profile)
-	breakdown := cloneFloat64Map(profile.ScoreBreakdown)
-	if penalty, _ := edgeQualitySevereDegradePenalty(rollup); penalty > 0 {
-		breakdown["severe_degrade"] = penalty
-		score += penalty
-	}
-	return score, breakdown
 }
 
 func edgeQualityRollupConfidence(rollup model.EdgeQualityRollup) float64 {
@@ -758,26 +711,6 @@ func edgeQualityRollupConfidence(rollup model.EdgeQualityRollup) float64 {
 	return confidence
 }
 
-func edgeQualitySevereDegradePenalty(rollup model.EdgeQualityRollup) (float64, string) {
-	if strings.TrimSpace(rollup.Window) != "5m" {
-		return 0, ""
-	}
-	switch {
-	case rollup.RequestCount >= 10 && rollup.ErrorRate >= 0.20:
-		return 1200, "5m_error_rate"
-	case rollup.RequestCount >= 10 && rollup.BodyReadErrorRate+rollup.BodyIncompleteRate >= 0.08:
-		return 1100, "5m_body_read_failures"
-	case rollup.RequestCount >= 5 && firstPositiveFloat(rollup.P10UploadEffectiveBPS, rollup.AvgUploadEffectiveBPS) > 0 && firstPositiveFloat(rollup.P10UploadEffectiveBPS, rollup.AvgUploadEffectiveBPS) < 32*1024:
-		return 900, "5m_upload_collapse"
-	case rollup.RequestCount >= 10 && (rollup.ClientTCPRetransRate >= 0.12 || rollup.ClientTCPRTORate >= 0.08):
-		return 900, "5m_tcp_loss"
-	case rollup.AvgActiveRequests >= 250 || rollup.AvgActiveBodyBuffers >= 100:
-		return 700, "5m_saturation"
-	default:
-		return 0, ""
-	}
-}
-
 type edgeQualityRollupScope struct {
 	Kind  string
 	Value string
@@ -785,7 +718,7 @@ type edgeQualityRollupScope struct {
 
 func edgeQualityRollupScopesForSample(sample model.EdgePerformanceSample) []edgeQualityRollupScope {
 	scopes := []edgeQualityRollupScope{{Kind: "global", Value: "global"}}
-	if !edgeDNSPerformanceSampleHasClientScope(sample) {
+	if !edgeQualityPerformanceSampleHasClientScope(sample) {
 		return scopes
 	}
 	country := strings.ToLower(strings.TrimSpace(sample.ClientCountry))
@@ -827,9 +760,17 @@ func truncateMetricLabel(value string, max int) string {
 	return value[:max]
 }
 
-func formatEdgeQualityRollupReason(rollup model.EdgeQualityRollup) string {
-	if penalty, reason := edgeQualitySevereDegradePenalty(rollup); penalty > 0 {
-		return fmt.Sprintf("scoped_quality_rollup_%s_penalty_%.0f_confidence_%d_pct", reason, penalty, int(rollup.Confidence*100+0.5))
+func edgeQualityPerformanceUploadBPS(sample model.EdgePerformanceSample) int64 {
+	uploadBPS := sample.UploadEffectiveBPS
+	if sample.MinWindowBPS > 0 && (uploadBPS <= 0 || sample.MinWindowBPS < uploadBPS) {
+		uploadBPS = sample.MinWindowBPS
 	}
-	return fmt.Sprintf("scoped_quality_rollup_confidence_%d_pct", int(rollup.Confidence*100+0.5))
+	return uploadBPS
+}
+
+func edgeQualityPerformanceSampleHasClientScope(sample model.EdgePerformanceSample) bool {
+	if strings.TrimSpace(sample.ClientCountry) != "" || strings.TrimSpace(sample.ClientRegion) != "" || strings.TrimSpace(sample.ClientASN) != "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(sample.DNSPolicy)), "client_scope")
 }

@@ -10,7 +10,7 @@ Use this when a user reports a slow or failed request, or when alerts report
 
 ```bash
 fugue admin request explain <request-id> --json
-fugue admin edge quality-rank <hostname> --json
+fugue admin dns decisions explain <dns-node-id> --hostname <hostname> --json
 fugue admin traffic-safety explain <hostname> --json
 ```
 
@@ -47,7 +47,7 @@ byte counters are not zero measurements or proof of an incomplete upload.
 
 ## Recovery
 
-1. For body-read issues, compare scoped edge ranking by request size class.
+1. For body-read issues, inspect recorded body-read and socket stages without treating application wait as network cost.
 2. For DNS/connect issues, inspect edge-to-origin and node DNS health.
 3. For origin 5xx or timeout, inspect app/runtime health before moving edge
    traffic.
@@ -56,5 +56,5 @@ byte counters are not zero measurements or proof of an incomplete upload.
 ## Verification
 
 - New samples show the error class has cleared or moved to the expected owner.
-- Traffic safety and edge ranking agree on the selected edge.
+- Recorded DNS selection and traffic safety identify the actual physical edge.
 - The incident records the explain command used for evidence.

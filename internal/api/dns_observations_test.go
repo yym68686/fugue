@@ -72,18 +72,12 @@ func TestDNSObservationsUseVerifiedPolicyAndNeverPublishArtifacts(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := server.reconcileDNSObservations(context.Background(), now); err != nil {
-		t.Fatal(err)
+	if err := server.reconcileDNSObservations(context.Background(), now); err == nil {
+		t.Fatal("retired legacy ranking reactivated")
 	}
-	decisions, _ := state.ListEdgeDNSRoutingDecisions(host)
-	var global model.EdgeDNSRoutingDecision
-	for _, d := range decisions {
-		if d.ScopeKey == "global" {
-			global = d
-		}
-	}
-	if global.SelectedEdgeGroupID != "edge-group-1" || !global.CooldownUntil.Equal(seed.SwitchedAt.Add(180*time.Second)) {
-		t.Fatal("signed cooldown ignored original switch time", global)
+	decisions, _ := state.ListEdgeDNSRoutingDecisions("")
+	if !reflect.DeepEqual(decisions, original) {
+		t.Fatal("retired observer changed historical decisions")
 	}
 	after, _ := state.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 1000})
 	if !reflect.DeepEqual(after, before) {
@@ -96,14 +90,12 @@ func TestDNSObservationsUseVerifiedPolicyAndNeverPublishArtifacts(t *testing.T) 
 		}
 	}
 	makePolicy("shorter", "active", 60, true)
-	if err := server.reconcileDNSObservations(context.Background(), now); err != nil {
-		t.Fatal(err)
+	if err := server.reconcileDNSObservations(context.Background(), now); err == nil {
+		t.Fatal("new generation reactivated retired ranking")
 	}
-	decisions, _ = state.ListEdgeDNSRoutingDecisions(host)
-	for _, d := range decisions {
-		if d.ScopeKey == "global" && d.SelectedEdgeGroupID != "edge-group-0" {
-			t.Fatal("new verified policy did not shorten cooldown", d)
-		}
+	decisions, _ = state.ListEdgeDNSRoutingDecisions("")
+	if !reflect.DeepEqual(decisions, original) {
+		t.Fatal("new generation rewrote historical decisions")
 	}
 	makePolicy("disabled", "disabled", 0, true)
 	beforeDecisions, _ := state.ListEdgeDNSRoutingDecisions("")

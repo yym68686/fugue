@@ -1,5 +1,37 @@
 # Physical-edge network quality shadow
 
+## Legacy production selector retirement
+
+Production query selection accepts only signed `physical_quality` or
+`physical_order` candidates. Geographic/group composite ranking and random
+request exploration are no longer live execution paths. The old producer
+scorer exists only in test reference files. The independent historical DNS
+replayer can execute the captured old format only during offline receipt replay;
+it cannot authorize a serving bundle or activate a policy.
+
+The legacy `quality-rank` API returns 410 without computing a score. Request
+rollups retain separate business and socket observations but do not calculate
+the retired composite score. `admin dns answer-check --explain` reads retained
+actual receipts; these are not guaranteed to be the receipts of that command's
+probe. Match query and decision IDs for exact attribution and use
+`admin dns decisions replay` to verify original evidence.
+
+The migration configuration lane may explicitly resolve orders from the latest
+verified full publication of the same producer. The declared record identities
+and complete physical membership must remain unchanged. The transaction still
+compares every resolved order against that exact signed baseline under locks.
+Evidence retains the original declaration digest, resolved order digest, source
+artifact and both identified business snapshots. MVCC snapshot IDs may differ
+when the complete projected intent content is identical; equality of the IDs is
+not a content-equivalence proof.
+
+Configuration migration must reach verified full and positive LKG on every
+serving and standby DNS instance before deploying retired execution code.
+Previous code must already understand those signed physical orders. Rejecting
+an incompatible new candidate never replaces the retained positive checkpoint.
+Do not treat a successful migration transaction or offline artifact audit as
+proof that the new code is already serving.
+
 ## Production migration evidence, 2026-10-09
 
 The first opted-in production hostname now executes `physical_quality` from a

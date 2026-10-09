@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -196,7 +197,7 @@ func dnsServingFixtureWithIntent(t *testing.T, group, scope string, change func(
 	now := time.Now().UTC()
 	zone := "example.test"
 	node := "dns-a"
-	r := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", RoutePolicy: model.EdgeRoutePolicyEnabled, UpstreamURL: "http://origin:8080", Enabled: true}}, DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", Type: "FUGUE_APP", Values: []string{"app"}, TTL: 60, Application: &platformconfig.DNSApplicationIntent{IPv4Policy: "ipv4_only", IPv6Policy: "ipv4_only", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}, {Hostname: "_acme-challenge.example.test", Type: "TXT", Values: []string{"expires"}, TTL: 60, ValueExpirations: map[string]time.Time{"expires": now.Add(30 * time.Second)}}}, DNSConsumers: []platformconfig.DNSConsumerIntent{{NodeID: node, EdgeGroupID: group, Zones: []string{zone}, ProbeLabel: "probe", ProbeTTL: 60}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope, MinimumHealthyEdges: 1, MaxStaleSeconds: 3600, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{group}}}, DNSReadiness: &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}, DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: node}}, DNSAuthorities: []platformconfig.DNSAuthorityPolicy{{NodeID: node, Zone: zone, Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, DNSAnswerRules: []platformconfig.DNSAnswerRule{{NodeID: node, Hostname: "app.example.test", Type: "A", SelectionMode: "global", TTLSeconds: 60}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: node, EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSEdgeEndpoints: []platformconfig.DNSEdgeEndpoint{{EdgeID: "edge-a", EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSSelections: []platformconfig.DNSSelectionObservation{{NodeID: node, Hostname: "app.example.test", Type: "A", SourceGeneration: "source", SourceDigest: "sha256:" + strings.Repeat("a", 64), ObservedAt: now, Candidates: []platformconfig.DNSSelectionCandidate{{IP: "8.8.8.8", EdgeID: "edge-a", EdgeGroupID: group, Weight: 100}}}}}}
+	r := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", RoutePolicy: model.EdgeRoutePolicyEnabled, UpstreamURL: "http://origin:8080", Enabled: true}}, DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", Type: "FUGUE_APP", Values: []string{"app"}, TTL: 60, Application: &platformconfig.DNSApplicationIntent{IPv4Policy: "ipv4_only", IPv6Policy: "ipv4_only", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}, {Hostname: "_acme-challenge.example.test", Type: "TXT", Values: []string{"expires"}, TTL: 60, ValueExpirations: map[string]time.Time{"expires": now.Add(30 * time.Second)}}}, DNSConsumers: []platformconfig.DNSConsumerIntent{{NodeID: node, EdgeGroupID: group, Zones: []string{zone}, ProbeLabel: "probe", ProbeTTL: 60}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope, MinimumHealthyEdges: 1, MaxStaleSeconds: 3600, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{group}}}, DNSReadiness: &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}, DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: node}}, DNSAuthorities: []platformconfig.DNSAuthorityPolicy{{NodeID: node, Zone: zone, Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, DNSAnswerRules: []platformconfig.DNSAnswerRule{{NodeID: node, Hostname: "app.example.test", Type: "A", SelectionMode: model.DNSAnswerPolicyKindPhysicalOrder, PhysicalOrder: &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a"}}, TTLSeconds: 60}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: node, EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSEdgeEndpoints: []platformconfig.DNSEdgeEndpoint{{EdgeID: "edge-a", EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSSelections: []platformconfig.DNSSelectionObservation{{NodeID: node, Hostname: "app.example.test", Type: "A", SourceGeneration: "source", SourceDigest: "sha256:" + strings.Repeat("a", 64), ObservedAt: now, Candidates: []platformconfig.DNSSelectionCandidate{{IP: "8.8.8.8", EdgeID: "edge-a", EdgeGroupID: group}}}}}}
 	if scope != "global" {
 		r.Intent.AuthorityCellID, r.Policy.AuthorityCellID = group, group
 		r.Intent.EdgeTopology = &edgetopology.Intent{
@@ -401,6 +402,37 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	if err != nil || !checkpoint.Positive {
 		t.Fatal(err)
 	}
+	previousParent, previousCandidate := parent, candidate
+	parent, candidate = dnsServingFixtureWithIntent(t, group, scope, func(request *platformconfig.CompileRequest) {
+		for index := range request.Policy.DNSAnswerRules {
+			request.Policy.DNSAnswerRules[index].SelectionMode = "global"
+			request.Policy.DNSAnswerRules[index].PhysicalOrder = nil
+		}
+	})
+	retainedProbe := func(_ context.Context, host, path, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
+		for _, requirement := range old.payload.Plan.Probes {
+			if requirement.Hostname != host || requirement.Path != path || requirement.Address != address {
+				continue
+			}
+			for _, fact := range old.facts {
+				if fact.ProbeID == requirement.ID {
+					return fact.Proof, nil
+				}
+			}
+		}
+		return routeprobe.Proof{}, routeprobe.ErrUnavailable
+	}
+	if err = s.syncPlatformDNSServingOnce(ctx, retainedProbe, s.probeDNSServingListener); err == nil || !strings.Contains(err.Error(), "legacy DNS selector retired") || s.platformServing.Load() == nil || !reflect.DeepEqual(s.platformServing.Load().record, old.record) {
+		t.Fatal("retired signed candidate replaced positive serving state", err)
+	}
+	if answer := s.platformServing.Load().answer(query, "", time.Now()); answer.Rcode != dns.RcodeSuccess || len(answer.Answer) != 1 {
+		t.Fatal("rejected selector interrupted the retained physical answer", answer)
+	}
+	retainedCheckpoint, err := os.ReadFile(cfg.CachePath + ".platform-serving.json")
+	if err != nil || !bytes.Equal(retainedCheckpoint, saved) {
+		t.Fatal("retired candidate overwrote positive checkpoint", err)
+	}
+	parent, candidate = previousParent, previousCandidate
 	for _, foreign := range []string{"global", "authority-cell:cell-b"} {
 		if foreign == scope {
 			continue

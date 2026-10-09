@@ -1024,7 +1024,9 @@ paths:
   /v1/edge/quality-rank/{hostname}:
     get:
       operationId: getEdgeQualityRank
-      summary: Get Edge Quality Rank
+      summary: Retired Composite Edge Quality Rank
+      deprecated: true
+      description: The composite business-duration and geographic scorer is retired. This endpoint returns 410 without computing a ranking. Use physical-edge quality receipts and actual DNS decision explain/replay instead.
       tags: [Edge]
       x-fugue-handler: handleGetEdgeQualityRank
       security:
@@ -1075,12 +1077,12 @@ paths:
           schema:
             type: string
       responses:
-        '200':
-          description: Successful response
+        '410':
+          description: Legacy ranking retired; no ranking is computed.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/EdgeQualityRankResponse"
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/edge/nodes/{edge_id}/desired-state:

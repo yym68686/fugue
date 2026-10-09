@@ -29,9 +29,6 @@ func decisionTestState(t *testing.T) (*dnsServingState, time.Time) {
 		model.EdgeDNSRecord{Name: "lease.example.test", Type: "TXT", Values: []string{"lease"}, ValueExpirations: map[string]time.Time{"lease": now.Add(time.Minute)}, TTL: 60},
 		model.EdgeDNSRecord{Name: "alias.example.test", Type: "CNAME", Values: []string{"static.example.test"}, TTL: 60},
 		model.EdgeDNSRecord{Name: "*.wild.example.test", Type: "TXT", Values: []string{"wild"}, TTL: 60})
-	for index := range view.Records {
-		view.Records[index].AnswerPolicy.ExplorationPercent = 50
-	}
 	payload := dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}, Policy: platformconfig.PolicySnapshot{MaxStaleSeconds: 3600, DNSReadiness: &policy,
 		DNSAuthorities:    []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}},
 		DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: "dns-a"}}}}
@@ -140,45 +137,6 @@ func TestDNSDecisionReplayReadinessFilteringAndTransition(t *testing.T) {
 	}
 }
 
-func TestDNSDecisionExplorationReplaysWithoutClientAddress(t *testing.T) {
-	state, now := decisionTestState(t)
-	zone := state.zones["example.test"]
-	record := model.EdgeDNSRecord{Name: "explore.example.test", Type: "A", TTL: 60, Values: []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"},
-		AnswerPolicy: model.DNSAnswerPolicy{PolicyKind: "latency_aware", ExplorationPercent: 50, SelectedEdgeGroupID: "group-a"},
-		Candidates:   []model.EdgeDNSAnswerCandidate{{IP: "192.0.2.1", EdgeID: "edge-a", EdgeGroupID: "group-a", Healthy: true, Score: 50}, {IP: "192.0.2.2", EdgeID: "edge-b", EdgeGroupID: "group-a", Healthy: true, Score: 100}, {IP: "192.0.2.3", EdgeID: "edge-c", EdgeGroupID: "group-b", Healthy: true, Score: 200}}}
-	zone.records[record.Name] = []dnsServingRecord{{record: record}}
-	for index := range record.Candidates {
-		record.Candidates[index].TLSReady = true
-	}
-	state.zones["example.test"] = zone
-	request := new(dns.Msg)
-	request.SetQuestion(dns.Fqdn(record.Name), dns.TypeA)
-	seen := map[string]bool{}
-	for index := 1; index <= 32; index++ {
-		receipt := captureDecision(t, state, request, fmt.Sprintf("198.51.100.%d:1234", index), now)
-		seen[receipt.Records[0].ExplorationKind] = true
-		if result, err := ReplayDNSDecision(receipt); err != nil || !result.Matched {
-			t.Fatal(index, err)
-		}
-	}
-	if !seen[""] || !seen["same_group"] {
-		t.Fatal("did not exercise exploration and incumbent", seen)
-	}
-	record.Candidates = append(record.Candidates[:1], record.Candidates[2:]...)
-	zone.records[record.Name] = []dnsServingRecord{{record: record}}
-	state.zones["example.test"] = zone
-	for index := 1; index <= 32; index++ {
-		receipt := captureDecision(t, state, request, fmt.Sprintf("198.51.100.%d:1234", index), now)
-		seen[receipt.Records[0].ExplorationKind] = true
-		if result, err := ReplayDNSDecision(receipt); err != nil || !result.Matched {
-			t.Fatal(index, err)
-		}
-	}
-	if !seen["cross_group"] {
-		t.Fatal("cross-group exploration missing")
-	}
-}
-
 func TestDNSDecisionJournalFailureAndOverflowCannotChangeServing(t *testing.T) {
 	state, now := decisionTestState(t)
 	service := NewService(config.DNSConfig{DNSNodeID: "dns-a"}, nil)
@@ -265,56 +223,6 @@ func TestDNSDecisionPublicationSeparatesDesiredLoadedAndLKG(t *testing.T) {
 	unknown := decisionPublicationState(state, nil)
 	if unknown.DesiredKnown || unknown.Desired != nil || unknown.Loaded == nil {
 		t.Fatal("invented desired publication")
-	}
-}
-
-func TestDNSDecisionScopedCooldownAndFiltering(t *testing.T) {
-	state, now := decisionTestState(t)
-	matcher, err := platformconfig.NewDNSClientMatcher([]platformconfig.DNSClientRule{{CIDR: "198.51.100.0/24", Country: "zz"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	state.matcher = matcher
-	candidates := []model.EdgeDNSAnswerCandidate{
-		{IP: "192.0.2.1", EdgeID: "edge-a", EdgeGroupID: "group-a", Healthy: true, RouteReady: true, TLSReady: true, Score: 40},
-		{IP: "192.0.2.2", EdgeID: "edge-b", EdgeGroupID: "group-b", Healthy: true, RouteReady: true, TLSReady: true, Score: 10},
-		{IP: "192.0.2.3", EdgeID: "edge-c", EdgeGroupID: "group-c", Healthy: false, RouteReady: true, TLSReady: true, Score: 5},
-	}
-	record := model.EdgeDNSRecord{Name: "scoped.example.test", Type: "A", TTL: 60, Candidates: candidates,
-		AnswerPolicy:     model.DNSAnswerPolicy{PolicyKind: "latency_aware", HealthRequired: true, SwitchCooldownSec: 300},
-		ScopedCandidates: []model.EdgeDNSScopedAnswerCandidates{{ScopeKey: "country:zz", Country: "zz", SelectedEdgeGroupID: "group-a", CooldownUntil: now.Add(time.Hour), Candidates: candidates}}}
-	state.zones["example.test"].records[record.Name] = []dnsServingRecord{{record: record}}
-	request := new(dns.Msg)
-	request.SetQuestion(dns.Fqdn(record.Name), dns.TypeA)
-	receipt := captureDecision(t, state, request, "198.51.100.5:5353", now)
-	observed := receipt.Records[0]
-	if observed.ScopeSource != "remote_addr" || observed.MatchedScopeKey != "country:zz" || observed.CooldownResult != "active" || !observed.CooldownUntil.Equal(now.Add(time.Hour)) {
-		t.Fatal(observed)
-	}
-	if len(observed.Filtered) != 2 || observed.Filtered[0].Reason != "not_selected_by_answer_limit" || observed.Filtered[1].Reason != "health_required" {
-		t.Fatal("filter phases confused", observed.Filtered)
-	}
-	if observed.Answered[0].EdgeID != "edge-a" || observed.InputCandidates[1].Score != 10 {
-		t.Fatal("original selection and scores lost")
-	}
-	if len(observed.Ranking) != 2 || observed.Ranking[0].Candidate.EdgeID != "edge-b" || observed.Ranking[0].SortScore != 10 {
-		t.Fatal("pre-incumbent scoring order lost", observed.Ranking)
-	}
-	if replay, err := ReplayDNSDecision(receipt); err != nil || !replay.Matched {
-		t.Fatal(err)
-	}
-	for _, mutate := range []func(*DNSDecisionReceipt){
-		func(value *DNSDecisionReceipt) { value.Hostname = "other.example.test" },
-		func(value *DNSDecisionReceipt) { value.QueryID++ },
-		func(value *DNSDecisionReceipt) { value.QType = dns.TypeAAAA },
-		func(value *DNSDecisionReceipt) { value.ObservedAt = value.ObservedAt.Add(time.Second) },
-	} {
-		altered := receipt
-		mutate(&altered)
-		altered.EvidenceDigest = dnsDecisionDigest(altered)
-		if _, err := ReplayDNSDecision(altered); err == nil {
-			t.Fatal("contradictory receipt metadata accepted")
-		}
 	}
 }
 
