@@ -31,7 +31,7 @@ def bounded_json(value):
 
 def validate(config):
     fields = {"schema", "generation", "origin", "hostname", "producer_generation", "precondition", "projection_policy"}
-    if not isinstance(config, dict) or set(config) != fields or not bounded_json(config) or config["schema"] != "fugue.physical-dns-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1:
+    if not isinstance(config, dict) or not fields.issubset(config) or set(config) - fields - {"baseline_mode"} or not bounded_json(config) or config["schema"] != "fugue.physical-dns-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config.get("baseline_mode", "declared") not in ["declared", "latest_verified_same_policy"]:
         raise ValueError("explicit bounded physical DNS declaration required")
     origin = urllib.parse.urlsplit(config["origin"])
     if origin.scheme != "https" or config["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
@@ -83,6 +83,27 @@ def baseline(config, api):
     return full
 
 
+def resolve_baseline(config, api):
+    if config.get("baseline_mode", "declared") == "declared":
+        return config
+    full = selected(api, "global", "full", "release_set")
+    reference = authority_identity(full)
+    declared = config["precondition"]["serving_full"]
+    if reference == declared:
+        baseline(config, api)
+        return config
+    if reference["fencing_token"] <= declared["fencing_token"] or full["artifact"].get("metadata", {}).get("producer_policy_release_id") != config["precondition"]["previous_policy"]["release_id"]:
+        raise ValueError("renewed baseline changed the declared producer or regressed its fence")
+    lkg = api("GET", "/v1/admin/artifacts/" + full["artifact"]["id"] + "/lkg").get("lkg", {})
+    evidence_hash = lkg.get("verification_evidence_hash", "")
+    if not DIGEST.fullmatch(evidence_hash):
+        raise ValueError("renewed baseline lacks verified LKG evidence")
+    resolved = copy.deepcopy(config)
+    resolved["precondition"].update(serving_full=reference, verification_evidence_hash=evidence_hash)
+    baseline(resolved, api)
+    return resolved
+
+
 def validate_preview(config, preview):
     if not preview.get("business_snapshot_revision") or preview.get("issues") or preview.get("policy", {}).get("scope") != "global":
         raise ValueError("physical projection lacks a ready fixed business snapshot")
@@ -107,6 +128,9 @@ def validate_preview(config, preview):
 
 def publish(config, api, save):
     validate(config)
+    declaration_digest = digest(config)
+    declared_precondition = copy.deepcopy(config["precondition"])
+    config = resolve_baseline(config, api)
     baseline(config, api)
     precondition = config["precondition"]
     old = api("GET", "/v1/admin/artifacts/" + precondition["previous_policy"]["artifact_id"])["artifact"]
@@ -129,7 +153,7 @@ def publish(config, api, save):
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
     summaries = validate_preview(config, preview)
     baseline(config, api)
-    evidence = {"schema": "fugue.physical-dns-reconfiguration-result/v1", "declaration_digest": digest(config), "artifact_id": artifact["id"], "hostname": config["hostname"], "business_snapshot_revision": preview["business_snapshot_revision"], "selections": summaries, "serving_full_precondition": precondition["serving_full"], "routing_acceptance_complete": False, "producer_activated": False}
+    evidence = {"schema": "fugue.physical-dns-reconfiguration-result/v1", "declaration_digest": declaration_digest, "declared_precondition": declared_precondition, "resolved_precondition": precondition, "artifact_id": artifact["id"], "hostname": config["hostname"], "business_snapshot_revision": preview["business_snapshot_revision"], "selections": summaries, "serving_full_precondition": precondition["serving_full"], "routing_acceptance_complete": False, "producer_activated": False}
     save(evidence)
     key = "producer-reconfiguration/" + digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": precondition})
     api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/release", {"release_channel": "shadow", "producer_reconfiguration": precondition, "idempotency_key": key, "reason": "Declarative single-host physical DNS opt-in with bound runtime evidence"})

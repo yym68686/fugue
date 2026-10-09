@@ -25,6 +25,7 @@ class Ledger(ArtifactAPI):
         super().__init__(config)
         self.fail_release = False
         self.release_bodies = []
+        self.expected_precondition = config["precondition"]
         self.on_capture = None
         def state(reference, kind, scope, channel, content):
             artifact = {"id": reference["artifact_id"], "content_hash": reference["content_hash"], "content": copy.deepcopy(content), "artifact_kind": kind, "scope_key": scope, "status": "validated", "generation": content["generation"]}
@@ -55,15 +56,51 @@ class Ledger(ArtifactAPI):
             if self.fail_release:
                 raise RuntimeError("atomic precondition conflict")
             artifact = self.artifacts[path.split("/")[-2]]
-            expected = "producer-reconfiguration/" + routing.digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": self.config["precondition"]})
+            expected = "producer-reconfiguration/" + routing.digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": self.expected_precondition})
             assert body["idempotency_key"] == expected
             assert set(body) == {"release_channel", "producer_reconfiguration", "idempotency_key", "reason"}
             assert body["release_channel"] == "shadow"
-            assert body["producer_reconfiguration"] == self.config["precondition"]
+            assert body["producer_reconfiguration"] == self.expected_precondition
         return super().__call__(method, path, body)
 
 
 class PhysicalDNSConfigurationTests(unittest.TestCase):
+    def test_queue_delay_resolves_only_verified_renewal_under_same_policy(self):
+        config, old, source = fixture()
+        config["baseline_mode"] = "latest_verified_same_policy"
+        ledger = Ledger(config, old, source)
+        full = ledger.authorities[("release_set", "global", "full")]
+        full["release"]["fencing_token"] += 1
+        full["release"]["id"] = "renewed-release"
+        ledger.lkg["verified_by_release_id"] = "renewed-release"
+        before = copy.deepcopy(config)
+        resolved = routing.resolve_baseline(config, ledger)
+        ledger.expected_precondition = resolved["precondition"]
+        result = routing.publish(config, ledger, lambda _: None)
+        self.assertEqual(before, config)
+        self.assertEqual(routing.digest(config), result["declaration_digest"])
+        self.assertEqual(before["precondition"], result["declared_precondition"])
+        self.assertEqual(resolved["precondition"], result["resolved_precondition"])
+        self.assertTrue(result["producer_activated"])
+
+    def test_baseline_refresh_never_weakens_lkg_or_transaction_guards(self):
+        for failure in ["regressed", "foreign producer", "unverified", "expired", "foreign lkg", "after capture"]:
+            with self.subTest(failure=failure):
+                config, old, source = fixture()
+                config["baseline_mode"] = "latest_verified_same_policy"
+                ledger = Ledger(config, old, source)
+                full = ledger.authorities[("release_set", "global", "full")]
+                full["release"]["fencing_token"] += 1
+                if failure == "regressed": full["release"]["fencing_token"] -= 2
+                elif failure == "foreign producer": full["artifact"]["metadata"]["producer_policy_release_id"] = "foreign"
+                elif failure == "unverified": full["release"]["verification_state"] = "serving_unverified"
+                elif failure == "expired": ledger.lkg["expires_at"] = (routing.now() - datetime.timedelta(seconds=1)).isoformat()
+                elif failure == "foreign lkg": ledger.lkg["artifact_id"] = "foreign"
+                elif failure == "after capture": ledger.on_capture = lambda api: api.authorities[("release_set", "global", "full")]["release"].update(fencing_token=99)
+                with self.assertRaises(ValueError):
+                    routing.publish(config, ledger, lambda _: None)
+                self.assertEqual([], ledger.release_bodies)
+
     def test_bounded_network_policy_requires_exact_shape(self):
         config, _, _ = fixture()
         policy = config["projection_policy"]["dns_query_policy"]["physical_routes"][0]["policy"]

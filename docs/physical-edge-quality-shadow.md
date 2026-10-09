@@ -371,6 +371,14 @@ establish the physical primary's observation clock, but neither activation nor a
 successful preview is no-detour acceptance. DNS receipts, offline replay and
 production validation of the subsequently published order remain separate.
 
+An explicit `baseline_mode: latest_verified_same_policy` allows a queued
+configuration run to resolve a later full publication from the exact declared
+producer policy. The fence must advance, the current full release must have its
+own unexpired positive LKG, and the executor records both declared and resolved
+preconditions. Compilation and the final atomic release use that one resolved
+reference; subsequent changes still fail closed. The default `declared` mode
+requires the original exact reference throughout.
+
 The declaration schema is `fugue.physical-dns-reconfiguration/v1`, with integer
 `generation`, canonical HTTPS `origin`, one `hostname`, `producer_generation`,
 the full successor `projection_policy`, and a `precondition` containing

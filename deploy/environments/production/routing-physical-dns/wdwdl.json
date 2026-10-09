@@ -1,6 +1,7 @@
 {
   "schema": "fugue.physical-dns-reconfiguration/v1",
-  "generation": 1,
+  "generation": 2,
+  "baseline_mode": "latest_verified_same_policy",
   "origin": "https://api.fugue.pro",
   "hostname": "wdwdl.fugue.pro",
   "producer_generation": "physical-network-v3-wdwdl-20261009-0315",
