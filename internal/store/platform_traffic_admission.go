@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"time"
@@ -98,6 +99,10 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		if sourceErr != nil {
 			return fail("DNS routing source authorization invalid")
 		}
+		physicalRequired, err := physicalNetworkCapabilityRequired(child)
+		if err != nil {
+			return fail("physical network policy cannot be decoded")
+		}
 		for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
 			if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
 				return fail("member lineage differs")
@@ -144,6 +149,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if fact.ConsumerID != expected.ConsumerID || fact.ArtifactKind != child.ArtifactKind || fact.ScopeKey != parent.ScopeKey {
 					continue
 				}
+				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
+					return fail("physical network v3 capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
+				}
 				if found || !trafficCapabilityFactFresh(expected, fact, now) || cellRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) || cellDNS && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellDNSCapabilityV1) || authorityTransition && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAuthorityTransitionCapabilityV1) || len(sources) > 0 && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSRouteSourcesCapabilityV1) {
 					return fail("fresh authenticated traffic capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
@@ -165,6 +173,29 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		}
 	}
 	return nil
+}
+
+func physicalNetworkCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {
+	var payload struct {
+		Policy struct {
+			DNSQueryPolicy *platformconfig.DNSQueryPolicy `json:"dns_query_policy"`
+		} `json:"policy"`
+	}
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false, err
+	}
+	if payload.Policy.DNSQueryPolicy != nil {
+		for _, route := range payload.Policy.DNSQueryPolicy.PhysicalRoutes {
+			if route.Policy.Version == model.PhysicalBoundedNetworkPolicyVersion {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func trafficCapabilityFactFresh(expected model.PlatformExpectedConsumer, fact model.PlatformConsumerInstance, now time.Time) bool {

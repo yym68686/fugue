@@ -241,6 +241,10 @@ x-fugue-leased-traffic-admission:
     override. It does not claim apply, successful probes or LKG and leaves full
     convergence and recovery checks in force. Standalone leased DNS serving
     remains rejected; failed admission preserves the lane, ledger and LKG.
+    Automatic rollback to the exact unexpired verified positive LKG retains
+    signature, topology and transactional authority checks, but does not depend
+    on fresh capability heartbeats from failing consumers. Recovery does not
+    renew the LKG or claim successful serving.
 x-fugue-traffic-consumer-capability:
   semantics: >-
     traffic_release_v1 in a verified consumer heartbeat declares support for
@@ -253,6 +257,10 @@ x-fugue-traffic-consumer-capability:
     activation; it is not proof of apply, probe success or a positive LKG.
     Only the executor declares support; clients cannot inherit capabilities
     from desired assignments. Existing staged/shadow facts remain non-passing.
+    A physical-network-bounded-v3 policy additionally requires authenticated
+    physical_network_bounded_v3 capability on every required route, DNS and TLS
+    consumer before gray or full publication. It covers policy decoding and
+    immutable physical DNS order execution, not measurement quality or apply.
 x-fugue-traffic-consumer-rollback:
   semantics: >-
     A trusted traffic consumer can report an older artifact generation only
