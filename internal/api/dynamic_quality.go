@@ -308,6 +308,9 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 		individual.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{hostJobs[0].Route}
 		if err := applyPhysicalDNSSelections(projection, individual, selections, time.Now().UTC()); err != nil {
 			states[hostname] = "learning_publication_validation_failed"
+			if s.log != nil {
+				s.log.Printf("dynamic quality publication validation failed; hostname=%s error=%v", hostname, err)
+			}
 			continue
 		}
 		states[hostname] = "measured"
