@@ -53,8 +53,12 @@ func (s *Server) capturePhysicalQualityWithAnswer(ctx context.Context, hostname,
 }
 
 func (s *Server) capturePhysicalQualityForDNS(ctx context.Context, hostname, dnsHostname, trafficClass string, scope edgeQualityRankScope, dnsNodeID string, networkPolicy edgequality.Policy, answer *dnsserver.DNSDecisionReceipt) (edgequality.Receipt, error) {
+	return s.capturePhysicalQualityPathForDNS(ctx, hostname, "", dnsHostname, trafficClass, scope, dnsNodeID, networkPolicy, answer)
+}
+
+func (s *Server) capturePhysicalQualityPathForDNS(ctx context.Context, hostname, pathPrefix, dnsHostname, trafficClass string, scope edgeQualityRankScope, dnsNodeID string, networkPolicy edgequality.Policy, answer *dnsserver.DNSDecisionReceipt) (edgequality.Receipt, error) {
 	now := time.Now().UTC()
-	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: hostname, TrafficClass: trafficClass,
+	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: hostname, PathPrefix: pathPrefix, TrafficClass: trafficClass,
 		Scope: scope.key(), Policy: networkPolicy, Candidates: []edgequality.Candidate{}, Observations: []edgequality.Observation{},
 		Blockers: []string{"actual_dns_receipt_not_bound"}, Limitations: []string{"dns_resolver_scope_is_not_terminal_path", "common_tcp_cohorts_do_not_cover_every_terminal", "node_capacity_is_not_link_or_application_capacity", "uncertainty_budget_is_not_statistical_confidence"}}
 	if dnsHostname != hostname {
@@ -243,7 +247,7 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 		candidate := &snapshot.Candidates[index]
 		proofs := []dnsserver.QualityRouteProof{}
 		for _, proof := range evidence.Proofs {
-			if proof.EdgeID == candidate.EdgeID && proof.EdgeGroupID == candidate.EdgeGroupID && proof.Hostname == snapshot.Hostname {
+			if proof.EdgeID == candidate.EdgeID && proof.EdgeGroupID == candidate.EdgeGroupID && proof.Hostname == snapshot.Hostname && (snapshot.PathPrefix == "" || snapshot.PathPrefix == proof.Path) {
 				proofs = append(proofs, proof)
 			}
 		}

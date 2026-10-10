@@ -16,7 +16,9 @@ func ServiceConsensusSnapshot(hostname string, receipts []Receipt) (Snapshot, er
 		return Snapshot{}, errors.New("bounded complete shared-service receipt set required")
 	}
 	ordered := append([]Receipt(nil), receipts...)
-	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Snapshot.Hostname < ordered[right].Snapshot.Hostname })
+	sort.Slice(ordered, func(left, right int) bool {
+		return ServiceEvidenceKey(ordered[left].Snapshot) < ServiceEvidenceKey(ordered[right].Snapshot)
+	})
 	first := ordered[0].Snapshot
 	if first.Policy.Version != DeliveryNetworkPolicyVersion || len(first.ActualDNSReceipt) == 0 {
 		return Snapshot{}, errors.New("shared-service selection requires bound V4 evidence")
@@ -28,14 +30,15 @@ func ServiceConsensusSnapshot(hostname string, receipts []Receipt) (Snapshot, er
 	nodes := map[string][]Candidate{}
 	for _, receipt := range ordered {
 		snapshot := receipt.Snapshot
-		if len(snapshot.ServiceReceipts) > 0 || seen[snapshot.Hostname] || snapshot.Hostname == hostname || snapshot.DNSHostname != hostname || snapshot.Schema != Schema || snapshot.TrafficClass != first.TrafficClass || snapshot.Scope != first.Scope ||
+		key := ServiceEvidenceKey(snapshot)
+		if len(snapshot.ServiceReceipts) > 0 || seen[key] || snapshot.Hostname == hostname && snapshot.PathPrefix == "" || DNSHostname(snapshot) != hostname || snapshot.Schema != Schema || snapshot.TrafficClass != first.TrafficClass && (snapshot.PathPrefix == "" || first.PathPrefix == "") || snapshot.Scope != first.Scope ||
 			snapshot.CurrentEdgeID != first.CurrentEdgeID || !reflect.DeepEqual(snapshot.LastSwitchAt, first.LastSwitchAt) || !reflect.DeepEqual(snapshot.Policy, first.Policy) || !bytes.Equal(snapshot.ActualDNSReceipt, first.ActualDNSReceipt) {
 			return Snapshot{}, errors.New("shared-service receipts have different owners, policy or actual DNS authority")
 		}
 		if _, err := Replay(receipt); err != nil {
 			return Snapshot{}, err
 		}
-		seen[snapshot.Hostname] = true
+		seen[key] = true
 		if snapshot.CapturedAt.After(root.CapturedAt) {
 			root.CapturedAt = snapshot.CapturedAt
 		}
@@ -71,6 +74,13 @@ func ServiceConsensusSnapshot(hostname string, receipts []Receipt) (Snapshot, er
 	return root, nil
 }
 
+func ServiceEvidenceKey(snapshot Snapshot) string {
+	if snapshot.PathPrefix == "" {
+		return snapshot.Hostname
+	}
+	return snapshot.Hostname + "\x00" + snapshot.PathPrefix + "\x00" + snapshot.TrafficClass
+}
+
 func evaluateServiceConsensus(snapshot Snapshot) (Result, error) {
 	expected, err := ServiceConsensusSnapshot(snapshot.Hostname, snapshot.ServiceReceipts)
 	if err != nil {
@@ -99,10 +109,10 @@ func evaluateServiceConsensus(snapshot Snapshot) (Result, error) {
 				assessment.RecordCount += child.RecordCount
 				assessment.BucketCount = min(assessment.BucketCount, child.BucketCount)
 				for name, metric := range child.Metrics {
-					assessment.Metrics[receipt.Snapshot.Hostname+":"+name] = metric
+					assessment.Metrics[ServiceEvidenceKey(receipt.Snapshot)+":"+name] = metric
 				}
 				for _, missing := range child.Missing {
-					assessment.Missing = append(assessment.Missing, receipt.Snapshot.Hostname+":"+missing)
+					assessment.Missing = append(assessment.Missing, ServiceEvidenceKey(receipt.Snapshot)+":"+missing)
 				}
 				assessment.HardGates = append(assessment.HardGates, child.HardGates...)
 			}

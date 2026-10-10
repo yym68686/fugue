@@ -84,3 +84,38 @@ func TestSharedServiceAliasRejectsRebindingAndNestedOrOmittedEvidence(t *testing
 		}
 	}
 }
+
+func TestSharedServiceConsensusKeepsDistinctPathsAndTrafficClasses(t *testing.T) {
+	prior := consensusFixture(t, true)
+	receipts := []Receipt{}
+	for index, child := range prior.ServiceReceipts {
+		snapshot := child.Snapshot
+		snapshot.Hostname, snapshot.DNSHostname = "app.example.test", ""
+		snapshot.PathPrefix, snapshot.TrafficClass = "/", "dynamic_api"
+		if index == 1 {
+			snapshot.PathPrefix, snapshot.TrafficClass = "/stream", "streaming"
+		}
+		for position := range snapshot.Observations {
+			snapshot.Observations[position].Hostname, snapshot.Observations[position].TrafficClass = snapshot.Hostname, snapshot.TrafficClass
+		}
+		receipt, err := Capture(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipts = append(receipts, receipt)
+	}
+	root, err := ServiceConsensusSnapshot("app.example.test", receipts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := Capture(root)
+	if err != nil || receipt.Result.Hypothesis != "switch" || receipt.Result.ProposedEdgeID != "edge-b" {
+		t.Fatal("complete route consensus did not preserve independent classes", receipt.Result, err)
+	}
+	if _, err := Replay(receipt); err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt.Result.Candidates[0].Metrics) != len(receipts[0].Result.Candidates[0].Metrics)+len(receipts[1].Result.Candidates[0].Metrics) {
+		t.Fatal("same-host path metrics overwrote each other")
+	}
+}

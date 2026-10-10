@@ -19250,7 +19250,11 @@ components:
           minItems: 2
           maxItems: 8
           items: {$ref: '#/components/schemas/PhysicalEdgeQualityReceipt'}
-          description: Complete single-level receipts for every declared service sharing one DNS alias. A normal switch requires all services to independently approve the same candidate; failures use a common eligible fallback. Child receipts retain exact actual DNS binding and raw network evidence.
+          description: Complete single-level receipts for every declared service and path sharing one DNS answer. A normal switch requires all routes to independently approve the same candidate; failures use a common eligible fallback. Child receipts retain their traffic class, exact actual DNS binding and raw network evidence.
+        path_prefix:
+          type: string
+          maxLength: 2048
+          description: Exact declared service path measured by this receipt. When present, evidence from another path or traffic class cannot replace it. Omitted for historical single-route receipts and consensus roots.
         dns_hostname:
           type: string
           description: Actual DNS query hostname when a declared single-service alias differs from the measured service hostname. Omitted for direct names. Publication must verify the declared owner and actual receipt; no arbitrary cross-host evidence fallback.

@@ -125,6 +125,28 @@ func TestDynamicQualityRefreshRotatesEvenWithoutTraffic(t *testing.T) {
 	}
 }
 
+func TestDynamicQualityCapturesEveryDeclaredPathAndClass(t *testing.T) {
+	projection, nodes, policy, now := directQueryFixture()
+	policy.ECSEnabled, policy.ExplorationPercent = false, 0
+	policy.OrderedProjection = &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}}
+	policy.DynamicQuality = &platformconfig.DynamicQualityPolicy{Mode: "all_dynamic", Policy: edgequality.DefaultDeliveryNetworkPolicy(), RefreshQueriesPerCycle: 8, RefreshConcurrency: 2}
+	streaming, dynamic := true, false
+	projection.Intent.Routes[0].Streaming = &dynamic
+	other := projection.Intent.Routes[0]
+	other.PathPrefix, other.Streaming = "/stream", &streaming
+	projection.Intent.Routes = append(projection.Intent.Routes, other)
+	if err := projectDirectDNSQueries(&projection, policy, nodes, now); err != nil {
+		t.Fatal(err)
+	}
+	jobs, _, err := dynamicQualityRoutes(projection, policy)
+	if err != nil || len(jobs) != 1 || len(jobs[0].EvidenceServices) != 2 {
+		t.Fatal("multi-path owner was skipped", jobs, err)
+	}
+	if jobs[0].EvidenceServices[0].PathPrefix != "/" || jobs[0].EvidenceServices[0].TrafficClass != "dynamic_api" || jobs[0].EvidenceServices[1].PathPrefix != "/stream" || jobs[0].EvidenceServices[1].TrafficClass != "streaming" {
+		t.Fatal("service paths or classes were mixed", jobs[0])
+	}
+}
+
 func TestDynamicCaptureUnstartedQueriesKeepPriorityAfterBudgetExhaustion(t *testing.T) {
 	state := dynamicQualityState{}
 	now := time.Now().UTC()

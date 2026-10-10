@@ -71,9 +71,11 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 	requested := map[string]platformconfig.PhysicalQualityRoute{}
 	evidenceHosts := map[string]string{}
 	ownerSets := map[string]map[string]bool{}
+	serviceSets := map[string]map[string]bool{}
 	for _, route := range policy.PhysicalRoutes {
 		requested[route.Hostname] = route
 		ownerSets[route.Hostname] = map[string]bool{}
+		serviceSets[route.Hostname] = map[string]bool{}
 		owned := false
 		for _, record := range projection.Intent.DNS {
 			if record.Hostname != route.Hostname {
@@ -93,6 +95,7 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 				}
 				evidenceHosts[route.Hostname] = owner.Hostname
 				ownerSets[route.Hostname][owner.Hostname] = true
+				serviceSets[route.Hostname][dynamicQualityServiceForRoute(owner).key()] = true
 				owned = true
 			}
 		}
@@ -116,20 +119,28 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 		if fact.Type != "A" || len(compiled.Evidence) == 0 || len(compiled.Evidence) > 8<<20 || !json.Valid(compiled.Evidence) {
 			return fmt.Errorf("physical selection lacks supported address-family evidence")
 		}
-		if evidenceHosts[fact.Hostname] != fact.Hostname || len(ownerSets[fact.Hostname]) > 1 {
+		if evidenceHosts[fact.Hostname] != fact.Hostname || len(ownerSets[fact.Hostname]) > 1 || policy.DynamicQuality != nil {
 			var receipt edgequality.Receipt
 			if json.Unmarshal(compiled.Evidence, &receipt) != nil || edgequality.DNSHostname(receipt.Snapshot) != fact.Hostname {
 				return fmt.Errorf("physical alias evidence differs from frozen service ownership")
 			}
-			captured := []string{receipt.Snapshot.Hostname}
+			captured := []string{edgequality.ServiceEvidenceKey(receipt.Snapshot)}
+			pathBound := receipt.Snapshot.PathPrefix != ""
 			if len(receipt.Snapshot.ServiceReceipts) > 0 {
 				captured = nil
 				for _, service := range receipt.Snapshot.ServiceReceipts {
-					captured = append(captured, service.Snapshot.Hostname)
+					captured = append(captured, edgequality.ServiceEvidenceKey(service.Snapshot))
+					pathBound = pathBound || service.Snapshot.PathPrefix != ""
 				}
 			}
 			declared := []string{}
-			for hostname := range ownerSets[fact.Hostname] {
+			owners := ownerSets[fact.Hostname]
+			if pathBound {
+				owners = serviceSets[fact.Hostname]
+			} else if len(serviceSets[fact.Hostname]) != len(owners) {
+				return fmt.Errorf("physical evidence omits declared service paths")
+			}
+			for hostname := range owners {
 				declared = append(declared, hostname)
 			}
 			sort.Strings(captured)

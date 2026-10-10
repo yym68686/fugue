@@ -37,7 +37,7 @@ func ClientProbeObservations(snapshot Snapshot) ([]Observation, error) {
 		for _, permit := range report.Plan.Permits {
 			candidate, exists := candidates[permit.EdgeID]
 			outcome := outcomes[permit.AttemptID]
-			if !exists || permit.Hostname != snapshot.Hostname || permit.TrafficClass != snapshot.TrafficClass || permit.RouteDigest != candidate.RouteGeneration || permit.EdgeGroupID != candidate.EdgeGroupID || !proofFresh(candidate, snapshot.Policy, snapshot.CapturedAt) ||
+			if !exists || permit.Hostname != snapshot.Hostname || snapshot.PathPrefix != "" && permit.Path != snapshot.PathPrefix || permit.TrafficClass != snapshot.TrafficClass || permit.RouteDigest != candidate.RouteGeneration || permit.EdgeGroupID != candidate.EdgeGroupID || !proofFresh(candidate, snapshot.Policy, snapshot.CapturedAt) ||
 				outcome.CompletedAt.After(snapshot.CapturedAt) || outcome.CompletedAt.Before(snapshot.CapturedAt.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second)) {
 				continue
 			}
