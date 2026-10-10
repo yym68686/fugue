@@ -1,12 +1,12 @@
 # Universal dynamic-domain physical edge quality
 
-## Work in progress
+## Production scope
 
-The target is every Fugue-managed dynamic DNS route, with explicit static and pinned constraints preserved. A code deployment cannot activate policy or invalidate a positive serving artifact. Configuration activation uses the existing independent signed producer transaction and declarative CI lane.
+The default V6 policy covers every Fugue-managed dynamic DNS route, with explicit static and pinned constraints preserved. A code deployment cannot activate policy or invalidate a positive serving artifact. Configuration activation uses the existing independent signed producer transaction and declarative CI lane. Production acceptance and its measurement limits are recorded in [the rollout report](quality-routing-acceptance-20261011.md).
 
-The existing retirement projection preserves 251 hostname orders. It is a compatibility baseline, not measured quality adoption. The new default must derive eligibility from route ownership and constraint policy and expose learning, measured selection and constrained/static exclusions separately. An isolated failed or unmeasured route must not block configuration recovery for other routes.
+The retirement projection supplies a verified safe order while a route is still learning. It does not claim measured quality. The default derives eligibility from route ownership and constraint policy and exposes learning, measured selection and constrained/static exclusions separately. An isolated failed or unmeasured route does not block configuration recovery for other routes.
 
-Implementation stages:
+The deployed behavior includes:
 
 1. Capture public TCP delivery windows with raw counters and exact physical/socket/route identity. Preserve old executors and historical receipt replay. Verify zero additional business-path waits.
 2. Add a separately versioned network evaluator and authenticated metric provenance. Keep failure-rate denominators distinct from packet retransmissions. Score only comparable client cohorts; unknown paths remain unknown.
@@ -23,7 +23,7 @@ Retransmitted data segments divided by sent data segments describe transport deg
 
 Public packet forwarding and DNS answers never wait for telemetry. The worker performs bounded asynchronous follow-ups; old Front processes omit delivery counters and remain compatible. A code rollback can discard the optional observations without discarding the currently serving artifact.
 
-No production acceptance is claimed by this work-in-progress document.
+Measured acceptance applies to the observed network and complete response comparison in the rollout report. DNS resolver scope does not identify every terminal, and missing measurements remain unknown.
 
 The independently versioned V5 evaluator distinguishes unknown download performance from observed transfer failures. A challenger with measured downloads can beat an incumbent lacking enough completed downloads only when both sides have explicit failure outcomes and the incumbent's failure rate is higher. The missing download is not assigned zero throughput. Sparse client cohorts remain unknown with one bounded uncertainty allowance; they cannot veto complete sustained evidence from another common cohort. Every sufficiently observed cohort still has to agree. V4 receipts retain their original evaluation semantics.
 
