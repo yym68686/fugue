@@ -716,7 +716,7 @@ func runPrepare(args []string, output io.Writer) error {
 		if stateErr != nil {
 			return fmt.Errorf("read edge candidate active slot: %w", stateErr)
 		}
-		rendered, err = declarativerelease.BindEdgeCandidateForward(plan, args[2], state.ActiveSlot, rendered)
+		rendered, err = cluster.bindServingEdgeDeclaration(plan, release, state, rendered)
 		if err != nil {
 			return err
 		}
