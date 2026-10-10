@@ -151,10 +151,37 @@ func (state *dynamicQualityState) schedule(jobs []dynamicQualityJob, budget int,
 			delete(state.entries, key)
 		}
 	}
-	ordered := append([]dynamicQualityJob(nil), jobs...)
-	sort.SliceStable(ordered, func(left, right int) bool {
-		return state.entries[ordered[left].Key].Attempted.Before(state.entries[ordered[right].Key].Attempted)
+	groups := map[string][]dynamicQualityJob{}
+	oldest := map[string]time.Time{}
+	for _, job := range jobs {
+		hostname := job.Route.Hostname
+		if hostname == "" {
+			hostname = job.Key
+		}
+		attempted := state.entries[job.Key].Attempted
+		if previous, exists := oldest[hostname]; !exists || attempted.Before(previous) {
+			oldest[hostname] = attempted
+		}
+		groups[hostname] = append(groups[hostname], job)
+	}
+	hostnames := make([]string, 0, len(groups))
+	for hostname := range groups {
+		hostnames = append(hostnames, hostname)
+	}
+	sort.Slice(hostnames, func(left, right int) bool {
+		if oldest[hostnames[left]].Equal(oldest[hostnames[right]]) {
+			return hostnames[left] < hostnames[right]
+		}
+		return oldest[hostnames[left]].Before(oldest[hostnames[right]])
 	})
+	ordered := make([]dynamicQualityJob, 0, len(jobs))
+	for _, hostname := range hostnames {
+		group := groups[hostname]
+		sort.SliceStable(group, func(left, right int) bool {
+			return state.entries[group[left].Key].Attempted.Before(state.entries[group[right].Key].Attempted)
+		})
+		ordered = append(ordered, group...)
+	}
 	if len(ordered) > budget {
 		ordered = ordered[:budget]
 	}
@@ -251,6 +278,9 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 		s.dynamicQuality.started(job.Key, entry.Attempted)
 		contextDigest, contextErr := dynamicQualityContext(*projection, job)
 		if contextErr != nil {
+			if s.log != nil {
+				s.log.Printf("dynamic quality context unavailable; hostname=%s dns_node=%s error=%v", job.Route.Hostname, job.NodeID, contextErr)
+			}
 			return
 		}
 		entry.ContextDigest = contextDigest
@@ -295,8 +325,11 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 			s.dynamicQuality.mu.Lock()
 			entry := s.dynamicQuality.entries[job.Key]
 			s.dynamicQuality.mu.Unlock()
-			if digestErr != nil || entry.ContextDigest != digest || entry.Compiled.Selection == nil || time.Since(entry.Compiled.Selection.CapturedAt) > time.Duration(job.Route.Policy.EvidenceMaxAgeSeconds)*time.Second {
+			if reason := dynamicQualityEntryUnavailable(entry, digest, digestErr, job.Route.Policy, time.Now().UTC()); reason != "" {
 				states[hostname] = "learning_evidence_unavailable"
+				if !entry.Attempted.IsZero() && s.log != nil {
+					s.log.Printf("dynamic quality cached evidence unavailable; hostname=%s dns_node=%s reason=%s", hostname, job.NodeID, reason)
+				}
 				break
 			}
 			selections[job.Key] = entry.Compiled
@@ -325,6 +358,22 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 	}
 	projection.RuntimeSnapshot.Facts["dynamic_quality_coverage"] = map[string]any{"mode": policy.DynamicQuality.Mode, "query_count": len(jobs), "scheduled_queries": len(work), "refreshed_queries": completed, "capture_budget_exhausted": captureBudget.Err() != nil, "hostnames": states}
 	return nil
+}
+
+func dynamicQualityEntryUnavailable(entry dynamicQualityEntry, contextDigest string, contextErr error, policy model.PhysicalEdgeQualityPolicy, now time.Time) string {
+	if contextErr != nil {
+		return "configuration_context_unavailable"
+	}
+	if entry.ContextDigest != contextDigest {
+		return "configuration_context_changed"
+	}
+	if entry.Compiled.Selection == nil {
+		return "selection_not_compiled"
+	}
+	if now.Sub(entry.Compiled.Selection.CapturedAt) > time.Duration(policy.EvidenceMaxAgeSeconds)*time.Second {
+		return "selection_evidence_expired"
+	}
+	return ""
 }
 
 func captureDynamicQualityJobs(ctx context.Context, work []dynamicQualityJob, concurrency int, capture func(context.Context, dynamicQualityJob)) int {

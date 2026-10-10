@@ -147,6 +147,53 @@ func TestDynamicQualityCapturesEveryDeclaredPathAndClass(t *testing.T) {
 	}
 }
 
+func TestDynamicQualityRefreshPairsConsumersWithinEvidenceWindow(t *testing.T) {
+	state := dynamicQualityState{}
+	jobs := []dynamicQualityJob{}
+	for _, node := range []string{"dns-a", "dns-b"} {
+		for index := 0; index < 130; index++ {
+			hostname := fmt.Sprintf("service-%03d.example.test", index)
+			jobs = append(jobs, dynamicQualityJob{NodeID: node, Key: node + "\x00" + hostname, Route: platformconfig.PhysicalQualityRoute{Hostname: hostname}})
+		}
+	}
+	seen := map[string]bool{}
+	now := time.Now().UTC()
+	for round := 0; round < 3; round++ {
+		captured := map[string]int{}
+		at := now.Add(time.Duration(round) * 11 * time.Minute)
+		for _, job := range state.schedule(jobs, 128, at) {
+			captured[job.Route.Hostname]++
+			state.started(job.Key, at)
+		}
+		for hostname, count := range captured {
+			if count != 2 {
+				t.Fatalf("hostname evidence requires another publication cycle: %s has %d consumers", hostname, count)
+			}
+			seen[hostname] = true
+		}
+	}
+	if len(seen) != 130 {
+		t.Fatalf("domain rotation skipped %d hosts", 130-len(seen))
+	}
+}
+
+func TestDynamicQualityRefreshResumesPartiallyCapturedHost(t *testing.T) {
+	state := dynamicQualityState{}
+	jobs := []dynamicQualityJob{
+		{Key: "a-first", Route: platformconfig.PhysicalQualityRoute{Hostname: "first.example.test"}},
+		{Key: "a-second", Route: platformconfig.PhysicalQualityRoute{Hostname: "second.example.test"}},
+		{Key: "b-first", Route: platformconfig.PhysicalQualityRoute{Hostname: "first.example.test"}},
+		{Key: "b-second", Route: platformconfig.PhysicalQualityRoute{Hostname: "second.example.test"}},
+	}
+	now := time.Now().UTC()
+	first := state.schedule(jobs, 1, now)
+	state.started(first[0].Key, now)
+	second := state.schedule(jobs, 1, now.Add(time.Second))
+	if first[0].Key != "a-first" || second[0].Key != "b-first" {
+		t.Fatal("partial host was skipped or its completed query repeated", first, second)
+	}
+}
+
 func TestDynamicCaptureUnstartedQueriesKeepPriorityAfterBudgetExhaustion(t *testing.T) {
 	state := dynamicQualityState{}
 	now := time.Now().UTC()
