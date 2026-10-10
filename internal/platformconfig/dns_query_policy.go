@@ -195,8 +195,8 @@ func ValidateDNSQueryPolicy(p *DNSQueryPolicy) error {
 		return nil
 	}
 	if dynamic := p.DynamicQuality; dynamic != nil {
-		if dynamic.Mode != "all_dynamic" || p.RankingMode != "active" || p.OrderedProjection == nil || dynamic.Policy.Version != model.PhysicalDeliveryNetworkPolicyVersion || model.ValidatePhysicalEdgeQualityPolicy(dynamic.Policy) != nil || dynamic.RefreshQueriesPerCycle < 1 || dynamic.RefreshQueriesPerCycle > 128 || dynamic.RefreshConcurrency < 1 || dynamic.RefreshConcurrency > 8 || dynamic.RefreshConcurrency > dynamic.RefreshQueriesPerCycle {
-			return fmt.Errorf("dynamic quality requires bounded explicit V4 policy and safe bootstrap order")
+		if dynamic.Mode != "all_dynamic" || p.RankingMode != "active" || p.OrderedProjection == nil || !model.IsDeliveryPhysicalNetworkPolicy(dynamic.Policy.Version) || model.ValidatePhysicalEdgeQualityPolicy(dynamic.Policy) != nil || dynamic.RefreshQueriesPerCycle < 1 || dynamic.RefreshQueriesPerCycle > 128 || dynamic.RefreshConcurrency < 1 || dynamic.RefreshConcurrency > 8 || dynamic.RefreshConcurrency > dynamic.RefreshQueriesPerCycle {
+			return fmt.Errorf("dynamic quality requires bounded explicit delivery policy and safe bootstrap order")
 		}
 	}
 	if ordered := p.OrderedProjection; ordered != nil {

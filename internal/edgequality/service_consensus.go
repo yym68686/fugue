@@ -20,7 +20,7 @@ func ServiceConsensusSnapshot(hostname string, receipts []Receipt) (Snapshot, er
 		return ServiceEvidenceKey(ordered[left].Snapshot) < ServiceEvidenceKey(ordered[right].Snapshot)
 	})
 	first := ordered[0].Snapshot
-	if first.Policy.Version != DeliveryNetworkPolicyVersion || len(first.ActualDNSReceipt) == 0 {
+	if !IsDeliveryNetworkPolicy(first.Policy.Version) || len(first.ActualDNSReceipt) == 0 {
 		return Snapshot{}, errors.New("shared-service selection requires bound V4 evidence")
 	}
 	root := Snapshot{Schema: Schema, Hostname: hostname, TrafficClass: first.TrafficClass, Scope: first.Scope, CapturedAt: first.CapturedAt, Policy: first.Policy,

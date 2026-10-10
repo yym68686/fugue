@@ -50,7 +50,7 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 		}
 	}
 	learning := false
-	if snapshot.Policy.Version == DeliveryNetworkPolicyVersion && result.Hypothesis == "hold" && result.ProposedEdgeID == snapshot.CurrentEdgeID && primary != nil && !primary.Ready && len(primary.HardGates) == 0 {
+	if IsDeliveryNetworkPolicy(snapshot.Policy.Version) && result.Hypothesis == "hold" && result.ProposedEdgeID == snapshot.CurrentEdgeID && primary != nil && !primary.Ready && len(primary.HardGates) == 0 {
 		for _, candidate := range snapshot.Candidates {
 			learning = learning || candidate.EdgeID == primary.EdgeID && proofFresh(candidate, snapshot.Policy, now)
 		}
@@ -64,7 +64,7 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 	selection := &model.DNSPhysicalSelection{Version: model.DNSPhysicalSelectionVersion, PrimaryEdgeID: primary.EdgeID,
 		OrderedEdgeIDs: []string{primary.EdgeID}, EvidenceDigest: receipt.Digest, DNSReceiptID: binding.ReceiptID,
 		LoadedDigest: binding.LoadedDigest, PolicyDigest: binding.PolicyDigest, Scope: snapshot.Scope, CapturedAt: snapshot.CapturedAt}
-	if snapshot.Policy.Version == DeliveryNetworkPolicyVersion {
+	if IsDeliveryNetworkPolicy(snapshot.Policy.Version) {
 		selection.QualityState = "measured"
 		if learning {
 			selection.QualityState = "learning"

@@ -36,7 +36,7 @@ def validate(config):
     if type(dynamic["refresh_queries_per_cycle"]) is not int or not 1 <= dynamic["refresh_queries_per_cycle"] <= 128 or type(dynamic["refresh_concurrency"]) is not int or not 1 <= dynamic["refresh_concurrency"] <= min(8, dynamic["refresh_queries_per_cycle"]):
         raise ValueError("bounded capture concurrency required")
     network = dynamic["policy"]
-    if set(network) != POLICY_FIELDS or network.get("version") != "physical-network-delivery-v4" or any(network[key] is None for key in POLICY_FIELDS):
+    if set(network) != POLICY_FIELDS or network.get("version") not in ["physical-network-delivery-v4", "physical-network-failure-aware-v5"] or any(network[key] is None for key in POLICY_FIELDS):
         raise ValueError("complete explicit delivery policy required")
     return config
 

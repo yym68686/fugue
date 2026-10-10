@@ -19165,6 +19165,7 @@ components:
     PhysicalEdgeQualityPolicy:
       type: object
       additionalProperties: false
+      description: V5 preserves signed raw evidence and historical V4 replay. It permits comparison against an incumbent with observed excess transfer failures even when too few downloads complete, and bounds uncertainty from undersampled client cohorts without treating them as proven vetoes. Every sufficiently sampled cohort must still show sustained advantage, and capacity, cooldown and route readiness gates remain mandatory.
       required: [version, window_seconds, bucket_seconds, required_buckets, minimum_records, cooldown_seconds, evidence_max_age_seconds, advantage_ms, advantage_ratio, unknown_cost_ms, uncertainty_ms, failure_cost_ms, capacity_cost_ms, throughput_cost_ms, throughput_target_bps, probe_interval_seconds, probe_budget_per_interval]
       properties:
         maximum_node_utilization: {type: number, minimum: 0, maximum: 1, description: Explicit v2 node CPU/memory headroom gate. Does not declare link or application capacity.}
@@ -34542,7 +34543,7 @@ components:
             - type: object
               required: [maximum_node_utilization]
               properties:
-                version: {type: string, enum: [physical-network-delivery-v4]}
+                version: {type: string, enum: [physical-network-delivery-v4, physical-network-failure-aware-v5]}
         refresh_queries_per_cycle: {type: integer, minimum: 1, maximum: 128}
         refresh_concurrency: {type: integer, minimum: 1, maximum: 8}
     PlatformPhysicalQualityRoute:
@@ -34558,7 +34559,7 @@ components:
             - type: object
               required: [maximum_node_utilization]
               properties:
-                version: {type: string, enum: [physical-network-cohort-v2, physical-network-bounded-v3, physical-network-delivery-v4]}
+                version: {type: string, enum: [physical-network-cohort-v2, physical-network-bounded-v3, physical-network-delivery-v4, physical-network-failure-aware-v5]}
     PlatformDNSAuthorityPolicy:
       type: object
       additionalProperties: false

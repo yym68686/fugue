@@ -35,7 +35,7 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	receipt, err := s.capturePhysicalQuality(ctx, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultDeliveryNetworkPolicy())
+	receipt, err := s.capturePhysicalQuality(ctx, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultFailureAwareNetworkPolicy())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -95,7 +95,7 @@ func (s *Server) capturePhysicalQualityPathForDNS(ctx context.Context, hostname,
 	if len(networkSamples) == edgequality.MaxObservations {
 		snapshot.Blockers = append(snapshot.Blockers, "network_observation_limit_reached")
 	}
-	if networkPolicy.Version == edgequality.DeliveryNetworkPolicyVersion {
+	if edgequality.IsDeliveryNetworkPolicy(networkPolicy.Version) {
 		reports, err := s.store.ListEdgeClientProbeReports(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), 256)
 		if err != nil {
 			return edgequality.Receipt{}, err
@@ -125,7 +125,7 @@ func (s *Server) capturePhysicalQualityPathForDNS(ctx context.Context, hostname,
 			snapshot.NetworkSamples = append(snapshot.NetworkSamples, witness)
 		}
 	}
-	if networkPolicy.Version != edgequality.DeliveryNetworkPolicyVersion {
+	if !edgequality.IsDeliveryNetworkPolicy(networkPolicy.Version) {
 		limitReached := errors.New("shadow observation limit reached")
 		visited := 0
 		err = s.store.WalkEdgePerformanceSamples(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), func(sample model.EdgePerformanceSample) error {
@@ -306,7 +306,7 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 			} else if sample.Source == "public_front_tcp_info_v1" && sample.ClientNetwork != nil && (snapshot.Scope == "global" || snapshot.Scope == sample.ClientNetwork.Scope) {
 				observation.ClientNetworkMS, observation.ClientSource = sample.ClientNetwork.RTTMS, "public_tcp_info"
 				observation.ClientCohort = sample.ClientNetwork.Scope
-				if snapshot.Policy.Version == edgequality.DeliveryNetworkPolicyVersion {
+				if edgequality.IsDeliveryNetworkPolicy(snapshot.Policy.Version) {
 					observation.DownloadBPS, observation.ClientRetransmissionRate = model.EdgeClientDeliveryMetrics(sample.ClientNetwork)
 				}
 			} else {

@@ -149,8 +149,11 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 				return fmt.Errorf("physical alias omits or adds a declared service owner")
 			}
 			verified, err := compileBoundPhysicalQualitySelection(receipt, now)
-			if err != nil || !reflect.DeepEqual(verified, selection) {
-				return fmt.Errorf("physical alias selection differs from exact captured answer and service evidence")
+			if err != nil {
+				return fmt.Errorf("physical alias evidence revalidation failed: %w", err)
+			}
+			if !reflect.DeepEqual(verified, selection) {
+				return fmt.Errorf("physical alias selection differs from exact captured answer and service evidence: fields=%s", physicalSelectionDifferenceFields(verified, selection))
 			}
 		}
 		if selection.CapturedAt.After(now) || now.Sub(selection.CapturedAt) > time.Duration(route.Policy.EvidenceMaxAgeSeconds)*time.Second || selection.Scope != "global" {
@@ -213,4 +216,18 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 	projection.CapturedAt = now
 	projection.RuntimeSnapshot.CapturedAt = &projection.CapturedAt
 	return nil
+}
+
+func physicalSelectionDifferenceFields(verified, captured *model.DNSPhysicalSelection) string {
+	if verified == nil || captured == nil {
+		return "selection"
+	}
+	left, right := reflect.ValueOf(*verified), reflect.ValueOf(*captured)
+	fields := []string{}
+	for index := 0; index < left.NumField(); index++ {
+		if !reflect.DeepEqual(left.Field(index).Interface(), right.Field(index).Interface()) {
+			fields = append(fields, left.Type().Field(index).Name)
+		}
+	}
+	return strings.Join(fields, ",")
 }

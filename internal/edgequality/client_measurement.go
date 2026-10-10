@@ -10,7 +10,7 @@ import (
 
 func ClientProbeObservations(snapshot Snapshot) ([]Observation, error) {
 	observations := []Observation{}
-	if len(snapshot.ClientProbeReports) > 0 && snapshot.Policy.Version != DeliveryNetworkPolicyVersion {
+	if len(snapshot.ClientProbeReports) > 0 && !IsDeliveryNetworkPolicy(snapshot.Policy.Version) {
 		return nil, errors.New("client measurement reports require the delivery evaluator")
 	}
 	candidates := map[string]Candidate{}

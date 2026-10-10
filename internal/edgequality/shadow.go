@@ -419,10 +419,10 @@ func sustained(snapshot Snapshot, challenger, current Candidate, observations ma
 }
 
 func validate(snapshot Snapshot) error {
-	if snapshot.PathPrefix != "" && (snapshot.Policy.Version != DeliveryNetworkPolicyVersion || !strings.HasPrefix(snapshot.PathPrefix, "/") || len(snapshot.PathPrefix) > 2048 || strings.ContainsAny(snapshot.PathPrefix, "?#\r\n\x00")) {
+	if snapshot.PathPrefix != "" && (!IsDeliveryNetworkPolicy(snapshot.Policy.Version) || !strings.HasPrefix(snapshot.PathPrefix, "/") || len(snapshot.PathPrefix) > 2048 || strings.ContainsAny(snapshot.PathPrefix, "?#\r\n\x00")) {
 		return errors.New("invalid exact service path binding")
 	}
-	if snapshot.DNSHostname != "" && (snapshot.Policy.Version != DeliveryNetworkPolicyVersion || snapshot.DNSHostname == snapshot.Hostname || len(snapshot.DNSHostname) > 253 || snapshot.DNSHostname != strings.TrimSuffix(strings.ToLower(snapshot.DNSHostname), ".") || strings.ContainsAny(snapshot.DNSHostname, "/:@?# \t\r\n")) {
+	if snapshot.DNSHostname != "" && (!IsDeliveryNetworkPolicy(snapshot.Policy.Version) || snapshot.DNSHostname == snapshot.Hostname || len(snapshot.DNSHostname) > 253 || snapshot.DNSHostname != strings.TrimSuffix(strings.ToLower(snapshot.DNSHostname), ".") || strings.ContainsAny(snapshot.DNSHostname, "/:@?# \t\r\n")) {
 		return errors.New("invalid explicit DNS alias binding")
 	}
 	if snapshot.Schema != Schema || snapshot.Hostname == "" || snapshot.TrafficClass == "" || snapshot.Scope == "" || snapshot.CapturedAt.IsZero() || snapshot.CapturedAt.Unix() < 0 {
@@ -539,7 +539,7 @@ func networkWitnessMeasurementMatches(observation Observation, sample model.Edge
 		return false
 	}
 	var download, retransmission *float64
-	if policyVersion == DeliveryNetworkPolicyVersion && sample.Source == "public_front_tcp_info_v1" {
+	if IsDeliveryNetworkPolicy(policyVersion) && sample.Source == "public_front_tcp_info_v1" {
 		download, retransmission = model.EdgeClientDeliveryMetrics(sample.ClientNetwork)
 	}
 	if !reflect.DeepEqual(observation.DownloadBPS, download) || !reflect.DeepEqual(observation.ClientRetransmissionRate, retransmission) {

@@ -8,9 +8,14 @@ import (
 const PhysicalNetworkPolicyVersion = "physical-network-cohort-v2"
 const PhysicalBoundedNetworkPolicyVersion = "physical-network-bounded-v3"
 const PhysicalDeliveryNetworkPolicyVersion = "physical-network-delivery-v4"
+const PhysicalFailureAwareNetworkPolicyVersion = "physical-network-failure-aware-v5"
+
+func IsDeliveryPhysicalNetworkPolicy(version string) bool {
+	return version == PhysicalDeliveryNetworkPolicyVersion || version == PhysicalFailureAwareNetworkPolicyVersion
+}
 
 func IsBoundedPhysicalNetworkPolicy(version string) bool {
-	return version == PhysicalBoundedNetworkPolicyVersion || version == PhysicalDeliveryNetworkPolicyVersion
+	return version == PhysicalBoundedNetworkPolicyVersion || IsDeliveryPhysicalNetworkPolicy(version)
 }
 
 type PhysicalEdgeQualityPolicy struct {

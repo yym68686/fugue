@@ -240,7 +240,7 @@ func physicalDeliveryCapabilityRequired(artifact model.PlatformArtifact) (bool, 
 			return true, nil
 		}
 		for _, route := range query.PhysicalRoutes {
-			if route.Policy.Version == model.PhysicalDeliveryNetworkPolicyVersion {
+			if model.IsDeliveryPhysicalNetworkPolicy(route.Policy.Version) {
 				return true, nil
 			}
 		}
