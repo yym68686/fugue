@@ -1806,7 +1806,7 @@ func (runtime *kubectlEdgeGroupRuntime) Roll(ctx context.Context, name string, t
 			if err != nil || current.Validate() != nil || current.GroupID != stage.GroupID {
 				return nil
 			}
-			if edgeCurrentAuthorityMatchesCandidate(current, *stage) {
+			if _, committed := runtime.committedStageForRelease(ctx, current, *stage); committed {
 				return errEdgeCandidateCommitted
 			}
 			if string(current.CurrentWorkerSlot) == stage.CurrentWorkerSlot && runtime.candidateConfigurationAdvanced(ctx, *stage) {
@@ -1875,8 +1875,10 @@ func (runtime *kubectlEdgeGroupRuntime) WaitCurrentAuthority(ctx context.Context
 	deadline := time.Now().Add(runtime.cluster.timeout)
 	for {
 		current, _, err := runtime.readCurrentAuthority(ctx)
-		if err == nil && edgeCurrentAuthorityMatchesCandidate(current, staged) {
-			return nil
+		if err == nil {
+			if _, committed := runtime.committedStageForRelease(ctx, current, staged); committed {
+				return nil
+			}
 		}
 		if err == nil && current.Validate() == nil && current.GroupID == staged.GroupID && string(current.CurrentWorkerSlot) == staged.CurrentWorkerSlot && runtime.candidateConfigurationAdvanced(ctx, staged) {
 			return errEdgeCandidateConfigurationAdvanced
@@ -2423,10 +2425,11 @@ func (runtime *kubectlEdgeGroupRuntime) waitEdgeCandidateWorkerAuthority(ctx con
 			}
 		}
 		current, _, currentErr := runtime.readCurrentAuthority(ctx)
-		if currentErr == nil && edgeCurrentAuthorityMatchesCandidate(current, stage) {
+		committedStage, committed := runtime.committedStageForRelease(ctx, current, stage)
+		if currentErr == nil && committed {
 			// The exact code grant may commit before this observer sees the
 			// candidate. A newer signed config must not turn that into failure.
-			if err == nil && edgeCommittedCandidateCohortReady(pods, target, stage, current, transition.ExpectedNodes, time.Now().UTC()) {
+			if err == nil && edgeCommittedCandidateCohortReady(pods, target, committedStage, current, transition.ExpectedNodes, time.Now().UTC()) {
 				return pods, nil
 			}
 		} else if err == nil && currentErr == nil && current.Validate() == nil && current.GroupID == stage.GroupID && string(current.CurrentWorkerSlot) == stage.CurrentWorkerSlot && runtime.candidateConfigurationAdvanced(ctx, stage) {
