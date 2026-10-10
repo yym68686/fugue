@@ -61,6 +61,10 @@ func TestTrackedPlatformSourcesContainNoBusinessCoupling(t *testing.T) {
 // data. Exempt only that typed value, never an entire file or configuration tree:
 // executable fields, comments, unknown schema and adjacent strings stay scanned.
 func businessCouplingSource(path string, body []byte) []byte {
+	const physicalDirectory = "deploy/environments/production/routing-physical-dns/"
+	if strings.HasPrefix(path, physicalDirectory) && !strings.Contains(strings.TrimPrefix(path, physicalDirectory), "/") && strings.HasSuffix(path, ".json") {
+		return orderedProjectionHostnameSource(body, "fugue.physical-dns-reconfiguration/v1")
+	}
 	const qualityDirectory = "deploy/environments/production/routing-dynamic-quality/"
 	if strings.HasPrefix(path, qualityDirectory) && !strings.Contains(strings.TrimPrefix(path, qualityDirectory), "/") && strings.HasSuffix(path, ".json") {
 		return orderedProjectionHostnameSource(body, "fugue.dynamic-quality-reconfiguration/v1")
@@ -149,6 +153,24 @@ func TestDynamicQualityExceptionOnlyCoversPreservedHostnameConstraints(t *testin
 	unknown := strings.Replace(body, "fugue.dynamic-quality-reconfiguration/v1", "unknown/v1", 1)
 	if string(businessCouplingSource(path, []byte(unknown))) != unknown {
 		t.Fatal("unknown schema exempted")
+	}
+}
+
+func TestPhysicalQualityExceptionOnlyCoversPreservedHostnameConstraints(t *testing.T) {
+	const path = "deploy/environments/production/routing-physical-dns/quality-canary.json"
+	const body = `{"schema":"fugue.physical-dns-reconfiguration/v1","projection_policy":{"dns_query_policy":{"ordered_projection":{"overrides":[{"hostname":"tenant.example.test","command":"branch on tenant.example.test"}]},"command":"branch on tenant.example.test"}}}`
+	masked := string(businessCouplingSource(path, []byte(body)))
+	if !strings.Contains(masked, `"hostname":"configuration-hostname"`) || strings.Count(masked, "branch on tenant.example.test") != 2 {
+		t.Fatal("physical configuration exception hid executable content")
+	}
+	for _, other := range []string{"internal/api/routing.go", path + ".go", strings.Replace(path, "/quality-canary", "/nested/quality-canary", 1)} {
+		if string(businessCouplingSource(other, []byte(body))) != body {
+			t.Fatal("physical configuration exception escaped declaration scope")
+		}
+	}
+	unknown := strings.Replace(body, "fugue.physical-dns-reconfiguration/v1", "unknown/v1", 1)
+	if string(businessCouplingSource(path, []byte(unknown))) != unknown {
+		t.Fatal("unknown physical configuration schema exempted")
 	}
 }
 

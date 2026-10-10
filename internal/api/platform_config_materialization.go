@@ -34,7 +34,19 @@ func (err *platformConfigReferenceError) Error() string { return err.reason }
 // touching release lanes or LKG. Existing inputs are retained verbatim on replay.
 // An interrupted write may leave immutable drafts; a retry ensures the same
 // identities and validates the complete parent before returning success.
-func (s *Server) materializePlatformCompilation(ctx context.Context, compiled platformconfig.CompileResult, principal model.Principal, inputs *platformConfigStoredInputs, sources ...platformCompilationSource) (platformConfigCompileResponse, error) {
+func (s *Server) materializePlatformCompilation(ctx context.Context, compiled platformconfig.CompileResult, principal model.Principal, inputs *platformConfigStoredInputs, sources ...platformCompilationSource) (response platformConfigCompileResponse, resultErr error) {
+	started, phaseStarted, phase := time.Now(), time.Now(), "validate_source"
+	durations := map[string]int64{}
+	advance := func(next string) {
+		durations[phase] += time.Since(phaseStarted).Milliseconds()
+		phase, phaseStarted = next, time.Now()
+	}
+	defer func() {
+		durations[phase] += time.Since(phaseStarted).Milliseconds()
+		if s.log != nil && (resultErr != nil || time.Since(started) > 10*time.Second) {
+			s.log.Printf("platform compilation storage timing scope=%s phase=%s elapsed_ms=%d durations_ms=%v error=%v", compiled.ReleaseSet.Scope, phase, time.Since(started).Milliseconds(), durations, resultErr)
+		}
+	}()
 	if binding, present := compiled.InputSnapshot.Facts["configuration_producer"]; present {
 		raw, ok := binding.(map[string]any)
 		if !ok || len(raw) != 2 && len(raw) != 4 && len(raw) != 6 {
@@ -83,6 +95,7 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	if err := s.validateCellDNSCompilation(compiled); err != nil {
 		return platformConfigCompileResponse{}, err
 	}
+	advance("compiler_input")
 	if err := s.store.EnsurePlatformCompilerInput(compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
 		return platformConfigCompileResponse{}, err
 	}
@@ -120,13 +133,16 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 			return platformConfigCompileResponse{}, err
 		}
 		artifact.CreatedByType, artifact.CreatedByID = strings.TrimSpace(principal.ActorType), strings.TrimSpace(principal.ActorID)
+		advance(artifact.ArtifactKind + ".creator")
 		if err := s.preservePlatformArtifactCreator(artifact); err != nil {
 			return platformConfigCompileResponse{}, err
 		}
+		advance(artifact.ArtifactKind + ".ensure")
 		stored, _, err := s.store.EnsurePlatformArtifact(*artifact)
 		if err != nil {
 			return platformConfigCompileResponse{}, err
 		}
+		advance(artifact.ArtifactKind + ".validate")
 		validated, err := s.store.ValidatePlatformArtifact(stored.ID, []model.PlatformArtifactValidationResult{validation})
 		if err != nil {
 			return platformConfigCompileResponse{}, err
@@ -143,6 +159,7 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	if compiled.ReleaseSet.PublicationRole == platformconfig.PublicationRoleCellDNS {
 		compiled.ReleaseSet.ArtifactIDs = []string{compiled.DNSArtifact.ID}
 	}
+	advance("parent_build")
 	parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, compiled.ReleaseSet.ArtifactIDs, time.Now().UTC())
 	if len(sources) == 1 {
 		parent.Metadata[platformproducer.PolicyReleaseMetadata] = sources[0].PolicyReleaseID
@@ -157,16 +174,20 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 		}
 	}
 	parent.CreatedByType, parent.CreatedByID = strings.TrimSpace(principal.ActorType), strings.TrimSpace(principal.ActorID)
+	advance("parent_creator")
 	if err := s.preservePlatformArtifactCreator(&parent); err != nil {
 		return platformConfigCompileResponse{}, err
 	}
+	advance("parent_ensure")
 	parent, _, err := s.store.EnsurePlatformArtifact(parent)
 	if err != nil {
 		return platformConfigCompileResponse{}, err
 	}
+	advance("parent_references")
 	if result := s.validateReleaseSetReferences(parent); !result.Pass {
 		return platformConfigCompileResponse{}, &platformConfigReferenceError{result.Message}
 	}
+	advance("parent_validate")
 	compiled.ReleaseArtifact, err = s.store.ValidatePlatformArtifact(parent.ID, []model.PlatformArtifactValidationResult{parentValidation})
 	if err != nil {
 		return platformConfigCompileResponse{}, err
