@@ -107,6 +107,10 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		if err != nil {
 			return fail("physical delivery policy cannot be decoded")
 		}
+		failureAwareRequired, err := physicalFailureAwareCapabilityRequired(child)
+		if err != nil {
+			return fail("physical failure-aware policy cannot be decoded")
+		}
 		orderRequired, err := physicalOrderCapabilityRequired(child)
 		if err != nil {
 			return fail("physical order policy cannot be decoded")
@@ -163,6 +167,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				}
 				if deliveryRequired && (!slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkDeliveryCapabilityV4) || !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalDynamicQualityCapabilityV1)) {
 					return fail("required consumer lacks physical network delivery v4 capability")
+				}
+				if failureAwareRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5) {
+					return fail("required DNS consumer lacks physical network failure-aware v5 capability")
 				}
 				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
 					return fail("physical network v3 capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
@@ -262,6 +269,35 @@ func physicalOrderProjectionCapabilityRequired(artifact model.PlatformArtifact) 
 		return false, err
 	}
 	return payload.Policy.Query != nil && payload.Policy.Query.OrderedProjection != nil, nil
+}
+
+func physicalFailureAwareCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {
+	if artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
+		return false, nil
+	}
+	var payload struct {
+		Policy struct {
+			Query *platformconfig.DNSQueryPolicy `json:"dns_query_policy"`
+		} `json:"policy"`
+	}
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false, err
+	}
+	if query := payload.Policy.Query; query != nil {
+		if query.DynamicQuality != nil && query.DynamicQuality.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion {
+			return true, nil
+		}
+		for _, route := range query.PhysicalRoutes {
+			if route.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func physicalOrderCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {

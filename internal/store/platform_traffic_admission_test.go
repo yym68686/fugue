@@ -40,7 +40,7 @@ func testLeasedTrafficAdmission(t *testing.T, address string) {
 }
 
 func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) {
-	for _, scenario := range []string{"supported", "physical supported", "physical missing DNS", "physical missing route", "physical missing TLS", "projection supported", "projection missing DNS", "projection missing route", "projection missing TLS", "failed facts still support recovery", "missing route capability", "missing DNS capability", "missing TLS capability", "stale issued", "missing issued", "stale received", "unverified", "new topology", "empty cohort member", "standalone", "soft override", "rollback", "rollback missing capability", "queued revocation"} {
+	for _, scenario := range []string{"supported", "physical supported", "physical missing DNS", "physical missing route", "physical missing TLS", "failure aware supported", "failure aware missing DNS", "projection supported", "projection missing DNS", "projection missing route", "projection missing TLS", "failed facts still support recovery", "missing route capability", "missing DNS capability", "missing TLS capability", "stale issued", "missing issued", "stale received", "unverified", "new topology", "empty cohort member", "standalone", "soft override", "rollback", "rollback missing capability", "queued revocation"} {
 		t.Run(scenario, func(t *testing.T) {
 			if scenario == "queued revocation" && address == "" {
 				t.Skip("Postgres concurrency")
@@ -71,6 +71,12 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				input.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120,
 					PhysicalRoutes: []platformconfig.PhysicalQualityRoute{{Hostname: "app.example.test", TrafficClass: "streaming", Policy: edgequality.DefaultNetworkPolicy()}}}
 			}
+			if strings.HasPrefix(scenario, "failure aware ") {
+				policy := edgequality.DefaultNetworkPolicy()
+				policy.Version = model.PhysicalFailureAwareNetworkPolicyVersion
+				input.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120,
+					PhysicalRoutes: []platformconfig.PhysicalQualityRoute{{Hostname: "app.example.test", TrafficClass: "streaming", Policy: policy}}}
+			}
 			if strings.HasPrefix(scenario, "projection ") {
 				input.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120,
 					OrderedProjection: &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a"}}, Overrides: []platformconfig.DNSOrderOverride{}}}
@@ -100,6 +106,12 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				}
 				if strings.HasPrefix(scenario, "projection ") && !(scenario == "projection missing DNS" && old.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle || scenario == "projection missing route" && old.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle || scenario == "projection missing TLS" && old.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig) {
 					h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.PhysicalOrderProjectionCapabilityV1)
+				}
+				if strings.HasPrefix(scenario, "failure aware ") {
+					h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalDynamicQualityCapabilityV1)
+					if scenario == "failure aware supported" && old.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
+						h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5)
+					}
 				}
 				h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 				if _, err := s.AcceptTrustedPlatformConsumerHeartbeat(claims, old.ExpectedConsumerSetID, h, time.Now().UTC(), platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err != nil {
@@ -229,7 +241,7 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 			if e != nil {
 				t.Fatal(e)
 			}
-			valid := scenario == "supported" || scenario == "physical supported" || scenario == "projection supported" || scenario == "failed facts still support recovery" || scenario == "rollback"
+			valid := scenario == "supported" || scenario == "physical supported" || scenario == "failure aware supported" || scenario == "projection supported" || scenario == "failed facts still support recovery" || scenario == "rollback"
 			if valid {
 				if err != nil || len(after) != len(before)+1 {
 					t.Fatal("supported release rejected", err)
