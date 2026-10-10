@@ -194,6 +194,21 @@ func TestDynamicQualityRefreshResumesPartiallyCapturedHost(t *testing.T) {
 	}
 }
 
+func TestDynamicQualityCoverageRetainsDynamicOwnerWithStaticMetadata(t *testing.T) {
+	projection, nodes, policy, now := directQueryFixture()
+	policy.ECSEnabled, policy.ExplorationPercent = false, 0
+	policy.OrderedProjection = &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}}
+	policy.DynamicQuality = &platformconfig.DynamicQualityPolicy{Mode: "all_dynamic", Policy: edgequality.DefaultComparableDeliveryPolicy(), RefreshQueriesPerCycle: 8, RefreshConcurrency: 2}
+	projection.Intent.DNS = append(projection.Intent.DNS, platformconfig.DNSIntent{Hostname: "app.example.test", Type: "TXT", Values: []string{"verification-token"}, TTL: 300})
+	if err := projectDirectDNSQueries(&projection, policy, nodes, now); err != nil {
+		t.Fatal(err)
+	}
+	jobs, states, err := dynamicQualityRoutes(projection, policy)
+	if err != nil || len(jobs) != 1 || states["app.example.test"] != "learning_queued" {
+		t.Fatal("static metadata hid dynamic coverage", jobs, states, err)
+	}
+}
+
 func TestDynamicCaptureUnstartedQueriesKeepPriorityAfterBudgetExhaustion(t *testing.T) {
 	state := dynamicQualityState{}
 	now := time.Now().UTC()

@@ -89,6 +89,29 @@ func TestPhysicalDNSOptInDoesNotAuthorizeAnUnboundManagedAlias(t *testing.T) {
 	}
 }
 
+func TestPhysicalDNSSelectionPreservesStaticNonAddressRecordsAtDynamicOwner(t *testing.T) {
+	for _, recordType := range []string{"TXT", "MX", "CAA", "NS"} {
+		t.Run(recordType, func(t *testing.T) {
+			projection, policy, selections, now := physicalQueryProjectionFixture(t)
+			static := platformconfig.DNSIntent{Hostname: "app.example.test", Type: recordType, Values: []string{"synthetic-static-value"}, TTL: 300}
+			projection.Intent.DNS = append(projection.Intent.DNS, static)
+			if err := applyPhysicalDNSSelections(&projection, policy, selections, now); err != nil {
+				t.Fatal("independent static record blocked dynamic address quality", err)
+			}
+			if !reflect.DeepEqual(static, projection.Intent.DNS[1]) || projection.Policy.DNSAnswerRules[0].SelectionMode != model.DNSAnswerPolicyKindPhysicalQuality {
+				t.Fatal("dynamic selection modified static content")
+			}
+		})
+	}
+	for _, recordType := range []string{"A", "AAAA", "CNAME"} {
+		projection, policy, selections, now := physicalQueryProjectionFixture(t)
+		projection.Intent.DNS = append(projection.Intent.DNS, platformconfig.DNSIntent{Hostname: "app.example.test", Type: recordType, Values: []string{"8.8.4.4"}, TTL: 300})
+		if err := applyPhysicalDNSSelections(&projection, policy, selections, now); err == nil {
+			t.Fatal("static address or alias constraint was overridden", recordType)
+		}
+	}
+}
+
 func TestPhysicalDNSPublicationRejectsUnsafeProjectionAtomically(t *testing.T) {
 	for _, test := range []struct {
 		name string

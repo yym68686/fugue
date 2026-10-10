@@ -82,7 +82,10 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 				continue
 			}
 			if platformconfig.DNSPlacementOptions(record) == nil {
-				return fmt.Errorf("physical route cannot rewrite a static record")
+				if record.Type == "A" || record.Type == "AAAA" || record.Type == "CNAME" {
+					return fmt.Errorf("physical route cannot rewrite a static address or alias record")
+				}
+				continue
 			}
 			owners, _, err := placementRecordRoutes(*projection, record)
 			if err != nil {

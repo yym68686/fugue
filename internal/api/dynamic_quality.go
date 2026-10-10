@@ -67,7 +67,9 @@ func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy pl
 	}
 	for _, record := range projection.Intent.DNS {
 		if platformconfig.DNSPlacementOptions(record) == nil {
-			states[record.Hostname] = "static_constraint"
+			if _, present := states[record.Hostname]; !present {
+				states[record.Hostname] = "static_constraint"
+			}
 			continue
 		}
 		if explicit[record.Hostname] {
