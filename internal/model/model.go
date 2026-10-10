@@ -3516,6 +3516,7 @@ type State struct {
 	EdgeRoutePolicies          []EdgeRoutePolicy              `json:"edge_route_policies,omitempty"`
 	EdgePerformanceSamples     []EdgePerformanceSample        `json:"edge_performance_samples,omitempty"`
 	EdgeNetworkSamples         []EdgeNetworkSample            `json:"edge_network_samples,omitempty"`
+	EdgeClientProbeReports     []EdgeClientProbeReport        `json:"edge_client_probe_reports,omitempty"`
 	EdgeNetworkRouteWitnesses  []EdgeNetworkSample            `json:"edge_network_route_witnesses,omitempty"`
 	EdgeQualityRollups         []EdgeQualityRollup            `json:"edge_quality_rollups,omitempty"`
 	EdgeQualityWatermarks      map[string]time.Time           `json:"edge_quality_rollup_watermarks,omitempty"`

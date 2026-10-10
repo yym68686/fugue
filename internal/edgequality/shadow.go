@@ -39,6 +39,7 @@ type Candidate struct {
 }
 
 type Observation struct {
+	ClientProbeRoundID       string             `json:"client_probe_round_id,omitempty"`
 	ClientRetransmissionRate *float64           `json:"client_retransmission_rate,omitempty"`
 	NodeCapacityID           string             `json:"node_capacity_id,omitempty"`
 	ClientCohort             string             `json:"client_cohort,omitempty"`
@@ -64,21 +65,22 @@ type Observation struct {
 }
 
 type Snapshot struct {
-	NodeCapacitySamples []NodeCapacitySample      `json:"node_capacity_samples,omitempty"`
-	Limitations         []string                  `json:"limitations,omitempty"`
-	ActualDNSReceipt    json.RawMessage           `json:"actual_dns_receipt,omitempty"`
-	NetworkSamples      []model.EdgeNetworkSample `json:"network_samples,omitempty"`
-	Schema              string                    `json:"schema"`
-	CapturedAt          time.Time                 `json:"captured_at"`
-	Hostname            string                    `json:"hostname"`
-	TrafficClass        string                    `json:"traffic_class"`
-	Scope               string                    `json:"scope"`
-	Policy              Policy                    `json:"policy"`
-	CurrentEdgeID       string                    `json:"current_edge_id"`
-	LastSwitchAt        *time.Time                `json:"last_switch_at"`
-	Candidates          []Candidate               `json:"candidates"`
-	Observations        []Observation             `json:"observations"`
-	Blockers            []string                  `json:"blockers"`
+	ClientProbeReports  []model.EdgeClientProbeReport `json:"client_probe_reports,omitempty"`
+	NodeCapacitySamples []NodeCapacitySample          `json:"node_capacity_samples,omitempty"`
+	Limitations         []string                      `json:"limitations,omitempty"`
+	ActualDNSReceipt    json.RawMessage               `json:"actual_dns_receipt,omitempty"`
+	NetworkSamples      []model.EdgeNetworkSample     `json:"network_samples,omitempty"`
+	Schema              string                        `json:"schema"`
+	CapturedAt          time.Time                     `json:"captured_at"`
+	Hostname            string                        `json:"hostname"`
+	TrafficClass        string                        `json:"traffic_class"`
+	Scope               string                        `json:"scope"`
+	Policy              Policy                        `json:"policy"`
+	CurrentEdgeID       string                        `json:"current_edge_id"`
+	LastSwitchAt        *time.Time                    `json:"last_switch_at"`
+	Candidates          []Candidate                   `json:"candidates"`
+	Observations        []Observation                 `json:"observations"`
+	Blockers            []string                      `json:"blockers"`
 }
 
 type Metric struct {
@@ -415,7 +417,7 @@ func validate(snapshot Snapshot) error {
 			return errors.New("invalid shadow cost")
 		}
 	}
-	if policy.AdvantageRatio >= 1 || len(snapshot.Observations) > MaxObservations || len(snapshot.NetworkSamples) > MaxObservations || len(snapshot.Candidates) > 256 || len(snapshot.NodeCapacitySamples) > 8 {
+	if policy.AdvantageRatio >= 1 || len(snapshot.Observations) > MaxObservations || len(snapshot.NetworkSamples) > MaxObservations || len(snapshot.Candidates) > 256 || len(snapshot.NodeCapacitySamples) > 8 || len(snapshot.ClientProbeReports) > 256 {
 		return errors.New("shadow input exceeds bounds")
 	}
 	capacitySamples := map[string]NodeCapacitySample{}
@@ -443,6 +445,14 @@ func validate(snapshot Snapshot) error {
 		return errors.New("future switch time")
 	}
 	seen := map[string]bool{}
+	probeObservations, probeErr := ClientProbeObservations(snapshot)
+	if probeErr != nil {
+		return probeErr
+	}
+	probesByID := map[string]Observation{}
+	for _, observation := range probeObservations {
+		probesByID[observation.ID] = observation
+	}
 	for _, candidate := range snapshot.Candidates {
 		if candidate.EdgeID == "" || seen[candidate.EdgeID] {
 			return errors.New("missing or duplicate physical edge")
@@ -452,6 +462,13 @@ func validate(snapshot Snapshot) error {
 	for _, observation := range snapshot.Observations {
 		if observation.ID == "" {
 			return errors.New("observation id required")
+		}
+		if observation.ClientProbeRoundID != "" || observation.ClientSource == "authenticated_client_probe" {
+			expected, exists := probesByID[observation.ID]
+			if !exists || !reflect.DeepEqual(expected, observation) {
+				return errors.New("client probe observation differs from complete captured report")
+			}
+			continue
 		}
 		if observation.NodeCapacityID != "" {
 			sample, found := capacitySamples[observation.EdgeID]

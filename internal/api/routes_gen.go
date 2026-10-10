@@ -43,6 +43,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/domains/{hostname}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformDomainBinding)))
 	mux.Handle("PUT /v1/admin/domains/{hostname}", s.auth.RequireAPI(http.HandlerFunc(s.handlePutPlatformDomainBinding)))
 	mux.Handle("DELETE /v1/admin/domains/{hostname}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeletePlatformDomainBinding)))
+	mux.Handle("POST /v1/admin/edge-quality/client-probes", s.auth.RequireAPI(http.HandlerFunc(s.handleIssueEdgeClientProbePlan)))
+	mux.Handle("POST /v1/admin/edge-quality/client-probes/report", s.auth.RequireAPI(http.HandlerFunc(s.handleReportEdgeClientProbeRound)))
 	mux.Handle("GET /v1/admin/edge/activation", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminGetEdgeActivation)))
 	mux.Handle("POST /v1/admin/edge/activation", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminAdvanceEdgeActivation)))
 	mux.Handle("POST /v1/admin/edge/activation/remediation", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminAdvanceEdgeRemediation)))

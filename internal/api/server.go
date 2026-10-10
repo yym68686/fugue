@@ -123,6 +123,8 @@ type Server struct {
 	frontNetworkObservationLast            map[string]time.Time
 	dynamicQuality                         dynamicQualityState
 	networkRouteWitness                    networkRouteWitnessState
+	clientProbePlanMu                      sync.Mutex
+	clientProbePlans                       map[string]time.Time
 	newManagedAppStatusClient              func() (*managedAppStatusClient, error)
 	managedAppStatusCache                  managedAppStatusCache
 	edgeRouteDecisionMu                    sync.Mutex

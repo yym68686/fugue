@@ -53,6 +53,11 @@ func validateBoundPhysicalQualitySnapshot(snapshot edgequality.Snapshot, evidenc
 		candidate.RouteGeneration, candidate.RouteProofVerified, candidate.ProofObservedAt = "", false, nil
 	}
 	bindPhysicalQualityEvidence(&derived, evidence)
+	probes, err := edgequality.ClientProbeObservations(derived)
+	if err != nil {
+		return err
+	}
+	derived.Observations = append(derived.Observations, probes...)
 	for index, candidate := range snapshot.Candidates {
 		bound := derived.Candidates[index]
 		if candidate.RouteGeneration != bound.RouteGeneration || candidate.RouteProofVerified != bound.RouteProofVerified || !sameQualityTime(candidate.ProofObservedAt, bound.ProofObservedAt) {
@@ -65,7 +70,7 @@ func validateBoundPhysicalQualitySnapshot(snapshot edgequality.Snapshot, evidenc
 	}
 	seen := map[string]bool{}
 	for _, observation := range snapshot.Observations {
-		if observation.ClientSource != "public_tcp_info" && observation.ServiceSource != "service_endpoint_tcp" && observation.CapacitySource != "kubelet_node_allocatable_v1" {
+		if observation.ClientSource != "public_tcp_info" && observation.ClientSource != "authenticated_client_probe" && observation.ServiceSource != "service_endpoint_tcp" && observation.CapacitySource != "kubelet_node_allocatable_v1" {
 			continue
 		}
 		bound, found := observations[observation.ID]

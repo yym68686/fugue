@@ -188,7 +188,7 @@ func selectNetworkChallenger(snapshot Snapshot, nodes map[string]Candidate, obse
 
 func hasClientNetworkCohort(observations []Observation) bool {
 	for _, observation := range observations {
-		if observation.ClientSource == "public_tcp_info" && observation.ClientNetworkMS != nil && validNetworkCohort(observation.ClientCohort) {
+		if measuredClientSource(observation.ClientSource) && observation.ClientNetworkMS != nil && validNetworkCohort(observation.ClientCohort) {
 			return true
 		}
 	}
@@ -199,12 +199,12 @@ func networkSharedCohorts(current, challenger []Observation) []string {
 	incumbent := map[string]bool{}
 	shared := map[string]bool{}
 	for _, observation := range current {
-		if observation.ClientSource == "public_tcp_info" && observation.ClientNetworkMS != nil && validNetworkCohort(observation.ClientCohort) {
+		if measuredClientSource(observation.ClientSource) && observation.ClientNetworkMS != nil && validNetworkCohort(observation.ClientCohort) {
 			incumbent[observation.ClientCohort] = true
 		}
 	}
 	for _, observation := range challenger {
-		if observation.ClientSource == "public_tcp_info" && observation.ClientNetworkMS != nil && incumbent[observation.ClientCohort] {
+		if measuredClientSource(observation.ClientSource) && observation.ClientNetworkMS != nil && incumbent[observation.ClientCohort] {
 			shared[observation.ClientCohort] = true
 		}
 	}
@@ -245,7 +245,7 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 	}
 	for _, observation := range observations {
 		assessment.RecordCount++
-		if compareClient && observation.ClientSource == "public_tcp_info" && validNetworkCohort(observation.ClientCohort) && (cohort == "" || cohort == observation.ClientCohort) {
+		if compareClient && measuredClientSource(observation.ClientSource) && validNetworkCohort(observation.ClientCohort) && (cohort == "" || cohort == observation.ClientCohort) {
 			collect("client_network_ms", observation.ClientNetworkMS, observation.ObservedAt)
 			collect("upload_bps", observation.UploadBPS, observation.ObservedAt)
 			collect("download_bps", observation.DownloadBPS, observation.ObservedAt)

@@ -111,6 +111,9 @@ type Service struct {
 	performanceBaseline      telemetry
 	networkSampleMu          sync.Mutex
 	networkSamples           []model.EdgeNetworkSample
+	clientProbeMu            sync.Mutex
+	clientProbePermits       map[string]time.Time
+	clientProbeLast          time.Time
 	originNetworkProbeMu     sync.Mutex
 	originNetworkProbeLast   time.Time
 	originNetworkProbeCursor string
@@ -1233,6 +1236,10 @@ func (s *Service) routeCanIssueTLS(route model.EdgeRouteBinding, allowlist []mod
 }
 
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
+	if _, requested := r.Header[http.CanonicalHeaderKey("X-Fugue-Network-Probe")]; requested {
+		s.handleClientMeasurement(w, r)
+		return
+	}
 	if _, requested := r.Header[http.CanonicalHeaderKey(routeproof.RequestHeader)]; requested {
 		s.handleRouteProof(w, r)
 		return

@@ -1023,6 +1023,72 @@ paths:
           $ref: '#/components/responses/ErrorResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
+  /v1/admin/edge-quality/client-probes:
+    post:
+      operationId: issueEdgeClientProbePlan
+      summary: Issue one bounded authenticated client measurement plan
+      description: >-
+        Requires explicit edge.quality.observe authority. Resolves current eligible
+        physical edges and exact route proofs. Issues short-lived signed permits
+        for identical generated download bytes; no application request is sent.
+        The executor records actual public TCP peer RTT. Client connect timing
+        is diagnostic only and cannot establish a terminal's public path.
+      tags: [Edge]
+      x-fugue-handler: handleIssueEdgeClientProbePlan
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EdgeClientProbeRequest'
+      responses:
+        '200':
+          description: Signed per-edge permits for a single same-content round.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EdgeClientProbePlan'}
+        '400': {$ref: '#/components/responses/ErrorResponse'}
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '503': {$ref: '#/components/responses/ErrorResponse'}
+  /v1/admin/edge-quality/client-probes/report:
+    post:
+      operationId: reportEdgeClientProbeRound
+      summary: Retain a complete authenticated client measurement round
+      description: >-
+        Requires explicit edge.quality.observe authority and the same observer
+        identity that obtained the signed plan. Requires one explicit outcome per
+        planned edge. Successful downloads must have identical expected bytes and
+        SHA-256. Signed executor attestations bind physical edge, route, bundle and
+        coarse public TCP peer. TTFB, application waiting and local connect timing
+        are not downstream throughput. Failed attempts remain explicit; all-failed
+        rounds cannot invent a peer cohort. Does not publish or change DNS.
+      tags: [Edge]
+      x-fugue-handler: handleReportEdgeClientProbeRound
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EdgeClientProbeReport'}
+      responses:
+        '200':
+          description: Complete retained observation, with no routing authorization.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [accepted, routing_authorized, report_digest]
+                properties:
+                  accepted: {type: boolean}
+                  routing_authorized: {type: boolean, enum: [false]}
+                  report_digest: {type: string}
+        '400': {$ref: '#/components/responses/ErrorResponse'}
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '503': {$ref: '#/components/responses/ErrorResponse'}
   /v1/edge/quality-rank/{hostname}:
     get:
       operationId: getEdgeQualityRank
@@ -19137,6 +19203,7 @@ components:
       additionalProperties: false
       required: [id, edge_id, hostname, traffic_class, scope, route_generation, observed_at, client_network_ms, service_network_ms, client_source, service_source, upload_bps, download_bps, client_failure_rate, service_failure_rate, capacity_utilization, diagnostics]
       properties:
+        client_probe_round_id: {type: string}
         client_retransmission_rate: {type: number, nullable: true, minimum: 0, maximum: 1, description: 'V4 only: retransmitted data segments divided by sent data segments in a verified public TCP delivery window. This is not a connection failure rate.'}
         client_cohort: {type: string, description: Coarse observed public TCP peer network. Never equated with the recursive DNS resolver or every terminal.}
         capacity_source: {type: string, description: Explicit capacity provenance; node capacity is not inferred from application concurrency.}
@@ -19178,6 +19245,11 @@ components:
       additionalProperties: false
       required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
       properties:
+        client_probe_reports:
+          type: array
+          maxItems: 256
+          items: {$ref: '#/components/schemas/EdgeClientProbeReport'}
+          description: Complete authenticated observer rounds with signed public-socket attestations and identical generated payloads. Never application or inference durations.
         limitations:
           type: array
           items: {type: string}
@@ -19640,6 +19712,98 @@ components:
         updated_at:
           type: string
           format: date-time
+    EdgeClientProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [hostname, path, traffic_class, observer_label]
+      properties:
+        hostname: {type: string, maxLength: 253}
+        path: {type: string, maxLength: 2048}
+        traffic_class: {type: string, enum: [dynamic_api, streaming]}
+        observer_label: {type: string, minLength: 1, maxLength: 128}
+    EdgeClientProbePermit:
+      type: object
+      additionalProperties: false
+      required: [schema, round_id, attempt_id, observer_id, hostname, path, traffic_class, edge_id, edge_group_id, address, route_digest, bundle_version, issued_at, expires_at, body_bytes, body_seed, body_sha256, target_edge_ids, key_id, signature]
+      properties:
+        schema: {type: string, enum: [fugue.client-probe-permit/v1]}
+        round_id: {type: string}
+        attempt_id: {type: string}
+        observer_id: {type: string}
+        hostname: {type: string}
+        path: {type: string}
+        traffic_class: {type: string, enum: [dynamic_api, streaming]}
+        edge_id: {type: string}
+        edge_group_id: {type: string}
+        address: {type: string}
+        route_digest: {type: string}
+        bundle_version: {type: string}
+        issued_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        body_bytes: {type: integer, enum: [1048576]}
+        body_seed: {type: string}
+        body_sha256: {type: string}
+        target_edge_ids:
+          type: array
+          minItems: 2
+          maxItems: 8
+          uniqueItems: true
+          items: {type: string}
+        key_id: {type: string}
+        signature: {type: string}
+    EdgeClientProbePlan:
+      type: object
+      additionalProperties: false
+      required: [schema, round_id, observer_label, permits]
+      properties:
+        schema: {type: string, enum: [fugue.client-probe-plan/v1]}
+        round_id: {type: string}
+        observer_label: {type: string}
+        permits:
+          type: array
+          minItems: 2
+          maxItems: 8
+          items: {$ref: '#/components/schemas/EdgeClientProbePermit'}
+    EdgeClientProbeAttestation:
+      type: object
+      additionalProperties: false
+      required: [schema, attempt_id, edge_id, edge_group_id, route_digest, bundle_version, observed_at, client_network, key_id, signature]
+      properties:
+        schema: {type: string, enum: [fugue.client-probe-attestation/v1]}
+        attempt_id: {type: string}
+        edge_id: {type: string}
+        edge_group_id: {type: string}
+        route_digest: {type: string}
+        bundle_version: {type: string}
+        observed_at: {type: string, format: date-time}
+        client_network: {$ref: '#/components/schemas/EdgeClientNetworkSample'}
+        key_id: {type: string}
+        signature: {type: string}
+    EdgeClientProbeOutcome:
+      type: object
+      additionalProperties: false
+      required: [attempt_id, started_at, completed_at, bytes_received, body_sha256, body_seconds, failure]
+      properties:
+        attempt_id: {type: string}
+        started_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time}
+        bytes_received: {type: integer, minimum: 0, maximum: 1048576}
+        body_sha256: {type: string}
+        body_seconds: {type: number, minimum: 0, maximum: 90}
+        failure: {type: string, enum: ['', connect, tls, response, body, integrity]}
+        attestation: {$ref: '#/components/schemas/EdgeClientProbeAttestation'}
+    EdgeClientProbeReport:
+      type: object
+      additionalProperties: false
+      required: [schema, plan, outcomes]
+      properties:
+        schema: {type: string, enum: [fugue.client-probe-report/v1]}
+        plan: {$ref: '#/components/schemas/EdgeClientProbePlan'}
+        outcomes:
+          type: array
+          minItems: 2
+          maxItems: 8
+          items: {$ref: '#/components/schemas/EdgeClientProbeOutcome'}
     EdgeNetworkSample:
       type: object
       additionalProperties: false

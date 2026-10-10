@@ -84,6 +84,20 @@ func (s *Server) capturePhysicalQualityWithAnswer(ctx context.Context, hostname,
 	if len(networkSamples) == edgequality.MaxObservations {
 		snapshot.Blockers = append(snapshot.Blockers, "network_observation_limit_reached")
 	}
+	if networkPolicy.Version == edgequality.DeliveryNetworkPolicyVersion {
+		reports, err := s.store.ListEdgeClientProbeReports(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), 256)
+		if err != nil {
+			return edgequality.Receipt{}, err
+		}
+		for _, report := range reports {
+			if len(report.Plan.Permits) > 0 && report.Plan.Permits[0].TrafficClass == trafficClass {
+				snapshot.ClientProbeReports = append(snapshot.ClientProbeReports, report)
+			}
+		}
+		if len(reports) == 256 {
+			snapshot.Blockers = append(snapshot.Blockers, "client_probe_report_limit_reached")
+		}
+	}
 	witnesses, err := s.store.ListEdgeNetworkRouteWitnesses(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), 256)
 	if err != nil {
 		return edgequality.Receipt{}, err
@@ -186,6 +200,14 @@ func bindPhysicalQualityDNS(snapshot *edgequality.Snapshot, receipt dnsserver.DN
 	}
 	snapshot.ActualDNSReceipt = raw
 	bindPhysicalQualityEvidence(snapshot, evidence)
+	probes, err := edgequality.ClientProbeObservations(*snapshot)
+	if err != nil {
+		return err
+	}
+	if len(snapshot.Observations)+len(probes) > edgequality.MaxObservations {
+		return errors.New("client probe observations exceed snapshot bound")
+	}
+	snapshot.Observations = append(snapshot.Observations, probes...)
 	return nil
 }
 
