@@ -121,3 +121,26 @@ func TestPayloadIsFixedSizeReproducibleAndSeedBound(t *testing.T) {
 		t.Fatal("fixed-content probe is not reproducible")
 	}
 }
+
+func TestClientWallClockSkewDoesNotAlterTransferDurationOrPermitLifetime(t *testing.T) {
+	for _, offset := range []time.Duration{-1500 * time.Millisecond, 1500 * time.Millisecond, -4 * time.Second, 4 * time.Second} {
+		report, keys := reportFixture(t)
+		for index := range report.Outcomes {
+			report.Outcomes[index].StartedAt = report.Outcomes[index].StartedAt.Add(offset)
+			report.Outcomes[index].CompletedAt = report.Outcomes[index].CompletedAt.Add(offset)
+			report.Outcomes[index].HTTPStatus = 200
+		}
+		_, err := ValidateReport(report)
+		if (err != nil) != (offset < -ClientClockSkew || offset > ClientClockSkew) {
+			t.Fatalf("clock offset %s validation: %v", offset, err)
+		}
+		permit := report.Plan.Permits[0]
+		if VerifyPermit(permit, keys, permit.ExpiresAt) == nil {
+			t.Fatal("client clock allowance extended a signed server permit")
+		}
+		report.Outcomes[0].BodySeconds = 4
+		if _, err := ValidateReport(report); err == nil {
+			t.Fatal("wall clock allowance admitted impossible transfer duration")
+		}
+	}
+}

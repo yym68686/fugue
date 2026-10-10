@@ -60,6 +60,7 @@ type EdgeClientProbeOutcome struct {
 	BodySHA256    string                      `json:"body_sha256"`
 	BodySeconds   float64                     `json:"body_seconds"`
 	Failure       string                      `json:"failure"`
+	HTTPStatus    int                         `json:"http_status,omitempty"`
 	Attestation   *EdgeClientProbeAttestation `json:"attestation,omitempty"`
 }
 

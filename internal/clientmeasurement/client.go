@@ -95,6 +95,7 @@ func measure(ctx context.Context, permit model.EdgeClientProbePermit) model.Edge
 }
 
 func receiveProbeResponse(result model.EdgeClientProbeOutcome, permit model.EdgeClientProbePermit, response *http.Response) model.EdgeClientProbeOutcome {
+	result.HTTPStatus = response.StatusCode
 	if response.StatusCode != http.StatusOK || response.ContentLength != BodyBytes || response.Header.Get("Content-Encoding") != "" || len(response.Header.Values(AttestationHeader)) != 1 || len(response.Header.Get(AttestationHeader)) > 16384 {
 		result.Failure, result.CompletedAt = "response", time.Now().UTC()
 		return result

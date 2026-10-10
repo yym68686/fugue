@@ -19791,6 +19791,7 @@ components:
     EdgeClientProbeOutcome:
       type: object
       additionalProperties: false
+      description: Client wall timestamps admit at most two seconds of clock skew against signed server times. Attempt duration remains bounded to 90 seconds; body_seconds measures only receiver body transfer with a monotonic clock.
       required: [attempt_id, started_at, completed_at, bytes_received, body_sha256, body_seconds, failure]
       properties:
         attempt_id: {type: string}
@@ -19800,6 +19801,7 @@ components:
         body_sha256: {type: string}
         body_seconds: {type: number, minimum: 0, maximum: 90}
         failure: {type: string, enum: ['', connect, tls, response, body, integrity]}
+        http_status: {type: integer, minimum: 100, maximum: 599, description: HTTP response status when headers were received; a rejected measurement is not a network failure.}
         attestation: {$ref: '#/components/schemas/EdgeClientProbeAttestation'}
     EdgeClientProbeReport:
       type: object

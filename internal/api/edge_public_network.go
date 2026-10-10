@@ -35,6 +35,9 @@ func (s *Server) handleReadEdgePublicNetworkObservation(writer http.ResponseWrit
 		return
 	}
 	if !s.allowPublicNetworkObservation(query.EdgeID, time.Now()) {
+		if s.log != nil {
+			s.log.Printf("public Front network observation rejected; edge_id=%s slot=%s reason=rate_limited", query.EdgeID, query.Slot)
+		}
 		httpx.WriteError(writer, http.StatusTooManyRequests, "Front observation budget exhausted")
 		return
 	}
@@ -47,6 +50,9 @@ func (s *Server) handleReadEdgePublicNetworkObservation(writer http.ResponseWrit
 	defer cancel()
 	response, err := s.readPublicFrontNetwork(ctx, node, query)
 	if err != nil {
+		if s.log != nil {
+			s.log.Printf("public Front network observation rejected; edge_id=%s slot=%s reason=%s", query.EdgeID, query.Slot, err.Error())
+		}
 		httpx.WriteError(writer, http.StatusServiceUnavailable, "selected public Front connection evidence unavailable")
 		return
 	}
@@ -158,56 +164,56 @@ func (s *Server) readPublicFrontNetwork(ctx context.Context, node model.EdgeNode
 		return frontnetwork.Response{}, err
 	}
 	defer client.closeIdleConnections()
-	fail := func() (frontnetwork.Response, error) {
-		return frontnetwork.Response{}, errors.New("public Front runtime binding failed")
+	fail := func(reason string) (frontnetwork.Response, error) {
+		return frontnetwork.Response{}, errors.New("public Front runtime binding failed: " + reason)
 	}
 	base := "/api/v1/namespaces/" + url.PathEscape(s.controlPlaneNamespace)
 	var services corev1.ServiceList
 	var pods corev1.PodList
 	podPath := base + "/pods?" + url.Values{"fieldSelector": {"spec.nodeName=" + node.ID}, "limit": {"256"}}.Encode()
 	if client.doJSON(ctx, http.MethodGet, base+"/services?limit=256", &services) != nil || services.Continue != "" || client.doJSON(ctx, http.MethodGet, podPath, &pods) != nil || pods.Continue != "" {
-		return fail()
+		return fail("runtime_inventory_unavailable")
 	}
 	service, err := publicFrontService(services.Items, node, s.controlPlaneNamespace)
 	if err != nil {
-		return fail()
+		return fail("serving_service_identity")
 	}
 	pod, port, err := publicFrontPod(*service, pods.Items, node)
 	if err != nil {
-		return fail()
+		return fail("serving_pod_identity")
 	}
 	slicePath := "/apis/discovery.k8s.io/v1/namespaces/" + url.PathEscape(s.controlPlaneNamespace) + "/endpointslices?" + url.Values{"labelSelector": {discoveryv1.LabelServiceName + "=" + service.Name}, "limit": {"256"}}.Encode()
 	var endpoints discoveryv1.EndpointSliceList
 	if client.doJSON(ctx, http.MethodGet, slicePath, &endpoints) != nil || endpoints.Continue != "" || !dnsBackendEndpointsMatch(*service, *pod, endpoints.Items, true) {
-		return fail()
+		return fail("serving_endpoints_identity")
 	}
 	var connections frontnetwork.LiveConnections
 	observed := time.Now().UTC()
 	path := base + "/pods/" + url.PathEscape(pod.Name+":"+strconv.Itoa(port)) + "/proxy/edge/tcp-connections"
 	if readDNSPodObservation(ctx, client, path, &connections, 2<<20) != nil {
-		return fail()
+		return fail("socket_inventory_unavailable")
 	}
 	sample, err := frontnetwork.SampleFromLiveConnections(query, connections, observed)
 	if err != nil {
-		return fail()
+		return fail(err.Error())
 	}
 	var currentServices corev1.ServiceList
 	var currentPod corev1.Pod
 	var currentEndpoints discoveryv1.EndpointSliceList
 	if client.doJSON(ctx, http.MethodGet, base+"/services?limit=256", &currentServices) != nil || currentServices.Continue != "" || client.doJSON(ctx, http.MethodGet, base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil || client.doJSON(ctx, http.MethodGet, slicePath, &currentEndpoints) != nil || currentEndpoints.Continue != "" {
-		return fail()
+		return fail("runtime_recheck_unavailable")
 	}
 	current, err := publicFrontService(currentServices.Items, node, s.controlPlaneNamespace)
 	if err != nil || current.UID != service.UID || current.ResourceVersion != service.ResourceVersion || currentPod.UID != pod.UID || currentPod.ResourceVersion != pod.ResourceVersion || !reflect.DeepEqual(currentEndpoints.Items, endpoints.Items) {
-		return fail()
+		return fail("runtime_changed_during_observation")
 	}
 	digest, err := platformconfig.Digest(endpoints.Items)
 	if err != nil {
-		return fail()
+		return fail("endpoints_digest_invalid")
 	}
 	sample.Backend = &model.EdgeClientNetworkBackend{Namespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID), PodVersion: pod.ResourceVersion, ServiceName: service.Name, ServiceUID: string(service.UID), ServiceVersion: service.ResourceVersion, EndpointsDigest: digest}
 	if model.ValidateEdgeClientNetworkSample(&sample) != nil {
-		return fail()
+		return fail("sample_validation_failed")
 	}
 	return frontnetwork.Response{Schema: frontnetwork.Schema, Nonce: query.Nonce, EdgeID: node.ID, GroupID: node.EdgeGroupID, Sample: sample}, nil
 }

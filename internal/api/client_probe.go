@@ -173,7 +173,7 @@ func (s *Server) handleReportEdgeClientProbeRound(writer http.ResponseWriter, re
 		}
 		index := slices.IndexFunc(report.Outcomes, func(outcome model.EdgeClientProbeOutcome) bool { return outcome.AttemptID == permit.AttemptID })
 		outcome := report.Outcomes[index]
-		if outcome.CompletedAt.After(now) || outcome.Attestation != nil && clientmeasurement.VerifyAttestation(*outcome.Attestation, permit, keys) != nil {
+		if outcome.CompletedAt.After(now.Add(clientmeasurement.ClientClockSkew)) || outcome.Attestation != nil && clientmeasurement.VerifyAttestation(*outcome.Attestation, permit, keys) != nil {
 			httpx.WriteError(writer, http.StatusBadRequest, "unverified executor or future client outcome")
 			return
 		}

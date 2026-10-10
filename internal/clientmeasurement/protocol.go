@@ -145,6 +145,8 @@ func VerifyAttestation(value model.EdgeClientProbeAttestation, permit model.Edge
 	return nil
 }
 
+const ClientClockSkew = 2 * time.Second
+
 func ValidateReport(report model.EdgeClientProbeReport) (string, error) {
 	plan := report.Plan
 	if report.Schema != "fugue.client-probe-report/v1" || plan.Schema != "fugue.client-probe-plan/v1" || len(plan.Permits) < 2 || len(plan.Permits) > 8 || len(plan.Permits) != len(report.Outcomes) || plan.ObserverLabel == "" || len(plan.ObserverLabel) > 128 || strings.ContainsAny(plan.ObserverLabel, "\r\n\x00") {
@@ -172,12 +174,12 @@ func ValidateReport(report model.EdgeClientProbeReport) (string, error) {
 		}
 		seen[permit.EdgeID] = true
 		outcome, found := outcomes[permit.AttemptID]
-		if !found || outcome.StartedAt.Before(permit.IssuedAt) || outcome.CompletedAt.Before(outcome.StartedAt) || outcome.CompletedAt.After(permit.ExpiresAt) || outcome.CompletedAt.Sub(outcome.StartedAt) > 90*time.Second || outcome.BytesReceived < 0 || outcome.BytesReceived > BodyBytes || math.IsNaN(outcome.BodySeconds) || math.IsInf(outcome.BodySeconds, 0) || outcome.BodySeconds < 0 || outcome.BodySeconds > outcome.CompletedAt.Sub(outcome.StartedAt).Seconds()+0.01 {
+		if !found || outcome.StartedAt.Before(permit.IssuedAt.Add(-ClientClockSkew)) || outcome.CompletedAt.Before(outcome.StartedAt) || outcome.CompletedAt.After(permit.ExpiresAt.Add(ClientClockSkew)) || outcome.CompletedAt.Sub(outcome.StartedAt) > 90*time.Second || outcome.BytesReceived < 0 || outcome.BytesReceived > BodyBytes || math.IsNaN(outcome.BodySeconds) || math.IsInf(outcome.BodySeconds, 0) || outcome.BodySeconds < 0 || outcome.BodySeconds > outcome.CompletedAt.Sub(outcome.StartedAt).Seconds()+0.01 || outcome.HTTPStatus != 0 && (outcome.HTTPStatus < 100 || outcome.HTTPStatus > 599) {
 			return "", errors.New("probe timing or attempt denominator is invalid")
 		}
 		switch outcome.Failure {
 		case "":
-			if outcome.BytesReceived != BodyBytes || outcome.BodySHA256 != permit.BodySHA256 || outcome.BodySeconds <= 0 || outcome.Attestation == nil {
+			if outcome.BytesReceived != BodyBytes || outcome.BodySHA256 != permit.BodySHA256 || outcome.BodySeconds <= 0 || outcome.Attestation == nil || outcome.HTTPStatus != 0 && outcome.HTTPStatus != 200 {
 				return "", errors.New("successful probe lacks complete identical response bytes")
 			}
 		case "connect", "tls", "response", "body", "integrity":
@@ -185,7 +187,7 @@ func ValidateReport(report model.EdgeClientProbeReport) (string, error) {
 			return "", errors.New("unsupported client probe failure category")
 		}
 		if outcome.Attestation != nil {
-			if outcome.Attestation.ObservedAt.Before(outcome.StartedAt) || outcome.Attestation.ObservedAt.After(outcome.CompletedAt) {
+			if outcome.Attestation.ObservedAt.Before(outcome.StartedAt.Add(-ClientClockSkew)) || outcome.Attestation.ObservedAt.After(outcome.CompletedAt.Add(ClientClockSkew)) {
 				return "", errors.New("public socket attestation falls outside client attempt")
 			}
 			if err := ValidateAttestation(*outcome.Attestation, permit); err != nil {

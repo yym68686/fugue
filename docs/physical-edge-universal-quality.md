@@ -33,6 +33,8 @@ The authenticated observer submits exactly one outcome for every signed target. 
 
 Reports are stored separately from legacy socket samples and are immutable on retry. V4 receipts retain the complete original report; publication reconstructs every derived metric and rejects omitted attempts. Older evaluators and receipts keep their original inputs. This trust model authorizes a named operator to report receiver measurements; it does not accept arbitrary browser claims or assert that a recursive resolver represents every terminal. A bounded CLI run measures its current network and does not create a permanent client agent or authorize DNS publication.
 
+Client and server wall clocks may differ by up to two seconds when validating an attempt against its permit and public-socket timestamp. Signed permit expiration on the server remains exact. The client measures body duration with a monotonic clock; clock tolerance cannot extend the 90-second attempt bound or admit a body duration longer than the attempt. Optional HTTP status distinguishes rejected measurements from transport failures.
+
 ## Bounded universal capture
 
 `dynamic_quality` is an explicit signed producer strategy, separate from code deployment. It derives owned dynamic hostnames from the frozen route intent. Static and pinned routes are excluded with a recorded reason. DNS-only aliases preserve their own real answer receipt while measuring their declared service owners. Shared aliases require complete receipts for every owner and a sustained unanimous winner; aggregate quality uses the worst service cost. Unmeasured address families remain visible as incomplete evidence coverage and are not mislabeled as measured adoption.
