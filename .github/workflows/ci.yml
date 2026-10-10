@@ -1152,6 +1152,123 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  front_replacement_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+      config: ${{ steps.plan.outputs.config }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one independent Front executor replacement
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/front-executor-replacement)
+          if (( ${#declarations[@]} > 1 )); then
+            echo 'one physical Front replacement atom is required' >&2
+            exit 1
+          fi
+          if (( ${#declarations[@]} == 1 )); then
+            config="${declarations[0]}"
+            [[ "$config" =~ ^deploy/environments/production/front-executor-replacement/[a-z0-9][a-z0-9-]*\.json$ ]]
+            python3 -m scripts.replace_front_executor validate "$config"
+            echo "config=$config" >> "$GITHUB_OUTPUT"
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  front_replacement:
+    needs: [prepush, front_replacement_plan]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_replacement_plan.outputs.selected == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-front-serving-handoff, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    outputs:
+      prepared: ${{ steps.prepared.outputs.ready }}
+    env:
+      CONFIG: ${{ needs.front_replacement_plan.outputs.config }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Require unchanged explicit Front replacement
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml scripts/replace_front_executor.py scripts/observe_front_candidate.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py scripts/reconcile_front_probe_transport.py scripts/stage_front_serving_transport.py scripts/handoff_front_serving_transport.py
+          python3 -m unittest scripts.test_replace_front_executor
+      - name: Prepare current executor and serving baseline evidence
+        run: python3 -m scripts.replace_front_executor prepare "$CONFIG" --evidence "$RUNNER_TEMP/front-replacement.json"
+      - name: Retain compensation witness before public mutation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-front-replacement-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-replacement.json
+          if-no-files-found: error
+          retention-days: 30
+      - id: prepared
+        run: echo 'ready=true' >> "$GITHUB_OUTPUT"
+      - name: Replace selector and verify preserved and new connections
+        run: python3 -m scripts.replace_front_executor apply "$CONFIG" --evidence "$RUNNER_TEMP/front-replacement.json" --result "$RUNNER_TEMP/front-replacement-result.json"
+      - name: Retain actual connection handoff evidence
+        if: always() && steps.prepared.outputs.ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-front-replacement-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-replacement-result.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  front_replacement_external:
+    needs: [front_replacement, front_replacement_plan]
+    if: ${{ needs.front_replacement.outputs.prepared == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    env:
+      CONFIG: ${{ needs.front_replacement_plan.outputs.config }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}'}
+      - name: Verify external TLS and exact physical edge authority
+        run: python3 -m scripts.replace_front_executor external "$CONFIG" --evidence "$RUNNER_TEMP/front-replacement-external.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-front-replacement-external-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-replacement-external.json
+          if-no-files-found: error
+          retention-days: 30
+
+  front_replacement_recovery:
+    needs: [front_replacement, front_replacement_external, front_replacement_plan]
+    if: ${{ always() && needs.front_replacement.outputs.prepared == 'true' && (needs.front_replacement.result != 'success' || needs.front_replacement_external.result != 'success') }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-front-serving-handoff, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read, actions: read}
+    env:
+      CONFIG: ${{ needs.front_replacement_plan.outputs.config }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}'}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: fugue-front-replacement-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-replacement-recovery
+      - name: Compensate only this exact applied selector generation
+        run: python3 -m scripts.replace_front_executor recover "$CONFIG" --evidence "$RUNNER_TEMP/front-replacement-recovery/front-replacement.json"
+
   front_observation:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
