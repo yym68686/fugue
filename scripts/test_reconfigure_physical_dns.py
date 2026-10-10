@@ -125,6 +125,9 @@ class PhysicalDNSConfigurationTests(unittest.TestCase):
         policy = config["projection_policy"]["dns_query_policy"]["physical_routes"][0]["policy"]
         policy["version"] = "physical-network-bounded-v3"
         self.assertEqual(config, routing.validate(config))
+        for version in ["physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6"]:
+            policy["version"] = version
+            self.assertEqual(config, routing.validate(config))
         policy["unknown_cost_ms"] = None
         with self.assertRaises(ValueError):
             routing.validate(config)

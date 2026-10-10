@@ -52,7 +52,7 @@ def validate(config):
     if query.get("ranking_mode") != "active" or not 1 <= len(routes) <= 64 or len({route.get("hostname") for route in routes}) != len(routes) or sum(route.get("hostname") == hostname for route in routes) != 1:
         raise ValueError("explicit active physical route policy required")
     for route in routes:
-        if set(route) != {"hostname", "traffic_class", "policy"} or set(route["policy"]) != POLICY_FIELDS or route["policy"].get("version") not in ["physical-network-cohort-v2", "physical-network-bounded-v3"] or any(route["policy"][field] is None for field in POLICY_FIELDS):
+        if set(route) != {"hostname", "traffic_class", "policy"} or set(route["policy"]) != POLICY_FIELDS or route["policy"].get("version") not in ["physical-network-cohort-v2", "physical-network-bounded-v3", "physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6"] or any(route["policy"][field] is None for field in POLICY_FIELDS):
             raise ValueError("physical route must declare complete versioned network policy")
     return config
 
@@ -190,7 +190,7 @@ def main():
         raise ValueError("configuration credential and evidence path required")
     def save(value):
         Path(args.evidence).write_text(canonical(value) + "\n")
-    print(canonical(publish(config, API(config["origin"], token, response_limit=16 << 20), save)))
+    print(canonical(publish(config, API(config["origin"], token, response_limit=128 << 20, timeout=120), save)))
 
 
 if __name__ == "__main__":
