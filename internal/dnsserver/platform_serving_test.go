@@ -302,8 +302,10 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 			if h.ConsumerID != consumerID || h.NodeID != "dns-a" {
 				t.Error("DNS receipt lost authority or physical node")
 			}
-			if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) {
-				t.Error("executor capability missing")
+			for _, capability := range []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5, platformcontrol.PhysicalComparableDeliveryCapabilityV6} {
+				if !slices.Contains(h.CompatibilityCapabilities, capability) {
+					t.Error("serving heartbeat downgraded executor capability", capability)
+				}
 			}
 			if h.ApplyStatus != "applied" || (h.ProbeStatus != "passed" && !(allowFailed && h.ProbeStatus == "failed")) {
 				t.Error("invalid receipt")
