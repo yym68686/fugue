@@ -30,6 +30,13 @@ type QualityAnswerEvidence struct {
 	Proofs       []QualityRouteProof
 }
 
+func QualityEvidenceFromCapturedDNSDecision(receipt DNSDecisionReceipt, capturedAt, now time.Time, maximumAge time.Duration) (QualityAnswerEvidence, error) {
+	if maximumAge <= 0 || capturedAt.IsZero() || capturedAt.After(now) || now.Sub(capturedAt) > maximumAge || receipt.ObservedAt.After(capturedAt) || now.Sub(receipt.ObservedAt) > maximumAge {
+		return QualityAnswerEvidence{}, errors.New("captured DNS quality evidence is outside the publication freshness bound")
+	}
+	return QualityEvidenceFromDNSDecision(receipt, capturedAt, maximumAge)
+}
+
 func QualityEvidenceFromDNSDecision(receipt DNSDecisionReceipt, now time.Time, maximumAge time.Duration) (QualityAnswerEvidence, error) {
 	if maximumAge <= 0 || !receipt.WriteSucceeded || receipt.RCode != 0 || receipt.ObservedAt.IsZero() || receipt.ObservedAt.After(now) || now.Sub(receipt.ObservedAt) > maximumAge || receipt.AnswerPublication == nil {
 		return QualityAnswerEvidence{}, errors.New("actual DNS answer is absent, failed or stale")

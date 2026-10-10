@@ -26,7 +26,7 @@ func compileBoundPhysicalQualitySelection(receipt edgequality.Receipt, now time.
 	if answer.QType != dns.TypeA {
 		return nil, errors.New("physical publication requires actual IPv4 DNS evidence")
 	}
-	evidence, err := dnsserver.QualityEvidenceFromDNSDecision(answer, now, time.Duration(receipt.Snapshot.Policy.EvidenceMaxAgeSeconds)*time.Second)
+	evidence, err := dnsserver.QualityEvidenceFromCapturedDNSDecision(answer, receipt.Snapshot.CapturedAt, now, time.Duration(receipt.Snapshot.Policy.EvidenceMaxAgeSeconds)*time.Second)
 	if err != nil {
 		return nil, err
 	}

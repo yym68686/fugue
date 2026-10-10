@@ -122,3 +122,29 @@ func TestQualityDNSBindingRejectsFailedWritesAndTampering(t *testing.T) {
 		})
 	}
 }
+
+func TestCapturedDNSQualityRevalidationKeepsOriginalProofTimeAndCurrentFreshnessBound(t *testing.T) {
+	receipt, capturedAt := qualityEvidenceFixture(t)
+	original, err := QualityEvidenceFromDNSDecision(receipt, capturedAt, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := capturedAt.Add(31 * time.Second)
+	if _, err := QualityEvidenceFromDNSDecision(receipt, later, time.Minute); err == nil {
+		t.Fatal("current readiness incorrectly admitted an expired proof")
+	}
+	replayed, err := QualityEvidenceFromCapturedDNSDecision(receipt, capturedAt, later, time.Minute)
+	if err != nil || len(replayed.Proofs) != len(original.Proofs) || replayed.ReceiptID != original.ReceiptID || replayed.Publication != original.Publication {
+		t.Fatal("historical capture changed while batch publication was prepared", replayed, err)
+	}
+	for _, times := range [][2]time.Time{{capturedAt, capturedAt.Add(61 * time.Second)}, {later, later}, {capturedAt.Add(-time.Second), later}, {later.Add(time.Second), later}} {
+		if _, err := QualityEvidenceFromCapturedDNSDecision(receipt, times[0], times[1], time.Minute); err == nil {
+			t.Fatal("stale, future or originally invalid capture accepted", times)
+		}
+	}
+	receipt.WriteSucceeded = false
+	receipt.EvidenceDigest = dnsDecisionDigest(receipt)
+	if _, err := QualityEvidenceFromCapturedDNSDecision(receipt, capturedAt, later, time.Minute); err == nil {
+		t.Fatal("failed original answer accepted")
+	}
+}
