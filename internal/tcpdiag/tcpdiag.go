@@ -10,33 +10,36 @@ import (
 )
 
 type Snapshot struct {
-	Available       bool
-	Error           string
-	State           uint8
-	RTTUsec         uint32
-	RTTVarUsec      uint32
-	MinRTTUsec      uint32
-	RTOUsec         uint32
-	Retransmits     uint8
-	TotalRetrans    uint32
-	Unacked         uint32
-	Sacked          uint32
-	Lost            uint32
-	SegsIn          uint32
-	SegsOut         uint32
-	DataSegsIn      uint32
-	DataSegsOut     uint32
-	BytesReceived   uint64
-	BytesAcked      uint64
-	BytesSent       uint64
-	BytesRetrans    uint64
-	DeliveryRateBPS uint64
-	RcvSpace        uint32
-	RcvMSS          uint32
-	SndMSS          uint32
-	LastDataRecvMS  uint32
-	TotalRTO        uint16
-	TotalRTOTimeMS  uint32
+	Available              bool
+	Error                  string
+	State                  uint8
+	RTTUsec                uint32
+	RTTVarUsec             uint32
+	MinRTTUsec             uint32
+	RTOUsec                uint32
+	Retransmits            uint8
+	TotalRetrans           uint32
+	Unacked                uint32
+	Sacked                 uint32
+	Lost                   uint32
+	SegsIn                 uint32
+	SegsOut                uint32
+	DataSegsIn             uint32
+	DataSegsOut            uint32
+	BytesReceived          uint64
+	BytesAcked             uint64
+	BytesSent              uint64
+	BytesRetrans           uint64
+	DeliveryRateBPS        uint64
+	DeliveryRateAppLimited bool
+	BusyTimeUsec           uint64
+	LastDataSentMS         uint32
+	RcvSpace               uint32
+	RcvMSS                 uint32
+	SndMSS                 uint32
+	LastDataRecvMS         uint32
+	TotalRTO               uint16
+	TotalRTOTimeMS         uint32
 }
 
 type ProcMetric struct {
@@ -78,6 +81,9 @@ func SnapshotFields(prefix string, snapshot Snapshot) map[string]any {
 	fields[prefix+"tcp_bytes_sent"] = snapshot.BytesSent
 	fields[prefix+"tcp_bytes_retrans"] = snapshot.BytesRetrans
 	fields[prefix+"tcp_delivery_rate_bps"] = snapshot.DeliveryRateBPS
+	fields[prefix+"tcp_delivery_rate_app_limited"] = snapshot.DeliveryRateAppLimited
+	fields[prefix+"tcp_busy_time_us"] = snapshot.BusyTimeUsec
+	fields[prefix+"tcp_last_data_sent_ms"] = snapshot.LastDataSentMS
 	fields[prefix+"tcp_rcv_space"] = snapshot.RcvSpace
 	fields[prefix+"tcp_rcv_mss"] = snapshot.RcvMSS
 	fields[prefix+"tcp_snd_mss"] = snapshot.SndMSS

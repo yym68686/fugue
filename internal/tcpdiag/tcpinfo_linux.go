@@ -3,8 +3,10 @@
 package tcpdiag
 
 import (
+	"encoding/binary"
 	"net"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -38,32 +40,39 @@ func SnapshotFromConn(conn net.Conn) Snapshot {
 	if info == nil {
 		return Snapshot{Error: "tcp_info unavailable"}
 	}
+	appLimitedMask := uint8(1)
+	if binary.NativeEndian.Uint16([]byte{1, 0}) != 1 {
+		appLimitedMask = 128
+	}
 	return Snapshot{
-		Available:       true,
-		State:           info.State,
-		RTTUsec:         info.Rtt,
-		RTTVarUsec:      info.Rttvar,
-		MinRTTUsec:      info.Min_rtt,
-		RTOUsec:         info.Rto,
-		Retransmits:     info.Retransmits,
-		TotalRetrans:    info.Total_retrans,
-		Unacked:         info.Unacked,
-		Sacked:          info.Sacked,
-		Lost:            info.Lost,
-		SegsIn:          info.Segs_in,
-		SegsOut:         info.Segs_out,
-		DataSegsIn:      info.Data_segs_in,
-		DataSegsOut:     info.Data_segs_out,
-		BytesReceived:   info.Bytes_received,
-		BytesAcked:      info.Bytes_acked,
-		BytesSent:       info.Bytes_sent,
-		BytesRetrans:    info.Bytes_retrans,
-		DeliveryRateBPS: info.Delivery_rate,
-		RcvSpace:        info.Rcv_space,
-		RcvMSS:          info.Rcv_mss,
-		SndMSS:          info.Snd_mss,
-		LastDataRecvMS:  info.Last_data_recv,
-		TotalRTO:        info.Total_rto,
-		TotalRTOTimeMS:  info.Total_rto_time,
+		Available:              true,
+		State:                  info.State,
+		RTTUsec:                info.Rtt,
+		RTTVarUsec:             info.Rttvar,
+		MinRTTUsec:             info.Min_rtt,
+		RTOUsec:                info.Rto,
+		Retransmits:            info.Retransmits,
+		TotalRetrans:           info.Total_retrans,
+		Unacked:                info.Unacked,
+		Sacked:                 info.Sacked,
+		Lost:                   info.Lost,
+		SegsIn:                 info.Segs_in,
+		SegsOut:                info.Segs_out,
+		DataSegsIn:             info.Data_segs_in,
+		DataSegsOut:            info.Data_segs_out,
+		BytesReceived:          info.Bytes_received,
+		BytesAcked:             info.Bytes_acked,
+		BytesSent:              info.Bytes_sent,
+		BytesRetrans:           info.Bytes_retrans,
+		DeliveryRateBPS:        info.Delivery_rate,
+		DeliveryRateAppLimited: *(*uint8)(unsafe.Add(unsafe.Pointer(info), 7))&appLimitedMask != 0,
+		BusyTimeUsec:           info.Busy_time,
+		LastDataSentMS:         info.Last_data_sent,
+		RcvSpace:               info.Rcv_space,
+		RcvMSS:                 info.Rcv_mss,
+		SndMSS:                 info.Snd_mss,
+		LastDataRecvMS:         info.Last_data_recv,
+		TotalRTO:               info.Total_rto,
+		TotalRTOTimeMS:         info.Total_rto_time,
 	}
 }

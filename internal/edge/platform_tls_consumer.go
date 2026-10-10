@@ -234,7 +234,7 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 	}
 	// No independent TLS serving/LKG generation has been established yet.
 	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, ProtocolVersion: model.PlatformConsumerProtocolVersionV1, SchemaVersion: model.PlatformConsumerSchemaVersionV1, Sequence: c.Sequence, IssuedAt: c.VerifiedAt, Nonce: hex.EncodeToString(nonce), GenerationSequence: a.GenerationSequence, DesiredGeneration: a.ExpectedGeneration, CandidateGeneration: a.ExpectedGeneration, ApplyStatus: "staged", ProbeStatus: "shadow_validated"}
-	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellRoutesCapabilityV1, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalOrderCapabilityV1, platformcontrol.PhysicalOrderProjectionCapabilityV1}
+	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellRoutesCapabilityV1, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalOrderCapabilityV1, platformcontrol.PhysicalOrderProjectionCapabilityV1}
 	h.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 	if err != nil {
 		return err

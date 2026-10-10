@@ -12,9 +12,10 @@ import (
 
 const NetworkPolicyVersion = model.PhysicalNetworkPolicyVersion
 const BoundedNetworkPolicyVersion = model.PhysicalBoundedNetworkPolicyVersion
+const DeliveryNetworkPolicyVersion = model.PhysicalDeliveryNetworkPolicyVersion
 
 func IsNetworkPolicy(version string) bool {
-	return version == NetworkPolicyVersion || version == BoundedNetworkPolicyVersion
+	return version == NetworkPolicyVersion || model.IsBoundedPhysicalNetworkPolicy(version)
 }
 
 type NetworkComparison struct {
@@ -134,7 +135,7 @@ func selectNetworkChallenger(snapshot Snapshot, nodes map[string]Candidate, obse
 			continue
 		}
 		cohorts := networkSharedCohorts(observations[current.EdgeID], observations[candidate.EdgeID])
-		if snapshot.Policy.Version == BoundedNetworkPolicyVersion && len(cohorts) == 0 &&
+		if model.IsBoundedPhysicalNetworkPolicy(snapshot.Policy.Version) && len(cohorts) == 0 &&
 			(!hasClientNetworkCohort(observations[current.EdgeID]) || !hasClientNetworkCohort(observations[candidate.EdgeID])) {
 			cohorts = []string{""}
 		}
@@ -172,7 +173,7 @@ func selectNetworkChallenger(snapshot Snapshot, nodes map[string]Candidate, obse
 		result.Hypothesis, result.ProposedEdgeID, result.SustainedBuckets = "switch", candidate.EdgeID, minimumBuckets
 		return
 	}
-	if snapshot.Policy.Version == BoundedNetworkPolicyVersion {
+	if model.IsBoundedPhysicalNetworkPolicy(snapshot.Policy.Version) {
 		result.Blockers = append(result.Blockers, "no_sustained_advantage_in_comparable_network_evidence")
 	} else {
 		result.Blockers = append(result.Blockers, "no_sustained_advantage_in_common_client_cohorts")
@@ -215,7 +216,7 @@ func assessNetwork(candidate Candidate, observations []Observation, policy Polic
 
 func assessNetworkAt(candidate Candidate, observations []Observation, policy Policy, now, metricNow time.Time, cohort string) Assessment {
 	assessment := Assessment{EdgeID: candidate.EdgeID, EdgeGroupID: candidate.EdgeGroupID, HardGates: append([]string{}, candidate.HardGates...), Metrics: map[string]Metric{}, Missing: []string{}}
-	compareClient := policy.Version != BoundedNetworkPolicyVersion || cohort != ""
+	compareClient := !model.IsBoundedPhysicalNetworkPolicy(policy.Version) || cohort != ""
 	values := map[string][]float64{}
 	latest := map[string]time.Time{}
 	latestValue := map[string]float64{}
@@ -243,6 +244,9 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 			collect("upload_bps", observation.UploadBPS, observation.ObservedAt)
 			collect("download_bps", observation.DownloadBPS, observation.ObservedAt)
 			collect("client_failure_rate", observation.ClientFailureRate, observation.ObservedAt)
+			if policy.Version == DeliveryNetworkPolicyVersion {
+				collect("client_retransmission_rate", observation.ClientRetransmissionRate, observation.ObservedAt)
+			}
 		}
 		if observation.ServiceSource == "service_endpoint_tcp" {
 			collect("service_network_ms", observation.ServiceNetworkMS, observation.ObservedAt)
@@ -257,7 +261,11 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 		assessment.Missing = append(assessment.Missing, "hostname_route_tls_proof")
 	}
 	unknownOptional := false
-	for _, name := range []string{"client_network_ms", "service_network_ms", "upload_bps", "download_bps", "client_failure_rate", "service_failure_rate", "capacity_utilization"} {
+	metricNames := []string{"client_network_ms", "service_network_ms", "upload_bps", "download_bps", "client_failure_rate", "service_failure_rate", "capacity_utilization"}
+	if policy.Version == DeliveryNetworkPolicyVersion {
+		metricNames = append(metricNames, "client_retransmission_rate")
+	}
+	for _, name := range metricNames {
 		measured := values[name]
 		sort.Float64s(measured)
 		core := name == "client_network_ms" && compareClient || name == "service_network_ms" || name == "capacity_utilization"
@@ -277,7 +285,7 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 			continue
 		}
 		value := networkQuantile(measured, 0.5)
-		if policy.Version == BoundedNetworkPolicyVersion && (name == "client_failure_rate" || name == "service_failure_rate") {
+		if model.IsBoundedPhysicalNetworkPolicy(policy.Version) && (name == "client_failure_rate" || name == "service_failure_rate" || name == "client_retransmission_rate") {
 			value = 0
 			for _, measuredValue := range measured {
 				value += measuredValue / float64(len(measured))

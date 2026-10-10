@@ -71,6 +71,21 @@ func SampleFromLiveConnections(query Request, connections LiveConnections, obser
 				return model.EdgeClientNetworkSample{}, errors.New("missing kernel counter")
 			}
 		}
+		fields := map[string]json.RawMessage{}
+		for _, key := range []string{"tcp_bytes_acked", "tcp_busy_time_us", "tcp_data_segs_out", "tcp_total_retrans", "tcp_delivery_rate_bps", "tcp_delivery_rate_app_limited", "tcp_last_data_sent_ms"} {
+			if raw, exists := matched.TCPInfo[key]; exists {
+				fields[key] = raw
+			}
+		}
+		if len(fields) == 7 {
+			counters := model.EdgeClientDeliveryCounters{ObservedAt: observed}
+			for key, target := range map[string]any{"tcp_bytes_acked": &counters.BytesAcked, "tcp_busy_time_us": &counters.BusyMicroseconds, "tcp_data_segs_out": &counters.DataSegmentsOut, "tcp_total_retrans": &counters.RetransmittedSegments, "tcp_delivery_rate_bps": &counters.DeliveryRateBytesPerSecond, "tcp_delivery_rate_app_limited": &counters.ApplicationLimited, "tcp_last_data_sent_ms": &counters.LastDataSentMS} {
+				if json.Unmarshal(fields[key], target) != nil {
+					return model.EdgeClientNetworkSample{}, errors.New("invalid kernel delivery counter")
+				}
+			}
+			sample.Delivery = &counters
+		}
 	}
 	return sample, model.ValidateEdgeClientNetworkSample(&sample)
 }

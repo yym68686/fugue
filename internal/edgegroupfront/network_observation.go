@@ -160,6 +160,9 @@ func publicClientNetworkSample(connection edgeFrontActiveTCPConnection, network 
 		}
 		sample.SegmentsOut, sample.RetransmittedSegments = network.SegsOut, network.TotalRetrans
 		sample.BytesSent, sample.BytesRetransmitted = network.BytesSent, network.BytesRetrans
+		sample.Delivery = &model.EdgeClientDeliveryCounters{ObservedAt: now, BytesAcked: network.BytesAcked, BusyMicroseconds: network.BusyTimeUsec,
+			DataSegmentsOut: network.DataSegsOut, RetransmittedSegments: network.TotalRetrans, DeliveryRateBytesPerSecond: network.DeliveryRateBPS,
+			ApplicationLimited: network.DeliveryRateAppLimited, LastDataSentMS: network.LastDataSentMS}
 	}
 	return sample
 }

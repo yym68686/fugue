@@ -103,6 +103,10 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		if err != nil {
 			return fail("physical network policy cannot be decoded")
 		}
+		deliveryRequired, err := physicalDeliveryCapabilityRequired(child)
+		if err != nil {
+			return fail("physical delivery policy cannot be decoded")
+		}
 		orderRequired, err := physicalOrderCapabilityRequired(child)
 		if err != nil {
 			return fail("physical order policy cannot be decoded")
@@ -157,6 +161,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if fact.ConsumerID != expected.ConsumerID || fact.ArtifactKind != child.ArtifactKind || fact.ScopeKey != parent.ScopeKey {
 					continue
 				}
+				if deliveryRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkDeliveryCapabilityV4) {
+					return fail("required consumer lacks physical network delivery v4 capability")
+				}
 				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
 					return fail("physical network v3 capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
@@ -204,7 +211,30 @@ func physicalNetworkCapabilityRequired(artifact model.PlatformArtifact) (bool, e
 	}
 	if payload.Policy.DNSQueryPolicy != nil {
 		for _, route := range payload.Policy.DNSQueryPolicy.PhysicalRoutes {
-			if route.Policy.Version == model.PhysicalBoundedNetworkPolicyVersion {
+			if model.IsBoundedPhysicalNetworkPolicy(route.Policy.Version) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func physicalDeliveryCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {
+	var payload struct {
+		Policy struct {
+			DNSQueryPolicy *platformconfig.DNSQueryPolicy `json:"dns_query_policy"`
+		} `json:"policy"`
+	}
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false, err
+	}
+	if query := payload.Policy.DNSQueryPolicy; query != nil {
+		for _, route := range query.PhysicalRoutes {
+			if route.Policy.Version == model.PhysicalDeliveryNetworkPolicyVersion {
 				return true, nil
 			}
 		}

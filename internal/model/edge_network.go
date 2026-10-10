@@ -155,20 +155,33 @@ func ValidateEdgeNetworkSample(sample EdgeNetworkSample) error {
 }
 
 type EdgeClientNetworkSample struct {
-	ConnectionID          string                    `json:"connection_id"`
-	Slot                  string                    `json:"slot"`
-	Scope                 string                    `json:"scope"`
-	StartedAt             time.Time                 `json:"started_at"`
-	ObservedAt            time.Time                 `json:"observed_at"`
-	TCPInfoAvailable      bool                      `json:"tcp_info_available"`
-	RTTMS                 *float64                  `json:"rtt_ms"`
-	MinRTTMS              *float64                  `json:"min_rtt_ms"`
-	RTTVarianceMS         *float64                  `json:"rtt_variance_ms"`
-	SegmentsOut           uint32                    `json:"segments_out"`
-	RetransmittedSegments uint32                    `json:"retransmitted_segments"`
-	BytesSent             uint64                    `json:"bytes_sent"`
-	BytesRetransmitted    uint64                    `json:"bytes_retransmitted"`
-	Backend               *EdgeClientNetworkBackend `json:"backend,omitempty"`
+	Delivery              *EdgeClientDeliveryCounters `json:"delivery,omitempty"`
+	DeliveryBaseline      *EdgeClientDeliveryCounters `json:"delivery_baseline,omitempty"`
+	ConnectionID          string                      `json:"connection_id"`
+	Slot                  string                      `json:"slot"`
+	Scope                 string                      `json:"scope"`
+	StartedAt             time.Time                   `json:"started_at"`
+	ObservedAt            time.Time                   `json:"observed_at"`
+	TCPInfoAvailable      bool                        `json:"tcp_info_available"`
+	RTTMS                 *float64                    `json:"rtt_ms"`
+	MinRTTMS              *float64                    `json:"min_rtt_ms"`
+	RTTVarianceMS         *float64                    `json:"rtt_variance_ms"`
+	SegmentsOut           uint32                      `json:"segments_out"`
+	RetransmittedSegments uint32                      `json:"retransmitted_segments"`
+	BytesSent             uint64                      `json:"bytes_sent"`
+	BytesRetransmitted    uint64                      `json:"bytes_retransmitted"`
+	Backend               *EdgeClientNetworkBackend   `json:"backend,omitempty"`
+}
+
+type EdgeClientDeliveryCounters struct {
+	ObservedAt                 time.Time `json:"observed_at"`
+	BytesAcked                 uint64    `json:"bytes_acked"`
+	BusyMicroseconds           uint64    `json:"busy_microseconds"`
+	DataSegmentsOut            uint32    `json:"data_segments_out"`
+	RetransmittedSegments      uint32    `json:"retransmitted_segments"`
+	DeliveryRateBytesPerSecond uint64    `json:"delivery_rate_bytes_per_second"`
+	ApplicationLimited         bool      `json:"application_limited"`
+	LastDataSentMS             uint32    `json:"last_data_sent_ms"`
 }
 
 type EdgeClientNetworkBackend struct {
@@ -212,5 +225,44 @@ func ValidateEdgeClientNetworkSample(sample *EdgeClientNetworkSample) error {
 	if !sample.TCPInfoAvailable && (sample.RTTMS != nil || sample.MinRTTMS != nil || sample.RTTVarianceMS != nil || sample.SegmentsOut != 0 || sample.RetransmittedSegments != 0 || sample.BytesSent != 0 || sample.BytesRetransmitted != 0) {
 		return errors.New("unavailable TCP_INFO contains measurements")
 	}
+	if sample.DeliveryBaseline != nil && sample.Delivery == nil {
+		return errors.New("public delivery baseline lacks counters")
+	}
+	for _, counters := range []*EdgeClientDeliveryCounters{sample.Delivery, sample.DeliveryBaseline} {
+		if counters != nil && (!sample.TCPInfoAvailable || counters.ObservedAt.Before(sample.StartedAt) || counters.ObservedAt.After(sample.ObservedAt) || counters.ObservedAt.IsZero()) {
+			return errors.New("invalid public delivery counter timestamp")
+		}
+	}
+	if sample.Delivery != nil && !sample.Delivery.ObservedAt.Equal(sample.ObservedAt) {
+		return errors.New("public delivery counters are not current")
+	}
+	if baseline := sample.DeliveryBaseline; baseline != nil {
+		current := sample.Delivery
+		elapsed := current.ObservedAt.Sub(baseline.ObservedAt)
+		if elapsed <= 0 || elapsed > 30*time.Second || current.BytesAcked < baseline.BytesAcked || current.BusyMicroseconds < baseline.BusyMicroseconds || current.DataSegmentsOut < baseline.DataSegmentsOut || current.RetransmittedSegments < baseline.RetransmittedSegments || current.BusyMicroseconds-baseline.BusyMicroseconds > uint64(elapsed.Microseconds())+1000 {
+			return errors.New("invalid public delivery window")
+		}
+	}
 	return nil
+}
+
+func EdgeClientDeliveryMetrics(sample *EdgeClientNetworkSample) (download, retransmission *float64) {
+	if ValidateEdgeClientNetworkSample(sample) != nil || sample.Delivery == nil || sample.DeliveryBaseline == nil {
+		return nil, nil
+	}
+	current, baseline := sample.Delivery, sample.DeliveryBaseline
+	segments := current.DataSegmentsOut - baseline.DataSegmentsOut
+	if segments >= 16 {
+		retransmits := current.RetransmittedSegments - baseline.RetransmittedSegments
+		value := math.Min(1, float64(retransmits)/float64(segments))
+		retransmission = &value
+	}
+	acked, busy := current.BytesAcked-baseline.BytesAcked, current.BusyMicroseconds-baseline.BusyMicroseconds
+	if acked >= 32768 && busy >= 10000 && !current.ApplicationLimited && current.LastDataSentMS <= 1000 && current.DeliveryRateBytesPerSecond > 0 {
+		value := math.Min(float64(acked)*1e6/float64(busy), float64(current.DeliveryRateBytesPerSecond))
+		if value > 0 && value <= 1e12 {
+			download = &value
+		}
+	}
+	return download, retransmission
 }

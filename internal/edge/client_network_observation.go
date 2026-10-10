@@ -94,10 +94,14 @@ func (s *Service) observePublicClientNetwork(request *http.Request, route model.
 	socketPath, slot := s.Config.FrontNetworkSocket, s.Config.EdgeSlot
 	go func() {
 		defer s.frontNetworkInFlight.Store(false)
-		result, err := frontnetwork.Read(context.Background(), socketPath, sample.EdgeID, sample.EdgeGroupID, slot, remote)
-		if err != nil && (frontnetwork.FailureReason(err) == "connection_missing" || frontnetwork.FailureReason(err) == "transport_failed") && s.Config.APIURL != "" && s.Config.EdgeToken != "" {
-			result, err = frontnetwork.ReadAPI(context.Background(), s.HTTPClient, s.Config.APIURL, s.Config.EdgeToken, sample.EdgeID, sample.EdgeGroupID, slot, remote)
+		read := func() (frontnetwork.Response, error) {
+			result, err := frontnetwork.Read(context.Background(), socketPath, sample.EdgeID, sample.EdgeGroupID, slot, remote)
+			if err != nil && (frontnetwork.FailureReason(err) == "connection_missing" || frontnetwork.FailureReason(err) == "transport_failed") && s.Config.APIURL != "" && s.Config.EdgeToken != "" {
+				return frontnetwork.ReadAPI(context.Background(), s.HTTPClient, s.Config.APIURL, s.Config.EdgeToken, sample.EdgeID, sample.EdgeGroupID, slot, remote)
+			}
+			return result, err
 		}
+		result, err := read()
 		if err != nil {
 			reject("front_" + frontnetwork.FailureReason(err))
 			return
@@ -115,17 +119,52 @@ func (s *Service) observePublicClientNetwork(request *http.Request, route model.
 			reject("sample_lock_busy_after_read")
 			return
 		}
-		defer s.networkSampleMu.Unlock()
 		s.appendNetworkSampleLocked(sample)
+		s.networkSampleMu.Unlock()
 		s.frontNetworkDiagMu.Lock()
 		s.frontNetworkDiag.Successes++
 		s.frontNetworkDiag.LastSuccessAt = networkObservationTime(sample.ObservedAt)
 		s.frontNetworkDiagMu.Unlock()
+		baseline := result.Sample
+		if baseline.Delivery == nil {
+			return
+		}
+		for _, delay := range []time.Duration{1100 * time.Millisecond, 2200 * time.Millisecond, 4400 * time.Millisecond} {
+			time.Sleep(delay)
+			result, err := read()
+			if err != nil {
+				reject("delivery_" + frontnetwork.FailureReason(err))
+				return
+			}
+			paired, ok := pairPublicDelivery(baseline, result.Sample)
+			if !ok {
+				reject("delivery_binding_mismatch")
+				return
+			}
+			baseline = result.Sample
+			followup := sample
+			followup.ID, followup.ClientNetwork, followup.ObservedAt = model.NewID("edge_client_net"), &paired, paired.ObservedAt
+			if s.networkSampleMu.TryLock() {
+				s.appendNetworkSampleLocked(followup)
+				s.networkSampleMu.Unlock()
+			}
+		}
 	}()
 	s.frontNetworkDiagMu.Lock()
 	s.frontNetworkDiag.Attempts++
 	s.frontNetworkDiag.LastAttemptAt = networkObservationTime(now)
 	s.frontNetworkDiagMu.Unlock()
+}
+
+func pairPublicDelivery(baseline, current model.EdgeClientNetworkSample) (model.EdgeClientNetworkSample, bool) {
+	if baseline.ConnectionID != current.ConnectionID || baseline.Slot != current.Slot || baseline.Scope != current.Scope || !baseline.StartedAt.Equal(current.StartedAt) || baseline.Delivery == nil || current.Delivery == nil {
+		return model.EdgeClientNetworkSample{}, false
+	}
+	if (baseline.Backend == nil) != (current.Backend == nil) || baseline.Backend != nil && *baseline.Backend != *current.Backend {
+		return model.EdgeClientNetworkSample{}, false
+	}
+	current.DeliveryBaseline = baseline.Delivery
+	return current, model.ValidateEdgeClientNetworkSample(&current) == nil
 }
 
 func networkObservationTime(value time.Time) *time.Time {

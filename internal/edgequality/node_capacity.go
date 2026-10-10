@@ -47,7 +47,7 @@ func NodeCapacityObservationMatches(snapshot Snapshot, observation Observation, 
 	if observation.NodeCapacityID != sample.ID || observation.ID != "node-capacity:"+sample.EdgeID+":"+sample.ID || observation.RouteWitnessID != "" ||
 		observation.EdgeID != sample.EdgeID || observation.Hostname != snapshot.Hostname || observation.TrafficClass != snapshot.TrafficClass || observation.Scope != snapshot.Scope ||
 		observation.ClientSource != "" || observation.ServiceSource != "" || observation.ClientCohort != "" ||
-		observation.ClientNetworkMS != nil || observation.ServiceNetworkMS != nil || observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.ServiceFailureRate != nil {
+		observation.ClientNetworkMS != nil || observation.ServiceNetworkMS != nil || observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.ServiceFailureRate != nil || observation.ClientRetransmissionRate != nil {
 		return false
 	}
 	for _, candidate := range snapshot.Candidates {

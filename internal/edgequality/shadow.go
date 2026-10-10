@@ -39,27 +39,28 @@ type Candidate struct {
 }
 
 type Observation struct {
-	NodeCapacityID      string             `json:"node_capacity_id,omitempty"`
-	ClientCohort        string             `json:"client_cohort,omitempty"`
-	CapacitySource      string             `json:"capacity_source,omitempty"`
-	RouteWitnessID      string             `json:"route_witness_id,omitempty"`
-	ID                  string             `json:"id"`
-	EdgeID              string             `json:"edge_id"`
-	Hostname            string             `json:"hostname"`
-	TrafficClass        string             `json:"traffic_class"`
-	Scope               string             `json:"scope"`
-	RouteGeneration     string             `json:"route_generation"`
-	ObservedAt          time.Time          `json:"observed_at"`
-	ClientNetworkMS     *float64           `json:"client_network_ms"`
-	ServiceNetworkMS    *float64           `json:"service_network_ms"`
-	ClientSource        string             `json:"client_source"`
-	ServiceSource       string             `json:"service_source"`
-	UploadBPS           *float64           `json:"upload_bps"`
-	DownloadBPS         *float64           `json:"download_bps"`
-	ClientFailureRate   *float64           `json:"client_failure_rate"`
-	ServiceFailureRate  *float64           `json:"service_failure_rate"`
-	CapacityUtilization *float64           `json:"capacity_utilization"`
-	Diagnostics         map[string]float64 `json:"diagnostics"`
+	ClientRetransmissionRate *float64           `json:"client_retransmission_rate,omitempty"`
+	NodeCapacityID           string             `json:"node_capacity_id,omitempty"`
+	ClientCohort             string             `json:"client_cohort,omitempty"`
+	CapacitySource           string             `json:"capacity_source,omitempty"`
+	RouteWitnessID           string             `json:"route_witness_id,omitempty"`
+	ID                       string             `json:"id"`
+	EdgeID                   string             `json:"edge_id"`
+	Hostname                 string             `json:"hostname"`
+	TrafficClass             string             `json:"traffic_class"`
+	Scope                    string             `json:"scope"`
+	RouteGeneration          string             `json:"route_generation"`
+	ObservedAt               time.Time          `json:"observed_at"`
+	ClientNetworkMS          *float64           `json:"client_network_ms"`
+	ServiceNetworkMS         *float64           `json:"service_network_ms"`
+	ClientSource             string             `json:"client_source"`
+	ServiceSource            string             `json:"service_source"`
+	UploadBPS                *float64           `json:"upload_bps"`
+	DownloadBPS              *float64           `json:"download_bps"`
+	ClientFailureRate        *float64           `json:"client_failure_rate"`
+	ServiceFailureRate       *float64           `json:"service_failure_rate"`
+	CapacityUtilization      *float64           `json:"capacity_utilization"`
+	Diagnostics              map[string]float64 `json:"diagnostics"`
 }
 
 type Snapshot struct {
@@ -474,12 +475,12 @@ func validate(snapshot Snapshot) error {
 				return errors.New("historical observation lacks matching captured route witness")
 			}
 		}
-		for _, value := range []*float64{observation.ClientNetworkMS, observation.ServiceNetworkMS, observation.UploadBPS, observation.DownloadBPS, observation.ClientFailureRate, observation.ServiceFailureRate, observation.CapacityUtilization} {
+		for _, value := range []*float64{observation.ClientNetworkMS, observation.ServiceNetworkMS, observation.UploadBPS, observation.DownloadBPS, observation.ClientFailureRate, observation.ServiceFailureRate, observation.CapacityUtilization, observation.ClientRetransmissionRate} {
 			if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0 || *value > 1e12) {
 				return fmt.Errorf("invalid measurement in %s", observation.ID)
 			}
 		}
-		for _, value := range []*float64{observation.ClientFailureRate, observation.ServiceFailureRate, observation.CapacityUtilization} {
+		for _, value := range []*float64{observation.ClientFailureRate, observation.ServiceFailureRate, observation.CapacityUtilization, observation.ClientRetransmissionRate} {
 			if value != nil && *value > 1 {
 				return errors.New("measurement ratio outside [0,1]")
 			}
@@ -489,11 +490,18 @@ func validate(snapshot Snapshot) error {
 }
 
 func networkWitnessMeasurementMatches(observation Observation, sample model.EdgeNetworkSample, policyVersion string) bool {
-	if observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.CapacityUtilization != nil {
+	if observation.UploadBPS != nil || observation.ClientFailureRate != nil || observation.CapacityUtilization != nil {
+		return false
+	}
+	var download, retransmission *float64
+	if policyVersion == DeliveryNetworkPolicyVersion && sample.Source == "public_front_tcp_info_v1" {
+		download, retransmission = model.EdgeClientDeliveryMetrics(sample.ClientNetwork)
+	}
+	if !reflect.DeepEqual(observation.DownloadBPS, download) || !reflect.DeepEqual(observation.ClientRetransmissionRate, retransmission) {
 		return false
 	}
 	var serviceFailure *float64
-	if policyVersion == BoundedNetworkPolicyVersion && model.EdgeNetworkServiceSource(sample.Source) && sample.ServiceConnectFailed != nil {
+	if model.IsBoundedPhysicalNetworkPolicy(policyVersion) && model.EdgeNetworkServiceSource(sample.Source) && sample.ServiceConnectFailed != nil {
 		value := 0.0
 		if *sample.ServiceConnectFailed {
 			value = 1
@@ -515,7 +523,7 @@ func networkWitnessCapacityMatches(observation Observation, witness model.EdgeNe
 	if witness.Source != "route_tls_witness_v1" || witness.RouteWitness == nil || witness.RouteWitness.NodeCapacity == nil || witness.ObservedAt.After(now) ||
 		observation.ID != "capacity:"+witness.EdgeID+":"+witness.ID || observation.EdgeID != witness.EdgeID || observation.Hostname != witness.Hostname ||
 		observation.TrafficClass != witness.TrafficClass || observation.RouteGeneration != witness.RouteDigest || observation.ClientSource != "" || observation.ServiceSource != "" ||
-		observation.ClientNetworkMS != nil || observation.ServiceNetworkMS != nil || observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.ServiceFailureRate != nil {
+		observation.ClientNetworkMS != nil || observation.ServiceNetworkMS != nil || observation.UploadBPS != nil || observation.DownloadBPS != nil || observation.ClientFailureRate != nil || observation.ServiceFailureRate != nil || observation.ClientRetransmissionRate != nil {
 		return false
 	}
 	capacity := witness.RouteWitness.NodeCapacity

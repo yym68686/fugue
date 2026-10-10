@@ -135,3 +135,30 @@ func TestNetworkQueueRetainsBothSegmentsUnderOneSidedTraffic(t *testing.T) {
 		t.Fatal(counts)
 	}
 }
+
+func TestDeliveryPairRejectsOtherConnectionOrReplacedFront(t *testing.T) {
+	now := time.Now().UTC()
+	baseline := model.EdgeClientNetworkSample{ConnectionID: "connection-a", Slot: "b", Scope: "tcp_peer:203.0.113.0/24", StartedAt: now.Add(-time.Minute), ObservedAt: now.Add(-time.Second), TCPInfoAvailable: true,
+		Delivery: &model.EdgeClientDeliveryCounters{ObservedAt: now.Add(-time.Second), BytesAcked: 1000, BusyMicroseconds: 100000}}
+	current := baseline
+	current.ObservedAt = now
+	current.Delivery = &model.EdgeClientDeliveryCounters{ObservedAt: now, BytesAcked: 101000, BusyMicroseconds: 600000, DataSegmentsOut: 100, DeliveryRateBytesPerSecond: 200000}
+	paired, ok := pairPublicDelivery(baseline, current)
+	if !ok || paired.DeliveryBaseline == nil || baseline.DeliveryBaseline != nil || current.DeliveryBaseline != nil {
+		t.Fatal("pair mutated its input or lost counters", paired, ok)
+	}
+	for _, edit := range []func(*model.EdgeClientNetworkSample){
+		func(value *model.EdgeClientNetworkSample) { value.ConnectionID = "other" },
+		func(value *model.EdgeClientNetworkSample) { value.StartedAt = value.StartedAt.Add(time.Second) },
+		func(value *model.EdgeClientNetworkSample) { value.Scope = "tcp_peer:203.0.114.0/24" },
+		func(value *model.EdgeClientNetworkSample) { value.Slot = "a" },
+		func(value *model.EdgeClientNetworkSample) { value.Delivery = nil },
+		func(value *model.EdgeClientNetworkSample) { value.Backend = &model.EdgeClientNetworkBackend{} },
+	} {
+		changed := current
+		edit(&changed)
+		if _, ok := pairPublicDelivery(baseline, changed); ok {
+			t.Fatal("paired unrelated or unproven socket")
+		}
+	}
+}

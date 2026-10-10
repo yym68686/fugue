@@ -19135,6 +19135,7 @@ components:
       additionalProperties: false
       required: [id, edge_id, hostname, traffic_class, scope, route_generation, observed_at, client_network_ms, service_network_ms, client_source, service_source, upload_bps, download_bps, client_failure_rate, service_failure_rate, capacity_utilization, diagnostics]
       properties:
+        client_retransmission_rate: {type: number, nullable: true, minimum: 0, maximum: 1, description: 'V4 only: retransmitted data segments divided by sent data segments in a verified public TCP delivery window. This is not a connection failure rate.'}
         client_cohort: {type: string, description: Coarse observed public TCP peer network. Never equated with the recursive DNS resolver or every terminal.}
         capacity_source: {type: string, description: Explicit capacity provenance; node capacity is not inferred from application concurrency.}
         route_witness_id: {type: string, description: Exact captured TLS witness used to bind a historical measurement or node-capacity observation. Replay requires the original raw facts; never a substitute for fresh current DNS route proof.}
@@ -19753,6 +19754,10 @@ components:
       required: [connection_id, slot, scope, started_at, observed_at, tcp_info_available, rtt_ms, min_rtt_ms, rtt_variance_ms, segments_out, retransmitted_segments, bytes_sent, bytes_retransmitted]
       description: Public Front TCP peer measurement joined to an exact live connection over a node-local Unix socket or a fenced read of the transport-selected public Front. Success-conditioned; retransmissions are not connection failure rates. Scope describes the TCP peer prefix, not a DNS resolver, country, or claimed original terminal. No raw client address or port is retained.
       properties:
+        delivery:
+          $ref: '#/components/schemas/EdgeClientDeliveryCounters'
+        delivery_baseline:
+          $ref: '#/components/schemas/EdgeClientDeliveryCounters'
         connection_id: {type: string, maxLength: 128}
         slot: {type: string, enum: [a, b]}
         scope: {type: string, maxLength: 128}
@@ -19768,6 +19773,20 @@ components:
         bytes_retransmitted: {type: integer, format: int64, minimum: 0}
         backend:
           $ref: '#/components/schemas/EdgeClientNetworkBackend'
+    EdgeClientDeliveryCounters:
+      type: object
+      additionalProperties: false
+      required: [observed_at, bytes_acked, busy_microseconds, data_segments_out, retransmitted_segments, delivery_rate_bytes_per_second, application_limited, last_data_sent_ms]
+      description: 'Kernel counters from the exact established public TCP socket. A matched pair measures acknowledged bytes per kernel busy time, excluding idle/model/application wait. No capacity claim is made for application-limited, undersized, stale, reset or unmatched windows. Units are bytes per second, never bits per second.'
+      properties:
+        observed_at: {type: string, format: date-time}
+        bytes_acked: {type: integer, format: int64, minimum: 0}
+        busy_microseconds: {type: integer, format: int64, minimum: 0}
+        data_segments_out: {type: integer, format: int64, minimum: 0}
+        retransmitted_segments: {type: integer, format: int64, minimum: 0}
+        delivery_rate_bytes_per_second: {type: integer, format: int64, minimum: 0}
+        application_limited: {type: boolean}
+        last_data_sent_ms: {type: integer, format: int64, minimum: 0}
     EdgePerformanceSample:
       type: object
       additionalProperties: false
@@ -34338,7 +34357,7 @@ components:
             - type: object
               required: [maximum_node_utilization]
               properties:
-                version: {type: string, enum: [physical-network-cohort-v2, physical-network-bounded-v3]}
+                version: {type: string, enum: [physical-network-cohort-v2, physical-network-bounded-v3, physical-network-delivery-v4]}
     PlatformDNSAuthorityPolicy:
       type: object
       additionalProperties: false
