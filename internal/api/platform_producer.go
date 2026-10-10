@@ -291,6 +291,7 @@ func platformProducerSourceDigest(projection platformIntentProjectionResponse, a
 		Routes    []platformconfig.CompiledRoute
 	}{projection.Intent, projection.Policy, authority, routes}
 	type assignment struct {
+		QualityState   string `json:"QualityState,omitempty"`
 		NodeID         string
 		Hostname       string
 		Type           string
@@ -310,7 +311,8 @@ func platformProducerSourceDigest(projection platformIntentProjectionResponse, a
 			return "", err
 		}
 		assignments = append(assignments, assignment{NodeID: fact.NodeID, Hostname: fact.Hostname, Type: fact.Type,
-			Version: selection.Version, PrimaryEdgeID: selection.PrimaryEdgeID, OrderedEdgeIDs: selection.OrderedEdgeIDs,
+			QualityState: selection.QualityState,
+			Version:      selection.Version, PrimaryEdgeID: selection.PrimaryEdgeID, OrderedEdgeIDs: selection.OrderedEdgeIDs,
 			Scope: selection.Scope, PrimarySince: selection.PrimarySince})
 	}
 	if len(assignments) == 0 {

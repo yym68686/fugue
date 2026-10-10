@@ -24,3 +24,13 @@ Retransmitted data segments divided by sent data segments describe transport deg
 Public packet forwarding and DNS answers never wait for telemetry. The worker performs bounded asynchronous follow-ups; old Front processes omit delivery counters and remain compatible. A code rollback can discard the optional observations without discarding the currently serving artifact.
 
 No production acceptance is claimed by this work-in-progress document.
+
+## Bounded universal capture
+
+`dynamic_quality` is an explicit signed producer strategy, separate from code deployment. It derives owned dynamic hostnames from the frozen route intent. Static and pinned routes are excluded with a recorded reason. Shared DNS aliases and unmeasured address families remain visible as incomplete evidence coverage; they are not mislabeled as measured adoption.
+
+Capture uses a per-cycle query budget, bounded concurrency and least-recently-attempted scheduling. Incomplete queries retain the previous verified signed order; completed queries carry actual DNS receipts and independently reconstructed network evidence. V4 can publish `quality_state=learning` only for the existing fresh route-ready primary. A learning receipt does not claim comparative quality and starts a known cooldown epoch. A failed query cannot block other completed queries.
+
+The independent `dynamic_quality` producer transaction may change only the default quality strategy and producer/input generations. It cannot modify static intent, pinned constraints, configured baseline orders, timing or other producer controls. Current verified full/LKG and absence of pending gray are checked under publication locks.
+
+Universal source TCP probing is opt-in through explicit worker configuration. It rotates all loaded eligible routes with a bounded batch and opens no application request. A single stable upstream entry matching the declared destination is measurable; multiple distinct upstreams remain ambiguous until their identity can be captured separately.

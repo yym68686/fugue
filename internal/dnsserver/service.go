@@ -3012,6 +3012,9 @@ func edgeDNSSelectionResult(decision edgeDNSCandidateOrderDecision, answered []m
 			return "physical_no_ready_endpoint"
 		}
 		if selection := decision.Policy.PhysicalSelection; selection != nil && answered[0].EdgeID == selection.PrimaryEdgeID {
+			if selection.QualityState == "learning" {
+				return "physical_learning_primary"
+			}
 			return "physical_selected_primary"
 		}
 		return "physical_readiness_failover"

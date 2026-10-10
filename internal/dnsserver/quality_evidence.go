@@ -64,6 +64,13 @@ func QualityEvidenceFromDNSDecision(receipt DNSDecisionReceipt, now time.Time, m
 			evidence.PrimarySince = &primarySince
 		}
 	}
+	if order := selected.Policy.PhysicalOrder; selected.Policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalOrder && order != nil && order.PrimarySince != nil && model.ValidateDNSPhysicalOrder(order) == nil && order.OrderedEdgeIDs[0] == evidence.EdgeID {
+		if order.PrimarySince.After(receipt.ObservedAt) {
+			return QualityAnswerEvidence{}, errors.New("future preserved primary assignment epoch")
+		}
+		at := *order.PrimarySince
+		evidence.PrimarySince = &at
+	}
 	var input dnsDecisionReplay
 	if err := json.Unmarshal(receipt.ReplayInput, &input); err != nil {
 		return QualityAnswerEvidence{}, err

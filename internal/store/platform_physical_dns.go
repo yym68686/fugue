@@ -8,6 +8,10 @@ import (
 )
 
 func validateProducerPhysicalDNSInputs(state *model.State, previous, next platformproducer.Policy, keys bundleauth.Keyring) error {
+	return validateProducerQualityInputs(state, previous, next, keys, false)
+}
+
+func validateProducerQualityInputs(state *model.State, previous, next platformproducer.Policy, keys bundleauth.Keyring, dynamic bool) error {
 	inputs := make([]model.PlatformArtifact, 0, 3)
 	for _, reference := range []struct{ id, digest, kind string }{
 		{previous.StaticIntentArtifactID, previous.StaticIntentDigest, model.PlatformArtifactKindPlatformIntent},
@@ -24,7 +28,11 @@ func validateProducerPhysicalDNSInputs(state *model.State, previous, next platfo
 		}
 		inputs = append(inputs, artifact)
 	}
-	if platformproducer.ValidatePhysicalDNSOptIn(previous, next, inputs[0], inputs[1], inputs[2]) != nil {
+	validate := platformproducer.ValidatePhysicalDNSOptIn
+	if dynamic {
+		validate = platformproducer.ValidateDynamicQualityUpdate
+	}
+	if validate(previous, next, inputs[0], inputs[1], inputs[2]) != nil {
 		return ErrConflict
 	}
 	return nil

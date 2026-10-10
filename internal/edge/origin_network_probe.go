@@ -15,6 +15,9 @@ import (
 )
 
 func (s *Service) originNetworkProbeEnabled() bool {
+	if s.Config.OriginNetworkProbeAllRoutes {
+		return s.Config.OriginNetworkProbeInterval >= 5*time.Second && s.Config.OriginNetworkProbeInterval <= 5*time.Minute && s.Config.OriginNetworkProbeBatchSize >= 1 && s.Config.OriginNetworkProbeBatchSize <= 16
+	}
 	return s.Config.OriginNetworkProbeInterval >= 30*time.Second && s.Config.OriginNetworkProbeInterval <= 5*time.Minute &&
 		len(s.Config.OriginNetworkProbeHostnames) > 0 && len(s.Config.OriginNetworkProbeHostnames) <= 8
 }
@@ -51,7 +54,14 @@ func (s *Service) probeOriginNetworkOnce(ctx context.Context, now time.Time, dia
 		return
 	}
 	targets := map[string]model.EdgeNetworkSample{}
-	for _, hostname := range s.Config.OriginNetworkProbeHostnames {
+	hostnames := s.Config.OriginNetworkProbeHostnames
+	if s.Config.OriginNetworkProbeAllRoutes {
+		hostnames = make([]string, 0, len(index.byHost))
+		for hostname := range index.byHost {
+			hostnames = append(hostnames, hostname)
+		}
+	}
+	for _, hostname := range hostnames {
 		for _, indexed := range index.byHost[normalizeRouteHost(hostname)] {
 			route, ok, fallback, _, _ := index.routeForRequest(hostname, indexed.pathPrefix)
 			if !ok || fallback {
@@ -66,19 +76,34 @@ func (s *Service) probeOriginNetworkOnce(ctx context.Context, now time.Time, dia
 	for key := range targets {
 		keys = append(keys, key)
 	}
-	if len(keys) == 0 || len(keys) > 64 {
+	maximum := 64
+	if s.Config.OriginNetworkProbeAllRoutes {
+		maximum = 20000
+	}
+	if len(keys) == 0 || len(keys) > maximum {
 		return
 	}
 	sort.Strings(keys)
-	key := keys[0]
-	for _, next := range keys {
-		if next > s.originNetworkProbeCursor {
-			key = next
-			break
-		}
+	start := sort.SearchStrings(keys, s.originNetworkProbeCursor)
+	if start < len(keys) && keys[start] == s.originNetworkProbeCursor {
+		start++
 	}
-	s.originNetworkProbeCursor, s.originNetworkProbeLast = key, now
-	sample := targets[key]
+	batch := 1
+	if s.Config.OriginNetworkProbeAllRoutes {
+		batch = min(s.Config.OriginNetworkProbeBatchSize, len(keys))
+	}
+	s.originNetworkProbeLast = now
+	for offset := 0; offset < batch; offset++ {
+		if ctx.Err() != nil || s.currentRouteIndex() != index {
+			return
+		}
+		key := keys[(start+offset)%len(keys)]
+		s.originNetworkProbeCursor = key
+		s.probeOriginNetworkTarget(ctx, index, targets[key], dial, inspect)
+	}
+}
+
+func (s *Service) probeOriginNetworkTarget(ctx context.Context, index *edgeRouteIndex, sample model.EdgeNetworkSample, dial func(context.Context, string, string) (net.Conn, error), inspect func(net.Conn) tcpdiag.Snapshot) {
 	probeContext, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	connection, err := dial(probeContext, "tcp", sample.ServiceTarget)
@@ -104,7 +129,7 @@ func (s *Service) probeOriginNetworkOnce(ctx context.Context, now time.Time, dia
 		}
 		sample.ServiceRTTMS = measured.ServiceRTTMS
 	}
-	active, known = s.servingActiveForHeartbeat()
+	active, known := s.servingActiveForHeartbeat()
 	if !active || !known || s.currentRouteIndex() != index || !s.appTrafficProofApplied(index) || model.ValidateEdgeNetworkSample(sample) != nil {
 		return
 	}
@@ -116,7 +141,7 @@ func (s *Service) probeOriginNetworkOnce(ctx context.Context, now time.Time, dia
 
 func originNetworkProbeTarget(route model.EdgeRouteBinding, version, edgeID, groupID string, now time.Time) (model.EdgeNetworkSample, bool) {
 	if route.Status != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) || !routeMatchesCurrentEdgeGroup(route, groupID) ||
-		slices.Contains(route.ExcludedEdgeIDs, edgeID) || slices.Contains(route.ExcludedEdgeGroupIDs, groupID) || len(route.Upstreams) != 0 ||
+		slices.Contains(route.ExcludedEdgeIDs, edgeID) || slices.Contains(route.ExcludedEdgeGroupIDs, groupID) || !singleOriginNetworkRoute(route) ||
 		route.UpstreamKind != model.EdgeRouteUpstreamKindKubernetesService || route.UpstreamScope != model.EdgeRouteUpstreamScopeLocalService {
 		return model.EdgeNetworkSample{}, false
 	}

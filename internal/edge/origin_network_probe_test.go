@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -13,6 +14,44 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/tcpdiag"
 )
+
+func TestOriginProbeAllRoutesUsesBoundedRoundRobinWithoutBusinessBytes(t *testing.T) {
+	service := originProbeService(t)
+	service.Config.OriginNetworkProbeAllRoutes = true
+	service.Config.OriginNetworkProbeHostnames = nil
+	service.Config.OriginNetworkProbeBatchSize = 2
+	service.Config.OriginNetworkProbeInterval = 10 * time.Second
+	route := networkTestObservation().Route
+	route.EdgeGroupID, route.Status, route.RoutePolicy = "group-a", model.EdgeRouteStatusActive, model.EdgeRoutePolicyEnabled
+	routes := []model.EdgeRouteBinding{}
+	for index := 0; index < 5; index++ {
+		copy := route
+		copy.Hostname = fmt.Sprintf("app-%d.example.test", index)
+		routes = append(routes, copy)
+	}
+	bundle := model.EdgeRouteBundle{Version: "bundle-many", ValidUntil: time.Now().Add(time.Hour), Routes: routes}
+	service.recordSyncSuccess(bundle, "", time.Now(), false)
+	service.mu.Lock()
+	service.snapshot.Healthy = true
+	service.snapshot.CaddyAppliedVersion = bundle.Version
+	service.mu.Unlock()
+	attempts := 0
+	dial := func(context.Context, string, string) (net.Conn, error) { attempts++; return &originProbeConn{}, nil }
+	now := time.Now()
+	for round := 0; round < 3; round++ {
+		service.probeOriginNetworkOnce(context.Background(), now.Add(time.Duration(round)*10*time.Second), dial, func(net.Conn) tcpdiag.Snapshot { return tcpdiag.Snapshot{Available: true, RTTUsec: 1000} })
+		if attempts != (round+1)*2 {
+			t.Fatal("probe exceeded or ignored cycle budget", attempts)
+		}
+	}
+	seen := map[string]bool{}
+	for _, sample := range service.originNetworkSamples() {
+		seen[sample.Hostname] = true
+	}
+	if len(seen) != 5 {
+		t.Fatal("quiet route never received a controlled probe", seen)
+	}
+}
 
 func originProbeService(t *testing.T) *Service {
 	t.Helper()

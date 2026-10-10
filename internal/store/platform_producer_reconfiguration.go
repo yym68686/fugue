@@ -16,7 +16,7 @@ import (
 )
 
 func globalDNSReconfiguration(operation string) bool {
-	return operation == "physical_dns" || operation == "retire_dns_selector"
+	return operation == "physical_dns" || operation == "retire_dns_selector" || operation == "dynamic_quality"
 }
 
 func producerReconfigurationKey(a model.PlatformArtifact, precondition model.PlatformProducerReconfiguration) (string, error) {
@@ -56,7 +56,7 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
-	case "continuous_serving", "physical_dns", "retire_dns_selector":
+	case "continuous_serving", "physical_dns", "retire_dns_selector", "dynamic_quality":
 		if p.Mode != "serving" || p.Serving == nil || p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
@@ -137,6 +137,11 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	oldSources := previous
 	if r.Operation == "physical_dns" {
 		if err := validateProducerPhysicalDNSInputs(state, previous, p, keys); err != nil {
+			return err
+		}
+	}
+	if r.Operation == "dynamic_quality" {
+		if err := validateProducerQualityInputs(state, previous, p, keys, true); err != nil {
 			return err
 		}
 	}

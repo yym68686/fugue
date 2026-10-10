@@ -121,6 +121,9 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 		updated := platformconfig.DNSSelectionObservation{NodeID: fact.NodeID, Hostname: fact.Hostname, Type: fact.Type,
 			ObservedAt: selection.CapturedAt, PhysicalSelection: model.CloneDNSPhysicalSelection(selection), RankingVersion: selection.Version,
 			RankingScope: selection.Scope, Reason: "bound_physical_network_evidence", Candidates: []platformconfig.DNSSelectionCandidate{}}
+		if selection.QualityState == "learning" {
+			updated.Reason = "physical_quality_learning_current_ready_primary"
+		}
 		updated.PhysicalEvidence = append(json.RawMessage(nil), compiled.Evidence...)
 		for _, candidate := range fact.Candidates {
 			updated.Candidates = append(updated.Candidates, platformconfig.DNSSelectionCandidate{IP: candidate.IP, EdgeID: candidate.EdgeID, EdgeGroupID: candidate.EdgeGroupID})

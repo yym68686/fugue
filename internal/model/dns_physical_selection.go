@@ -12,13 +12,17 @@ const DNSAnswerPolicyKindPhysicalOrder = "physical_order"
 const DNSPhysicalSelectionVersion = "physical-edge-network-v1"
 
 type DNSPhysicalOrder struct {
-	Version        string   `json:"version"`
-	OrderedEdgeIDs []string `json:"ordered_edge_ids"`
+	PrimarySince   *time.Time `json:"primary_since,omitempty"`
+	Version        string     `json:"version"`
+	OrderedEdgeIDs []string   `json:"ordered_edge_ids"`
 }
 
 func ValidateDNSPhysicalOrder(order *DNSPhysicalOrder) error {
 	if order == nil || order.Version != "physical-order-v1" || len(order.OrderedEdgeIDs) == 0 || len(order.OrderedEdgeIDs) > 256 {
 		return errors.New("invalid physical-edge order")
+	}
+	if order.PrimarySince != nil && order.PrimarySince.IsZero() {
+		return errors.New("invalid preserved primary assignment epoch")
 	}
 	seen := map[string]bool{}
 	for _, edgeID := range order.OrderedEdgeIDs {
@@ -34,10 +38,16 @@ func CloneDNSPhysicalOrder(order *DNSPhysicalOrder) *DNSPhysicalOrder {
 	if order == nil {
 		return nil
 	}
-	return &DNSPhysicalOrder{Version: order.Version, OrderedEdgeIDs: append([]string(nil), order.OrderedEdgeIDs...)}
+	cloned := &DNSPhysicalOrder{Version: order.Version, OrderedEdgeIDs: append([]string(nil), order.OrderedEdgeIDs...)}
+	if order.PrimarySince != nil {
+		at := *order.PrimarySince
+		cloned.PrimarySince = &at
+	}
+	return cloned
 }
 
 type DNSPhysicalSelection struct {
+	QualityState   string     `json:"quality_state,omitempty"`
 	Version        string     `json:"version"`
 	PrimaryEdgeID  string     `json:"primary_edge_id"`
 	OrderedEdgeIDs []string   `json:"ordered_edge_ids"`
@@ -55,6 +65,9 @@ func ValidateDNSPhysicalSelection(selection *DNSPhysicalSelection) error {
 		len(selection.OrderedEdgeIDs) == 0 || len(selection.OrderedEdgeIDs) > 256 || selection.OrderedEdgeIDs[0] != selection.PrimaryEdgeID ||
 		selection.DNSReceiptID == "" || len(selection.DNSReceiptID) > 256 || selection.Scope == "" || len(selection.Scope) > 512 || selection.CapturedAt.IsZero() {
 		return errors.New("invalid physical-edge selection identity")
+	}
+	if selection.QualityState != "" && selection.QualityState != "learning" && selection.QualityState != "measured" {
+		return errors.New("invalid physical-edge quality state")
 	}
 	if selection.PrimarySince != nil && (selection.PrimarySince.IsZero() || selection.PrimarySince.After(selection.CapturedAt)) {
 		return errors.New("invalid physical-edge primary assignment time")

@@ -51,7 +51,10 @@ func (s *Server) captureDirectDNSQueriesWithNodes(ctx context.Context, result *p
 	if err := projectDirectDNSQueries(result, policy, eligible, now); err != nil {
 		return err
 	}
-	return s.capturePhysicalDNSQueries(ctx, result, policy)
+	if err := s.capturePhysicalDNSQueries(ctx, result, policy); err != nil {
+		return err
+	}
+	return s.captureDynamicQuality(ctx, result, policy)
 }
 
 func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy platformconfig.DNSQueryPolicy, nodes []model.EdgeNode, observed time.Time) error {

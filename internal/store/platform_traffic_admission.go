@@ -161,7 +161,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if fact.ConsumerID != expected.ConsumerID || fact.ArtifactKind != child.ArtifactKind || fact.ScopeKey != parent.ScopeKey {
 					continue
 				}
-				if deliveryRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkDeliveryCapabilityV4) {
+				if deliveryRequired && (!slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkDeliveryCapabilityV4) || !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalDynamicQualityCapabilityV1)) {
 					return fail("required consumer lacks physical network delivery v4 capability")
 				}
 				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
@@ -210,6 +210,9 @@ func physicalNetworkCapabilityRequired(artifact model.PlatformArtifact) (bool, e
 		return false, err
 	}
 	if payload.Policy.DNSQueryPolicy != nil {
+		if payload.Policy.DNSQueryPolicy.DynamicQuality != nil {
+			return true, nil
+		}
 		for _, route := range payload.Policy.DNSQueryPolicy.PhysicalRoutes {
 			if model.IsBoundedPhysicalNetworkPolicy(route.Policy.Version) {
 				return true, nil
@@ -233,6 +236,9 @@ func physicalDeliveryCapabilityRequired(artifact model.PlatformArtifact) (bool, 
 		return false, err
 	}
 	if query := payload.Policy.DNSQueryPolicy; query != nil {
+		if query.DynamicQuality != nil {
+			return true, nil
+		}
 		for _, route := range query.PhysicalRoutes {
 			if route.Policy.Version == model.PhysicalDeliveryNetworkPolicyVersion {
 				return true, nil

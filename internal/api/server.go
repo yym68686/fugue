@@ -121,6 +121,7 @@ type Server struct {
 	newClusterNodeClient                   func() (*clusterNodeClient, error)
 	frontNetworkObservationMu              sync.Mutex
 	frontNetworkObservationLast            map[string]time.Time
+	dynamicQuality                         dynamicQualityState
 	networkRouteWitness                    networkRouteWitnessState
 	newManagedAppStatusClient              func() (*managedAppStatusClient, error)
 	managedAppStatusCache                  managedAppStatusCache

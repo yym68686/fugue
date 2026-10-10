@@ -20398,6 +20398,7 @@ components:
       required: [version, ordered_edge_ids]
       description: Explicit immutable physical-edge order. This is configuration authority, not a claim of measured network superiority. The first currently route/TLS-ready endpoint wins. Geography, numeric candidate scores, group weights and exploration cannot reorder it. Deploying support does not convert an existing signed policy.
       properties:
+        primary_since: {type: string, format: date-time, description: Optional preserved primary assignment epoch from verified quality publication; never inferred from process start or sample time.}
         version: {type: string, enum: [physical-order-v1]}
         ordered_edge_ids: {type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
     DNSPhysicalSelection:
@@ -20406,6 +20407,7 @@ components:
       required: [version, primary_edge_id, ordered_edge_ids, evidence_digest, dns_receipt_id, loaded_digest, policy_digest, scope, captured_at]
       description: Immutable physical-edge order compiled from verified network evidence. Query execution only removes endpoints lacking current route/TLS readiness; it never re-ranks by group, country, business duration, or random exploration. Evidence age gates compilation, not the validity of a positive serving LKG.
       properties:
+        quality_state: {type: string, enum: [learning, measured], description: 'V4 distinguishes preserving a fresh route-ready current primary while collecting evidence from a measured quality selection. Learning never fabricates network metrics.'}
         version: {type: string, enum: [physical-edge-network-v1]}
         primary_edge_id: {type: string, maxLength: 128}
         ordered_edge_ids: {type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 128}}
@@ -34310,6 +34312,8 @@ components:
       required: [ranking_mode, preference_mode, ecs_enabled, exploration_percent, switch_cooldown_seconds, minimum_ttl_seconds, maximum_ttl_seconds]
       description: Producer query strategy, independent of runtime ranking, locality and candidate eligibility. The producer observes inventory and ranking directly, expands concrete DNSAnswerRules, and never reads legacy DNS bundles when this policy is present. Readiness remains independently proven.
       properties:
+        dynamic_quality:
+          $ref: '#/components/schemas/PlatformDynamicQualityPolicy'
         ordered_projection:
           $ref: '#/components/schemas/PlatformDNSOrderedProjection'
         physical_routes:
@@ -34344,6 +34348,22 @@ components:
               hostname: {type: string, minLength: 1, maxLength: 253}
               type: {type: string, enum: [A, AAAA]}
               order: {$ref: '#/components/schemas/DNSPhysicalOrder'}
+    PlatformDynamicQualityPolicy:
+      type: object
+      additionalProperties: false
+      required: [mode, policy, refresh_queries_per_cycle, refresh_concurrency]
+      description: 'Applies quality evaluation to every eligible owned dynamic query, including future domains. Static records and explicit pinned placement are preserved. Signed current order remains the safe learning baseline until independently bound evidence authorizes a change; learning failures are isolated per query. Refresh is bounded and rotates fairly, independently of user query volume.'
+      properties:
+        mode: {type: string, enum: [all_dynamic]}
+        policy:
+          allOf:
+            - $ref: '#/components/schemas/PhysicalEdgeQualityPolicy'
+            - type: object
+              required: [maximum_node_utilization]
+              properties:
+                version: {type: string, enum: [physical-network-delivery-v4]}
+        refresh_queries_per_cycle: {type: integer, minimum: 1, maximum: 128}
+        refresh_concurrency: {type: integer, minimum: 1, maximum: 8}
     PlatformPhysicalQualityRoute:
       type: object
       additionalProperties: false
@@ -35582,7 +35602,7 @@ components:
       properties:
         operation:
           type: string
-          enum: [placement, activate_serving, refresh_serving, continuous_serving, expand_membership, physical_dns, retire_dns_selector]
+          enum: [placement, activate_serving, refresh_serving, continuous_serving, expand_membership, physical_dns, retire_dns_selector, dynamic_quality]
           default: placement
           description: activate_serving requires a shadow or paused predecessor and bounded serving settings with single_publication=true. refresh_serving requires a serving predecessor with single_publication=true, permits only a new generation and requires the exact baseline full/LKG to have been produced by that predecessor policy publication. continuous_serving requires that same completed single-publication predecessor and only clears single_publication while retaining every other setting. expand_membership requires the same completed serving predecessor and preserves its positive full/LKG while moving the producer to shadow with new pinned input artifacts. Static input may only change generation and add exactly one Edge already declared identically in route_placement_transition.next_topology; projection policy may only change generation and the matching topology digest. physical_dns applies only to an existing continuously serving global producer with no placement transition. It changes only generation and the pinned DNS policy, whose sole strategy change must add exactly one physical_routes hostname while preserving every existing entry. Both input signatures, unchanged static intent, exact predecessor-owned full/LKG and its source metadata are checked transactionally; in-flight gray publications conflict. It does not directly publish a DNS answer. Existing members, pools, labels, failure domains, routes, ownership, constraints, schedules and serving settings remain identical. All input signatures and old full input metadata are checked in the transaction. Activation and refresh require the cohort in the exact full baseline; candidate publication independently revalidates pinned inputs, membership and fresh runtime gates. Placement and membership expansion cannot activate serving, enroll a process or select public transport. retire_dns_selector applies only to that same continuous global producer with an unmapped, unscoped legacy DNS baseline. It adds an explicit ordered_projection, disables ECS and exploration, and preserves every existing measured physical route and all other policy. Each override must exactly retain the signed current full DNS member's normal global physical order and complete candidate membership. Static records cannot receive overrides. The default order must contain the existing physical candidate set. Signed input and member integrity, lineage, exact full/LKG, source metadata and no pending gray are checked under the same locks. It changes producer configuration only; compatible consumer admission and positive LKG remain independent.
         previous_policy:

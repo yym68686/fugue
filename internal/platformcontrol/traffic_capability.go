@@ -24,5 +24,6 @@ const DNSRouteSourcesCapabilityV1 = "dns_route_sources_v1"
 
 const PhysicalNetworkBoundedCapabilityV3 = "physical_network_bounded_v3"
 const PhysicalNetworkDeliveryCapabilityV4 = "physical_network_delivery_v4"
+const PhysicalDynamicQualityCapabilityV1 = "physical_dynamic_quality_v1"
 const PhysicalOrderCapabilityV1 = "physical_order_v1"
 const PhysicalOrderProjectionCapabilityV1 = "physical_order_projection_v1"

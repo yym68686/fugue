@@ -9,6 +9,14 @@ import (
 )
 
 func ValidatePhysicalDNSOptIn(previous, next Policy, static, oldDNS, newDNS model.PlatformArtifact) error {
+	return validatePhysicalDNSUpdate(previous, next, static, oldDNS, newDNS, false)
+}
+
+func ValidateDynamicQualityUpdate(previous, next Policy, static, oldDNS, newDNS model.PlatformArtifact) error {
+	return validatePhysicalDNSUpdate(previous, next, static, oldDNS, newDNS, true)
+}
+
+func validatePhysicalDNSUpdate(previous, next Policy, static, oldDNS, newDNS model.PlatformArtifact, dynamic bool) error {
 	if previous.TargetScope != "global" || next.TargetScope != "global" || previous.PublicationRole != "" || next.PublicationRole != "" || previous.RoutePlacementTransition != nil || next.RoutePlacementTransition != nil ||
 		previous.Mode != "serving" || next.Mode != "serving" || previous.Serving == nil || next.Serving == nil || previous.Serving.SinglePublication || next.Serving.SinglePublication || !previous.RequireDNSQueryPolicy || !next.RequireDNSQueryPolicy ||
 		previous.StaticIntentArtifactID != next.StaticIntentArtifactID || previous.StaticIntentDigest != next.StaticIntentDigest || previous.DNSPolicyArtifactID == next.DNSPolicyArtifactID || previous.Generation == next.Generation ||
@@ -36,6 +44,17 @@ func ValidatePhysicalDNSOptIn(previous, next Policy, static, oldDNS, newDNS mode
 	}
 	if oldPolicy.DNSQueryPolicy == nil || newPolicy.DNSQueryPolicy == nil || oldPolicy.Generation == newPolicy.Generation {
 		return fmt.Errorf("physical DNS transition requires versioned explicit query policy")
+	}
+	if dynamic {
+		if newPolicy.DNSQueryPolicy.DynamicQuality == nil || newPolicy.DNSQueryPolicy.OrderedProjection == nil || reflect.DeepEqual(oldPolicy.DNSQueryPolicy.DynamicQuality, newPolicy.DNSQueryPolicy.DynamicQuality) {
+			return fmt.Errorf("dynamic quality transition requires changed complete default policy")
+		}
+		oldPolicy.DNSQueryPolicy.DynamicQuality, newPolicy.DNSQueryPolicy.DynamicQuality = nil, nil
+		oldPolicy.Generation, newPolicy.Generation = "", ""
+		if !reflect.DeepEqual(oldPolicy, newPolicy) {
+			return fmt.Errorf("dynamic quality transition cannot change constraints, static intent or configured orders")
+		}
+		return nil
 	}
 	oldRoutes, newRoutes := oldPolicy.DNSQueryPolicy.PhysicalRoutes, newPolicy.DNSQueryPolicy.PhysicalRoutes
 	if len(newRoutes) != len(oldRoutes)+1 {

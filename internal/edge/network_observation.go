@@ -67,7 +67,7 @@ func (s *Service) appendNetworkSampleLocked(sample model.EdgeNetworkSample) {
 }
 
 func originNetworkSample(observed *edgeProxyObservation, remote net.Addr, network tcpdiag.Snapshot, edgeID, groupID string, now time.Time) (model.EdgeNetworkSample, bool) {
-	if observed == nil || observed.PeerFallback || remote == nil || len(observed.Route.Upstreams) > 0 || observed.Route.UpstreamKind != "kubernetes-service" || observed.Route.UpstreamScope != "local-service" {
+	if observed == nil || observed.PeerFallback || remote == nil || !singleOriginNetworkRoute(observed.Route) || observed.Route.UpstreamKind != "kubernetes-service" || observed.Route.UpstreamScope != "local-service" {
 		return model.EdgeNetworkSample{}, false
 	}
 	host, _, err := net.SplitHostPort(remote.String())
@@ -102,6 +102,17 @@ func originNetworkSample(observed *edgeProxyObservation, remote net.Addr, networ
 		sample.ServiceRTTMS = &value
 	}
 	return sample, model.ValidateEdgeNetworkSample(sample) == nil
+}
+
+func singleOriginNetworkRoute(route model.EdgeRouteBinding) bool {
+	if len(route.Upstreams) == 0 {
+		return true
+	}
+	if len(route.Upstreams) != 1 {
+		return false
+	}
+	upstream := route.Upstreams[0]
+	return upstream.UpstreamURL == route.UpstreamURL && upstream.UpstreamKind == route.UpstreamKind && upstream.UpstreamScope == route.UpstreamScope && upstream.Weight > 0 && (upstream.Status == "" || upstream.Status == model.EdgeRouteStatusActive)
 }
 
 func (s *Service) originNetworkSamples() []model.EdgeNetworkSample {

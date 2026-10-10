@@ -271,6 +271,8 @@ type EdgeConfig struct {
 	HeartbeatInterval               time.Duration
 	OriginNetworkProbeInterval      time.Duration
 	OriginNetworkProbeHostnames     []string
+	OriginNetworkProbeAllRoutes     bool
+	OriginNetworkProbeBatchSize     int
 	HTTPTimeout                     time.Duration
 	CaddyEnabled                    bool
 	CaddyAdminURL                   string
@@ -679,6 +681,8 @@ func EdgeFromEnv() EdgeConfig {
 		HeartbeatInterval:           getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
 		OriginNetworkProbeInterval:  getenvDuration("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_INTERVAL", 0),
 		OriginNetworkProbeHostnames: getenvList("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_HOSTNAMES"),
+		OriginNetworkProbeAllRoutes: getenvBool("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_ALL_ROUTES", false),
+		OriginNetworkProbeBatchSize: getenvInt("FUGUE_EDGE_ORIGIN_NETWORK_PROBE_BATCH_SIZE", 1),
 		HTTPTimeout:                 getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
 		CaddyEnabled:                getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
 		CaddyAdminURL:               getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),

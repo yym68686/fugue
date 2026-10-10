@@ -42,7 +42,13 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 			primary = candidate
 		}
 	}
-	if primary == nil || !primary.Ready || len(primary.HardGates) != 0 {
+	learning := false
+	if snapshot.Policy.Version == DeliveryNetworkPolicyVersion && result.Hypothesis == "hold" && result.ProposedEdgeID == snapshot.CurrentEdgeID && primary != nil && !primary.Ready && len(primary.HardGates) == 0 {
+		for _, candidate := range snapshot.Candidates {
+			learning = learning || candidate.EdgeID == primary.EdgeID && proofFresh(candidate, snapshot.Policy, now)
+		}
+	}
+	if primary == nil || !primary.Ready && !learning || len(primary.HardGates) != 0 {
 		return nil, errors.New("physical selection primary lacks complete network evidence")
 	}
 	if result.Hypothesis != "hold" && result.Hypothesis != "switch" && result.Hypothesis != "failover" {
@@ -51,6 +57,12 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 	selection := &model.DNSPhysicalSelection{Version: model.DNSPhysicalSelectionVersion, PrimaryEdgeID: primary.EdgeID,
 		OrderedEdgeIDs: []string{primary.EdgeID}, EvidenceDigest: receipt.Digest, DNSReceiptID: binding.ReceiptID,
 		LoadedDigest: binding.LoadedDigest, PolicyDigest: binding.PolicyDigest, Scope: snapshot.Scope, CapturedAt: snapshot.CapturedAt}
+	if snapshot.Policy.Version == DeliveryNetworkPolicyVersion {
+		selection.QualityState = "measured"
+		if learning {
+			selection.QualityState = "learning"
+		}
+	}
 	primarySince := snapshot.CapturedAt
 	if primary.EdgeID == snapshot.CurrentEdgeID && snapshot.LastSwitchAt != nil {
 		primarySince = *snapshot.LastSwitchAt

@@ -74,6 +74,20 @@ func TestOriginNetworkSampleRejectsUnprovedTransport(t *testing.T) {
 	}
 }
 
+func TestOriginSamplingAcceptsOnlyUnambiguousConfiguredRelease(t *testing.T) {
+	observed := networkTestObservation()
+	observed.Route.Upstreams = []model.EdgeRouteUpstream{{UpstreamURL: observed.Route.UpstreamURL, UpstreamKind: observed.Route.UpstreamKind, UpstreamScope: observed.Route.UpstreamScope, Weight: 100, Status: model.EdgeRouteStatusActive}}
+	remote := &net.TCPAddr{IP: net.ParseIP("10.43.0.20"), Port: 3000}
+	sample, ok := originNetworkSample(&observed, remote, tcpdiag.Snapshot{Available: true, RTTUsec: 800}, "edge-a", "group-a", time.Now())
+	if !ok || sample.ServiceRTTMS == nil || *sample.ServiceRTTMS != 0.8 {
+		t.Fatal("single stable release lost network evidence", sample, ok)
+	}
+	observed.Route.Upstreams = append(observed.Route.Upstreams, observed.Route.Upstreams[0])
+	if _, ok := originNetworkSample(&observed, remote, tcpdiag.Snapshot{Available: true, RTTUsec: 800}, "edge-a", "group-a", time.Now()); ok {
+		t.Fatal("ambiguous release network treated as one origin")
+	}
+}
+
 func TestOriginNetworkQueueNonblockingAndBounded(t *testing.T) {
 	service := &Service{}
 	service.Config.EdgeID, service.Config.EdgeGroupID = "edge-a", "group-a"

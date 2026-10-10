@@ -35,7 +35,7 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	receipt, err := s.capturePhysicalQuality(ctx, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultNetworkPolicy())
+	receipt, err := s.capturePhysicalQuality(ctx, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultDeliveryNetworkPolicy())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -130,7 +130,10 @@ func (s *Server) capturePhysicalQualityWithAnswer(ctx context.Context, hostname,
 			}
 			decisions.Snapshot.Receipts = []dnsserver.DNSDecisionReceipt{*answer}
 		} else {
-			decisions, readErr = s.readPlatformDNSDecisions(ctx, dnsNodeID, hostname, "", 1)
+			decisions, readErr = s.readPlatformDNSDecisions(ctx, dnsNodeID, hostname, "", 20)
+			if readErr == nil {
+				decisions.Snapshot.Receipts = qualityDNSAnswerReceipts(decisions.Snapshot.Receipts, hostname, time.Now().UTC(), time.Duration(snapshot.Policy.EvidenceMaxAgeSeconds)*time.Second)
+			}
 		}
 		if readErr != nil {
 			snapshot.Blockers = append(snapshot.Blockers, "actual_dns_backend_unavailable")
@@ -145,6 +148,26 @@ func (s *Server) capturePhysicalQualityWithAnswer(ctx context.Context, hostname,
 		}
 	}
 	return edgequality.Capture(snapshot)
+}
+
+func qualityDNSAnswerReceipts(receipts []dnsserver.DNSDecisionReceipt, hostname string, now time.Time, age time.Duration) []dnsserver.DNSDecisionReceipt {
+	var chosen *dnsserver.DNSDecisionReceipt
+	for index := range receipts {
+		receipt := &receipts[index]
+		if receipt.Hostname != hostname || receipt.QType != 1 {
+			continue
+		}
+		if _, err := dnsserver.QualityEvidenceFromDNSDecision(*receipt, now, age); err != nil {
+			continue
+		}
+		if chosen == nil || receipt.ObservedAt.After(chosen.ObservedAt) {
+			chosen = receipt
+		}
+	}
+	if chosen == nil {
+		return nil
+	}
+	return []dnsserver.DNSDecisionReceipt{*chosen}
 }
 
 func bindPhysicalQualityDNS(snapshot *edgequality.Snapshot, receipt dnsserver.DNSDecisionReceipt) error {

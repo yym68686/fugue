@@ -37,6 +37,12 @@ func DefaultNetworkPolicy() Policy {
 	return policy
 }
 
+func DefaultDeliveryNetworkPolicy() Policy {
+	policy := DefaultNetworkPolicy()
+	policy.Version = DeliveryNetworkPolicyVersion
+	return policy
+}
+
 func validNetworkCohort(value string) bool {
 	if !strings.HasPrefix(value, "tcp_peer:") {
 		return false
@@ -149,7 +155,7 @@ func selectNetworkChallenger(snapshot Snapshot, nodes map[string]Candidate, obse
 			challenger := assessNetwork(nodes[candidate.EdgeID], observations[candidate.EdgeID], snapshot.Policy, snapshot.CapturedAt, cohort)
 			comparison := NetworkComparison{EdgeID: candidate.EdgeID, IncumbentEdgeID: current.EdgeID, Cohort: cohort,
 				IncumbentLower: incumbent.Lower, ChallengerUpper: challenger.Upper, Ready: incumbent.Ready && challenger.Ready}
-			comparison.Advantageous = comparison.Ready && advantageous(challenger, incumbent, snapshot.Policy)
+			comparison.Advantageous = comparison.Ready && networkAdvantageous(challenger, incumbent, snapshot.Policy)
 			comparison.SustainedBuckets = networkSustained(snapshot, current, nodes[candidate.EdgeID], observations, cohort)
 			if len(result.Comparisons) >= 1024 {
 				result.Blockers = append(result.Blockers, "cohort_comparison_limit_reached")
@@ -308,6 +314,13 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 			cost := value * policy.FailureCostMS
 			if name == "upload_bps" || name == "download_bps" {
 				cost = policy.ThroughputCostMS * math.Max(0, 1-value/policy.ThroughputTargetBPS)
+				if policy.Version == DeliveryNetworkPolicyVersion {
+					cost = deliveryCost(value, policy)
+					assessment.Score += cost
+					assessment.Lower += deliveryCost(networkQuantile(measured, 0.9), policy)
+					assessment.Upper += deliveryCost(networkQuantile(measured, 0.1), policy)
+					continue
+				}
 			}
 			if name == "capacity_utilization" {
 				cost = value * policy.CapacityCostMS
@@ -360,10 +373,25 @@ func networkSustained(snapshot Snapshot, current, challenger Candidate, observat
 		at := time.Unix((bucket+1)*int64(policy.BucketSeconds), 0).Add(-time.Nanosecond).UTC()
 		currentAssessment := assessNetworkAt(current, selected(current.EdgeID), policy, snapshot.CapturedAt, at, cohort)
 		challengerAssessment := assessNetworkAt(challenger, selected(challenger.EdgeID), policy, snapshot.CapturedAt, at, cohort)
-		if !currentAssessment.Ready || !challengerAssessment.Ready || !advantageous(challengerAssessment, currentAssessment, policy) {
+		if !currentAssessment.Ready || !challengerAssessment.Ready || !networkAdvantageous(challengerAssessment, currentAssessment, policy) {
 			break
 		}
 		count++
 	}
 	return count
+}
+
+func deliveryCost(bytesPerSecond float64, policy Policy) float64 {
+	return policy.ThroughputCostMS * math.Min(1000, math.Max(0, policy.ThroughputTargetBPS/math.Max(1, bytesPerSecond)-1))
+}
+
+func networkAdvantageous(challenger, current Assessment, policy Policy) bool {
+	if policy.Version == DeliveryNetworkPolicyVersion {
+		for _, metric := range []string{"download_bps", "client_retransmission_rate"} {
+			if (challenger.Metrics[metric].State == "observed") != (current.Metrics[metric].State == "observed") {
+				return false
+			}
+		}
+	}
+	return advantageous(challenger, current, policy)
 }

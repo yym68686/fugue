@@ -9,7 +9,7 @@ import (
 )
 
 func TestQualityDNSPrimarySinceComesFromAnsweredPhysicalArtifact(t *testing.T) {
-	for _, name := range []string{"signed_primary", "legacy", "old_physical_artifact", "readiness_fallback"} {
+	for _, name := range []string{"signed_primary", "preserved_order", "legacy", "old_physical_artifact", "readiness_fallback"} {
 		t.Run(name, func(t *testing.T) {
 			state, now := decisionTestState(t)
 			primarySince := now.Add(-20 * time.Minute)
@@ -23,6 +23,11 @@ func TestQualityDNSPrimarySinceComesFromAnsweredPhysicalArtifact(t *testing.T) {
 					record.AnswerPolicy = physicalSelectionTestRecord(now).AnswerPolicy
 					selection := record.AnswerPolicy.PhysicalSelection
 					selection.PrimarySince = &primarySince
+					if name == "preserved_order" {
+						record.AnswerPolicy.PolicyKind = model.DNSAnswerPolicyKindPhysicalOrder
+						record.AnswerPolicy.PhysicalOrder = &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: append([]string(nil), selection.OrderedEdgeIDs...), PrimarySince: &primarySince}
+						record.AnswerPolicy.PhysicalSelection = nil
+					}
 					if name == "old_physical_artifact" {
 						selection.PrimarySince = nil
 					}
@@ -44,7 +49,7 @@ func TestQualityDNSPrimarySinceComesFromAnsweredPhysicalArtifact(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if name == "signed_primary" {
+			if name == "signed_primary" || name == "preserved_order" {
 				if evidence.PrimarySince == nil || !evidence.PrimarySince.Equal(primarySince) {
 					t.Fatal("lost signed assignment history", evidence)
 				}

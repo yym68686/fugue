@@ -41,6 +41,10 @@ func savePhysicalDNSTestArtifact(t *testing.T, state *Store, kind, scope, genera
 }
 
 func physicalDNSReconfigurationFixture(t *testing.T, database string) reconfigurationFixture {
+	return physicalDNSFixtureWithQuery(t, database, nil)
+}
+
+func physicalDNSFixtureWithQuery(t *testing.T, database string, edit func(map[string]any)) reconfigurationFixture {
 	t.Helper()
 	serving := newServingFixture(t, database)
 	source, err := serving.s.GetPlatformArtifact(serving.policy.DNSPolicyArtifactID)
@@ -49,8 +53,17 @@ func physicalDNSReconfigurationFixture(t *testing.T, database string) reconfigur
 	}
 	source.Content["generation"] = "dns-active"
 	source.Content["dns_query_policy"].(map[string]any)["ranking_mode"] = "active"
+	if edit != nil {
+		edit(source.Content["dns_query_policy"].(map[string]any))
+	}
 	source = savePhysicalDNSTestArtifact(t, serving.s, source.ArtifactKind, source.ScopeKey, "dns-active", source.Content)
 	serving.input.DNSQueryPolicy.RankingMode = "active"
+	if edit != nil {
+		raw, _ := json.Marshal(source.Content["dns_query_policy"])
+		if err := json.Unmarshal(raw, serving.input.DNSQueryPolicy); err != nil {
+			t.Fatal(err)
+		}
+	}
 	serving.policy.Generation = "producer-active"
 	serving.policy.DNSPolicyArtifactID, serving.policy.DNSPolicyDigest = source.ID, source.ContentHash
 	old := savePhysicalDNSTestArtifact(t, serving.s, model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, serving.policy.Generation, serving.policy)
