@@ -121,7 +121,7 @@ def main():
         raise ValueError("configuration credential and evidence path required")
     def save(value):
         Path(args.evidence).write_text(canonical(value) + "\n")
-    print(canonical(publish(config, API(config["origin"], token, response_limit=32 << 20), save)))
+    print(canonical(publish(config, API(config["origin"], token, response_limit=16 << 20), save)))
 
 
 if __name__ == "__main__":

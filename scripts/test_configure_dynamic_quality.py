@@ -1,5 +1,6 @@
 import copy
 import unittest
+from unittest.mock import patch
 
 from scripts import configure_dynamic_quality as quality
 from scripts.test_reconfigure_physical_dns import fixture as physical_fixture
@@ -22,6 +23,13 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_entrypoint_uses_supported_bounded_transport(self):
+        config, _ = fixture()
+        import json
+        with patch.object(quality.Path, "read_bytes", return_value=json.dumps(config).encode()), patch.object(quality, "publish", return_value={"accepted": True}) as publish, patch.object(quality.os.environ, "pop", return_value="synthetic-key"), patch("sys.argv", ["configure", "declaration.json", "--evidence", "evidence.json"]):
+            quality.main()
+        self.assertEqual(publish.call_args.args[1].response_limit, 16 << 20)
+
     def test_generic_delta_preserves_constraints_and_orders(self):
         config, source = fixture()
         quality.validate(config)
