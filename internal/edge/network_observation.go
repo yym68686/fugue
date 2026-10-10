@@ -40,7 +40,11 @@ func (s *Service) observeOriginNetwork(observed *edgeProxyObservation, connectio
 }
 
 func (s *Service) appendNetworkSampleLocked(sample model.EdgeNetworkSample) {
-	if len(s.networkSamples) >= 32 {
+	capacity := 32
+	if s.Config.OriginNetworkProbeAllRoutes {
+		capacity = 128
+	}
+	if len(s.networkSamples) >= capacity {
 		oldest, count := -1, 0
 		for index, previous := range s.networkSamples {
 			if previous.Source == sample.Source {
@@ -50,7 +54,7 @@ func (s *Service) appendNetworkSampleLocked(sample model.EdgeNetworkSample) {
 				count++
 			}
 		}
-		if count < 16 {
+		if count < capacity/2 {
 			for index, previous := range s.networkSamples {
 				if previous.Source != sample.Source {
 					oldest = index

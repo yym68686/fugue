@@ -35,13 +35,16 @@ func TestOriginProbeAllRoutesUsesBoundedRoundRobinWithoutBusinessBytes(t *testin
 	service.snapshot.Healthy = true
 	service.snapshot.CaddyAppliedVersion = bundle.Version
 	service.mu.Unlock()
-	attempts := 0
-	dial := func(context.Context, string, string) (net.Conn, error) { attempts++; return &originProbeConn{}, nil }
+	var attempts atomic.Int32
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		attempts.Add(1)
+		return &originProbeConn{}, nil
+	}
 	now := time.Now()
 	for round := 0; round < 3; round++ {
 		service.probeOriginNetworkOnce(context.Background(), now.Add(time.Duration(round)*10*time.Second), dial, func(net.Conn) tcpdiag.Snapshot { return tcpdiag.Snapshot{Available: true, RTTUsec: 1000} })
-		if attempts != (round+1)*2 {
-			t.Fatal("probe exceeded or ignored cycle budget", attempts)
+		if attempts.Load() != int32((round+1)*2) {
+			t.Fatal("probe exceeded or ignored cycle budget", attempts.Load())
 		}
 	}
 	seen := map[string]bool{}
@@ -50,6 +53,70 @@ func TestOriginProbeAllRoutesUsesBoundedRoundRobinWithoutBusinessBytes(t *testin
 	}
 	if len(seen) != 5 {
 		t.Fatal("quiet route never received a controlled probe", seen)
+	}
+}
+
+func TestOriginProbeUniversalBatchBoundsConcurrentSockets(t *testing.T) {
+	service := originProbeService(t)
+	service.Config.OriginNetworkProbeAllRoutes = true
+	service.Config.OriginNetworkProbeHostnames = nil
+	service.Config.OriginNetworkProbeBatchSize = 16
+	service.Config.OriginNetworkProbeInterval = 5 * time.Second
+	route := networkTestObservation().Route
+	route.EdgeGroupID, route.Status, route.RoutePolicy = "group-a", model.EdgeRouteStatusActive, model.EdgeRoutePolicyEnabled
+	routes := make([]model.EdgeRouteBinding, 16)
+	for index := range routes {
+		routes[index] = route
+		routes[index].Hostname = fmt.Sprintf("route-%02d.example.test", index)
+	}
+	bundle := model.EdgeRouteBundle{Version: "batch-bundle", ValidUntil: time.Now().Add(time.Hour), Routes: routes}
+	service.recordSyncSuccess(bundle, "", time.Now(), false)
+	service.mu.Lock()
+	service.snapshot.Healthy, service.snapshot.CaddyAppliedVersion = true, bundle.Version
+	service.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started, release, finished := make(chan struct{}, 16), make(chan struct{}), make(chan struct{})
+	var inFlight, attempts, maximum atomic.Int32
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		active := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for prior := maximum.Load(); active > prior; prior = maximum.Load() {
+			if maximum.CompareAndSwap(prior, active) {
+				break
+			}
+		}
+		attempts.Add(1)
+		started <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-release:
+			return &originProbeConn{}, nil
+		}
+	}
+	go func() {
+		defer close(finished)
+		service.probeOriginNetworkOnce(ctx, time.Now(), dial, func(net.Conn) tcpdiag.Snapshot { return tcpdiag.Snapshot{Available: true, RTTUsec: 1000} })
+	}()
+	for index := 0; index < 4; index++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("bounded batch did not issue concurrent probes")
+		}
+	}
+	if attempts.Load() != 4 {
+		t.Fatal("probe sockets exceed concurrency budget", attempts.Load())
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("probe batch did not finish")
+	}
+	if attempts.Load() != 16 || maximum.Load() > 4 || len(service.originNetworkSamples()) != 16 {
+		t.Fatal("batch lost attempts or exceeded concurrency", attempts.Load(), maximum.Load(), len(service.originNetworkSamples()))
 	}
 }
 

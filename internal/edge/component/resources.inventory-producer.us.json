@@ -400,11 +400,15 @@
                   },
                   {
                     "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_INTERVAL",
-                    "value": "60s"
+                    "value": "5s"
                   },
                   {
-                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_HOSTNAMES",
-                    "value": "wdwdl.fugue.pro"
+                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_ALL_ROUTES",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_BATCH_SIZE",
+                    "value": "16"
                   },
                   {
                     "name": "FUGUE_EDGE_HTTP_TIMEOUT",
@@ -1034,11 +1038,15 @@
                   },
                   {
                     "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_INTERVAL",
-                    "value": "60s"
+                    "value": "5s"
                   },
                   {
-                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_HOSTNAMES",
-                    "value": "wdwdl.fugue.pro"
+                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_ALL_ROUTES",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_ORIGIN_NETWORK_PROBE_BATCH_SIZE",
+                    "value": "16"
                   },
                   {
                     "name": "FUGUE_EDGE_HTTP_TIMEOUT",

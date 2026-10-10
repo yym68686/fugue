@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/model"
@@ -93,14 +94,30 @@ func (s *Service) probeOriginNetworkOnce(ctx context.Context, now time.Time, dia
 		batch = min(s.Config.OriginNetworkProbeBatchSize, len(keys))
 	}
 	s.originNetworkProbeLast = now
+	queue := make(chan model.EdgeNetworkSample, batch)
 	for offset := 0; offset < batch; offset++ {
 		if ctx.Err() != nil || s.currentRouteIndex() != index {
 			return
 		}
 		key := keys[(start+offset)%len(keys)]
 		s.originNetworkProbeCursor = key
-		s.probeOriginNetworkTarget(ctx, index, targets[key], dial, inspect)
+		queue <- targets[key]
 	}
+	close(queue)
+	var workers sync.WaitGroup
+	for worker := 0; worker < min(4, batch); worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for sample := range queue {
+				if ctx.Err() != nil || s.currentRouteIndex() != index {
+					return
+				}
+				s.probeOriginNetworkTarget(ctx, index, sample, dial, inspect)
+			}
+		}()
+	}
+	workers.Wait()
 }
 
 func (s *Service) probeOriginNetworkTarget(ctx context.Context, index *edgeRouteIndex, sample model.EdgeNetworkSample, dial func(context.Context, string, string) (net.Conn, error), inspect func(net.Conn) tcpdiag.Snapshot) {
@@ -133,10 +150,9 @@ func (s *Service) probeOriginNetworkTarget(ctx context.Context, index *edgeRoute
 	if !active || !known || s.currentRouteIndex() != index || !s.appTrafficProofApplied(index) || model.ValidateEdgeNetworkSample(sample) != nil {
 		return
 	}
-	if s.networkSampleMu.TryLock() {
-		s.appendNetworkSampleLocked(sample)
-		s.networkSampleMu.Unlock()
-	}
+	s.networkSampleMu.Lock()
+	s.appendNetworkSampleLocked(sample)
+	s.networkSampleMu.Unlock()
 }
 
 func originNetworkProbeTarget(route model.EdgeRouteBinding, version, edgeID, groupID string, now time.Time) (model.EdgeNetworkSample, bool) {

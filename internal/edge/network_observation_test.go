@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +22,33 @@ func networkTestObservation() edgeProxyObservation {
 	return edgeProxyObservation{BundleVersion: "bundle-one", Duration: time.Hour, TTFB: time.Minute,
 		Route: model.EdgeRouteBinding{Hostname: "app.example.test", PathPrefix: "/", Streaming: true,
 			UpstreamKind: "kubernetes-service", UpstreamScope: "local-service", UpstreamURL: "http://app.tenant.svc.cluster.local:3000"}}
+}
+
+func TestUniversalSamplerRetainsOneFullHeartbeatProbeWindow(t *testing.T) {
+	service := &Service{}
+	service.Config.OriginNetworkProbeAllRoutes = true
+	for index := 0; index < 96; index++ {
+		service.appendNetworkSampleLocked(model.EdgeNetworkSample{Source: "service_endpoint_tcp_probe_v1", ID: fmt.Sprintf("probe-%d", index)})
+	}
+	for index := 0; index < 32; index++ {
+		service.appendNetworkSampleLocked(model.EdgeNetworkSample{Source: "public_front_tcp_info_v1", ID: fmt.Sprintf("client-%d", index)})
+	}
+	if len(service.originNetworkSamples()) != 128 {
+		t.Fatal("universal probe window was truncated before heartbeat")
+	}
+	for index := 96; index < 400; index++ {
+		service.appendNetworkSampleLocked(model.EdgeNetworkSample{Source: "service_endpoint_tcp_probe_v1", ID: fmt.Sprintf("probe-%d", index)})
+	}
+	samples := service.originNetworkSamples()
+	clients := 0
+	for _, sample := range samples {
+		if sample.Source == "public_front_tcp_info_v1" {
+			clients++
+		}
+	}
+	if len(samples) != 128 || clients != 32 || samples[len(samples)-1].ID != "probe-399" {
+		t.Fatal("universal sampling exceeded its bound or starved passive measurements", len(samples), clients)
+	}
 }
 
 func TestOriginNetworkSampleSeparatesSocketRTTFromBusinessDuration(t *testing.T) {
