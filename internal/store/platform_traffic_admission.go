@@ -169,7 +169,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 					return fail("required consumer lacks physical network delivery v4 capability")
 				}
 				if failureAwareRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5) {
-					return fail("required DNS consumer lacks physical network failure-aware v5 capability")
+					return fail("required consumer lacks physical network failure-aware v5 capability")
 				}
 				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
 					return fail("physical network v3 capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
@@ -272,9 +272,6 @@ func physicalOrderProjectionCapabilityRequired(artifact model.PlatformArtifact) 
 }
 
 func physicalFailureAwareCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {
-	if artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
-		return false, nil
-	}
 	var payload struct {
 		Policy struct {
 			Query *platformconfig.DNSQueryPolicy `json:"dns_query_policy"`

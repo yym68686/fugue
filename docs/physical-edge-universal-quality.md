@@ -27,7 +27,7 @@ No production acceptance is claimed by this work-in-progress document.
 
 The independently versioned V5 evaluator distinguishes unknown download performance from observed transfer failures. A challenger with measured downloads can beat an incumbent lacking enough completed downloads only when both sides have explicit failure outcomes and the incumbent's failure rate is higher. The missing download is not assigned zero throughput. Sparse client cohorts remain unknown with one bounded uncertainty allowance; they cannot veto complete sustained evidence from another common cohort. Every sufficiently observed cohort still has to agree. V4 receipts retain their original evaluation semantics.
 
-DNS executors must advertise `physical_network_failure_aware_v5` before a traffic publication containing V5 policy can enter gray or full serving. V4 capability alone is insufficient because the DNS artifact also carries the signed producer policy, which older executors validate while decoding it. This gate runs before traffic authority changes and does not prevent recovery to an already verified positive LKG.
+Route, TLS and DNS executors must advertise `physical_network_failure_aware_v5` before a traffic publication containing V5 policy can enter gray or full serving. V4 capability alone is insufficient because each child artifact also carries the signed producer policy, which older executors validate while decoding it. This gate runs before traffic authority changes and does not prevent recovery to an already verified positive LKG.
 
 ## Authenticated client measurement
 

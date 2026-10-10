@@ -40,7 +40,7 @@ func testLeasedTrafficAdmission(t *testing.T, address string) {
 }
 
 func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) {
-	for _, scenario := range []string{"supported", "physical supported", "physical missing DNS", "physical missing route", "physical missing TLS", "failure aware supported", "failure aware missing DNS", "projection supported", "projection missing DNS", "projection missing route", "projection missing TLS", "failed facts still support recovery", "missing route capability", "missing DNS capability", "missing TLS capability", "stale issued", "missing issued", "stale received", "unverified", "new topology", "empty cohort member", "standalone", "soft override", "rollback", "rollback missing capability", "queued revocation"} {
+	for _, scenario := range []string{"supported", "physical supported", "physical missing DNS", "physical missing route", "physical missing TLS", "failure aware supported", "failure aware missing DNS", "failure aware missing route", "failure aware missing TLS", "projection supported", "projection missing DNS", "projection missing route", "projection missing TLS", "failed facts still support recovery", "missing route capability", "missing DNS capability", "missing TLS capability", "stale issued", "missing issued", "stale received", "unverified", "new topology", "empty cohort member", "standalone", "soft override", "rollback", "rollback missing capability", "queued revocation"} {
 		t.Run(scenario, func(t *testing.T) {
 			if scenario == "queued revocation" && address == "" {
 				t.Skip("Postgres concurrency")
@@ -109,7 +109,7 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				}
 				if strings.HasPrefix(scenario, "failure aware ") {
 					h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalDynamicQualityCapabilityV1)
-					if scenario == "failure aware supported" && old.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
+					if scenario == "failure aware supported" || scenario == "failure aware missing DNS" && old.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || scenario == "failure aware missing route" && old.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle || scenario == "failure aware missing TLS" && old.ArtifactKind != model.PlatformArtifactKindCaddyRouteConfig {
 						h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5)
 					}
 				}
