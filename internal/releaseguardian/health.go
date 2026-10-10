@@ -1,6 +1,11 @@
 package releaseguardian
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+var secondaryIdentityDrift = regexp.MustCompile(`^health (?:Deployment|DaemonSet)/[a-z0-9](?:[a-z0-9.-]*[a-z0-9])? release identity differs from the stable record$`)
 
 type Decision struct {
 	State            ReleaseState
@@ -64,7 +69,7 @@ func stableIdentityDrift(reason string) bool {
 	reason = strings.TrimSpace(reason)
 	return reason == "Deployment release identity differs from the stable record" ||
 		reason == "DaemonSet release identity differs from the stable record" ||
-		reason == "workload image differs from the stable record"
+		reason == "workload image differs from the stable record" || secondaryIdentityDrift.MatchString(reason)
 }
 
 func joinedReason(prefix string, health HealthSnapshot) string {

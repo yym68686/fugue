@@ -505,6 +505,32 @@ func TestWriteModeRepairsCurrentStableRecordInsteadOfWalkingItsOlderLKG(t *testi
 	}
 }
 
+func TestStableSecondaryIdentityDriftRepairsOnlyExactCurrentRecord(t *testing.T) {
+	for _, reason := range []string{"health DaemonSet/edge-worker-a release identity differs from the stable record", "health Deployment/worker-b release identity differs from the stable record"} {
+		now := time.Now().UTC()
+		snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), "")
+		snapshot.Health.Local.Reason = reason
+		snapshot.CurrentRecordDigest, snapshot.LastSuccessfulLKG = snapshot.Record.RecordDigest, snapshot.Record.RecordDigest
+		store, executor := &fakeStore{snapshot: snapshot}, &fakeExecutor{}
+		controller, err := NewController(ModeWrite, store, executor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.now = func() time.Time { return now }
+		if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+			t.Fatal(err)
+		}
+		if executor.repairs != 1 || executor.rollbacks != 0 || store.lkgCAS != 0 || store.status.State != StateStable {
+			t.Fatal("secondary workload drift walked an older LKG", reason, executor, store.status)
+		}
+	}
+	for _, reason := range []string{"health DaemonSet/worker runtime failed", "health Other/worker release identity differs from the stable record", "health DaemonSet/worker release identity differs from the stable record; unknown", "health DaemonSet/ release identity differs from the stable record"} {
+		if stableIdentityDrift(reason) {
+			t.Fatal("unrelated degradation admitted as identity repair", reason)
+		}
+	}
+}
+
 func TestWriteModeRollsBackAStableRecordWithRuntimeFailure(t *testing.T) {
 	now := time.Unix(36, 0).UTC()
 	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), "")
