@@ -11,11 +11,18 @@ import (
 )
 
 func TestDynamicQualityTransactionIsFencedAndPreservesServingLKG(t *testing.T) {
-	for _, scenario := range []string{"success", "stale_full", "constraint_changed", "static_changed", "frozen"} {
+	for _, scenario := range []string{"success", "adopt_equivalent", "reject_distinct", "stale_full", "constraint_changed", "static_changed", "frozen"} {
 		t.Run(scenario, func(t *testing.T) {
 			fixture := physicalDNSFixtureWithQuery(t, "", func(query map[string]any) {
 				query["ecs_enabled"], query["exploration_percent"] = false, 0
 				query["ordered_projection"] = platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a"}}, Overrides: []platformconfig.DNSOrderOverride{}}
+				if scenario == "adopt_equivalent" || scenario == "reject_distinct" {
+					policy := edgequality.DefaultNetworkPolicy()
+					if scenario == "reject_distinct" {
+						policy.AdvantageMS += 10
+					}
+					query["physical_routes"] = []platformconfig.PhysicalQualityRoute{{Hostname: "app.example.test", TrafficClass: "streaming", Policy: policy}}
+				}
 			})
 			previous, err := platformproducer.Decode(fixture.old)
 			if err != nil {
@@ -29,6 +36,9 @@ func TestDynamicQualityTransactionIsFencedAndPreservesServingLKG(t *testing.T) {
 			policy := edgequality.DefaultNetworkPolicy()
 			policy.Version = edgequality.DeliveryNetworkPolicyVersion
 			source.Content["dns_query_policy"].(map[string]any)["dynamic_quality"] = &platformconfig.DynamicQualityPolicy{Mode: "all_dynamic", Policy: policy, RefreshQueriesPerCycle: 16, RefreshConcurrency: 4}
+			if scenario == "adopt_equivalent" || scenario == "reject_distinct" {
+				delete(source.Content["dns_query_policy"].(map[string]any), "physical_routes")
+			}
 			if scenario == "constraint_changed" {
 				source.Content["minimum_healthy_edges"] = 2
 			}
@@ -49,7 +59,7 @@ func TestDynamicQualityTransactionIsFencedAndPreservesServingLKG(t *testing.T) {
 			}
 			fixture.bindKey(t)
 			_, _, _, _, err = fixture.s.ReleasePlatformArtifact(fixture.next.ID, fixture.request, testPlatformPrincipal())
-			if (err == nil) != (scenario == "success") {
+			if (err == nil) != (scenario == "success" || scenario == "adopt_equivalent") {
 				t.Fatal("unexpected configuration outcome", scenario, err)
 			}
 			lkg, err := fixture.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")

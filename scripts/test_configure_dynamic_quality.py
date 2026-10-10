@@ -28,17 +28,35 @@ class DynamicQualityConfigurationTests(unittest.TestCase):
         import json
         with patch.object(quality.Path, "read_bytes", return_value=json.dumps(config).encode()), patch.object(quality, "publish", return_value={"accepted": True}) as publish, patch.object(quality.os.environ, "pop", return_value="synthetic-key"), patch("sys.argv", ["configure", "declaration.json", "--evidence", "evidence.json"]):
             quality.main()
-        self.assertEqual(publish.call_args.args[1].response_limit, 16 << 20)
+        self.assertEqual(publish.call_args.args[1].response_limit, 128 << 20)
+        self.assertEqual(publish.call_args.args[1].timeout, 120)
+
+    def test_large_preview_bounds_require_explicit_configuration(self):
+        default = quality.API("https://api.example.test", "synthetic-key")
+        self.assertEqual((default.response_limit, default.timeout), (1 << 20, 30))
+        for options in [{"response_limit": 129 << 20}, {"response_limit": True}, {"timeout": 121}, {"timeout": True}, {"timeout": 0}]:
+            with self.assertRaises(ValueError):
+                quality.API("https://api.example.test", "synthetic-key", **options)
 
     def test_generic_delta_preserves_constraints_and_orders(self):
         config, source = fixture()
         quality.validate(config)
         quality.check_delta(source, config["projection_policy"])
-        for key in ["minimum_ttl_seconds", "ordered_projection", "physical_routes"]:
+        for key in ["minimum_ttl_seconds", "ordered_projection"]:
             changed = copy.deepcopy(config["projection_policy"])
             changed["dns_query_policy"][key] = None
             with self.assertRaises(ValueError):
                 quality.check_delta(source, changed)
+
+    def test_universal_adoption_removes_only_equivalent_quality_overrides(self):
+        config, source = fixture()
+        policy = copy.deepcopy(config["projection_policy"]["dns_query_policy"]["dynamic_quality"]["policy"])
+        policy["version"] = "physical-network-bounded-v3"
+        source["dns_query_policy"]["physical_routes"] = [{"hostname": "app.example.test", "traffic_class": "streaming", "policy": policy}]
+        quality.check_delta(source, config["projection_policy"])
+        source["dns_query_policy"]["physical_routes"][0]["policy"]["advantage_ms"] += 10
+        with self.assertRaises(ValueError):
+            quality.check_delta(source, config["projection_policy"])
 
     def test_incomplete_or_unbounded_policies_reject(self):
         for field in ["mode", "policy", "refresh_queries_per_cycle", "refresh_concurrency"]:

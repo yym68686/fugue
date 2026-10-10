@@ -59,6 +59,34 @@ func TestPhysicalPublicationReconstructsMeasuredEvidenceRatherThanTrustingScores
 	}
 }
 
+func TestPhysicalAliasKeepsActualQuerySeparateFromMeasuredService(t *testing.T) {
+	now := time.Now().UTC()
+	sample, proof := networkWitnessFixture(now)
+	evidence := dnsserver.QualityAnswerEvidence{EdgeID: sample.EdgeID, Hostname: "alias.example.test", Scope: "global", Proofs: []dnsserver.QualityRouteProof{{EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID, Hostname: sample.Hostname, Path: sample.PathPrefix, Proof: proof}}}
+	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: sample.Hostname, DNSHostname: evidence.Hostname, TrafficClass: sample.TrafficClass, Scope: "global",
+		Policy: edgequality.DefaultDeliveryNetworkPolicy(), Candidates: []edgequality.Candidate{{EdgeID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID}}, NetworkSamples: []model.EdgeNetworkSample{sample}}
+	bindPhysicalQualityEvidence(&snapshot, evidence)
+	if len(snapshot.Observations) != 1 || validateBoundPhysicalQualitySnapshot(snapshot, evidence) != nil || snapshot.NetworkSamples[0].Hostname != sample.Hostname {
+		t.Fatal("alias discarded or relabeled its declared service evidence", snapshot)
+	}
+	receipt, err := edgequality.Capture(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := edgequality.Replay(receipt); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.DNSHostname = "foreign.example.test"
+	if validateBoundPhysicalQualitySnapshot(snapshot, evidence) == nil {
+		t.Fatal("service measurements rebound to an unrelated DNS query")
+	}
+	snapshot.DNSHostname = evidence.Hostname
+	snapshot.Hostname = "foreign-service.example.test"
+	if validateBoundPhysicalQualitySnapshot(snapshot, evidence) == nil {
+		t.Fatal("alias admitted an undeclared service")
+	}
+}
+
 func TestPhysicalPublicationRejectsAbsentActualDNSReceipt(t *testing.T) {
 	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, Hostname: "app.example.test", Scope: "global", TrafficClass: "streaming", CapturedAt: time.Now().UTC(), Policy: edgequality.DefaultNetworkPolicy()}
 	for _, raw := range []json.RawMessage{nil, json.RawMessage(`{}`), json.RawMessage(`{"write_succeeded":true}`)} {

@@ -19245,6 +19245,9 @@ components:
       additionalProperties: false
       required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
       properties:
+        dns_hostname:
+          type: string
+          description: Actual DNS query hostname when a declared single-service alias differs from the measured service hostname. Omitted for direct names. Publication must verify the declared owner and actual receipt; no arbitrary cross-host evidence fallback.
         client_probe_reports:
           type: array
           maxItems: 256

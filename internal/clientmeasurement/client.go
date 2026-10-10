@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/routeproof"
 )
 
 func MeasureRound(ctx context.Context, plan model.EdgeClientProbePlan) (model.EdgeClientProbeReport, error) {
@@ -73,6 +74,7 @@ func measure(ctx context.Context, permit model.EdgeClientProbePermit) model.Edge
 	}
 	raw, _ := json.Marshal(permit)
 	request.Header.Set(RequestHeader, base64.RawURLEncoding.EncodeToString(raw))
+	request.Header.Set(routeproof.RequestHeader, "1")
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("User-Agent", "fugue-authenticated-network-probe/v1")
 	response, err := client.Do(request)

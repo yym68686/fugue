@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,6 +147,103 @@ func TestEnvironmentRetirementRejectsDriftAndForeignOwnership(t *testing.T) {
 			}
 			if _, _, err := retirementPatch(desired, live, r.Workload.FieldManager, retired); err == nil {
 				t.Fatal("unreviewed deletion accepted")
+			}
+		})
+	}
+}
+
+func TestEnvironmentRetirementStatusUpdateBeforeScalarTransferKeepsCASBound(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		t.Run(fmt.Sprintf("spec_drift_%t", drift), func(t *testing.T) {
+			release, old, next, cluster := retirementFixture(t)
+			container, _, _ := retirementContainer(next, "containers", "dns")
+			container["env"].([]any)[0].(map[string]any)["value"] = "updated"
+			set := func(value map[string]any) []byte {
+				return mustJSON(t, map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{value}})
+			}
+			if err := cluster.BindManifestTransition(release, set(next), set(old)); err != nil {
+				t.Fatal(err)
+			}
+			live := retirementLive(t, release, old)
+			desired := bindRetirementCAS(t, next, live)
+			_, retired, err := retirementPatch(desired, live, release.Workload.FieldManager, cluster.envRetirements[retirementResourceKey(desired)])
+			if err != nil {
+				t.Fatal(err)
+			}
+			mapField(retired, "metadata")["resourceVersion"], mapField(retired, "metadata")["generation"] = "42", json.Number("8")
+			statusUpdate := deepCopyJSONMap(t, retired)
+			mapField(statusUpdate, "metadata")["resourceVersion"] = "43"
+			statusUpdate["status"] = map[string]any{"observedGeneration": json.Number("8")}
+			if drift {
+				container, _, _ := retirementContainer(statusUpdate, "containers", "dns")
+				container["image"] = "foreign"
+			}
+			transferred := deepCopyJSONMap(t, statusUpdate)
+			mapField(transferred, "metadata")["resourceVersion"], mapField(transferred, "metadata")["generation"] = "44", json.Number("9")
+			container, _, _ = retirementContainer(transferred, "containers", "dns")
+			container["env"].([]any)[0].(map[string]any)["value"] = "updated"
+			beforeTransfer := deepCopyJSONMap(t, desired)
+			mapField(beforeTransfer, "metadata")["resourceVersion"] = "43"
+			conflict := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="dns"].env[name="KEEP"].value`)
+			expected, expectedErr := expectedStateAfterOwnershipTransfer(beforeTransfer, statusUpdate, transferred, ownershipConvergencePointers(release, declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "system", Name: "dns-agent"}, desired), release.Workload.FieldManager, conflict)
+			if !drift && (expectedErr != nil || digestJSON(sanitizeObservedResource(expected)) != digestJSON(sanitizeObservedResource(transferred))) {
+				t.Fatalf("fixture transfer mismatch: %v expected=%s actual=%s", expectedErr, mustJSON(t, expected), mustJSON(t, transferred))
+			}
+			if !drift && digestJSON(sanitizeObservedResource(retired)) != digestJSON(sanitizeObservedResource(statusUpdate)) {
+				t.Fatalf("fixture status mismatch: before=%s after=%s", mustJSON(t, retired), mustJSON(t, statusUpdate))
+			}
+			directory := t.TempDir()
+			t.Setenv("RETIRE_SEQUENCE_DIR", directory)
+			for filename, value := range map[string]map[string]any{"live": live, "retired": retired, "status": statusUpdate, "transferred": transferred} {
+				if err := os.WriteFile(filepath.Join(directory, filename), mustJSON(t, value), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			program := `#!/bin/sh
+set -eu
+directory="$RETIRE_SEQUENCE_DIR"
+case "$1" in
+get)
+  if [ -f "$directory/patch-two" ]; then cat "$directory/transferred"
+  elif [ -f "$directory/patch-one" ]; then cat "$directory/status"
+  else cat "$directory/live"; fi;;
+patch)
+  if [ -f "$directory/patch-one" ]; then touch "$directory/patch-two"; cat "$directory/transferred"
+  else touch "$directory/patch-one"; cat "$directory/retired"; fi;;
+apply)
+  if [ -f "$directory/apply-one" ]; then cat > "$directory/applied"; printf '{}'
+  else touch "$directory/apply-one"; cat > /dev/null
+    printf 'Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="dns"].env[name="KEEP"].value' >&2
+    exit 1; fi;;
+*) exit 43;;
+esac
+`
+			binary := filepath.Join(directory, "kubectl")
+			if err := os.WriteFile(binary, []byte(program), 0700); err != nil {
+				t.Fatal(err)
+			}
+			cluster.kubectl, cluster.timeout = binary, time.Second
+			identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "system", Name: "dns-agent"}
+			err = cluster.applyResourceWithOwnershipConvergence(context.Background(), release, identity, desired, mustJSON(t, desired), false)
+			if drift {
+				if err == nil {
+					t.Fatal("foreign spec edit accepted as status-only RV movement")
+				}
+				if _, err := os.Stat(filepath.Join(directory, "patch-two")); !os.IsNotExist(err) {
+					t.Fatal("ownership mutation occurred after foreign spec drift")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(filepath.Join(directory, "applied"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			applied, err := decodeJSONObject(raw)
+			if err != nil || mapField(applied, "metadata")["uid"] != "uid-one" || mapField(applied, "metadata")["resourceVersion"] != "44" {
+				t.Fatal("final SSA was not bound to exact post-transfer identity", err)
 			}
 		})
 	}

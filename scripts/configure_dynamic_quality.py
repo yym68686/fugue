@@ -49,6 +49,15 @@ def check_delta(previous, successor):
     new.pop("generation", None)
     before = old.get("dns_query_policy", {}).pop("dynamic_quality", None)
     after = new.get("dns_query_policy", {}).pop("dynamic_quality", None)
+    if after is not None and not new.get("dns_query_policy", {}).get("physical_routes"):
+        routes = old.get("dns_query_policy", {}).get("physical_routes", [])
+        for route in routes:
+            prior = copy.deepcopy(route["policy"])
+            prior["version"] = after["policy"]["version"]
+            if prior != after["policy"]:
+                raise ValueError("universal adoption cannot discard a distinct per-service quality constraint")
+        old.get("dns_query_policy", {}).pop("physical_routes", None)
+        new.get("dns_query_policy", {}).pop("physical_routes", None)
     if after is None or before == after or old != new:
         raise ValueError("only the generic quality policy may change")
 
@@ -121,7 +130,7 @@ def main():
         raise ValueError("configuration credential and evidence path required")
     def save(value):
         Path(args.evidence).write_text(canonical(value) + "\n")
-    print(canonical(publish(config, API(config["origin"], token, response_limit=16 << 20), save)))
+    print(canonical(publish(config, API(config["origin"], token, response_limit=128 << 20, timeout=120), save)))
 
 
 if __name__ == "__main__":

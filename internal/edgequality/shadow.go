@@ -65,6 +65,7 @@ type Observation struct {
 }
 
 type Snapshot struct {
+	DNSHostname         string                        `json:"dns_hostname,omitempty"`
 	ClientProbeReports  []model.EdgeClientProbeReport `json:"client_probe_reports,omitempty"`
 	NodeCapacitySamples []NodeCapacitySample          `json:"node_capacity_samples,omitempty"`
 	Limitations         []string                      `json:"limitations,omitempty"`
@@ -397,6 +398,9 @@ func sustained(snapshot Snapshot, challenger, current Candidate, observations ma
 }
 
 func validate(snapshot Snapshot) error {
+	if snapshot.DNSHostname != "" && (snapshot.Policy.Version != DeliveryNetworkPolicyVersion || snapshot.DNSHostname == snapshot.Hostname || len(snapshot.DNSHostname) > 253 || snapshot.DNSHostname != strings.TrimSuffix(strings.ToLower(snapshot.DNSHostname), ".") || strings.ContainsAny(snapshot.DNSHostname, "/:@?# \t\r\n")) {
+		return errors.New("invalid explicit DNS alias binding")
+	}
 	if snapshot.Schema != Schema || snapshot.Hostname == "" || snapshot.TrafficClass == "" || snapshot.Scope == "" || snapshot.CapturedAt.IsZero() || snapshot.CapturedAt.Unix() < 0 {
 		return errors.New("invalid shadow schema or context")
 	}

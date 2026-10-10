@@ -227,7 +227,7 @@ class PhysicalDNSConfigurationTests(unittest.TestCase):
     def test_api_size_bounds_are_explicit_and_default_unchanged(self):
         self.assertEqual(1 << 20, API("https://api.example.test", "test").response_limit)
         self.assertEqual(16 << 20, API("https://api.example.test", "test", 16 << 20).response_limit)
-        for size in [0, True, 16 << 21]:
+        for size in [0, True, 129 << 20]:
             with self.assertRaises(ValueError): API("https://api.example.test", "test", size)
 
     def test_workflow_is_a_configuration_lane_not_a_component_deploy(self):

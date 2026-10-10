@@ -63,6 +63,32 @@ func TestDynamicQualityCoversFutureDomainsAndPreservesStaticPinned(t *testing.T)
 	}
 }
 
+func TestDynamicQualityAliasesUseDeclaredServiceOwner(t *testing.T) {
+	projection, nodes, policy, now := directQueryFixture()
+	policy.ECSEnabled, policy.ExplorationPercent = false, 0
+	policy.OrderedProjection = &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}}
+	policy.DynamicQuality = &platformconfig.DynamicQualityPolicy{Mode: "all_dynamic", Policy: edgequality.DefaultDeliveryNetworkPolicy(), RefreshQueriesPerCycle: 8, RefreshConcurrency: 2}
+	record := projection.Intent.DNS[0]
+	record.Hostname = "alias.example.test"
+	record.Type = "FUGUE_ROUTE"
+	record.Values = nil
+	record.Application = nil
+	record.Route = &platformconfig.DNSRouteIntent{DNSApplicationIntent: platformconfig.DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}, Hostnames: []string{"app.example.test"}}
+	projection.Intent.DNS = append(projection.Intent.DNS, record)
+	if err := projectDirectDNSQueries(&projection, policy, nodes, now); err != nil {
+		t.Fatal(err)
+	}
+	jobs, states, err := dynamicQualityRoutes(projection, policy)
+	if err != nil || len(jobs) != 2 || states[record.Hostname] != "learning_queued" {
+		t.Fatal(jobs, states, err)
+	}
+	for _, job := range jobs {
+		if job.EvidenceHostname != "app.example.test" {
+			t.Fatal("alias fabricated a service route for its DNS-only name", job)
+		}
+	}
+}
+
 func TestDynamicQualityRefreshRotatesEvenWithoutTraffic(t *testing.T) {
 	state := dynamicQualityState{}
 	jobs := []dynamicQualityJob{}
@@ -74,6 +100,7 @@ func TestDynamicQualityRefreshRotatesEvenWithoutTraffic(t *testing.T) {
 	for round := 0; round < 4; round++ {
 		for _, job := range state.schedule(jobs, 4, now.Add(time.Duration(round)*time.Minute)) {
 			seen[job.Key]++
+			state.started(job.Key, now.Add(time.Duration(round)*time.Minute))
 		}
 	}
 	if len(seen) != 13 {
@@ -82,5 +109,17 @@ func TestDynamicQualityRefreshRotatesEvenWithoutTraffic(t *testing.T) {
 	state.schedule(jobs[:2], 1, now.Add(time.Hour))
 	if len(state.entries) != 2 {
 		t.Fatal("removed domain state leaked")
+	}
+}
+
+func TestDynamicCaptureUnstartedQueriesKeepPriorityAfterBudgetExhaustion(t *testing.T) {
+	state := dynamicQualityState{}
+	now := time.Now().UTC()
+	jobs := []dynamicQualityJob{{Key: "first"}, {Key: "second"}, {Key: "third"}}
+	selected := state.schedule(jobs, 3, now)
+	state.started(selected[0].Key, now)
+	next := state.schedule(jobs, 2, now.Add(time.Minute))
+	if len(next) != 2 || next[0].Key != "second" || next[1].Key != "third" {
+		t.Fatal("unstarted domains were delayed as if actually probed", next)
 	}
 }

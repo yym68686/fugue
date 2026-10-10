@@ -49,10 +49,17 @@ func (s *Server) capturePhysicalQuality(ctx context.Context, hostname, trafficCl
 }
 
 func (s *Server) capturePhysicalQualityWithAnswer(ctx context.Context, hostname, trafficClass string, scope edgeQualityRankScope, dnsNodeID string, networkPolicy edgequality.Policy, answer *dnsserver.DNSDecisionReceipt) (edgequality.Receipt, error) {
+	return s.capturePhysicalQualityForDNS(ctx, hostname, hostname, trafficClass, scope, dnsNodeID, networkPolicy, answer)
+}
+
+func (s *Server) capturePhysicalQualityForDNS(ctx context.Context, hostname, dnsHostname, trafficClass string, scope edgeQualityRankScope, dnsNodeID string, networkPolicy edgequality.Policy, answer *dnsserver.DNSDecisionReceipt) (edgequality.Receipt, error) {
 	now := time.Now().UTC()
 	snapshot := edgequality.Snapshot{Schema: edgequality.Schema, CapturedAt: now, Hostname: hostname, TrafficClass: trafficClass,
 		Scope: scope.key(), Policy: networkPolicy, Candidates: []edgequality.Candidate{}, Observations: []edgequality.Observation{},
 		Blockers: []string{"actual_dns_receipt_not_bound"}, Limitations: []string{"dns_resolver_scope_is_not_terminal_path", "common_tcp_cohorts_do_not_cover_every_terminal", "node_capacity_is_not_link_or_application_capacity", "uncertainty_budget_is_not_statistical_confidence"}}
+	if dnsHostname != hostname {
+		snapshot.DNSHostname = dnsHostname
+	}
 	nodes, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
 		return edgequality.Receipt{}, err
@@ -141,14 +148,14 @@ func (s *Server) capturePhysicalQualityWithAnswer(ctx context.Context, hostname,
 		var decisions platformDNSDecisionResponse
 		var readErr error
 		if answer != nil {
-			if answer.NodeID != dnsNodeID || answer.Hostname != hostname {
+			if answer.NodeID != dnsNodeID || answer.Hostname != dnsHostname {
 				return edgequality.Receipt{}, errors.New("physical DNS probe identity differs")
 			}
 			decisions.Snapshot.Receipts = []dnsserver.DNSDecisionReceipt{*answer}
 		} else {
-			decisions, readErr = s.readPlatformDNSDecisions(ctx, dnsNodeID, hostname, "", 20)
+			decisions, readErr = s.readPlatformDNSDecisions(ctx, dnsNodeID, dnsHostname, "", 20)
 			if readErr == nil {
-				decisions.Snapshot.Receipts = qualityDNSAnswerReceipts(decisions.Snapshot.Receipts, hostname, time.Now().UTC(), time.Duration(snapshot.Policy.EvidenceMaxAgeSeconds)*time.Second)
+				decisions.Snapshot.Receipts = qualityDNSAnswerReceipts(decisions.Snapshot.Receipts, dnsHostname, time.Now().UTC(), time.Duration(snapshot.Policy.EvidenceMaxAgeSeconds)*time.Second)
 			}
 		}
 		if readErr != nil {
@@ -191,7 +198,7 @@ func bindPhysicalQualityDNS(snapshot *edgequality.Snapshot, receipt dnsserver.DN
 	if err != nil {
 		return err
 	}
-	if evidence.Hostname != snapshot.Hostname || evidence.Scope != snapshot.Scope {
+	if evidence.Hostname != edgequality.DNSHostname(*snapshot) || evidence.Scope != snapshot.Scope {
 		return errors.New("actual DNS answer scope differs from shadow")
 	}
 	raw, err := json.Marshal(receipt)

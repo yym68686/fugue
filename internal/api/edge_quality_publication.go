@@ -40,7 +40,7 @@ func compileBoundPhysicalQualitySelection(receipt edgequality.Receipt, now time.
 }
 
 func validateBoundPhysicalQualitySnapshot(snapshot edgequality.Snapshot, evidence dnsserver.QualityAnswerEvidence) error {
-	if evidence.Hostname != snapshot.Hostname || evidence.Scope != snapshot.Scope || evidence.EdgeID != snapshot.CurrentEdgeID ||
+	if evidence.Hostname != edgequality.DNSHostname(snapshot) || evidence.Scope != snapshot.Scope || evidence.EdgeID != snapshot.CurrentEdgeID ||
 		!sameQualityTime(snapshot.LastSwitchAt, evidence.PrimarySince) {
 		return errors.New("physical publication context or cooldown differs from actual DNS answer")
 	}

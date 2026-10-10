@@ -49,6 +49,16 @@ func validatePhysicalDNSUpdate(previous, next Policy, static, oldDNS, newDNS mod
 		if newPolicy.DNSQueryPolicy.DynamicQuality == nil || newPolicy.DNSQueryPolicy.OrderedProjection == nil || reflect.DeepEqual(oldPolicy.DNSQueryPolicy.DynamicQuality, newPolicy.DNSQueryPolicy.DynamicQuality) {
 			return fmt.Errorf("dynamic quality transition requires changed complete default policy")
 		}
+		if len(newPolicy.DNSQueryPolicy.PhysicalRoutes) == 0 {
+			for _, route := range oldPolicy.DNSQueryPolicy.PhysicalRoutes {
+				prior := route.Policy
+				prior.Version = newPolicy.DNSQueryPolicy.DynamicQuality.Policy.Version
+				if !reflect.DeepEqual(prior, newPolicy.DNSQueryPolicy.DynamicQuality.Policy) {
+					return fmt.Errorf("universal adoption cannot discard a distinct per-service quality constraint")
+				}
+			}
+			oldPolicy.DNSQueryPolicy.PhysicalRoutes = nil
+		}
 		oldPolicy.DNSQueryPolicy.DynamicQuality, newPolicy.DNSQueryPolicy.DynamicQuality = nil, nil
 		oldPolicy.Generation, newPolicy.Generation = "", ""
 		if !reflect.DeepEqual(oldPolicy, newPolicy) {

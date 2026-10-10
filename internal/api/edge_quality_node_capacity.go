@@ -97,9 +97,10 @@ func (s *Server) captureQualityCapacity(ctx context.Context, snapshot *edgequali
 		return
 	}
 	evidence, err := dnsserver.QualityEvidenceFromDNSDecision(receipt, time.Now().UTC(), time.Duration(snapshot.Policy.EvidenceMaxAgeSeconds)*time.Second)
-	if err != nil || evidence.Hostname != snapshot.Hostname || evidence.Scope != snapshot.Scope {
+	if err != nil || evidence.Hostname != edgequality.DNSHostname(*snapshot) || evidence.Scope != snapshot.Scope {
 		return
 	}
+	evidence.Hostname = snapshot.Hostname
 	targets := qualityCapacityTargets(nodes, evidence)
 	if len(targets) == 0 {
 		return

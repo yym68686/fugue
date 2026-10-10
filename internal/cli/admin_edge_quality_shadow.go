@@ -64,7 +64,7 @@ func (c *CLI) newAdminEdgeQualityShadowCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if evidence.Hostname != receipt.Snapshot.Hostname || evidence.Scope != receipt.Snapshot.Scope || evidence.EdgeID != receipt.Snapshot.CurrentEdgeID {
+				if evidence.Hostname != edgequality.DNSHostname(receipt.Snapshot) || evidence.Scope != receipt.Snapshot.Scope || evidence.EdgeID != receipt.Snapshot.CurrentEdgeID {
 					return errors.New("captured DNS answer differs from shadow binding")
 				}
 			}

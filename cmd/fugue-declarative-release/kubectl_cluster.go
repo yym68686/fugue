@@ -1140,6 +1140,16 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if dryRun {
 			return nil
 		}
+		if retirementWitness != nil && stringValue(mapField(desired, "metadata")["resourceVersion"]) != stringValue(mapField(live, "metadata")["resourceVersion"]) {
+			rebound, rebindErr := rebindDesiredResourceVersionAfterScalarTransfer(desired, retirementWitness, live)
+			if rebindErr != nil {
+				return errors.Join(applyErr, rebindErr)
+			}
+			desired, decodeErr = decodeJSONObject(rebound)
+			if decodeErr != nil {
+				return decodeErr
+			}
+		}
 		transferPatch, transferFound, transferErr := nextOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
 		if transferErr != nil {
 			return transferErr

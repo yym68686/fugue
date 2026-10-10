@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
+	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
@@ -65,6 +67,7 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 		return err
 	}
 	requested := map[string]platformconfig.PhysicalQualityRoute{}
+	evidenceHosts := map[string]string{}
 	for _, route := range policy.PhysicalRoutes {
 		requested[route.Hostname] = route
 		owned := false
@@ -80,9 +83,11 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 				return err
 			}
 			for _, owner := range owners {
-				if owner.Hostname != route.Hostname || owner.DNSPlacementEdgeGroupID != "" || owner.EdgeGroupMode == model.PlatformRouteEdgeGroupModePinned {
+				if owner.DNSPlacementEdgeGroupID != "" || owner.EdgeGroupMode == model.PlatformRouteEdgeGroupModePinned ||
+					owner.Hostname != route.Hostname && policy.DynamicQuality == nil || evidenceHosts[route.Hostname] != "" && evidenceHosts[route.Hostname] != owner.Hostname {
 					return fmt.Errorf("physical route conflicts with shared or pinned ownership")
 				}
+				evidenceHosts[route.Hostname] = owner.Hostname
 				owned = true
 			}
 		}
@@ -105,6 +110,16 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 		}
 		if fact.Type != "A" || len(compiled.Evidence) == 0 || len(compiled.Evidence) > 8<<20 || !json.Valid(compiled.Evidence) {
 			return fmt.Errorf("physical selection lacks supported address-family evidence")
+		}
+		if evidenceHosts[fact.Hostname] != fact.Hostname {
+			var receipt edgequality.Receipt
+			if json.Unmarshal(compiled.Evidence, &receipt) != nil || receipt.Snapshot.Hostname != evidenceHosts[fact.Hostname] || edgequality.DNSHostname(receipt.Snapshot) != fact.Hostname {
+				return fmt.Errorf("physical alias evidence differs from frozen service ownership")
+			}
+			verified, err := compileBoundPhysicalQualitySelection(receipt, now)
+			if err != nil || !reflect.DeepEqual(verified, selection) {
+				return fmt.Errorf("physical alias selection differs from exact captured answer and service evidence")
+			}
 		}
 		if selection.CapturedAt.After(now) || now.Sub(selection.CapturedAt) > time.Duration(route.Policy.EvidenceMaxAgeSeconds)*time.Second || selection.Scope != "global" {
 			return fmt.Errorf("physical selection has stale or unsupported answer scope")

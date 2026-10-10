@@ -19,6 +19,13 @@ type DNSBinding struct {
 	WriteSucceeded bool
 }
 
+func DNSHostname(snapshot Snapshot) string {
+	if snapshot.DNSHostname != "" {
+		return snapshot.DNSHostname
+	}
+	return snapshot.Hostname
+}
+
 func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*model.DNSPhysicalSelection, error) {
 	result, err := Replay(receipt)
 	if err != nil {
@@ -29,7 +36,7 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 	if maximumAge <= 0 || maximumAge > time.Duration(snapshot.Policy.WindowSeconds)*time.Second ||
 		now.Before(snapshot.CapturedAt) || now.Sub(snapshot.CapturedAt) > maximumAge ||
 		binding.ObservedAt.IsZero() || binding.ObservedAt.After(snapshot.CapturedAt) || snapshot.CapturedAt.Sub(binding.ObservedAt) > maximumAge ||
-		!binding.ReplayMatched || !binding.WriteSucceeded || binding.Hostname != snapshot.Hostname || binding.Scope != snapshot.Scope || binding.CurrentEdgeID != snapshot.CurrentEdgeID {
+		!binding.ReplayMatched || !binding.WriteSucceeded || binding.Hostname != DNSHostname(snapshot) || binding.Scope != snapshot.Scope || binding.CurrentEdgeID != snapshot.CurrentEdgeID {
 		return nil, errors.New("physical selection lacks fresh matching actual DNS evidence")
 	}
 	if len(snapshot.Blockers) != 0 {
