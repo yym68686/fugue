@@ -584,6 +584,78 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  dynamic_quality_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+      config: ${{ steps.plan.outputs.config }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one explicit universal quality policy
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/routing-dynamic-quality)
+          if (( ${#declarations[@]} > 1 )); then
+            echo 'one independent dynamic quality configuration atom is required' >&2
+            exit 1
+          fi
+          if (( ${#declarations[@]} == 1 )); then
+            config="${declarations[0]}"
+            [[ "$config" =~ ^deploy/environments/production/routing-dynamic-quality/[a-z0-9][a-z0-9-]*\.json$ ]]
+            test -f "$config"
+            echo "config=$config" >> "$GITHUB_OUTPUT"
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  dynamic_quality_reconfiguration:
+    needs: [prepush, dynamic_quality_plan]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dynamic_quality_plan.outputs.selected == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    env:
+      CONFIG: ${{ needs.dynamic_quality_plan.outputs.config }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Validate exact unchanged quality configuration
+        id: configuration
+        run: |
+          set -euo pipefail
+          [[ "$CONFIG" =~ ^deploy/environments/production/routing-dynamic-quality/[a-z0-9][a-z0-9-]*\.json$ ]]
+          git fetch origin main
+          if git diff --quiet HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml scripts/configure_dynamic_quality.py scripts/test_configure_dynamic_quality.py scripts/reconfigure_physical_dns.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py scripts/reconfigure_cell_producer.py scripts/observe_front_candidate.py; then
+            python3 -m unittest scripts.test_configure_dynamic_quality
+            python3 -m scripts.configure_dynamic_quality "$CONFIG" --validate-only
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Apply independent fenced producer configuration
+        if: steps.configuration.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: python3 -m scripts.configure_dynamic_quality "$CONFIG" --evidence "$RUNNER_TEMP/dynamic-quality-reconfiguration.json"
+      - name: Retain quality configuration transaction evidence
+        if: always() && steps.configuration.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-dynamic-quality-reconfiguration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dynamic-quality-reconfiguration.json
+          if-no-files-found: warn
+          retention-days: 30
+
   dns_selector_retirement_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
