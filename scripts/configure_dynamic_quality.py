@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 import urllib.parse
 
 from scripts.bootstrap_cell_producer import authority_identity, digest, ensure_input, exact, selected
@@ -76,7 +77,7 @@ def validate_preview(previous, current):
 def publish(config, api, save):
     validate(config)
     declaration = digest(config)
-    config = resolve_baseline(config, api)
+    config = wait_verified_baseline(config, api)
     baseline(config, api)
     precondition = config["precondition"]
     old = api("GET", "/v1/admin/artifacts/" + precondition["previous_policy"]["artifact_id"])["artifact"]
@@ -99,7 +100,8 @@ def publish(config, api, save):
     before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"])
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
     coverage = validate_preview(before, preview)
-    baseline(config, api)
+    config = wait_verified_baseline(config, api)
+    precondition = config["precondition"]
     evidence = {"schema": "fugue.dynamic-quality-reconfiguration-result/v1", "declaration_digest": declaration, "resolved_precondition": precondition, "artifact_id": artifact["id"], "coverage": coverage, "producer_activated": False, "routing_acceptance_complete": False}
     save(evidence)
     key = "producer-reconfiguration/" + digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": precondition})
@@ -110,6 +112,20 @@ def publish(config, api, save):
     evidence.update(producer_activated=True, authority=authority_identity(current), completed_at=now().isoformat())
     save(evidence)
     return evidence
+
+
+def wait_verified_baseline(config, api):
+    transient = {"baseline is not the predecessor's verified producer publication", "serving full publication changed", "exact unexpired positive LKG required"}
+    for attempt in range(25):
+        try:
+            resolved = resolve_baseline(config, api)
+            baseline(resolved, api)
+            return resolved
+        except ValueError as error:
+            if config.get("baseline_mode") != "latest_verified_same_policy" or str(error) not in transient or attempt == 24:
+                raise
+            time.sleep(10)
+    raise ValueError("verified producer baseline did not settle")
 
 
 def main():

@@ -359,14 +359,18 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 	if err != nil {
 		return err
 	}
-	if state.lkg == nil || !state.hasFull || state.fullArtifact.ID != state.lkg.ArtifactID || !state.lkg.ExpiresAt.After(time.Now()) || s.store.VerifyPlatformArtifactIntegrity(state.fullArtifact) != nil {
+	if state.lkg == nil || !state.hasFull || !state.lkg.ExpiresAt.After(time.Now()) {
 		return fmt.Errorf("dynamic quality requires verified full serving baseline")
 	}
+	baseline, err := s.store.GetPlatformArtifact(state.lkg.ArtifactID)
+	if err != nil || baseline.ContentHash != state.lkg.ContentHash || baseline.Generation != state.lkg.Generation || baseline.ScopeKey != projection.Intent.Scope || s.store.VerifyPlatformArtifactIntegrity(baseline) != nil {
+		return fmt.Errorf("dynamic quality positive LKG integrity is unproven")
+	}
 	var set platformconfig.ReleaseSet
-	if _, err := platformconfig.ValidateReleaseComposition(state.fullArtifact); err != nil {
+	if _, err := platformconfig.ValidateReleaseComposition(baseline); err != nil {
 		return err
 	}
-	raw, _ := json.Marshal(state.fullArtifact.Content)
+	raw, _ := json.Marshal(baseline.Content)
 	if json.Unmarshal(raw, &set) != nil {
 		return fmt.Errorf("invalid dynamic quality baseline")
 	}
@@ -379,11 +383,11 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 			}
 		}
 	}
-	if member.ID == "" || s.store.VerifyPlatformArtifactIntegrity(member) != nil || member.Metadata["release_set_generation"] != state.fullArtifact.Generation {
+	if member.ID == "" || s.store.VerifyPlatformArtifactIntegrity(member) != nil || member.Metadata["release_set_generation"] != baseline.Generation {
 		return fmt.Errorf("dynamic quality baseline DNS member invalid")
 	}
 	for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
-		if state.fullArtifact.Metadata[key] == "" || member.Metadata[key] != state.fullArtifact.Metadata[key] {
+		if baseline.Metadata[key] == "" || member.Metadata[key] != baseline.Metadata[key] {
 			return fmt.Errorf("dynamic quality baseline lineage mismatch")
 		}
 	}
@@ -394,7 +398,7 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 	if json.Unmarshal(raw, &payload) != nil {
 		return fmt.Errorf("dynamic quality baseline query views invalid")
 	}
-	s.restorePublishedQualityEvidence(*projection, jobs, state.fullArtifact)
+	s.restorePublishedQualityEvidence(*projection, jobs, baseline)
 	orders := map[string][]string{}
 	epochs := map[string]*time.Time{}
 	for _, view := range payload.Views {

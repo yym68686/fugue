@@ -184,6 +184,14 @@ func TestServingProducerProgressesRecoversAndDoesNotRetryFailedSource(t *testing
 	if nextFull.ArtifactID != candidate.ID {
 		t.Fatal("restart lost gray cursor")
 	}
+	baselineProjection := platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Scope: "global"}}
+	if err := server.preservePublishedDynamicOrder(&baselineProjection, nil); err != nil {
+		t.Fatal("unverified full prevented read-only access to the positive DNS LKG", err)
+	}
+	stillPending, pendingErr := state.GetPlatformArtifactRelease(nextFull.ID)
+	if pendingErr != nil || stillPending.VerificationState == model.PlatformArtifactVerificationStateVerified {
+		t.Fatal("quality capture changed pending publication authority", stillPending, pendingErr)
+	}
 	age(nextFull.ID, 2)
 	reconcile()
 	lkg, err := state.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")

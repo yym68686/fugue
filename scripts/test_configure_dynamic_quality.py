@@ -23,6 +23,18 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_configuration_waits_only_for_verified_same_producer_baseline(self):
+        config, _ = fixture()
+        resolved = copy.deepcopy(config)
+        resolved["precondition"]["serving_full"]["fencing_token"] += 2
+        with patch.object(quality, "resolve_baseline", side_effect=[ValueError("baseline is not the predecessor's verified producer publication"), resolved]), patch.object(quality, "baseline"), patch.object(quality.time, "sleep") as wait:
+            self.assertEqual(quality.wait_verified_baseline(config, None), resolved)
+            wait.assert_called_once_with(10)
+        with patch.object(quality, "resolve_baseline", side_effect=ValueError("renewed baseline changed the declared producer or regressed its fence")), patch.object(quality.time, "sleep") as wait:
+            with self.assertRaises(ValueError):
+                quality.wait_verified_baseline(config, None)
+            wait.assert_not_called()
+
     def test_entrypoint_uses_supported_bounded_transport(self):
         config, _ = fixture()
         import json
