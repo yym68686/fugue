@@ -7,7 +7,7 @@ import (
 )
 
 func sanitizeEdgeNetworkSamples(req edgeHeartbeatRequest, servingActive *bool, now time.Time) []model.EdgeNetworkSample {
-	if servingActive == nil || !*servingActive || len(req.NetworkSamples) > 32 {
+	if servingActive == nil || !*servingActive || len(req.NetworkSamples) > 128 {
 		return nil
 	}
 	samples := []model.EdgeNetworkSample{}

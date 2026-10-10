@@ -100,26 +100,28 @@ func (s *Server) capturePhysicalQualityWithAnswer(ctx context.Context, hostname,
 			snapshot.NetworkSamples = append(snapshot.NetworkSamples, witness)
 		}
 	}
-	limitReached := errors.New("shadow observation limit reached")
-	visited := 0
-	err = s.store.WalkEdgePerformanceSamples(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), func(sample model.EdgePerformanceSample) error {
-		visited++
-		if visited > edgequality.MaxObservations*4 {
-			return limitReached
-		}
-		if normalizeEdgeTrafficClass(sample.TrafficClass) != trafficClass || !edgeQualitySampleMatchesScope(sample, scope) {
+	if networkPolicy.Version != edgequality.DeliveryNetworkPolicyVersion {
+		limitReached := errors.New("shadow observation limit reached")
+		visited := 0
+		err = s.store.WalkEdgePerformanceSamples(ctx, hostname, now.Add(-time.Duration(snapshot.Policy.WindowSeconds)*time.Second), func(sample model.EdgePerformanceSample) error {
+			visited++
+			if visited > edgequality.MaxObservations*4 {
+				return limitReached
+			}
+			if normalizeEdgeTrafficClass(sample.TrafficClass) != trafficClass || !edgeQualitySampleMatchesScope(sample, scope) {
+				return nil
+			}
+			if len(snapshot.Observations) >= edgequality.MaxObservations {
+				return limitReached
+			}
+			snapshot.Observations = append(snapshot.Observations, legacyPhysicalEdgeObservation(sample, scope.key()))
 			return nil
+		})
+		if errors.Is(err, limitReached) {
+			snapshot.Blockers = append(snapshot.Blockers, "observation_limit_reached")
+		} else if err != nil {
+			return edgequality.Receipt{}, err
 		}
-		if len(snapshot.Observations) >= edgequality.MaxObservations {
-			return limitReached
-		}
-		snapshot.Observations = append(snapshot.Observations, legacyPhysicalEdgeObservation(sample, scope.key()))
-		return nil
-	})
-	if errors.Is(err, limitReached) {
-		snapshot.Blockers = append(snapshot.Blockers, "observation_limit_reached")
-	} else if err != nil {
-		return edgequality.Receipt{}, err
 	}
 	if dnsNodeID != "" {
 		var decisions platformDNSDecisionResponse

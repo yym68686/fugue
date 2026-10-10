@@ -19,7 +19,7 @@ func (s *Store) RecordEdgeNetworkRouteWitnesses(ctx context.Context, samples []m
 }
 
 func (s *Store) recordEdgeNetworkSamples(ctx context.Context, samples []model.EdgeNetworkSample, pruneBefore time.Time, witnesses bool) error {
-	if len(samples) > 32 {
+	if len(samples) > 128 {
 		return fmt.Errorf("network observation batch exceeds bound")
 	}
 	for _, sample := range samples {

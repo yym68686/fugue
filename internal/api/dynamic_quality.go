@@ -163,50 +163,34 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 		return err
 	}
 	work := s.dynamicQuality.schedule(jobs, policy.DynamicQuality.RefreshQueriesPerCycle, time.Now().UTC())
-	queue := make(chan dynamicQualityJob, len(work))
-	for _, job := range work {
-		queue <- job
-	}
-	close(queue)
-	var workers sync.WaitGroup
-	for index := 0; index < policy.DynamicQuality.RefreshConcurrency; index++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for job := range queue {
-				if ctx.Err() != nil {
-					return
-				}
-				entry := dynamicQualityEntry{Attempted: time.Now().UTC()}
-				contextDigest, contextErr := dynamicQualityContext(*projection, job)
-				if contextErr != nil {
-					continue
-				}
-				entry.ContextDigest = contextDigest
-				captureContext, cancel := context.WithTimeout(ctx, 8*time.Second)
-				answer, captureErr := s.observePhysicalDNSAnswer(captureContext, projection.RuntimeSnapshot.DNSConsumers, job.NodeID, job.Route.Hostname)
+	captureBudget, cancelBudget := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelBudget()
+	completed := captureDynamicQualityJobs(captureBudget, work, policy.DynamicQuality.RefreshConcurrency, func(captureContext context.Context, job dynamicQualityJob) {
+		entry := dynamicQualityEntry{Attempted: time.Now().UTC()}
+		contextDigest, contextErr := dynamicQualityContext(*projection, job)
+		if contextErr != nil {
+			return
+		}
+		entry.ContextDigest = contextDigest
+		answer, captureErr := s.observePhysicalDNSAnswer(captureContext, projection.RuntimeSnapshot.DNSConsumers, job.NodeID, job.Route.Hostname)
+		if captureErr == nil {
+			receipt, readErr := s.capturePhysicalQualityWithAnswer(captureContext, job.Route.Hostname, job.Route.TrafficClass, edgeQualityRankScope{}, job.NodeID, job.Route.Policy, &answer)
+			captureErr = readErr
+			if captureErr == nil {
+				entry.Compiled.Selection, captureErr = compileBoundPhysicalQualitySelection(receipt, time.Now().UTC())
 				if captureErr == nil {
-					receipt, readErr := s.capturePhysicalQualityWithAnswer(captureContext, job.Route.Hostname, job.Route.TrafficClass, edgeQualityRankScope{}, job.NodeID, job.Route.Policy, &answer)
-					captureErr = readErr
-					if captureErr == nil {
-						entry.Compiled.Selection, captureErr = compileBoundPhysicalQualitySelection(receipt, time.Now().UTC())
-						if captureErr == nil {
-							entry.Compiled.Evidence, captureErr = json.Marshal(receipt)
-						}
-					}
+					entry.Compiled.Evidence, captureErr = json.Marshal(receipt)
 				}
-				cancel()
-				if captureErr != nil {
-					entry.Failure = captureErr.Error()
-					entry.Compiled = compiledPhysicalDNSSelection{}
-				}
-				s.dynamicQuality.mu.Lock()
-				s.dynamicQuality.entries[job.Key] = entry
-				s.dynamicQuality.mu.Unlock()
 			}
-		}()
-	}
-	workers.Wait()
+		}
+		if captureErr != nil {
+			entry.Failure = captureErr.Error()
+			entry.Compiled = compiledPhysicalDNSSelection{}
+		}
+		s.dynamicQuality.mu.Lock()
+		s.dynamicQuality.entries[job.Key] = entry
+		s.dynamicQuality.mu.Unlock()
+	})
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -254,8 +238,35 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 	if projection.RuntimeSnapshot.Facts == nil {
 		projection.RuntimeSnapshot.Facts = map[string]any{}
 	}
-	projection.RuntimeSnapshot.Facts["dynamic_quality_coverage"] = map[string]any{"mode": policy.DynamicQuality.Mode, "query_count": len(jobs), "refreshed_queries": len(work), "hostnames": states}
+	projection.RuntimeSnapshot.Facts["dynamic_quality_coverage"] = map[string]any{"mode": policy.DynamicQuality.Mode, "query_count": len(jobs), "scheduled_queries": len(work), "refreshed_queries": completed, "capture_budget_exhausted": captureBudget.Err() != nil, "hostnames": states}
 	return nil
+}
+
+func captureDynamicQualityJobs(ctx context.Context, work []dynamicQualityJob, concurrency int, capture func(context.Context, dynamicQualityJob)) int {
+	queue := make(chan dynamicQualityJob, len(work))
+	for _, job := range work {
+		queue <- job
+	}
+	close(queue)
+	var workers sync.WaitGroup
+	completed := make(chan struct{}, len(work))
+	for index := 0; index < concurrency; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for job := range queue {
+				if ctx.Err() != nil {
+					return
+				}
+				captureContext, cancel := context.WithTimeout(ctx, 8*time.Second)
+				capture(captureContext, job)
+				cancel()
+				completed <- struct{}{}
+			}
+		}()
+	}
+	workers.Wait()
+	return len(completed)
 }
 
 func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProjectionResponse, jobs []dynamicQualityJob) error {

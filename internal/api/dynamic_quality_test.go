@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -9,6 +11,34 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
+
+func TestDynamicCaptureBudgetDoesNotWaitForEveryQueuedDomain(t *testing.T) {
+	jobs := make([]dynamicQualityJob, 128)
+	ctx, cancel := context.WithCancel(context.Background())
+	var started atomic.Int32
+	ready := make(chan struct{})
+	go func() {
+		<-ready
+		cancel()
+	}()
+	completed := captureDynamicQualityJobs(ctx, jobs, 2, func(captureContext context.Context, job dynamicQualityJob) {
+		if deadline, ok := captureContext.Deadline(); !ok || time.Until(deadline) > 8*time.Second {
+			t.Error("per-query capture deadline missing")
+		}
+		if started.Add(1) == 2 {
+			close(ready)
+		}
+		<-captureContext.Done()
+	})
+	if completed != 2 || started.Load() != 2 {
+		t.Fatal("expired capture budget started additional domain work", completed, started.Load())
+	}
+	if completed := captureDynamicQualityJobs(ctx, jobs, 8, func(context.Context, dynamicQualityJob) {
+		t.Error("cancelled budget ran another probe")
+	}); completed != 0 {
+		t.Fatal(completed)
+	}
+}
 
 func TestDynamicQualityCoversFutureDomainsAndPreservesStaticPinned(t *testing.T) {
 	projection, nodes, policy, now := directQueryFixture()

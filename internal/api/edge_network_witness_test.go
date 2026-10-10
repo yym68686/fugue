@@ -21,6 +21,77 @@ func networkWitnessFixture(now time.Time) (model.EdgeNetworkSample, routeprobe.P
 	return sample, proof
 }
 
+func TestNetworkWitnessBatchBoundsAndRotatesUniversalRoutes(t *testing.T) {
+	now := time.Now().UTC()
+	var state networkRouteWitnessState
+	seen := map[string]bool{}
+	for round := 0; round < 4; round++ {
+		at := now.Add(time.Duration(round) * 30 * time.Second)
+		samples := []model.EdgeNetworkSample{}
+		for index := 0; index < 251; index++ {
+			sample, _ := networkWitnessFixture(at)
+			sample.ID, sample.Hostname = fmt.Sprintf("sample-%d", index), fmt.Sprintf("route-%03d.example.test", index)
+			samples = append(samples, sample)
+		}
+		node := model.EdgeNode{ID: samples[0].EdgeID, EdgeGroupID: samples[0].EdgeGroupID}
+		batch := state.selectBatch(node, samples, at, 96)
+		if len(batch) != 96 || state.inFlight != 1 || len(state.selectBatch(node, samples, at, 96)) != 0 {
+			t.Fatal("batch exceeds per-node or concurrency budget", len(batch), state.inFlight)
+		}
+		for _, sample := range batch {
+			seen[sample.Hostname] = true
+		}
+		state.release()
+	}
+	if len(seen) != 251 {
+		t.Fatal("universal witness rotation starved routes", len(seen))
+	}
+	for _, value := range []string{"", "invalid", "0", "129"} {
+		t.Setenv("FUGUE_EDGE_NETWORK_WITNESS_BATCH_SIZE", value)
+		if networkWitnessBatchSize() != 1 {
+			t.Fatal("invalid explicit budget enabled universal probes")
+		}
+	}
+	t.Setenv("FUGUE_EDGE_NETWORK_WITNESS_BATCH_SIZE", "96")
+	if networkWitnessBatchSize() != 96 {
+		t.Fatal("explicit batch budget ignored")
+	}
+}
+
+func TestNetworkWitnessBatchRejectsForeignAndStaleSamples(t *testing.T) {
+	now := time.Now().UTC()
+	sample, _ := networkWitnessFixture(now)
+	node := model.EdgeNode{ID: sample.EdgeID, EdgeGroupID: sample.EdgeGroupID}
+	var state networkRouteWitnessState
+	for _, edit := range []func(*model.EdgeNetworkSample){
+		func(value *model.EdgeNetworkSample) { value.EdgeID = "another-edge" },
+		func(value *model.EdgeNetworkSample) { value.EdgeGroupID = "another-group" },
+		func(value *model.EdgeNetworkSample) { value.ObservedAt = now.Add(-2 * time.Minute) },
+		func(value *model.EdgeNetworkSample) { value.ObservedAt = now.Add(time.Minute) },
+		func(value *model.EdgeNetworkSample) { value.RouteDigest = "invalid" },
+	} {
+		changed := sample
+		edit(&changed)
+		if batch := state.selectBatch(node, []model.EdgeNetworkSample{changed}, now, 96); len(batch) != 0 || state.inFlight != 0 {
+			t.Fatal("invalid raw sample consumed batch budget", batch)
+		}
+	}
+	for index := 0; index < 4; index++ {
+		changed := sample
+		changed.EdgeID = fmt.Sprintf("edge-%d", index)
+		if len(state.selectBatch(model.EdgeNode{ID: changed.EdgeID, EdgeGroupID: changed.EdgeGroupID}, []model.EdgeNetworkSample{changed}, now, 96)) != 1 {
+			t.Fatal("available batch slot rejected")
+		}
+	}
+	if len(state.selectBatch(node, []model.EdgeNetworkSample{sample}, now, 96)) != 0 {
+		t.Fatal("global batch concurrency exceeded")
+	}
+	state.release()
+	if len(state.selectBatch(node, []model.EdgeNetworkSample{sample}, now, 96)) != 1 {
+		t.Fatal("batch slot leaked")
+	}
+}
+
 func TestNetworkWitnessRequiresExactPublicTLSProof(t *testing.T) {
 	now := time.Now().UTC()
 	for _, test := range []struct {

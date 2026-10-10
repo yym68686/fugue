@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -17,6 +19,76 @@ type networkRouteWitnessState struct {
 	mu       sync.Mutex
 	last     map[string]networkRouteWitnessCursor
 	inFlight int
+	batchAt  map[string]time.Time
+}
+
+func networkWitnessBatchSize() int {
+	value, err := strconv.Atoi(os.Getenv("FUGUE_EDGE_NETWORK_WITNESS_BATCH_SIZE"))
+	if err != nil || value < 1 || value > 128 {
+		return 1
+	}
+	return value
+}
+
+func (state *networkRouteWitnessState) selectBatch(node model.EdgeNode, samples []model.EdgeNetworkSample, now time.Time, budget int) []model.EdgeNetworkSample {
+	if budget < 2 || budget > 128 || !state.mu.TryLock() {
+		return nil
+	}
+	defer state.mu.Unlock()
+	if state.inFlight >= 4 || now.Sub(state.batchAt[node.ID]) < 15*time.Second {
+		return nil
+	}
+	if state.batchAt == nil {
+		state.batchAt = map[string]time.Time{}
+	}
+	for edgeID, at := range state.batchAt {
+		if now.Sub(at) >= 10*time.Minute {
+			delete(state.batchAt, edgeID)
+			delete(state.last, edgeID)
+		}
+	}
+	if len(state.batchAt) >= 256 {
+		if _, exists := state.batchAt[node.ID]; !exists {
+			return nil
+		}
+	}
+	eligible := map[string]model.EdgeNetworkSample{}
+	for _, sample := range samples {
+		if sample.EdgeID != node.ID || sample.EdgeGroupID != node.EdgeGroupID || sample.ObservedAt.After(now) || now.Sub(sample.ObservedAt) > 90*time.Second || model.ValidateEdgeNetworkSample(sample) != nil || (!model.EdgeNetworkServiceSource(sample.Source) && sample.Source != "public_front_tcp_info_v1") {
+			continue
+		}
+		key := sample.Hostname + "\x00" + sample.PathPrefix + "\x00" + sample.TrafficClass
+		previous, exists := eligible[key]
+		if !exists || sample.ObservedAt.After(previous.ObservedAt) {
+			eligible[key] = sample
+		}
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(eligible))
+	for key := range eligible {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if state.last == nil {
+		state.last = map[string]networkRouteWitnessCursor{}
+	}
+	previous := state.last[node.ID]
+	start := sort.SearchStrings(keys, previous.key)
+	if start < len(keys) && keys[start] == previous.key {
+		start++
+	}
+	batch := make([]model.EdgeNetworkSample, 0, min(budget, len(keys)))
+	for offset := 0; offset < budget && offset < len(keys); offset++ {
+		key := keys[(start+offset)%len(keys)]
+		batch = append(batch, eligible[key])
+		previous.key = key
+	}
+	previous.at = now
+	state.last[node.ID], state.batchAt[node.ID] = previous, now
+	state.inFlight++
+	return batch
 }
 
 type networkRouteWitnessCursor struct {
@@ -108,6 +180,13 @@ func (s *Server) observeNetworkRouteWitness(node model.EdgeNode, samples []model
 	if err != nil || !platformconfig.PublicDNSFlattenIP(ip) {
 		return
 	}
+	if budget := networkWitnessBatchSize(); budget > 1 {
+		batch := s.networkRouteWitness.selectBatch(node, samples, now, budget)
+		if len(batch) > 0 {
+			go s.observeNetworkRouteWitnessBatch(node, address, batch)
+		}
+		return
+	}
 	sample, ok := s.networkRouteWitness.selectSample(node, samples, now)
 	if !ok {
 		return
@@ -138,6 +217,63 @@ func (s *Server) observeNetworkRouteWitness(node model.EdgeNode, samples []model
 			s.log.Printf("edge network route witness unavailable; edge_id=%s hostname=%s path=%s traffic_class=%s sample_id=%s sample_bundle=%s sample_digest=%s proof_bundle=%s proof_digest=%s error=%v", node.ID, sample.Hostname, sample.PathPrefix, sample.TrafficClass, sample.ID, sample.BundleVersion, sample.RouteDigest, proof.Version, proof.Digest, err)
 		}
 	}()
+}
+
+func (s *Server) observeNetworkRouteWitnessBatch(node model.EdgeNode, address string, samples []model.EdgeNetworkSample) {
+	defer s.networkRouteWitness.release()
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	var capacity *model.EdgeNetworkNodeCapacity
+	if client, err := s.newClusterNodeClient(); err == nil {
+		capacityContext, capacityCancel := context.WithTimeout(ctx, time.Second)
+		capacity, _ = readNetworkNodeCapacity(capacityContext, client, node.ID, address, time.Now)
+		capacityCancel()
+		client.closeIdleConnections()
+	}
+	queue := make(chan model.EdgeNetworkSample, len(samples))
+	results := make(chan model.EdgeNetworkSample, len(samples))
+	for _, sample := range samples {
+		queue <- sample
+	}
+	close(queue)
+	var workers sync.WaitGroup
+	for index := 0; index < min(8, len(samples)); index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for sample := range queue {
+				if ctx.Err() != nil {
+					return
+				}
+				proof, err := routeprobe.Probe(ctx, sample.Hostname, sample.PathPrefix, address, "", 2*time.Second)
+				if err != nil {
+					continue
+				}
+				witness, err := networkRouteWitnessSample(sample, address, proof, time.Now().UTC())
+				if err != nil {
+					continue
+				}
+				witness.RouteWitness.NodeCapacity = capacity
+				results <- witness
+			}
+		}()
+	}
+	workers.Wait()
+	close(results)
+	witnesses := make([]model.EdgeNetworkSample, 0, len(results))
+	for witness := range results {
+		witnesses = append(witnesses, witness)
+	}
+	if len(witnesses) != len(samples) && s.log != nil {
+		s.log.Printf("edge network witness batch incomplete; edge_id=%s attempted=%d witnessed=%d budget_exhausted=%t", node.ID, len(samples), len(witnesses), ctx.Err() != nil)
+	}
+	if len(witnesses) > 0 {
+		persistContext, persistCancel := context.WithTimeout(context.Background(), time.Second)
+		defer persistCancel()
+		if err := s.store.RecordEdgeNetworkRouteWitnesses(persistContext, witnesses, time.Now().UTC().Add(-time.Hour)); err != nil && s.log != nil {
+			s.log.Printf("edge network witness batch persistence failed; edge_id=%s witnesses=%d error=%v", node.ID, len(witnesses), err)
+		}
+	}
 }
 
 func networkRouteWitnessSample(sample model.EdgeNetworkSample, address string, proof routeprobe.Proof, now time.Time) (model.EdgeNetworkSample, error) {

@@ -49,8 +49,12 @@ func TestPhysicalQualityShadowReadOnlyAndLegacyUnknown(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if len(receipt.Snapshot.Observations) != 1 || len(receipt.Result.Candidates) != 2 || receipt.Result.PromotionReady || !receipt.Result.DNSUnchanged {
+	if len(receipt.Snapshot.Observations) != 0 || len(receipt.Result.Candidates) != 2 || receipt.Result.PromotionReady || !receipt.Result.DNSUnchanged {
 		t.Fatal(receipt)
+	}
+	legacy, err := server.capturePhysicalQuality(context.Background(), "app.example.test", "streaming", edgeQualityRankScope{}, "", edgequality.DefaultNetworkPolicy())
+	if err != nil || len(legacy.Snapshot.Observations) != 1 {
+		t.Fatal("older evaluator capture semantics changed", legacy, err)
 	}
 	if len(receipt.Snapshot.NetworkSamples) != 1 || *receipt.Snapshot.NetworkSamples[0].ServiceRTTMS != rtt {
 		t.Fatal("captured socket evidence missing", receipt.Snapshot.NetworkSamples)

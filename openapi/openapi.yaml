@@ -976,7 +976,9 @@ paths:
       description: >-
         Platform-admin-only read. Does not change DNS, publish artifacts, execute
         probes or authorize promotion. Uses exact hostname, traffic class and scope;
-        legacy timings without segment provenance remain diagnostic-only. Missing
+        legacy timings without segment provenance remain diagnostic-only. New V4
+        captures omit legacy application-duration observations entirely; historical
+        receipts retain their original inputs and evaluator version. Missing
         metrics and hostname-specific route/TLS proofs block promotion. This is a
         captured counterfactual, not a receipt of an actual DNS answer. Resolver/ECS
         scope cannot establish a particular terminal's current network path.
@@ -19572,7 +19574,7 @@ components:
             $ref: "#/components/schemas/EdgePerformanceSample"
         network_samples:
           type: array
-          maxItems: 32
+          maxItems: 128
           description: Isolated network observations from the serving worker; never merged into legacy HTTP quality scores.
           items:
             $ref: "#/components/schemas/EdgeNetworkSample"
