@@ -90,7 +90,23 @@ func originNetworkSample(observed *edgeProxyObservation, remote net.Addr, networ
 			port = "443"
 		}
 	}
-	digest, err := routeproof.Digest(observed.Route)
+	binding := observed.Route
+	if observed.NetworkRoute != nil {
+		binding = *observed.NetworkRoute
+		if !singleOriginNetworkRoute(binding) {
+			return model.EdgeNetworkSample{}, false
+		}
+		expected := binding
+		if len(binding.Upstreams) == 1 {
+			expected = edgeRouteWithUpstream(binding, binding.Upstreams[0])
+		}
+		expectedDigest, expectedErr := routeproof.Digest(expected)
+		actualDigest, actualErr := routeproof.Digest(observed.Route)
+		if expectedErr != nil || actualErr != nil || expectedDigest != actualDigest {
+			return model.EdgeNetworkSample{}, false
+		}
+	}
+	digest, err := routeproof.Digest(binding)
 	if err != nil {
 		return model.EdgeNetworkSample{}, false
 	}

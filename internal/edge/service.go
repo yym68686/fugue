@@ -367,6 +367,7 @@ type edgeProxyObservation struct {
 	ReceivedAt              time.Time
 	Host                    string
 	Route                   model.EdgeRouteBinding
+	NetworkRoute            *model.EdgeRouteBinding
 	BundleVersion           string
 	ReleaseID               string
 	ReleaseRole             string
@@ -1267,6 +1268,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		ReceivedAt:           startedAt.UTC(),
 		Host:                 host,
 		Route:                selectedRoute,
+		NetworkRoute:         &route,
 		BundleVersion:        bundleVersion,
 		ReleaseID:            strings.TrimSpace(selectedUpstream.ReleaseID),
 		ReleaseRole:          strings.TrimSpace(selectedUpstream.Role),
@@ -1299,7 +1301,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	observed.Streaming = observed.WebSocket || observed.SSE
 	if ok {
-		s.observePublicClientNetwork(r, selectedRoute, bundleVersion, startedAt)
+		s.observePublicClientNetwork(r, route, bundleVersion, startedAt)
 	}
 	cacheDecision := s.edgeCacheDecision(r, selectedRoute)
 	if len(route.Upstreams) > 0 {

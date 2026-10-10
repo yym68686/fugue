@@ -43,11 +43,13 @@ Client and server wall clocks may differ by up to two seconds when validating an
 
 Each distinct service path retains its own traffic class, exact route proof and observations. Multi-path domains and shared aliases require all declared paths to agree; one fast path cannot conceal a degraded sibling. The captured path set is compared with frozen configuration ownership before publication, and historical single-route receipts remain replayable.
 
-Capture uses a per-cycle query budget, bounded concurrency and least-recently-attempted scheduling. Incomplete queries retain the previous verified signed order; completed queries carry actual DNS receipts and independently reconstructed network evidence. V4 can publish `quality_state=learning` only for the existing fresh route-ready primary. A learning receipt does not claim comparative quality and starts a known cooldown epoch. A failed query cannot block other completed queries.
+Capture uses a per-cycle query budget, bounded concurrency and least-recently-attempted scheduling. Queries for the same hostname are grouped across its DNS consumers, so a publication wait cannot separate the required pair beyond the evidence window. Partially started groups resume their unstarted queries first. Incomplete queries retain the previous verified signed order; completed queries carry actual DNS receipts and independently reconstructed network evidence. V4 can publish `quality_state=learning` only for the existing fresh route-ready primary. A learning receipt does not claim comparative quality and starts a known cooldown epoch. A failed query cannot block other completed queries.
 
 The independent `dynamic_quality` producer transaction may change only the default quality strategy and producer/input generations. It cannot modify static intent, pinned constraints, configured baseline orders, timing or other producer controls. Current verified full/LKG and absence of pending gray are checked under publication locks.
 
 Universal source TCP probing is opt-in through explicit worker configuration. It rotates all loaded eligible routes with a bounded batch and opens no application request. A single stable upstream entry matching the declared destination is measurable; multiple distinct upstreams remain ambiguous until their identity can be captured separately.
+
+Passive samples retain the loaded route proof identity separately from metadata resolved for one selected upstream. Source socket samples require that the executed route exactly matches the loaded route's sole configured upstream; a different destination, runtime, path or fallback rejects the sample. Selecting a release must not make an otherwise valid network observation lose its signed route binding.
 
 Quality capture has a separate 30-second cycle budget and an 8-second per-query deadline. Budget exhaustion records incomplete coverage and retains verified existing orders without consuming the entire producer compilation deadline.
 

@@ -146,6 +146,41 @@ func TestOriginNetworkQueueNonblockingAndBounded(t *testing.T) {
 	}
 }
 
+func TestOriginNetworkSampleRetainsLoadedProofAcrossUpstreamSelection(t *testing.T) {
+	observed := networkTestObservation()
+	loaded := observed.Route
+	loaded.RuntimeID, loaded.DeploymentGeneration = "declared-runtime", "declared-generation"
+	loaded.Upstreams = []model.EdgeRouteUpstream{{UpstreamURL: loaded.UpstreamURL, UpstreamKind: loaded.UpstreamKind, UpstreamScope: loaded.UpstreamScope,
+		RuntimeID: "selected-runtime", DeploymentGeneration: "selected-generation", ServicePort: 3000, Weight: 100, Status: model.EdgeRouteStatusActive}}
+	observed.NetworkRoute = &loaded
+	observed.Route = edgeRouteWithUpstream(loaded, loaded.Upstreams[0])
+	loadedDigest, err := routeproof.Digest(loaded)
+	selectedDigest, selectedErr := routeproof.Digest(observed.Route)
+	if err != nil || selectedErr != nil || loadedDigest == selectedDigest {
+		t.Fatal("fixture does not reproduce executor metadata refinement")
+	}
+	remote := &net.TCPAddr{IP: net.ParseIP("10.43.0.20"), Port: 3000}
+	sample, ok := originNetworkSample(&observed, remote, tcpdiag.Snapshot{Available: true, RTTUsec: 800}, "edge-a", "group-a", time.Now())
+	if !ok || sample.RouteDigest != loadedDigest || sample.ServiceRTTMS == nil || *sample.ServiceRTTMS != 0.8 || sample.ServiceTarget != "app.tenant.svc.cluster.local:3000" {
+		t.Fatal("selected release lost its actual loaded route proof", sample, ok)
+	}
+	for _, mutate := range []func(*edgeProxyObservation){
+		func(value *edgeProxyObservation) { value.Route.RuntimeID = "foreign-runtime" },
+		func(value *edgeProxyObservation) {
+			value.Route.UpstreamURL = "http://other.tenant.svc.cluster.local:3000"
+		},
+		func(value *edgeProxyObservation) { value.Route.PathPrefix = "/other" },
+		func(value *edgeProxyObservation) { value.Route.Streaming = false },
+		func(value *edgeProxyObservation) { value.PeerFallback = true },
+	} {
+		changed := observed
+		mutate(&changed)
+		if _, ok := originNetworkSample(&changed, remote, tcpdiag.Snapshot{Available: true, RTTUsec: 800}, "edge-a", "group-a", time.Now()); ok {
+			t.Fatal("a different executed route borrowed the loaded proof")
+		}
+	}
+}
+
 type networkTestConn struct {
 	net.Conn
 	remote net.Addr
