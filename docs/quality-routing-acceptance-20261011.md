@@ -12,6 +12,8 @@ The second captured publication accounts for 474 eligible dynamic queries across
 
 Coverage advanced by 64 newly captured hostnames between the first two cycles. Missing evidence retains the verified safe order and rotates through a bounded capture queue. It is not assigned zero latency, zero failure rate, or an overwhelming permanent penalty. The second DNS artifact contains 264 `physical_quality` records and 244 `physical_order` records, including pinned records and safe learning baselines. No geographic or legacy latency selector appears in these dynamic answer policies.
 
+By the fourth capture at 17:42:36 UTC, all 237 active dynamic hostnames had obtained a measured or ready-primary learning receipt at least once: cumulative coverage progressed 68 → 132 → 196 → 237. This is complete rotation coverage, not a claim that every metric is simultaneously fresh. Expired comparison evidence returns to safe-order service and is captured again in later cycles.
+
 ## Same-network, identical-content acceptance
 
 The authenticated `GET /v1/codex/models` on `i00.pro` was sent from the same local network to each physical edge, using the same hostname, path and headers. Both returned HTTP 200 and the complete same body:
@@ -53,5 +55,7 @@ V6 removes an optional retransmission cost from both sides when only one side ob
 ## Validation
 
 Backend `make test`, focused regression tests, prepush checks and materialized release plans passed. Frontend generated OpenAPI refresh and type checks passed; contract CI [38060846945](https://github.com/yym68686/fugue-web/actions/runs/38060846945) succeeded. Backend runtime release [38070482560](https://github.com/yym68686/fugue/actions/runs/38070482560) succeeded. API replicas were Ready with zero restarts; public DNS, actual loaded artifacts, authority receipts and offline replay were checked separately from CI and preview results.
+
+A bounded inventory check queried all 237 active dynamic hostnames on both public authorities. Of 474 UDP queries, 468 initially returned NOERROR and six timed out. All six subsequently returned NOERROR over both UDP and TCP; no SERVFAIL or NXDOMAIN was observed in this final check. This does not establish the cause of transient packet timeouts.
 
 Raw observation files remain local to the investigation, including the same-content report, signed raw quality receipts, published compiler evidence and real DNS replay exports. Credentials are not part of this report.
