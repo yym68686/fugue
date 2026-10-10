@@ -39,6 +39,10 @@ Reports are stored separately from legacy socket samples and are immutable on re
 
 Client and server wall clocks may differ by up to two seconds when validating an attempt against its permit and public-socket timestamp. Signed permit expiration on the server remains exact. The client measures body duration with a monotonic clock; clock tolerance cannot extend the 90-second attempt bound or admit a body duration longer than the attempt. Optional HTTP status distinguishes rejected measurements from transport failures.
 
+An authenticated measurement plan also retains the actual route nonce proof and independently read node capacity for its bounded target set. Capacity reads share a two-second budget and at most four concurrent reads; persistence has a one-second budget. Failed capacity collection never becomes zero utilization and does not prevent issuing the measurement permit. Original kubelet observation times and route proof times remain separate. This keeps controlled measurement windows from depending on the unrelated rotation of all service route witnesses.
+
+The V6 evaluator keeps all V5 replay semantics available. If complete downloads or explicit excess incumbent failures establish delivery evidence, optional retransmission counters measured on just one edge are removed from both comparison costs and add one configured uncertainty allowance to the challenger. The receipt reports excluded metric costs and comparison uncertainty. Raw metrics are preserved; one-sided retransmissions alone cannot manufacture a switch.
+
 ## Bounded universal capture
 
 `dynamic_quality` is an explicit signed producer strategy, separate from code deployment. It derives owned dynamic hostnames from the frozen route intent. Static and pinned routes are excluded with a recorded reason. DNS-only aliases preserve their own real answer receipt while measuring their declared service owners. Shared aliases require complete receipts for every owner and a sustained unanimous winner; aggregate quality uses the worst service cost. Unmeasured address families remain visible as incomplete evidence coverage and are not mislabeled as measured adoption.

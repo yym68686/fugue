@@ -109,6 +109,7 @@ func (s *Server) handleIssueEdgeClientProbePlan(writer http.ResponseWriter, requ
 		}
 		plan.Permits = append(plan.Permits, permit)
 	}
+	s.captureClientProbeCapacityWitnesses(ctx, input, eligible, proofs)
 	writer.Header().Set("Cache-Control", "private, no-store")
 	httpx.WriteJSON(writer, http.StatusOK, plan)
 }
