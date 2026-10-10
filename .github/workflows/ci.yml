@@ -1191,7 +1191,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_replacement_plan.outputs.selected == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-front-serving-handoff, cancel-in-progress: false}
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false}
     timeout-minutes: 10
     permissions: {contents: read}
     outputs:
@@ -1254,7 +1254,7 @@ jobs:
     if: ${{ always() && needs.front_replacement.outputs.prepared == 'true' && (needs.front_replacement.result != 'success' || needs.front_replacement_external.result != 'success') }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-front-serving-handoff, cancel-in-progress: false}
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false}
     timeout-minutes: 5
     permissions: {contents: read, actions: read}
     env:
