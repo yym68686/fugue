@@ -136,8 +136,20 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	return s.reconcilePlatformConfigurationScope(ctx, platformproducer.Scope, capture)
 }
 
-func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope string, capture func(context.Context, model.Principal) (platformIntentProjectionResponse, error)) (time.Duration, error) {
-	interval := 30 * time.Second
+func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope string, capture func(context.Context, model.Principal) (platformIntentProjectionResponse, error)) (interval time.Duration, resultErr error) {
+	interval = 30 * time.Second
+	started, phaseStarted, phase := time.Now(), time.Now(), "load_policy"
+	phaseDurations := map[string]int64{}
+	advance := func(next string) {
+		phaseDurations[phase] += time.Since(phaseStarted).Milliseconds()
+		phase, phaseStarted = next, time.Now()
+	}
+	defer func() {
+		phaseDurations[phase] += time.Since(phaseStarted).Milliseconds()
+		if s.log != nil && (resultErr != nil || time.Since(started) > 30*time.Second) {
+			s.log.Printf("platform configuration producer phase timing scope=%s phase=%s elapsed_ms=%d durations_ms=%v error=%v", scope, phase, time.Since(started).Milliseconds(), phaseDurations, resultErr)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return interval, err
 	}
@@ -154,6 +166,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		return interval, nil
 	}
 	if policy.Mode == "serving" {
+		advance("reconcile_pending")
 		if handled, err := s.reconcilePendingProducedTraffic(ctx, policy, authority); handled || err != nil {
 			return interval, err
 		}
@@ -165,6 +178,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		}
 	}
 	principal := platformProducerPrincipal()
+	advance("read_previous")
 	current, previous, haveCurrent, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, policy.TargetScope, "shadow")
 	if err != nil {
 		return interval, err
@@ -179,6 +193,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	var projection platformIntentProjectionResponse
+	advance("capture_inputs")
 	if capture != nil {
 		projection, err = capture(runCtx, principal)
 	} else {
@@ -187,6 +202,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
+	advance("source_digest")
 	sourceDigest, err := platformProducerSourceDigest(projection, authority.ID)
 	if err != nil {
 		return interval, err
@@ -226,14 +242,17 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			binding["dns_policy_artifact_id"], binding["dns_policy_digest"] = policy.DNSPolicyArtifactID, policy.DNSPolicyDigest
 		}
 	}
+	advance("compile")
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot})
 	if err != nil {
 		return interval, err
 	}
+	advance("persist_inputs")
 	inputs, err := s.ensurePlatformProducerInputs(runCtx, compiled, principal)
 	if err != nil {
 		return interval, err
 	}
+	advance("persist_artifacts")
 	result, err := s.materializePlatformCompilation(runCtx, compiled, principal, &inputs, platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest})
 	if err != nil {
 		return interval, err
@@ -241,10 +260,12 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err = runCtx.Err(); err != nil {
 		return interval, err
 	}
+	advance("publish_shadow")
 	_, release, _, _, err := s.store.ReleaseProducedPlatformArtifact(result.ReleaseArtifact.ID, authority.ID, previous.ID, principal)
 	if err != nil {
 		return interval, err
 	}
+	advance("prepare_consumers")
 	if _, err = s.preparePlatformReleaseSetConsumers(runCtx, principal, result.ReleaseArtifact, release); err != nil {
 		return interval, err
 	}
@@ -253,6 +274,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		s.log.Printf("platform configuration producer published policy_release=%s release=%s artifact=%s source_digest=%s business_revision=%s", authority.ID, release.ID, result.ReleaseArtifact.ID, sourceDigest, projection.BusinessSnapshotRevision)
 	}
 	if policy.Mode == "serving" {
+		advance("stage_traffic")
 		return interval, s.stageProducedTraffic(ctx, policy, authority, result.ReleaseArtifact)
 	}
 	return interval, nil
