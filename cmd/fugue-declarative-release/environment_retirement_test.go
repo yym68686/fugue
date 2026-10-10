@@ -325,6 +325,40 @@ func TestEnvironmentRetirementFirstInstallHasNoDeletionAuthority(t *testing.T) {
 	}
 }
 
+func TestCompletedRetirementReplayRequiresExactAppliedDeclaration(t *testing.T) {
+	release, old, next, cluster := retirementFixture(t)
+	before := retirementLive(t, release, old)
+	desired := bindRetirementCAS(t, next, before)
+	live := bindRetirementCAS(t, next, before)
+	mapField(live, "metadata")["resourceVersion"] = "55"
+	retired := cluster.envRetirements[retirementResourceKey(desired)]
+	rebound, complete := completedRetirementReplay(desired, live, retired)
+	if !complete || mapField(rebound, "metadata")["resourceVersion"] != "55" || mapField(desired, "metadata")["resourceVersion"] != "41" {
+		t.Fatal("restaging did not preserve immutable desired state and bind applied live state")
+	}
+	for _, scenario := range []string{"recreated", "image drift", "retirement incomplete", "desired missing", "duplicate environment"} {
+		t.Run(scenario, func(t *testing.T) {
+			changed := deepCopyJSONMap(t, live)
+			container, _, _ := retirementContainer(changed, "containers", "dns")
+			switch scenario {
+			case "recreated":
+				mapField(changed, "metadata")["uid"] = "foreign"
+			case "image drift":
+				container["image"] = "foreign"
+			case "retirement incomplete":
+				container["env"] = append(anySlice(container["env"]), retired[0].Entry)
+			case "desired missing":
+				container["env"] = anySlice(container["env"])[:1]
+			case "duplicate environment":
+				container["env"] = append(anySlice(container["env"]), anySlice(container["env"])[0])
+			}
+			if _, complete := completedRetirementReplay(desired, changed, retired); complete {
+				t.Fatal("drifted restaging was accepted")
+			}
+		})
+	}
+}
+
 func TestEnvironmentRetirementLeavesReferenceChangesToOrdinarySSA(t *testing.T) {
 	r, old, next, cluster := retirementFixture(t)
 	c, _, _ := retirementContainer(next, "containers", "dns")

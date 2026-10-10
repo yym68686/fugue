@@ -257,6 +257,10 @@ func (cluster *kubectlCluster) retireEnvironment(ctx context.Context, release de
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	if rebound, complete := completedRetirementReplay(desired, live, retired); complete {
+		output, err := declarativerelease.CanonicalJSON(rebound)
+		return rebound, output, live, err
+	}
 	patch, expected, err := retirementPatch(desired, live, release.Workload.FieldManager, retired)
 	if err != nil {
 		return nil, nil, nil, err
@@ -297,4 +301,34 @@ func (cluster *kubectlCluster) retireEnvironment(ctx context.Context, release de
 	mapField(rebound, "metadata")["resourceVersion"] = fm["resourceVersion"]
 	output, err := declarativerelease.CanonicalJSON(rebound)
 	return rebound, output, fresh, err
+}
+
+func completedRetirementReplay(desired, live map[string]any, retired []retiredEnvironment) (map[string]any, bool) {
+	desiredMetadata, liveMetadata := mapField(desired, "metadata"), mapField(live, "metadata")
+	if len(retired) == 0 || stringValue(desiredMetadata["uid"]) == "" || desiredMetadata["uid"] != liveMetadata["uid"] || !validKubernetesResourceVersion(stringValue(liveMetadata["resourceVersion"])) {
+		return nil, false
+	}
+	for _, retiredEntry := range retired {
+		container, _, err := retirementContainer(live, retiredEntry.Field, retiredEntry.Container)
+		if err != nil {
+			return nil, false
+		}
+		entries, err := retirementEnvIndex(container)
+		if err != nil || entries[stringValue(retiredEntry.Entry["name"])] != nil {
+			return nil, false
+		}
+	}
+	raw, err := declarativerelease.CanonicalJSON(desired)
+	if err != nil {
+		return nil, false
+	}
+	rebound, err := decodeJSONObject(raw)
+	if err != nil {
+		return nil, false
+	}
+	mapField(rebound, "metadata")["resourceVersion"] = liveMetadata["resourceVersion"]
+	if !declarativerelease.ResourceDesiredSubset(rebound, live) {
+		return nil, false
+	}
+	return rebound, true
 }
