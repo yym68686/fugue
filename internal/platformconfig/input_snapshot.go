@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 )
 
 func canonicalPhysicalEvidence(raw json.RawMessage) (json.RawMessage, error) {
@@ -20,15 +21,24 @@ func canonicalPhysicalEvidence(raw json.RawMessage) (json.RawMessage, error) {
 }
 
 func DecodeRuntimeSnapshotContent(content map[string]any) (RuntimeSnapshot, error) {
-	var snapshot RuntimeSnapshot
 	raw, err := json.Marshal(content)
 	if err != nil {
-		return snapshot, err
+		return RuntimeSnapshot{}, err
 	}
+	return DecodeRuntimeSnapshotJSON(raw)
+}
+
+func DecodeRuntimeSnapshotJSON(raw []byte) (RuntimeSnapshot, error) {
+	var snapshot RuntimeSnapshot
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	err = decoder.Decode(&snapshot)
-	return snapshot, err
+	if err := decoder.Decode(&snapshot); err != nil {
+		return snapshot, err
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return snapshot, fmt.Errorf("runtime snapshot has trailing JSON")
+	}
+	return snapshot, nil
 }
 
 func RuntimeSnapshotContentDigest(content map[string]any) (string, error) {
