@@ -111,6 +111,10 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		if err != nil {
 			return fail("physical failure-aware policy cannot be decoded")
 		}
+		comparableDeliveryRequired, err := physicalComparableDeliveryCapabilityRequired(child)
+		if err != nil {
+			return fail("physical comparable delivery policy cannot be decoded")
+		}
 		orderRequired, err := physicalOrderCapabilityRequired(child)
 		if err != nil {
 			return fail("physical order policy cannot be decoded")
@@ -170,6 +174,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				}
 				if failureAwareRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5) {
 					return fail("required consumer lacks physical network failure-aware v5 capability")
+				}
+				if comparableDeliveryRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalComparableDeliveryCapabilityV6) {
+					return fail("required consumer lacks physical comparable delivery v6 capability")
 				}
 				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
 					return fail("physical network v3 capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
@@ -272,6 +279,14 @@ func physicalOrderProjectionCapabilityRequired(artifact model.PlatformArtifact) 
 }
 
 func physicalFailureAwareCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {
+	return physicalNetworkVersionCapabilityRequired(artifact, model.PhysicalFailureAwareNetworkPolicyVersion)
+}
+
+func physicalComparableDeliveryCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {
+	return physicalNetworkVersionCapabilityRequired(artifact, model.PhysicalComparableDeliveryPolicyVersion)
+}
+
+func physicalNetworkVersionCapabilityRequired(artifact model.PlatformArtifact, version string) (bool, error) {
 	var payload struct {
 		Policy struct {
 			Query *platformconfig.DNSQueryPolicy `json:"dns_query_policy"`
@@ -285,11 +300,11 @@ func physicalFailureAwareCapabilityRequired(artifact model.PlatformArtifact) (bo
 		return false, err
 	}
 	if query := payload.Policy.Query; query != nil {
-		if query.DynamicQuality != nil && query.DynamicQuality.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion {
+		if query.DynamicQuality != nil && query.DynamicQuality.Policy.Version == version {
 			return true, nil
 		}
 		for _, route := range query.PhysicalRoutes {
-			if route.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion {
+			if route.Policy.Version == version {
 				return true, nil
 			}
 		}

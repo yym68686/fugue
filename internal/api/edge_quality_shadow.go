@@ -35,7 +35,7 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	receipt, err := s.capturePhysicalQuality(ctx, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultFailureAwareNetworkPolicy())
+	receipt, err := s.capturePhysicalQuality(ctx, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultComparableDeliveryPolicy())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

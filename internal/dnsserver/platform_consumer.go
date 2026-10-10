@@ -238,7 +238,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		DesiredGeneration: chosen.ExpectedGeneration, ActualGeneration: status.ServingGeneration, LKGGeneration: status.LKGGeneration,
 		ApplyStatus: "staged", ProbeStatus: "shadow_validated", ServingLKG: status.StaleCache, LKGExpired: status.MaxStaleExceeded,
 	}
-	heartbeat.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.DNSAuthorityTransitionCapabilityV1, platformcontrol.DNSRouteSourcesCapabilityV1, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5, platformcontrol.PhysicalDynamicQualityCapabilityV1, platformcontrol.PhysicalOrderCapabilityV1, platformcontrol.PhysicalOrderProjectionCapabilityV1}
+	heartbeat.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.DNSAuthorityTransitionCapabilityV1, platformcontrol.DNSRouteSourcesCapabilityV1, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5, platformcontrol.PhysicalComparableDeliveryCapabilityV6, platformcontrol.PhysicalDynamicQualityCapabilityV1, platformcontrol.PhysicalOrderCapabilityV1, platformcontrol.PhysicalOrderProjectionCapabilityV1}
 	heartbeat.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat)
 	if err != nil {
 		return errors.New("encode platform heartbeat evidence failed")

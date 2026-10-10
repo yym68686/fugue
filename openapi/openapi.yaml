@@ -19165,7 +19165,7 @@ components:
     PhysicalEdgeQualityPolicy:
       type: object
       additionalProperties: false
-      description: V5 preserves signed raw evidence and historical V4 replay. It permits comparison against an incumbent with observed excess transfer failures even when too few downloads complete, and bounds uncertainty from undersampled client cohorts without treating them as proven vetoes. Every sufficiently sampled cohort must still show sustained advantage, and capacity, cooldown and route readiness gates remain mandatory.
+      description: V6 preserves historical V4/V5 replay. With comparable completed downloads or explicit excess incumbent transfer failures, a retransmission metric observed on only one edge is excluded from both comparison costs and adds one configured uncertainty budget to the challenger. Raw observations remain intact. Missing optional packet counters cannot veto otherwise sufficient delivery evidence. Every sufficiently sampled cohort must still show sustained advantage, and capacity, cooldown and route readiness gates remain mandatory.
       required: [version, window_seconds, bucket_seconds, required_buckets, minimum_records, cooldown_seconds, evidence_max_age_seconds, advantage_ms, advantage_ratio, unknown_cost_ms, uncertainty_ms, failure_cost_ms, capacity_cost_ms, throughput_cost_ms, throughput_target_bps, probe_interval_seconds, probe_budget_per_interval]
       properties:
         maximum_node_utilization: {type: number, minimum: 0, maximum: 1, description: Explicit v2 node CPU/memory headroom gate. Does not declare link or application capacity.}
@@ -19363,6 +19363,13 @@ components:
       required: [edge_id, incumbent_edge_id, cohort, incumbent_lower, challenger_upper, sustained_buckets, ready, advantageous]
       description: Comparison within one actually observed common TCP peer network. Bands combine observed variation and a configured uncertainty budget, not a statistical confidence interval or a worst-case bound for unobserved terminals.
       properties:
+        excluded_metric_costs:
+          type: array
+          description: V6 optional metrics excluded from both comparison costs because only one side observed them; raw observations are preserved.
+          items: {type: string}
+        comparison_uncertainty_ms:
+          type: number
+          description: Additional configured uncertainty for a V6 comparison with an excluded optional metric; not a statistical confidence bound.
         edge_id: {type: string}
         incumbent_edge_id: {type: string}
         cohort: {type: string}
@@ -34543,7 +34550,7 @@ components:
             - type: object
               required: [maximum_node_utilization]
               properties:
-                version: {type: string, enum: [physical-network-delivery-v4, physical-network-failure-aware-v5]}
+                version: {type: string, enum: [physical-network-delivery-v4, physical-network-failure-aware-v5, physical-network-comparable-delivery-v6]}
         refresh_queries_per_cycle: {type: integer, minimum: 1, maximum: 128}
         refresh_concurrency: {type: integer, minimum: 1, maximum: 8}
     PlatformPhysicalQualityRoute:
@@ -34559,7 +34566,7 @@ components:
             - type: object
               required: [maximum_node_utilization]
               properties:
-                version: {type: string, enum: [physical-network-cohort-v2, physical-network-bounded-v3, physical-network-delivery-v4, physical-network-failure-aware-v5]}
+                version: {type: string, enum: [physical-network-cohort-v2, physical-network-bounded-v3, physical-network-delivery-v4, physical-network-failure-aware-v5, physical-network-comparable-delivery-v6]}
     PlatformDNSAuthorityPolicy:
       type: object
       additionalProperties: false

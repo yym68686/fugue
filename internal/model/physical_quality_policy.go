@@ -9,9 +9,14 @@ const PhysicalNetworkPolicyVersion = "physical-network-cohort-v2"
 const PhysicalBoundedNetworkPolicyVersion = "physical-network-bounded-v3"
 const PhysicalDeliveryNetworkPolicyVersion = "physical-network-delivery-v4"
 const PhysicalFailureAwareNetworkPolicyVersion = "physical-network-failure-aware-v5"
+const PhysicalComparableDeliveryPolicyVersion = "physical-network-comparable-delivery-v6"
+
+func IsFailureAwarePhysicalNetworkPolicy(version string) bool {
+	return version == PhysicalFailureAwareNetworkPolicyVersion || version == PhysicalComparableDeliveryPolicyVersion
+}
 
 func IsDeliveryPhysicalNetworkPolicy(version string) bool {
-	return version == PhysicalDeliveryNetworkPolicyVersion || version == PhysicalFailureAwareNetworkPolicyVersion
+	return version == PhysicalDeliveryNetworkPolicyVersion || IsFailureAwarePhysicalNetworkPolicy(version)
 }
 
 func IsBoundedPhysicalNetworkPolicy(version string) bool {
