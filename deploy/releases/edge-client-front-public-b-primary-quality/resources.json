@@ -1,0 +1,231 @@
+{
+  "apiVersion": "release.fugue.dev/v2",
+  "kind": "ComponentResourceSet",
+  "items": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "metadata": {
+        "name": "fugue-edge-front-public-b-primary-quality",
+        "namespace": "fugue-system",
+        "labels": {
+          "app.kubernetes.io/component": "edge-client-front-public-b-primary-quality",
+          "app.kubernetes.io/instance": "fugue",
+          "app.kubernetes.io/name": "fugue",
+          "fugue.io/authority-cell-id": "cell-public-b",
+          "fugue.io/edge-group-id": "edge-group-country-us",
+          "fugue.io/edge-node": "vps-591f4447"
+        }
+      },
+      "spec": {
+        "revisionHistoryLimit": 2,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "edge-client-front-public-b-primary-quality",
+            "app.kubernetes.io/instance": "fugue",
+            "app.kubernetes.io/name": "fugue",
+            "fugue.io/edge-node": "vps-591f4447"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/component": "edge-client-front-public-b-primary-quality",
+              "app.kubernetes.io/instance": "fugue",
+              "app.kubernetes.io/name": "fugue",
+              "fugue.io/authority-cell-id": "cell-public-b",
+              "fugue.io/edge-group-id": "edge-group-country-us",
+              "fugue.io/edge-node": "vps-591f4447"
+            },
+            "annotations": {
+              "fugue.pro/edge-front-transport": "independent/v1"
+            }
+          },
+          "spec": {
+            "automountServiceAccountToken": false,
+            "containers": [
+              {
+                "command": [
+                  "/usr/local/bin/fugue-edge-front"
+                ],
+                "env": [
+                  {
+                    "name": "FUGUE_EDGE_FRONT_NODE_HOST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "status.hostIP"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_EDGE_ID",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "spec.nodeName"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_EDGE_GROUP_ID",
+                    "value": "edge-group-country-us"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_HTTP_LISTEN_ADDR",
+                    "value": ":80"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_HTTPS_LISTEN_ADDR",
+                    "value": ":443"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_HEALTH_LISTEN_ADDR",
+                    "value": ":7831"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_HTTP_MODE",
+                    "value": "redirect"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE",
+                    "value": "/var/lib/fugue-edge-front/activation.json"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_REQUIRE_ACTIVATION_STATE",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_DEFAULT_SLOT",
+                    "value": "a"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_SLOT_A_HTTP_PORT",
+                    "value": "18080"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_SLOT_A_HTTPS_PORT",
+                    "value": "18443"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_SLOT_B_HTTP_PORT",
+                    "value": "28080"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_SLOT_B_HTTPS_PORT",
+                    "value": "28443"
+                  }
+                ],
+                "image": "fugue-artifact://edge-client-front-public-b-primary-quality",
+                "imagePullPolicy": "IfNotPresent",
+                "livenessProbe": {
+                  "failureThreshold": 6,
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health"
+                  },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 10,
+                  "timeoutSeconds": 3
+                },
+                "name": "edge-front",
+                "ports": [
+                  {
+                    "containerPort": 80,
+                    "name": "http-public",
+                    "protocol": "TCP"
+                  },
+                  {
+                    "containerPort": 443,
+                    "name": "https-public",
+                    "protocol": "TCP"
+                  },
+                  {
+                    "containerPort": 7831,
+                    "name": "health",
+                    "protocol": "TCP"
+                  }
+                ],
+                "readinessProbe": {
+                  "failureThreshold": 3,
+                  "httpGet": {
+                    "path": "/readyz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 5,
+                  "timeoutSeconds": 3
+                },
+                "resources": {
+                  "limits": {
+                    "ephemeral-storage": "128Mi",
+                    "memory": "128Mi"
+                  },
+                  "requests": {
+                    "cpu": "10m",
+                    "ephemeral-storage": "16Mi",
+                    "memory": "32Mi"
+                  }
+                },
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                },
+                "startupProbe": {
+                  "failureThreshold": 600,
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 2
+                },
+                "volumeMounts": [
+                  {
+                    "mountPath": "/var/lib/fugue-edge-front",
+                    "name": "activation-state",
+                    "readOnly": true
+                  }
+                ]
+              }
+            ],
+            "enableServiceLinks": false,
+            "terminationGracePeriodSeconds": 30,
+            "tolerations": [
+              {
+                "effect": "NoSchedule",
+                "key": "fugue.io/dedicated",
+                "operator": "Equal",
+                "value": "edge"
+              },
+              {
+                "effect": "NoSchedule",
+                "key": "fugue.io/tenant",
+                "operator": "Exists"
+              }
+            ],
+            "volumes": [
+              {
+                "hostPath": {
+                  "path": "/var/lib/fugue/edge-owned/edge-group-country-us/front",
+                  "type": "Directory"
+                },
+                "name": "activation-state"
+              }
+            ],
+            "nodeSelector": {
+              "kubernetes.io/hostname": "vps-591f4447"
+            }
+          }
+        },
+        "updateStrategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxUnavailable": 1
+          }
+        }
+      }
+    }
+  ]
+}
