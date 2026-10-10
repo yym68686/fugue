@@ -418,7 +418,7 @@ func (activator *groupAuthorityActivator) promoteControl(ctx context.Context, ta
 		receipt.PreviousAuthoritySequence < target.AuthoritySequence || receipt.PreviousPublicationSequence < target.PublicationSequence ||
 		receipt.PreviousRecoveryEpoch < target.RecoveryEpoch || receipt.PreviousBundleGeneration != target.PreviousServingGeneration ||
 		!exactSHA256Digest(receipt.PreviousPublishedBundleDigest) || receipt.PublicationSequence != receipt.PreviousAuthoritySequence+1 ||
-		receipt.RecoveryEpoch != target.RecoveryEpoch || receipt.BundleGeneration != target.ServingGeneration ||
+		receipt.RecoveryEpoch < receipt.PreviousRecoveryEpoch || receipt.BundleGeneration != target.ServingGeneration ||
 		receipt.CandidateRecordDigest != target.CandidateRecordDigest || receipt.WorkerSlot != string(target.TargetSlot) || receipt.Authority != "edge-control" ||
 		!exactSHA256Digest(receipt.PublishedBundleDigest) {
 		return receipt, errors.New("Edge Control promotion receipt is invalid")

@@ -317,21 +317,13 @@ func (activator *frontAuthorityActivator) observeFrontsForPreflight(ctx context.
 	if err == nil {
 		return fronts, nil
 	}
-	selector := labels.Set{"fugue.io/edge-group-id": target.GroupID}.AsSelector().String()
-	list, listErr := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: authorityRuntimeCohortLimit(activator.config.ExpectedNodes)})
-	if listErr != nil || list.Continue != "" {
+	pods, listErr := activator.servingFrontPods(ctx)
+	if listErr != nil {
 		return nil, fmt.Errorf("Front readiness failed and recovery cohort is unavailable: %w", err)
 	}
 	degraded := make(map[string]observedFront, activator.config.ExpectedNodes)
-	for index := range list.Items {
-		pod := &list.Items[index]
-		isFront := false
-		for _, container := range pod.Spec.Containers {
-			isFront = isFront || container.Name == "edge-front"
-		}
-		if !isFront {
-			continue
-		}
+	for index := range pods {
+		pod := &pods[index]
 		if pod.DeletionTimestamp != nil || pod.UID == "" || strings.TrimSpace(pod.Spec.NodeName) == "" {
 			return nil, errors.New("Front recovery cohort identity is incomplete")
 		}
@@ -824,21 +816,13 @@ func sealFrontCandidateWorkerCohort(pods []corev1.Pod, candidate releaseguardian
 }
 
 func (activator *frontAuthorityActivator) observeFronts(ctx context.Context) (map[string]observedFront, error) {
-	selector := labels.Set{"fugue.io/edge-group-id": activator.config.GroupID}.AsSelector().String()
-	list, err := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 101})
-	if err != nil || list.Continue != "" {
-		return nil, errors.New("Front cohort is unavailable")
+	pods, err := activator.servingFrontPods(ctx)
+	if err != nil {
+		return nil, err
 	}
 	fronts := map[string]observedFront{}
-	for index := range list.Items {
-		pod := &list.Items[index]
-		isFront := false
-		for _, container := range pod.Spec.Containers {
-			isFront = isFront || container.Name == "edge-front"
-		}
-		if !isFront {
-			continue
-		}
+	for index := range pods {
+		pod := &pods[index]
 		if pod.DeletionTimestamp != nil || !podReady(pod.Status.Conditions) || strings.TrimSpace(pod.Status.PodIP) == "" || strings.TrimSpace(pod.Spec.NodeName) == "" {
 			return nil, errors.New("Front cohort is not ready")
 		}

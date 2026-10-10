@@ -311,6 +311,39 @@ func TestSameAuthorityBundleGenerationIgnoresPublicationVersionOnly(t *testing.T
 	}
 }
 
+func TestGroupAuthorityPromotionRetriesAfterCompensatedRecovery(t *testing.T) {
+	target := groupAuthorityTargetFixture()
+	for _, scenario := range []string{"fresh promotion", "committed replay", "epoch regression", "different predecessor"} {
+		t.Run(scenario, func(t *testing.T) {
+			receipt := edgecontrol.GroupPromotionReceipt{Schema: edgecontrol.GroupPromotionReceiptSchemaV1,
+				GroupID: target.GroupID, PreviousAuthoritySequence: target.AuthoritySequence + 2,
+				PreviousPublicationSequence: target.PublicationSequence + 2, PreviousRecoveryEpoch: target.RecoveryEpoch + 1,
+				PreviousBundleGeneration: target.PreviousServingGeneration, PreviousPublishedBundleDigest: target.PublishedBundleDigest,
+				PublicationSequence: target.AuthoritySequence + 3, RecoveryEpoch: target.RecoveryEpoch + 1,
+				BundleGeneration: target.ServingGeneration, PublishedBundleDigest: "sha256:" + strings.Repeat("9", 64),
+				CandidateRecordDigest: target.CandidateRecordDigest, WorkerSlot: string(target.TargetSlot), Authority: "edge-control"}
+			switch scenario {
+			case "committed replay":
+				receipt.PreviousRecoveryEpoch = target.RecoveryEpoch
+			case "epoch regression":
+				receipt.RecoveryEpoch = target.RecoveryEpoch
+			case "different predecessor":
+				receipt.PreviousBundleGeneration = "unrelated-generation"
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(receipt)
+			}))
+			defer server.Close()
+			activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, time.Now())
+			_, err := activator.promoteControl(context.Background(), target)
+			wantError := scenario == "epoch regression" || scenario == "different predecessor"
+			if (err != nil) != wantError {
+				t.Fatalf("promotion result: %v", err)
+			}
+		})
+	}
+}
+
 func TestGroupAuthorityPromotionTypesOnlyExplicitConflictAsPrewriteCAS(t *testing.T) {
 	for name, status := range map[string]int{"sequence_conflict": http.StatusConflict, "candidate_conflict": http.StatusConflict, "unavailable": http.StatusServiceUnavailable} {
 		t.Run(name, func(t *testing.T) {
