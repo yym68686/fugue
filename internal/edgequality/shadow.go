@@ -65,6 +65,7 @@ type Observation struct {
 }
 
 type Snapshot struct {
+	ServiceReceipts     []Receipt                     `json:"service_receipts,omitempty"`
 	DNSHostname         string                        `json:"dns_hostname,omitempty"`
 	ClientProbeReports  []model.EdgeClientProbeReport `json:"client_probe_reports,omitempty"`
 	NodeCapacitySamples []NodeCapacitySample          `json:"node_capacity_samples,omitempty"`
@@ -160,6 +161,22 @@ func receiptDigest(receipt Receipt) (string, error) {
 	switch receipt.DigestFormat {
 	case "":
 	case ReceiptDigestFormat:
+		receipt.Snapshot.ServiceReceipts = append([]Receipt(nil), receipt.Snapshot.ServiceReceipts...)
+		for index := range receipt.Snapshot.ServiceReceipts {
+			child := &receipt.Snapshot.ServiceReceipts[index]
+			if len(child.Snapshot.ServiceReceipts) > 0 {
+				return "", errors.New("nested consensus receipt is unsupported")
+			}
+			if len(child.Snapshot.ActualDNSReceipt) > 0 {
+				decoder := json.NewDecoder(bytes.NewReader(child.Snapshot.ActualDNSReceipt))
+				decoder.UseNumber()
+				var embedded any
+				if err := decoder.Decode(&embedded); err != nil {
+					return "", err
+				}
+				child.Snapshot.ActualDNSReceipt, _ = json.Marshal(embedded)
+			}
+		}
 		if len(receipt.Snapshot.ActualDNSReceipt) > 0 {
 			decoder := json.NewDecoder(bytes.NewReader(receipt.Snapshot.ActualDNSReceipt))
 			decoder.UseNumber()
@@ -189,6 +206,9 @@ func receiptDigest(receipt Receipt) (string, error) {
 }
 
 func Evaluate(snapshot Snapshot) (Result, error) {
+	if len(snapshot.ServiceReceipts) > 0 {
+		return evaluateServiceConsensus(snapshot)
+	}
 	if err := validate(snapshot); err != nil {
 		return Result{}, err
 	}

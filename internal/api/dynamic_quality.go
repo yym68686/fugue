@@ -10,16 +10,18 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/dnsserver"
 	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
 
 type dynamicQualityJob struct {
-	NodeID           string
-	Route            platformconfig.PhysicalQualityRoute
-	Key              string
-	EvidenceHostname string
+	NodeID            string
+	Route             platformconfig.PhysicalQualityRoute
+	Key               string
+	EvidenceHostname  string
+	EvidenceHostnames []string
 }
 
 type dynamicQualityEntry struct {
@@ -59,10 +61,12 @@ func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy pl
 		pinned, streaming := false, true
 		evidenceHostname := ""
 		shared := false
+		hostSet := map[string]bool{}
 		for _, owner := range owners {
 			pinned = pinned || owner.DNSPlacementEdgeGroupID != "" || owner.EdgeGroupMode == model.PlatformRouteEdgeGroupModePinned
 			shared = shared || evidenceHostname != "" && evidenceHostname != owner.Hostname
 			evidenceHostname = owner.Hostname
+			hostSet[owner.Hostname] = true
 			streaming = streaming && owner.Streaming != nil && *owner.Streaming
 		}
 		if pinned {
@@ -70,9 +74,17 @@ func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy pl
 			continue
 		}
 		states[record.Hostname] = "learning_queued"
-		if shared || evidenceHostname == "" {
+		if len(hostSet) > 8 || evidenceHostname == "" {
 			states[record.Hostname] = "learning_shared_owner_evidence_required"
 			continue
+		}
+		evidenceHostnames := []string{}
+		if shared {
+			for hostname := range hostSet {
+				evidenceHostnames = append(evidenceHostnames, hostname)
+			}
+			sort.Strings(evidenceHostnames)
+			evidenceHostname = record.Hostname
 		}
 		class := "dynamic_api"
 		if streaming {
@@ -86,7 +98,7 @@ func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy pl
 				states[record.Hostname] = "learning_address_family_evidence_required"
 				continue
 			}
-			jobs = append(jobs, dynamicQualityJob{NodeID: fact.NodeID, Key: fact.NodeID + "\x00" + record.Hostname, EvidenceHostname: evidenceHostname, Route: platformconfig.PhysicalQualityRoute{Hostname: record.Hostname, TrafficClass: class, Policy: policy.DynamicQuality.Policy}})
+			jobs = append(jobs, dynamicQualityJob{NodeID: fact.NodeID, Key: fact.NodeID + "\x00" + record.Hostname, EvidenceHostname: evidenceHostname, EvidenceHostnames: evidenceHostnames, Route: platformconfig.PhysicalQualityRoute{Hostname: record.Hostname, TrafficClass: class, Policy: policy.DynamicQuality.Policy}})
 		}
 	}
 	sort.Slice(jobs, func(left, right int) bool { return jobs[left].Key < jobs[right].Key })
@@ -155,6 +167,33 @@ func dynamicQualityContext(projection platformIntentProjectionResponse, job dyna
 	}{record, owners, job.Route.Policy, candidates})
 }
 
+func (s *Server) captureDynamicQualityEvidence(ctx context.Context, job dynamicQualityJob, answer dnsserver.DNSDecisionReceipt) (edgequality.Receipt, error) {
+	if len(job.EvidenceHostnames) == 0 {
+		return s.capturePhysicalQualityForDNS(ctx, job.EvidenceHostname, job.Route.Hostname, job.Route.TrafficClass, edgeQualityRankScope{}, job.NodeID, job.Route.Policy, &answer)
+	}
+	receipts := make([]edgequality.Receipt, len(job.EvidenceHostnames))
+	errors := make([]error, len(receipts))
+	var workers sync.WaitGroup
+	for index, hostname := range job.EvidenceHostnames {
+		workers.Add(1)
+		go func(index int, hostname string) {
+			defer workers.Done()
+			receipts[index], errors[index] = s.capturePhysicalQualityForDNS(ctx, hostname, job.Route.Hostname, job.Route.TrafficClass, edgeQualityRankScope{}, job.NodeID, job.Route.Policy, &answer)
+		}(index, hostname)
+	}
+	workers.Wait()
+	for _, err := range errors {
+		if err != nil {
+			return edgequality.Receipt{}, err
+		}
+	}
+	snapshot, err := edgequality.ServiceConsensusSnapshot(job.Route.Hostname, receipts)
+	if err != nil {
+		return edgequality.Receipt{}, err
+	}
+	return edgequality.Capture(snapshot)
+}
+
 func (s *Server) captureDynamicQuality(ctx context.Context, projection *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy) error {
 	if policy.DynamicQuality == nil {
 		return nil
@@ -182,7 +221,7 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 		entry.ContextDigest = contextDigest
 		answer, captureErr := s.observePhysicalDNSAnswer(captureContext, projection.RuntimeSnapshot.DNSConsumers, job.NodeID, job.Route.Hostname)
 		if captureErr == nil {
-			receipt, readErr := s.capturePhysicalQualityForDNS(captureContext, job.EvidenceHostname, job.Route.Hostname, job.Route.TrafficClass, edgeQualityRankScope{}, job.NodeID, job.Route.Policy, &answer)
+			receipt, readErr := s.captureDynamicQualityEvidence(captureContext, job, answer)
 			captureErr = readErr
 			if captureErr == nil {
 				entry.Compiled.Selection, captureErr = compileBoundPhysicalQualitySelection(receipt, time.Now().UTC())

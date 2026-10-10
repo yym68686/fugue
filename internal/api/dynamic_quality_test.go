@@ -87,6 +87,19 @@ func TestDynamicQualityAliasesUseDeclaredServiceOwner(t *testing.T) {
 			t.Fatal("alias fabricated a service route for its DNS-only name", job)
 		}
 	}
+	other := projection.Intent.Routes[0]
+	other.Hostname = "other.example.test"
+	projection.Intent.Routes = append(projection.Intent.Routes, other)
+	projection.Intent.DNS[1].Route.Hostnames = append(projection.Intent.DNS[1].Route.Hostnames, other.Hostname)
+	jobs, states, err = dynamicQualityRoutes(projection, policy)
+	if err != nil || len(jobs) != 2 || states[record.Hostname] != "learning_queued" {
+		t.Fatal("shared owners were permanently excluded", jobs, states, err)
+	}
+	for _, job := range jobs {
+		if job.Route.Hostname == record.Hostname && (job.EvidenceHostname != record.Hostname || len(job.EvidenceHostnames) != 2) {
+			t.Fatal("shared alias did not retain every declared service", job)
+		}
+	}
 }
 
 func TestDynamicQualityRefreshRotatesEvenWithoutTraffic(t *testing.T) {

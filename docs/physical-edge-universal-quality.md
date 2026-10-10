@@ -35,7 +35,7 @@ Reports are stored separately from legacy socket samples and are immutable on re
 
 ## Bounded universal capture
 
-`dynamic_quality` is an explicit signed producer strategy, separate from code deployment. It derives owned dynamic hostnames from the frozen route intent. Static and pinned routes are excluded with a recorded reason. Shared DNS aliases and unmeasured address families remain visible as incomplete evidence coverage; they are not mislabeled as measured adoption.
+`dynamic_quality` is an explicit signed producer strategy, separate from code deployment. It derives owned dynamic hostnames from the frozen route intent. Static and pinned routes are excluded with a recorded reason. DNS-only aliases preserve their own real answer receipt while measuring their declared service owners. Shared aliases require complete receipts for every owner and a sustained unanimous winner; aggregate quality uses the worst service cost. Unmeasured address families remain visible as incomplete evidence coverage and are not mislabeled as measured adoption.
 
 Capture uses a per-cycle query budget, bounded concurrency and least-recently-attempted scheduling. Incomplete queries retain the previous verified signed order; completed queries carry actual DNS receipts and independently reconstructed network evidence. V4 can publish `quality_state=learning` only for the existing fresh route-ready primary. A learning receipt does not claim comparative quality and starts a known cooldown epoch. A failed query cannot block other completed queries.
 

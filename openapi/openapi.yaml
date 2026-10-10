@@ -19245,6 +19245,12 @@ components:
       additionalProperties: false
       required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
       properties:
+        service_receipts:
+          type: array
+          minItems: 2
+          maxItems: 8
+          items: {$ref: '#/components/schemas/PhysicalEdgeQualityReceipt'}
+          description: Complete single-level receipts for every declared service sharing one DNS alias. A normal switch requires all services to independently approve the same candidate; failures use a common eligible fallback. Child receipts retain exact actual DNS binding and raw network evidence.
         dns_hostname:
           type: string
           description: Actual DNS query hostname when a declared single-service alias differs from the measured service hostname. Omitted for direct names. Publication must verify the declared owner and actual receipt; no arbitrary cross-host evidence fallback.

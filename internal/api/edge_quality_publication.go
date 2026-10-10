@@ -44,6 +44,20 @@ func validateBoundPhysicalQualitySnapshot(snapshot edgequality.Snapshot, evidenc
 		!sameQualityTime(snapshot.LastSwitchAt, evidence.PrimarySince) {
 		return errors.New("physical publication context or cooldown differs from actual DNS answer")
 	}
+	if len(snapshot.ServiceReceipts) > 0 {
+		if _, err := edgequality.Evaluate(snapshot); err != nil {
+			return err
+		}
+		for _, receipt := range snapshot.ServiceReceipts {
+			if len(receipt.Snapshot.ServiceReceipts) > 0 {
+				return errors.New("nested shared-service receipt is unsupported")
+			}
+			if err := validateBoundPhysicalQualitySnapshot(receipt.Snapshot, evidence); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	derived := snapshot
 	derived.Observations = nil
 	derived.Candidates = append([]edgequality.Candidate(nil), snapshot.Candidates...)

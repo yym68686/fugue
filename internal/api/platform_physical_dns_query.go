@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -68,8 +70,10 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 	}
 	requested := map[string]platformconfig.PhysicalQualityRoute{}
 	evidenceHosts := map[string]string{}
+	ownerSets := map[string]map[string]bool{}
 	for _, route := range policy.PhysicalRoutes {
 		requested[route.Hostname] = route
+		ownerSets[route.Hostname] = map[string]bool{}
 		owned := false
 		for _, record := range projection.Intent.DNS {
 			if record.Hostname != route.Hostname {
@@ -84,10 +88,11 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 			}
 			for _, owner := range owners {
 				if owner.DNSPlacementEdgeGroupID != "" || owner.EdgeGroupMode == model.PlatformRouteEdgeGroupModePinned ||
-					owner.Hostname != route.Hostname && policy.DynamicQuality == nil || evidenceHosts[route.Hostname] != "" && evidenceHosts[route.Hostname] != owner.Hostname {
+					owner.Hostname != route.Hostname && policy.DynamicQuality == nil {
 					return fmt.Errorf("physical route conflicts with shared or pinned ownership")
 				}
 				evidenceHosts[route.Hostname] = owner.Hostname
+				ownerSets[route.Hostname][owner.Hostname] = true
 				owned = true
 			}
 		}
@@ -111,10 +116,26 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 		if fact.Type != "A" || len(compiled.Evidence) == 0 || len(compiled.Evidence) > 8<<20 || !json.Valid(compiled.Evidence) {
 			return fmt.Errorf("physical selection lacks supported address-family evidence")
 		}
-		if evidenceHosts[fact.Hostname] != fact.Hostname {
+		if evidenceHosts[fact.Hostname] != fact.Hostname || len(ownerSets[fact.Hostname]) > 1 {
 			var receipt edgequality.Receipt
-			if json.Unmarshal(compiled.Evidence, &receipt) != nil || receipt.Snapshot.Hostname != evidenceHosts[fact.Hostname] || edgequality.DNSHostname(receipt.Snapshot) != fact.Hostname {
+			if json.Unmarshal(compiled.Evidence, &receipt) != nil || edgequality.DNSHostname(receipt.Snapshot) != fact.Hostname {
 				return fmt.Errorf("physical alias evidence differs from frozen service ownership")
+			}
+			captured := []string{receipt.Snapshot.Hostname}
+			if len(receipt.Snapshot.ServiceReceipts) > 0 {
+				captured = nil
+				for _, service := range receipt.Snapshot.ServiceReceipts {
+					captured = append(captured, service.Snapshot.Hostname)
+				}
+			}
+			declared := []string{}
+			for hostname := range ownerSets[fact.Hostname] {
+				declared = append(declared, hostname)
+			}
+			sort.Strings(captured)
+			sort.Strings(declared)
+			if !slices.Equal(captured, declared) {
+				return fmt.Errorf("physical alias omits or adds a declared service owner")
 			}
 			verified, err := compileBoundPhysicalQualitySelection(receipt, now)
 			if err != nil || !reflect.DeepEqual(verified, selection) {
