@@ -1,0 +1,78 @@
+# Managed SSH front rollout
+
+The existing host-network SSH fronts serve active customer connections and must
+remain running during replacement. The managed backend canary has passed public
+client acceptance, but these older front binaries cannot emit the new exact-Pod
+acknowledgements. This document describes the remaining ingress release work;
+it does not authorize skipping its verification gates.
+
+## Release and configuration separation
+
+Build and verify a standalone SSH-front image through the existing `ci.yml`
+entrypoint. The artifact receipt selects an immutable image and source; building
+it does not select public serving configuration. An independent configuration
+lane creates a new per-node candidate with its own durable route cache. Candidate
+names bind image and node identity so an executable update cannot replace a
+currently serving process in place.
+
+Candidates use ordinary Pod networking and no host listening ports. The initial
+enrollment declares only the two synthetic canary ports. A separately fenced
+Service transport declaration can select a verified candidate on a node's exact
+public address, with local endpoints. Current production HTTP/DNS transport
+already uses this Kubernetes Service mechanism. Its connection-preserving
+behavior for the SSH host-network predecessor must still be proved in an
+isolated cluster before a canary public handoff. Existing front processes and
+their established sockets remain alive. Removing our exact transport selection
+restores the preceding path for new connections; compensation must refuse newer
+ownership or generation changes.
+
+Public handoff requires the candidate's exact Pod UID, node, image digest,
+route-set digest, fresh persisted ACK, endpoint ownership, and successful host-key
+probes. Test an established connection across selection and compensation while
+new connections reach the selected process. Stage and observe each edge before
+enrolling it as a required consumer for backend retirement. A backend's own
+active-connection check remains required even when all new fronts have ACKed,
+because retained legacy fronts can still hold older streams.
+
+The transport declaration must support allocation changes without code changes.
+Do not use a fixed single application, a hardcoded port, or a fixed active front
+Deployment as the general publication design. A canary-only port declaration is
+an explicit initial rollout scope, not a substitute for the platform allocation
+contract. Workload control, traffic selection, credentials, and binary rollout
+remain separately owned.
+
+## Observed credential sources
+
+Read-only checks on 2026-10-11 confirmed four current SSH-front nodes. Hashes of
+their credential files and mounted Kubernetes Secrets were compared with the
+control-plane node-token records in read-only PostgreSQL transactions. No token
+was rotated, transmitted outside Fugue, or printed.
+
+| Node | Group | Valid existing credential source |
+| --- | --- | --- |
+| `vps-591f4447` | `edge-group-country-us` | Secret `fugue-edge-token-vps-591f4447` |
+| `vps-84c8f0a9` | `edge-group-country-de` | Secret `fugue-edge-token-vps-84c8f0a9` |
+| `bwg` | `edge-group-country-us` | owner-only `/etc/fugue/edge-node.env` |
+| `86eabf26-42a9-4f9d-998a-754115f8b829` | `edge-group-country-us` | owner-only `/etc/fugue/edge-node.env` |
+
+The first two node-local files do not match current token records; their currently
+mounted Secrets do. New candidates must use the explicitly reviewed source and
+must not prefer a stale file over it. The two other files authenticate exactly
+their respective nodes. The legacy US DaemonSet references one Secret across all
+its replicas; do not weaken exact-node ACK authorization to accommodate that
+older configuration. New candidates can reuse valid credentials without changing
+any currently serving consumer.
+
+## Remaining acceptance
+
+- Isolated actual-image routing, durable ACK, and failed-publication retention.
+- Isolated Service handoff and compensation with established TCP streams.
+- Canary staging and public handoff on all four observed nodes.
+- Same identity and current authorization after ingress and backend rollback.
+- Fresh per-instance ACKs, backend active-session drain, and retained rollback
+  material before retirement.
+- Explicit new-binding transport reconciliation and stale/allocation rejection.
+- A concrete Argus cutover and client-trust review after these prerequisites.
+
+The original Argus ports and client known-hosts files remain unchanged. New
+managed fingerprints must never be silently installed into those client files.
