@@ -1,15 +1,12 @@
 # Managed application SSH
 
-Status: identity, observation, managed sessions, independent intent, candidate
-publication, explicit activation, and guarded route rollback are implemented
-locally. Kubernetes candidate publication and execution passed isolated-cluster
-acceptance. Instance-bound edge acknowledgement and guarded slot retirement now
-have local and isolated-cluster coverage. Production release enrollment, enforcing
-network-policy acceptance, and traffic migration remain in progress. The user authorized committing and pushing completed work,
-following GitHub Actions deployment, and investigating unexpected behavior.
-Initial code and independent keyring configuration have now been pushed.
-Production traffic, application identity activation, Argus, and client trust
-have not been changed. Component release monitoring remains in progress.
+Status: API, schema, SSH controller, independent keyrings, and a restricted
+canary runtime are deployed through CI. The synthetic application's independent
+SSH identity passed Pod and Service handshakes and target verification; its
+public test binding is activated. Public ingress acceptance remains in progress.
+The original Argus workloads, identities, routes, and client trust are unchanged.
+Instance-bound edge acknowledgements and retirement have isolated-cluster
+coverage but production edge enrollment and customer migration remain pending.
 
 ## Outcome
 
@@ -641,3 +638,37 @@ now compares the decoded private key in constant time for its exact immutable
 identity Secret and retains the existing serialized data. Different keys,
 unexpected Secret ownership, and malformed keys still reject publication. The
 real Kubernetes acceptance test now reserializes the key between publications.
+
+The `e107c7ba` CI run completed successfully and released the key-comparison and
+legacy-readiness fixes. The original CLI again renders its native SSH command;
+`identity_verified` still distinguishes trustworthy current observations. The
+synthetic candidate passed bound Pod and Service handshakes without a restart of
+the candidate or application. Its reserved public port was activated through the
+reviewed API. The first public probe reached the legacy front but its upstream
+connection was rejected. A bounded packet observation at the candidate and a
+read-only route inspection proved that the US front's host-network traffic is
+translated to `10.42.2.0`, rather than its public node address. Runtime generation
+two admits that exact source only on the SSH port. Other node egress paths still
+require equivalent observations; health access is unchanged.
+
+The production encrypted identity and anchor tables were exported with a
+read-only transaction, bounded statement and lock timeouts, and no other table
+selection. The 6,307-byte custom PostgreSQL dump has SHA-256
+`8dd08694e3304be8002e880d8340808059676b1b3998a78e8acf4d09b4a6b453`.
+It was restored into a disposable local PostgreSQL database. The opt-in
+`TestRestoredSSHIdentityMatchesAuthenticatedInventory` used an independently
+retained owner-only keyring backup and compared the decrypted identity with the
+authenticated API inventory. The identity and its ownership anchor matched.
+The temporary database was removed; protected backup material remains outside
+the repository. This proves the logical identity restore path, not a complete
+physical control-plane restore. The latest observed physical backup attempt had
+failed after its instance manager restarted; that is separate recovery evidence
+and must not be described as a successful current physical backup.
+
+Repeat the identity recovery check only against a restored disposable loopback
+database whose name contains `fugue_test`. Set
+`FUGUE_TEST_SSH_RESTORED_DATABASE_URL`, `FUGUE_TEST_SSH_KEYRING`, and
+`FUGUE_TEST_SSH_EXPECTED_IDENTITY` (an authenticated `identity show` JSON response),
+then run `go test ./internal/sshidentity -run TestRestoredSSHIdentityMatchesAuthenticatedInventory -count=1 -v`.
+The check opens a read-only transaction and never restores or modifies a live
+database. Retain the encrypted tables and keyring separately.
