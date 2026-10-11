@@ -1,10 +1,27 @@
 import copy
 import unittest
+import json
+from unittest import mock
 
 from scripts import verify_managed_ssh_image as artifact
 
 
 class ManagedSSHImageTest(unittest.TestCase):
+    def test_candidate_uses_cri_pull_and_checks_config_identity(self):
+        image="registry.example/ssh@sha256:"+"a"*64
+        node="fugue-ssh-artifact-0123456789-control-plane"
+        metadata={"Id":"sha256:"+"b"*64}
+        result={"status":{"id":metadata["Id"],"repoDigests":[image]}}
+        with mock.patch.object(artifact,"run",side_effect=[b"",json.dumps(result).encode()]) as execute:
+            self.assertEqual(artifact.pull_candidate_into_test_node(node,image,metadata),metadata["Id"])
+            self.assertEqual(execute.call_args_list[0].args[0],["docker","exec",node,"crictl","pull",image])
+        result["status"]["id"]="sha256:"+"c"*64
+        with mock.patch.object(artifact,"run",side_effect=[b"",json.dumps(result).encode()]):
+            with self.assertRaises(ValueError):artifact.pull_candidate_into_test_node(node,image,metadata)
+        with mock.patch.object(artifact,"run") as execute:
+            with self.assertRaises(ValueError):artifact.pull_candidate_into_test_node("production-node",image,metadata)
+            execute.assert_not_called()
+
     def test_rejects_unpinned_network_policy_code(self):
         with self.assertRaises(ValueError):
             artifact.policy_manifest(b"untrusted manifest")

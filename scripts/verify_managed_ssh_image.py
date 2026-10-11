@@ -42,6 +42,17 @@ def validate_metadata(metadata, source):
     return metadata["Architecture"]
 
 
+def pull_candidate_into_test_node(node, image, docker_metadata):
+    if not re.fullmatch(r"fugue-ssh-artifact-[a-f0-9]{10}-control-plane",node):
+        raise ValueError("candidate pull is restricted to the task-owned kind node")
+    run(["docker","exec",node,"crictl","pull",image],timeout=180)
+    observed=json.loads(run(["docker","exec",node,"crictl","inspecti",image]))
+    status=observed.get("status",{})
+    if status.get("id")!=docker_metadata.get("Id") or image not in status.get("repoDigests",[]):
+        raise ValueError("CRI candidate identity differs from the verified registry image")
+    return status["id"]
+
+
 def verify(image, source):
     if not re.fullmatch(r"[^\s]+@sha256:[a-f0-9]{64}", image) or not re.fullmatch(r"[a-f0-9]{40}", source):
         raise ValueError("digest-addressed image and exact source commit required")
@@ -83,7 +94,8 @@ def verify(image, source):
             run(kube+["rollout", "status", "daemonset/calico-node", "-n", "kube-system", "--timeout=300s"], timeout=310)
             run(kube+["wait", "--for=condition=Ready", "node", "--all", "--timeout=60s"], timeout=70)
             run(["docker", "pull", "alpine:3.22"], timeout=180)
-            run(kind+["load", "docker-image", "--name", cluster, image, "alpine:3.22"], timeout=180)
+            run(kind+["load", "docker-image", "--name", cluster, "alpine:3.22"], timeout=180)
+            pull_candidate_into_test_node(node,image,metadata)
             internal = json.loads(run(["kubectl", "--kubeconfig", str(kubeconfig), "config", "view", "--raw", "-o", "json"]))
             for configured in internal["clusters"]:
                 configured["cluster"]["server"] = "https://127.0.0.1:6443"
