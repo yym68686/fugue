@@ -55,14 +55,21 @@ type KubernetesOptions struct {
 }
 
 type EdgeConsumer struct {
-	EdgeID        string            `json:"edge_id"`
-	EdgeGroupID   string            `json:"edge_group_id"`
-	Namespace     string            `json:"namespace"`
-	PodLabels     map[string]string `json:"pod_labels"`
-	PublicAddress string            `json:"public_address"`
-	PublicService string            `json:"public_service,omitempty"`
-	ServiceUID    string            `json:"service_uid,omitempty"`
-	Image         string            `json:"image,omitempty"`
+	EdgeID        string                    `json:"edge_id"`
+	EdgeGroupID   string                    `json:"edge_group_id"`
+	Namespace     string                    `json:"namespace"`
+	PodLabels     map[string]string         `json:"pod_labels"`
+	PublicAddress string                    `json:"public_address"`
+	PublicService string                    `json:"public_service,omitempty"`
+	ServiceUID    string                    `json:"service_uid,omitempty"`
+	Image         string                    `json:"image,omitempty"`
+	Publication   *BindingPublicationPolicy `json:"binding_publication,omitempty"`
+}
+
+type BindingPublicationPolicy struct {
+	PortStart    int    `json:"port_start"`
+	PortEnd      int    `json:"port_end"`
+	IntentDigest string `json:"intent_digest"`
 }
 
 type KubernetesRuntime struct {
@@ -70,6 +77,7 @@ type KubernetesRuntime struct {
 	client            kubernetes.Interface
 	dynamic           dynamic.Interface
 	httpClient        *http.Client
+	probeSSH          func(context.Context, string, ssh.PublicKey, time.Duration) (sshidentity.Observation, error)
 }
 
 func NewKubernetesRuntime(configuration *rest.Config, configurationFile string) (*KubernetesRuntime, error) {

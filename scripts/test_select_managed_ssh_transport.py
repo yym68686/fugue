@@ -3,10 +3,28 @@ import json
 import unittest
 
 from scripts import select_managed_ssh_transport as transport
-from scripts.run_managed_ssh_transport import api_origin, validate_operation
+from scripts.run_managed_ssh_transport import api_origin, await_evidence, validate_operation
+from scripts.observe_managed_ssh_front import EvidencePending
 
 
 class SSHTransportSelectionTest(unittest.TestCase):
+    def test_waits_only_for_pending_read_evidence_with_one_bounded_deadline(self):
+        clock = [0]
+        reads = []
+        def read():
+            reads.append(clock[0])
+            if len(reads)<3:raise EvidencePending('awaiting controller observation')
+            return {'verified': True}
+        def sleep(seconds):clock[0]+=seconds
+        self.assertTrue(await_evidence(read,20,sleep,lambda:clock[0])['verified'])
+        self.assertEqual(reads,[0,5,10])
+        def foreign():raise ValueError('identity changed')
+        with self.assertRaisesRegex(ValueError,'identity changed'):await_evidence(foreign,20,sleep,lambda:clock[0])
+        self.assertEqual(clock[0],10)
+        def pending():raise EvidencePending('still pending')
+        with self.assertRaises(EvidencePending):await_evidence(pending,20,sleep,lambda:clock[0])
+        self.assertEqual(clock[0],15)
+
     def test_host_runner_resolves_only_declared_internal_service_and_port(self):
         stage = {'namespace': 'test-system', 'apiURL': 'http://api.test-system.svc.cluster.local:80'}
         service = {'metadata': {'uid': 'api-service'}, 'spec': {'type': 'ClusterIP', 'clusterIP': '10.2.2.10', 'ports': [{'port': 80}]}}

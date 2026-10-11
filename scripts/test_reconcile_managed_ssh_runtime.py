@@ -11,6 +11,11 @@ class ManagedSSHRuntimeTest(unittest.TestCase):
         edge={'edge_id':'edge-a','edge_group_id':'group-a','namespace':'test-system','pod_labels':{'slot':'front-a'},'public_address':'192.0.2.10','public_service':'public-ssh','service_uid':'service-a','image':'registry.example/front@sha256:'+'d'*64}
         config['runtime']['required_edges']=[edge]
         runtime.validate(config,receipt)
+        edge['binding_publication']={'port_start':24000,'port_end':25000,'intent_digest':'sha256:'+'e'*64}
+        runtime.validate(config,receipt)
+        publication=[resource for resource in runtime.objects(config) if resource['kind']=='Role' and resource['metadata']['name']=='managed-ssh-public-binding']
+        self.assertEqual(len(publication),1)
+        self.assertEqual(publication[0]['rules'],[{'apiGroups':[''],'resources':['services'],'resourceNames':['public-ssh'],'verbs':['get','patch']}])
         for field in ('public_service','service_uid','image'):
             candidate=copy.deepcopy(config)
             del candidate['runtime']['required_edges'][0][field]

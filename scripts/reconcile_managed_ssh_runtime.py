@@ -115,12 +115,16 @@ def validate(config, receipt):
     for edge in options["required_edges"]:
         base_fields={"edge_id","edge_group_id","namespace","pod_labels","public_address"}
         service_fields={"public_service","service_uid","image"}
-        if set(edge) not in (base_fields,base_fields|service_fields) or edge["edge_id"] in seen_edges:
+        if set(edge) not in (base_fields,base_fields|service_fields,base_fields|service_fields|{'binding_publication'}) or edge["edge_id"] in seen_edges:
             raise ValueError("invalid or duplicated edge consumer")
         if "public_service" in edge:
             name(edge["public_service"])
             if not isinstance(edge["service_uid"],str) or not re.fullmatch(r'[A-Za-z0-9-]{1,128}',edge["service_uid"]) or not isinstance(edge["image"],str) or not re.fullmatch(r'[^\s]+@sha256:[a-f0-9]{64}',edge["image"]):
                 raise ValueError("Service-backed consumer requires exact Service UID and immutable image")
+        if 'binding_publication' in edge:
+            policy=edge['binding_publication']
+            if set(policy)!={'port_start','port_end','intent_digest'} or type(policy['port_start']) is not int or type(policy['port_end']) is not int or not 1024<=policy['port_start']<=policy['port_end']<=65535 or not re.fullmatch(r'sha256:[a-f0-9]{64}',policy['intent_digest']):
+                raise ValueError('explicit bounded managed binding publication required')
         name(edge["namespace"])
         name(edge["edge_id"])
         name(edge["edge_group_id"])
@@ -149,6 +153,14 @@ def objects(config):
     for selected_namespace, permissions in assignments:
         metadata = {"name":"managed-ssh-controller", "namespace":selected_namespace, "labels":labels}
         resources.extend([{"apiVersion":"rbac.authorization.k8s.io/v1", "kind":"Role", "metadata":dict(metadata), "rules":permissions}, {"apiVersion":"rbac.authorization.k8s.io/v1", "kind":"RoleBinding", "metadata":dict(metadata), "roleRef":{"apiGroup":"rbac.authorization.k8s.io", "kind":"Role", "name":metadata["name"]}, "subjects":[{"kind":"ServiceAccount", "name":account, "namespace":controller_namespace}]}])
+    publication_services={}
+    for edge in options['required_edges']:
+        if edge.get('binding_publication'):
+            publication_services.setdefault(edge['namespace'],set()).add(edge['public_service'])
+    for selected_namespace,names in sorted(publication_services.items()):
+        metadata={'name':'managed-ssh-public-binding','namespace':selected_namespace,'labels':labels}
+        rules=[{'apiGroups':[''],'resources':['services'],'resourceNames':sorted(names),'verbs':['get','patch']}]
+        resources.extend([{'apiVersion':'rbac.authorization.k8s.io/v1','kind':'Role','metadata':dict(metadata),'rules':rules},{'apiVersion':'rbac.authorization.k8s.io/v1','kind':'RoleBinding','metadata':dict(metadata),'roleRef':{'apiGroup':'rbac.authorization.k8s.io','kind':'Role','name':metadata['name']},'subjects':[{'kind':'ServiceAccount','name':account,'namespace':controller_namespace}]}])
     return resources
 
 

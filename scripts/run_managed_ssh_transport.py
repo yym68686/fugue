@@ -3,6 +3,7 @@ import ipaddress
 import os
 from pathlib import Path
 import tempfile
+import time
 import urllib.parse
 
 from scripts import observe_managed_ssh_front as observation
@@ -37,6 +38,16 @@ def api_origin(stage, kube=kubectl):
     return stage['apiURL'].rstrip('/')
 
 
+def await_evidence(read, deadline, sleep=time.sleep, clock=time.monotonic):
+    while True:
+        try:
+            return read()
+        except observation.EvidencePending:
+            if clock()+5 >= deadline:
+                raise
+            sleep(5)
+
+
 def run(operation, probe_binary):
     validate_operation(operation)
     stage = strict_json(Path(operation['stage']).read_bytes())
@@ -48,7 +59,8 @@ def run(operation, probe_binary):
         raise ValueError('administrator observation credential required')
     api = lambda path: observation.read_json(origin+path, token)
     probe = lambda target, identity: observation.probe_identity(probe_binary, target, identity)
-    observe = lambda public: observation.observe(stage, config['node'], config['applications'], api, probe, public=public)
+    deadline = time.monotonic()+180
+    observe = lambda public: await_evidence(lambda: observation.observe(stage, config['node'], config['applications'], api, probe, public=public), deadline)
     with tempfile.TemporaryDirectory(prefix='fugue-ssh-transport-witness-') as directory:
         witness = None
         if operation['action'] != 'stage':

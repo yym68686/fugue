@@ -247,6 +247,15 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 			reconcileErrors = append(reconcileErrors, err)
 		}
 	}
+	if publisher, supported := reconciler.Runtime.(BindingRuntime); supported && intent.Spec.Enabled && state.Active != nil {
+		binding, err := reconciler.Store.GetManagedSSHBinding(tenantID, appID)
+		if err == nil {
+			err = publisher.ReconcilePublicBinding(ctx, binding, state, reconciler.Store.GetEdgeSSHAcknowledgement)
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			reconcileErrors = append(reconcileErrors, err)
+		}
+	}
 	if err := reconciler.retireSlots(ctx, state, reconciler.currentTime()); err != nil {
 		reconcileErrors = append(reconcileErrors, err)
 	}

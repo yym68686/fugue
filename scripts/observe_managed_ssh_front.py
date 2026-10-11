@@ -13,6 +13,10 @@ from scripts.reconcile_managed_ssh_runtime import digest, name
 from scripts.stage_managed_ssh_fronts import DIGEST, GENERATION, MANAGER, slot_name
 
 
+class EvidencePending(ValueError):
+    pass
+
+
 def now():
     return datetime.datetime.now(datetime.timezone.utc)
 
@@ -79,8 +83,11 @@ def selected_binding(app_id, status, identity, ack, node):
     route = routes[0]
     if route['app_id'] != app_id or route['tenant_id'] != binding['tenant_id'] or route['target_host'] != active['id']+'.'+active['namespace']+'.svc.cluster.local' or route['target_port'] != 2222 or route['status'] not in ('ready', 'pending'):
         raise ValueError('front route differs from the committed managed target')
-    if not active.get('verified') or active['evidence'].get('fingerprint') != identity['fingerprint'] or active['evidence'].get('identity_id') != identity['id'] or timestamp(active['evidence']['expires_at']) <= now()+datetime.timedelta(seconds=10):
-        raise ValueError('active managed target lacks fresh identity evidence')
+    evidence = active.get('evidence')
+    if evidence and (evidence.get('fingerprint') != identity['fingerprint'] or evidence.get('identity_id') != identity['id']):
+        raise ValueError('active managed target identity differs from its public inventory')
+    if not active.get('verified') or not evidence or timestamp(evidence['expires_at']) <= now()+datetime.timedelta(seconds=10):
+        raise EvidencePending('active managed target is awaiting fresh identity evidence: '+app_id)
     return {'app_id': app_id, 'tenant_id': identity['tenant_id'], 'identity_id': identity['id'], 'binding_id': binding['id'], 'public_port': binding['public_port'], 'public_key': identity['public_key'], 'fingerprint': identity['fingerprint'], 'route': route, 'slot_id': active['id'], 'route_generation': control['route_generation']}
 
 

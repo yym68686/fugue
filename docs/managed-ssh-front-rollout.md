@@ -233,3 +233,64 @@ selector drift, missing or remapped ports, foreign EndpointSlices, old Pods,
 wrong nodes, unready endpoints, and ambiguous endpoint sets. No production
 consumer is enrolled until its public transport is selected and independently
 verified; shipping this code does not itself authorize retirement.
+
+## Automatic binding publication and remaining acceptance
+
+The completed allocation API remains the authority for application public ports.
+The reconciliation boundary is a separately declared set of serving ingress
+Services: edge/node identity, Service UID, selected front image/selector, and an
+allowed port range. The controller may add a port only for an enabled, committed
+platform-managed binding whose exact target is verified and already appears in
+the selected instance's fresh persisted ACK. It must never infer managed
+ownership from a raw port number or import an application-native SSH endpoint.
+
+Port publication must preserve every unrelated Service field and existing
+binding, use resource-version and full-selection preconditions, and retry only
+after rereading authoritative ownership. Configuration must grant update rights
+only for explicitly enrolled Service names. Missing or stale front evidence
+leaves the previous selection intact. Disabled/revoked access remains denied by
+the signed backend authorization contract even while an old transport mapping
+is retained for established streams. Safe transport removal and executor
+replacement require their own drain and rollback observations.
+
+Acceptance must include adding a new synthetic managed application after the
+ingress policy is already active, proving its new public port appears without
+changing code or the static migration declaration, and confirming that an
+application-native endpoint is excluded. Repeat with stale ACK, replaced Service
+UID, selector drift, a conflicting public allocation, and concurrent port adds.
+This automatic publication boundary is separate from the finite migration
+operation and production acceptance remains an explicit completion requirement.
+
+The controller now implements opt-in `binding_publication` on each declared
+Service-backed consumer. Its policy supplies an exact transport-intent digest
+and permitted port range. Publication validates current backend evidence and
+authorization, the exact node/Pod/image, persisted ACK, existing Service
+selection, endpoint ownership, and conflicting Service addresses. A bounded
+host-key exchange through the selected front's new listener must also match the
+binding's authenticated public identity before the patch. It adds only
+the new verified binding and records immutable logical ownership for that port.
+Existing ports and unrelated Service fields remain unchanged. Replaying the
+same binding is idempotent; reassigning a retained port to another binding is
+rejected. Each Service currently supports up to 100 retained managed ports and
+a bounded ownership annotation; exhaustion requires an explicitly designed
+additional transport rather than silently discarding existing ownership.
+
+The independent runtime publisher grants only `get` and `patch` on the named
+Services; it does not grant arbitrary Service creation or deletion. JSON patches
+test UID, resource version, full spec, annotations, and labels. Tests cover a
+concurrent update between observation and patch, preserve the original port on
+conflict, and reject stale ACKs, wrong identities/tenants, application-native
+targets, revoked grants, absent routes, intent drift, and replaced Services.
+The production runtime still has no enrolled consumers/publication policy, so
+shipping this implementation cannot add production ports or retire old slots.
+
+The first public canary selection attempt stopped during its initial read-only
+observation because the active backend lacked fresh identity evidence; the
+Service remained at staged generation 1 without external IPs. The observation
+now distinguishes pending freshness from identity mismatch. A single bounded
+three-minute deadline allows only those read-only observations to wait for fresh
+controller evidence. Identity/ownership changes, API failures, and mutations are
+not blindly retried, and the existing freshness thresholds remain unchanged.
+The host runner also attempted to restore a Go module cache over existing files;
+the transport job now leaves that existing cache alone by disabling setup-go's
+archive restoration for this job. This does not change serving software.
