@@ -39,3 +39,15 @@ timing and exit status. A timeout regression also demonstrates why killing only
 a launcher can keep inherited child output pipes open; subprocess verification
 now terminates the entire task-owned process group and bounds output cleanup.
 No serving behavior is changed based on a guessed CI failure cause.
+
+The new immutable image passed the actual-image acceptance job `114535006986`
+in CI run `38161369653`, including `native-interactive-account-login`, SCP/SFTP,
+PTY, loopback forwarding, enforced network policy, authorization refresh, and
+graceful retirement. Verification completed in 297.9 seconds. Runtime intent
+generation 9 selects image
+`ghcr.io/yym68686/fugue-managed-ssh@sha256:87541a523fb4bcda86f58b15e33cdfe146989bf86547edbe3bb8184443f46f29`
+and helper
+`sha256:0dcb1b53a69b3667585b0cb9b326deb54759bad17e58f14f23d20178977d4e5f`.
+Its predecessor is the exact independently declared generation 8. This selection
+creates verified platform SSH candidates and preserves existing sessions on
+retained servers; it does not change business workloads or client host trust.
