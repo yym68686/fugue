@@ -18777,6 +18777,8 @@ components:
           type: boolean
         tls_ready:
           type: boolean
+        enrollment:
+          $ref: "#/components/schemas/EdgeNodeEnrollment"
         token_prefix:
           type: string
         last_heartbeat_at:
@@ -18789,6 +18791,42 @@ components:
       properties:
         desired_state:
           $ref: "#/components/schemas/EdgeNodeDesiredState"
+    EdgeNodeEnrollment:
+      type: object
+      additionalProperties: false
+      description: >-
+        Persisted administrator intent for preparing one new node against the
+        current Edge authority. It permits private verification of signed current
+        bundles on an absent activation only. It grants no public serving, health,
+        DNS selection or LKG and its absolute lease is never renewed by reading.
+      required: [id, node_id, edge_group_id, authority_record_digest, slot, fence_sequence, bundle_version, worker_source_sha, worker_image_digest, issued_at, expires_at]
+      properties:
+        id:
+          type: string
+        node_id:
+          type: string
+        edge_group_id:
+          type: string
+        authority_record_digest:
+          type: string
+        slot:
+          type: string
+          enum: [a, b]
+        fence_sequence:
+          type: integer
+          minimum: 1
+        bundle_version:
+          type: string
+        worker_source_sha:
+          type: string
+        worker_image_digest:
+          type: string
+        issued_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
     SetEdgeNodeCanaryRequest:
       type: object
       additionalProperties: false
@@ -27520,6 +27558,13 @@ components:
     SetClusterNodePolicyRequest:
       type: object
       additionalProperties: false
+      description: >-
+        Update node roles. An explicit edge_group_id together with allow_edge=true
+        enrolls this node with node-updater-managed Edge credentials. Group identity
+        is configuration intent and is never inferred from country or hostname.
+        node_reconciled only describes Kubernetes labels and taints; callers must
+        separately verify Edge workload and serving readiness before reporting a
+        completed Edge enrollment.
       properties:
         allow_app_runtime:
           type: boolean
@@ -27529,6 +27574,10 @@ components:
           type: boolean
         allow_edge:
           type: boolean
+        edge_group_id:
+          type: string
+          minLength: 1
+          description: Explicit existing Edge authority for managed node enrollment. Requires allow_edge=true.
         allow_dns:
           type: boolean
         allow_internal_maintenance:

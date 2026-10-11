@@ -209,6 +209,18 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 	if nodePolicy != nil && len(nodePolicy.Labels) > 0 {
 		labels = nodePolicy.Labels
 	}
+	// Initial scheduling is gated on credential installation, so observed
+	// Kubernetes labels may intentionally lack Edge metadata at this point.
+	// Use only this authenticated updater's saved administrator enrollment.
+	if machine, err := s.store.GetMachineByClusterNodeName(updater.ClusterNodeName); err == nil && machine.ID == updater.MachineID && machine.Policy.AllowEdge && machine.Labels[model.MachineEdgeEnrollmentLabel] != "" {
+		labels = cloneStringMap(labels)
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels[runtimepkg.EdgeGroupIDLabelKey] = machine.Labels[runtimepkg.EdgeGroupIDLabelKey]
+		labels[runtimepkg.EdgeWorkloadLabelKey] = machine.Labels[runtimepkg.EdgeWorkloadLabelKey]
+		labels[runtimepkg.EdgeRoleLabelKey] = runtimepkg.NodeRoleLabelValue
+	}
 	if !nodeUpdaterPolicyAllowsEdge(labels, nodePolicy) {
 		return nil, nil, nil
 	}
@@ -273,6 +285,15 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 				warnings = append(warnings, "edge credential token not issued: static edge token is managed outside node-updater")
 			}
 			return credential, warnings, nil
+		}
+		if existing.EdgeGroupID != edgeGroupID {
+			return nil, nil, fmt.Errorf("%w: Edge credential authority differs from node enrollment", store.ErrInvalidInput)
+		}
+		if existing.WorkloadMode != workloadMode {
+			if existing.Healthy || existing.LastHeartbeatAt != nil || existing.RouteBundleVersion != "" {
+				return nil, nil, fmt.Errorf("%w: established Edge credentials require an explicit migration", store.ErrInvalidInput)
+			}
+			needsToken = true
 		}
 		if existingPrefix == "" || !strings.EqualFold(reportedTokenPrefix, existingPrefix) {
 			needsToken = true

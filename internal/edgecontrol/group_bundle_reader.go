@@ -15,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 )
 
 const (
@@ -39,10 +42,11 @@ type GroupBundleReaderStore interface {
 }
 
 type GroupBundleHandlerConfig struct {
-	Store      GroupBundleReaderStore
-	GroupIDs   []string
-	KeyringDir string
-	Now        func() time.Time
+	Store                     GroupBundleReaderStore
+	GroupIDs                  []string
+	KeyringDir                string
+	ManagedIdentityKeyringDir string
+	Now                       func() time.Time
 }
 
 type groupBundleReaderCredential struct {
@@ -62,10 +66,11 @@ type groupBundleReaderKeyring struct {
 }
 
 type groupBundleHandler struct {
-	store      GroupBundleReaderStore
-	groups     map[string]struct{}
-	keyringDir string
-	now        func() time.Time
+	store                     GroupBundleReaderStore
+	groups                    map[string]struct{}
+	keyringDir                string
+	managedIdentityKeyringDir string
+	now                       func() time.Time
 }
 
 func NewGroupBundleHandler(config GroupBundleHandlerConfig) (http.Handler, error) {
@@ -88,7 +93,11 @@ func NewGroupBundleHandler(config GroupBundleHandlerConfig) (http.Handler, error
 	if config.Now != nil {
 		now = func() time.Time { return config.Now().UTC() }
 	}
-	return &groupBundleHandler{store: config.Store, groups: allowed, keyringDir: keyringDir, now: now}, nil
+	managed := config.ManagedIdentityKeyringDir
+	if managed != "" && (!filepath.IsAbs(managed) || filepath.Clean(managed) != managed) {
+		return nil, errors.New("managed Edge reader keyring path is invalid")
+	}
+	return &groupBundleHandler{store: config.Store, groups: allowed, keyringDir: keyringDir, managedIdentityKeyringDir: managed, now: now}, nil
 }
 
 func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -108,7 +117,7 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 	if len(authorizations) == 1 && strings.HasPrefix(authorizations[0], "Bearer ") {
 		token = strings.TrimPrefix(authorizations[0], "Bearer ")
 	}
-	if query.Get("edge_group_id") != groupID || query.Get("edge_id") != edgeID || edgeID == "" || len(token) < 32 || len(token) > 256 || strings.ContainsAny(token, "\r\n\t ") {
+	if query.Get("edge_group_id") != groupID || query.Get("edge_id") != edgeID || edgeID == "" || len(token) < 32 || len(token) > 8192 || (len(token) > 256 && handler.managedIdentityKeyringDir == "") || strings.ContainsAny(token, "\r\n\t ") {
 		writeGroupBundleError(w, http.StatusBadRequest, "request_rejected")
 		return
 	}
@@ -116,7 +125,8 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 		writeGroupBundleError(w, http.StatusForbidden, "group_rejected")
 		return
 	}
-	if err := authenticateGroupBundleReader(filepath.Join(handler.keyringDir, groupID+".json"), groupID, edgeID, token, handler.now()); err != nil {
+	legacyErr := authenticateGroupBundleReader(filepath.Join(handler.keyringDir, groupID+".json"), groupID, edgeID, token, handler.now())
+	if legacyErr != nil && !handler.authenticateManagedReader(groupID, edgeID, token) {
 		writeGroupBundleError(w, http.StatusUnauthorized, "credential_rejected")
 		return
 	}
@@ -204,6 +214,18 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 		return
 	}
 	writeJSON(w, http.StatusOK, published.Bundle)
+}
+
+func (handler *groupBundleHandler) authenticateManagedReader(group, node, token string) bool {
+	if handler.managedIdentityKeyringDir == "" {
+		return false
+	}
+	keyring, err := loadInventoryPlatformIdentityKeyring(filepath.Join(handler.managedIdentityKeyringDir, group+".json"), group)
+	if err != nil {
+		return false
+	}
+	claims, err := platformcontrol.ParsePlatformComponentIdentity(keyring, token, handler.now())
+	return err == nil && claims.CredentialID == "edge-route-reader" && claims.Component == model.PlatformConsumerComponentEdgeWorker && claims.NodeID == node && claims.ScopeKey == group && len(claims.ArtifactKinds) == 1 && claims.ArtifactKinds[0] == model.PlatformArtifactKindEdgeRouteBundle
 }
 
 func authenticateGroupBundleReader(path, groupID, edgeID, token string, now time.Time) error {

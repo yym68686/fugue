@@ -84,11 +84,13 @@ func verifyEdgeInstanceMigrationReceipt(ctx context.Context, queryer interface {
 		return fmt.Errorf("%w: invalid edge instance migration receipt", ErrEdgeInstanceFencingNotReady)
 	}
 	var missing int64
+	// The immutable receipt covers the migration-time inventory. A control
+	// identity registered afterwards has no legacy process to migrate.
 	if err := queryer.QueryRowContext(ctx, `
 SELECT count(*) FROM fugue_edge_nodes AS n
 LEFT JOIN fugue_edge_node_instances AS i
   ON i.edge_id=n.id AND i.edge_group_id=n.edge_group_id AND i.slot=$1 AND i.release_epoch=$2
-WHERE i.edge_id IS NULL`, edgeLegacyMigrationSlot, edgeLegacyMigrationEpoch).Scan(&missing); err != nil {
+WHERE i.edge_id IS NULL AND n.created_at <= $3`, edgeLegacyMigrationSlot, edgeLegacyMigrationEpoch, receipt.RecordedAt).Scan(&missing); err != nil {
 		return fmt.Errorf("verify legacy edge instance mapping: %w", err)
 	}
 	if missing != 0 {

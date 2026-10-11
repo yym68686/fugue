@@ -345,6 +345,7 @@ type setClusterNodePolicyRequest struct {
 	AllowBuilds              *bool   `json:"allow_builds,omitempty"`
 	AllowSharedPool          *bool   `json:"allow_shared_pool,omitempty"`
 	AllowEdge                *bool   `json:"allow_edge,omitempty"`
+	EdgeGroupID              *string `json:"edge_group_id,omitempty"`
 	AllowDNS                 *bool   `json:"allow_dns,omitempty"`
 	AllowInternalMaintenance *bool   `json:"allow_internal_maintenance,omitempty"`
 	DesiredControlPlaneRole  *string `json:"desired_control_plane_role,omitempty"`

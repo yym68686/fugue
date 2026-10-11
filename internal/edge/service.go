@@ -78,6 +78,7 @@ type Service struct {
 	HTTPClient                    *http.Client
 	RouteBundleHTTPClient         *http.Client
 	InventoryProducerHTTPClient   *http.Client
+	edgeEnrollment                *model.EdgeNodeEnrollment
 	Logger                        *log.Logger
 	caddyWarmup                   func(context.Context, string, string) error
 	caddyImportedTLSRoots         *x509.CertPool
@@ -192,17 +193,18 @@ type edgeDesiredStateEnvelope struct {
 }
 
 type edgeDesiredState struct {
-	EdgeID            string     `json:"edge_id"`
-	EdgeGroupID       string     `json:"edge_group_id"`
-	WorkloadMode      string     `json:"workload_mode"`
-	CanaryState       string     `json:"canary_state"`
-	CanaryWeight      int        `json:"canary_weight"`
-	PublicProbeStatus string     `json:"public_probe_status"`
-	DNSEligible       bool       `json:"dns_eligible"`
-	Draining          bool       `json:"draining"`
-	RouteReady        bool       `json:"route_ready"`
-	TLSReady          bool       `json:"tls_ready"`
-	LastHeartbeatAt   *time.Time `json:"last_heartbeat_at,omitempty"`
+	Enrollment        *model.EdgeNodeEnrollment `json:"enrollment,omitempty"`
+	EdgeID            string                    `json:"edge_id"`
+	EdgeGroupID       string                    `json:"edge_group_id"`
+	WorkloadMode      string                    `json:"workload_mode"`
+	CanaryState       string                    `json:"canary_state"`
+	CanaryWeight      int                       `json:"canary_weight"`
+	PublicProbeStatus string                    `json:"public_probe_status"`
+	DNSEligible       bool                      `json:"dns_eligible"`
+	Draining          bool                      `json:"draining"`
+	RouteReady        bool                      `json:"route_ready"`
+	TLSReady          bool                      `json:"tls_ready"`
+	LastHeartbeatAt   *time.Time                `json:"last_heartbeat_at,omitempty"`
 }
 
 type cacheFile struct {
@@ -2994,7 +2996,7 @@ func (s *Service) newRoutesRequestWithSelection(ctx context.Context) (*http.Requ
 	}
 	routeSource := selection.config
 	baseURL := routeSource.url
-	token, err := loadEdgeRouteReaderToken(routeSource.tokenFile)
+	token, err := s.routeReaderToken(routeSource.tokenFile)
 	if err != nil {
 		return nil, routeSourceSelection{}, err
 	}
@@ -3050,6 +3052,14 @@ func (s *Service) RefreshDesiredState(ctx context.Context) error {
 	if strings.TrimSpace(desired.EdgeGroupID) == "" {
 		return fmt.Errorf("edge desired state missing edge_group_id")
 	}
+	if desired.Enrollment != nil {
+		if desired.EdgeID != s.Config.EdgeID || desired.EdgeGroupID != s.Config.EdgeGroupID {
+			return errors.New("Edge enrollment desired state changed the projected identity")
+		}
+		if err := desired.Enrollment.Validate(s.Config.EdgeID, s.Config.EdgeGroupID, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
 	s.applyDesiredState(desired)
 	return nil
 }
@@ -3097,6 +3107,7 @@ func (s *Service) applyDesiredState(desired edgeDesiredState) {
 		s.Config.WorkloadMode = workloadMode
 	}
 	s.Config.Draining = desired.Draining
+	s.edgeEnrollment = desired.Enrollment
 	s.snapshot.EdgeGroupID = edgeGroupID
 	s.mu.Unlock()
 }

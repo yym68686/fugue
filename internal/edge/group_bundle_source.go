@@ -148,6 +148,7 @@ type configEdgeRouteSource struct {
 }
 
 type routeSourceSelection struct {
+	enrollment                  model.EdgeNodeEnrollment
 	config                      configEdgeRouteSource
 	candidate                   bool
 	activationGeneration        uint64
@@ -197,6 +198,18 @@ func (s *Service) selectRouteBundleSource() (routeSourceSelection, error) {
 		return routeSourceSelection{}, errors.New("candidate route source requires an exact worker slot identity")
 	}
 	activation, exists, err := edgegroupfront.ReadActivationState(cfg.activationFile)
+	if errors.Is(err, os.ErrNotExist) {
+		enrollment := s.currentEdgeEnrollment()
+		if enrollment != nil && enrollment.Validate(s.Config.EdgeID, s.Config.EdgeGroupID, time.Now().UTC()) == nil {
+			selection.enrollment = *enrollment
+			selection.activeSlot = enrollment.Slot
+			selection.expectedGeneration, selection.expectedPublicationSequence, selection.expectedRecoveryEpoch, err = parseActivatedPublicationVersion(enrollment.BundleVersion)
+			if err != nil {
+				return routeSourceSelection{}, err
+			}
+			return selection, nil
+		}
+	}
 	if err != nil || !exists || activation.GroupID != strings.TrimSpace(s.Config.EdgeGroupID) ||
 		(activation.ActiveSlot != model.EdgeSlotA && activation.ActiveSlot != model.EdgeSlotB) {
 		return routeSourceSelection{}, errors.New("candidate route source activation state is unavailable or unbound")
@@ -278,6 +291,16 @@ func (s *Service) validateRouteBundleSourceSelection(selection routeSourceSelect
 		return nil
 	}
 	activation, exists, err := edgegroupfront.ReadActivationState(selection.config.activationFile)
+	if selection.enrollment.ID != "" {
+		if !errors.Is(err, os.ErrNotExist) || exists {
+			return errors.New("Edge activation changed during private enrollment")
+		}
+		current := s.currentEdgeEnrollment()
+		if current == nil || *current != selection.enrollment {
+			return errors.New("Edge enrollment changed during private preparation")
+		}
+		return current.Validate(s.Config.EdgeID, s.Config.EdgeGroupID, time.Now().UTC())
+	}
 	if err != nil || !exists || activation.GroupID != strings.TrimSpace(s.Config.EdgeGroupID) ||
 		activation.Generation != selection.activationGeneration || activation.ActiveSlot != selection.activeSlot {
 		return errors.New("edge route authority changed while loading a bundle")

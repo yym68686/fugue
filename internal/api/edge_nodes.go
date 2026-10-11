@@ -70,18 +70,19 @@ type edgeHeartbeatRequest struct {
 }
 
 type edgeNodeDesiredStateResponse struct {
-	EdgeID            string     `json:"edge_id"`
-	EdgeGroupID       string     `json:"edge_group_id"`
-	WorkloadMode      string     `json:"workload_mode"`
-	CanaryState       string     `json:"canary_state"`
-	CanaryWeight      int        `json:"canary_weight"`
-	PublicProbeStatus string     `json:"public_probe_status"`
-	DNSEligible       bool       `json:"dns_eligible"`
-	Draining          bool       `json:"draining"`
-	RouteReady        bool       `json:"route_ready"`
-	TLSReady          bool       `json:"tls_ready"`
-	TokenPrefix       string     `json:"token_prefix,omitempty"`
-	LastHeartbeatAt   *time.Time `json:"last_heartbeat_at,omitempty"`
+	Enrollment        *model.EdgeNodeEnrollment `json:"enrollment,omitempty"`
+	EdgeID            string                    `json:"edge_id"`
+	EdgeGroupID       string                    `json:"edge_group_id"`
+	WorkloadMode      string                    `json:"workload_mode"`
+	CanaryState       string                    `json:"canary_state"`
+	CanaryWeight      int                       `json:"canary_weight"`
+	PublicProbeStatus string                    `json:"public_probe_status"`
+	DNSEligible       bool                      `json:"dns_eligible"`
+	Draining          bool                      `json:"draining"`
+	RouteReady        bool                      `json:"route_ready"`
+	TLSReady          bool                      `json:"tls_ready"`
+	TokenPrefix       string                    `json:"token_prefix,omitempty"`
+	LastHeartbeatAt   *time.Time                `json:"last_heartbeat_at,omitempty"`
 }
 
 func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +142,9 @@ func (s *Server) handleGetEdgeNodeDesiredState(w http.ResponseWriter, r *http.Re
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"desired_state": buildEdgeNodeDesiredState(node)})
+	desired := buildEdgeNodeDesiredState(node)
+	desired.Enrollment = s.edgeNodeEnrollment(r.Context(), node)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"desired_state": desired})
 }
 
 func (s *Server) handleAdminGetEdgeNodeDesiredState(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +158,9 @@ func (s *Server) handleAdminGetEdgeNodeDesiredState(w http.ResponseWriter, r *ht
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"desired_state": buildEdgeNodeDesiredState(node)})
+	desired := buildEdgeNodeDesiredState(node)
+	desired.Enrollment = s.edgeNodeEnrollment(r.Context(), node)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"desired_state": desired})
 }
 
 func buildEdgeNodeDesiredState(node model.EdgeNode) edgeNodeDesiredStateResponse {

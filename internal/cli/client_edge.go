@@ -66,18 +66,19 @@ type createEdgeNodeTokenResponse struct {
 }
 
 type edgeNodeDesiredState struct {
-	EdgeID            string     `json:"edge_id"`
-	EdgeGroupID       string     `json:"edge_group_id"`
-	WorkloadMode      string     `json:"workload_mode"`
-	CanaryState       string     `json:"canary_state"`
-	CanaryWeight      int        `json:"canary_weight"`
-	PublicProbeStatus string     `json:"public_probe_status"`
-	DNSEligible       bool       `json:"dns_eligible"`
-	Draining          bool       `json:"draining"`
-	RouteReady        bool       `json:"route_ready"`
-	TLSReady          bool       `json:"tls_ready"`
-	TokenPrefix       string     `json:"token_prefix,omitempty"`
-	LastHeartbeatAt   *time.Time `json:"last_heartbeat_at,omitempty"`
+	Enrollment        *model.EdgeNodeEnrollment `json:"enrollment,omitempty"`
+	EdgeID            string                    `json:"edge_id"`
+	EdgeGroupID       string                    `json:"edge_group_id"`
+	WorkloadMode      string                    `json:"workload_mode"`
+	CanaryState       string                    `json:"canary_state"`
+	CanaryWeight      int                       `json:"canary_weight"`
+	PublicProbeStatus string                    `json:"public_probe_status"`
+	DNSEligible       bool                      `json:"dns_eligible"`
+	Draining          bool                      `json:"draining"`
+	RouteReady        bool                      `json:"route_ready"`
+	TLSReady          bool                      `json:"tls_ready"`
+	TokenPrefix       string                    `json:"token_prefix,omitempty"`
+	LastHeartbeatAt   *time.Time                `json:"last_heartbeat_at,omitempty"`
 }
 
 type edgeNodeDesiredStateResponse struct {

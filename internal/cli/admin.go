@@ -5,6 +5,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 
@@ -884,6 +885,9 @@ func (c *CLI) newAdminClusterNodePolicyStatusCommand() *cobra.Command {
 }
 
 func (c *CLI) newAdminClusterNodePolicySetCommand() *cobra.Command {
+	var edgeGroup string
+	var wait bool
+	var waitTimeout time.Duration
 	opts := struct {
 		AppRuntime          string
 		Builds              string
@@ -906,26 +910,66 @@ func (c *CLI) newAdminClusterNodePolicySetCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if edgeGroup != "" && (request.AllowEdge == nil || !*request.AllowEdge) {
+				return fmt.Errorf("--edge-group requires --edge on")
+			}
+			enrollEdge := request.AllowEdge != nil && *request.AllowEdge
+			if enrollEdge {
+				if waitTimeout <= 0 {
+					return fmt.Errorf("--timeout must be positive")
+				}
+				request, edgeGroup, err = prepareEdgePolicyEnrollment(client, args[0], edgeGroup, request)
+				if err != nil {
+					return err
+				}
+			}
 			response, err := client.SetClusterNodePolicy(args[0], request)
 			if err != nil {
 				return err
 			}
+			if response.ReconcileError != "" {
+				return fmt.Errorf("node policy saved but reconciliation failed: %s", response.ReconcileError)
+			}
+			edgeReady := false
+			if enrollEdge {
+				if _, err = client.CreateNodeUpdateTask(nodeUpdateTaskCreateRequest{ClusterNodeName: args[0], Type: model.NodeUpdateTaskTypeRefreshDesiredState}); err != nil {
+					return fmt.Errorf("Edge intent saved but node preparation was not queued: %w", err)
+				}
+				if wait {
+					if err = c.waitForEdgeEnrollment(cmd.Context(), client, args[0], edgeGroup, waitTimeout); err != nil {
+						return err
+					}
+					edgeReady = true
+				}
+			}
 			if c.wantsJSON() {
-				return c.writeJSON(map[string]any{"cluster_node": response.ClusterNode, "node_reconciled": response.NodeReconciled, "reconcile_error": response.ReconcileError})
+				result := map[string]any{"cluster_node": response.ClusterNode, "node_reconciled": response.NodeReconciled, "reconcile_error": response.ReconcileError}
+				if enrollEdge {
+					result["edge_ready"] = edgeReady
+					result["edge_group_id"] = edgeGroup
+				}
+				return c.writeJSON(result)
 			}
 			if err := writeClusterNodeTable(c.stdout, []model.ClusterNode{response.ClusterNode}); err != nil {
 				return err
 			}
-			return writeKeyValues(c.stdout,
+			pairs := []kvPair{
 				kvPair{Key: "node_reconciled", Value: fmt.Sprintf("%t", response.NodeReconciled)},
 				kvPair{Key: "reconcile_error", Value: firstNonEmpty(response.ReconcileError, "-")},
-			)
+			}
+			if enrollEdge {
+				pairs = append(pairs, kvPair{Key: "edge_ready", Value: strconv.FormatBool(edgeReady)}, kvPair{Key: "edge_group_id", Value: edgeGroup})
+			}
+			return writeKeyValues(c.stdout, pairs...)
 		},
 	}
 	cmd.Flags().StringVar(&opts.AppRuntime, "app-runtime", "", "Set app runtime allowance: on or off")
 	cmd.Flags().StringVar(&opts.Builds, "builds", "", "Set build allowance: on or off")
 	cmd.Flags().StringVar(&opts.SharedPool, "shared-pool", "", "Set shared pool allowance: on or off")
 	cmd.Flags().StringVar(&opts.Edge, "edge", "", "Set edge allowance: on or off")
+	cmd.Flags().StringVar(&edgeGroup, "edge-group", "", "Explicit Edge authority for node enrollment; otherwise reuse the node's existing binding")
+	cmd.Flags().BoolVar(&wait, "wait", true, "Wait for Edge workloads, fresh route/TLS health and public probes when enabling Edge")
+	cmd.Flags().DurationVar(&waitTimeout, "timeout", 10*time.Minute, "Maximum time to wait for Edge enrollment")
 	cmd.Flags().StringVar(&opts.DNS, "dns", "", "Set DNS allowance: on or off")
 	cmd.Flags().StringVar(&opts.InternalMaintenance, "internal-maintenance", "", "Set internal maintenance allowance: on or off")
 	cmd.Flags().StringVar(&opts.ControlPlaneRole, "control-plane-role", "", "Set desired control-plane role: none, candidate, or member")

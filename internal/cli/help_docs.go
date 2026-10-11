@@ -947,6 +947,14 @@ Show one node's desired roles, actual Kubernetes labels and taints, health gate 
 `),
 		Example: "fugue admin cluster node-policy get ns101351",
 	},
+	"fugue admin cluster node-policy set": {
+		Long: strings.TrimSpace(`
+Update explicit node roles. Enabling Edge on a new node requires an Edge authority binding and a healthy node updater. It preserves tenant ownership and sharing; --edge-group never derives an authority from geography.
+
+The command queues node preparation and waits for both worker slots, Front, fresh runtime health, route/TLS readiness and public reachability. A timeout or reconciliation error is incomplete enrollment and exits unsuccessfully. Rerunning the same intent reuses its authority and acknowledged credentials. --wait=false only submits intent and reports edge_ready=false.
+`),
+		Example: "fugue admin cluster node-policy set worker-new --edge on --edge-group edge-group-example",
+	},
 	"fugue admin cluster node-policy status": {
 		Long: strings.TrimSpace(`
 Summarize NodePolicy convergence across the cluster, including unhealthy and unreconciled nodes.

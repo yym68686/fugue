@@ -333,6 +333,7 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	}
 	bundles, err := edgecontrol.NewGroupBundleHandler(edgecontrol.GroupBundleHandlerConfig{
 		Store: store, GroupIDs: cfg.AuthorityGroupIDs, KeyringDir: cfg.GroupReaderKeyringDir,
+		ManagedIdentityKeyringDir: cfg.InventoryKeyringDir,
 	})
 	if err != nil {
 		return nil, nil, err

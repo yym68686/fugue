@@ -420,6 +420,10 @@ func (s *Service) readInventoryProducerCursor(ctx context.Context, groupID strin
 }
 
 func issueBoundInventoryProducerIdentity(path string, edgeConfig config.EdgeConfig, now time.Time) (string, error) {
+	return issueBoundEdgeComponentIdentity(path, edgeConfig, now, "edge-inventory-producer")
+}
+
+func issueBoundEdgeComponentIdentity(path string, edgeConfig config.EdgeConfig, now time.Time, credentialID string) (string, error) {
 	raw, err := readBoundedPrivateFile(path, maxInventoryProducerTokenBytes)
 	if err != nil {
 		return "", errors.New("Edge inventory producer identity keyring is unavailable")
@@ -440,7 +444,7 @@ func issueBoundInventoryProducerIdentity(path string, edgeConfig config.EdgeConf
 	file.ActiveKey = ""
 	file.PreviousKey = ""
 	token, err := platformcontrol.IssuePlatformComponentIdentity(keyring, platformcontrol.PlatformComponentIdentityClaims{
-		CredentialID: "edge-inventory-producer", Component: model.PlatformConsumerComponentEdgeWorker,
+		CredentialID: credentialID, Component: model.PlatformConsumerComponentEdgeWorker,
 		NodeID: strings.TrimSpace(edgeConfig.EdgeID), ScopeKey: strings.TrimSpace(edgeConfig.EdgeGroupID),
 		ArtifactKinds: []string{model.PlatformArtifactKindEdgeRouteBundle},
 	}, now.UTC(), 5*time.Minute)

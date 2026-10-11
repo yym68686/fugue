@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -150,6 +151,14 @@ func (s *Store) pgEnsurePlatformMachineForClusterNode(nodeName, endpoint string,
 }
 
 func (s *Store) pgSetMachinePolicyByClusterNodeName(name string, policy model.MachinePolicy) (model.Machine, error) {
+	return s.pgSetMachinePolicyWithEdgeGroup(name, policy, "")
+}
+
+func (s *Store) pgSetMachinePolicyWithEdgeGroup(name string, policy model.MachinePolicy, edgeGroupID string) (model.Machine, error) {
+	return s.pgSetMachinePolicyWithEdgeEnrollment(name, policy, edgeGroupID, nil)
+}
+
+func (s *Store) pgSetMachinePolicyWithEdgeEnrollment(name string, policy model.MachinePolicy, edgeGroupID string, enrollment *model.EdgeNodeEnrollment) (model.Machine, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -177,6 +186,16 @@ func (s *Store) pgSetMachinePolicyByClusterNodeName(name string, policy model.Ma
 		}
 	}
 
+	if err := applyMachineEdgeEnrollment(&machine, edgeGroupID); err != nil {
+		return model.Machine{}, err
+	}
+	if enrollment != nil {
+		raw, err := json.Marshal(enrollment)
+		if err != nil {
+			return model.Machine{}, err
+		}
+		machine.Labels[model.MachineEdgeEnrollmentLabel] = string(raw)
+	}
 	machine.Policy = normalizeMachinePolicy(machine.Scope, policy)
 	machine.UpdatedAt = time.Now().UTC()
 	if err := s.pgUpsertMachineTx(ctx, tx, machine); err != nil {

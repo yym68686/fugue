@@ -1,10 +1,12 @@
 package store
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"time"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 )
@@ -211,6 +213,7 @@ func machineFromRuntime(runtime model.Runtime, existing *model.Machine, now time
 	}
 	if existing != nil {
 		machine.ID = existing.ID
+		preserveMachineEdgeEnrollment(&machine, *existing)
 		if !existing.CreatedAt.IsZero() {
 			machine.CreatedAt = existing.CreatedAt
 		}
@@ -263,6 +266,7 @@ func buildPlatformMachineRecord(nodeKeyID, nodeName, endpoint string, labels map
 		} else {
 			machine.Policy = normalizeMachinePolicy(model.MachineScopePlatformNode, existing.Policy)
 		}
+		preserveMachineEdgeEnrollment(&machine, *existing)
 	}
 	normalizeMachineForRead(&machine)
 	return machine, nil
@@ -535,12 +539,55 @@ func (s *Store) EnsureMachineForRuntime(runtimeID string) (model.Machine, error)
 }
 
 func (s *Store) SetMachinePolicyByClusterNodeName(name string, policy model.MachinePolicy) (model.Machine, error) {
+	return s.setMachinePolicyByClusterNodeName(name, policy, "")
+}
+
+// SetMachineEdgePolicyByClusterNodeName records explicit enrollment intent
+// together with its role policy. This does not publish serving configuration.
+func (s *Store) SetMachineEdgePolicyByClusterNodeName(name string, policy model.MachinePolicy, groupID string) (model.Machine, error) {
+	if !policy.AllowEdge || !edgetopology.ValidAuthorityID(groupID) {
+		return model.Machine{}, ErrInvalidInput
+	}
+	return s.setMachinePolicyByClusterNodeName(name, policy, groupID)
+}
+
+func (s *Store) SetMachineEdgeEnrollment(name string, policy model.MachinePolicy, enrollment model.EdgeNodeEnrollment) (model.Machine, error) {
+	if err := enrollment.Validate(name, enrollment.EdgeGroupID, time.Now().UTC()); err != nil || !policy.AllowEdge {
+		return model.Machine{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgSetMachinePolicyWithEdgeEnrollment(name, policy, enrollment.EdgeGroupID, &enrollment)
+	}
+	var machine model.Machine
+	err := s.withLockedState(true, func(state *model.State) error {
+		idx := findMachineByClusterNodeName(state, name)
+		if idx < 0 {
+			return ErrNotFound
+		}
+		next := state.Machines[idx]
+		if err := applyMachineEdgeEnrollment(&next, enrollment.EdgeGroupID); err != nil {
+			return err
+		}
+		raw, err := json.Marshal(enrollment)
+		if err != nil {
+			return err
+		}
+		next.Labels[model.MachineEdgeEnrollmentLabel] = string(raw)
+		next.Policy = normalizeMachinePolicy(next.Scope, policy)
+		next.UpdatedAt = time.Now().UTC()
+		state.Machines[idx], machine = next, next
+		return nil
+	})
+	return machine, err
+}
+
+func (s *Store) setMachinePolicyByClusterNodeName(name string, policy model.MachinePolicy, edgeGroupID string) (model.Machine, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return model.Machine{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgSetMachinePolicyByClusterNodeName(name, policy)
+		return s.pgSetMachinePolicyWithEdgeGroup(name, policy, edgeGroupID)
 	}
 	var machine model.Machine
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -559,6 +606,9 @@ func (s *Store) SetMachinePolicyByClusterNodeName(name string, policy model.Mach
 			}
 		}
 		next := state.Machines[machineIndex]
+		if err := applyMachineEdgeEnrollment(&next, edgeGroupID); err != nil {
+			return err
+		}
 		next.Policy = normalizeMachinePolicy(next.Scope, policy)
 		next.UpdatedAt = now
 		state.Machines[machineIndex] = next
@@ -566,6 +616,39 @@ func (s *Store) SetMachinePolicyByClusterNodeName(name string, policy model.Mach
 		return nil
 	})
 	return machine, err
+}
+
+func applyMachineEdgeEnrollment(machine *model.Machine, groupID string) error {
+	if groupID == "" {
+		return nil
+	}
+	if previous := machine.Labels[runtimepkg.EdgeGroupIDLabelKey]; previous != "" && previous != groupID {
+		return ErrInvalidInput
+	}
+	machine.Labels = cloneMap(machine.Labels)
+	if machine.Labels == nil {
+		machine.Labels = map[string]string{}
+	}
+	machine.Labels[runtimepkg.EdgeGroupIDLabelKey] = groupID
+	machine.Labels[runtimepkg.EdgeWorkloadLabelKey] = runtimepkg.EdgeWorkloadDynamicValue
+	return nil
+}
+
+// Runtime discovery updates observations, not an administrator's enrollment
+// binding. Rejoining or changing pool scope must retain this explicit intent.
+func preserveMachineEdgeEnrollment(machine *model.Machine, previous model.Machine) {
+	groupID := previous.Labels[runtimepkg.EdgeGroupIDLabelKey]
+	if !edgetopology.ValidAuthorityID(groupID) || previous.Labels[runtimepkg.EdgeWorkloadLabelKey] != runtimepkg.EdgeWorkloadDynamicValue {
+		return
+	}
+	if machine.Labels == nil {
+		machine.Labels = map[string]string{}
+	}
+	machine.Labels[runtimepkg.EdgeGroupIDLabelKey] = groupID
+	machine.Labels[runtimepkg.EdgeWorkloadLabelKey] = runtimepkg.EdgeWorkloadDynamicValue
+	if intent := previous.Labels[model.MachineEdgeEnrollmentLabel]; intent != "" {
+		machine.Labels[model.MachineEdgeEnrollmentLabel] = intent
+	}
 }
 
 func (s *Store) attachPlatformClusterMachine(key model.NodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Machine, error) {

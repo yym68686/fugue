@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
@@ -18,6 +19,7 @@ type setClusterNodePolicyRequest struct {
 	AllowBuilds              *bool   `json:"allow_builds"`
 	AllowSharedPool          *bool   `json:"allow_shared_pool"`
 	AllowEdge                *bool   `json:"allow_edge"`
+	EdgeGroupID              *string `json:"edge_group_id"`
 	AllowDNS                 *bool   `json:"allow_dns"`
 	AllowInternalMaintenance *bool   `json:"allow_internal_maintenance"`
 	DesiredControlPlaneRole  *string `json:"desired_control_plane_role"`
@@ -45,6 +47,10 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusBadRequest, "at least one policy field must be provided")
 		return
 	}
+	if req.EdgeGroupID != nil && (req.AllowEdge == nil || !*req.AllowEdge || !edgetopology.ValidAuthorityID(*req.EdgeGroupID)) {
+		httpx.WriteError(w, http.StatusBadRequest, "edge_group_id requires allow_edge=true and an explicit canonical Edge authority")
+		return
+	}
 
 	machine, err := s.store.GetMachineByClusterNodeName(nodeName)
 	if err == store.ErrNotFound {
@@ -59,6 +65,19 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	var enrollment *model.EdgeNodeEnrollment
+	if req.EdgeGroupID != nil {
+		if err := s.validateManagedEdgeEnrollment(machine, *req.EdgeGroupID); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		intent, err := s.prepareManagedEdgeEnrollment(r.Context(), machine, *req.EdgeGroupID)
+		if err != nil {
+			httpx.WriteError(w, http.StatusConflict, "Edge enrollment preflight: "+err.Error())
+			return
+		}
+		enrollment = &intent
 	}
 
 	if req.AllowSharedPool != nil && runtimeObj != nil {
@@ -89,7 +108,11 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	machine, err = s.store.SetMachinePolicyByClusterNodeName(nodeName, nextPolicy)
+	if req.EdgeGroupID != nil {
+		machine, err = s.store.SetMachineEdgeEnrollment(nodeName, nextPolicy, *enrollment)
+	} else {
+		machine, err = s.store.SetMachinePolicyByClusterNodeName(nodeName, nextPolicy)
+	}
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -231,6 +254,18 @@ func (s *Server) reconcileClusterNodePolicy(ctx context.Context, machine model.M
 }
 
 func (s *Server) reconcileMachineClusterNode(ctx context.Context, machine model.Machine, runtimeObj *model.Runtime) (bool, error) {
+	// Do not schedule a new managed Edge before its updater has installed the
+	// node-scoped credential. The updater writes the file before applying the
+	// desired join labels and acknowledges its prefix on the next heartbeat.
+	if machine.Policy.AllowEdge && machine.Labels[model.MachineEdgeEnrollmentLabel] != "" {
+		ready, err := s.managedEdgeCredentialInstalled(machine)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			machine.Policy.AllowEdge = false
+		}
+	}
 	nodeName := strings.TrimSpace(machine.ClusterNodeName)
 	if nodeName == "" {
 		if runtimeObj != nil {
