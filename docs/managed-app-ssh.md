@@ -913,3 +913,10 @@ receives a real apply. Tests verify publication ordering, expiry headroom,
 durable-before-runtime ordering, ownership/generation fences, unchanged-write
 avoidance, drift repair, and removed configuration. Production acceptance must
 span multiple renewal cycles before this regression is considered resolved.
+
+The first renewal fix kept held sessions alive but full resource/retirement
+checks still exhausted the Kubernetes client's default request budget. The
+controller now accepts an explicitly bounded execution budget; production sets
+20 requests/second with burst 40, shared across typed and dynamic clients. This
+replaces their independent implicit defaults without creating an unbounded
+request path or changing grants, public routes, client trust, or business Pods.

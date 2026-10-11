@@ -20,11 +20,14 @@ import (
 	"fugue/internal/store"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 func main() {
 	var namespace, runtimeFile, signingFile, identityFile, kubeconfig, health string
 	var once bool
+	var apiQPS float64
+	var apiBurst int
 	flag.StringVar(&namespace, "namespace", "fugue-ssh", "Dedicated managed SSH namespace")
 	flag.StringVar(&runtimeFile, "runtime-config", "", "Independent runtime and immutable release configuration file")
 	flag.StringVar(&signingFile, "signing-keyring", "", "Protected configuration signing keyring file")
@@ -32,16 +35,21 @@ func main() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Explicit Kubernetes configuration; empty uses in-cluster credentials")
 	flag.StringVar(&health, "health-listen", ":7838", "Controller health listener")
 	flag.BoolVar(&once, "once", false, "Reconcile one snapshot of configured intents")
+	flag.Float64Var(&apiQPS, "kube-qps", 5, "Aggregate Kubernetes request budget")
+	flag.IntVar(&apiBurst, "kube-burst", 10, "Aggregate Kubernetes request burst")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	if err := run(ctx, namespace, runtimeFile, signingFile, identityFile, kubeconfig, health, once); err != nil {
+	if err := run(ctx, namespace, runtimeFile, signingFile, identityFile, kubeconfig, health, once, apiQPS, apiBurst); err != nil {
 		log.Printf("managed SSH controller stopped: %v", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, namespace, runtimeFile, signingFile, identityFile, kubeconfig, health string, once bool) error {
+func run(ctx context.Context, namespace, runtimeFile, signingFile, identityFile, kubeconfig, health string, once bool, apiQPS float64, apiBurst int) error {
+	if !(apiQPS >= 1 && apiQPS <= 50) || apiBurst < int(apiQPS) || apiBurst > 100 {
+		return fmt.Errorf("explicit bounded Kubernetes request budget required")
+	}
 	databaseURL := os.Getenv("FUGUE_DATABASE_URL")
 	if databaseURL == "" || namespace == "" || runtimeFile == "" || signingFile == "" || identityFile == "" {
 		return fmt.Errorf("database, namespace, runtime config, identity keyring, and signing keyring are required")
@@ -62,6 +70,7 @@ func run(ctx context.Context, namespace, runtimeFile, signingFile, identityFile,
 		return err
 	}
 	configuration.Timeout = 15 * time.Second
+	configuration.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(float32(apiQPS), apiBurst)
 	runtime, err := sshcontrol.NewKubernetesRuntime(configuration, runtimeFile)
 	if err != nil {
 		return err
