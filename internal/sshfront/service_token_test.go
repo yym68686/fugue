@@ -1,10 +1,22 @@
 package sshfront
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestRouteURLNeverCarriesCredentials(t *testing.T) {
+	address, err := sshRoutesURL(Config{APIURL: "https://control.example?token=old-secret&region=sample", EdgeToken: "current-secret", EdgeID: "edge", EdgeGroupID: "group"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.Query().Has("token") || parsed.Query().Get("edge_id") != "edge" || parsed.Query().Get("region") != "sample" {
+		t.Fatal("route URL leaked a credential or lost its declared selector")
+	}
+}
 
 func TestPreferNodeScopedEdgeToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "edge-node.env")

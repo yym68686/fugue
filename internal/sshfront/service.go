@@ -357,7 +357,7 @@ func sshRoutesURL(cfg Config) (string, error) {
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/v1/edge/ssh/routes"
 	query := base.Query()
-	query.Set("token", strings.TrimSpace(cfg.EdgeToken))
+	query.Del("token")
 	if edgeID := strings.TrimSpace(cfg.EdgeID); edgeID != "" {
 		query.Set("edge_id", edgeID)
 	}

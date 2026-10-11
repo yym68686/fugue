@@ -76,3 +76,28 @@ any currently serving consumer.
 
 The original Argus ports and client known-hosts files remain unchanged. New
 managed fingerprints must never be silently installed into those client files.
+
+## Artifact and transport verification checkpoint
+
+`verify_ssh_front_transport.py` creates its own randomly named kind cluster and
+disposable TCP witnesses. It passed the real Service selection/compensation
+sequence in 44.44 seconds: new connections moved from the host-network process
+to the Pod-network candidate and back, while both held streams kept their
+original executor and no Pod restarted. The test removed its cluster and client
+containers. This is isolated transport evidence; production handoff still needs
+its own canary observations.
+
+The standalone `Dockerfile.ssh-front` and `managed_ssh_front_artifact` CI lane
+build an immutable image without touching production. Image acceptance executes
+the actual container and checks signed routes, an exact-instance persisted ACK,
+the on-disk route cache, old-target connection accounting, route switching,
+rejection of modified signatures, and continued LKG serving. It then runs the
+isolated transport test. Only success produces a source/digest receipt; no
+production configuration currently selects this artifact.
+
+Local actual-image acceptance passed. The first attempt reached an ACK before
+the local Docker host port was reachable; the test now separately waits up to
+five seconds for its published TCP port and retains container diagnostics on
+failure. It does not retry application payloads or weaken route verification.
+Front requests now keep credentials in the Authorization header and remove
+legacy `token` query parameters; both unit and actual-image tests enforce this.

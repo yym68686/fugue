@@ -6,6 +6,7 @@ DOCKER ?= docker
 
 test:
 	python3 -m unittest scripts.test_reconcile_managed_ssh_runtime
+	python3 -m unittest scripts.test_verify_ssh_front_image
 	python3 -m unittest scripts.test_publish_storage_policy
 	python3 -m unittest scripts.test_verify_managed_ssh_image
 	python3 -m unittest scripts.test_reconcile_managed_ssh_keys
