@@ -73,3 +73,21 @@ func TestMemoryCheckpointHasIndependentCaptureWithoutClaimingAnalysis(t *testing
 		t.Fatal("capture lost")
 	}
 }
+
+func TestPostgresCgroupResolvesNamespaceRelativePathByIdentity(t *testing.T) {
+	root := t.TempDir()
+	id := strings.Repeat("a", 64)
+	dir := filepath.Join(root, "kubepods.slice", "pod.slice", "cri-containerd-"+id+".scope")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte("27\n42\n"), 0600)
+	os.WriteFile(filepath.Join(dir, "memory.current"), []byte("100"), 0600)
+	got, err := postgresCgroupAt(root, 42, id)
+	if err != nil || got != dir {
+		t.Fatalf("cgroup not resolved %s %v", got, err)
+	}
+	if _, err := postgresCgroupAt(root, 43, id); err == nil {
+		t.Fatal("accepted wrong PID membership")
+	}
+}

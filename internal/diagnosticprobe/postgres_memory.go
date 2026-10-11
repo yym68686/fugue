@@ -200,21 +200,51 @@ func postgresMemoryWindow(ctx context.Context, req livediagnostics.ProbeRequest,
 }
 
 func postgresCgroup(pid int, id string) (string, error) {
-	raw, err := readBounded(filepath.Join(hostProc, strconv.Itoa(pid), "cgroup"), 8192)
+	return postgresCgroupAt("/sys/fs/cgroup", pid, id)
+}
+func postgresCgroupAt(root string, pid int, id string) (string, error) {
+	if !criIDPattern.MatchString(id) || pid <= 1 {
+		return "", errors.New("invalid frozen cgroup identity")
+	}
+	found := ""
+	visited := 0
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return err
+			}
+			return nil
+		}
+		visited++
+		if visited > 20000 {
+			return errors.New("cgroup inventory budget exceeded")
+		}
+		if !entry.IsDir() || !strings.Contains(entry.Name(), id) {
+			return nil
+		}
+		raw, err := readBounded(filepath.Join(path, "cgroup.procs"), 8192)
+		if err != nil {
+			return nil
+		}
+		for _, value := range strings.Fields(raw) {
+			if value == strconv.Itoa(pid) {
+				if _, err := os.Stat(filepath.Join(path, "memory.current")); err == nil {
+					found = path
+					return filepath.SkipAll
+				}
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-	for _, line := range strings.Split(raw, "\n") {
-		if strings.HasPrefix(line, "0::/") && strings.Contains(line, id) {
-			path := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(line, "0::"))
-			if _, err := os.Stat(filepath.Join(path, "memory.current")); err != nil {
-				return "", err
-			}
-			return path, nil
-		}
+	if found == "" {
+		return "", errors.New("frozen container cgroup and PID membership unavailable")
 	}
-	return "", errors.New("frozen container cgroup v2 identity unavailable")
+	return found, nil
 }
+
 func readPostgresMemory(cg, id string) (pgMemorySample, error) {
 	sample := pgMemorySample{At: time.Now().UTC(), Events: map[string]uint64{}, Processes: []pgProcessMemory{}}
 	// Pod-level limits may be stricter than the child container. Record the
