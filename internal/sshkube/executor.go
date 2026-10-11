@@ -152,10 +152,18 @@ func (executor *Kubernetes) Validate(ctx context.Context, target managedssh.Targ
 	if fields[1] != target.User && fields[2] != target.User {
 		return managedssh.Capabilities{}, managedssh.RuntimeCheckFailure("capability_output", "user", managedssh.ErrCapabilities)
 	}
+	stream, err := executor.openHelper(ctx, target)
+	if err != nil {
+		return managedssh.Capabilities{}, runtimeCheckFailure("helper_probe", err)
+	}
+	capabilities, err := sshexecutor.ProbeHelper(ctx, stream, target, executor.shell)
+	if err != nil {
+		return managedssh.Capabilities{}, runtimeCheckFailure("helper_probe", err)
+	}
 	if _, err := executor.boundPod(ctx, target); err != nil {
 		return managedssh.Capabilities{}, runtimeCheckFailure("bound_after", err)
 	}
-	return managedssh.Capabilities{Exec: true, Shell: true, PTY: true, SFTP: true, Signals: true, Forward: true}, nil
+	return capabilities, nil
 }
 
 func runtimeCheckFailure(stage string, err error) error {

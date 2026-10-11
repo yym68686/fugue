@@ -849,3 +849,26 @@ Remaining completion work includes explicit helper capability verification and
 operational key rewrapping/retention tooling. The earlier chronological notes in
 this document describe checkpoints; the current status and checklist take
 precedence over their historical pending statements.
+
+## Executed helper capability preflight
+
+Metadata-only capability checks could accept an executable shell path whose
+actual execution fails. A regression fixture reproduces this distinction with
+an executable shell returning an error. Runtime validation now performs a
+bounded request through the real, digest-verified helper in the exact selected
+workload container. The helper verifies the configured user/directory, executes
+a no-op shell command, opens/configures/closes a PTY, checks socket creation,
+and verifies signal permission without sending a signal. Probe processes are
+bounded and their process groups are cleaned up. Capability responses do not
+claim that any particular forwarded destination is listening or that arbitrary
+filesystem paths are writable; those operations still enforce target policy
+and operating-system permissions when used.
+
+An absent, non-executable, malformed, or unresponsive helper cannot return
+positive capability evidence. The controller retains prior serving selection
+when a new candidate fails the check. Bounded `helper_probe` diagnostics omit
+underlying command output. Unit/race tests cover unusable executable metadata,
+real helper probing, missing/unresponsive runtime, and command/connection
+boundaries. The isolated Kubernetes/native-client test passed in 19.45 seconds
+with the new protocol. The immutable artifact must still pass CI and be selected
+through independent runtime configuration before this preflight is live.

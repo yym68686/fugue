@@ -113,6 +113,21 @@ func ServeHelper(ctx context.Context, stream io.ReadWriteCloser) error {
 		_ = writer.send(frameFailure, []byte("runtime capability or user mismatch"))
 		return err
 	}
+	if invocation.Kind == "probe" {
+		if invocation.Command != "" || invocation.Terminal != nil || len(invocation.Environment) != 0 || invocation.ForwardHost != "" || invocation.ForwardPort != 0 {
+			return managedssh.ErrConfiguration
+		}
+		capabilities, err := process.ProbeCapabilities(ctx)
+		if err != nil {
+			_ = writer.send(frameFailure, []byte("runtime capability probe failed"))
+			return err
+		}
+		payload, err := json.Marshal(capabilities)
+		if err != nil {
+			return err
+		}
+		return writer.send(frameCapabilities, payload)
+	}
 	switch invocation.Kind {
 	case "exec", "shell", "sftp", "forward":
 	default:

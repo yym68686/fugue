@@ -17,6 +17,9 @@ func TestRuntimeDiagnosticNeverExposesUnderlyingOutput(test *testing.T) {
 			test.Fatal("diagnostic classification or privacy failed")
 		}
 	}
+	if reason := RuntimeFailureReason(RuntimeCheckFailure("helper_probe", "eof", cause)); reason != "helper_probe:eof" {
+		test.Fatal("actual helper failure lost its bounded diagnostic stage", reason)
+	}
 	err := RuntimeCheckFailure(cause.Error(), cause.Error(), cause)
 	if RuntimeFailureReason(err) != "unknown:unknown" || strings.Contains(err.Error(), "private") || RuntimeFailureReason(cause) != "unclassified" {
 		test.Fatal("untrusted diagnostic labels reached the audit reason")

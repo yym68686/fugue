@@ -22,7 +22,7 @@ func (failure *runtimeCheckError) Unwrap() error {
 
 func RuntimeCheckFailure(stage, reason string, cause error) error {
 	switch stage {
-	case "bound_before", "capability_probe", "capability_output", "bound_after":
+	case "bound_before", "capability_probe", "capability_output", "helper_probe", "bound_after":
 	default:
 		stage = "unknown"
 	}
