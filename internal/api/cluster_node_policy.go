@@ -71,7 +71,16 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 			httpx.WriteError(w, 409, "Edge admission: "+err.Error())
 			return
 		}
-		httpx.WriteJSON(w, 200, map[string]any{"node_reconciled": true})
+		clusterNode, err := s.loadManagedClusterNodeView(r.Context(), principal, nodeName)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		s.appendAudit(principal, "cluster.node.edge.admit", "cluster_node", nodeName, machine.TenantID, map[string]string{
+			"edge_enrollment_id": *req.EdgeAdmissionID,
+			"edge_group_id":      machine.Labels[runtimepkg.EdgeGroupIDLabelKey],
+		})
+		httpx.WriteJSON(w, 200, map[string]any{"cluster_node": clusterNode, "node_reconciled": true})
 		return
 	}
 	runtimeObj, err := s.loadClusterNodePolicyRuntime(machine)
