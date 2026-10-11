@@ -27,6 +27,8 @@ type testRuntime struct {
 	release      managedssh.RuntimeRelease
 	resolveError error
 	observeError error
+	observeDelay time.Duration
+	observeSkew  time.Duration
 	applied      []managedssh.ServingSlot
 	now          time.Time
 }
@@ -65,8 +67,10 @@ func (runtime *testRuntime) Observe(ctx context.Context, slot managedssh.Serving
 	if runtime.observeError != nil {
 		return managedssh.CandidateEvidence{}, runtime.observeError
 	}
+	runtime.now = runtime.now.Add(runtime.observeDelay)
 	configuration := slot.Artifact.Configuration
-	return managedssh.CandidateEvidence{ArtifactDigest: slot.Artifact.Digest, IdentityID: configuration.Identity.ID, Fingerprint: configuration.Identity.Fingerprint, ServerPodUID: "server-pod", TargetPodUID: configuration.Target.PodUID, TargetContainerID: configuration.Target.ContainerID, KeyExchangeVerified: true, RuntimeVerified: true, ObservedAt: runtime.now, ExpiresAt: runtime.now.Add(time.Minute)}, nil
+	observedAt := runtime.now.Add(runtime.observeSkew)
+	return managedssh.CandidateEvidence{ArtifactDigest: slot.Artifact.Digest, IdentityID: configuration.Identity.ID, Fingerprint: configuration.Identity.Fingerprint, ServerPodUID: "server-pod", TargetPodUID: configuration.Target.PodUID, TargetContainerID: configuration.Target.ContainerID, KeyExchangeVerified: true, RuntimeVerified: true, ObservedAt: observedAt, ExpiresAt: observedAt.Add(time.Minute)}, nil
 }
 
 func TestReconcileStagesCandidateAndRevokesDespiteFailedTarget(test *testing.T) {
@@ -165,5 +169,19 @@ func TestReconcileStagesCandidateAndRevokesDespiteFailedTarget(test *testing.T) 
 	after, err := stateStore.GetApp(app.ID)
 	if err != nil || !reflect.DeepEqual(after.Spec, app.Spec) {
 		test.Fatal("SSH reconciliation edited application spec", err)
+	}
+	runtime.observeError = nil
+	runtime.observeDelay = 6 * time.Second
+	if err := reconciler.Reconcile(ctx, tenant.ID, app.ID); err != nil {
+		test.Fatal("completed valid observation compared against an earlier reconciliation timestamp", err)
+	}
+	state, err = stateStore.GetManagedSSHControl(tenant.ID, app.ID)
+	if err != nil || state.Candidate == nil || !state.Candidate.Verified(runtime.now) {
+		test.Fatal("slow valid observation was not retained", err)
+	}
+	runtime.now = runtime.now.Add(50 * time.Second)
+	runtime.observeSkew = 10 * time.Second
+	if err := reconciler.Reconcile(ctx, tenant.ID, app.ID); err == nil || !strings.Contains(err.Error(), "observation_after_verification_clock") {
+		test.Fatal("genuinely future observation passed after clock fix", err)
 	}
 }

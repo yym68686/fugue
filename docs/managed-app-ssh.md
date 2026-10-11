@@ -727,3 +727,23 @@ that current key inventory, rather than copied stale intent material, governs
 authorization. The canary and both Argus application Pod/container identities
 remain unchanged with zero restarts. The original public Argus fingerprint
 remains unchanged; its managed migration has not been activated.
+
+The next canary image passed native exec, exit status 37, forced PTY, a 1 MiB
+SCP/SFTP upload/download, allowed workload-loopback forwarding, and rejected
+forwarding to an undeclared port and the Kubernetes API. These checks used a
+controlled SSH tunnel directly to the candidate while public routing retained
+the older active slot. This is candidate acceptance, not evidence of a public
+upgrade. A separate Python/Debian fixture with no sshd is used for actual VS Code
+Remote SSH acceptance; it has an independent host identity and explicit limited
+loopback port range.
+
+Candidate promotion initially failed without a precise cause. The `126f5f40`
+diagnostic release preserved all admission checks and reported the exact failed
+predicate. Production logged `observation_after_verification_clock` with
+`observed_after_check_ms=8123`: reconciliation compared a newly completed
+observation with the timestamp captured before Kubernetes publication and
+probes. A deterministic test advancing the fake clock during observation
+reproduced the same rejection. Verification, promotion, and retirement now use
+the clock at their decision point. The five-second future-evidence bound and
+expiry checks are unchanged; a separate test still rejects actual future
+observations. Old public serving state stayed available throughout diagnosis.

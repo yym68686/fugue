@@ -35,11 +35,15 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context, tenantID, appID str
 	return err
 }
 
-func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID string) error {
-	now := time.Now().UTC()
+func (reconciler *Reconciler) currentTime() time.Time {
 	if reconciler.Now != nil {
-		now = reconciler.Now().UTC()
+		return reconciler.Now().UTC()
 	}
+	return time.Now().UTC()
+}
+
+func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID string) error {
+	now := reconciler.currentTime()
 	intent, err := reconciler.Store.GetManagedSSHIntent(tenantID, appID)
 	if err != nil {
 		return err
@@ -206,7 +210,8 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("apply managed SSH slot %s: %w", slot.ID, err))
 			continue
 		}
-		if slot.Verified(now) && slot.Evidence.ExpiresAt.After(now.Add(20*time.Second)) {
+		checkTime := reconciler.currentTime()
+		if slot.Verified(checkTime) && slot.Evidence.ExpiresAt.After(checkTime.Add(20*time.Second)) {
 			continue
 		}
 		if slot.RetiringAt != nil {
@@ -215,8 +220,9 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 		evidence, err := reconciler.Runtime.Observe(ctx, slot)
 		observed := slot
 		observed.Evidence = &evidence
-		if err != nil || !observed.Verified(now) {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("verify slot %s: reason=%s observed_after_check_ms=%d: %w", slot.ID, observed.VerificationFailure(now), evidence.ObservedAt.Sub(now).Milliseconds(), errors.Join(managedssh.ErrCandidateUnverified, err)))
+		verifiedAt := reconciler.currentTime()
+		if err != nil || !observed.Verified(verifiedAt) {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("verify slot %s: reason=%s observed_after_check_ms=%d: %w", slot.ID, observed.VerificationFailure(verifiedAt), evidence.ObservedAt.Sub(verifiedAt).Milliseconds(), errors.Join(managedssh.ErrCandidateUnverified, err)))
 			if slot.Evidence == nil {
 				continue
 			}
@@ -228,7 +234,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 			return err
 		}
 	}
-	if intent.Spec.Enabled && state.Active != nil && state.Candidate != nil && state.Candidate.Verified(now) && !state.RollbackHold {
+	if intent.Spec.Enabled && state.Active != nil && state.Candidate != nil && state.Candidate.Verified(reconciler.currentTime()) && !state.RollbackHold {
 		binding, err := reconciler.Store.GetManagedSSHBinding(tenantID, appID)
 		if err == nil {
 			var activated managedssh.ControlState
@@ -241,7 +247,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 			reconcileErrors = append(reconcileErrors, err)
 		}
 	}
-	if err := reconciler.retireSlots(ctx, state, now); err != nil {
+	if err := reconciler.retireSlots(ctx, state, reconciler.currentTime()); err != nil {
 		reconcileErrors = append(reconcileErrors, err)
 	}
 	return errors.Join(reconcileErrors...)
