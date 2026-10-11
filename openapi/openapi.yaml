@@ -859,6 +859,42 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/ssh/front-acknowledgements/{edge_id}/{instance_uid}:
+    get:
+      operationId: adminGetSSHFrontAcknowledgement
+      summary: Read persisted SSH route evidence for one exact edge instance
+      description: Requires platform admin. Returns the stored acknowledgement without refreshing its timestamps. Freshness and correspondence to the currently authorized route bundle are evaluated separately. An acknowledgement is runtime evidence; it does not authorize traffic selection or prove that public traffic reaches this instance. Public transport ownership and host-key probes must be verified independently. Route derivation or evidence-store failures do not return positive evidence.
+      tags: [Admin, SSH]
+      x-fugue-handler: handleAdminGetSSHFrontAcknowledgement
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9_.-]+$'}
+        - in: path
+          name: instance_uid
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9_.-]+$'}
+      responses:
+        '200':
+          description: Persisted evidence and its current validity; stale evidence remains visible and never becomes fresh through a read.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: [no-store]}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSSHFrontObservation"
+        '404':
+          description: No acknowledgement exists for this exact node and instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/ssh/ack:
     post:
       operationId: acknowledgeEdgeSSHRoutes
@@ -22513,6 +22549,41 @@ components:
           maximum: 86400
         restart_token:
           type: string
+    AdminSSHFrontObservation:
+      type: object
+      additionalProperties: false
+      required: [acknowledgement, evaluated_at, fresh, current_routes_match]
+      properties:
+        acknowledgement:
+          $ref: "#/components/schemas/EdgeSSHAcknowledgement"
+        evaluated_at: {type: string, format: date-time}
+        fresh: {type: boolean}
+        current_routes_match: {type: boolean}
+    EdgeSSHAcknowledgement:
+      type: object
+      additionalProperties: false
+      required: [edge_id, edge_group_id, instance_uid, bundle_version, route_digest, persisted, loaded_at, connections, routes, observed_at, expires_at]
+      properties:
+        edge_id: {type: string, minLength: 1, maxLength: 256}
+        edge_group_id: {type: string, minLength: 1, maxLength: 256}
+        instance_uid: {type: string, minLength: 1, maxLength: 256}
+        bundle_version: {type: string, minLength: 1, maxLength: 256}
+        route_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        persisted: {type: boolean, enum: [true]}
+        loaded_at: {type: string, format: date-time}
+        observed_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        connections:
+          type: array
+          maxItems: 20000
+          items:
+            $ref: "#/components/schemas/EdgeSSHRouteConnections"
+        routes:
+          type: array
+          nullable: true
+          maxItems: 10000
+          items:
+            $ref: "#/components/schemas/EdgeSSHRoute"
     EdgeSSHAcknowledgementRequest:
       type: object
       additionalProperties: false

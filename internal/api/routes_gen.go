@@ -103,6 +103,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/routes", s.auth.RequireAPI(http.HandlerFunc(s.handleListRouteServingModes)))
 	mux.Handle("GET /v1/admin/routes/explain/{hostname}", s.auth.RequireAPI(http.HandlerFunc(s.handleExplainRoute)))
 	mux.Handle("POST /v1/admin/security/key-rotation", s.auth.RequireAPI(http.HandlerFunc(s.handlePreflightKeyRotation)))
+	mux.Handle("GET /v1/admin/ssh/front-acknowledgements/{edge_id}/{instance_uid}", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminGetSSHFrontAcknowledgement)))
 	mux.Handle("GET /v1/admin/traffic-override-signing-key", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminGetTrafficOverrideSigningKey)))
 	mux.Handle("POST /v1/admin/traffic-override-signing-key/rotate", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminRotateTrafficOverrideSigningKey)))
 	mux.Handle("GET /v1/admin/traffic-overrides", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminListTrafficOverrides)))

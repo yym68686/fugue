@@ -162,3 +162,22 @@ generation 2 selects image
 `ghcr.io/yym68686/fugue-ssh-front@sha256:3e9908984365189c0c7157fa4418f9ef2318f6aa01f7bf113ad0bfd04726649b`
 and that exact receipt. It prepares new candidate slots and retains generation 1;
 it still does not change public transport or restart either application.
+
+## Public transport observation contract
+
+`GET /v1/admin/ssh/front-acknowledgements/{edge_id}/{instance_uid}` exposes the
+persisted acknowledgement to platform administrators. Reading never refreshes
+the stored timestamps. The response separately evaluates whether the evidence
+is fresh and whether it still matches the currently authorized route set. A
+record from a different node/Pod, expired evidence, and a previously authorized
+bundle cannot authorize selection. Ordinary tenant keys and edge tokens cannot
+use this administrator inventory. Responses prohibit caching.
+
+The transport gate must combine this API evidence with exact Kubernetes Pod,
+node, image, Service, and EndpointSlice ownership. ACKs alone do not prove public
+traffic reaches the process. `cmd/fugue-ssh-probe` accepts bounded JSON containing
+an explicit address, authenticated public key, and expected fingerprint, then
+verifies host-key possession with the existing SSH key-exchange probe. It stops
+before user authentication and neither accepts user private keys nor modifies
+client trust. This allows the CI transport verifier to probe both candidate and
+public paths without deploying a probe binary on a production node.
