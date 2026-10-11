@@ -51,3 +51,27 @@ and helper
 Its predecessor is the exact independently declared generation 8. This selection
 creates verified platform SSH candidates and preserves existing sessions on
 retained servers; it does not change business workloads or client host trust.
+
+Production runtime publication succeeded in run `38162033519`, job
+`114536778261`. All five managed applications selected the new immutable image.
+Plain `ssh poly`, without a remote command, entered the unchanged business
+container with `argv[0]=-bash`, `SHELL=/bin/bash`, `HOME=/workspace`, and Bash
+5.2.37. A Bash array expression succeeded. Both real applications passed native
+interactive login and Bash remote commands independently through all four
+public addresses: eight interactive sessions and eight command sessions. The
+final public observation was `2026-10-11T18:08:22.967464Z`, receipt SHA-256
+`139e9a367f0f014ae1bf1e57b1b1ca5454ad6efe95ebacc08bfdefadfe9a4374`.
+Both native SFTP paths remained functional. A held pre-upgrade poly connection
+continued exchanging messages after runtime selection. Business Pod/container
+IDs and zero restart counts were unchanged, as was the approved known_hosts
+SHA-256 `6374f314aed0de767d10ca11d819a59903c3754a2bdd290ba5f0a5ec50ef0b7b`.
+
+The original terminal application's complete integration script was not
+available for direct replay, and Warp UI automation was unavailable. The
+acceptance above is actual native OpenSSH, not a claimed Warp UI test.
+One initial parallel command probe failed before the successful full repeat;
+runtime audit also recorded `helper_probe:unavailable` with API exec transport
+reset diagnostics. These observations do not establish the transport failure's
+root cause or justify weakening capability checks. Existing bounded audit and
+runtime diagnostics, plus captured client exit/stdout/stderr in the acceptance
+probe, support continued follow-up without a speculative serving change.
