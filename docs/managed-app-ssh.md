@@ -672,3 +672,12 @@ database whose name contains `fugue_test`. Set
 then run `go test ./internal/sshidentity -run TestRestoredSSHIdentityMatchesAuthenticatedInventory -count=1 -v`.
 The check opens a read-only transaction and never restores or modifies a live
 database. Retain the encrypted tables and keyring separately.
+
+The first runtime configuration update exposed a publisher defect before its
+ConfigMap commit. A Role and its RoleBinding shared a mutable metadata map;
+reading the binding's resourceVersion overwrote the Role precondition. The
+initial creation path was unaffected, while subsequent updates conflicted.
+The fake Kubernetes adapter now enforces resource versions and reproduced this
+failure. Each resource now has separate metadata, and failed publication names
+the resource and expected version without emitting request data. Version fences
+remain enforced and the configuration is still committed last.

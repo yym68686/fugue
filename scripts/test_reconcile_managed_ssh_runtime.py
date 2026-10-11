@@ -20,6 +20,9 @@ class ManagedSSHRuntimeTest(unittest.TestCase):
                     return json.dumps({'metadata':{'name':'test-tenant'}})
                 return json.dumps(state[key]) if key in state else ''
             desired=copy.deepcopy(value)
+            key=(desired['kind'].lower(),desired['metadata'].get('namespace',''),desired['metadata']['name'])
+            if key in state and desired['metadata'].get('resourceVersion') != state[key]['metadata']['resourceVersion']:
+                raise ValueError('stale resource version for '+desired['kind'])
             desired['metadata']['resourceVersion']=str(len(writes)+1)
             desired['metadata']['uid']='uid-'+desired['metadata']['name']
             state[(desired['kind'].lower(),desired['metadata'].get('namespace',''),desired['metadata']['name'])]=desired

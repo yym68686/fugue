@@ -140,7 +140,7 @@ def objects(config):
         assignments.append((tenant, [{"apiGroups":[""], "resources":["pods"], "verbs":["get", "list"]}, {"apiGroups":[""], "resources":["pods/exec"], "verbs":["get", "create"]}, {"apiGroups":["rbac.authorization.k8s.io"], "resources":["roles", "rolebindings"], "verbs":["get", "create", "update", "patch"]}]))
     for selected_namespace, permissions in assignments:
         metadata = {"name":"managed-ssh-controller", "namespace":selected_namespace, "labels":labels}
-        resources.extend([{"apiVersion":"rbac.authorization.k8s.io/v1", "kind":"Role", "metadata":metadata, "rules":permissions}, {"apiVersion":"rbac.authorization.k8s.io/v1", "kind":"RoleBinding", "metadata":metadata, "roleRef":{"apiGroup":"rbac.authorization.k8s.io", "kind":"Role", "name":metadata["name"]}, "subjects":[{"kind":"ServiceAccount", "name":account, "namespace":controller_namespace}]}])
+        resources.extend([{"apiVersion":"rbac.authorization.k8s.io/v1", "kind":"Role", "metadata":dict(metadata), "rules":permissions}, {"apiVersion":"rbac.authorization.k8s.io/v1", "kind":"RoleBinding", "metadata":dict(metadata), "roleRef":{"apiGroup":"rbac.authorization.k8s.io", "kind":"Role", "name":metadata["name"]}, "subjects":[{"kind":"ServiceAccount", "name":account, "namespace":controller_namespace}]}])
     return resources
 
 
@@ -187,7 +187,11 @@ def reconcile(config, receipt, kube=kubectl):
                 raise ValueError("runtime resource ownership differs from reviewed declaration")
             desired["metadata"]["resourceVersion"] = previous["resourceVersion"]
     for desired in planned:
-        kube(["apply", "--server-side", "--field-manager="+MANAGER, "-f", "-"], desired)
+        try:
+            kube(["apply", "--server-side", "--field-manager="+MANAGER, "-f", "-"], desired)
+        except Exception:
+            metadata=desired['metadata']
+            raise RuntimeError("runtime publication failed for "+desired['kind']+" "+metadata.get('namespace','')+"/"+metadata['name']+" at expected resourceVersion "+metadata.get('resourceVersion','absent')) from None
     desired = {"apiVersion":"v1", "kind":"ConfigMap", "metadata":{"name":configmap,"namespace":namespace,"labels":{"app.kubernetes.io/managed-by":MANAGER},"annotations":{GENERATION:str(config["generation"]),DIGEST:configuration_digest}}, "data":{"runtime.json":canonical(config["runtime"]),"declaration.json":canonical(config)}}
     if current:
         desired["metadata"]["resourceVersion"] = current["metadata"]["resourceVersion"]
