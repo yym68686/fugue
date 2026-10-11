@@ -561,6 +561,16 @@ of the producer's change fingerprint. A changed physical decision triggers norma
 publication before the periodic refresh; a new receipt ID or measurement timestamp
 alone does not. Nonphysical source fingerprints retain their previous encoding.
 
+When dynamic quality evidence expires, the producer preserves the positive LKG's
+physical order against the current query's constrained candidate topology. The
+bootstrap order is only a fallback ordering seed, not an eligibility allowlist:
+an edge admitted by a verified quality publication remains in its existing position
+even if it was absent from that older seed. Current ownership and placement
+constraints still remove unauthorized endpoints. A newly discovered endpoint that
+appears in neither the verified order nor the bootstrap seed is not added by this
+fallback path. Expired measurements never become fresh quality evidence, and DNS
+continues to apply live route, TLS and health checks to the retained order.
+
 Runtime input digests normalize object ordering inside embedded physical evidence
 before hashing. JSONB storage may reorder keys; it must not change input identity.
 The normalization preserves numeric tokens and all evidence values. Stored input

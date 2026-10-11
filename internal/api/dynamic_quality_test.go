@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,6 +12,33 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
+
+func TestDynamicQualityPreservesVerifiedMembershipWhenEvidenceExpires(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		previous   []string
+		candidates []string
+		want       []string
+	}{
+		{"admitted fallback", []string{"edge-b", "edge-new", "edge-a"}, []string{"edge-a", "edge-new", "edge-b"}, []string{"edge-b", "edge-new", "edge-a"}},
+		{"admitted primary", []string{"edge-new", "edge-b", "edge-a"}, []string{"edge-a", "edge-new", "edge-b"}, []string{"edge-new", "edge-b", "edge-a"}},
+		{"removed by current constraints", []string{"edge-b", "edge-new", "edge-a"}, []string{"edge-a", "edge-b"}, []string{"edge-b", "edge-a"}},
+		{"new unmeasured candidate", []string{"edge-b", "edge-a"}, []string{"edge-a", "edge-new", "edge-b"}, []string{"edge-b", "edge-a"}},
+		{"removed primary", []string{"edge-b", "edge-new", "edge-a"}, []string{"edge-new", "edge-a"}, []string{"edge-new", "edge-a"}},
+		{"no authorized endpoint", []string{"edge-b", "edge-new", "edge-a"}, nil, nil},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			candidates := []platformconfig.DNSSelectionCandidate{}
+			for _, edgeID := range scenario.candidates {
+				candidates = append(candidates, platformconfig.DNSSelectionCandidate{EdgeID: edgeID})
+			}
+			order := preservedDynamicQualityOrder(scenario.previous, []string{"edge-a", "edge-b"}, candidates)
+			if !slices.Equal(order, scenario.want) {
+				t.Fatalf("verified order changed outside current constraints: got %v, want %v", order, scenario.want)
+			}
+		})
+	}
+}
 
 func TestDynamicCaptureBudgetDoesNotWaitForEveryQueuedDomain(t *testing.T) {
 	jobs := make([]dynamicQualityJob, 128)

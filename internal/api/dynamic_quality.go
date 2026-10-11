@@ -479,16 +479,16 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 		if len(orders[key]) == 0 {
 			continue
 		}
-		allowed := map[string]bool{}
-		for _, edgeID := range rule.PhysicalOrder.OrderedEdgeIDs {
-			allowed[edgeID] = true
-		}
-		order := []string{}
-		for _, edgeID := range append(append([]string(nil), orders[key]...), rule.PhysicalOrder.OrderedEdgeIDs...) {
-			if allowed[edgeID] {
-				order = append(order, edgeID)
-				delete(allowed, edgeID)
+		var candidates []platformconfig.DNSSelectionCandidate
+		for _, fact := range projection.RuntimeSnapshot.DNSSelections {
+			if fact.NodeID == rule.NodeID && fact.Hostname == rule.Hostname && fact.Type == rule.Type {
+				candidates = fact.Candidates
+				break
 			}
+		}
+		order := preservedDynamicQualityOrder(orders[key], rule.PhysicalOrder.OrderedEdgeIDs, candidates)
+		if len(order) == 0 {
+			return fmt.Errorf("dynamic quality baseline has no currently authorized endpoint")
 		}
 		projection.Policy.DNSAnswerRules[index].PhysicalOrder = &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: order}
 		if len(order) > 0 && order[0] == orders[key][0] && epochs[key] != nil {
@@ -515,6 +515,24 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 	}
 	projection.Policy.Generation, projection.RuntimeSnapshot.PolicyGeneration = generation, generation
 	return nil
+}
+
+func preservedDynamicQualityOrder(previous, bootstrap []string, candidates []platformconfig.DNSSelectionCandidate) []string {
+	// Eligibility comes from the current constrained topology, not the older bootstrap order.
+	allowed := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		allowed[candidate.EdgeID] = true
+	}
+	order := []string{}
+	for _, source := range [][]string{previous, bootstrap} {
+		for _, edgeID := range source {
+			if allowed[edgeID] {
+				order = append(order, edgeID)
+				delete(allowed, edgeID)
+			}
+		}
+	}
+	return order
 }
 
 func (s *Server) restorePublishedQualityEvidence(projection platformIntentProjectionResponse, jobs []dynamicQualityJob, parent model.PlatformArtifact) {
