@@ -238,6 +238,11 @@ preserve pre-exit samples when the database restarts. A coincident idle query
 is never claimed as the cause of retained memory. Process start ticks,
 namespace PID, backend_start, postmaster start, container and boot identities
 must agree before correlating samples across sources.
+The query-size setting is converted with PostgreSQL's unit-aware size parser.
+Failed SQL observations expose only a fixed failure class and back off for
+15 seconds while process sampling continues. The cgroup `memory.stat` byte
+counters distinguish anonymous memory, file cache and shared memory; these
+overlapping categories must not be added together or treated as process RSS.
 
 `runtime-heap-export` and `runtime-allocs-export` save a single raw gzip profile
 in the retained report with SHA256, length and bounded base64 chunks. They do

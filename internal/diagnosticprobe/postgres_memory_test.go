@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/livediagnostics"
 )
@@ -89,5 +91,48 @@ func TestPostgresCgroupResolvesNamespaceRelativePathByIdentity(t *testing.T) {
 	}
 	if _, err := postgresCgroupAt(root, 43, id); err == nil {
 		t.Fatal("accepted wrong PID membership")
+	}
+}
+
+func TestPostgresObservationKeepsFailureClassesAndLifecycle(t *testing.T) {
+	valid := pgActivityObservation{At: time.Now(), ServerStarted: time.Now().Add(-time.Hour), QueryLimit: 1024, Backends: []pgBackendObservation{{PID: 42, BackendStart: time.Now().Add(-time.Minute), Fingerprint: "fingerprint"}}}
+	raw, _ := json.Marshal(valid)
+	if got, err := decodePostgresObservation(raw, false, nil); err != nil || got.QueryLimit != 1024 || got.Backends[0].PID != 42 {
+		t.Fatalf("valid observation lost: %+v %v", got, err)
+	}
+	missing := valid
+	missing.ServerStarted = time.Time{}
+	missingRaw, _ := json.Marshal(missing)
+	many := valid
+	many.Backends = make([]pgBackendObservation, 129)
+	manyRaw, _ := json.Marshal(many)
+	for _, tt := range []struct {
+		raw        []byte
+		truncated  bool
+		commandErr error
+		want       string
+	}{
+		{raw, false, errors.New("private backend failure"), "command failed"},
+		{raw, true, nil, "byte budget"},
+		{[]byte("not JSON"), false, nil, "JSON is invalid"},
+		{missingRaw, false, nil, "metadata missing"},
+		{manyRaw, false, nil, "backend count"},
+	} {
+		_, err := decodePostgresObservation(tt.raw, tt.truncated, tt.commandErr)
+		if err == nil || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), "private") {
+			t.Fatalf("wrong or unsafe failure class: %v", err)
+		}
+	}
+}
+
+func TestPostgresMemoryStatSeparatesBytesFromEventCounters(t *testing.T) {
+	values, err := postgresMemoryStat("anon 100\nfile 200\nshmem 20\npgfault 900\nfile_dirty 0\n")
+	if err != nil || values["anon"] != 100 || values["file"] != 200 || len(values) != 4 {
+		t.Fatalf("incorrect byte accounting: %+v %v", values, err)
+	}
+	for _, raw := range []string{"anon 0\n", "file 0\n", "anon invalid\nfile 0\n"} {
+		if _, err := postgresMemoryStat(raw); err == nil {
+			t.Fatal("incomplete memory breakdown accepted")
+		}
 	}
 }
