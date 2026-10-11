@@ -7,7 +7,9 @@ acceptance. Instance-bound edge acknowledgement and guarded slot retirement now
 have local and isolated-cluster coverage. Production release enrollment, enforcing
 network-policy acceptance, and traffic migration remain in progress. The user authorized committing and pushing completed work,
 following GitHub Actions deployment, and investigating unexpected behavior.
-No production traffic or client trust has been changed.
+Initial code and independent keyring configuration have now been pushed.
+Production traffic, application identity activation, Argus, and client trust
+have not been changed. Component release monitoring remains in progress.
 
 ## Outcome
 
@@ -278,8 +280,9 @@ Implementation moved from an older local branch into the isolated
 refresh is retained in stash `74e6315dfb80df202b8b1a5ba2c8e761effafaf1`; the
 prior refresh is retained in stash `f35cae77ee783ad4ef9e05f9f09d221e33f9e1b1`; the
 initial transfer is also retained in stash
-`0f8d4866d47dc2c20e55712a9908725ac7015f42`. No commit or push has
-been made yet.
+`0f8d4866d47dc2c20e55712a9908725ac7015f42`. Initial code was pushed as
+`46be3447`; `54a5cd76` enrolled independent keyring recovery and `8b938942`
+fixed the bounded prepush scheduling failure and retried component deployment.
 
 Before production release, enroll exact production edge consumers and tokens,
 complete signing/identity key provisioning and backup, enforce network isolation,
@@ -528,9 +531,13 @@ replay, partial update, forbidden recreation, exact restoration, and key reuse.
 The CI contract verifies current-main selection, production scope, explicit
 declaration, and independence from code-release jobs.
 
-No production declaration, private keyring, CI secret, or workload has been
-created yet. Backup enrollment and storage-key rewrapping/retention procedures
-must be completed before production identity preparation.
+The generation-one keyring declaration was pushed as `54a5cd76`. CI restored
+both keyrings successfully; read-only Kubernetes metadata checks matched the
+reviewed generations and digests. Private material is retained in the production
+GitHub environment Secret and an owner-only local backup outside the repository.
+No application identity has been prepared from these keys. Database/identity
+backup restoration and storage-key rewrapping/retention procedures still need
+acceptance before production identity preparation.
 
 Read-only production inspection found the US SSH-front DaemonSet references the
 same token Secret across multiple node instances. Its Secret name does not prove
@@ -576,3 +583,25 @@ also installs the pinned enforcing CNI and requires the network allow/deny
 checks to run rather than skip. Its public receipt records the immutable image,
 source commit, helper digest, architecture, and verification results. That
 receipt is not serving intent: runtime configuration must explicitly select it.
+
+The first release run stopped before deployment: affected tests and vet passed,
+but warming all affected packages before compilation left only 10.5 seconds for
+the release-tool suite within the unchanged 240-second CI budget. The fix warms
+only the identified large API package; remaining packages run with compilation
+under the same concurrency bound. No test or timeout gate was removed. Tests
+verify overlap, exactly-once execution, and preservation of warm-phase failures.
+The retry passed prepush and built API, schema, and SSH-control images; production
+rollout and the separate immutable SSH-image acceptance job remain monitored.
+
+Frontend generated contracts were pushed as `d58f3cce` after integrating current
+frontend main; its GitHub contract-drift check passed. Existing historical source
+archive errors still prevent an unfiltered local TypeScript check.
+
+The independent runtime publisher is prepared for the next stage. It requires
+the exact successful artifact job, source commit, receipt digest, immutable
+image, and network-isolation evidence. Runtime configuration is published only
+after explicit namespace-scoped authority and default-deny policy resources.
+Tenant authority excludes application Deployment writes and Secret reads;
+foreign resource ownership, stale predecessor versions, image substitution,
+and unreviewed namespace changes fail closed. No production runtime declaration
+or mutation-authority enrollment has been published yet.

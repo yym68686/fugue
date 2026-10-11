@@ -10,6 +10,53 @@ permissions:
   contents: read
 
 jobs:
+  managed_ssh_runtime:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-managed-ssh-runtime, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read, actions: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select independent runtime intent and exact verified artifact receipt
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/managed-ssh/runtime.json
+          if [[ ! -f "$config" ]]; then exit 0; fi
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_managed_ssh_runtime.py scripts/test_reconcile_managed_ssh_runtime.py; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_managed_ssh_runtime.py .github/workflows/ci.yml; then
+              python3 -m unittest scripts.test_reconcile_managed_ssh_runtime
+              source="$(jq -r '.artifactSourceCommit' "$config")"
+              run_id="$(jq -r '.artifactRunID' "$config")"
+              [[ "$source" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ ]]
+              gh run view "$run_id" --json headSha,jobs > "$RUNNER_TEMP/ssh-artifact-run.json"
+              python3 -c 'import json,sys; value=json.load(open(sys.argv[1])); assert value["headSha"]==sys.argv[2]; assert any(job["name"]=="managed_ssh_artifact" and job["conclusion"]=="success" for job in value["jobs"])' "$RUNNER_TEMP/ssh-artifact-run.json" "$source"
+              gh run download "$run_id" --name "fugue-managed-ssh-artifact-$source" --dir "$RUNNER_TEMP/ssh-runtime-artifact"
+              python3 -m scripts.reconcile_managed_ssh_runtime "$config" --receipt "$RUNNER_TEMP/ssh-runtime-artifact/managed-ssh-receipt.json" --validate-only
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Publish scoped runtime configuration without rebuilding or switching public routes
+        if: steps.selected.outputs.changed == 'true'
+        run: python3 -m scripts.reconcile_managed_ssh_runtime deploy/environments/production/managed-ssh/runtime.json --receipt "$RUNNER_TEMP/ssh-runtime-artifact/managed-ssh-receipt.json" > "$RUNNER_TEMP/ssh-runtime-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-managed-ssh-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/ssh-runtime-result.json
+          if-no-files-found: error
+          retention-days: 90
+
   managed_ssh_artifact:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' }}

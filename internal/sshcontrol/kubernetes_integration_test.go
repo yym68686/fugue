@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -63,6 +64,43 @@ func TestCandidatePublicationIsolatedKubernetes(test *testing.T) {
 		test.Fatal(err)
 	}
 	defer client.CoreV1().Namespaces().Delete(context.Background(), namespace, metav1.DeleteOptions{})
+	defer func() {
+		if !test.Failed() {
+			return
+		}
+		diagnosticsContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for _, selected := range []string{platform.Name, namespace} {
+			pods, err := client.CoreV1().Pods(selected).List(diagnosticsContext, metav1.ListOptions{})
+			if err != nil {
+				test.Log("failed to collect candidate pods", err)
+				continue
+			}
+			for _, pod := range pods.Items {
+				test.Logf("candidate diagnostic namespace=%s pod=%s phase=%s node=%s", selected, pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+				for _, status := range pod.Status.ContainerStatuses {
+					state, _ := json.Marshal(status.State)
+					test.Logf("container=%s image=%s image_id=%s ready=%t restarts=%d state=%s", status.Name, status.Image, status.ImageID, status.Ready, status.RestartCount, state)
+				}
+				if pod.Labels["app.kubernetes.io/component"] == "managed-ssh" {
+					lines := int64(20)
+					stream, err := client.CoreV1().Pods(selected).GetLogs(pod.Name, &corev1.PodLogOptions{Container: "ssh", TailLines: &lines}).Stream(diagnosticsContext)
+					if err == nil {
+						output, _ := io.ReadAll(io.LimitReader(stream, 8192))
+						stream.Close()
+						test.Logf("managed SSH startup diagnostics: %s", output)
+					}
+				}
+			}
+			events, err := client.CoreV1().Events(selected).List(diagnosticsContext, metav1.ListOptions{})
+			if err != nil {
+				continue
+			}
+			for _, event := range events.Items {
+				test.Logf("candidate event object=%s reason=%s message=%s", event.InvolvedObject.Name, event.Reason, event.Message)
+			}
+		}
+	}()
 	labels := map[string]string{"fugue.pro/app-id": app.ID, "fugue.pro/tenant-id": app.TenantID, "release": "active"}
 	pod, err := client.CoreV1().Pods(namespace).Create(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workspace", Labels: labels}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "workspace", Image: "alpine:3.22", ImagePullPolicy: corev1.PullNever, Command: []string{"/bin/sh", "-c", "mkdir -p /workspace; exec sleep 3600"}}}}}, metav1.CreateOptions{})
 	if err != nil {
