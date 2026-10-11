@@ -15,6 +15,10 @@ class SSHFrontArtifactTest(unittest.TestCase):
             changed[field]=value
             with self.assertRaises(ValueError):artifact.validate_metadata(changed,source)
         with self.assertRaises(ValueError):artifact.validate_metadata(metadata,'b'*40)
+        image='registry.example/front@sha256:'+'b'*64
+        with self.assertRaises(ValueError):artifact.validate_metadata(metadata,source,image)
+        metadata['RepoDigests']=[image]
+        self.assertEqual(artifact.validate_metadata(metadata,source,image),'amd64')
 
     def test_refuses_mutable_or_local_only_artifacts_before_execution(self):
         with mock.patch.object(artifact,'run') as execute:

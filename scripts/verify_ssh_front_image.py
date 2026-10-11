@@ -7,11 +7,13 @@ from scripts.verify_managed_ssh_image import run
 from scripts.verify_ssh_front_transport import verify as verify_transport
 
 
-def validate_metadata(metadata, source):
+def validate_metadata(metadata, source, image=None):
     if metadata.get('Os')!='linux' or metadata.get('Architecture') not in {'amd64','arm64'} or metadata.get('Config',{}).get('Labels',{}).get('org.opencontainers.image.revision')!=source:
         raise ValueError('SSH front artifact provenance or architecture differs')
     if metadata.get('Config',{}).get('Entrypoint')!=['/usr/local/bin/fugue-ssh-front']:
         raise ValueError('SSH front image entrypoint differs from its contract')
+    if image is not None and image not in metadata.get('RepoDigests',[]):
+        raise ValueError('pulled SSH front image lacks the reviewed repository digest')
     return metadata['Architecture']
 
 
@@ -20,7 +22,7 @@ def verify(image, source):
         raise ValueError('immutable registry image and exact source required')
     run(['docker','pull',image],timeout=180)
     metadata=json.loads(run(['docker','image','inspect',image]))[0]
-    architecture=validate_metadata(metadata,source)
+    architecture=validate_metadata(metadata,source,image)
     host=run(['docker','info','--format','{{.Architecture}}']).decode().strip()
     if host not in {'amd64':{'amd64','x86_64'},'arm64':{'arm64','aarch64'}}[architecture]:
         raise ValueError('front acceptance requires native image execution')

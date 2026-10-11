@@ -101,3 +101,10 @@ five seconds for its published TCP port and retains container diagnostics on
 failure. It does not retry application payloads or weaken route verification.
 Front requests now keep credentials in the Authorization header and remove
 legacy `token` query parameters; both unit and actual-image tests enforce this.
+
+The first front-artifact CI run passed prepush tests but stopped at declarative
+release planning. The dependency expansion includes SSH-front code through
+`internal/config` and the runtime package, including the SSH controller. The
+retry enrolls the controller through its normal intent with the exact deployed
+predecessor, while keeping front image selection independent. The release plan
+must be checked before push; production traffic is not selected by this retry.
