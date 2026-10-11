@@ -75,6 +75,8 @@ def verify(image, source):
         calico = work/"calico.yaml"
         calico.write_text(manifest)
         try:
+            run(["ssh", "-V"], timeout=10)
+            run(["kubectl", "version", "--client"], timeout=15)
             run(kind+["create", "cluster", "--name", cluster, "--image", "kindest/node:v1.34.0", "--config", str(kind_config), "--kubeconfig", str(kubeconfig)], timeout=180)
             kube = ["kubectl", "--kubeconfig", str(kubeconfig)]
             run(kube+["create", "-f", str(calico)], timeout=120)

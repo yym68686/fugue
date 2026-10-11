@@ -241,6 +241,36 @@ class CanonicalReceiptTest(unittest.TestCase):
         for name in ("affected-vet", "openapi-generated"):
             self.assertEqual(receipt["checks"][name]["status"], "pass")
 
+    def test_api_warmup_does_not_serialize_unrelated_affected_packages(self):
+        api_finished = threading.Event()
+        barrier = threading.Barrier(2)
+        executed = []
+
+        def fake_run(command, _timeout):
+            executed.append(command)
+            if command == ["go", "test", "./internal/api"]:
+                api_finished.set()
+            elif command in (["go", "build", "-p", "4", "./..."], ["go", "test", "./internal/model"]):
+                self.assertTrue(api_finished.is_set())
+                barrier.wait(timeout=2)
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(fake_run, paths=["internal/api/ssh_ack.go", "internal/model/ssh_ack.go"])
+        self.assertEqual(result, 0)
+        self.assertEqual(executed.count(["go", "test", "./internal/api"]), 1)
+        self.assertEqual(executed.count(["go", "test", "./internal/model"]), 1)
+        self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
+
+    def test_api_warm_failure_is_not_overwritten_by_later_success(self):
+        def fake_run(command, _timeout):
+            if command == ["go", "test", "./internal/api"]:
+                return 1, "synthetic API failure"
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(fake_run, paths=["internal/api/ssh_ack.go", "internal/model/ssh_ack.go"])
+        self.assertEqual(result, 1)
+        self.assertEqual(receipt["checks"]["affected-tests"]["status"], "fail")
+
     def test_helm_checks_start_only_after_compile_success(self) -> None:
         compile_finished = threading.Event()
         helm_observations = []

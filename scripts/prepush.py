@@ -545,8 +545,14 @@ def main() -> int:
         go_dependent_tasks["helm-lint-render"] = None
 
     failures: list[tuple[str, str]] = []
+    warm_test_result: tuple[int, str, float] | None = None
 
     def record(name: str, before: float, status: int, output: str) -> None:
+        if name == "affected-tests" and warm_test_result is not None:
+            warm_status, warm_output, warm_before = warm_test_result
+            status = warm_status or status
+            output = warm_output + output
+            before = warm_before
         checks[name] = {"durationMs": round((time.monotonic() - before) * 1000), "status": "pass" if status == 0 else "fail"}
         if status != 0:
             failures.append((name, bounded_failure_output(output)))
@@ -589,15 +595,20 @@ def main() -> int:
 
     warm_affected = warm_affected_tests_before_compile(test_commands)
     if warm_affected:
-        status, output, before = execute("affected-tests", None)
-        record("affected-tests", before, status, output)
+        warm_commands = [command for command in test_commands if command[2] in SERIAL_WARM_TEST_PACKAGES]
+        test_commands = [command for command in test_commands if command[2] not in SERIAL_WARM_TEST_PACKAGES]
+        before = time.monotonic()
+        status, output = run_test_commands(warm_commands, deadline, go_slots)
+        warm_test_result = (status, output, before)
+        if not test_commands:
+            record("affected-tests", before, 0, "")
 
-    phase_one_workers = 1 + len(non_go_tasks) + (1 if test_commands and not warm_affected else 0)
+    phase_one_workers = 1 + len(non_go_tasks) + (1 if test_commands else 0)
     with concurrent.futures.ThreadPoolExecutor(max_workers=phase_one_workers) as phase_one:
         compile_name, compile_command = compile_task
         compile_future = phase_one.submit(execute, compile_name, compile_command)
         affected_futures = {}
-        if test_commands and not warm_affected:
+        if test_commands:
             affected_futures[phase_one.submit(execute, "affected-tests", None)] = "affected-tests"
         non_go_futures = {
             phase_one.submit(execute, name, command): name
