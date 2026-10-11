@@ -57,7 +57,7 @@ func publicationFixture(test *testing.T) (corev1.Service, EdgeConsumer, corev1.P
 }
 
 func TestPublicBindingRuntimeFencesConcurrentServiceChanges(test *testing.T) {
-	for _, scenario := range []string{"publish", "concurrent-change", "wrong-host-identity"} {
+	for _, scenario := range []string{"publish", "concurrent-change", "wrong-host-identity", "outside-policy"} {
 		test.Run(scenario, func(test *testing.T) {
 			conflict := scenario == "concurrent-change"
 			service, edge, pod, binding, state, ack, _ := publicationFixture(test)
@@ -105,6 +105,9 @@ func TestPublicBindingRuntimeFencesConcurrentServiceChanges(test *testing.T) {
 				}
 				return sshidentity.Observation{IdentityMatched: scenario != "wrong-host-identity", KeyExchangeVerified: true, Fingerprint: ssh.FingerprintSHA256(key)}, nil
 			}}
+			if scenario == "outside-policy" {
+				binding.PublicPort = 23000
+			}
 			err = runtime.ReconcilePublicBinding(context.Background(), binding, state, func(edgeID, instanceUID string) (model.EdgeSSHAcknowledgement, error) {
 				if edgeID != edge.EdgeID || instanceUID != string(pod.UID) {
 					test.Fatal("requested acknowledgement of another instance")
@@ -112,10 +115,17 @@ func TestPublicBindingRuntimeFencesConcurrentServiceChanges(test *testing.T) {
 				return ack, nil
 			})
 			expectedPatches := 1
-			if scenario == "wrong-host-identity" {
+			expectedProbes := 1
+			if scenario == "wrong-host-identity" || scenario == "outside-policy" {
 				expectedPatches = 0
 			}
-			if (err != nil) != (scenario != "publish") || patches != expectedPatches || probes != 1 {
+			if scenario == "outside-policy" {
+				expectedProbes = 0
+				if len(client.Actions()) != 0 {
+					test.Fatal("unenrolled binding touched a public Service")
+				}
+			}
+			if (err != nil) != (scenario == "concurrent-change" || scenario == "wrong-host-identity") || patches != expectedPatches || probes != expectedProbes {
 				test.Fatal("unexpected publication or conflict result", patches, err)
 			}
 			actual, err := client.CoreV1().Services(edge.Namespace).Get(context.Background(), service.Name, metav1.GetOptions{})

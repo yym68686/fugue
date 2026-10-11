@@ -138,6 +138,9 @@ func (runtime *KubernetesRuntime) ReconcilePublicBinding(ctx context.Context, bi
 		if edge.Publication == nil || binding.EdgeGroupID != "" && binding.EdgeGroupID != edge.EdgeGroupID {
 			continue
 		}
+		if binding.PublicPort < edge.Publication.PortStart || binding.PublicPort > edge.Publication.PortEnd {
+			continue
+		}
 		pods, err := runtime.client.CoreV1().Pods(edge.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(edge.PodLabels).String(), FieldSelector: "spec.nodeName=" + edge.EdgeID, Limit: 3})
 		if err != nil {
 			return err
