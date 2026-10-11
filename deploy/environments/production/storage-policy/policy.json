@@ -1,1 +1,1 @@
-{"namespace":"fugue-system","name":"fugue-storage-policy","policy":{"version":1,"compiler_input_chunks":false,"checkpoint_pages":false,"database_max_open":0,"database_max_idle":16,"database_idle_seconds":300}}
+{"namespace":"fugue-system","name":"fugue-storage-policy","policy":{"version":1,"compiler_input_chunks":true,"checkpoint_pages":true,"database_max_open":24,"database_max_idle":8,"database_idle_seconds":60}}
