@@ -1,9 +1,10 @@
 # Managed application SSH
 
 Status: API, schema, SSH controller, independent keyrings, and a restricted
-canary runtime are deployed through CI. The synthetic application's independent
-SSH identity passed Pod and Service handshakes and target verification; its
-public test binding is activated. Public ingress acceptance remains in progress.
+canary runtime are deployed through CI. Two synthetic applications have separate
+managed identities and public bindings. Native SSH, forced PTY, SCP/SFTP,
+forwarding isolation, current-key revocation, actual VS Code Remote SSH,
+candidate promotion, and reviewed rollback passed production canary acceptance.
 The original Argus workloads, identities, routes, and client trust are unchanged.
 Instance-bound edge acknowledgements and retirement have isolated-cluster
 coverage but production edge enrollment and customer migration remain pending.
@@ -12,9 +13,9 @@ coverage but production edge enrollment and customer migration remain pending.
 
 Fugue owns application SSH identity, authorization, serving configuration, and
 session execution independently of application images and releases. Existing
-applications must not need source changes or image rebuilds to migrate. The
-initial compatibility step can configure an existing OpenSSH server, but does
-not count as completion of platform-managed SSH.
+applications must not need source changes or image rebuilds to migrate.
+Migration uses the independent managed server and does not depend on application
+OpenSSH configuration.
 
 This extends the scope of `native-app-ssh-plan.md`: the managed implementation
 terminates standard SSH in a Fugue component and uses an explicitly authorized
@@ -48,7 +49,7 @@ substitute for standard SSH protocol support.
 
 ## Phase 1: managed identity and evidence
 
-- [ ] Define the identity, observation, migration, and public trust contracts.
+- [x] Define the identity, observation, migration, and public trust contracts.
 - [ ] Implement durable, encrypted, independently recoverable host identities.
 - [x] Verify idempotency, concurrent creation, corruption handling, and tenant
       isolation for persistent storage implementations.
@@ -57,16 +58,16 @@ substitute for standard SSH protocol support.
       user authentication. Inventory across all supported algorithms remains
       part of observation integration.
 - [x] Report route configuration, host identity, observation freshness, and
-      client trust separately; remove configuration-only ready assertions.
-- [ ] Render explicit host-key configuration for compatible existing servers,
+      client trust separately; preserve the deprecated legacy readiness alias.
+- [x] Serve the managed identity independently of existing application sshd,
       preserving application image, command, environment, and data.
-- [ ] Add candidate validation and activation with retained serving state;
+- [x] Add candidate validation and activation with retained serving state;
       avoid app restarts for access changes where the runtime supports it.
 - [x] Expose authenticated fingerprints and a reviewable client trust update.
       Do not disable strict host checking or overwrite unrelated host entries.
-- [ ] Synchronize API consumers, CLI diagnostics, and web status.
-- [ ] Pass targeted tests, generated contract checks, and repository tests.
-- [ ] Validate migration, reload, rollback, and active-session behavior in an
+- [x] Synchronize API consumers, CLI diagnostics, and generated web contracts.
+- [x] Pass targeted tests, generated contract checks, and repository tests.
+- [x] Validate migration, reload, rollback, and active-session behavior in an
       isolated environment using synthetic applications.
 - [ ] Review a concrete production migration with impact and rollback evidence.
 - [ ] Execute the approved normal release and migration path and verify the
@@ -79,23 +80,23 @@ substitute for standard SSH protocol support.
       tenant, application identity, authorized user, and exact workload target.
 - [x] Implement interactive PTY, resize, stdin/stdout/stderr, exit status,
       cancellation, signal delivery, and bounded resource consumption.
-- [ ] Implement SFTP and SCP compatibility in the target filesystem, without
-      relying on an application-provided SSH daemon.
-- [ ] Implement explicitly authorized forwarding needed by supported clients;
+- [x] Implement SFTP and modern native SCP in the target filesystem, without
+      relying on an application-provided SSH daemon. Legacy SCP remains a limit.
+- [x] Implement explicitly authorized forwarding needed by supported clients;
       prevent access to other tenants, node management, and cluster credentials.
 - [ ] Ensure helper/runtime compatibility is explicit and generic. Unsupported
       images must report precise limitations rather than falsely claim success.
-- [ ] Reconcile signed serving configuration and authorization separately from
+- [x] Reconcile signed serving configuration and authorization separately from
       the SSH component executable; retain verified state on failed updates.
 - [ ] Implement revocation, authorization expiry, session limits, and audit
       records without exposing command output or secrets by default.
 - [ ] Ship deployment manifests, narrow runtime permissions, health checks,
       metrics, and component release integration.
-- [ ] Verify native OpenSSH, file transfer, and the promised remote development
+- [x] Verify native OpenSSH, file transfer, and the promised remote development
       client workflows with synthetic workloads.
 - [ ] Verify tenant isolation, authorization races, restart/recovery, partial
       rollout, bad configuration, missing identity, and rollback behavior.
-- [ ] Canary the platform-owned serving path before migrating existing routes;
+- [x] Canary the platform-owned serving path before migrating existing routes;
       drain established connections rather than claim seamless process recovery.
 - [ ] Complete reviewed production migration, trust enrollment, and runbook.
 
@@ -747,3 +748,41 @@ reproduced the same rejection. Verification, promotion, and retirement now use
 the clock at their decision point. The five-second future-evidence bound and
 expiry checks are unchanged; a separate test still rejects actual future
 observations. Old public serving state stayed available throughout diagnosis.
+
+## Public canary acceptance checkpoint
+
+The clock fix `1fa92136` completed CI and deployed successfully. The original
+Alpine canary promoted the verified newer image automatically, preserving its
+logical identity and the application Pod/container. A native connection opened
+before promotion continued emitting five-second timestamps across the switch.
+The complete command, exit-status, PTY, 1 MiB SCP/SFTP, allowed forwarding, and
+denied forwarding suite then passed through the public US SSH front.
+
+Actual VS Code 1.115.0 with Remote SSH 0.124.0 installed its server through
+managed SFTP into the independent Python/Debian fixture. Its 91,598,824-byte
+archive transferred through the candidate tunnel and the server listened only
+within the explicitly allowed loopback range 45000-45010. VS Code opened the
+remote `/workspace` and its terminal returned the fixture hostname, `PTY_OK`,
+and `NO_APP_SSHD`. The client then reconnected through the public binding and
+returned `PUBLIC_VSCODE_SSH_OK`, the same workload hostname, and `PTY_OK`.
+Acceptance used an isolated local VS Code user-data directory and separate SSH
+config/known-hosts files; the user's normal SSH trust and editor settings were
+not changed. Alpine remains valid for generic managed SSH but is not claimed
+as a supported VS Code Remote SSH server platform.
+
+Reviewed rollback selected the retained older canary slot with fresh evidence
+and current authorization. The API set route generation three and rollback hold;
+the deleted test key remained rejected while the independent current key worked.
+A truncated HTTP response was followed by a read-only status check, not a repeated
+write. Reviewed reactivation returned to the newer slot at route generation four
+and cleared the hold. The original connection continued across both operations.
+
+Production edge retirement remains deliberately unenrolled: current legacy
+fronts do not provide exact-instance ACKs. The old slot is retained and the
+controller reports that missing prerequisite. Finish a parallel front release
+and proven connection-preserving traffic handoff, exact node credentials/ACKs,
+retirement, recovery/retention tooling, and the concrete Argus trust migration
+before claiming completion of the two-phase goal. An occasional earlier exec
+request rejection remains unexplained; the new bounded diagnostics are in place
+and subsequent acceptance has not reproduced it. No speculative behavioral fix
+was applied to that unexplained event.
