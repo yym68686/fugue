@@ -333,3 +333,28 @@ code was not changed on that hypothesis. Observation failures now report bounded
 HTTP status, truncated byte count, or exception class without printing response
 contents, credential-bearing URLs, or tokens. Internal API Service observations
 used by the verified production transport operations succeeded.
+
+## Four-node canary serving and runtime enrollment
+
+CI run `38147871599`, job `114494918639`, successfully activated the two
+synthetic ports on all four declared nodes. Each node retained its Service UID
+and both front processes, checked candidate/public identities three times, and
+preserved pre-switch and post-switch authenticated sessions. US primary resumed
+at generation 4; the other three selected generation 2. The original Argus
+ports were outside this migration scope.
+
+Runtime generation 6 enrolls these exact Service UIDs, front image, node/Pod
+selectors, public addresses, and transport-intent digests. Automatic publication
+is initially limited to ports 22004-22100. Existing Argus ports remain outside
+that policy. The rollback retention is explicitly one hour for this acceptance
+stage; the only retained old backend belongs to the synthetic fixture and has
+already been retained for more than three hours. An authenticated test session
+is deliberately held on that old slot so signed drain and zero-connection
+retirement can be verified without touching a customer's session. Runtime
+publication remains independent of executable deployment and does not alter
+application images or Deployments.
+
+The transport CI budget is 40 minutes for up to eight sequential operations,
+each with its own bounded three-minute observation deadline, probes, and
+compensation. This accommodates the declared batch limit without changing any
+evidence expiry or retrying mutations.

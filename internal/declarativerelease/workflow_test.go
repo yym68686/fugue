@@ -81,6 +81,9 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	if yamlMappingValue(t, sshTransport, "environment").Value != "production" {
 		t.Fatal("SSH transport bypasses production environment")
 	}
+	if yamlMappingValue(t, sshTransport, "timeout-minutes").Value != "40" {
+		t.Fatal("SSH transport budget must accommodate eight sequential bounded observation windows and compensation")
+	}
 	sshTransportRaw, err := yaml.Marshal(sshTransport)
 	if err != nil {
 		t.Fatal(err)
