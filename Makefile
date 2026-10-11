@@ -5,6 +5,7 @@ DOCKER ?= docker
 .PHONY: test test-scripts prepush generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
 
 test:
+	python3 -m unittest scripts.test_run_ssh_identity_maintenance
 	python3 -m unittest scripts.test_reconcile_managed_ssh_runtime
 	python3 -m unittest scripts.test_verify_ssh_front_image
 	python3 -m unittest scripts.test_stage_managed_ssh_fronts
@@ -36,6 +37,7 @@ test:
 	$(MAKE) test-static-edge-observability
 
 test-scripts:
+	python3 -m unittest scripts.test_run_ssh_identity_maintenance
 	python3 -m unittest scripts.test_observe_worker_standby
 	python3 -m unittest scripts.test_enroll_cell_member
 	python3 -m unittest scripts.test_activate_agent_edge_policy

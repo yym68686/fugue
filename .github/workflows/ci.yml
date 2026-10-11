@@ -10,6 +10,56 @@ permissions:
   contents: read
 
 jobs:
+  managed_ssh_identity_maintenance:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-managed-ssh-identity-maintenance, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select exact independently declared identity maintenance operation
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/managed-ssh/identity-maintenance.json
+          if [[ ! -f "$config" ]]; then exit 0; fi
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          paths=("$config" scripts/run_ssh_identity_maintenance.py scripts/test_run_ssh_identity_maintenance.py cmd/fugue-ssh-identity-maintenance internal/sshmaintenance)
+          if ! git diff --quiet "$base" HEAD -- "${paths[@]}"; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "${paths[@]}" deploy/environments/production/managed-ssh/keys.json internal/sshidentity go.mod go.sum .github/workflows/ci.yml; then
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        if: steps.selected.outputs.changed == 'true'
+        with: {go-version-file: go.mod, cache: false}
+      - name: Verify maintenance gates and compile the independent tool
+        if: steps.selected.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_run_ssh_identity_maintenance
+          go test ./cmd/fugue-ssh-identity-maintenance ./internal/sshmaintenance ./internal/sshidentity
+          go build -trimpath -o "$RUNNER_TEMP/fugue-ssh-identity-maintenance-$GITHUB_RUN_ID" ./cmd/fugue-ssh-identity-maintenance
+      - name: Execute only the declared identity maintenance operation
+        if: steps.selected.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m scripts.run_ssh_identity_maintenance deploy/environments/production/managed-ssh/identity-maintenance.json --binary "$RUNNER_TEMP/fugue-ssh-identity-maintenance-$GITHUB_RUN_ID" --actor "github-actions:$GITHUB_RUN_ID" > "$RUNNER_TEMP/ssh-identity-maintenance-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-ssh-identity-maintenance-${{ github.sha }}
+          path: ${{ runner.temp }}/ssh-identity-maintenance-result.json
+          if-no-files-found: error
+          retention-days: 90
+
   managed_ssh_transport:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

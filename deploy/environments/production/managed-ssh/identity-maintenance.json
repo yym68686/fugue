@@ -1,0 +1,10 @@
+{
+  "schema": "fugue.ssh-identity-maintenance-operation/v1",
+  "operation": "plan",
+  "planID": "inventory-20261012-generation1",
+  "expectedPlanDigest": "",
+  "namespace": "fugue-system",
+  "keyringDeclaration": "deploy/environments/production/managed-ssh/keys.json",
+  "databaseSecret": "fugue-fugue-config",
+  "storageDirectory": "/home/github-runner/.local/state/fugue/ssh-identity-maintenance"
+}
