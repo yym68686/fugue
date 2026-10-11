@@ -1,0 +1,28 @@
+{
+  "schema": "fugue.ssh-front-stage/v1",
+  "generation": 1,
+  "expectedPreviousGeneration": 0,
+  "expectedPreviousDigest": "",
+  "namespace": "fugue-system",
+  "stateConfigMap": "fugue-ssh-front-stage",
+  "image": "ghcr.io/yym68686/fugue-ssh-front@sha256:2a001490dceae95d009a3f9ddc0790e6c7eebc7c6a375cf96cc3175ebc12cbb5",
+  "artifactReceiptDigest": "sha256:98126d7bed13fbea10b8352078f8ac8e8a32e92a22d30af6d8a884fdd01cce2c",
+  "artifactSourceCommit": "6c63735c2ebc8c719ac4274d7178f8c2bd260a73",
+  "artifactRunID": 38138692546,
+  "apiURL": "http://fugue-fugue.fugue-system.svc.cluster.local:80",
+  "signingSecret": "fugue-fugue-config",
+  "signingKeyID": "control-plane",
+  "signingPreviousKeyID": "",
+  "revokedSigningKeyIDs": [],
+  "portStart": 22000,
+  "portEnd": 32000,
+  "cacheHostRoot": "/var/lib/fugue/ssh-front/managed",
+  "healthSourceCIDRs": ["10.42.0.0/32", "15.204.88.101/32"],
+  "backendNamespace": "fugue-ssh",
+  "nodes": [
+    {"id":"vps-591f4447","group":"edge-group-country-us","publicAddress":"15.204.94.71","credential":{"kind":"secret","name":"fugue-edge-token-vps-591f4447"}},
+    {"id":"vps-84c8f0a9","group":"edge-group-country-de","publicAddress":"51.38.126.103","credential":{"kind":"secret","name":"fugue-edge-token-vps-84c8f0a9"}},
+    {"id":"bwg","group":"edge-group-country-us","publicAddress":"95.169.10.156","credential":{"kind":"node-file","path":"/etc/fugue/edge-node.env"}},
+    {"id":"86eabf26-42a9-4f9d-998a-754115f8b829","group":"edge-group-country-us","publicAddress":"154.51.41.196","credential":{"kind":"node-file","path":"/etc/fugue/edge-node.env"}}
+  ]
+}

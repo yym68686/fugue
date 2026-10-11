@@ -15,7 +15,9 @@ GENERATION = "ssh.fugue.dev/runtime-generation"
 DIGEST = "ssh.fugue.dev/runtime-digest"
 
 
-def verify_artifact_run(config, repository, token, request=None):
+def verify_artifact_run(config, repository, token, request=None, job_name="managed_ssh_artifact"):
+    if job_name not in {"managed_ssh_artifact", "managed_ssh_front_artifact"}:
+        raise ValueError("reviewed SSH artifact acceptance job required")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository or "") or not token:
         raise ValueError("authenticated repository identity required")
     if type(config.get("artifactRunID")) is not int or config["artifactRunID"] < 1 or not re.fullmatch(r"[a-f0-9]{40}", config.get("artifactSourceCommit", "")):
@@ -38,7 +40,7 @@ def verify_artifact_run(config, repository, token, request=None):
     for page in range(1,11):
         jobs = request(prefix+"/jobs?filter=latest&per_page=100&page="+str(page)).get("jobs",[])
         for job in jobs:
-            if job.get("name") == "managed_ssh_artifact":
+            if job.get("name") == job_name:
                 if job.get("status") != "completed" or job.get("conclusion") != "success":
                     raise ValueError("managed SSH artifact acceptance did not succeed")
                 return {"verified":True,"run_id":config["artifactRunID"],"source_commit":config["artifactSourceCommit"]}

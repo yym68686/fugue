@@ -74,8 +74,10 @@ any currently serving consumer.
 - Explicit new-binding transport reconciliation and stale/allocation rejection.
 - A concrete Argus cutover and client-trust review after these prerequisites.
 
-The original Argus ports and client known-hosts files remain unchanged. New
-managed fingerprints must never be silently installed into those client files.
+The original Argus port numbers remain unchanged. The explicitly approved
+identity transition and this Mac's backed-up trust update are recorded in
+`argus-managed-ssh-migration-review.md`. New managed fingerprints must never be
+silently installed into other clients' trust files.
 
 ## Artifact and transport verification checkpoint
 
@@ -108,3 +110,21 @@ release planning. The dependency expansion includes SSH-front code through
 retry enrolls the controller through its normal intent with the exact deployed
 predecessor, while keeping front image selection independent. The release plan
 must be checked before push; production traffic is not selected by this retry.
+
+## Independent private candidate stage
+
+The verified front artifact from commit
+`6c63735c2ebc8c719ac4274d7178f8c2bd260a73` passed both actual-image and isolated
+transport checks in CI run `38138692546`. `front-stage.json` selects that exact
+image and receipt through the independent `managed_ssh_front_stage` configuration
+lane. The lane verifies successful artifact-job provenance before creating new
+versioned Deployments and narrowly scoped NetworkPolicies on the four declared
+nodes. It does not create Services, bind host ports, modify existing DaemonSets,
+rotate credentials, or select public traffic.
+
+Each candidate has a separate durable cache, exact downward-API node and Pod
+identity, an explicit valid credential source, and no Kubernetes API token.
+The stage state records a generation and content digest; stale predecessors,
+foreign resources, and changed executor identities are rejected. Previous slots
+remain intact when a new generation is prepared. Live ACKs and host-key probes
+remain required before a separate public transport declaration can select one.

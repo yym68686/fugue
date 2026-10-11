@@ -10,6 +10,60 @@ permissions:
   contents: read
 
 jobs:
+  managed_ssh_front_stage:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-managed-ssh-front-stage, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read, actions: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select exact independently reviewed SSH front stage and provenance
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/managed-ssh/front-stage.json
+          if [[ ! -f "$config" ]]; then exit 0; fi
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/stage_managed_ssh_fronts.py scripts/test_stage_managed_ssh_fronts.py; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/stage_managed_ssh_fronts.py scripts/reconcile_managed_ssh_runtime.py .github/workflows/ci.yml; then
+              python3 -m unittest scripts.test_stage_managed_ssh_fronts scripts.test_reconcile_managed_ssh_runtime
+              python3 -m scripts.stage_managed_ssh_fronts "$config" --verify-artifact-run
+              echo "source=$(jq -r '.artifactSourceCommit' "$config")" >> "$GITHUB_OUTPUT"
+              echo "run_id=$(jq -r '.artifactRunID' "$config")" >> "$GITHUB_OUTPUT"
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.selected.outputs.run_id }}
+          name: fugue-ssh-front-artifact-${{ steps.selected.outputs.source }}
+          path: ${{ runner.temp }}/ssh-front-artifact-${{ github.run_id }}
+      - name: Create isolated SSH front candidates without selecting public traffic
+        if: steps.selected.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/managed-ssh/front-stage.json
+          receipt="$RUNNER_TEMP/ssh-front-artifact-$GITHUB_RUN_ID/ssh-front-receipt.json"
+          python3 -m scripts.stage_managed_ssh_fronts "$config" --receipt "$receipt" --validate-only
+          python3 -m scripts.stage_managed_ssh_fronts "$config" --receipt "$receipt" > "$RUNNER_TEMP/ssh-front-stage-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-ssh-front-stage-${{ github.sha }}
+          path: ${{ runner.temp }}/ssh-front-stage-result.json
+          if-no-files-found: error
+          retention-days: 90
+
   managed_ssh_front_artifact:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' }}
