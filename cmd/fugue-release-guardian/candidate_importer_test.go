@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -926,4 +928,25 @@ func candidateImporterEnvelopeFixture(t *testing.T, groupID string, now time.Tim
 		t.Fatal(err)
 	}
 	return candidateEnvelope{Schema: edgeCandidateEnvelopeSchemaV1, GroupID: groupID, Epoch: 5, AuthorityLedgerSequence: 7, CandidateLedgerSequence: 9, RouteIntentGeneration: "route-intent-5", InventoryGeneration: "inventory-5", ReleaseRecordDigest: "sha256:" + strings.Repeat("7", 64), WorkerSourceSHA: strings.Repeat("8", 40), WorkerImageDigest: "sha256:" + strings.Repeat("9", 64), WorkerSlot: releaseguardian.AuthoritySlotB, PublishedAt: now, CurrentRecord: &current, CurrentBundle: &currentBundle, CurrentWorkerSlot: releaseguardian.AuthoritySlotA, Record: candidate, Bundle: candidateBundle}
+}
+
+func TestCandidateImporterKeepsExistingReaderWhenManagedNodesJoin(t *testing.T) {
+	group := "edge-group-fixture"
+	objects := []runtime.Object{}
+	for i := 0; i < 10; i++ {
+		node := fmt.Sprintf("aa-managed-%02d", i)
+		objects = append(objects, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node, Labels: map[string]string{"fugue.io/edge-group-id": group, "fugue.io/edge-enrollment-phase": "admitted"}}}, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node, Namespace: "fugue-system", Labels: map[string]string{"fugue.io/edge-group-id": group, "fugue.io/edge-control-client": "true"}}, Spec: corev1.PodSpec{NodeName: node}})
+	}
+	objects = append(objects, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "existing-reader", Namespace: "fugue-system", Labels: map[string]string{"fugue.io/edge-group-id": group, "fugue.io/edge-control-client": "true"}}, Spec: corev1.PodSpec{NodeName: "legacy-reader"}})
+	client := fake.NewSimpleClientset(objects...)
+	got, err := candidateImportEdgeID(context.Background(), client, group)
+	if err != nil || got != "legacy-reader" {
+		t.Fatalf("existing credential was rebound by membership: %q %v", got, err)
+	}
+	if err = client.CoreV1().Pods("fugue-system").Delete(context.Background(), "existing-reader", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = candidateImportEdgeID(context.Background(), client, group); err == nil {
+		t.Fatal("managed node substituted for unavailable credential owner")
+	}
 }

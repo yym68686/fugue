@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/model/edgecohort"
 	"fugue/internal/releaseguardian"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -272,14 +273,25 @@ func candidateEnvelopeMatchesSettledCurrent(envelope candidateEnvelope, current 
 
 func candidateImportEdgeID(ctx context.Context, client kubernetes.Interface, groupID string) (string, error) {
 	selector := labels.Set{"fugue.io/edge-group-id": groupID, "fugue.io/edge-control-client": "true"}.AsSelector().String()
-	pods, err := client.CoreV1().Pods("fugue-system").List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 8})
-	if err != nil || pods.Continue != "" || len(pods.Items) == 0 || len(pods.Items) > 7 {
+	pods, err := client.CoreV1().Pods("fugue-system").List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 1601})
+	if err != nil || pods.Continue != "" || len(pods.Items) == 0 || len(pods.Items) > 1600 {
 		return "", errors.New("candidate import worker identity is unavailable")
+	}
+	// The importer owns the established reader credential. Managed members
+	// have separate node-bound credentials, so their lexical order must never
+	// cause this credential to be presented as a different node identity.
+	declarations, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: labels.Set{"fugue.io/edge-group-id": groupID}.AsSelector().String(), Limit: 1001})
+	if err != nil || declarations.Continue != "" || len(declarations.Items) > 1000 {
+		return "", errors.New("candidate import membership declaration is unavailable")
+	}
+	managed := map[string]bool{}
+	for _, node := range declarations.Items {
+		managed[node.Name] = node.Labels[edgecohort.PhaseLabel] != ""
 	}
 	nodes := map[string]bool{}
 	for index := range pods.Items {
 		pod := &pods.Items[index]
-		if pod.DeletionTimestamp != nil || strings.TrimSpace(pod.Spec.NodeName) == "" {
+		if pod.DeletionTimestamp != nil || strings.TrimSpace(pod.Spec.NodeName) == "" || managed[pod.Spec.NodeName] {
 			continue
 		}
 		nodes[strings.TrimSpace(pod.Spec.NodeName)] = true
