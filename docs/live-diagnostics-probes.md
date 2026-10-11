@@ -251,3 +251,15 @@ Node memory recipes preserve scrape and container-lifecycle labels. A zero
 six-hour OOM series conflicting with a recent Kubernetes OOMKilled termination
 makes the report degraded; the original values remain unchanged. Collection
 success is not proof of cross-source agreement or causal attribution.
+
+The API's `database` runtime provider correlates pgx query fingerprints with
+backend PID, a bounded connection identity, operation lineage and exact lengths
+of existing string/byte parameters. Other encodings remain explicitly unknown;
+no re-serialization is performed to measure them. Known result boundaries may
+record buffer lengths, separate from protocol bytes. The recorder keeps at most
+256 recent queries, 128 large input/output queries and 128 unfinished queries.
+Writers drop observations on contention instead of blocking application work;
+dropped completions and overwrites are explicit. Compiler input persistence
+propagates operation lineage without changing the store's existing timeout or
+cancellation semantics. Runtime requests never expose SQL text, parameters,
+result payloads, credentials or raw error messages.

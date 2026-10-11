@@ -9,6 +9,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
+	"fugue/internal/runtimeobservation"
 	"fugue/internal/store"
 )
 
@@ -35,6 +36,7 @@ func (err *platformConfigReferenceError) Error() string { return err.reason }
 // An interrupted write may leave immutable drafts; a retry ensures the same
 // identities and validates the complete parent before returning success.
 func (s *Server) materializePlatformCompilation(ctx context.Context, compiled platformconfig.CompileResult, principal model.Principal, inputs *platformConfigStoredInputs, sources ...platformCompilationSource) (response platformConfigCompileResponse, resultErr error) {
+	ctx = runtimeobservation.WithDatabaseOperation(ctx, "platform-compilation")
 	started, phaseStarted, phase := time.Now(), time.Now(), "validate_source"
 	durations := map[string]int64{}
 	advance := func(next string) {
@@ -96,7 +98,7 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 		return platformConfigCompileResponse{}, err
 	}
 	advance("compiler_input")
-	if err := s.store.EnsurePlatformCompilerInput(compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
+	if err := s.store.EnsurePlatformCompilerInputContext(runtimeobservation.WithDatabaseOperation(ctx, "compiler-input-persist"), compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
 		return platformConfigCompileResponse{}, err
 	}
 	artifacts := []*model.PlatformArtifact{&compiled.RouteArtifact, &compiled.DNSArtifact, &compiled.TLSArtifact}

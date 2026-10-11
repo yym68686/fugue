@@ -2397,7 +2397,7 @@ func loggingMiddleware(logger *log.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(recorder, r)
+		next.ServeHTTP(recorder, r.WithContext(runtimeobservation.WithDatabaseOperation(r.Context(), "http-request")))
 		logger.Printf("%s %s status=%d duration=%s", r.Method, r.URL.Path, recorder.status, time.Since(start))
 	})
 }

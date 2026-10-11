@@ -45,13 +45,15 @@ type pgProcessMemory struct {
 	Anonymous   uint64 `json:"anonymous_bytes"`
 }
 type pgMemorySample struct {
-	At            time.Time              `json:"observed_at"`
-	Current       uint64                 `json:"memory_current"`
-	Limit         uint64                 `json:"memory_limit"`
-	Events        map[string]uint64      `json:"memory_events"`
-	Processes     []pgProcessMemory      `json:"processes"`
-	Activity      *pgActivityObservation `json:"activity,omitempty"`
-	ActivityError string                 `json:"activity_error,omitempty"`
+	AccountingCgroup string                 `json:"accounting_cgroup"`
+	MissingProcesses int                    `json:"missing_processes"`
+	At               time.Time              `json:"observed_at"`
+	Current          uint64                 `json:"memory_current"`
+	Limit            uint64                 `json:"memory_limit"`
+	Events           map[string]uint64      `json:"memory_events"`
+	Processes        []pgProcessMemory      `json:"processes"`
+	Activity         *pgActivityObservation `json:"activity,omitempty"`
+	ActivityError    string                 `json:"activity_error,omitempty"`
 }
 
 func postgresMemoryWindow(ctx context.Context, req livediagnostics.ProbeRequest, c Collector) (any, error) {
@@ -135,6 +137,9 @@ func postgresMemoryWindow(ctx context.Context, req livediagnostics.ProbeRequest,
 		if err != nil {
 			gaps = append(gaps, "memory source became unavailable; pre-exit samples retained")
 			break
+		}
+		if sample.MissingProcesses > 0 && len(gaps) == 0 {
+			gaps = append(gaps, "some process lifetimes changed during memory sampling")
 		}
 		high := sample.Limit > 0 && float64(sample.Current)/float64(sample.Limit) >= 0.8
 		if high && !dense {
@@ -226,6 +231,7 @@ func readPostgresMemory(cg, id string) (pgMemorySample, error) {
 			accounting = path
 		}
 	}
+	sample.AccountingCgroup = accounting
 	raw, err := readBounded(filepath.Join(accounting, "memory.current"), 80)
 	if err != nil {
 		return sample, err
@@ -258,6 +264,13 @@ func readPostgresMemory(cg, id string) (pgMemorySample, error) {
 	for _, v := range pids {
 		pid, err := strconv.Atoi(v)
 		if err != nil {
+			continue
+		}
+		beforeStat, beforeErr := readBounded(filepath.Join(hostProc, v, "stat"), 16384)
+		before, parseErr := parseProcessStat(pid, beforeStat)
+		group, groupErr := readBounded(filepath.Join(hostProc, v, "cgroup"), 8192)
+		if beforeErr != nil || parseErr != nil || groupErr != nil || !strings.Contains(group, id) {
+			sample.MissingProcesses++
 			continue
 		}
 		status, err := readBounded(filepath.Join(hostProc, v, "status"), 8192)
@@ -293,6 +306,10 @@ func readPostgresMemory(cg, id string) (pgMemorySample, error) {
 		}
 		f, err := parseProcessStat(pid, s)
 		if err != nil {
+			continue
+		}
+		if f.StartTicks != before.StartTicks {
+			sample.MissingProcesses++
 			continue
 		}
 		p.StartTicks = f.StartTicks
