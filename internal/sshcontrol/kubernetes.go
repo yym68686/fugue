@@ -437,7 +437,7 @@ func (runtime *KubernetesRuntime) Observe(ctx context.Context, slot managedssh.S
 	observed := slot
 	observed.Evidence = &evidence
 	if !observed.Verified(time.Now().UTC()) {
-		return evidence, managedssh.ErrCandidateUnverified
+		return evidence, fmt.Errorf("runtime bound evidence: %s: %w", observed.VerificationFailure(time.Now().UTC()), managedssh.ErrCandidateUnverified)
 	}
 	return evidence, nil
 }

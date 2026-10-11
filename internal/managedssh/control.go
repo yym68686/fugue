@@ -82,9 +82,40 @@ func SlotID(identityID string, target Target, release RuntimeRelease) string {
 }
 
 func (slot ServingSlot) Verified(now time.Time) bool {
+	return slot.VerificationFailure(now) == ""
+}
+
+func (slot ServingSlot) VerificationFailure(now time.Time) string {
 	evidence := slot.Evidence
 	configuration := slot.Artifact.Configuration
-	return evidence != nil && evidence.ArtifactDigest == slot.Artifact.Digest && evidence.IdentityID == configuration.Identity.ID && evidence.Fingerprint == configuration.Identity.Fingerprint && evidence.ServerPodUID != "" && evidence.TargetPodUID == configuration.Target.PodUID && evidence.TargetContainerID == configuration.Target.ContainerID && evidence.KeyExchangeVerified && evidence.RuntimeVerified && !evidence.ObservedAt.IsZero() && !evidence.ObservedAt.After(now.Add(5*time.Second)) && evidence.ExpiresAt.After(now) && evidence.ExpiresAt.After(evidence.ObservedAt) && !evidence.ExpiresAt.After(evidence.ObservedAt.Add(2*time.Minute)) && configuration.ValidUntil.After(evidence.ExpiresAt)
+	switch {
+	case evidence == nil:
+		return "evidence_missing"
+	case evidence.ArtifactDigest != slot.Artifact.Digest:
+		return "artifact_digest_mismatch"
+	case evidence.IdentityID != configuration.Identity.ID || evidence.Fingerprint != configuration.Identity.Fingerprint:
+		return "host_identity_mismatch"
+	case evidence.ServerPodUID == "":
+		return "server_pod_missing"
+	case evidence.TargetPodUID != configuration.Target.PodUID || evidence.TargetContainerID != configuration.Target.ContainerID:
+		return "target_identity_mismatch"
+	case !evidence.KeyExchangeVerified:
+		return "key_exchange_unverified"
+	case !evidence.RuntimeVerified:
+		return "runtime_unverified"
+	case evidence.ObservedAt.IsZero():
+		return "observation_time_missing"
+	case evidence.ObservedAt.After(now.Add(5 * time.Second)):
+		return "observation_after_verification_clock"
+	case !evidence.ExpiresAt.After(now):
+		return "observation_expired"
+	case !evidence.ExpiresAt.After(evidence.ObservedAt) || evidence.ExpiresAt.After(evidence.ObservedAt.Add(2*time.Minute)):
+		return "observation_lifetime_invalid"
+	case !configuration.ValidUntil.After(evidence.ExpiresAt):
+		return "observation_exceeds_authorization"
+	default:
+		return ""
+	}
 }
 
 func (state ControlState) Validate() error {

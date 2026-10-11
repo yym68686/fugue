@@ -216,7 +216,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 		observed := slot
 		observed.Evidence = &evidence
 		if err != nil || !observed.Verified(now) {
-			reconcileErrors = append(reconcileErrors, errors.Join(managedssh.ErrCandidateUnverified, err))
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("verify slot %s: reason=%s observed_after_check_ms=%d: %w", slot.ID, observed.VerificationFailure(now), evidence.ObservedAt.Sub(now).Milliseconds(), errors.Join(managedssh.ErrCandidateUnverified, err)))
 			if slot.Evidence == nil {
 				continue
 			}
