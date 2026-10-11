@@ -108,6 +108,9 @@ then authenticated using the existing local key with strict host checking and
 returned UID 0, `/workspace`, and their respective original application hostname.
 No application source, image, startup command, deployment, or user key changed.
 Both original business containers retained their IDs and zero restarts.
+Repeated login checks remained successful after the cutover. Native forced-PTY
+sessions returned `PTY_OK`, and SFTP `pwd` returned `/workspace` on both aliases;
+these checks did not write application files.
 
 Owner-only backups:
 

@@ -5,10 +5,14 @@ canary runtime are deployed through CI. Two synthetic applications have separate
 managed identities and public bindings. Native SSH, forced PTY, SCP/SFTP,
 forwarding isolation, current-key revocation, actual VS Code Remote SSH,
 candidate promotion, and reviewed rollback passed production canary acceptance.
-The original Argus workloads, public routes, and client trust are unchanged.
-Separate Argus host identities are now prepared for private candidate review.
-Instance-bound edge acknowledgements and retirement have isolated-cluster
-coverage but production edge enrollment and customer migration remain pending.
+Both Argus endpoints now serve their separately prepared managed identities
+after explicit user approval. Their source, images, startup commands, original
+Pods, and container IDs remain unchanged. This Mac's two matching trust records
+were backed up and updated after all four public fronts matched the reviewed
+keys. Four independent front candidates now have verified production ACKs and
+private SSH acceptance; their public transport selection and retirement remain
+unfinished. See `argus-managed-ssh-migration-review.md` for the completed cutover
+and `managed-ssh-front-rollout.md` for the remaining front work.
 
 ## Outcome
 
@@ -51,7 +55,10 @@ substitute for standard SSH protocol support.
 ## Phase 1: managed identity and evidence
 
 - [x] Define the identity, observation, migration, and public trust contracts.
-- [ ] Implement durable, encrypted, independently recoverable host identities.
+- [x] Implement durable, encrypted, independently recoverable host identities.
+      All four prepared records and ownership anchors passed an isolated restore
+      using the separately retained keyring; both affected public identities
+      matched their authenticated inventory after recovery.
 - [x] Verify idempotency, concurrent creation, corruption handling, and tenant
       isolation for persistent storage implementations.
 - [x] Add a read-only, bounded SSH handshake probe for a selected expected host
@@ -70,8 +77,8 @@ substitute for standard SSH protocol support.
 - [x] Pass targeted tests, generated contract checks, and repository tests.
 - [x] Validate migration, reload, rollback, and active-session behavior in an
       isolated environment using synthetic applications.
-- [ ] Review a concrete production migration with impact and rollback evidence.
-- [ ] Execute the approved normal release and migration path and verify the
+- [x] Review a concrete production migration with impact and rollback evidence.
+- [x] Execute the approved normal release and migration path and verify the
       affected endpoints without changes to application source or images.
 
 ## Phase 2: platform-managed sessions
@@ -793,8 +800,9 @@ was applied to that unexplained event.
 Both affected applications retain their existing active registered RSA user key,
 which matches the local SSH client key. The platform prepared different encrypted
 host identities for the two logical applications without changing either route
-or workload. These identities are declarations pending candidate verification;
-the public endpoints still present their original shared image key.
+or workload during preparation. After private verification and explicit user
+approval, these identities were activated at the original ports. Public checks
+and this Mac's client trust transition are recorded in the migration review.
 
 The updated identity/anchor dump has SHA-256
 `ddd2f2cdf500ffd6ae5052bfc3f48c7719b6316f4585e21ae52705980838fbfa`.

@@ -155,3 +155,10 @@ preserved both old-target and new-target streams after SIGTERM and exited cleanl
 after the clients finished. Future image receipts record
 `graceful-shutdown-drain`; building that artifact does not replace the staged or
 currently public processes.
+
+CI run `38141570188`, artifact job `114476532682`, passed the real immutable
+image and transport tests including graceful shutdown. Independent stage
+generation 2 selects image
+`ghcr.io/yym68686/fugue-ssh-front@sha256:3e9908984365189c0c7157fa4418f9ef2318f6aa01f7bf113ad0bfd04726649b`
+and that exact receipt. It prepares new candidate slots and retains generation 1;
+it still does not change public transport or restart either application.
