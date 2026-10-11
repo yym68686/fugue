@@ -1781,6 +1781,33 @@ jobs:
           python3 -m unittest scripts.test_reconcile_prometheus_scrape_policy
           python3 scripts/reconcile_prometheus_scrape_policy.py deploy/environments/production/observability/scrape-policy.json --apply
 
+  storage_policy:
+    # Writer activation and budget recovery are independent of code builds.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-storage-policy, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Publish independent storage policy when changed
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          if git diff --quiet "$BASE_SHA" HEAD -- deploy/environments/production/storage-policy scripts/publish_storage_policy.py scripts/test_publish_storage_policy.py; then
+            exit 0
+          fi
+          git fetch origin main
+          if ! git diff --quiet HEAD origin/main -- deploy/environments/production/storage-policy scripts/publish_storage_policy.py; then
+            echo "A newer storage policy supersedes this run."
+            exit 0
+          fi
+          python3 -m unittest scripts.test_publish_storage_policy
+          python3 scripts/publish_storage_policy.py deploy/environments/production/storage-policy/policy.json
+          python3 scripts/publish_storage_policy.py deploy/environments/production/storage-policy/policy.json --apply
+
   workload_memory_policy:
     # Admission configuration remains recoverable if a component build fails.
     if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' }}

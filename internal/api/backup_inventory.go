@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"path"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/store"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
@@ -209,30 +209,21 @@ func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *back
 	var next time.Time
 	ctx, cancel := context.WithTimeout(parent, cfg.PageTimeout+5*time.Second)
 	defer cancel()
-	_, err := s.store.UpdateObservationCheckpoint(ctx, g.key, func(raw []byte) ([]byte, error) {
-		cp := backupInventoryCheckpoint{Version: 1}
-		if len(raw) > 0 {
-			if err := json.Unmarshal(raw, &cp); err != nil {
-				return nil, fmt.Errorf("decode backup inventory checkpoint: %w", err)
-			}
-			if cp.Version != 1 {
-				return nil, fmt.Errorf("unsupported backup inventory checkpoint")
-			}
-		}
+	advance := func(cp *backupInventoryCheckpoint) (bool, error) {
 		if now.Before(cp.NextAttempt) {
 			next = cp.NextAttempt
-			return nil, nil
+			return false, nil
 		}
 		if cp.Current == nil && cp.Complete != nil && cp.Complete.FinishedAt != nil && now.Sub(*cp.Complete.FinishedAt) < cfg.RefreshInterval {
 			next = cp.Complete.FinishedAt.Add(cfg.RefreshInterval)
-			return nil, nil
+			return false, nil
 		}
 		backend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(g.backends[0]))
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		if !backupUsageR2NamespaceIsMeasurable(backend) {
-			return nil, errors.New("backup namespace is not measurable")
+			return false, errors.New("backup namespace is not measurable")
 		}
 		if cp.Current == nil || now.Sub(cp.Current.StartedAt) > cfg.MaxScanAge {
 			cp.Current = &backupInventoryScan{Generation: model.NewID("inventory"), StartedAt: now, Wanted: map[string]bool{}, References: map[string]dataObjectInfo{}, Totals: map[string]backupInventoryTotals{}}
@@ -246,7 +237,7 @@ func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *back
 			cp.Current.NamespaceOwner = owner
 			artifacts, err := s.store.ListBackupUsageArtifacts("", true)
 			if err != nil {
-				return nil, err
+				return false, err
 			}
 			ids := map[string]bool{}
 			for _, b := range g.backends {
@@ -307,14 +298,14 @@ func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *back
 			}
 			cp.NextAttempt = now.Add(cfg.RetryInterval)
 			next = cp.NextAttempt
-			return json.Marshal(cp)
+			return true, nil
 		}
 		nextCursor := aws.ToString(response.NextContinuationToken)
 		if aws.ToBool(response.IsTruncated) && (nextCursor == "" || nextCursor == scan.Cursor) {
 			cp.Error = "invalid_pagination"
 			cp.NextAttempt = now.Add(cfg.RetryInterval)
 			next = cp.NextAttempt
-			return json.Marshal(cp)
+			return true, nil
 		}
 		objects := make([]dataObjectInfo, 0, len(response.Contents))
 		for _, o := range response.Contents {
@@ -376,8 +367,30 @@ func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *back
 			cp.Current = nil
 			next = scan.FinishedAt.Add(cfg.RefreshInterval)
 		}
+		return true, nil
+	}
+	legacy := func(raw []byte) ([]byte, error) {
+		cp, err := decodeBackupInventoryPages(store.ObservationPages{}, raw)
+		if err != nil {
+			return nil, err
+		}
+		dirty, err := advance(&cp)
+		if err != nil || !dirty {
+			return nil, err
+		}
 		return json.Marshal(cp)
-	})
+	}
+	_, err := s.store.UpdateObservationPages(ctx, g.key, func(pages store.ObservationPages, raw []byte) (store.ObservationPages, error) {
+		cp, err := decodeBackupInventoryPages(pages, raw)
+		if err != nil {
+			return store.ObservationPages{}, err
+		}
+		dirty, err := advance(&cp)
+		if err != nil || !dirty {
+			return store.ObservationPages{}, err
+		}
+		return encodeBackupInventoryPages(cp)
+	}, legacy)
 	return next, err
 }
 
@@ -390,13 +403,9 @@ func (s *Server) readBackupInventory(ctx context.Context, groupKey string) (back
 	if g == nil {
 		return backupInventoryCheckpoint{}, errors.New("backup namespace no longer configured")
 	}
-	raw, err := s.store.ReadObservationCheckpoint(ctx, g.key)
+	pages, raw, err := s.store.ReadObservationPages(ctx, g.key)
 	if err != nil {
 		return backupInventoryCheckpoint{}, err
 	}
-	var cp backupInventoryCheckpoint
-	if len(raw) > 0 {
-		err = json.Unmarshal(raw, &cp)
-	}
-	return cp, err
+	return decodeBackupInventoryPages(pages, raw)
 }

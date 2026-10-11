@@ -799,6 +799,12 @@ func (s *Store) verifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 }
 
 func (s *Store) GetActivePlatformArtifact(kind, scopeKey, channel string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
+	return s.GetActivePlatformArtifactWithReader(kind, scopeKey, channel, nil)
+}
+
+// A caller-owned reader can reuse immutable artifacts within one request. The
+// active release row is always fetched afresh; this never caches a lane/fence.
+func (s *Store) GetActivePlatformArtifactWithReader(kind, scopeKey, channel string, read func(string) (model.PlatformArtifact, error)) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
 	kind = NormalizePlatformArtifactKind(kind)
 	scopeKey = strings.TrimSpace(strings.ToLower(scopeKey))
 	if scopeKey == "" {
@@ -809,7 +815,7 @@ func (s *Store) GetActivePlatformArtifact(kind, scopeKey, channel string) (model
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, false, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgGetActivePlatformArtifact(kind, scopeKey, channel)
+		return s.pgGetActivePlatformArtifactWithReader(kind, scopeKey, channel, read)
 	}
 	var artifact model.PlatformArtifact
 	var release model.PlatformArtifactRelease
@@ -833,6 +839,9 @@ func (s *Store) GetActivePlatformArtifact(kind, scopeKey, channel string) (model
 		artifact = state.PlatformArtifacts[index]
 		return nil
 	})
+	if err == nil && found && read != nil {
+		artifact, err = read(release.ArtifactID)
+	}
 	return artifact, release, found, err
 }
 

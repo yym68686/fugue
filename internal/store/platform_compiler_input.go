@@ -20,6 +20,9 @@ func (s *Store) EnsurePlatformCompilerInput(snapshot platformconfig.RuntimeSnaps
 
 func (s *Store) EnsurePlatformCompilerInputContext(ctx context.Context, snapshot platformconfig.RuntimeSnapshot, digest string) error {
 	if s.usingDatabase() {
+		if s.StoragePolicy().CompilerInputChunks {
+			return s.pgEnsureChunkedInput(ctx, snapshot, digest)
+		}
 		return s.pgEnsurePlatformCompilerInput(ctx, snapshot, digest)
 	}
 	raw, err := json.Marshal(snapshot)

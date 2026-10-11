@@ -99,30 +99,11 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		if sourceErr != nil {
 			return fail("DNS routing source authorization invalid")
 		}
-		physicalRequired, err := physicalNetworkCapabilityRequired(child)
+		required, err := physicalCapabilitiesRequired(child)
 		if err != nil {
 			return fail("physical network policy cannot be decoded")
 		}
-		deliveryRequired, err := physicalDeliveryCapabilityRequired(child)
-		if err != nil {
-			return fail("physical delivery policy cannot be decoded")
-		}
-		failureAwareRequired, err := physicalFailureAwareCapabilityRequired(child)
-		if err != nil {
-			return fail("physical failure-aware policy cannot be decoded")
-		}
-		comparableDeliveryRequired, err := physicalComparableDeliveryCapabilityRequired(child)
-		if err != nil {
-			return fail("physical comparable delivery policy cannot be decoded")
-		}
-		orderRequired, err := physicalOrderCapabilityRequired(child)
-		if err != nil {
-			return fail("physical order policy cannot be decoded")
-		}
-		projectionRequired, err := physicalOrderProjectionCapabilityRequired(child)
-		if err != nil {
-			return fail("physical order projection cannot be decoded")
-		}
+		physicalRequired, deliveryRequired, failureAwareRequired, comparableDeliveryRequired, orderRequired, projectionRequired := required.network, required.delivery, required.failureAware, required.comparableDelivery, required.order, required.projection
 		for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
 			if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
 				return fail("member lineage differs")
@@ -208,6 +189,44 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		}
 	}
 	return nil
+}
+
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection bool }
+
+func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
+	var out physicalCapabilities
+	var payload struct {
+		Policy struct {
+			Query *platformconfig.DNSQueryPolicy `json:"dns_query_policy"`
+			Rules []platformconfig.DNSAnswerRule `json:"dns_answer_rules"`
+		} `json:"policy"`
+	}
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return out, err
+	}
+	if err = json.Unmarshal(raw, &payload); err != nil {
+		return out, err
+	}
+	if query := payload.Policy.Query; query != nil {
+		out.projection = query.OrderedProjection != nil
+		if query.DynamicQuality != nil {
+			out.network = true
+			out.delivery = true
+			out.failureAware = query.DynamicQuality.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion
+			out.comparableDelivery = query.DynamicQuality.Policy.Version == model.PhysicalComparableDeliveryPolicyVersion
+		}
+		for _, route := range query.PhysicalRoutes {
+			out.network = out.network || model.IsBoundedPhysicalNetworkPolicy(route.Policy.Version)
+			out.delivery = out.delivery || model.IsDeliveryPhysicalNetworkPolicy(route.Policy.Version)
+			out.failureAware = out.failureAware || route.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion
+			out.comparableDelivery = out.comparableDelivery || route.Policy.Version == model.PhysicalComparableDeliveryPolicyVersion
+		}
+	}
+	for _, rule := range payload.Policy.Rules {
+		out.order = out.order || rule.SelectionMode == model.DNSAnswerPolicyKindPhysicalOrder
+	}
+	return out, nil
 }
 
 func physicalNetworkCapabilityRequired(artifact model.PlatformArtifact) (bool, error) {

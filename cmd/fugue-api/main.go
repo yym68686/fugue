@@ -118,6 +118,7 @@ func main() {
 		Observability: cfg.Observability,
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	go store.RunStoragePolicy(ctx, os.Getenv("FUGUE_STORAGE_POLICY_FILE"))
 	defer stop()
 	billingStatementsReady := false
 	go store.RunBillingStatementWarmer(ctx, min(cfg.DatabaseBillingWarmConnections, cfg.DatabaseMaxIdleConnections), func(err error) {
@@ -133,7 +134,7 @@ func main() {
 	if err := livediagnostics.StartRuntimeEndpoint(ctx, "api"); err != nil {
 		logger.Printf("live diagnostics runtime endpoint unavailable: %v", err)
 	}
-	if err := runtimeobservation.Start(ctx, "api", map[string]runtimeobservation.Provider{"database": runtimeobservation.DatabaseObservations.Snapshot, "http-client": kubeauth.HTTPObservations.Snapshot, "operations": server.OperationSnapshot}); err != nil {
+	if err := runtimeobservation.Start(ctx, "api", map[string]runtimeobservation.Provider{"storage": store.StorageObservation, "database": runtimeobservation.DatabaseObservations.Snapshot, "http-client": kubeauth.HTTPObservations.Snapshot, "operations": server.OperationSnapshot}); err != nil {
 		logger.Printf("runtime observations unavailable: %v", err)
 	}
 	warmersDone := server.StartBackgroundWarmers(ctx)

@@ -519,13 +519,11 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 
 func (s *Server) restorePublishedQualityEvidence(projection platformIntentProjectionResponse, jobs []dynamicQualityJob, parent model.PlatformArtifact) {
 	digest := parent.Metadata["input_snapshot_digest"]
-	content, err := s.store.GetPlatformArtifactContent(digest)
+	snapshot, err := s.store.GetPlatformCompilerInput(digest)
 	if err != nil {
 		return
 	}
-	snapshot, err := platformconfig.DecodeRuntimeSnapshotContent(content.Content)
-	actual, digestErr := platformconfig.RuntimeSnapshotDigest(snapshot)
-	if err != nil || digestErr != nil || actual != digest || snapshot.IntentGeneration != parent.Metadata["intent_generation"] || snapshot.PolicyGeneration != parent.Metadata["policy_generation"] || snapshot.IntentGeneration != projection.Intent.Generation {
+	if snapshot.IntentGeneration != parent.Metadata["intent_generation"] || snapshot.PolicyGeneration != parent.Metadata["policy_generation"] || snapshot.IntentGeneration != projection.Intent.Generation {
 		return
 	}
 	requested := map[string]dynamicQualityJob{}

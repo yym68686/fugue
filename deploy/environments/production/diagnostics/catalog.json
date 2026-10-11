@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 42,
+    "generation": 43,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,7 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {"id":"runtime-storage-budget","description":"Live storage format policy, database connection occupancy and wait counters","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":120,"parameters":{},"config":{"collectors":[{"name":"storage-budget","kind":"runtime-json","path":"/v1/snapshots/storage","interval_seconds":15,"fields":["schema","observed_at","policy","policy_loaded_at","policy_read_failed","compiler_input_chunk_bytes","compiler_input_database_writer_limit","database_pool"]}]}},
       {"id":"runtime-database-queries","description":"Bounded query fingerprints, backend PID, operation lineage and known input/output buffer sizes; excludes SQL text and values","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":120,"parameters":{},"config":{"collectors":[{"name":"database-queries","kind":"runtime-json","path":"/v1/snapshots/database","interval_seconds":15,"fields":["schema","observed_at","queries","large_queries","active","completed_total","large_completed_total","overwritten","dropped_events","note"]}]}},
       {"id":"runtime-heap-export","description":"Export one bounded raw heap profile with frozen process identity and SHA256 for offline analysis; no live analyzer","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":30,"parameters":{},"config":{"collectors":[{"name":"profile","kind":"runtime-profile-export","path":"/v1/profile/heap","interval_seconds":60}]}},
       {"id":"runtime-allocs-export","description":"Export one bounded raw allocs profile with frozen process identity and SHA256 for offline analysis; no live analyzer","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":30,"parameters":{},"config":{"collectors":[{"name":"profile","kind":"runtime-profile-export","path":"/v1/profile/allocs","interval_seconds":60}]}},

@@ -213,6 +213,15 @@ SELECT content_hash, content_json, size_bytes, created_at, updated_at
 FROM fugue_platform_artifact_contents
 WHERE content_hash = $1`, contentHash))
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, ErrNotFound) {
+			chunked, chunkErr := s.pgReadChunkedContent(ctx, contentHash)
+			if chunkErr == nil {
+				return chunked, nil
+			}
+			if !absentInputManifest(chunkErr) {
+				return model.PlatformArtifactContent{}, chunkErr
+			}
+		}
 		return model.PlatformArtifactContent{}, mapDBErr(err)
 	}
 	return content, nil
@@ -1393,6 +1402,10 @@ func platformArtifactProvenanceEquivalent(existing, candidate model.PlatformArti
 }
 
 func (s *Store) pgGetActivePlatformArtifact(kind, scopeKey, channel string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
+	return s.pgGetActivePlatformArtifactWithReader(kind, scopeKey, channel, nil)
+}
+
+func (s *Store) pgGetActivePlatformArtifactWithReader(kind, scopeKey, channel string, read func(string) (model.PlatformArtifact, error)) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	release, err := scanPlatformArtifactRelease(s.db.QueryRowContext(ctx, `
@@ -1413,7 +1426,12 @@ LIMIT 1`, kind, scopeKey, channel, model.PlatformArtifactReleaseStatusActive))
 		}
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, false, mapDBErr(err)
 	}
-	artifact, err := pgGetPlatformArtifactForUpdate(ctx, s.db, release.ArtifactID, false)
+	var artifact model.PlatformArtifact
+	if read != nil {
+		artifact, err = read(release.ArtifactID)
+	} else {
+		artifact, err = pgGetPlatformArtifactForUpdate(ctx, s.db, release.ArtifactID, false)
+	}
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, false, mapDBErr(err)
 	}

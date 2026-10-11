@@ -21,7 +21,16 @@ var trafficProjectionValidations = struct {
 }{keys: make(map[[32]byte]bool)}
 
 func trafficProjectionKey(parent, child model.PlatformArtifact, policy []byte) ([32]byte, bool) {
-	if len(policy) < 2048 {
+	var value any
+	if json.Unmarshal(policy, &value) != nil {
+		return [32]byte{}, false
+	}
+	return trafficProjectionContentKey(parent, child, value)
+}
+
+func trafficProjectionContentKey(parent, child model.PlatformArtifact, policy any) ([32]byte, bool) {
+	policyHash, size, ok := policyTreeFingerprint(policy)
+	if !ok || size < 2048 {
 		return [32]byte{}, false
 	}
 	// The validator reads the child's policy and its envelope, plus the
@@ -40,7 +49,7 @@ func trafficProjectionKey(parent, child model.PlatformArtifact, policy []byte) (
 	h := sha256.New()
 	_, _ = h.Write([]byte("fugue-traffic-projection/v1\x00"))
 	var length [8]byte
-	for _, raw := range [][]byte{parentRaw, childRaw, policy} {
+	for _, raw := range [][]byte{parentRaw, childRaw, policyHash[:]} {
 		binary.LittleEndian.PutUint64(length[:], uint64(len(raw)))
 		_, _ = h.Write(length[:])
 		_, _ = h.Write(raw)

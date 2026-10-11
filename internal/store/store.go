@@ -32,11 +32,12 @@ var (
 )
 
 type Store struct {
-	path        string
-	databaseURL string
-	db          *sql.DB
-	dbInitMu    sync.Mutex
-	dbReady     bool
+	path          string
+	databaseURL   string
+	db            *sql.DB
+	dbInitMu      sync.Mutex
+	dbReady       bool
+	storagePolicy storagePolicyState
 
 	advisoryLockMu sync.Mutex
 	advisoryLocks  map[string]bool

@@ -521,6 +521,10 @@ def main() -> int:
            or name.startswith("deploy/environments/production/diagnostics/") for name in paths):
         non_go_tasks["diagnostic-publication-tests"] = ["python3", "-m", "unittest", "scripts.test_publish_diagnostic_catalog"]
 
+    if any(name in {"scripts/publish_storage_policy.py", "scripts/test_publish_storage_policy.py"}
+           or name.startswith("deploy/environments/production/storage-policy/") for name in paths):
+        non_go_tasks["storage-policy-tests"] = ["python3", "-m", "unittest", "scripts.test_publish_storage_policy"]
+
     if declarative_engine_changed:
         non_go_tasks["declarative-release-tests"] = [
             "go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release",

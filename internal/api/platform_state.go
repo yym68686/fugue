@@ -1231,8 +1231,9 @@ func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.Platf
 func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcontrol.PlatformComponentIdentityClaims, readArtifact func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, error) {
 	defer s.observeOperation("consumer-resolve")()
 	assignments := make([]consumerArtifactLookup, 0)
+	validatedParents := map[string]bool{}
 	for _, channel := range []string{model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull} {
-		releaseSet, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, claims.ScopeKey, channel)
+		releaseSet, release, found, err := s.store.GetActivePlatformArtifactWithReader(model.PlatformArtifactKindReleaseSet, claims.ScopeKey, channel, readArtifact)
 		if err != nil {
 			return nil, errors.New("consumer release assignment unavailable")
 		}
@@ -1242,9 +1243,14 @@ func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcon
 		if release.ArtifactID != releaseSet.ID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet ||
 			release.Status != model.PlatformArtifactReleaseStatusActive || release.ReleaseChannel != channel ||
 			release.Generation != releaseSet.Generation || release.ScopeKey != claims.ScopeKey || release.FencingToken <= 0 ||
-			releaseSet.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(releaseSet) != nil ||
-			!validateReleaseSetReferences(releaseSet, readArtifact).Pass {
+			releaseSet.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(releaseSet) != nil {
 			return nil, errors.New("consumer release assignment is inconsistent")
+		}
+		if !validatedParents[releaseSet.ID] {
+			if !validateReleaseSetReferences(releaseSet, readArtifact).Pass {
+				return nil, errors.New("consumer release assignment is inconsistent")
+			}
+			validatedParents[releaseSet.ID] = true
 		}
 		var canaryGroups []string
 		if channel == model.PlatformArtifactReleaseChannelGray {

@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"fugue/internal/httpx"
-	"fugue/internal/platformconfig"
 )
 
 func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r *http.Request) {
@@ -27,14 +26,12 @@ func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r
 		httpx.WriteError(w, http.StatusNotFound, "artifact has no compiler runtime input")
 		return
 	}
-	input, err := s.store.GetPlatformArtifactContent(digest)
+	snapshot, err := s.store.GetPlatformCompilerInput(digest)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	snapshot, decodeErr := platformconfig.DecodeRuntimeSnapshotContent(input.Content)
-	actual, digestErr := platformconfig.RuntimeSnapshotDigest(snapshot)
-	if decodeErr != nil || digestErr != nil || actual != digest || snapshot.IntentGeneration != a.Metadata["intent_generation"] || snapshot.PolicyGeneration != a.Metadata["policy_generation"] {
+	if snapshot.IntentGeneration != a.Metadata["intent_generation"] || snapshot.PolicyGeneration != a.Metadata["policy_generation"] {
 		httpx.WriteError(w, http.StatusConflict, "compiler input integrity or lineage differs")
 		return
 	}
