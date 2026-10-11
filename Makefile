@@ -6,6 +6,8 @@ DOCKER ?= docker
 
 test:
 	python3 -m unittest scripts.test_publish_storage_policy
+	python3 -m unittest scripts.test_verify_managed_ssh_image
+	python3 -m unittest scripts.test_reconcile_managed_ssh_keys
 	python3 -m unittest scripts.test_observe_worker_standby
 	python3 -m unittest scripts.test_enroll_cell_member
 	python3 -m unittest scripts.test_activate_agent_edge_policy

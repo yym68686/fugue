@@ -149,6 +149,9 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigrateObjectStorage(ctx, databaseURL); err != nil {
 		return err
 	}
+	if err := schemamigrate.MigrateSSHIdentity(ctx, databaseURL); err != nil {
+		return err
+	}
 	if err := schemamigrate.MigrateSourceUploadSessions(ctx, databaseURL); err != nil {
 		return err
 	}

@@ -16,6 +16,7 @@ func SSHFrontFromEnv() SSHFrontConfig {
 		APIURL:                              getenv("FUGUE_SSH_FRONT_API_URL", getenv("FUGUE_API_URL", "")),
 		EdgeToken:                           getenv("FUGUE_SSH_FRONT_EDGE_TOKEN", getenv("FUGUE_EDGE_TOKEN", "")),
 		EdgeID:                              strings.TrimSpace(getenv("FUGUE_SSH_FRONT_EDGE_ID", os.Getenv("FUGUE_EDGE_ID"))),
+		InstanceUID:                         strings.TrimSpace(os.Getenv("FUGUE_SSH_FRONT_INSTANCE_UID")),
 		EdgeGroupID:                         strings.TrimSpace(getenv("FUGUE_SSH_FRONT_EDGE_GROUP_ID", os.Getenv("FUGUE_EDGE_GROUP_ID"))),
 		ListenHost:                          getenv("FUGUE_SSH_FRONT_LISTEN_HOST", "0.0.0.0"),
 		HealthAddr:                          getenv("FUGUE_SSH_FRONT_HEALTH_LISTEN_ADDR", ":7836"),

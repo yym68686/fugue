@@ -67,7 +67,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_image_gc", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_probe_egress", "dns_probe_egress_plan", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_probe_egress", "dns_probe_egress_plan", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "managed_ssh_artifact", "managed_ssh_keyrings", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -80,6 +80,47 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	if yamlMappingValue(t, storagePolicy, "environment").Value != "production" {
 		t.Fatal("storage policy bypasses production environment")
+	}
+	sshArtifact := yamlMappingValue(t, jobs, "managed_ssh_artifact")
+	if yamlMappingValue(t, sshArtifact, "needs").Value != "prepush" || yamlMappingValue(t, sshArtifact, "runs-on").Value != "ubuntu-latest" {
+		t.Fatal("managed SSH artifact must be built and tested off production")
+	}
+	sshArtifactRaw, err := yaml.Marshal(sshArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"Dockerfile.managed-ssh", "scripts.verify_managed_ssh_image", "org.opencontainers.image.revision", "managed-ssh-receipt.json", "--platform linux/amd64", "--push"} {
+		if !strings.Contains(string(sshArtifactRaw), required) {
+			t.Fatal("managed SSH image lost immutable build or real runtime verification", required)
+		}
+	}
+	sshControl := yamlMappingValue(t, jobs, "deploy_ssh_control")
+	sshControlRaw, err := yaml.Marshal(sshControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"deploy_schema", "fugue-production-ssh-control", "./.github/actions/deploy-declarative-component", "component: ssh-control"} {
+		if !strings.Contains(string(sshControlRaw), required) {
+			t.Fatal("managed SSH controller bypasses normal component release", required)
+		}
+	}
+	sshKeys := yamlMappingValue(t, jobs, "managed_ssh_keyrings")
+	for _, key := range yamlMappingKeys(t, sshKeys) {
+		if key == "needs" {
+			t.Fatal("SSH keyring recovery must not depend on code releases")
+		}
+	}
+	if yamlMappingValue(t, sshKeys, "environment").Value != "production" {
+		t.Fatal("SSH keyring publication requires the production environment")
+	}
+	sshKeysRaw, err := yaml.Marshal(sshKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"deploy/environments/production/managed-ssh/keys.json", "git fetch origin main", "git diff --quiet HEAD origin/main", "scripts.test_reconcile_managed_ssh_keys", "--validate-only", "fugue-production-managed-ssh-keyrings", "selected == 'true'", "secrets.FUGUE_MANAGED_SSH_KEYRINGS_JSON"} {
+		if !strings.Contains(string(sshKeysRaw), required) {
+			t.Fatal("SSH keyring recovery lost its explicit configuration gate", required)
+		}
 	}
 	if strings.Contains(source, `git diff --quiet "$base" HEAD -- "$config" scripts/publish_agent_edge_shadow.py scripts/test_publish_agent_edge_shadow.py; then`) {
 		t.Fatal("shared API client code must not replay an initial Agent shadow configuration")

@@ -444,11 +444,13 @@ func (s *Store) pgGetAppSSHEndpointForUpdateTx(ctx context.Context, tx *sql.Tx, 
 
 func (s *Store) pgAllocateAppSSHPublicPortTx(ctx context.Context, tx *sql.Tx, start, end, exclude int) (int, error) {
 	start, end = normalizeAppSSHPortRange(start, end)
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('fugue.ssh-public-ports/v1',0))`); err != nil {
+		return 0, err
+	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT public_port, status, released_at
 FROM fugue_app_ssh_endpoints
 WHERE public_port BETWEEN $1 AND $2
-FOR UPDATE
 `, start, end)
 	if err != nil {
 		return 0, fmt.Errorf("list allocated app ssh ports: %w", err)
@@ -480,7 +482,32 @@ FOR UPDATE
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("iterate allocated app ssh ports: %w", err)
 	}
+	var managedBindingsExist bool
+	if err := tx.QueryRowContext(ctx, `SELECT to_regclass('fugue_managed_ssh_bindings') IS NOT NULL`).Scan(&managedBindingsExist); err != nil {
+		return 0, err
+	}
+	if managedBindingsExist {
+		reserved, err := tx.QueryContext(ctx, `SELECT public_port FROM fugue_managed_ssh_bindings WHERE public_port BETWEEN $1 AND $2`, start, end)
+		if err != nil {
+			return 0, err
+		}
+		for reserved.Next() {
+			var port int
+			if err := reserved.Scan(&port); err != nil {
+				reserved.Close()
+				return 0, err
+			}
+			used[port] = struct{}{}
+		}
+		reserved.Close()
+		if err := reserved.Err(); err != nil {
+			return 0, err
+		}
+	}
 	for port := start; port <= end; port++ {
+		if port == exclude {
+			continue
+		}
 		if _, ok := used[port]; !ok {
 			return port, nil
 		}

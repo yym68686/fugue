@@ -156,6 +156,8 @@ func (c *CLI) newAppSSHCommand() *cobra.Command {
 		c.newAppSSHDiagnoseCommand(),
 		c.newAppSSHRotatePortCommand(),
 		c.newAppSSHConfigCommand(),
+		c.newAppSSHIdentityCommand(),
+		c.newAppSSHManagedCommand(),
 	)
 	return cmd
 }
@@ -402,7 +404,7 @@ func ensureAppSSHConnectable(status model.AppSSHStatus) error {
 	if !status.Supported {
 		return fmt.Errorf("app SSH is unsupported: %s", strings.TrimSpace(status.Message))
 	}
-	if !status.Ready || strings.TrimSpace(status.Hostname) == "" || status.PublicPort <= 0 {
+	if (!status.Ready && !status.RouteConfigured) || strings.TrimSpace(status.Hostname) == "" || status.PublicPort <= 0 {
 		message := strings.TrimSpace(status.Message)
 		if message == "" {
 			message = "endpoint is not ready"
@@ -496,6 +498,11 @@ func writeAppSSHStatus(w interface{ Write([]byte) (int, error) }, app model.App,
 		{Key: "app", Value: formatDisplayName(app.Name, app.ID, showIDs)},
 		{Key: "supported", Value: fmt.Sprintf("%t", status.Supported)},
 		{Key: "ready", Value: fmt.Sprintf("%t", status.Ready)},
+		{Key: "route_configured", Value: fmt.Sprintf("%t", status.RouteConfigured)},
+		{Key: "identity_verified", Value: fmt.Sprintf("%t", status.IdentityVerified)},
+	}
+	if status.IdentityState != "" {
+		pairs = append(pairs, kvPair{Key: "identity_state", Value: status.IdentityState})
 	}
 	if strings.TrimSpace(status.Hostname) != "" {
 		pairs = append(pairs, kvPair{Key: "host", Value: status.Hostname})
@@ -515,7 +522,7 @@ func writeAppSSHStatus(w interface{ Write([]byte) (int, error) }, app model.App,
 	if strings.TrimSpace(status.Message) != "" {
 		pairs = append(pairs, kvPair{Key: "message", Value: status.Message})
 	}
-	if status.Ready && strings.TrimSpace(status.Hostname) != "" && status.PublicPort > 0 {
+	if (status.Ready || status.RouteConfigured) && strings.TrimSpace(status.Hostname) != "" && status.PublicPort > 0 {
 		pairs = append(pairs, kvPair{Key: "ssh", Value: appSSHCommand(status, "")})
 	}
 	return writeKeyValues(w, pairs...)

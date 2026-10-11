@@ -10,6 +10,93 @@ permissions:
   contents: read
 
 jobs:
+  managed_ssh_artifact:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions: {contents: read, packages: write}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version-file: go.mod}
+      - name: Select managed SSH artifact changes without activating serving configuration
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if ! git diff --quiet "$base" HEAD -- Dockerfile.managed-ssh cmd/fugue-managed-ssh cmd/fugue-ssh-helper internal/managedssh internal/sshexecutor internal/sshkube internal/sshcontrol internal/sshdeployment internal/sshidentity internal/model scripts/verify_managed_ssh_image.py scripts/test_verify_managed_ssh_image.py go.mod go.sum; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+        if: steps.selected.outputs.changed == 'true'
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        if: steps.selected.outputs.changed == 'true'
+        with: {registry: ghcr.io, username: '${{ github.actor }}', password: '${{ secrets.GITHUB_TOKEN }}'}
+      - name: Build digest-addressed runtime and verify its actual execution path
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/fugue-managed-ssh
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_verify_managed_ssh_image
+          docker buildx build --platform linux/amd64 --file Dockerfile.managed-ssh \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --tag "$IMAGE_REPOSITORY:$SOURCE_SHA" --metadata-file "$RUNNER_TEMP/managed-ssh-build.json" --push .
+          digest="$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/managed-ssh-build.json"))["containerimage.digest"])')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          python3 -m scripts.verify_managed_ssh_image "$IMAGE_REPOSITORY@$digest" "$SOURCE_SHA" > "$RUNNER_TEMP/managed-ssh-receipt.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-managed-ssh-artifact-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/managed-ssh-build.json
+            ${{ runner.temp }}/managed-ssh-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+  managed_ssh_keyrings:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-managed-ssh-keyrings, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select the current independently reviewed SSH keyring declaration
+        id: keys
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/managed-ssh/keys.json
+          if [[ ! -f "$config" ]]; then exit 0; fi
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_managed_ssh_keys.py scripts/test_reconcile_managed_ssh_keys.py; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_managed_ssh_keys.py .github/workflows/ci.yml; then
+              python3 -m unittest scripts.test_reconcile_managed_ssh_keys
+              python3 -m scripts.reconcile_managed_ssh_keys "$config" --validate-only
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Restore or advance SSH keyrings without deploying code or changing traffic
+        if: steps.keys.outputs.selected == 'true'
+        env:
+          FUGUE_MANAGED_SSH_KEYRINGS_JSON: ${{ secrets.FUGUE_MANAGED_SSH_KEYRINGS_JSON }}
+        run: python3 -m scripts.reconcile_managed_ssh_keys deploy/environments/production/managed-ssh/keys.json
+
   static_edge_observability:
     needs: prepush
     if: github.event_name != 'schedule'
@@ -2297,6 +2384,20 @@ jobs:
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: runtime-agent-canary, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+
+  deploy_ssh_control:
+    needs: [prepush, component-build, deploy_schema]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'ssh-control') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-ssh-control, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: ssh-control, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   deploy_api:
     needs: [prepush, component-build, deploy_schema, deploy_release_guardian]

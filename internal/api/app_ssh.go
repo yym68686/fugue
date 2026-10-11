@@ -102,7 +102,9 @@ func (s *Server) handleGetAppSSH(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, appSSHResponse(app, endpoint, found, nil, false))
+	response := appSSHResponse(app, endpoint, found, nil, false)
+	response["ssh"] = s.observedAppSSHStatus(app, endpoint, found)
+	httpx.WriteJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handlePatchAppSSH(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +115,9 @@ func (s *Server) handlePatchAppSSH(w http.ResponseWriter, r *http.Request) {
 	}
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
 	if !allowed {
+		return
+	}
+	if !s.allowNativeSSHMutation(w, app) {
 		return
 	}
 	var req struct {
@@ -206,6 +211,9 @@ func (s *Server) handleRotateAppSSHPort(w http.ResponseWriter, r *http.Request) 
 	if !allowed {
 		return
 	}
+	if !s.allowNativeSSHMutation(w, app) {
+		return
+	}
 	endpoint, err := s.store.RotateAppSSHPort(app.ID, s.sshPublicPortStart, s.sshPublicPortEnd)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -232,6 +240,12 @@ func (s *Server) handleDiagnoseAppSSH(w http.ResponseWriter, r *http.Request) {
 	}
 	checks := appSSHDiagnosisChecks(app, endpoint, found)
 	response := appSSHResponse(app, endpoint, found, nil, false)
+	status := s.observedAppSSHStatus(app, endpoint, found)
+	response["ssh"] = status
+	checks = append(checks, appSSHDiagnosisCheck{
+		Name: "host_identity", Pass: status.IdentityVerified,
+		Message: "managed host identity observation: " + status.IdentityState,
+	})
 	response["checks"] = checks
 	httpx.WriteJSON(w, http.StatusOK, response)
 }
@@ -325,7 +339,7 @@ func appSSHResponse(app model.App, endpoint model.AppSSHEndpoint, found bool, op
 
 func appSSHStatus(app model.App, endpoint model.AppSSHEndpoint, found bool) model.AppSSHStatus {
 	ssh := model.NormalizeAppSSHSpec(app.Spec.SSH)
-	status := model.AppSSHStatus{Supported: true}
+	status := model.AppSSHStatus{Supported: true, IdentityState: "unmanaged"}
 	if ssh == nil {
 		status.Ready = false
 		status.Message = "ssh disabled"
@@ -349,10 +363,13 @@ func appSSHStatus(app model.App, endpoint model.AppSSHEndpoint, found bool) mode
 		status.Ready = false
 	case model.AppSSHEndpointStatusUnavailable, model.AppSSHEndpointStatusDisabled, model.AppSSHEndpointStatusReleased:
 		status.Ready = false
-	default:
-		status.Ready = endpoint.PublicPort > 0 && strings.TrimSpace(endpoint.TargetHost) != ""
+	case model.AppSSHEndpointStatusPending, model.AppSSHEndpointStatusReady:
+		status.RouteConfigured = endpoint.PublicPort > 0 && endpoint.PublicPort <= 65535 && strings.TrimSpace(endpoint.TargetHost) != "" && strings.TrimSpace(endpoint.Hostname) != ""
 	}
 	status.Message = endpoint.StatusReason
+	if status.Message == "" && status.RouteConfigured {
+		status.Message = "SSH route is configured; managed host identity has not been verified"
+	}
 	return status
 }
 

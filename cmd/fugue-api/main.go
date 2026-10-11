@@ -45,6 +45,7 @@ func main() {
 		logger.Fatalf("init store: %v", err)
 	}
 	store.ConfigureDatabasePool(cfg.DatabaseMaxIdleConnections, cfg.DatabaseConnectionMaxIdleTime)
+	store.ConfigureSSHIdentityKeyFile(cfg.SSHIdentityKeyringFile)
 
 	authenticator := auth.New(store, cfg.BootstrapAdminKey)
 	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey

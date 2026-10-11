@@ -19,6 +19,7 @@ import (
 	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
+	"fugue/internal/sshidentity"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -58,6 +59,9 @@ type Store struct {
 
 	platformArtifactKeyringMu sync.RWMutex
 	platformArtifactKeyring   bundleauth.Keyring
+	sshIdentityKeyringMu      sync.RWMutex
+	sshIdentityKeyring        sshidentity.Keyring
+	sshIdentityKeyFile        string
 }
 
 func (s *Store) ConfigurePlatformArtifactSigning(keyring bundleauth.Keyring) {

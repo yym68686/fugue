@@ -43,14 +43,19 @@ type AppSSHSpec struct {
 }
 
 type AppSSHStatus struct {
-	Supported          bool   `json:"supported"`
-	Ready              bool   `json:"ready"`
-	Hostname           string `json:"hostname,omitempty"`
-	PublicPort         int    `json:"public_port,omitempty"`
-	TargetPort         int    `json:"target_port,omitempty"`
-	User               string `json:"user,omitempty"`
-	HostKeyFingerprint string `json:"host_key_fingerprint,omitempty"`
-	Message            string `json:"message,omitempty"`
+	Supported          bool               `json:"supported"`
+	Ready              bool               `json:"ready"`
+	RouteConfigured    bool               `json:"route_configured"`
+	IdentityVerified   bool               `json:"identity_verified"`
+	IdentityState      string             `json:"identity_state,omitempty"`
+	IdentityID         string             `json:"identity_id,omitempty"`
+	Observation        *AppSSHObservation `json:"observation,omitempty"`
+	Hostname           string             `json:"hostname,omitempty"`
+	PublicPort         int                `json:"public_port,omitempty"`
+	TargetPort         int                `json:"target_port,omitempty"`
+	User               string             `json:"user,omitempty"`
+	HostKeyFingerprint string             `json:"host_key_fingerprint,omitempty"`
+	Message            string             `json:"message,omitempty"`
 }
 
 type AppSSHEndpoint struct {

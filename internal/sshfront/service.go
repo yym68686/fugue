@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +26,7 @@ type Config struct {
 	APIURL                              string
 	EdgeToken                           string
 	EdgeID                              string
+	InstanceUID                         string
 	EdgeGroupID                         string
 	ListenHost                          string
 	HealthAddr                          string
@@ -53,24 +53,27 @@ type Service struct {
 	Config Config
 	Logger *log.Logger
 
-	mu             sync.Mutex
-	listeners      map[int]*routeListener
-	bundle         model.EdgeSSHRouteBundle
-	lastSyncAt     time.Time
-	lastOKAt       time.Time
-	lastError      string
-	syncCount      uint64
-	errorCount     uint64
-	connCount      uint64
-	dialErrors     uint64
-	limitRejects   uint64
-	bytesIn        uint64
-	bytesOut       uint64
-	activeConns    int
-	activeByIP     map[string]int
-	activeByApp    map[string]int
-	activeByTenant map[string]int
-	rateByIP       map[string]connectionRateWindow
+	mu               sync.Mutex
+	listeners        map[int]*routeListener
+	bundle           model.EdgeSSHRouteBundle
+	lastSyncAt       time.Time
+	lastOKAt         time.Time
+	lastError        string
+	lastAckAt        time.Time
+	lastAckError     string
+	syncCount        uint64
+	errorCount       uint64
+	connCount        uint64
+	dialErrors       uint64
+	limitRejects     uint64
+	bytesIn          uint64
+	bytesOut         uint64
+	activeConns      int
+	activeByIP       map[string]int
+	activeByApp      map[string]int
+	activeByTenant   map[string]int
+	rateByIP         map[string]connectionRateWindow
+	routeConnections map[model.EdgeSSHRouteConnections]int
 }
 
 type routeListener struct {
@@ -221,11 +224,8 @@ func (s *Service) syncAndLog(ctx context.Context, cfg Config) {
 		s.Logger.Printf("ssh-front route sync failed; error=%s", redactedError)
 		return
 	}
-	s.lastOKAt = time.Now().UTC()
-	s.lastError = ""
-	s.bundle = bundle
 	s.mu.Unlock()
-	if err := s.reconcile(cfg, bundle.Routes); err != nil {
+	if err := s.reconcileWithCommit(cfg, bundle.Routes, func() error { return writeCachedBundle(cfg, bundle) }); err != nil {
 		s.mu.Lock()
 		s.errorCount++
 		s.lastError = err.Error()
@@ -233,8 +233,23 @@ func (s *Service) syncAndLog(ctx context.Context, cfg Config) {
 		s.Logger.Printf("ssh-front route reconcile failed; error=%s", err)
 		return
 	}
-	if err := writeCachedBundle(cfg, bundle); err != nil {
-		s.Logger.Printf("ssh-front route cache write failed; path=%s error=%v", cfg.CachePath, err)
+	s.mu.Lock()
+	s.lastOKAt = time.Now().UTC()
+	s.lastError = ""
+	s.bundle = bundle
+	s.mu.Unlock()
+	if cfg.InstanceUID != "" && cfg.CachePath != "" {
+		err := s.acknowledge(ctx, cfg, bundle)
+		s.mu.Lock()
+		if err == nil {
+			s.lastAckAt, s.lastAckError = time.Now().UTC(), ""
+		} else {
+			s.lastAckError = redactToken(err.Error(), cfg.EdgeToken)
+		}
+		s.mu.Unlock()
+		if err != nil {
+			s.Logger.Printf("ssh-front acknowledgement failed; error=%s", redactToken(err.Error(), cfg.EdgeToken))
+		}
 	}
 	s.Logger.Printf("ssh-front route sync success; version=%s routes=%d duration_ms=%d", bundle.Version, len(bundle.Routes), time.Since(started).Milliseconds())
 }
@@ -255,13 +270,13 @@ func (s *Service) loadCachedBundle(cfg Config) error {
 	if err := verifyBundle(cfg, bundle, time.Now().UTC()); err != nil {
 		return fmt.Errorf("verify cached ssh routes: %w", err)
 	}
+	if err := s.reconcile(cfg, bundle.Routes); err != nil {
+		return fmt.Errorf("reconcile cached ssh routes: %w", err)
+	}
 	s.mu.Lock()
 	s.bundle = bundle
 	s.lastOKAt = time.Now().UTC()
 	s.mu.Unlock()
-	if err := s.reconcile(cfg, bundle.Routes); err != nil {
-		return fmt.Errorf("reconcile cached ssh routes: %w", err)
-	}
 	s.Logger.Printf("ssh-front loaded cached routes; version=%s routes=%d path=%s", bundle.Version, len(bundle.Routes), path)
 	return nil
 }
@@ -278,11 +293,30 @@ func writeCachedBundle(cfg Config, bundle model.EdgeSSHRouteBundle) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o600); err != nil {
+	file, err := os.CreateTemp(filepath.Dir(path), ".ssh-routes-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if _, err := file.Write(payload); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(file.Name(), path); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func (s *Service) fetchBundle(ctx context.Context, cfg Config) (model.EdgeSSHRouteBundle, error) {
@@ -352,10 +386,17 @@ func verifyBundle(cfg Config, bundle model.EdgeSSHRouteBundle, now time.Time) er
 }
 
 func (s *Service) reconcile(cfg Config, routes []model.EdgeSSHRoute) error {
+	return s.reconcileWithCommit(cfg, routes, nil)
+}
+
+func (s *Service) reconcileWithCommit(cfg Config, routes []model.EdgeSSHRoute, persist func() error) error {
 	desired := map[int]model.EdgeSSHRoute{}
 	for _, route := range routes {
 		if !routePublishable(route, cfg) {
 			continue
+		}
+		if _, exists := desired[route.PublicPort]; exists {
+			return fmt.Errorf("duplicate ssh public port %d", route.PublicPort)
 		}
 		desired[route.PublicPort] = route
 	}
@@ -364,38 +405,49 @@ func (s *Service) reconcile(cfg Config, routes []model.EdgeSSHRoute) error {
 	if s.listeners == nil {
 		s.listeners = map[int]*routeListener{}
 	}
-	existing := s.listeners
-	toClose := make([]*routeListener, 0)
-	toStart := make([]model.EdgeSSHRoute, 0)
-	for port, listener := range existing {
-		route, ok := desired[port]
-		if !ok || routeKey(route) != routeKey(listener.route) {
-			toClose = append(toClose, listener)
-			delete(existing, port)
+	prepared := map[int]*routeListener{}
+	for port, route := range desired {
+		if _, exists := s.listeners[port]; exists {
+			continue
+		}
+		addr := net.JoinHostPort(strings.TrimSpace(cfg.ListenHost), strconv.Itoa(port))
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			for _, candidate := range prepared {
+				_ = candidate.listener.Close()
+			}
+			s.mu.Unlock()
+			return fmt.Errorf("listen ssh route app_id=%s port=%d: %w", route.AppID, port, err)
+		}
+		prepared[port] = &routeListener{route: route, listener: listener, done: make(chan struct{})}
+	}
+	if persist != nil {
+		if err := persist(); err != nil {
+			for _, candidate := range prepared {
+				_ = candidate.listener.Close()
+			}
+			s.mu.Unlock()
+			return fmt.Errorf("persist ssh routes before activation: %w", err)
 		}
 	}
-	for port, route := range desired {
-		if _, ok := existing[port]; !ok {
-			toStart = append(toStart, route)
+	toClose := make([]*routeListener, 0)
+	for port, listener := range s.listeners {
+		if route, exists := desired[port]; exists {
+			listener.route = route
+		} else {
+			toClose = append(toClose, listener)
+			delete(s.listeners, port)
 		}
+	}
+	for port, listener := range prepared {
+		s.listeners[port] = listener
+		s.startRouteListener(cfg, listener)
 	}
 	s.mu.Unlock()
 
 	for _, listener := range toClose {
 		_ = listener.listener.Close()
 		<-listener.done
-	}
-	sort.Slice(toStart, func(i, j int) bool {
-		return toStart[i].PublicPort < toStart[j].PublicPort
-	})
-	for _, route := range toStart {
-		listener, err := s.startRouteListener(cfg, route)
-		if err != nil {
-			return err
-		}
-		s.mu.Lock()
-		s.listeners[route.PublicPort] = listener
-		s.mu.Unlock()
 	}
 	return nil
 }
@@ -408,45 +460,44 @@ func routePublishable(route model.EdgeSSHRoute, cfg Config) bool {
 	if route.PublicPort < cfg.PublicPortStart || route.PublicPort > cfg.PublicPortEnd {
 		return false
 	}
-	return route.TargetPort > 0 && strings.TrimSpace(route.TargetHost) != ""
+	return route.TargetPort > 0 && route.TargetPort <= 65535 && strings.TrimSpace(route.TargetHost) != ""
 }
 
-func routeKey(route model.EdgeSSHRoute) string {
-	return strings.Join([]string{
-		strconv.Itoa(route.PublicPort),
-		strings.TrimSpace(route.TargetHost),
-		strconv.Itoa(route.TargetPort),
-		strings.TrimSpace(route.RouteGeneration),
-	}, "|")
-}
-
-func (s *Service) startRouteListener(cfg Config, route model.EdgeSSHRoute) (*routeListener, error) {
-	addr := net.JoinHostPort(strings.TrimSpace(cfg.ListenHost), strconv.Itoa(route.PublicPort))
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("listen ssh route app_id=%s port=%d: %w", route.AppID, route.PublicPort, err)
-	}
-	entry := &routeListener{
-		route:    route,
-		listener: listener,
-		done:     make(chan struct{}),
-	}
+func (s *Service) startRouteListener(cfg Config, entry *routeListener) {
+	publicPort := entry.route.PublicPort
 	go func() {
 		defer close(entry.done)
 		for {
-			conn, err := listener.Accept()
+			conn, err := entry.listener.Accept()
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) {
 					return
 				}
-				s.Logger.Printf("ssh-front accept failed; port=%d error=%v", route.PublicPort, err)
+				s.Logger.Printf("ssh-front accept failed; port=%d error=%v", publicPort, err)
 				continue
 			}
-			go s.handleConnection(cfg, route, conn)
+			s.mu.Lock()
+			route := entry.route
+			connectionKey := model.EdgeSSHRouteConnections{AppID: route.AppID, PublicPort: route.PublicPort, TargetHost: route.TargetHost, TargetPort: route.TargetPort}
+			if s.routeConnections == nil {
+				s.routeConnections = map[model.EdgeSSHRouteConnections]int{}
+			}
+			s.routeConnections[connectionKey]++
+			s.mu.Unlock()
+			go func() {
+				defer func() {
+					s.mu.Lock()
+					s.routeConnections[connectionKey]--
+					if s.routeConnections[connectionKey] == 0 {
+						delete(s.routeConnections, connectionKey)
+					}
+					s.mu.Unlock()
+				}()
+				s.handleConnection(cfg, route, conn)
+			}()
 		}
 	}()
-	s.Logger.Printf("ssh-front listening; app_id=%s public_port=%d target=%s:%d", route.AppID, route.PublicPort, route.TargetHost, route.TargetPort)
-	return entry, nil
+	s.Logger.Printf("ssh-front listening; app_id=%s public_port=%d target=%s:%d", entry.route.AppID, publicPort, entry.route.TargetHost, entry.route.TargetPort)
 }
 
 func (s *Service) handleConnection(cfg Config, route model.EdgeSSHRoute, downstream net.Conn) {
@@ -620,6 +671,10 @@ func (s *Service) writeStatus(w http.ResponseWriter, code int) {
 		"last_ok_at":     s.lastOKAt,
 		"bundle_version": s.bundle.Version,
 		"last_error":     s.lastError,
+		"instance_uid":   s.Config.InstanceUID,
+		"route_digest":   model.SSHRoutesDigest(s.bundle.Routes),
+		"last_ack_at":    s.lastAckAt,
+		"last_ack_error": s.lastAckError,
 	}
 	if code >= 400 {
 		status["status"] = "unavailable"

@@ -859,6 +859,36 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/ssh/ack:
+    post:
+      operationId: acknowledgeEdgeSSHRoutes
+      summary: Acknowledge durably loaded SSH routes from one edge instance
+      description: Requires the node-scoped edge token for the exact edge_id. Records runtime evidence only, never serving intent. The supplied bundle version and route digest must match the current authorized route set. The front acknowledges only after durable cache publication and listener activation. Evidence expires after two minutes and cannot attest another node or instance.
+      tags: [Edge, SSH]
+      x-fugue-handler: handleAcknowledgeEdgeSSHRoutes
+      security:
+        - EdgeToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EdgeSSHAcknowledgementRequest"
+      responses:
+        '200':
+          description: Accepted bounded runtime observation
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [accepted, observed_at, expires_at]
+                properties:
+                  accepted: {type: boolean}
+                  observed_at: {type: string, format: date-time}
+                  expires_at: {type: string, format: date-time}
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/ssh/routes:
     get:
       operationId: edgeSSHRoutes
@@ -9419,6 +9449,7 @@ paths:
     patch:
       operationId: patchAppSSH
       summary: Patch App SSH
+      description: Configures application-provided SSH. Returns conflict when an independent managed SSH public binding exists; use managed SSH intent for that endpoint.
       tags: [Apps, SSH]
       x-fugue-handler: handlePatchAppSSH
       security:
@@ -9446,10 +9477,244 @@ paths:
                 $ref: "#/components/schemas/AppSSHResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/ssh/managed:
+    get:
+      operationId: getManagedSSHIntent
+      summary: Read independent platform-managed SSH intent
+      description: Requires app.ssh.read or app.ssh.write. Intent is independent of application releases. Prepared intent does not assert runtime readiness or activate a public route.
+      tags: [Apps, SSH]
+      x-fugue-handler: handleGetManagedSSHIntent
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Stored managed SSH intent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSSHIntentResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: putManagedSSHIntent
+      summary: Update independent managed SSH intent with a generation precondition
+      description: Requires app.ssh.write. expected_generation must be zero for creation or equal the current intent generation for an update. The identity must already exist and cannot change. Authorized key IDs refer to current tenant keys; private keys and raw grants are not accepted. This does not edit an application image, spec, Deployment, public route, or client trust. Initial activation requires separately verified candidate evidence.
+      tags: [Apps, SSH]
+      x-fugue-handler: handlePutManagedSSHIntent
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_generation, spec]
+              properties:
+                expected_generation:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                spec:
+                  $ref: "#/components/schemas/ManagedSSHIntentSpec"
+      responses:
+        '200':
+          description: Persisted intent; runtime reconciliation is observed separately
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSSHIntentResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/ssh/managed/status:
+    get:
+      operationId: getManagedSSHStatus
+      summary: Read managed SSH candidates, serving state, and evidence
+      description: Requires app.ssh.read or app.ssh.write. Candidate evidence is distinct from public endpoint observation and client trust. No private material is returned.
+      tags: [Apps, SSH]
+      x-fugue-handler: handleGetManagedSSHStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Independent intent, binding, and observed control state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSSHStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/ssh/managed/binding:
+    post:
+      operationId: prepareManagedSSHBinding
+      summary: Reserve a durable public SSH address without switching traffic
+      description: Requires app.ssh.write. Existing native endpoints require their exact legacy_route_digest from managed status. An empty digest is allowed only for a new endpoint. The server controls hostname and port range. Does not edit application specs, enable a public route, or modify client trust.
+      tags: [Apps, SSH]
+      x-fugue-handler: handlePrepareManagedSSHBinding
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [identity_id, legacy_route_digest]
+              properties:
+                identity_id: {type: string, minLength: 1}
+                legacy_route_digest: {type: string}
+      responses:
+        '200':
+          description: Reserved public binding; traffic has not been activated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [binding]
+                properties:
+                  binding:
+                    $ref: "#/components/schemas/ManagedSSHPublicBinding"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/ssh/managed/activate:
+    post:
+      operationId: activateManagedSSH
+      summary: Activate an explicitly reviewed and verified SSH candidate
+      description: Requires app.ssh.write and PostgreSQL independent route storage. All preconditions must match; the candidate must have fresh runtime and actual SSH key-exchange evidence and current authorization. Traffic publication and control state commit atomically. Failed activation preserves the prior route. Existing streams drain through their previous target. This does not change application images or client trust. A host identity migration may require separately reviewed client enrollment.
+      tags: [Apps, SSH]
+      x-fugue-handler: handleActivateManagedSSH
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManagedSSHActivationRequest"
+      responses:
+        '200':
+          description: Atomically committed serving state; edge propagation and public observation remain separate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSSHStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/ssh/managed/rollback:
+    post:
+      operationId: rollbackManagedSSH
+      summary: Switch to a retained verified SSH slot with current authorization
+      description: Requires app.ssh.write. Never restores expired or revoked grants. The retained slot must still have fresh runtime and handshake evidence and match current intent. Existing streams drain; new streams use the reviewed slot. Sets rollback_hold so automatic target or executable updates cannot immediately undo this rollback. Explicit candidate activation clears the hold. Does not modify application releases or client trust.
+      tags: [Apps, SSH]
+      x-fugue-handler: handleRollbackManagedSSH
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManagedSSHRollbackRequest"
+      responses:
+        '200':
+          description: Atomically committed rollback with a retained identity and current authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSSHStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/ssh/identity:
+    get:
+      operationId: getAppSSHIdentity
+      summary: Get the public managed SSH identity for an app
+      description: Returns public identity metadata only. This operation never generates keys or changes serving routes. Requires app.ssh.read or app.ssh.write.
+      tags: [Apps, SSH]
+      x-fugue-handler: handleGetAppSSHIdentity
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Prepared managed SSH identity; this does not imply activation or client trust
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppSSHIdentityResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: prepareAppSSHIdentity
+      summary: Prepare a durable managed SSH identity without activating it
+      description: Requires app.ssh.write. Creates an independent identity once and returns the same identity on retry. Never adopts image host keys, replaces existing identity material, changes routing, restarts workloads, or updates client trust. An unavailable encryption key or corrupt identity fails closed.
+      tags: [Apps, SSH]
+      x-fugue-handler: handlePrepareAppSSHIdentity
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Prepared identity metadata without private key material
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppSSHIdentityResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/ssh/identity/observe:
+    post:
+      operationId: observeAppSSHIdentity
+      summary: Observe the configured public SSH endpoint without authentication
+      description: Requires app.ssh.read or app.ssh.write. Performs a bounded key-exchange probe against the allocated public endpoint and records its observed host identity. The supplied identity_id is a precondition. This does not activate identity, update routes or client trust, or establish a user session. A successful probe represents this observation vantage and does not attest every edge replica.
+      tags: [Apps, SSH]
+      x-fugue-handler: handleObserveAppSSHIdentity
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [identity_id]
+              properties:
+                identity_id:
+                  type: string
+                  minLength: 1
+      responses:
+        '200':
+          description: Recorded observation, including mismatches and unsuccessful handshakes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppSSHObservationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/ssh/rotate-port:
     post:
       operationId: rotateAppSSHPort
       summary: Rotate App SSH Port
+      description: Rotates an application-provided SSH endpoint. A managed SSH public binding rejects this legacy mutation.
       tags: [Apps, SSH]
       x-fugue-handler: handleRotateAppSSHPort
       security:
@@ -22248,6 +22513,346 @@ components:
           maximum: 86400
         restart_token:
           type: string
+    EdgeSSHAcknowledgementRequest:
+      type: object
+      additionalProperties: false
+      required: [edge_id, edge_group_id, instance_uid, bundle_version, route_digest, persisted, loaded_at, connections]
+      properties:
+        edge_id: {type: string, minLength: 1, maxLength: 256}
+        edge_group_id: {type: string, minLength: 1, maxLength: 256}
+        instance_uid: {type: string, minLength: 1, maxLength: 256}
+        bundle_version: {type: string, minLength: 1, maxLength: 256}
+        route_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        persisted: {type: boolean, enum: [true]}
+        loaded_at: {type: string, format: date-time}
+        connections:
+          type: array
+          maxItems: 20000
+          items:
+            $ref: "#/components/schemas/EdgeSSHRouteConnections"
+    EdgeSSHRouteConnections:
+      type: object
+      additionalProperties: false
+      required: [app_id, public_port, target_host, target_port, count]
+      properties:
+        app_id: {type: string, minLength: 1, maxLength: 256}
+        public_port: {type: integer, minimum: 1, maximum: 65535}
+        target_host: {type: string, minLength: 1, maxLength: 253}
+        target_port: {type: integer, minimum: 1, maximum: 65535}
+        count: {type: integer, minimum: 1}
+    ManagedSSHActivationRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, expected_intent_generation, artifact_digest, fingerprint, binding_id, legacy_route_digest]
+      properties:
+        expected_revision: {type: integer, format: int64, minimum: 1}
+        expected_intent_generation: {type: integer, format: int64, minimum: 1}
+        artifact_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        fingerprint: {type: string, minLength: 1}
+        binding_id: {type: string, minLength: 1}
+        legacy_route_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+    ManagedSSHRollbackRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, expected_intent_generation, artifact_digest, fingerprint, binding_id, legacy_route_digest, slot_id]
+      properties:
+        expected_revision: {type: integer, format: int64, minimum: 1}
+        expected_intent_generation: {type: integer, format: int64, minimum: 1}
+        artifact_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        fingerprint: {type: string, minLength: 1}
+        binding_id: {type: string, minLength: 1}
+        legacy_route_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        slot_id: {type: string, minLength: 1}
+    ManagedSSHPublicBinding:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, app_id, identity_id, hostname, public_port, runtime_id, runtime_type, legacy_route_digest, created_at]
+      properties:
+        id: {type: string}
+        tenant_id: {type: string}
+        app_id: {type: string}
+        identity_id: {type: string}
+        hostname: {type: string}
+        public_port: {type: integer, minimum: 1, maximum: 65535}
+        runtime_id: {type: string}
+        runtime_type: {type: string}
+        edge_group_id: {type: string}
+        legacy_route_digest: {type: string}
+        created_at: {type: string, format: date-time}
+    ManagedSSHTarget:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, app_id, namespace, pod_name, pod_uid, container, container_id, user, working_directory]
+      properties:
+        tenant_id: {type: string}
+        app_id: {type: string}
+        namespace: {type: string}
+        pod_name: {type: string}
+        pod_uid: {type: string}
+        container: {type: string}
+        container_id: {type: string}
+        user: {type: string}
+        working_directory: {type: string}
+    ManagedSSHCandidateEvidence:
+      type: object
+      additionalProperties: false
+      required: [artifact_digest, identity_id, fingerprint, server_pod_uid, target_pod_uid, target_container_id, key_exchange_verified, runtime_verified, observed_at, expires_at]
+      properties:
+        artifact_digest: {type: string}
+        identity_id: {type: string}
+        fingerprint: {type: string}
+        server_pod_uid: {type: string}
+        target_pod_uid: {type: string}
+        target_container_id: {type: string}
+        key_exchange_verified: {type: boolean}
+        runtime_verified: {type: boolean}
+        observed_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+    ManagedSSHSlotStatus:
+      type: object
+      additionalProperties: false
+      required: [id, namespace, image, helper_digest, architecture, artifact_digest, generation, target, verified, valid_until, created_at]
+      properties:
+        id: {type: string}
+        namespace: {type: string}
+        image: {type: string}
+        helper_digest: {type: string}
+        architecture: {type: string}
+        artifact_digest: {type: string}
+        generation: {type: integer, format: int64}
+        target:
+          $ref: "#/components/schemas/ManagedSSHTarget"
+        evidence:
+          $ref: "#/components/schemas/ManagedSSHCandidateEvidence"
+        verified: {type: boolean}
+        valid_until: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        draining_since: {type: string, format: date-time}
+        retiring_at: {type: string, format: date-time}
+        retired_at: {type: string, format: date-time}
+    ManagedSSHControlStatus:
+      type: object
+      additionalProperties: false
+      required: [identity_id, revision, generation, intent_generation, route_generation, draining, retired, rollback_hold]
+      properties:
+        identity_id: {type: string}
+        revision: {type: integer, format: int64}
+        generation: {type: integer, format: int64}
+        intent_generation: {type: integer, format: int64}
+        route_generation: {type: integer, format: int64}
+        rollback_hold: {type: boolean}
+        active:
+          $ref: "#/components/schemas/ManagedSSHSlotStatus"
+        candidate:
+          $ref: "#/components/schemas/ManagedSSHSlotStatus"
+        draining:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManagedSSHSlotStatus"
+        retired:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManagedSSHSlotStatus"
+        activation_actor: {type: string}
+        activated_at: {type: string, format: date-time}
+    ManagedSSHStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [intent, legacy_route_digest]
+      properties:
+        intent:
+          $ref: "#/components/schemas/ManagedSSHIntent"
+        binding:
+          $ref: "#/components/schemas/ManagedSSHPublicBinding"
+        control:
+          $ref: "#/components/schemas/ManagedSSHControlStatus"
+        legacy_route_digest: {type: string}
+    ManagedSSHForwardRule:
+      type: object
+      additionalProperties: false
+      required: [host, port]
+      properties:
+        host:
+          type: string
+          description: Numeric loopback address in the target container network namespace
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        end_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Optional inclusive upper port bound, at least port
+    ManagedSSHIntentSpec:
+      type: object
+      additionalProperties: false
+      required: [enabled, identity_id, container, user, working_directory, authorized_key_ids, allow_pty, allow_sftp, max_connections, max_connections_per_ip, max_channels]
+      properties:
+        enabled:
+          type: boolean
+        identity_id:
+          type: string
+          minLength: 1
+        container:
+          type: string
+          minLength: 1
+          maxLength: 63
+          description: Explicit application container name; no inferred sidecar selection
+        user:
+          type: string
+          minLength: 1
+          maxLength: 256
+        working_directory:
+          type: string
+          minLength: 1
+          description: Absolute normalized directory inside the target container
+        authorized_key_ids:
+          type: array
+          maxItems: 256
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+        allow_pty:
+          type: boolean
+        allow_sftp:
+          type: boolean
+        forward_rules:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/ManagedSSHForwardRule"
+        allowed_environment:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+        max_connections:
+          type: integer
+          minimum: 1
+          maximum: 1024
+        max_connections_per_ip:
+          type: integer
+          minimum: 1
+          maximum: 1024
+        max_channels:
+          type: integer
+          minimum: 1
+          maximum: 64
+    ManagedSSHIntent:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, app_id, generation, spec, created_at, updated_at]
+      properties:
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        spec:
+          $ref: "#/components/schemas/ManagedSSHIntentSpec"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ManagedSSHIntentResponse:
+      type: object
+      additionalProperties: false
+      required: [intent]
+      properties:
+        intent:
+          $ref: "#/components/schemas/ManagedSSHIntent"
+    AppSSHIdentity:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, app_id, generation, algorithm, public_key, fingerprint, created_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        algorithm:
+          type: string
+          enum: [ssh-ed25519]
+        public_key:
+          type: string
+          description: OpenSSH authorized-key format public host key; never private material
+        fingerprint:
+          type: string
+          description: SHA256 fingerprint of the public host key
+        created_at:
+          type: string
+          format: date-time
+    AppSSHIdentityResponse:
+      type: object
+      additionalProperties: false
+      required: [identity]
+      properties:
+        identity:
+          $ref: "#/components/schemas/AppSSHIdentity"
+    AppSSHObservation:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, app_id, identity_id, endpoint_id, route_digest, scope, observer, target, key_exchange_verified, identity_matched, observed_at, expires_at, reason]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        identity_id:
+          type: string
+        endpoint_id:
+          type: string
+        route_digest:
+          type: string
+        scope:
+          type: string
+          enum: [public_endpoint]
+        observer:
+          type: string
+        target:
+          type: string
+        algorithm:
+          type: string
+        fingerprint:
+          type: string
+        key_exchange_verified:
+          type: boolean
+        identity_matched:
+          type: boolean
+        observed_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          enum: [identity_verified, identity_mismatch, target_unreachable, handshake_failed, unverified]
+    AppSSHObservationResponse:
+      type: object
+      additionalProperties: false
+      required: [identity, observation]
+      properties:
+        identity:
+          $ref: "#/components/schemas/AppSSHIdentity"
+        observation:
+          $ref: "#/components/schemas/AppSSHObservation"
     AppSSHSpec:
       type: object
       additionalProperties: false
@@ -22334,6 +22939,19 @@ components:
           type: boolean
         ready:
           type: boolean
+          description: True only when the configured endpoint has a fresh matching managed host identity observation. This does not attest user authentication, every edge replica, or client trust.
+        route_configured:
+          type: boolean
+          description: Routing intent is allocated and publishable; not a handshake observation
+        identity_verified:
+          type: boolean
+        identity_state:
+          type: string
+          enum: [unmanaged, unobserved, verified, mismatch, unreachable, expired, route_changed, unavailable]
+        identity_id:
+          type: string
+        observation:
+          $ref: "#/components/schemas/AppSSHObservation"
         hostname:
           type: string
         public_port:

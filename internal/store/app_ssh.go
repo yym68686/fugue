@@ -228,7 +228,7 @@ func (s *Store) UpsertAppSSHConfig(appID string, update AppSSHUpdate) (model.App
 		if endpointIndex >= 0 {
 			endpoint = state.AppSSHEndpoints[endpointIndex]
 		} else {
-			port, err := allocateAppSSHPublicPortState(state, update.PublicPortStart, update.PublicPortEnd, 0)
+			port, err := s.allocateSSHPortWithManagedBindings(state, update.PublicPortStart, update.PublicPortEnd, 0)
 			if err != nil {
 				return err
 			}
@@ -259,6 +259,9 @@ func (s *Store) UpsertAppSSHConfig(appID string, update AppSSHUpdate) (model.App
 		endpoint.StatusReason = statusReason
 		endpoint.ReleasedAt = nil
 		endpoint.UpdatedAt = time.Now().UTC()
+		if err := s.validateManagedSSHNativePort(endpoint); err != nil {
+			return err
+		}
 		state.AppSSHEndpoints[endpointIndex] = endpoint
 		normalizeAppStatusForRead(&app)
 		hydrateAppBackingServices(state, &app)
@@ -324,11 +327,14 @@ func (s *Store) RotateAppSSHPort(appID string, start, end int) (model.AppSSHEndp
 			return ErrNotFound
 		}
 		current := state.AppSSHEndpoints[index]
-		port, err := allocateAppSSHPublicPortState(state, start, end, current.PublicPort)
+		port, err := s.allocateSSHPortWithManagedBindings(state, start, end, current.PublicPort)
 		if err != nil {
 			return err
 		}
 		current.PublicPort = port
+		if err := s.validateManagedSSHNativePort(current); err != nil {
+			return err
+		}
 		current.UpdatedAt = time.Now().UTC()
 		state.AppSSHEndpoints[index] = current
 		endpoint = current
@@ -426,9 +432,12 @@ func resolveAppSSHAuthorizedKeysState(state *model.State, tenantID string, keyID
 	return model.NormalizeSSHPublicKeys(keys), nil
 }
 
-func allocateAppSSHPublicPortState(state *model.State, start, end, exclude int) (int, error) {
+func allocateAppSSHPublicPortState(state *model.State, start, end, exclude int, reserved ...int) (int, error) {
 	start, end = normalizeAppSSHPortRange(start, end)
 	used := map[int]struct{}{}
+	for _, port := range reserved {
+		used[port] = struct{}{}
+	}
 	for _, endpoint := range state.AppSSHEndpoints {
 		if endpoint.PublicPort == exclude {
 			continue

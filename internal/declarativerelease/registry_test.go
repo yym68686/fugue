@@ -98,7 +98,7 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 	for _, group := range edgeRegistry.Groups {
 		want = append(want, group.Client.ID, group.Control.ID, group.Worker.ID)
 	}
-	want = append(want, "edge-image-gc", "image-cache", "release-guardian", "runtime-agent-canary", "schema", "telemetry")
+	want = append(want, "edge-image-gc", "image-cache", "release-guardian", "runtime-agent-canary", "schema", "ssh-control", "telemetry")
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("runtime lane inventory mismatch: got=%v want=%v", got, want)
