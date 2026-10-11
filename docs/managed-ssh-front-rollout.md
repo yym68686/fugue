@@ -394,3 +394,32 @@ application-native endpoints are not imported. Two read-only sessions opened
 through the original poly/argus paths span this ingress change. Their already
 approved host identities and application workloads remain unchanged. Existing
 front processes remain running so their established streams are preserved.
+
+Generation 7 deployed successfully through CI run `38150758680`, runtime job
+`114503552188`. All four Services now contain managed ports 22001, 22002, 22004,
+22005, and 22006 with their exact binding ownership; application-native port
+22003 remains excluded. The poly and argus sessions opened before publication
+continued exchanging data after the new ingress selection. Separately opened
+authenticated sessions through every public edge were recorded by each selected
+front's own ACK at 15:24:53 UTC. Both host fingerprints remained unchanged.
+Original business Pod/container IDs and zero restart counts were reverified.
+This ingress change did not touch the already enrolled client trust file.
+
+An abrupt client-disconnect test used only the new synthetic workload. It
+observed one temporary helper for its inspector, two while a test command was
+held, and one again after force-killing only the local test SSH client. The
+remote test process was absent afterwards. This verifies abnormal client
+disconnect cleanup, not arbitrary host/process kill recovery. Additional race
+tests verify connection/channel admission limits, release of capacity after
+disconnect, natural authorization expiry closing active execution without a
+configuration update, denial of subsequent expired-key login, and audit failure
+preventing commands on an already authenticated transport.
+
+The new synthetic workload was deliberately restarted through the normal app
+reconcile API with an exact spec precondition. Its Pod UID changed from
+`277a9c42-fbc1-44e7-b46d-ba9d2a970014` to
+`4c502092-e3ac-4f94-87aa-a0963ac5a421`. The controller verified and selected new
+slot `ssh-bba57410fb06e488c5e0ebe8952b888f` at route generation 2 while preserving
+the logical host identity and port 22006. Native SSH through all four public
+addresses reused the original pinned key and reached the new workload hostname.
+The old synthetic slot remains retained under the declared rollback interval.

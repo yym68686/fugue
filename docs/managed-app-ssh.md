@@ -9,10 +9,12 @@ Both Argus endpoints now serve their separately prepared managed identities
 after explicit user approval. Their source, images, startup commands, original
 Pods, and container IDs remain unchanged. This Mac's two matching trust records
 were backed up and updated after all four public fronts matched the reviewed
-keys. Four independent front candidates now have verified production ACKs and
-private SSH acceptance; their public transport selection and retirement remain
-unfinished. See `argus-managed-ssh-migration-review.md` for the completed cutover
-and `managed-ssh-front-rollout.md` for the remaining front work.
+keys. Four independent fronts now serve the managed bindings with verified
+instance-bound ACKs and public session evidence. A newly created synthetic app's
+port was added automatically to all four ingress Services. A retained old
+backend refused new connections, preserved an existing session, and retired
+only after it closed. See `argus-managed-ssh-migration-review.md` for the identity
+cutover and `managed-ssh-front-rollout.md` for ingress and retirement evidence.
 
 ## Outcome
 
@@ -96,17 +98,17 @@ substitute for standard SSH protocol support.
       images must report precise limitations rather than falsely claim success.
 - [x] Reconcile signed serving configuration and authorization separately from
       the SSH component executable; retain verified state on failed updates.
-- [ ] Implement revocation, authorization expiry, session limits, and audit
+- [x] Implement revocation, authorization expiry, session limits, and audit
       records without exposing command output or secrets by default.
-- [ ] Ship deployment manifests, narrow runtime permissions, health checks,
+- [x] Ship deployment manifests, narrow runtime permissions, health checks,
       metrics, and component release integration.
 - [x] Verify native OpenSSH, file transfer, and the promised remote development
       client workflows with synthetic workloads.
-- [ ] Verify tenant isolation, authorization races, restart/recovery, partial
+- [x] Verify tenant isolation, authorization races, restart/recovery, partial
       rollout, bad configuration, missing identity, and rollback behavior.
 - [x] Canary the platform-owned serving path before migrating existing routes;
       drain established connections rather than claim seamless process recovery.
-- [ ] Complete reviewed production migration, trust enrollment, and runbook.
+- [x] Complete reviewed production migration, trust enrollment, and runbook.
 
 ## Evidence and release boundaries
 
@@ -811,3 +813,39 @@ affected Argus application's public metadata with its authenticated API response
 Runtime generation five enrolls their existing tenant namespace and runtime so
 private candidates can be prepared with named-Pod exec delegation. It does not
 enroll application Deployment writes, switch ports, or modify client trust.
+
+## Current production acceptance
+
+Both affected applications now use the platform-owned SSH server and all four
+new ingress fronts, retaining their prepared identities, original business
+images, original Pod/container IDs, and zero business restarts. The reviewed
+client trust transition happened once; the subsequent ingress migration did not
+change the key or client records. Held read-only sessions survived that migration,
+and each front's exact-instance ACK recorded newly opened authenticated sessions.
+
+A fresh synthetic application received port 22006 after ingress policy activation.
+The controller added it to all four selected Services without a code or static
+port declaration change. A separate workload restart replaced that synthetic
+Pod/container; the controller verified a new SSH slot, automatically promoted
+route generation 2, and preserved identity
+`sshidentity_1791731232_a8097ce7a417` and binding
+`sshbinding_1791731414_b95eed473350`. Native clients reused the same pinned host
+key and original port to reach the new workload. No production application was
+restarted for that test.
+
+Graceful backend retirement was observed while an authenticated session was
+held: signed drain denied new transports, retained the old session and replica,
+then scaled to zero only after the test client closed. Its identity Secret and
+state PVC remain retained. Abrupt termination of a local synthetic SSH client
+also removed its remote test process and temporary helper. Race tests cover
+admission limits, natural grant expiry, and audit failure refusing an unrecorded
+command. Current-key revocation and rollback were previously verified with
+synthetic production sessions. These observations complement isolated tests for
+tenant boundaries, missing identity, bad artifacts, persisted reload, and
+concurrent ownership changes; they do not claim live sessions survive loss of
+their workload process or host.
+
+Remaining completion work includes explicit helper capability verification and
+operational key rewrapping/retention tooling. The earlier chronological notes in
+this document describe checkpoints; the current status and checklist take
+precedence over their historical pending statements.
