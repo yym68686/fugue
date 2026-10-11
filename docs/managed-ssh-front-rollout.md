@@ -294,3 +294,11 @@ not blindly retried, and the existing freshness thresholds remain unchanged.
 The host runner also attempted to restore a Go module cache over existing files;
 the transport job now leaves that existing cache alone by disabling setup-go's
 archive restoration for this job. This does not change serving software.
+
+The retry succeeded in CI run `38146166167`, job `114489863661`. The US primary
+synthetic Service retained UID `2017d294-cfcf-468b-b646-79b90ef9f31d` and advanced
+to serving generation 2 with public address `15.204.94.71`. Its scope remains
+only ports 22004 and 22005. The operation verified candidate/public identities
+and preserved both held authenticated sessions. Original Argus ports are not
+selected by this Service. The next explicit operation exercises compensation to
+private generation 3 while keeping the front processes and established streams.
