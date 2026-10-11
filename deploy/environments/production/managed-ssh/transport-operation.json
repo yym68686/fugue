@@ -2,5 +2,5 @@
   "schema": "fugue.ssh-transport-operation/v1",
   "stage": "deploy/environments/production/managed-ssh/front-stage.json",
   "selection": "deploy/environments/production/managed-ssh/transport/us-primary-canary.json",
-  "action": "stage"
+  "action": "activate"
 }
