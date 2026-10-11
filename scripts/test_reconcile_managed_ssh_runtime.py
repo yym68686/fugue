@@ -56,6 +56,25 @@ class ManagedSSHRuntimeTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runtime.validate(config,receipt)
 
+    def test_artifact_provenance_requires_exact_main_run_and_successful_job(self):
+        config,receipt,state,writes,kube=self.fixture()
+        run={'head_sha':config['artifactSourceCommit'],'event':'push','head_branch':'main','path':'.github/workflows/ci.yml','repository':{'full_name':'example/platform'}}
+        job={'name':'managed_ssh_artifact','status':'completed','conclusion':'success'}
+        paths=[]
+        def request(path):
+            paths.append(path)
+            if '/jobs?' not in path:return run
+            return {'jobs':[{'name':'other'}]*100 if path.endswith('page=1') else [job]}
+        self.assertTrue(runtime.verify_artifact_run(config,'example/platform','test-token',request)['verified'])
+        self.assertTrue(paths[-1].endswith('page=2'))
+        for field,value in [('head_sha','d'*40),('event','pull_request'),('head_branch','feature'),('path','other.yml')]:
+            previous=run[field]
+            run[field]=value
+            with self.assertRaises(ValueError):runtime.verify_artifact_run(config,'example/platform','test-token',request)
+            run[field]=previous
+        job['conclusion']='failure'
+        with self.assertRaises(ValueError):runtime.verify_artifact_run(config,'example/platform','test-token',request)
+
     def test_foreign_resource_rejects_before_any_writes(self):
         config,receipt,state,writes,kube=self.fixture()
         state[('role','test-tenant','managed-ssh-controller')]={'metadata':{'labels':{'app.kubernetes.io/managed-by':'another-owner'},'resourceVersion':'1'}}

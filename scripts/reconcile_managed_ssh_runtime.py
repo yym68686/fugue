@@ -2,8 +2,10 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
+import urllib.request
 
 from scripts.reconcile_agent_edge_trust import canonical, kubectl, strict_json
 
@@ -11,6 +13,38 @@ from scripts.reconcile_agent_edge_trust import canonical, kubectl, strict_json
 MANAGER = "fugue-managed-ssh-runtime"
 GENERATION = "ssh.fugue.dev/runtime-generation"
 DIGEST = "ssh.fugue.dev/runtime-digest"
+
+
+def verify_artifact_run(config, repository, token, request=None):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository or "") or not token:
+        raise ValueError("authenticated repository identity required")
+    if type(config.get("artifactRunID")) is not int or config["artifactRunID"] < 1 or not re.fullmatch(r"[a-f0-9]{40}", config.get("artifactSourceCommit", "")):
+        raise ValueError("exact artifact run and source required")
+    if request is None:
+        def request(path):
+            query = urllib.request.Request("https://api.github.com/repos/"+repository+path, headers={"Authorization":"Bearer "+token,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"})
+            try:
+                with urllib.request.urlopen(query, timeout=30) as response:
+                    raw = response.read(2*1024*1024+1)
+            except Exception:
+                raise ValueError("GitHub artifact provenance request failed") from None
+            if len(raw)>2*1024*1024:
+                raise ValueError("GitHub artifact provenance exceeds bound")
+            return strict_json(raw)
+    prefix = "/actions/runs/"+str(config["artifactRunID"])
+    run = request(prefix)
+    if run.get("head_sha") != config["artifactSourceCommit"] or run.get("event") != "push" or run.get("head_branch") != "main" or run.get("path") != ".github/workflows/ci.yml" or run.get("repository",{}).get("full_name") != repository:
+        raise ValueError("artifact source differs from reviewed main workflow")
+    for page in range(1,11):
+        jobs = request(prefix+"/jobs?filter=latest&per_page=100&page="+str(page)).get("jobs",[])
+        for job in jobs:
+            if job.get("name") == "managed_ssh_artifact":
+                if job.get("status") != "completed" or job.get("conclusion") != "success":
+                    raise ValueError("managed SSH artifact acceptance did not succeed")
+                return {"verified":True,"run_id":config["artifactRunID"],"source_commit":config["artifactSourceCommit"]}
+        if len(jobs)<100:
+            break
+    raise ValueError("managed SSH artifact acceptance job missing")
 
 
 def digest(value):
@@ -168,10 +202,15 @@ def reconcile(config, receipt, kube=kubectl):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("declaration")
-    parser.add_argument("--receipt", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--receipt")
+    source.add_argument("--verify-artifact-run", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
     config = strict_json(Path(args.declaration).read_bytes())
+    if args.verify_artifact_run:
+        print(canonical(verify_artifact_run(config, os.environ.get("GITHUB_REPOSITORY"), os.environ.get("GH_TOKEN"))))
+        raise SystemExit(0)
     receipt = strict_json(Path(args.receipt).read_bytes())
     validate(config, receipt)
     print(canonical({"valid":True,"generation":config["generation"]} if args.validate_only else reconcile(config, receipt)))

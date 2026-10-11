@@ -85,7 +85,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"git fetch origin main", "git diff --quiet HEAD origin/main", "artifactSourceCommit", "artifactRunID", "gh run download", "scripts.test_reconcile_managed_ssh_runtime", "--validate-only", "fugue-production-managed-ssh-runtime", "managed-ssh-receipt.json"} {
+	for _, required := range []string{"git fetch origin main", "git diff --quiet HEAD origin/main", "artifactSourceCommit", "artifactRunID", "actions/download-artifact@", "--verify-artifact-run", "scripts.test_reconcile_managed_ssh_runtime", "--validate-only", "fugue-production-managed-ssh-runtime", "managed-ssh-receipt.json"} {
 		if !strings.Contains(string(sshRuntimeRaw), required) {
 			t.Fatal("SSH runtime publication lost its verified artifact gate", required)
 		}
