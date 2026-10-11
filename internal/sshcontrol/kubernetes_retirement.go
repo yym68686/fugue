@@ -7,16 +7,20 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"fugue/internal/managedssh"
 	"fugue/internal/model"
 	"fugue/internal/sshidentity"
 	"golang.org/x/crypto/ssh"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func (runtime *KubernetesRuntime) RetirementPolicy(ctx context.Context, binding model.ManagedSSHPublicBinding, active managedssh.ServingSlot) ([]EdgeConsumerInstance, time.Duration, error) {
@@ -60,8 +64,11 @@ func (runtime *KubernetesRuntime) RetirementPolicy(ctx context.Context, binding 
 			return nil, 0, errors.New("SSH edge instance set is missing or ambiguous")
 		}
 		pod := pods.Items[0]
-		if string(pod.UID) == "" || pod.Spec.NodeName != edge.EdgeID || pod.DeletionTimestamp != nil || !pod.Spec.HostNetwork || len(pod.Status.ContainerStatuses) != 1 || !pod.Status.ContainerStatuses[0].Ready {
+		if string(pod.UID) == "" || pod.Spec.NodeName != edge.EdgeID || pod.DeletionTimestamp != nil || len(pod.Status.ContainerStatuses) != 1 || !pod.Status.ContainerStatuses[0].Ready {
 			return nil, 0, errors.New("SSH edge instance is not positively serving")
+		}
+		if err := runtime.verifyEdgeTransport(ctx, edge, pod, binding.PublicPort); err != nil {
+			return nil, 0, err
 		}
 		declaredInstance := false
 		for _, container := range pod.Spec.Containers {
@@ -95,12 +102,81 @@ func (runtime *KubernetesRuntime) RetirementPolicy(ctx context.Context, binding 
 		if err != nil || !observation.IdentityMatched || !observation.KeyExchangeVerified {
 			return nil, 0, managedssh.ErrCandidateUnverified
 		}
+		if err := runtime.verifyEdgeTransport(ctx, edge, pod, binding.PublicPort); err != nil {
+			return nil, 0, err
+		}
 		consumers = append(consumers, EdgeConsumerInstance{EdgeID: edge.EdgeID, EdgeGroupID: edge.EdgeGroupID, InstanceUID: string(pod.UID)})
 	}
 	if len(consumers) == 0 {
 		return nil, 0, errors.New("SSH binding has no configured edge consumers")
 	}
 	return consumers, retention, nil
+}
+
+func (runtime *KubernetesRuntime) verifyEdgeTransport(ctx context.Context, edge EdgeConsumer, pod corev1.Pod, port int) error {
+	if pod.Spec.HostNetwork {
+		if edge.PublicService != "" || edge.ServiceUID != "" || edge.Image != "" {
+			return errors.New("SSH host-network consumer has an incompatible Service declaration")
+		}
+		return nil
+	}
+	if edge.PublicService == "" || edge.ServiceUID == "" || edge.Image == "" || len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Image != edge.Image || len(pod.Status.ContainerStatuses) != 1 || strings.TrimPrefix(pod.Status.ContainerStatuses[0].ImageID, "docker-pullable://") != edge.Image {
+		return errors.New("SSH Pod-network consumer requires an exact public Service and immutable image")
+	}
+	service, err := runtime.client.CoreV1().Services(edge.Namespace).Get(ctx, edge.PublicService, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if string(service.UID) != edge.ServiceUID || service.DeletionTimestamp != nil || service.Labels["app.kubernetes.io/managed-by"] != "fugue-managed-ssh-transport" || service.Annotations["ssh.fugue.dev/transport-phase"] != "serving" || service.Spec.Type != corev1.ServiceTypeClusterIP || !reflect.DeepEqual(service.Spec.Selector, edge.PodLabels) || !reflect.DeepEqual(service.Spec.ExternalIPs, []string{edge.PublicAddress}) || service.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal || service.Spec.InternalTrafficPolicy == nil || *service.Spec.InternalTrafficPolicy != corev1.ServiceInternalTrafficPolicyLocal || service.Spec.PublishNotReadyAddresses {
+		return errors.New("SSH public Service no longer selects the declared edge instance")
+	}
+	portName := ""
+	for _, selected := range service.Spec.Ports {
+		if int(selected.Port) == port && selected.Protocol == corev1.ProtocolTCP && selected.TargetPort.Type == intstr.Int && int(selected.TargetPort.IntVal) == port {
+			if portName != "" {
+				return errors.New("SSH public Service repeats the selected binding")
+			}
+			portName = selected.Name
+		}
+	}
+	if portName == "" {
+		return errors.New("SSH public Service does not own this binding")
+	}
+	slices, err := runtime.client.DiscoveryV1().EndpointSlices(edge.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "kubernetes.io/service-name=" + service.Name, Limit: 10})
+	if err != nil {
+		return err
+	}
+	if slices.Continue != "" {
+		return errors.New("SSH public endpoint inventory is incomplete")
+	}
+	count := 0
+	for _, slice := range slices.Items {
+		owned := false
+		for _, owner := range slice.OwnerReferences {
+			if owner.Kind == "Service" && owner.UID == service.UID && owner.Controller != nil && *owner.Controller {
+				owned = true
+			}
+		}
+		selected := false
+		for _, endpointPort := range slice.Ports {
+			if endpointPort.Name != nil && *endpointPort.Name == portName && endpointPort.Port != nil && int(*endpointPort.Port) == port && endpointPort.Protocol != nil && *endpointPort.Protocol == corev1.ProtocolTCP {
+				selected = true
+			}
+		}
+		if !owned || !selected || slice.DeletionTimestamp != nil {
+			return errors.New("SSH EndpointSlice ownership or port differs")
+		}
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.NodeName == nil || *endpoint.NodeName != edge.EdgeID || endpoint.TargetRef == nil || endpoint.TargetRef.Kind != "Pod" || endpoint.TargetRef.UID != pod.UID || endpoint.TargetRef.Name != pod.Name || endpoint.TargetRef.Namespace != pod.Namespace || !reflect.DeepEqual(endpoint.Addresses, []string{pod.Status.PodIP}) || endpoint.Conditions.Ready == nil || !*endpoint.Conditions.Ready || endpoint.Conditions.Terminating != nil && *endpoint.Conditions.Terminating {
+				return errors.New("SSH public endpoint differs from the acknowledged Pod")
+			}
+			count++
+		}
+	}
+	if count != 1 {
+		return errors.New("SSH public binding requires exactly one selected endpoint")
+	}
+	return nil
 }
 
 func (runtime *KubernetesRuntime) StopDrainedSlot(ctx context.Context, slot managedssh.ServingSlot) (bool, error) {

@@ -60,6 +60,9 @@ type EdgeConsumer struct {
 	Namespace     string            `json:"namespace"`
 	PodLabels     map[string]string `json:"pod_labels"`
 	PublicAddress string            `json:"public_address"`
+	PublicService string            `json:"public_service,omitempty"`
+	ServiceUID    string            `json:"service_uid,omitempty"`
+	Image         string            `json:"image,omitempty"`
 }
 
 type KubernetesRuntime struct {

@@ -6,6 +6,16 @@ from scripts import reconcile_managed_ssh_runtime as runtime
 
 
 class ManagedSSHRuntimeTest(unittest.TestCase):
+    def test_service_backed_retirement_requires_complete_transport_identity(self):
+        config,receipt,state,writes,kube=self.fixture()
+        edge={'edge_id':'edge-a','edge_group_id':'group-a','namespace':'test-system','pod_labels':{'slot':'front-a'},'public_address':'192.0.2.10','public_service':'public-ssh','service_uid':'service-a','image':'registry.example/front@sha256:'+'d'*64}
+        config['runtime']['required_edges']=[edge]
+        runtime.validate(config,receipt)
+        for field in ('public_service','service_uid','image'):
+            candidate=copy.deepcopy(config)
+            del candidate['runtime']['required_edges'][0][field]
+            with self.assertRaises(ValueError):runtime.validate(candidate,receipt)
+
     def fixture(self):
         receipt={"schema":"fugue.managed-ssh-image-receipt/v1","image":"registry.example/ssh@sha256:"+"a"*64,"helper_digest":"sha256:"+"b"*64,"architecture":"amd64","source_commit":"c"*40,"verified":True,"network_policy_enforced":True,"checks":["candidate-publication","native-ssh","native-scp","authorization-refresh","graceful-retirement","network-policy-allow-and-deny","unchanged-workload"]}
         options={"schema":"fugue.managed-ssh-runtime/v1","namespace":"test-ssh","runtime_ids":["runtime_test_1"],"releases":{"amd64":{"image":receipt["image"],"helper_digest":receipt["helper_digest"],"architecture":"amd64"}},"state_storage_class":"test-retained","api_servers":[{"cidr":"192.0.2.10/32","port":6443}],"ingress_namespace":"test-system","ingress_pod_labels":{"component":"front"},"controller_namespace":"test-system","controller_pod_labels":{"component":"ssh-control"},"ingress_cidrs":[],"required_edges":[],"rollback_retention_seconds":86400}

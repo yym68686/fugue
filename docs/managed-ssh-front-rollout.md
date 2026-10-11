@@ -215,3 +215,21 @@ regression reproduced this with a neutral NodePort fixture. The resolver now
 accepts the standard cluster-address-bearing Service types while still selecting
 only the declared ClusterIP and service port, rejecting ExternalName, missing
 addresses, and mismatched ports. It does not use the external node port.
+
+## Retirement follows actual public transport
+
+Pod-network consumers require explicit `public_service`, `service_uid`, and
+immutable `image` fields in the independent runtime declaration. Retirement
+validates the serving Service owner, exact UID, declared selector, public node
+address, local traffic policies, and the application's precise TCP port mapping.
+Every EndpointSlice must belong to that Service and select exactly the ready
+acknowledged Pod on the declared node. An unused private candidate's ACK cannot
+satisfy these conditions. The transport is checked before and after the public
+identity probe, and existing ACK freshness, old-stream accounting, retention,
+signed backend drain, and zero-backend-connection checks still apply.
+
+Tests reject private staging, compensated transport, another Service owner,
+selector drift, missing or remapped ports, foreign EndpointSlices, old Pods,
+wrong nodes, unready endpoints, and ambiguous endpoint sets. No production
+consumer is enrolled until its public transport is selected and independently
+verified; shipping this code does not itself authorize retirement.

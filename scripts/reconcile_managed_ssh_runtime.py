@@ -113,8 +113,14 @@ def validate(config, receipt):
         raise ValueError("bounded edge consumers required")
     seen_edges=set()
     for edge in options["required_edges"]:
-        if set(edge)!={"edge_id","edge_group_id","namespace","pod_labels","public_address"} or edge["edge_id"] in seen_edges:
+        base_fields={"edge_id","edge_group_id","namespace","pod_labels","public_address"}
+        service_fields={"public_service","service_uid","image"}
+        if set(edge) not in (base_fields,base_fields|service_fields) or edge["edge_id"] in seen_edges:
             raise ValueError("invalid or duplicated edge consumer")
+        if "public_service" in edge:
+            name(edge["public_service"])
+            if not isinstance(edge["service_uid"],str) or not re.fullmatch(r'[A-Za-z0-9-]{1,128}',edge["service_uid"]) or not isinstance(edge["image"],str) or not re.fullmatch(r'[^\s]+@sha256:[a-f0-9]{64}',edge["image"]):
+                raise ValueError("Service-backed consumer requires exact Service UID and immutable image")
         name(edge["namespace"])
         name(edge["edge_id"])
         name(edge["edge_group_id"])
