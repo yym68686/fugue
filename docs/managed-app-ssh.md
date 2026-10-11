@@ -845,10 +845,11 @@ tenant boundaries, missing identity, bad artifacts, persisted reload, and
 concurrent ownership changes; they do not claim live sessions survive loss of
 their workload process or host.
 
-Remaining completion work includes explicit helper capability verification and
-operational key rewrapping/retention tooling. The earlier chronological notes in
-this document describe checkpoints; the current status and checklist take
-precedence over their historical pending statements.
+The independent identity backup and reviewed storage-key maintenance workflow
+is documented in `managed-ssh-identity-maintenance.md`. Its initial production
+operation is read-only. The earlier chronological notes in this document
+describe checkpoints; the current status and checklist take precedence over
+their historical pending statements.
 
 ## Executed helper capability preflight
 
@@ -881,3 +882,34 @@ policy, graceful retirement, and unchanged workload verification. Runtime
 generation 8 selects that exact image and helper digest. Candidate creation and
 verification precede route selection; old servers remain available for their
 existing sessions. Separate read-only poly/argus test sessions span this rollout.
+
+## Authorization renewal deadline regression
+
+Longer production observation found a precise renewal gap in an old retained
+server. The held Argus acceptance connection closed at
+`2026-10-11T16:14:33.116877397Z`. Its loaded signed generation 75 expired at
+`16:14:33.052763469Z`; generation 77 was compiled at `16:13:13.173748202Z` but
+the server admitted it at `16:14:35.360150247Z`. The old configuration therefore
+expired before the replacement loaded. Business Pod/container IDs and server
+restart counts did not change. A new authenticated connection succeeded.
+
+The controller renewed only when less than two minutes remained, polled after
+bounded but slow reconciliation sweeps, and interleaved retained-slot publication
+with workload discovery, resource writes, and capability/handshake checks.
+Kubernetes client-side throttling and deadline failures were observed. This
+ordering left only about 80 seconds before expiry for that renewal, less than
+the observed publication/projection/loading delay. The server's expiry check
+correctly refused to extend the expired grant; weakening expiry is not a fix.
+
+Authorization publication now happens immediately after durable artifact
+creation, before workload discovery or runtime resource reconciliation. Existing
+owned trust/artifact Secrets can be refreshed without recreating an absent
+runtime, restarting a server, or rechecking a slow candidate. Renewal begins
+after one minute of the existing five-minute lifetime, leaving headroom for the
+bounded sweep, Kubernetes Secret projection, and loader polling. Grants are not
+made longer-lived. Unchanged resource intent no longer sends repeat PATCH
+requests; reads still detect drift, and an intent digest ensures field removal
+receives a real apply. Tests verify publication ordering, expiry headroom,
+durable-before-runtime ordering, ownership/generation fences, unchanged-write
+avoidance, drift repair, and removed configuration. Production acceptance must
+span multiple renewal cycles before this regression is considered resolved.

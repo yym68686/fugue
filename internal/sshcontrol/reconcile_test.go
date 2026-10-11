@@ -30,11 +30,30 @@ type testRuntime struct {
 	observeDelay time.Duration
 	observeSkew  time.Duration
 	applied      []managedssh.ServingSlot
+	published    []managedssh.ServingSlot
+	resolveCheck func() error
 	now          time.Time
 }
 
 func (runtime *testRuntime) Resolve(context.Context, model.App, model.ManagedSSHIntent, managedssh.Target) (managedssh.Target, managedssh.RuntimeRelease, error) {
+	if runtime.resolveCheck != nil {
+		if err := runtime.resolveCheck(); err != nil {
+			return runtime.target, runtime.release, err
+		}
+	}
 	return runtime.target, runtime.release, runtime.resolveError
+}
+
+func (runtime *testRuntime) PublishAuthorization(ctx context.Context, slot managedssh.ServingSlot, trust map[string]ed25519.PublicKey) error {
+	if _, err := managedssh.VerifyArtifact(slot.Artifact, trust); err != nil {
+		return err
+	}
+	state, err := runtime.store.GetManagedSSHControl(slot.Artifact.Configuration.Identity.TenantID, slot.Artifact.Configuration.Identity.AppID)
+	if err != nil || state.Slot(slot.ID) == nil || state.Slot(slot.ID).Artifact.Digest != slot.Artifact.Digest {
+		return errors.New("authorization was not durably published before delivery")
+	}
+	runtime.published = append(runtime.published, slot)
+	return nil
 }
 
 func (runtime *testRuntime) Apply(ctx context.Context, slot managedssh.ServingSlot, private []byte, trust map[string]ed25519.PublicKey) error {
@@ -141,6 +160,17 @@ func TestReconcileStagesCandidateAndRevokesDespiteFailedTarget(test *testing.T) 
 		test.Fatal(err)
 	}
 	activeID := activated.Active.ID
+	runtime.now = runtime.now.Add(80 * time.Second)
+	runtime.resolveCheck = func() error {
+		if len(runtime.published) == 0 || !runtime.published[len(runtime.published)-1].Artifact.Configuration.ValidUntil.Equal(runtime.now.Add(managedssh.GrantLifetime)) {
+			test.Fatal("authorization renewal waited for workload discovery or the old two-minute deadline")
+		}
+		return nil
+	}
+	if err := reconciler.Reconcile(ctx, tenant.ID, app.ID); err != nil {
+		test.Fatal(err)
+	}
+	runtime.resolveCheck = nil
 	if _, err := stateStore.DeleteSSHKey(userKey.ID); err != nil {
 		test.Fatal(err)
 	}

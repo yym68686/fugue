@@ -15,6 +15,7 @@ import (
 
 type Runtime interface {
 	Resolve(context.Context, model.App, model.ManagedSSHIntent, managedssh.Target) (managedssh.Target, managedssh.RuntimeRelease, error)
+	PublishAuthorization(context.Context, managedssh.ServingSlot, map[string]ed25519.PublicKey) error
 	Apply(context.Context, managedssh.ServingSlot, []byte, map[string]ed25519.PublicKey) error
 	Observe(context.Context, managedssh.ServingSlot) (managedssh.CandidateEvidence, error)
 }
@@ -109,7 +110,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 		for index := range comparison.Keys {
 			comparison.Keys[index].ExpiresAt = previous.ValidUntil
 		}
-		if reflect.DeepEqual(comparison, previous) && previous.ValidUntil.Sub(now) > 2*time.Minute {
+		if reflect.DeepEqual(comparison, previous) && previous.ValidUntil.Sub(now) > managedssh.GrantLifetime-time.Minute {
 			return nil
 		}
 		artifact, err := managedssh.SignArtifact(configuration, signer.KeyID, signer.PrivateKey)
@@ -132,6 +133,18 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 		}
 	}
 	var reconcileErrors []error
+	if changed && len(state.Slots()) > 0 {
+		state.Revision++
+		if err := reconciler.Store.SaveManagedSSHControl(expected, state); err != nil {
+			return err
+		}
+		expected, changed = state.Revision, false
+	}
+	for _, slot := range state.Slots() {
+		if err := reconciler.Runtime.PublishAuthorization(ctx, slot, signer.PublicKeys); err != nil {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("publish managed SSH authorization %s: %w", slot.ID, err))
+		}
+	}
 	if intent.Spec.Enabled {
 		app, err := reconciler.Store.GetApp(appID)
 		if err != nil {

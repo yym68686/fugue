@@ -3,6 +3,7 @@ package sshcontrol
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -230,6 +231,48 @@ func (runtime *KubernetesRuntime) Apply(ctx context.Context, slot managedssh.Ser
 	return nil
 }
 
+func (runtime *KubernetesRuntime) PublishAuthorization(ctx context.Context, slot managedssh.ServingSlot, trust map[string]ed25519.PublicKey) error {
+	options, err := runtime.options()
+	if err != nil {
+		return err
+	}
+	configuration, err := managedssh.VerifyArtifact(slot.Artifact, trust)
+	if err != nil {
+		return err
+	}
+	if slot.Namespace != options.Namespace || slot.Namespace == configuration.Target.Namespace || slot.ID != managedssh.SlotID(configuration.Identity.ID, configuration.Target, slot.Release) {
+		return managedssh.ErrConfiguration
+	}
+	namespace, err := runtime.client.CoreV1().Namespaces().Get(ctx, slot.Namespace, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if namespace.Labels["fugue.pro/managed-ssh-control"] != "true" || namespace.DeletionTimestamp != nil {
+		return managedssh.ErrUnauthorized
+	}
+	artifact, err := json.Marshal(slot.Artifact)
+	if err != nil {
+		return err
+	}
+	publicKeys := map[string]string{}
+	for identifier, key := range trust {
+		publicKeys[identifier] = base64.StdEncoding.EncodeToString(key)
+	}
+	publicTrust, err := json.Marshal(map[string]any{"schema": "fugue.managed-ssh-trust/v1", "keys": publicKeys})
+	if err != nil {
+		return err
+	}
+	for _, secret := range []corev1.Secret{
+		{ObjectMeta: metav1.ObjectMeta{Name: slot.ID + "-trust", Namespace: slot.Namespace, Labels: slotLabels(slot)}, Data: map[string][]byte{"trust.json": publicTrust}},
+		{ObjectMeta: metav1.ObjectMeta{Name: slot.ID + "-artifact", Namespace: slot.Namespace, Labels: slotLabels(slot)}, Data: map[string][]byte{"artifact.json": artifact}},
+	} {
+		if err := runtime.updateSecret(ctx, slot, secret, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func slotLabels(slot managedssh.ServingSlot) map[string]string {
 	identity := slot.Artifact.Configuration.Identity
 	return map[string]string{"app.kubernetes.io/component": "managed-ssh", "fugue.pro/ssh-instance": slot.ID, "fugue.pro/ssh-app-id": identity.AppID, "fugue.pro/ssh-tenant-id": identity.TenantID}
@@ -245,9 +288,16 @@ func ownedSlotLabels(actual map[string]string, slot managedssh.ServingSlot) bool
 }
 
 func (runtime *KubernetesRuntime) applySecret(ctx context.Context, slot managedssh.ServingSlot, desired corev1.Secret) error {
+	return runtime.updateSecret(ctx, slot, desired, true)
+}
+
+func (runtime *KubernetesRuntime) updateSecret(ctx context.Context, slot managedssh.ServingSlot, desired corev1.Secret, create bool) error {
 	client := runtime.client.CoreV1().Secrets(slot.Namespace)
 	current, err := client.Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if !create {
+			return nil
+		}
 		_, err = client.Create(ctx, &desired, metav1.CreateOptions{FieldManager: "fugue-managed-ssh"})
 		return safeResourceError("Secret", desired.Name, err)
 	}
@@ -343,6 +393,20 @@ func (runtime *KubernetesRuntime) applyObject(ctx context.Context, slot manageds
 				}
 			}
 		}
+		desired, err := object.MarshalJSON()
+		if err != nil {
+			return err
+		}
+		digest := fmt.Sprintf("sha256:%x", sha256.Sum256(desired))
+		annotations := object.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations["ssh.fugue.dev/resource-intent-digest"] = digest
+		object.SetAnnotations(annotations)
+		if containsDesiredObject(current.Object, object.Object) {
+			return nil
+		}
 		object.SetResourceVersion(current.GetResourceVersion())
 	}
 	raw, err = object.MarshalJSON()
@@ -351,6 +415,38 @@ func (runtime *KubernetesRuntime) applyObject(ctx context.Context, slot manageds
 	}
 	_, err = client.Patch(ctx, object.GetName(), types.ApplyPatchType, raw, metav1.PatchOptions{FieldManager: "fugue-managed-ssh"})
 	return safeResourceError(object.GetKind(), object.GetName(), err)
+}
+
+func containsDesiredObject(current, desired any) bool {
+	if desired == nil {
+		return true
+	}
+	switch expected := desired.(type) {
+	case map[string]any:
+		actual, ok := current.(map[string]any)
+		if !ok {
+			return false
+		}
+		for key, value := range expected {
+			if !containsDesiredObject(actual[key], value) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		actual, ok := current.([]any)
+		if !ok || len(actual) != len(expected) {
+			return false
+		}
+		for index, value := range expected {
+			if !containsDesiredObject(actual[index], value) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(current, desired)
+	}
 }
 
 func safeResourceError(kind, name string, err error) error {

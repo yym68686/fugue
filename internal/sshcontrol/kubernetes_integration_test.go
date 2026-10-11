@@ -254,7 +254,7 @@ func TestCandidatePublicationIsolatedKubernetes(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
-	if err := runtime.Apply(ctx, slot, privateKey, trust); err != nil {
+	if err := runtime.PublishAuthorization(ctx, slot, trust); err != nil {
 		test.Fatal("revocation publication failed", err)
 	}
 	for {
