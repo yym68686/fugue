@@ -207,3 +207,11 @@ not alter any user's SSH configuration.
 This initial migration declaration is deliberately finite. Automatic management
 of future platform-owned bindings and retirement validation against the actual
 selected Service remain required before platform-wide completion.
+
+The first internal transport run stopped before any Service creation. Its API
+origin resolver incorrectly required Service type `ClusterIP`; the declared
+API Service is type `NodePort` with a valid cluster address and port 80. The
+regression reproduced this with a neutral NodePort fixture. The resolver now
+accepts the standard cluster-address-bearing Service types while still selecting
+only the declared ClusterIP and service port, rejecting ExternalName, missing
+addresses, and mismatched ports. It does not use the external node port.

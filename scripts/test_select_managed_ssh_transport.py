@@ -14,6 +14,9 @@ class SSHTransportSelectionTest(unittest.TestCase):
             self.assertEqual(args, ['get', 'service', 'api', '-n', 'test-system', '-o', 'json'])
             return json.dumps(service)
         self.assertEqual(api_origin(stage, kube), 'http://10.2.2.10:80')
+        service['spec']['type'] = 'NodePort'
+        service['spec']['ports'][0]['nodePort'] = 30080
+        self.assertEqual(api_origin(stage, kube), 'http://10.2.2.10:80')
         service['spec']['ports'][0]['port'] = 8080
         with self.assertRaises(ValueError):api_origin(stage, kube)
         stage['apiURL'] = 'https://api.example'

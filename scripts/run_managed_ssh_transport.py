@@ -29,7 +29,7 @@ def api_origin(stage, kube=kubectl):
         transport.name(service_name)
         service = strict_json(kube(['get', 'service', service_name, '-n', stage['namespace'], '-o', 'json']))
         port = origin.port or 80
-        if service['metadata'].get('deletionTimestamp') or not service['metadata'].get('uid') or service['spec'].get('type') != 'ClusterIP' or not any(item['port'] == port and item.get('protocol', 'TCP') == 'TCP' for item in service['spec']['ports']):
+        if service['metadata'].get('deletionTimestamp') or not service['metadata'].get('uid') or service['spec'].get('type') not in ('ClusterIP', 'NodePort', 'LoadBalancer') or not any(item['port'] == port and item.get('protocol', 'TCP') == 'TCP' for item in service['spec']['ports']):
             raise ValueError('declared API Service is not available at its selected port')
         address = ipaddress.ip_address(service['spec']['clusterIP'])
         host = '['+str(address)+']' if address.version == 6 else str(address)
