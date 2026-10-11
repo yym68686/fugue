@@ -694,3 +694,20 @@ Further client acceptance found that a forced native PTY with unspecified
 dimensions is rejected; that compatibility defect remains under repair. One
 exec request was also rejected without a sufficiently precise diagnostic; a
 successful repeat does not establish its cause.
+
+PTY requests now accept unspecified zero dimensions, retain the last known
+nonzero dimensions during resize, and use initial 80-column/24-row defaults.
+This follows [RFC 4254 section 6.2](https://www.rfc-editor.org/rfc/rfc4254#section-6.2).
+A regression test reproduced the previous rejection and now passes, including
+partial and all-zero resize requests. The isolated native-client acceptance
+also forces a PTY from a process without a local terminal. An omitted TERM uses
+the generic `dumb` terminal; resource bounds and terminal-mode validation remain.
+
+The unexplained exec rejection is being investigated through additional
+observability. Rejected program requests record a bounded stage and reason,
+connection/session identities, and the exact target in the existing protected
+audit. Runtime checks distinguish target reads, capability execution, empty or
+malformed responses, user/architecture mismatch, timeouts, authorization errors,
+and nonzero probe exits. Underlying command output and exception text are never
+copied into the diagnostic; privacy tests cover malicious labels and wrapped
+errors. This does not presume or change the cause of the unexplained rejection.

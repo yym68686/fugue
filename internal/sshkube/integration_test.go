@@ -269,6 +269,11 @@ func TestManagedSSHIsolatedKubernetes(test *testing.T) {
 	if err != nil || string(output) != "native-client" {
 		test.Fatal("native OpenSSH failed", string(output), err)
 	}
+	native = exec.CommandContext(ctx, "ssh", append(append([]string{}, sshOptions...), "-tt", "-p", port, "root@"+host, "test -t 0 && stty size")...)
+	output, err = native.CombinedOutput()
+	if err != nil || !bytes.Contains(output, []byte("24 80")) {
+		test.Fatal("native forced PTY without local dimensions failed", string(output), err)
+	}
 	localFile := filepath.Join(identityDirectory, "upload.txt")
 	if err := os.WriteFile(localFile, []byte("native-scp-payload"), 0o600); err != nil {
 		test.Fatal(err)

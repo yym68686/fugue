@@ -19,12 +19,14 @@ import (
 	"fugue/internal/sshexecutor"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	utilexec "k8s.io/client-go/util/exec"
 )
 
 const helperReady = "FUGUE_SSH_HELPER_READY_v1\n"
@@ -130,21 +132,53 @@ func (executor *Kubernetes) Validate(ctx context.Context, target managedssh.Targ
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if _, err := executor.boundPod(ctx, target); err != nil {
-		return managedssh.Capabilities{}, err
+		return managedssh.Capabilities{}, runtimeCheckFailure("bound_before", err)
 	}
 	output := &limitedBuffer{limit: 2048}
 	err := executor.stream(ctx, target, []string{executor.shell, "-c", helperCapabilityProbe, "fugue-ssh", target.WorkingDirectory}, nil, output, io.Discard)
 	if err != nil {
-		return managedssh.Capabilities{}, managedssh.ErrCapabilities
+		return managedssh.Capabilities{}, runtimeCheckFailure("capability_probe", err)
 	}
 	fields := strings.Fields(output.String())
-	if len(fields) != 3 || fields[0] != executor.architecture || (fields[1] != target.User && fields[2] != target.User) {
-		return managedssh.Capabilities{}, managedssh.ErrCapabilities
+	if len(fields) == 0 {
+		return managedssh.Capabilities{}, managedssh.RuntimeCheckFailure("capability_output", "empty", managedssh.ErrCapabilities)
+	}
+	if len(fields) != 3 {
+		return managedssh.Capabilities{}, managedssh.RuntimeCheckFailure("capability_output", "malformed", managedssh.ErrCapabilities)
+	}
+	if fields[0] != executor.architecture {
+		return managedssh.Capabilities{}, managedssh.RuntimeCheckFailure("capability_output", "architecture", managedssh.ErrCapabilities)
+	}
+	if fields[1] != target.User && fields[2] != target.User {
+		return managedssh.Capabilities{}, managedssh.RuntimeCheckFailure("capability_output", "user", managedssh.ErrCapabilities)
 	}
 	if _, err := executor.boundPod(ctx, target); err != nil {
-		return managedssh.Capabilities{}, err
+		return managedssh.Capabilities{}, runtimeCheckFailure("bound_after", err)
 	}
 	return managedssh.Capabilities{Exec: true, Shell: true, PTY: true, SFTP: true, Signals: true, Forward: true}, nil
+}
+
+func runtimeCheckFailure(stage string, err error) error {
+	reason := "unavailable"
+	var exitError utilexec.ExitError
+	var networkError net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &networkError) && networkError.Timeout():
+		reason = "deadline"
+	case errors.Is(err, context.Canceled):
+		reason = "canceled"
+	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+		reason = "forbidden"
+	case apierrors.IsNotFound(err):
+		reason = "not_found"
+	case errors.Is(err, managedssh.ErrUnauthorized), errors.Is(err, managedssh.ErrUnavailable):
+		reason = "binding"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		reason = "eof"
+	case errors.As(err, &exitError):
+		reason = "exit_" + strconv.Itoa(exitError.ExitStatus())
+	}
+	return managedssh.RuntimeCheckFailure(stage, reason, errors.Join(managedssh.ErrCapabilities, err))
 }
 
 func (executor *Kubernetes) Run(ctx context.Context, target managedssh.Target, request managedssh.SessionRequest, streams managedssh.SessionIO) (managedssh.Exit, error) {

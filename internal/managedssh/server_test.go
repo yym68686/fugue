@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -224,6 +225,47 @@ func TestManagedSSHPTYResizeAndSignals(test *testing.T) {
 	var exitError *ssh.ExitError
 	if !errors.As(err, &exitError) || exitError.Signal() != "TERM" {
 		test.Fatal("signal/terminal handling failed", err)
+	}
+}
+
+func TestManagedSSHPTYUnspecifiedDimensions(test *testing.T) {
+	configuration, hostSigner, userSigner := testConfiguration(test)
+	executor := &testExecutor{run: func(ctx context.Context, target Target, request SessionRequest, streams SessionIO) (Exit, error) {
+		if request.Terminal == nil || request.Terminal.Columns != 80 || request.Terminal.Rows != 24 {
+			return Exit{}, errors.New("unspecified dimensions did not retain terminal defaults")
+		}
+		for _, expected := range []Resize{{Columns: 80, Rows: 40}, {Columns: 120, Rows: 40}, {Columns: 120, Rows: 40}} {
+			select {
+			case actual := <-request.Resize:
+				if actual != expected {
+					return Exit{}, fmt.Errorf("zero resize dimension changed known size: %v", actual)
+				}
+			case <-ctx.Done():
+				return Exit{}, ctx.Err()
+			}
+		}
+		return Exit{}, nil
+	}}
+	_, address := serveForTest(test, executor, &testAudit{}, configuration, hostSigner)
+	client := connectForTest(test, address, "app", hostSigner, userSigner)
+	session, err := client.NewSession()
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer session.Close()
+	if err := session.RequestPty("dumb", 0, 0, ssh.TerminalModes{}); err != nil {
+		test.Fatal("native client without local terminal dimensions was rejected", err)
+	}
+	if err := session.Shell(); err != nil {
+		test.Fatal(err)
+	}
+	for _, resize := range []Resize{{Rows: 40}, {Columns: 120}, {}} {
+		if err := session.WindowChange(int(resize.Rows), int(resize.Columns)); err != nil {
+			test.Fatal(err)
+		}
+	}
+	if err := session.Wait(); err != nil {
+		test.Fatal(err)
 	}
 }
 

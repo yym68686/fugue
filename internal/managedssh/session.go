@@ -30,6 +30,7 @@ func (server *Server) handleSession(ctx context.Context, connectionState, policy
 	resize := make(chan Resize, 16)
 	signals := make(chan string, 16)
 	request := SessionRequest{ID: model.NewID("sshsession"), Environment: map[string]string{}, Resize: resize, Signals: signals}
+	terminalSize := Resize{Columns: 80, Rows: 24}
 	started := false
 	completed := make(chan Exit, 1)
 	initialTimer := time.NewTimer(30 * time.Second)
@@ -63,6 +64,7 @@ func (server *Server) handleSession(ctx context.Context, connectionState, policy
 			}
 			current := server.state.Load()
 			if !current.authorize(connectionState.configuration.Target.User, fingerprint, time.Now().UTC()) {
+				_ = server.record(context.WithoutCancel(sessionContext), current, "session_request_rejected", connectionID, request.ID, fingerprint, "authorization_expired_or_revoked", 0)
 				_ = message.Reply(false, nil)
 				return
 			}
@@ -80,18 +82,24 @@ func (server *Server) handleSession(ctx context.Context, connectionState, policy
 					Columns, Rows, Width, Height uint32
 					Modes                        string
 				}
-				if !started && request.Terminal == nil && current.configuration.AllowPTY && ssh.Unmarshal(message.Payload, &value) == nil && safeToken(value.Name) && validSize(value.Columns, value.Rows) {
+				if !started && request.Terminal == nil && current.configuration.AllowPTY && ssh.Unmarshal(message.Payload, &value) == nil && (value.Name == "" || safeToken(value.Name)) && validSize(value.Columns, value.Rows) {
 					modes, err := terminalModes([]byte(value.Modes))
 					if err == nil {
-						request.Terminal = &Terminal{Name: value.Name, Columns: value.Columns, Rows: value.Rows, Modes: modes}
+						terminalSize = retainTerminalDimensions(terminalSize, value.Columns, value.Rows)
+						if value.Name == "" {
+							value.Name = "dumb"
+						}
+						request.Terminal = &Terminal{Name: value.Name, Columns: terminalSize.Columns, Rows: terminalSize.Rows, Modes: modes}
 						accepted = true
 					}
 				}
 			case "window-change":
 				var value struct{ Columns, Rows, Width, Height uint32 }
 				if request.Terminal != nil && ssh.Unmarshal(message.Payload, &value) == nil && validSize(value.Columns, value.Rows) {
+					nextSize := retainTerminalDimensions(terminalSize, value.Columns, value.Rows)
 					select {
-					case resize <- Resize{Columns: value.Columns, Rows: value.Rows}:
+					case resize <- nextSize:
+						terminalSize = nextSize
 						accepted = true
 					default:
 					}
@@ -107,6 +115,7 @@ func (server *Server) handleSession(ctx context.Context, connectionState, policy
 				}
 			case "shell", "exec", "subsystem":
 				if started || current.configuration.Target != connectionState.configuration.Target {
+					_ = server.record(sessionContext, current, "session_request_rejected", connectionID, request.ID, fingerprint, "session_started_or_target_changed", 0)
 					break
 				}
 				valid := false
@@ -125,10 +134,16 @@ func (server *Server) handleSession(ctx context.Context, connectionState, policy
 					request.Kind = "sftp"
 				}
 				if !valid {
+					_ = server.record(sessionContext, current, "session_request_rejected", connectionID, request.ID, fingerprint, "invalid_request", 0)
 					break
 				}
 				capabilities, err := server.executor.Validate(sessionContext, connectionState.configuration.Target)
-				if err != nil || !sessionSupported(capabilities, request) {
+				if err != nil {
+					_ = server.record(context.WithoutCancel(sessionContext), current, "session_request_rejected", connectionID, request.ID, fingerprint, RuntimeFailureReason(err), 0)
+					break
+				}
+				if !sessionSupported(capabilities, request) {
+					_ = server.record(sessionContext, current, "session_request_rejected", connectionID, request.ID, fingerprint, "capability_not_supported", 0)
 					break
 				}
 				if err := server.record(sessionContext, current, "session_opened", connectionID, request.ID, fingerprint, request.Kind, 0); err != nil {
@@ -182,7 +197,17 @@ func environmentAllowed(configuration Configuration, name string) bool {
 }
 
 func validSize(columns, rows uint32) bool {
-	return columns > 0 && columns <= 65535 && rows > 0 && rows <= 65535
+	return columns <= 65535 && rows <= 65535
+}
+
+func retainTerminalDimensions(previous Resize, columns, rows uint32) Resize {
+	if columns != 0 {
+		previous.Columns = columns
+	}
+	if rows != 0 {
+		previous.Rows = rows
+	}
+	return previous
 }
 
 func allowedSignal(signal string) bool {
