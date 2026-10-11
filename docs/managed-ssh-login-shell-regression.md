@@ -31,3 +31,11 @@ forwarding, exact workload identity, and zero-workload-restart assertions.
 Production uses the normal immutable-artifact CI followed by an independent
 runtime intent selection. No application or local SSH configuration edits are
 part of this repair.
+
+The first image-acceptance run completed image publication but then remained in
+the opaque verification step without a stage log. That evidence does not identify
+which verification command stalled. The verifier now reports bounded stage
+timing and exit status. A timeout regression also demonstrates why killing only
+a launcher can keep inherited child output pipes open; subprocess verification
+now terminates the entire task-owned process group and bounds output cleanup.
+No serving behavior is changed based on a guessed CI failure cause.

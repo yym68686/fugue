@@ -1,12 +1,22 @@
 import copy
 import unittest
 import json
+import sys
+import time
 from unittest import mock
 
 from scripts import verify_managed_ssh_image as artifact
 
 
 class ManagedSSHImageTest(unittest.TestCase):
+    def test_timeout_cleans_descendants_holding_output_pipes(self):
+        started=time.monotonic()
+        child='import time; time.sleep(5)'
+        parent='import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",'+repr(child)+']); time.sleep(5)'
+        with self.assertRaisesRegex(RuntimeError,'verification timed out'):
+            artifact.run([sys.executable,'-c',parent],timeout=0.5)
+        self.assertLess(time.monotonic()-started,3,'timeout waited on inherited child output pipes')
+
     def test_candidate_uses_cri_pull_and_checks_config_identity(self):
         image="registry.example/ssh@sha256:"+"a"*64
         node="fugue-ssh-artifact-0123456789-control-plane"

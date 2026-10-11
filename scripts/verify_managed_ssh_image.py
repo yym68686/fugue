@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,11 +28,30 @@ def policy_manifest(raw):
 
 
 def run(command, timeout=180, env=None):
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env, check=False)
-    if result.returncode:
-        sys.stderr.buffer.write(result.stdout[-12000:] + result.stderr[-12000:])
+    stage=' '.join(command[:2])
+    started=time.monotonic()
+    print('managed SSH verification starting: '+stage+'; timeout='+str(timeout)+'s',file=sys.stderr,flush=True)
+    process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=True)
+    try:
+        stdout,stderr=process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid,signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout,stderr=process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.stdout.close()
+            process.stderr.close()
+            raise RuntimeError('managed SSH verification timeout cleanup did not complete: '+stage) from None
+        sys.stderr.buffer.write(stdout[-12000:]+stderr[-12000:])
+        raise RuntimeError('managed SSH verification timed out: '+stage) from None
+    print('managed SSH verification finished: '+stage+'; exit='+str(process.returncode)+'; elapsed='+str(round(time.monotonic()-started,2))+'s',file=sys.stderr,flush=True)
+    if process.returncode:
+        sys.stderr.buffer.write(stdout[-12000:] + stderr[-12000:])
         raise RuntimeError("managed SSH artifact verification command failed")
-    return result.stdout
+    return stdout
 
 
 def validate_metadata(metadata, source):
