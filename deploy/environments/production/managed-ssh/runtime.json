@@ -1,9 +1,9 @@
 {
   "apiVersion": "ssh.fugue.dev/v1",
   "kind": "ManagedSSHRuntimeIntent",
-  "generation": 6,
-  "expectedPreviousGeneration": 5,
-  "expectedPreviousDigest": "sha256:e19fbe94bfde3fac497d6b78ae99097de6a612c32aeb17803c9d37106ab80d45",
+  "generation": 7,
+  "expectedPreviousGeneration": 6,
+  "expectedPreviousDigest": "sha256:82a456f3157170647c0af2a4bba1f47ded77579fd99d66ea97c7f8eb1c31fd59",
   "controllerNamespace": "fugue-system",
   "controllerAccount": "fugue-ssh-control",
   "runtimeConfigMap": "fugue-ssh-runtime",
@@ -42,7 +42,7 @@
         "public_service": "fugue-managed-ssh-us-primary-canary",
         "service_uid": "2017d294-cfcf-468b-b646-79b90ef9f31d",
         "image": "ghcr.io/yym68686/fugue-ssh-front@sha256:3e9908984365189c0c7157fa4418f9ef2318f6aa01f7bf113ad0bfd04726649b",
-        "binding_publication": {"port_start": 22004, "port_end": 22100, "intent_digest": "sha256:4ab305bd6d73e41d8638041c152ab0650bf8cde6ec8b02b5f3f7e6d77eda1edd"}
+        "binding_publication": {"port_start": 22000, "port_end": 32000, "intent_digest": "sha256:4ab305bd6d73e41d8638041c152ab0650bf8cde6ec8b02b5f3f7e6d77eda1edd"}
       },
       {
         "edge_id": "vps-84c8f0a9",
@@ -53,7 +53,7 @@
         "public_service": "fugue-managed-ssh-de-primary-canary",
         "service_uid": "a70a1fac-4aaa-4dac-a6db-b48247450def",
         "image": "ghcr.io/yym68686/fugue-ssh-front@sha256:3e9908984365189c0c7157fa4418f9ef2318f6aa01f7bf113ad0bfd04726649b",
-        "binding_publication": {"port_start": 22004, "port_end": 22100, "intent_digest": "sha256:c3f0e3d86e3565ecd06e9cf9b0bcf3c8ef80b1cdd401a3004275de5218f167ce"}
+        "binding_publication": {"port_start": 22000, "port_end": 32000, "intent_digest": "sha256:c3f0e3d86e3565ecd06e9cf9b0bcf3c8ef80b1cdd401a3004275de5218f167ce"}
       },
       {
         "edge_id": "bwg",
@@ -64,7 +64,7 @@
         "public_service": "fugue-managed-ssh-us-optimized-canary",
         "service_uid": "be13b602-9263-4c80-be78-f907fcc9f63e",
         "image": "ghcr.io/yym68686/fugue-ssh-front@sha256:3e9908984365189c0c7157fa4418f9ef2318f6aa01f7bf113ad0bfd04726649b",
-        "binding_publication": {"port_start": 22004, "port_end": 22100, "intent_digest": "sha256:7b1db8266b8ae45f54a3d9d178998732cff65af36c0aa9d5995c75d5d326ba16"}
+        "binding_publication": {"port_start": 22000, "port_end": 32000, "intent_digest": "sha256:7b1db8266b8ae45f54a3d9d178998732cff65af36c0aa9d5995c75d5d326ba16"}
       },
       {
         "edge_id": "86eabf26-42a9-4f9d-998a-754115f8b829",
@@ -75,7 +75,7 @@
         "public_service": "fugue-managed-ssh-us-secondary-canary",
         "service_uid": "da28d881-14e5-44ce-ac8e-247cb692f8dd",
         "image": "ghcr.io/yym68686/fugue-ssh-front@sha256:3e9908984365189c0c7157fa4418f9ef2318f6aa01f7bf113ad0bfd04726649b",
-        "binding_publication": {"port_start": 22004, "port_end": 22100, "intent_digest": "sha256:92f016142a69c327f29c092022ee624a5aa3761063668161a47e7f3d642b9c59"}
+        "binding_publication": {"port_start": 22000, "port_end": 32000, "intent_digest": "sha256:92f016142a69c327f29c092022ee624a5aa3761063668161a47e7f3d642b9c59"}
       }
     ],
     "rollback_retention_seconds": 3600

@@ -358,3 +358,39 @@ The transport CI budget is 40 minutes for up to eight sequential operations,
 each with its own bounded three-minute observation deadline, probes, and
 compensation. This accommodates the declared batch limit without changing any
 evidence expiry or retrying mutations.
+
+## Dynamic allocation and backend retirement acceptance
+
+Runtime generation 6 deployed successfully. The retained synthetic backend
+`ssh-8dc9fd07d4822467cd49a9d40b90f5b6` entered signed drain at 15:06:41 UTC.
+Its health reported `draining=true`, one active connection, and one running
+replica. That held authenticated session still exchanged data, while a new SSH
+connection to the old slot was refused. After the test client closed normally,
+the controller scaled it to zero, verified Pod disappearance, and recorded
+retirement at 15:09:54 UTC. Its immutable identity Secret and bound state PVC
+remain retained for recovery.
+
+A third synthetic workload, `app_1791731173_3c446201c5fc`, was created after
+ingress policy enrollment. It has no application SSH daemon and received a new
+managed identity and public binding on port 22006. No code, runtime policy, or
+static migration declaration changed to add that port. The controller added
+22006 to all four existing Services and persisted its exact logical binding
+ownership. All four public addresses authenticated to the unchanged target Pod.
+At 15:15:26 UTC, four separately held public sessions were each visible in the
+fresh ACK from their exact selected front Pod, proving the traffic reached the
+new ingress rather than merely succeeding through a legacy listener.
+
+The target Pod UID remained `277a9c42-fbc1-44e7-b46d-ba9d2a970014`, its container
+ID remained unchanged, and restart count was zero. The updated protected
+identity/anchor dump contains five identities; an isolated restore verified
+every private/public pair and matched the new identity with authenticated API
+inventory. Backup SHA-256 is
+`2d2c36c1142396c12777d77ca9b24105f0506898e4bba12d1ef0bfbcdf545c59`.
+
+Runtime generation 7 extends the same verified managed-binding policy to the
+declared platform SSH range 22000-32000. Only applications with committed managed
+identity, intent, route, and current verification may acquire a transport port;
+application-native endpoints are not imported. Two read-only sessions opened
+through the original poly/argus paths span this ingress change. Their already
+approved host identities and application workloads remain unchanged. Existing
+front processes remain running so their established streams are preserved.
