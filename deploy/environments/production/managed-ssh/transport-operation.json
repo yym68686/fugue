@@ -1,6 +1,11 @@
 {
-  "schema": "fugue.ssh-transport-operation/v1",
+  "schema": "fugue.ssh-transport-operation/v2",
   "stage": "deploy/environments/production/managed-ssh/front-stage.json",
-  "selection": "deploy/environments/production/managed-ssh/transport/us-primary-canary.json",
-  "action": "compensate"
+  "selections": [
+    "deploy/environments/production/managed-ssh/transport/us-primary-canary.json",
+    "deploy/environments/production/managed-ssh/transport/de-primary-canary.json",
+    "deploy/environments/production/managed-ssh/transport/us-optimized-canary.json",
+    "deploy/environments/production/managed-ssh/transport/us-secondary-canary.json"
+  ],
+  "action": "stage"
 }

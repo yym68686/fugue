@@ -1,0 +1,11 @@
+{
+  "schema": "fugue.ssh-transport-selection/v1",
+  "namespace": "fugue-system",
+  "service": "fugue-managed-ssh-us-optimized-canary",
+  "node": "bwg",
+  "stageDigest": "sha256:30a858fc590b5d57375c2ec49cfcdc1ffab2cfecdcd8b271522ba8a21f2636d5",
+  "applications": ["app_1791712211_50da9cd89e0a", "app_1791716954_7ef0ec5ed606"],
+  "stagedGeneration": 1,
+  "servingGeneration": 2,
+  "compensationGeneration": 3
+}

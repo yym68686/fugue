@@ -1,13 +1,32 @@
 import copy
 import json
+import io
 import unittest
+from unittest import mock
 
 from scripts import select_managed_ssh_transport as transport
 from scripts.run_managed_ssh_transport import api_origin, await_evidence, validate_operation
 from scripts.observe_managed_ssh_front import EvidencePending
+from scripts import run_managed_ssh_transport as runner
 
 
 class SSHTransportSelectionTest(unittest.TestCase):
+    def test_batch_validates_all_authorities_before_writing_and_stops_after_failure(self):
+        config, stage, evidence, state, writes, kube, observe, witness, witnesses = self.fixture()
+        stage['nodes'].extend([{'id':'worker-b','publicAddress':'1.1.1.1'},{'id':'worker-c','publicAddress':'8.8.4.4'}])
+        operation={'schema':'fugue.ssh-transport-operation/v2','stage':'deploy/environments/production/managed-ssh/front-stage.json','selections':['deploy/environments/production/managed-ssh/transport/'+name+'.json' for name in ('first','second','third')],'action':'stage'}
+        records={operation['stage']:stage}
+        for index,path in enumerate(operation['selections']):
+            records[path]=dict(config,node=stage['nodes'][index]['id'],service='ssh-'+str(index),stageDigest=transport.digest(stage))
+        with mock.patch.object(runner.Path,'read_bytes',lambda path:json.dumps(records[str(path)]).encode()), mock.patch.object(runner,'api_origin',return_value='https://control.example'), mock.patch.dict(runner.os.environ,{'FUGUE_API_KEY':'fixture-token'}), mock.patch.object(runner.sys,'stderr',io.StringIO()):
+            with mock.patch.object(transport,'select',side_effect=[{'phase':'staged','verified':True},ValueError('second node unavailable')]) as select:
+                with self.assertRaisesRegex(ValueError,'second node unavailable'):runner.run(operation,'unused-probe')
+                self.assertEqual(select.call_count,2)
+            records[operation['selections'][2]]['node']='worker-a'
+            with mock.patch.object(transport,'select') as select:
+                with self.assertRaisesRegex(ValueError,'repeat a node'):runner.run(operation,'unused-probe')
+                select.assert_not_called()
+
     def test_waits_only_for_pending_read_evidence_with_one_bounded_deadline(self):
         clock = [0]
         reads = []
@@ -48,6 +67,12 @@ class SSHTransportSelectionTest(unittest.TestCase):
         for field, value in [('stage', '/tmp/stage.json'), ('selection', 'deploy/environments/production/managed-ssh/transport/../fixture.json'), ('action', 'automatic')]:
             candidate = dict(operation)
             candidate[field] = value
+            with self.assertRaises(ValueError):validate_operation(candidate)
+        batch={key:value for key,value in operation.items() if key!='selection'}
+        batch.update(schema='fugue.ssh-transport-operation/v2',selections=[operation['selection']])
+        self.assertEqual(validate_operation(batch),batch)
+        for selections in [[],[operation['selection']]*2,['/tmp/selection.json']]:
+            candidate=dict(batch,selections=selections)
             with self.assertRaises(ValueError):validate_operation(candidate)
 
     def fixture(self):
@@ -119,6 +144,31 @@ class SSHTransportSelectionTest(unittest.TestCase):
         self.assertTrue(all(value.closed and value.exchanges >= 3 for value in witnesses))
         with self.assertRaises(ValueError):transport.select(config, stage, 'activate', observe, witness, kube)
         self.assertEqual(len(writes), 3)
+
+    def test_reactivation_requires_exact_compensated_predecessor_and_is_idempotent(self):
+        config, stage, evidence, state, writes, kube, observe, witness, witnesses = self.fixture()
+        transport.select(config, stage, 'stage', observe, kube=kube)
+        transport.select(config, stage, 'activate', observe, witness, kube, lambda seconds: None)
+        repeated=transport.select(config, stage, 'activate', observe, witness, kube)
+        self.assertTrue(repeated['already_selected'])
+        self.assertEqual(len(writes),2)
+        transport.select(config, stage, 'compensate', observe, witness, kube, lambda seconds: None)
+        repeated=transport.select(config, stage, 'compensate', observe, witness, kube)
+        self.assertTrue(repeated['already_selected'])
+        previous_digest=transport.digest(config)
+        restored=dict(config,schema='fugue.ssh-transport-selection/v2',stagedGeneration=3,servingGeneration=4,compensationGeneration=5,previousServiceUID=state['service']['metadata']['uid'],previousIntentDigest=previous_digest)
+        for field,value in [('previousServiceUID','replacement'),('previousIntentDigest','sha256:'+'a'*64)]:
+            invalid=dict(restored)
+            invalid[field]=value
+            with self.assertRaises(ValueError):transport.select(invalid,stage,'activate',observe,witness,kube)
+        self.assertEqual(len(writes),3)
+        result=transport.select(restored,stage,'activate',observe,witness,kube,lambda seconds:None)
+        self.assertTrue(result['verified'])
+        self.assertEqual(state['service']['metadata']['annotations'][transport.GENERATION],'4')
+        self.assertEqual(state['service']['metadata']['annotations'][transport.INTENT],transport.digest(restored))
+        transport.select(restored,stage,'compensate',observe,witness,kube,lambda seconds:None)
+        self.assertEqual(state['service']['metadata']['annotations'][transport.GENERATION],'5')
+        self.assertEqual(len(writes),5)
 
     def test_failed_public_verification_compensates_only_its_selection(self):
         config, stage, evidence, state, writes, kube, observe, witness, witnesses = self.fixture()

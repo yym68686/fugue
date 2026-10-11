@@ -302,3 +302,25 @@ only ports 22004 and 22005. The operation verified candidate/public identities
 and preserved both held authenticated sessions. Original Argus ports are not
 selected by this Service. The next explicit operation exercises compensation to
 private generation 3 while keeping the front processes and established streams.
+
+Selection schema v2 can reactivate a compensated Service only when its exact
+UID, previous intent digest, private selector/ports, and predecessor generation
+still match. The new serving and compensation generations are explicit and
+consecutive; an old operation cannot overwrite a newer selection. Repeating an
+already selected operation performs current identity/endpoint/session checks
+without another mutation.
+
+Operation schema v2 declares an ordered, bounded list of node selections. All
+declarations are validated for unique node and Service authority before any
+write, then executed sequentially. Failure stops subsequent nodes and preserves
+earlier successful selections. This supports a reviewable multi-node rollout
+and safe retry after partial success. The first multi-node operation only stages
+internal Services for the synthetic ports; activation remains a separate intent.
+
+Production compensation passed in CI run `38146514520`, job `114490905008`.
+The original Service UID remained unchanged, the generation advanced to 3, and
+external IP selection was removed. Three observations at 14:24:22, 14:24:31,
+and 14:24:41 UTC verified both candidate and public identities while both held
+authenticated sessions continued exchanging data. Both executor generations
+were retained. The four-node preparation now references this exact compensated
+predecessor for reactivation and stages the other three internal Services.

@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import time
 import urllib.parse
+import sys
 
 from scripts import observe_managed_ssh_front as observation
 from scripts import select_managed_ssh_transport as transport
@@ -12,10 +13,15 @@ from scripts.reconcile_agent_edge_trust import canonical, kubectl, strict_json
 
 
 def validate_operation(operation):
-    if set(operation) != {'schema', 'stage', 'selection', 'action'} or operation['schema'] != 'fugue.ssh-transport-operation/v1' or operation['action'] not in ('stage', 'activate', 'compensate'):
+    batch = operation.get('schema') == 'fugue.ssh-transport-operation/v2'
+    fields = {'schema','stage','selections' if batch else 'selection','action'}
+    if set(operation) != fields or operation['schema'] not in ('fugue.ssh-transport-operation/v1','fugue.ssh-transport-operation/v2') or operation['action'] not in ('stage', 'activate', 'compensate'):
         raise ValueError('explicit transport operation required')
+    selections = operation['selections'] if batch else [operation['selection']]
+    if not isinstance(selections,list) or not 1<=len(selections)<=8 or any(not isinstance(value,str) for value in selections) or len(set(selections))!=len(selections):
+        raise ValueError('bounded unique ordered transport selections required')
     root = Path('deploy/environments/production/managed-ssh')
-    if Path(operation['stage']) != root/'front-stage.json' or Path(operation['selection']).parent != root/'transport' or Path(operation['selection']).suffix != '.json' or '..' in Path(operation['selection']).parts:
+    if Path(operation['stage']) != root/'front-stage.json' or any(Path(selection).parent != root/'transport' or Path(selection).suffix != '.json' or '..' in Path(selection).parts for selection in selections):
         raise ValueError('transport operation must name declared configuration files')
     return operation
 
@@ -51,6 +57,18 @@ def await_evidence(read, deadline, sleep=time.sleep, clock=time.monotonic):
 def run(operation, probe_binary):
     validate_operation(operation)
     stage = strict_json(Path(operation['stage']).read_bytes())
+    if operation['schema']=='fugue.ssh-transport-operation/v2':
+        members=[strict_json(Path(path).read_bytes()) for path in operation['selections']]
+        for member in members:
+            transport.validate(member,stage)
+        if len({member['node'] for member in members})!=len(members) or len({(member['namespace'],member['service']) for member in members})!=len(members):
+            raise ValueError('batch cannot repeat a node or Service authority')
+        results=[]
+        for path,member in zip(operation['selections'],members):
+            result=run({'schema':'fugue.ssh-transport-operation/v1','stage':operation['stage'],'selection':path,'action':operation['action']},probe_binary)
+            results.append(dict(result,node=member['node'],service=member['service']))
+            print(canonical({'node':member['node'],'service':member['service'],'phase':result['phase'],'verified':result['verified']}),file=sys.stderr,flush=True)
+        return {'verified':True,'action':operation['action'],'completed':len(results),'results':results}
     origin = api_origin(stage)
     config = strict_json(Path(operation['selection']).read_bytes())
     transport.validate(config, stage)

@@ -3,6 +3,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import select as readiness
 import subprocess
 import tempfile
@@ -69,15 +70,20 @@ class HeldSSH:
 
 def validate(config, stage):
     fields = {'schema', 'namespace', 'service', 'node', 'stageDigest', 'applications', 'stagedGeneration', 'servingGeneration', 'compensationGeneration'}
-    if set(config) != fields or config['schema'] != 'fugue.ssh-transport-selection/v1':
+    restored = config.get('schema') == 'fugue.ssh-transport-selection/v2'
+    if restored:
+        fields |= {'previousServiceUID', 'previousIntentDigest'}
+    if set(config) != fields or config['schema'] not in ('fugue.ssh-transport-selection/v1', 'fugue.ssh-transport-selection/v2'):
         raise ValueError('complete independent SSH transport intent required')
     for field in ('namespace', 'service', 'node'):
         name(config[field])
     if config['namespace'] != stage['namespace'] or config['stageDigest'] != digest(stage):
         raise ValueError('transport differs from the exact front stage')
     generations = [config[field] for field in ('stagedGeneration', 'servingGeneration', 'compensationGeneration')]
-    if any(type(value) is not int for value in generations) or generations != [1, 2, 3]:
-        raise ValueError('initial transport must declare stage, selection, and compensation generations')
+    if any(type(value) is not int for value in generations) or not 1 <= generations[0] < generations[2] <= 2**53-1 or generations != [generations[0], generations[0]+1, generations[0]+2] or not restored and generations != [1, 2, 3]:
+        raise ValueError('explicit consecutive transport generations required')
+    if restored and (generations[0]<3 or not re.fullmatch(r'[A-Za-z0-9-]{1,128}',config['previousServiceUID']) or not re.fullmatch(r'sha256:[a-f0-9]{64}',config['previousIntentDigest'])):
+        raise ValueError('reactivation requires the exact compensated Service and previous intent')
     if not isinstance(config['applications'], list) or not 1 <= len(config['applications']) <= 100 or len(set(config['applications'])) != len(config['applications']):
         raise ValueError('explicit bounded unique application scope required')
     nodes = [node for node in stage['nodes'] if node['id'] == config['node']]
@@ -100,12 +106,14 @@ def projection(spec):
     return {'type': spec.get('type'), 'selector': spec.get('selector'), 'ports': [{key: item.get(key) for key in ('name', 'protocol', 'port', 'targetPort')} for item in spec.get('ports', [])], 'publishNotReadyAddresses': bool(spec.get('publishNotReadyAddresses')), 'internalTrafficPolicy': spec.get('internalTrafficPolicy'), 'externalIPs': spec.get('externalIPs') or [], 'externalTrafficPolicy': spec.get('externalTrafficPolicy') or ''}
 
 
-def validate_service(current, config, expected_spec, generation, phase):
+def validate_service(current, config, expected_spec, generation, phase, intent_digest=None):
     meta = current['metadata']
     annotations = meta.get('annotations', {})
     if meta.get('name') != config['service'] or meta.get('namespace') != config['namespace'] or meta.get('labels', {}).get('app.kubernetes.io/managed-by') != MANAGER or meta.get('deletionTimestamp') or not meta.get('uid') or not meta.get('resourceVersion'):
         raise ValueError('SSH transport is foreign or lacks stable ownership')
-    if annotations.get(GENERATION) != str(generation) or annotations.get(INTENT) != digest(config) or annotations.get(PHASE) != phase or annotations.get(SELECTION) != digest(projection(expected_spec)) or projection(current['spec']) != projection(expected_spec):
+    if config.get('previousServiceUID') and meta['uid'] != config['previousServiceUID']:
+        raise ValueError('reactivation cannot adopt a replacement Service')
+    if annotations.get(GENERATION) != str(generation) or annotations.get(INTENT) != (intent_digest or digest(config)) or annotations.get(PHASE) != phase or annotations.get(SELECTION) != digest(projection(expected_spec)) or projection(current['spec']) != projection(expected_spec):
         raise ValueError('SSH transport generation or declared selection changed')
     if current['spec'].get('loadBalancerIP') or current['spec'].get('externalName') or current.get('status', {}).get('loadBalancer', {}).get('ingress'):
         raise ValueError('SSH transport has undeclared external authority')
@@ -131,6 +139,9 @@ def select(config, stage, action, observe, witness=None, kube=kubectl, sleep=tim
     private_spec = spec_for(config, evidence, node['publicAddress'], False)
     public_spec = spec_for(config, evidence, node['publicAddress'], True)
     namespace = config['namespace']
+    staged_generation, serving_generation, compensation_generation = (config[field] for field in ('stagedGeneration','servingGeneration','compensationGeneration'))
+    baseline_phase = 'compensated' if config.get('previousServiceUID') else 'staged'
+    baseline_intent = config.get('previousIntentDigest')
     def read():
         raw = kube(['get', 'service', config['service'], '-n', namespace, '--ignore-not-found', '-o', 'json'])
         return strict_json(raw) if raw.strip() else None
@@ -139,18 +150,25 @@ def select(config, stage, action, observe, witness=None, kube=kubectl, sleep=tim
     current = read()
     if action == 'stage':
         if current is not None:
-            validate_service(current, config, private_spec, 1, 'staged')
+            validate_service(current, config, private_spec, staged_generation, baseline_phase, baseline_intent)
         else:
-            kube(['create', '-f', '-'], {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': config['service'], 'namespace': namespace, 'labels': {'app.kubernetes.io/managed-by': MANAGER}, 'annotations': annotations(1, 'staged', private_spec)}, 'spec': private_spec})
+            if config.get('previousServiceUID'):
+                raise ValueError('missing compensated Service requires explicit recovery')
+            kube(['create', '-f', '-'], {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': config['service'], 'namespace': namespace, 'labels': {'app.kubernetes.io/managed-by': MANAGER}, 'annotations': annotations(staged_generation, baseline_phase, private_spec)}, 'spec': private_spec})
             current = read()
-            validate_service(current, config, private_spec, 1, 'staged')
-        return {'verified': True, 'phase': 'staged', 'public_changed': False, 'service_uid': current['metadata']['uid']}
+            validate_service(current, config, private_spec, staged_generation, baseline_phase)
+        return {'verified': True, 'phase': baseline_phase, 'public_changed': False, 'service_uid': current['metadata']['uid']}
     if current is None:
         raise ValueError('missing internal transport stage')
     if witness is None:
         raise ValueError('public selection requires an authenticated held-session witness')
-    before_spec, before_generation, before_phase = (private_spec, 1, 'staged') if action == 'activate' else (public_spec, 2, 'serving')
-    validate_service(current, config, before_spec, before_generation, before_phase)
+    desired_spec, desired_generation, desired_phase = (public_spec, serving_generation, 'serving') if action == 'activate' else (private_spec, compensation_generation, 'compensated')
+    already_selected = current['metadata'].get('annotations',{}).get(GENERATION) == str(desired_generation)
+    if already_selected:
+        validate_service(current, config, desired_spec, desired_generation, desired_phase)
+    else:
+        before_spec, before_generation, before_phase = (private_spec, staged_generation, baseline_phase) if action == 'activate' else (public_spec, serving_generation, 'serving')
+        validate_service(current, config, before_spec, before_generation, before_phase, baseline_intent if action == 'activate' else None)
     services = strict_json(kube(['get', 'services', '-A', '-o', 'json']))
     if services.get('metadata', {}).get('continue'):
         raise ValueError('public transport ownership inventory incomplete')
@@ -166,7 +184,14 @@ def select(config, stage, action, observe, witness=None, kube=kubectl, sleep=tim
     latest = observe(True)
     if latest['pod']['metadata']['uid'] != evidence['pod']['metadata']['uid'] or latest['route_digest'] != evidence['route_digest'] or [binding['route'] for binding in latest['bindings']] != [binding['route'] for binding in evidence['bindings']]:
         raise ValueError('front or route ownership changed before selection')
-    desired_spec, desired_generation, desired_phase = (public_spec, 2, 'serving') if action == 'activate' else (private_spec, 3, 'compensated')
+    if already_selected:
+        connection = witness(node['publicAddress'], evidence['bindings'][0])
+        try:
+            connection.exchange()
+            validate_service(read(), config, desired_spec, desired_generation, desired_phase)
+            return {'verified': True, 'phase': desired_phase, 'public_changed': False, 'service_uid': current['metadata']['uid'], 'already_selected': True}
+        finally:
+            connection.close()
     patch = patch_selection(current, desired_spec, annotations(desired_generation, desired_phase, desired_spec))
     held = [witness(node['publicAddress'], evidence['bindings'][0])]
     try:
@@ -196,12 +221,12 @@ def select(config, stage, action, observe, witness=None, kube=kubectl, sleep=tim
             latest = read()
             if latest is not None and latest['metadata'].get('uid') == current['metadata']['uid']:
                 try:
-                    validate_service(latest, config, private_spec, 1, 'staged')
+                    validate_service(latest, config, private_spec, staged_generation, baseline_phase, baseline_intent)
                 except ValueError:
-                    validate_service(latest, config, public_spec, 2, 'serving')
-                    rollback = patch_selection(latest, private_spec, annotations(3, 'compensated', private_spec))
+                    validate_service(latest, config, public_spec, serving_generation, 'serving')
+                    rollback = patch_selection(latest, private_spec, annotations(compensation_generation, 'compensated', private_spec))
                     kube(['patch', 'service', config['service'], '-n', namespace, '--type=json', '-p', canonical(rollback)])
-                    validate_service(read(), config, private_spec, 3, 'compensated')
+                    validate_service(read(), config, private_spec, compensation_generation, 'compensated')
                     for connection in held:
                         connection.exchange()
                     raise ValueError('SSH public verification failed; exact selection compensated and held sessions preserved') from failure
