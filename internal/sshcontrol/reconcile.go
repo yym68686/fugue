@@ -269,7 +269,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 			reconcileErrors = append(reconcileErrors, err)
 		}
 	}
-	if err := reconciler.retireSlots(ctx, state, reconciler.currentTime()); err != nil {
+	if err := reconciler.retireSlots(ctx, state); err != nil {
 		reconcileErrors = append(reconcileErrors, err)
 	}
 	return errors.Join(reconcileErrors...)

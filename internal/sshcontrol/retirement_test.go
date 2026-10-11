@@ -55,6 +55,40 @@ func TestRetirementRequiresFreshExactConsumerAndNoOldStreams(test *testing.T) {
 	}
 }
 
+func TestRetirementUsesClockAfterAllConsumerReads(test *testing.T) {
+	for _, mode := range []string{"slow valid reads", "expired during reads", "future observation"} {
+		test.Run(mode, func(test *testing.T) {
+			now := time.Now().UTC()
+			activated := now.Add(-time.Minute)
+			state := managedssh.ControlState{AppID: "app", TenantID: "tenant", ActivatedAt: &activated, Active: &managedssh.ServingSlot{ID: "new", Namespace: "platform"}}
+			binding := model.ManagedSSHPublicBinding{PublicPort: 24000}
+			edges := []EdgeConsumerInstance{{EdgeID: "edge-one", EdgeGroupID: "group", InstanceUID: "pod-one"}, {EdgeID: "edge-two", EdgeGroupID: "group", InstanceUID: "pod-two"}}
+			reads := 0
+			readAck := func(edgeID, instance string) (model.EdgeSSHAcknowledgement, error) {
+				reads++
+				now = now.Add(6 * time.Second)
+				ack := model.EdgeSSHAcknowledgement{EdgeSSHAcknowledgementRequest: model.EdgeSSHAcknowledgementRequest{EdgeID: edgeID, EdgeGroupID: "group", InstanceUID: instance, Persisted: true, LoadedAt: now, Connections: []model.EdgeSSHRouteConnections{}}, ObservedAt: now, ExpiresAt: now.Add(time.Minute), Routes: []model.EdgeSSHRoute{{AppID: state.AppID, TenantID: state.TenantID, PublicPort: binding.PublicPort, TargetHost: "new.platform.svc.cluster.local", TargetPort: 2222}}}
+				if mode == "expired during reads" && reads == 1 {
+					ack.ExpiresAt = now.Add(time.Second)
+				}
+				if mode == "future observation" {
+					ack.ObservedAt = now.Add(20 * time.Second)
+				}
+				ack.RouteDigest = model.SSHRoutesDigest(ack.Routes)
+				return ack, nil
+			}
+			ready, err := retirementConsumersReady(state, binding, edges, readAck, func() time.Time { return now })
+			if mode == "slow valid reads" {
+				if !ready || err != nil || reads != 2 {
+					test.Fatal("fresh completed observations were compared against a pre-request timestamp", ready, err)
+				}
+			} else if ready || err == nil {
+				test.Fatal("expired or genuinely future evidence was accepted", mode)
+			}
+		})
+	}
+}
+
 func TestStopSlotRequiresServerDrainAndZeroConnections(test *testing.T) {
 	now := time.Now().UTC()
 	slot := managedssh.ServingSlot{ID: "ssh-old", Namespace: "platform", RetiringAt: &now, Release: managedssh.RuntimeRelease{Image: "registry.example/ssh@sha256:" + strings.Repeat("a", 64)}, Artifact: managedssh.Artifact{Digest: "digest", Configuration: managedssh.Configuration{Draining: true, Identity: model.AppSSHIdentity{ID: "identity", TenantID: "tenant", AppID: "app"}}}}

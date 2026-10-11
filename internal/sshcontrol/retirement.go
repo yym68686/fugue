@@ -20,7 +20,7 @@ type EdgeConsumerInstance struct {
 	InstanceUID string
 }
 
-func (reconciler *Reconciler) retireSlots(ctx context.Context, state managedssh.ControlState, now time.Time) error {
+func (reconciler *Reconciler) retireSlots(ctx context.Context, state managedssh.ControlState) error {
 	runtime, supported := reconciler.Runtime.(RetirementRuntime)
 	if !supported || state.Active == nil || len(state.Draining) == 0 || state.RollbackHold {
 		return nil
@@ -36,18 +36,13 @@ func (reconciler *Reconciler) retireSlots(ctx context.Context, state managedssh.
 	if len(edges) == 0 || retention < time.Hour {
 		return errors.New("SSH slot retirement requires an explicit consumer set and rollback retention of at least one hour")
 	}
+	ready, err := retirementConsumersReady(state, binding, edges, reconciler.Store.GetEdgeSSHAcknowledgement, reconciler.currentTime)
+	if err != nil || !ready {
+		return err
+	}
+	now := reconciler.currentTime()
 	if !state.Active.Verified(now) {
 		return managedssh.ErrCandidateUnverified
-	}
-	for _, edge := range edges {
-		ack, err := reconciler.Store.GetEdgeSSHAcknowledgement(edge.EdgeID, edge.InstanceUID)
-		if err != nil {
-			return err
-		}
-		ready, err := retirementAcknowledged(state, binding, edge, ack, now)
-		if err != nil || !ready {
-			return err
-		}
 	}
 	for index := range state.Draining {
 		slot := state.Draining[index]
@@ -86,13 +81,32 @@ func (reconciler *Reconciler) retireSlots(ctx context.Context, state managedssh.
 		if len(state.Retired) >= 64 {
 			return errors.New("SSH retired-slot retention limit requires archival before further retirement")
 		}
-		slot.RetiredAt = &now
+		retiredAt := reconciler.currentTime()
+		slot.RetiredAt = &retiredAt
 		state.Retired = append(state.Retired, slot)
 		state.Draining = append(state.Draining[:index:index], state.Draining[index+1:]...)
 		state.Revision++
 		return reconciler.Store.SaveManagedSSHControl(state.Revision-1, state)
 	}
 	return nil
+}
+
+func retirementConsumersReady(state managedssh.ControlState, binding model.ManagedSSHPublicBinding, edges []EdgeConsumerInstance, readAck func(string, string) (model.EdgeSSHAcknowledgement, error), clock func() time.Time) (bool, error) {
+	acknowledgements := make([]model.EdgeSSHAcknowledgement, len(edges))
+	for index, edge := range edges {
+		ack, err := readAck(edge.EdgeID, edge.InstanceUID)
+		if err != nil {
+			return false, err
+		}
+		acknowledgements[index] = ack
+	}
+	now := clock()
+	for index, edge := range edges {
+		if ready, err := retirementAcknowledged(state, binding, edge, acknowledgements[index], now); err != nil || !ready {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func retirementAcknowledged(state managedssh.ControlState, binding model.ManagedSSHPublicBinding, edge EdgeConsumerInstance, ack model.EdgeSSHAcknowledgement, now time.Time) (bool, error) {

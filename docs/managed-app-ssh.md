@@ -1,7 +1,7 @@
 # Managed application SSH
 
 Status: API, schema, SSH controller, independent keyrings, and a restricted
-canary runtime are deployed through CI. Two synthetic applications have separate
+runtime are deployed through CI. Three synthetic applications have separate
 managed identities and public bindings. Native SSH, forced PTY, SCP/SFTP,
 forwarding isolation, current-key revocation, actual VS Code Remote SSH,
 candidate promotion, and reviewed rollback passed production canary acceptance.
@@ -94,7 +94,7 @@ substitute for standard SSH protocol support.
       relying on an application-provided SSH daemon. Legacy SCP remains a limit.
 - [x] Implement explicitly authorized forwarding needed by supported clients;
       prevent access to other tenants, node management, and cluster credentials.
-- [ ] Ensure helper/runtime compatibility is explicit and generic. Unsupported
+- [x] Ensure helper/runtime compatibility is explicit and generic. Unsupported
       images must report precise limitations rather than falsely claim success.
 - [x] Reconcile signed serving configuration and authorization separately from
       the SSH component executable; retain verified state on failed updates.
@@ -156,7 +156,9 @@ its `.anchors` companion. An older release rewriting ordinary application
 state cannot discard them. Restore both files together; losing both ownership
 and encrypted records requires recovery from the independent backup.
 Retained records are inaccessible through app APIs after compute deletion.
-An explicit retention and destruction policy still needs implementation.
+The explicit retention policy keeps encrypted identities, ownership anchors,
+and backup keys until separately reviewed decommission; see
+`managed-ssh-identity-maintenance.md`. No background destruction is enabled.
 
 Configure `FUGUE_SSH_IDENTITY_KEYRING_FILE` with a protected JSON file readable
 only by its owner. It has schema `fugue.ssh-identity-keyring/v1`, an
@@ -165,7 +167,7 @@ random encryption key. No development fallback or release-signing key reuse is
 allowed. The file is reread for private operations, so restoring configuration
 does not require changing or restarting API code. Back up the encrypted identity
 records and the encryption keyring independently. Safe storage-key rewrapping
-is tested but is not yet exposed as an administrative operation.
+is available through the independent, exact-plan maintenance CLI and CI lane.
 
 Validation completed for this foundation: encryption roundtrip and metadata
 tampering, missing keys, stable identity under encryption-key rotation,
@@ -274,9 +276,11 @@ an unchanged Alpine container without `sshd`, and it verifies:
 - Unchanged Pod UID, container ID, image, and zero application restarts.
 - No abandoned completed helper binary after sessions finish.
 
-The native SCP test covers the modern SFTP transport. Legacy `scp -O`, real
-remote-development client acceptance, abnormal-helper cleanup, restart races,
-cross-edge migration, and production canary/rollback remain unverified.
+The native SCP test covers the modern SFTP transport; legacy `scp -O` is not
+supported. Subsequent acceptance recorded below verifies actual VS Code Remote
+SSH, abnormal-client cleanup, workload restart identity continuity, cross-edge
+migration, and production canary/rollback. It does not promise live-session
+survival after loss of the workload process or node.
 
 The integration test intentionally requires `FUGUE_SSH_TEST_KUBECONFIG` and
 `FUGUE_SSH_TEST_HELPER`; it never uses the default Kubernetes context. Static
@@ -872,7 +876,8 @@ underlying command output. Unit/race tests cover unusable executable metadata,
 real helper probing, missing/unresponsive runtime, and command/connection
 boundaries. The isolated Kubernetes/native-client test passed in 19.45 seconds
 with the new protocol. The immutable artifact must still pass CI and be selected
-through independent runtime configuration before this preflight is live.
+through independent runtime configuration before this preflight is live; that
+selection and production acceptance are recorded below.
 
 The immutable image from commit
 `782b5cfd81f5ea70b7f278af4df5c18955e3b664` passed CI artifact acceptance in run
@@ -882,6 +887,14 @@ policy, graceful retirement, and unchanged workload verification. Runtime
 generation 8 selects that exact image and helper digest. Candidate creation and
 verification precede route selection; old servers remain available for their
 existing sessions. Separate read-only poly/argus test sessions span this rollout.
+
+All five applications' selected generation-8 servers passed native authenticated
+public sessions through each of the four exact front instances: 20 independent
+public paths, with the expected immutable identity and unchanged workload
+target. The independent maintenance lane passed in CI run `38155368068`, job
+`114517134300`: five identity/anchor pairs decrypted and matched, the exact plan
+digest was `sha256:d78c457c0c0d74e9e0847237025c1a320186bc34af6e6f37fc58d5bf5a73e76a`,
+and zero storage rewraps were required. The operation was read-only.
 
 ## Authorization renewal deadline regression
 
@@ -920,3 +933,20 @@ controller now accepts an explicitly bounded execution budget; production sets
 20 requests/second with burst 40, shared across typed and dynamic clients. This
 replaces their independent implicit defaults without creating an unbounded
 request path or changing grants, public routes, client trust, or business Pods.
+
+Retirement had the same stale-clock hazard: it captured the validation time
+before network policy/transport checks and database ACK reads, so a valid ACK
+arriving more than five seconds later could be rejected as coming from the
+future. Retirement now collects all ACKs first and uses the completion clock
+for their shared freshness check, then rechecks active evidence and retention.
+Tests advance the clock during two reads and also ensure truly future evidence
+and an ACK expiring during the later read remain rejected. Existing-connection,
+exact-instance, identity, route, and rollback-retention requirements are intact.
+
+The authorization renewal regression passed a 631.451-second production witness
+across poly, argus, and the isolated allocation fixture. All three authenticated
+sessions continued across multiple loaded grant generations; the minimum sampled
+remaining authorization lifetime was 107.327 seconds. Their identities, target
+Pod/container IDs, and selected slots stayed unchanged. The witness closed only
+its own test sessions after completion. A separate Argus witness also survived
+the subsequent request-budget controller rollout.
