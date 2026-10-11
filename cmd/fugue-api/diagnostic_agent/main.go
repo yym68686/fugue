@@ -659,6 +659,15 @@ func runMemoryProfile(opts options, pids []int, processNames []string, cgroupRoo
 		report.OOMKillsDelta = subtractUint64(last["oom_kill"], first["oom_kill"])
 	}
 	if opts.kind == string(livediagnostics.ProbeMemoryProfile) && goComponent != "" {
+		// Preserve completed observations before the separately bounded analyzer.
+		// Its process may be killed for memory without losing the capture window.
+		checkpoint, err := json.Marshal(report)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(opts.outputDir, "memory-checkpoint.json"), checkpoint, 0600); err != nil {
+			return err
+		}
 		heapAfter := filepath.Join(opts.outputDir, "heap-after.pb.gz")
 		allocAfter := filepath.Join(opts.outputDir, "allocs-after.pb.gz")
 		if err := fetchRuntimeDiagnosticFile(pids[0], "/v1/profile/heap", heapAfter, 8<<20); err != nil {

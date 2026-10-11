@@ -195,11 +195,12 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 	}
 	report.FinishedAt = time.Now().UTC()
 	appendWindowSummary(&report)
+	appendMemoryConsistency(&report)
 	return report, nil
 }
 func collectorBudget(sessionSeconds int, kind string) time.Duration {
 	switch kind {
-	case "process-cpu-profile", "process-memory-profile", "perf-capture-check", "process-page-faults", "process-runqueue-latency":
+	case "postgres-memory-window", "process-cpu-profile", "process-memory-profile", "perf-capture-check", "process-page-faults", "process-runqueue-latency":
 		return time.Duration(sessionSeconds-1) * time.Second
 	default:
 		return 8 * time.Second
@@ -217,6 +218,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return processCPUProfile(ctx, req, c)
 	case "process-memory-profile":
 		return processMemoryProfile(ctx, req, c)
+	case "runtime-profile-export":
+		return rawRuntimeProfile(ctx, req, c)
 	case "process-page-faults":
 		return processPageFaults(ctx, req, c)
 	case "process-runqueue-latency":
@@ -239,6 +242,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return k.serviceJSON(ctx, req, c)
 	case "runtime-json":
 		return runtimeJSON(ctx, req, c)
+	case "postgres-memory-window":
+		return postgresMemoryWindow(ctx, req, c)
 	case "pod-runtime-state":
 		return podRuntimeState(ctx, req, c)
 	case "host-loopback-metrics":

@@ -227,3 +227,27 @@ collector also checks that PID's current presence in host proc. Raw CRI runtime
 specs, environment variables, labels and annotations are not exported. The signed
 recipe selects an allowlisted local runtime binary and socket. This diagnostic
 report describes current state only and does not authorize deletion.
+
+`postgres-memory-window` observes an exact namespace/Pod UID/container through
+fixed read-only CRI/psql calls on the selected node. It never accepts SQL or
+credentials. Database reads have a 500 ms statement timeout and use only
+pg_stat_activity; query text and parameters are replaced by fingerprints.
+A five-second baseline becomes one second for at most 60 seconds after 80%
+of the closest cgroup memory limit. The 300-second/300-sample/2-MiB bounds
+preserve pre-exit samples when the database restarts. A coincident idle query
+is never claimed as the cause of retained memory. Process start ticks,
+namespace PID, backend_start, postmaster start, container and boot identities
+must agree before correlating samples across sources.
+
+`runtime-heap-export` and `runtime-allocs-export` save a single raw gzip profile
+in the retained report with SHA256, length and bounded base64 chunks. They do
+not run pprof on the production node. Concatenate decoded chunks, verify the
+digest and analyze offline. Oversized captures are explicitly unavailable.
+Memory analysis also retains completed process/cgroup samples in a checkpoint
+before invoking pprof, so analyzer RSS protection does not discard that window.
+The memory-profile recipe needs a session of at least 90 seconds.
+
+Node memory recipes preserve scrape and container-lifecycle labels. A zero
+six-hour OOM series conflicting with a recent Kubernetes OOMKilled termination
+makes the report degraded; the original values remain unchanged. Collection
+success is not proof of cross-source agreement or causal attribution.

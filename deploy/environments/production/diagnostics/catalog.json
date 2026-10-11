@@ -18,6 +18,9 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {"id":"runtime-heap-export","description":"Export one bounded raw heap profile with frozen process identity and SHA256 for offline analysis; no live analyzer","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":30,"parameters":{},"config":{"collectors":[{"name":"profile","kind":"runtime-profile-export","path":"/v1/profile/heap","interval_seconds":60}]}},
+      {"id":"runtime-allocs-export","description":"Export one bounded raw allocs profile with frozen process identity and SHA256 for offline analysis; no live analyzer","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":30,"parameters":{},"config":{"collectors":[{"name":"profile","kind":"runtime-profile-export","path":"/v1/profile/allocs","interval_seconds":60}]}},
+      {"id":"postgres-memory-window","description":"Bounded PostgreSQL process/cgroup memory and SQL fingerprints through one fixed read-only statement; preserves pre-exit evidence","image":"$runner","profile":"process-profile","target_types":["node"],"max_duration_seconds":360,"parameters":{"namespace":{"required":true,"max_length":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},"pod":{"required":true,"max_length":253,"pattern":"^[a-z0-9][a-z0-9.-]*$"},"pod_uid":{"required":true,"max_length":36,"pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},"container":{"required":true,"max_length":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}},"config":{"collectors":[{"name":"postgres-memory","kind":"postgres-memory-window","capture_seconds":300,"interval_seconds":360,"namespace":"{{param.namespace}}","object_name":"{{param.pod}}","pod_uid":"{{param.pod_uid}}","container":"{{param.container}}","runtime_binary":"/var/lib/rancher/k3s/data/current/bin/crictl","path":"/run/k3s/containerd/containerd.sock"}]}},
       {
         "id": "process-memory-profile",
         "image": "$runner",
@@ -37,7 +40,7 @@
             }
           ]
         },
-        "description": "Bounded Go heap and allocation profiles with process RSS, cgroup memory and OOM observations for an exact container"
+        "description": "Bounded Go heap and allocation profiles with process RSS, cgroup memory and OOM observations for an exact container; use duration >=90 seconds (60 seconds capture plus 30 analysis)"
       },
       {
         "id": "node-memory-budget",
@@ -67,13 +70,13 @@
                 "port": "http"
               },
               "queries": {
-                "working_set_bytes": "sum by(namespace,pod,container)(container_memory_working_set_bytes{node={{param.node_name}},container!=\"\",container!=\"POD\"})",
-                "rss_bytes": "sum by(namespace,pod,container)(container_memory_rss{node={{param.node_name}},container!=\"\",container!=\"POD\"})",
-                "cache_bytes": "sum by(namespace,pod,container)(container_memory_cache{node={{param.node_name}},container!=\"\",container!=\"POD\"})",
-                "working_set_peak_6h": "max by(namespace,pod,container)(max_over_time(container_memory_working_set_bytes{node={{param.node_name}},container!=\"\",container!=\"POD\"}[6h]))",
-                "cpu_cores": "sum by(namespace,pod,container)(rate(container_cpu_usage_seconds_total{node={{param.node_name}},container!=\"\",container!=\"POD\"}[5m]))",
-                "oom_events_6h": "sum by(namespace,pod,container)(increase(container_oom_events_total{node={{param.node_name}},container!=\"\",container!=\"POD\"}[6h]))",
-                "requested_bytes": "sum by(namespace,pod,container)(kube_pod_container_resource_requests{node={{param.node_name}},resource=\"memory\",unit=\"byte\"})"
+                "working_set_bytes": "container_memory_working_set_bytes{node={{param.node_name}},container!=\"\",container!=\"POD\"}",
+                "rss_bytes": "container_memory_rss{node={{param.node_name}},container!=\"\",container!=\"POD\"}",
+                "cache_bytes": "container_memory_cache{node={{param.node_name}},container!=\"\",container!=\"POD\"}",
+                "working_set_peak_6h": "max_over_time(container_memory_working_set_bytes{node={{param.node_name}},container!=\"\",container!=\"POD\"}[6h])",
+                "cpu_cores": "rate(container_cpu_usage_seconds_total{node={{param.node_name}},container!=\"\",container!=\"POD\"}[5m])",
+                "oom_events_6h": "increase(container_oom_events_total{node={{param.node_name}},container!=\"\",container!=\"POD\"}[6h])",
+                "requested_bytes": "kube_pod_container_resource_requests{node={{param.node_name}},resource=\"memory\",unit=\"byte\"}"
               },
               "required_queries": [
                 "working_set_bytes",

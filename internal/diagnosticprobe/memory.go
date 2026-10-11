@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,14 @@ func processMemoryProfile(ctx context.Context, req livediagnostics.ProbeRequest,
 		}
 		if json.Unmarshal(raw, &failure) == nil && failure.Error != "" {
 			detail = safeText(failure.Error)
+		}
+		if checkpoint, readErr := readBounded(filepath.Join(dir, "memory-checkpoint.json"), 2<<20); readErr == nil {
+			if saved, validateErr := memoryProfileEvidence([]byte(checkpoint), req.ContainerID, before, c.CaptureSeconds); validateErr == nil {
+				saved.Value.(map[string]any)["sampler_resources"] = resources
+				saved.Value.(map[string]any)["capture_preserved"] = true
+				saved.Gaps = append(saved.Gaps, "analysis failed after capture: "+detail)
+				return saved, nil
+			}
 		}
 		return partialValue{Value: map[string]any{"sampler_error": detail, "sampler_resources": resources}, Gaps: []string{"memory sampler failed: " + detail}}, nil
 	}
