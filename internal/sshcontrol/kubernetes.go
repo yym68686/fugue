@@ -3,6 +3,7 @@ package sshcontrol
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -252,6 +253,9 @@ func (runtime *KubernetesRuntime) applySecret(ctx context.Context, slot manageds
 		return nil
 	}
 	if desired.Immutable != nil && *desired.Immutable {
+		if desired.Name == slot.ID+"-identity" && len(current.Data) == 1 && len(desired.Data) == 1 && equivalentHostKeys(current.Data["host-key"], desired.Data["host-key"]) {
+			return nil
+		}
 		return managedssh.ErrIdentityChange
 	}
 	if encoded, exists := current.Data["artifact.json"]; exists {
@@ -264,6 +268,27 @@ func (runtime *KubernetesRuntime) applySecret(ctx context.Context, slot manageds
 	updated.Data = desired.Data
 	_, err = client.Update(ctx, updated, metav1.UpdateOptions{FieldManager: "fugue-managed-ssh"})
 	return safeResourceError("Secret", desired.Name, err)
+}
+
+func equivalentHostKeys(current, desired []byte) bool {
+	decode := func(encoded []byte) ed25519.PrivateKey {
+		key, err := ssh.ParseRawPrivateKey(encoded)
+		if err != nil {
+			return nil
+		}
+		switch decoded := key.(type) {
+		case ed25519.PrivateKey:
+			return decoded
+		case *ed25519.PrivateKey:
+			return *decoded
+		default:
+			return nil
+		}
+	}
+	currentKey, desiredKey := decode(current), decode(desired)
+	defer clear(currentKey)
+	defer clear(desiredKey)
+	return len(currentKey) == ed25519.PrivateKeySize && len(desiredKey) == ed25519.PrivateKeySize && subtle.ConstantTimeCompare(currentKey, desiredKey) == 1
 }
 
 var managedSSHResources = map[string]schema.GroupVersionResource{

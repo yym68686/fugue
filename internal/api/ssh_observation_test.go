@@ -76,8 +76,8 @@ func TestSSHObservationUsesRealHandshakeAndDoesNotChangeWorkload(test *testing.T
 				SSH model.AppSSHStatus `json:"ssh"`
 			}
 			mustDecodeJSON(test, beforeResponse, &previous)
-			if previous.SSH.Ready || !previous.SSH.RouteConfigured || previous.SSH.IdentityState != "unobserved" {
-				test.Fatal("configuration falsely reported verified readiness", previous.SSH)
+			if !previous.SSH.Ready || !previous.SSH.RouteConfigured || previous.SSH.IdentityVerified || previous.SSH.IdentityState != "unobserved" {
+				test.Fatal("legacy routing readiness and identity evidence were conflated", previous.SSH)
 			}
 			wrong := performJSONRequest(test, server, http.MethodPost, path+"/identity/observe", apiKey, map[string]string{"identity_id": "wrong-identity"})
 			if wrong.Code != http.StatusConflict {
@@ -100,7 +100,7 @@ func TestSSHObservationUsesRealHandshakeAndDoesNotChangeWorkload(test *testing.T
 				SSH model.AppSSHStatus `json:"ssh"`
 			}
 			mustDecodeJSON(test, statusResponse, &status)
-			if status.SSH.Ready != matches || status.SSH.IdentityVerified != matches || status.SSH.Observation == nil {
+			if !status.SSH.Ready || status.SSH.IdentityVerified != matches || status.SSH.Observation == nil {
 				test.Fatal("status ignored handshake evidence", status)
 			}
 			repeated := performJSONRequest(test, server, http.MethodPost, path+"/identity/observe", apiKey, map[string]string{"identity_id": identity.ID})
@@ -121,7 +121,7 @@ func TestSSHObservationReadinessRejectsStaleOrUnboundEvidence(test *testing.T) {
 	identity := model.AppSSHIdentity{ID: "identity", TenantID: "tenant", AppID: "app", Algorithm: ssh.KeyAlgoED25519, Fingerprint: "SHA256:expected"}
 	observation := model.AppSSHObservation{ID: "observation", TenantID: "tenant", AppID: "app", IdentityID: "identity", EndpointID: "endpoint", RouteDigest: model.AppSSHRouteDigest(endpoint), Scope: "public_endpoint", Target: model.AppSSHPublicAddress(endpoint), Algorithm: identity.Algorithm, Fingerprint: identity.Fingerprint, KeyExchangeVerified: true, IdentityMatched: true, ObservedAt: now, ExpiresAt: now.Add(time.Minute), Reason: "identity_verified"}
 	status := model.AppSSHStatus{Supported: true, RouteConfigured: true}
-	if !applyAppSSHObservation(status, endpoint, identity, observation, now).Ready {
+	if !applyAppSSHObservation(status, endpoint, identity, observation, now).IdentityVerified {
 		test.Fatal("valid evidence not accepted")
 	}
 	for name, mutate := range map[string]func(*model.AppSSHObservation){
@@ -141,7 +141,7 @@ func TestSSHObservationReadinessRejectsStaleOrUnboundEvidence(test *testing.T) {
 		test.Run(name, func(test *testing.T) {
 			candidate := observation
 			mutate(&candidate)
-			if got := applyAppSSHObservation(status, endpoint, identity, candidate, now); got.Ready || got.IdentityVerified {
+			if got := applyAppSSHObservation(status, endpoint, identity, candidate, now); !got.Ready || got.IdentityVerified {
 				test.Fatal("invalid evidence was accepted", got)
 			}
 		})

@@ -133,7 +133,7 @@ func (server *Server) configuredAppSSHStatus(app model.App, endpoint model.AppSS
 		return status
 	}
 	if err != nil {
-		status.Ready = false
+		status.Ready, status.RouteConfigured = false, false
 		return status
 	}
 	if state.Active == nil {
@@ -156,7 +156,7 @@ func (server *Server) configuredAppSSHStatus(app model.App, endpoint model.AppSS
 }
 
 func applyAppSSHObservation(status model.AppSSHStatus, endpoint model.AppSSHEndpoint, identity model.AppSSHIdentity, observation model.AppSSHObservation, now time.Time) model.AppSSHStatus {
-	status.Ready = false
+	status.Ready = status.RouteConfigured
 	status.IdentityVerified = false
 	status.Observation = &observation
 	if observation.TenantID != identity.TenantID || observation.AppID != identity.AppID || observation.IdentityID != identity.ID || observation.EndpointID != endpoint.ID || observation.RouteDigest != model.AppSSHRouteDigest(endpoint) || observation.Scope != "public_endpoint" || observation.Target != model.AppSSHPublicAddress(endpoint) {

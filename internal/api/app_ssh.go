@@ -365,6 +365,7 @@ func appSSHStatus(app model.App, endpoint model.AppSSHEndpoint, found bool) mode
 		status.Ready = false
 	case model.AppSSHEndpointStatusPending, model.AppSSHEndpointStatusReady:
 		status.RouteConfigured = endpoint.PublicPort > 0 && endpoint.PublicPort <= 65535 && strings.TrimSpace(endpoint.TargetHost) != "" && strings.TrimSpace(endpoint.Hostname) != ""
+		status.Ready = status.RouteConfigured
 	}
 	status.Message = endpoint.StatusReason
 	if status.Message == "" && status.RouteConfigured {

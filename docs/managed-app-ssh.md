@@ -195,11 +195,13 @@ serving intent. The observation names its observer, target, identity, route
 digest, result, and expiry. It represents that observer's path, not every edge
 replica. A later failure replaces older positive evidence for readiness.
 
-`ready` now requires fresh matching host identity evidence. `route_configured`
-preserves the separate statement that a route is publishable. Existing CLI
-connections can still invoke the native SSH client for configured routes so
-that an API status correction does not itself prevent an already trusted
-connection. The SSH client continues its own host and user authentication.
+`identity_verified` requires fresh matching host identity evidence.
+`route_configured` states separately that a route is publishable. The deprecated
+`ready` field preserves its legacy routing meaning for already installed CLI
+versions; changing it to require new identity metadata prevented those clients
+from invoking SSH even when the existing route was unchanged. New clients use
+the explicit route and identity fields. The native SSH client continues its own
+host and user authentication, including strict known-hosts checks.
 
 `fugue app ssh identity observe <app>` records evidence. `identity trust-plan`
 requires a fresh verified observation, compares the identity with the selected
@@ -629,3 +631,13 @@ The API, schema, and read-only SSH controller were released successfully at
 `8b938942`. Read-only checks confirmed both original Argus container identities
 and restart counts remained unchanged. No Argus managed identity, public route
 activation, image rebuild, or client known-hosts update has occurred.
+
+The isolated production candidate exposed an idempotency defect before public
+activation: each reconciliation serializes the same decrypted Ed25519 key into
+an OpenSSH envelope with a fresh check integer. Comparing PEM bytes therefore
+mistook stable key material for an identity replacement. A regression test using
+two reads of the same encrypted identity reproduced the failure. The publisher
+now compares the decoded private key in constant time for its exact immutable
+identity Secret and retains the existing serialized data. Different keys,
+unexpected Secret ownership, and malformed keys still reject publication. The
+real Kubernetes acceptance test now reserializes the key between publications.

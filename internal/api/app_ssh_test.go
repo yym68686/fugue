@@ -57,6 +57,9 @@ func TestAppSSHKeyAndEndpointLifecycle(t *testing.T) {
 		Operation model.Operation      `json:"operation"`
 	}
 	mustDecodeJSON(t, enable, &enableResp)
+	if !enableResp.SSH.Ready || !enableResp.SSH.RouteConfigured || enableResp.SSH.IdentityVerified || enableResp.SSH.IdentityState != "unmanaged" {
+		t.Fatalf("legacy clients must retain routing readiness without claiming managed identity verification: %+v", enableResp.SSH)
+	}
 	if enableResp.SSH.Hostname != "ssh.fugue.pro" || enableResp.SSH.PublicPort != model.DefaultAppSSHPublicPortStart || enableResp.SSH.TargetPort != 2222 {
 		t.Fatalf("unexpected SSH status after enable: %+v", enableResp.SSH)
 	}

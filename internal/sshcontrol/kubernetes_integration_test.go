@@ -201,6 +201,10 @@ func TestCandidatePublicationIsolatedKubernetes(test *testing.T) {
 	}
 	slot := managedssh.ServingSlot{ID: managedssh.SlotID(identity.Identity.ID, target, release), Namespace: platform.Name, Release: release, Artifact: artifact, CreatedAt: time.Now().UTC()}
 	for attempt := 0; attempt < 2; attempt++ {
+		privateKey, err = keyring.PrivateKeyPEM(identity)
+		if err != nil {
+			test.Fatal(err)
+		}
 		if err := runtime.Apply(ctx, slot, privateKey, trust); err != nil {
 			test.Fatal("candidate publication failed", err)
 		}

@@ -1,18 +1,65 @@
 package sshcontrol
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"fugue/internal/managedssh"
 	"fugue/internal/model"
+	"fugue/internal/sshidentity"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+func TestImmutableHostKeyReconciliationComparesKeyMaterial(test *testing.T) {
+	keyring, err := sshidentity.NewKeyring("storage", map[string][]byte{"storage": bytes.Repeat([]byte{46}, 32)})
+	if err != nil {
+		test.Fatal(err)
+	}
+	identity, err := keyring.Create("tenant", "workspace", time.Now())
+	if err != nil {
+		test.Fatal(err)
+	}
+	initial, err := keyring.PrivateKeyPEM(identity)
+	if err != nil {
+		test.Fatal(err)
+	}
+	fresh, err := keyring.PrivateKeyPEM(identity)
+	if err != nil {
+		test.Fatal(err)
+	}
+	immutable := true
+	slot := managedssh.ServingSlot{ID: "ssh-slot", Namespace: "platform", Artifact: managedssh.Artifact{Configuration: managedssh.Configuration{Identity: identity.Identity}}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: slot.ID + "-identity", Namespace: slot.Namespace, Labels: slotLabels(slot)}, Immutable: &immutable, Data: map[string][]byte{"host-key": initial}}
+	client := fake.NewClientset(secret)
+	runtime := &KubernetesRuntime{client: client}
+	desired := secret.DeepCopy()
+	desired.Data["host-key"] = fresh
+	if err := runtime.applySecret(context.Background(), slot, *desired); err != nil {
+		test.Fatal("same encrypted identity rejected after fresh OpenSSH serialization", err)
+	}
+	actual, err := client.CoreV1().Secrets(slot.Namespace).Get(context.Background(), secret.Name, metav1.GetOptions{})
+	if err != nil || !bytes.Equal(actual.Data["host-key"], initial) {
+		test.Fatal("equivalent identity rewrote immutable serving material", err)
+	}
+	other, err := keyring.Create("tenant", "another", time.Now())
+	if err != nil {
+		test.Fatal(err)
+	}
+	desired.Data["host-key"], err = keyring.PrivateKeyPEM(other)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if err := runtime.applySecret(context.Background(), slot, *desired); !errors.Is(err, managedssh.ErrIdentityChange) {
+		test.Fatal("different private identity was admitted", err)
+	}
+}
 
 func TestKubernetesSecretPublicationFencesIdentityAndGeneration(test *testing.T) {
 	ctx := context.Background()
