@@ -872,3 +872,12 @@ real helper probing, missing/unresponsive runtime, and command/connection
 boundaries. The isolated Kubernetes/native-client test passed in 19.45 seconds
 with the new protocol. The immutable artifact must still pass CI and be selected
 through independent runtime configuration before this preflight is live.
+
+The immutable image from commit
+`782b5cfd81f5ea70b7f278af4df5c18955e3b664` passed CI artifact acceptance in run
+`38152568257`, including Pod/Service host identity, actual target execution,
+authorization refresh, native SSH/SCP, PTY, SFTP, forwarding, enforced network
+policy, graceful retirement, and unchanged workload verification. Runtime
+generation 8 selects that exact image and helper digest. Candidate creation and
+verification precede route selection; old servers remain available for their
+existing sessions. Separate read-only poly/argus test sessions span this rollout.

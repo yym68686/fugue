@@ -1,9 +1,9 @@
 {
   "apiVersion": "ssh.fugue.dev/v1",
   "kind": "ManagedSSHRuntimeIntent",
-  "generation": 7,
-  "expectedPreviousGeneration": 6,
-  "expectedPreviousDigest": "sha256:82a456f3157170647c0af2a4bba1f47ded77579fd99d66ea97c7f8eb1c31fd59",
+  "generation": 8,
+  "expectedPreviousGeneration": 7,
+  "expectedPreviousDigest": "sha256:7684ba9c13b28d6bca0acdf8b5d486ddce9c4e88afc1209e5c48da3de9a62cb7",
   "controllerNamespace": "fugue-system",
   "controllerAccount": "fugue-ssh-control",
   "runtimeConfigMap": "fugue-ssh-runtime",
@@ -14,8 +14,8 @@
     "runtime_ids": ["runtime_managed_shared_loc_country-us-ee6bbcaf", "runtime_1777592665_cd4d8fd98d0c"],
     "releases": {
       "amd64": {
-        "image": "ghcr.io/yym68686/fugue-managed-ssh@sha256:bb45656fabc628cb3b9600919a3d29b4f406eb9a327d784ab775aa3db14da231",
-        "helper_digest": "sha256:ac8280010fe0ae1bcc8dd75d2af8b3fa7738a80fa54ebfdbec726511f2322a42",
+        "image": "ghcr.io/yym68686/fugue-managed-ssh@sha256:d41c707e41027e1483d95da2a5d6c19e5270074b2f8f2dfc205b4ebe2b0cfcd9",
+        "helper_digest": "sha256:ef0e74d8b0fb3cd1b0685bd82253a931a4776a49c18ca435a72383cd391fee9f",
         "architecture": "amd64"
       }
     },
@@ -80,7 +80,7 @@
     ],
     "rollback_retention_seconds": 3600
   },
-  "artifactReceiptDigest": "sha256:b4131786be223c1314f8f703c09f3986a21d6bb6ebb833dacdf6d57cf37de3e1",
-  "artifactSourceCommit": "6d301547a7f8799a729f3c73538b7d1484a0997c",
-  "artifactRunID": 38133483906
+  "artifactReceiptDigest": "sha256:229d7b427d3e3e3e2dce6893bee000b79e99596acd380d07f82866693e180342",
+  "artifactSourceCommit": "782b5cfd81f5ea70b7f278af4df5c18955e3b664",
+  "artifactRunID": 38152568257
 }
