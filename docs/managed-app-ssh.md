@@ -711,3 +711,19 @@ malformed responses, user/architecture mismatch, timeouts, authorization errors,
 and nonzero probe exits. Underlying command output and exception text are never
 copied into the diagnostic; privacy tests cover malicious labels and wrapped
 errors. This does not presume or change the cause of the unexplained rejection.
+
+The updated immutable image passed the full isolated acceptance, including the
+native forced-PTY regression, with receipt source `6d301547`. Runtime generation
+four selects that image for the canary. All four existing public front addresses
+have already authenticated the same canary identity and executed in its original
+container. A negative ingress check from the synthetic workload to the managed
+Service was rejected while its positive local TCP control succeeded.
+
+Production revocation acceptance removed only a synthetic user key. A held
+authenticated session closed 42.72 seconds after the removal request, subsequent
+connections using that key were rejected, and a separately authorized key still
+worked. The intent retained the deleted key reference during this test, proving
+that current key inventory, rather than copied stale intent material, governs
+authorization. The canary and both Argus application Pod/container identities
+remain unchanged with zero restarts. The original public Argus fingerprint
+remains unchanged; its managed migration has not been activated.
