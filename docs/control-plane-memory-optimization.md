@@ -92,7 +92,7 @@ go test ./internal/store -run 'TestChunkedCompilerInputPostgres|TestObservationP
 ```
 
 The opt-in memory experiment additionally requires a local Docker container
-whose name starts with `fugue-memory-`. It uses synthetic 26/60/100 MiB input,
+whose name starts with `fugue-memory-`. It uses synthetic 26/60/100/150 MiB input,
 the real store/pgx implementation and 20 ms process sampling. Results are
 observed peak lower bounds, not proof of identical production performance.
 It is never run against production. Full API changes require `make test` and

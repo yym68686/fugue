@@ -14,78 +14,107 @@ import (
 // Type/length framing makes mutations, absent values and nested boundaries
 // distinguishable. Unsupported typed values use encoding/json and fail closed.
 func policyTreeFingerprint(value any) ([32]byte, int, bool) {
-	h := sha256.New()
-	size := 0
-	if !hashPolicyTree(h, value, 0, &size) {
+	w := policyTreeHasher{hash: sha256.New(), buffer: make([]byte, 0, 32<<10)}
+	if !w.tree(value, 0) {
 		return [32]byte{}, 0, false
 	}
+	w.flush()
 	var key [32]byte
-	h.Sum(key[:0])
-	return key, size, true
+	w.hash.Sum(key[:0])
+	return key, w.size, true
 }
-func hashPolicyTree(h hash.Hash, value any, depth int, size *int) bool {
+
+type policyTreeHasher struct {
+	hash    hash.Hash
+	buffer  []byte
+	size    int
+	scratch [9]byte
+}
+
+func (w *policyTreeHasher) flush() { w.hash.Write(w.buffer); w.buffer = w.buffer[:0] }
+func (w *policyTreeHasher) bytes(raw []byte) {
+	for len(raw) > 0 {
+		n := min(cap(w.buffer)-len(w.buffer), len(raw))
+		w.buffer = append(w.buffer, raw[:n]...)
+		raw = raw[n:]
+		if len(w.buffer) == cap(w.buffer) {
+			w.flush()
+		}
+	}
+}
+func (w *policyTreeHasher) header(tag byte, length int) {
+	w.scratch[0] = tag
+	binary.LittleEndian.PutUint64(w.scratch[1:], uint64(length))
+	w.bytes(w.scratch[:])
+	w.size += length + 1
+}
+func (w *policyTreeHasher) text(tag byte, value string) {
+	w.header(tag, len(value))
+	for len(value) > 0 {
+		n := min(cap(w.buffer)-len(w.buffer), len(value))
+		w.buffer = append(w.buffer, value[:n]...)
+		value = value[n:]
+		if len(w.buffer) == cap(w.buffer) {
+			w.flush()
+		}
+	}
+}
+func (w *policyTreeHasher) write(tag byte, raw []byte) { w.header(tag, len(raw)); w.bytes(raw) }
+func (w *policyTreeHasher) tree(value any, depth int) bool {
 	if depth > 256 {
 		return false
 	}
-	write := func(tag byte, raw []byte) {
-		var header [9]byte
-		header[0] = tag
-		binary.LittleEndian.PutUint64(header[1:], uint64(len(raw)))
-		h.Write(header[:])
-		h.Write(raw)
-		*size += len(raw) + 1
-	}
 	switch v := value.(type) {
 	case nil:
-		write('n', nil)
+		w.write('n', nil)
 	case string:
-		write('s', []byte(v))
+		w.text('s', v)
 	case bool:
 		if v {
-			write('t', nil)
+			w.write('t', nil)
 		} else {
-			write('f', nil)
+			w.write('f', nil)
 		}
 	case float64:
 		var raw [8]byte
 		binary.LittleEndian.PutUint64(raw[:], math.Float64bits(v))
-		write('d', raw[:])
+		w.write('d', raw[:])
 	case map[string]any:
 		if v == nil {
-			write('m', nil)
+			w.write('m', nil)
 			return true
 		}
-		write('{', nil)
+		w.write('{', nil)
 		keys := make([]string, 0, len(v))
 		for key := range v {
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			write('k', []byte(key))
-			if !hashPolicyTree(h, v[key], depth+1, size) {
+			w.text('k', key)
+			if !w.tree(v[key], depth+1) {
 				return false
 			}
 		}
-		write('}', nil)
+		w.write('}', nil)
 	case []any:
 		if v == nil {
-			write('a', nil)
+			w.write('a', nil)
 			return true
 		}
-		write('[', nil)
+		w.write('[', nil)
 		for _, item := range v {
-			if !hashPolicyTree(h, item, depth+1, size) {
+			if !w.tree(item, depth+1) {
 				return false
 			}
 		}
-		write(']', nil)
+		w.write(']', nil)
 	default:
 		raw, err := json.Marshal(value)
 		if err != nil {
 			return false
 		}
-		write('j', raw)
+		w.write('j', raw)
 	}
 	return true
 }

@@ -220,3 +220,28 @@ func TestObservationPagesPostgresAtomicCursorAndReplicaLock(t *testing.T) {
 		t.Fatal("legacy checkpoint overwritten")
 	}
 }
+
+func TestChunkedCompilerInputDistinctConcurrentWriters(t *testing.T) {
+	s := boundedContentTestStore(t)
+	a, ad := chunkedInputFixture(t)
+	b, bd := chunkedInputFixture(t)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, item := range []struct {
+		snapshot platformconfig.RuntimeSnapshot
+		digest   string
+	}{{a, ad}, {b, bd}} {
+		go func() { <-start; results <- s.EnsurePlatformCompilerInput(item.snapshot, item.digest) }()
+	}
+	close(start)
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, digest := range []string{ad, bd} {
+		if _, err := s.GetPlatformCompilerInput(digest); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

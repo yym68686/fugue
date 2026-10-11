@@ -25,7 +25,7 @@ func TestBoundedCompilerInputMemoryExperiment(t *testing.T) {
 	if !strings.HasPrefix(container, "fugue-memory-") {
 		t.Fatal("requires named disposable memory container")
 	}
-	for _, mib := range []int{26, 60, 100} {
+	for _, mib := range []int{26, 60, 100, 150} {
 		for _, chunks := range []bool{false, true} {
 			s := boundedContentTestStore(t)
 			s.db.SetMaxOpenConns(1)
