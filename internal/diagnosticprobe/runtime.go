@@ -81,6 +81,15 @@ func runtimeJSONForProcesses(ctx context.Context, c Collector, procRoot string, 
 		}
 		seen = append(seen, info)
 		rows = append(rows, map[string]any{"pid": peerPID, "start_ticks": before[peerPID], "snapshot": value})
+		if value["overwritten"] == true {
+			gaps = append(gaps, "runtime source ring has overwritten earlier events; historical coverage is incomplete")
+		}
+		if count, ok := value["dropped_events"].(json.Number); ok {
+			n, _ := count.Int64()
+			if n > 0 {
+				gaps = append(gaps, "runtime source dropped observation events")
+			}
+		}
 		if value["truncated"] == true {
 			truncated = true
 			gaps = append(gaps, "runtime source rows are truncated")

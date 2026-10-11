@@ -85,12 +85,13 @@ func TestRuntimeJSONDeduplicatesHelpersAndVerifiesActualProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	var truncated atomic.Bool
+	var dropped atomic.Bool
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"count":1,"truncated":%t}`, truncated.Load())
+		fmt.Fprintf(w, `{"count":1,"truncated":%t,"overwritten":%t,"dropped_events":%d}`, truncated.Load(), dropped.Load(), map[bool]int{false: 0, true: 1}[dropped.Load()])
 	})}
 	go server.Serve(ln)
 	defer server.Close()
-	c := Collector{Path: "/v1/snapshots/queue", Fields: []string{"count", "truncated"}}
+	c := Collector{Path: "/v1/snapshots/queue", Fields: []string{"count", "truncated", "overwritten", "dropped_events"}}
 	v, err := runtimeJSONForProcesses(context.Background(), c, proc, before)
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +111,12 @@ func TestRuntimeJSONDeduplicatesHelpersAndVerifiesActualProvider(t *testing.T) {
 		t.Fatal("provider truncation was not propagated to report quality")
 	}
 	truncated.Store(false)
+	dropped.Store(true)
+	v, _ = runtimeJSONForProcesses(context.Background(), c, proc, before)
+	if partial, ok := v.(partialValue); !ok || len(partial.Gaps) < 2 {
+		t.Fatal("dropped and overwritten events not reported")
+	}
+	dropped.Store(false)
 	writeStat("999")
 	v, _ = runtimeJSONForProcesses(context.Background(), c, proc, before)
 	if _, ok := v.(partialValue); !ok {
