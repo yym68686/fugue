@@ -939,6 +939,15 @@ func (c *CLI) newAdminClusterNodePolicySetCommand() *cobra.Command {
 					if err = c.waitForEdgeEnrollment(cmd.Context(), client, args[0], edgeGroup, waitTimeout); err != nil {
 						return err
 					}
+					current, err := client.GetClusterNodePolicy(args[0])
+					if err != nil {
+						return err
+					}
+					if current.Policy == nil || !current.Policy.EffectiveEdge || !current.Reconciled {
+						return fmt.Errorf("Edge policy changed after readiness verification")
+					}
+					response.ClusterNode.Policy = current.Policy
+					response.NodeReconciled = current.Reconciled
 					edgeReady = true
 				}
 			}

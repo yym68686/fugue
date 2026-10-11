@@ -203,6 +203,13 @@ func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, targ
 			_ = lease.release(context.WithoutCancel(ctx))
 		}
 	}()
+	resolved, resolveErr := activator.front.withManagedCohort(ctx)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	copy := *activator
+	copy.front = resolved
+	activator = &copy
 	promotion, err := activator.promoteControl(ctx, target)
 	if err != nil {
 		return nil, err
@@ -287,6 +294,13 @@ func (activator *groupAuthorityActivator) CompensationSettled(ctx context.Contex
 		PreviousWorkerSourceSHA:   activation.TargetWorkerSourceSHA,
 		PreviousWorkerImageDigest: activation.TargetWorkerImageDigest,
 	}
+	resolved, resolveErr := activator.front.withManagedCohort(ctx)
+	if resolveErr != nil {
+		return false, resolveErr
+	}
+	copy := *activator
+	copy.front = resolved
+	activator = &copy
 	preflight, err := activator.front.preflightForOperation(ctx, target, edgegroupfront.ActivationOperationRollback)
 	if err != nil || !preflight.alreadyAtNew {
 		return false, err

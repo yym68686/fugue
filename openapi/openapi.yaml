@@ -27578,6 +27578,10 @@ components:
           type: string
           minLength: 1
           description: Explicit existing Edge authority for managed node enrollment. Requires allow_edge=true.
+        edge_admission_id:
+          type: string
+          minLength: 1
+          description: Finalize this exact managed enrollment after server verification of current authority, both Worker slots, Front and fresh route/TLS health. This field must be sent alone. It changes declared release membership and does not force traffic selection.
         allow_dns:
           type: boolean
         allow_internal_maintenance:

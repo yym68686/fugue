@@ -1662,3 +1662,21 @@ func digestFromTarget(t *testing.T, target declarativerelease.TargetIdentity) st
 	}
 	return digest
 }
+
+func TestAdmittedFreshNodeRetainsIndependentActivationHistory(t *testing.T) {
+	established := edgeActivationState{Schema: edgeActivationStateSchema, GroupID: "edge-group-fixture", Generation: 9, ActiveSlot: "b", PreviousSlot: "a", BundleGeneration: "routes.p9.r0", WorkerSourceCommit: strings.Repeat("a", 40), WorkerImageDigest: "sha256:" + strings.Repeat("b", 64), Authority: edgeActivationAuthority, Operation: edgeActivationPromote, Reason: "promote verified candidate authority", UpdatedAt: time.Now().UTC()}
+	fresh := established
+	fresh.Operation = "initialize"
+	fresh.PreviousSlot = ""
+	fresh.Reason = "Verified node enrollment fixture"
+	if !edgeActivationStatesAgreeForMember(established, fresh, false, true) || edgeActivationStatesAgreeForMember(established, fresh, false, false) {
+		t.Fatal("explicit new membership was not required")
+	}
+	for _, change := range []func(*edgeActivationState){func(v *edgeActivationState) { v.Generation++ }, func(v *edgeActivationState) { v.BundleGeneration = "routes.p10.r0" }, func(v *edgeActivationState) { v.ActiveSlot = "a" }, func(v *edgeActivationState) { v.WorkerSourceCommit = strings.Repeat("c", 40) }, func(v *edgeActivationState) { v.WorkerImageDigest = "sha256:" + strings.Repeat("d", 64) }, func(v *edgeActivationState) { v.GroupID = "edge-group-other" }} {
+		changed := fresh
+		change(&changed)
+		if edgeActivationStatesAgreeForMember(established, changed, false, true) {
+			t.Fatal("admission weakened serving authority equality")
+		}
+	}
+}

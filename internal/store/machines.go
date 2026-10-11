@@ -8,6 +8,7 @@ import (
 
 	"fugue/internal/edgetopology"
 	"fugue/internal/model"
+	"fugue/internal/model/edgecohort"
 	runtimepkg "fugue/internal/runtime"
 )
 
@@ -631,6 +632,9 @@ func applyMachineEdgeEnrollment(machine *model.Machine, groupID string) error {
 	}
 	machine.Labels[runtimepkg.EdgeGroupIDLabelKey] = groupID
 	machine.Labels[runtimepkg.EdgeWorkloadLabelKey] = runtimepkg.EdgeWorkloadDynamicValue
+	if machine.Labels[model.MachineEdgeEnrollmentLabel] == "" || machine.Labels[edgecohort.PhaseLabel] != edgecohort.Admitted {
+		machine.Labels[edgecohort.PhaseLabel] = edgecohort.Preparing
+	}
 	return nil
 }
 
@@ -648,6 +652,7 @@ func preserveMachineEdgeEnrollment(machine *model.Machine, previous model.Machin
 	machine.Labels[runtimepkg.EdgeWorkloadLabelKey] = runtimepkg.EdgeWorkloadDynamicValue
 	if intent := previous.Labels[model.MachineEdgeEnrollmentLabel]; intent != "" {
 		machine.Labels[model.MachineEdgeEnrollmentLabel] = intent
+		machine.Labels[edgecohort.PhaseLabel] = previous.Labels[edgecohort.PhaseLabel]
 	}
 }
 

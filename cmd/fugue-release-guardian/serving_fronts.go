@@ -12,7 +12,7 @@ import (
 
 func (activator *frontAuthorityActivator) servingFrontPods(ctx context.Context) ([]corev1.Pod, error) {
 	selector := labels.Set{"fugue.io/edge-group-id": activator.config.GroupID}.AsSelector().String()
-	pods, err := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: int64(16*activator.config.ExpectedNodes + 16)})
+	pods, err := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 1601})
 	if err != nil || pods.Continue != "" {
 		return nil, errors.New("Front cohort is unavailable")
 	}
@@ -22,10 +22,18 @@ func (activator *frontAuthorityActivator) servingFrontPods(ctx context.Context) 
 	if err != nil || services.Continue != "" {
 		return nil, errors.New("Front serving transport is unavailable")
 	}
-	return selectServingFrontPods(pods.Items, services.Items, activator.config.RouteAddress, activator.config.ExpectedNodes)
+	var admitted map[string]bool
+	if activator.cohort != nil {
+		admitted = activator.cohort.Admitted
+	}
+	return selectServingFrontPodsWithMembers(activator.cohortPods(pods.Items), services.Items, activator.config.RouteAddress, activator.config.ExpectedNodes, admitted)
 }
 
 func selectServingFrontPods(pods []corev1.Pod, services []corev1.Service, routeAddress string, expectedNodes int) ([]corev1.Pod, error) {
+	return selectServingFrontPodsWithMembers(pods, services, routeAddress, expectedNodes, nil)
+}
+
+func selectServingFrontPodsWithMembers(pods []corev1.Pod, services []corev1.Service, routeAddress string, expectedNodes int, admitted map[string]bool) ([]corev1.Pod, error) {
 	routeHost, _, _ := net.SplitHostPort(routeAddress)
 	managedRoute := false
 	for _, service := range services {
@@ -60,6 +68,16 @@ func selectServingFrontPods(pods []corev1.Pod, services []corev1.Service, routeA
 	}
 	if len(selected) == 0 && !managedRoute {
 		selected = legacy
+	} else if len(admitted) > 0 {
+		selectedNodes := map[string]bool{}
+		for _, pod := range selected {
+			selectedNodes[pod.Spec.NodeName] = true
+		}
+		for _, pod := range legacy {
+			if admitted[pod.Spec.NodeName] && !selectedNodes[pod.Spec.NodeName] {
+				selected = append(selected, pod)
+			}
+		}
 	}
 	if len(selected) != expectedNodes || expectedNodes < 1 {
 		return nil, errors.New("Front serving cohort size is invalid")

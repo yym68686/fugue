@@ -11,6 +11,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/model/edgecohort"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
@@ -620,6 +621,7 @@ func machineJoinMetadataLabels(source map[string]string) map[string]string {
 
 func machineMetadataNodeLabelKeys() []string {
 	return []string{
+		edgecohort.PhaseLabel,
 		runtime.RegionLabelKey,
 		runtime.LegacyRegionLabelKey,
 		runtime.ZoneLabelKey,

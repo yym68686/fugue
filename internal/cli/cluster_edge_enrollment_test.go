@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/model/edgecohort"
 	runtimepkg "fugue/internal/runtime"
 )
 
@@ -44,14 +45,15 @@ func TestEdgeEnrollmentRejectsUnreadyOrForeignPods(t *testing.T) {
 
 func TestEdgeEnrollmentCommandWaitsForRuntimeAndRetriesWithoutTokenRotation(t *testing.T) {
 	now := time.Now().UTC()
-	patches, tasks := 0, 0
+	patches, tasks, admissions := 0, 0, 0
+	phase := edgecohort.Preparing
 	stale := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		var value any
 		switch r.Method + " " + r.URL.Path {
 		case "GET /v1/cluster/node-policies/node-new":
-			value = map[string]any{"node_policy": model.ClusterNodePolicyStatus{NodeName: "node-new", Ready: true, NodeSchedulable: true, Reconciled: true, Policy: &model.ClusterNodePolicy{AllowEdge: true, EffectiveEdge: true}, Labels: map[string]string{runtimepkg.EdgeGroupIDLabelKey: "edge-group-fixture"}}}
+			value = map[string]any{"node_policy": model.ClusterNodePolicyStatus{NodeName: "node-new", Ready: true, NodeSchedulable: true, Reconciled: true, Policy: &model.ClusterNodePolicy{AllowEdge: true, EffectiveEdge: true}, Labels: map[string]string{runtimepkg.EdgeGroupIDLabelKey: "edge-group-fixture", edgecohort.PhaseLabel: phase}}}
 		case "GET /v1/edge/nodes/node-new":
 			seen := now
 			if stale {
@@ -62,6 +64,15 @@ func TestEdgeEnrollmentCommandWaitsForRuntimeAndRetriesWithoutTokenRotation(t *t
 			var body setClusterNodePolicyRequest
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
+			}
+			if body.EdgeAdmissionID != nil {
+				if *body.EdgeAdmissionID != "fixture-admission" || body.AllowEdge != nil || body.EdgeGroupID != nil {
+					t.Error("admission changed unrelated policy")
+				}
+				admissions++
+				phase = edgecohort.Admitted
+				_ = json.NewEncoder(w).Encode(setClusterNodePolicyResponse{NodeReconciled: true})
+				return
 			}
 			if body.EdgeGroupID == nil || *body.EdgeGroupID != "edge-group-fixture" || body.AllowEdge == nil || !*body.AllowEdge || body.AllowSharedPool != nil {
 				t.Errorf("unexpected intent: %+v", body)
@@ -77,7 +88,7 @@ func TestEdgeEnrollmentCommandWaitsForRuntimeAndRetriesWithoutTokenRotation(t *t
 			}
 			value = map[string]any{"cluster_pods": readyEnrollmentPods()}
 		case "GET /v1/admin/edge/nodes/node-new/desired-state":
-			value = edgeNodeDesiredStateResponse{DesiredState: edgeNodeDesiredState{EdgeID: "node-new", EdgeGroupID: "edge-group-fixture", RouteReady: true, TLSReady: true, PublicProbeStatus: model.EdgePublicProbeStatusPassing}}
+			value = edgeNodeDesiredStateResponse{DesiredState: edgeNodeDesiredState{EdgeID: "node-new", EdgeGroupID: "edge-group-fixture", RouteReady: true, TLSReady: true, PublicProbeStatus: model.EdgePublicProbeStatusPassing, Enrollment: &model.EdgeNodeEnrollment{ID: "fixture-admission"}}}
 		default:
 			t.Errorf("unexpected request, including any token rotation: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -100,7 +111,7 @@ func TestEdgeEnrollmentCommandWaitsForRuntimeAndRetriesWithoutTokenRotation(t *t
 			t.Fatalf("runtime verification missing: %s", stdout.String())
 		}
 	}
-	if patches != 2 || tasks != 2 {
+	if patches != 2 || tasks != 2 || admissions != 1 {
 		t.Fatalf("retry did not reuse enrollment: patches=%d tasks=%d", patches, tasks)
 	}
 	stale = true

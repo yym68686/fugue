@@ -128,7 +128,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(set.Items) != 10 {
+	if len(set.Items) != 12 {
 		t.Fatalf("resource count=%d", len(set.Items))
 	}
 	encoded, _ := json.Marshal(set)
@@ -188,11 +188,19 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		t.Fatal("Guardian Secret metadata access is not one exact resourceNames-scoped rule")
 	}
 	guardianConfigMapRules := 0
+	memberReader := false
 	guardianGeneralDelete := false
 	guardianTransitionDelete := false
 	for _, item := range set.Items {
 		metadata, _ := item["metadata"].(map[string]any)
 		name, _ := metadata["name"].(string)
+		if item["kind"] == "ClusterRole" {
+			rawRules, _ := json.Marshal(item["rules"])
+			if name != "fugue-release-guardian-edge-membership" || string(rawRules) != `[{"apiGroups":[""],"resources":["nodes"],"verbs":["get","list"]}]` {
+				t.Fatal("managed membership must only add read-only Node access")
+			}
+			memberReader = true
+		}
 		if item["kind"] != "Role" || name != "fugue-release-guardian" {
 			continue
 		}
@@ -219,7 +227,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 			}
 		}
 	}
-	if guardianConfigMapRules != 2 || !guardianGeneralDelete || !guardianTransitionDelete {
+	if guardianConfigMapRules != 2 || !guardianGeneralDelete || !guardianTransitionDelete || !memberReader {
 		t.Fatal("Guardian ConfigMap permissions do not preserve the transition bridge and retention writer")
 	}
 	for _, forbidden := range []string{`"resources":["events","pods"]`, `"resources":["pods"],"verbs":["*"]`, `"resources":["pods/exec"],"verbs":["*"]`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {

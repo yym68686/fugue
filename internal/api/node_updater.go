@@ -15,6 +15,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/imagecachegraph"
 	"fugue/internal/model"
+	"fugue/internal/model/edgecohort"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/storagerecovery"
 	"fugue/internal/store"
@@ -220,6 +221,15 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 		labels[runtimepkg.EdgeGroupIDLabelKey] = machine.Labels[runtimepkg.EdgeGroupIDLabelKey]
 		labels[runtimepkg.EdgeWorkloadLabelKey] = machine.Labels[runtimepkg.EdgeWorkloadLabelKey]
 		labels[runtimepkg.EdgeRoleLabelKey] = runtimepkg.NodeRoleLabelValue
+		if nodePolicy != nil {
+			clone := *nodePolicy
+			clone.Labels = cloneStringMap(nodePolicy.Labels)
+			if clone.Labels == nil {
+				clone.Labels = map[string]string{}
+			}
+			clone.Labels[edgecohort.PhaseLabel] = machine.Labels[edgecohort.PhaseLabel]
+			*nodePolicy = clone
+		}
 	}
 	if !nodeUpdaterPolicyAllowsEdge(labels, nodePolicy) {
 		return nil, nil, nil

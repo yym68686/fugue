@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/model/edgecohort"
 	"fugue/internal/releaseguardian"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -77,6 +78,7 @@ type podCommandExecutor interface {
 }
 
 type frontAuthorityActivator struct {
+	cohort   *edgecohort.Snapshot
 	client   kubernetes.Interface
 	executor podCommandExecutor
 	config   frontAuthorityConfig
@@ -187,6 +189,10 @@ func (activator *frontAuthorityActivator) beginWithOperation(ctx context.Context
 			_ = lease.release(context.WithoutCancel(ctx))
 		}
 	}()
+	activator, err = activator.withManagedCohort(ctx)
+	if err != nil {
+		return nil, err
+	}
 	preflight, err := activator.preflightForOperation(ctx, target, operation)
 	if err != nil {
 		return nil, err
@@ -641,7 +647,10 @@ type observedFront struct {
 
 func (activator *frontAuthorityActivator) observeWorkers(ctx context.Context, target releaseguardian.FrontAuthorityTarget) (map[string]corev1.Pod, releaseguardian.CandidateWorkerCohort, error) {
 	selector := labels.Set{"fugue.io/edge-group-id": target.GroupID, "fugue.io/edge-slot": string(target.TargetSlot)}.AsSelector().String()
-	list, err := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: int64(activator.config.ExpectedNodes + 1)})
+	list, err := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 1001})
+	if err == nil {
+		list.Items = activator.cohortPods(list.Items)
+	}
 	if err != nil || list.Continue != "" || len(list.Items) != activator.config.ExpectedNodes {
 		return nil, releaseguardian.CandidateWorkerCohort{}, errors.New("target worker cohort is unavailable")
 	}
@@ -675,6 +684,11 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 		strings.TrimSpace(bundleGeneration) == "" || (requireFront && frontGeneration == 0) {
 		return false, errors.New("authority runtime observation input is invalid")
 	}
+	resolved, resolveErr := activator.withManagedCohort(ctx)
+	if resolveErr != nil {
+		return false, resolveErr
+	}
+	activator = resolved
 	workers, cohort, err := activator.observeWorkers(ctx, releaseguardian.FrontAuthorityTarget{GroupID: activator.config.GroupID,
 		TargetSlot: slot, CandidateBundleGeneration: bundleGeneration, WorkerSourceSHA: sourceSHA, WorkerImageDigest: imageDigest})
 	if err != nil || !authorityRuntimeMatches(workers, cohort, nil, slot, sourceSHA, imageDigest, frontGeneration, bundleGeneration, false) {

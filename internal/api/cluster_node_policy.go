@@ -20,6 +20,7 @@ type setClusterNodePolicyRequest struct {
 	AllowSharedPool          *bool   `json:"allow_shared_pool"`
 	AllowEdge                *bool   `json:"allow_edge"`
 	EdgeGroupID              *string `json:"edge_group_id"`
+	EdgeAdmissionID          *string `json:"edge_admission_id"`
 	AllowDNS                 *bool   `json:"allow_dns"`
 	AllowInternalMaintenance *bool   `json:"allow_internal_maintenance"`
 	DesiredControlPlaneRole  *string `json:"desired_control_plane_role"`
@@ -61,6 +62,18 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if req.EdgeAdmissionID != nil {
+		if req.AllowAppRuntime != nil || req.AllowBuilds != nil || req.AllowSharedPool != nil || req.AllowEdge != nil || req.EdgeGroupID != nil || req.AllowDNS != nil || req.AllowInternalMaintenance != nil || req.DesiredControlPlaneRole != nil {
+			httpx.WriteError(w, 400, "edge_admission_id must be sent alone")
+			return
+		}
+		if err := s.admitManagedEdgeEnrollment(r.Context(), machine, *req.EdgeAdmissionID); err != nil {
+			httpx.WriteError(w, 409, "Edge admission: "+err.Error())
+			return
+		}
+		httpx.WriteJSON(w, 200, map[string]any{"node_reconciled": true})
+		return
+	}
 	runtimeObj, err := s.loadClusterNodePolicyRuntime(machine)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -68,6 +81,10 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 	}
 	var enrollment *model.EdgeNodeEnrollment
 	if req.EdgeGroupID != nil {
+		if err := s.validateManagedEdgeCohortCapability(r.Context()); err != nil {
+			httpx.WriteError(w, 409, err.Error())
+			return
+		}
 		if err := s.validateManagedEdgeEnrollment(machine, *req.EdgeGroupID); err != nil {
 			s.writeStoreError(w, err)
 			return
@@ -169,7 +186,7 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 }
 
 func (req setClusterNodePolicyRequest) hasUpdates() bool {
-	return req.AllowAppRuntime != nil ||
+	return req.EdgeAdmissionID != nil || req.AllowAppRuntime != nil ||
 		req.AllowBuilds != nil ||
 		req.AllowSharedPool != nil ||
 		req.AllowEdge != nil ||

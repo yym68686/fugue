@@ -12,6 +12,7 @@ import (
 
 	"fugue/internal/edgetopology"
 	"fugue/internal/model"
+	"fugue/internal/model/edgecohort"
 	runtimepkg "fugue/internal/runtime"
 )
 
@@ -142,6 +143,16 @@ func observeEdgeEnrollment(client *Client, node, group string, now time.Time) (s
 	if desired.PublicProbeStatus != model.EdgePublicProbeStatusPassing {
 		return "waiting for public 80/443 reachability", true, nil
 	}
+	if policy.Labels[edgecohort.PhaseLabel] == edgecohort.Preparing {
+		if desired.Enrollment == nil {
+			return "waiting for an active enrollment permission before admission", false, nil
+		}
+		_, err := client.SetClusterNodePolicy(node, setClusterNodePolicyRequest{EdgeAdmissionID: &desired.Enrollment.ID})
+		if err != nil {
+			return "", false, err
+		}
+		return "waiting for admitted release membership", false, nil
+	}
 	return "", false, nil
 }
 
@@ -247,7 +258,7 @@ func prepareEdgeEnrollmentActivation(client *Client, pods []model.ClusterPod, no
 	if latest.DesiredState.Enrollment == nil || *latest.DesiredState.Enrollment != *intent {
 		return "", errors.New("Edge authority changed before initial activation; rerun enrollment")
 	}
-	_, err = exec("/usr/local/bin/fugue-edge-front-cas", "--state-file", statePath, "--group", group, "--expected-generation", "0", "--initial-generation", strconv.FormatUint(intent.FenceSequence, 10), "--expected-slot", intent.Slot, "--target-slot", intent.Slot, "--bundle-generation", health.Bundle, "--worker-source-commit", intent.WorkerSourceSHA, "--worker-image-digest", intent.WorkerImageDigest, "--operation", "initialize", "--reason", "Verified node enrollment "+intent.ID)
+	_, err = exec("/usr/local/bin/fugue-edge-front-cas", "--state-file", statePath, "--group", group, "--expected-generation", "0", "--initial-generation", strconv.FormatUint(intent.FenceSequence, 10), "--expected-slot", intent.Slot, "--target-slot", intent.Slot, "--bundle-generation", intent.BundleVersion, "--worker-source-commit", intent.WorkerSourceSHA, "--worker-image-digest", intent.WorkerImageDigest, "--operation", "initialize", "--reason", "Verified node enrollment "+intent.ID)
 	if err != nil {
 		return "", err
 	}

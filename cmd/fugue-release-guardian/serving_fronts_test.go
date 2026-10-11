@@ -21,6 +21,13 @@ func TestServingFrontCohortUsesTransportSelectors(t *testing.T) {
 	if err != nil || len(selected) != 2 || selected[0].Name != "selected-a" || selected[1].Name != "selected-b" {
 		t.Fatalf("serving transport did not isolate current executors: %+v %v", selected, err)
 	}
+	withMember := append(append([]corev1.Pod(nil), pods...), front("new-member", "node-new", "legacy", 443))
+	if selected, err := selectServingFrontPodsWithMembers(withMember, services, "192.0.2.1:443", 3, map[string]bool{"node-new": true}); err != nil || len(selected) != 3 || selected[2].Name != "new-member" {
+		t.Fatal("explicit admitted Front was not observed alongside selected transport", err)
+	}
+	if _, err := selectServingFrontPodsWithMembers(withMember, services, "192.0.2.1:443", 3, nil); err == nil {
+		t.Fatal("undeclared public Front entered serving membership")
+	}
 	for name, changed := range map[string][]corev1.Pod{
 		"missing":                 pods[:3],
 		"duplicate":               append(append([]corev1.Pod(nil), pods...), front("duplicate", "node-a", "selected", 0)),

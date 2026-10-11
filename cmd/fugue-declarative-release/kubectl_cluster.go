@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/model/edgecohort"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -96,6 +97,7 @@ func emergencyOwnershipManager(manager string) bool {
 }
 
 type kubectlCluster struct {
+	edgeCohorts      map[string]edgecohort.Snapshot
 	kubectl          string
 	verifier         string
 	timeout          time.Duration

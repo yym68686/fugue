@@ -206,7 +206,10 @@ func (cluster *kubectlCluster) applyEdgeGroupAB(ctx context.Context, release dec
 	if release.Transition == nil || release.Transition.EdgeGroupAB == nil || !target.Present {
 		return errors.New("edge group transition is not fully bound")
 	}
-	transition := *release.Transition.EdgeGroupAB
+	transition, membershipErr := cluster.managedEdgeTransition(ctx, *release.Transition.EdgeGroupAB)
+	if membershipErr != nil {
+		return membershipErr
+	}
 	config, err := loadComponentLeaseClientConfig()
 	if err != nil {
 		return fmt.Errorf("load Kubernetes client config: %w", err)
@@ -228,7 +231,10 @@ func (cluster *kubectlCluster) ReconcileCommittedForward(ctx context.Context, re
 	if release.Transition == nil || release.Transition.Type != "edge-group-ab" || release.Transition.EdgeGroupAB == nil || !target.Present {
 		return declarativerelease.Observation{}, errors.New("committed edge reconciliation is not transition-bound")
 	}
-	transition := *release.Transition.EdgeGroupAB
+	transition, membershipErr := cluster.managedEdgeTransition(ctx, *release.Transition.EdgeGroupAB)
+	if membershipErr != nil {
+		return declarativerelease.Observation{}, membershipErr
+	}
 	config, err := loadComponentLeaseClientConfig()
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("load Kubernetes client config: %w", err)
@@ -1970,6 +1976,11 @@ func (runtime *kubectlEdgeGroupRuntime) WaitActiveWorkerAuthority(ctx context.Co
 }
 
 func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition) (edgeGroupState, error) {
+	var membershipErr error
+	transition, membershipErr = cluster.managedEdgeTransition(ctx, transition)
+	if membershipErr != nil {
+		return edgeGroupState{}, membershipErr
+	}
 	// A broken active Front is exactly the state this transition is meant to
 	// recover. Keep its immutable pod identity even when readiness is false so
 	// the caller can use the group-local activation CAS as the serving witness.
@@ -2035,6 +2046,8 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 	// stale Front health cache cannot hide a valid CAS record before candidate
 	// staging. Fall back to a Worker mount for older layouts.
 	var canonical *edgeActivationState
+	canonicalAdmitted := false
+	admitted := func(node string) bool { return cluster.edgeCohorts[transition.GroupID].Admitted[node] }
 	for _, node := range sortedEdgeNodes(front) {
 		state, exists, err := cluster.readEdgeActivationStateFromPod(ctx, release, transition, front[node], "edge-front")
 		if err != nil {
@@ -2049,7 +2062,8 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 		if canonical == nil {
 			copy := state
 			canonical = &copy
-		} else if !edgeActivationStatesAgree(*canonical, state) {
+			canonicalAdmitted = admitted(node)
+		} else if !edgeActivationStatesAgreeForMember(*canonical, state, canonicalAdmitted, admitted(node)) {
 			return nil, false, errors.New("edge Front activation evidence disagrees across nodes")
 		}
 	}
@@ -2090,7 +2104,8 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 		if canonical == nil {
 			copy := state
 			canonical = &copy
-		} else if !edgeActivationStatesAgree(*canonical, state) {
+			canonicalAdmitted = admitted(pod.NodeName)
+		} else if !edgeActivationStatesAgreeForMember(*canonical, state, canonicalAdmitted, admitted(pod.NodeName)) {
 			return nil, false, errors.New("edge Worker activation evidence disagrees across nodes")
 		}
 	}
@@ -2106,6 +2121,21 @@ func edgeActivationStatesAgree(left, right edgeActivationState) bool {
 		left.WorkerSourceCommit == right.WorkerSourceCommit && left.WorkerImageDigest == right.WorkerImageDigest &&
 		left.Authority == right.Authority && left.Operation == right.Operation && left.RollbackOfGeneration == right.RollbackOfGeneration &&
 		left.Reason == right.Reason
+}
+
+// A newly admitted node has its own initialize receipt, not another host's
+// promotion history. Only explicit admitted members may differ in local history;
+// their complete serving authority must still match the established cohort.
+func edgeActivationStatesAgreeForMember(left, right edgeActivationState, leftAdmitted, rightAdmitted bool) bool {
+	if edgeActivationStatesAgree(left, right) {
+		return true
+	}
+	leftInitial := leftAdmitted && left.Operation == "initialize" && left.PreviousSlot == "" && left.RollbackOfGeneration == 0
+	rightInitial := rightAdmitted && right.Operation == "initialize" && right.PreviousSlot == "" && right.RollbackOfGeneration == 0
+	if !leftInitial && !rightInitial {
+		return false
+	}
+	return left.Schema == right.Schema && left.GroupID == right.GroupID && left.Generation == right.Generation && left.ActiveSlot == right.ActiveSlot && left.BundleGeneration == right.BundleGeneration && left.WorkerSourceCommit == right.WorkerSourceCommit && left.WorkerImageDigest == right.WorkerImageDigest && left.Authority == right.Authority
 }
 
 // An active Worker or Front can be unready during an outage. Preserve its
@@ -2141,6 +2171,13 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace, "--selector", selector, "--output", "json")
 	if err != nil {
 		return nil, err
+	}
+	podsRaw, err = cluster.managedEdgePods(podsRaw, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot, ok := cluster.edgeCohorts[groupID]; ok {
+		expectedNodes = snapshot.Expected
 	}
 	pods, err := parseEdgeGroupPodsWithReadiness(podsRaw, container, expectedNodes, groupID, requireReady)
 	if err != nil {
