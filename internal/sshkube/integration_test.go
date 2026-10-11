@@ -67,7 +67,9 @@ func TestManagedSSHIsolatedKubernetes(test *testing.T) {
 	defer client.CoreV1().Namespaces().Delete(context.Background(), namespace.Name, metav1.DeleteOptions{})
 	pod, err := client.CoreV1().Pods(namespace.Name).Create(ctx, &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "workspace", Labels: map[string]string{"fugue.pro/tenant-id": "tenant_fixture", "fugue.pro/app-id": "app_fixture"}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "workspace", Image: "alpine:3.22", ImagePullPolicy: corev1.PullNever, Command: []string{"/bin/sh", "-c", "mkdir -p /workspace; while true; do printf 'HTTP/1.0 200 OK\\r\\nContent-Length: 14\\r\\n\\r\\nbusiness-ready' | nc -l -p 9090; done"}}}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "workspace", Image: "alpine:3.22", ImagePullPolicy: corev1.PullNever,
+			Env:     []corev1.EnvVar{{Name: "HOME", Value: "/bootstrap-home"}, {Name: "SHELL", Value: "/bin/sh"}},
+			Command: []string{"/bin/sh", "-c", "mkdir -p /workspace; sed -i 's@^root:.*@root:x:0:0:root:/workspace:/bin/ash@' /etc/passwd; printf 'export FUGUE_LOGIN_PROFILE=account-profile-loaded\\n' > /workspace/.profile; while true; do printf 'HTTP/1.0 200 OK\\r\\nContent-Length: 14\\r\\n\\r\\nbusiness-ready' | nc -l -p 9090; done"}}}},
 	}, metav1.CreateOptions{})
 	if err != nil {
 		test.Fatal(err)
@@ -273,6 +275,12 @@ func TestManagedSSHIsolatedKubernetes(test *testing.T) {
 	output, err = native.CombinedOutput()
 	if err != nil || !bytes.Contains(output, []byte("24 80")) {
 		test.Fatal("native forced PTY without local dimensions failed", string(output), err)
+	}
+	native = exec.CommandContext(ctx, "ssh", append(append([]string{}, sshOptions...), "-tt", "-p", port, "root@"+host)...)
+	native.Stdin = strings.NewReader("printf 'ACCOUNT:%s:%s:%s:%s:%s:%s\\n' \"$SHELL\" \"$HOME\" \"$USER\" \"$LOGNAME\" \"$0\" \"$FUGUE_LOGIN_PROFILE\"\nexit 0\n")
+	output, err = native.CombinedOutput()
+	if err != nil || !bytes.Contains(output, []byte("ACCOUNT:/bin/ash:/workspace:root:root:-ash:account-profile-loaded")) {
+		test.Fatal("native interactive login ignored the target account shell, home, or profile", string(output), err)
 	}
 	localFile := filepath.Join(identityDirectory, "upload.txt")
 	if err := os.WriteFile(localFile, []byte("native-scp-payload"), 0o600); err != nil {

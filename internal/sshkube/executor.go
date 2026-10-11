@@ -156,7 +156,7 @@ func (executor *Kubernetes) Validate(ctx context.Context, target managedssh.Targ
 	if err != nil {
 		return managedssh.Capabilities{}, runtimeCheckFailure("helper_probe", err)
 	}
-	capabilities, err := sshexecutor.ProbeHelper(ctx, stream, target, executor.shell)
+	capabilities, err := sshexecutor.ProbeHelper(ctx, stream, target, "")
 	if err != nil {
 		return managedssh.Capabilities{}, runtimeCheckFailure("helper_probe", err)
 	}
@@ -194,7 +194,7 @@ func (executor *Kubernetes) Run(ctx context.Context, target managedssh.Target, r
 	if err != nil {
 		return managedssh.Exit{}, err
 	}
-	invocation := sshexecutor.Invocation{Schema: "fugue.ssh-execution/v1", Target: target, Shell: executor.shell, Kind: request.Kind, Command: request.Command, Terminal: request.Terminal, Environment: request.Environment}
+	invocation := sshexecutor.Invocation{Schema: "fugue.ssh-execution/v1", Target: target, Kind: request.Kind, Command: request.Command, Terminal: request.Terminal, Environment: request.Environment}
 	return sshexecutor.ExecuteHelper(ctx, stream, invocation, request, streams)
 }
 
@@ -211,7 +211,7 @@ func (executor *Kubernetes) Forward(ctx context.Context, target managedssh.Targe
 	result := &forwardConnection{Conn: client}
 	go func() {
 		defer backend.Close()
-		invocation := sshexecutor.Invocation{Schema: "fugue.ssh-execution/v1", Target: target, Shell: executor.shell, Kind: "forward", ForwardHost: host, ForwardPort: port}
+		invocation := sshexecutor.Invocation{Schema: "fugue.ssh-execution/v1", Target: target, Kind: "forward", ForwardHost: host, ForwardPort: port}
 		_, err := sshexecutor.ExecuteHelper(ctx, stream, invocation, managedssh.SessionRequest{Kind: "forward"}, managedssh.SessionIO{Stdin: backend, Stdout: backend, Stderr: io.Discard})
 		result.mutex.Lock()
 		result.failure = err

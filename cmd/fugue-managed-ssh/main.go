@@ -34,7 +34,7 @@ func main() {
 	flag.StringVar(&helperPath, "helper", "", "Static Linux runtime helper")
 	flag.StringVar(&helperDigest, "helper-digest", "", "Expected helper SHA256 digest")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Explicit Kubernetes credentials; empty uses in-cluster credentials")
-	flag.StringVar(&shell, "shell", "/bin/sh", "Supported runtime shell")
+	flag.StringVar(&shell, "shell", "/bin/sh", "Bootstrap shell for staging the helper; sessions use the target account login shell")
 	flag.Parse()
 	for _, value := range []string{artifact, trust, private, lkg, auditPath, helperPath, helperDigest} {
 		if strings.TrimSpace(value) == "" {

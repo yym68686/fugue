@@ -24,6 +24,7 @@ func (process *Process) ProbeCapabilities(ctx context.Context) (managedssh.Capab
 	defer cancel()
 	command := exec.CommandContext(ctx, process.shell, "-c", ":")
 	command.Dir = process.target.WorkingDirectory
+	command.Env = process.executionEnvironment(managedssh.SessionRequest{})
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.WaitDelay = 100 * time.Millisecond
 	command.Cancel = func() error {

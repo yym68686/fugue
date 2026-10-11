@@ -111,7 +111,7 @@ def verify(image, source):
             native = run(["go", "test", "./internal/sshkube", "-run", "^TestManagedSSHIsolatedKubernetes$", "-count=1", "-v"], timeout=180, env=native_env)
             if b"--- PASS: TestManagedSSHIsolatedKubernetes" not in native:
                 raise ValueError("native SSH/SCP acceptance did not verify")
-            return {"schema": "fugue.managed-ssh-image-receipt/v1", "image": image, "source_commit": source, "architecture": architecture, "helper_digest": helper_digest, "verified": True, "checks": ["candidate-publication", "pod-and-service-host-identity", "target-execution", "authorization-refresh", "graceful-retirement", "unchanged-workload", "native-ssh", "native-scp", "pty", "sftp", "loopback-forward", "network-policy-allow-and-deny"], "network_policy_enforced": True, "network_policy_manifest_sha256": CALICO_MANIFEST_SHA256, "elapsed_seconds": round(time.time()-started, 2)}
+            return {"schema": "fugue.managed-ssh-image-receipt/v1", "image": image, "source_commit": source, "architecture": architecture, "helper_digest": helper_digest, "verified": True, "checks": ["candidate-publication", "pod-and-service-host-identity", "target-execution", "authorization-refresh", "graceful-retirement", "unchanged-workload", "native-ssh", "native-interactive-account-login", "native-scp", "pty", "sftp", "loopback-forward", "network-policy-allow-and-deny"], "network_policy_enforced": True, "network_policy_manifest_sha256": CALICO_MANIFEST_SHA256, "elapsed_seconds": round(time.time()-started, 2)}
         except Exception:
             for command in [["docker", "exec", node, "ctr", "-n", "k8s.io", "images", "list"], ["kubectl", "--kubeconfig", str(kubeconfig), "get", "pods", "-A", "-o", "wide"]]:
                 try:

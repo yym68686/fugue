@@ -235,9 +235,18 @@ UID, container name and container ID before and after opening the execution
 transport. Runtime credentials have named-Pod `get` and `pods/exec` permission
 only. Host namespaces and privileged containers are rejected. The current
 adapter requires Linux, a compatible static helper architecture, the configured
-shell, basic bootstrap utilities, and a writable executable temporary directory.
+account login shell, a POSIX bootstrap shell, basic bootstrap utilities, and a
+writable executable temporary directory.
 It runs as the target container's current user; changing to another Unix user is
 not silently emulated.
+
+The bootstrap shell only stages the helper. The helper resolves the bound
+account's login shell and home from the target container's account database;
+both SSH `exec` and `shell` requests use that shell. A `shell` request supplies
+the normal login `argv[0]`. `HOME`, `USER`, `LOGNAME`, and `SHELL` reflect that
+account rather than inherited container defaults or client environment values.
+Missing, ambiguous, substituted, or unusable account metadata fails closed.
+Only an explicitly empty account shell uses the conventional `/bin/sh` default.
 
 The platform helper is streamed into a private temporary directory, checked
 against its digest, executed for a session, and removed after normal completion.

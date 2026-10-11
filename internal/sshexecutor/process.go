@@ -26,10 +26,12 @@ type Process struct {
 	target managedssh.Target
 	shell  string
 	uid    int
+	home   string
+	user   string
 }
 
 func NewProcess(target managedssh.Target, shell string) (*Process, error) {
-	if !filepath.IsAbs(shell) || !filepath.IsAbs(target.WorkingDirectory) {
+	if shell != "" && !filepath.IsAbs(shell) || !filepath.IsAbs(target.WorkingDirectory) {
 		return nil, managedssh.ErrConfiguration
 	}
 	account, err := user.Lookup(target.User)
@@ -43,7 +45,16 @@ func NewProcess(target managedssh.Target, shell string) (*Process, error) {
 	if err != nil || uid != os.Geteuid() {
 		return nil, managedssh.ErrUnauthorized
 	}
-	process := &Process{target: target, shell: shell, uid: uid}
+	if shell == "" {
+		shell, err = accountLoginShell(account)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !filepath.IsAbs(account.HomeDir) {
+		return nil, managedssh.ErrCapabilities
+	}
+	process := &Process{target: target, shell: shell, uid: uid, home: account.HomeDir, user: account.Username}
 	if _, err := process.Validate(context.Background(), target); err != nil {
 		return nil, err
 	}
@@ -78,14 +89,15 @@ func (process *Process) Run(ctx context.Context, target managedssh.Target, reque
 	var command *exec.Cmd
 	switch request.Kind {
 	case "shell":
-		command = exec.Command(process.shell, "-l")
+		command = exec.Command(process.shell)
+		command.Args[0] = "-" + filepath.Base(process.shell)
 	case "exec":
 		command = exec.Command(process.shell, "-c", request.Command)
 	default:
 		return managedssh.Exit{}, managedssh.ErrCapabilities
 	}
 	command.Dir = target.WorkingDirectory
-	command.Env = executionEnvironment(request)
+	command.Env = process.executionEnvironment(request)
 	var terminal *os.File
 	var terminalOutput chan struct{}
 	var input io.WriteCloser
@@ -201,7 +213,7 @@ func (process *Process) Forward(ctx context.Context, target managedssh.Target, h
 	return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(address.String(), strconv.Itoa(int(port))))
 }
 
-func executionEnvironment(request managedssh.SessionRequest) []string {
+func (process *Process) executionEnvironment(request managedssh.SessionRequest) []string {
 	environment := map[string]string{}
 	for _, entry := range os.Environ() {
 		name, value, ok := strings.Cut(entry, "=")
@@ -212,6 +224,10 @@ func executionEnvironment(request managedssh.SessionRequest) []string {
 	for name, value := range request.Environment {
 		environment[name] = value
 	}
+	environment["HOME"] = process.home
+	environment["USER"] = process.user
+	environment["LOGNAME"] = process.user
+	environment["SHELL"] = process.shell
 	if request.Terminal != nil {
 		environment["TERM"] = request.Terminal.Name
 	}
