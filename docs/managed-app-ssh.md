@@ -5,7 +5,8 @@ canary runtime are deployed through CI. Two synthetic applications have separate
 managed identities and public bindings. Native SSH, forced PTY, SCP/SFTP,
 forwarding isolation, current-key revocation, actual VS Code Remote SSH,
 candidate promotion, and reviewed rollback passed production canary acceptance.
-The original Argus workloads, identities, routes, and client trust are unchanged.
+The original Argus workloads, public routes, and client trust are unchanged.
+Separate Argus host identities are now prepared for private candidate review.
 Instance-bound edge acknowledgements and retirement have isolated-cluster
 coverage but production edge enrollment and customer migration remain pending.
 
@@ -786,3 +787,19 @@ before claiming completion of the two-phase goal. An occasional earlier exec
 request rejection remains unexplained; the new bounded diagnostics are in place
 and subsequent acceptance has not reproduced it. No speculative behavioral fix
 was applied to that unexplained event.
+
+## Argus candidate preparation
+
+Both affected applications retain their existing active registered RSA user key,
+which matches the local SSH client key. The platform prepared different encrypted
+host identities for the two logical applications without changing either route
+or workload. These identities are declarations pending candidate verification;
+the public endpoints still present their original shared image key.
+
+The updated identity/anchor dump has SHA-256
+`ddd2f2cdf500ffd6ae5052bfc3f48c7719b6316f4585e21ae52705980838fbfa`.
+Its isolated restore verified all four encrypted identities and compared each
+affected Argus application's public metadata with its authenticated API response.
+Runtime generation five enrolls their existing tenant namespace and runtime so
+private candidates can be prepared with named-Pod exec delegation. It does not
+enroll application Deployment writes, switch ports, or modify client trust.

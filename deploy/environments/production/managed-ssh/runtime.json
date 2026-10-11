@@ -1,17 +1,17 @@
 {
   "apiVersion": "ssh.fugue.dev/v1",
   "kind": "ManagedSSHRuntimeIntent",
-  "generation": 4,
-  "expectedPreviousGeneration": 3,
-  "expectedPreviousDigest": "sha256:5afa2307fb327374d274474029e385160e33cf9c47008fec54fed0c6697a8800",
+  "generation": 5,
+  "expectedPreviousGeneration": 4,
+  "expectedPreviousDigest": "sha256:d423bf8c662426655fb4c5ce8aa5033899cb535c2c6e63a1c530633d1f4ba771",
   "controllerNamespace": "fugue-system",
   "controllerAccount": "fugue-ssh-control",
   "runtimeConfigMap": "fugue-ssh-runtime",
-  "tenantNamespaces": ["fg-tenant-1791712205-3d4658fb88e7"],
+  "tenantNamespaces": ["fg-tenant-1791712205-3d4658fb88e7", "fg-tenant-1774495361-ceff207a44cc"],
   "runtime": {
     "schema": "fugue.managed-ssh-runtime/v1",
     "namespace": "fugue-ssh",
-    "runtime_ids": ["runtime_managed_shared_loc_country-us-ee6bbcaf"],
+    "runtime_ids": ["runtime_managed_shared_loc_country-us-ee6bbcaf", "runtime_1777592665_cd4d8fd98d0c"],
     "releases": {
       "amd64": {
         "image": "ghcr.io/yym68686/fugue-managed-ssh@sha256:bb45656fabc628cb3b9600919a3d29b4f406eb9a327d784ab775aa3db14da231",
