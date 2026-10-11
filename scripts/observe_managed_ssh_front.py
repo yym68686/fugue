@@ -1,11 +1,13 @@
 import argparse
 import datetime
+import http.client
 import ipaddress
 import json
 import os
 from pathlib import Path
 import subprocess
 import urllib.parse
+import urllib.error
 import urllib.request
 
 from scripts.reconcile_agent_edge_trust import canonical, kubectl, strict_json
@@ -40,8 +42,12 @@ def read_json(url, token=None):
     try:
         with opener.open(query, timeout=10) as response:
             raw = response.read(8*1024*1024+1)
-    except Exception:
-        raise ValueError('SSH observation request failed') from None
+    except urllib.error.HTTPError as error:
+        raise ValueError('SSH observation request failed: HTTP '+str(error.code)) from None
+    except http.client.IncompleteRead as error:
+        raise ValueError('SSH observation response truncated: received '+str(len(error.partial))+' bytes') from None
+    except Exception as error:
+        raise ValueError('SSH observation request failed: '+type(error).__name__) from None
     if len(raw)>8*1024*1024:
         raise ValueError('SSH observation exceeded response bound')
     return strict_json(raw)

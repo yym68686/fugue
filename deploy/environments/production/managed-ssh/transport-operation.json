@@ -7,5 +7,5 @@
     "deploy/environments/production/managed-ssh/transport/us-optimized-canary.json",
     "deploy/environments/production/managed-ssh/transport/us-secondary-canary.json"
   ],
-  "action": "stage"
+  "action": "activate"
 }

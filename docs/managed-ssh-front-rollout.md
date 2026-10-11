@@ -324,3 +324,12 @@ and 14:24:41 UTC verified both candidate and public identities while both held
 authenticated sessions continued exchanging data. Both executor generations
 were retained. The four-node preparation now references this exact compensated
 predecessor for reactivation and stages the other three internal Services.
+
+An independent public-API observation found Python urllib receiving an
+incomplete HTTP chunked response while curl HTTP/1.1 and HTTP/2 returned complete
+ACK JSON. Matching curl's user agent, Accept-Encoding, and Connection headers
+did not reproduce that truncation. Its exact source remains unproven, so serving
+code was not changed on that hypothesis. Observation failures now report bounded
+HTTP status, truncated byte count, or exception class without printing response
+contents, credential-bearing URLs, or tokens. Internal API Service observations
+used by the verified production transport operations succeeded.

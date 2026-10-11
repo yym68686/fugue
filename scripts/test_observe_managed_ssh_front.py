@@ -1,13 +1,27 @@
 import copy
 import datetime
+import http.client
 import json
 import unittest
+from unittest import mock
+import urllib.error
 
 from scripts import observe_managed_ssh_front as observe
 from scripts import stage_managed_ssh_fronts as stage
 
 
 class SSHFrontObservationTest(unittest.TestCase):
+    def test_network_diagnostics_classify_failure_without_response_or_credentials(self):
+        failures=[(http.client.IncompleteRead(b'private-response-body'),'response truncated: received 21 bytes'),(urllib.error.HTTPError('https://control.example?token=hidden',403,'hidden-header',{},None),'HTTP 403'),(TimeoutError('hidden-credential'),'TimeoutError')]
+        for error,expected in failures:
+            opener=mock.Mock()
+            opener.open.side_effect=error
+            with mock.patch.object(observe.urllib.request,'build_opener',return_value=opener):
+                with self.assertRaises(ValueError) as raised:observe.read_json('https://control.example','private-api-token')
+            self.assertIn(expected,str(raised.exception))
+            self.assertNotIn('hidden',str(raised.exception))
+            self.assertNotIn('private-',str(raised.exception))
+
     def fixture(self):
         node = {'id': 'worker-a', 'group': 'group-a', 'publicAddress': '8.8.8.8'}
         config = {'generation': 2, 'namespace': 'test-system', 'stateConfigMap': 'front-stage', 'image': 'registry.example/front@sha256:'+'a'*64, 'nodes': [node]}
