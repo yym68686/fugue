@@ -128,3 +128,30 @@ The stage state records a generation and content digest; stale predecessors,
 foreign resources, and changed executor identities are rejected. Previous slots
 remain intact when a new generation is prepared. Live ACKs and host-key probes
 remain required before a separate public transport declaration can select one.
+
+Generation 1 staged successfully through CI run `38141035667`, job
+`114474780170`. All four candidates became ready with zero restarts, and each
+reported its own Pod UID and the same loaded route digest. Read-only database
+checks independently confirmed fresh persisted acknowledgements for all four
+UIDs. Authenticated SSH through each private candidate reached the unchanged
+synthetic workload and matched its prepared host key. Public transport remains
+on the existing front processes.
+
+## Shutdown drain verification
+
+A focused test reproduced an executor shutdown defect: `Run` returned on
+cancellation while established proxy streams still existed. Returning lets the
+binary exit, so preserving listeners during route changes alone was insufficient
+for process retirement. The front now stops admission, marks readiness as
+draining, and waits for held streams up to its configured shutdown timeout. At
+the deadline it closes both sides of remaining streams; no new route activation
+occurs during this phase. Normal rollout must still wait for zero connections
+before deleting retained predecessors; the shutdown timeout is a bounded final
+safeguard, not permission to interrupt active users.
+
+The regression failed before the fix and passed afterwards, including the
+forced-deadline case. Race tests passed. The locally built actual image also
+preserved both old-target and new-target streams after SIGTERM and exited cleanly
+after the clients finished. Future image receipts record
+`graceful-shutdown-drain`; building that artifact does not replace the staged or
+currently public processes.

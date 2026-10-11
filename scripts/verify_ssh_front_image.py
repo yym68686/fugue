@@ -33,7 +33,7 @@ def verify(image, source):
     transport=verify_transport()
     if transport.get('verified') is not True:
         raise ValueError('public transport handoff acceptance failed')
-    return {'schema':'fugue.ssh-front-image-receipt/v1','verified':True,'image':image,'source_commit':source,'architecture':architecture,'checks':['actual-front-image','signed-route-load','persisted-exact-instance-ack','preserved-target-streams','invalid-configuration-keeps-lkg','credentials-excluded-from-urls','service-public-handoff','compensation-preserves-established-streams'],'transport':transport}
+    return {'schema':'fugue.ssh-front-image-receipt/v1','verified':True,'image':image,'source_commit':source,'architecture':architecture,'checks':['actual-front-image','signed-route-load','persisted-exact-instance-ack','preserved-target-streams','invalid-configuration-keeps-lkg','credentials-excluded-from-urls','service-public-handoff','compensation-preserves-established-streams','graceful-shutdown-drain'],'transport':transport}
 
 
 if __name__=='__main__':

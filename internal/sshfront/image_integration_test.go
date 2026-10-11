@@ -200,6 +200,31 @@ func TestActualSSHFrontImage(test *testing.T) {
 	})
 	exchange(previous, "previous")
 	exchange(candidate, "candidate")
-	exchange(connect(), "candidate")
-	test.Log("actual front image verified signed routes, exact durable ACKs, preserved connections, rejected configuration, and credential privacy")
+	latest := connect()
+	exchange(latest, "candidate")
+	docker("kill", "--signal=TERM", name)
+	wait("actual image did not enter shutdown drain", func() bool {
+		response, err := client.Get("http://" + health + "/readyz")
+		if err != nil {
+			return false
+		}
+		defer response.Body.Close()
+		var status struct {
+			Draining bool `json:"draining"`
+		}
+		return response.StatusCode == http.StatusServiceUnavailable && json.NewDecoder(response.Body).Decode(&status) == nil && status.Draining
+	})
+	exchange(previous, "previous")
+	exchange(candidate, "candidate")
+	exchange(latest, "candidate")
+	previous.Close()
+	candidate.Close()
+	latest.Close()
+	wait("actual image did not finish after its held streams closed", func() bool {
+		return strings.TrimSpace(string(docker("inspect", "--format", "{{.State.Running}}", name))) == "false"
+	})
+	if exitCode := strings.TrimSpace(string(docker("inspect", "--format", "{{.State.ExitCode}}", name))); exitCode != "0" {
+		test.Fatal("actual front shutdown was not clean", exitCode)
+	}
+	test.Log("actual front image verified signed routes, exact durable ACKs, preserved connections, rejected configuration, credential privacy, and shutdown drain")
 }

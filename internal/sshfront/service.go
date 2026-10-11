@@ -74,6 +74,10 @@ type Service struct {
 	activeByTenant   map[string]int
 	rateByIP         map[string]connectionRateWindow
 	routeConnections map[model.EdgeSSHRouteConnections]int
+	connections      map[net.Conn]struct{}
+	connectionWG     sync.WaitGroup
+	draining         bool
+	forceClosing     bool
 }
 
 type routeListener struct {
@@ -150,10 +154,14 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 			defer cancel()
+			s.mu.Lock()
+			s.draining = true
+			s.mu.Unlock()
+			s.closeAllListeners()
+			s.drainConnections(shutdownCtx)
 			if healthServer != nil {
 				_ = healthServer.Shutdown(shutdownCtx)
 			}
-			s.closeAllListeners()
 			wg.Wait()
 			return ctx.Err()
 		case <-ticker.C:
@@ -483,10 +491,17 @@ func (s *Service) startRouteListener(cfg Config, entry *routeListener) {
 				s.routeConnections = map[model.EdgeSSHRouteConnections]int{}
 			}
 			s.routeConnections[connectionKey]++
+			if s.connections == nil {
+				s.connections = map[net.Conn]struct{}{}
+			}
+			s.connections[conn] = struct{}{}
+			s.connectionWG.Add(1)
 			s.mu.Unlock()
 			go func() {
+				defer s.connectionWG.Done()
 				defer func() {
 					s.mu.Lock()
+					delete(s.connections, conn)
 					s.routeConnections[connectionKey]--
 					if s.routeConnections[connectionKey] == 0 {
 						delete(s.routeConnections, connectionKey)
@@ -525,6 +540,18 @@ func (s *Service) handleConnection(cfg Config, route model.EdgeSSHRoute, downstr
 		return
 	}
 	defer upstream.Close()
+	s.mu.Lock()
+	if s.forceClosing {
+		s.mu.Unlock()
+		return
+	}
+	s.connections[upstream] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.connections, upstream)
+		s.mu.Unlock()
+	}()
 	if cfg.IdleTimeout > 0 {
 		deadline := time.Now().Add(cfg.IdleTimeout)
 		_ = upstream.SetDeadline(deadline)
@@ -641,7 +668,7 @@ func (s *Service) startHealthServer(cfg Config, wg *sync.WaitGroup) *http.Server
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
-		ready := !s.lastOKAt.IsZero()
+		ready := !s.draining && !s.lastOKAt.IsZero()
 		s.mu.Unlock()
 		if !ready {
 			s.writeStatus(w, http.StatusServiceUnavailable)
@@ -667,6 +694,7 @@ func (s *Service) writeStatus(w http.ResponseWriter, code int) {
 		"status":         "ok",
 		"listeners":      len(s.listeners),
 		"active_conns":   s.activeConns,
+		"draining":       s.draining,
 		"last_sync_at":   s.lastSyncAt,
 		"last_ok_at":     s.lastOKAt,
 		"bundle_version": s.bundle.Version,
@@ -742,6 +770,29 @@ func (s *Service) closeAllListeners() {
 	for _, listener := range listeners {
 		_ = listener.listener.Close()
 		<-listener.done
+	}
+}
+
+func (s *Service) drainConnections(ctx context.Context) {
+	finished := make(chan struct{})
+	go func() {
+		s.connectionWG.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		return
+	case <-ctx.Done():
+		s.mu.Lock()
+		s.forceClosing = true
+		connections := make([]net.Conn, 0, len(s.connections))
+		for connection := range s.connections {
+			connections = append(connections, connection)
+		}
+		s.mu.Unlock()
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
 	}
 }
 
