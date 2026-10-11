@@ -707,6 +707,11 @@ func TestExecuteManagedOperationDeployDoesNotConsumeLivePostgresPlacement(t *tes
 		t.Fatalf("create deploy op: %v", err)
 	}
 
+	op, claimed, err := stateStore.TryClaimPendingOperation(op.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim deploy op: claimed=%v err=%v", claimed, err)
+	}
+
 	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
 	clusterName := "demo-postgres"
 	primaryPodName := "demo-postgres-2"

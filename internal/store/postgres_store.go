@@ -4612,6 +4612,10 @@ func (s *Store) pgDispatchOperationToRuntime(id, runtimeID string) (model.Operat
 }
 
 func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource) (model.Operation, error) {
+	return s.pgCompleteOperationGuarded(id, runtimeID, manifestPath, message, desiredSpec, desiredSource, desiredOriginSource, nil)
+}
+
+func (s *Store) pgCompleteOperationGuarded(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource, guard *operationFinalizationGuard) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -4645,6 +4649,15 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	}
 	if !operationCanTransitionToCompleted(op) {
 		return model.Operation{}, ErrConflict
+	}
+	if guard != nil {
+		currentApp, e := s.pgGetAppTx(ctx, tx, op.AppID, true)
+		if e != nil {
+			return model.Operation{}, e
+		}
+		if e = validateOperationFinalization(op, currentApp, guard); e != nil {
+			return model.Operation{}, e
+		}
 	}
 	immutableDesiredOperation := isManagedPostgresLifecycleOperationType(op.Type) ||
 		op.Type == model.OperationTypeDatabaseResize
@@ -4773,6 +4786,10 @@ func (s *Store) pgUpdateOperationProgress(id, message string) (model.Operation, 
 }
 
 func (s *Store) pgFailOperation(id, message string) (model.Operation, error) {
+	return s.pgFailOperationGuarded(id, message, nil)
+}
+
+func (s *Store) pgFailOperationGuarded(id, message string, guard *operationFinalizationGuard) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -4787,6 +4804,15 @@ func (s *Store) pgFailOperation(id, message string) (model.Operation, error) {
 		return model.Operation{}, mapDBErr(err)
 	}
 
+	if guard != nil {
+		currentApp, e := s.pgGetAppTx(ctx, tx, op.AppID, true)
+		if e != nil {
+			return model.Operation{}, e
+		}
+		if e = validateOperationFinalization(op, currentApp, guard); e != nil {
+			return model.Operation{}, e
+		}
+	}
 	now := time.Now().UTC()
 	op.Status = model.OperationStatusFailed
 	op.UpdatedAt = now
@@ -5076,7 +5102,7 @@ ORDER BY created_at ASC
 	return ops, nil
 }
 
-func (s *Store) pgRequeueManagedOperation(id, message string) (model.Operation, error) {
+func (s *Store) pgRequeueManagedOperationGuarded(id, message string, guard *operationFinalizationGuard) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -5097,6 +5123,10 @@ func (s *Store) pgRequeueManagedOperation(id, message string) (model.Operation, 
 	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
+	}
+
+	if err := validateOperationFinalization(op, app, guard); err != nil {
+		return model.Operation{}, err
 	}
 
 	requeueManagedOperationState(&op, message)

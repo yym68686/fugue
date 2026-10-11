@@ -22,6 +22,8 @@ import (
 )
 
 type Service struct {
+	operationClaimMu                sync.Mutex
+	runningManagedOperations        sync.Map
 	Store                           *store.Store
 	Config                          config.ControllerConfig
 	Renderer                        runtime.Renderer
@@ -284,6 +286,9 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		s.Config.GitHubSyncActivateWorkers,
 		"0=unbounded",
 	)
+	if err := s.recoverCompletedManagedDeploys(ctx); err != nil {
+		return fmt.Errorf("recover ready interrupted deployments: %w", err)
+	}
 	requeued, err := s.Store.RequeueInFlightManagedOperations("operation requeued after controller restart")
 	if err != nil {
 		return fmt.Errorf("requeue in-flight managed operations: %w", err)
@@ -303,6 +308,8 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		return fmt.Errorf("backfill distributed image metadata before managed app reconciliation: %w", err)
 	}
 
+	stopOperationRecovery := s.startPeriodicReconcile(ctx, time.Minute, "operation finalization recovery", s.recoverCompletedManagedDeploys)
+	defer stopOperationRecovery()
 	foregroundImports := s.startPendingOperationWorkers(ctx, operationLaneForegroundImport, s.Config.ForegroundImportWorkers)
 	foregroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, s.Config.ForegroundActivateWorkers)
 	backgroundImports := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, s.Config.GitHubSyncImportWorkers)
@@ -772,6 +779,8 @@ func (s *Service) dispatchPendingOperationsInLane(ctx context.Context, lane oper
 }
 
 func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Operation, bool, error) {
+	s.operationClaimMu.Lock()
+	defer s.operationClaimMu.Unlock()
 	for {
 		now := time.Now().UTC()
 		if s.now != nil {
@@ -838,6 +847,7 @@ func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Ope
 			s.logOperationAppEvent("claimed", "info", claimed, app, "operation claimed", map[string]any{
 				"lane": lane.String(),
 			})
+			s.runningManagedOperations.Store(claimed.ID, operationExecutionKey(claimed))
 			return claimed, true, nil
 		}
 		if restartScan {
@@ -863,17 +873,18 @@ func (s *Service) drainPendingOperationsInLane(ctx context.Context, lane operati
 }
 
 func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation) error {
+	defer s.runningManagedOperations.CompareAndDelete(op.ID, operationExecutionKey(op))
 	switch op.ExecutionMode {
 	case model.ExecutionModeManaged:
 		if err := s.executeManagedOperation(ctx, op); err != nil {
 			if errors.Is(err, context.Canceled) {
-				if _, requeueErr := s.Store.RequeueManagedOperation(op.ID, "operation requeued after controller interruption"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
+				if _, requeueErr := s.Store.RequeueManagedOperationGuarded(op, "operation requeued after controller interruption"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
 					s.Logger.Printf("operation %s requeue after interruption failed: %v", op.ID, requeueErr)
 				}
 				return err
 			}
 			if errors.Is(err, errManagedPostgresLifecycleOwnershipUnknown) {
-				if _, requeueErr := s.Store.RequeueManagedOperation(op.ID, "operation requeued because managed postgres lifecycle ownership could not be verified"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) && !errors.Is(requeueErr, store.ErrNotFound) {
+				if _, requeueErr := s.Store.RequeueManagedOperationGuarded(op, "operation requeued because managed postgres lifecycle ownership could not be verified"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) && !errors.Is(requeueErr, store.ErrNotFound) {
 					// Keep the operation running when the Store is unavailable. Startup
 					// recovery will requeue managed operations once persistence returns.
 					s.Logger.Printf("operation %s requeue after lifecycle ownership check failed: %v", op.ID, requeueErr)
@@ -894,13 +905,13 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				return nil
 			}
 			if errors.Is(err, errRegistryGCRunning) {
-				if _, requeueErr := s.Store.RequeueManagedOperation(op.ID, "operation requeued while registry garbage collection is running"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
+				if _, requeueErr := s.Store.RequeueManagedOperationGuarded(op, "operation requeued while registry garbage collection is running"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
 					s.Logger.Printf("operation %s requeue during registry GC failed: %v", op.ID, requeueErr)
 				}
 				return nil
 			}
 			s.Logger.Printf("operation %s failed: %v", op.ID, err)
-			if failed, failErr := s.Store.FailOperation(op.ID, err.Error()); failErr != nil {
+			if failed, failErr := s.finalizeManagedOperation(ctx, op, model.OperationStatusFailed, func() (model.Operation, error) { return s.Store.FailManagedOperationGuarded(op, err.Error()) }); failErr != nil {
 				s.Logger.Printf("operation %s fail update error: %v", op.ID, failErr)
 			} else {
 				s.failReleaseAttemptForOperation(failed, err.Error())
@@ -1026,7 +1037,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	}
 	timer.Mark("prepare_operation")
 
-	if err := s.ensureOperationStillActive(op.ID); err != nil {
+	if err := s.ensureOperationStillActiveContext(ctx, op.ID); err != nil {
 		return err
 	}
 	timer.Mark("operation_active_check")
@@ -1251,7 +1262,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := s.ensureOperationStillActive(op.ID); err != nil {
+	if err := s.ensureOperationStillActiveContext(ctx, op.ID); err != nil {
 		return err
 	}
 	timer.Mark("final_active_check")
@@ -1266,12 +1277,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if op.Type == model.OperationTypeDelete {
 		message = fmt.Sprintf("managed app deleted from namespace %s", bundle.TenantNamespace)
 	}
-	var completed model.Operation
-	if completionDesiredSpec != nil {
-		completed, err = s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, message, completionDesiredSpec, op.DesiredSource)
-	} else {
-		completed, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
-	}
+	completed, err := s.finalizeManagedOperation(ctx, op, model.OperationStatusCompleted, func() (model.Operation, error) {
+		return s.Store.CompleteManagedOperationGuarded(op, nil, bundle.ManifestPath, message, completionDesiredSpec, op.DesiredSource, nil)
+	})
 	if err != nil {
 		if op.Type == model.OperationTypeMigrate {
 			s.recordManagedMigrationCompletionFailure(op, app, "migration operation completion failed: "+err.Error())

@@ -4019,14 +4019,27 @@ func (s *Store) SetOperationControllerTiming(id string, segments []model.Operati
 }
 
 func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource) (model.Operation, error) {
+	return s.completeOperationGuarded(id, runtimeID, manifestPath, message, desiredSpec, desiredSource, desiredOriginSource, nil)
+}
+
+func (s *Store) completeOperationGuarded(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource, guard *operationFinalizationGuard) (model.Operation, error) {
 	if s.usingDatabase() {
-		return s.pgCompleteOperation(id, runtimeID, manifestPath, message, desiredSpec, desiredSource, desiredOriginSource)
+		return s.pgCompleteOperationGuarded(id, runtimeID, manifestPath, message, desiredSpec, desiredSource, desiredOriginSource, guard)
 	}
 	var op model.Operation
 	err := s.withLockedState(true, func(state *model.State) error {
 		index := findOperation(state, id)
 		if index < 0 {
 			return ErrNotFound
+		}
+		if guard != nil {
+			ai := findApp(state, state.Operations[index].AppID)
+			if ai < 0 {
+				return ErrNotFound
+			}
+			if err := validateOperationFinalization(state.Operations[index], state.Apps[ai], guard); err != nil {
+				return err
+			}
 		}
 		if runtimeID != "" && state.Operations[index].AssignedRuntimeID != runtimeID {
 			return ErrNotFound
@@ -4109,8 +4122,12 @@ func (s *Store) DispatchOperationToRuntime(id, runtimeID string) (model.Operatio
 }
 
 func (s *Store) RequeueManagedOperation(id, message string) (model.Operation, error) {
+	return s.requeueManagedOperationGuarded(id, message, nil)
+}
+
+func (s *Store) requeueManagedOperationGuarded(id, message string, guard *operationFinalizationGuard) (model.Operation, error) {
 	if s.usingDatabase() {
-		return s.pgRequeueManagedOperation(id, message)
+		return s.pgRequeueManagedOperationGuarded(id, message, guard)
 	}
 	var op model.Operation
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -4120,6 +4137,9 @@ func (s *Store) RequeueManagedOperation(id, message string) (model.Operation, er
 		}
 		if !isRequeueableManagedOperation(state.Operations[index]) {
 			return ErrConflict
+		}
+		if err := validateOperationFinalization(state.Operations[index], model.App{}, guard); err != nil {
+			return err
 		}
 		requeueManagedOperationState(&state.Operations[index], message)
 		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
@@ -4153,8 +4173,12 @@ func (s *Store) RequeueInFlightManagedOperations(message string) (int, error) {
 }
 
 func (s *Store) FailOperation(id, message string) (model.Operation, error) {
+	return s.failOperationGuarded(id, message, nil)
+}
+
+func (s *Store) failOperationGuarded(id, message string, guard *operationFinalizationGuard) (model.Operation, error) {
 	if s.usingDatabase() {
-		op, err := s.pgFailOperation(id, message)
+		op, err := s.pgFailOperationGuarded(id, message, guard)
 		if err != nil {
 			return op, err
 		}
@@ -4170,6 +4194,15 @@ func (s *Store) FailOperation(id, message string) (model.Operation, error) {
 		index := findOperation(state, id)
 		if index < 0 {
 			return ErrNotFound
+		}
+		if guard != nil {
+			ai := findApp(state, state.Operations[index].AppID)
+			if ai < 0 {
+				return ErrNotFound
+			}
+			if err := validateOperationFinalization(state.Operations[index], state.Apps[ai], guard); err != nil {
+				return err
+			}
 		}
 		now := time.Now().UTC()
 		state.Operations[index].Status = model.OperationStatusFailed

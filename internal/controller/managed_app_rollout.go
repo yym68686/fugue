@@ -86,7 +86,7 @@ func (s *Service) waitForManagedAppRolloutResultWithScheduling(
 		ExpectedReleaseKey: s.expectedManagedAppReleaseKey(app, scheduling),
 		Phase:              "rollout_wait",
 	}
-	err := s.waitForManagedAppRolloutErrorWithScheduling(ctx, app, operationID, scheduling)
+	err := retryRolloutPersistenceObservation(ctx, func() error { return s.waitForManagedAppRolloutErrorWithScheduling(ctx, app, operationID, scheduling) })
 	if err != nil {
 		result.Err = err
 		result.Message = err.Error()
@@ -122,7 +122,9 @@ func (s *Service) waitForManagedAppRevisionRolloutResultWithScheduling(
 		result.Message = result.Err.Error()
 		return result
 	}
-	err := s.waitForManagedAppRevisionRolloutErrorWithScheduling(ctx, app, operationID, scheduling, revision, expectedDeployment)
+	err := retryRolloutPersistenceObservation(ctx, func() error {
+		return s.waitForManagedAppRevisionRolloutErrorWithScheduling(ctx, app, operationID, scheduling, revision, expectedDeployment)
+	})
 	if err != nil {
 		result.Err = err
 		result.Message = err.Error()
@@ -181,7 +183,7 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 	}
 	for {
 		if strings.TrimSpace(operationID) != "" {
-			if err := s.ensureOperationStillActive(operationID); err != nil {
+			if err := s.ensureOperationStillActiveContext(waitCtx, operationID); err != nil {
 				return err
 			}
 		}
@@ -290,7 +292,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 
 	for {
 		if strings.TrimSpace(operationID) != "" {
-			if err := s.ensureOperationStillActive(operationID); err != nil {
+			if err := s.ensureOperationStillActiveContext(waitCtx, operationID); err != nil {
 				return err
 			}
 		}
@@ -389,7 +391,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 		}
 		if ready {
 			if s.Store != nil {
-				if err := s.refreshManagedAppStatus(waitCtx, client, app); err != nil {
+				if err := retryOperationStore(waitCtx, time.Second, s.operationPersistencePending(operationID, "ready_status"), func() error { return s.refreshManagedAppStatus(waitCtx, client, app) }); err != nil {
 					return fmt.Errorf("publish managed app ready status for %s/%s: %w", namespace, name, err)
 				}
 				managed, foundManagedApp, err = client.getManagedApp(waitCtx, namespace, managedAppName)
@@ -503,7 +505,7 @@ func (s *Service) waitForManagedBackingServiceLifecycle(ctx context.Context, app
 	lastMessage := ""
 	for {
 		if operationID = strings.TrimSpace(operationID); operationID != "" {
-			if err := s.ensureOperationStillActive(operationID); err != nil {
+			if err := s.ensureOperationStillActiveContext(waitCtx, operationID); err != nil {
 				return err
 			}
 		}
