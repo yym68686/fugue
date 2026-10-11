@@ -681,3 +681,16 @@ The fake Kubernetes adapter now enforces resource versions and reproduced this
 failure. Each resource now has separate metadata, and failed publication names
 the resource and expected version without emitting request data. Version fences
 remain enforced and the configuration is still committed last.
+
+Runtime generation two published successfully after that fix. Native OpenSSH
+then authenticated the canary's independently prepared key and executed inside
+the unchanged Alpine application at `/workspace`; no sshd exists there. The
+API's public handshake observation also matched the retained fingerprint.
+Equivalent bounded SYN observations for the other three currently running
+front instances found sources `10.42.8.0`, `10.42.4.0`, and `10.42.1.0`.
+Kubernetes node inventory matched them to the respective front nodes. Generation
+three adds these exact addresses on port 2222, preserving health isolation.
+Further client acceptance found that a forced native PTY with unspecified
+dimensions is rejected; that compatibility defect remains under repair. One
+exec request was also rejected without a sufficiently precise diagnostic; a
+successful repeat does not establish its cause.

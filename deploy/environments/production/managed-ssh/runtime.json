@@ -1,9 +1,9 @@
 {
   "apiVersion": "ssh.fugue.dev/v1",
   "kind": "ManagedSSHRuntimeIntent",
-  "generation": 2,
-  "expectedPreviousGeneration": 1,
-  "expectedPreviousDigest": "sha256:1bfcd209feeba5a1010994baa020d9f215cd5c740cec44dc8afff26c43283108",
+  "generation": 3,
+  "expectedPreviousGeneration": 2,
+  "expectedPreviousDigest": "sha256:871397454f448a9c114a993c1db2b9be2db6125047d05290696ddc796225a537",
   "controllerNamespace": "fugue-system",
   "controllerAccount": "fugue-ssh-control",
   "runtimeConfigMap": "fugue-ssh-runtime",
@@ -31,7 +31,7 @@
       "app.kubernetes.io/name": "fugue",
       "app.kubernetes.io/component": "ssh-control"
     },
-    "ingress_cidrs": ["15.204.94.71/32", "154.51.41.196/32", "95.169.10.156/32", "51.38.126.103/32", "10.42.2.0/32"],
+    "ingress_cidrs": ["15.204.94.71/32", "154.51.41.196/32", "95.169.10.156/32", "51.38.126.103/32", "10.42.2.0/32", "10.42.8.0/32", "10.42.4.0/32", "10.42.1.0/32"],
     "required_edges": [],
     "rollback_retention_seconds": 86400
   },
