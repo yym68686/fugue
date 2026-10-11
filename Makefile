@@ -9,6 +9,7 @@ test:
 	python3 -m unittest scripts.test_verify_ssh_front_image
 	python3 -m unittest scripts.test_stage_managed_ssh_fronts
 	python3 -m unittest scripts.test_observe_managed_ssh_front
+	python3 -m unittest scripts.test_select_managed_ssh_transport
 	python3 -m unittest scripts.test_publish_storage_policy
 	python3 -m unittest scripts.test_verify_managed_ssh_image
 	python3 -m unittest scripts.test_reconcile_managed_ssh_keys

@@ -10,6 +10,59 @@ permissions:
   contents: read
 
 jobs:
+  managed_ssh_transport:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-managed-ssh-transport, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select exact independently declared SSH transport operation
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/managed-ssh/transport-operation.json
+          if [[ ! -f "$config" ]]; then exit 0; fi
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          paths=(deploy/environments/production/managed-ssh/transport-operation.json deploy/environments/production/managed-ssh/transport scripts/run_managed_ssh_transport.py scripts/select_managed_ssh_transport.py scripts/observe_managed_ssh_front.py cmd/fugue-ssh-probe)
+          if ! git diff --quiet "$base" HEAD -- "${paths[@]}"; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "${paths[@]}" deploy/environments/production/managed-ssh/front-stage.json .github/workflows/ci.yml; then
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        if: steps.selected.outputs.changed == 'true'
+        with: {go-version-file: go.mod}
+      - name: Verify transport gates and compile the read-only identity probe
+        if: steps.selected.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_observe_managed_ssh_front scripts.test_select_managed_ssh_transport
+          go test ./cmd/fugue-ssh-probe ./internal/sshidentity
+          go build -trimpath -o "$RUNNER_TEMP/fugue-ssh-probe-$GITHUB_RUN_ID" ./cmd/fugue-ssh-probe
+      - name: Apply the independently fenced SSH transport operation
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+          FUGUE_SSH_WITNESS_KEY: ${{ secrets.FUGUE_MANAGED_SSH_CANARY_KEY }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.run_managed_ssh_transport deploy/environments/production/managed-ssh/transport-operation.json --probe-binary "$RUNNER_TEMP/fugue-ssh-probe-$GITHUB_RUN_ID" > "$RUNNER_TEMP/ssh-transport-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-ssh-transport-${{ github.sha }}
+          path: ${{ runner.temp }}/ssh-transport-result.json
+          if-no-files-found: error
+          retention-days: 90
+
   managed_ssh_front_stage:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

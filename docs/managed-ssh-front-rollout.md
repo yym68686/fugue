@@ -181,3 +181,29 @@ verifies host-key possession with the existing SSH key-exchange probe. It stops
 before user authentication and neither accepts user private keys nor modifies
 client trust. This allows the CI transport verifier to probe both candidate and
 public paths without deploying a probe binary on a production node.
+
+## Fenced transport preparation
+
+`transport-operation.json` selects one explicit stage, activate, or compensate
+operation against a separate immutable selection declaration. The independent
+`managed_ssh_transport` CI lane rejects superseded configuration, runs the
+observation and selection tests, and compiles the read-only probe. The initial
+declaration covers the two synthetic applications on the US primary edge and
+only creates an internal Service. It has no external IP until a subsequent
+explicit activation operation.
+
+Activation requires the exact staged Service owner, UID, resource version,
+selector, ports, candidate EndpointSlice, fresh persisted ACK, current managed
+bindings, and candidate/public host-key probes. It rejects overlapping public
+ownership by another Service. The JSON patch tests the entire previous Service
+specification and ownership metadata. Authenticated synthetic SSH sessions span
+the switch, and both pre-switch and post-switch connections must keep exchanging
+data through the observation window. Verification failure compensates only the
+same exact serving generation; a newer or foreign state is never overwritten.
+Compensation changes only public selection and retains the old and new front
+processes and existing streams. Test credentials and trust are temporary and do
+not alter any user's SSH configuration.
+
+This initial migration declaration is deliberately finite. Automatic management
+of future platform-owned bindings and retirement validation against the actual
+selected Service remain required before platform-wide completion.
