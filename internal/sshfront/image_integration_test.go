@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -175,10 +174,13 @@ func TestActualSSHFrontImage(test *testing.T) {
 	candidate := connect()
 	exchange(previous, "previous")
 	exchange(candidate, "candidate")
-	raw, err := os.ReadFile(filepath.Join(cache, "routes.json"))
+	if mode := strings.TrimSpace(string(docker("exec", name, "stat", "-c", "%a", "/state/routes.json"))); mode != "600" {
+		test.Fatal("actual route cache lost its private permissions", mode)
+	}
+	raw := docker("exec", name, "cat", "/state/routes.json")
 	var persisted model.EdgeSSHRouteBundle
-	if err != nil || json.Unmarshal(raw, &persisted) != nil || persisted.Version != "second" {
-		test.Fatal("actual image acknowledged a non-durable selection", err)
+	if json.Unmarshal(raw, &persisted) != nil || persisted.Version != "second" {
+		test.Fatal("actual image acknowledged a non-durable selection")
 	}
 	mutex.Lock()
 	bundle.Version = "unsigned-change"
