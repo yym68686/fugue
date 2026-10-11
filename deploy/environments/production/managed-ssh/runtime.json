@@ -1,0 +1,41 @@
+{
+  "apiVersion": "ssh.fugue.dev/v1",
+  "kind": "ManagedSSHRuntimeIntent",
+  "generation": 1,
+  "expectedPreviousGeneration": 0,
+  "expectedPreviousDigest": "",
+  "controllerNamespace": "fugue-system",
+  "controllerAccount": "fugue-ssh-control",
+  "runtimeConfigMap": "fugue-ssh-runtime",
+  "tenantNamespaces": ["fg-tenant-1791712205-3d4658fb88e7"],
+  "runtime": {
+    "schema": "fugue.managed-ssh-runtime/v1",
+    "namespace": "fugue-ssh",
+    "runtime_ids": ["runtime_managed_shared_loc_country-us-ee6bbcaf"],
+    "releases": {
+      "amd64": {
+        "image": "ghcr.io/yym68686/fugue-managed-ssh@sha256:c983682552c59a64acdf063e3c9214b5e2c7e5fd79ca615daa825e9fd4de5086",
+        "helper_digest": "sha256:9a88ca60cfe9d0287c1871f7842ba34d88b9d84846395ea9bbcde41ed8ee882a",
+        "architecture": "amd64"
+      }
+    },
+    "state_storage_class": "fugue-local-rwo",
+    "api_servers": [
+      {"cidr": "10.43.0.1/32", "port": 443},
+      {"cidr": "15.204.88.101/32", "port": 6443}
+    ],
+    "ingress_namespace": "fugue-system",
+    "ingress_pod_labels": {"app.kubernetes.io/component": "fugue-ssh-front"},
+    "controller_namespace": "fugue-system",
+    "controller_pod_labels": {
+      "app.kubernetes.io/name": "fugue",
+      "app.kubernetes.io/component": "ssh-control"
+    },
+    "ingress_cidrs": ["15.204.94.71/32", "154.51.41.196/32", "95.169.10.156/32", "51.38.126.103/32"],
+    "required_edges": [],
+    "rollback_retention_seconds": 86400
+  },
+  "artifactReceiptDigest": "sha256:1395042842f6ab9bf60db5fbe47345f3e79b0dd3ddaff05fab56e3e5a7cfcd25",
+  "artifactSourceCommit": "3f46f8c64aa08366b80f4b232e2b66cdcb88247c",
+  "artifactRunID": 38129642333
+}

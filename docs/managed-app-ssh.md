@@ -605,3 +605,27 @@ Tenant authority excludes application Deployment writes and Secret reads;
 foreign resource ownership, stale predecessor versions, image substitution,
 and unreviewed namespace changes fail closed. No production runtime declaration
 or mutation-authority enrollment has been published yet.
+
+## Production canary enrollment
+
+The `3f46f8c6` CI run completed successfully, including immutable-image acceptance
+with enforced network policy. The previous candidate startup failure was traced
+to containerd retaining an unresolved temporary import alias when kind loaded a
+digest-only Docker archive. The verifier now pulls the exact digest through CRI
+inside its disposable node and checks the resulting image identity. This change
+does not alter production image handling.
+
+Runtime generation one enrolls only the separately created acceptance tenant.
+The normal Fugue API deployed an Alpine fixture with no sshd or application SSH
+configuration. Its managed identity and user key are dedicated test credentials.
+The selected image and helper come from the successful CI receipt. Only the
+fixture namespace receives exec delegation; no customer tenant is enrolled.
+Host-network front addresses are explicit ingress peers. Edge retirement remains
+disabled until exact instance acknowledgements are enrolled. The canary uses
+node-local persistent state; it does not establish production backup or node-loss
+recovery acceptance.
+
+The API, schema, and read-only SSH controller were released successfully at
+`8b938942`. Read-only checks confirmed both original Argus container identities
+and restart counts remained unchanged. No Argus managed identity, public route
+activation, image rebuild, or client known-hosts update has occurred.

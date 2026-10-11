@@ -47,6 +47,15 @@ class ManagedSSHRuntimeTest(unittest.TestCase):
             runtime.reconcile(config,receipt,kube)
         self.assertEqual(writes,[])
 
+    def test_runtime_identity_accepts_location_ids_and_rejects_invalid_types(self):
+        config,receipt,state,writes,kube=self.fixture()
+        config['runtime']['runtime_ids']=['runtime_managed_shared_loc_country-zz_ab12cd34']
+        self.assertTrue(runtime.reconcile(config,receipt,kube)['verified'])
+        for identifier in [None, 1, 'runtime_wrong/path', 'runtime_has space']:
+            config['runtime']['runtime_ids']=[identifier]
+            with self.assertRaises(ValueError):
+                runtime.validate(config,receipt)
+
     def test_foreign_resource_rejects_before_any_writes(self):
         config,receipt,state,writes,kube=self.fixture()
         state[('role','test-tenant','managed-ssh-controller')]={'metadata':{'labels':{'app.kubernetes.io/managed-by':'another-owner'},'resourceVersion':'1'}}

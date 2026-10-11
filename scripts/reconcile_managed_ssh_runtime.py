@@ -48,7 +48,7 @@ def validate(config, receipt):
         name(namespace)
         if namespace in {options["namespace"], config["controllerNamespace"], "default", "kube-system", "kube-public", "kube-node-lease"}:
             raise ValueError("platform namespaces cannot be enrolled for tenant execution")
-    if not isinstance(options["runtime_ids"], list) or not 1 <= len(options["runtime_ids"]) <= 32 or any(not re.fullmatch(r"runtime_[A-Za-z0-9_]+", identifier) for identifier in options["runtime_ids"]):
+    if not isinstance(options["runtime_ids"], list) or not 1 <= len(options["runtime_ids"]) <= 32 or any(not isinstance(identifier, str) or not re.fullmatch(r"runtime_[A-Za-z0-9_-]+", identifier) for identifier in options["runtime_ids"]):
         raise ValueError("explicit runtime identities required")
     if type(config["artifactRunID"]) is not int or config["artifactRunID"] < 1 or not re.fullmatch(r"[a-f0-9]{40}",config["artifactSourceCommit"]):
         raise ValueError("exact CI artifact run and source required")
