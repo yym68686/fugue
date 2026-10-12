@@ -1,0 +1,16 @@
+{
+  "schema": "fugue.dns-hostport-retirement/v1",
+  "generation": 1,
+  "namespace": "fugue-system",
+  "node": "vps-591f4447",
+  "node_uid": "ecc25989-8514-4e16-9a76-ae74608b1c0e",
+  "workload": "fugue-fugue-dns",
+  "workload_uid": "b2559411-6a5b-4b8d-bab7-776498c2d878",
+  "image": "ghcr.io/yym68686/fugue-edge@sha256:210c6e181b1ab6cc3bb4edc5fd88f2edc45821fc5b8001dff7c5e000bb851d89",
+  "service": "fugue-dns-public-us",
+  "service_uid": "182da187-4dbc-4a7b-a42b-5725d72e0ca1",
+  "candidate_uid": "a94c22b8-e6d7-47b2-8387-67a34402f62c",
+  "candidate_image": "ghcr.io/yym68686/fugue-edge@sha256:f5eaf96407ef46fc9473e84542eb13750fd14c19b0a096f60a5bd200772c9dfe",
+  "origin": "https://api.fugue.pro",
+  "api_address": "15.204.94.71"
+}

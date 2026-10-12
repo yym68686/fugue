@@ -2060,6 +2060,72 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  dns_port_retirement:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-dns-transport, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one independent DNS port retirement
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          mapfile -t configs < <(git diff --name-only "$base" HEAD -- deploy/environments/production/dns-port-retirement)
+          if (( ${#configs[@]} == 0 )); then exit 0; fi
+          (( ${#configs[@]} == 1 )) || { echo 'one DNS port retirement per release required' >&2; exit 1; }
+          config="${configs[0]}"
+          [[ "$config" =~ ^deploy/environments/production/dns-port-retirement/[a-z0-9-]+\.json$ ]]
+          git fetch origin main
+          if git diff --quiet HEAD origin/main -- "$config" scripts/retire_dns_hostport.py scripts/recover_dns_transport.py scripts/reconcile_dns_transport.py cmd/fugue-dns-observation-verify internal/dnsserver .github/workflows/ci.yml; then
+            echo "config=$config" >> "$GITHUB_OUTPUT"
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        if: steps.selected.outputs.changed == 'true'
+        with: {go-version-file: go.mod, cache: false}
+      - name: Verify replacement authority and drained legacy DNS ports
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          CONFIG: ${{ steps.selected.outputs.config }}
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_retire_dns_hostport scripts.test_recover_dns_transport scripts.test_reconcile_dns_transport
+          export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
+          go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
+          python3 -m scripts.retire_dns_hostport "$CONFIG" --evidence "$RUNNER_TEMP/dns-port-retirement-prewrite.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-dns-port-retirement-prewrite-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-port-retirement-prewrite.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Release only the declared legacy DNS host ports
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          CONFIG: ${{ steps.selected.outputs.config }}
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          set -euo pipefail
+          export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
+          python3 -m scripts.retire_dns_hostport "$CONFIG" --apply --evidence "$RUNNER_TEMP/dns-port-retirement-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-dns-port-retirement-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-port-retirement-result.json
+          if-no-files-found: warn
+          retention-days: 90
+
   postgres_protection:
     # Database recovery must remain possible when an application build fails.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

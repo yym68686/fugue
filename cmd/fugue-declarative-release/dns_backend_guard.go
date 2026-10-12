@@ -23,7 +23,8 @@ func (cluster *kubectlCluster) requireUnselectedDNSBackend(ctx context.Context, 
 	}
 	_ = json.Unmarshal([]byte(stringValue(annotations["fugue.pro/consumer-identity"])), &policy)
 	front := annotations["fugue.pro/edge-front-transport"] == "independent/v1"
-	if policy.Component != "dns-server" && !front {
+	hostClaims := dnsHostPortClaims(template)
+	if policy.Component != "dns-server" && !front && len(hostClaims) == 0 {
 		return nil
 	}
 	raw, err := cluster.getResource(ctx, identity)
@@ -34,15 +35,15 @@ func (cluster *kubectlCluster) requireUnselectedDNSBackend(ctx context.Context, 
 	if json.Unmarshal(raw, &current) != nil {
 		return errors.New("DNS workload observation is invalid")
 	}
-	if current == nil {
+	if current == nil && len(hostClaims) == 0 {
 		return nil
 	}
 	liveTemplate := mapField(mapField(current, "spec"), "template")
-	if declarativerelease.ResourceDesiredSubset(template, liveTemplate) {
+	if declarativerelease.ResourceDesiredSubset(template, liveTemplate) && len(hostClaims) == 0 {
 		return nil
 	}
 	labels := mapField(mapField(liveTemplate, "metadata"), "labels")
-	if len(labels) == 0 {
+	if len(labels) == 0 && len(hostClaims) == 0 {
 		return errors.New("DNS workload has no observed selection labels")
 	}
 	raw, err = cluster.kubectlRead(ctx, nil, "get", "services", "-n", identity.Namespace, "-o", "json")
@@ -59,11 +60,51 @@ func (cluster *kubectlCluster) requireUnselectedDNSBackend(ctx context.Context, 
 		return errors.New("DNS public transport observation is incomplete")
 	}
 	for _, service := range services.Items {
+		if dnsHostClaimOverlapsService(hostClaims, service) {
+			return errors.New("DNS hostPort conflicts with independently declared public transport; release the legacy claim before code deployment")
+		}
 		if (!front && dnsPublicServiceSelects(service, labels)) || (front && frontPublicServiceSelects(service, labels)) {
 			return fmt.Errorf("workload %s/%s is selected by public Service %s; a verified transport handoff is required before code replacement", identity.Kind, identity.Name, stringValue(mapField(service, "metadata")["name"]))
 		}
 	}
 	return nil
+}
+
+func dnsHostPortClaims(template map[string]any) []string {
+	spec := mapField(template, "spec")
+	containers, _ := spec["containers"].([]any)
+	claims := []string{}
+	for _, raw := range containers {
+		container, _ := raw.(map[string]any)
+		ports, _ := container["ports"].([]any)
+		for _, item := range ports {
+			port, _ := item.(map[string]any)
+			if fmt.Sprint(port["hostPort"]) == "53" || spec["hostNetwork"] == true && fmt.Sprint(port["containerPort"]) == "53" {
+				claims = append(claims, stringValue(port["hostIP"]))
+			}
+		}
+	}
+	return claims
+}
+
+func dnsHostClaimOverlapsService(claims []string, service map[string]any) bool {
+	spec := mapField(service, "spec")
+	addresses, _ := spec["externalIPs"].([]any)
+	ports, _ := spec["ports"].([]any)
+	for _, raw := range ports {
+		port, _ := raw.(map[string]any)
+		if fmt.Sprint(port["port"]) != "53" {
+			continue
+		}
+		for _, claim := range claims {
+			for _, address := range addresses {
+				if claim == "" || claim == "0.0.0.0" || claim == "::" || claim == stringValue(address) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func dnsPublicServiceSelects(service map[string]any, labels map[string]any) bool {
