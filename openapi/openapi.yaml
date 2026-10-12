@@ -964,11 +964,16 @@ paths:
     get:
       operationId: listEdgeNodes
       summary: List Edge Nodes
+      description: Lists current policy-filtered nodes. include_stale retains stale heartbeat rows for diagnosis; inventory observations never attest a current route proof or a public DNS answer.
       tags: [Edge]
       x-fugue-handler: handleListEdgeNodes
       security:
         - BearerAuth: []
       parameters:
+        - in: query
+          name: include_stale
+          required: false
+          schema: {type: boolean, default: false}
         - in: query
           name: edge_group_id
           required: false
@@ -18925,6 +18930,8 @@ components:
         - created_at
         - updated_at
       properties:
+        observation:
+          $ref: "#/components/schemas/EdgeNodeInventoryObservation"
         id:
           type: string
         edge_group_id:
@@ -19044,11 +19051,31 @@ components:
         updated_at:
           type: string
           format: date-time
+    EdgeNodeInventoryObservation:
+      type: object
+      additionalProperties: false
+      description: A read-only evaluation of stored inventory, separate from configuration intent and per-route serving proofs. eligible=true only means inventory checks pass; it does not claim DNS selection or public reachability.
+      required: [evaluated_at, heartbeat_fresh, admission_allows_dns, route_state_present, tls_state_present, eligible, reason, route_proof_status]
+      properties:
+        evaluated_at: {type: string, format: date-time}
+        observed_at: {type: string, format: date-time}
+        fresh_until: {type: string, format: date-time}
+        heartbeat_fresh: {type: boolean}
+        admission_allows_dns: {type: boolean}
+        route_state_present: {type: boolean}
+        tls_state_present: {type: boolean}
+        eligible: {type: boolean}
+        reason:
+          type: string
+          enum: [observations_missing, observation_from_future, heartbeat_stale, draining, admission_rejected, node_unhealthy, route_state_missing, tls_state_missing, inventory_checks_passed]
+        route_proof_status: {type: string, enum: [not_evaluated]}
     EdgeNodeDesiredState:
       type: object
       additionalProperties: false
       required: [edge_id, edge_group_id, workload_mode, canary_state, canary_weight, public_probe_status, dns_eligible, draining, route_ready, tls_ready]
       properties:
+        observation:
+          $ref: "#/components/schemas/EdgeNodeInventoryObservation"
         edge_id:
           type: string
         edge_group_id:
@@ -19072,6 +19099,7 @@ components:
           type: boolean
         dns_eligible:
           type: boolean
+          description: Admission configuration only; current inventory freshness is reported in observation. A route still needs its own valid proof.
         draining:
           type: boolean
         route_ready:

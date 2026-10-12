@@ -70,19 +70,20 @@ type edgeHeartbeatRequest struct {
 }
 
 type edgeNodeDesiredStateResponse struct {
-	Enrollment        *model.EdgeNodeEnrollment `json:"enrollment,omitempty"`
-	EdgeID            string                    `json:"edge_id"`
-	EdgeGroupID       string                    `json:"edge_group_id"`
-	WorkloadMode      string                    `json:"workload_mode"`
-	CanaryState       string                    `json:"canary_state"`
-	CanaryWeight      int                       `json:"canary_weight"`
-	PublicProbeStatus string                    `json:"public_probe_status"`
-	DNSEligible       bool                      `json:"dns_eligible"`
-	Draining          bool                      `json:"draining"`
-	RouteReady        bool                      `json:"route_ready"`
-	TLSReady          bool                      `json:"tls_ready"`
-	TokenPrefix       string                    `json:"token_prefix,omitempty"`
-	LastHeartbeatAt   *time.Time                `json:"last_heartbeat_at,omitempty"`
+	Observation       *model.EdgeNodeInventoryObservation `json:"observation,omitempty"`
+	Enrollment        *model.EdgeNodeEnrollment           `json:"enrollment,omitempty"`
+	EdgeID            string                              `json:"edge_id"`
+	EdgeGroupID       string                              `json:"edge_group_id"`
+	WorkloadMode      string                              `json:"workload_mode"`
+	CanaryState       string                              `json:"canary_state"`
+	CanaryWeight      int                                 `json:"canary_weight"`
+	PublicProbeStatus string                              `json:"public_probe_status"`
+	DNSEligible       bool                                `json:"dns_eligible"`
+	Draining          bool                                `json:"draining"`
+	RouteReady        bool                                `json:"route_ready"`
+	TLSReady          bool                                `json:"tls_ready"`
+	TokenPrefix       string                              `json:"token_prefix,omitempty"`
+	LastHeartbeatAt   *time.Time                          `json:"last_heartbeat_at,omitempty"`
 }
 
 func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +102,18 @@ func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
 	} else if s.log != nil {
 		s.log.Printf("edge node inventory continuing without node policy filter: %v", err)
 	}
-	nodes = freshEdgeNodes(nodes, time.Now().UTC())
+	includeStale := r.URL.Query().Get("include_stale")
+	if includeStale != "" && includeStale != "true" && includeStale != "false" {
+		httpx.WriteError(w, http.StatusBadRequest, "include_stale must be true or false")
+		return
+	}
+	now := time.Now().UTC()
+	if includeStale != "true" {
+		nodes = freshEdgeNodes(nodes, now)
+	}
+	for index := range nodes {
+		nodes[index].Observation = observeEdgeNodeInventory(nodes[index], now)
+	}
 	groups = activeEdgeGroupsForInventory(groups, nodes, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"nodes":  nodes,
@@ -120,6 +132,7 @@ func (s *Server) handleGetEdgeNode(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	node.Observation = observeEdgeNodeInventory(node, time.Now().UTC())
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":  node,
 		"group": group,
@@ -166,6 +179,7 @@ func (s *Server) handleAdminGetEdgeNodeDesiredState(w http.ResponseWriter, r *ht
 func buildEdgeNodeDesiredState(node model.EdgeNode) edgeNodeDesiredStateResponse {
 	canaryState := edgeNodeEffectiveCanaryState(node)
 	return edgeNodeDesiredStateResponse{
+		Observation:       observeEdgeNodeInventory(node, time.Now().UTC()),
 		EdgeID:            strings.TrimSpace(node.ID),
 		EdgeGroupID:       strings.TrimSpace(node.EdgeGroupID),
 		WorkloadMode:      edgeNodeEffectiveWorkloadMode(node),
