@@ -148,3 +148,12 @@ although this run had performed no handoff. Its first error was an exact interna
 stage mismatch. The repair schedules drain observation only after this run's
 selected handoff and successful public verification, and reads only that target.
 The next transition stages the internal-only Service; no public address is added.
+
+The stage release `8f3dece0`, CI `38297915746`, passed. Service UID
+`33a28c0e-3dd2-4d49-84d9-c22b5531bfd0` is at transport generation two, phase
+`staged`, with no external IP and one Ready EndpointSlice referencing the exact
+candidate Pod UID. The next separate handoff intent requires fresh same-run
+external and restricted-network proofs, a held original socket, exact new-flow
+attribution, Service CAS and compensation. It does not authorize deleting the
+retained Front. Native strict-key poly/argus logins at 19:34 UTC still returned
+`-bash`, `/bin/bash`, `/workspace`, and the trust file hash was unchanged.
