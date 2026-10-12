@@ -61,6 +61,10 @@ func TestTrackedPlatformSourcesContainNoBusinessCoupling(t *testing.T) {
 // data. Exempt only that typed value, never an entire file or configuration tree:
 // executable fields, comments, unknown schema and adjacent strings stay scanned.
 func businessCouplingSource(path string, body []byte) []byte {
+	const offlineDirectory = "deploy/environments/production/edge-offline/"
+	if strings.HasPrefix(path, offlineDirectory) && !strings.Contains(strings.TrimPrefix(path, offlineDirectory), "/") && strings.HasSuffix(path, ".json") {
+		return orderedProjectionHostnameSource(body, "fugue.edge-offline-reconfiguration/v1")
+	}
 	const physicalDirectory = "deploy/environments/production/routing-physical-dns/"
 	if strings.HasPrefix(path, physicalDirectory) && !strings.Contains(strings.TrimPrefix(path, physicalDirectory), "/") && strings.HasSuffix(path, ".json") {
 		return orderedProjectionHostnameSource(body, "fugue.physical-dns-reconfiguration/v1")
@@ -153,6 +157,24 @@ func TestDynamicQualityExceptionOnlyCoversPreservedHostnameConstraints(t *testin
 	unknown := strings.Replace(body, "fugue.dynamic-quality-reconfiguration/v1", "unknown/v1", 1)
 	if string(businessCouplingSource(path, []byte(unknown))) != unknown {
 		t.Fatal("unknown schema exempted")
+	}
+}
+
+func TestOfflineConfigurationExceptionDoesNotHideExecutableFields(t *testing.T) {
+	const path = "deploy/environments/production/edge-offline/global.json"
+	const body = `{"schema":"fugue.edge-offline-reconfiguration/v1","projection_policy":{"dns_query_policy":{"ordered_projection":{"overrides":[{"hostname":"tenant.example.test","command":"branch on tenant.example.test"}]}},"offline_edges":[{"edge_id":"edge-a","command":"branch on tenant.example.test"}]}}`
+	masked := string(businessCouplingSource(path, []byte(body)))
+	if !strings.Contains(masked, `"hostname":"configuration-hostname"`) || strings.Count(masked, "branch on tenant.example.test") != 2 {
+		t.Fatal("offline data exemption hid executable content")
+	}
+	for _, other := range []string{"internal/api/routing.go", path + ".go", strings.Replace(path, "/global", "/nested/global", 1)} {
+		if string(businessCouplingSource(other, []byte(body))) != body {
+			t.Fatal("offline data exemption escaped its declaration")
+		}
+	}
+	unknown := strings.Replace(body, "fugue.edge-offline-reconfiguration/v1", "unknown/v1", 1)
+	if string(businessCouplingSource(path, []byte(unknown))) != unknown {
+		t.Fatal("unknown offline schema exempted")
 	}
 }
 
