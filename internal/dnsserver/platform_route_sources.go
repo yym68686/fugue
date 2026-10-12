@@ -61,7 +61,7 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 		union.Probes = append(union.Probes, requirement)
 	}
 	sort.Slice(union.Probes, func(i, j int) bool { return union.Probes[i].ID < union.Probes[j].ID })
-	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe)
+	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, s.servingDNSProbes.bind(c.Assignment, s.Logger))
 	facts = retainValidDNSReadinessFacts(union, p.Policy.DNSReadiness, s.platformDNSRouteFacts, facts, time.Now().UTC())
 	boundDNSRouteSourceFacts(dnsServingPayload{routeSources: &dnsroutesource.Context{Snapshot: snapshot}}, facts, time.Now().UTC())
 	valid := validDNSReadinessFacts(union, p.Policy.DNSReadiness, facts, time.Now().UTC())
@@ -121,7 +121,7 @@ func (s *Service) checkDNSRouteSources(ctx context.Context, client platformconsu
 // Schedule each physical target once, then evaluate its unchanged observation
 // against every authorized publication. Waiting duplicates must not occupy the
 // bounded network worker pool or starve other targets during the probe window.
-func collectDNSRouteSourceFacts(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc) []dnsReadinessFact {
+func collectDNSRouteSourceFacts(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, schedulers ...*dnsReadinessScheduler) []dnsReadinessFact {
 	physical := &platformconfig.DNSReadinessPlan{}
 	representatives := map[string]string{}
 	for _, requirement := range plan.Probes {
@@ -148,7 +148,7 @@ func collectDNSRouteSourceFacts(ctx context.Context, plan *platformconfig.DNSRea
 		results[indices[key]] = observation{proof, err}
 		return proof, err
 	}
-	physicalFacts := collectDNSReadinessFacts(ctx, physical, policy, wrapped)
+	physicalFacts := collectDNSReadinessFacts(ctx, physical, policy, wrapped, schedulers...)
 	facts := make([]dnsReadinessFact, 0, len(plan.Probes))
 	for _, requirement := range plan.Probes {
 		i := indices[dnsroutesource.ProbeKey(requirement)]

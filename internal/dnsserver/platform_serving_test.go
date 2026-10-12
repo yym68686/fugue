@@ -479,6 +479,33 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	}, s.probeDNSServingListener); err == nil || lastProbeStatus != "failed" {
 		t.Fatal("failed serving retained positive runtime fact", err, lastProbeStatus)
 	}
+	degraded := s.platformServing.Load()
+	if !reflect.DeepEqual(degraded.record, old.record) {
+		t.Fatal("record failure changed the verified positive checkpoint")
+	}
+	for _, fact := range degraded.facts {
+		if fact.Ready || fact.Reason != "probe_failed" {
+			t.Fatal("negative observation was masked or mislabeled", fact)
+		}
+	}
+	s.udpListening.Store(true)
+	s.tcpListening.Store(true)
+	readyResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(readyResponse, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if readyResponse.Code != http.StatusOK {
+		t.Fatal("record failure removed the listener", readyResponse.Body.String())
+	}
+	if answer := degraded.answer(query, "", time.Now()); answer.Rcode != dns.RcodeServerFailure {
+		t.Fatal("failed record reused a positive proof", answer)
+	}
+	authorityQuery := new(dns.Msg)
+	authorityQuery.SetQuestion("example.test.", dns.TypeNS)
+	if answer := degraded.answer(authorityQuery, "", time.Now()); answer.Rcode != dns.RcodeSuccess || len(answer.Answer) == 0 {
+		t.Fatal("record failure interrupted zone authority", answer)
+	}
+	if _, _, err := s.verifiedDNSCheckpointPayload(degraded.record); err != nil {
+		t.Fatal("negative observations damaged checkpoint authentication", err)
+	}
 	allowFailed = false
 	s.platformServing.Store(old)
 	// A new fenced candidate that fails readiness or wire probes cannot change

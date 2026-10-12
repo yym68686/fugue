@@ -8,7 +8,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"fugue/internal/model"
@@ -89,44 +88,19 @@ func (s *Service) observePlatformDNSReadiness(ctx context.Context, c dnsPlatform
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("DNS readiness facts cache unavailable")
 	}
-	facts := collectDNSReadinessFacts(ctx, payload.Plan, payload.Policy.DNSReadiness, routeprobe.Probe)
+	facts := collectDNSReadinessFacts(ctx, payload.Plan, payload.Policy.DNSReadiness, routeprobe.Probe, s.candidateDNSProbes.bind(a, s.Logger))
 	checkedAt := time.Now().UTC()
 	receipt.Facts = facts
 	receipt.Status = summarizeDNSReadiness(payload.Plan, payload.Policy.DNSReadiness, facts, planDigest, checkedAt, checkedAt)
 	return receipt, nil
 }
 
-func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc) []dnsReadinessFact {
-	// The signed policy bounds both concurrency and the observation window.
-	// An additional shorter code constant can starve valid plans even when
-	// every target fits within their configured interval.
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(policy.ProbeIntervalSeconds)*time.Second)
-	defer cancel()
-	facts := make([]dnsReadinessFact, len(plan.Probes))
-	jobs := make(chan int, len(plan.Probes))
-	for i, p := range plan.Probes {
-		facts[i] = dnsReadinessFact{ProbeID: p.ID, Reason: "not_observed"}
-		jobs <- i
+func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, schedulers ...*dnsReadinessScheduler) []dnsReadinessFact {
+	scheduler := &dnsReadinessScheduler{}
+	if len(schedulers) > 0 && schedulers[0] != nil {
+		scheduler = schedulers[0]
 	}
-	close(jobs)
-	var wg sync.WaitGroup
-	for worker := 0; worker < min(policy.MaxConcurrency, len(plan.Probes)); worker++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range jobs {
-				if ctx.Err() != nil {
-					return
-				}
-				requirement := plan.Probes[i]
-				proof, err := probe(ctx, requirement.Hostname, requirement.Path, requirement.Address, requirement.State, time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
-				fact := evaluateDNSReadinessFact(requirement, policy, proof, err, time.Now().UTC())
-				facts[i] = fact
-			}
-		}()
-	}
-	wg.Wait()
-	return facts
+	return scheduler.collect(ctx, plan, policy, probe)
 }
 
 func evaluateDNSReadinessFact(requirement platformconfig.DNSReadinessProbe, policy *platformconfig.DNSReadinessPolicy, proof routeprobe.Proof, err error, now time.Time) dnsReadinessFact {

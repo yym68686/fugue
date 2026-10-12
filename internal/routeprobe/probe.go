@@ -42,7 +42,23 @@ type Proof struct {
 // deliberately do not use this error.
 var ErrUnavailable = errors.New("placement probe transport timed out")
 
+var ErrConnectionUnavailable = errors.New("placement probe connection unavailable")
+
+type connectionError struct {
+	err error
+}
+
+func (failure connectionError) Error() string        { return failure.err.Error() }
+func (failure connectionError) Unwrap() error        { return failure.err }
+func (failure connectionError) Is(target error) bool { return target == ErrConnectionUnavailable }
+
 func classifyTransportError(err error) error {
+	if errors.Is(err, ErrConnectionUnavailable) {
+		var failure connectionError
+		if errors.As(err, &failure) {
+			return failure
+		}
+	}
 	var networkError net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
 		return ErrUnavailable
@@ -71,7 +87,11 @@ func Probe(ctx context.Context, host, path, address, expectedState string, timeo
 	dialer := &net.Dialer{Timeout: timeout}
 	transport := &http.Transport{Proxy: nil, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}, MaxResponseHeaderBytes: 16 << 10, ForceAttemptHTTP2: true,
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), "443"))
+			connection, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), "443"))
+			if err != nil {
+				return nil, connectionError{err: classifyTransportError(err)}
+			}
+			return connection, nil
 		}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

@@ -280,7 +280,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	bridge.payload = p
 	facts := sourceFacts
 	if p.routeSources == nil {
-		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe)
+		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.bind(a, s.Logger))
 	}
 	// Keep the original observations for the retained release. Candidate
 	// assignment filtering below must not erase a valid old-release proof.
@@ -291,7 +291,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		facts = retainDNSFactsForSourceRenewal(old, facts, now)
 	}
 	for i := range facts {
-		if !dnsFactMatchesRelease(facts[i], parent, candidate, routeID, p) {
+		if facts[i].Ready && !dnsFactMatchesRelease(facts[i], parent, candidate, routeID, p) {
 			facts[i].Ready = false
 			facts[i].Reason = "traffic_release_mismatch"
 		}
@@ -317,8 +317,12 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			return err
 		}
 		if same {
-			st.record.AppliedAt = old.record.AppliedAt
-			st.record.Positive = false
+			if old.record.Positive && dnsSameSourceContext(old.record.RouteSources, p.routeSources) {
+				st.record = old.record
+			} else {
+				st.record.AppliedAt = old.record.AppliedAt
+				st.record.Positive = false
+			}
 			st.fallback = "readiness_incomplete"
 			s.platformServing.Store(st)
 			_ = s.reportDNSServingState(ctx, client, id, st, false)
@@ -412,7 +416,7 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	return status.ReadyRecords == status.Records
 }
 func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact) (*dnsServingState, error) {
-	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe)
+	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.bind(old.record.Candidate.Assignment, s.Logger))
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe
 	// has a transient transport failure. Keep only proofs that are still valid;
@@ -424,7 +428,7 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 	}
 	bridgeAllowed := compatibleDNSReleaseProbes(old, bridge)
 	for i := range facts {
-		if !dnsFactMatchesRelease(facts[i], old.record.Parent, old.record.Candidate, old.routeID, old.payload) &&
+		if facts[i].Ready && !dnsFactMatchesRelease(facts[i], old.record.Parent, old.record.Candidate, old.routeID, old.payload) &&
 			!(bridgeAllowed[facts[i].ProbeID] && facts[i].Ready && dnsFactMatchesRelease(facts[i], bridge.parent, bridge.candidate, bridge.routeID, bridge.payload)) {
 			facts[i].Ready = false
 			facts[i].Reason = "traffic_release_mismatch"
@@ -447,9 +451,9 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 // requirements. Reuse them with their original timestamps and apply the old
 // release/verified-successor checks below; only changed or missing requirements
 // need another probe. This avoids a second full scan starving serving proofs.
-func collectRetainedDNSReadinessFacts(ctx context.Context, old *dnsServingState, bridge *dnsReleaseBridge, observations []dnsReadinessFact, probe dnsReadinessProbeFunc) []dnsReadinessFact {
+func collectRetainedDNSReadinessFacts(ctx context.Context, old *dnsServingState, bridge *dnsReleaseBridge, observations []dnsReadinessFact, probe dnsReadinessProbeFunc, schedulers ...*dnsReadinessScheduler) []dnsReadinessFact {
 	if bridge == nil || bridge.payload.Plan == nil || len(observations) == 0 {
-		return collectDNSReadinessFacts(ctx, old.payload.Plan, old.payload.Policy.DNSReadiness, probe)
+		return collectDNSReadinessFacts(ctx, old.payload.Plan, old.payload.Policy.DNSReadiness, probe, schedulers...)
 	}
 	observedRequirements := make(map[string]platformconfig.DNSReadinessProbe, len(bridge.payload.Plan.Probes))
 	for _, requirement := range bridge.payload.Plan.Probes {
@@ -481,7 +485,7 @@ func collectRetainedDNSReadinessFacts(ctx context.Context, old *dnsServingState,
 			missing.Probes = append(missing.Probes, requirement)
 		}
 	}
-	collected := collectDNSReadinessFacts(ctx, &missing, old.payload.Policy.DNSReadiness, probe)
+	collected := collectDNSReadinessFacts(ctx, &missing, old.payload.Policy.DNSReadiness, probe, schedulers...)
 	next := 0
 	for i := range facts {
 		if facts[i].ProbeID == "" {

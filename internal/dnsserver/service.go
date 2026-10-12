@@ -77,6 +77,9 @@ type Service struct {
 	platformParent                *Service
 	PlatformTokenFile             string
 	platformConsumerMu            sync.Mutex
+	servingDNSProbes              dnsReadinessScheduler
+	candidateDNSProbes            dnsReadinessScheduler
+	retainedDNSProbes             dnsReadinessScheduler
 	platformCandidate             PlatformCandidateStatus
 	platformDNSRouteFacts         []dnsReadinessFact // guarded by platformConsumerMu; never persisted
 	Config                        config.DNSConfig
