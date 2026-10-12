@@ -1,6 +1,6 @@
 {
   "schema": "fugue.front-serving-stage/v1",
-  "generation": 2,
+  "generation": 4,
   "namespace": "fugue-system",
   "services": [
     {

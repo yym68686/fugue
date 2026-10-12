@@ -4,6 +4,20 @@ from scripts import observe_front_public_probe as external
 
 
 class ExternalFrontTests(unittest.TestCase):
+    def test_failure_retains_exact_attempt_and_completed_observations(self):
+        config = {'listeners': [{'name': 'selected', 'address': '8.8.8.8', 'port': 15443}]}
+        profiles = {'selected': {'node': 'node-a', 'group': 'cell-a', 'probes': [{'host': 'api.example.test', 'path': '/'}]}}
+        progress = {}
+        results = [{'proof': {'edge': 'node-a', 'group': 'cell-a'}, 'publication_retries': 0}, TimeoutError('private transport diagnostic')]
+        with patch.object(external.front, 'stable_proof_pair', side_effect=results):
+            with self.assertRaises(TimeoutError):
+                external.observe(config, profiles, samples=2, interval=0, listener_name='selected', progress=progress)
+        self.assertEqual(len(progress['observations']), 1)
+        self.assertEqual(progress['current_attempt']['listener'], 'selected')
+        self.assertEqual(progress['current_attempt']['sample'], 1)
+        self.assertEqual(progress['current_attempt']['host'], 'api.example.test')
+        self.assertNotIn('private transport diagnostic', str(progress))
+
     def test_selected_release_does_not_probe_unrelated_offline_listener(self):
         config = {'listeners': [{'name': 'changed', 'address': '8.8.8.8', 'port': 15443},
                                 {'name': 'unchanged', 'address': '9.9.9.9', 'port': 15443}]}

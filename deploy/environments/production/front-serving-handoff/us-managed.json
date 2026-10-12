@@ -4,8 +4,8 @@
   "service": "fugue-front-serving-us-managed",
   "address": "154.51.41.196",
   "observation": "deploy/environments/production/front-observation/us-managed.json",
-  "expectedGeneration": 2,
-  "generation": 3,
-  "rollbackGeneration": 4,
+  "expectedGeneration": 4,
+  "generation": 5,
+  "rollbackGeneration": 6,
   "verificationSeconds": 60
 }

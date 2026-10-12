@@ -157,3 +157,21 @@ external and restricted-network proofs, a held original socket, exact new-flow
 attribution, Service CAS and compensation. It does not authorize deleting the
 retained Front. Native strict-key poly/argus logins at 19:34 UTC still returned
 `-bash`, `/bin/bash`, `/workspace`, and the trust file hash was unchanged.
+
+Handoff run `38298847333` passed the held-connection/public CAS checks, then its
+hosted public-verification job timed out at 19:46:53 UTC. Recovery succeeded:
+the same Service UID is staged at compensation generation four with no external
+IP. The legacy executor retains its connections; the US worker retry is withheld.
+The failing workflow invoked the observer without its exact listener, selecting
+all four historical entries rather than this run's handoff. A workflow regression
+test proves the missing binding. The old failure receipt contains no attempted
+listener, so it does not establish which endpoint timed out or why. Do not assign
+that timeout to BWG or to the newly staged Front without evidence.
+
+Public verification now inherits the same-run listener already validated against
+the declared handoff, requires it to be nonempty, and preserves all original
+route/TLS/public-candidate equality checks. Failed observations retain the exact
+attempt and completed samples without raw transport errors. The next declaration
+starts from the observed compensation generation four, targets serving generation
+five and reserves six for compensation. It does not run a stage mutation or
+change any other ingress. Exploration and automatic adjustment remain disabled.

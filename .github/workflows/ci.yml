@@ -1949,6 +1949,7 @@ jobs:
     outputs:
       selected: ${{ steps.handoff.outputs.selected }}
       target: ${{ steps.handoff.outputs.target }}
+      observation_target: ${{ needs.front_probe_transport.outputs.observation_target }}
       recoverable: ${{ steps.handoff_witness.outcome == 'success' }}
     needs: [front_probe_transport, front_external_observation, front_serving_stage, front_restricted_egress_observation]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_external_observation.result == 'success' && needs.front_serving_stage.result == 'success' && needs.front_restricted_egress_observation.result == 'success' }}
@@ -2023,11 +2024,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {contents: read}
+    env:
+      PROBE_LISTENER: ${{ needs.front_serving_handoff.outputs.observation_target }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}'}
       - name: Verify public Front ingress after the handoff from outside the cluster
-        run: python3 scripts/observe_front_public_probe.py deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-public-external.json"
+        run: |
+          set -euo pipefail
+          test -n "$PROBE_LISTENER"
+          python3 -m unittest scripts.test_observe_front_public_probe
+          python3 scripts/observe_front_public_probe.py deploy/environments/production/front-probe-transport/listeners.json --listener "$PROBE_LISTENER" --evidence "$RUNNER_TEMP/front-public-external.json"
       - name: Retain independent public Front acceptance
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

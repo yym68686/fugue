@@ -13,8 +13,11 @@ except ImportError:
     import reconcile_front_probe_transport as transport
 
 
-def observe(config, profiles, samples=5, interval=15, listener_name=None):
+def observe(config, profiles, samples=5, interval=15, listener_name=None, progress=None):
     observations = []
+    if progress is None:
+        progress = {}
+    progress.update(observations=observations, current_attempt=None)
     listeners = [listener for listener in config['listeners'] if listener_name is None or listener['name'] == listener_name]
     if not listeners or listener_name is not None and len(listeners) != 1:
         raise ValueError('exact declared Front observation listener required')
@@ -23,9 +26,11 @@ def observe(config, profiles, samples=5, interval=15, listener_name=None):
             profile = profiles[listener["name"]]
             proofs = []
             for route in profile["probes"]:
+                progress['current_attempt'] = {"started_at": front.now().isoformat(), "sample": index, "listener": listener["name"], "address": listener["address"], "public_port": 443, "probe_port": listener["port"], "host": route["host"], "path": route["path"], "profile_digest": transport.digest(profile)}
                 observed = front.stable_proof_pair(listener["address"], listener["port"], route["host"], route["path"], profile["node"], profile["group"])
                 proofs.append({"host": route["host"], "path": route["path"], "proof_digest": transport.digest(observed["proof"]), "publication_retries": observed["publication_retries"]})
             observations.append({"at": front.now().isoformat(), "listener": listener["name"], "address": listener["address"], "port": listener["port"], "profile_digest": transport.digest(profile), "proofs": proofs})
+            progress['current_attempt'] = None
         if index + 1 < samples:
             time.sleep(interval)
     return {"schema": "fugue.front-external-probe-evidence/v1", "authorizes_traffic": False, "declaration_digest": transport.digest(config), "observed_listeners": [listener['name'] for listener in listeners], "observations": observations}
@@ -39,10 +44,11 @@ def main():
     args = parser.parse_args()
     config = transport.validate(json.loads(Path(args.config).read_text()))
     profiles = {item["name"]: front.validate(json.loads(Path(item["observation"]).read_text())) for item in config["listeners"]}
+    progress = {}
     try:
-        evidence = observe(config, profiles, listener_name=args.listener)
+        evidence = observe(config, profiles, listener_name=args.listener, progress=progress)
     except Exception as error:
-        failure = {"schema": "fugue.front-external-probe-failure/v1", "authorizes_traffic": False, "at": front.now().isoformat(), "declaration_digest": transport.digest(config), "error_type": type(error).__name__, "error": str(error)[:2048]}
+        failure = {"schema": "fugue.front-external-probe-failure/v1", "authorizes_traffic": False, "at": front.now().isoformat(), "declaration_digest": transport.digest(config), "error_type": type(error).__name__, "progress": progress}
         Path(args.evidence).write_text(front.canonical(failure) + "\n")
         raise
     Path(args.evidence).write_text(front.canonical(evidence) + "\n")

@@ -65,6 +65,24 @@ func TestFrontHandoffCollectsSameRunWitnessWithoutProbeMutation(t *testing.T) {
 		t.Fatal("restricted egress observation must select the exact declared listener")
 	}
 	drain := yamlMappingValue(t, jobs, "front_drain_observation")
+	handoff := yamlMappingValue(t, jobs, "front_serving_handoff")
+	handoffOutputs := yamlMappingValue(t, handoff, "outputs")
+	if !strings.Contains(yamlMappingValue(t, handoffOutputs, "observation_target").Value, "needs.front_probe_transport.outputs.observation_target") {
+		t.Fatal("public acceptance must retain this run's exact ingress witness target")
+	}
+	verification := yamlMappingValue(t, jobs, "front_public_verification")
+	if !strings.Contains(yamlMappingValue(t, yamlMappingValue(t, verification, "env"), "PROBE_LISTENER").Value, "needs.front_serving_handoff.outputs.observation_target") {
+		t.Fatal("public verification must select the handed-off ingress only")
+	}
+	verificationSource, err := yaml.Marshal(verification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{`--listener "$PROBE_LISTENER"`, `test -n "$PROBE_LISTENER"`} {
+		if !strings.Contains(string(verificationSource), required) {
+			t.Fatalf("public verification lost exact nonempty target: %s", required)
+		}
+	}
 	if !strings.Contains(yamlMappingValue(t, yamlMappingValue(t, drain, "env"), "HANDOFF_CONFIG").Value, "needs.front_serving_handoff.outputs.target") {
 		t.Fatal("drain observation requires the exact verified handoff target")
 	}

@@ -1,6 +1,6 @@
 {
   "schema": "fugue.front-transport-transition/v1",
-  "generation": 4,
+  "generation": 5,
   "phase": "handoff",
   "target": "deploy/environments/production/front-serving-handoff/us-managed.json"
 }
