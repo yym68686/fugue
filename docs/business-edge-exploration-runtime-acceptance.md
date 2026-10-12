@@ -75,3 +75,26 @@ Both isolated candidates also passed all 24 actual UDP/TCP A/AAAA/NS/SOA queries
 Transport generation 35 selects only the US public listener's C backend; Germany
 remains D until independent handoff acceptance. The existing CI selector-CAS and
 fresh signed observation checks remain mandatory.
+
+CI `38291664514` successfully applied the US handoff. At 18:46 UTC the public US
+Service selected the exact C Pod UID and a Ready EndpointSlice, while Germany
+still selected D. All 24 public UDP/TCP checks passed. At 18:47 UTC fresh complete
+reads again verified both C signatures, current full publications and all 503
+positive probes per instance. Transport generation 36 selects Germany C only.
+
+The US worker retry passed the corrected member-count declaration but was stopped
+before writes at 18:32:48 UTC: the managed node's legacy Front retained eight
+active connections. Its Pod UID and host ports 80/443 are confirmed; no public
+Front Service selects an independent executor on that node. Guardian subsequently
+returned to stable with the previous worker authority. This is an intentional
+connection-preservation gate, not permission to delete the Pod or force drainage.
+An independently staged Front and the existing fenced transport handoff are
+required before retrying the worker update. Fixed Cell membership is unchanged.
+
+The post-US-handoff monitor observed five new SERVFAIL counters on the unchanged
+Germany D instance at 18:49 UTC; US C remained at zero. The retained latest-20
+receipt query did not contain those failures (journal totals: 17 dropped, 44,258
+evicted). The increment is therefore unattributed, not evidence for a particular
+route/probe cause or an exploration regression. The raw bounded timeline is
+retained; neither historical success nor current absence of failures closes that
+evidence gap. Germany C independently passed the signed complete verification.
