@@ -98,9 +98,11 @@ func CloneDNSOrderedProjection(value *DNSOrderedProjection) *DNSOrderedProjectio
 }
 
 type PhysicalQualityRoute struct {
-	Hostname     string                          `json:"hostname"`
-	TrafficClass string                          `json:"traffic_class"`
-	Policy       model.PhysicalEdgeQualityPolicy `json:"policy"`
+	BusinessExploration *model.BusinessEdgeExplorationPolicy `json:"business_exploration,omitempty"`
+	PathPrefix          string                               `json:"path_prefix,omitempty"`
+	Hostname            string                               `json:"hostname"`
+	TrafficClass        string                               `json:"traffic_class"`
+	Policy              model.PhysicalEdgeQualityPolicy      `json:"policy"`
 }
 
 func (route *PhysicalQualityRoute) UnmarshalJSON(raw []byte) error {
@@ -108,7 +110,16 @@ func (route *PhysicalQualityRoute) UnmarshalJSON(raw []byte) error {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return err
 	}
-	if len(fields) != 3 {
+	optional := 0
+	for _, key := range []string{"business_exploration", "path_prefix"} {
+		if value, present := fields[key]; present {
+			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return fmt.Errorf("physical route cannot contain null %s", key)
+			}
+			optional++
+		}
+	}
+	if len(fields) != 3+optional {
 		return fmt.Errorf("physical route requires complete explicit fields")
 	}
 	if err := validateExplicitPhysicalPolicy(fields["policy"]); err != nil {
@@ -222,6 +233,16 @@ func ValidateDNSQueryPolicy(p *DNSQueryPolicy) error {
 	for _, route := range p.PhysicalRoutes {
 		if !validDNSConsumerZone(route.Hostname) || seen[route.Hostname] || !slices.Contains([]string{"large_body_api", "small_api", "dynamic_api", "static_cacheable", "streaming", "sse", "websocket", "html_dynamic"}, route.TrafficClass) || model.ValidatePhysicalEdgeQualityPolicy(route.Policy) != nil {
 			return fmt.Errorf("invalid or duplicate physical route strategy")
+		}
+		if exploration := route.BusinessExploration; exploration != nil {
+			if model.ValidateBusinessEdgeExplorationPolicy(*exploration) != nil || route.PathPrefix == "" || route.PathPrefix[0] != '/' || len(route.PathPrefix) > 2048 ||
+				(route.TrafficClass != "dynamic_api" && route.TrafficClass != "streaming") || !model.IsDeliveryPhysicalNetworkPolicy(route.Policy.Version) ||
+				route.Policy.WindowSeconds < exploration.BucketSeconds*(exploration.RequiredBuckets+1) ||
+				route.Policy.EvidenceMaxAgeSeconds < exploration.EvidenceMaxAgeSeconds {
+				return fmt.Errorf("business exploration requires explicit exact path and bounded complete passive evidence windows")
+			}
+		} else if route.PathPrefix != "" {
+			return fmt.Errorf("physical route path requires explicit business exploration")
 		}
 		seen[route.Hostname] = true
 	}

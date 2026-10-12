@@ -338,6 +338,9 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 				if err := validateDNSPhysicalQuery(record); err != nil {
 					return nil, fmt.Errorf("compile physical query %s/%s/%s: %w", view.NodeID, r.Hostname, r.Type, err)
 				}
+				if err := validateDNSBusinessIntent(record, policy); err != nil {
+					return nil, err
+				}
 				if fact.PhysicalSelection != nil && !fact.PhysicalSelection.CapturedAt.Equal(fact.ObservedAt) {
 					return nil, fmt.Errorf("physical-edge selection capture differs from ranking observation")
 				}
@@ -458,6 +461,9 @@ func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNS
 			if err := validateDNSPhysicalQuery(r); err != nil {
 				return fmt.Errorf("validate physical query %s/%s/%s: %w", view.NodeID, r.Name, r.Type, err)
 			}
+			if err := validateDNSBusinessIntent(r, policy); err != nil {
+				return err
+			}
 			if len(r.Candidates) != len(r.Values) {
 				return fmt.Errorf("DNS query address lacks candidate authorization")
 			}
@@ -527,6 +533,30 @@ func validateDNSPhysicalQuery(record model.EdgeDNSRecord) error {
 		if !edges[edgeID] {
 			return fmt.Errorf("physical-edge order contains unauthorized endpoint")
 		}
+	}
+	return nil
+}
+
+func validateDNSBusinessIntent(record model.EdgeDNSRecord, policy PolicySnapshot) error {
+	var declared *PhysicalQualityRoute
+	if policy.DNSQueryPolicy != nil {
+		for index := range policy.DNSQueryPolicy.PhysicalRoutes {
+			route := &policy.DNSQueryPolicy.PhysicalRoutes[index]
+			if route.Hostname == record.Name && route.BusinessExploration != nil {
+				declared = route
+				break
+			}
+		}
+	}
+	selection := record.AnswerPolicy.PhysicalSelection
+	if selection == nil || selection.BusinessAllocation == nil {
+		if declared != nil && record.Type == "A" {
+			return fmt.Errorf("business exploration intent lacks an exact signed allocation")
+		}
+		return nil
+	}
+	if declared == nil || record.Type != "A" || !reflect.DeepEqual(*declared.BusinessExploration, selection.BusinessAllocation.Policy) {
+		return fmt.Errorf("business allocation differs from explicit producer intent")
 	}
 	return nil
 }

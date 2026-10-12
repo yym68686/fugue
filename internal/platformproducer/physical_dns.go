@@ -16,6 +16,10 @@ func ValidateDynamicQualityUpdate(previous, next Policy, static, oldDNS, newDNS 
 	return validatePhysicalDNSUpdate(previous, next, static, oldDNS, newDNS, "dynamic_quality")
 }
 
+func ValidateBusinessExplorationUpdate(previous, next Policy, static, oldDNS, newDNS model.PlatformArtifact) error {
+	return validatePhysicalDNSUpdate(previous, next, static, oldDNS, newDNS, "business_exploration")
+}
+
 func validatePhysicalDNSUpdate(previous, next Policy, static, oldDNS, newDNS model.PlatformArtifact, operation string) error {
 	if previous.TargetScope != "global" || next.TargetScope != "global" || previous.PublicationRole != "" || next.PublicationRole != "" || previous.RoutePlacementTransition != nil || next.RoutePlacementTransition != nil ||
 		previous.Mode != "serving" || next.Mode != "serving" || previous.Serving == nil || next.Serving == nil || previous.Serving.SinglePublication || next.Serving.SinglePublication || !previous.RequireDNSQueryPolicy || !next.RequireDNSQueryPolicy ||
@@ -48,12 +52,18 @@ func validatePhysicalDNSUpdate(previous, next Policy, static, oldDNS, newDNS mod
 	if operation == "edge_offline" {
 		return validateOfflinePolicyDelta(oldPolicy, newPolicy)
 	}
+	if operation == "business_exploration" {
+		return validateBusinessExplorationDelta(oldPolicy, newPolicy)
+	}
 	if operation == "dynamic_quality" {
 		if newPolicy.DNSQueryPolicy.DynamicQuality == nil || newPolicy.DNSQueryPolicy.OrderedProjection == nil || reflect.DeepEqual(oldPolicy.DNSQueryPolicy.DynamicQuality, newPolicy.DNSQueryPolicy.DynamicQuality) {
 			return fmt.Errorf("dynamic quality transition requires changed complete default policy")
 		}
 		if len(newPolicy.DNSQueryPolicy.PhysicalRoutes) == 0 {
 			for _, route := range oldPolicy.DNSQueryPolicy.PhysicalRoutes {
+				if route.BusinessExploration != nil {
+					return fmt.Errorf("universal adoption cannot discard explicit business exploration intent")
+				}
 				prior := route.Policy
 				prior.Version = newPolicy.DNSQueryPolicy.DynamicQuality.Policy.Version
 				if !reflect.DeepEqual(prior, newPolicy.DNSQueryPolicy.DynamicQuality.Policy) {

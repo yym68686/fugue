@@ -25,6 +25,7 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 		return nil
 	}
 	selections := map[string]compiledPhysicalDNSSelection{}
+	coverage := []map[string]any{}
 	for _, route := range policy.PhysicalRoutes {
 		matched := false
 		for _, fact := range projection.RuntimeSnapshot.DNSSelections {
@@ -42,10 +43,27 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 				cancel()
 				return fmt.Errorf("physical DNS actual answer capture: %w", err)
 			}
-			receipt, err := s.capturePhysicalQualityWithAnswer(captureContext, route.Hostname, route.TrafficClass, edgeQualityRankScope{}, fact.NodeID, route.Policy, &answer)
+			receipt, err := s.capturePhysicalQualityPathForDNS(captureContext, route.Hostname, route.PathPrefix, route.Hostname, route.TrafficClass, edgeQualityRankScope{}, fact.NodeID, route.Policy, &answer)
 			cancel()
 			if err != nil {
 				return fmt.Errorf("physical DNS evidence capture: %w", err)
+			}
+			if route.BusinessExploration != nil {
+				compiled, err := captureBusinessPublication(receipt, route, time.Now().UTC())
+				if err != nil {
+					return fmt.Errorf("business DNS evidence cannot authorize publication: %w", err)
+				}
+				selections[key] = compiled
+				var evidence businessPublicationEvidence
+				if err := json.Unmarshal(compiled.Evidence, &evidence); err != nil {
+					return err
+				}
+				coverage = append(coverage, map[string]any{"hostname": route.Hostname, "dns_node_id": fact.NodeID, "intent_id": route.BusinessExploration.IntentID,
+					"source_receipt_digest": evidence.Source.Digest, "allocation_receipt_digest": evidence.Evaluation.Digest,
+					"raw_network_records": len(evidence.Source.Snapshot.NetworkSamples), "route_witness_bound_passive_records": len(evidence.Evaluation.Input.NetworkSamples),
+					"action": evidence.Evaluation.Decision.Action, "reasons": evidence.Evaluation.Decision.Reasons, "coverage": evidence.Evaluation.Decision.Coverage,
+					"comparisons": evidence.Evaluation.Decision.Comparisons, "rejected": evidence.Evaluation.Decision.Rejected, "valid_until": evidence.Evaluation.Decision.ValidUntil})
+				continue
 			}
 			selection, err := compileBoundPhysicalQualitySelection(receipt, time.Now().UTC())
 			if err != nil {
@@ -61,7 +79,16 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 			return fmt.Errorf("physical route lacks an owned dynamic DNS query")
 		}
 	}
-	return applyPhysicalDNSSelections(projection, policy, selections, time.Now().UTC())
+	if err := applyPhysicalDNSSelections(projection, policy, selections, time.Now().UTC()); err != nil {
+		return err
+	}
+	if len(coverage) > 0 {
+		if projection.RuntimeSnapshot.Facts == nil {
+			projection.RuntimeSnapshot.Facts = map[string]any{}
+		}
+		projection.RuntimeSnapshot.Facts["business_exploration_coverage"] = coverage
+	}
+	return nil
 }
 
 func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy, selections map[string]compiledPhysicalDNSSelection, now time.Time) error {
@@ -122,7 +149,25 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 		if fact.Type != "A" || len(compiled.Evidence) == 0 || len(compiled.Evidence) > 8<<20 || !json.Valid(compiled.Evidence) {
 			return fmt.Errorf("physical selection lacks supported address-family evidence")
 		}
-		if evidenceHosts[fact.Hostname] != fact.Hostname || len(ownerSets[fact.Hostname]) > 1 || policy.DynamicQuality != nil {
+		if route.BusinessExploration != nil {
+			expectedService := fact.Hostname + "\x00" + route.PathPrefix + "\x00" + route.TrafficClass
+			if len(serviceSets[fact.Hostname]) != 1 || !serviceSets[fact.Hostname][expectedService] || evidenceHosts[fact.Hostname] != fact.Hostname {
+				return fmt.Errorf("business exploration requires one exact owned service path; shared aliases need separate consensus")
+			}
+			var evidence businessPublicationEvidence
+			if err := json.Unmarshal(compiled.Evidence, &evidence); err != nil {
+				return err
+			}
+			verified, err := compileBoundBusinessSelection(evidence, route, now)
+			if err != nil {
+				return err
+			}
+			if !reflect.DeepEqual(verified, selection) {
+				return fmt.Errorf("business DNS selection differs from reconstructed evidence")
+			}
+		} else if selection.BusinessAllocation != nil {
+			return fmt.Errorf("business DNS allocation lacks explicit producer intent")
+		} else if evidenceHosts[fact.Hostname] != fact.Hostname || len(ownerSets[fact.Hostname]) > 1 || policy.DynamicQuality != nil {
 			var receipt edgequality.Receipt
 			if json.Unmarshal(compiled.Evidence, &receipt) != nil || edgequality.DNSHostname(receipt.Snapshot) != fact.Hostname {
 				return fmt.Errorf("physical alias evidence differs from frozen service ownership")

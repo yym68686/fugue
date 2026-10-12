@@ -1010,7 +1010,7 @@ jobs:
           config="${configs[0]}"
           [[ "$config" =~ ^deploy/environments/production/edge-offline/[a-z0-9-]+\.json$ ]]
           git fetch origin main
-          if git diff --quiet HEAD origin/main -- "$config" scripts/configure_edge_offline.py scripts/configure_dynamic_quality.py scripts/reconfigure_physical_dns.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py scripts/reconfigure_cell_producer.py .github/workflows/ci.yml; then
+          if git diff --quiet HEAD origin/main -- "$config" scripts/configure_edge_offline.py scripts/configure_dynamic_quality.py scripts/configure_business_exploration.py scripts/reconfigure_physical_dns.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py scripts/reconfigure_cell_producer.py .github/workflows/ci.yml; then
             python3 -m unittest scripts.test_configure_edge_offline
             python3 -m scripts.configure_edge_offline "$config" --validate-only
             echo "config=$config" >> "$GITHUB_OUTPUT"
@@ -1083,8 +1083,8 @@ jobs:
           set -euo pipefail
           [[ "$CONFIG" =~ ^deploy/environments/production/routing-dynamic-quality/[a-z0-9][a-z0-9-]*\.json$ ]]
           git fetch origin main
-          if git diff --quiet HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml scripts/configure_dynamic_quality.py scripts/test_configure_dynamic_quality.py scripts/reconfigure_physical_dns.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py scripts/reconfigure_cell_producer.py scripts/observe_front_candidate.py; then
-            python3 -m unittest scripts.test_configure_dynamic_quality
+          if git diff --quiet HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml scripts/configure_dynamic_quality.py scripts/test_configure_dynamic_quality.py scripts/configure_business_exploration.py scripts/test_configure_business_exploration.py scripts/reconfigure_physical_dns.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py scripts/reconfigure_cell_producer.py scripts/observe_front_candidate.py; then
+            python3 -m unittest scripts.test_configure_dynamic_quality scripts.test_configure_business_exploration
             python3 -m scripts.configure_dynamic_quality "$CONFIG" --validate-only
             echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi

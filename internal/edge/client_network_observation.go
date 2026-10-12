@@ -59,18 +59,20 @@ func (s *Service) observePublicClientNetwork(request *http.Request, route model.
 		reject("in_flight")
 		return
 	}
-	if _, err := frontnetwork.ParseRemote(remote); err != nil {
+	peer, err := frontnetwork.ParseRemote(remote)
+	if err != nil {
 		reject("client_remote_invalid")
 		s.frontNetworkInFlight.Store(false)
 		return
 	}
+	cohort := frontnetwork.Scope(peer.Addr())
 	if !s.networkSampleMu.TryLock() {
 		reject("sample_lock_busy")
 		s.frontNetworkInFlight.Store(false)
 		return
 	}
 	for _, previous := range s.networkSamples {
-		if previous.Source == "public_front_tcp_info_v1" && previous.Hostname == route.Hostname && previous.PathPrefix == model.NormalizeAppRoutePathPrefix(route.PathPrefix) && now.Sub(previous.ObservedAt) < time.Minute {
+		if previous.Source == "public_front_tcp_info_v1" && previous.Hostname == route.Hostname && previous.PathPrefix == model.NormalizeAppRoutePathPrefix(route.PathPrefix) && previous.ClientNetwork != nil && previous.ClientNetwork.Scope == cohort && now.Sub(previous.ObservedAt) < time.Minute {
 			reject("same_route_recent")
 			s.networkSampleMu.Unlock()
 			s.frontNetworkInFlight.Store(false)

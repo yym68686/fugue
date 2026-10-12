@@ -159,6 +159,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if comparableDeliveryRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalComparableDeliveryCapabilityV6) {
 					return fail("required consumer lacks physical comparable delivery v6 capability")
 				}
+				if required.business && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.BusinessEdgeExplorationCapabilityV1) {
+					return fail("required consumer lacks business edge exploration v1 capability")
+				}
 				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
 					return fail("physical network v3 capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
@@ -191,7 +194,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	return nil
 }
 
-type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection bool }
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business bool }
 
 func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
 	var out physicalCapabilities
@@ -217,6 +220,7 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 			out.comparableDelivery = query.DynamicQuality.Policy.Version == model.PhysicalComparableDeliveryPolicyVersion
 		}
 		for _, route := range query.PhysicalRoutes {
+			out.business = out.business || route.BusinessExploration != nil
 			out.network = out.network || model.IsBoundedPhysicalNetworkPolicy(route.Policy.Version)
 			out.delivery = out.delivery || model.IsDeliveryPhysicalNetworkPolicy(route.Policy.Version)
 			out.failureAware = out.failureAware || route.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion

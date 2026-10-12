@@ -2690,6 +2690,7 @@ func rrForEdgeDNSRecordAt(record model.EdgeDNSRecord, ownerName string, now time
 	if ttl == 0 {
 		ttl = 60
 	}
+	ttl = businessAnswerTTL(record, now, ttl)
 	ownerName = normalizeName(firstNonEmpty(ownerName, record.Name))
 	rrs := make([]miekgdns.RR, 0, len(record.Values))
 	for _, value := range record.Values {
@@ -2932,6 +2933,7 @@ func rrForEdgeDNSRecordWithGeoAuditAt(record model.EdgeDNSRecord, ownerName stri
 	if ttl == 0 {
 		ttl = 60
 	}
+	ttl = businessAnswerTTL(record, now, ttl)
 	rrs := make([]miekgdns.RR, 0, len(ordered))
 	for _, candidate := range ordered {
 		ip := net.ParseIP(strings.TrimSpace(candidate.IP))
@@ -3011,6 +3013,18 @@ func edgeDNSSelectionResult(decision edgeDNSCandidateOrderDecision, answered []m
 		return "physical_order_readiness_failover"
 	}
 	if decision.Policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalQuality {
+		if selection := decision.Policy.PhysicalSelection; selection != nil && selection.Version == model.DNSPhysicalBusinessSelectionVersion {
+			if len(answered) == 0 {
+				return "business_no_ready_endpoint"
+			}
+			if decision.ExplorationKind == "business_allocation" && edgeDNSCandidateDecisionKey(answered[0]) == decision.ExplorationCandidateKey {
+				return "business_allocated_candidate"
+			}
+			if answered[0].EdgeID == selection.PrimaryEdgeID {
+				return "business_safe_baseline"
+			}
+			return "business_readiness_failover"
+		}
 		if len(answered) == 0 {
 			return "physical_no_ready_endpoint"
 		}
@@ -3092,6 +3106,9 @@ func edgeDNSOrderedCandidatesWithDecision(record model.EdgeDNSRecord, hint dnsGe
 	case model.DNSAnswerPolicyKindPhysicalOrder:
 		return declaredPhysicalEdgeOrder(record, hint, liveTLSProbeEnabled)
 	case model.DNSAnswerPolicyKindPhysicalQuality:
+		if record.AnswerPolicy.PhysicalSelection != nil && record.AnswerPolicy.PhysicalSelection.Version == model.DNSPhysicalBusinessSelectionVersion {
+			return businessEdgeOrderedCandidates(record, hint, now, liveTLSProbeEnabled)
+		}
 		return physicalEdgeOrderedCandidates(record, hint, liveTLSProbeEnabled)
 	default:
 		if hint.decisionEntropy != nil && hint.decisionEntropy.replaying {

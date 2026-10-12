@@ -1,4 +1,14 @@
 openapi: 3.1.0
+x-fugue-business-exploration:
+  semantics: >-
+    business_exploration is an independently fenced producer configuration
+    transition. It may add, change, pause or remove exactly one explicit
+    business-exploration route. Changing its settings requires a new intent_id;
+    all unrelated DNS and producer constraints remain identical. Configuration
+    publication does not itself allocate traffic: signed candidate artifacts,
+    fresh route proofs, executor capability admission and normal gray/full
+    rollout remain mandatory. Historical positive LKG recovery is independent.
+    Exploration weights describe DNS answers, not exact HTTP requests or bytes.
 x-fugue-edge-offline:
   semantics: >-
     edge_offline is an independently fenced global producer reconfiguration.
@@ -1100,6 +1110,10 @@ paths:
           name: dns_node_id
           description: Optionally bind to a recent successful, replay-verified actual answer from this public DNS process. Missing or conflicting evidence remains an explicit blocker; this never queries a current ranking as a substitute.
           schema: {type: string, maxLength: 253}
+        - in: query
+          name: path_prefix
+          description: Optional exact normalized served path prefix. Binds route proofs and retained samples to one declared service; omission preserves historical hostname-level capture.
+          schema: {type: string, pattern: '^/', maxLength: 2048}
       responses:
         '200':
           description: Bounded, digest-protected shadow snapshot and deterministic result.
@@ -19569,6 +19583,182 @@ components:
         generated_at:
           type: string
           format: date-time
+    BusinessDNSPublicationAnchor:
+      type: object
+      additionalProperties: false
+      required: [digest, fencing_token]
+      properties:
+        digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        fencing_token: {type: integer, format: int64, minimum: 1}
+    BusinessEdgeExplorationPolicy:
+      type: object
+      additionalProperties: false
+      description: Explicit real-business-only DNS allocation intent. Basis points describe DNS answers, not HTTP requests or bytes. This contract alone grants no serving authority. Observe mode never increases a candidate beyond the initial exploration allocation; adaptive mode requires replayable passive TCP evidence and bounded steps. A new intent is required to clear sticky stops.
+      required: [version, intent_id, mode, baseline_edge_id, candidate_edge_ids, initial_dns_publications, starts_at, expires_at, exploration_basis_points, maximum_candidate_basis_points, maximum_step_basis_points, bucket_seconds, required_buckets, minimum_connections_per_bucket, cooldown_seconds, evidence_max_age_seconds, minimum_cohort_coverage_basis_points, rtt_advantage_ratio, delivery_advantage_ratio, maximum_rtt_regression_ratio, maximum_delivery_regression_ratio, maximum_retransmission_increase, stop_rtt_ms, stop_retransmission_rate]
+      properties:
+        version: {type: string, enum: [business-edge-exploration-v1]}
+        initial_dns_publications:
+          type: object
+          minProperties: 1
+          maxProperties: 32
+          description: Explicit DNS node ID to exact serving child artifact and publication fence permitted to initialize this intent. Each DNS assignment has its own artifact; republishing an old artifact cannot reset sticky stops or cooldown.
+          additionalProperties:
+            $ref: "#/components/schemas/BusinessDNSPublicationAnchor"
+        intent_id: {type: string, minLength: 1, maxLength: 128}
+        mode: {type: string, enum: [observe, adaptive, paused]}
+        baseline_edge_id: {type: string, minLength: 1, maxLength: 128}
+        candidate_edge_ids:
+          type: array
+          minItems: 2
+          maxItems: 32
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 128}
+        starts_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time, description: At most seven days after starts_at; expiration cannot be extended by evidence.}
+        exploration_basis_points: {type: integer, minimum: 1, maximum: 1000}
+        maximum_candidate_basis_points: {type: integer, minimum: 1, maximum: 9000, description: "Maximum total non-baseline allocation, never below the exploration budget."}
+        maximum_step_basis_points: {type: integer, minimum: 1, maximum: 1000}
+        bucket_seconds: {type: integer, minimum: 60, maximum: 3600}
+        required_buckets: {type: integer, minimum: 2, maximum: 12}
+        minimum_connections_per_bucket: {type: integer, minimum: 3, maximum: 10000}
+        cooldown_seconds: {type: integer, minimum: 60, maximum: 86400}
+        evidence_max_age_seconds: {type: integer, minimum: 60, maximum: 86400}
+        minimum_cohort_coverage_basis_points: {type: integer, minimum: 1, maximum: 10000}
+        rtt_advantage_ratio: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 1}
+        delivery_advantage_ratio: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 1}
+        maximum_rtt_regression_ratio: {type: number, minimum: 0, maximum: 1}
+        maximum_delivery_regression_ratio: {type: number, minimum: 0, maximum: 1}
+        maximum_retransmission_increase: {type: number, minimum: 0, maximum: 1}
+        stop_rtt_ms: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 60000}
+        stop_retransmission_rate: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 1}
+    BusinessEdgeExplorationState:
+      type: object
+      additionalProperties: false
+      description: Predecessor allocation facts for deterministic evaluation. Publication must independently bind these facts to a verified previously serving artifact; a caller-supplied state is not serving authority.
+      required: [intent_id, policy_digest, basis_points, stopped, last_adjusted_at, last_evaluated_at, last_evidence_bucket, evidence_valid_until]
+      properties:
+        intent_id: {type: string, minLength: 1, maxLength: 128}
+        policy_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        basis_points:
+          type: object
+          maxProperties: 32
+          additionalProperties: {type: integer, minimum: 0, maximum: 10000}
+        stopped:
+          type: object
+          maxProperties: 32
+          additionalProperties: {type: string, enum: [candidate_not_route_ready, observed_transport_stop_threshold]}
+        last_adjusted_at: {type: string, format: date-time}
+        last_evaluated_at: {type: string, format: date-time}
+        last_evidence_bucket: {type: string, format: date-time}
+        evidence_valid_until: {type: string, format: date-time, description: Adaptive shares cannot renew without fresh comparable passive observations.}
+    BusinessEdgeExplorationInput:
+      type: object
+      additionalProperties: false
+      description: Offline real-business TCP evidence input. Only public_front_tcp_info_v1 samples enter comparison. No client probe reports or application request durations participate. Supplied route-ready facts require independent authentication before any production publication.
+      required: [policy, captured_at, hostname, path_prefix, traffic_class, candidates, network_samples]
+      properties:
+        policy: {$ref: '#/components/schemas/BusinessEdgeExplorationPolicy'}
+        captured_at: {type: string, format: date-time}
+        hostname: {type: string, minLength: 1, maxLength: 253}
+        path_prefix: {type: string, minLength: 1, maxLength: 2048, pattern: '^/'}
+        traffic_class: {type: string, enum: [dynamic_api, streaming]}
+        candidates:
+          type: array
+          minItems: 2
+          maxItems: 32
+          items: {$ref: '#/components/schemas/PhysicalEdgeQualityCandidate'}
+        network_samples:
+          type: array
+          maxItems: 32768
+          items: {$ref: '#/components/schemas/EdgeNetworkSample'}
+        previous: {$ref: '#/components/schemas/BusinessEdgeExplorationState'}
+    BusinessEdgeExplorationWindow:
+      type: object
+      additionalProperties: false
+      description: One complete time bucket for one physical edge and actual coarse TCP peer network. One qualified sample per connection per bucket contributes; follow-up snapshots are not independent connections.
+      required: [edge_id, cohort, started_at, last_observed_at, connections, acknowledged_bytes_median, busy_microseconds_median, rtt_median_ms, rtt_p90_ms, delivery_median_bps, delivery_p10_bps, retransmission_p90]
+      properties:
+        edge_id: {type: string}
+        cohort: {type: string}
+        started_at: {type: string, format: date-time}
+        last_observed_at: {type: string, format: date-time}
+        connections: {type: integer, minimum: 1}
+        acknowledged_bytes_median: {type: number, minimum: 0, description: Median acknowledged-byte delta of the selected independent connection intervals; not total business traffic.}
+        busy_microseconds_median: {type: number, minimum: 0, description: Median sender-busy-time delta over those same intervals.}
+        rtt_median_ms: {type: number, minimum: 0}
+        rtt_p90_ms: {type: number, minimum: 0}
+        delivery_median_bps: {type: number, minimum: 0}
+        delivery_p10_bps: {type: number, minimum: 0}
+        retransmission_p90: {type: number, minimum: 0, maximum: 1}
+    BusinessEdgeExplorationCoverage:
+      type: object
+      additionalProperties: false
+      required: [edge_id, records, connections, connection_windows, rtt_records, acknowledged_delta_records, delivery_records, retransmission_records, reasons]
+      properties:
+        edge_id: {type: string}
+        records: {type: integer, minimum: 0}
+        connections: {type: integer, minimum: 0}
+        connection_windows: {type: integer, minimum: 0, description: Observed independent connection-bucket pairs including incomplete metric samples; denominator for evidence coverage.}
+        rtt_records: {type: integer, minimum: 0, description: Context-valid records with RTT; may include multiple observations of one connection.}
+        acknowledged_delta_records: {type: integer, minimum: 0, description: "Context-valid records with paired acknowledged-byte counters, including application-limited intervals."}
+        delivery_records: {type: integer, minimum: 0, description: Context-valid records with qualified delivery rate; not independent sample count.}
+        retransmission_records: {type: integer, minimum: 0, description: Context-valid records with normalized retransmission rate; not independent sample count.}
+        last_sample_at: {type: string, format: date-time}
+        reasons:
+          type: object
+          additionalProperties: {type: integer, minimum: 0}
+    BusinessEdgeExplorationComparison:
+      type: object
+      additionalProperties: false
+      required: [edge_id, cohorts, coverage_basis_points, complete_buckets, verdict, reasons]
+      properties:
+        edge_id: {type: string}
+        cohorts: {type: array, items: {type: string}}
+        coverage_basis_points: {type: integer, minimum: 0, maximum: 10000}
+        complete_buckets: {type: integer, minimum: 0, maximum: 12}
+        verdict: {type: string, enum: [insufficient, inconclusive, better, worse]}
+        reasons: {type: array, items: {type: string}}
+    BusinessEdgeExplorationDecision:
+      type: object
+      additionalProperties: false
+      required: [state, action, reasons, windows, coverage, comparisons, rejected, used_sample_ids, valid_until, serving_authority]
+      properties:
+        state: {$ref: '#/components/schemas/BusinessEdgeExplorationState'}
+        action: {type: string, enum: [hold, initialize, withhold, baseline_only, stop_candidates, evidence_expired, increase, decrease]}
+        reasons: {type: array, items: {type: string}}
+        windows: {type: array, items: {$ref: '#/components/schemas/BusinessEdgeExplorationWindow'}}
+        coverage: {type: array, items: {$ref: '#/components/schemas/BusinessEdgeExplorationCoverage'}}
+        comparisons: {type: array, items: {$ref: '#/components/schemas/BusinessEdgeExplorationComparison'}}
+        rejected: {type: object, additionalProperties: {type: integer, minimum: 0}}
+        used_sample_ids: {type: array, items: {type: string}}
+        valid_until: {type: string, format: date-time}
+        serving_authority: {type: boolean, enum: [false], description: Offline calculation never authorizes DNS or routing changes.}
+    BusinessEdgeExplorationReceipt:
+      type: object
+      additionalProperties: false
+      required: [input, decision, digest]
+      properties:
+        input: {$ref: '#/components/schemas/BusinessEdgeExplorationInput'}
+        decision: {$ref: '#/components/schemas/BusinessEdgeExplorationDecision'}
+        digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$', description: Integrity hash of input and recomputed decision with digest empty; not a signature or producer authority.}
+    DNSBusinessAllocation:
+      type: object
+      additionalProperties: false
+      required: [policy, state, valid_until, receipt_digest]
+      description: Immutable allocation embedded in a signed physical-edge-business-v1 selection. Receipts must be reconstructed against the producer intent and previous actual serving allocation before signing. Expiration disables exploration only; the signed baseline order remains available subject to current readiness.
+      properties:
+        policy: {$ref: '#/components/schemas/BusinessEdgeExplorationPolicy'}
+        state: {$ref: '#/components/schemas/BusinessEdgeExplorationState'}
+        valid_until: {type: string, format: date-time}
+        receipt_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+    BusinessEdgePublicationEvidence:
+      type: object
+      additionalProperties: false
+      required: [source, evaluation]
+      description: Captured actual DNS/route witness and passive TCP source plus deterministic business allocation calculation. The producer reconstructs evaluation input rather than trusting supplied scores or predecessor weights.
+      properties:
+        source: {$ref: '#/components/schemas/PhysicalEdgeQualityReceipt'}
+        evaluation: {$ref: '#/components/schemas/BusinessEdgeExplorationReceipt'}
     PhysicalEdgeQualityPolicy:
       type: object
       additionalProperties: false
@@ -21001,10 +21191,11 @@ components:
       type: object
       additionalProperties: false
       required: [version, primary_edge_id, ordered_edge_ids, evidence_digest, dns_receipt_id, loaded_digest, policy_digest, scope, captured_at]
-      description: Immutable physical-edge order compiled from verified network evidence. Query execution only removes endpoints lacking current route/TLS readiness; it never re-ranks by group, country, business duration, or random exploration. Evidence age gates compilation, not the validity of a positive serving LKG.
+      description: Immutable physical-edge order compiled from verified evidence. The historical physical-edge-network-v1 version never explores. Explicit physical-edge-business-v1 may execute only its embedded signed allocation until that allocation expires; it then preserves the declared baseline order. Both versions filter by current route/TLS readiness without legacy ranking. Allocation expiry does not invalidate a positive serving artifact.
       properties:
         quality_state: {type: string, enum: [learning, measured], description: 'V4 distinguishes preserving a fresh route-ready current primary while collecting evidence from a measured quality selection. Learning never fabricates network metrics.'}
-        version: {type: string, enum: [physical-edge-network-v1]}
+        version: {type: string, enum: [physical-edge-network-v1, physical-edge-business-v1]}
+        business_allocation: {$ref: '#/components/schemas/DNSBusinessAllocation'}
         primary_edge_id: {type: string, maxLength: 128}
         ordered_edge_ids: {type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 128}}
         evidence_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
@@ -35380,6 +35571,8 @@ components:
       additionalProperties: false
       required: [hostname, traffic_class, policy]
       properties:
+        business_exploration: {$ref: '#/components/schemas/BusinessEdgeExplorationPolicy'}
+        path_prefix: {type: string, minLength: 1, maxLength: 2048, pattern: '^/', description: Required exact sole service path when business_exploration is configured. No implicit path mixing or alias enrollment.}
         hostname: {type: string, maxLength: 253}
         traffic_class: {type: string, enum: [large_body_api, small_api, dynamic_api, static_cacheable, streaming, sse, websocket, html_dynamic]}
         policy:
@@ -36627,7 +36820,7 @@ components:
       properties:
         operation:
           type: string
-          enum: [placement, activate_serving, refresh_serving, continuous_serving, expand_membership, physical_dns, retire_dns_selector, dynamic_quality, edge_offline]
+          enum: [placement, activate_serving, refresh_serving, continuous_serving, expand_membership, physical_dns, retire_dns_selector, dynamic_quality, edge_offline, business_exploration]
           default: placement
           description: activate_serving requires a shadow or paused predecessor and bounded serving settings with single_publication=true. refresh_serving requires a serving predecessor with single_publication=true, permits only a new generation and requires the exact baseline full/LKG to have been produced by that predecessor policy publication. continuous_serving requires that same completed single-publication predecessor and only clears single_publication while retaining every other setting. expand_membership requires the same completed serving predecessor and preserves its positive full/LKG while moving the producer to shadow with new pinned input artifacts. Static input may only change generation and add exactly one Edge already declared identically in route_placement_transition.next_topology; projection policy may only change generation and the matching topology digest. physical_dns applies only to an existing continuously serving global producer with no placement transition. It changes only generation and the pinned DNS policy, whose sole strategy change must add exactly one physical_routes hostname while preserving every existing entry. Both input signatures, unchanged static intent, exact predecessor-owned full/LKG and its source metadata are checked transactionally; in-flight gray publications conflict. It does not directly publish a DNS answer. Existing members, pools, labels, failure domains, routes, ownership, constraints, schedules and serving settings remain identical. All input signatures and old full input metadata are checked in the transaction. Activation and refresh require the cohort in the exact full baseline; candidate publication independently revalidates pinned inputs, membership and fresh runtime gates. Placement and membership expansion cannot activate serving, enroll a process or select public transport. retire_dns_selector applies only to that same continuous global producer with an unmapped, unscoped legacy DNS baseline. It adds an explicit ordered_projection, disables ECS and exploration, and preserves every existing measured physical route and all other policy. Each override must exactly retain the signed current full DNS member's normal global physical order and complete candidate membership. Static records cannot receive overrides. The default order must contain the existing physical candidate set. Signed input and member integrity, lineage, exact full/LKG, source metadata and no pending gray are checked under the same locks. It changes producer configuration only; compatible consumer admission and positive LKG remain independent.
         previous_policy:

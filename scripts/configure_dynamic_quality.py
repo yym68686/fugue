@@ -13,6 +13,7 @@ from scripts.observe_front_candidate import now
 from scripts.publish_agent_edge_shadow import API, canonical
 from scripts.reconfigure_cell_producer import DIGEST, IDENTITY, validate_ref
 from scripts.reconfigure_physical_dns import POLICY_FIELDS, SCOPE, baseline, bounded_json, resolve_baseline
+from scripts.configure_business_exploration import check_business_delta, validate_business_preview, validate_business_routes
 
 
 def validate(config):
@@ -23,7 +24,7 @@ def validate(config):
     if origin.scheme != "https" or config["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
         raise ValueError("canonical HTTPS API origin required")
     precondition = config["precondition"]
-    if set(precondition) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or precondition["operation"] != "dynamic_quality" or not DIGEST.fullmatch(precondition["verification_evidence_hash"]):
+    if set(precondition) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or precondition["operation"] not in ["dynamic_quality", "business_exploration"] or not DIGEST.fullmatch(precondition["verification_evidence_hash"]):
         raise ValueError("fenced dynamic quality precondition required")
     for field in ["previous_policy", "serving_full"]:
         validate_ref(precondition[field])
@@ -39,6 +40,8 @@ def validate(config):
     network = dynamic["policy"]
     if set(network) != POLICY_FIELDS or network.get("version") not in ["physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6"] or any(network[key] is None for key in POLICY_FIELDS):
         raise ValueError("complete explicit delivery policy required")
+    if precondition["operation"] == "business_exploration":
+        validate_business_routes(query.get("physical_routes", []))
     return config
 
 
@@ -53,6 +56,8 @@ def check_delta(previous, successor):
     if after is not None and not new.get("dns_query_policy", {}).get("physical_routes"):
         routes = old.get("dns_query_policy", {}).get("physical_routes", [])
         for route in routes:
+            if route.get("business_exploration") is not None:
+                raise ValueError("universal adoption cannot discard explicit business exploration")
             prior = copy.deepcopy(route["policy"])
             prior["version"] = after["policy"]["version"]
             if prior != after["policy"]:
@@ -87,7 +92,11 @@ def publish(config, api, save):
     source = api("GET", "/v1/admin/artifacts/" + previous["dns_policy_artifact_id"])["artifact"]
     if source.get("content_hash") != previous["dns_policy_digest"] or not exact(source, "policy_snapshot", "global", source["content"]):
         raise ValueError("pinned source integrity mismatch")
-    check_delta(source["content"], config["projection_policy"])
+    business = precondition["operation"] == "business_exploration"
+    if business:
+        changed_hostname = check_business_delta(source["content"], config["projection_policy"])
+    else:
+        check_delta(source["content"], config["projection_policy"])
     current = selected(api, SCOPE, "shadow")
     if authority_identity(current) != precondition["previous_policy"] and current.get("artifact", {}).get("generation") != config["producer_generation"]:
         raise ValueError("producer changed")
@@ -100,6 +109,8 @@ def publish(config, api, save):
     before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"])
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
     coverage = validate_preview(before, preview)
+    if business:
+        coverage = validate_business_preview(preview, config["projection_policy"], changed_hostname)
     config = wait_verified_baseline(config, api)
     precondition = config["precondition"]
     evidence = {"schema": "fugue.dynamic-quality-reconfiguration-result/v1", "declaration_digest": declaration, "resolved_precondition": precondition, "artifact_id": artifact["id"], "coverage": coverage, "producer_activated": False, "routing_acceptance_complete": False}

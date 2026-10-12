@@ -75,7 +75,7 @@ func TestPhysicalQualityShadowReadOnlyAndLegacyUnknown(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("shadow read mutated serving state")
 	}
-	for _, query := range []string{"", "?traffic_class=bad", "?traffic_class=streaming&scope=invalid"} {
+	for _, query := range []string{"", "?traffic_class=bad", "?traffic_class=streaming&scope=invalid", "?traffic_class=streaming&path_prefix=", "?traffic_class=streaming&path_prefix=/a/../b", "?traffic_class=streaming&path_prefix=/a&path_prefix=/b"} {
 		if response := performJSONRequest(t, server, http.MethodGet, "/v1/edge/quality-shadow/app.example.test"+query, "shadow-admin", nil); response.Code != 400 {
 			t.Fatal(query, response.Code)
 		}

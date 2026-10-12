@@ -25,6 +25,11 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	trafficClass := normalizeEdgeTrafficClass(r.URL.Query().Get("traffic_class"))
 	scope, err := parseEdgeQualityRankScope(r.URL.Query().Get("scope"))
 	dnsNodeID := strings.TrimSpace(r.URL.Query().Get("dns_node_id"))
+	pathPrefix := r.URL.Query().Get("path_prefix")
+	if r.URL.Query().Has("path_prefix") && (pathPrefix == "" || len(pathPrefix) > 2048 || model.NormalizeAppRoutePathPrefix(pathPrefix) != pathPrefix || len(r.URL.Query()["path_prefix"]) != 1) {
+		httpx.WriteError(w, http.StatusBadRequest, "one exact normalized path_prefix required")
+		return
+	}
 	if err != nil || hostname == "" || trafficClass == "" || dnsNodeID != "" && len(validation.IsDNS1123Subdomain(dnsNodeID)) != 0 {
 		httpx.WriteError(w, http.StatusBadRequest, "hostname, explicit traffic_class and valid scope required")
 		return
@@ -35,7 +40,7 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	receipt, err := s.capturePhysicalQuality(ctx, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultComparableDeliveryPolicy())
+	receipt, err := s.capturePhysicalQualityPathForDNS(ctx, hostname, pathPrefix, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultComparableDeliveryPolicy(), nil)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

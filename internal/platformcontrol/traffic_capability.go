@@ -29,3 +29,4 @@ const PhysicalComparableDeliveryCapabilityV6 = "physical_network_comparable_deli
 const PhysicalDynamicQualityCapabilityV1 = "physical_dynamic_quality_v1"
 const PhysicalOrderCapabilityV1 = "physical_order_v1"
 const PhysicalOrderProjectionCapabilityV1 = "physical_order_projection_v1"
+const BusinessEdgeExplorationCapabilityV1 = "business_edge_exploration_v1"

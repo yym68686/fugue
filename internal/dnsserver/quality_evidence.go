@@ -19,15 +19,16 @@ type QualityRouteProof struct {
 }
 
 type QualityAnswerEvidence struct {
-	ReceiptID    string
-	Hostname     string
-	Scope        string
-	EdgeID       string
-	Publication  DNSDecisionPublication
-	ObservedAt   time.Time
-	PrimarySince *time.Time
-	Candidates   []model.EdgeDNSAnswerCandidate
-	Proofs       []QualityRouteProof
+	BusinessAllocation *model.DNSBusinessAllocation
+	ReceiptID          string
+	Hostname           string
+	Scope              string
+	EdgeID             string
+	Publication        DNSDecisionPublication
+	ObservedAt         time.Time
+	PrimarySince       *time.Time
+	Candidates         []model.EdgeDNSAnswerCandidate
+	Proofs             []QualityRouteProof
 }
 
 func QualityEvidenceFromCapturedDNSDecision(receipt DNSDecisionReceipt, capturedAt, now time.Time, maximumAge time.Duration) (QualityAnswerEvidence, error) {
@@ -65,6 +66,10 @@ func QualityEvidenceFromDNSDecision(receipt DNSDecisionReceipt, now time.Time, m
 	if selection := selected.Policy.PhysicalSelection; selected.Policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalQuality && selection != nil {
 		if model.ValidateDNSPhysicalSelection(selection) != nil || selection.CapturedAt.After(receipt.ObservedAt) {
 			return QualityAnswerEvidence{}, errors.New("actual DNS physical assignment is invalid")
+		}
+		if selection.BusinessAllocation != nil {
+			evidence.BusinessAllocation = model.CloneDNSBusinessAllocation(selection.BusinessAllocation)
+			evidence.EdgeID = selection.PrimaryEdgeID
 		}
 		if selection.PrimaryEdgeID == evidence.EdgeID && selection.Scope == evidence.Scope && selection.PrimarySince != nil {
 			primarySince := *selection.PrimarySince

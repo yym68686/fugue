@@ -86,6 +86,58 @@ func TestPublicClientSamplerNeverBlocksBusinessAndBindsExactRequest(t *testing.T
 	}
 }
 
+func TestPublicClientSamplerDoesNotSuppressAnotherPeerCohort(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "edge-cohort-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(directory) })
+	path := filepath.Join(directory, "network.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int64
+	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var query frontnetwork.Request
+		if err := json.NewDecoder(request.Body).Decode(&query); err != nil {
+			t.Error(err)
+			return
+		}
+		calls.Add(1)
+		peer, err := frontnetwork.ParseRemote(query.RemoteAddr)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		now := time.Now().UTC()
+		json.NewEncoder(writer).Encode(frontnetwork.Response{Schema: frontnetwork.Schema, Nonce: query.Nonce, EdgeID: query.EdgeID, GroupID: query.GroupID,
+			Sample: model.EdgeClientNetworkSample{ConnectionID: "connection-other", Slot: "b", Scope: frontnetwork.Scope(peer.Addr()), StartedAt: now.Add(-time.Minute), ObservedAt: now}})
+	})}
+	go server.Serve(listener)
+	t.Cleanup(func() { server.Close() })
+	observation := networkTestObservation()
+	service := &Service{Config: config.EdgeConfig{EdgeID: "edge-a", EdgeGroupID: "group-a", EdgeSlot: "b", CaddyEnabled: true, CaddyProxyProtocolEnabled: true, FrontNetworkSocket: path}}
+	service.networkSamples = []model.EdgeNetworkSample{{ID: "old-cohort", Source: "public_front_tcp_info_v1", Hostname: observation.Route.Hostname,
+		PathPrefix: model.NormalizeAppRoutePathPrefix(observation.Route.PathPrefix), ObservedAt: time.Now().Add(-2 * time.Second),
+		ClientNetwork: &model.EdgeClientNetworkSample{Scope: "tcp_peer:203.0.113.0/24"}}}
+	request := httptest.NewRequest(http.MethodGet, "https://app.example.test/", nil)
+	request.RemoteAddr = "127.0.0.1:32000"
+	request.Header.Set(edgeClientRemoteAddrHeader, "198.51.100.7:41000")
+	service.observePublicClientNetwork(request, observation.Route, observation.BundleVersion, time.Now())
+	deadline := time.Now().Add(time.Second)
+	for service.frontNetworkInFlight.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if calls.Load() != 1 || service.frontNetworkObservationStatus().Successes != 1 || service.frontNetworkObservationStatus().Rejections["same_route_recent"] != 0 {
+		t.Fatal("existing route sample suppressed a different network", service.frontNetworkObservationStatus())
+	}
+	service.observePublicClientNetwork(request, observation.Route, observation.BundleVersion, time.Now().Add(2*time.Second))
+	if service.frontNetworkInFlight.Load() || service.frontNetworkObservationStatus().Rejections["same_route_recent"] != 1 {
+		t.Fatal("same peer cohort bypassed the bounded interval")
+	}
+}
+
 func TestPublicClientSamplerRejectsUntrustedHeadersAndDisabledConfiguration(t *testing.T) {
 	for _, test := range []struct {
 		name   string
