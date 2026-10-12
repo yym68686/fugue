@@ -46,6 +46,14 @@ func TestManagedSSHIsolatedKubernetes(test *testing.T) {
 	if !strings.HasPrefix(loaded.CurrentContext, "kind-fugue-ssh-") {
 		test.Fatal("requires task-owned isolated kind context")
 	}
+	fixturePath := filepath.Join(test.TempDir(), "background.test")
+	buildContext, stopBuild := context.WithTimeout(context.Background(), time.Minute)
+	defer stopBuild()
+	build := exec.CommandContext(buildContext, "go", "test", "-c", "-o", fixturePath, "../sshexecutor")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
+	if output, err := build.CombinedOutput(); err != nil {
+		test.Fatal("background fixture build failed", string(output), err)
+	}
 	configuration, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		test.Fatal(err)
@@ -219,6 +227,23 @@ func TestManagedSSHIsolatedKubernetes(test *testing.T) {
 		test.Fatal(err)
 	}
 	_ = file.Close()
+	fixture, err := os.ReadFile(fixturePath)
+	if err != nil {
+		test.Fatal(err)
+	}
+	file, err = transfer.Create("background.test")
+	if err != nil {
+		test.Fatal(err)
+	}
+	if _, err := file.Write(fixture); err != nil {
+		test.Fatal(err)
+	}
+	if err := file.Chmod(0o700); err != nil {
+		test.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		test.Fatal(err)
+	}
 	_ = transfer.Close()
 	fileCheck, err := connection.NewSession()
 	if err != nil {
@@ -271,6 +296,19 @@ func TestManagedSSHIsolatedKubernetes(test *testing.T) {
 	if err != nil || string(output) != "native-client" {
 		test.Fatal("native OpenSSH failed", string(output), err)
 	}
+	bootstrap := "FUGUE_TEST_BACKGROUND_SOCKET=/workspace/background.sock nohup /workspace/background.test -test.run=^TestBackgroundServiceFixture$ </dev/null >/workspace/background.log 2>&1 &"
+	native = exec.CommandContext(ctx, "ssh", append(append([]string{}, sshOptions...), "-T", "-p", port, "root@"+host, bootstrap)...)
+	output, err = native.CombinedOutput()
+	if err != nil || len(output) != 0 {
+		test.Fatal("native detached bootstrap failed", string(output), err)
+	}
+	proxy := "attempt=0; until test -S /workspace/background.sock; do attempt=$((attempt+1)); test $attempt -lt 50 || exit 1; sleep 0.1; done; FUGUE_TEST_BACKGROUND_SOCKET=/workspace/background.sock FUGUE_TEST_BACKGROUND_CLIENT=true exec /workspace/background.test -test.run=^TestBackgroundServiceFixture$"
+	native = exec.CommandContext(ctx, "ssh", append(append([]string{}, sshOptions...), "-T", "-p", port, "root@"+host, proxy)...)
+	output, err = native.CombinedOutput()
+	if err != nil || !bytes.Contains(output, []byte("PASS")) {
+		test.Fatal("native cross-session Unix socket proxy failed", string(output), err)
+	}
+	test.Log("native detached bootstrap and cross-session Unix socket verified")
 	native = exec.CommandContext(ctx, "ssh", append(append([]string{}, sshOptions...), "-tt", "-p", port, "root@"+host, "test -t 0 && stty size")...)
 	output, err = native.CombinedOutput()
 	if err != nil || !bytes.Contains(output, []byte("24 80")) {

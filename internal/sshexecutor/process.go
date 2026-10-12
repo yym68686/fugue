@@ -146,6 +146,7 @@ func (process *Process) Run(ctx context.Context, target managedssh.Target, reque
 	controlDone := make(chan struct{})
 	go func() {
 		defer close(controlDone)
+		signals, resize := request.Signals, request.Resize
 		for {
 			select {
 			case <-processDone:
@@ -153,19 +154,21 @@ func (process *Process) Run(ctx context.Context, target managedssh.Target, reque
 			case <-ctx.Done():
 				_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 				return
-			case signal, open := <-request.Signals:
+			case signal, open := <-signals:
 				if !open {
-					return
+					signals = nil
+					continue
 				}
 				if value, ok := processSignal(signal); ok {
 					_ = syscall.Kill(-command.Process.Pid, value)
 				}
-			case resize, open := <-request.Resize:
+			case size, open := <-resize:
 				if !open {
-					return
+					resize = nil
+					continue
 				}
-				if terminal != nil && resize.Columns > 0 && resize.Columns <= 65535 && resize.Rows > 0 && resize.Rows <= 65535 {
-					_ = pty.Setsize(terminal, &pty.Winsize{Cols: uint16(resize.Columns), Rows: uint16(resize.Rows)})
+				if terminal != nil && size.Columns > 0 && size.Columns <= 65535 && size.Rows > 0 && size.Rows <= 65535 {
+					_ = pty.Setsize(terminal, &pty.Winsize{Cols: uint16(size.Columns), Rows: uint16(size.Rows)})
 				}
 			}
 		}
@@ -173,7 +176,9 @@ func (process *Process) Run(ctx context.Context, target managedssh.Target, reque
 	err := command.Wait()
 	close(processDone)
 	<-controlDone
-	_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	if terminal != nil || ctx.Err() != nil || err != nil {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	}
 	if terminal != nil {
 		select {
 		case <-terminalOutput:
