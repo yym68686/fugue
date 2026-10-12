@@ -28,3 +28,24 @@ func TestEnrollmentIntentChangesMembershipWithoutWeakeningBaseline(t *testing.T)
 		t.Fatal("foreign authority changed cohort")
 	}
 }
+
+func TestExplicitSuspensionFiltersPlacementButNeverLowersDeclaredBaseline(t *testing.T) {
+	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "suspended-node", UID: "node-uid", ResourceVersion: "20", Labels: map[string]string{"fugue.io/edge-group-id": "edge-pool-a", "fugue.io/role.edge": "true", "fugue.io/schedulable": "false"}}}
+	pods := []corev1.Pod{{Spec: corev1.PodSpec{NodeName: "active-node"}}, {Spec: corev1.PodSpec{NodeName: node.Name}}}
+	cohort, err := FromNodes([]corev1.Node{node}, "edge-pool-a", 2)
+	if err != nil || cohort.Expected != 2 || len(cohort.FilterPods(pods)) != 1 {
+		t.Fatal("explicit suspension must not fabricate the missing baseline member", cohort, err)
+	}
+	for _, label := range []string{"", "true"} {
+		node.Labels["fugue.io/schedulable"] = label
+		cohort, err = FromNodes([]corev1.Node{node}, "edge-pool-a", 2)
+		if err != nil || len(cohort.FilterPods(pods)) != 2 {
+			t.Fatal("missing health or scheduling evidence removed a member", cohort, err)
+		}
+	}
+	node.Labels["fugue.io/schedulable"] = "false"
+	node.UID = ""
+	if _, err := FromNodes([]corev1.Node{node}, "edge-pool-a", 2); err == nil {
+		t.Fatal("unidentified suspension accepted")
+	}
+}

@@ -20,16 +20,23 @@ type Snapshot struct {
 	Expected  int
 	Preparing map[string]bool
 	Admitted  map[string]bool
+	Suspended map[string]bool
 }
 
 func FromNodes(nodes []corev1.Node, group string, baseline int) (Snapshot, error) {
-	s := Snapshot{Group: group, Expected: baseline, Preparing: map[string]bool{}, Admitted: map[string]bool{}}
+	s := Snapshot{Group: group, Expected: baseline, Preparing: map[string]bool{}, Admitted: map[string]bool{}, Suspended: map[string]bool{}}
 	if group == "" || baseline < 1 || baseline > 100 {
 		return s, errors.New("invalid Edge cohort baseline")
 	}
 	for _, n := range nodes {
 		if n.Labels["fugue.io/edge-group-id"] != group || n.Labels["fugue.io/role.edge"] != "true" {
 			continue
+		}
+		if n.Labels["fugue.io/schedulable"] == "false" {
+			if n.Name == "" || n.UID == "" || n.ResourceVersion == "" || n.DeletionTimestamp != nil {
+				return s, errors.New("invalid explicitly suspended Edge identity")
+			}
+			s.Suspended[n.Name] = true
 		}
 		phase := n.Labels[PhaseLabel]
 		if phase == "" {
@@ -57,7 +64,7 @@ func FromNodes(nodes []corev1.Node, group string, baseline int) (Snapshot, error
 func (s Snapshot) FilterPods(pods []corev1.Pod) []corev1.Pod {
 	out := make([]corev1.Pod, 0, len(pods))
 	for _, p := range pods {
-		if !s.Preparing[strings.TrimSpace(p.Spec.NodeName)] {
+		if !s.Preparing[strings.TrimSpace(p.Spec.NodeName)] && !s.Suspended[strings.TrimSpace(p.Spec.NodeName)] {
 			out = append(out, p)
 		}
 	}

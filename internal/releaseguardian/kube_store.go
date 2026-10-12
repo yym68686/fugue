@@ -676,7 +676,10 @@ type retiredPodHealthEvidence struct {
 }
 
 func (store *KubeStore) workloadHealthPods(ctx context.Context, pods []corev1.Pod, daemonSet *appsv1.DaemonSet) ([]corev1.Pod, []retiredPodHealthEvidence, error) {
-	active := nonTerminalPods(pods)
+	return FilterRetiredDaemonSetPods(ctx, store.client, nonTerminalPods(pods), daemonSet)
+}
+
+func FilterRetiredDaemonSetPods(ctx context.Context, client kubernetes.Interface, active []corev1.Pod, daemonSet *appsv1.DaemonSet) ([]corev1.Pod, []retiredPodHealthEvidence, error) {
 	if daemonSet == nil || daemonSet.UID == "" || len(daemonSet.Spec.Template.Spec.NodeSelector) == 0 {
 		return active, nil, nil
 	}
@@ -695,7 +698,7 @@ func (store *KubeStore) workloadHealthPods(ctx context.Context, pods []corev1.Po
 				return nil, nil, errors.New("retired Pod placement exceeds bounded node reads")
 			}
 			var err error
-			node, err = store.client.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
+			node, err = client.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
 			if err != nil || node.UID == "" || node.ResourceVersion == "" {
 				return nil, nil, errors.New("retired Pod placement lacks a current identified Node")
 			}

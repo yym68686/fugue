@@ -221,6 +221,10 @@ func observeCandidateWorkerCohort(ctx context.Context, client kubernetes.Interfa
 	if err != nil || pods.Continue != "" || len(pods.Items) < 1 || len(pods.Items) > 100 {
 		return releaseguardian.CandidateWorkerCohort{}, errors.New("candidate worker cohort is unavailable")
 	}
+	pods.Items, err = requiredCandidateWorkerPods(ctx, client, namespace, candidate, pods.Items)
+	if err != nil {
+		return releaseguardian.CandidateWorkerCohort{}, err
+	}
 	cohort := releaseguardian.CandidateWorkerCohort{
 		GroupID: candidate.GroupID, WorkerSlot: candidate.WorkerSlot, BundleGeneration: candidate.BundleGeneration,
 		Instances: make([]releaseguardian.CandidateWorkerInstance, 0, len(pods.Items)),
