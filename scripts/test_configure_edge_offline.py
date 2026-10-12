@@ -6,6 +6,15 @@ from scripts.test_reconfigure_physical_dns import fixture as physical_fixture
 
 
 class OfflineConfigurationTests(unittest.TestCase):
+    def test_preview_failure_evidence_is_bounded_and_contains_no_values(self):
+        before = {'intent': {'routes': [{'credential': 'private-before'} for index in range(300)]}}
+        after = {'intent': {'routes': [{'credential': 'private-after'} for index in range(300)]}}
+        evidence = offline.preview_evidence(before, after)
+        self.assertEqual(len(evidence['changed_paths']), 256)
+        self.assertEqual(evidence['changed_paths_omitted'], 44)
+        self.assertNotEqual(evidence['before_intent_digest'], evidence['after_intent_digest'])
+        self.assertNotIn('private-', str(evidence))
+
     def fixture(self):
         config, _, source = physical_fixture()
         config.pop('hostname')

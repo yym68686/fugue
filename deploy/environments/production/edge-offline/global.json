@@ -1,6 +1,6 @@
 {
   "schema": "fugue.edge-offline-reconfiguration/v1",
-  "generation": 1,
+  "generation": 2,
   "origin": "https://api.fugue.pro",
   "producer_generation": "edge-offline-20261012-v1",
   "baseline_mode": "latest_verified_same_policy",

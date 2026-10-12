@@ -88,6 +88,30 @@ def validate_preview(previous, current, policy):
     return sorted(endpoint['edge_id'] for endpoint in endpoints)
 
 
+def preview_evidence(previous, current):
+    paths = []
+    omitted = 0
+    def compare(before, after, path):
+        nonlocal omitted
+        if before == after:
+            return
+        if isinstance(before, dict) and isinstance(after, dict):
+            for key in sorted(before.keys() | after.keys()):
+                compare(before.get(key), after.get(key), path + '/' + key)
+        elif isinstance(before, list) and isinstance(after, list) and len(before) == len(after):
+            for index, pair in enumerate(zip(before, after)):
+                compare(*pair, path + '/' + str(index))
+        elif len(paths) < 256:
+            paths.append(path[:512])
+        else:
+            omitted += 1
+    for field in ['intent', 'policy', 'issues']:
+        compare(previous.get(field), current.get(field), '/' + field)
+    return {'before_revision': previous.get('business_snapshot_revision'), 'after_revision': current.get('business_snapshot_revision'),
+            'before_intent_digest': digest(previous.get('intent')), 'after_intent_digest': digest(current.get('intent')),
+            'changed_paths': paths, 'changed_paths_omitted': omitted}
+
+
 def publish(config, api, save):
     validate(config)
     declaration = digest(config)
@@ -111,19 +135,24 @@ def publish(config, api, save):
     if authority_identity(current) != precondition['previous_policy'] and not exact(current.get('artifact', {}), 'policy_snapshot', SCOPE, successor):
         raise ValueError('successor differs')
     artifact = ensure_input(api, 'policy_snapshot', SCOPE, successor)
+    evidence = {'schema': config['schema'], 'declaration_digest': declaration, 'resolved_precondition': precondition, 'artifact_id': artifact['id'], 'changed_edge': changed,
+                'offline_edges': holds(config['projection_policy']), 'producer_activated': False, 'routing_acceptance_complete': False, 'automatic_readmission': False, 'phase': 'reading_previews'}
+    save(evidence)
     before = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + old['id'])
     preview = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + artifact['id'])
+    evidence.update(phase='validating_previews', preview=preview_evidence(before, preview))
+    save(evidence)
     candidates = validate_preview(before, preview, config['projection_policy'])
     config = wait_verified_baseline(config, api)
     precondition = config['precondition']
-    evidence = {'schema': config['schema'], 'declaration_digest': declaration, 'resolved_precondition': precondition, 'artifact_id': artifact['id'], 'changed_edge': changed, 'candidate_edge_ids': candidates, 'offline_edges': holds(config['projection_policy']), 'producer_activated': False, 'routing_acceptance_complete': False, 'automatic_readmission': False}
+    evidence.update(phase='publishing_producer', resolved_precondition=precondition, candidate_edge_ids=candidates)
     save(evidence)
     key = 'producer-reconfiguration/' + digest({'artifact_id': artifact['id'], 'content_hash': artifact['content_hash'], 'precondition': precondition})
     api('POST', '/v1/admin/artifacts/' + artifact['id'] + '/release', {'release_channel': 'shadow', 'producer_reconfiguration': precondition, 'idempotency_key': key, 'reason': 'Declarative endpoint maintenance with unchanged routes, proof requirements and positive LKG'})
     current = selected(api, SCOPE, 'shadow')
     if not exact(current.get('artifact', {}), 'policy_snapshot', SCOPE, successor):
         raise ValueError('producer activation not confirmed')
-    evidence.update(producer_activated=True, authority=authority_identity(current), completed_at=now().isoformat())
+    evidence.update(phase='producer_published', producer_activated=True, authority=authority_identity(current), completed_at=now().isoformat())
     save(evidence)
     return evidence
 
