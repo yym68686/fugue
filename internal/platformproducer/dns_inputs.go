@@ -12,6 +12,7 @@ import (
 // ProjectionPolicyInput is the supported producer subset of PolicySnapshot.
 // Unused fields are rejected rather than silently ignored.
 type ProjectionPolicyInput struct {
+	OfflineEdges             []OfflineEdge                             `json:"offline_edges,omitempty"`
 	PublicationRole          string                                    `json:"publication_role,omitempty"`
 	AuthorityCellID          string                                    `json:"authority_cell_id,omitempty"`
 	ConsumerTopologyDigest   string                                    `json:"consumer_topology_digest,omitempty"`
@@ -46,8 +47,11 @@ func DecodeProjectionPolicy(a model.PlatformArtifact, consumers []platformconfig
 	if d.Decode(&p) != nil {
 		return fail()
 	}
+	if ValidateOfflineEdges(p.OfflineEdges) != nil || len(p.OfflineEdges) > 0 && (p.Scope != "global" || p.PublicationRole != "" || p.DNSPlacementMode != platformconfig.DNSPlacementConsumerReadiness) {
+		return fail()
+	}
 
-	for _, key := range []string{"minimum_healthy_edges", "max_stale_seconds", "route_constraints", "edge_selection_constraints", "dns_route_state_constraints"} {
+	for _, key := range []string{"minimum_healthy_edges", "max_stale_seconds", "route_constraints", "edge_selection_constraints", "dns_route_state_constraints", "offline_edges"} {
 		if value, present := a.Content[key]; present && value == nil {
 			return fail()
 		}

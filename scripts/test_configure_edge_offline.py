@@ -1,0 +1,55 @@
+import copy
+import unittest
+
+from scripts import configure_edge_offline as offline
+from scripts.test_reconfigure_physical_dns import fixture as physical_fixture
+
+
+class OfflineConfigurationTests(unittest.TestCase):
+    def fixture(self):
+        config, _, source = physical_fixture()
+        config.pop('hostname')
+        config.update(schema='fugue.edge-offline-reconfiguration/v1', baseline_mode='latest_verified_same_policy')
+        config['precondition']['operation'] = 'edge_offline'
+        source['dns_placement_mode'] = 'consumer_readiness'
+        config['projection_policy'] = copy.deepcopy(source)
+        config['projection_policy']['generation'] += '-offline'
+        config['projection_policy']['offline_edges'] = [{'edge_id': 'edge-a', 'edge_group_id': 'edge-group-a', 'public_ipv4': '8.8.8.8', 'reason': 'maintenance', 'expected_recovery_date': '2020-01-01'}]
+        return config, source
+
+    def test_explicit_hold_and_resume_preserve_other_policy(self):
+        config, source = self.fixture()
+        offline.validate(config)
+        self.assertEqual(offline.check_delta(source, config['projection_policy']), 'edge-a')
+        resumed = copy.deepcopy(source)
+        resumed['generation'] += '-resumed'
+        self.assertEqual(offline.check_delta(config['projection_policy'], resumed), 'edge-a')
+        for change in ['quorum', 'deadline', 'two', 'date']:
+            changed = copy.deepcopy(config['projection_policy'])
+            if change == 'quorum':
+                changed['minimum_healthy_edges'] = 10
+            elif change == 'deadline':
+                changed['max_stale_seconds'] = 900
+            elif change == 'two':
+                changed['offline_edges'].append({**changed['offline_edges'][0], 'edge_id': 'edge-b'})
+            else:
+                changed['offline_edges'][0]['expected_recovery_date'] = '2026-02-30'
+            with self.assertRaises(ValueError):
+                offline.check_delta(source, changed)
+
+    def test_preview_rejects_held_candidate_and_unrelated_changes(self):
+        config, _ = self.fixture()
+        before = {'business_snapshot_revision': 'before', 'intent': {'dns': [{'hostname': 'app.example.test'}]}, 'policy': {'minimum_healthy_edges': 1}, 'issues': []}
+        after = copy.deepcopy(before)
+        after['runtime_snapshot'] = {'dns_edge_endpoints': [{'edge_id': 'edge-b'}]}
+        self.assertEqual(offline.validate_preview(before, after, config['projection_policy']), ['edge-b'])
+        for field in ['candidate', 'intent', 'policy', 'issue']:
+            changed = copy.deepcopy(after)
+            if field == 'candidate':
+                changed['runtime_snapshot']['dns_edge_endpoints'][0]['edge_id'] = 'edge-a'
+            elif field == 'issue':
+                changed['issues'] = [{'code': 'new_failure'}]
+            else:
+                changed[field] = {}
+            with self.assertRaises(ValueError):
+                offline.validate_preview(before, changed, config['projection_policy'])

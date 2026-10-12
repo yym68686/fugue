@@ -1,4 +1,18 @@
 openapi: 3.1.0
+x-fugue-edge-offline:
+  semantics: >-
+    edge_offline is an independently fenced global producer reconfiguration.
+    Only one offline_edges entry and input/producer generations may change.
+    All other constraints, immutable static intent and serving controls remain
+    exact. The entry pins the physical edge ID, group and address, reason and
+    optional informational recovery date. It removes candidate endpoints from
+    future signed DNS publications; it does not revoke Host routes or restart
+    workloads. Exact current producer/full references, unexpired verified LKG,
+    input signatures and source bindings are checked under normal transaction
+    locks. A draft has no serving effect. Existing artifacts remain active until
+    normal gray/full rollout, fresh per-route proofs, unchanged quorum and
+    observation windows pass. Removing a hold is an explicit new publication;
+    neither a date nor a fresh heartbeat can resume traffic by itself.
 info:
   title: Fugue API
   version: 1.0.0
@@ -35546,6 +35560,20 @@ components:
             traffic_constraints: {type: array, maxItems: 0, items: {}}
           not: {required: [tls_readiness]}
       properties:
+        offline_edges:
+          type: array
+          maxItems: 64
+          description: Pinned global producer input only. Explicitly suspends these exact physical endpoint identities from future DNS candidate publications. Current serving artifacts remain unchanged until normal signed rollout succeeds. Expected recovery dates are informational and never expire the hold; removing a hold requires another fenced configuration publication and fresh route proofs. Runtime heartbeats cannot alter this intent.
+          items:
+            type: object
+            additionalProperties: false
+            required: [edge_id, edge_group_id, public_ipv4, reason]
+            properties:
+              edge_id: {type: string, minLength: 1, maxLength: 128}
+              edge_group_id: {type: string, pattern: '^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$'}
+              public_ipv4: {type: string, format: ipv4}
+              reason: {type: string, enum: [quota_exhausted, maintenance, network_unavailable]}
+              expected_recovery_date: {type: string, format: date}
         publication_role:
           type: string
           enum: [cell-routes, cell-dns]
@@ -36573,7 +36601,7 @@ components:
       properties:
         operation:
           type: string
-          enum: [placement, activate_serving, refresh_serving, continuous_serving, expand_membership, physical_dns, retire_dns_selector, dynamic_quality]
+          enum: [placement, activate_serving, refresh_serving, continuous_serving, expand_membership, physical_dns, retire_dns_selector, dynamic_quality, edge_offline]
           default: placement
           description: activate_serving requires a shadow or paused predecessor and bounded serving settings with single_publication=true. refresh_serving requires a serving predecessor with single_publication=true, permits only a new generation and requires the exact baseline full/LKG to have been produced by that predecessor policy publication. continuous_serving requires that same completed single-publication predecessor and only clears single_publication while retaining every other setting. expand_membership requires the same completed serving predecessor and preserves its positive full/LKG while moving the producer to shadow with new pinned input artifacts. Static input may only change generation and add exactly one Edge already declared identically in route_placement_transition.next_topology; projection policy may only change generation and the matching topology digest. physical_dns applies only to an existing continuously serving global producer with no placement transition. It changes only generation and the pinned DNS policy, whose sole strategy change must add exactly one physical_routes hostname while preserving every existing entry. Both input signatures, unchanged static intent, exact predecessor-owned full/LKG and its source metadata are checked transactionally; in-flight gray publications conflict. It does not directly publish a DNS answer. Existing members, pools, labels, failure domains, routes, ownership, constraints, schedules and serving settings remain identical. All input signatures and old full input metadata are checked in the transaction. Activation and refresh require the cohort in the exact full baseline; candidate publication independently revalidates pinned inputs, membership and fresh runtime gates. Placement and membership expansion cannot activate serving, enroll a process or select public transport. retire_dns_selector applies only to that same continuous global producer with an unmapped, unscoped legacy DNS baseline. It adds an explicit ordered_projection, disables ECS and exploration, and preserves every existing measured physical route and all other policy. Each override must exactly retain the signed current full DNS member's normal global physical order and complete candidate membership. Static records cannot receive overrides. The default order must contain the existing physical candidate set. Signed input and member integrity, lineage, exact full/LKG, source metadata and no pending gray are checked under the same locks. It changes producer configuration only; compatible consumer admission and positive LKG remain independent.
         previous_policy:

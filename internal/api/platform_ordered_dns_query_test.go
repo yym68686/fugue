@@ -8,6 +8,7 @@ import (
 	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
 )
 
 func TestOrderedProjectionPreservesStaticAndOwnedAliasConstraints(t *testing.T) {
@@ -50,6 +51,35 @@ func TestOrderedProjectionPreservesStaticAndOwnedAliasConstraints(t *testing.T) 
 	after, _ := json.Marshal(projection.Intent)
 	if string(before) != string(after) {
 		t.Fatal("static or route intent changed")
+	}
+}
+
+func TestOfflineProjectionRemovesCandidateWithoutReorderingAlternatives(t *testing.T) {
+	projection, nodes, strategy, now := directQueryFixture()
+	strategy.ECSEnabled, strategy.ExplorationPercent = false, 0
+	strategy.OrderedProjection = &platformconfig.DNSOrderedProjection{DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}}
+	input := &platformproducer.ProjectionPolicyInput{DNSReadiness: &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}, DNSQueryPolicy: &strategy,
+		OfflineEdges: []platformproducer.OfflineEdge{{EdgeID: nodes[0].ID, EdgeGroupID: nodes[0].EdgeGroupID, PublicIPv4: nodes[0].PublicIPv4, Reason: "maintenance"}}}
+	if err := projectDNSReadinessWithPolicy(&projection, nodes, now, input); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectDirectDNSQueries(&projection, strategy, nodes, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range projection.Policy.DNSAnswerRules {
+		if !reflect.DeepEqual(rule.PhysicalOrder.OrderedEdgeIDs, []string{"edge-b"}) {
+			t.Fatal("held endpoint still selected or survivor order changed", rule)
+		}
+	}
+	for _, fact := range projection.RuntimeSnapshot.DNSSelections {
+		for _, candidate := range fact.Candidates {
+			if candidate.EdgeID == nodes[0].ID {
+				t.Fatal("held endpoint remained in signed candidate input")
+			}
+		}
+	}
+	if len(projection.Policy.DNSAnswerRules) == 0 || !reflect.DeepEqual(strategy.OrderedProjection.DefaultOrder.OrderedEdgeIDs, []string{"edge-a", "edge-b"}) {
+		t.Fatal("offline projection mutated original priority policy")
 	}
 }
 

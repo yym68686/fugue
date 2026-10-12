@@ -22,6 +22,13 @@ func projectDNSReadinessWithPolicy(result *platformIntentProjectionResponse, nod
 	if len(nodes) == 0 || len(nodes) > 4096 {
 		return fmt.Errorf("DNS readiness requires bounded edge topology")
 	}
+	if input != nil && len(input.OfflineEdges) > 0 {
+		selected, err := platformproducer.SelectDNSCandidateEndpoints(nodes, input.OfflineEdges)
+		if err != nil {
+			return err
+		}
+		nodes = selected
+	}
 	for _, node := range nodes {
 		endpoint := platformconfig.DNSEdgeEndpoint{EdgeID: node.ID, EdgeGroupID: node.EdgeGroupID, ObservedAt: captured}
 		for _, address := range []string{node.PublicIPv4, node.PublicIPv6} {

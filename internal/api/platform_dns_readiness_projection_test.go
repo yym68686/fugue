@@ -7,6 +7,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
 )
 
 func TestDNSReadinessProjectionSeparatesTopologyFromHeartbeatHealth(t *testing.T) {
@@ -35,5 +36,27 @@ func TestDNSReadinessProjectionSeparatesTopologyFromHeartbeatHealth(t *testing.T
 	}
 	if !reflect.DeepEqual(prior, result) {
 		t.Fatal("failed capture partially modified projection")
+	}
+}
+
+func TestDNSCandidateProjectionAppliesSignedOfflineIntent(t *testing.T) {
+	now := time.Now().UTC()
+	nodes := []model.EdgeNode{{ID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8", Healthy: true}, {ID: "edge-b", EdgeGroupID: "edge-group-a", PublicIPv4: "9.9.9.9", Healthy: false}}
+	result := platformIntentProjectionResponse{Policy: platformconfig.PolicySnapshot{Generation: "old", Scope: "global"}}
+	if err := projectDNSReadiness(&result, nodes, now); err != nil {
+		t.Fatal(err)
+	}
+	policy := &platformproducer.ProjectionPolicyInput{DNSReadiness: result.Policy.DNSReadiness, TLSReadiness: result.Policy.TLSReadiness, Cohorts: result.Policy.TrafficRolloutCohorts,
+		OfflineEdges: []platformproducer.OfflineEdge{{EdgeID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8", Reason: "maintenance", ExpectedRecoveryDate: "2020-01-01"}}}
+	if err := projectDNSReadinessWithPolicy(&result, nodes, now, policy); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.RuntimeSnapshot.DNSEdgeEndpoints) != 1 || result.RuntimeSnapshot.DNSEdgeEndpoints[0].EdgeID != "edge-b" {
+		t.Fatal("held healthy endpoint still eligible", result.RuntimeSnapshot.DNSEdgeEndpoints)
+	}
+	previous := result
+	nodes[0].PublicIPv4 = "1.1.1.1"
+	if err := projectDNSReadinessWithPolicy(&result, nodes, now, policy); err == nil || !reflect.DeepEqual(previous, result) {
+		t.Fatal("identity substitution must reject without changing LKG candidate")
 	}
 }

@@ -23,14 +23,16 @@ type queryIntent struct {
 }
 
 type configuration struct {
-	Schema         string        `json:"schema"`
-	Servers        []string      `json:"servers"`
-	Queries        []queryIntent `json:"queries"`
-	TimeoutSeconds int           `json:"timeout_seconds"`
+	Schema           string        `json:"schema"`
+	Servers          []string      `json:"servers"`
+	RecursiveServers []string      `json:"recursive_servers,omitempty"`
+	Queries          []queryIntent `json:"queries"`
+	TimeoutSeconds   int           `json:"timeout_seconds"`
 }
 
 type observation struct {
 	Server        string    `json:"server"`
+	Source        string    `json:"source"`
 	Transport     string    `json:"transport"`
 	Hostname      string    `json:"hostname"`
 	Type          string    `json:"type"`
@@ -47,10 +49,10 @@ type observation struct {
 }
 
 func validate(config configuration) error {
-	if config.Schema != "fugue.dns-public-observation/v1" || len(config.Servers) < 1 || len(config.Servers) > 8 || len(config.Queries) < 1 || len(config.Queries) > 32 || config.TimeoutSeconds < 1 || config.TimeoutSeconds > 5 {
+	if config.Schema != "fugue.dns-public-observation/v1" || len(config.Servers) < 1 || len(config.Servers)+len(config.RecursiveServers) > 8 || len(config.Queries) < 1 || len(config.Queries) > 32 || config.TimeoutSeconds < 1 || config.TimeoutSeconds > 5 {
 		return errors.New("bounded DNS observation configuration required")
 	}
-	for _, server := range config.Servers {
+	for _, server := range append(slices.Clone(config.Servers), config.RecursiveServers...) {
 		if net.ParseIP(server) == nil {
 			return errors.New("explicit DNS server address required")
 		}
@@ -72,7 +74,7 @@ func evaluate(answer *dns.Msg, request *dns.Msg, intent queryIntent, observed *o
 		return
 	}
 	observed.ResponseCode, observed.Authoritative = answer.Rcode, answer.Authoritative
-	if answer.Rcode != dns.RcodeSuccess || !answer.Authoritative {
+	if answer.Rcode != dns.RcodeSuccess || request.RecursionDesired && !answer.RecursionAvailable || !request.RecursionDesired && !answer.Authoritative {
 		observed.Reason = "non_authoritative_or_failed_answer"
 		return
 	}
@@ -107,14 +109,19 @@ func evaluate(answer *dns.Msg, request *dns.Msg, intent queryIntent, observed *o
 func observe(ctx context.Context, config configuration) ([]observation, bool) {
 	results := []observation{}
 	passed := true
-	for _, server := range config.Servers {
+	for index, server := range append(slices.Clone(config.Servers), config.RecursiveServers...) {
+		recursive := index >= len(config.Servers)
 		for _, transport := range []string{"udp", "tcp"} {
 			for _, intent := range config.Queries {
 				request := new(dns.Msg)
 				request.SetQuestion(dns.Fqdn(intent.Hostname), dns.StringToType[intent.Type])
-				request.RecursionDesired = false
+				request.RecursionDesired = recursive
 				client := &dns.Client{Net: transport, Timeout: time.Duration(config.TimeoutSeconds) * time.Second}
 				result := observation{Server: server, Transport: transport, Hostname: intent.Hostname, Type: intent.Type, QueryID: request.Id, StartedAt: time.Now().UTC(), ResponseCode: -1, Answers: []string{}, TTLs: []uint32{}}
+				result.Source = "authoritative"
+				if recursive {
+					result.Source = "recursive_sample"
+				}
 				answer, elapsed, err := client.ExchangeContext(ctx, request, net.JoinHostPort(server, "53"))
 				result.FinishedAt, result.DurationMS = time.Now().UTC(), elapsed.Milliseconds()
 				if err != nil {
@@ -151,7 +158,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	results, passed := observe(ctx, config)
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"schema": config.Schema, "passed": passed, "authorizes_traffic": false, "coverage": "declared_authoritative_samples_only", "observations": results})
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"schema": config.Schema, "passed": passed, "authorizes_traffic": false, "coverage": "declared_authoritative_and_recursive_samples_only", "client_traffic_share": "not_measured", "observations": results})
 	if !passed {
 		os.Exit(1)
 	}

@@ -986,6 +986,50 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  edge_offline_configuration:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    timeout-minutes: 15
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select independently declared endpoint maintenance
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          mapfile -t configs < <(git diff --name-only "$base" HEAD -- deploy/environments/production/edge-offline)
+          if (( ${#configs[@]} == 0 )); then exit 0; fi
+          (( ${#configs[@]} == 1 )) || { echo 'one offline intent per configuration release required' >&2; exit 1; }
+          config="${configs[0]}"
+          [[ "$config" =~ ^deploy/environments/production/edge-offline/[a-z0-9-]+\.json$ ]]
+          git fetch origin main
+          if git diff --quiet HEAD origin/main -- "$config" scripts/configure_edge_offline.py scripts/configure_dynamic_quality.py scripts/reconfigure_physical_dns.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py scripts/reconfigure_cell_producer.py .github/workflows/ci.yml; then
+            python3 -m unittest scripts.test_configure_edge_offline
+            python3 -m scripts.configure_edge_offline "$config" --validate-only
+            echo "config=$config" >> "$GITHUB_OUTPUT"
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish fenced endpoint maintenance without rebuilding code
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+          CONFIG: ${{ steps.selected.outputs.config }}
+        run: python3 -m scripts.configure_edge_offline "$CONFIG" --evidence "$RUNNER_TEMP/edge-offline-configuration.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-edge-offline-configuration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/edge-offline-configuration.json
+          if-no-files-found: warn
+          retention-days: 90
+
   dynamic_quality_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
