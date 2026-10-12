@@ -80,3 +80,9 @@ OpenAPI 先改契约再生成，后端 make test 全通过；停用能力 prepus
 最终追加材料：offline-configuration-ci/edge-offline-configuration.json、public-during-gray.json、ci-public-recursive/dns-public-observation.json、verified-final-offline-config.jsonl、verified-final-renewed-config.jsonl、ssh-health-before.json、ssh-health-after.json。运行期校验跨过合法下一轮灰度/full时仍会严格拒绝“当前已验证full不匹配”；这不代表签名失效，不得修改验证器来强行通过。最终成员修复的make test、竞态通过，prepush146.780秒通过。
 
 已有 fugue-ssh 自动化更新为“Fugue DNS、edge 与 SSH 上线后观察”，每小时24次，完成后暂停；新周期0/24，不混入修复前8次。正常无可处理变化时安静，仅异常、完成或需要用户行动时通知。
+
+## 增量诊断
+
+06:08 UTC复查德国A/SERVFAIL计数从7增至17，06:13为21；同轮48项抽样中仅8.8.8.8的i00.pro UDP请求transport_unavailable，其余47项通过。现有64条回执只覆盖约十几秒，读取时失败回执已淘汰，不能把两类观察直接归因为同一故障、网络攻击或本次代码回归。
+
+按证据不足时优先提升观测的约束，新增只读 `scripts/observe_dns_failure_timeline.py`：跟随声明Service的实际Pod UID/容器身份，读取SERVFAIL增量，仅在增加时抓取最多20条决策回执，单独保存至多32条失败回执与512次样本，输出遗漏计数及Pod/计数重置。只允许get，无生产写入，不修改DNS决策、签名、期限或quorum。可用 `--namespace fugue-system --service fugue-dns-public-de --duration 300 --interval 5 --evidence <private-path>` 采样；超过保留窗的历史失败仍不可恢复，也不能声称所有失败都已捕获。每次小时观察应复用这个脚本并保留增量材料。
