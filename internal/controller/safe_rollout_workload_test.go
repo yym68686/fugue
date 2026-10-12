@@ -9,12 +9,14 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 )
 
 func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testing.T) {
-	for _, scenario := range []string{"valid", "defaults", "omitted_zero_delay", "omitted_nonzero_delay", "wrong_owner", "wrong_release", "wrong_uid", "wrong_selector", "extra_selector", "wrong_image", "wrong_key", "wrong_service_port", "missing_resource", "deleting", "replaced_between_reads", "generation_changed", "wrong_operation", "operation_finished"} {
+	for _, scenario := range []string{"valid", "defaults", "kubernetes_serialization", "omitted_zero_delay", "omitted_nonzero_delay", "wrong_owner", "wrong_release", "wrong_uid", "wrong_selector", "extra_selector", "wrong_image", "wrong_key", "wrong_service_port", "missing_resource", "deleting", "replaced_between_reads", "generation_changed", "wrong_operation", "operation_finished"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			st, _, app, op := newSafeRolloutTestState(t)
@@ -50,6 +52,25 @@ func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testin
 			}
 			dep, service := live["Deployment"], live["Service"]
 			switch scenario {
+			case "kubernetes_serialization":
+				// A real API round trip omits empty lists and resource maps,
+				// unlike the map-only fake used by the other scenarios.
+				raw, err := json.Marshal(dep)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var typed appsv1.Deployment
+				if err := json.Unmarshal(raw, &typed); err != nil {
+					t.Fatal(err)
+				}
+				raw, err = json.Marshal(typed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dep = nil
+				if err := json.Unmarshal(raw, &dep); err != nil {
+					t.Fatal(err)
+				}
 			case "omitted_zero_delay", "omitted_nonzero_delay":
 				for _, obj := range objects {
 					if obj["kind"] == "Deployment" {
@@ -123,7 +144,7 @@ func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testin
 			client := &kubeClient{baseURL: server.URL, client: server.Client()}
 			state := &safeRolloutState{Enabled: true, CandidateApp: app, Candidate: release}
 			err = svc.bindSafeRolloutWorkload(context.Background(), client, op, state, objects)
-			valid := scenario == "valid" || scenario == "defaults" || scenario == "omitted_zero_delay"
+			valid := scenario == "kubernetes_serialization" || scenario == "valid" || scenario == "defaults" || scenario == "omitted_zero_delay"
 			if !valid {
 				if err == nil {
 					t.Fatal("invalid binding accepted")
@@ -197,6 +218,30 @@ func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testin
 			objectMapField(dep, "metadata")["uid"] = "replacement"
 			if err := svc.verifyResumedSafeRolloutWorkload(context.Background(), client, op, state, objects); err == nil {
 				t.Fatal("resumed verification accepted replacement UID")
+			}
+		})
+	}
+}
+
+func TestRevisionAppliedFieldsPreservesEmptyListMembership(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		actual, desired any
+		want            bool
+	}{
+		{"omitted empty list", nil, []any{}, true},
+		{"empty list", []any{}, []any{}, true},
+		{"omitted empty map", nil, map[string]any{}, true},
+		{"missing populated map", nil, map[string]any{"memory": "64Mi"}, false},
+		{"wrong map type", []any{}, map[string]any{}, false},
+		{"wrong type", map[string]any{}, []any{}, false},
+		{"injected member", []any{"unexpected"}, []any{}, false},
+		{"missing member", nil, []any{"required"}, false},
+		{"reordered members", []any{"b", "a"}, []any{"a", "b"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := revisionAppliedFieldsMatch("spec.template.spec.volumes", tc.actual, tc.desired); got != tc.want {
+				t.Fatalf("match = %v, want %v", got, tc.want)
 			}
 		})
 	}

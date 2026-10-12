@@ -131,6 +131,10 @@ func (s *Service) safeRolloutWorkloadIdentity(op model.Operation, app model.App,
 func revisionAppliedFieldsMatch(path string, actual, desired any) bool {
 	switch want := desired.(type) {
 	case map[string]any:
+		// Optional empty maps (such as resource limits) are omitted by the API.
+		if actual == nil && len(want) == 0 {
+			return true
+		}
 		got, ok := actual.(map[string]any)
 		if !ok {
 			return false
@@ -142,6 +146,12 @@ func revisionAppliedFieldsMatch(path string, actual, desired any) bool {
 		}
 		return true
 	case []any:
+		// Kubernetes serializes optional empty lists as absent (for example
+		// volumes and volumeMounts). Both contain no members; a nonempty or
+		// differently typed observed value must still fail the identity check.
+		if actual == nil && len(want) == 0 {
+			return true
+		}
 		got, ok := actual.([]any)
 		if !ok || len(got) != len(want) {
 			return false
