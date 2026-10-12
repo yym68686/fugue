@@ -24,6 +24,9 @@ import (
 func decisionTestState(t *testing.T) (*dnsServingState, time.Time) {
 	t.Helper()
 	view, plan, policy, facts, now := queryExecutionFixture()
+	for index := range facts {
+		facts[index].ObservationID = "sha256:" + strings.Repeat("a", 64)
+	}
 	view.Records = append(view.Records,
 		model.EdgeDNSRecord{Name: "static.example.test", Type: "A", Values: []string{"192.0.2.12"}, TTL: 60},
 		model.EdgeDNSRecord{Name: "lease.example.test", Type: "TXT", Values: []string{"lease"}, ValueExpirations: map[string]time.Time{"lease": now.Add(time.Minute)}, TTL: 60},
@@ -101,6 +104,41 @@ func TestDNSDecisionReplayActualAnswersAndPrivacy(t *testing.T) {
 	after, _ := json.Marshal(state.payload)
 	if string(before) != string(after) {
 		t.Fatal("audit mutated serving input")
+	}
+}
+
+func TestDNSDecisionRetainsOriginalSweepAndProofDeadlines(t *testing.T) {
+	state, now := decisionTestState(t)
+	request := new(dns.Msg)
+	request.SetQuestion("target.example.test.", dns.TypeA)
+	receipt := captureDecision(t, state, request, "198.51.100.1:53", now.Add(time.Second))
+	var input dnsDecisionReplay
+	if err := json.Unmarshal(receipt.ReplayInput, &input); err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, stage := range input.Stages {
+		for _, entry := range stage.Entries {
+			for _, fact := range entry.Facts {
+				if fact.ObservationID != "sha256:"+strings.Repeat("a", 64) {
+					t.Fatal("decision lost original observation identity")
+				}
+				for _, original := range state.facts {
+					if original.ProbeID == fact.ProbeID {
+						if !reflect.DeepEqual(original.Proof, fact.Proof) {
+							t.Fatal("decision changed original proof or deadline")
+						}
+						found++
+					}
+				}
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("decision retained no correlated observations")
+	}
+	if result, err := ReplayDNSDecision(receipt); err != nil || !result.Matched {
+		t.Fatal("correlation changed deterministic replay", err)
 	}
 }
 
