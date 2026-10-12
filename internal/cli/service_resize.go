@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +15,18 @@ import (
 
 type backingServiceResizeRequest struct {
 	RuntimeResources model.ResourceSpec `json:"runtime_resources"`
+}
+
+// Keep the explicitly selected zero CPU limit on the wire; ResourceSpec's
+// omitempty would otherwise turn preservation into an incomplete request.
+func (r backingServiceResizeRequest) MarshalJSON() ([]byte, error) {
+	type envelope struct {
+		model.ResourceSpec
+		CPULimitMilliCores int64 `json:"cpu_limit_millicores"`
+	}
+	return json.Marshal(struct {
+		RuntimeResources envelope `json:"runtime_resources"`
+	}{RuntimeResources: envelope{r.RuntimeResources, r.RuntimeResources.CPULimitMilliCores}})
 }
 
 type backingServiceResizeResponse struct {
@@ -56,10 +69,10 @@ func (e *backingServiceResizeClientError) Error() string {
 
 func validateManualPostgresResizeEnvelope(resources model.ResourceSpec) error {
 	if resources.CPUMilliCores <= 0 || resources.MemoryMebibytes <= 0 ||
-		resources.CPULimitMilliCores <= 0 || resources.MemoryLimitMebibytes <= 0 {
-		return fmt.Errorf("all four resource values must be greater than zero")
+		resources.CPULimitMilliCores < 0 || resources.MemoryLimitMebibytes <= 0 {
+		return fmt.Errorf("CPU limit must be nonnegative; all other resource values must be greater than zero")
 	}
-	if resources.CPULimitMilliCores < resources.CPUMilliCores {
+	if resources.CPULimitMilliCores > 0 && resources.CPULimitMilliCores < resources.CPUMilliCores {
 		return fmt.Errorf("CPU limit must be greater than or equal to CPU request")
 	}
 	if resources.MemoryLimitMebibytes < resources.MemoryMebibytes {
@@ -270,7 +283,7 @@ func (c *CLI) newServicePostgresResizeCommand() *cobra.Command {
 	}
 	cmd.Flags().Int64Var(&opts.CPURequest, "cpu-millicores", 0, "CPU request in millicores")
 	cmd.Flags().Int64Var(&opts.MemoryRequest, "memory-mebibytes", 0, "Memory request in MiB")
-	cmd.Flags().Int64Var(&opts.CPULimit, "cpu-limit-millicores", 0, "CPU limit in millicores")
+	cmd.Flags().Int64Var(&opts.CPULimit, "cpu-limit-millicores", 0, "CPU limit in millicores (0 preserves an existing unlimited allowance)")
 	cmd.Flags().Int64Var(&opts.MemoryLimit, "memory-limit-mebibytes", 0, "Memory limit in MiB")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", false, "Wait for the database-resize operation to reach a terminal state")
 	return cmd

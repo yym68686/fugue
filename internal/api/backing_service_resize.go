@@ -35,14 +35,21 @@ func (s *Server) handleResizeBackingService(w http.ResponseWriter, r *http.Reque
 	}
 
 	var req struct {
-		RuntimeResources model.ResourceSpec `json:"runtime_resources"`
+		RuntimeResources struct {
+			model.ResourceSpec
+			CPULimitMilliCores *int64 `json:"cpu_limit_millicores"`
+		} `json:"runtime_resources"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	addManagedPostgresResizeResourceAuditMetadata(metadata, req.RuntimeResources)
-	if !validManagedPostgresResizeResourceEnvelope(req.RuntimeResources) {
+	resources := req.RuntimeResources.ResourceSpec
+	if req.RuntimeResources.CPULimitMilliCores != nil {
+		resources.CPULimitMilliCores = *req.RuntimeResources.CPULimitMilliCores
+	}
+	addManagedPostgresResizeResourceAuditMetadata(metadata, resources)
+	if req.RuntimeResources.CPULimitMilliCores == nil || !validManagedPostgresResizeResourceEnvelope(resources) {
 		metadata["result"] = "invalid_resource_envelope"
 		s.appendAudit(principal, "backing_service.resize", "backing_service", service.ID, service.TenantID, metadata)
 		s.writeStoreError(w, store.ErrInvalidInput)
@@ -60,7 +67,7 @@ func (s *Server) handleResizeBackingService(w http.ResponseWriter, r *http.Reque
 	op, createResult, err := s.createManagedPostgresResizeOperation(
 		app,
 		service,
-		req.RuntimeResources,
+		resources,
 		principal.ActorType,
 		principal.ActorID,
 	)
@@ -108,7 +115,7 @@ func (s *Server) createManagedPostgresResizeOperation(
 func validManagedPostgresResizeResourceEnvelope(resources model.ResourceSpec) bool {
 	return resources.CPUMilliCores > 0 &&
 		resources.MemoryMebibytes > 0 &&
-		resources.CPULimitMilliCores >= resources.CPUMilliCores &&
+		(resources.CPULimitMilliCores == 0 || resources.CPULimitMilliCores >= resources.CPUMilliCores) &&
 		resources.MemoryLimitMebibytes >= resources.MemoryMebibytes
 }
 

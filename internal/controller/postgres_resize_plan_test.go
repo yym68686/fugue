@@ -247,3 +247,12 @@ func managedPostgresResizeInvariantFixture(t *testing.T) (kubeCloudNativePGClust
 	observation.ActualResources = &actual
 	return cluster, observation
 }
+
+func TestPlanManagedPostgresResizeRejectsRemovingCPULimit(t *testing.T) {
+	current := kubeResourceRequirements{Requests: map[string]string{"cpu": "100m", "memory": "1024Mi"}, Limits: map[string]string{"cpu": "200m", "memory": "1536Mi"}}
+	target := cloneKubeResourceRequirements(current)
+	delete(target.Limits, "cpu")
+	if _, err := planManagedPostgresResizeStages(current, target); err == nil || !strings.Contains(err.Error(), "removing an existing CPU limit") {
+		t.Fatalf("limit removal did not fail closed: %v", err)
+	}
+}

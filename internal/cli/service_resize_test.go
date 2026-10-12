@@ -330,3 +330,29 @@ func TestRunServiceShowLabelsPartialRuntimeAndUnknownLiveResources(t *testing.T)
 func resizeOperationJSON(status, message string) string {
 	return fmt.Sprintf(`{"id":"op_resize","tenant_id":"tenant_123","app_id":"app_123","service_id":"svc_pg","type":"database-resize","status":%q,"execution_mode":"managed","result_message":%q,"created_at":"2026-08-01T00:01:00Z","updated_at":"2026-08-01T00:01:00Z"}`, status, message)
 }
+
+func TestResizeBackingServiceSendsExplicitUnlimitedCPULimit(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			RuntimeResources map[string]int64 `json:"runtime_resources"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if value, present := request.RuntimeResources["cpu_limit_millicores"]; !present || value != 0 {
+			t.Fatalf("zero CPU limit omitted or changed: %+v", request)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"backing_service":{"id":"svc_pg"},"operation":{"id":"op_resize","service_id":"svc_pg","type":"database-resize"}}`))
+	}))
+	defer server.Close()
+	client, err := newClientWithOptions(server.URL, "token", clientOptions{RequireToken: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ResizeBackingService("svc_pg", model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 1024, MemoryLimitMebibytes: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

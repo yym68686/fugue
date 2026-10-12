@@ -8,9 +8,8 @@ import (
 )
 
 // normalizeManagedPostgresResizeTarget requires a complete resource envelope.
-// Zero values are not accepted because ResourceSpec cannot distinguish an
-// omitted limit from a request to remove an existing limit, and Kubernetes
-// cannot safely remove an existing request or limit through Pod /resize.
+// A zero CPU limit preserves an existing unlimited allowance. The live resize
+// preflight rejects removal of a configured limit; other fields stay positive.
 func normalizeManagedPostgresResizeTarget(target *model.ResourceSpec) (*model.ResourceSpec, error) {
 	if target == nil {
 		return nil, ErrInvalidInput
@@ -20,7 +19,7 @@ func normalizeManagedPostgresResizeTarget(target *model.ResourceSpec) (*model.Re
 		return nil, err
 	}
 	if normalized.CPUMilliCores <= 0 || normalized.MemoryMebibytes <= 0 ||
-		normalized.CPULimitMilliCores <= 0 || normalized.MemoryLimitMebibytes <= 0 {
+		normalized.CPULimitMilliCores < 0 || normalized.MemoryLimitMebibytes <= 0 {
 		return nil, ErrInvalidInput
 	}
 	return normalized, nil
@@ -46,6 +45,13 @@ func prepareManagedPostgresResizeOperation(app model.App, op *model.Operation) e
 	}
 	if target.Postgres.Suspended {
 		return ErrConflict
+	}
+	currentResources := target.Postgres.RuntimeResources
+	if currentResources == nil {
+		currentResources = target.Postgres.Resources
+	}
+	if targetResources.CPULimitMilliCores == 0 && currentResources != nil && currentResources.CPULimitMilliCores > 0 {
+		return ErrInvalidInput
 	}
 
 	desiredSpec := cloneAppSpec(&app.Spec)

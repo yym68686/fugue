@@ -247,3 +247,24 @@ func TestResizeBackingServiceReportsExactDatabaseMutationInterlocks(t *testing.T
 		})
 	}
 }
+
+func TestResizeBackingServiceAcceptsExplicitUnlimitedCPU(t *testing.T) {
+	t.Parallel()
+	_, server, apiKey, _, service := managedPostgresLifecycleFixture(t, 0)
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/"+service.ID+"/resize", apiKey, map[string]any{
+		"runtime_resources": map[string]int64{
+			"cpu_millicores": 750, "memory_mebibytes": 1536,
+			"cpu_limit_millicores": 0, "memory_limit_mebibytes": 2048,
+		},
+	})
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("explicit unlimited CPU rejected: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, response, &payload)
+	if payload.Operation.DesiredSpec.Postgres.RuntimeResources.CPULimitMilliCores != 0 {
+		t.Fatalf("unlimited CPU changed: %+v", payload.Operation.DesiredSpec.Postgres.RuntimeResources)
+	}
+}

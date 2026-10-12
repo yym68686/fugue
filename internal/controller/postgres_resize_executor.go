@@ -892,8 +892,8 @@ func observeManagedPostgresResizeSnapshot(
 
 func managedPostgresKubeResources(resources model.ResourceSpec) (kubeResourceRequirements, error) {
 	if resources.CPUMilliCores <= 0 || resources.MemoryMebibytes <= 0 ||
-		resources.CPULimitMilliCores <= 0 || resources.MemoryLimitMebibytes <= 0 {
-		return kubeResourceRequirements{}, fmt.Errorf("managed postgres resize requires explicit positive CPU and memory requests and limits")
+		resources.CPULimitMilliCores < 0 || resources.MemoryLimitMebibytes <= 0 {
+		return kubeResourceRequirements{}, fmt.Errorf("managed postgres resize requires explicit positive requests and memory limit, with zero CPU limit preserving an existing unlimited allowance")
 	}
 	target := kubeResourceRequirements{
 		Requests: map[string]string{
@@ -901,11 +901,13 @@ func managedPostgresKubeResources(resources model.ResourceSpec) (kubeResourceReq
 			"memory": fmt.Sprintf("%dMi", resources.MemoryMebibytes),
 		},
 		Limits: map[string]string{
-			"cpu":    fmt.Sprintf("%dm", resources.CPULimitMilliCores),
 			"memory": fmt.Sprintf("%dMi", resources.MemoryLimitMebibytes),
 		},
 	}
-	if err := validateCompleteManagedPostgresResizeEnvelope(target); err != nil {
+	if resources.CPULimitMilliCores > 0 {
+		target.Limits["cpu"] = fmt.Sprintf("%dm", resources.CPULimitMilliCores)
+	}
+	if err := validateCurrentManagedPostgresResizeEnvelope(target); err != nil {
 		return kubeResourceRequirements{}, err
 	}
 	return target, nil

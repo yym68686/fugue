@@ -537,3 +537,25 @@ func TestExecuteManagedPostgresResizeFromUnlimitedCPU(t *testing.T) {
 		})
 	}
 }
+
+func TestExecuteManagedPostgresResizePreservesUnlimitedCPU(t *testing.T) {
+	fixture := newManagedPostgresResizeExecutorFixture(t)
+	delete(fixture.snapshot.Observation.DesiredResources.Limits, "cpu")
+	delete(fixture.snapshot.Observation.ActualResources.Limits, "cpu")
+	target, err := managedPostgresKubeResources(model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 1280, MemoryLimitMebibytes: 1792})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := executeManagedPostgresResizeStages(context.Background(), target,
+		config.ManagedPostgresInPlaceResizeConfig{Enabled: true, MemoryRequestUpscaleEnabled: true, MemoryLimitUpscaleEnabled: true},
+		5*time.Second, time.Millisecond, fixture.hooks())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := final.Observation.DesiredResources.Limits["cpu"]; present {
+		t.Fatal("memory resize introduced an unsolicited CPU limit")
+	}
+	if fixture.patchCalls != 2 || final.Observation.RestartCount != fixture.initialRestartCount {
+		t.Fatalf("unexpected resize or restart: patches=%d snapshot=%+v", fixture.patchCalls, final.Observation)
+	}
+}

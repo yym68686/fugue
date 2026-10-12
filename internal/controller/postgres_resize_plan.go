@@ -30,10 +30,15 @@ func planManagedPostgresResizeStages(
 	if err := validateCurrentManagedPostgresResizeEnvelope(current); err != nil {
 		return nil, fmt.Errorf("validate current managed postgres resources: %w", err)
 	}
-	if err := validateCompleteManagedPostgresResizeEnvelope(target); err != nil {
+	if err := validateCurrentManagedPostgresResizeEnvelope(target); err != nil {
 		return nil, fmt.Errorf("validate target managed postgres resources: %w", err)
 	}
 
+	if _, present := current.Limits["cpu"]; present {
+		if _, requested := target.Limits["cpu"]; !requested {
+			return nil, fmt.Errorf("removing an existing CPU limit is not a safe in-place transition")
+		}
+	}
 	cursor := cloneKubeResourceRequirements(current)
 	stages := make([]managedPostgresResizePlanStage, 0, 4)
 	appendStage := func(name string, update func(*kubeResourceRequirements)) error {
@@ -75,7 +80,9 @@ func planManagedPostgresResizeStages(
 		// unknown resource. Introducing a limit is a downscale and must run
 		// last, under the same independent policy gate as other downscales.
 		if _, present := cursor.Limits["cpu"]; !present {
-			next.Limits["cpu"] = target.Limits["cpu"]
+			if value, requested := target.Limits["cpu"]; requested {
+				next.Limits["cpu"] = value
+			}
 		}
 	}); err != nil {
 		return nil, err
@@ -119,7 +126,7 @@ func managedPostgresCPUAndMemoryEnvelope(resources kubeResourceRequirements) kub
 
 // Existing Pods may intentionally have no CPU limit. Preserve that known
 // unlimited value during intermediate stages; requests and the memory limit
-// must still be explicit, and the final target must specify all four values.
+// must still be explicit. A target without a CPU limit preserves this value.
 func validateCurrentManagedPostgresResizeEnvelope(resources kubeResourceRequirements) error {
 	copy := cloneKubeResourceRequirements(resources)
 	if _, present := copy.Limits["cpu"]; !present {

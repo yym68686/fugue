@@ -29377,7 +29377,7 @@ components:
       properties:
         cpu_millicores: {type: integer, format: int64, minimum: 1}
         memory_mebibytes: {type: integer, format: int64, minimum: 1}
-        cpu_limit_millicores: {type: integer, format: int64, minimum: 1}
+        cpu_limit_millicores: {type: integer, format: int64, minimum: 0, description: "Zero preserves an existing unlimited CPU allowance; removing a configured CPU limit is rejected by the live resize preflight."}
         memory_limit_mebibytes: {type: integer, format: int64, minimum: 1}
     ManagedPostgresResizeRequest:
       type: object

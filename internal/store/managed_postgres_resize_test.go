@@ -271,7 +271,7 @@ func TestManagedPostgresResizeRejectsIncompleteOrUnsafeIntent(t *testing.T) {
 			want: ErrInvalidInput,
 		},
 		{
-			name: "missing cpu limit",
+			name: "removing configured cpu limit",
 			mutate: func(_ *managedPostgresResizeFixture, op *model.Operation) {
 				op.DesiredSpec.Postgres.RuntimeResources.CPULimitMilliCores = 0
 			},
@@ -438,5 +438,19 @@ func TestManagedPostgresResizeRestoreConflictRecognizesRunningOnly(t *testing.T)
 	})
 	if _, err := f.store.CreateOperation(managedPostgresResizeOperation(f, managedPostgresResizeTarget())); err != nil {
 		t.Fatalf("finished restore incorrectly blocked resize: %v", err)
+	}
+}
+
+func TestManagedPostgresResizePreservesUnlimitedCPU(t *testing.T) {
+	t.Parallel()
+	f := newManagedPostgresResizeFixture(t)
+	mutateResizeFixtureState(t, f.store, func(state *model.State) {
+		state.BackingServices[findBackingService(state, f.service.ID)].Spec.Postgres.Resources.CPULimitMilliCores = 0
+	})
+	target := managedPostgresResizeTarget()
+	target.CPULimitMilliCores = 0
+	op, result, err := f.store.CreateOperationWithResult(managedPostgresResizeOperation(f, target))
+	if err != nil || !result.Created || op.DesiredSpec.Postgres.RuntimeResources.CPULimitMilliCores != 0 {
+		t.Fatalf("unlimited CPU preservation rejected: op=%+v result=%+v err=%v", op, result, err)
 	}
 }
