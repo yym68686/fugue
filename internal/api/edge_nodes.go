@@ -111,8 +111,10 @@ func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
 	if includeStale != "true" {
 		nodes = freshEdgeNodes(nodes, now)
 	}
+	intent, holds := s.observeGlobalDNSAdmission(now)
 	for index := range nodes {
 		nodes[index].Observation = observeEdgeNodeInventory(nodes[index], now)
+		nodes[index].Observation.DNSAdmissionIntent = dnsAdmissionForNode(nodes[index], intent, holds)
 	}
 	groups = activeEdgeGroupsForInventory(groups, nodes, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
@@ -132,7 +134,7 @@ func (s *Server) handleGetEdgeNode(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	node.Observation = observeEdgeNodeInventory(node, time.Now().UTC())
+	node.Observation = s.observeEdgeNode(node, time.Now().UTC())
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":  node,
 		"group": group,
@@ -156,6 +158,7 @@ func (s *Server) handleGetEdgeNodeDesiredState(w http.ResponseWriter, r *http.Re
 		return
 	}
 	desired := buildEdgeNodeDesiredState(node)
+	desired.Observation = s.observeEdgeNode(node, time.Now().UTC())
 	desired.Enrollment = s.edgeNodeEnrollment(r.Context(), node)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"desired_state": desired})
 }
@@ -172,6 +175,7 @@ func (s *Server) handleAdminGetEdgeNodeDesiredState(w http.ResponseWriter, r *ht
 		return
 	}
 	desired := buildEdgeNodeDesiredState(node)
+	desired.Observation = s.observeEdgeNode(node, time.Now().UTC())
 	desired.Enrollment = s.edgeNodeEnrollment(r.Context(), node)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"desired_state": desired})
 }

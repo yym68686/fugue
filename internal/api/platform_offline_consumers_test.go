@@ -47,6 +47,10 @@ func TestGlobalOfflineMembershipUsesPinnedInputAndPreservesRequiredSurvivors(t *
 	if err != nil {
 		t.Fatal(err)
 	}
+	observedIntent, observedHolds := server.observeGlobalDNSAdmission(time.Now().UTC())
+	if observedIntent.State != "allowed" || observedIntent.ProducerPolicyID != authority.ID || observedIntent.ProducerReleaseID != release.ID || observedIntent.InputArtifactID != input.ID || observedIntent.ServingEvidence != "not_evaluated" || !reflect.DeepEqual(observedHolds, policy.OfflineEdges) {
+		t.Fatal("observed offline intent lost its exact signed configuration source", observedIntent, observedHolds)
+	}
 	plan := platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{{EdgeID: "edge-b", Address: "9.9.9.9:443"}}, Records: []platformconfig.DNSReadinessRecord{{Hostname: "app.example.test", Targets: []platformconfig.DNSReadinessTarget{{EdgeID: "edge-b", Address: "9.9.9.9"}}}}}
 	child := create(model.PlatformArtifactKindDNSAnswerBundle, "global", "candidate-dns", map[string]any{"readiness_plan": plan})
 	parent := model.PlatformArtifact{ID: "parent", ArtifactKind: model.PlatformArtifactKindReleaseSet, ScopeKey: "global", CreatedByType: model.ActorTypeBootstrap, CreatedByID: platformproducer.Actor,

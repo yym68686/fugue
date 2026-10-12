@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformproducer"
 )
 
 func TestEdgeInventoryObservationSeparatesAdmissionFromFreshness(t *testing.T) {
@@ -79,6 +80,10 @@ func TestStaleEdgeDiagnosticsAreExplicitAndDoNotUpdateStoredHealth(t *testing.T)
 		if subject["observation"].(map[string]any)["route_proof_status"] != "not_evaluated" {
 			t.Fatal("diagnostic endpoint invented serving proof")
 		}
+		intent := subject["observation"].(map[string]any)["dns_admission_intent"].(map[string]any)
+		if intent["state"] != "not_configured" || intent["serving_evidence"] != "not_evaluated" {
+			t.Fatal("diagnostic endpoint invented a configured hold or serving evidence", intent)
+		}
 	}
 	if response := performJSONRequest(t, server, http.MethodGet, "/v1/edge/nodes?include_stale=invalid", key, nil); response.Code != http.StatusBadRequest {
 		t.Fatal("invalid diagnostic selector accepted", response.Code)
@@ -86,5 +91,33 @@ func TestStaleEdgeDiagnosticsAreExplicitAndDoNotUpdateStoredHealth(t *testing.T)
 	after, _, err := storeState.GetEdgeNode(stored.ID)
 	if err != nil || after.Observation != nil || after.Healthy != stored.Healthy || !after.UpdatedAt.Equal(stored.UpdatedAt) {
 		t.Fatal("read-only observation changed stored inventory", err)
+	}
+}
+
+func TestDNSIntentObservationDoesNotConflateRecoveryDateOrHealthyInventory(t *testing.T) {
+	now := time.Now().UTC()
+	intent := model.EdgeDNSAdmissionIntent{EvaluatedAt: now, Scope: "global", State: "allowed", ServingEvidence: "not_evaluated", ProducerPolicyID: "policy-a", ProducerReleaseID: "publication-a", ProducerFencingToken: 10, InputArtifactID: "input-a"}
+	holds := []platformproducer.OfflineEdge{{EdgeID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "1.1.1.1", Reason: "quota_exhausted", ExpectedRecoveryDate: "2020-01-01"}}
+	node := model.EdgeNode{ID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "1.1.1.1", Healthy: true, Status: model.EdgeHealthHealthy, LastHeartbeatAt: &now}
+	for _, scenario := range []string{"held", "other_node", "identity", "unavailable"} {
+		t.Run(scenario, func(t *testing.T) {
+			candidate, declaration := node, intent
+			want := "suspended"
+			switch scenario {
+			case "other_node":
+				candidate.ID, want = "edge-b", "allowed"
+			case "identity":
+				candidate.PublicIPv4, want = "9.9.9.9", "identity_conflict"
+			case "unavailable":
+				declaration.State, want = "unavailable", "unavailable"
+			}
+			observed := dnsAdmissionForNode(candidate, declaration, holds)
+			if observed.State != want || observed.ProducerPolicyID != intent.ProducerPolicyID || observed.ServingEvidence != "not_evaluated" || !candidate.Healthy {
+				t.Fatal("planned intent was replaced by date, health or unknown state", observed)
+			}
+			if scenario == "held" && (observed.Reason != "quota_exhausted" || observed.ExpectedRecoveryDate != "2020-01-01") {
+				t.Fatal("planned downtime metadata absent", observed)
+			}
+		})
 	}
 }

@@ -19078,6 +19078,8 @@ components:
       description: A read-only evaluation of stored inventory, separate from configuration intent and per-route serving proofs. eligible=true only means inventory checks pass; it does not claim DNS selection or public reachability.
       required: [evaluated_at, heartbeat_fresh, admission_allows_dns, route_state_present, tls_state_present, eligible, reason, route_proof_status]
       properties:
+        dns_admission_intent:
+          $ref: "#/components/schemas/EdgeDNSAdmissionIntent"
         evaluated_at: {type: string, format: date-time}
         observed_at: {type: string, format: date-time}
         fresh_until: {type: string, format: date-time}
@@ -19090,6 +19092,23 @@ components:
           type: string
           enum: [observations_missing, observation_from_future, heartbeat_stale, draining, admission_rejected, node_unhealthy, route_state_missing, tls_state_missing, inventory_checks_passed]
         route_proof_status: {type: string, enum: [not_evaluated]}
+    EdgeDNSAdmissionIntent:
+      type: object
+      additionalProperties: false
+      required: [evaluated_at, scope, state, serving_evidence]
+      description: Read-only projection of the current signed global producer input, separate from heartbeat health and currently serving DNS evidence. A planned suspension never expires on its estimated recovery date. unavailable or identity_conflict must not be shown as allowed; independent Cell membership is not inferred from this global intent. This does not mutate inventory admission flags.
+      properties:
+        evaluated_at: {type: string, format: date-time}
+        scope: {type: string, enum: [global]}
+        state: {type: string, enum: [not_configured, allowed, suspended, unavailable, identity_conflict]}
+        serving_evidence: {type: string, enum: [not_evaluated]}
+        reason: {type: string, enum: [quota_exhausted, maintenance, network_unavailable]}
+        expected_recovery_date: {type: string, format: date}
+        producer_policy_id: {type: string}
+        producer_release_id: {type: string}
+        producer_fencing_token: {type: integer, format: int64, minimum: 1}
+        input_artifact_id: {type: string}
+        input_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
     EdgeNodeDesiredState:
       type: object
       additionalProperties: false
