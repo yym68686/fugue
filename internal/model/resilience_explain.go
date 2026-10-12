@@ -26,20 +26,23 @@ type ReleaseGuardStatusResponse struct {
 }
 
 type ServiceTrafficSafetyState struct {
-	Hostname            string               `json:"hostname"`
-	Pass                bool                 `json:"pass"`
-	MinHealthyEdgeCount int                  `json:"min_healthy_edge_count"`
-	HealthyEdgeCount    int                  `json:"healthy_edge_count"`
-	EligibleEdgeGroups  []string             `json:"eligible_edge_groups,omitempty"`
-	HardGatedEdgeGroups []string             `json:"hard_gated_edge_groups,omitempty"`
-	HardGateReasons     map[string]string    `json:"hard_gate_reasons,omitempty"`
-	Blockers            []string             `json:"blockers,omitempty"`
-	FailureContracts    []string             `json:"failure_contracts,omitempty"`
-	GrayReleaseScope    string               `json:"gray_release_scope,omitempty"`
-	StrictProtection    bool                 `json:"strict_protection"`
-	ExplorationPaused   bool                 `json:"exploration_paused"`
-	RouteExplain        RouteExplainResponse `json:"route_explain"`
-	GeneratedAt         time.Time            `json:"generated_at"`
+	EvaluationScope           string               `json:"evaluation_scope"`
+	PublicDNSVerification     string               `json:"public_dns_verification"`
+	ConsumerProofVerification string               `json:"consumer_proof_verification"`
+	Hostname                  string               `json:"hostname"`
+	Pass                      bool                 `json:"pass"`
+	MinHealthyEdgeCount       int                  `json:"min_healthy_edge_count"`
+	HealthyEdgeCount          int                  `json:"healthy_edge_count"`
+	EligibleEdgeGroups        []string             `json:"eligible_edge_groups,omitempty"`
+	HardGatedEdgeGroups       []string             `json:"hard_gated_edge_groups,omitempty"`
+	HardGateReasons           map[string]string    `json:"hard_gate_reasons,omitempty"`
+	Blockers                  []string             `json:"blockers,omitempty"`
+	FailureContracts          []string             `json:"failure_contracts,omitempty"`
+	GrayReleaseScope          string               `json:"gray_release_scope,omitempty"`
+	StrictProtection          bool                 `json:"strict_protection"`
+	ExplorationPaused         bool                 `json:"exploration_paused"`
+	RouteExplain              RouteExplainResponse `json:"route_explain"`
+	GeneratedAt               time.Time            `json:"generated_at"`
 }
 
 type TrafficSafetyExplainResponse struct {

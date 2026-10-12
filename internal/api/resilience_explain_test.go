@@ -333,6 +333,9 @@ func TestTrafficSafetyExplainReportsUnroutedHostname(t *testing.T) {
 	if response.State.Pass || response.State.RouteExplain.ServingMode != "unrouted" {
 		t.Fatalf("expected unrouted traffic safety failure, got %+v", response.State)
 	}
+	if response.State.EvaluationScope != "inventory_and_route_policy" || response.State.PublicDNSVerification != "not_evaluated" || response.State.ConsumerProofVerification != "see_route_explain" {
+		t.Fatal("traffic safety hid its evidence scope", response.State)
+	}
 	if !stringSliceContains(response.State.Blockers, "hostname has no generated edge route") {
 		t.Fatalf("expected unrouted blocker, got %+v", response.State.Blockers)
 	}

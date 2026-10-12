@@ -32624,6 +32624,7 @@ components:
     ServiceTrafficSafetyState:
       type: object
       additionalProperties: false
+      description: Inventory and route-policy admission checks, not an end-to-end availability receipt. pass does not prove current public DNS answers, exact consumer ACKs, or client reachability; those evidence boundaries are explicit below.
       required:
         [
           hostname,
@@ -32636,6 +32637,15 @@ components:
           generated_at,
         ]
       properties:
+        evaluation_scope:
+          type: string
+          enum: [inventory_and_route_policy]
+        public_dns_verification:
+          type: string
+          enum: [not_evaluated]
+        consumer_proof_verification:
+          type: string
+          enum: [see_route_explain]
         hostname:
           type: string
         pass:

@@ -141,20 +141,23 @@ func (s *Server) handleExplainTrafficSafety(w http.ResponseWriter, r *http.Reque
 		blockers = append(blockers, "service is at or below minimum healthy edge count; exploration and exclusion expansion require strict protection")
 	}
 	state := model.ServiceTrafficSafetyState{
-		Hostname:            hostname,
-		Pass:                len(blockers) == 0,
-		MinHealthyEdgeCount: minHealthy,
-		HealthyEdgeCount:    healthyEdgeCount,
-		EligibleEdgeGroups:  eligible,
-		HardGatedEdgeGroups: gated,
-		HardGateReasons:     gateReasons,
-		Blockers:            blockers,
-		FailureContracts:    []string{"edge_front", "edge_worker", "dns_server", "dns_answer_policy", "caddy_route_bundle", "runtime_scheduler"},
-		GrayReleaseScope:    grayScope,
-		StrictProtection:    strictProtection,
-		ExplorationPaused:   explorationPaused,
-		RouteExplain:        explain,
-		GeneratedAt:         time.Now().UTC(),
+		EvaluationScope:           "inventory_and_route_policy",
+		PublicDNSVerification:     "not_evaluated",
+		ConsumerProofVerification: "see_route_explain",
+		Hostname:                  hostname,
+		Pass:                      len(blockers) == 0,
+		MinHealthyEdgeCount:       minHealthy,
+		HealthyEdgeCount:          healthyEdgeCount,
+		EligibleEdgeGroups:        eligible,
+		HardGatedEdgeGroups:       gated,
+		HardGateReasons:           gateReasons,
+		Blockers:                  blockers,
+		FailureContracts:          []string{"edge_front", "edge_worker", "dns_server", "dns_answer_policy", "caddy_route_bundle", "runtime_scheduler"},
+		GrayReleaseScope:          grayScope,
+		StrictProtection:          strictProtection,
+		ExplorationPaused:         explorationPaused,
+		RouteExplain:              explain,
+		GeneratedAt:               time.Now().UTC(),
 	}
 	httpx.WriteJSON(w, http.StatusOK, model.TrafficSafetyExplainResponse{State: state})
 }
