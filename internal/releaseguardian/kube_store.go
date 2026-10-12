@@ -365,6 +365,7 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 		return LayerHealth{State: HealthDegraded, Reason: reason, EvidenceDigest: digest([]byte(reason)), ObservedAt: now.Format(time.RFC3339Nano)}
 	}
 	var selector labels.Selector
+	var daemonSet *appsv1.DaemonSet
 	var desired, updated, ready, available int32
 	var generation, observed int64
 	switch release.Workload.Kind {
@@ -391,6 +392,7 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 		if err := workloadIdentityMatchesDaemonSet(workload, release, target); err != nil {
 			return degraded(err.Error())
 		}
+		daemonSet = workload
 		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)
 		if err != nil {
 			return degraded("DaemonSet Pod template labels are invalid")
@@ -407,7 +409,10 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 	if err != nil {
 		return degraded("cannot read workload pod inventory")
 	}
-	activePods := nonTerminalPods(pods.Items)
+	activePods, retiredPods, err := store.workloadHealthPods(ctx, pods.Items, daemonSet)
+	if err != nil {
+		return degraded("cannot classify workload pod inventory: " + err.Error())
+	}
 	if len(activePods) != int(desired) {
 		return degraded("workload pod inventory is incomplete")
 	}
@@ -427,18 +432,19 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 	}
 	return healthy(map[string]any{
 		"desired": desired, "updated": updated, "ready": ready, "available": available,
-		"generation": generation, "image": target.ImageRef, "componentWorkloads": componentWorkloads,
+		"generation": generation, "image": target.ImageRef, "componentWorkloads": componentWorkloads, "retiredPods": retiredPods,
 	})
 }
 
 type workloadHealthEvidence struct {
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
-	Desired    int32  `json:"desired"`
-	Updated    int32  `json:"updated"`
-	Ready      int32  `json:"ready"`
-	Available  int32  `json:"available"`
-	Generation int64  `json:"generation"`
+	Kind        string                     `json:"kind"`
+	Name        string                     `json:"name"`
+	Desired     int32                      `json:"desired"`
+	Updated     int32                      `json:"updated"`
+	Ready       int32                      `json:"ready"`
+	Available   int32                      `json:"available"`
+	Generation  int64                      `json:"generation"`
+	RetiredPods []retiredPodHealthEvidence `json:"retired_pods,omitempty"`
 }
 
 // componentWorkloadHealth keeps continuous Guardian health component-scoped:
@@ -591,6 +597,7 @@ func interfaceSlice(value any) []any {
 
 func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, probeType, name string) (workloadHealthEvidence, error) {
 	var selector labels.Selector
+	var daemonSet *appsv1.DaemonSet
 	var desired, updated, ready, available int32
 	var generation, observed int64
 	var podNamespace string
@@ -618,6 +625,7 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 		if err := workloadReleaseIdentity(release, target, "DaemonSet", name, workload.Annotations, workload.Spec.Template.Annotations, workload.Spec.Template.Spec.Containers, workload.Spec.Template.Spec.InitContainers); err != nil {
 			return workloadHealthEvidence{}, err
 		}
+		daemonSet = workload
 		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)
 		if err != nil {
 			return workloadHealthEvidence{}, fmt.Errorf("health DaemonSet/%s Pod template labels are invalid", name)
@@ -632,7 +640,10 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 	if err != nil {
 		return workloadHealthEvidence{}, fmt.Errorf("read health %s/%s Pod inventory: %w", probeType, name, err)
 	}
-	activePods := nonTerminalPods(pods.Items)
+	activePods, retiredPods, err := store.workloadHealthPods(ctx, pods.Items, daemonSet)
+	if err != nil {
+		return workloadHealthEvidence{}, fmt.Errorf("health %s/%s Pod placement: %w", probeType, name, err)
+	}
 	if len(activePods) != int(desired) {
 		return workloadHealthEvidence{}, fmt.Errorf("health %s/%s Pod inventory is incomplete", probeType, name)
 	}
@@ -654,7 +665,50 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 			}
 		}
 	}
-	return workloadHealthEvidence{Kind: kind, Name: name, Desired: desired, Updated: updated, Ready: ready, Available: available, Generation: generation}, nil
+	return workloadHealthEvidence{Kind: kind, Name: name, Desired: desired, Updated: updated, Ready: ready, Available: available, Generation: generation, RetiredPods: retiredPods}, nil
+}
+
+type retiredPodHealthEvidence struct {
+	PodUID              string            `json:"pod_uid"`
+	NodeUID             string            `json:"node_uid"`
+	NodeResourceVersion string            `json:"node_resource_version"`
+	NodeSelector        map[string]string `json:"node_selector"`
+}
+
+func (store *KubeStore) workloadHealthPods(ctx context.Context, pods []corev1.Pod, daemonSet *appsv1.DaemonSet) ([]corev1.Pod, []retiredPodHealthEvidence, error) {
+	active := nonTerminalPods(pods)
+	if daemonSet == nil || daemonSet.UID == "" || len(daemonSet.Spec.Template.Spec.NodeSelector) == 0 {
+		return active, nil, nil
+	}
+	selector := labels.SelectorFromSet(daemonSet.Spec.Template.Spec.NodeSelector)
+	nodes := map[string]*corev1.Node{}
+	retired := []retiredPodHealthEvidence{}
+	retained := make([]corev1.Pod, 0, len(active))
+	for _, pod := range active {
+		if pod.DeletionTimestamp == nil || pod.UID == "" || pod.Spec.NodeName == "" || !metav1.IsControlledBy(&pod, daemonSet) {
+			retained = append(retained, pod)
+			continue
+		}
+		node := nodes[pod.Spec.NodeName]
+		if node == nil {
+			if len(nodes) >= 32 {
+				return nil, nil, errors.New("retired Pod placement exceeds bounded node reads")
+			}
+			var err error
+			node, err = store.client.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
+			if err != nil || node.UID == "" || node.ResourceVersion == "" {
+				return nil, nil, errors.New("retired Pod placement lacks a current identified Node")
+			}
+			nodes[pod.Spec.NodeName] = node
+		}
+		if selector.Matches(labels.Set(node.Labels)) {
+			retained = append(retained, pod)
+			continue
+		}
+		retired = append(retired, retiredPodHealthEvidence{PodUID: string(pod.UID), NodeUID: string(node.UID), NodeResourceVersion: node.ResourceVersion, NodeSelector: daemonSet.Spec.Template.Spec.NodeSelector})
+	}
+	sort.Slice(retired, func(left, right int) bool { return retired[left].PodUID < retired[right].PodUID })
+	return retained, retired, nil
 }
 
 // Evicted and completed pods can remain in Kubernetes after their replacement
