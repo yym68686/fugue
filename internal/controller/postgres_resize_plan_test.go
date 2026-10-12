@@ -48,17 +48,31 @@ func TestPlanManagedPostgresResizeStagesUsesSafeDirectionOrder(t *testing.T) {
 	}
 }
 
-func TestPlanManagedPostgresResizeStagesRejectsIncompleteEnvelope(t *testing.T) {
+func TestPlanManagedPostgresResizeStagesRejectsMissingMemoryLimit(t *testing.T) {
 	current := kubeResourceRequirements{
 		Requests: map[string]string{"cpu": "100m", "memory": "1024Mi"},
-		Limits:   map[string]string{"memory": "1536Mi"},
+		Limits:   map[string]string{"cpu": "200m"},
 	}
 	target := kubeResourceRequirements{
 		Requests: map[string]string{"cpu": "200m", "memory": "1024Mi"},
 		Limits:   map[string]string{"cpu": "300m", "memory": "1536Mi"},
 	}
-	if _, err := planManagedPostgresResizeStages(current, target); err == nil || !strings.Contains(err.Error(), "limits.cpu") {
-		t.Fatalf("expected missing CPU limit to fail closed, got %v", err)
+	if _, err := planManagedPostgresResizeStages(current, target); err == nil || !strings.Contains(err.Error(), "limits.memory") {
+		t.Fatalf("expected missing memory limit to fail closed, got %v", err)
+	}
+}
+
+func TestManagedPostgresResizeResourcesEqualOmittedCPULimit(t *testing.T) {
+	current := kubeResourceRequirements{Requests: map[string]string{"cpu": "100m", "memory": "1024Mi"}, Limits: map[string]string{"memory": "1536Mi"}}
+	if !managedPostgresResizeResourcesEqual(current, managedPostgresCPUAndMemoryEnvelope(current)) {
+		t.Fatal("identical unlimited CPU observations reported as resource drift")
+	}
+	for _, value := range []string{"", "0", "invalid", "200m"} {
+		target := cloneKubeResourceRequirements(current)
+		target.Limits["cpu"] = value
+		if managedPostgresResizeResourcesEqual(current, target) {
+			t.Fatalf("omitted CPU limit equated with explicit %q", value)
+		}
 	}
 }
 

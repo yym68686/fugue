@@ -27,7 +27,7 @@ type managedPostgresResizePlanStage struct {
 func planManagedPostgresResizeStages(
 	current, target kubeResourceRequirements,
 ) ([]managedPostgresResizePlanStage, error) {
-	if err := validateCompleteManagedPostgresResizeEnvelope(current); err != nil {
+	if err := validateCurrentManagedPostgresResizeEnvelope(current); err != nil {
 		return nil, fmt.Errorf("validate current managed postgres resources: %w", err)
 	}
 	if err := validateCompleteManagedPostgresResizeEnvelope(target); err != nil {
@@ -43,7 +43,7 @@ func planManagedPostgresResizeStages(
 		if len(changed) == 0 {
 			return nil
 		}
-		if err := validateCompleteManagedPostgresResizeEnvelope(cursor); err != nil {
+		if err := validateCurrentManagedPostgresResizeEnvelope(cursor); err != nil {
 			return fmt.Errorf("validate managed postgres resize stage %s: %w", name, err)
 		}
 		stages = append(stages, managedPostgresResizePlanStage{
@@ -71,6 +71,12 @@ func planManagedPostgresResizeStages(
 	}
 	if err := appendStage(managedPostgresResizeStageLimitDownscale, func(next *kubeResourceRequirements) {
 		copyManagedPostgresResizeDirection(next.Limits, cursor.Limits, target.Limits, false)
+		// An omitted CPU limit is an observed unlimited allowance, not an
+		// unknown resource. Introducing a limit is a downscale and must run
+		// last, under the same independent policy gate as other downscales.
+		if _, present := cursor.Limits["cpu"]; !present {
+			next.Limits["cpu"] = target.Limits["cpu"]
+		}
 	}); err != nil {
 		return nil, err
 	}
@@ -99,16 +105,30 @@ func copyManagedPostgresResizeDirection(
 }
 
 func managedPostgresCPUAndMemoryEnvelope(resources kubeResourceRequirements) kubeResourceRequirements {
-	return kubeResourceRequirements{
-		Requests: map[string]string{
-			"cpu":    strings.TrimSpace(resources.Requests["cpu"]),
-			"memory": strings.TrimSpace(resources.Requests["memory"]),
-		},
-		Limits: map[string]string{
-			"cpu":    strings.TrimSpace(resources.Limits["cpu"]),
-			"memory": strings.TrimSpace(resources.Limits["memory"]),
-		},
+	out := kubeResourceRequirements{Requests: map[string]string{}, Limits: map[string]string{}}
+	for _, name := range []string{"cpu", "memory"} {
+		if value, ok := resources.Requests[name]; ok {
+			out.Requests[name] = strings.TrimSpace(value)
+		}
+		if value, ok := resources.Limits[name]; ok {
+			out.Limits[name] = strings.TrimSpace(value)
+		}
 	}
+	return out
+}
+
+// Existing Pods may intentionally have no CPU limit. Preserve that known
+// unlimited value during intermediate stages; requests and the memory limit
+// must still be explicit, and the final target must specify all four values.
+func validateCurrentManagedPostgresResizeEnvelope(resources kubeResourceRequirements) error {
+	copy := cloneKubeResourceRequirements(resources)
+	if _, present := copy.Limits["cpu"]; !present {
+		if copy.Limits == nil {
+			copy.Limits = map[string]string{}
+		}
+		copy.Limits["cpu"] = copy.Requests["cpu"]
+	}
+	return validateCompleteManagedPostgresResizeEnvelope(copy)
 }
 
 func validateCompleteManagedPostgresResizeEnvelope(resources kubeResourceRequirements) error {
@@ -133,13 +153,19 @@ func validateCompleteManagedPostgresResizeEnvelope(resources kubeResourceRequire
 
 func managedPostgresResizeResourcesEqual(left, right kubeResourceRequirements) bool {
 	for _, scope := range []struct {
+		name  string
 		left  map[string]string
 		right map[string]string
 	}{
-		{left: left.Requests, right: right.Requests},
-		{left: left.Limits, right: right.Limits},
+		{name: "requests", left: left.Requests, right: right.Requests},
+		{name: "limits", left: left.Limits, right: right.Limits},
 	} {
 		for _, resourceName := range []string{"cpu", "memory"} {
+			_, leftPresent := scope.left[resourceName]
+			_, rightPresent := scope.right[resourceName]
+			if scope.name == "limits" && resourceName == "cpu" && !leftPresent && !rightPresent {
+				continue
+			}
 			leftQuantity, leftOK := parseResizeQuantity(scope.left[resourceName])
 			rightQuantity, rightOK := parseResizeQuantity(scope.right[resourceName])
 			if !leftOK || !rightOK || leftQuantity.Cmp(rightQuantity) != 0 {

@@ -502,3 +502,38 @@ func cloneManagedPostgresResizeSnapshot(in managedPostgresResizeSnapshot) manage
 	out.Observation.Conditions = append([]managedPostgresResizeCondition(nil), in.Observation.Conditions...)
 	return out
 }
+
+func TestExecuteManagedPostgresResizeFromUnlimitedCPU(t *testing.T) {
+	for _, allowDownscale := range []bool{false, true} {
+		t.Run(fmt.Sprint(allowDownscale), func(t *testing.T) {
+			fixture := newManagedPostgresResizeExecutorFixture(t)
+			delete(fixture.snapshot.Observation.DesiredResources.Limits, "cpu")
+			delete(fixture.snapshot.Observation.ActualResources.Limits, "cpu")
+			target := kubeResourceRequirements{
+				Requests: map[string]string{"cpu": "100m", "memory": "1280Mi"},
+				Limits:   map[string]string{"cpu": "2000m", "memory": "1792Mi"},
+			}
+			gates := config.ManagedPostgresInPlaceResizeConfig{
+				Enabled: true, MemoryRequestUpscaleEnabled: true,
+				MemoryLimitUpscaleEnabled: true, CPULimitDownscaleEnabled: allowDownscale,
+			}
+			final, err := executeManagedPostgresResizeStages(context.Background(), target, gates, 5*time.Second, time.Millisecond, fixture.hooks())
+			if !allowDownscale {
+				if err == nil || !strings.Contains(err.Error(), "limits_cpu_downscale_disabled") || fixture.patchCalls != 0 {
+					t.Fatalf("CPU limit introduction bypassed its downscale gate: patches=%d err=%v", fixture.patchCalls, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(fixture.eventStageNames(model.OperationEvidenceTypePostgresResizeApplying), ","); got != "limit_upscale,request_upscale,limit_downscale" {
+				t.Fatalf("unsafe stage ordering: %s", got)
+			}
+			if final.Observation.RestartCount != fixture.initialRestartCount || final.Observation.PodUID != fixture.initialPodUID ||
+				!managedPostgresResizeResourcesEqual(*final.Observation.ActualResources, target) {
+				t.Fatalf("resize did not preserve identity and reach exact resources: %+v", final.Observation)
+			}
+		})
+	}
+}

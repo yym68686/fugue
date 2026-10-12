@@ -84,8 +84,11 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 		return out, fmt.Errorf("stable traffic still uses the previous workload")
 	}
 	proof, err := s.edgeBundleObserverForSafeRollout().WaitForSafeRolloutEdgeRouteBundle(ctx, app, stable, 0, since)
-	if err != nil || !proof.Ready {
-		return out, fmt.Errorf("current stable traffic is not confirmed before drain")
+	if err != nil {
+		return out, fmt.Errorf("current stable traffic is not confirmed before drain: %w (waiting=%v)", err, proof.WaitingNodes)
+	}
+	if !proof.Ready {
+		return out, fmt.Errorf("current stable traffic is not confirmed before drain: waiting=%v", proof.WaitingNodes)
 	}
 	client, err := s.kubeClient()
 	if err != nil {
