@@ -54,9 +54,13 @@ this implementation.
 
 ## Status
 
-Implementation in progress. Neither phase is complete or activated. No production
-routing configuration has been modified for this goal. Exploration changes remain
-local. The independent release-health prerequisite `712637af` passed CI
+Implementation in progress. Neither exploration phase is complete or activated.
+Compatible runtime code was pushed in `afaf749e`; its first CI deployed API,
+Germany workers and the non-public DNS candidates, but stopped the US worker
+before mutation. The bound-sample association repair is `d2c6b770`, and the
+independent suspended-baseline release declaration is `6637de9b`. Their runtime
+acceptance is pending. Public DNS handoff is a separate configuration operation;
+business exploration remains disabled. The release-health prerequisite `712637af` passed CI
 `38281903369`. At 17:19 UTC the actual Guardian ran that revision with image
 `sha256:aaf637ae0466e7b0190f162abafc135f92fb9cf379754e8d77fc6b9f01f21479`;
 both worker release statuses were stable with local/dependency/route health
@@ -105,7 +109,8 @@ Completed locally:
   owned service and atomic rejection of extra paths, a changed traffic class,
   shared aliases and a modified allocation. The compatible-runtime release
   explicitly updates API, both guarded worker groups and the two non-public DNS
-  C instances; public DNS selection and traffic intent remain unchanged.
+  C instances. See `business-edge-exploration-runtime-acceptance.md` for partial
+  release outcomes, repairs and separately gated public handoff.
 
 Remaining acceptance and limitations:
 

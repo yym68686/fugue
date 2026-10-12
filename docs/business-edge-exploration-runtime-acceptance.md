@@ -53,7 +53,9 @@ actual observation builder and requires the original TCP sample in its receipt.
 - Both DNS C instances run `afaf749e`, are Ready with zero restarts, and passed
   checkpoint/artifact signature, current verified full publication, every positive
   probe and complete per-record quorum verification. Each had 503 positive probes.
-  An initial US checkpoint/read race was rejected; a fresh complete read passed.
+  An initial US read failed the authority/freshness predicate; a fresh complete
+  read passed. The original raw predicate operands were not retained, so its
+  specific cause is not attributed to a race or another mechanism.
 - Five-minute public DNS counter sampling completed with 30 samples, no new
   SERVFAIL and no observation errors; historical totals are not attributed.
 - Native strict-host-key `ssh poly` and `ssh argus`, without remote commands,
@@ -65,3 +67,11 @@ Local bounded evidence is retained in `/tmp/fugue-business-*`. No credentials or
 raw business responses are included in this document. Public DNS handoff,
 phase-one activation, real comparison acceptance and phase-two activation are
 still pending; runtime deployment alone is not completion.
+
+At 18:26 UTC both logical DNS-node captures using the repaired CLI retained 118
+actual passive records and replayed successfully. They reported incomplete common
+cohort evidence, not a winner; no serving authority or allocation was published.
+Both isolated candidates also passed all 24 actual UDP/TCP A/AAAA/NS/SOA queries.
+Transport generation 35 selects only the US public listener's C backend; Germany
+remains D until independent handoff acceptance. The existing CI selector-CAS and
+fresh signed observation checks remain mandatory.
