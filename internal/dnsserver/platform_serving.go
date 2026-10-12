@@ -319,6 +319,17 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		if same {
 			if old.record.Positive && dnsSameSourceContext(old.record.RouteSources, p.routeSources) {
 				st.record = old.record
+			} else if old.record.Positive {
+				st, err = s.refreshedDNSServingFacts(ctx, old, probe, "readiness_incomplete", nil, nil)
+				if err != nil {
+					return err
+				}
+				if err = client.CheckServingAssignment(ctx, id, a); err != nil {
+					return err
+				}
+				if err = s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
+					return err
+				}
 			} else {
 				st.record.AppliedAt = old.record.AppliedAt
 				st.record.Positive = false
