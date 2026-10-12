@@ -27,9 +27,12 @@ class ObservationUnavailable(RuntimeError):
 
 def load_config(path):
     config = json.loads(Path(path).read_text())
-    if set(config) != {"apiVersion", "kind", "generation", "namespace", "listeners"}:
+    fields = {"apiVersion", "kind", "generation", "namespace", "listeners"}
+    if config.get("apiVersion") == "transport.fugue.dev/v2":
+        fields.add("recovery")
+    if set(config) != fields:
         raise ValueError("unknown or missing transport configuration fields")
-    if config["apiVersion"] != "transport.fugue.dev/v1" or config["kind"] != "DNSLocalTransport":
+    if config["apiVersion"] not in {"transport.fugue.dev/v1", "transport.fugue.dev/v2"} or config["kind"] != "DNSLocalTransport":
         raise ValueError("invalid transport schema")
     if type(config["generation"]) is not int or config["generation"] <= 0:
         raise ValueError("positive integer generation is required")
@@ -59,6 +62,9 @@ def load_config(path):
         selector = listener["selector"]
         if not isinstance(selector, dict) or not selector or len(selector) > 16 or any(not isinstance(k, str) or not isinstance(v, str) or not k or not v or any(c in k + v for c in "\n\r,= ") for k, v in selector.items()):
             raise ValueError("explicit bounded selector is required")
+    if "recovery" in config:
+        from scripts.recover_dns_transport import validate
+        validate(config)
     return config
 
 
@@ -171,7 +177,7 @@ def handoff_backend(namespace, selector, node_name, target_port):
     current = read_json("get", "pod", meta["name"], "-n", namespace, "-o", "json")
     if current["metadata"].get("uid") != meta["uid"] or current["metadata"].get("resourceVersion") != meta["resourceVersion"]:
         raise ValueError("DNS handoff backend changed while reading runtime facts")
-    return {"pod": pod, "snapshot": snapshot}
+    return {"pod": pod, "snapshot": snapshot, "snapshot_path": path}
 
 
 def validate_handoff_snapshots(old, candidate, node_name, now=None):
@@ -232,6 +238,9 @@ def handoff_witness(config, listener, current):
     last_error = None
     for attempt in range(HANDOFF_ATTEMPTS):
         try:
+            if config.get("recovery", {}).get("listener") == listener["name"]:
+                from scripts.recover_dns_transport import witness
+                return witness(config, listener, current, owners[0])
             old = handoff_backend(namespace, current["spec"]["selector"], node, listener["targetPort"])
             candidate = handoff_backend(namespace, listener["selector"], node, listener["targetPort"])
             if old["pod"]["metadata"]["uid"] == candidate["pod"]["metadata"]["uid"]:
@@ -252,6 +261,7 @@ def handoff_witness(config, listener, current):
                 "different artifact assignments", "different probe membership", "expired or future observations",
                 "proof is expired or from the future",
                 "proof belongs to another release", "backend changed while reading runtime facts",
+                "DNS recovery observation",
             ])
             if not retryable or attempt + 1 == HANDOFF_ATTEMPTS:
                 raise
@@ -288,7 +298,9 @@ def validate_handoff_endpoints(service, pod, slices, target_port):
         raise ValueError("DNS handoff current endpoint is missing or duplicated")
 
 
-def reconcile(config, apply=False):
+def reconcile(config, apply=False, evidence_path=None):
+    if apply and config.get('recovery') and not evidence_path:
+        raise ValueError('DNS recovery requires durable prewrite evidence')
     planned = []
     inventory = json.loads(kubectl("get", "services", "--all-namespaces", "-o", "json"))["items"]
     for listener in config["listeners"]:
@@ -302,6 +314,8 @@ def reconcile(config, apply=False):
         existing = kubectl("get", "service", listener["name"], "-n", config["namespace"], "--ignore-not-found", "-o", "json")
         current = json.loads(existing) if existing.strip() else None
         validate_existing(current, desired)
+        if current and current["metadata"].get("annotations", {}).get(DIGEST) == desired["metadata"]["annotations"][DIGEST]:
+            continue
         selector = ",".join(k + "=" + v for k, v in sorted(listener["selector"].items()))
         pods = json.loads(kubectl("get", "pods", "-n", config["namespace"], "-l", selector, "-o", "json"))["items"]
         ready = [pod for pod in pods if not pod["metadata"].get("deletionTimestamp") and any(c.get("type") == "Ready" and c.get("status") == "True" for c in pod.get("status", {}).get("conditions", []))]
@@ -325,11 +339,24 @@ def reconcile(config, apply=False):
             body = json.dumps(desired)
         kubectl(*command, "--dry-run=server", body=body)
         planned.append((command, body, listener, current, witness))
+    evidence = {'schema': 'fugue.dns-transport-execution/v1', 'generation': config['generation'],
+                'declaration_digest': 'sha256:' + hashlib.sha256(json.dumps(config, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                'operations': [{'listener': listener['name'], 'patch': json.loads(body), 'witness': witness}
+                               for _, body, listener, _, witness in planned], 'applied': []}
+    def save_evidence():
+        if evidence_path:
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.touch(mode=0o600, exist_ok=True)
+            evidence_path.chmod(0o600)
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True) + '\n')
+    save_evidence()
     if apply:
         for command, body, listener, current, witness in planned:
             if witness is not None:
                 revalidate_handoff_witness(config, listener, current, witness)
             kubectl(*command, body=body)
+            evidence['applied'].append(listener['name'])
+            save_evidence()
             print("reconciled Service/" + listener["name"], flush=True)
     return len(planned)
 
@@ -355,5 +382,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("path")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--evidence", type=Path)
     args = parser.parse_args()
-    print("listeners=" + str(reconcile(load_config(args.path), args.apply)))
+    print("listeners=" + str(reconcile(load_config(args.path), args.apply, args.evidence)))

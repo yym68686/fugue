@@ -13,10 +13,13 @@ except ImportError:
     import reconcile_front_probe_transport as transport
 
 
-def observe(config, profiles, samples=5, interval=15):
+def observe(config, profiles, samples=5, interval=15, listener_name=None):
     observations = []
+    listeners = [listener for listener in config['listeners'] if listener_name is None or listener['name'] == listener_name]
+    if not listeners or listener_name is not None and len(listeners) != 1:
+        raise ValueError('exact declared Front observation listener required')
     for index in range(samples):
-        for listener in config["listeners"]:
+        for listener in listeners:
             profile = profiles[listener["name"]]
             proofs = []
             for route in profile["probes"]:
@@ -25,24 +28,25 @@ def observe(config, profiles, samples=5, interval=15):
             observations.append({"at": front.now().isoformat(), "listener": listener["name"], "address": listener["address"], "port": listener["port"], "profile_digest": transport.digest(profile), "proofs": proofs})
         if index + 1 < samples:
             time.sleep(interval)
-    return {"schema": "fugue.front-external-probe-evidence/v1", "authorizes_traffic": False, "declaration_digest": transport.digest(config), "observations": observations}
+    return {"schema": "fugue.front-external-probe-evidence/v1", "authorizes_traffic": False, "declaration_digest": transport.digest(config), "observed_listeners": [listener['name'] for listener in listeners], "observations": observations}
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     parser.add_argument("--evidence", required=True)
+    parser.add_argument("--listener")
     args = parser.parse_args()
     config = transport.validate(json.loads(Path(args.config).read_text()))
     profiles = {item["name"]: front.validate(json.loads(Path(item["observation"]).read_text())) for item in config["listeners"]}
     try:
-        evidence = observe(config, profiles)
+        evidence = observe(config, profiles, listener_name=args.listener)
     except Exception as error:
         failure = {"schema": "fugue.front-external-probe-failure/v1", "authorizes_traffic": False, "at": front.now().isoformat(), "declaration_digest": transport.digest(config), "error_type": type(error).__name__, "error": str(error)[:2048]}
         Path(args.evidence).write_text(front.canonical(failure) + "\n")
         raise
     Path(args.evidence).write_text(front.canonical(evidence) + "\n")
-    print(front.canonical({"external_front_verified": True, "authorizes_traffic": False, "samples": len(evidence["observations"])}))
+    print(front.canonical({"external_front_verified": True, "authorizes_traffic": False, "observed_listeners": evidence['observed_listeners'], "samples": len(evidence["observations"])}))
 
 
 if __name__ == "__main__":

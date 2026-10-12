@@ -427,8 +427,12 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 			t.Fatal("DNS transport recovery must not depend on rebuilding consumer code")
 		}
 	}
-	if yamlMappingValue(t, dnsTransport, "environment").Value != "production" || !strings.Contains(source, `scripts/reconcile_dns_transport.py "$config" --apply`) {
+	if yamlMappingValue(t, dnsTransport, "environment").Value != "production" || !strings.Contains(source, `scripts.reconcile_dns_transport "$config" --apply`) {
 		t.Fatal("DNS transport must use the production declarative reconciler")
+	}
+	frontObservation := yamlMappingValue(t, jobs, "front_external_observation")
+	if !strings.Contains(yamlMappingValue(t, frontObservation, "if").Value, "needs.front_probe_transport.outputs.selected == 'true'") {
+		t.Fatal("external probe verification must bind to an actual transport operation")
 	}
 	externalController := yamlMappingValue(t, jobs, "external_controller_release")
 	if yamlMappingValue(t, externalController, "environment").Value != "production" || yamlMappingValue(t, externalController, "needs").Value != "prepush" {

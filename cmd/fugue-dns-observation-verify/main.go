@@ -17,6 +17,7 @@ func verify(input io.Reader) error {
 	var request struct {
 		NodeID        string            `json:"node_id"`
 		GroupID       string            `json:"group_id"`
+		Zone          string            `json:"zone"`
 		Scope         string            `json:"scope"`
 		SigningKey    string            `json:"signing_key"`
 		SigningKeyID  string            `json:"signing_key_id"`
@@ -31,7 +32,7 @@ func verify(input io.Reader) error {
 	if decoder.Decode(&request) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return errors.New("invalid bounded DNS verification input")
 	}
-	configuration := config.DNSConfig{DNSNodeID: request.NodeID, EdgeGroupID: request.GroupID, PlatformScopeKey: request.Scope,
+	configuration := config.DNSConfig{DNSNodeID: request.NodeID, EdgeGroupID: request.GroupID, Zone: request.Zone, PlatformScopeKey: request.Scope,
 		BundleSigningKey: request.SigningKey, BundleSigningKeyID: request.SigningKeyID,
 		BundleSigningPreviousKey: request.PreviousKey, BundleSigningPreviousKeyID: request.PreviousKeyID, BundleRevokedKeyIDs: request.RevokedKeyIDs}
 	return dnsserver.VerifyServingObservation(configuration, request.Checkpoint, request.Snapshot, time.Now().UTC())

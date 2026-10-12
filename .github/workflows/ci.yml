@@ -1673,6 +1673,9 @@ jobs:
     concurrency: {group: fugue-production-front-probe-transport, cancel-in-progress: false}
     timeout-minutes: 10
     permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.transport.outputs.selected }}
+      target: ${{ steps.transport.outputs.target }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
@@ -1733,7 +1736,7 @@ jobs:
 
   front_external_observation:
     needs: [front_probe_transport]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_probe_transport.outputs.selected == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {contents: read}
@@ -1741,9 +1744,11 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Verify Front ingress from outside the production cluster
+        env:
+          PROBE_LISTENER: ${{ needs.front_probe_transport.outputs.target }}
         run: |
           python3 -m unittest scripts.test_observe_front_public_probe
-          python3 scripts/observe_front_public_probe.py deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-external-observation.json"
+          python3 scripts/observe_front_public_probe.py deploy/environments/production/front-probe-transport/listeners.json --listener "$PROBE_LISTENER" --evidence "$RUNNER_TEMP/front-external-observation.json"
       - name: Retain external Front observations
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -1999,8 +2004,10 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Validate and reconcile DNS network transport
+        id: dns_transport
         env:
           BASE_SHA: ${{ github.event.before }}
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
         run: |
           set -euo pipefail
           config=deploy/environments/production/dns-transport/transport.json
@@ -2008,16 +2015,45 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_dns_transport.py scripts/test_reconcile_dns_transport.py; then
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_dns_transport.py scripts/test_reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/test_recover_dns_transport.py; then
             git fetch origin main
-            if ! git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_dns_transport.py; then
+            if ! git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py cmd/fugue-dns-observation-verify internal/dnsserver .github/workflows/ci.yml; then
               echo "Newer DNS transport configuration supersedes this run."
               exit 0
             fi
-            python3 -m unittest scripts.test_reconcile_dns_transport
-            python3 scripts/reconcile_dns_transport.py "$config"
-            python3 scripts/reconcile_dns_transport.py "$config" --apply
+            python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport
+            if jq -e '.apiVersion == "transport.fugue.dev/v2"' "$config" >/dev/null; then
+              export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
+              go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
+            fi
+            python3 -m scripts.reconcile_dns_transport "$config" --evidence "$RUNNER_TEMP/dns-transport-prewrite.json"
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi
+      - name: Retain DNS transport prewrite witness
+        if: steps.dns_transport.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-dns-transport-prewrite-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-transport-prewrite.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Apply the independently verified DNS transport declaration
+        if: steps.dns_transport.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/dns-transport/transport.json
+          export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
+          python3 -m scripts.reconcile_dns_transport "$config" --apply --evidence "$RUNNER_TEMP/dns-transport-result.json"
+      - name: Retain DNS transport execution result
+        if: always() && steps.dns_transport.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-dns-transport-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-transport-result.json
+          if-no-files-found: warn
+          retention-days: 30
 
   postgres_protection:
     # Database recovery must remain possible when an application build fails.
