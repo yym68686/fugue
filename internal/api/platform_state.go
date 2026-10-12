@@ -454,7 +454,11 @@ func (s *Server) releaseConsumerTopology(ctx context.Context, principal model.Pr
 	if err != nil || declared {
 		return topology, err
 	}
-	return s.platformConsumerTopology(ctx, principal)
+	topology, err = s.platformConsumerTopology(ctx, principal)
+	if err != nil {
+		return topology, err
+	}
+	return s.applyGlobalOfflineConsumerIntent(parent, topology)
 }
 
 func (s *Server) validateReleaseSetConvergence(ctx context.Context, artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {

@@ -13,6 +13,13 @@ x-fugue-edge-offline:
     normal gray/full rollout, fresh per-route proofs, unchanged quorum and
     observation windows pass. Removing a hold is an explicit new publication;
     neither a date nor a fresh heartbeat can resume traffic by itself.
+    Global release preparation also removes a held physical Worker from the
+    new candidate's required execution set only when that exact signed parent
+    pins the verified producer/input publications and its complete DNS plan
+    contains no target for the held endpoint. Existing full/LKG expectations
+    retain their original pinned input. Required surviving Workers and all DNS
+    consumers still need fresh authenticated capability and convergence.
+    Independently declared Cell membership is never reduced by a global hold.
 info:
   title: Fugue API
   version: 1.0.0
