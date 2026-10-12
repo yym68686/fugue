@@ -171,6 +171,45 @@ func TestBusinessPublicationCannotInitializeFromFallbackLKG(t *testing.T) {
 	}
 }
 
+func TestBusinessPublicationRetainsCapturedPassiveSamples(t *testing.T) {
+	source, route := businessPublicationFixture(t)
+	now := source.Snapshot.CapturedAt
+	sample, _ := networkWitnessFixture(now)
+	sample.EdgeGroupID = "group-edge-a"
+	sample.TrafficClass = route.TrafficClass
+	sample.Source = "public_front_tcp_info_v1"
+	sample.ServiceRTTMS = nil
+	sample.ServiceTarget = ""
+	rtt := 25.0
+	sample.ClientNetwork = &model.EdgeClientNetworkSample{ConnectionID: "connection-a", Slot: "a", Scope: "tcp_peer:203.0.113.0/24", StartedAt: now.Add(-time.Minute), ObservedAt: sample.ObservedAt, TCPInfoAvailable: true, RTTMS: &rtt}
+	source.Snapshot.NetworkSamples = []model.EdgeNetworkSample{sample}
+	var actual dnsserver.DNSDecisionReceipt
+	if err := json.Unmarshal(source.Snapshot.ActualDNSReceipt, &actual); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := dnsserver.QualityEvidenceFromDNSDecision(actual, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Snapshot.Observations = nil
+	bindPhysicalQualityEvidence(&source.Snapshot, answer)
+	source, err = edgequality.Capture(source.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := captureBusinessPublication(source, route, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidence businessPublicationEvidence
+	if err := json.Unmarshal(compiled.Evidence, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Evaluation.Input.NetworkSamples) != 1 || evidence.Evaluation.Input.NetworkSamples[0].ID != sample.ID {
+		t.Fatal("derived observation ID omitted the original passive TCP sample")
+	}
+}
+
 func TestBusinessPublicationReconstructsExactDNSAndServingPredecessor(t *testing.T) {
 	source, route := businessPublicationFixture(t)
 	compiled, err := captureBusinessPublication(source, route, source.Snapshot.CapturedAt)

@@ -83,17 +83,7 @@ func boundBusinessInput(source edgequality.Receipt, route platformconfig.Physica
 			input.Candidates = append(input.Candidates, candidate)
 		}
 	}
-	bound := map[string]bool{}
-	for _, observation := range snapshot.Observations {
-		if observation.ClientSource == "public_tcp_info" {
-			bound[observation.ID] = true
-		}
-	}
-	for _, sample := range snapshot.NetworkSamples {
-		if sample.Source == "public_front_tcp_info_v1" && bound[sample.ID] && slices.Contains(policy.CandidateEdgeIDs, sample.EdgeID) {
-			input.NetworkSamples = append(input.NetworkSamples, sample)
-		}
-	}
+	input.NetworkSamples = edgequality.BusinessSamplesFromBoundObservations(snapshot, policy.CandidateEdgeIDs)
 	if previous := answer.BusinessAllocation; previous != nil && previous.Policy.IntentID == policy.IntentID {
 		if !reflect.DeepEqual(previous.Policy, policy) {
 			return input, answer, errors.New("business intent changed without a new intent identity")

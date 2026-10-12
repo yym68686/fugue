@@ -85,6 +85,23 @@ type BusinessExplorationReceipt struct {
 	Digest   string                      `json:"digest"`
 }
 
+func BusinessSamplesFromBoundObservations(snapshot Snapshot, candidateIDs []string) []model.EdgeNetworkSample {
+	bound := map[string]string{}
+	for _, observation := range snapshot.Observations {
+		if observation.ClientSource == "public_tcp_info" {
+			bound[observation.ID] = observation.EdgeID
+		}
+	}
+	samples := []model.EdgeNetworkSample{}
+	for _, sample := range snapshot.NetworkSamples {
+		observationID := "network:" + sample.EdgeID + ":" + sample.ID
+		if sample.Source == "public_front_tcp_info_v1" && sample.EdgeID != "" && bound[observationID] == sample.EdgeID && slices.Contains(candidateIDs, sample.EdgeID) {
+			samples = append(samples, sample)
+		}
+	}
+	return samples
+}
+
 func CaptureBusinessExploration(input BusinessExplorationInput) (BusinessExplorationReceipt, error) {
 	if input.NetworkSamples == nil {
 		input.NetworkSamples = []model.EdgeNetworkSample{}

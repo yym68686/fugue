@@ -54,6 +54,38 @@ func priorBusinessState(t *testing.T, input BusinessExplorationInput) *BusinessE
 	return &decision.State
 }
 
+func TestBusinessSampleBindingUsesCompositeObservationIdentity(t *testing.T) {
+	input := businessInputFixture()
+	sample := input.NetworkSamples[0]
+	for _, scenario := range []string{"bound", "raw_id", "other_edge", "other_source", "missing", "not_candidate"} {
+		t.Run(scenario, func(t *testing.T) {
+			observation := Observation{ID: "network:" + sample.EdgeID + ":" + sample.ID, EdgeID: sample.EdgeID, ClientSource: "public_tcp_info"}
+			snapshot := Snapshot{NetworkSamples: []model.EdgeNetworkSample{sample}, Observations: []Observation{observation}}
+			candidates := input.Policy.CandidateEdgeIDs
+			switch scenario {
+			case "raw_id":
+				snapshot.Observations[0].ID = sample.ID
+			case "other_edge":
+				snapshot.Observations[0].EdgeID = "edge-other"
+			case "other_source":
+				snapshot.NetworkSamples[0].Source = "service_endpoint_tcp_info_v1"
+			case "missing":
+				snapshot.Observations = nil
+			case "not_candidate":
+				candidates = []string{"edge-other"}
+			}
+			bound := BusinessSamplesFromBoundObservations(snapshot, candidates)
+			if scenario == "bound" {
+				if len(bound) != 1 || !reflect.DeepEqual(bound[0], sample) {
+					t.Fatal("bound raw business sample was lost or changed")
+				}
+			} else if len(bound) != 0 {
+				t.Fatal("unbound or unrelated sample admitted", scenario)
+			}
+		})
+	}
+}
+
 func TestBusinessObserveHasFixedBudgetAndDeterministicReplay(t *testing.T) {
 	input := businessInputFixture()
 	receipt, err := CaptureBusinessExploration(input)
