@@ -853,3 +853,31 @@ func TestRolloutIntentForManagedOperationRejectsRuntimeMigrationWithConfigDrift(
 		t.Fatalf("runtime migration with config drift must fail closed, got %q", got)
 	}
 }
+
+func TestMixedOnlineUpdateIgnoresRightSizingPolicy(t *testing.T) {
+	current := model.App{ID: "app_test", TenantID: "tenant_test", Status: model.AppStatus{CurrentReplicas: 1}, Spec: model.AppSpec{Image: "registry.example/app:v1", Ports: []int{8080}, Replicas: 1, RuntimeID: "runtime_test", Resources: &model.ResourceSpec{MemoryMebibytes: 128}, RightSizing: &model.AppRightSizingSpec{Mode: model.AppRightSizingModeAuto}}}
+	for _, scenario := range []string{"mixed", "runtime", "ports", "storage"} {
+		t.Run(scenario, func(t *testing.T) {
+			desired := current
+			desired.Spec.Image = "registry.example/app:v2"
+			desired.Spec.RestartToken = "next"
+			desired.Spec.Resources = &model.ResourceSpec{MemoryMebibytes: 512}
+			desired.Spec.RightSizing = &model.AppRightSizingSpec{Mode: model.AppRightSizingModeRecommend}
+			switch scenario {
+			case "runtime":
+				desired.Spec.RuntimeID = "other"
+			case "ports":
+				desired.Spec.Ports = []int{9090}
+			case "storage":
+				desired.Spec.PersistentStorage = &model.AppPersistentStorageSpec{Mode: model.AppPersistentStorageModeMovableRWO}
+			}
+			want := ""
+			if scenario == "mixed" {
+				want = model.AppRolloutIntentOnlineRestart
+			}
+			if got := rolloutIntentForManagedDesiredState(current, desired); got != want {
+				t.Fatalf("intent=%q want=%q", got, want)
+			}
+		})
+	}
+}

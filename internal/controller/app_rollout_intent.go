@@ -431,6 +431,9 @@ func comparableZeroDowntimeRestartSpec(spec model.AppSpec) model.AppSpec {
 	normalized.GeneratedEnv = nil
 	normalized.SSH = nil
 	normalized.Resources = nil
+	// Right-sizing policy does not change the workload topology. It must not
+	// invalidate an online plan when image and resources converge together.
+	normalized.RightSizing = nil
 	normalized.WorkloadClass = ""
 	normalized.Continuity = nil
 	normalized.TerminationGracePeriodSeconds = 0
