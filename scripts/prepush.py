@@ -474,7 +474,7 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
-    for script in ("reconcile_managed_ssh_keys", "reconcile_managed_ssh_runtime", "verify_managed_ssh_image", "verify_ssh_front_image", "stage_managed_ssh_fronts", "observe_managed_ssh_front", "select_managed_ssh_transport", "run_ssh_identity_maintenance"):
+    for script in ("reconcile_managed_ssh_keys", "reconcile_managed_ssh_runtime", "verify_managed_ssh_image", "verify_ssh_front_image", "stage_managed_ssh_fronts", "reconcile_fixed_node_retention", "observe_managed_ssh_front", "select_managed_ssh_transport", "run_ssh_identity_maintenance"):
         if any(name in {f"scripts/{script}.py", f"scripts/test_{script}.py"} for name in paths):
             non_go_tasks[script.replace("_", "-")+"-tests"] = ["python3", "-m", "unittest", f"scripts.test_{script}"]
     if any(name in {"scripts/observe_worker_standby.py", "scripts/test_observe_worker_standby.py", "scripts/observe_front_candidate.py"} or name.startswith("deploy/environments/production/worker-standby-observation/") for name in paths):

@@ -1,0 +1,20 @@
+{
+  "schema": "fugue.fixed-node-retention/v1",
+  "generation": 1,
+  "expected_previous_digest": "",
+  "namespace": "fugue-system",
+  "state_configmap": "fugue-fixed-node-retention",
+  "owner_manager": "fugue-ssh-front-stage",
+  "pod_selector": {
+    "app.kubernetes.io/component": "fugue-ssh-front",
+    "app.kubernetes.io/managed-by": "fugue-ssh-front-stage"
+  },
+  "nodes": [
+    {
+      "id": "bwg",
+      "uid": "275836a4-5739-4cf7-a051-4b9be9bce79f",
+      "reason": "quota_exhausted",
+      "expected_recovery_date": "2026-10-18"
+    }
+  ]
+}

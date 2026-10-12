@@ -40,6 +40,10 @@ class SSHFrontStageTest(unittest.TestCase):
         self.assertFalse(pod['hostNetwork'])
         self.assertFalse(pod['automountServiceAccountToken'])
         self.assertEqual(pod['nodeName'],'worker-a')
+        for key in ['node.kubernetes.io/not-ready', 'node.kubernetes.io/unreachable']:
+            matching = [entry for entry in pod['tolerations'] if entry.get('key') == key and entry.get('effect') == 'NoExecute']
+            self.assertEqual(len(matching), 1)
+            self.assertNotIn('tolerationSeconds', matching[0])
         self.assertTrue(pod['containers'][0]['securityContext']['readOnlyRootFilesystem'])
         self.assertFalse(any('hostPort' in port for port in pod['containers'][0]['ports']))
         self.assertEqual(pod['volumes'][0]['hostPath']['path'],config['cacheHostRoot']+'/'+deployment['metadata']['name'])
@@ -61,6 +65,15 @@ class SSHFrontStageTest(unittest.TestCase):
         self.assertEqual(pod['volumes'][1]['hostPath'],{'path':'/etc/fugue/edge-node.env','type':'File'})
         self.assertTrue(pod['containers'][0]['volumeMounts'][1]['readOnly'])
         self.assertFalse(any(value['name']=='FUGUE_EDGE_TOKEN' for value in pod['containers'][0]['env']))
+
+    def test_reobserving_old_stage_does_not_restart_existing_fronts(self):
+        config,receipt,state,writes,kube=self.fixture()
+        stage.reconcile(config,receipt,kube)
+        identity=('deployment',config['namespace'],stage.slot_name(config,config['nodes'][0]))
+        legacy=[{'operator':'Exists','effect':'NoSchedule'}]
+        state[identity]['spec']['template']['spec']['tolerations']=legacy
+        stage.reconcile(config,receipt,kube)
+        self.assertEqual(state[identity]['spec']['template']['spec']['tolerations'],legacy)
 
     def test_foreign_candidate_and_missing_predecessor_fail_before_writes(self):
         config,receipt,state,writes,kube=self.fixture()

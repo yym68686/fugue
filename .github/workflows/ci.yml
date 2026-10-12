@@ -113,6 +113,56 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  fixed_node_retention:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-fixed-node-retention, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one fixed-node retention declaration
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          mapfile -t configs < <(git diff --name-only "$base" HEAD -- deploy/environments/production/fixed-node-retention)
+          if (( ${#configs[@]} == 0 )); then exit 0; fi
+          (( ${#configs[@]} == 1 )) || { echo 'one retention declaration per release required' >&2; exit 1; }
+          config="${configs[0]}"
+          [[ "$config" =~ ^deploy/environments/production/fixed-node-retention/[a-z0-9-]+\.json$ ]]
+          git fetch origin main
+          if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_fixed_node_retention.py scripts/test_reconcile_fixed_node_retention.py .github/workflows/ci.yml; then
+            python3 -m unittest scripts.test_reconcile_fixed_node_retention scripts.test_stage_managed_ssh_fronts
+            python3 -m scripts.reconcile_fixed_node_retention "$config" --evidence "$RUNNER_TEMP/fixed-node-retention-plan.json"
+            echo "config=$config" >> "$GITHUB_OUTPUT"
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-fixed-node-retention-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixed-node-retention-plan.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain inactive fixed-node instances without restarting containers
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          CONFIG: ${{ steps.selected.outputs.config }}
+        run: python3 -m scripts.reconcile_fixed_node_retention "$CONFIG" --apply --evidence "$RUNNER_TEMP/fixed-node-retention-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-fixed-node-retention-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixed-node-retention-result.json
+          if-no-files-found: warn
+          retention-days: 90
+
   managed_ssh_front_stage:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
@@ -134,7 +184,7 @@ jobs:
           if [[ ! -f "$config" ]]; then exit 0; fi
           base="$BASE_SHA"
           if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/stage_managed_ssh_fronts.py scripts/test_stage_managed_ssh_fronts.py; then
+          if ! git diff --quiet "$base" HEAD -- "$config"; then
             git fetch origin main
             if git diff --quiet HEAD origin/main -- "$config" scripts/stage_managed_ssh_fronts.py scripts/reconcile_managed_ssh_runtime.py .github/workflows/ci.yml; then
               python3 -m unittest scripts.test_stage_managed_ssh_fronts scripts.test_reconcile_managed_ssh_runtime

@@ -9,6 +9,7 @@ import urllib.parse
 
 from scripts.reconcile_agent_edge_trust import canonical, kubectl, strict_json
 from scripts.reconcile_managed_ssh_runtime import digest, exact_address, name, verify_artifact_run
+from scripts.reconcile_fixed_node_retention import retain_tolerations
 
 
 MANAGER='fugue-ssh-front-stage'
@@ -95,6 +96,7 @@ def objects(config,node):
         mounts.append({'name':'node-credential','mountPath':'/run/fugue/node.env','readOnly':True})
         env.append({'name':'FUGUE_EDGE_NODE_ENV_FILE','value':'/run/fugue/node.env'})
     deployment={'apiVersion':'apps/v1','kind':'Deployment','metadata':metadata,'spec':{'replicas':1,'revisionHistoryLimit':1,'selector':{'matchLabels':{'fugue.pro/ssh-front-slot':slot}},'strategy':{'type':'Recreate'},'template':{'metadata':{'labels':labels},'spec':{'nodeName':node['id'],'automountServiceAccountToken':False,'hostNetwork':False,'terminationGracePeriodSeconds':60,'securityContext':{'seccompProfile':{'type':'RuntimeDefault'}},'tolerations':[{'operator':'Exists','effect':'NoSchedule'}],'containers':[{'name':'ssh-front','image':config['image'],'imagePullPolicy':'IfNotPresent','env':env,'ports':[{'name':'health','containerPort':7836}],'readinessProbe':{'httpGet':{'path':'/readyz','port':'health'},'periodSeconds':5,'timeoutSeconds':2},'resources':{'requests':{'cpu':'10m','memory':'32Mi'},'limits':{'memory':'128Mi'}},'securityContext':{'runAsUser':0,'allowPrivilegeEscalation':False,'readOnlyRootFilesystem':True,'capabilities':{'drop':['ALL']}},'volumeMounts':mounts}],'volumes':volumes}}}}
+    deployment['spec']['template']['spec']['tolerations'] = retain_tolerations(deployment['spec']['template']['spec']['tolerations'])
     def selector(namespace,labels):
         return {'namespaceSelector':{'matchLabels':{'kubernetes.io/metadata.name':namespace}},'podSelector':{'matchLabels':labels}}
     policy={'apiVersion':'networking.k8s.io/v1','kind':'NetworkPolicy','metadata':metadata,'spec':{'podSelector':{'matchLabels':{'fugue.pro/ssh-front-slot':slot}},'policyTypes':['Ingress','Egress'],'ingress':[{'ports':[{'protocol':'TCP','port':config['portStart'],'endPort':config['portEnd']}]},{'from':[{'ipBlock':{'cidr':cidr}} for cidr in config['healthSourceCIDRs']],'ports':[{'protocol':'TCP','port':7836}]}],'egress':[{'to':[selector('kube-system',{'k8s-app':'kube-dns'})],'ports':[{'protocol':'UDP','port':53},{'protocol':'TCP','port':53}]},{'to':[selector(config['namespace'],{'app.kubernetes.io/component':'api','app.kubernetes.io/name':'fugue'})],'ports':[{'protocol':'TCP','port':8080}]},{'to':[selector(config['backendNamespace'],{'app.kubernetes.io/component':'managed-ssh'})],'ports':[{'protocol':'TCP','port':2222}]}]}}
@@ -146,6 +148,8 @@ def reconcile(config,receipt,kube=kubectl):
                 raise ValueError('foreign or changed front candidate')
             if desired['kind']=='Deployment' and (observed.get('spec',{}).get('template',{}).get('spec',{}).get('containers',[{}])[0].get('image')!=config['image'] or observed['spec']['template']['spec'].get('nodeName')!=desired['spec']['template']['spec']['nodeName']):
                 raise ValueError('immutable front executor differs')
+            if desired['kind']=='Deployment':
+                desired['spec']['template']['spec']['tolerations'] = observed['spec']['template']['spec'].get('tolerations', [])
             desired['metadata']=dict(metadata,resourceVersion=old['resourceVersion'])
     for desired in planned:
         kube(['apply','--server-side','--field-manager='+MANAGER,'-f','-'],desired)
