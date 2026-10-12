@@ -73,6 +73,12 @@ def pull_candidate_into_test_node(node, image, docker_metadata):
     return status["id"]
 
 
+def validate_native_acceptance(output):
+    required = [b"--- PASS: TestManagedSSHIsolatedKubernetes", b"native detached bootstrap and cross-session Unix socket verified"]
+    if any(marker not in output for marker in required):
+        raise ValueError("native SSH/SCP or detached Unix socket acceptance did not verify")
+
+
 def verify(image, source):
     if not re.fullmatch(r"[^\s]+@sha256:[a-f0-9]{64}", image) or not re.fullmatch(r"[a-f0-9]{40}", source):
         raise ValueError("digest-addressed image and exact source commit required")
@@ -129,8 +135,7 @@ def verify(image, source):
                 raise ValueError("candidate integration was skipped or did not verify")
             native_env = dict(os.environ, FUGUE_SSH_TEST_KUBECONFIG=str(kubeconfig), FUGUE_SSH_TEST_HELPER=str(helper))
             native = run(["go", "test", "./internal/sshkube", "-run", "^TestManagedSSHIsolatedKubernetes$", "-count=1", "-v"], timeout=180, env=native_env)
-            if b"--- PASS: TestManagedSSHIsolatedKubernetes" not in native or b"native detached bootstrap and cross-session Unix socket verified" not in native:
-                raise ValueError("native SSH/SCP acceptance did not verify")
+            validate_native_acceptance(native)
             return {"schema": "fugue.managed-ssh-image-receipt/v1", "image": image, "source_commit": source, "architecture": architecture, "helper_digest": helper_digest, "verified": True, "checks": ["candidate-publication", "pod-and-service-host-identity", "target-execution", "authorization-refresh", "graceful-retirement", "unchanged-workload", "native-ssh", "native-detached-bootstrap", "cross-session-unix-socket", "native-interactive-account-login", "native-scp", "pty", "sftp", "loopback-forward", "network-policy-allow-and-deny"], "network_policy_enforced": True, "network_policy_manifest_sha256": CALICO_MANIFEST_SHA256, "elapsed_seconds": round(time.time()-started, 2)}
         except Exception:
             for command in [["docker", "exec", node, "ctr", "-n", "k8s.io", "images", "list"], ["kubectl", "--kubeconfig", str(kubeconfig), "get", "pods", "-A", "-o", "wide"]]:

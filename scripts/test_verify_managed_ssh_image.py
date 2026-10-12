@@ -9,6 +9,13 @@ from scripts import verify_managed_ssh_image as artifact
 
 
 class ManagedSSHImageTest(unittest.TestCase):
+    def test_native_acceptance_requires_cross_session_background_service(self):
+        complete = b"--- PASS: TestManagedSSHIsolatedKubernetes\nnative detached bootstrap and cross-session Unix socket verified"
+        artifact.validate_native_acceptance(complete)
+        for incomplete in [b"", *complete.splitlines()]:
+            with self.assertRaises(ValueError):
+                artifact.validate_native_acceptance(incomplete)
+
     def test_timeout_cleans_descendants_holding_output_pipes(self):
         started=time.monotonic()
         child='import time; time.sleep(5)'
