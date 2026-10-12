@@ -2003,6 +2003,11 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Load the reviewed DNS verification toolchain
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
       - name: Validate and reconcile DNS network transport
         id: dns_transport
         env:
@@ -2015,7 +2020,7 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_dns_transport.py scripts/test_reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/test_recover_dns_transport.py; then
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_dns_transport.py scripts/test_reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/test_recover_dns_transport.py .github/workflows/ci.yml; then
             git fetch origin main
             if ! git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py cmd/fugue-dns-observation-verify internal/dnsserver .github/workflows/ci.yml; then
               echo "Newer DNS transport configuration supersedes this run."
