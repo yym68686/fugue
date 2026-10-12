@@ -175,3 +175,13 @@ attempt and completed samples without raw transport errors. The next declaration
 starts from the observed compensation generation four, targets serving generation
 five and reserves six for compensation. It does not run a stage mutation or
 change any other ingress. Exploration and automatic adjustment remain disabled.
+
+The corrected handoff `20fbe240`, CI `38301031823`, succeeded. Five independent
+hosted public/candidate equality observations at 20:06–20:07 UTC selected only
+the intended listener. The retained-socket proof and restricted-network checks
+passed. The same Service UID now serves generation five. Three exact drain
+observations at 20:08:03, 20:08:18 and 20:08:32 UTC each reported zero legacy
+connections, with both executor identities retained. A separate read confirmed
+zero connections on both US legacy Fronts. The worker declaration advances to
+208 using the unchanged observed `4c107203` predecessor; its prewrite connection,
+cohort, candidate, Guardian and signed-route checks are not bypassed.
