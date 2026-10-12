@@ -460,3 +460,15 @@ func TestAPIFromEnvDerivesBackupCoordinationLeaseForBootstrapRollout(t *testing.
 		t.Fatalf("unexpected derived backup coordination Lease namespace: %q", cfg.BackupCoordination.LeaseNamespace)
 	}
 }
+
+func TestControllerFromEnvLoadsArtifactVerificationKeys(t *testing.T) {
+	t.Setenv("FUGUE_BUNDLE_SIGNING_KEY", "current-key")
+	t.Setenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "current-id")
+	t.Setenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY", "previous-key")
+	t.Setenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID", "previous-id")
+	t.Setenv("FUGUE_BUNDLE_REVOKED_KEY_IDS", "revoked-id")
+	cfg := ControllerFromEnv()
+	if cfg.BundleSigningKey != "current-key" || cfg.BundleSigningKeyID != "current-id" || cfg.BundleSigningPreviousKey != "previous-key" || cfg.BundleSigningPreviousKeyID != "previous-id" || len(cfg.BundleRevokedKeyIDs) != 1 || cfg.BundleRevokedKeyIDs[0] != "revoked-id" {
+		t.Fatal("controller artifact verification key configuration incomplete")
+	}
+}

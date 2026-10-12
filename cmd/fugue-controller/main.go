@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/config"
 	"fugue/internal/controller"
 	"fugue/internal/kubeauth"
@@ -41,6 +42,7 @@ func main() {
 	cfg := config.ControllerFromEnv()
 	logger := log.Default()
 	store := store.New(cfg.StorePath, cfg.DatabaseURL)
+	store.ConfigurePlatformArtifactSigning(bundleauth.NewKeyring(cfg.BundleSigningKey, cfg.BundleSigningKeyID, cfg.BundleSigningPreviousKey, cfg.BundleSigningPreviousKeyID, cfg.BundleRevokedKeyIDs))
 	if err := store.Init(); err != nil {
 		logger.Fatalf("init store: %v", err)
 	}

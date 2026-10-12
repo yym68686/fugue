@@ -115,6 +115,11 @@ type ManagedPostgresInPlaceResizeConfig struct {
 }
 
 type ControllerConfig struct {
+	BundleSigningKey                           string
+	BundleSigningKeyID                         string
+	BundleSigningPreviousKey                   string
+	BundleSigningPreviousKeyID                 string
+	BundleRevokedKeyIDs                        []string
 	MetricsBindAddr                            string
 	StorePath                                  string
 	DatabaseURL                                string
@@ -492,6 +497,11 @@ func ObservabilityFromEnv() observability.Config {
 
 func ControllerFromEnv() ControllerConfig {
 	cfg := ControllerConfig{
+		BundleSigningKey:                           strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_KEY")),
+		BundleSigningKeyID:                         getenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "control-plane"),
+		BundleSigningPreviousKey:                   strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY")),
+		BundleSigningPreviousKeyID:                 strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
+		BundleRevokedKeyIDs:                        getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
 		MetricsBindAddr:                            strings.TrimSpace(os.Getenv("FUGUE_CONTROLLER_METRICS_BIND_ADDR")),
 		StorePath:                                  getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                                getenv("FUGUE_DATABASE_URL", ""),

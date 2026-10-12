@@ -1,0 +1,90 @@
+package store
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"fugue/internal/model"
+	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
+	"fugue/internal/platformsafety"
+)
+
+func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testing.T) {
+	for _, scenario := range []string{"verified", "unverified_full", "expired_lkg", "tampered_source", "wrong_identity", "still_in_dns", "missing_dns_plan", "cell_publication", "producer_mismatch"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newServingFixture(t, "")
+			source, err := f.s.GetPlatformArtifact(f.policy.DNSPolicyArtifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			holds := []platformproducer.OfflineEdge{{EdgeID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8", Reason: "maintenance", ExpectedRecoveryDate: "2020-01-01"}}
+			source.Content["offline_edges"] = holds
+			source.Content["generation"] = "offline-input"
+			source = savePhysicalDNSTestArtifact(t, f.s, source.ArtifactKind, source.ScopeKey, "offline-input", source.Content)
+			f.policy.Generation = "offline-producer"
+			f.policy.DNSPolicyArtifactID, f.policy.DNSPolicyDigest = source.ID, source.ContentHash
+			authority := savePhysicalDNSTestArtifact(t, f.s, model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, f.policy.Generation, f.policy)
+			ownerRelease := model.PlatformArtifactRelease{ID: "offline-authority", ArtifactID: authority.ID, ArtifactKind: authority.ArtifactKind, ScopeKey: authority.ScopeKey, Generation: authority.Generation, ReleaseChannel: "shadow", FencingToken: 2}
+			plan := platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{{EdgeID: "edge-b", Address: "9.9.9.9:443"}}, Records: []platformconfig.DNSReadinessRecord{{Hostname: "app.example.test", Targets: []platformconfig.DNSReadinessTarget{{EdgeID: "edge-b", Address: "9.9.9.9"}}}}}
+			if scenario == "still_in_dns" {
+				plan.Records[0].Targets[0].Address = "8.8.8.8"
+			}
+			if scenario == "missing_dns_plan" {
+				plan.Probes = nil
+			}
+			dns := savePhysicalDNSTestArtifact(t, f.s, model.PlatformArtifactKindDNSAnswerBundle, "global", "offline-dns", map[string]any{"readiness_plan": plan})
+			parent := model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindReleaseSet, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: "global"}, Generation: "offline-parent", CreatedByType: model.ActorTypeBootstrap, CreatedByID: platformproducer.Actor, Content: map[string]any{"artifact_ids": []any{dns.ID}, "artifact_kinds": []any{dns.ArtifactKind}}, Metadata: map[string]string{platformproducer.DNSPolicyIDMetadata: source.ID, platformproducer.DNSPolicyDigestMetadata: source.ContentHash, platformproducer.StaticIntentIDMetadata: f.base.ID, platformproducer.StaticIntentDigestMetadata: f.base.ContentHash, platformproducer.PolicyReleaseMetadata: ownerRelease.ID}}
+			if scenario == "cell_publication" {
+				parent.Content["publication_role"] = platformconfig.PublicationRoleCellRoutes
+			}
+			if scenario == "producer_mismatch" {
+				parent.Metadata[platformproducer.StaticIntentDigestMetadata] = "sha256:" + strings.Repeat("e", 64)
+			}
+			parent, err = f.s.CreatePlatformArtifact(parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent, err = f.s.ValidatePlatformArtifact(parent.ID, []model.PlatformArtifactValidationResult{{Name: "fixture", Pass: true}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			full := model.PlatformArtifactRelease{ID: "offline-full", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, Scope: parent.Scope, ScopeKey: parent.ScopeKey, Generation: parent.Generation, ReleaseChannel: "full", Status: model.PlatformArtifactReleaseStatusActive, FencingToken: 1, VerificationState: model.PlatformArtifactVerificationStateVerified, ReleasedAt: now}
+			if scenario == "unverified_full" {
+				full.VerificationState = "pending"
+			}
+			expires := now.Add(time.Hour)
+			if scenario == "expired_lkg" {
+				expires = now.Add(-time.Hour)
+			}
+			lkg, err := platformsafety.SignPlatformLKGSnapshot(model.PlatformLKGSnapshot{ID: "offline-lkg", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, Scope: parent.Scope, ScopeKey: parent.ScopeKey, SchemaVersion: parent.SchemaVersion, Generation: parent.Generation, GenerationSequence: parent.GenerationSequence, ContentHash: parent.ContentHash, ArtifactProvenance: parent.Provenance, VerifiedByReleaseID: full.ID, VerificationEvidenceHash: "sha256:" + strings.Repeat("a", 64), ExpiresAt: expires, CreatedAt: now, UpdatedAt: now}, f.s.platformArtifactSigningKeyring())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.s.withLockedState(true, func(state *model.State) error {
+				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, ownerRelease, full)
+				state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, lkg)
+				if scenario == "tampered_source" {
+					state.PlatformArtifacts[platformArtifactIndex(state.PlatformArtifacts, source.ID)].Provenance.Signature = "forged"
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			nodes := []model.EdgeNode{{ID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8"}, {ID: "edge-b", EdgeGroupID: "edge-group-a", PublicIPv4: "9.9.9.9"}}
+			if scenario == "wrong_identity" {
+				nodes[0].PublicIPv4 = "1.1.1.1"
+			}
+			selected, err := f.s.SelectSafeRolloutServingEdges(nodes)
+			if scenario == "verified" {
+				if err != nil || len(selected) != 1 || selected[0].ID != "edge-b" {
+					t.Fatalf("verified offline member retained: %+v %v", selected, err)
+				}
+			} else if err == nil {
+				t.Fatalf("unsafe exclusion accepted for %s: %+v", scenario, selected)
+			}
+		})
+	}
+}

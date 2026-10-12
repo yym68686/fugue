@@ -667,7 +667,7 @@ func (s *Service) edgeBundleObserverForSafeRollout() safeRolloutEdgeBundleObserv
 	if s != nil {
 		sleep = s.safeRolloutSleep
 	}
-	return storeSafeRolloutEdgeBundleObserver{Store: s.Store, Traffic: s.Store, Membership: s.Store, Sleep: sleep}
+	return storeSafeRolloutEdgeBundleObserver{Store: s.Store, Traffic: s.Store, Membership: s.Store, ServingEdges: s.Store, Sleep: sleep}
 }
 
 func (s *Service) recheckSafeRolloutCandidateBeforeRetire(ctx context.Context, op model.Operation, state *safeRolloutState, phase string) bool {

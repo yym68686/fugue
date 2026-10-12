@@ -356,3 +356,36 @@ func TestSafeRolloutMembershipUsesExplicitPolicyNotHeartbeatHistory(t *testing.T
 		})
 	}
 }
+
+type rolloutServingEdgesFixture struct{ exclude string }
+
+func (f *rolloutServingEdgesFixture) SelectSafeRolloutServingEdges(nodes []model.EdgeNode) ([]model.EdgeNode, error) {
+	out := []model.EdgeNode{}
+	for _, node := range nodes {
+		if node.ID != f.exclude {
+			out = append(out, node)
+		}
+	}
+	return out, nil
+}
+
+func TestSafeRolloutMembershipFollowsServingOfflineIntent(t *testing.T) {
+	now := time.Now().UTC()
+	o, a, r, node, _ := appTrafficObserverFixture(t, now)
+	old := node
+	old.ID = "offline-edge"
+	old.LastHeartbeatAt = nil
+	o.Store = staticEdgeNodeLister{nodes: []model.EdgeNode{node, old}}
+	o.Membership = &rolloutMembershipFixture{machines: []model.Machine{{ClusterNodeName: node.ID, Policy: model.MachinePolicy{AllowEdge: true}}, {ClusterNodeName: old.ID, Policy: model.MachinePolicy{AllowEdge: true}}}}
+	serving := &rolloutServingEdgesFixture{exclude: old.ID}
+	o.ServingEdges = serving
+	got, err := o.observe(context.Background(), a, r, 20, now.Add(-time.Minute))
+	if err != nil || !got.Ready || got.RequiredNodes != 1 {
+		t.Fatalf("verified offline intent ignored: %+v %v", got, err)
+	}
+	serving.exclude = ""
+	got, err = o.observe(context.Background(), a, r, 20, now.Add(-time.Minute))
+	if err != nil || got.Ready || got.RequiredNodes != 2 {
+		t.Fatalf("removed hold did not restore required proof: %+v %v", got, err)
+	}
+}

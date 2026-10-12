@@ -59,13 +59,16 @@ type safeRolloutDrainMetrics struct {
 }
 
 type storeSafeRolloutEdgeBundleObserver struct {
-	Store      edgeNodeLister
-	Timeout    time.Duration
-	Interval   time.Duration
-	Sleep      func(context.Context, time.Duration) error
-	Now        func() time.Time
-	Traffic    safeRolloutTrafficStore
-	Probe      safeRolloutRouteProbe
+	Store        edgeNodeLister
+	Timeout      time.Duration
+	Interval     time.Duration
+	Sleep        func(context.Context, time.Duration) error
+	Now          func() time.Time
+	Traffic      safeRolloutTrafficStore
+	Probe        safeRolloutRouteProbe
+	ServingEdges interface {
+		SelectSafeRolloutServingEdges([]model.EdgeNode) ([]model.EdgeNode, error)
+	}
 	Membership safeRolloutEdgeMembership
 }
 
@@ -108,6 +111,9 @@ func (o storeSafeRolloutEdgeBundleObserver) requiredNodes() ([]model.EdgeNode, e
 		if enabled && !present[id] {
 			return nil, fmt.Errorf("declared Edge %s is missing from inventory", id)
 		}
+	}
+	if o.ServingEdges != nil {
+		return o.ServingEdges.SelectSafeRolloutServingEdges(out)
 	}
 	return out, nil
 }
