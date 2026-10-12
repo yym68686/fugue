@@ -280,7 +280,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	bridge.payload = p
 	facts := sourceFacts
 	if p.routeSources == nil {
-		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.bind(a, s.Logger))
+		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.bind(a, s.Logger, s.Config.CachePath))
 	}
 	// Keep the original observations for the retained release. Candidate
 	// assignment filtering below must not erase a valid old-release proof.
@@ -416,7 +416,7 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	return status.ReadyRecords == status.Records
 }
 func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact) (*dnsServingState, error) {
-	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.bind(old.record.Candidate.Assignment, s.Logger))
+	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath))
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe
 	// has a transient transport failure. Keep only proofs that are still valid;

@@ -77,6 +77,22 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 
 func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	servingErr := s.SyncPlatformDNSServingOnce(ctx)
+	if servingErr != nil && ctx.Err() == nil && s.Config.CachePath != "" {
+		message := servingErr.Error()
+		for _, secret := range []string{s.Config.EdgeToken, s.Config.BundleSigningKey, s.Config.BundleSigningPreviousKey} {
+			if secret != "" {
+				message = strings.ReplaceAll(message, secret, "<redacted>")
+			}
+		}
+		if len(message) > 1024 {
+			message = message[:1024]
+		}
+		report, err := json.Marshal(map[string]any{"observed_at": time.Now().UTC(), "node_id": s.Config.DNSNodeID, "error": message, "publication": s.decisionPublication.Load()})
+		if err == nil {
+			diagnostics := dnsReadinessScheduler{path: s.Config.CachePath + ".consumer-observations.json", logger: s.Logger}
+			diagnostics.saveObservation(report)
+		}
+	}
 	// A newly enrolled shadow reader has no serving publication by design.
 	// Only the absence of both an assignment and retained state permits this
 	// path; serving failures must still preserve and report the current LKG.

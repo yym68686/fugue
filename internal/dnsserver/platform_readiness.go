@@ -88,7 +88,7 @@ func (s *Service) observePlatformDNSReadiness(ctx context.Context, c dnsPlatform
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("DNS readiness facts cache unavailable")
 	}
-	facts := collectDNSReadinessFacts(ctx, payload.Plan, payload.Policy.DNSReadiness, routeprobe.Probe, s.candidateDNSProbes.bind(a, s.Logger))
+	facts := collectDNSReadinessFacts(ctx, payload.Plan, payload.Policy.DNSReadiness, routeprobe.Probe, s.candidateDNSProbes.bind(a, s.Logger, s.Config.CachePath))
 	checkedAt := time.Now().UTC()
 	receipt.Facts = facts
 	receipt.Status = summarizeDNSReadiness(payload.Plan, payload.Policy.DNSReadiness, facts, planDigest, checkedAt, checkedAt)

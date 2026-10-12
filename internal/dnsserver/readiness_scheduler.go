@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"os"
 	"sort"
 	"sync"
 	"time"
 
+	"fugue/internal/lkgcache"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/routeprobe"
@@ -27,21 +29,28 @@ type dnsReadinessScheduler struct {
 	attempts map[string]time.Time
 	targets  map[string]dnsProbeTargetState
 	logger   *log.Logger
+	path     string
 }
 
-func (scheduler *dnsReadinessScheduler) bind(assignment model.PlatformConsumerAssignment, logger *log.Logger) *dnsReadinessScheduler {
+func (scheduler *dnsReadinessScheduler) bind(assignment model.PlatformConsumerAssignment, logger *log.Logger, paths ...string) *dnsReadinessScheduler {
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
 	scheduler.scope, _ = platformconfig.Digest(assignment)
 	scheduler.logger = logger
+	if len(paths) == 1 && paths[0] != "" {
+		scheduler.path = paths[0] + ".probe-observations.json"
+	}
 	return scheduler
 }
 
 type dnsProbeTargetQueue struct {
-	address string
-	indices []int
-	next    int
-	active  int
+	address  string
+	indices  []int
+	next     int
+	active   int
+	started  int
+	outcomes map[string]int
+	duration time.Duration
 }
 
 type dnsProbeResult struct {
@@ -87,17 +96,23 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 		sort.SliceStable(indices, func(left, right int) bool {
 			return scheduler.attempts[plan.Probes[indices[left]].ID].Before(scheduler.attempts[plan.Probes[indices[right]].ID])
 		})
-		queues = append(queues, dnsProbeTargetQueue{address: address, indices: indices})
+		queues = append(queues, dnsProbeTargetQueue{address: address, indices: indices, outcomes: map[string]int{}})
 	}
 	if len(queues) == 0 || policy.MaxConcurrency <= 0 {
 		return facts
 	}
 	concurrency := min(policy.MaxConcurrency, len(plan.Probes))
-	perTarget := max(1, (concurrency+len(queues)-1)/len(queues))
 	results := make(chan dnsProbeResult, concurrency)
 	active, attempted := 0, 0
 	for {
 		for active < concurrency && ctx.Err() == nil {
+			eligible := 0
+			for _, queue := range queues {
+				if queue.next < len(queue.indices) && !scheduler.targets[queue.address].retryAt.After(time.Now()) {
+					eligible++
+				}
+			}
+			perTarget := max(1, (concurrency+max(1, eligible)-1)/max(1, eligible))
 			selected := -1
 			for offset := 0; offset < len(queues); offset++ {
 				target := (scheduler.cursor + offset) % len(queues)
@@ -114,6 +129,7 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 			index := queue.indices[queue.next]
 			queue.next++
 			queue.active++
+			queue.started++
 			scheduler.cursor = (selected + 1) % len(queues)
 			scheduler.attempts[plan.Probes[index].ID] = time.Now().UTC()
 			active++
@@ -133,6 +149,12 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 		active--
 		queue := &queues[result.target]
 		queue.active--
+		queue.duration += result.finished.Sub(result.started)
+		outcome := result.fact.Reason
+		if result.fact.Ready {
+			outcome = "proof_observed"
+		}
+		queue.outcomes[outcome]++
 		facts[result.index] = result.fact
 		state := scheduler.targets[queue.address]
 		if result.connectionFailure && ctx.Err() == nil {
@@ -144,7 +166,7 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 		}
 		scheduler.targets[queue.address] = state
 	}
-	if scheduler.logger != nil {
+	if scheduler.logger != nil || scheduler.path != "" {
 		counts := map[string]int{}
 		for _, fact := range facts {
 			reason := fact.Reason
@@ -155,10 +177,39 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 		}
 		deadline, _ := ctx.Deadline()
 		planDigest, _ := platformconfig.Digest(plan)
-		report, err := json.Marshal(map[string]any{"event": "dns_readiness_sweep", "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "probes": len(facts), "targets": len(queues), "attempted": attempted, "unobserved": len(facts) - attempted, "outcomes": counts})
+		targets := make([]map[string]any, 0, min(32, len(queues)))
+		for _, queue := range queues[:min(32, len(queues))] {
+			targets = append(targets, map[string]any{"address": queue.address, "probes": len(queue.indices), "started": queue.started, "unobserved": len(queue.indices) - queue.started, "outcomes": queue.outcomes, "duration_ms": queue.duration.Milliseconds(), "retry_at": scheduler.targets[queue.address].retryAt})
+		}
+		report, err := json.Marshal(map[string]any{"event": "dns_readiness_sweep", "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "probes": len(facts), "targets": len(queues), "attempted": attempted, "unobserved": len(facts) - attempted, "outcomes": counts, "target_observations": targets, "targets_omitted": len(queues) - len(targets)})
 		if err == nil {
-			scheduler.logger.Print(string(report))
+			if scheduler.logger != nil {
+				scheduler.logger.Print(string(report))
+			}
+			if scheduler.path != "" {
+				scheduler.saveObservation(report)
+			}
 		}
 	}
 	return facts
+}
+
+func (scheduler *dnsReadinessScheduler) saveObservation(report json.RawMessage) {
+	var previous []json.RawMessage
+	if stat, err := os.Stat(scheduler.path); err == nil && stat.Size() <= 128<<10 {
+		if raw, err := os.ReadFile(scheduler.path); err == nil {
+			_ = json.Unmarshal(raw, &previous)
+		}
+	}
+	if len(previous) > 7 {
+		previous = previous[len(previous)-7:]
+	}
+	previous = append(previous, report)
+	raw, err := json.Marshal(previous)
+	if err == nil && len(raw) <= 128<<10 {
+		err = lkgcache.AtomicWriteFile(scheduler.path, raw, 0600)
+	}
+	if err != nil && scheduler.logger != nil {
+		scheduler.logger.Print("DNS probe observation persistence unavailable")
+	}
 }

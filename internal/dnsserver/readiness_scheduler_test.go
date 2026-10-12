@@ -2,8 +2,12 @@ package dnsserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -61,6 +65,67 @@ func TestDNSReadinessBlackholeDoesNotStarveHealthyRoutes(t *testing.T) {
 	}
 }
 
+func TestDNSReadinessReusesCapacityAfterAnotherTargetCompletes(t *testing.T) {
+	plan := &platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{{ID: "fast", Address: "192.0.2.1"}}}
+	for index := 0; index < 8; index++ {
+		plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{ID: fmt.Sprint(index), Address: "192.0.2.2"})
+	}
+	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 1, MaxConcurrency: 8}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	gate := make(chan struct{})
+	var entered atomic.Int32
+	collectDNSReadinessFacts(ctx, plan, policy, func(ctx context.Context, _, _, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
+		if address == "192.0.2.2" {
+			if entered.Add(1) == 8 {
+				close(gate)
+			}
+			select {
+			case <-ctx.Done():
+			case <-gate:
+			}
+		}
+		return routeprobe.Proof{}, errors.New("synthetic rejection")
+	})
+	if ctx.Err() != nil || entered.Load() != 8 {
+		t.Fatal("completed target kept capacity reserved", entered.Load())
+	}
+}
+
+func TestDNSReadinessRetainsBoundedNonSensitiveFailureObservations(t *testing.T) {
+	plan, policy := readinessTestPlan()
+	path := filepath.Join(t.TempDir(), "cache")
+	scheduler := (&dnsReadinessScheduler{}).bind(model.PlatformConsumerAssignment{FencingToken: 1}, nil, path)
+	probe := func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+		return routeprobe.Proof{}, errors.New("https://private.example.test private-token")
+	}
+	for cycle := 0; cycle < 10; cycle++ {
+		collectDNSReadinessFacts(context.Background(), &plan, &policy, probe, scheduler)
+	}
+	raw, err := os.ReadFile(path + ".probe-observations.json")
+	if err != nil || strings.Contains(string(raw), "private") {
+		t.Fatal("failure diagnostics missing or containing upstream details", err)
+	}
+	var observations []map[string]any
+	if json.Unmarshal(raw, &observations) != nil || len(observations) != 8 {
+		t.Fatal("failure history is not bounded")
+	}
+	stat, err := os.Stat(path + ".probe-observations.json")
+	if err != nil || stat.Mode().Perm() != 0600 {
+		t.Fatal("failure observation permissions are not private", err)
+	}
+	scheduler.path = path + "/unwritable/observation.json"
+	if err := os.WriteFile(path, []byte("block directory creation"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	facts := collectDNSReadinessFacts(context.Background(), &plan, &policy, probe, scheduler)
+	for _, fact := range facts {
+		if fact.Ready || fact.Reason != "probe_failed" {
+			t.Fatal("diagnostic persistence failure changed runtime facts", fact)
+		}
+	}
+}
+
 func TestDNSReadinessProgressSurvivesShortObservationWindows(t *testing.T) {
 	plan := &platformconfig.DNSReadinessPlan{}
 	for index := 0; index < 4; index++ {
@@ -102,8 +167,8 @@ func TestDNSReadinessBackoffIsConnectionScopedAndAssignmentBound(t *testing.T) {
 	}
 	collectDNSReadinessFacts(context.Background(), &plan, &policy, probe, scheduler.bind(assignment, nil))
 	first := unavailable.Load()
-	if first != 1 {
-		t.Fatal("failed physical target consumed repeated attempts", first)
+	if first < 1 || first > int32(policy.MaxConcurrency) {
+		t.Fatal("failed physical target exceeded bounded in-flight attempts", first)
 	}
 	facts := collectDNSReadinessFacts(context.Background(), &plan, &policy, probe, scheduler.bind(assignment, nil))
 	if unavailable.Load() != first || facts[2].Reason != "probe_failed" || facts[3].Reason != "probe_failed" {
@@ -111,7 +176,7 @@ func TestDNSReadinessBackoffIsConnectionScopedAndAssignmentBound(t *testing.T) {
 	}
 	assignment.FencingToken++
 	collectDNSReadinessFacts(context.Background(), &plan, &policy, probe, scheduler.bind(assignment, nil))
-	if unavailable.Load() != first+1 {
+	if unavailable.Load() <= first || unavailable.Load() > first+int32(policy.MaxConcurrency) {
 		t.Fatal("new assignment inherited old scheduling state")
 	}
 	scheduler.targets[plan.Probes[0].Address] = dnsProbeTargetState{retryAt: time.Now().Add(-time.Second), failures: 4}
