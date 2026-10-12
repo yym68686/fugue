@@ -16,6 +16,26 @@ def inventories():
 
 
 class FrontTransitionSelectionTests(unittest.TestCase):
+    def test_handoff_selects_fresh_readonly_witness_without_probe_mutation(self):
+        probes, staging, public = inventories()
+        current = declaration('handoff', 'deploy/environments/production/front-serving-handoff/next.json', 2)
+        self.assertEqual(transition.resolve(current, 'witness', probes, staging, lambda _: public), 'probe-a')
+        for phase in ['probe', 'stage']:
+            self.assertEqual(transition.resolve(current, phase, probes, staging, lambda _: public), '')
+        for phase, target in [('observe', ''), ('stage', 'front-a')]:
+            self.assertEqual(transition.resolve(declaration(phase, target, 2), 'witness', probes, staging, lambda _: public), '')
+        self.assertEqual(transition.resolve(declaration('probe', 'probe-a', 2), 'witness', probes, staging, lambda _: public), 'probe-a')
+
+    def test_handoff_witness_rejects_wrong_binding_and_does_not_mutate_inputs(self):
+        probes, staging, public = inventories()
+        current = declaration('handoff', 'deploy/environments/production/front-serving-handoff/next.json', 2)
+        before = copy.deepcopy((probes, staging, public))
+        for field, value in [('address', '9.9.9.9'), ('service', 'absent'), ('expectedGeneration', 2)]:
+            changed = dict(public, **{field: value})
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                transition.resolve(current, 'witness', probes, staging, lambda _: changed)
+        self.assertEqual((probes, staging, public), before)
+
     def test_initial_declaration_is_inert_and_only_one_phase_can_execute(self):
         baseline=declaration()
         transition.advance(None,baseline)

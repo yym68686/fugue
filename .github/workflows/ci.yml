@@ -1777,6 +1777,7 @@ jobs:
     outputs:
       selected: ${{ steps.transport.outputs.selected }}
       target: ${{ steps.transport.outputs.target }}
+      observation_target: ${{ steps.transport.outputs.observation_target }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
@@ -1801,6 +1802,10 @@ jobs:
               fi
               python3 -m unittest scripts.test_select_front_transport_transition
               target="$(python3 scripts/select_front_transport_transition.py "$config" --phase probe --previous "$previous")"
+              observation_target="$(python3 scripts/select_front_transport_transition.py "$config" --phase witness --previous "$previous")"
+              if [[ -n "$observation_target" ]]; then
+                echo "observation_target=$observation_target" >> "$GITHUB_OUTPUT"
+              fi
               if [[ -n "$target" ]]; then
                 echo "target=$target" >> "$GITHUB_OUTPUT"
                 echo 'selected=true' >> "$GITHUB_OUTPUT"
@@ -1822,12 +1827,12 @@ jobs:
         if: steps.transport.outputs.selected == 'true'
         run: python3 scripts/reconcile_front_probe_transport.py apply deploy/environments/production/front-probe-transport/listeners.json --listener "${{ steps.transport.outputs.target }}" --evidence "$RUNNER_TEMP/front-probe-transport.json"
       - name: Attribute held connections to the original and candidate Front
-        if: steps.transport.outputs.selected == 'true'
+        if: steps.transport.outputs.observation_target != ''
         run: |
           python3 -m unittest scripts.test_front_connection_witness scripts.test_read_front_conntrack scripts.test_observe_front_node_conntrack
-          python3 scripts/front_connection_witness.py deploy/environments/production/front-probe-transport/listeners.json --listener "${{ steps.transport.outputs.target }}" --evidence "$RUNNER_TEMP/front-held-connections.json"
+          python3 scripts/front_connection_witness.py deploy/environments/production/front-probe-transport/listeners.json --listener "${{ steps.transport.outputs.observation_target }}" --evidence "$RUNNER_TEMP/front-held-connections.json"
       - name: Retain held Front connection evidence
-        if: steps.transport.outputs.selected == 'true'
+        if: steps.transport.outputs.observation_target != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: fugue-front-held-connections-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1837,7 +1842,7 @@ jobs:
 
   front_external_observation:
     needs: [front_probe_transport]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_probe_transport.outputs.selected == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_probe_transport.outputs.observation_target != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {contents: read}
@@ -1846,7 +1851,7 @@ jobs:
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Verify Front ingress from outside the production cluster
         env:
-          PROBE_LISTENER: ${{ needs.front_probe_transport.outputs.target }}
+          PROBE_LISTENER: ${{ needs.front_probe_transport.outputs.observation_target }}
         run: |
           python3 -m unittest scripts.test_observe_front_public_probe
           python3 scripts/observe_front_public_probe.py deploy/environments/production/front-probe-transport/listeners.json --listener "$PROBE_LISTENER" --evidence "$RUNNER_TEMP/front-external-observation.json"
@@ -1871,13 +1876,13 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}'}
       - name: Verify public Fronts from actual restricted application networks
+        env:
+          PROBE_LISTENER: ${{ needs.front_probe_transport.outputs.observation_target }}
         run: |
           set -euo pipefail
           python3 -m unittest scripts.test_observe_front_restricted_egress
           mkdir -p "$RUNNER_TEMP/front-restricted-egress"
-          while IFS= read -r listener; do
-            python3 scripts/observe_front_restricted_egress.py deploy/environments/production/front-egress-observation/consumers.json --listener "$listener" --evidence "$RUNNER_TEMP/front-restricted-egress/$listener.json"
-          done < <(python3 -c 'import json; print("\n".join(x["name"] for x in json.load(open("deploy/environments/production/front-probe-transport/listeners.json"))["listeners"]))')
+          python3 scripts/observe_front_restricted_egress.py deploy/environments/production/front-egress-observation/consumers.json --listener "$PROBE_LISTENER" --evidence "$RUNNER_TEMP/front-restricted-egress/$PROBE_LISTENER.json"
       - name: Retain tenant-network acceptance before any public handoff
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

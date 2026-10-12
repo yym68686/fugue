@@ -37,6 +37,35 @@ func TestFrontObservationSelectsOnlyExplicitChangedProfiles(t *testing.T) {
 	}
 }
 
+func TestFrontHandoffCollectsSameRunWitnessWithoutProbeMutation(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	jobs := yamlMappingValue(t, document.Content[0], "jobs")
+	probe := yamlMappingValue(t, jobs, "front_probe_transport")
+	outputs := yamlMappingValue(t, probe, "outputs")
+	if !strings.Contains(yamlMappingValue(t, outputs, "observation_target").Value, "steps.transport.outputs.observation_target") {
+		t.Fatal("read-only handoff witness must be independent of probe mutation")
+	}
+	external := yamlMappingValue(t, jobs, "front_external_observation")
+	condition := yamlMappingValue(t, external, "if").Value
+	if !strings.Contains(condition, "outputs.observation_target != ''") || strings.Contains(condition, "outputs.selected == 'true'") {
+		t.Fatal("handoff cannot require a probe mutation to obtain fresh external evidence")
+	}
+	restricted, err := yaml.Marshal(yamlMappingValue(t, jobs, "front_restricted_egress_observation"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(restricted), `--listener "$PROBE_LISTENER"`) || strings.Contains(string(restricted), "while IFS=") {
+		t.Fatal("restricted egress observation must select the exact declared listener")
+	}
+}
+
 func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	entries, err := os.ReadDir("../../.github/workflows")
 	if err != nil {
@@ -466,8 +495,8 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatal("DNS transport must use the production declarative reconciler")
 	}
 	frontObservation := yamlMappingValue(t, jobs, "front_external_observation")
-	if !strings.Contains(yamlMappingValue(t, frontObservation, "if").Value, "needs.front_probe_transport.outputs.selected == 'true'") {
-		t.Fatal("external probe verification must bind to an actual transport operation")
+	if !strings.Contains(yamlMappingValue(t, frontObservation, "if").Value, "needs.front_probe_transport.outputs.observation_target != ''") {
+		t.Fatal("external probe verification must bind to the exact declared transition witness")
 	}
 	externalController := yamlMappingValue(t, jobs, "external_controller_release")
 	if yamlMappingValue(t, externalController, "environment").Value != "production" || yamlMappingValue(t, externalController, "needs").Value != "prepush" {

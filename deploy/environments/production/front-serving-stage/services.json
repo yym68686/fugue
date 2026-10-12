@@ -1,6 +1,6 @@
 {
   "schema": "fugue.front-serving-stage/v1",
-  "generation": 1,
+  "generation": 2,
   "namespace": "fugue-system",
   "services": [
     {
@@ -17,6 +17,11 @@
       "name": "fugue-front-serving-public-b-secondary",
       "observation": "deploy/environments/production/front-observation/public-b-secondary.json",
       "probeListener": "fugue-front-probe-public-b-secondary"
+    },
+    {
+      "name": "fugue-front-serving-us-managed",
+      "observation": "deploy/environments/production/front-observation/us-managed.json",
+      "probeListener": "fugue-front-probe-us-managed"
     }
   ]
 }

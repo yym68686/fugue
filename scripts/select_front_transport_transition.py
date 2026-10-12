@@ -45,11 +45,17 @@ def advance(previous, current):
 
 def resolve(config, requested_phase, probes, staging, load_handoff):
     validate(config)
+    witness = requested_phase == 'witness'
+    if witness:
+        if config['phase'] not in ['probe', 'handoff']:
+            return ''
+        requested_phase = config['phase']
     if requested_phase not in ['probe','stage','handoff']:
         raise ValueError('a known mutation phase is required')
     if config['phase'] != requested_phase:
         return ''
     target = config['target']
+    witness_target = target
     probes, staging = probe.validate(probes), stage.validate(staging)
     if probes['namespace'] != staging['namespace']:
         raise ValueError('Front declarations disagree on namespace')
@@ -65,17 +71,18 @@ def resolve(config, requested_phase, probes, staging, load_handoff):
             target_service=target
         service=probe.select_named(staging,'services',target_service)['services'][0]
         listener=probe.select_named(probes,'listeners',service['probeListener'])['listeners'][0]
+        witness_target = listener['name']
         if listener['observation'] != service['observation']:
             raise ValueError('Front stage and probe profiles differ')
         if requested_phase == 'handoff' and (listener['address'] != public['address'] or service['observation'] != public['observation']):
             raise ValueError('public address or profile differs from its observed candidate')
-    return target
+    return witness_target if witness else target
 
 
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('config')
-    parser.add_argument('--phase',required=True,choices=['probe','stage','handoff'])
+    parser.add_argument('--phase',required=True,choices=['probe','stage','handoff','witness'])
     parser.add_argument('--previous',required=True)
     args=parser.parse_args()
     current=json.loads(Path(args.config).read_text())

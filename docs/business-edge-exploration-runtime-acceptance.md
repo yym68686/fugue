@@ -115,3 +115,27 @@ The read-only observation lane now selects only added or modified explicit
 profiles, with the same current-main check and a 32-profile bound. Previously a
 single new profile ran every historical profile, including intentionally offline
 nodes. No mutation lane or health/quorum check is relaxed by this selection.
+
+The existing transport selector exposed another deterministic pipeline gap:
+`handoff` selects no `probe` mutation, but the same-run external witness job
+required `probe.selected=true`. Consequently a distinct handoff intent could
+never reach its required external evidence. A regression test reproduced the
+missing witness selection. The repair resolves a separate read-only witness
+target for `probe` or `handoff`, preserving exclusive mutation phases. Both
+external and restricted-network checks use only that explicitly bound listener;
+all current route, TLS, exact tuple, held socket and CAS checks remain mandatory.
+
+Germany handoff CI `38293798130` succeeded; both public Services now select their
+exact C Pod UIDs and all 24 public queries passed again. A five-minute recheck
+retained 58 samples with zero SERVFAIL increments and zero observation errors.
+An earlier local monitor failed before SSH authentication because its temporary
+ControlPath plus OpenSSH suffix exceeded the Unix socket bound; that failed
+collection is retained and is not counted as a healthy observation window.
+
+The independent Front bootstrap is `f96dc5e9`, CI `38294675745` attempt two. The
+first attempt stopped before writes on an API Server readiness observation;
+the same immutable job passed all original checks on retry. The actual Pod UID
+`4567c919-16a4-4040-be5d-b5f3578b68da` is Ready with zero restarts and image
+`sha256:7508005ba14e61cc90124b17634b77723b8e9dea380d3f271e95db2a22a5bc9d`.
+The next explicit transition only creates the isolated 15443 listener. It grants
+no public 80/443 handoff or business exploration authority.
