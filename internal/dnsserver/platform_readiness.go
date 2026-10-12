@@ -30,10 +30,11 @@ type DNSReadinessStatus struct {
 }
 
 type dnsReadinessFact struct {
-	ProbeID string           `json:"probe_id"`
-	Ready   bool             `json:"ready"`
-	Reason  string           `json:"reason,omitempty"`
-	Proof   routeprobe.Proof `json:"proof"`
+	ObservationID string           `json:"observation_id,omitempty"`
+	ProbeID       string           `json:"probe_id"`
+	Ready         bool             `json:"ready"`
+	Reason        string           `json:"reason,omitempty"`
+	Proof         routeprobe.Proof `json:"proof"`
 }
 
 type dnsReadinessReceipt struct {

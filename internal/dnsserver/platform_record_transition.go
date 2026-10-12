@@ -67,10 +67,10 @@ func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[st
 	if previous.payload.Plan == nil || next.payload.Plan == nil {
 		return nil
 	}
-	allowed := compatibleDNSReleaseProbes(&previous, &next)
+	allowed, records := dnsReleaseCompatibility(&previous, &next)
 	hosts := map[string]bool{}
 	for _, record := range previous.payload.Plan.Records {
-		complete := len(record.Targets) > 0
+		complete := records[record.Hostname] && len(record.Targets) > 0
 		for _, target := range record.Targets {
 			if len(target.ProbeIDs) == 0 {
 				complete = false

@@ -14,10 +14,28 @@ import (
 // selection rules must also agree. Scores are observations: retaining the old
 // score cannot introduce a new endpoint or prolong either artifact's authority.
 func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) map[string]bool {
+	probes, records := dnsReleaseCompatibility(old, bridge)
+	if old == nil || old.payload.Plan == nil {
+		return probes
+	}
+	for _, record := range old.payload.Plan.Records {
+		if records[record.Hostname] {
+			continue
+		}
+		for _, target := range record.Targets {
+			for _, identity := range target.ProbeIDs {
+				delete(probes, identity)
+			}
+		}
+	}
+	return probes
+}
+
+func dnsReleaseCompatibility(old *dnsServingState, bridge *dnsReleaseBridge) (map[string]bool, map[string]bool) {
 	if bridge == nil || old == nil || old.payload.Plan == nil || bridge.payload.Plan == nil ||
 		bridge.candidate.Release.ID == old.record.Candidate.Release.ID ||
 		!bridge.candidate.Release.ReleasedAt.After(old.record.Candidate.Release.ReleasedAt) {
-		return nil
+		return nil, nil
 	}
 	previous, next := old.payload, bridge.payload
 	oldRules, newRules := dnsBridgeRules(previous.Policy.DNSAnswerRules), dnsBridgeRules(next.Policy.DNSAnswerRules)
@@ -32,7 +50,7 @@ func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) 
 	previous.Policy.TrafficConstraints, next.Policy.TrafficConstraints = nil, nil
 	previous.Queries, next.Queries = nil, nil
 	if !reflect.DeepEqual(previous, next) {
-		return nil
+		return nil, nil
 	}
 	nextProbes := make(map[string]platformconfig.DNSReadinessProbe, len(newPlan.Probes))
 	for _, probe := range newPlan.Probes {
@@ -48,23 +66,17 @@ func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) 
 			allowed[probe.ID] = true
 		}
 	}
+	records := make(map[string]bool, len(oldPlan.Records))
 	for _, record := range oldPlan.Records {
 		if next, exists := nextRecords[record.Hostname]; exists && reflect.DeepEqual(record, next) &&
 			len(oldQueries[record.Hostname]) > 0 &&
 			reflect.DeepEqual(oldQueries[record.Hostname], newQueries[record.Hostname]) &&
 			reflect.DeepEqual(oldRules[record.Hostname], newRules[record.Hostname]) &&
 			reflect.DeepEqual(oldTraffic[record.Hostname], newTraffic[record.Hostname]) {
-			continue
-		}
-		// A probe shared by records cannot silently carry a changed record
-		// along with an unchanged one. Conservatively exclude that probe.
-		for _, target := range record.Targets {
-			for _, id := range target.ProbeIDs {
-				delete(allowed, id)
-			}
+			records[record.Hostname] = true
 		}
 	}
-	return allowed
+	return allowed, records
 }
 
 // Application rollout constraints authorize only that application's records.

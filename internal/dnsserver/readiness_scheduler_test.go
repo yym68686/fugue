@@ -189,3 +189,79 @@ func TestDNSReadinessBackoffIsConnectionScopedAndAssignmentBound(t *testing.T) {
 		t.Fatal("recovered connection did not resume independent route checks")
 	}
 }
+
+func TestDNSReadinessRefreshPrioritizesExpiryWithoutStarvingUnobservedOrAgedWork(t *testing.T) {
+	plan := &platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{
+		{ID: "comfortable", Hostname: "comfortable.example.test", Address: "192.0.2.1"},
+		{ID: "expiring", Hostname: "expiring.example.test", Address: "192.0.2.1"},
+		{ID: "waiting", Hostname: "waiting.example.test", Address: "192.0.2.1"},
+	}}
+	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, MaxConcurrency: 1}
+	for _, scenario := range []string{"expiry", "never observed", "aged"} {
+		t.Run(scenario, func(t *testing.T) {
+			scheduler := &dnsReadinessScheduler{}
+			scheduler.collect(context.Background(), plan, policy, func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+				return routeprobe.Proof{}, errors.New("synthetic rejection")
+			})
+			now := time.Now()
+			for _, requirement := range plan.Probes {
+				scheduler.attempts[requirement.ID] = now.Add(-time.Second)
+				scheduler.expires[requirement.ID] = now.Add(2 * time.Minute)
+			}
+			scheduler.expires["expiring"] = now.Add(5 * time.Second)
+			want := "expiring.example.test"
+			if scenario == "never observed" {
+				delete(scheduler.attempts, "waiting")
+				want = "waiting.example.test"
+			}
+			if scenario == "aged" {
+				scheduler.attempts["waiting"] = now.Add(-time.Minute)
+				want = "waiting.example.test"
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			first := ""
+			scheduler.collect(ctx, plan, policy, func(_ context.Context, hostname, _, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+				first = hostname
+				cancel()
+				return routeprobe.Proof{}, errors.New("synthetic rejection")
+			})
+			if first != want {
+				t.Fatal("expiry scheduling lost bounded fairness", scenario, first, want)
+			}
+		})
+	}
+}
+
+func TestDNSReadinessReportsBudgetExhaustionAndBindsEveryFactToSweep(t *testing.T) {
+	plan := &platformconfig.DNSReadinessPlan{}
+	for index := 0; index < 8; index++ {
+		plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{ID: fmt.Sprint(index), Address: fmt.Sprintf("192.0.2.%d", 1+index%2)})
+	}
+	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, MaxConcurrency: 2}
+	path := filepath.Join(t.TempDir(), "cache")
+	scheduler := (&dnsReadinessScheduler{}).bind(model.PlatformConsumerAssignment{FencingToken: 1}, nil, path)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	facts := scheduler.collect(ctx, plan, policy, func(ctx context.Context, _, _, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+		<-ctx.Done()
+		return routeprobe.Proof{}, ctx.Err()
+	})
+	raw, err := os.ReadFile(path + ".probe-observations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observations []struct {
+		ObservationID   string `json:"observation_id"`
+		BudgetExhausted bool   `json:"budget_exhausted"`
+		Unobserved      int    `json:"unobserved"`
+	}
+	if json.Unmarshal(raw, &observations) != nil || len(observations) != 1 || !observations[0].BudgetExhausted || observations[0].Unobserved != 6 || observations[0].ObservationID == "" {
+		t.Fatal("bounded exhaustion has no explicit causal observation", string(raw))
+	}
+	for _, fact := range facts {
+		if fact.Ready || fact.ObservationID != observations[0].ObservationID {
+			t.Fatal("diagnostic sweep fabricated readiness or lost fact association", fact)
+		}
+	}
+}

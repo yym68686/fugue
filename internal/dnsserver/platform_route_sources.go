@@ -153,11 +153,13 @@ func collectDNSRouteSourceFacts(ctx context.Context, plan *platformconfig.DNSRea
 	for _, requirement := range plan.Probes {
 		i := indices[dnsroutesource.ProbeKey(requirement)]
 		if physicalFacts[i].Reason == "not_observed" {
-			facts = append(facts, dnsReadinessFact{ProbeID: requirement.ID, Reason: "not_observed"})
+			facts = append(facts, dnsReadinessFact{ProbeID: requirement.ID, ObservationID: physicalFacts[i].ObservationID, Reason: "not_observed"})
 			continue
 		}
 		observed := results[i]
-		facts = append(facts, evaluateDNSReadinessFact(requirement, policy, observed.proof, observed.err, time.Now().UTC()))
+		fact := evaluateDNSReadinessFact(requirement, policy, observed.proof, observed.err, time.Now().UTC())
+		fact.ObservationID = physicalFacts[i].ObservationID
+		facts = append(facts, fact)
 	}
 	return facts
 }

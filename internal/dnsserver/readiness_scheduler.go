@@ -27,6 +27,7 @@ type dnsReadinessScheduler struct {
 	digest   string
 	cursor   int
 	attempts map[string]time.Time
+	expires  map[string]time.Time
 	targets  map[string]dnsProbeTargetState
 	logger   *log.Logger
 	path     string
@@ -77,12 +78,17 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 		scheduler.digest = digest
 		scheduler.cursor = 0
 		scheduler.attempts = map[string]time.Time{}
+		scheduler.expires = map[string]time.Time{}
 		scheduler.targets = map[string]dnsProbeTargetState{}
 	}
+	observationID, _ := platformconfig.Digest(struct {
+		Context string
+		Started time.Time
+	}{digest, started})
 	facts := make([]dnsReadinessFact, len(plan.Probes))
 	byAddress := map[string][]int{}
 	for index, requirement := range plan.Probes {
-		facts[index] = dnsReadinessFact{ProbeID: requirement.ID, Reason: "not_observed"}
+		facts[index] = dnsReadinessFact{ProbeID: requirement.ID, ObservationID: observationID, Reason: "not_observed"}
 		byAddress[requirement.Address] = append(byAddress[requirement.Address], index)
 	}
 	addresses := make([]string, 0, len(byAddress))
@@ -94,7 +100,28 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 	for _, address := range addresses {
 		indices := byAddress[address]
 		sort.SliceStable(indices, func(left, right int) bool {
-			return scheduler.attempts[plan.Probes[indices[left]].ID].Before(scheduler.attempts[plan.Probes[indices[right]].ID])
+			first, second := plan.Probes[indices[left]].ID, plan.Probes[indices[right]].ID
+			firstAttempt, secondAttempt := scheduler.attempts[first], scheduler.attempts[second]
+			interval := time.Duration(policy.ProbeIntervalSeconds) * time.Second
+			firstAged := firstAttempt.IsZero() || started.Sub(firstAttempt) >= 2*interval
+			secondAged := secondAttempt.IsZero() || started.Sub(secondAttempt) >= 2*interval
+			if firstAged != secondAged {
+				return firstAged
+			}
+			if firstAged {
+				return firstAttempt.Before(secondAttempt)
+			}
+			refresh := func(identity string, attempted time.Time) time.Time {
+				if expiry := scheduler.expires[identity]; !expiry.IsZero() {
+					return expiry.Add(-interval)
+				}
+				return attempted.Add(interval)
+			}
+			firstRefresh, secondRefresh := refresh(first, firstAttempt), refresh(second, secondAttempt)
+			if !firstRefresh.Equal(secondRefresh) {
+				return firstRefresh.Before(secondRefresh)
+			}
+			return firstAttempt.Before(secondAttempt)
 		})
 		queues = append(queues, dnsProbeTargetQueue{address: address, indices: indices, outcomes: map[string]int{}})
 	}
@@ -155,7 +182,13 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 			outcome = "proof_observed"
 		}
 		queue.outcomes[outcome]++
+		result.fact.ObservationID = observationID
 		facts[result.index] = result.fact
+		if result.fact.Ready {
+			scheduler.expires[result.fact.ProbeID] = result.fact.Proof.ValidUntil
+		} else {
+			delete(scheduler.expires, result.fact.ProbeID)
+		}
 		state := scheduler.targets[queue.address]
 		if result.connectionFailure && ctx.Err() == nil {
 			state.failures = min(state.failures+1, 6)
@@ -181,7 +214,7 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 		for _, queue := range queues[:min(32, len(queues))] {
 			targets = append(targets, map[string]any{"address": queue.address, "probes": len(queue.indices), "started": queue.started, "unobserved": len(queue.indices) - queue.started, "outcomes": queue.outcomes, "duration_ms": queue.duration.Milliseconds(), "retry_at": scheduler.targets[queue.address].retryAt})
 		}
-		report, err := json.Marshal(map[string]any{"event": "dns_readiness_sweep", "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "probes": len(facts), "targets": len(queues), "attempted": attempted, "unobserved": len(facts) - attempted, "outcomes": counts, "target_observations": targets, "targets_omitted": len(queues) - len(targets)})
+		report, err := json.Marshal(map[string]any{"event": "dns_readiness_sweep", "observation_id": observationID, "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "budget_exhausted": errors.Is(ctx.Err(), context.DeadlineExceeded), "probes": len(facts), "targets": len(queues), "attempted": attempted, "unobserved": len(facts) - attempted, "outcomes": counts, "target_observations": targets, "targets_omitted": len(queues) - len(targets)})
 		if err == nil {
 			if scheduler.logger != nil {
 				scheduler.logger.Print(string(report))

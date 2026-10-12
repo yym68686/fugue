@@ -144,6 +144,68 @@ func TestDNSRecordTransitionPreservesAuthorizationAndCompleteQuorum(t *testing.T
 	}
 }
 
+func TestDNSRecordTransitionIsolatesChangedAliasSharingRouteProofs(t *testing.T) {
+	view, plan, readiness, facts, now := queryExecutionFixture()
+	hostname := plan.Records[0].Hostname
+	alias := view.Records[0]
+	alias.Name = "alias.example.test"
+	view.Records = append(view.Records, alias)
+	aliasPlan := plan.Records[0]
+	aliasPlan.Hostname = alias.Name
+	plan.Records = append(plan.Records, aliasPlan)
+	previous := dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}, Policy: platformconfig.PolicySnapshot{
+		MaxStaleSeconds: 3600, DNSReadiness: &readiness,
+		DNSAuthorities:    []platformconfig.DNSAuthorityPolicy{{NodeID: view.NodeID, Zone: view.Zone, Nameservers: []string{"ns.example.test"}, TTLSeconds: 60}},
+		DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: view.NodeID}},
+		DNSAnswerRules: []platformconfig.DNSAnswerRule{
+			{NodeID: view.NodeID, Hostname: hostname, Type: "A", SelectionMode: model.DNSAnswerPolicyKindPhysicalOrder, PhysicalOrder: model.CloneDNSPhysicalOrder(alias.AnswerPolicy.PhysicalOrder)},
+			{NodeID: view.NodeID, Hostname: alias.Name, Type: "A", SelectionMode: model.DNSAnswerPolicyKindPhysicalOrder, PhysicalOrder: model.CloneDNSPhysicalOrder(alias.AnswerPolicy.PhysicalOrder)},
+		},
+	}}
+	raw := mustDNSJSON(t, previous)
+	var next dnsServingPayload
+	if err := json.Unmarshal(raw, &next); err != nil {
+		t.Fatal(err)
+	}
+	next.Policy.DNSAnswerRules[1].PhysicalOrder.OrderedEdgeIDs = []string{"edge-b", "edge-a"}
+	next.Queries[0].Records[len(view.Records)-1].AnswerPolicy.PhysicalOrder.OrderedEdgeIDs = []string{"edge-b", "edge-a"}
+	record := dnsServingCheckpoint{AppliedAt: now.Add(-time.Minute), Positive: true, Candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "previous", ReleasedAt: now.Add(-time.Minute)}}}
+	old := &dnsServingState{payload: previous, record: record}
+	bridge := &dnsReleaseBridge{payload: next, candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "next", ReleasedAt: now}}}
+	for _, allowed := range compatibleDNSReleaseProbes(old, bridge) {
+		if allowed {
+			t.Fatal("shared proof must not bypass the changed alias policy")
+		}
+	}
+	hosts := dnsTransitionRecords(old, bridge)
+	if !hosts[hostname] || hosts[alias.Name] {
+		t.Fatal("changed alias incorrectly disabled its unchanged shared-route sibling", hosts)
+	}
+	old, err := buildDNSServingState(record, previous, "route", view.NodeID, view.EdgeGroupID, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := buildDNSServingState(dnsServingCheckpoint{AppliedAt: record.AppliedAt}, next, "route", view.NodeID, view.EdgeGroupID, facts, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.transition = &dnsRecordTransition{state: transition, hosts: hosts}
+	for _, candidate := range []string{hostname, alias.Name} {
+		question := new(dns.Msg)
+		question.SetQuestion(dns.Fqdn(candidate), dns.TypeA)
+		answer := old.answer(question, "", now)
+		if (answer.Rcode == dns.RcodeSuccess) != (candidate == hostname) {
+			t.Fatal("per-record authorization was changed", candidate, answer)
+		}
+		if expired := old.answer(question, "", now.Add(time.Minute)); expired.Rcode != dns.RcodeServerFailure {
+			t.Fatal("transition extended original proof deadline")
+		}
+	}
+	if !reflect.DeepEqual(old.record, record) || transition.record.Positive || string(mustDNSJSON(t, previous)) != string(raw) {
+		t.Fatal("record transition modified original positive identity or promoted the candidate")
+	}
+}
+
 // Two hostnames move independently. The changed deployment is already serving
 // on its Edge while another hostname still reports the previous publication.
 // Neither whole DNS artifact is ready, although each hostname has a complete,
