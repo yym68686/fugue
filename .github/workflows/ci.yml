@@ -1740,7 +1740,10 @@ jobs:
             git fetch origin main
             if git diff --quiet HEAD origin/main -- "$config" scripts/observe_front_candidate.py; then
               python3 -m unittest scripts.test_observe_front_candidate
-              echo 'selected=true' >> "$GITHUB_OUTPUT"
+              git diff --name-only --diff-filter=AM "$base" HEAD -- "$config/*.json" > "$RUNNER_TEMP/front-observation-profiles.txt"
+              if [[ -s "$RUNNER_TEMP/front-observation-profiles.txt" ]]; then
+                echo 'selected=true' >> "$GITHUB_OUTPUT"
+              fi
             fi
           fi
       - name: Observe actual Front route and activation equivalence
@@ -1748,9 +1751,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/front-observations"
-          for config in deploy/environments/production/front-observation/*.json; do
+          count=0
+          while IFS= read -r config; do
+            [[ "$config" =~ ^deploy/environments/production/front-observation/[a-z0-9]+(-[a-z0-9]+)*\.json$ ]]
+            count=$((count + 1))
+            [[ "$count" -le 32 ]]
             python3 scripts/observe_front_candidate.py "$config" --evidence "$RUNNER_TEMP/front-observations/$(basename "$config")"
-          done
+          done < "$RUNNER_TEMP/front-observation-profiles.txt"
       - name: Retain independent Front observations
         if: steps.observation.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

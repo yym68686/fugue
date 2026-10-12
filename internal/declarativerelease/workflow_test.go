@@ -11,6 +11,32 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestFrontObservationSelectsOnlyExplicitChangedProfiles(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	jobs := yamlMappingValue(t, document.Content[0], "jobs")
+	job := yamlMappingValue(t, jobs, "front_observation")
+	encoded, err := yaml.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(encoded)
+	for _, required := range []string{"git diff --name-only --diff-filter=AM", "front-observation-profiles.txt", "while IFS= read -r config", `[[ "$count" -le 32 ]]`, "git diff --quiet HEAD origin/main"} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("Front observation lost bounded explicit selection: %s", required)
+		}
+	}
+	if strings.Contains(source, "for config in deploy/environments/production/front-observation/*.json") {
+		t.Fatal("unselected historical Front profiles must not block a new observation")
+	}
+}
+
 func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	entries, err := os.ReadDir("../../.github/workflows")
 	if err != nil {

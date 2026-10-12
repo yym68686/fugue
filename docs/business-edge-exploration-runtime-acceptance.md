@@ -98,3 +98,20 @@ evicted). The increment is therefore unattributed, not evidence for a particular
 route/probe cause or an exploration regression. The raw bounded timeline is
 retained; neither historical success nor current absence of failures closes that
 evidence gap. Germany C independently passed the signed complete verification.
+
+## Independent Front prerequisite
+
+The new `edge-client-front-us-managed` declaration stages a separate Pod-network
+executor on the explicitly identified admitted US node. It uses the existing
+read-only activation directory, no host ports, no API credential and no Cell
+membership label. It neither changes the public listener nor writes activation.
+The existing isolated probe, internal stage, fenced public handoff and retained
+socket proof must pass before a worker retry. Its network evidence uses the
+existing authenticated API fallback, which binds the selected public Service,
+exact Ready Pod, EndpointSlice and connection tuple; it does not take over the
+legacy Front's Unix socket. Old connections and old executors remain intact.
+
+The read-only observation lane now selects only added or modified explicit
+profiles, with the same current-main check and a 32-profile bound. Previously a
+single new profile ran every historical profile, including intentionally offline
+nodes. No mutation lane or health/quorum check is relaxed by this selection.
