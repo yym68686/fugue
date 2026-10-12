@@ -139,3 +139,12 @@ the same immutable job passed all original checks on retry. The actual Pod UID
 `sha256:7508005ba14e61cc90124b17634b77723b8e9dea380d3f271e95db2a22a5bc9d`.
 The next explicit transition only creates the isolated 15443 listener. It grants
 no public 80/443 handoff or business exploration authority.
+
+The isolated-probe run `38296485245` passed exact Front equivalence, held-socket
+attribution, five hosted-runner observations and 42 restricted-network checks.
+All evidence explicitly has `authorizes_traffic=false`. A subsequent read-only
+drain job failed at 19:24:44 UTC because it enumerated every historical handoff,
+although this run had performed no handoff. Its first error was an exact internal
+stage mismatch. The repair schedules drain observation only after this run's
+selected handoff and successful public verification, and reads only that target.
+The next transition stages the internal-only Service; no public address is added.

@@ -2056,40 +2056,34 @@ jobs:
         run: python3 scripts/handoff_front_serving_transport.py recover "${{ needs.front_serving_handoff.outputs.target }}" --evidence "$RUNNER_TEMP/front-handoff-recovery/front-public-handoff.json"
 
   front_drain_observation:
-    needs: [front_external_observation, front_public_verification]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_external_observation.result == 'success' && (needs.front_public_verification.result == 'success' || needs.front_public_verification.result == 'skipped') }}
+    needs: [front_serving_handoff, front_public_verification]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_serving_handoff.outputs.selected == 'true' && needs.front_public_verification.result == 'success' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-front-drain-observation, cancel-in-progress: false}
     timeout-minutes: 5
     permissions: {contents: read}
+    env:
+      HANDOFF_CONFIG: ${{ needs.front_serving_handoff.outputs.target }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current read-only Front drain observation
         id: observation
-        env:
-          BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          base="$BASE_SHA"
-          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
-            base="$(git rev-parse HEAD^)"
-          fi
-          if ! git diff --quiet "$base" HEAD -- scripts/observe_front_drain.py scripts/test_observe_front_drain.py scripts/stage_front_serving_transport.py scripts/observe_front_public_probe.py deploy/environments/production/front-serving-handoff; then
-            git fetch origin main
-            if git diff --quiet HEAD origin/main -- scripts/observe_front_drain.py scripts/stage_front_serving_transport.py scripts/handoff_front_serving_transport.py scripts/front_connection_witness.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-serving-handoff deploy/environments/production/front-observation; then
-              python3 -m unittest scripts.test_observe_front_drain
-              echo 'selected=true' >> "$GITHUB_OUTPUT"
-            fi
+          [[ "$HANDOFF_CONFIG" =~ ^deploy/environments/production/front-serving-handoff/[a-z0-9]+(-[a-z0-9]+)*\.json$ ]]
+          git fetch origin main
+          if git diff --quiet HEAD origin/main -- deploy/environments/production/front-transport-transition/intent.json "$HANDOFF_CONFIG" scripts/observe_front_drain.py scripts/stage_front_serving_transport.py scripts/handoff_front_serving_transport.py scripts/front_connection_witness.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-serving-stage deploy/environments/production/front-observation; then
+            python3 -m unittest scripts.test_observe_front_drain
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi
       - name: Observe exact public Front selection and retained connections
         if: steps.observation.outputs.selected == 'true'
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/front-drain-observations"
-          for config in deploy/environments/production/front-serving-handoff/*.json; do
-            python3 scripts/observe_front_drain.py "$config" --evidence "$RUNNER_TEMP/front-drain-observations/$(basename "$config")"
-          done
+          python3 scripts/observe_front_drain.py "$HANDOFF_CONFIG" --evidence "$RUNNER_TEMP/front-drain-observations/$(basename "$HANDOFF_CONFIG")"
       - name: Retain Front drain observation without deleting any executor
         if: steps.observation.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

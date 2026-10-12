@@ -64,6 +64,23 @@ func TestFrontHandoffCollectsSameRunWitnessWithoutProbeMutation(t *testing.T) {
 	if !strings.Contains(string(restricted), `--listener "$PROBE_LISTENER"`) || strings.Contains(string(restricted), "while IFS=") {
 		t.Fatal("restricted egress observation must select the exact declared listener")
 	}
+	drain := yamlMappingValue(t, jobs, "front_drain_observation")
+	if !strings.Contains(yamlMappingValue(t, yamlMappingValue(t, drain, "env"), "HANDOFF_CONFIG").Value, "needs.front_serving_handoff.outputs.target") {
+		t.Fatal("drain observation requires the exact verified handoff target")
+	}
+	drainCondition := yamlMappingValue(t, drain, "if").Value
+	for _, required := range []string{"needs.front_serving_handoff.outputs.selected == 'true'", "needs.front_public_verification.result == 'success'"} {
+		if !strings.Contains(drainCondition, required) {
+			t.Fatal("drain observation requires a verified handoff in this run")
+		}
+	}
+	drainSource, err := yaml.Marshal(drain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(drainCondition, "skipped") || strings.Contains(string(drainSource), "for config in") || !strings.Contains(string(drainSource), `scripts/observe_front_drain.py "$HANDOFF_CONFIG"`) {
+		t.Fatal("drain observation must not select historical or uncommitted public transports")
+	}
 }
 
 func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
