@@ -2110,6 +2110,30 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  dns_public_observation:
+    needs: [dns_transport, dns_port_retirement]
+    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}'}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version-file: go.mod}
+      - name: Observe authoritative UDP and TCP outside the cluster
+        run: |
+          set -euo pipefail
+          go test ./cmd/fugue-dns-observe
+          go run ./cmd/fugue-dns-observe deploy/environments/production/dns-observation/public.json > "$RUNNER_TEMP/dns-public-observation.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: fugue-dns-public-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-public-observation.json
+          if-no-files-found: warn
+          retention-days: 90
+
   dns_port_retirement:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
