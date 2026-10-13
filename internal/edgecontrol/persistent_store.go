@@ -1,7 +1,9 @@
 package edgecontrol
 
 import (
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +30,7 @@ const (
 	// Keep enough headroom for recovery while retaining the existing bounded
 	// compaction behavior.
 	maxPersistentGroupStateBytes          = 96 << 20
+	maxDecodedPersistentGroupStateBytes   = 256 << 20
 	targetPersistentGroupStateBytes       = 48 << 20
 	retainedGroupCandidateBundles         = 8
 	persistentGroupStateDigestPlaceholder = "sha256:" + "0000000000000000000000000000000000000000000000000000000000000000"
@@ -59,10 +63,13 @@ type persistentGroupState struct {
 type PersistentGroupStore struct {
 	root                     string
 	deferInventoryEpochWrite bool
+	compressStateWrites      bool
 	summaryMu                sync.RWMutex
 	summaries                map[string]persistentGroupSummary
 	stateMu                  sync.Mutex
 	validated                map[string]validatedGroupState
+	compressedGroups         map[string]bool
+	storageReports           map[string]time.Time
 }
 
 type validatedGroupState struct {
@@ -80,6 +87,7 @@ type persistentGroupSummary struct {
 // for a single producer until the preceding code can read per-producer epochs.
 type PersistentGroupStoreOptions struct {
 	DeferInventoryEpochWrite bool
+	CompressStateWrites      bool
 }
 
 func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
@@ -119,7 +127,7 @@ func OpenPersistentGroupStoreWithOptions(root string, options PersistentGroupSto
 			}
 		}
 	}
-	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState)}, nil
+	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, compressStateWrites: options.CompressStateWrites, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState), compressedGroups: map[string]bool{}, storageReports: map[string]time.Time{}}, nil
 }
 
 func (store *PersistentGroupStore) StoreGroupInventoryCAS(ctx context.Context, groupID string, expectedSequence uint64, snapshot GroupInventorySnapshot) error {
@@ -925,7 +933,11 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 	}
 	compactPersistentGroupState(&state)
 	state.Revision++
-	if err := compactPersistentGroupStateForSize(&state); err != nil {
+	limit := maxPersistentGroupStateBytes
+	if store.groupUsesCompression(groupID) {
+		limit = maxDecodedPersistentGroupStateBytes
+	}
+	if err := compactPersistentGroupStateForLimit(&state, limit); err != nil {
 		return err
 	}
 	if err := store.writeGroupState(statePath, state); err != nil {
@@ -1086,7 +1098,25 @@ func (store *PersistentGroupStore) readGroupStateSnapshot(path, groupID string, 
 		return persistentGroupState{}, err
 	}
 	hash.Reset()
-	decoder := json.NewDecoder(io.TeeReader(io.LimitReader(file, maxPersistentGroupStateBytes+1), hash))
+	encoded := bufio.NewReader(io.TeeReader(io.LimitReader(file, maxPersistentGroupStateBytes+1), hash))
+	magic, err := encoded.Peek(2)
+	if err != nil {
+		return persistentGroupState{}, errors.New("edge-control group state encoding is invalid")
+	}
+	compressed := magic[0] == 0x1f && magic[1] == 0x8b
+	var input io.Reader = encoded
+	limit := int64(maxPersistentGroupStateBytes)
+	if compressed {
+		reader, err := gzip.NewReader(encoded)
+		if err != nil {
+			return persistentGroupState{}, errors.New("edge-control compressed state header is invalid")
+		}
+		defer reader.Close()
+		reader.Multistream(false)
+		input, limit = reader, maxDecodedPersistentGroupStateBytes
+	}
+	bounded := &io.LimitedReader{R: input, N: limit + 1}
+	decoder := json.NewDecoder(bounded)
 	decoder.DisallowUnknownFields()
 	var state persistentGroupState
 	if err := decoder.Decode(&state); err != nil {
@@ -1095,12 +1125,21 @@ func (store *PersistentGroupStore) readGroupStateSnapshot(path, groupID string, 
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return persistentGroupState{}, errors.New("edge-control group state contains trailing data")
 	}
+	if bounded.N <= 0 {
+		return persistentGroupState{}, errors.New("edge-control decoded group state exceeds bound")
+	}
+	if _, err := encoded.Peek(1); !errors.Is(err, io.EOF) {
+		return persistentGroupState{}, errors.New("edge-control encoded group state contains trailing data")
+	}
 	if !bytes.Equal(hash.Sum(nil), fingerprint[:]) {
 		return persistentGroupState{}, errors.New("edge-control group state changed while decoding")
 	}
 	if err := validatePersistentGroupState(state, groupID); err != nil {
 		return persistentGroupState{}, err
 	}
+	store.stateMu.Lock()
+	store.compressedGroups[groupID] = compressed
+	store.stateMu.Unlock()
 	if mutable {
 		return state, nil
 	}
@@ -1160,6 +1199,10 @@ func compactPersistentGroupState(state *persistentGroupState) {
 // candidates while shrinking older recovery copies before the hard durable
 // state limit can reject a write.
 func compactPersistentGroupStateForSize(state *persistentGroupState) error {
+	return compactPersistentGroupStateForLimit(state, maxPersistentGroupStateBytes)
+}
+
+func compactPersistentGroupStateForLimit(state *persistentGroupState, limit int) error {
 	if state == nil {
 		return nil
 	}
@@ -1221,7 +1264,7 @@ func compactPersistentGroupStateForSize(state *persistentGroupState) error {
 			return err
 		}
 	}
-	if size > maxPersistentGroupStateBytes {
+	if size > limit {
 		return errors.New("edge-control group state exceeds durable size limit after compaction")
 	}
 	return nil
@@ -1240,6 +1283,25 @@ func (store *PersistentGroupStore) writeGroupState(path string, state persistent
 	data, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode edge-control group state: %w", err)
+	}
+	expandedBytes := len(data)
+	compressed := store.groupUsesCompression(state.GroupID)
+	if compressed {
+		if expandedBytes > maxDecodedPersistentGroupStateBytes {
+			return errors.New("edge-control decoded group state exceeds bound")
+		}
+		var encoded bytes.Buffer
+		writer, err := gzip.NewWriterLevel(&encoded, gzip.BestSpeed)
+		if err != nil {
+			return err
+		}
+		if _, err := writer.Write(data); err != nil {
+			return err
+		}
+		if err := writer.Close(); err != nil {
+			return err
+		}
+		data = encoded.Bytes()
 	}
 	if len(data) > maxPersistentGroupStateBytes {
 		return errors.New("edge-control group state exceeds durable size limit")
@@ -1280,7 +1342,26 @@ func (store *PersistentGroupStore) writeGroupState(path string, state persistent
 		return fmt.Errorf("close edge-control state directory: %w", err)
 	}
 	store.cacheValidatedGroupState(state.GroupID, sha256.Sum256(data), clonePersistentGroupState(state))
+	store.reportStorageUsage(state, compressed, len(data), expandedBytes)
 	return nil
+}
+
+func (store *PersistentGroupStore) groupUsesCompression(groupID string) bool {
+	store.stateMu.Lock()
+	defer store.stateMu.Unlock()
+	return store.compressStateWrites || store.compressedGroups[groupID]
+}
+
+func (store *PersistentGroupStore) reportStorageUsage(state persistentGroupState, compressed bool, encodedBytes, expandedBytes int) {
+	store.stateMu.Lock()
+	defer store.stateMu.Unlock()
+	changed := store.compressedGroups[state.GroupID] != compressed
+	store.compressedGroups[state.GroupID] = compressed
+	if !changed && time.Since(store.storageReports[state.GroupID]) < 5*time.Minute {
+		return
+	}
+	store.storageReports[state.GroupID] = time.Now()
+	log.Printf("edge-control group storage group=%s compressed=%t encoded_bytes=%d expanded_bytes=%d encoded_limit=%d expanded_limit=%d shadow_entries=%d authority_entries=%d", state.GroupID, compressed, encodedBytes, expandedBytes, maxPersistentGroupStateBytes, maxDecodedPersistentGroupStateBytes, len(state.Ledger), len(state.AuthorityLedger))
 }
 
 func validatePersistentGroupState(state persistentGroupState, groupID string) error {

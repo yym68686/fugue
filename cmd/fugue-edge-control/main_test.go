@@ -50,6 +50,7 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	root := t.TempDir()
 	values := map[string]string{
 		"FUGUE_EDGE_CONTROL_ENABLED":                          "true",
+		"FUGUE_EDGE_CONTROL_COMPRESS_STATE_WRITES":            "true",
 		"FUGUE_EDGE_CONTROL_DEFER_INVENTORY_EPOCH_WRITE":      "true",
 		"FUGUE_EDGE_CONTROL_AUTHORITY_RUNTIME_ENABLED":        "true",
 		"FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR":              filepath.Join(root, "state"),
@@ -76,7 +77,7 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.AuthorityRuntimeEnabled || !cfg.DeferInventoryEpochWrite || !cfg.CandidateStaging || cfg.CandidateIdentity.SourceSHA != strings.Repeat("1", 40) ||
+	if !cfg.AuthorityRuntimeEnabled || !cfg.DeferInventoryEpochWrite || !cfg.CompressStateWrites || !cfg.CandidateStaging || cfg.CandidateIdentity.SourceSHA != strings.Repeat("1", 40) ||
 		cfg.AuthorityStateDir != values["FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"] ||
 		cfg.AuthorityPollInterval != 30*time.Second || cfg.GroupBundleValidity != 30*time.Minute ||
 		!reflect.DeepEqual(cfg.AuthorityGroupIDs, []string{"edge-group-country-us"}) {
@@ -87,6 +88,11 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 		t.Fatal("invalid durable-format option accepted")
 	}
 	values["FUGUE_EDGE_CONTROL_DEFER_INVENTORY_EPOCH_WRITE"] = "true"
+	values["FUGUE_EDGE_CONTROL_COMPRESS_STATE_WRITES"] = "maybe"
+	if _, err := configFromEnv(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("invalid compression format option accepted")
+	}
+	values["FUGUE_EDGE_CONTROL_COMPRESS_STATE_WRITES"] = "true"
 	runtime, handler, err := buildAuthorityProcess(cfg)
 	if err != nil {
 		t.Fatal(err)
