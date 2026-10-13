@@ -22,12 +22,26 @@ def resolve_business_anchors(config, api, full, hostname):
         raise ValueError("anchor resolution requires one explicit business intent")
     route = routes[0]
     policy = route["business_exploration"]
-    for node_id, anchor in policy["initial_dns_publications"].items():
+    for anchor_index, (node_id, anchor) in enumerate(policy["initial_dns_publications"].items()):
         query = urllib.parse.urlencode({"scope": "global", "traffic_class": route["traffic_class"], "path_prefix": route["path_prefix"], "dns_node_id": node_id})
         result = api("GET", "/v1/edge/quality-shadow/" + urllib.parse.quote(hostname, safe="") + "?" + query)
         snapshot = result.get("snapshot", {})
-        if snapshot.get("hostname") != hostname or snapshot.get("traffic_class") != route["traffic_class"] or snapshot.get("path_prefix") != route["path_prefix"] or snapshot.get("policy") != route["policy"] or snapshot.get("blockers") or snapshot.get("service_receipts"):
-            raise ValueError("business anchor observation differs from explicit service context")
+        context_checks = {
+            "hostname": snapshot.get("hostname") == hostname,
+            "traffic_class": snapshot.get("traffic_class") == route["traffic_class"],
+            "path_prefix": snapshot.get("path_prefix") == route["path_prefix"],
+            "policy": snapshot.get("policy") == route["policy"],
+            "blockers": not snapshot.get("blockers"),
+            "service_receipts": not snapshot.get("service_receipts"),
+        }
+        mismatches = [field for field, matched in context_checks.items() if not matched]
+        if mismatches:
+            detail = []
+            if "blockers" in mismatches:
+                blockers = snapshot.get("blockers")
+                if isinstance(blockers, list):
+                    detail = [blocker if isinstance(blocker, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", blocker) else "unclassified" for blocker in blockers[:5]]
+            raise ValueError("business anchor observation differs from explicit service context: " + ",".join(mismatches) + "; anchor_index=" + str(anchor_index) + ("; blockers=" + ",".join(detail) if detail else ""))
         receipt = snapshot.get("actual_dns_receipt", {})
         if isinstance(receipt, str):
             receipt = json.loads(receipt)

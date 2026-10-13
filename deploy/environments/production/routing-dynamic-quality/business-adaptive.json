@@ -1,8 +1,8 @@
 {
   "schema": "fugue.dynamic-quality-reconfiguration/v1",
-  "generation": 3,
+  "generation": 4,
   "origin": "https://api.fugue.pro",
-  "producer_generation": "business-adaptive-20261013T120903Z-producer",
+  "producer_generation": "business-adaptive-20261013T130004Z-producer",
   "baseline_mode": "latest_verified_same_policy",
   "business_anchor_mode": "latest_verified_same_baseline",
   "precondition": {
@@ -6647,7 +6647,7 @@
             "cooldown_seconds": 900,
             "delivery_advantage_ratio": 0.2,
             "evidence_max_age_seconds": 600,
-            "expires_at": "2026-10-13T18:09:03Z",
+            "expires_at": "2026-10-13T19:00:04Z",
             "exploration_basis_points": 100,
             "initial_dns_publications": {
               "vps-591f4447": {
@@ -6661,7 +6661,7 @@
                 "fencing_token": 3466
               }
             },
-            "intent_id": "business-adaptive-20261013T120903Z",
+            "intent_id": "business-adaptive-20261013T130004Z",
             "maximum_candidate_basis_points": 1000,
             "maximum_delivery_regression_ratio": 0.1,
             "maximum_retransmission_increase": 0.01,
@@ -6672,7 +6672,7 @@
             "mode": "adaptive",
             "required_buckets": 3,
             "rtt_advantage_ratio": 0.15,
-            "starts_at": "2026-10-13T12:09:03Z",
+            "starts_at": "2026-10-13T13:00:04Z",
             "stop_retransmission_rate": 0.1,
             "stop_rtt_ms": 2000,
             "version": "business-edge-exploration-v1"
@@ -6719,7 +6719,7 @@
         "record_kind": "custom-domain-target"
       }
     ],
-    "generation": "business-adaptive-20261013T120903Z-policy",
+    "generation": "business-adaptive-20261013T130004Z-policy",
     "max_stale_seconds": 86400,
     "minimum_healthy_edges": 1,
     "offline_edges": [

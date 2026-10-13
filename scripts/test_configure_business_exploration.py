@@ -78,6 +78,16 @@ class BusinessExplorationConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     business.resolve_business_anchors(config, api, full, "app.example.test")
 
+    def test_binding_context_failure_names_only_safe_fields_and_blockers(self):
+        config, full, snapshots, api = self.anchor_fixture()
+        snapshot = snapshots["dns-b"]["snapshot"]
+        snapshot["blockers"] = ["actual_dns_receipt_not_retained", "Bearer secret-key"]
+        snapshot["path_prefix"] = "/different"
+        with self.assertRaisesRegex(ValueError, "path_prefix,blockers; anchor_index=1; blockers=actual_dns_receipt_not_retained,unclassified") as failure:
+            business.resolve_business_anchors(config, api, full, "app.example.test")
+        self.assertNotIn("secret-key", str(failure.exception))
+        self.assertNotIn("/different", str(failure.exception))
+
     def test_binding_mode_cannot_implicitly_enable_or_cross_operation(self):
         for field, value in [("business_anchor_mode", "automatic"), ("baseline_mode", "declared")]:
             config, _, _, _ = self.anchor_fixture()

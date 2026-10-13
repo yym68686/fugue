@@ -124,3 +124,25 @@ failure: stale BWG capability for `cell-public-b` edge-route compatibility.
 Because BWG is intentionally offline, the producer retained the previous
 release. This does not block the global i00.pro observe release and no BWG
 recovery or topology mutation was attempted.
+
+## Bounded adaptive transaction
+
+A separate `business_exploration` declaration retains the same two edges,
+per-DNS-node baselines, 1% candidate allocation, 10% absolute candidate cap,
+0.5 percentage-point maximum step, three consecutive complete five-minute
+windows, three independent connections per candidate and baseline per cohort,
+90% cohort coverage, advantage and regression thresholds, 15-minute cooldown,
+and a six-hour lease. Only the intent identity, adaptive mode and lease window
+change relative to the observed source policy; candidate health, proofs and
+exact renewed positive LKG remain prerequisites. Insufficient evidence remains
+at 1%; activating the mode alone does not claim a quality winner.
+
+The first configuration attempt at `249eac67` failed closed in CI
+`38399396286` at 12:47:28 UTC, before producer activation: the fresh business
+anchor observation did not match the explicit service context. A read-only
+local check before CI and another check afterwards both matched, so those
+checks cannot establish which field differed during the failed transaction.
+The CI diagnostic now reports only mismatched field names, a bounded anchor
+index and allowlisted blocker codes. Its sanitization test rejects untrusted
+blocker strings without printing their contents. No verification, signing,
+fencing or positive-LKG condition is weakened for the retry.
