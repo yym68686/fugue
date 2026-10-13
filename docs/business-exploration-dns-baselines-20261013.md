@@ -57,3 +57,19 @@ baselines and missing capability for each of route/TLS/DNS consumers.
 Frontend snapshot and generated types are synchronized. Typecheck still reports
 147 pre-existing errors; this change does not claim the frontend build passes.
 Neither controlled exploration nor adaptive mode has been activated yet.
+
+## Isolated verification prerequisite
+
+CI `38360741561`, job `115175417078`, failed at 07:13:26 UTC while creating
+the isolated SSH transport fixture. The API Server explicitly rejected both
+Pods because `transport-fixture/default` did not exist. The script submitted
+a new Namespace and its Pods together and relied on the namespace controller
+to create the default ServiceAccount asynchronously. No production SSH
+deployment was selected by this failure.
+
+The fixture now creates its own token-free ServiceAccount before its two
+Pods and explicitly binds both Pods to it. The regression check verifies
+creation order and account binding without depending on controller timing.
+Transport preservation and compensation assertions remain unchanged. The real
+isolated test still has to pass through normal CI; a unit test alone does not
+prove its network behavior.

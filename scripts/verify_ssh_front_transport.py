@@ -51,6 +51,19 @@ def echo_pod(name, namespace, node, host_network, port):
     return {'apiVersion':'v1','kind':'Pod','metadata':{'name':name,'namespace':namespace,'labels':{'fixture':name}},'spec':{'nodeName':node,'hostNetwork':host_network,'automountServiceAccountToken':False,'terminationGracePeriodSeconds':1,'containers':[{'name':'tcp','image':'alpine:3.22','imagePullPolicy':'IfNotPresent','command':['/bin/sh','-ec','printf %s "$1" >/tmp/fixture; chmod 700 /tmp/fixture; exec nc -lk -p '+str(port)+' -e /tmp/fixture','fixture',script],'resources':{'requests':{'cpu':'5m','memory':'8Mi'},'limits':{'memory':'32Mi'}}}]}}
 
 
+def fixture_resources(namespace, node, port):
+    account = 'transport-witness'
+    pods = [echo_pod('previous', namespace, node, True, port), echo_pod('candidate', namespace, node, False, port)]
+    for pod in pods:
+        pod['spec']['serviceAccountName'] = account
+    return [
+        {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': namespace}},
+        {'apiVersion': 'v1', 'kind': 'ServiceAccount', 'metadata': {'name': account, 'namespace': namespace}, 'automountServiceAccountToken': False},
+        *pods,
+        {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': 'entry', 'namespace': namespace}, 'spec': {'type': 'ClusterIP', 'selector': {'fixture': 'candidate'}, 'ports': [{'name': 'ssh', 'port': port, 'targetPort': port, 'protocol': 'TCP'}]}},
+    ]
+
+
 def verify():
     cluster = 'fugue-ssh-transport-'+uuid.uuid4().hex[:10]
     kind = ['go','run','sigs.k8s.io/kind@v0.30.0']
@@ -75,7 +88,7 @@ def verify():
             address = next(value['address'] for value in node['status']['addresses'] if value['type']=='InternalIP')
             namespace = 'transport-fixture'
             port = 29444
-            resources = [{'apiVersion':'v1','kind':'Namespace','metadata':{'name':namespace}},echo_pod('previous',namespace,node['metadata']['name'],True,port),echo_pod('candidate',namespace,node['metadata']['name'],False,port),{'apiVersion':'v1','kind':'Service','metadata':{'name':'entry','namespace':namespace},'spec':{'type':'ClusterIP','selector':{'fixture':'candidate'},'ports':[{'name':'ssh','port':port,'targetPort':port,'protocol':'TCP'}]}}]
+            resources = fixture_resources(namespace, node['metadata']['name'], port)
             manifest = work/'resources.json'
             manifest.write_text(json.dumps({'apiVersion':'v1','kind':'List','items':resources}))
             run(kube+['create','-f',str(manifest)])
