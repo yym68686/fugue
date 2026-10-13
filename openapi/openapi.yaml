@@ -19598,14 +19598,16 @@ components:
           type: string
           minLength: 1
           maxLength: 128
-          description: Explicit baseline for this DNS node, required to be a declared candidate and to match its replayed serving answer. When absent the policy baseline applies. Compilation resolves this baseline into the node's signed allocation without changing another node's allocation. Consumers must advertise business_dns_baseline_v1 before publication using this field.
+          description: Explicit serving predecessor for this DNS node, required to be a declared candidate and to match its replayed answer. V1 resolves it into the node's allocation baseline. V2 uses it only to validate initialization and reconstruct bounded migration weights; it cannot change the common quality decision. Consumers must advertise business_dns_baseline_v1 before publication using this field, and business_edge_unified_v2 for v2 policies.
     BusinessEdgeExplorationPolicy:
       type: object
       additionalProperties: false
-      description: Explicit real-business-only DNS allocation intent. Basis points describe DNS answers, not HTTP requests or bytes. This contract alone grants no serving authority. Observe mode never increases a candidate beyond the initial exploration allocation; adaptive mode requires replayable passive TCP evidence and bounded steps. A new intent is required to clear sticky stops.
+      description: Explicit real-business-only DNS allocation intent. Basis points describe DNS answers, not HTTP requests or bytes. This contract alone grants no serving authority. Observe mode retains the primary with a separate exploration budget; adaptive mode requires replayable passive TCP evidence and bounded steps. V2 reconstructs one common decision from every declared DNS predecessor, supports explicit promotion, and retains temporary bounded migration weights until executors converge. A new intent is required to clear sticky stops.
       required: [version, intent_id, mode, baseline_edge_id, candidate_edge_ids, initial_dns_publications, starts_at, expires_at, exploration_basis_points, maximum_candidate_basis_points, maximum_step_basis_points, bucket_seconds, required_buckets, minimum_connections_per_bucket, cooldown_seconds, evidence_max_age_seconds, minimum_cohort_coverage_basis_points, rtt_advantage_ratio, delivery_advantage_ratio, maximum_rtt_regression_ratio, maximum_delivery_regression_ratio, maximum_retransmission_increase, stop_rtt_ms, stop_retransmission_rate]
       properties:
-        version: {type: string, enum: [business-edge-exploration-v1]}
+        version: {type: string, enum: [business-edge-exploration-v1, business-edge-unified-v2]}
+        unified:
+          $ref: '#/components/schemas/BusinessUnifiedPolicy'
         initial_dns_publications:
           type: object
           minProperties: 1
@@ -19624,12 +19626,12 @@ components:
           items: {type: string, minLength: 1, maxLength: 128}
         starts_at: {type: string, format: date-time}
         expires_at: {type: string, format: date-time, description: At most seven days after starts_at; expiration cannot be extended by evidence.}
-        exploration_basis_points: {type: integer, minimum: 1, maximum: 1000}
-        maximum_candidate_basis_points: {type: integer, minimum: 1, maximum: 9000, description: "Maximum total non-baseline allocation, never below the exploration budget."}
+        exploration_basis_points: {type: integer, minimum: 0, maximum: 1000, description: V2 may explicitly stop exploration with zero; v1 requires a nonzero candidate floor.}
+        maximum_candidate_basis_points: {type: integer, minimum: 1, maximum: 10000, description: "V1 limits total non-baseline allocation to at most 9000. V2 requires 10000: only the separate exploration budget, finite total and step bound constrain allocation; the historical baseline does not impose a candidate ceiling."}
         maximum_step_basis_points: {type: integer, minimum: 1, maximum: 1000}
         bucket_seconds: {type: integer, minimum: 60, maximum: 3600}
         required_buckets: {type: integer, minimum: 2, maximum: 12}
-        minimum_connections_per_bucket: {type: integer, minimum: 3, maximum: 10000}
+        minimum_connections_per_bucket: {type: integer, minimum: 1, maximum: 10000, description: V1 requires at least three. V2 also requires independent connections across the entire common-cohort window.}
         cooldown_seconds: {type: integer, minimum: 60, maximum: 86400}
         evidence_max_age_seconds: {type: integer, minimum: 60, maximum: 86400}
         minimum_cohort_coverage_basis_points: {type: integer, minimum: 1, maximum: 10000}
@@ -19640,6 +19642,32 @@ components:
         maximum_retransmission_increase: {type: number, minimum: 0, maximum: 1}
         stop_rtt_ms: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 60000}
         stop_retransmission_rate: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 1}
+    BusinessUnifiedPolicy:
+      type: object
+      additionalProperties: false
+      description: Required only for business-edge-unified-v2. One common business decision is reconstructed from every declared DNS predecessor; DNS identity cannot select a quality baseline. RTT can independently authorize gradual movement; available qualified delivery and retransmission evidence can veto regression. Missing metrics remain unknown. Promotion requires the additional connection and coverage thresholds. Initial per-node anchors authorize migration only.
+      required: [minimum_connections_per_cohort, rtt_advantage_ms, promotion_minimum_connections, promotion_minimum_coverage_basis_points]
+      properties:
+        minimum_connections_per_cohort: {type: integer, minimum: 3, maximum: 10000}
+        rtt_advantage_ms: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 60000}
+        promotion_minimum_connections: {type: integer, minimum: 3, maximum: 10000}
+        promotion_minimum_coverage_basis_points: {type: integer, minimum: 1, maximum: 10000}
+    BusinessUnifiedState:
+      type: object
+      additionalProperties: false
+      required: [primary_edge_id, target_edge_id, primary_since, sequence, quality_basis_points, exploration_basis_points]
+      properties:
+        primary_edge_id: {type: string, minLength: 1, maxLength: 128}
+        target_edge_id: {type: string, minLength: 1, maxLength: 128}
+        primary_since: {type: string, format: date-time}
+        sequence: {type: integer, minimum: 1}
+        quality_basis_points: {type: object, maxProperties: 32, additionalProperties: {type: integer, minimum: 0, maximum: 10000}}
+        exploration_basis_points: {type: object, maxProperties: 32, additionalProperties: {type: integer, minimum: 0, maximum: 10000}}
+        migration_basis_points:
+          type: object
+          maxProperties: 32
+          description: Temporary explicitly replayed execution weights for every declared DNS node. All executors share this map and target; differences may only shrink toward the common target by the configured step per cooldown. Cleared after convergence. This map is not quality evidence.
+          additionalProperties: {type: object, maxProperties: 32, additionalProperties: {type: integer, minimum: 0, maximum: 10000}}
     BusinessEdgeExplorationState:
       type: object
       additionalProperties: false
@@ -19660,6 +19688,7 @@ components:
         last_evaluated_at: {type: string, format: date-time}
         last_evidence_bucket: {type: string, format: date-time}
         evidence_valid_until: {type: string, format: date-time, description: Adaptive shares cannot renew without fresh comparable passive observations.}
+        unified: {$ref: '#/components/schemas/BusinessUnifiedState'}
     BusinessEdgeExplorationInput:
       type: object
       additionalProperties: false
@@ -19681,12 +19710,21 @@ components:
           maxItems: 32768
           items: {$ref: '#/components/schemas/EdgeNetworkSample'}
         previous: {$ref: '#/components/schemas/BusinessEdgeExplorationState'}
+        initial_dns_basis_points:
+          type: object
+          maxProperties: 32
+          description: V2 initialization only. Exact per-node predecessor weights independently reconstructed from every fenced DNS source. Not a ranking input.
+          additionalProperties: {type: object, maxProperties: 32, additionalProperties: {type: integer, minimum: 0, maximum: 10000}}
     BusinessEdgeExplorationWindow:
       type: object
       additionalProperties: false
       description: One complete time bucket for one physical edge and actual coarse TCP peer network. One qualified sample per connection per bucket contributes; follow-up snapshots are not independent connections.
       required: [edge_id, cohort, started_at, last_observed_at, connections, acknowledged_bytes_median, busy_microseconds_median, rtt_median_ms, rtt_p90_ms, delivery_median_bps, delivery_p10_bps, retransmission_p90]
       properties:
+        metric_connections:
+          type: object
+          additionalProperties: {type: integer, minimum: 0}
+          description: V2 metric-specific qualified independent connection counts. A metric with zero count is unknown; its legacy numeric summary field must not be interpreted as a measurement.
         edge_id: {type: string}
         cohort: {type: string}
         started_at: {type: string, format: date-time}
@@ -19721,6 +19759,8 @@ components:
       additionalProperties: false
       required: [edge_id, cohorts, coverage_basis_points, complete_buckets, verdict, reasons]
       properties:
+        minimum_connections: {type: integer, minimum: 0, description: V2 minimum deduplicated RTT connections across both sides of matched cohorts.}
+        promotion_qualified: {type: boolean, description: V2 stronger promotion sample and coverage thresholds also passed.}
         edge_id: {type: string}
         cohorts: {type: array, items: {type: string}}
         coverage_basis_points: {type: integer, minimum: 0, maximum: 10000}
@@ -19733,7 +19773,7 @@ components:
       required: [state, action, reasons, windows, coverage, comparisons, rejected, used_sample_ids, valid_until, serving_authority]
       properties:
         state: {$ref: '#/components/schemas/BusinessEdgeExplorationState'}
-        action: {type: string, enum: [hold, initialize, withhold, baseline_only, stop_candidates, evidence_expired, increase, decrease]}
+        action: {type: string, enum: [hold, initialize, withhold, baseline_only, stop_candidates, evidence_expired, increase, decrease, promote, migrate]}
         reasons: {type: array, items: {type: string}}
         windows: {type: array, items: {$ref: '#/components/schemas/BusinessEdgeExplorationWindow'}}
         coverage: {type: array, items: {$ref: '#/components/schemas/BusinessEdgeExplorationCoverage'}}
@@ -19756,6 +19796,7 @@ components:
       required: [policy, state, valid_until, receipt_digest]
       description: Immutable allocation embedded in a signed physical-edge-business-v1 selection. Receipts must be reconstructed against the producer intent and previous actual serving allocation before signing. Expiration disables exploration only; the signed baseline order remains available subject to current readiness.
       properties:
+        execution_node_id: {type: string, minLength: 1, maxLength: 128, description: Required in v2 signed execution envelopes. Selects only that executor's temporary migration weights; never selects a quality ranking or baseline.}
         policy: {$ref: '#/components/schemas/BusinessEdgeExplorationPolicy'}
         state: {$ref: '#/components/schemas/BusinessEdgeExplorationState'}
         valid_until: {type: string, format: date-time}
@@ -19767,6 +19808,12 @@ components:
       description: Captured actual DNS/route witness and passive TCP source plus deterministic business allocation calculation. The producer reconstructs evaluation input rather than trusting supplied scores or predecessor weights.
       properties:
         source: {$ref: '#/components/schemas/PhysicalEdgeQualityReceipt'}
+        sources:
+          type: array
+          minItems: 1
+          maxItems: 32
+          description: Required for v2. Complete canonical set of all declared DNS predecessors and independently bound passive observations. The legacy source field identifies this DNS execution envelope only; all nodes share sources and evaluation.
+          items: {$ref: '#/components/schemas/PhysicalEdgeQualityReceipt'}
         evaluation: {$ref: '#/components/schemas/BusinessEdgeExplorationReceipt'}
     PhysicalEdgeQualityPolicy:
       type: object

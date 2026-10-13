@@ -40,7 +40,7 @@ func testLeasedTrafficAdmission(t *testing.T, address string) {
 }
 
 func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) {
-	for _, scenario := range []string{"supported", "physical supported", "physical missing DNS", "physical missing route", "physical missing TLS", "failure aware supported", "failure aware missing DNS", "failure aware missing route", "failure aware missing TLS", "comparable supported", "comparable missing DNS", "comparable missing route", "comparable missing TLS", "business supported", "business missing DNS", "business missing route", "business missing TLS", "business DNS baseline supported", "business DNS baseline missing DNS", "business DNS baseline missing route", "business DNS baseline missing TLS", "projection supported", "projection missing DNS", "projection missing route", "projection missing TLS", "failed facts still support recovery", "missing route capability", "missing DNS capability", "missing TLS capability", "stale issued", "missing issued", "stale received", "unverified", "new topology", "empty cohort member", "standalone", "soft override", "rollback", "rollback missing capability", "queued revocation"} {
+	for _, scenario := range []string{"supported", "physical supported", "physical missing DNS", "physical missing route", "physical missing TLS", "failure aware supported", "failure aware missing DNS", "failure aware missing route", "failure aware missing TLS", "comparable supported", "comparable missing DNS", "comparable missing route", "comparable missing TLS", "business supported", "business missing DNS", "business missing route", "business missing TLS", "business unified supported", "business unified missing DNS", "business unified missing route", "business unified missing TLS", "business DNS baseline supported", "business DNS baseline missing DNS", "business DNS baseline missing route", "business DNS baseline missing TLS", "projection supported", "projection missing DNS", "projection missing route", "projection missing TLS", "failed facts still support recovery", "missing route capability", "missing DNS capability", "missing TLS capability", "stale issued", "missing issued", "stale received", "unverified", "new topology", "empty cohort member", "standalone", "soft override", "rollback", "rollback missing capability", "queued revocation"} {
 		t.Run(scenario, func(t *testing.T) {
 			if scenario == "queued revocation" && address == "" {
 				t.Skip("Postgres concurrency")
@@ -97,6 +97,12 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				anchor.BaselineEdgeID = "edge-b"
 				policy.InitialDNSPublications["dns-a"] = anchor
 			}
+			if strings.HasPrefix(scenario, "business unified ") {
+				policy := input.Policy.DNSQueryPolicy.PhysicalRoutes[0].BusinessExploration
+				policy.Version = model.BusinessEdgeUnifiedVersion
+				policy.MaximumCandidateBasisPoints = 10000
+				policy.Unified = &model.BusinessUnifiedPolicy{MinimumConnectionsPerCohort: 5, RTTAdvantageMS: 20, PromotionMinimumConnections: 8, PromotionMinimumCoverageBasisPoints: 9000}
+			}
 			f := prepareTrafficLKGFixture(t, s, scope, "shadow", false, input)
 			for _, old := range f.consumers {
 				claims := platformcontrol.PlatformComponentIdentityClaims{Version: "v1", CredentialID: "credential", TokenID: "token", Component: old.Component, NodeID: old.NodeID, ScopeKey: scope, ArtifactKinds: []string{old.ArtifactKind}}
@@ -140,6 +146,9 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 					}
 					if strings.HasPrefix(scenario, "business DNS baseline ") && !(strings.HasSuffix(scenario, "missing DNS") && old.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle || strings.HasSuffix(scenario, "missing route") && old.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle || strings.HasSuffix(scenario, "missing TLS") && old.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig) {
 						h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.BusinessDNSBaselineCapabilityV1)
+					}
+					if strings.HasPrefix(scenario, "business unified ") && !(strings.HasSuffix(scenario, "missing DNS") && old.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle || strings.HasSuffix(scenario, "missing route") && old.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle || strings.HasSuffix(scenario, "missing TLS") && old.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig) {
+						h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.BusinessUnifiedCapabilityV2)
 					}
 				}
 				h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
@@ -270,7 +279,7 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 			if e != nil {
 				t.Fatal(e)
 			}
-			valid := scenario == "supported" || scenario == "physical supported" || scenario == "failure aware supported" || scenario == "comparable supported" || scenario == "business supported" || scenario == "business DNS baseline supported" || scenario == "projection supported" || scenario == "failed facts still support recovery" || scenario == "rollback"
+			valid := scenario == "supported" || scenario == "physical supported" || scenario == "failure aware supported" || scenario == "comparable supported" || scenario == "business supported" || scenario == "business unified supported" || scenario == "business DNS baseline supported" || scenario == "projection supported" || scenario == "failed facts still support recovery" || scenario == "rollback"
 			if valid {
 				if err != nil || len(after) != len(before)+1 {
 					t.Fatal("supported release rejected", err)

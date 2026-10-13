@@ -72,7 +72,14 @@ func ValidateDNSPhysicalSelection(selection *DNSPhysicalSelection) error {
 		if err := ValidateDNSBusinessAllocation(selection.BusinessAllocation, selection.CapturedAt); err != nil {
 			return err
 		}
-		if selection.PrimaryEdgeID != selection.BusinessAllocation.Policy.BaselineEdgeID || selection.Scope != "global" {
+		primary := selection.BusinessAllocation.Policy.BaselineEdgeID
+		if selection.BusinessAllocation.Policy.Version == BusinessEdgeUnifiedVersion {
+			primary = BusinessServingPrimary(selection.BusinessAllocation)
+			if selection.PrimarySince == nil || !selection.PrimarySince.Equal(selection.BusinessAllocation.State.Unified.PrimarySince) {
+				return errors.New("unified primary epoch differs from shared decision")
+			}
+		}
+		if selection.PrimaryEdgeID != primary || selection.Scope != "global" {
 			return errors.New("business allocation differs from declared safe baseline")
 		}
 	} else if selection.BusinessAllocation != nil {

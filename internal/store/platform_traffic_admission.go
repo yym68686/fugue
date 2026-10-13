@@ -165,6 +165,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if required.businessDNSBaseline && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.BusinessDNSBaselineCapabilityV1) {
 					return fail("required consumer lacks business DNS baseline v1 capability")
 				}
+				if required.businessUnified && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.BusinessUnifiedCapabilityV2) {
+					return fail("required consumer lacks unified business decision v2 capability")
+				}
 				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
 					return fail("physical network v3 capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
@@ -197,7 +200,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	return nil
 }
 
-type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline bool }
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified bool }
 
 func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
 	var out physicalCapabilities
@@ -225,6 +228,7 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 		for _, route := range query.PhysicalRoutes {
 			out.business = out.business || route.BusinessExploration != nil
 			if route.BusinessExploration != nil {
+				out.businessUnified = out.businessUnified || route.BusinessExploration.Version == model.BusinessEdgeUnifiedVersion
 				for _, anchor := range route.BusinessExploration.InitialDNSPublications {
 					out.businessDNSBaseline = out.businessDNSBaseline || anchor.BaselineEdgeID != ""
 				}

@@ -562,5 +562,8 @@ func validateDNSBusinessIntent(record model.EdgeDNSRecord, policy PolicySnapshot
 	if err != nil || !reflect.DeepEqual(resolved, selection.BusinessAllocation.Policy) {
 		return fmt.Errorf("business allocation differs from explicit DNS node producer intent")
 	}
+	if resolved.Version == model.BusinessEdgeUnifiedVersion && selection.BusinessAllocation.ExecutionNodeID != nodeID {
+		return fmt.Errorf("unified allocation execution envelope differs from DNS compiler target")
+	}
 	return nil
 }

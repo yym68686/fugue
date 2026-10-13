@@ -3020,6 +3020,15 @@ func edgeDNSSelectionResult(decision edgeDNSCandidateOrderDecision, answered []m
 			if decision.ExplorationKind == "business_allocation" && edgeDNSCandidateDecisionKey(answered[0]) == decision.ExplorationCandidateKey {
 				return "business_allocated_candidate"
 			}
+			if selection.BusinessAllocation.State.Unified != nil {
+				if edgeDNSCandidateDecisionKey(answered[0]) == decision.ExplorationCandidateKey && (decision.ExplorationKind == "business_quality" || decision.ExplorationKind == "business_exploration" || decision.ExplorationKind == "business_migration") {
+					return decision.ExplorationKind
+				}
+				if answered[0].EdgeID == selection.PrimaryEdgeID {
+					return "business_current_primary"
+				}
+				return "business_readiness_failover"
+			}
 			if answered[0].EdgeID == selection.PrimaryEdgeID {
 				return "business_safe_baseline"
 			}

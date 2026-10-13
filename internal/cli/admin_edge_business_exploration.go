@@ -27,6 +27,9 @@ func (c *CLI) newAdminEdgeBusinessExplorationCommand() *cobra.Command {
 			if err := readBusinessExplorationFile(policyPath, &policy); err != nil {
 				return err
 			}
+			if policy.Version == model.BusinessEdgeUnifiedVersion {
+				return c.captureUnifiedBusiness(policy, args[0], trafficClass, pathPrefix, dnsNodeID)
+			}
 			policy, err := model.BusinessExplorationPolicyForDNS(policy, dnsNodeID)
 			if err != nil {
 				return err
@@ -81,7 +84,7 @@ func (c *CLI) newAdminEdgeBusinessExplorationCommand() *cobra.Command {
 		}}
 	capture.Flags().StringVar(&policyPath, "policy", "", "Explicit business exploration policy file; does not activate it")
 	capture.Flags().StringVar(&trafficClass, "traffic-class", "", "Exact business class: dynamic_api or streaming")
-	capture.Flags().StringVar(&dnsNodeID, "dns-node-id", "", "Logical DNS node ID whose replayable answer binds the current baseline")
+	capture.Flags().StringVar(&dnsNodeID, "dns-node-id", "", "Declared DNS member; v2 captures all declared members for one common decision")
 	capture.Flags().StringVar(&pathPrefix, "path-prefix", "", "Exact served route prefix used to filter retained TCP evidence")
 	for _, name := range []string{"policy", "traffic-class", "dns-node-id", "path-prefix"} {
 		_ = capture.MarkFlagRequired(name)

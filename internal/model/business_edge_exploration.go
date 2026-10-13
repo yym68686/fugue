@@ -12,23 +12,26 @@ import (
 )
 
 const BusinessEdgeExplorationVersion = "business-edge-exploration-v1"
+const BusinessEdgeUnifiedVersion = "business-edge-unified-v2"
 
 type BusinessEdgeExplorationState struct {
-	IntentID           string            `json:"intent_id"`
-	PolicyDigest       string            `json:"policy_digest"`
-	BasisPoints        map[string]int    `json:"basis_points"`
-	Stopped            map[string]string `json:"stopped"`
-	LastAdjustedAt     time.Time         `json:"last_adjusted_at"`
-	LastEvaluatedAt    time.Time         `json:"last_evaluated_at"`
-	LastEvidenceBucket time.Time         `json:"last_evidence_bucket"`
-	EvidenceValidUntil time.Time         `json:"evidence_valid_until"`
+	Unified            *BusinessUnifiedState `json:"unified,omitempty"`
+	IntentID           string                `json:"intent_id"`
+	PolicyDigest       string                `json:"policy_digest"`
+	BasisPoints        map[string]int        `json:"basis_points"`
+	Stopped            map[string]string     `json:"stopped"`
+	LastAdjustedAt     time.Time             `json:"last_adjusted_at"`
+	LastEvaluatedAt    time.Time             `json:"last_evaluated_at"`
+	LastEvidenceBucket time.Time             `json:"last_evidence_bucket"`
+	EvidenceValidUntil time.Time             `json:"evidence_valid_until"`
 }
 
 type DNSBusinessAllocation struct {
-	Policy        BusinessEdgeExplorationPolicy `json:"policy"`
-	State         BusinessEdgeExplorationState  `json:"state"`
-	ValidUntil    time.Time                     `json:"valid_until"`
-	ReceiptDigest string                        `json:"receipt_digest"`
+	ExecutionNodeID string                        `json:"execution_node_id,omitempty"`
+	Policy          BusinessEdgeExplorationPolicy `json:"policy"`
+	State           BusinessEdgeExplorationState  `json:"state"`
+	ValidUntil      time.Time                     `json:"valid_until"`
+	ReceiptDigest   string                        `json:"receipt_digest"`
 }
 
 func ValidateDNSBusinessAllocation(allocation *DNSBusinessAllocation, capturedAt time.Time) error {
@@ -70,6 +73,15 @@ func ValidateDNSBusinessAllocation(allocation *DNSBusinessAllocation, capturedAt
 		total += weight
 	}
 	nonBaseline := 10000 - state.BasisPoints[policy.BaselineEdgeID]
+	if policy.Version == BusinessEdgeUnifiedVersion {
+		if _, exists := policy.InitialDNSPublications[allocation.ExecutionNodeID]; !exists {
+			return errors.New("unified allocation requires declared DNS execution identity")
+		}
+		return ValidateBusinessUnifiedState(policy, state, capturedAt, allocation.ValidUntil)
+	}
+	if state.Unified != nil {
+		return errors.New("legacy business allocation cannot carry unified state")
+	}
 	if total != 10000 || nonBaseline > policy.MaximumCandidateBasisPoints ||
 		policy.Mode == "observe" && nonBaseline > policy.ExplorationBasisPoints || policy.Mode == "paused" && nonBaseline != 0 ||
 		nonBaseline > policy.ExplorationBasisPoints && allocation.ValidUntil.After(state.EvidenceValidUntil) {
@@ -92,6 +104,7 @@ func CloneDNSBusinessAllocation(allocation *DNSBusinessAllocation) *DNSBusinessA
 	for edgeID, reason := range allocation.State.Stopped {
 		cloned.State.Stopped[edgeID] = reason
 	}
+	cloned.State.Unified = CloneBusinessUnifiedState(allocation.State.Unified)
 	return &cloned
 }
 
@@ -137,7 +150,7 @@ func BusinessExplorationPolicyForDNS(policy BusinessEdgeExplorationPolicy, nodeI
 		return BusinessEdgeExplorationPolicy{}, errors.New("business exploration DNS node has no explicit publication anchor")
 	}
 	resolved := CloneBusinessEdgeExplorationPolicy(policy)
-	if anchor.BaselineEdgeID != "" {
+	if policy.Version == BusinessEdgeExplorationVersion && anchor.BaselineEdgeID != "" {
 		resolved.BaselineEdgeID = anchor.BaselineEdgeID
 	}
 	return resolved, nil
@@ -146,6 +159,10 @@ func BusinessExplorationPolicyForDNS(policy BusinessEdgeExplorationPolicy, nodeI
 func CloneBusinessEdgeExplorationPolicy(policy BusinessEdgeExplorationPolicy) BusinessEdgeExplorationPolicy {
 	cloned := policy
 	cloned.CandidateEdgeIDs = append([]string(nil), policy.CandidateEdgeIDs...)
+	if policy.Unified != nil {
+		unified := *policy.Unified
+		cloned.Unified = &unified
+	}
 	if policy.InitialDNSPublications != nil {
 		cloned.InitialDNSPublications = make(map[string]BusinessDNSPublicationAnchor, len(policy.InitialDNSPublications))
 		for nodeID, anchor := range policy.InitialDNSPublications {
@@ -156,6 +173,7 @@ func CloneBusinessEdgeExplorationPolicy(policy BusinessEdgeExplorationPolicy) Bu
 }
 
 type BusinessEdgeExplorationPolicy struct {
+	Unified                          *BusinessUnifiedPolicy                  `json:"unified,omitempty"`
 	InitialDNSPublications           map[string]BusinessDNSPublicationAnchor `json:"initial_dns_publications"`
 	Version                          string                                  `json:"version"`
 	IntentID                         string                                  `json:"intent_id"`
@@ -184,7 +202,7 @@ type BusinessEdgeExplorationPolicy struct {
 
 func (policy *BusinessEdgeExplorationPolicy) UnmarshalJSON(raw []byte) error {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || len(fields) != 24 {
+	if json.Unmarshal(raw, &fields) != nil || (len(fields) != 24 && len(fields) != 25) {
 		return errors.New("business exploration requires complete explicit intent")
 	}
 	for _, value := range fields {
@@ -198,6 +216,9 @@ func (policy *BusinessEdgeExplorationPolicy) UnmarshalJSON(raw []byte) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
 		return err
+	}
+	if decoded.Version == BusinessEdgeUnifiedVersion && len(fields) != 25 || decoded.Version == BusinessEdgeExplorationVersion && len(fields) != 24 {
+		return errors.New("business policy version requires its complete explicit field set")
 	}
 	if err := ValidateBusinessEdgeExplorationPolicy(BusinessEdgeExplorationPolicy(decoded)); err != nil {
 		return err
@@ -219,7 +240,7 @@ func ValidateBusinessEdgeExplorationPolicy(policy BusinessEdgeExplorationPolicy)
 			return errors.New("business exploration requires exact initial DNS publication binding for each DNS node")
 		}
 	}
-	if policy.Version != BusinessEdgeExplorationVersion || !validIdentity(policy.IntentID) ||
+	if (policy.Version != BusinessEdgeExplorationVersion && policy.Version != BusinessEdgeUnifiedVersion) || !validIdentity(policy.IntentID) ||
 		(policy.Mode != "observe" && policy.Mode != "adaptive" && policy.Mode != "paused") ||
 		!validIdentity(policy.BaselineEdgeID) || len(policy.CandidateEdgeIDs) < 2 || len(policy.CandidateEdgeIDs) > 32 ||
 		policy.StartsAt.IsZero() || !policy.ExpiresAt.After(policy.StartsAt) || policy.ExpiresAt.Sub(policy.StartsAt) > 7*24*time.Hour {
@@ -237,11 +258,20 @@ func ValidateBusinessEdgeExplorationPolicy(policy BusinessEdgeExplorationPolicy)
 			return errors.New("business DNS baseline must be an explicitly declared candidate")
 		}
 	}
-	if !seen[policy.BaselineEdgeID] || policy.ExplorationBasisPoints < len(seen)-1 || policy.ExplorationBasisPoints > 1000 ||
-		policy.MaximumCandidateBasisPoints < policy.ExplorationBasisPoints || policy.MaximumCandidateBasisPoints > 9000 ||
+	minimumExploration, minimumConnections, maximumCandidate := len(seen)-1, 3, 9000
+	if policy.Version == BusinessEdgeUnifiedVersion {
+		minimumExploration, minimumConnections, maximumCandidate = 0, 1, 10000
+		if err := ValidateBusinessUnifiedPolicy(policy); err != nil {
+			return err
+		}
+	} else if policy.Unified != nil {
+		return errors.New("legacy policy cannot carry unified controls")
+	}
+	if !seen[policy.BaselineEdgeID] || policy.ExplorationBasisPoints < minimumExploration || policy.ExplorationBasisPoints > 1000 ||
+		policy.MaximumCandidateBasisPoints < policy.ExplorationBasisPoints || policy.MaximumCandidateBasisPoints > maximumCandidate ||
 		policy.MaximumStepBasisPoints < 1 || policy.MaximumStepBasisPoints > 1000 ||
 		policy.BucketSeconds < 60 || policy.BucketSeconds > 3600 || policy.RequiredBuckets < 2 || policy.RequiredBuckets > 12 ||
-		policy.MinimumConnectionsPerBucket < 3 || policy.MinimumConnectionsPerBucket > 10000 ||
+		policy.MinimumConnectionsPerBucket < minimumConnections || policy.MinimumConnectionsPerBucket > 10000 ||
 		policy.CooldownSeconds < 60 || policy.CooldownSeconds > 86400 || policy.EvidenceMaxAgeSeconds < policy.BucketSeconds || policy.EvidenceMaxAgeSeconds > 86400 ||
 		policy.MinimumCohortCoverageBasisPoints < 1 || policy.MinimumCohortCoverageBasisPoints > 10000 {
 		return errors.New("business exploration budget or evidence bounds are invalid")

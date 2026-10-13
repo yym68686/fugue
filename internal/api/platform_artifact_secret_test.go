@@ -56,4 +56,10 @@ func TestArtifactSecretScanAcceptsOnlyTypedBusinessDNSAnchor(t *testing.T) {
 	if firstSecretLikeContentPath(json.RawMessage(`{"business_allocation":{"policy":{"version":"business-edge-exploration-v1","initial_dns_publications":{"dns-a":{"digest":"`+digest+`","fencing_token":3}}}}}`), "") != "" {
 		t.Fatal("signed allocation policy rejected")
 	}
+	for _, version := range []string{"business-edge-unified-v2", "unsupported"} {
+		content := json.RawMessage(`{"business_allocation":{"policy":{"version":"` + version + `","initial_dns_publications":{"dns-a":{"digest":"` + digest + `","fencing_token":3}}}}}`)
+		if allowed := firstSecretLikeContentPath(content, "") == ""; allowed != (version == "business-edge-unified-v2") {
+			t.Fatal("business policy anchor version boundary invalid", version)
+		}
+	}
 }

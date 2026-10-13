@@ -93,9 +93,11 @@ def validate_business_routes(routes):
         if "business_exploration" not in route:
             continue
         policy = route["business_exploration"]
-        if not isinstance(policy, dict) or set(policy) != FIELDS or any(value is None for value in policy.values()):
+        unified = isinstance(policy, dict) and policy.get("version") == "business-edge-unified-v2"
+        required_fields = FIELDS | {"unified"} if unified else FIELDS
+        if not isinstance(policy, dict) or set(policy) != required_fields or any(value is None for value in policy.values()):
             raise ValueError("complete explicit business exploration policy required")
-        if policy["version"] != "business-edge-exploration-v1" or policy["mode"] not in ["observe", "adaptive", "paused"] or not route.get("path_prefix", "").startswith("/") or route.get("traffic_class") not in ["streaming", "dynamic_api"]:
+        if policy["version"] not in ["business-edge-exploration-v1", "business-edge-unified-v2"] or policy["mode"] not in ["observe", "adaptive", "paused"] or not route.get("path_prefix", "").startswith("/") or route.get("traffic_class") not in ["streaming", "dynamic_api"]:
             raise ValueError("unsupported business exploration context")
         candidates = policy["candidate_edge_ids"]
         if not isinstance(candidates, list) or not 2 <= len(candidates) <= 32 or len(set(candidates)) != len(candidates) or policy["baseline_edge_id"] not in candidates:
@@ -115,6 +117,19 @@ def validate_business_routes(routes):
                   "maximum_step_basis_points": (1, 1000), "bucket_seconds": (60, 3600), "required_buckets": (2, 12),
                   "minimum_connections_per_bucket": (3, 10000), "cooldown_seconds": (60, 86400),
                   "evidence_max_age_seconds": (policy["bucket_seconds"], 86400), "minimum_cohort_coverage_basis_points": (1, 10000)}
+        if unified:
+            bounds.update(exploration_basis_points=(0, 1000), maximum_candidate_basis_points=(10000, 10000), minimum_connections_per_bucket=(1, 10000))
+            controls = policy["unified"]
+            expected = {"minimum_connections_per_cohort", "rtt_advantage_ms", "promotion_minimum_connections", "promotion_minimum_coverage_basis_points"}
+            if not isinstance(controls, dict) or set(controls) != expected:
+                raise ValueError("complete unified comparison and promotion policy required")
+            for field, minimum, maximum in [("minimum_connections_per_cohort", 3, 10000), ("promotion_minimum_connections", controls["minimum_connections_per_cohort"], 10000), ("promotion_minimum_coverage_basis_points", policy["minimum_cohort_coverage_basis_points"], 10000)]:
+                if type(controls[field]) is not int or not minimum <= controls[field] <= maximum:
+                    raise ValueError("invalid unified business bound: " + field)
+            if type(controls["rtt_advantage_ms"]) not in [int, float] or not math.isfinite(controls["rtt_advantage_ms"]) or not 0 < controls["rtt_advantage_ms"] <= 60000:
+                raise ValueError("invalid unified RTT absolute advantage")
+            if 0 < policy["exploration_basis_points"] < len(candidates):
+                raise ValueError("unified exploration budget cannot starve candidates")
         for field, (minimum, maximum) in bounds.items():
             if type(policy[field]) is not int or not minimum <= policy[field] <= maximum:
                 raise ValueError("business exploration bound invalid: " + field)

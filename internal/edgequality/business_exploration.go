@@ -19,6 +19,7 @@ import (
 type BusinessExplorationState = model.BusinessEdgeExplorationState
 
 type BusinessExplorationInput struct {
+	InitialDNSBasisPoints map[string]map[string]int `json:"initial_dns_basis_points,omitempty"`
 	Policy         model.BusinessEdgeExplorationPolicy `json:"policy"`
 	CapturedAt     time.Time                           `json:"captured_at"`
 	Hostname       string                              `json:"hostname"`
@@ -30,18 +31,19 @@ type BusinessExplorationInput struct {
 }
 
 type BusinessExplorationWindow struct {
-	EdgeID                  string    `json:"edge_id"`
-	Cohort                  string    `json:"cohort"`
-	StartedAt               time.Time `json:"started_at"`
-	LastObservedAt          time.Time `json:"last_observed_at"`
-	Connections             int       `json:"connections"`
-	AcknowledgedBytesMedian float64   `json:"acknowledged_bytes_median"`
-	BusyMicrosecondsMedian  float64   `json:"busy_microseconds_median"`
-	RTTMedianMS             float64   `json:"rtt_median_ms"`
-	RTTP90MS                float64   `json:"rtt_p90_ms"`
-	DeliveryBPS             float64   `json:"delivery_median_bps"`
-	DeliveryP10             float64   `json:"delivery_p10_bps"`
-	RetransmitP90           float64   `json:"retransmission_p90"`
+	MetricConnections       map[string]int `json:"metric_connections,omitempty"`
+	EdgeID                  string         `json:"edge_id"`
+	Cohort                  string         `json:"cohort"`
+	StartedAt               time.Time      `json:"started_at"`
+	LastObservedAt          time.Time      `json:"last_observed_at"`
+	Connections             int            `json:"connections"`
+	AcknowledgedBytesMedian float64        `json:"acknowledged_bytes_median"`
+	BusyMicrosecondsMedian  float64        `json:"busy_microseconds_median"`
+	RTTMedianMS             float64        `json:"rtt_median_ms"`
+	RTTP90MS                float64        `json:"rtt_p90_ms"`
+	DeliveryBPS             float64        `json:"delivery_median_bps"`
+	DeliveryP10             float64        `json:"delivery_p10_bps"`
+	RetransmitP90           float64        `json:"retransmission_p90"`
 }
 
 type BusinessExplorationCoverage struct {
@@ -58,6 +60,8 @@ type BusinessExplorationCoverage struct {
 }
 
 type BusinessExplorationComparison struct {
+	MinimumConnections  int      `json:"minimum_connections,omitempty"`
+	PromotionQualified  bool     `json:"promotion_qualified,omitempty"`
 	EdgeID              string   `json:"edge_id"`
 	Cohorts             []string `json:"cohorts"`
 	CoverageBasisPoints int      `json:"coverage_basis_points"`
@@ -147,6 +151,12 @@ func EvaluateBusinessExploration(input BusinessExplorationInput) (BusinessExplor
 		len(input.PathPrefix) > 2048 || (input.TrafficClass != "dynamic_api" && input.TrafficClass != "streaming") ||
 		len(input.NetworkSamples) > 32768 || len(input.Candidates) != len(policy.CandidateEdgeIDs) {
 		return BusinessExplorationDecision{}, errors.New("invalid business exploration context or input bounds")
+	}
+	if policy.Version == model.BusinessEdgeUnifiedVersion {
+		return evaluateUnifiedBusiness(input)
+	}
+	if input.Previous != nil && input.Previous.Unified != nil {
+		return BusinessExplorationDecision{}, errors.New("legacy evaluator cannot consume unified state")
 	}
 	policyDigest, err := businessDigest(policy)
 	if err != nil {

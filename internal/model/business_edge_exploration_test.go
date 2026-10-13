@@ -53,6 +53,40 @@ func TestBusinessDNSBaselinesAreExplicitIndependentAndBounded(t *testing.T) {
 	}
 }
 
+func TestUnifiedBusinessDNSIdentityCannotChooseQualityBaseline(t *testing.T) {
+	policy := businessPolicyFixture()
+	policy.Version = BusinessEdgeUnifiedVersion
+	policy.MaximumCandidateBasisPoints = 10000
+	policy.MinimumConnectionsPerBucket = 1
+	policy.Unified = &BusinessUnifiedPolicy{MinimumConnectionsPerCohort: 5, RTTAdvantageMS: 20, PromotionMinimumConnections: 8, PromotionMinimumCoverageBasisPoints: 9000}
+	anchor := policy.InitialDNSPublications["dns-a"]
+	anchor.BaselineEdgeID = "edge-b"
+	policy.InitialDNSPublications["dns-b"] = anchor
+	for _, nodeID := range []string{"dns-a", "dns-b"} {
+		resolved, err := BusinessExplorationPolicyForDNS(policy, nodeID)
+		if err != nil || resolved.BaselineEdgeID != "edge-a" {
+			t.Fatal("DNS identity changed business baseline", nodeID, err)
+		}
+	}
+	raw, _ := json.Marshal(policy)
+	var decoded BusinessEdgeExplorationPolicy
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*BusinessEdgeExplorationPolicy){
+		func(value *BusinessEdgeExplorationPolicy) { value.Unified = nil },
+		func(value *BusinessEdgeExplorationPolicy) { value.MaximumCandidateBasisPoints = 1000 },
+		func(value *BusinessEdgeExplorationPolicy) { value.Unified.PromotionMinimumConnections = 1 },
+		func(value *BusinessEdgeExplorationPolicy) { value.Unified.RTTAdvantageMS = math.NaN() },
+	} {
+		copy := CloneBusinessEdgeExplorationPolicy(policy)
+		mutate(&copy)
+		if ValidateBusinessEdgeExplorationPolicy(copy) == nil {
+			t.Fatal("accepted invalid unified controls")
+		}
+	}
+}
+
 func TestBusinessExplorationRequiresExplicitBoundedIntent(t *testing.T) {
 	valid := businessPolicyFixture()
 	raw, err := json.Marshal(valid)

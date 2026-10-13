@@ -28,6 +28,7 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 	coverage := []map[string]any{}
 	for _, route := range policy.PhysicalRoutes {
 		matched := false
+		unifiedSources := []edgequality.Receipt{}
 		for _, fact := range projection.RuntimeSnapshot.DNSSelections {
 			if fact.Hostname != route.Hostname {
 				continue
@@ -49,6 +50,10 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 				return fmt.Errorf("physical DNS evidence capture: %w", err)
 			}
 			if route.BusinessExploration != nil {
+				if route.BusinessExploration.Version == model.BusinessEdgeUnifiedVersion {
+					unifiedSources = append(unifiedSources, receipt)
+					continue
+				}
 				compiled, err := captureBusinessPublication(receipt, route, time.Now().UTC())
 				if err != nil {
 					return fmt.Errorf("business DNS evidence cannot authorize publication: %w", err)
@@ -78,6 +83,30 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 		if !matched {
 			return fmt.Errorf("physical route lacks an owned dynamic DNS query")
 		}
+		if len(unifiedSources) > 0 {
+			compiled, err := captureUnifiedBusinessPublications(unifiedSources, route, time.Now().UTC())
+			if err != nil {
+				return fmt.Errorf("unified business publication waiting for coherent source group: %w", err)
+			}
+			keys := make([]string, 0, len(compiled))
+			for key := range compiled {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				selection := compiled[key]
+				selections[key] = selection
+				var evidence businessPublicationEvidence
+				if err := json.Unmarshal(selection.Evidence, &evidence); err != nil {
+					return err
+				}
+				entry, err := businessExplorationCoverageFact(route, strings.SplitN(key, "\x00", 2)[0], evidence)
+				if err != nil {
+					return err
+				}
+				coverage = append(coverage, entry)
+			}
+		}
 	}
 	if err := applyPhysicalDNSSelections(projection, policy, selections, time.Now().UTC()); err != nil {
 		return err
@@ -97,6 +126,10 @@ func businessExplorationCoverageFact(route platformconfig.PhysicalQualityRoute, 
 		"raw_network_records": len(evidence.Source.Snapshot.NetworkSamples), "route_witness_bound_passive_records": len(evidence.Evaluation.Input.NetworkSamples),
 		"action": evidence.Evaluation.Decision.Action, "reasons": evidence.Evaluation.Decision.Reasons, "coverage": evidence.Evaluation.Decision.Coverage,
 		"comparisons": evidence.Evaluation.Decision.Comparisons, "rejected": evidence.Evaluation.Decision.Rejected, "valid_until": evidence.Evaluation.Decision.ValidUntil}
+	if unified := evidence.Evaluation.Decision.State.Unified; unified != nil {
+		entry["decision_version"] = route.BusinessExploration.Version
+		entry["unified_decision"] = unified
+	}
 	raw, err := json.Marshal(entry)
 	if err != nil {
 		return nil, err
@@ -153,6 +186,8 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 	facts := append([]platformconfig.DNSSelectionObservation(nil), projection.RuntimeSnapshot.DNSSelections...)
 	rules := append([]platformconfig.DNSAnswerRule(nil), projection.Policy.DNSAnswerRules...)
 	used := map[string]bool{}
+	unifiedDecisions := map[string]*model.DNSBusinessAllocation{}
+	unifiedMembers := map[string]map[string]bool{}
 	for index, fact := range facts {
 		route, requested := requested[fact.Hostname]
 		if !requested {
@@ -181,6 +216,27 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 			}
 			if !reflect.DeepEqual(verified, selection) {
 				return fmt.Errorf("business DNS selection differs from reconstructed evidence")
+			}
+			if route.BusinessExploration.Version == model.BusinessEdgeUnifiedVersion {
+				var actual struct {
+					NodeID string `json:"node_id"`
+				}
+				if json.Unmarshal(evidence.Source.Snapshot.ActualDNSReceipt, &actual) != nil || actual.NodeID != fact.NodeID {
+					return fmt.Errorf("unified DNS execution envelope belongs to another node")
+				}
+				common := model.CloneDNSBusinessAllocation(selection.BusinessAllocation)
+				if common.ExecutionNodeID != fact.NodeID {
+					return fmt.Errorf("unified allocation execution identity mismatch")
+				}
+				common.ExecutionNodeID = ""
+				if previous := unifiedDecisions[fact.Hostname]; previous != nil && !reflect.DeepEqual(previous, common) {
+					return fmt.Errorf("DNS executors cannot publish different unified business decisions")
+				}
+				unifiedDecisions[fact.Hostname] = common
+				if unifiedMembers[fact.Hostname] == nil {
+					unifiedMembers[fact.Hostname] = map[string]bool{}
+				}
+				unifiedMembers[fact.Hostname][fact.NodeID] = true
 			}
 		} else if selection.BusinessAllocation != nil {
 			return fmt.Errorf("business DNS allocation lacks explicit producer intent")
@@ -264,6 +320,16 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 	}
 	if len(used) != len(requested) {
 		return fmt.Errorf("physical route opt-in did not match dynamic query facts")
+	}
+	for hostname, allocation := range unifiedDecisions {
+		if len(unifiedMembers[hostname]) != len(allocation.Policy.InitialDNSPublications) {
+			return fmt.Errorf("unified business publication omits a declared DNS executor")
+		}
+		for nodeID := range allocation.Policy.InitialDNSPublications {
+			if !unifiedMembers[hostname][nodeID] {
+				return fmt.Errorf("unified business publication substitutes a DNS executor")
+			}
+		}
 	}
 	updatedPolicy := platformconfig.NormalizePolicySnapshot(projection.Policy)
 	updatedPolicy.DNSAnswerRules = rules

@@ -24,6 +24,19 @@ def fixture():
 
 
 class BusinessExplorationConfigurationTests(unittest.TestCase):
+    def test_unified_policy_relaxes_comparison_without_legacy_ceiling(self):
+        config, _ = fixture()
+        routes = config["projection_policy"]["dns_query_policy"]["physical_routes"]
+        policy = routes[0]["business_exploration"]
+        policy.update(version="business-edge-unified-v2", maximum_candidate_basis_points=10000, minimum_connections_per_bucket=1,
+                      unified={"minimum_connections_per_cohort": 5, "rtt_advantage_ms": 20, "promotion_minimum_connections": 8, "promotion_minimum_coverage_basis_points": 9000})
+        business.validate_business_routes(routes)
+        for field, value in [("maximum_candidate_basis_points", 1000), ("unified", {}), ("exploration_basis_points", 1)]:
+            invalid = copy.deepcopy(routes)
+            invalid[0]["business_exploration"][field] = value
+            with self.assertRaises(ValueError):
+                business.validate_business_routes(invalid)
+
     def anchor_fixture(self):
         config, _ = fixture()
         config["business_anchor_mode"] = "latest_verified_same_baseline"

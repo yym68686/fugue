@@ -17,10 +17,14 @@ import (
 
 type businessPublicationEvidence struct {
 	Source     edgequality.Receipt                    `json:"source"`
+	Sources    []edgequality.Receipt                  `json:"sources,omitempty"`
 	Evaluation edgequality.BusinessExplorationReceipt `json:"evaluation"`
 }
 
 func captureBusinessPublication(source edgequality.Receipt, route platformconfig.PhysicalQualityRoute, now time.Time) (compiledPhysicalDNSSelection, error) {
+	if route.BusinessExploration != nil && route.BusinessExploration.Version == model.BusinessEdgeUnifiedVersion {
+		return compiledPhysicalDNSSelection{}, errors.New("unified business publication requires complete DNS source group")
+	}
 	input, _, err := boundBusinessInput(source, route, now)
 	if err != nil {
 		return compiledPhysicalDNSSelection{}, err
@@ -69,7 +73,15 @@ func boundBusinessInput(source edgequality.Receipt, route platformconfig.Physica
 	if err != nil {
 		return edgequality.BusinessExplorationInput{}, answer, err
 	}
-	if answer.EdgeID != policy.BaselineEdgeID {
+	expectedPrimary := policy.BaselineEdgeID
+	if policy.Version == model.BusinessEdgeUnifiedVersion {
+		if previous := answer.BusinessAllocation; previous != nil && previous.Policy.IntentID == policy.IntentID && previous.State.Unified != nil {
+			expectedPrimary = model.BusinessServingPrimary(previous)
+		} else if anchor := policy.InitialDNSPublications[actual.NodeID]; anchor.BaselineEdgeID != "" {
+			expectedPrimary = anchor.BaselineEdgeID
+		}
+	}
+	if answer.EdgeID != expectedPrimary {
 		return edgequality.BusinessExplorationInput{}, answer, errors.New("business safe baseline differs from actual serving assignment")
 	}
 	input := edgequality.BusinessExplorationInput{Policy: policy, CapturedAt: snapshot.CapturedAt, Hostname: snapshot.Hostname, PathPrefix: snapshot.PathPrefix, TrafficClass: snapshot.TrafficClass,
@@ -97,11 +109,24 @@ func boundBusinessInput(source edgequality.Receipt, route platformconfig.Physica
 		if !exists || actual.Publication.ServingLKG || actual.Publication.Rejected || answer.Publication.Digest != anchor.Digest || answer.Publication.FencingToken != anchor.FencingToken {
 			return input, answer, errors.New("business initialization differs from explicitly fenced DNS node baseline; refusing to reset prior stops or cooldown")
 		}
+		if policy.Version == model.BusinessEdgeUnifiedVersion {
+			weights := map[string]int{answer.EdgeID: 10000}
+			if answer.BusinessAllocation != nil {
+				weights = model.BusinessExecutionWeights(answer.BusinessAllocation, snapshot.CapturedAt)
+			}
+			input.InitialDNSBasisPoints = map[string]map[string]int{actual.NodeID: weights}
+		}
 	}
 	return input, answer, nil
 }
 
 func compileBoundBusinessSelection(evidence businessPublicationEvidence, route platformconfig.PhysicalQualityRoute, now time.Time) (*model.DNSPhysicalSelection, error) {
+	if route.BusinessExploration != nil && route.BusinessExploration.Version == model.BusinessEdgeUnifiedVersion {
+		return compileUnifiedBusinessSelection(evidence, route, now)
+	}
+	if len(evidence.Sources) != 0 {
+		return nil, errors.New("legacy business evidence cannot carry unified sources")
+	}
 	input, answer, err := boundBusinessInput(evidence.Source, route, now)
 	if err != nil {
 		return nil, err

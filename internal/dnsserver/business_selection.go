@@ -63,23 +63,49 @@ func businessEdgeOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, 
 	if allocation.Policy.Mode != "paused" && !now.Before(allocation.Policy.StartsAt) && now.Before(allocation.Policy.ExpiresAt) && now.Before(allocation.ValidUntil) {
 		seed := strings.Join([]string{selection.EvidenceDigest, allocation.Policy.IntentID, record.Name, record.Type, hint.IP, strconv.FormatInt(now.UnixNano(), 10)}, "\x00")
 		bucket := dnsDecisionBucketValue(hint, seed, 10000, "business_allocation")
+		weights := allocation.State.BasisPoints
+		allocationKind := "business_allocation"
+		if unified := allocation.State.Unified; unified != nil {
+			if migration := unified.MigrationBasisPoints[allocation.ExecutionNodeID]; migration != nil {
+				weights, allocationKind = migration, "business_migration"
+			} else {
+				explorationTotal := 0
+				for _, weight := range unified.ExplorationBasisPoints {
+					explorationTotal += weight
+				}
+				if bucket < explorationTotal {
+					weights, allocationKind = unified.ExplorationBasisPoints, "business_exploration"
+				} else {
+					bucket -= explorationTotal
+					weights, allocationKind = unified.QualityBasisPoints, "business_quality"
+				}
+			}
+		}
 		edges := append([]string(nil), allocation.Policy.CandidateEdgeIDs...)
 		sort.Strings(edges)
 		selected := ""
 		for _, edgeID := range edges {
-			weight := allocation.State.BasisPoints[edgeID]
+			weight := weights[edgeID]
 			if bucket < weight {
 				selected = edgeID
 				break
 			}
 			bucket -= weight
 		}
+		if allocation.State.Unified != nil {
+			for _, candidate := range eligible {
+				if candidate.EdgeID == selected {
+					decision.ExplorationKind = allocationKind
+					decision.ExplorationCandidateKey = edgeDNSCandidateDecisionKey(candidate)
+				}
+			}
+		}
 		if selected != "" && selected != selection.PrimaryEdgeID {
 			for index, candidate := range eligible {
 				if candidate.EdgeID == selected {
 					copy(eligible[1:index+1], eligible[:index])
 					eligible[0] = candidate
-					decision.ExplorationKind = "business_allocation"
+					decision.ExplorationKind = allocationKind
 					decision.ExplorationCandidateKey = edgeDNSCandidateDecisionKey(candidate)
 					break
 				}

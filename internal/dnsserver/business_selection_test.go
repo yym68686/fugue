@@ -39,6 +39,46 @@ func businessBucketHint(value int) dnsGeoHint {
 	return dnsGeoHint{decisionEntropy: &dnsDecisionEntropy{replaying: true, Buckets: []dnsDecisionBucket{{Purpose: "business_allocation", Modulus: 10000, Value: value}}}}
 }
 
+func TestUnifiedDNSSeparatesExplorationAndQualityAcrossExecutors(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	record := businessSelectionRecord(t, now)
+	selection := record.AnswerPolicy.PhysicalSelection
+	policy := selection.BusinessAllocation.Policy
+	policy.Version = model.BusinessEdgeUnifiedVersion
+	policy.MaximumCandidateBasisPoints = 10000
+	policy.Unified = &model.BusinessUnifiedPolicy{MinimumConnectionsPerCohort: 5, RTTAdvantageMS: 20, PromotionMinimumConnections: 8, PromotionMinimumCoverageBasisPoints: 9000}
+	policy.InitialDNSPublications["dns-b"] = policy.InitialDNSPublications["dns-a"]
+	receipt, err := edgequality.CaptureBusinessExploration(edgequality.BusinessExplorationInput{Policy: policy, CapturedAt: now, Hostname: record.Name, PathPrefix: "/", TrafficClass: "dynamic_api", Candidates: []edgequality.Candidate{
+		{EdgeID: "edge-a", EdgeGroupID: "shared", RouteGeneration: selection.EvidenceDigest, RouteProofVerified: true, ProofObservedAt: &now},
+		{EdgeID: "edge-b", EdgeGroupID: "shared", RouteGeneration: selection.EvidenceDigest, RouteProofVerified: true, ProofObservedAt: &now}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection.PrimarySince = &receipt.Decision.State.Unified.PrimarySince
+	for _, nodeID := range []string{"dns-a", "dns-b"} {
+		selection.BusinessAllocation = &model.DNSBusinessAllocation{ExecutionNodeID: nodeID, Policy: policy, State: receipt.Decision.State, ReceiptDigest: receipt.Digest, ValidUntil: receipt.Decision.ValidUntil}
+		if err := model.ValidateDNSPhysicalSelection(selection); err != nil {
+			t.Fatal(err)
+		}
+		counts, kinds := map[string]int{}, map[string]int{}
+		for bucket := 0; bucket < 10000; bucket++ {
+			ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, businessBucketHint(bucket), now, false)
+			if len(ordered) != 2 {
+				t.Fatal("lost ready candidates", nodeID, bucket, decision)
+			}
+			counts[ordered[0].EdgeID]++
+			kinds[decision.ExplorationKind]++
+		}
+		if counts["edge-a"] != 50 || counts["edge-b"] != 9950 || kinds["business_exploration"] != 100 || kinds["business_quality"] != 9900 {
+			t.Fatal(nodeID, counts, kinds)
+		}
+	}
+	selection.BusinessAllocation.ExecutionNodeID = "dns-other"
+	if model.ValidateDNSPhysicalSelection(selection) == nil {
+		t.Fatal("undeclared DNS executor accepted")
+	}
+}
+
 func TestBusinessDNSWireTTLDoesNotOutliveAllocationLease(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	record := businessSelectionRecord(t, now)

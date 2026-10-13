@@ -97,6 +97,7 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 	want = append(want, "edge-client-front-public-a-quality", "edge-client-front-public-b-primary-quality", "edge-client-front-public-b-secondary-quality")
 	want = append(want, "edge-client-front-us-managed")
 	want = append(want, "edge-client-dns-de-c", "edge-client-dns-us-c", "edge-client-dns-de-d", "edge-client-dns-us-d")
+	want = append(want, "edge-client-dns-de-e", "edge-client-dns-us-e")
 	for _, group := range edgeRegistry.Groups {
 		want = append(want, group.Client.ID, group.Control.ID, group.Worker.ID)
 	}

@@ -1635,7 +1635,7 @@ func firstSecretLikeTypedContentPath(value any, path string, businessAnchors, bu
 			if platformArtifactSecretLikeKey(key) && !(key == "fencing_token" && businessAnchor && platformArtifactBusinessDNSAnchor(typed)) {
 				return childPath
 			}
-			isBusinessPolicy := path == "business_exploration" || strings.HasSuffix(path, ".business_exploration") || (path != "" && (path == "policy" || strings.HasSuffix(path, ".policy")) && typed["version"] == "business-edge-exploration-v1")
+			isBusinessPolicy := path == "business_exploration" || strings.HasSuffix(path, ".business_exploration") || (path != "" && (path == "policy" || strings.HasSuffix(path, ".policy")) && (typed["version"] == model.BusinessEdgeExplorationVersion || typed["version"] == model.BusinessEdgeUnifiedVersion))
 			if found := firstSecretLikeTypedContentPath(child, childPath, key == "initial_dns_publications" && isBusinessPolicy, businessAnchors); found != "" {
 				return found
 			}
