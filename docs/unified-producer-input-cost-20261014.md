@@ -37,6 +37,12 @@ and full verification, and independent positive LKG are unchanged. Production
 phase timings must confirm the improvement after normal API release generation
 755; activation acceptance is still pending.
 
+API generation 755 deployed through CI 38465718827 successfully. Both replicas
+are Ready with zero restarts. At 21:04:10 UTC the producer completed in 65,797 ms;
+compiler-input persistence was 9,459 ms and materialization was 10,893 ms.
+The producer published successfully. This is one observed production cycle,
+not a claim that every future cycle has the same latency.
+
 Disposable PostgreSQL integration tests inject changed stored bytes, changed
 bytes with a matching chunk hash, and a missing chunk before commit. Every
 case fails and rolls back both chunks and manifest. Existing corruption,

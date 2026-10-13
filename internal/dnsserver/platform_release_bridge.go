@@ -15,7 +15,7 @@ import (
 // selection rules must also agree. Scores are observations: retaining the old
 // score cannot introduce a new endpoint or prolong either artifact's authority.
 func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) map[string]bool {
-	probes, records := dnsReleaseCompatibility(old, bridge)
+	probes, records := dnsReleaseCompatibilityForProof(old, bridge, true)
 	if old == nil || old.payload.Plan == nil {
 		return probes
 	}
@@ -33,6 +33,10 @@ func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) 
 }
 
 func dnsReleaseCompatibility(old *dnsServingState, bridge *dnsReleaseBridge) (map[string]bool, map[string]bool) {
+	return dnsReleaseCompatibilityForProof(old, bridge, false)
+}
+
+func dnsReleaseCompatibilityForProof(old *dnsServingState, bridge *dnsReleaseBridge, retainSelection bool) (map[string]bool, map[string]bool) {
 	if bridge == nil || old == nil || old.payload.Plan == nil || bridge.payload.Plan == nil ||
 		bridge.candidate.Release.ID == old.record.Candidate.Release.ID ||
 		!bridge.candidate.Release.ReleasedAt.After(old.record.Candidate.Release.ReleasedAt) {
@@ -41,6 +45,10 @@ func dnsReleaseCompatibility(old *dnsServingState, bridge *dnsReleaseBridge) (ma
 	previous, next := old.payload, bridge.payload
 	oldRules, newRules := dnsBridgeRules(previous.Policy.DNSAnswerRules), dnsBridgeRules(next.Policy.DNSAnswerRules)
 	oldQueries, newQueries := dnsBridgeQueries(previous.Queries), dnsBridgeQueries(next.Queries)
+	if retainSelection {
+		retainDNSSelectionComparison(oldQueries)
+		retainDNSSelectionComparison(newQueries)
+	}
 	oldTraffic, newTraffic := dnsBridgeTrafficConstraints(previous), dnsBridgeTrafficConstraints(next)
 	oldPlan, newPlan := previous.Plan, next.Plan
 	previous.Plan, next.Plan = nil, nil
@@ -78,6 +86,31 @@ func dnsReleaseCompatibility(old *dnsServingState, bridge *dnsReleaseBridge) (ma
 		}
 	}
 	return allowed, records
+}
+
+func retainDNSSelectionComparison(queries map[string][]platformconfig.DNSQueryView) {
+	for _, views := range queries {
+		for _, view := range views {
+			for index := range view.Records {
+				selection := view.Records[index].AnswerPolicy.PhysicalSelection
+				if selection == nil {
+					continue
+				}
+				allocation := selection.BusinessAllocation
+				if allocation != nil && (allocation.Policy.Version != model.BusinessEdgeUnifiedVersion || allocation.State.Unified == nil) {
+					continue
+				}
+				selection.PrimaryEdgeID, selection.OrderedEdgeIDs, selection.PrimarySince = "", nil, nil
+				if allocation == nil {
+					continue
+				}
+				allocation.State.BasisPoints = nil
+				allocation.State.LastAdjustedAt = time.Time{}
+				allocation.State.LastEvidenceBucket = time.Time{}
+				allocation.State.Unified = &model.BusinessUnifiedState{}
+			}
+		}
+	}
 }
 
 // Application rollout constraints authorize only that application's records.
