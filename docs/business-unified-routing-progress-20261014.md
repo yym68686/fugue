@@ -63,6 +63,29 @@ The code release retry declares API generation 751, US/DE edge-worker generation
 the isolated instances have been accepted; transport handoff and business intent
 activation are separate configuration changes.
 
+The activation draft removes the candidate ceiling (`10000` basis points),
+sets a separate 200-point exploration budget, allows a 1000-point step and a
+120-second cooldown. Comparison still requires three complete 300-second
+windows, at least one connection per window, five distinct connections per
+cohort, 30% coverage, and both 15% and 20 ms RTT advantage. Promotion requires
+eight distinct connections and 50% coverage. Qualified delivery/retransmission
+regression guards and transport stops remain in force. The explicit 48-hour
+intent is prepared independently and has not yet been activated. DNS answer
+shares are not represented as exact HTTP request or byte shares.
+
+US worker staging exposed a separately proven durable state size limit; see
+`edge-authority-storage-pressure-20261014.md`. The compatible reader was released
+first, then compressed writes were enabled independently. At 19:05:49 UTC,
+the live state was 18,775,914 encoded bytes and 100,161,024 expanded bytes,
+preserving 57,308 shadow and 55,038 authority audit entries. No audit history
+or serving identity was deleted.
+
+The observed DNS proof-renewal regression and exact replay are documented in
+`dns-business-proof-renewal-20261014.md`. The retry at `892b7176` selects only
+API generation 754, US worker 216 and isolated DNS E generation 4 in both
+regions. `36f484ae` was rejected during preflight; its successor plan validates
+against the same verified production predecessors.
+
 CI 38440948436 rejected the first attempt before any component deployment because
 one input struct needed gofmt alignment. All affected tests, vet, compilation,
 release and configuration checks passed. The retry keeps the exact live
