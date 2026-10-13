@@ -42,7 +42,8 @@ an obsolete historical baseline.
 Code and configuration release separately through `.github/workflows/ci.yml`.
 The new policy is admitted only after every required route/TLS/DNS consumer
 advertises its v2 capability. No business workload, SSH identity or trust file
-is changed. Production activation and acceptance remain outstanding.
+is changed. The v2 intent was activated through CI 38461304882; production
+handoff and subsequent verification are recorded below.
 
 ## Local verification
 
@@ -63,14 +64,14 @@ The code release retry declares API generation 751, US/DE edge-worker generation
 the isolated instances have been accepted; transport handoff and business intent
 activation are separate configuration changes.
 
-The activation draft removes the candidate ceiling (`10000` basis points),
+The active generation 5 declaration removes the candidate ceiling (`10000` basis points),
 sets a separate 200-point exploration budget, allows a 1000-point step and a
 120-second cooldown. Comparison still requires three complete 300-second
 windows, at least one connection per window, five distinct connections per
 cohort, 30% coverage, and both 15% and 20 ms RTT advantage. Promotion requires
 eight distinct connections and 50% coverage. Qualified delivery/retransmission
 regression guards and transport stops remain in force. The explicit 48-hour
-intent is prepared independently and has not yet been activated. DNS answer
+intent expires at 2026-10-15 20:07:50 UTC. DNS answer
 shares are not represented as exact HTTP request or byte shares.
 
 US worker staging exposed a separately proven durable state size limit; see
@@ -91,3 +92,31 @@ one input struct needed gofmt alignment. All affected tests, vet, compilation,
 release and configuration checks passed. The retry keeps the exact live
 predecessor and changes only formatting and monotonically increasing release
 generations; it does not declare the failed build as a serving predecessor.
+
+## Production activation and follow-up
+
+Both DNS executors now consume `business-edge-unified-v2`. At 21:39:36–38 UTC,
+both independently recorded sequence 9, allocation receipt
+`sha256:d0214f2127e4e8ce9145165cd022033acfd572ac070f440b2cc8e87be132aafe`
+and the same full publication fence 3561. The shared quality primary and target
+were vmarck, with 9800 quality points and a separate 200-point exploration
+budget. The US execution map was 9900/100 and Germany was 6000/4000 during
+the bounded migration. At 21:52 UTC the shared migration map had advanced
+Germany to 8000/2000. These are temporary execution shares, not competing
+DNS-specific quality rankings.
+
+Production acceptance exposed two exact regressions, each documented with
+private evidence and a focused reproducer. The compiler-input persistence
+repair is described in `unified-producer-input-cost-20261014.md`; the migration
+proof compatibility repair is described in
+`unified-migration-proof-handoff-20261014.md`. API generation 755 was deployed
+through CI 38465718827. Isolated DNS F runtimes were deployed through
+CI 38468543536. Both F instances passed signature and current verified-full
+checks, exact predecessor handoff checks and 24 isolated UDP/TCP checks.
+The US public listener was handed to F by transport generation 41 through
+successful CI 38472764012; 48 public and recursive checks passed afterward.
+
+At 21:47–21:48 UTC, native poly and argus SSH login both exited successfully
+with Bash and the expected workspace, strict host verification enabled and
+the trust-file hash unchanged. Their business Pod UIDs, container IDs and
+zero restart counts matched the captured pre-handoff baseline.
