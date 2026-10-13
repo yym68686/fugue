@@ -73,3 +73,22 @@ creation order and account binding without depending on controller timing.
 Transport preservation and compensation assertions remain unchanged. The real
 isolated test still has to pass through normal CI; a unit test alone does not
 prove its network behavior.
+
+API 747 and both workers (US 211, DE 385) completed their deployment jobs in
+CI `38360741561`; its overall failure is the isolated fixture issue above.
+The candidate DNS D Pods are Ready at zero restarts. The US D UID is
+`9a00624a-c1dc-48d7-8505-e5266956ab7c`, image
+`sha256:6e1a40288c1806c7ffa81e42a90685206fcaec49ffce29a4e9b449b8bcf6ffa8`.
+At 07:42:55 UTC the US old/candidate runtime snapshots passed existing strict
+handoff validation on `artifact_1791876939_cee1d7771ff0`. Germany's snapshot
+was not admissible in that capture and is not authorized by this observation.
+Transport generation 37 selects only US D; all original CI preflight, CAS,
+signed proof and public query checks remain required. The German public
+selector remains C until an independent successful verification.
+
+07:13-07:18 UTC: the bounded DNS collector retained 11 samples, no collection
+errors and no SERVFAIL increase. Historical cumulative totals were US 16 and
+DE 9, unchanged from 05:44-05:45; these totals have not been attributed here.
+Native SSH from this workstation at 07:22 UTC timed out during banner exchange
+for both aliases; the trust file hash was unchanged. This is an unsuccessful
+client acceptance attempt, not evidence of a DNS or SSH regression cause.
