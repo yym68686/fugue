@@ -53,7 +53,13 @@ The frontend contract snapshot and generated types are synchronized. Its existin
 contract snapshot and generated-artifact checks pass. No unrelated frontend fixes
 are included.
 
-The code release declares API generation 750, US/DE edge-worker generations
-212/386, and isolated US/DE DNS E generation 1. Public DNS D remains selected until
+The code release retry declares API generation 751, US/DE edge-worker generations
+213/387, and isolated US/DE DNS E generation 2. Public DNS D remains selected until
 the isolated instances have been accepted; transport handoff and business intent
 activation are separate configuration changes.
+
+CI 38440948436 rejected the first attempt before any component deployment because
+one input struct needed gofmt alignment. All affected tests, vet, compilation,
+release and configuration checks passed. The retry keeps the exact live
+predecessor and changes only formatting and monotonically increasing release
+generations; it does not declare the failed build as a serving predecessor.

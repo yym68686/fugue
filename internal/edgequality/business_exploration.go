@@ -19,15 +19,15 @@ import (
 type BusinessExplorationState = model.BusinessEdgeExplorationState
 
 type BusinessExplorationInput struct {
-	InitialDNSBasisPoints map[string]map[string]int `json:"initial_dns_basis_points,omitempty"`
-	Policy         model.BusinessEdgeExplorationPolicy `json:"policy"`
-	CapturedAt     time.Time                           `json:"captured_at"`
-	Hostname       string                              `json:"hostname"`
-	PathPrefix     string                              `json:"path_prefix"`
-	TrafficClass   string                              `json:"traffic_class"`
-	Candidates     []Candidate                         `json:"candidates"`
-	NetworkSamples []model.EdgeNetworkSample           `json:"network_samples"`
-	Previous       *BusinessExplorationState           `json:"previous,omitempty"`
+	InitialDNSBasisPoints map[string]map[string]int           `json:"initial_dns_basis_points,omitempty"`
+	Policy                model.BusinessEdgeExplorationPolicy `json:"policy"`
+	CapturedAt            time.Time                           `json:"captured_at"`
+	Hostname              string                              `json:"hostname"`
+	PathPrefix            string                              `json:"path_prefix"`
+	TrafficClass          string                              `json:"traffic_class"`
+	Candidates            []Candidate                         `json:"candidates"`
+	NetworkSamples        []model.EdgeNetworkSample           `json:"network_samples"`
+	Previous              *BusinessExplorationState           `json:"previous,omitempty"`
 }
 
 type BusinessExplorationWindow struct {
