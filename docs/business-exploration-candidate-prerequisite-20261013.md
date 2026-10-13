@@ -125,3 +125,14 @@ requests and verify identity binding, bounded output and absence of raw response
 content. Publish this observation improvement through the Guardian lane before
 another bounded worker attempt. This change supplies evidence and is not a claim
 to have fixed the unobserved HTTP failure.
+
+Observation release `f584cae9`, CI `38351421131`, succeeded. Both Ready Guardian
+Pods run `sha256:452166458e5939be38d1750ef1ecd64720746953220977221babc51f74f78672`
+with zero restarts. The current authority was read again before worker intent
+210 and still matches the exact `4c107203` predecessor. The next bounded attempt
+can therefore retain the missing HTTP evidence through the normal CI executor.
+Public US/DE DNS Service identities still select the original C instances.
+All 24 authoritative UDP/TCP queries passed; seven queries to the external
+recursive resolver `8.8.8.8` timed out locally. Those transport failures and local
+SSH banner timeouts are retained separately and are not attributed to this code
+release. Local SSH checks are incomplete; the trust file is unchanged.
