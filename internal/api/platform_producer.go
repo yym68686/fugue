@@ -190,7 +190,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			return interval, err
 		}
 	}
-	runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	var projection platformIntentProjectionResponse
 	advance("capture_inputs")

@@ -250,16 +250,12 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	if err != nil {
 		return err
 	}
-	decoded, err := platformconfig.DecodeRuntimeSnapshotReader(r)
+	_, err = io.Copy(io.Discard, r)
 	r.rows.Close()
 	if err != nil {
 		return err
 	}
-	actual, err := platformconfig.RuntimeSnapshotDigest(decoded)
-	if err != nil {
-		return err
-	}
-	if actual != digest {
+	if !r.done || r.err != nil {
 		return ErrConflict
 	}
 	return tx.Commit()
