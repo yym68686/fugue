@@ -101,3 +101,26 @@ digest algorithm and storage integrity checks stay unchanged. The test failed
 before this correction and passes after it. API intent 749 selects only this
 runtime repair using the verified generation-748 predecessor; real acceptance
 still requires its normal CI deployment and subsequent publication evidence.
+
+API 749 CI `38387245545` completed successfully; both API replicas now run image
+`sha256:ee2c270de8da152de0291cc32111b6219f9b99fbc938b93d5e451866f9175710`,
+zero restarts. A sanitized replay of the actual managed-app Kubernetes evidence
+for `i00.pro`'s stable release passed the strict readiness test: Deployment and
+Service ownership, current image, EndpointSlice, ReplicaSet and one Ready Pod
+all matched. The app had an independent rollout at 10:59 UTC. Its earlier
+rejected readiness snapshot was not retained, so this later successful replay
+does not establish the exact cause of the original rejection.
+
+At 11:45:06 UTC the producer generated full release
+`artifact_1791891780_63b0f8072980`, fence 3472, and at 11:49:10 UTC generated a
+gray candidate. Both DNS actual receipts now load the signed full parent
+and retain the two explicit 1% observe allocations (US baseline vmarck with
+US OVH candidate; DE baseline US OVH with vmarck candidate). Separate real-sample
+capture and matched deterministic replay found no complete shared cohort windows;
+neither comparison authorizes an adaptive change. The full release was verified.
+
+An independent cell producer log at 11:49:56 reports a separate, expected
+failure: stale BWG capability for `cell-public-b` edge-route compatibility.
+Because BWG is intentionally offline, the producer retained the previous
+release. This does not block the global i00.pro observe release and no BWG
+recovery or topology mutation was attempted.
