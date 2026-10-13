@@ -92,3 +92,13 @@ DE 9, unchanged from 05:44-05:45; these totals have not been attributed here.
 Native SSH from this workstation at 07:22 UTC timed out during banner exchange
 for both aliases; the trust file hash was unchanged. This is an unsuccessful
 client acceptance attempt, not evidence of a DNS or SSH regression cause.
+
+US handoff `b59408f0`, CI `38364910077`, passed. A separate 07:50:35 UTC
+read passed both regions' old/candidate validation on full parent
+`artifact_1791877711_53359f9581a9`; this supersedes the earlier inadmissible
+German capture without explaining its transient readiness loss. Transport
+generation 38 changes only the German public selector from C to D. Its exact
+candidate UID is `aaca9dd3-f5e2-41fb-aafe-44e0318cb63b`, image
+`sha256:da53fa2047f1aa95fe74f5812b351250cd15400b60d0a19fc87e5b38d7025350`.
+The isolated SSH fixture correction passed CI `38364072041`, including job
+`115185310269`. No production SSH image declaration was changed.
