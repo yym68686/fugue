@@ -58,11 +58,11 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 				if err := json.Unmarshal(compiled.Evidence, &evidence); err != nil {
 					return err
 				}
-				coverage = append(coverage, map[string]any{"hostname": route.Hostname, "dns_node_id": fact.NodeID, "intent_id": route.BusinessExploration.IntentID,
-					"source_receipt_digest": evidence.Source.Digest, "allocation_receipt_digest": evidence.Evaluation.Digest,
-					"raw_network_records": len(evidence.Source.Snapshot.NetworkSamples), "route_witness_bound_passive_records": len(evidence.Evaluation.Input.NetworkSamples),
-					"action": evidence.Evaluation.Decision.Action, "reasons": evidence.Evaluation.Decision.Reasons, "coverage": evidence.Evaluation.Decision.Coverage,
-					"comparisons": evidence.Evaluation.Decision.Comparisons, "rejected": evidence.Evaluation.Decision.Rejected, "valid_until": evidence.Evaluation.Decision.ValidUntil})
+				entry, err := businessExplorationCoverageFact(route, fact.NodeID, evidence)
+				if err != nil {
+					return err
+				}
+				coverage = append(coverage, entry)
 				continue
 			}
 			selection, err := compileBoundPhysicalQualitySelection(receipt, time.Now().UTC())
@@ -89,6 +89,23 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 		projection.RuntimeSnapshot.Facts["business_exploration_coverage"] = coverage
 	}
 	return nil
+}
+
+func businessExplorationCoverageFact(route platformconfig.PhysicalQualityRoute, nodeID string, evidence businessPublicationEvidence) (map[string]any, error) {
+	entry := map[string]any{"hostname": route.Hostname, "dns_node_id": nodeID, "intent_id": route.BusinessExploration.IntentID,
+		"source_receipt_digest": evidence.Source.Digest, "allocation_receipt_digest": evidence.Evaluation.Digest,
+		"raw_network_records": len(evidence.Source.Snapshot.NetworkSamples), "route_witness_bound_passive_records": len(evidence.Evaluation.Input.NetworkSamples),
+		"action": evidence.Evaluation.Decision.Action, "reasons": evidence.Evaluation.Decision.Reasons, "coverage": evidence.Evaluation.Decision.Coverage,
+		"comparisons": evidence.Evaluation.Decision.Comparisons, "rejected": evidence.Evaluation.Decision.Rejected, "valid_until": evidence.Evaluation.Decision.ValidUntil}
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return nil, err
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return nil, err
+	}
+	return stored, nil
 }
 
 func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy, selections map[string]compiledPhysicalDNSSelection, now time.Time) error {

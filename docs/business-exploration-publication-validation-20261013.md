@@ -69,3 +69,35 @@ At 10:11:43–10:11:47 UTC, the new read-only resolver matched both actual DNS
 receipts to verified full `artifact_1791886026_78d42905a601`, fence 3465, retaining
 each declared baseline. This read grants no serving authority. The renewed
 observe declaration must still pass normal configuration CI and gray/full ACKs.
+
+## Observe activation and compiler input persistence
+
+Configuration CI `38381883183`, job `115244573531`, activated producer
+`artifact_1791886662_ee58c92d88a9` at 10:19:47 UTC, fence 39. The resolved source
+digest is `sha256:f22a5222ef0057280e1d5889fdead2a3fa5a2f2cec3438c294fd1c40a5f83585`;
+both initialization anchors were fence 3466. The job succeeded; the overall
+workflow was cancelled because the unselected producer-renewal job was cancelled.
+That does not undo the completed configuration transaction.
+
+Its preview retained a fixed 1% exploration intent and reported insufficient
+comparison evidence on both DNS nodes: no complete shared cohort windows.
+The captured vmarck/US OVH records numbered 73/52, independent connections 27/20,
+ACK-delta records 45/32, and qualified delivery records only 2/2. The reasons
+include application-limited delivery, absent delivery pairs and unqualified
+retransmission ratios. These are evidence counts, not a winner or traffic share.
+
+Actual gray/full traffic acceptance remained incomplete. At 10:35:56 and
+10:38:13 UTC the producer's nested storage timing located `conflict` in
+`compiler_input`, before candidate artifacts were published. A regression test
+using the exact production coverage construction reproduced a changed input
+digest after both ordinary JSON and streamed storage decoding. Coverage embedded
+typed comparison and coverage structs inside an untyped facts map. Encoding them
+used struct field order; storage decoding produced maps, whose keys encoded in
+sorted order. The digest check correctly rejected those unequal bytes.
+
+Coverage facts are now converted once to their JSON storage representation
+before lineage computation. The deterministic allocation receipt, signed source,
+digest algorithm and storage integrity checks stay unchanged. The test failed
+before this correction and passes after it. API intent 749 selects only this
+runtime repair using the verified generation-748 predecessor; real acceptance
+still requires its normal CI deployment and subsequent publication evidence.

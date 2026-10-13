@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,46 @@ import (
 	"fugue/internal/routeprobe"
 	"github.com/miekg/dns"
 )
+
+func TestBusinessCoverageCompilerInputRoundTrip(t *testing.T) {
+	source, route := businessPublicationFixture(t)
+	compiled, err := captureBusinessPublication(source, route, source.Snapshot.CapturedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidence businessPublicationEvidence
+	if err := json.Unmarshal(compiled.Evidence, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	coverage, err := businessExplorationCoverageFact(route, "dns-a", evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := platformconfig.RuntimeSnapshot{Facts: map[string]any{"business_exploration_coverage": []map[string]any{coverage}}}
+	digest, err := platformconfig.RuntimeSnapshotDigest(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded bytes.Buffer
+	if err := platformconfig.WriteRuntimeSnapshot(&encoded, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for _, decode := range []func([]byte) (platformconfig.RuntimeSnapshot, error){
+		platformconfig.DecodeRuntimeSnapshotJSON,
+		func(raw []byte) (platformconfig.RuntimeSnapshot, error) {
+			return platformconfig.DecodeRuntimeSnapshotReader(bytes.NewReader(raw))
+		},
+	} {
+		decoded, err := decode(encoded.Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		actual, err := platformconfig.RuntimeSnapshotDigest(decoded)
+		if err != nil || actual != digest {
+			t.Fatalf("compiler input changed after storage decode: before=%s after=%s error=%v", digest, actual, err)
+		}
+	}
+}
 
 func businessPublicationFixture(t *testing.T) (edgequality.Receipt, platformconfig.PhysicalQualityRoute) {
 	return businessPublicationFixtureWithSelection(t, nil, false)

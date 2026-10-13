@@ -9,6 +9,9 @@ x-fugue-business-exploration:
     fresh route proofs, executor capability admission and normal gray/full
     rollout remain mandatory. Historical positive LKG recovery is independent.
     Exploration weights describe DNS answers, not exact HTTP requests or bytes.
+    Observational coverage facts are converted to their JSON storage representation
+    before computing compiler input lineage; storage round trips must preserve
+    that digest. This conversion never changes allocation evidence or authority.
 x-fugue-edge-offline:
   semantics: >-
     edge_offline is an independently fenced global producer reconfiguration.
