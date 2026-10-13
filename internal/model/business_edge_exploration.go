@@ -96,8 +96,51 @@ func CloneDNSBusinessAllocation(allocation *DNSBusinessAllocation) *DNSBusinessA
 }
 
 type BusinessDNSPublicationAnchor struct {
-	Digest       string `json:"digest"`
-	FencingToken int64  `json:"fencing_token"`
+	Digest         string `json:"digest"`
+	FencingToken   int64  `json:"fencing_token"`
+	BaselineEdgeID string `json:"baseline_edge_id,omitempty"`
+}
+
+func (anchor *BusinessDNSPublicationAnchor) UnmarshalJSON(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	if len(fields) < 2 || len(fields) > 3 || fields["digest"] == nil || fields["fencing_token"] == nil {
+		return errors.New("business DNS anchor requires explicit digest and fence")
+	}
+	for _, value := range fields {
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return errors.New("business DNS anchor fields cannot be null")
+		}
+	}
+	type plain BusinessDNSPublicationAnchor
+	var decoded plain
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if fields["baseline_edge_id"] != nil && decoded.BaselineEdgeID == "" {
+		return errors.New("explicit business DNS baseline cannot be empty")
+	}
+	*anchor = BusinessDNSPublicationAnchor(decoded)
+	return nil
+}
+
+func BusinessExplorationPolicyForDNS(policy BusinessEdgeExplorationPolicy, nodeID string) (BusinessEdgeExplorationPolicy, error) {
+	if err := ValidateBusinessEdgeExplorationPolicy(policy); err != nil {
+		return BusinessEdgeExplorationPolicy{}, err
+	}
+	anchor, exists := policy.InitialDNSPublications[nodeID]
+	if !exists {
+		return BusinessEdgeExplorationPolicy{}, errors.New("business exploration DNS node has no explicit publication anchor")
+	}
+	resolved := CloneBusinessEdgeExplorationPolicy(policy)
+	if anchor.BaselineEdgeID != "" {
+		resolved.BaselineEdgeID = anchor.BaselineEdgeID
+	}
+	return resolved, nil
 }
 
 func CloneBusinessEdgeExplorationPolicy(policy BusinessEdgeExplorationPolicy) BusinessEdgeExplorationPolicy {
@@ -188,6 +231,11 @@ func ValidateBusinessEdgeExplorationPolicy(policy BusinessEdgeExplorationPolicy)
 			return errors.New("invalid or duplicate business exploration candidate")
 		}
 		seen[edgeID] = true
+	}
+	for _, anchor := range policy.InitialDNSPublications {
+		if anchor.BaselineEdgeID != "" && !seen[anchor.BaselineEdgeID] {
+			return errors.New("business DNS baseline must be an explicitly declared candidate")
+		}
 	}
 	if !seen[policy.BaselineEdgeID] || policy.ExplorationBasisPoints < len(seen)-1 || policy.ExplorationBasisPoints > 1000 ||
 		policy.MaximumCandidateBasisPoints < policy.ExplorationBasisPoints || policy.MaximumCandidateBasisPoints > 9000 ||

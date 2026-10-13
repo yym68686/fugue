@@ -26,6 +26,10 @@ func businessPublicationFixtureWithSelection(t *testing.T, previous *model.DNSPh
 }
 
 func businessPublicationFixtureForNode(t *testing.T, previous *model.DNSPhysicalSelection, servingLKG bool, nodeID string) (edgequality.Receipt, platformconfig.PhysicalQualityRoute) {
+	return businessPublicationFixtureForBaselines(t, previous, servingLKG, nodeID, nil)
+}
+
+func businessPublicationFixtureForBaselines(t *testing.T, previous *model.DNSPhysicalSelection, servingLKG bool, nodeID string, baselines map[string]string) (edgequality.Receipt, platformconfig.PhysicalQualityRoute) {
 	t.Helper()
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	exploration := model.BusinessEdgeExplorationPolicy{Version: model.BusinessEdgeExplorationVersion, IntentID: "intent-a", Mode: "observe", BaselineEdgeID: "edge-a", CandidateEdgeIDs: []string{"edge-a", "edge-b"},
@@ -36,12 +40,20 @@ func businessPublicationFixtureForNode(t *testing.T, previous *model.DNSPhysical
 		BucketSeconds: 300, RequiredBuckets: 3, MinimumConnectionsPerBucket: 3, CooldownSeconds: 600, EvidenceMaxAgeSeconds: 600,
 		MinimumCohortCoverageBasisPoints: 9000, RTTAdvantageRatio: .15, DeliveryAdvantageRatio: .2, MaximumRTTRegressionRatio: .1,
 		MaximumDeliveryRegressionRatio: .1, MaximumRetransmissionIncrease: .01, StopRTTMS: 3000, StopRetransmissionRate: .2}
+	for dnsNodeID, baseline := range baselines {
+		anchor := exploration.InitialDNSPublications[dnsNodeID]
+		anchor.BaselineEdgeID = baseline
+		exploration.InitialDNSPublications[dnsNodeID] = anchor
+	}
 	route := platformconfig.PhysicalQualityRoute{Hostname: "app.example.test", PathPrefix: "/", TrafficClass: "dynamic_api", Policy: edgequality.DefaultDeliveryNetworkPolicy(), BusinessExploration: &exploration}
 	plan := platformconfig.DNSReadinessPlan{Records: []platformconfig.DNSReadinessRecord{{Hostname: route.Hostname, MinimumHealthyEdges: 2}}}
 	readiness := platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}
 	facts := []map[string]any{}
 	record := model.EdgeDNSRecord{Name: route.Hostname, Type: "A", TTL: 60, AnswerPolicy: model.DNSAnswerPolicy{PolicyKind: model.DNSAnswerPolicyKindPhysicalOrder,
 		PhysicalOrder: &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: exploration.CandidateEdgeIDs}, HealthRequired: true, RouteReadyRequired: true}}
+	if baselines[nodeID] == "edge-b" {
+		record.AnswerPolicy.PhysicalOrder.OrderedEdgeIDs = []string{"edge-b", "edge-a"}
+	}
 	candidates := []edgequality.Candidate{}
 	for index, edgeID := range exploration.CandidateEdgeIDs {
 		address, group := []string{"8.8.8.8", "9.9.9.9"}[index], "group-"+edgeID
@@ -127,6 +139,48 @@ func TestBusinessPublicationInitialAnchorsAreBoundToEachDNSNode(t *testing.T) {
 				if _, err := captureBusinessPublication(source, changed, source.Snapshot.CapturedAt); err == nil {
 					t.Fatal("accepted invalid DNS node publication anchor", invalid)
 				}
+			}
+		})
+	}
+}
+
+func TestBusinessPublicationPreservesDifferentDNSBaselines(t *testing.T) {
+	baselines := map[string]string{"dns-a": "edge-a", "dns-b": "edge-b"}
+	for nodeID, baseline := range baselines {
+		t.Run(nodeID, func(t *testing.T) {
+			source, route := businessPublicationFixtureForBaselines(t, nil, false, nodeID, baselines)
+			compiled, err := captureBusinessPublication(source, route, source.Snapshot.CapturedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			allocation := compiled.Selection.BusinessAllocation
+			if compiled.Selection.PrimaryEdgeID != baseline || allocation.Policy.BaselineEdgeID != baseline || allocation.State.BasisPoints[baseline] != 9900 || route.BusinessExploration.BaselineEdgeID != "edge-a" {
+				t.Fatal("initialization replaced a DNS node's serving baseline", allocation)
+			}
+			var evidence businessPublicationEvidence
+			if err := json.Unmarshal(compiled.Evidence, &evidence); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := compileBoundBusinessSelection(evidence, route, source.Snapshot.CapturedAt); err != nil {
+				t.Fatal("node-local evaluation did not replay", err)
+			}
+			other := "edge-b"
+			if baseline == other {
+				other = "edge-a"
+			}
+			allocation.State.Stopped[other] = "observed_transport_stop_threshold"
+			allocation.State.BasisPoints = map[string]int{baseline: 10000}
+			nextSource, nextRoute := businessPublicationFixtureForBaselines(t, compiled.Selection, false, nodeID, baselines)
+			nextRoute.BusinessExploration.BaselineEdgeID = "edge-a"
+			next, err := captureBusinessPublication(nextSource, nextRoute, nextSource.Snapshot.CapturedAt)
+			if err != nil || next.Selection.BusinessAllocation.State.Stopped[other] == "" || next.Selection.BusinessAllocation.State.BasisPoints[baseline] != 10000 {
+				t.Fatal("node-local renewal lost stopped predecessor", err)
+			}
+			anchor := route.BusinessExploration.InitialDNSPublications[nodeID]
+			anchor.BaselineEdgeID = other
+			route.BusinessExploration.InitialDNSPublications[nodeID] = anchor
+			if _, err := captureBusinessPublication(source, route, source.Snapshot.CapturedAt); err == nil {
+				t.Fatal("declared baseline mismatch authorized a bulk traffic move")
 			}
 		})
 	}

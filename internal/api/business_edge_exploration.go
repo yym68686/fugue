@@ -65,7 +65,10 @@ func boundBusinessInput(source edgequality.Receipt, route platformconfig.Physica
 	if err := validateBoundPhysicalQualitySnapshot(snapshot, answer); err != nil {
 		return edgequality.BusinessExplorationInput{}, answer, err
 	}
-	policy := *route.BusinessExploration
+	policy, err := model.BusinessExplorationPolicyForDNS(*route.BusinessExploration, actual.NodeID)
+	if err != nil {
+		return edgequality.BusinessExplorationInput{}, answer, err
+	}
 	if answer.EdgeID != policy.BaselineEdgeID {
 		return edgequality.BusinessExplorationInput{}, answer, errors.New("business safe baseline differs from actual serving assignment")
 	}

@@ -19590,6 +19590,11 @@ components:
       properties:
         digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
         fencing_token: {type: integer, format: int64, minimum: 1}
+        baseline_edge_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Explicit baseline for this DNS node, required to be a declared candidate and to match its replayed serving answer. When absent the policy baseline applies. Compilation resolves this baseline into the node's signed allocation without changing another node's allocation. Consumers must advertise business_dns_baseline_v1 before publication using this field.
     BusinessEdgeExplorationPolicy:
       type: object
       additionalProperties: false

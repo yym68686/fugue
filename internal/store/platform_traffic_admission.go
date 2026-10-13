@@ -162,6 +162,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if required.business && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.BusinessEdgeExplorationCapabilityV1) {
 					return fail("required consumer lacks business edge exploration v1 capability")
 				}
+				if required.businessDNSBaseline && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.BusinessDNSBaselineCapabilityV1) {
+					return fail("required consumer lacks business DNS baseline v1 capability")
+				}
 				if physicalRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3) {
 					return fail("physical network v3 capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
@@ -194,7 +197,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	return nil
 }
 
-type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business bool }
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline bool }
 
 func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
 	var out physicalCapabilities
@@ -221,6 +224,11 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 		}
 		for _, route := range query.PhysicalRoutes {
 			out.business = out.business || route.BusinessExploration != nil
+			if route.BusinessExploration != nil {
+				for _, anchor := range route.BusinessExploration.InitialDNSPublications {
+					out.businessDNSBaseline = out.businessDNSBaseline || anchor.BaselineEdgeID != ""
+				}
+			}
 			out.network = out.network || model.IsBoundedPhysicalNetworkPolicy(route.Policy.Version)
 			out.delivery = out.delivery || model.IsDeliveryPhysicalNetworkPolicy(route.Policy.Version)
 			out.failureAware = out.failureAware || route.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion

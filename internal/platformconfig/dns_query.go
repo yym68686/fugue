@@ -338,7 +338,7 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 				if err := validateDNSPhysicalQuery(record); err != nil {
 					return nil, fmt.Errorf("compile physical query %s/%s/%s: %w", view.NodeID, r.Hostname, r.Type, err)
 				}
-				if err := validateDNSBusinessIntent(record, policy); err != nil {
+				if err := validateDNSBusinessIntent(record, policy, view.NodeID); err != nil {
 					return nil, err
 				}
 				if fact.PhysicalSelection != nil && !fact.PhysicalSelection.CapturedAt.Equal(fact.ObservedAt) {
@@ -461,7 +461,7 @@ func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNS
 			if err := validateDNSPhysicalQuery(r); err != nil {
 				return fmt.Errorf("validate physical query %s/%s/%s: %w", view.NodeID, r.Name, r.Type, err)
 			}
-			if err := validateDNSBusinessIntent(r, policy); err != nil {
+			if err := validateDNSBusinessIntent(r, policy, view.NodeID); err != nil {
 				return err
 			}
 			if len(r.Candidates) != len(r.Values) {
@@ -537,7 +537,7 @@ func validateDNSPhysicalQuery(record model.EdgeDNSRecord) error {
 	return nil
 }
 
-func validateDNSBusinessIntent(record model.EdgeDNSRecord, policy PolicySnapshot) error {
+func validateDNSBusinessIntent(record model.EdgeDNSRecord, policy PolicySnapshot, nodeID string) error {
 	var declared *PhysicalQualityRoute
 	if policy.DNSQueryPolicy != nil {
 		for index := range policy.DNSQueryPolicy.PhysicalRoutes {
@@ -555,8 +555,12 @@ func validateDNSBusinessIntent(record model.EdgeDNSRecord, policy PolicySnapshot
 		}
 		return nil
 	}
-	if declared == nil || record.Type != "A" || !reflect.DeepEqual(*declared.BusinessExploration, selection.BusinessAllocation.Policy) {
+	if declared == nil || record.Type != "A" {
 		return fmt.Errorf("business allocation differs from explicit producer intent")
+	}
+	resolved, err := model.BusinessExplorationPolicyForDNS(*declared.BusinessExploration, nodeID)
+	if err != nil || !reflect.DeepEqual(resolved, selection.BusinessAllocation.Policy) {
+		return fmt.Errorf("business allocation differs from explicit DNS node producer intent")
 	}
 	return nil
 }

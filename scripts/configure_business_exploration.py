@@ -34,8 +34,10 @@ def validate_business_routes(routes):
         if not isinstance(anchors, dict) or not 1 <= len(anchors) <= 32:
             raise ValueError("bounded initial DNS publications required")
         for node_id, anchor in anchors.items():
-            if not isinstance(node_id, str) or not re.fullmatch(r"[^\s\x00]{1,128}", node_id) or not isinstance(anchor, dict) or set(anchor) != {"digest", "fencing_token"} or not isinstance(anchor["digest"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", anchor["digest"]) or type(anchor["fencing_token"]) is not int or anchor["fencing_token"] < 1:
+            if not isinstance(node_id, str) or not re.fullmatch(r"[^\s\x00]{1,128}", node_id) or not isinstance(anchor, dict) or set(anchor) not in ({"digest", "fencing_token"}, {"digest", "fencing_token", "baseline_edge_id"}) or not isinstance(anchor["digest"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", anchor["digest"]) or type(anchor["fencing_token"]) is not int or anchor["fencing_token"] < 1:
                 raise ValueError("exact initial DNS publication required for each DNS node")
+            if "baseline_edge_id" in anchor and anchor["baseline_edge_id"] not in candidates:
+                raise ValueError("DNS baseline must be a declared candidate")
         bounds = {"exploration_basis_points": (len(candidates)-1, 1000), "maximum_candidate_basis_points": (policy["exploration_basis_points"], 9000),
                   "maximum_step_basis_points": (1, 1000), "bucket_seconds": (60, 3600), "required_buckets": (2, 12),
                   "minimum_connections_per_bucket": (3, 10000), "cooldown_seconds": (60, 86400),

@@ -22,6 +22,18 @@ def fixture():
 
 
 class BusinessExplorationConfigurationTests(unittest.TestCase):
+    def test_explicit_per_dns_baseline_must_be_a_candidate(self):
+        config, _ = fixture()
+        policy = config["projection_policy"]["dns_query_policy"]["physical_routes"][0]["business_exploration"]
+        anchor = copy.deepcopy(policy["initial_dns_publications"]["dns-a"])
+        anchor["baseline_edge_id"] = "edge-b"
+        policy["initial_dns_publications"]["dns-b"] = anchor
+        quality.validate(config)
+        for invalid in [None, "", "undeclared"]:
+            anchor["baseline_edge_id"] = invalid
+            with self.assertRaises(ValueError):
+                quality.validate(config)
+
     def test_explicit_enrollment_and_independent_phase_change(self):
         config, previous = fixture()
         quality.validate(config)

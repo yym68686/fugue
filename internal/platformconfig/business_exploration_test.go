@@ -57,19 +57,41 @@ func TestBusinessDNSCompilerRequiresMatchingProducerIntent(t *testing.T) {
 	policy := businessPolicyForTest(time.Now().UTC())
 	record := model.EdgeDNSRecord{Name: "app.example.test", Type: "A", AnswerPolicy: model.DNSAnswerPolicy{
 		PhysicalSelection: &model.DNSPhysicalSelection{BusinessAllocation: &model.DNSBusinessAllocation{Policy: policy}}}}
-	if validateDNSBusinessIntent(record, PolicySnapshot{}) == nil {
+	if validateDNSBusinessIntent(record, PolicySnapshot{}, "dns-a") == nil {
 		t.Fatal("accepted allocation without independent producer intent")
 	}
 	declared := PolicySnapshot{DNSQueryPolicy: &DNSQueryPolicy{PhysicalRoutes: []PhysicalQualityRoute{{Hostname: record.Name, PathPrefix: "/", BusinessExploration: &policy}}}}
-	if err := validateDNSBusinessIntent(record, declared); err != nil {
+	if err := validateDNSBusinessIntent(record, declared, "dns-a"); err != nil {
 		t.Fatal(err)
 	}
 	record.AnswerPolicy.PhysicalSelection.BusinessAllocation.Policy.Mode = "adaptive"
-	if validateDNSBusinessIntent(record, declared) == nil {
+	if validateDNSBusinessIntent(record, declared, "dns-a") == nil {
 		t.Fatal("artifact silently enabled automatic promotion")
 	}
 	record.AnswerPolicy.PhysicalSelection = nil
-	if validateDNSBusinessIntent(record, declared) == nil {
+	if validateDNSBusinessIntent(record, declared, "dns-a") == nil {
 		t.Fatal("missing business allocation accepted")
+	}
+}
+
+func TestBusinessDNSCompilerBindsBaselineToExactNode(t *testing.T) {
+	policy := businessPolicyForTest(time.Now().UTC())
+	anchor := policy.InitialDNSPublications["dns-a"]
+	anchor.BaselineEdgeID = "edge-b"
+	policy.InitialDNSPublications["dns-b"] = anchor
+	resolved, err := model.BusinessExplorationPolicyForDNS(policy, "dns-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := model.EdgeDNSRecord{Name: "app.example.test", Type: "A", AnswerPolicy: model.DNSAnswerPolicy{
+		PhysicalSelection: &model.DNSPhysicalSelection{BusinessAllocation: &model.DNSBusinessAllocation{Policy: resolved}}}}
+	declared := PolicySnapshot{DNSQueryPolicy: &DNSQueryPolicy{PhysicalRoutes: []PhysicalQualityRoute{{Hostname: record.Name, PathPrefix: "/", BusinessExploration: &policy}}}}
+	if err := validateDNSBusinessIntent(record, declared, "dns-b"); err != nil {
+		t.Fatal(err)
+	}
+	for _, wrongNode := range []string{"dns-a", "unknown"} {
+		if validateDNSBusinessIntent(record, declared, wrongNode) == nil {
+			t.Fatal("accepted another DNS node's baseline", wrongNode)
+		}
 	}
 }

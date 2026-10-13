@@ -27,6 +27,10 @@ func (c *CLI) newAdminEdgeBusinessExplorationCommand() *cobra.Command {
 			if err := readBusinessExplorationFile(policyPath, &policy); err != nil {
 				return err
 			}
+			policy, err := model.BusinessExplorationPolicyForDNS(policy, dnsNodeID)
+			if err != nil {
+				return err
+			}
 			client, err := c.newClient()
 			if err != nil {
 				return err

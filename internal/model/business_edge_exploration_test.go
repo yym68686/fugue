@@ -17,6 +17,42 @@ func businessPolicyFixture() BusinessEdgeExplorationPolicy {
 		MaximumDeliveryRegressionRatio: .1, MaximumRetransmissionIncrease: .01, StopRTTMS: 3000, StopRetransmissionRate: .2}
 }
 
+func TestBusinessDNSBaselinesAreExplicitIndependentAndBounded(t *testing.T) {
+	policy := businessPolicyFixture()
+	anchor := policy.InitialDNSPublications["dns-a"]
+	anchor.BaselineEdgeID = "edge-b"
+	policy.InitialDNSPublications["dns-b"] = anchor
+	for nodeID, expected := range map[string]string{"dns-a": "edge-a", "dns-b": "edge-b"} {
+		resolved, err := BusinessExplorationPolicyForDNS(policy, nodeID)
+		if err != nil || resolved.BaselineEdgeID != expected {
+			t.Fatal("node baseline differs", nodeID, resolved.BaselineEdgeID, err)
+		}
+		resolved.CandidateEdgeIDs[0] = "changed"
+		delete(resolved.InitialDNSPublications, "dns-a")
+	}
+	if policy.BaselineEdgeID != "edge-a" || policy.CandidateEdgeIDs[0] != "edge-a" || len(policy.InitialDNSPublications) != 2 {
+		t.Fatal("resolution mutated explicit intent")
+	}
+	if _, err := BusinessExplorationPolicyForDNS(policy, "unknown"); err == nil {
+		t.Fatal("undeclared DNS node inherited another node's anchor")
+	}
+	anchor.BaselineEdgeID = "undeclared"
+	policy.InitialDNSPublications["dns-b"] = anchor
+	if ValidateBusinessEdgeExplorationPolicy(policy) == nil {
+		t.Fatal("undeclared baseline accepted")
+	}
+	for _, raw := range []string{
+		`{"digest":"value","fencing_token":1,"baseline_edge_id":null}`,
+		`{"digest":"value","fencing_token":1,"baseline_edge_id":""}`,
+		`{"digest":"value","fencing_token":1,"unknown":true}`,
+		`{"digest":"value","fencing_token":null}`,
+	} {
+		if json.Unmarshal([]byte(raw), &anchor) == nil {
+			t.Fatal("accepted invalid anchor shape", raw)
+		}
+	}
+}
+
 func TestBusinessExplorationRequiresExplicitBoundedIntent(t *testing.T) {
 	valid := businessPolicyFixture()
 	raw, err := json.Marshal(valid)
