@@ -13,12 +13,12 @@ from scripts.observe_front_candidate import now
 from scripts.publish_agent_edge_shadow import API, canonical
 from scripts.reconfigure_cell_producer import DIGEST, IDENTITY, validate_ref
 from scripts.reconfigure_physical_dns import POLICY_FIELDS, SCOPE, baseline, bounded_json, resolve_baseline
-from scripts.configure_business_exploration import check_business_delta, validate_business_preview, validate_business_routes
+from scripts.configure_business_exploration import BusinessBaselineChanged, check_business_delta, resolve_business_anchors, validate_business_preview, validate_business_routes
 
 
 def validate(config):
     fields = {"schema", "generation", "origin", "producer_generation", "precondition", "projection_policy", "baseline_mode"}
-    if not isinstance(config, dict) or set(config) != fields or not bounded_json(config) or config["schema"] != "fugue.dynamic-quality-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config["baseline_mode"] not in ["declared", "latest_verified_same_policy"]:
+    if not isinstance(config, dict) or not fields.issubset(config) or set(config) - fields - {"business_anchor_mode"} or not bounded_json(config) or config["schema"] != "fugue.dynamic-quality-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config["baseline_mode"] not in ["declared", "latest_verified_same_policy"]:
         raise ValueError("complete explicit dynamic quality declaration required")
     origin = urllib.parse.urlsplit(config["origin"])
     if origin.scheme != "https" or config["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
@@ -26,6 +26,8 @@ def validate(config):
     precondition = config["precondition"]
     if set(precondition) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or precondition["operation"] not in ["dynamic_quality", "business_exploration"] or not DIGEST.fullmatch(precondition["verification_evidence_hash"]):
         raise ValueError("fenced dynamic quality precondition required")
+    if config.get("business_anchor_mode", "declared") not in ["declared", "latest_verified_same_baseline"] or "business_anchor_mode" in config and precondition["operation"] != "business_exploration" or config.get("business_anchor_mode") == "latest_verified_same_baseline" and config["baseline_mode"] != "latest_verified_same_policy":
+        raise ValueError("business anchor resolution requires explicit same-policy baseline mode")
     for field in ["previous_policy", "serving_full"]:
         validate_ref(precondition[field])
     policy = config["projection_policy"]
@@ -80,10 +82,21 @@ def validate_preview(previous, current):
 
 
 def publish(config, api, save):
+    for attempt in range(3):
+        try:
+            return publish_once(config, api, save)
+        except BusinessBaselineChanged:
+            if config.get("business_anchor_mode") != "latest_verified_same_baseline" or attempt == 2:
+                raise
+            time.sleep(10)
+    raise ValueError("business DNS baseline did not settle")
+
+
+def publish_once(config, api, save):
     validate(config)
     declaration = digest(config)
     config = wait_verified_baseline(config, api)
-    baseline(config, api)
+    serving = baseline(config, api)
     precondition = config["precondition"]
     old = api("GET", "/v1/admin/artifacts/" + precondition["previous_policy"]["artifact_id"])["artifact"]
     previous = old["content"]
@@ -95,6 +108,9 @@ def publish(config, api, save):
     business = precondition["operation"] == "business_exploration"
     if business:
         changed_hostname = check_business_delta(source["content"], config["projection_policy"])
+        config = resolve_business_anchors(config, api, serving, changed_hostname)
+        validate(config)
+        check_business_delta(source["content"], config["projection_policy"])
     else:
         check_delta(source["content"], config["projection_policy"])
     current = selected(api, SCOPE, "shadow")
@@ -111,9 +127,19 @@ def publish(config, api, save):
     coverage = validate_preview(before, preview)
     if business:
         coverage = validate_business_preview(preview, config["projection_policy"], changed_hostname)
-    config = wait_verified_baseline(config, api)
+    if config.get("business_anchor_mode") == "latest_verified_same_baseline":
+        try:
+            baseline(config, api)
+        except ValueError as error:
+            if str(error) == "serving full publication changed":
+                raise BusinessBaselineChanged("business baseline advanced during preview") from error
+            raise
+    else:
+        config = wait_verified_baseline(config, api)
     precondition = config["precondition"]
     evidence = {"schema": "fugue.dynamic-quality-reconfiguration-result/v1", "declaration_digest": declaration, "resolved_precondition": precondition, "artifact_id": artifact["id"], "coverage": coverage, "producer_activated": False, "routing_acceptance_complete": False}
+    if config.get("business_anchor_mode") == "latest_verified_same_baseline":
+        evidence.update(resolved_policy_digest=digest(config["projection_policy"]), resolved_dns_anchors=next(route["business_exploration"]["initial_dns_publications"] for route in config["projection_policy"]["dns_query_policy"]["physical_routes"] if route["hostname"] == changed_hostname))
     save(evidence)
     key = "producer-reconfiguration/" + digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": precondition})
     api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/release", {"release_channel": "shadow", "producer_reconfiguration": precondition, "idempotency_key": key, "reason": "Declarative universal dynamic quality policy with preserved explicit constraints"})

@@ -1,9 +1,11 @@
 import copy
 import unittest
+from unittest.mock import patch
 
 from scripts import configure_business_exploration as business
 from scripts import configure_dynamic_quality as quality
 from scripts.test_configure_dynamic_quality import fixture as quality_fixture
+from scripts.test_reconfigure_physical_dns import Ledger, fixture as physical_fixture
 
 
 def fixture():
@@ -22,6 +24,111 @@ def fixture():
 
 
 class BusinessExplorationConfigurationTests(unittest.TestCase):
+    def anchor_fixture(self):
+        config, _ = fixture()
+        config["business_anchor_mode"] = "latest_verified_same_baseline"
+        route = config["projection_policy"]["dns_query_policy"]["physical_routes"][0]
+        route["business_exploration"]["initial_dns_publications"]["dns-b"] = {"digest": "sha256:" + "a" * 64, "fencing_token": 1, "baseline_edge_id": "edge-b"}
+        full = {"artifact": {"id": config["precondition"]["serving_full"]["artifact_id"], "content_hash": config["precondition"]["serving_full"]["content_hash"]}, "release": {"fencing_token": config["precondition"]["serving_full"]["fencing_token"]}}
+        snapshots = {}
+        for node_id, baseline in [("dns-a", "edge-a"), ("dns-b", "edge-b")]:
+            snapshots[node_id] = {"snapshot": {"hostname": route["hostname"], "traffic_class": route["traffic_class"], "path_prefix": route["path_prefix"], "policy": route["policy"], "blockers": [], "current_edge_id": baseline,
+                "candidates": [{"edge_id": edge, "route_proof_verified": True, "hard_gates": []} for edge in ["edge-a", "edge-b"]],
+                "actual_dns_receipt": {"node_id": node_id, "decision_id": "decision-" + node_id, "rcode": 0, "qtype": 1, "write_succeeded": True, "publication": {"serving_lkg": False, "rejected": False},
+                    "answer_publication": {"release_set_id": full["artifact"]["id"], "parent_digest": full["artifact"]["content_hash"], "digest": "sha256:" + "b" * 64, "fencing_token": full["release"]["fencing_token"], "release_channel": "full"}}}}
+        def api(method, path):
+            self.assertEqual(method, "GET")
+            node_id = business.urllib.parse.parse_qs(business.urllib.parse.urlsplit(path).query)["dns_node_id"][0]
+            return copy.deepcopy(snapshots[node_id])
+        return config, full, snapshots, api
+
+    def test_binding_refresh_is_explicit_and_preserves_each_baseline_and_budget(self):
+        config, full, _, api = self.anchor_fixture()
+        original = copy.deepcopy(config)
+        quality.validate(config)
+        resolved = business.resolve_business_anchors(config, api, full, "app.example.test")
+        self.assertEqual(config, original)
+        declared_policy = original["projection_policy"]["dns_query_policy"]["physical_routes"][0]["business_exploration"]
+        actual_policy = resolved["projection_policy"]["dns_query_policy"]["physical_routes"][0]["business_exploration"]
+        self.assertEqual({key: value for key, value in declared_policy.items() if key != "initial_dns_publications"}, {key: value for key, value in actual_policy.items() if key != "initial_dns_publications"})
+        self.assertEqual(actual_policy["initial_dns_publications"]["dns-b"]["baseline_edge_id"], "edge-b")
+        self.assertEqual(actual_policy["initial_dns_publications"]["dns-a"]["fencing_token"], full["release"]["fencing_token"])
+        self.assertEqual(resolved, business.resolve_business_anchors(config, api, full, "app.example.test"))
+        self.assertNotEqual(config["producer_generation"], resolved["producer_generation"])
+        config.pop("business_anchor_mode")
+        self.assertIs(business.resolve_business_anchors(config, None, None, "app.example.test"), config)
+
+    def test_binding_rejects_changed_context_baseline_or_negative_evidence(self):
+        for scenario in ["node", "context", "edge", "lkg", "rejected", "parent", "fence", "write", "rcode", "candidate", "digest"]:
+            with self.subTest(scenario=scenario):
+                config, full, snapshots, api = self.anchor_fixture()
+                snapshot = snapshots["dns-b"]["snapshot"]
+                receipt = snapshot["actual_dns_receipt"]
+                if scenario == "node": receipt["node_id"] = "dns-other"
+                elif scenario == "context": snapshot["path_prefix"] = "/other"
+                elif scenario == "edge": snapshot["current_edge_id"] = "edge-a"
+                elif scenario == "lkg": receipt["publication"]["serving_lkg"] = True
+                elif scenario == "rejected": receipt["publication"]["rejected"] = True
+                elif scenario == "parent": receipt["answer_publication"]["parent_digest"] = "sha256:" + "f" * 64
+                elif scenario == "fence": receipt["answer_publication"]["fencing_token"] -= 1
+                elif scenario == "write": receipt["write_succeeded"] = False
+                elif scenario == "rcode": receipt["rcode"] = 2
+                elif scenario == "candidate": snapshot["candidates"][1]["hard_gates"] = ["route_unverified"]
+                elif scenario == "digest": receipt["answer_publication"]["digest"] = "invalid"
+                with self.assertRaises(ValueError):
+                    business.resolve_business_anchors(config, api, full, "app.example.test")
+
+    def test_binding_mode_cannot_implicitly_enable_or_cross_operation(self):
+        for field, value in [("business_anchor_mode", "automatic"), ("baseline_mode", "declared")]:
+            config, _, _, _ = self.anchor_fixture()
+            config[field] = value
+            with self.assertRaises(ValueError): quality.validate(config)
+        config, _, _, _ = self.anchor_fixture()
+        config["precondition"]["operation"] = "dynamic_quality"
+        with self.assertRaises(ValueError): quality.validate(config)
+
+    def test_binding_retry_is_bounded_and_does_not_retry_unrelated_failure(self):
+        config, _, _, _ = self.anchor_fixture()
+        with patch.object(quality, "publish_once", side_effect=[business.BusinessBaselineChanged("advanced"), {"producer_activated": True}]) as publish, patch.object(quality.time, "sleep"):
+            self.assertTrue(quality.publish(config, None, None)["producer_activated"])
+            self.assertEqual(publish.call_count, 2)
+        with patch.object(quality, "publish_once", side_effect=business.BusinessBaselineChanged("advanced")) as publish, patch.object(quality.time, "sleep"):
+            with self.assertRaises(ValueError): quality.publish(config, None, None)
+            self.assertEqual(publish.call_count, 3)
+        with patch.object(quality, "publish_once", side_effect=ValueError("baseline changed")) as publish, patch.object(quality.time, "sleep"):
+            with self.assertRaises(ValueError): quality.publish(config, None, None)
+            publish.assert_called_once()
+
+    def test_bound_publication_keeps_cas_and_never_releases_after_preview_drift(self):
+        for drift in [False, True]:
+            with self.subTest(drift=drift):
+                config, _, _, quality_api = self.anchor_fixture()
+                _, source = fixture()
+                _, old, _ = physical_fixture()
+                old["dns_policy_digest"] = quality.digest(source)
+                config["precondition"]["previous_policy"]["content_hash"] = quality.digest(old)
+                ledger = Ledger(dict(config, hostname="app.example.test"), old, source)
+                ledger.preview.update(intent={"generation": "unchanged"}, business_snapshot_revision="fixed")
+                coverage = [{"hostname": "app.example.test", "dns_node_id": node, "intent_id": "intent-a", "action": "initialize", "allocation_receipt_digest": "sha256:" + "a" * 64} for node in ["dns-a", "dns-b"]]
+                ledger.preview["runtime_snapshot"] = {"dns_selections": [{"hostname": "app.example.test", "node_id": node, "type": "A"} for node in ["dns-a", "dns-b"]], "facts": {"business_exploration_coverage": coverage, "dynamic_quality_coverage": {"mode": "all_dynamic", "query_count": 2, "hostnames": {"app.example.test": "business_exploration"}}}}
+                def api(method, path, body=None):
+                    if path.startswith("/v1/edge/quality-shadow/"):
+                        return quality_api(method, path)
+                    if drift and path.startswith("/v1/admin/platform-config/routes/project?"):
+                        ledger.authorities[("release_set", "global", "full")]["release"]["fencing_token"] += 1
+                    return ledger(method, path, body)
+                if drift:
+                    with self.assertRaises(business.BusinessBaselineChanged):
+                        quality.publish_once(config, api, lambda value: None)
+                    self.assertEqual(ledger.release_bodies, [])
+                else:
+                    evidence = quality.publish_once(config, api, lambda value: None)
+                    self.assertTrue(evidence["producer_activated"])
+                    self.assertEqual(evidence["declaration_digest"], quality.digest(config))
+                    self.assertEqual(evidence["resolved_precondition"], config["precondition"])
+                    self.assertEqual(evidence["resolved_dns_anchors"]["dns-b"]["baseline_edge_id"], "edge-b")
+                    self.assertEqual(len(ledger.release_bodies), 1)
+
     def test_explicit_per_dns_baseline_must_be_a_candidate(self):
         config, _ = fixture()
         policy = config["projection_policy"]["dns_query_policy"]["physical_routes"][0]["business_exploration"]

@@ -1,8 +1,8 @@
 {
   "schema": "fugue.dynamic-quality-reconfiguration/v1",
-  "generation": 1,
+  "generation": 2,
   "origin": "https://api.fugue.pro",
-  "producer_generation": "business-observe-20261013T084307Z-producer",
+  "producer_generation": "business-observe-20261013T100807Z-producer",
   "baseline_mode": "latest_verified_same_policy",
   "precondition": {
     "operation": "business_exploration",
@@ -6664,7 +6664,7 @@
           },
           "business_exploration": {
             "version": "business-edge-exploration-v1",
-            "intent_id": "business-observe-20261013T084307Z",
+            "intent_id": "business-observe-20261013T100807Z",
             "mode": "observe",
             "baseline_edge_id": "86eabf26-42a9-4f9d-998a-754115f8b829",
             "candidate_edge_ids": [
@@ -6683,8 +6683,8 @@
                 "baseline_edge_id": "vps-591f4447"
               }
             },
-            "starts_at": "2026-10-13T08:43:07Z",
-            "expires_at": "2026-10-13T14:43:07Z",
+            "starts_at": "2026-10-13T10:08:07Z",
+            "expires_at": "2026-10-13T16:08:07Z",
             "exploration_basis_points": 100,
             "maximum_candidate_basis_points": 1000,
             "maximum_step_basis_points": 50,
@@ -6718,7 +6718,7 @@
         "record_kind": "custom-domain-target"
       }
     ],
-    "generation": "business-observe-20261013T084307Z-policy",
+    "generation": "business-observe-20261013T100807Z-policy",
     "max_stale_seconds": 86400,
     "minimum_healthy_edges": 1,
     "offline_edges": [
@@ -6769,5 +6769,6 @@
         "id": "edge-group-country-us"
       }
     ]
-  }
+  },
+  "business_anchor_mode": "latest_verified_same_baseline"
 }

@@ -3,6 +3,57 @@ import copy
 from datetime import datetime, timedelta
 import math
 import re
+import json
+import urllib.parse
+
+from scripts.bootstrap_cell_producer import digest
+
+
+class BusinessBaselineChanged(ValueError):
+    pass
+
+
+def resolve_business_anchors(config, api, full, hostname):
+    if config.get("business_anchor_mode", "declared") == "declared":
+        return config
+    resolved = copy.deepcopy(config)
+    routes = [route for route in resolved["projection_policy"]["dns_query_policy"].get("physical_routes", []) if route["hostname"] == hostname and "business_exploration" in route]
+    if len(routes) != 1:
+        raise ValueError("anchor resolution requires one explicit business intent")
+    route = routes[0]
+    policy = route["business_exploration"]
+    for node_id, anchor in policy["initial_dns_publications"].items():
+        query = urllib.parse.urlencode({"scope": "global", "traffic_class": route["traffic_class"], "path_prefix": route["path_prefix"], "dns_node_id": node_id})
+        result = api("GET", "/v1/edge/quality-shadow/" + urllib.parse.quote(hostname, safe="") + "?" + query)
+        snapshot = result.get("snapshot", {})
+        if snapshot.get("hostname") != hostname or snapshot.get("traffic_class") != route["traffic_class"] or snapshot.get("path_prefix") != route["path_prefix"] or snapshot.get("policy") != route["policy"] or snapshot.get("blockers") or snapshot.get("service_receipts"):
+            raise ValueError("business anchor observation differs from explicit service context")
+        receipt = snapshot.get("actual_dns_receipt", {})
+        if isinstance(receipt, str):
+            receipt = json.loads(receipt)
+        if receipt.get("node_id") != node_id or receipt.get("write_succeeded") is not True or receipt.get("rcode") != 0 or receipt.get("qtype") != 1 or not receipt.get("decision_id"):
+            raise ValueError("business anchor requires successful actual DNS receipt")
+        publication = receipt.get("answer_publication", {})
+        state = receipt.get("publication", {})
+        if state.get("serving_lkg") or state.get("rejected") or publication.get("release_channel") != "full" or publication.get("release_set_id") != full["artifact"]["id"] or publication.get("parent_digest") != full["artifact"]["content_hash"] or publication.get("fencing_token") != full["release"]["fencing_token"]:
+            raise BusinessBaselineChanged("business DNS receipt has not settled on verified full baseline")
+        expected_baseline = anchor.get("baseline_edge_id", policy["baseline_edge_id"])
+        if snapshot.get("current_edge_id") != expected_baseline:
+            raise ValueError("business DNS baseline edge changed; fresh intent required")
+        candidates = snapshot.get("candidates", [])
+        for edge_id in policy["candidate_edge_ids"]:
+            matches = [candidate for candidate in candidates if candidate.get("edge_id") == edge_id]
+            if len(matches) != 1 or matches[0].get("hard_gates") or matches[0].get("route_proof_verified") is not True:
+                raise ValueError("business candidate lacks current positive route evidence")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", publication.get("digest", "")) or publication["fencing_token"] < anchor["fencing_token"]:
+            raise ValueError("business publication anchor regressed or is malformed")
+        if publication["fencing_token"] == anchor["fencing_token"] and publication["digest"] != anchor["digest"]:
+            raise ValueError("business publication digest changed without a new fence")
+        anchor.update(digest=publication["digest"], fencing_token=publication["fencing_token"])
+    binding = digest({"policy": resolved["projection_policy"], "full": config["precondition"]["serving_full"]})[7:23]
+    resolved["projection_policy"]["generation"] += "-bound-" + binding
+    resolved["producer_generation"] += "-bound-" + binding
+    return resolved
 
 
 FIELDS = set("version intent_id mode baseline_edge_id candidate_edge_ids initial_dns_publications starts_at expires_at exploration_basis_points maximum_candidate_basis_points maximum_step_basis_points bucket_seconds required_buckets minimum_connections_per_bucket cooldown_seconds evidence_max_age_seconds minimum_cohort_coverage_basis_points rtt_advantage_ratio delivery_advantage_ratio maximum_rtt_regression_ratio maximum_delivery_regression_ratio maximum_retransmission_increase stop_rtt_ms stop_retransmission_rate".split())

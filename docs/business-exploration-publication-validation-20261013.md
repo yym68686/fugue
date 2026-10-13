@@ -28,3 +28,44 @@ was still 6, the current publication matched loaded positive LKG, and journal
 drops were zero. Eviction was nonzero. Neither the validation rejection nor the
 DNS count establishes a cause for those failures. No speculative DNS behavior
 change is authorized by these observations.
+
+## Publication renewal while configuration is queued
+
+The read-only business capture using the 08:43 declaration later rejected
+initialization from an unfenced DNS predecessor. The producer had legitimately
+renewed its full publication. The existing configuration lane refreshed the
+full-publication precondition but left the business intent's initial DNS
+anchors unchanged. These two references then described different publications.
+
+`business_anchor_mode: latest_verified_same_baseline` explicitly permits the
+configuration lane to bind its new intent to a later verified full publication
+under the exact same predecessor producer. The default remains `declared`.
+Each declared DNS node must provide a successful actual receipt for that full
+parent, with the same declared baseline edge, service context and positively
+admitted candidates. A changed edge, negative evidence or regressed fence is
+rejected. Candidate sets, budgets, expiry, stop rules and intent identity stay
+exactly as declared. A binding digest makes resolved artifact generations
+immutable and distinct; the CI receipt records both the declaration digest and
+the resolved policy digest and anchors.
+
+After preview, the verified full predecessor must still be identical. A change
+causes at most three complete bounded attempts; no release is sent for a stale
+preview. The existing server transaction still compares both producer and full
+publication authorities under its original locks. This feature does not change
+serving configuration until the normal CI configuration job succeeds.
+
+Focused tests exercise separate DNS baselines, immutable budgets and leases,
+default opt-out, changed context/edge/proof rejection, bounded retry, successful
+ledger publication, and a full-publication race with zero release writes.
+
+API generation 748 completed normal CI `38379154113`, deployment job
+`115237214624`, and the 10:05 UTC read found two Ready/available replicas at
+source `02e9461c`, image
+`sha256:55d094005c316f20eee1df7a1da29b5aecaebfd91dac895bcffcd1bd86dba5b4`.
+The complete backend suite passed. Frontend snapshot/type generation checks
+passed; its existing 147 TypeScript errors remain unchanged.
+
+At 10:11:43–10:11:47 UTC, the new read-only resolver matched both actual DNS
+receipts to verified full `artifact_1791886026_78d42905a601`, fence 3465, retaining
+each declared baseline. This read grants no serving authority. The renewed
+observe declaration must still pass normal configuration CI and gray/full ACKs.
