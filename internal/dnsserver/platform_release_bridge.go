@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"reflect"
 	"slices"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -128,6 +129,7 @@ func dnsBridgeQueries(views []platformconfig.DNSQueryView) map[string][]platform
 	for _, view := range views {
 		for _, record := range view.Records {
 			row := record
+			row.AnswerPolicy.PhysicalSelection = dnsBridgePhysicalSelection(record.AnswerPolicy.PhysicalSelection)
 			row.Candidates = dnsBridgeCandidates(record.Candidates)
 			row.ScopedCandidates = append([]model.EdgeDNSScopedAnswerCandidates(nil), record.ScopedCandidates...)
 			for i := range row.ScopedCandidates {
@@ -137,6 +139,25 @@ func dnsBridgeQueries(views []platformconfig.DNSQueryView) map[string][]platform
 		}
 	}
 	return byHost
+}
+
+func dnsBridgePhysicalSelection(selection *model.DNSPhysicalSelection) *model.DNSPhysicalSelection {
+	result := model.CloneDNSPhysicalSelection(selection)
+	if result == nil {
+		return nil
+	}
+	result.EvidenceDigest, result.DNSReceiptID, result.LoadedDigest, result.PolicyDigest = "", "", "", ""
+	result.CapturedAt = time.Time{}
+	if allocation := result.BusinessAllocation; allocation != nil {
+		allocation.ReceiptDigest = ""
+		allocation.ValidUntil = time.Time{}
+		allocation.State.LastEvaluatedAt = time.Time{}
+		allocation.State.EvidenceValidUntil = time.Time{}
+		if allocation.State.Unified != nil {
+			allocation.State.Unified.Sequence = 0
+		}
+	}
+	return result
 }
 
 func dnsBridgeCandidates(in []model.EdgeDNSAnswerCandidate) []model.EdgeDNSAnswerCandidate {
