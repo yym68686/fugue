@@ -124,9 +124,12 @@ Remaining acceptance and limitations:
 - Full post-sync validation, frontend baseline comparison, compatible-runtime
   publication, capability/ACK verification, and isolated DNS acceptance followed
   by normal public handoff.
-- Explicit phase-one traffic activation and real-evidence acceptance, then
-  separate bounded adaptive activation. No synthetic samples may satisfy the
-  consecutive-window or minimum-connection gates.
+- The explicit phase-one 1% observe intent and separate bounded adaptive intent
+  are live through independent signed publication paths. Both actual public DNS
+  consumers load the adaptive intent only under a matching verified full/LKG.
+  The first real adaptive comparisons replay deterministically but have zero
+  complete shared-cohort windows, so the candidate remains at the 1% floor.
+  No synthetic samples satisfy consecutive-window or minimum-connection gates.
 
 An offline receipt hash is not authentication. A caller can construct offline
 inputs; neither `evaluate` nor `replay` is a producer authorization boundary.

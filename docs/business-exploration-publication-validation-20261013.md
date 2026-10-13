@@ -146,3 +146,34 @@ The CI diagnostic now reports only mismatched field names, a bounded anchor
 index and allowlisted blocker codes. Its sanitization test rejects untrusted
 blocker strings without printing their contents. No verification, signing,
 fencing or positive-LKG condition is weakened for the retry.
+
+The diagnostic retry and adaptive declaration were pushed together as
+`3811e449`. CI `38402009038` passed prepush and declaration planning; selected
+configuration job `115312353454` succeeded. It activated source
+`artifact_1791896961_264522d5b86c`, producer fence 40, using intent
+`business-adaptive-20261013T130004Z`. The overall workflow was later cancelled
+because a separate, unselected renewal job was cancelled; that does not undo
+the successful producer configuration transaction.
+
+Global full artifact `artifact_1791897786_527a83f0b9a8`, fence 3487, subsequently
+became verified with matching positive LKG. Both public DNS consumers loaded
+the same full parent and fence, with zero quality blockers. Their actual signed
+allocations retained the adaptive intent at the original 1% candidate budget:
+the US candidate allocation is 100 basis points against its 9900-basis-point
+baseline; the German candidate allocation is the inverse for its local baseline.
+The sticky stop map is empty and the lease is bounded. No share adjustment was
+authorized by the observed evidence.
+
+Fresh read-only captures for both DNS consumers included real traffic only.
+Each produced 39 baseline and 49 candidate context-valid records, 15 and 13
+independent connections, 24 and 31 ACK-delta records, one and zero qualified
+delivery records, and one retransmission-qualified record each. Both deterministic
+replays matched. Both comparisons returned `insufficient`, zero complete
+shared-cohort buckets and `hold`; automatic allocation therefore stayed at 1%.
+This is successful guard behavior, not evidence that either edge is faster.
+TCP ACK/delivery metric gaps remain explicitly visible rather than imputed.
+
+The anchor diagnostic identifies only mismatched field names and allowlisted
+blocker codes. DNS-node identity itself is represented as declaration order,
+and unrecognized values become `unclassified`; the regression test verifies
+that hostile strings and values are not emitted.
