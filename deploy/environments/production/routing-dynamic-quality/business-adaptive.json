@@ -1,25 +1,25 @@
 {
   "schema": "fugue.dynamic-quality-reconfiguration/v1",
-  "generation": 4,
+  "generation": 5,
   "origin": "https://api.fugue.pro",
-  "producer_generation": "business-adaptive-20261013T130004Z-producer",
+  "producer_generation": "business-unified-20261013T200750Z-producer",
   "baseline_mode": "latest_verified_same_policy",
   "business_anchor_mode": "latest_verified_same_baseline",
   "precondition": {
     "operation": "business_exploration",
     "previous_policy": {
-      "artifact_id": "artifact_1791886662_ee58c92d88a9",
-      "content_hash": "sha256:a7ff7ea0f14c3e4d2e58080b90b130459578aeeecadfe5d93a4de2e0fcf5215f",
-      "release_id": "artifactrel_1791886787_55e000b725b2",
-      "fencing_token": 39
+      "artifact_id": "artifact_1791896961_264522d5b86c",
+      "content_hash": "sha256:ad03911c3ec242c8cc6844bee150b2c05cbf3e9f4e89405652ae3e3d5a6c4c3b",
+      "release_id": "artifactrel_1791897102_00d8f2107e21",
+      "fencing_token": 40
     },
     "serving_full": {
-      "artifact_id": "artifact_1791892900_f53a908cf00c",
-      "content_hash": "sha256:f2afa31acb3aef075b706ee401af45969c141d57a6ccd54abec4bb905e152035",
-      "release_id": "artifactrel_1791893028_f4c5385bf572",
-      "fencing_token": 3475
+      "artifact_id": "artifact_1791921764_cee3046d021c",
+      "content_hash": "sha256:f8cda964756f3b12227e524f150219bf7b580b981a51e4e85326fdff456db4ee",
+      "release_id": "artifactrel_1791921892_11f1d85b77a7",
+      "fencing_token": 3550
     },
-    "verification_evidence_hash": "sha256:d9954da554a1b7546bba96778dc20e6cbcd0e42cb61b6568cc49aec85835ed9d"
+    "verification_evidence_hash": "sha256:2eaa6aa26963e9758a0c966178f3549a4429e2e9f95125e4cefcb2e3af813570"
   },
   "projection_policy": {
     "dns_authorities": [
@@ -6644,38 +6644,44 @@
               "86eabf26-42a9-4f9d-998a-754115f8b829",
               "vps-591f4447"
             ],
-            "cooldown_seconds": 900,
+            "cooldown_seconds": 120,
             "delivery_advantage_ratio": 0.2,
             "evidence_max_age_seconds": 600,
-            "expires_at": "2026-10-13T19:00:04Z",
-            "exploration_basis_points": 100,
+            "expires_at": "2026-10-15T20:07:50Z",
+            "exploration_basis_points": 200,
             "initial_dns_publications": {
               "vps-591f4447": {
                 "baseline_edge_id": "86eabf26-42a9-4f9d-998a-754115f8b829",
-                "digest": "sha256:590ab5639eac33cda391ca630d30c2f5b11d0dd1859d8016b490f4cafc78bc9e",
-                "fencing_token": 3466
+                "digest": "sha256:3749955450262c544a1c308d3806de3bc22f33b629c3ace7c261678d4e6fb335",
+                "fencing_token": 3485
               },
               "vps-84c8f0a9": {
                 "baseline_edge_id": "vps-591f4447",
-                "digest": "sha256:590ab5639eac33cda391ca630d30c2f5b11d0dd1859d8016b490f4cafc78bc9e",
-                "fencing_token": 3466
+                "digest": "sha256:3749955450262c544a1c308d3806de3bc22f33b629c3ace7c261678d4e6fb335",
+                "fencing_token": 3485
               }
             },
-            "intent_id": "business-adaptive-20261013T130004Z",
-            "maximum_candidate_basis_points": 1000,
+            "intent_id": "business-unified-20261013T200750Z",
+            "maximum_candidate_basis_points": 10000,
             "maximum_delivery_regression_ratio": 0.1,
             "maximum_retransmission_increase": 0.01,
             "maximum_rtt_regression_ratio": 0.1,
-            "maximum_step_basis_points": 50,
-            "minimum_cohort_coverage_basis_points": 9000,
-            "minimum_connections_per_bucket": 3,
+            "maximum_step_basis_points": 1000,
+            "minimum_cohort_coverage_basis_points": 3000,
+            "minimum_connections_per_bucket": 1,
             "mode": "adaptive",
             "required_buckets": 3,
             "rtt_advantage_ratio": 0.15,
-            "starts_at": "2026-10-13T13:00:04Z",
+            "starts_at": "2026-10-13T20:07:50Z",
             "stop_retransmission_rate": 0.1,
             "stop_rtt_ms": 2000,
-            "version": "business-edge-exploration-v1"
+            "version": "business-edge-unified-v2",
+            "unified": {
+              "minimum_connections_per_cohort": 5,
+              "rtt_advantage_ms": 20,
+              "promotion_minimum_connections": 8,
+              "promotion_minimum_coverage_basis_points": 5000
+            }
           },
           "hostname": "i00.pro",
           "path_prefix": "/",
@@ -6719,7 +6725,7 @@
         "record_kind": "custom-domain-target"
       }
     ],
-    "generation": "business-adaptive-20261013T130004Z-policy",
+    "generation": "business-unified-20261013T200750Z-policy",
     "max_stale_seconds": 86400,
     "minimum_healthy_edges": 1,
     "offline_edges": [

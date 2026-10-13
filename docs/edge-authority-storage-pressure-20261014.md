@@ -38,5 +38,13 @@ also passes checksum/authority validation and exact deep-equality round trip:
 100,150,205 expanded bytes become 18,772,186 encoded bytes, preserving all 57,302
 shadow entries, 55,032 authority entries and revision 408845. The backup remains
 private outside the repository and is not a serving input.
-Production reader release, format activation and US Worker recovery remain
-outstanding.
+The compatible reader was released by CI 38450034542 (`f2ca3f17`), then
+the independent compression declaration by CI 38451410183 (`6b105f40`).
+The latter component deployment succeeded; its separate public DNS observation
+failed and is tracked in `dns-business-proof-renewal-20261014.md`.
+At 19:05:49 UTC the live control reported 18,775,914 encoded bytes and
+100,161,024 expanded bytes with 57,308 shadow and 55,038 authority entries.
+The new Pod was Ready with zero restarts. CI 38456758394 subsequently completed
+the US Worker deployment (`892b7176`); at 19:59:23 UTC Guardian was stable with
+local, dependency and route health verified. This confirms candidate staging
+can proceed without deleting historical state.
