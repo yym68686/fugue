@@ -82,3 +82,19 @@ group validation, source/image binding, signatures, readiness, quorum, and LKG
 predecessor validation are unchanged. Publish through the Guardian lane with
 the exact verified predecessor. Exploration remains unactivated until every
 required runtime advertises the feature and the separate publication gates pass.
+
+Release `62088513`, CI `38345961113`, completed successfully. Both actual
+Guardian Pods run image
+`sha256:48e1c56cedfe4b666a72ae34a305a5dcbd16166d81b3e68765c6e540613d5bce`,
+Ready with zero restarts. The retained US candidate subsequently advanced from
+`loaded` generation 232 to `verified` generation 233 with signed canary result
+`sha256:c836bcf5c19261ee8767fd3f5b631870bb19bb43287a0edaf9802fd6f044b583`.
+This establishes that the Node-name rejection is resolved in production.
+
+The 04:31 UTC read still binds CurrentAuthority to slot `a`, source `4c107203`,
+and its previous image. The distinct worker recovery status still reports the
+standby/stable image mismatch and exact monitor-predecessor error; the candidate
+has not acquired ordinary traffic authority. Worker intent 209 is therefore a
+new normal CI attempt against that unchanged exact serving predecessor. It must
+re-run prewrite, retained-connection, candidate, authority and full release checks;
+it does not clear recovery state or manually promote the older candidate.
