@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1620,6 +1621,10 @@ func platformArtifactValidationPass(results []model.PlatformArtifactValidationRe
 }
 
 func firstSecretLikeContentPath(value any, path string) string {
+	return firstSecretLikeTypedContentPath(value, path, false, false)
+}
+
+func firstSecretLikeTypedContentPath(value any, path string, businessAnchors, businessAnchor bool) string {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
@@ -1627,10 +1632,11 @@ func firstSecretLikeContentPath(value any, path string) string {
 			if path != "" {
 				childPath = path + "." + key
 			}
-			if platformArtifactSecretLikeKey(key) {
+			if platformArtifactSecretLikeKey(key) && !(key == "fencing_token" && businessAnchor && platformArtifactBusinessDNSAnchor(typed)) {
 				return childPath
 			}
-			if found := firstSecretLikeContentPath(child, childPath); found != "" {
+			isBusinessPolicy := path == "business_exploration" || strings.HasSuffix(path, ".business_exploration") || (path != "" && (path == "policy" || strings.HasSuffix(path, ".policy")) && typed["version"] == "business-edge-exploration-v1")
+			if found := firstSecretLikeTypedContentPath(child, childPath, key == "initial_dns_publications" && isBusinessPolicy, businessAnchors); found != "" {
 				return found
 			}
 		}
@@ -1644,10 +1650,39 @@ func firstSecretLikeContentPath(value any, path string) string {
 	case json.RawMessage:
 		var decoded any
 		if json.Unmarshal(typed, &decoded) == nil {
-			return firstSecretLikeContentPath(decoded, path)
+			return firstSecretLikeTypedContentPath(decoded, path, businessAnchors, businessAnchor)
 		}
 	}
 	return ""
+}
+
+func platformArtifactBusinessDNSAnchor(value map[string]any) bool {
+	sequence, exists := value["fencing_token"]
+	if !exists {
+		return false
+	}
+	switch typed := sequence.(type) {
+	case json.Number:
+		if _, err := typed.Int64(); err != nil {
+			return false
+		}
+	case float64:
+		if typed < 1 || typed > 9007199254740991 || math.Trunc(typed) != typed {
+			return false
+		}
+	default:
+		return false
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	var anchor model.BusinessDNSPublicationAnchor
+	if json.Unmarshal(raw, &anchor) != nil || anchor.FencingToken <= 0 || len(anchor.Digest) != 71 || !strings.HasPrefix(anchor.Digest, "sha256:") || anchor.Digest != strings.ToLower(anchor.Digest) {
+		return false
+	}
+	digest, err := hex.DecodeString(strings.TrimPrefix(anchor.Digest, "sha256:"))
+	return err == nil && len(digest) == 32
 }
 
 func platformArtifactSecretLikeKey(key string) bool {
