@@ -74,7 +74,7 @@ func TestCandidateWorkerCohortBindsExactReadySlotRelease(t *testing.T) {
 		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
 	}
 	image := "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("c", 64)
-	pod := candidateWorkerPod("worker-b", "edge-node-a", "pod-uid-worker-b", string(candidate.WorkerSlot), strings.Repeat("d", 40), image)
+	pod := candidateWorkerPod("worker-b", "7edge.region.example", "pod-uid-worker-b", string(candidate.WorkerSlot), strings.Repeat("d", 40), image)
 	client := fake.NewSimpleClientset(pod)
 	cohort, err := observeCandidateWorkerCohort(context.Background(), client, "fugue-system", candidate)
 	if err != nil || cohort.Validate() != nil || cohort.GroupID != candidate.GroupID || cohort.WorkerSlot != candidate.WorkerSlot ||

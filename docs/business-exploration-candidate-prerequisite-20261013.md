@@ -53,3 +53,32 @@ An adversarial test proves that filtering a suspended Pod still leaves a missing
 declared member as a failure. The Guardian's separate configuration baseline is
 explicitly corrected to one, matching the worker declaration, while the admitted
 member remains required. No Node labels or independent Cell topology are changed.
+
+## Exact Node name validation prerequisite
+
+Guardian release `f0ab7694`, CI `38308672354`, completed on 2026-10-12 at
+21:13 UTC. Its two controller Pods run image
+`sha256:166d814a9ec4cf523693b93d569d589e0a7c09a0e9e19663a073762cc0f15432`,
+Ready with zero restarts when read through the cluster API on 2026-10-13.
+At 03:43:07–03:43:37 UTC the prober repeatedly logged the exact retired BWG
+Pod UID and current DaemonSet/Node identities, proving that placement filtering
+now completed. The next rejection was `candidate worker cohort member is invalid`.
+
+The two remaining candidate Pods have distinct Node names and Pod UIDs, exact
+matching declared/runtime image digests, Ready containers and zero restarts.
+Their Node names are `vps-591f4447` and
+`86eabf26-42a9-4f9d-998a-754115f8b829`. The latter fails the component identifier
+regex because it starts with a digit. `CandidateWorkerCohort.validateUnsigned`
+incorrectly uses that regex for a Kubernetes Node name. The same incorrect
+validation appears in baseline, normalization and transition-journal witnesses.
+This explains the observed cohort rejection; it does not establish the cause of
+any earlier transport or recovery-ledger failure.
+
+Use the existing Kubernetes DNS-subdomain validator specifically for these four
+Node-name fields. Neutral tests cover numeric-leading names, UUID-shaped names,
+subdomains, repeated internal hyphens, and the length boundary; malformed names,
+duplicate identities and invalid Pod identities remain rejected. Component and
+group validation, source/image binding, signatures, readiness, quorum, and LKG
+predecessor validation are unchanged. Publish through the Guardian lane with
+the exact verified predecessor. Exploration remains unactivated until every
+required runtime advertises the feature and the separate publication gates pass.

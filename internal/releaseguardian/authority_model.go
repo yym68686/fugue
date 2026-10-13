@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgeauthority"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -446,7 +447,7 @@ func (receipt AuthorityNormalizationReceipt) validateUnsigned() error {
 	}
 	seen := map[string]bool{}
 	for _, node := range receipt.Nodes {
-		if !componentPattern.MatchString(node.NodeName) || seen[node.NodeName] || len(node.FrontPodUID) < 8 || len(node.WorkerPodUID) < 8 ||
+		if len(validation.IsDNS1123Subdomain(node.NodeName)) != 0 || seen[node.NodeName] || len(node.FrontPodUID) < 8 || len(node.WorkerPodUID) < 8 ||
 			strings.TrimSpace(node.FrontResourceVersion) == "" || strings.TrimSpace(node.WorkerResourceVersion) == "" ||
 			node.ActivationGeneration != receipt.After.CurrentFrontGeneration || node.BundleGeneration != receipt.After.CurrentBundleGeneration ||
 			node.WorkerSourceSHA != receipt.After.CurrentWorkerSourceSHA || node.WorkerImageDigest != receipt.After.CurrentWorkerImageDigest ||
@@ -498,7 +499,7 @@ func (receipt AuthorityBaselineReceipt) validateUnsigned() error {
 	}
 	seen := map[string]bool{}
 	for _, node := range receipt.Nodes {
-		if !componentPattern.MatchString(node.NodeName) || seen[node.NodeName] || len(node.FrontPodUID) < 8 || len(node.WorkerPodUID) < 8 ||
+		if len(validation.IsDNS1123Subdomain(node.NodeName)) != 0 || seen[node.NodeName] || len(node.FrontPodUID) < 8 || len(node.WorkerPodUID) < 8 ||
 			strings.TrimSpace(node.FrontResourceVersion) == "" || strings.TrimSpace(node.WorkerResourceVersion) == "" || node.ActivationGeneration < 1 ||
 			!authorityGenerationPattern.MatchString(node.BundleGeneration) || !authorityGenerationPattern.MatchString(node.ServingGeneration) ||
 			!shaPattern.MatchString(node.WorkerSourceSHA) || !digestPattern.MatchString(node.WorkerImageDigest) {
@@ -597,7 +598,7 @@ func (journal AuthorityTransitionJournal) validateUnsigned() error {
 	}
 	seenNodes := map[string]bool{}
 	for _, node := range journal.PreviousNodes {
-		if !componentPattern.MatchString(node.NodeName) || seenNodes[node.NodeName] || len(node.FrontPodUID) < 8 || len(node.WorkerPodUID) < 8 ||
+		if len(validation.IsDNS1123Subdomain(node.NodeName)) != 0 || seenNodes[node.NodeName] || len(node.FrontPodUID) < 8 || len(node.WorkerPodUID) < 8 ||
 			strings.TrimSpace(node.FrontResourceVersion) == "" || strings.TrimSpace(node.WorkerResourceVersion) == "" ||
 			node.ActivationGeneration < 1 || !authorityGenerationPattern.MatchString(node.BundleGeneration) ||
 			!authorityGenerationPattern.MatchString(node.ServingGeneration) || !shaPattern.MatchString(node.WorkerSourceSHA) ||

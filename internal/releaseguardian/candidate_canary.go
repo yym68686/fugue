@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const CandidateCanaryRequiredSamples = 3
@@ -121,7 +122,7 @@ func (cohort CandidateWorkerCohort) validateUnsigned() error {
 	}
 	seenNodes, seenPods := map[string]bool{}, map[string]bool{}
 	for _, instance := range cohort.Instances {
-		if !componentPattern.MatchString(instance.NodeName) || len(instance.PodUID) < 8 || len(instance.PodUID) > 64 ||
+		if len(validation.IsDNS1123Subdomain(instance.NodeName)) != 0 || len(instance.PodUID) < 8 || len(instance.PodUID) > 64 ||
 			strings.ContainsAny(instance.PodUID, "\r\n\t ,") || seenNodes[instance.NodeName] || seenPods[instance.PodUID] {
 			return errors.New("candidate worker cohort member is invalid")
 		}
