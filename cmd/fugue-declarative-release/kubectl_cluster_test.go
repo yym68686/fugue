@@ -2570,7 +2570,7 @@ func TestPodHTTPUsesBoundReadyPodIPAndNamedPort(t *testing.T) {
 	pod["spec"] = map[string]any{"containers": []any{map[string]any{"name": "edge-front", "ports": []any{map[string]any{"name": "health", "containerPort": port}}}}}
 	pod["status"].(map[string]any)["podIP"] = host
 	endpoints, err := podHTTPEndpointsFromJSON(mustJSON(t, map[string]any{"items": []any{pod}}), "edge-front", "health")
-	if err != nil || len(endpoints) != 1 || endpoints[0].Name != "edge-front-1" || endpoints[0].IP != host || endpoints[0].Port != port {
+	if err != nil || len(endpoints) != 1 || endpoints[0].Name != "edge-front-1" || endpoints[0].UID != "pod-uid" || endpoints[0].IP != host || endpoints[0].Port != port {
 		t.Fatalf("parse bound pod endpoint: endpoints=%+v err=%v", endpoints, err)
 	}
 	body, err := readPodHTTP(context.Background(), endpoints[0], "/readyz")

@@ -98,3 +98,30 @@ has not acquired ordinary traffic authority. Worker intent 209 is therefore a
 new normal CI attempt against that unchanged exact serving predecessor. It must
 re-run prewrite, retained-connection, candidate, authority and full release checks;
 it does not clear recovery state or manually promote the older candidate.
+
+## Bounded HTTP failure evidence
+
+Worker intent 209 (`c99ab300`, CI `38347656328`) failed at 04:51:57 UTC with
+`roll inactive edge slot b: pod HTTP response is invalid`. The current authority
+remains slot `a`. The managed node's standby Pod now runs the new immutable
+target, while the other selected standby still runs `5df1df2a`; the signed canary
+correctly refuses that mixed cohort. The DaemonSet is deliberately `OnDelete`,
+with two desired/Ready members and one updated member. No manual deletion or
+restart is authorized to bypass the release executor.
+
+The recorded HTTP error contains neither endpoint identity, status, response
+size nor digest. Both exact standby health endpoints return HTTP 200 and a
+group-bound candidate when read at 05:10:39 UTC, which does not explain the earlier
+failure. Its specific cause remains unproven; no health rule is relaxed or retry
+policy changed. Instead, HTTP failures now retain bounded structured evidence:
+UTC time, Pod name/UID, address, path, phase, HTTP status, captured size and body
+digest, completeness, and a coarse transport error class. Response bodies and raw
+transport errors are not logged. The existing one-MiB limit, status predicate,
+request timeout and failure behavior remain unchanged. Target waits retain their
+last exact observation when they expire, rather than discarding it.
+
+Tests reproduce the prior information loss for non-200, oversized and canceled
+requests and verify identity binding, bounded output and absence of raw response
+content. Publish this observation improvement through the Guardian lane before
+another bounded worker attempt. This change supplies evidence and is not a claim
+to have fixed the unobserved HTTP failure.

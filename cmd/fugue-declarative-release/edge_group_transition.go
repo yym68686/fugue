@@ -2322,7 +2322,7 @@ func parseEdgeGroupPodsWithReadiness(raw []byte, container string, expectedNodes
 }
 
 func (cluster *kubectlCluster) readEdgeWorkerHealth(ctx context.Context, pod edgeGroupPod, groupID string) (edgeWorkerHealth, error) {
-	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, IP: pod.PodIP, Port: pod.HealthPort}, "/healthz")
+	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, UID: pod.UID, IP: pod.PodIP, Port: pod.HealthPort}, "/healthz")
 	if err != nil {
 		return edgeWorkerHealth{}, err
 	}
@@ -2484,7 +2484,7 @@ func (runtime *kubectlEdgeGroupRuntime) waitEdgeCandidateWorkerAuthority(ctx con
 }
 
 func (cluster *kubectlCluster) readEdgeFrontHealth(ctx context.Context, pod edgeGroupPod) (edgeFrontHealth, error) {
-	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, IP: pod.PodIP, Port: pod.HealthPort}, "/readyz")
+	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, UID: pod.UID, IP: pod.PodIP, Port: pod.HealthPort}, "/readyz")
 	if err != nil {
 		return edgeFrontHealth{}, err
 	}
@@ -2514,7 +2514,7 @@ func (cluster *kubectlCluster) readEdgeFrontHealth(ctx context.Context, pod edge
 // release controller must observe an exact, complete inventory before it can
 // delete that executor; any observer failure fails closed.
 func (cluster *kubectlCluster) readEdgeFrontConnectionCount(ctx context.Context, pod edgeGroupPod) (int, error) {
-	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, IP: pod.PodIP, Port: pod.HealthPort}, "/edge/tcp-connections")
+	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, UID: pod.UID, IP: pod.PodIP, Port: pod.HealthPort}, "/edge/tcp-connections")
 	if err != nil {
 		return 0, fmt.Errorf("read Front connection inventory for Pod/%s: %w", pod.Name, err)
 	}
@@ -2657,6 +2657,7 @@ func deleteEdgePodExact(ctx context.Context, client dynamic.Interface, namespace
 
 func (cluster *kubectlCluster) waitEdgePodTarget(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name, container, node, priorUID string, target declarativerelease.TargetIdentity, includeHealth, requireGroupAuthority bool, progress func(context.Context) error) (edgeGroupPod, error) {
 	deadline := time.Now().Add(cluster.timeout)
+	var lastObservation error
 	for {
 		var pods map[string]edgeGroupPod
 		var err error
@@ -2676,13 +2677,16 @@ func (cluster *kubectlCluster) waitEdgePodTarget(ctx context.Context, release de
 			if exists && pod.UID != priorUID && edgePodMatchesTarget(pod, target) && authorityReady {
 				return pod, nil
 			}
+			lastObservation = fmt.Errorf("pod target observation: node=%s pod=%s uid=%s exists=%t ready=%t restarts=%d source=%s image=%s authority_ready=%t", node, pod.Name, pod.UID, exists, pod.Ready, pod.RestartCount, pod.SourceCommit, pod.ImageRef, authorityReady)
+		} else {
+			lastObservation = err
 		}
 		if time.Now().After(deadline) {
-			return edgeGroupPod{}, fmt.Errorf("DaemonSet/%s node %s did not converge to immutable target", name, node)
+			return edgeGroupPod{}, waitHealthyTerminalError(fmt.Errorf("DaemonSet/%s node %s did not converge to immutable target", name, node), lastObservation)
 		}
 		select {
 		case <-ctx.Done():
-			return edgeGroupPod{}, ctx.Err()
+			return edgeGroupPod{}, waitHealthyTerminalError(ctx.Err(), lastObservation)
 		case <-time.After(2 * time.Second):
 		}
 	}

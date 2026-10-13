@@ -121,6 +121,7 @@ type healthSoakTracker struct {
 
 type podHTTPEndpoint struct {
 	Name string
+	UID  string
 	IP   string
 	Port int
 }
@@ -3249,7 +3250,7 @@ func podHTTPEndpointsFromJSONWithReadiness(raw []byte, containerName, portName s
 		if port < 1 || port > 65535 {
 			return nil, errors.New("ready pod HTTP port is invalid")
 		}
-		endpoints = append(endpoints, podHTTPEndpoint{Name: name, IP: ip, Port: port})
+		endpoints = append(endpoints, podHTTPEndpoint{Name: name, UID: stringValue(metadata["uid"]), IP: ip, Port: port})
 	}
 	sort.Slice(endpoints, func(i, j int) bool { return endpoints[i].Name < endpoints[j].Name })
 	if len(endpoints) == 0 {
@@ -3272,15 +3273,18 @@ func readPodHTTP(ctx context.Context, endpoint podHTTPEndpoint, path string) ([]
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, podHTTPFailureEvidence(endpoint, path, "request", 0, nil, false, err)
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
 	if err != nil {
-		return nil, err
+		return nil, podHTTPFailureEvidence(endpoint, path, "body_read", response.StatusCode, body, false, err)
 	}
-	if response.StatusCode != http.StatusOK || len(body) > 1<<20 {
-		return nil, errors.New("pod HTTP response is invalid")
+	if len(body) > 1<<20 {
+		return nil, podHTTPFailureEvidence(endpoint, path, "body_limit", response.StatusCode, body, false, nil)
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, podHTTPFailureEvidence(endpoint, path, "status", response.StatusCode, body, true, nil)
 	}
 	return body, nil
 }
