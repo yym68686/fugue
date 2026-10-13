@@ -140,6 +140,25 @@ func evaluateUnifiedBusiness(input BusinessExplorationInput) (BusinessExploratio
 	}
 	if unified.MigrationBasisPoints != nil {
 		finishUnifiedAllocation(input, &decision)
+		winner := unifiedBusinessWinner(input, data, decision.Comparisons)
+		outperformed := false
+		for _, comparison := range decision.Comparisons {
+			outperformed = outperformed || comparison.Verdict == "better"
+		}
+		if outperformed {
+			if winner != nil && winner.PromotionQualified && input.Previous != nil && input.CapturedAt.Sub(state.LastAdjustedAt) >= time.Duration(policy.CooldownSeconds)*time.Second {
+				unified.PrimaryEdgeID, unified.TargetEdgeID, unified.PrimarySince = winner.EdgeID, winner.EdgeID, input.CapturedAt
+				unified.QualityBasisPoints = map[string]int{winner.EdgeID: qualityBudget}
+				state.LastAdjustedAt = input.CapturedAt
+				state.EvidenceValidUntil = unifiedComparisonExpiry(input, *winner, data, primary)
+				decision.Action = "promote"
+				decision.Reasons = append(decision.Reasons, "qualified_migration_winner_promoted_preserve_executing_weights")
+				finishUnifiedAllocation(input, &decision)
+			} else {
+				decision.Reasons = append(decision.Reasons, "migration_target_outperformed_wait_for_qualified_promotion")
+			}
+			return decision, nil
+		}
 		if primaryDegraded {
 			decision.Reasons = append(decision.Reasons, "migration_target_transport_degraded")
 		}
@@ -214,26 +233,7 @@ func evaluateUnifiedBusiness(input BusinessExplorationInput) (BusinessExploratio
 		finishUnifiedAllocation(input, &decision)
 		return decision, nil
 	}
-	winners := []BusinessExplorationComparison{}
-	for _, comparison := range decision.Comparisons {
-		if comparison.Verdict == "better" {
-			winners = append(winners, comparison)
-		}
-	}
-	var winner *BusinessExplorationComparison
-	for index := range winners {
-		candidate := &winners[index]
-		best := true
-		for _, other := range winners {
-			if other.EdgeID != candidate.EdgeID && compareUnifiedBusiness(input, data, other.EdgeID, candidate.EdgeID).Verdict != "better" {
-				best = false
-			}
-		}
-		if best {
-			winner = candidate
-			break
-		}
-	}
+	winner := unifiedBusinessWinner(input, data, decision.Comparisons)
 	if winner == nil {
 		decision.Reasons = append(decision.Reasons, "no_unique_qualified_winner")
 		finishUnifiedAllocation(input, &decision)
@@ -272,6 +272,28 @@ func evaluateUnifiedBusiness(input BusinessExplorationInput) (BusinessExploratio
 	decision.ValidUntil = minBusinessTime(decision.ValidUntil, state.EvidenceValidUntil)
 	finishUnifiedAllocation(input, &decision)
 	return decision, nil
+}
+
+func unifiedBusinessWinner(input BusinessExplorationInput, data unifiedWindows, comparisons []BusinessExplorationComparison) *BusinessExplorationComparison {
+	winners := []BusinessExplorationComparison{}
+	for _, comparison := range comparisons {
+		if comparison.Verdict == "better" {
+			winners = append(winners, comparison)
+		}
+	}
+	for index := range winners {
+		candidate := &winners[index]
+		best := true
+		for _, other := range winners {
+			if other.EdgeID != candidate.EdgeID && compareUnifiedBusiness(input, data, other.EdgeID, candidate.EdgeID).Verdict != "better" {
+				best = false
+			}
+		}
+		if best {
+			return candidate
+		}
+	}
+	return nil
 }
 
 func unifiedExplorationWeights(policy model.BusinessEdgeExplorationPolicy, stopped map[string]string, active bool) map[string]int {

@@ -67,6 +67,35 @@ func TestUnifiedObserveAndMigrationRetainComparisons(t *testing.T) {
 	}
 }
 
+func TestUnifiedMigrationCannotOverrideQualifiedQualityWinner(t *testing.T) {
+	for _, qualifies := range []bool{false, true} {
+		input := unifiedBusinessFixture()
+		input.InitialDNSBasisPoints = map[string]map[string]int{"dns-a": {"edge-a": 100, "edge-b": 9900}}
+		if !qualifies {
+			input.Policy.Unified.PromotionMinimumConnections = 100
+		}
+		initial, err := EvaluateBusinessExploration(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.Previous, input.InitialDNSBasisPoints = &initial.State, nil
+		advanceUnifiedFixture(&input, time.Duration(input.Policy.CooldownSeconds)*time.Second)
+		next, err := EvaluateBusinessExploration(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(next.State.Unified.MigrationBasisPoints, initial.State.Unified.MigrationBasisPoints) {
+			t.Fatal("migration moved traffic toward an outperformed historical target")
+		}
+		if qualifies && (next.Action != "promote" || next.State.Unified.PrimaryEdgeID != "edge-b") {
+			t.Fatal("migration blocked replayable quality promotion", next.Action)
+		}
+		if !qualifies && next.State.Unified.PrimaryEdgeID != "edge-a" {
+			t.Fatal("migration promoted without the additional evidence")
+		}
+	}
+}
+
 func TestUnifiedRTTOnlyMovesBeyondOldCeilingAndPromotes(t *testing.T) {
 	input := unifiedBusinessFixture()
 	promoted := false

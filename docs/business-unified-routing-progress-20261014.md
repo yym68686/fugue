@@ -24,6 +24,11 @@ initialization does not change either node's answer distribution. Each cooldown
 moves at most the configured step toward that target. The map is removed after
 all nodes converge. These temporary execution differences are labeled
 `business_migration`, never claimed as different user-quality rankings.
+If fresh comparable evidence shows the migration target is outperformed,
+migration toward it pauses. A uniquely qualified winner can be promoted while
+the exact current executing weights remain unchanged; subsequent convergence
+still obeys the configured step and cooldown. Historical migration intent thus
+cannot override a qualified business decision.
 
 Quality and exploration weights are separate, add to 10000 and use independent
 decision labels. RTT, delivery and retransmission qualify separately. Shared

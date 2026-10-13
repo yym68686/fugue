@@ -72,16 +72,27 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 			copyContainer := copyUS["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
 			var copiedEnv []any
 			memoryBudget := ""
+			compressedStateWrites := 0
 			for _, raw := range copyContainer["env"].([]any) {
 				env := raw.(map[string]any)
 				if env["name"] == "GOMEMLIMIT" {
 					memoryBudget, _ = env["value"].(string)
 					continue
 				}
+				if env["name"] == "FUGUE_EDGE_CONTROL_COMPRESS_STATE_WRITES" {
+					if !reflect.DeepEqual(env, map[string]any{"name": "FUGUE_EDGE_CONTROL_COMPRESS_STATE_WRITES", "value": "true"}) {
+						t.Fatalf("US compressed state writes configuration=%v", env)
+					}
+					compressedStateWrites++
+					continue
+				}
 				copiedEnv = append(copiedEnv, raw)
 			}
 			if memoryBudget != "1400MiB" {
 				t.Fatalf("US Go memory budget=%q", memoryBudget)
+			}
+			if compressedStateWrites != 1 {
+				t.Fatalf("US compressed state writes entries=%d, want 1", compressedStateWrites)
 			}
 			copyContainer["env"] = copiedEnv
 			copyResources := copyContainer["resources"].(map[string]any)
