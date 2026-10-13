@@ -43,3 +43,12 @@ positive current publication, wire protocol and exact handoff checks pass.
 Each country's Service selection then changes separately through the normal
 configuration lane. No serving DNS process or business workload is restarted
 to apply this repair.
+
+Transport handoff completed independently through CI 38472764012 (US,
+generation 41) and CI 38473706130 (DE, generation 42). Each witness recorded
+the exact old and candidate Pod UIDs, node UID, release assignment, parent
+digest and plan digest. Both public Services now select their F instance; the
+retired E instances remain Ready and undeleted for rollback evidence.
+Subsequent public observation returned 48/48 passing checks in both regions,
+with no new SERVFAIL or unattributed increment. The six historical German
+SERVFAILs remain the pre-fix baseline and are not counted as a regression.
