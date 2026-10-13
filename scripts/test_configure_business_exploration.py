@@ -81,11 +81,13 @@ class BusinessExplorationConfigurationTests(unittest.TestCase):
     def test_binding_context_failure_names_only_safe_fields_and_blockers(self):
         config, full, snapshots, api = self.anchor_fixture()
         snapshot = snapshots["dns-b"]["snapshot"]
-        snapshot["blockers"] = ["actual_dns_receipt_not_retained", "Bearer secret-key"]
+        snapshot["blockers"] = ["actual_dns_receipt_not_retained", "Bearer secret-key", "private_lowercase_value", {"error": "sensitive"}]
         snapshot["path_prefix"] = "/different"
-        with self.assertRaisesRegex(ValueError, "path_prefix,blockers; anchor_index=1; blockers=actual_dns_receipt_not_retained,unclassified") as failure:
+        with self.assertRaisesRegex(ValueError, "path_prefix,blockers; anchor_index=1; blockers=actual_dns_receipt_not_retained,unclassified,unclassified,unclassified$") as failure:
             business.resolve_business_anchors(config, api, full, "app.example.test")
         self.assertNotIn("secret-key", str(failure.exception))
+        self.assertNotIn("private_lowercase_value", str(failure.exception))
+        self.assertNotIn("sensitive", str(failure.exception))
         self.assertNotIn("/different", str(failure.exception))
 
     def test_binding_mode_cannot_implicitly_enable_or_cross_operation(self):

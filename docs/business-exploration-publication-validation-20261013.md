@@ -149,7 +149,7 @@ fencing or positive-LKG condition is weakened for the retry.
 
 The diagnostic retry and adaptive declaration were pushed together as
 `3811e449`. CI `38402009038` passed prepush and declaration planning; selected
-configuration job `115312353454` succeeded. It activated source
+configuration job `115312353454` succeeded. It activated producer
 `artifact_1791896961_264522d5b86c`, producer fence 40, using intent
 `business-adaptive-20261013T130004Z`. The overall workflow was later cancelled
 because a separate, unselected renewal job was cancelled; that does not undo
@@ -165,7 +165,7 @@ The sticky stop map is empty and the lease is bounded. No share adjustment was
 authorized by the observed evidence.
 
 Fresh read-only captures for both DNS consumers included real traffic only.
-Each produced 39 baseline and 49 candidate context-valid records, 15 and 13
+Each produced 39 vmarck and 49 US OVH context-valid records, 15 and 13
 independent connections, 24 and 31 ACK-delta records, one and zero qualified
 delivery records, and one retransmission-qualified record each. Both deterministic
 replays matched. Both comparisons returned `insufficient`, zero complete
@@ -177,3 +177,12 @@ The anchor diagnostic identifies only mismatched field names and allowlisted
 blocker codes. DNS-node identity itself is represented as declaration order,
 and unrecognized values become `unclassified`; the regression test verifies
 that hostile strings and values are not emitted.
+
+The subsequent authoritative and recursive public-DNS smoke check passed all
+48 UDP/TCP queries under the unchanged allowed-answer declaration. At 14:04 UTC,
+the three online route/TLS consumers and both DNS consumers reported applied,
+passed, identity-verified ACKs for the selected parent. BWG retained its stale
+October 11 ACK and was excluded from online acceptance, as required by the
+explicit offline intent. The final full repository test passed after the
+diagnostic change; passive missing-data conditions never authorized a share
+increase or weakened publication requirements.

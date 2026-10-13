@@ -54,18 +54,17 @@ this implementation.
 
 ## Status
 
-Implementation in progress. Neither exploration phase is complete or activated.
-Compatible runtime code was pushed in `afaf749e`; its first CI deployed API,
-Germany workers and the non-public DNS candidates, but stopped the US worker
-before mutation. The bound-sample association repair is `d2c6b770`, and the
-independent suspended-baseline release declaration is `6637de9b`. Their runtime
-acceptance is pending. Public DNS handoff is a separate configuration operation;
-business exploration remains disabled. The release-health prerequisite `712637af` passed CI
-`38281903369`. At 17:19 UTC the actual Guardian ran that revision with image
-`sha256:aaf637ae0466e7b0190f162abafc135f92fb9cf379754e8d77fc6b9f01f21479`;
-both worker release statuses were stable with local/dependency/route health
-verified and their serving images unchanged. Subsequent unrelated main changes
-through `1a27cf22` are preserved.
+Both implementation phases have been published and activated separately.
+The 1% observe intent produced deterministic real-evidence comparisons before
+the adaptive intent was enabled by CI `38402009038`, selected configuration job
+`115312353454`. At 13:27:37 UTC on 2026-10-13, both public DNS consumers loaded
+the adaptive allocation from full `artifact_1791897786_527a83f0b9a8`, fence 3487,
+with verified positive LKG. The real comparisons remain insufficient, so there
+has been no automatic share increase. The current intent expires at
+2026-10-13 19:00:04 UTC; the deadline does not authorize renewal or revival of
+offline edges. The chronological release and repair evidence is retained in
+`business-edge-exploration-runtime-acceptance.md` and
+`business-exploration-publication-validation-20261013.md`.
 
 Completed locally:
 
@@ -84,12 +83,11 @@ Completed locally:
 - Passive sampler's existing one-minute route suppression now also matches the
   actual coarse peer cohort, retaining the global rate and concurrency bounds.
   This is a coverage improvement, not an asserted diagnosis of the old incident.
-- Focused model/evaluator/sampler/CLI tests pass. One full `make test` run passed
-  during implementation; final full validation must be repeated after integration.
+- Focused model/evaluator/sampler/CLI tests and the final full `make test` pass.
 - Frontend contract snapshot/types regenerated from this backend checkout.
   `contract:check` remains blocked by 147 pre-existing TypeScript errors in
   historical documentation and other unrelated code. Baseline comparison showed
-  no new diagnostic; the latest synchronized baseline still needs rechecking.
+  no new diagnostic in the synchronized consumer baseline.
 - Signed `physical-edge-business-v1` allocation, per-DNS-node initial digest/fence
   anchors, actual-serving predecessor continuity, independent source reconstruction,
   route/TLS/DNS capability admission, recorded DNS entropy and replay. Stops and
@@ -112,21 +110,20 @@ Completed locally:
   C instances. See `business-edge-exploration-runtime-acceptance.md` for partial
   release outcomes, repairs and separately gated public handoff.
 
-Remaining acceptance and limitations:
+Acceptance scope and limitations:
 
 - Initial enrollment is restricted to a directly owned hostname with one exact
   service path/class. Shared aliases and multiple service paths are rejected,
   not silently ranked using evidence from only one owner. They are not covered
   by the initial serving implementation.
-- Exact initialization anchors must still match the actual serving publication
-  at activation. A concurrent publication change must abort, not silently rebind
-  the operator's explicit predecessor or discard sticky state.
-- Full post-sync validation, frontend baseline comparison, compatible-runtime
-  publication, capability/ACK verification, and isolated DNS acceptance followed
-  by normal public handoff.
+- Exact initialization anchors must match the actual serving publication at
+  activation. The explicitly configured `latest_verified_same_baseline` mode
+  permits only same-producer, same-service, same-baseline positive renewal;
+  concurrent preview changes retry boundedly or abort. It cannot discard sticky
+  state or adopt different routing intent.
 - The explicit phase-one 1% observe intent and separate bounded adaptive intent
   are live through independent signed publication paths. Both actual public DNS
-  consumers load the adaptive intent only under a matching verified full/LKG.
+  consumers have been accepted against a matching verified full/LKG.
   The first real adaptive comparisons replay deterministically but have zero
   complete shared-cohort windows, so the candidate remains at the 1% floor.
   No synthetic samples satisfy consecutive-window or minimum-connection gates.

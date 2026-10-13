@@ -13,6 +13,14 @@ class BusinessBaselineChanged(ValueError):
     pass
 
 
+ANCHOR_BLOCKER_CODES = frozenset({
+    "actual_dns_receipt_not_bound", "actual_dns_backend_unavailable",
+    "actual_dns_receipt_not_retained", "actual_dns_evidence_unbound",
+    "network_observation_limit_reached", "client_probe_report_limit_reached",
+    "route_witness_limit_reached", "observation_limit_reached",
+})
+
+
 def resolve_business_anchors(config, api, full, hostname):
     if config.get("business_anchor_mode", "declared") == "declared":
         return config
@@ -40,7 +48,7 @@ def resolve_business_anchors(config, api, full, hostname):
             if "blockers" in mismatches:
                 blockers = snapshot.get("blockers")
                 if isinstance(blockers, list):
-                    detail = [blocker if isinstance(blocker, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", blocker) else "unclassified" for blocker in blockers[:5]]
+                    detail = [blocker if isinstance(blocker, str) and blocker in ANCHOR_BLOCKER_CODES else "unclassified" for blocker in blockers[:5]]
             raise ValueError("business anchor observation differs from explicit service context: " + ",".join(mismatches) + "; anchor_index=" + str(anchor_index) + ("; blockers=" + ",".join(detail) if detail else ""))
         receipt = snapshot.get("actual_dns_receipt", {})
         if isinstance(receipt, str):
