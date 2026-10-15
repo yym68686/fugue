@@ -52,7 +52,7 @@ func TestPostgresStorageRescueDeliveryOrder(t *testing.T) {
 	if len(tasks) != 9 {
 		t.Fatalf("missing tasks: %+v", tasks)
 	}
-	for i, want := range []string{"upgrade", "policy", "capacity", "fresh-policy", "rescue", "journald", "prune", "inventory", "refresh"} {
+	for i, want := range []string{"upgrade", "capacity", "rescue", "journald", "policy", "prune", "inventory", "fresh-policy", "refresh"} {
 		if tasks[i].ID != want {
 			t.Fatalf("Postgres order %d: got %s want %s", i, tasks[i].ID, want)
 		}
