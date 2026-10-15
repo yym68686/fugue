@@ -306,6 +306,12 @@ func ReleaseGateComparisonFailures(metrics map[string]any, policy model.AppRelea
 	if candidateRequests <= 0 {
 		return failures
 	}
+	// The absolute gate still checks errors and latency below this sample floor.
+	// Ratios from an undersampled candidate must not turn a sample deficit into
+	// a regression, which would prevent the next bounded canary step.
+	if policy.MinCandidateRequests > 0 && candidateRequests < float64(policy.MinCandidateRequests) {
+		return failures
+	}
 	if stableRequests <= 0 {
 		failures = append(failures, "stable baseline request count 0 is below minimum 1 for comparative release gate")
 		return failures
