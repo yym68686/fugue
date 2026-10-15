@@ -26,3 +26,21 @@ Deployment first updates the inactive DNS E slots using exact live predecessor
 fences. Public Service selectors remain on the positive F slots until the new
 processes are ready and direct observations pass. Transport handoff is a later
 independent declaration and does not require another code build.
+
+The API also embeds the DNS replay algorithm: it admits physical quality evidence
+only after replaying the DNS process's exact receipt. It must receive the same
+algorithm correction through its independently fenced API release. An older API
+rejects the corrected two-stage successful transition with `unconsumed replay
+stages`; updating only the DNS executors leaves this evidence path incompatible.
+The API registry therefore owns `internal/dnsserver` as a compiled source root.
+The planner already discovers transitive Go dependencies; the missing API
+release intent, rather than dependency discovery alone, left production on the
+old replay implementation. Explicit registry ownership documents this consumer
+but does not by itself prevent a producer-only rollout.
+Shared-source ownership still requires an explicit API intent; it does not
+automatically deploy all consumers or transfer serving configuration authority.
+
+For future changes to decision semantics, validate both receipt production and
+every online replay consumer before public handoff. Historical receipts retain
+their original behavior and continue to require the matching original release;
+do not bypass replay or rewrite old evidence to make a mixed-version test pass.
