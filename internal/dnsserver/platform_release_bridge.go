@@ -45,7 +45,7 @@ func dnsReleaseCompatibilityForProof(old *dnsServingState, bridge *dnsReleaseBri
 	previous, next := old.payload, bridge.payload
 	oldRules, newRules := dnsBridgeRules(previous.Policy.DNSAnswerRules), dnsBridgeRules(next.Policy.DNSAnswerRules)
 	oldQueries, newQueries := dnsBridgeQueries(previous.Queries), dnsBridgeQueries(next.Queries)
-	retainEquivalentDNSPhysicalOrder(oldQueries, newQueries, oldRules, newRules)
+	normalizeDNSPhysicalOrders(oldQueries, newQueries, oldRules, newRules, !retainSelection)
 	if retainSelection {
 		retainDNSSelectionComparison(oldQueries)
 		retainDNSSelectionComparison(newQueries)
@@ -103,17 +103,19 @@ func dnsBridgeRecordIntents(records []platformconfig.DNSIntent) map[string][]pla
 	return byHost
 }
 
-// The compiler can represent an unchanged verified order either as an explicit
-// order or as a measured physical selection. Compare those equivalent forms
-// without changing either serving payload. Business allocation, scopes, actual
-// reordering, primary epochs and all other authorization fields stay exact.
-func retainEquivalentDNSPhysicalOrder(oldQueries, newQueries map[string][]platformconfig.DNSQueryView, oldRules, newRules map[string][]platformconfig.DNSAnswerRule) {
+// Equivalent representations can share proofs while retaining the old selector.
+// Only forward record recovery may also remove fallbacks without reordering or
+// changing the primary's epoch. It executes the original successor selector with
+// a complete successor quorum; it never rebinds those proofs into the old order.
+func normalizeDNSPhysicalOrders(oldQueries, newQueries map[string][]platformconfig.DNSQueryView, oldRules, newRules map[string][]platformconfig.DNSAnswerRule, allowNarrowing bool) {
 	for host, before := range oldQueries {
 		after := newQueries[host]
 		if len(before) != len(after) {
 			continue
 		}
 		orders := map[string]*model.DNSPhysicalOrder{}
+		narrowed := map[string]bool{}
+		var oldRuleIndex, newRuleIndex map[string]*platformconfig.DNSAnswerRule
 		for index := range before {
 			a, b := &before[index], &after[index]
 			if a.NodeID != b.NodeID || a.Zone != b.Zone || a.EdgeGroupID != b.EdgeGroupID || len(a.Records) != 1 || len(b.Records) != 1 || a.Records[0].Type != b.Records[0].Type {
@@ -131,26 +133,92 @@ func retainEquivalentDNSPhysicalOrder(oldQueries, newQueries map[string][]platfo
 			if selection.Version != model.DNSPhysicalSelectionVersion || selection.BusinessAllocation != nil || selection.Scope != "global" ||
 				measured.RankingVersion != model.DNSPhysicalSelectionVersion || measured.RankingScope != "global" ||
 				len(selection.OrderedEdgeIDs) == 0 || selection.PrimaryEdgeID != selection.OrderedEdgeIDs[0] ||
-				!slices.Equal(fixed.PhysicalOrder.OrderedEdgeIDs, selection.OrderedEdgeIDs) || !reflect.DeepEqual(fixed.PhysicalOrder.PrimarySince, selection.PrimarySince) {
+				model.ValidateDNSPhysicalOrder(&model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: selection.OrderedEdgeIDs}) != nil ||
+				!reflect.DeepEqual(fixed.PhysicalOrder.PrimarySince, selection.PrimarySince) {
 				continue
 			}
+			beforeOrder, afterOrder := fixed.PhysicalOrder.OrderedEdgeIDs, selection.OrderedEdgeIDs
+			if a.Records[0].AnswerPolicy.PolicyKind == model.DNSAnswerPolicyKindPhysicalQuality {
+				beforeOrder, afterOrder = afterOrder, beforeOrder
+			}
+			isNarrower := allowNarrowing && narrowerDNSPhysicalOrder(beforeOrder, afterOrder)
+			if !slices.Equal(beforeOrder, afterOrder) && !isNarrower {
+				continue
+			}
+			if isNarrower {
+				if oldRuleIndex == nil {
+					oldRuleIndex, newRuleIndex = indexDNSPhysicalRules(oldRules[host]), indexDNSPhysicalRules(newRules[host])
+				}
+				if !dnsPhysicalRuleMatchesQuery(oldRuleIndex, *a) || !dnsPhysicalRuleMatchesQuery(newRuleIndex, *b) {
+					continue
+				}
+			}
 			order := model.CloneDNSPhysicalOrder(fixed.PhysicalOrder)
+			if isNarrower {
+				order.OrderedEdgeIDs = slices.Clone(afterOrder)
+				fixed.PhysicalOrder = model.CloneDNSPhysicalOrder(order)
+			}
 			measured.PolicyKind, measured.PhysicalOrder, measured.PhysicalSelection = model.DNSAnswerPolicyKindPhysicalOrder, order, nil
 			measured.RankingVersion, measured.RankingScope = fixed.RankingVersion, fixed.RankingScope
 			// Reason describes how that identical order was observed, not who may
 			// answer. Every endpoint and policy guard is still compared below.
 			fixed.Reason, measured.Reason = "", ""
-			orders[a.NodeID+"\x00"+a.Records[0].Type] = order
+			key := a.NodeID + "\x00" + a.Records[0].Type
+			orders[key], narrowed[key] = order, isNarrower
 		}
 		for _, rules := range []map[string][]platformconfig.DNSAnswerRule{oldRules, newRules} {
 			for index := range rules[host] {
 				rule := &rules[host][index]
-				if order := orders[rule.NodeID+"\x00"+rule.Type]; order != nil && rule.SelectionMode == model.DNSAnswerPolicyKindPhysicalQuality && rule.PhysicalOrder == nil {
+				key := rule.NodeID + "\x00" + rule.Type
+				if order := orders[key]; order != nil && (rule.SelectionMode == model.DNSAnswerPolicyKindPhysicalQuality && rule.PhysicalOrder == nil ||
+					narrowed[key] && rule.SelectionMode == model.DNSAnswerPolicyKindPhysicalOrder) {
 					rule.SelectionMode, rule.PhysicalOrder = model.DNSAnswerPolicyKindPhysicalOrder, model.CloneDNSPhysicalOrder(order)
 				}
 			}
 		}
 	}
+}
+
+func narrowerDNSPhysicalOrder(before, after []string) bool {
+	if len(after) == 0 || len(after) >= len(before) || after[0] != before[0] {
+		return false
+	}
+	next := 0
+	for _, edge := range before {
+		if next < len(after) && edge == after[next] {
+			next++
+		}
+	}
+	return next == len(after)
+}
+
+func indexDNSPhysicalRules(rules []platformconfig.DNSAnswerRule) map[string]*platformconfig.DNSAnswerRule {
+	indexed := make(map[string]*platformconfig.DNSAnswerRule, len(rules))
+	for index := range rules {
+		rule := &rules[index]
+		key := rule.NodeID + "\x00" + rule.Type
+		if _, exists := indexed[key]; exists {
+			indexed[key] = nil
+		} else {
+			indexed[key] = rule
+		}
+	}
+	return indexed
+}
+
+func dnsPhysicalRuleMatchesQuery(rules map[string]*platformconfig.DNSAnswerRule, view platformconfig.DNSQueryView) bool {
+	record := view.Records[0]
+	for _, key := range []string{view.NodeID + "\x00" + record.Type, "\x00" + record.Type} {
+		rule, exists := rules[key]
+		if !exists {
+			continue
+		}
+		if rule == nil || rule.SelectionMode != record.AnswerPolicy.PolicyKind ||
+			!reflect.DeepEqual(rule.PhysicalOrder, record.AnswerPolicy.PhysicalOrder) {
+			return false
+		}
+	}
+	return true
 }
 
 func retainDNSSelectionComparison(queries map[string][]platformconfig.DNSQueryView) {
