@@ -369,6 +369,7 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 	}
 
 	jobName := buildJobName(req)
+	ctx = withBuilderEffectivePolicy(ctx, req.PodPolicy, req.WorkloadProfile)
 	return runBuilderJobWithRetry(ctx, "dockerfile", jobName, req.ImageRef, logger, func(attemptCtx context.Context, attempt builderJobAttempt) error {
 		attemptPolicy, err := builderPodPolicyForJobAttempt(req.PodPolicy, req.WorkloadProfile, attempt)
 		if err != nil {

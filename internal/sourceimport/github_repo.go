@@ -103,6 +103,10 @@ func (i *Importer) cloneGitHubRepo(ctx context.Context, repoURL, repoAuthToken, 
 	if err != nil {
 		commitCommittedAt = ""
 	}
+	if err := checkBuildInput(ctx, commitSHA); err != nil {
+		_ = os.RemoveAll(repoDir)
+		return clonedGitHubRepo{}, err
+	}
 
 	return clonedGitHubRepo{
 		RepoOwner:         owner,

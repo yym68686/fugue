@@ -35,9 +35,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 	importCtx, cancel := context.WithTimeout(ctx, importSourceTimeout())
 	defer cancel()
-	importCtx = sourceimport.WithBuilderEvidenceRecorder(importCtx, func(fact model.BuilderAttemptEvidence, diagnostics map[string]any) {
+	recordBuildEvidence := func(fact model.BuilderAttemptEvidence, diagnostics map[string]any) {
 		severity := model.OperationEvidenceSeverityInfo
-		if fact.Outcome == "failed" {
+		if fact.Outcome == "failed" || fact.Outcome == "rejected" {
 			severity = model.OperationEvidenceSeverityError
 		}
 		confidence := model.OperationEvidenceConfidenceConfirmed
@@ -54,7 +54,8 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			Payload: payload, PayloadVersion: 1,
 			RedactionStatus: model.OperationEvidenceRedactionRedacted,
 		})
-	})
+	}
+	importCtx = sourceimport.WithBuilderEvidenceRecorder(importCtx, recordBuildEvidence)
 
 	jobLabels := map[string]string{
 		"fugue.pro/operation-id": op.ID,
@@ -64,6 +65,38 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil || op.DesiredSpec.Postgres != nil
 	placementNodeSelector := s.importBuildPlacementNodeSelector(ctx, app, op)
 	builderMemoryCeiling := s.importBuilderMemoryCeilingBytes(app.TenantID)
+	builderPolicy := s.effectiveImportBuilderPolicy(builderMemoryCeiling)
+	failureFingerprint := ""
+	guardRejected := false
+	importCtx = sourceimport.WithBuildInputGuard(importCtx, func(actualCommit string) error {
+		source := *op.DesiredSource
+		source.CommitSHA = actualCommit
+		failureFingerprint = buildInputFingerprint(source, *op.DesiredSpec, builderPolicy)
+		ledger, loadErr := s.readBuildFailureLedger(importCtx, app)
+		if loadErr != nil {
+			return fmt.Errorf("read build admission history: %w", loadErr)
+		}
+		if rejection := cachedBuildRejection(ledger, failureFingerprint); rejection != nil {
+			guardRejected = true
+			failure := rejection.(*sourceimport.BuilderResourceFailure)
+			now := time.Now().UTC()
+			recordBuildEvidence(model.BuilderAttemptEvidence{Attempt: 1, Outcome: "rejected", StartedAt: now, FinishedAt: now,
+				Causes: []string{failure.Code()}, MissingEvidence: []string{}}, map[string]any{"execution_started": false, "input_fingerprint": failureFingerprint, "reason": "previous_permanent_failure"})
+			return rejection
+		}
+		return nil
+	})
+	defer func() {
+		var failure *sourceimport.BuilderResourceFailure
+		if guardRejected || failureFingerprint == "" || !errors.As(err, &failure) {
+			return
+		}
+		writeCtx, done := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
+		defer done()
+		if persistErr := s.recordPermanentBuildFailure(writeCtx, app, op.ID, failureFingerprint, failure); persistErr != nil {
+			err = errors.Join(err, fmt.Errorf("persist permanent build failure: %w", persistErr))
+		}
+	}()
 	imageDestination := s.importImageDestination(importCtx, app, op)
 	importCtx = sourceimport.WithBuildArtifactRecorder(importCtx, func(buildCtx context.Context, job, ref string, complete bool) error {
 		return s.recordBuildArtifact(buildCtx, app, op, job, ref, complete, imageDestination)

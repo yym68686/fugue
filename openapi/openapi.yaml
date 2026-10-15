@@ -24746,10 +24746,12 @@ components:
           minimum: 1
         outcome:
           type: string
-          enum: [succeeded, failed]
+          enum: [succeeded, failed, rejected]
+          description: rejected means admission refused before a build Pod was started; failed means an execution attempt failed.
         started_at:
           type: string
           format: date-time
+          description: Time the attempt or admission evaluation began; rejected outcomes did not execute a build container.
         finished_at:
           type: string
           format: date-time

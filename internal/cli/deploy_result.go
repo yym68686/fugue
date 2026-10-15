@@ -212,7 +212,7 @@ func decodePublicBuildAttempt(value any) (model.BuilderAttemptEvidence, bool) {
 	if err != nil || len(data) > 16384 {
 		return fact, false
 	}
-	if json.Unmarshal(data, &fact) != nil || fact.Attempt < 1 || fact.Attempt > 16 || (fact.Outcome != "failed" && fact.Outcome != "succeeded") || fact.StartedAt.IsZero() || fact.FinishedAt.Before(fact.StartedAt) {
+	if json.Unmarshal(data, &fact) != nil || fact.Attempt < 1 || fact.Attempt > 16 || (fact.Outcome != "failed" && fact.Outcome != "succeeded" && fact.Outcome != "rejected") || fact.StartedAt.IsZero() || fact.FinishedAt.Before(fact.StartedAt) {
 		return fact, false
 	}
 	codes := []string{}

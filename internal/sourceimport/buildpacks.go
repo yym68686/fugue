@@ -176,6 +176,7 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 		ImageRef:           req.ImageRef,
 		JobLabels:          req.JobLabels,
 	})
+	ctx = withBuilderEffectivePolicy(ctx, req.PodPolicy, req.WorkloadProfile)
 	return runBuilderJobWithRetry(ctx, "buildpacks", jobName, req.ImageRef, logger, func(attemptCtx context.Context, attempt builderJobAttempt) error {
 		attemptPolicy, err := builderPodPolicyForJobAttempt(req.PodPolicy, req.WorkloadProfile, attempt)
 		if err != nil {

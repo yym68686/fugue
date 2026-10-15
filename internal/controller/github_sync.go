@@ -74,13 +74,26 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		}
 		trackedCommitStates := collectTrackedGitHubCommitStates(ops)
 		var retryBaseOperation *model.Operation
-		if state, found := trackedCommitStates[trackedGitHubCommitStateKey(app.ID, latestCommit)]; found {
-			if !gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
-				continue
-			}
+		state, found := trackedCommitStates[trackedGitHubCommitStateKey(app.ID, latestCommit)]
+		if found {
 			if strings.TrimSpace(state.lastManualOperation.ID) != "" {
 				retryBaseOperation = &state.lastManualOperation
 			}
+		}
+		buildSpec, buildSource := gitHubRetryInputs(app, retryBaseOperation)
+		buildSource.CommitSHA = latestCommit
+		fingerprint := buildInputFingerprint(buildSource, buildSpec, s.effectiveImportBuilderPolicy(s.importBuilderMemoryCeilingBytes(app.TenantID)))
+		ledger, historyErr := s.readBuildFailureLedger(ctx, app)
+		if historyErr != nil {
+			s.Logger.Printf("github sync build admission history unavailable app=%s: %v", app.ID, historyErr)
+			continue
+		}
+		if cachedBuildRejection(ledger, fingerprint) != nil {
+			continue
+		}
+		if found && !buildPolicyChangedSinceFailure(ledger, state.lastAutomaticFailure, fingerprint) &&
+			!gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
+			continue
 		}
 
 		if ctx.Err() != nil {
@@ -173,27 +186,11 @@ func queueableGitHubSource(source model.AppSource, branch string, commit string)
 }
 
 func (s *Service) queueGitHubAutoRebuild(app model.App, branch string, commit string, retryBaseOperation *model.Operation) (model.Operation, error) {
-	spec := cloneImportSpec(app.Spec)
-	if strings.TrimSpace(spec.RuntimeID) == "" {
-		spec.RuntimeID = "runtime_managed_shared"
-	}
-
 	originSource := model.AppOriginSource(app)
 	if originSource == nil {
 		return model.Operation{}, fmt.Errorf("app does not have github origin source")
 	}
-	sourceBase := *originSource
-	if retryBaseOperation != nil {
-		if retryBaseOperation.DesiredSpec != nil {
-			spec = cloneImportSpec(*retryBaseOperation.DesiredSpec)
-			if strings.TrimSpace(spec.RuntimeID) == "" {
-				spec.RuntimeID = "runtime_managed_shared"
-			}
-		}
-		if retryBaseOperation.DesiredSource != nil && model.IsGitHubAppSourceType(retryBaseOperation.DesiredSource.Type) {
-			sourceBase = *retryBaseOperation.DesiredSource
-		}
-	}
+	spec, sourceBase := gitHubRetryInputs(app, retryBaseOperation)
 	source, err := queueableGitHubSource(sourceBase, branch, commit)
 	if err != nil {
 		return model.Operation{}, err
@@ -209,6 +206,26 @@ func (s *Service) queueGitHubAutoRebuild(app model.App, branch string, commit st
 		DesiredSource:       &source,
 		DesiredOriginSource: model.CloneAppSource(&source),
 	})
+}
+
+func gitHubRetryInputs(app model.App, retryBaseOperation *model.Operation) (model.AppSpec, model.AppSource) {
+	spec := cloneImportSpec(app.Spec)
+	sourceBase := *model.AppOriginSource(app)
+	if retryBaseOperation != nil {
+		if retryBaseOperation.DesiredSpec != nil {
+			spec = cloneImportSpec(*retryBaseOperation.DesiredSpec)
+			if strings.TrimSpace(spec.RuntimeID) == "" {
+				spec.RuntimeID = "runtime_managed_shared"
+			}
+		}
+		if retryBaseOperation.DesiredSource != nil && model.IsGitHubAppSourceType(retryBaseOperation.DesiredSource.Type) {
+			sourceBase = *retryBaseOperation.DesiredSource
+		}
+	}
+	if strings.TrimSpace(spec.RuntimeID) == "" {
+		spec.RuntimeID = "runtime_managed_shared"
+	}
+	return spec, sourceBase
 }
 
 func shouldAutoSyncGitHubApp(app model.App) bool {

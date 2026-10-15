@@ -2,6 +2,7 @@ package sourceimport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -70,6 +71,7 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 			EphemeralRetryCount: ephemeralRetryCount,
 		}
 		err := run(ctx, currentAttempt)
+		err = classifyExhaustedBuilderPolicy(ctx, currentAttempt, err)
 		recordBuilderAttempt(ctx, jobName, currentAttempt, started, err)
 		if err == nil {
 			if err := recordBuildArtifact(ctx, jobName, imageRef, true); err != nil {
@@ -153,6 +155,10 @@ func isBuilderEphemeralStorageFailure(err error, signal string) bool {
 func shouldRetryBuilderJobFailure(err error) (bool, string) {
 	if err == nil {
 		return false, ""
+	}
+	var exhausted *BuilderResourceFailure
+	if errors.As(err, &exhausted) {
+		return false, exhausted.Code()
 	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	if isEmptyKubectlGetJobExitStatusOne(message) {

@@ -26,6 +26,10 @@ type BuilderAttemptEvidence struct {
 // echoed: diagnostic output can contain arbitrary credentials and topology.
 func PublicDeploymentCause(code string) string {
 	switch code {
+	case "builder_memory_policy_exhausted":
+		return "The build cannot fit within the current memory policy. Change the build configuration or increase the available memory envelope."
+	case "builder_storage_policy_exhausted":
+		return "The build cannot fit within the current temporary storage policy. Change the build configuration or increase its storage envelope."
 	case "ephemeral_storage_limit_exceeded":
 		return "The build exceeded its temporary storage limit."
 	case "builder_disk_pressure":

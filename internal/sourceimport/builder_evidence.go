@@ -3,6 +3,7 @@ package sourceimport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -28,6 +29,21 @@ func recordBuilderAttempt(ctx context.Context, jobName string, attempt builderJo
 	fact := model.BuilderAttemptEvidence{Attempt: attempt.Number, Outcome: "succeeded", StartedAt: started, FinishedAt: time.Now().UTC(), Causes: []string{}, MissingEvidence: []string{}}
 	if runErr != nil {
 		fact.Outcome = "failed"
+	}
+	var exhausted *BuilderResourceFailure
+	if errors.As(runErr, &exhausted) {
+		addBuilderCauses(&fact, exhausted.Code())
+		if exhausted.Resource == "memory" {
+			fact.MemoryLimitBytes = exhausted.LimitBytes
+		} else {
+			fact.EphemeralLimitBytes = exhausted.LimitBytes
+		}
+		if exhausted.Preflight {
+			fact.Outcome = "rejected"
+			diagnostics["execution_started"] = false
+			record(fact, diagnostics)
+			return
+		}
 	}
 	// The operation deadline has often expired. A separate bounded read context
 	// captures terminal evidence before retry deletion/zombie cleanup can remove it.

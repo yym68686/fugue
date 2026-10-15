@@ -1,7 +1,6 @@
 package sourceimport
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -210,10 +209,7 @@ func builderPodPolicyForJobAttempt(policy BuilderPodPolicy, profile builderWorkl
 		currentBytes := parseBuilderBytes(current.Heavy.Resources.Limits["memory"])
 		previousBytes := parseBuilderBytes(previous.Heavy.Resources.Limits["memory"])
 		if currentBytes <= previousBytes {
-			return BuilderPodPolicy{}, fmt.Errorf(
-				"builder memory escalation is capped at %s; increase the tenant managed memory envelope or free capacity before retrying",
-				current.Heavy.Resources.Limits["memory"],
-			)
+			return BuilderPodPolicy{}, &BuilderResourceFailure{Resource: "memory", LimitBytes: currentBytes, Preflight: true}
 		}
 	}
 	if attempt.EphemeralRetryCount > 0 {
@@ -221,10 +217,7 @@ func builderPodPolicyForJobAttempt(policy BuilderPodPolicy, profile builderWorkl
 		currentBytes := parseBuilderBytes(current.Heavy.Resources.Limits["ephemeral-storage"])
 		previousBytes := parseBuilderBytes(previous.Heavy.Resources.Limits["ephemeral-storage"])
 		if currentBytes <= previousBytes {
-			return BuilderPodPolicy{}, fmt.Errorf(
-				"builder ephemeral-storage escalation is capped at %s; free builder node disk capacity or increase the tenant builder storage envelope before retrying",
-				current.Heavy.Resources.Limits["ephemeral-storage"],
-			)
+			return BuilderPodPolicy{}, &BuilderResourceFailure{Resource: "ephemeral-storage", LimitBytes: currentBytes, Preflight: true}
 		}
 	}
 	return current, nil
