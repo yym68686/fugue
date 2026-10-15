@@ -3184,7 +3184,7 @@ jobs:
     timeout-minutes: 15
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-api, cancel-in-progress: false}
+    concurrency: {group: fugue-production-api, cancel-in-progress: false, queue: max}
     permissions: {actions: read, contents: read, packages: read}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -3252,7 +3252,7 @@ jobs:
       matrix: ${{ fromJSON(needs.prepush.outputs.edge_client_matrix) }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: '${{ matrix.concurrency }}', cancel-in-progress: false}
+    concurrency: {group: '${{ matrix.concurrency }}', cancel-in-progress: false, queue: max}
     permissions: {actions: read, contents: read, packages: read}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
