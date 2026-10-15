@@ -1,5 +1,5 @@
 {
-  "publish": false,
+  "publish": true,
   "origin": "https://api.fugue.pro",
   "policy_file": "policy.json"
 }
