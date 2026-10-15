@@ -1,5 +1,5 @@
 {
-  "enabled": false,
+  "enabled": true,
   "origin": "https://api.fugue.pro",
   "policy_file": "policy.json",
   "local_node": "vps-d6d20fa1",
