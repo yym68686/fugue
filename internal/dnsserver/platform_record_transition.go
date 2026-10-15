@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"fugue/internal/dnsroutesource"
+	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
 
@@ -64,6 +65,8 @@ func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[st
 	previous, next := *old, *bridge
 	previous.payload.Plan = dnsTransitionRequirementShape(old.payload.Plan)
 	next.payload.Plan = dnsTransitionRequirementShape(bridge.payload.Plan)
+	previous.payload.Policy.TrafficConstraints = dnsTransitionTrafficConstraints(old.payload.Policy.TrafficConstraints)
+	next.payload.Policy.TrafficConstraints = dnsTransitionTrafficConstraints(bridge.payload.Policy.TrafficConstraints)
 	if previous.payload.Plan == nil || next.payload.Plan == nil {
 		return nil
 	}
@@ -84,6 +87,24 @@ func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[st
 		}
 	}
 	return hosts
+}
+
+// A signed canary step between the same two already-active releases changes
+// route digests, not DNS endpoint authority. Only this comparison omits weights;
+// the successor still answers with its original policy and exact fresh proofs.
+// Enabling/disabling a release, changing identity, fallback or stickiness remains
+// incompatible. The old-proof bridge deliberately retains its stricter checks.
+func dnsTransitionTrafficConstraints(constraints []platformconfig.TrafficPolicyConstraint) []platformconfig.TrafficPolicyConstraint {
+	result := slices.Clone(constraints)
+	for index := range result {
+		constraint := &result[index]
+		if constraint.Mode == model.AppTrafficModeCanary && constraint.ID != "" && constraint.AppID != "" && constraint.TenantID != "" &&
+			constraint.StableReleaseID != "" && constraint.CandidateReleaseID != "" && constraint.StableReleaseID != constraint.CandidateReleaseID &&
+			constraint.StableWeight > 0 && constraint.CandidateWeight > 0 && constraint.StableWeight+constraint.CandidateWeight == 100 {
+			constraint.StableWeight, constraint.CandidateWeight = -1, -1
+		}
+	}
+	return result
 }
 
 func dnsTransitionRequirementShape(plan *platformconfig.DNSReadinessPlan) *platformconfig.DNSReadinessPlan {
