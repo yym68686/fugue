@@ -438,11 +438,6 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask, now time.Time) in
 	if task.Type == model.NodeUpdateTaskTypeUpgradeUpdater {
 		return 0
 	}
-	if task.Type == noderesourcepolicy.TaskType {
-		// Host resource exhaustion must recover before recurring inventories
-		// refill the single-task polling queue. Admission checks still apply.
-		return 1
-	}
 	if task.Type == model.NodeUpdateTaskTypeRefreshJoinConfig && task.Payload["pod_capacity_mode"] != "" {
 		return 1
 	}

@@ -11,7 +11,7 @@ func TestResourceRecoveryIsNotStarvedByPeriodicInventory(t *testing.T) {
 	now := time.Now().UTC()
 	tasks := []model.NodeUpdateTask{
 		{ID: "inventory", Type: model.NodeUpdateTaskTypeReportLocalPV, CreatedAt: now.Add(-time.Minute)},
-		{ID: "capacity", Type: noderesourcepolicy.TaskType, CreatedAt: now},
+		{ID: "capacity", Type: noderesourcepolicy.TaskType, CreatedAt: now.Add(-11 * time.Minute)},
 		{ID: "upgrade", Type: model.NodeUpdateTaskTypeUpgradeUpdater, CreatedAt: now},
 	}
 	sortNodeUpdateTasksForDelivery(tasks)
