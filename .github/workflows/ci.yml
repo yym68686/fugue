@@ -2151,8 +2151,35 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  dns_transport:
+  dns_configuration_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    outputs:
+      transport: ${{ steps.selected.outputs.transport }}
+      ports: ${{ steps.selected.outputs.ports }}
+      slots: ${{ steps.selected.outputs.slots }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select changed declarations before entering the shared writer fence
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_select_dns_configuration
+          python3 -m scripts.select_dns_configuration "$BASE_SHA" HEAD > dns-configuration-selection.json
+          python3 - <<'PYTHON'
+          import json, os
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in json.load(open('dns-configuration-selection.json')).items():
+                  output.write(key + '=' + str(value).lower() + '\n')
+          PYTHON
+
+  dns_transport:
+    needs: dns_configuration_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dns_configuration_plan.outputs.transport == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-dns-transport, cancel-in-progress: false}
@@ -2243,8 +2270,8 @@ jobs:
           retention-days: 90
 
   dns_slot_retirement:
-    # Executor retirement cannot depend on a successful code build.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: dns_configuration_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dns_configuration_plan.outputs.slots == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-dns-transport, cancel-in-progress: false}
@@ -2307,7 +2334,8 @@ jobs:
           retention-days: 90
 
   dns_port_retirement:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: dns_configuration_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dns_configuration_plan.outputs.ports == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-dns-transport, cancel-in-progress: false}
