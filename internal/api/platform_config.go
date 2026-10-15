@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -352,21 +353,51 @@ func (s *Server) handleGetPlatformHostnameLineage(w http.ResponseWriter, r *http
 		httpx.WriteError(w, http.StatusBadRequest, "hostname is required")
 		return
 	}
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			httpx.WriteError(w, http.StatusBadRequest, "limit must be between 1 and 200")
+			return
+		}
+		limit = parsed
+	}
+	includeContent := false
+	if raw := r.URL.Query().Get("include_content"); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "include_content must be boolean")
+			return
+		}
+		includeContent = parsed
+	}
+	if includeContent && limit > 5 {
+		if r.URL.Query().Get("limit") == "" {
+			limit = 5
+		} else {
+			httpx.WriteError(w, http.StatusBadRequest, "include_content requires limit at most 5")
+			return
+		}
+	}
 	entries := []platformConfigLineageDependency{}
+	lkgs := map[string]*model.PlatformLKGSnapshot{}
 	for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig} {
-		artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{ArtifactKind: kind, Status: model.PlatformArtifactStatusValidated, Limit: 200})
+		artifacts, err := s.store.ListPlatformHostnameArtifacts(r.Context(), kind, hostname, limit, includeContent)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
 		for _, artifact := range artifacts {
-			if !platformArtifactContentContainsHostname(artifact.Content, hostname) {
-				continue
-			}
-			lkg, lkgErr := s.store.GetPlatformLKG(artifact.ArtifactKind, artifact.ScopeKey)
-			if lkgErr != nil && !isStoreNotFound(lkgErr) {
-				s.writeStoreError(w, lkgErr)
-				return
+			key := artifact.ArtifactKind + "\x00" + artifact.ScopeKey
+			lkg, found := lkgs[key]
+			if !found {
+				var lkgErr error
+				lkg, lkgErr = s.store.GetPlatformLKG(artifact.ArtifactKind, artifact.ScopeKey)
+				if lkgErr != nil && !isStoreNotFound(lkgErr) {
+					s.writeStoreError(w, lkgErr)
+					return
+				}
+				lkgs[key] = lkg
 			}
 			entries = append(entries, platformConfigLineageDependency{Artifact: artifact, Lineage: platformconfig.LineageFromArtifact(artifact), LKG: lkg})
 		}
@@ -380,7 +411,7 @@ func (s *Server) handleGetPlatformHostnameLineage(w http.ResponseWriter, r *http
 		}
 		return strings.Compare(left.Artifact.Generation, right.Artifact.Generation)
 	})
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"hostname": hostname, "artifacts": entries, "generated_at": time.Now().UTC()})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"hostname": hostname, "artifacts": entries, "generated_at": time.Now().UTC(), "candidate_limit_per_kind": limit, "content_included": includeContent})
 }
 
 func platformArtifactContentContainsHostname(content map[string]any, hostname string) bool {

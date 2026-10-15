@@ -215,3 +215,29 @@ func TestRouteBusinessReleaseProjectionPostgresPreservesReadinessIdentity(t *tes
 		t.Fatalf("unneeded spec retained: %d bytes", len(projected))
 	}
 }
+
+func TestHostnameLineagePostgresBoundsAndProjectsContent(t *testing.T) {
+	s := artifactReadTestStore(t)
+	raw, _ := json.Marshal(map[string]any{"payload": strings.Repeat("x", 1<<20), "rows": []any{map[string]any{"origin_HOSTNAME": " .Target.example. "}, map[string]any{"hostname": 3}}})
+	if _, err := s.db.Exec(`INSERT INTO fugue_platform_artifacts(id,generation,content_json) VALUES('match','match',$1),('miss','miss','{"hostname":"other.example"}')`, raw); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListPlatformHostnameArtifacts(context.Background(), "dns-answer-bundle", "target.example", 20, false)
+	if err != nil || len(got) != 1 || got[0].ID != "match" || got[0].Content != nil {
+		t.Fatalf("projection: %+v %v", got, err)
+	}
+	got, err = s.ListPlatformHostnameArtifacts(context.Background(), "dns-answer-bundle", "target.example", 5, true)
+	if err != nil || len(got) != 1 || len(got[0].Content) == 0 {
+		t.Fatal("explicit content unavailable", err)
+	}
+	if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET updated_at=now()+interval '1 minute' WHERE id='miss'`); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.ListPlatformHostnameArtifacts(context.Background(), "dns-answer-bundle", "target.example", 1, false)
+	if err != nil || len(got) != 0 {
+		t.Fatal("candidate boundary was applied after matching", err)
+	}
+	if _, err = s.ListPlatformHostnameArtifacts(context.Background(), "dns-answer-bundle", "target.example", 6, true); err != ErrInvalidInput {
+		t.Fatal("unbounded body option", err)
+	}
+}

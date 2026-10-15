@@ -67,3 +67,15 @@ use only the fixed families `platform_artifact` and `host_journald_state`.
 These counters omit protocol/metadata bytes and must not be interpreted as total
 network throughput. No tenant IDs, SQL text, artifact content or credentials are
 included in metrics.
+
+## Bounded hostname lineage diagnostics
+
+Post-rollout verification found an adjacent read amplification bug: hostname
+lineage loaded up to 600 complete historical artifact bodies and repeatedly read
+LKG per artifact. The endpoint now defaults to metadata only and 20 recent
+candidates per kind. PostgreSQL performs hostname matching inside the bounded
+candidate set; each kind/scope LKG is read once per request. Responses explicitly
+report candidate coverage and content inclusion. `limit` supports 1–200;
+`include_content=true` defaults to five candidates per kind and rejects larger
+explicit limits. Individual artifact retrieval remains available. These are
+OpenAPI-declared diagnostic semantics, not changes to serving authorization.

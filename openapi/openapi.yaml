@@ -3717,6 +3717,7 @@ paths:
     get:
       operationId: getPlatformHostnameLineage
       summary: Get Platform Hostname Lineage
+      description: Bounded diagnostic metadata for validated artifacts containing the hostname. Searches the most recent artifacts of each traffic kind. Content bodies are omitted by default; fetch a specific artifact separately when executable content is needed. This diagnostic response is not serving authority.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformHostnameLineage
       security:
@@ -3727,9 +3728,25 @@ paths:
           required: true
           schema:
             type: string
+        - in: query
+          name: limit
+          required: false
+          description: Maximum recent candidates inspected per artifact kind, before hostname matching.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+        - in: query
+          name: include_content
+          required: false
+          description: Include full matching artifact content. Limited to at most 5 candidates per kind when enabled.
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
-          description: Validated route, DNS and TLS artifacts for one hostname
+          description: Validated route, DNS and TLS artifact metadata and lineage for one hostname; content included only when explicitly requested
           content:
             application/json:
               schema:
