@@ -2235,9 +2235,14 @@ jobs:
               exit 0
             fi
             python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport
-            if jq -e '.apiVersion == "transport.fugue.dev/v2"' "$config" >/dev/null; then
+            if jq -e 'has("recovery") or has("recoveries")' "$config" >/dev/null; then
               export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
-              go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
+              verifier_revision="$(jq -r '.verifier_revision // empty' "$config")"
+              if [[ -n "$verifier_revision" ]]; then
+                bash scripts/build_dns_observation_verifier.sh "$verifier_revision" "$FUGUE_DNS_OBSERVATION_VERIFIER"
+              else
+                go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
+              fi
             fi
             python3 -m scripts.reconcile_dns_transport "$config" --evidence "$RUNNER_TEMP/dns-transport-prewrite.json"
             echo 'selected=true' >> "$GITHUB_OUTPUT"
@@ -2329,7 +2334,8 @@ jobs:
           set -euo pipefail
           python3 -m unittest scripts.test_retire_dns_slots scripts.test_retire_dns_hostport scripts.test_recover_dns_transport scripts.test_reconcile_dns_transport
           export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
-          go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
+          verifier_revision="$(jq -r '.verifier_revision' deploy/environments/production/dns-slot-retirement/intent.json)"
+          bash scripts/build_dns_observation_verifier.sh "$verifier_revision" "$FUGUE_DNS_OBSERVATION_VERIFIER"
           python3 -m scripts.retire_dns_slots deploy/environments/production/dns-slot-retirement/intent.json --evidence "$RUNNER_TEMP/dns-slot-retirement-prewrite.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: steps.selected.outputs.changed == 'true'

@@ -65,6 +65,50 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixtures.TransportTests().load(config)
 
+    def test_multiple_recoveries_bind_distinct_explicit_listeners(self):
+        config = self.config()
+        config['apiVersion'] = 'transport.fugue.dev/v3'
+        config['verifier_revision'] = 'a' * 40
+        config['recoveries'] = [config.pop('recovery')]
+        listener = copy.deepcopy(config['listeners'][0])
+        listener['name'], listener['port'] = 'second-listener', 15353
+        config['listeners'].append(listener)
+        second = dict(config['recoveries'][0], listener=listener['name'])
+        config['recoveries'].append(second)
+        fixtures.TransportTests().load(config)
+        for change in [lambda c: c['recoveries'].append(second),
+                       lambda c: c['recoveries'][1].update(candidate_image='unverified:latest'),
+                       lambda c: c['recoveries'][1].update(listener='unknown'),
+                       lambda c: c.update(recovery=second),
+                       lambda c: c.update(recoveries=[])]:
+            altered = copy.deepcopy(config)
+            change(altered)
+            with self.assertRaises(ValueError):
+                fixtures.TransportTests().load(altered)
+
+    def test_multiple_recovery_apply_requires_prewrite_evidence(self):
+        config = self.config()
+        config['apiVersion'] = 'transport.fugue.dev/v3'
+        config['verifier_revision'] = 'a' * 40
+        config['recoveries'] = [config.pop('recovery')]
+        with patch.object(transport, 'kubectl') as kube:
+            with self.assertRaisesRegex(ValueError, 'prewrite evidence'):
+                transport.reconcile(config, apply=True)
+            kube.assert_not_called()
+
+    def test_recovery_witness_uses_only_the_matching_listener_identity(self):
+        config = self.config()
+        config['apiVersion'] = 'transport.fugue.dev/v3'
+        config['verifier_revision'] = 'a' * 40
+        first = config.pop('recovery')
+        config['recoveries'] = [first, dict(first, listener='other-listener', candidate_pod_uid='55555555-5555-5555-5555-555555555555')]
+        listener = dict(config['listeners'][0], name='other-listener')
+        current = {'spec': {'selector': {'app': 'old'}}}
+        node = {'metadata': {'name': 'node', 'uid': 'uid'}, 'status': {'addresses': [{'address': listener['address']}]}}
+        with patch.object(transport, 'read_json', return_value={'items': [node]}), patch.object(recovery, 'witness', return_value={'verified': True}) as verify:
+            self.assertEqual(transport.handoff_witness(config, listener, current), {'verified': True})
+            self.assertEqual(verify.call_args.args[0]['recovery'], config['recoveries'][1])
+
     def test_recovery_rejects_noncurrent_unverified_or_foreign_authority(self):
         snapshot = self.candidate()['snapshot']
         publication = self.publication(snapshot)

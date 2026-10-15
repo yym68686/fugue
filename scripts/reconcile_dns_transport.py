@@ -30,9 +30,11 @@ def load_config(path):
     fields = {"apiVersion", "kind", "generation", "namespace", "listeners"}
     if config.get("apiVersion") == "transport.fugue.dev/v2":
         fields.add("recovery")
+    if config.get("apiVersion") == "transport.fugue.dev/v3":
+        fields.update({"recoveries", "verifier_revision"})
     if set(config) != fields:
         raise ValueError("unknown or missing transport configuration fields")
-    if config["apiVersion"] not in {"transport.fugue.dev/v1", "transport.fugue.dev/v2"} or config["kind"] != "DNSLocalTransport":
+    if config["apiVersion"] not in {"transport.fugue.dev/v1", "transport.fugue.dev/v2", "transport.fugue.dev/v3"} or config["kind"] != "DNSLocalTransport":
         raise ValueError("invalid transport schema")
     if type(config["generation"]) is not int or config["generation"] <= 0:
         raise ValueError("positive integer generation is required")
@@ -65,6 +67,19 @@ def load_config(path):
     if "recovery" in config:
         from scripts.recover_dns_transport import validate
         validate(config)
+    if "recoveries" in config:
+        from scripts.recover_dns_transport import validate
+        if not re.fullmatch(r'[a-f0-9]{40}', config['verifier_revision']):
+            raise ValueError('verified reader source revision required')
+        recoveries = config['recoveries']
+        if not isinstance(recoveries, list) or not 1 <= len(recoveries) <= len(listeners):
+            raise ValueError('bounded nonempty listener recoveries required')
+        seen = set()
+        for recovery in recoveries:
+            validate(dict(config, recovery=recovery))
+            if recovery['listener'] in seen:
+                raise ValueError('duplicate listener recovery')
+            seen.add(recovery['listener'])
     return config
 
 
@@ -238,9 +253,11 @@ def handoff_witness(config, listener, current):
     last_error = None
     for attempt in range(HANDOFF_ATTEMPTS):
         try:
-            if config.get("recovery", {}).get("listener") == listener["name"]:
+            recoveries = config.get('recoveries', [config.get('recovery', {})])
+            selected = [recovery for recovery in recoveries if recovery.get('listener') == listener['name']]
+            if selected:
                 from scripts.recover_dns_transport import witness
-                return witness(config, listener, current, owners[0])
+                return witness(dict(config, recovery=selected[0]), listener, current, owners[0])
             old = handoff_backend(namespace, current["spec"]["selector"], node, listener["targetPort"])
             candidate = handoff_backend(namespace, listener["selector"], node, listener["targetPort"])
             if old["pod"]["metadata"]["uid"] == candidate["pod"]["metadata"]["uid"]:
@@ -299,7 +316,7 @@ def validate_handoff_endpoints(service, pod, slices, target_port):
 
 
 def reconcile(config, apply=False, evidence_path=None):
-    if apply and config.get('recovery') and not evidence_path:
+    if apply and (config.get('recovery') or config.get('recoveries')) and not evidence_path:
         raise ValueError('DNS recovery requires durable prewrite evidence')
     planned = []
     inventory = json.loads(kubectl("get", "services", "--all-namespaces", "-o", "json"))["items"]
