@@ -1,9 +1,9 @@
 {
   "apiVersion": "ssh.fugue.dev/v1",
   "kind": "ManagedSSHRuntimeIntent",
-  "generation": 10,
-  "expectedPreviousGeneration": 9,
-  "expectedPreviousDigest": "sha256:5b8290244c3d91e01aae5376361cca88e96a19f74585168c56f32fdb6385c352",
+  "generation": 11,
+  "expectedPreviousGeneration": 10,
+  "expectedPreviousDigest": "sha256:4fe9bce267204e26ae5c400f5d30d8f6fe0ffff313a0da97ad901a7e5f3995fb",
   "controllerNamespace": "fugue-system",
   "controllerAccount": "fugue-ssh-control",
   "runtimeConfigMap": "fugue-ssh-runtime",
@@ -54,17 +54,6 @@
         "service_uid": "a70a1fac-4aaa-4dac-a6db-b48247450def",
         "image": "ghcr.io/yym68686/fugue-ssh-front@sha256:3e9908984365189c0c7157fa4418f9ef2318f6aa01f7bf113ad0bfd04726649b",
         "binding_publication": {"port_start": 22000, "port_end": 32000, "intent_digest": "sha256:c3f0e3d86e3565ecd06e9cf9b0bcf3c8ef80b1cdd401a3004275de5218f167ce"}
-      },
-      {
-        "edge_id": "bwg",
-        "edge_group_id": "edge-group-country-us",
-        "namespace": "fugue-system",
-        "pod_labels": {"fugue.pro/ssh-front-slot": "ssh-front-29502487205814521910ee8a"},
-        "public_address": "95.169.10.156",
-        "public_service": "fugue-managed-ssh-us-optimized-canary",
-        "service_uid": "be13b602-9263-4c80-be78-f907fcc9f63e",
-        "image": "ghcr.io/yym68686/fugue-ssh-front@sha256:3e9908984365189c0c7157fa4418f9ef2318f6aa01f7bf113ad0bfd04726649b",
-        "binding_publication": {"port_start": 22000, "port_end": 32000, "intent_digest": "sha256:7b1db8266b8ae45f54a3d9d178998732cff65af36c0aa9d5995c75d5d326ba16"}
       },
       {
         "edge_id": "86eabf26-42a9-4f9d-998a-754115f8b829",

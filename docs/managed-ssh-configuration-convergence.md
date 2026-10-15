@@ -38,3 +38,15 @@ During `pending_apply`, compare desired and loaded digests and the persisted
 deadline. Investigate rejected observations; do not relax digest, identity or
 revocation checks to silence a controller error. The underlying SSH server retains
 its signed authorization checks and enforces authorization expiry independently.
+
+## Production Consumer Maintenance
+
+Runtime intent generation 11 removes the quota-exhausted `bwg` front from the
+required serving consumers, matching the existing edge-offline declaration.
+The US primary, US secondary and German fronts still require exact Pod, Service,
+host-key and route acknowledgements. This is a configuration-only change with a
+fenced generation-10 predecessor; it does not replace the SSH runtime image or
+change any application authorization. Before returning the offline front to the
+serving set, verify its transport and current route acknowledgement and explicitly
+reenroll it through a new runtime intent. An offline machine cannot supply fresh
+drain evidence and must not remain a mandatory online consumer.
