@@ -1,7 +1,7 @@
 {
   "apiVersion": "ssh.fugue.dev/v1",
   "kind": "ManagedSSHRuntimeIntent",
-  "generation": 12,
+  "generation": 13,
   "expectedPreviousGeneration": 10,
   "expectedPreviousDigest": "sha256:4fe9bce267204e26ae5c400f5d30d8f6fe0ffff313a0da97ad901a7e5f3995fb",
   "controllerNamespace": "fugue-system",

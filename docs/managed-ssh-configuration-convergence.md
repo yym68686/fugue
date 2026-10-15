@@ -41,7 +41,7 @@ its signed authorization checks and enforces authorization expiry independently.
 
 ## Production Consumer Maintenance
 
-Runtime intent generation 12 removes the quota-exhausted `bwg` front from the
+Runtime intent generation 13 removes the quota-exhausted `bwg` front from the
 required serving consumers, matching the existing edge-offline declaration.
 The US primary, US secondary and German fronts still require exact Pod, Service,
 host-key and route acknowledgements. This is a configuration-only change with a
@@ -54,4 +54,5 @@ drain evidence and must not remain a mandatory online consumer.
 The SSH runtime lane selects changed configuration on a hosted runner before
 acquiring its production concurrency fence. Unrelated pushes therefore cannot
 cancel a pending configuration publication. Generation 11 was cancelled in the
-old queue; generation 12 retains the actual generation-10 predecessor.
+old queue. Generation 12 was skipped when the workflow advanced before execution;
+generation 13 retains the actual generation-10 predecessor.
