@@ -16,7 +16,7 @@ import (
 )
 
 func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
-	for _, scenario := range []string{"idle", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready"} {
+	for _, scenario := range []string{"idle", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			s, app, candidate, f := newDrainWorkloadFixtureWithSnapshot(t, false, true)
@@ -75,20 +75,28 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			rm["name"], rm["uid"], rm["labels"] = "original-rs", "original-rs-uid", cLabels
 			rm["ownerReferences"] = []map[string]any{{"kind": "Deployment", "name": name, "uid": "canonical-uid", "controller": true}}
 			targetSelector := objectStringMapValue(nestedObjectValue(f.service, "spec", "selector"))
-			marked := scenario == "resume" || scenario == "restore_ready" || scenario == "restore_unready"
+			marked := scenario == "resume" || strings.HasPrefix(scenario, "restore_")
 			if marked {
 				b, _ := json.Marshal(safeCanonicalHandoff{ReleaseID: candidate.ID, DeploymentUID: "canonical-uid", ReleaseKey: "old-key", Image: oldImage})
 				objectMapField(cm, "annotations")[safeCanonicalHandoffAnnotation] = string(b)
 				objectMapField(canonicalService, "spec")["selector"] = targetSelector
 			}
-			if scenario == "restore_ready" || scenario == "restore_unready" {
+			if strings.HasPrefix(scenario, "restore_") {
 				canonical["spec"] = cloneKubeMap(objectMapField(desired, "spec"))
 				objectMapField(cm, "annotations")[runtime.FugueAnnotationReleaseKey] = "release-key"
+				for i, pod := range sourcePods {
+					objectMapField(objectMapField(pod, "metadata"), "annotations")[runtime.FugueAnnotationReleaseKey] = "release-key"
+					mapSlice(nestedObjectValue(pod, "spec", "containers"))[0]["image"] = app.Spec.Image
+					objectMapField(pod, "status")["podIP"] = fmt.Sprintf("10.0.1.%d", i+10)
+				}
+				if scenario == "restore_wrong_image" {
+					mapSlice(nestedObjectValue(sourcePods[0], "spec", "containers"))[0]["image"] = oldImage
+				}
 				if scenario == "restore_unready" {
 					objectMapField(canonical, "status")["updatedReplicas"] = 0
 				}
 			}
-			if scenario == "wrong_selector" {
+			if scenario == "wrong_selector" || scenario == "restore_wrong_selector" {
 				objectMapField(canonicalService, "spec")["selector"] = map[string]string{"unexpected": "workload"}
 			}
 			if scenario == "candidate_unhealthy" {
@@ -124,6 +132,10 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					return true
 				case strings.HasSuffix(r.URL.Path, "/services/"+serviceName):
 					if r.Method == http.MethodPatch {
+						if scenario == "restore_patch_failure" {
+							http.Error(w, "conflicting selector update", http.StatusConflict)
+							return true
+						}
 						var patch []map[string]any
 						if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 							t.Error(err)
@@ -144,6 +156,9 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					return true
 				case strings.HasSuffix(r.URL.Path, "/endpointslices"):
 					addresses := []string{"10.0.0.10", "10.0.0.11"}
+					if strings.HasPrefix(scenario, "restore_") && scenario != "restore_stale_endpoints" && objectStringMapValue(nestedObjectValue(canonicalService, "spec", "selector"))[runtime.FugueLabelAppWorkload] == name {
+						addresses = []string{"10.0.1.10", "10.0.1.11"}
+					}
 					if scenario == "stale_endpoints" {
 						addresses = append(addresses, "10.0.0.99")
 					}
@@ -168,7 +183,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			client, _ := s.kubeClient()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if scenario == "busy" || scenario == "stale_endpoints" {
+			if scenario == "busy" || scenario == "stale_endpoints" || scenario == "restore_stale_endpoints" {
 				ctx, cancel = context.WithTimeout(context.Background(), 150*time.Millisecond)
 				defer cancel()
 			}
@@ -189,12 +204,18 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				}
 			}
 			if scenario == "restore_ready" {
+				if servicePatches != 1 || !reflect.DeepEqual(objectStringMapValue(nestedObjectValue(canonicalService, "spec", "selector")), objectStringMapValue(nestedObjectValue(desiredService, "spec", "selector"))) {
+					t.Fatal("canonical selector was not replaced exactly")
+				}
 				if objectStringMapValue(cm["annotations"])[safeCanonicalHandoffAnnotation] != "" {
 					t.Fatal("handoff marker not cleared")
 				}
 				if objectStringMapValue(nestedObjectValue(got[1], "spec", "selector"))[runtime.FugueLabelAppWorkload] != name {
 					t.Fatal("new canonical service not restored")
 				}
+			}
+			if strings.HasPrefix(scenario, "restore_") && !success && objectStringMapValue(cm["annotations"])[safeCanonicalHandoffAnnotation] == "" {
+				t.Fatal("failed restoration lost its resumable marker")
 			}
 			if scenario == "candidate_unhealthy" && servicePatches != 0 {
 				t.Fatal("unhealthy candidate received canonical service")

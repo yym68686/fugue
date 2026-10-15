@@ -134,6 +134,9 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	// A prior pass has already drained and replaced the canonical Deployment.
 	// Restore canonical Service selectors only after that exact new template is ready.
 	if marker != "" && liveKey == desiredKey && managedDeploymentStatusReady(deployment, app.Spec.Replicas) && s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(deployment), app.Spec.Image) {
+		if err := s.restoreSafeCanonicalServices(ctx, client, app, objects, live, selector); err != nil {
+			return nil, err
+		}
 		if err := client.patchAppWorkloadObject(ctx, deploymentAPIPath(namespace, name), live, map[string]any{"metadata": map[string]any{"annotations": map[string]any{safeCanonicalHandoffAnnotation: nil}}}); err != nil {
 			return nil, err
 		}
@@ -303,6 +306,83 @@ func safeCanonicalEndpoints(ctx context.Context, client *kubeClient, namespace, 
 	}
 	if !reflect.DeepEqual(expected, seen) {
 		return fmt.Errorf("canonical handoff candidate endpoints incomplete")
+	}
+	return nil
+}
+
+// JSON patch replaces the entire selector, including keys introduced by another
+// field manager. Server-side apply alone may preserve a revision label that the
+// canonical Pods do not have, leaving the Service without matching endpoints.
+// Keep the resumable marker until the exact canonical Pods are published.
+func (s *Service) restoreSafeCanonicalServices(ctx context.Context, client *kubeClient, app model.App, objects []map[string]any, live map[string]any, candidateSelector map[string]string) error {
+	namespace, name := runtime.NamespaceForTenant(app.TenantID), runtime.RuntimeAppResourceName(app)
+	metadata := objectMapField(live, "metadata")
+	var deployment kubeDeployment
+	raw, _ := json.Marshal(live)
+	if err := json.Unmarshal(raw, &deployment); err != nil {
+		return err
+	}
+	canonical := model.AppRelease{AppID: app.ID, TenantID: app.TenantID, DeploymentName: name, ResolvedImageRef: app.Spec.Image, RevisionWorkload: &model.AppReleaseWorkload{DeploymentName: name, DeploymentUID: objectStringField(metadata, "uid"), ReleaseKey: objectStringMapValue(nestedObjectValue(live, "spec", "template", "metadata", "annotations"))[runtime.FugueAnnotationReleaseKey], DeploymentGeneration: deployment.Metadata.Generation}}
+	before, err := s.captureDrainWorkload(ctx, client, app, canonical, false, true)
+	if err != nil {
+		return fmt.Errorf("verify replacement canonical Pods: %w", err)
+	}
+	services := []string{}
+	for _, object := range objects {
+		if object["kind"] != "Service" {
+			continue
+		}
+		selector := objectStringMapValue(nestedObjectValue(object, "spec", "selector"))
+		if selector[runtime.FugueLabelAppWorkload] != name {
+			continue
+		}
+		serviceName := objectStringField(objectMapField(object, "metadata"), "name")
+		path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/services/" + url.PathEscape(serviceName)
+		current, found, err := client.getRawObject(ctx, path)
+		if err != nil || !found {
+			return fmt.Errorf("restore canonical Service unavailable")
+		}
+		cm := objectMapField(current, "metadata")
+		if objectStringField(cm, "uid") == "" || objectStringField(cm, "resourceVersion") == "" || objectStringField(cm, "deletionTimestamp") != "" || !appWorkloadOwnerMatches(cm, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) {
+			return fmt.Errorf("restore canonical Service identity changed")
+		}
+		existing := objectStringMapValue(nestedObjectValue(current, "spec", "selector"))
+		if !reflect.DeepEqual(existing, selector) {
+			if !reflect.DeepEqual(existing, candidateSelector) {
+				return fmt.Errorf("restore canonical Service selector changed")
+			}
+			patch := []map[string]any{{"op": "test", "path": "/metadata/uid", "value": objectStringField(cm, "uid")}, {"op": "test", "path": "/metadata/resourceVersion", "value": objectStringField(cm, "resourceVersion")}, {"op": "test", "path": "/spec/selector", "value": existing}, {"op": "replace", "path": "/spec/selector", "value": selector}}
+			if _, err := client.doRequest(ctx, http.MethodPatch, path, "application/json-patch+json", patch, nil); err != nil {
+				return err
+			}
+		}
+		services = append(services, serviceName)
+	}
+	if len(services) == 0 {
+		return fmt.Errorf("restore canonical handoff has no managed Service")
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	for {
+		ready := true
+		for _, serviceName := range services {
+			if err := safeCanonicalEndpoints(waitCtx, client, namespace, serviceName, before.Pods); err != nil {
+				ready = false
+				break
+			}
+		}
+		if ready {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("%w: canonical endpoint restoration", errSafeCanonicalHandoffPending)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	after, err := s.captureDrainWorkload(ctx, client, app, canonical, false, true)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		return fmt.Errorf("replacement canonical Pods changed during service restoration")
 	}
 	return nil
 }
