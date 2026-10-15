@@ -191,6 +191,16 @@ func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.
 			selectionAt, selectionHint := capture.selection(stage, hint)
 			rrs, audit, _ := rrForEdgeDNSRecordWithGeoAuditAt(records[0], name, q.Qtype, selectionHint, nil, nil, selectionAt)
 			capture.record(entry, &records[0], hint, selectionAt, audit, "")
+			// A route quorum may survive only on candidates excluded by the
+			// signed selector. This is temporary serving failure, not absence
+			// of the declared RRset. Preserve selection constraints and allow
+			// the existing verified per-record transition below to recover.
+			if len(rrs) == 0 && (kind == "A" || kind == "AAAA") &&
+				(len(entry.record.Candidates) > 0 || len(entry.record.ScopedCandidates) > 0) {
+				resp.Rcode = dns.RcodeServerFailure
+				resp.Answer = nil
+				return
+			}
 			resp.Answer = append(resp.Answer, rrs...)
 		}
 	}
