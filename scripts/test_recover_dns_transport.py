@@ -50,12 +50,20 @@ class RecoveryTests(unittest.TestCase):
         for mutate in [lambda value: value['recovery'].update(candidate_pod_uid=value['recovery']['old_pod_uid']),
                        lambda value: value['recovery'].update(candidate_image='registry.example/dns:latest'),
                        lambda value: value['recovery'].update(origin='http://api.example.test'),
-                       lambda value: value['listeners'][0].update(port=15353),
+                       lambda value: value['listeners'][0].update(targetPort=15353),
                        lambda value: value['recovery'].update(skip_verification=True)]:
             altered = copy.deepcopy(config)
             mutate(altered)
             with self.assertRaises(ValueError):
                 fixtures.TransportTests().load(altered)
+
+    def test_explicit_diagnostic_listener_uses_the_same_verified_recovery(self):
+        config = self.config()
+        config['listeners'][0]['port'] = 15353
+        fixtures.TransportTests().load(config)
+        config['recovery']['candidate_image'] = 'unverified:latest'
+        with self.assertRaises(ValueError):
+            fixtures.TransportTests().load(config)
 
     def test_recovery_rejects_noncurrent_unverified_or_foreign_authority(self):
         snapshot = self.candidate()['snapshot']

@@ -1,6 +1,6 @@
 {
-  "apiVersion": "transport.fugue.dev/v1",
-  "generation": 43,
+  "apiVersion": "transport.fugue.dev/v2",
+  "generation": 44,
   "kind": "DNSLocalTransport",
   "listeners": [
     {
@@ -8,7 +8,7 @@
       "name": "fugue-dns-transport-de",
       "port": 15353,
       "selector": {
-        "app.kubernetes.io/component": "dns-de-a",
+        "app.kubernetes.io/component": "dns-de-f",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
@@ -30,7 +30,7 @@
       "name": "fugue-dns-public-de",
       "port": 53,
       "selector": {
-        "app.kubernetes.io/component": "dns-de-e",
+        "app.kubernetes.io/component": "dns-de-f",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
@@ -41,12 +41,22 @@
       "name": "fugue-dns-public-us",
       "port": 53,
       "selector": {
-        "app.kubernetes.io/component": "dns-us-e",
+        "app.kubernetes.io/component": "dns-us-f",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
       "targetPort": 53
     }
   ],
-  "namespace": "fugue-system"
+  "namespace": "fugue-system",
+  "recovery": {
+    "api_address": "15.204.94.71",
+    "candidate_image": "ghcr.io/yym68686/fugue-edge@sha256:26e55b8e01c0863984d3adff40aa35bdbd154e80dd460c899c25751191b27f28",
+    "candidate_pod_uid": "1f378161-dd9c-4734-b5ac-a620c20f4d00",
+    "listener": "fugue-dns-transport-de",
+    "node_uid": "5fc22742-672c-48e3-b847-60726919f16c",
+    "old_pod_uid": "16f55ad4-8e8b-4038-b1e2-3c3117c42be2",
+    "origin": "https://api.fugue.pro",
+    "service_uid": "c6d910fa-e7ae-4ae0-8b1f-ff132417b1eb"
+  }
 }

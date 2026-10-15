@@ -16,8 +16,8 @@ def validate(config):
     if not isinstance(recovery, dict) or set(recovery) != fields:
         raise ValueError('complete explicit DNS recovery declaration required')
     matching = [listener for listener in config['listeners'] if listener['name'] == recovery['listener']]
-    if len(matching) != 1 or matching[0]['port'] != 53:
-        raise ValueError('DNS recovery must select one declared public listener')
+    if len(matching) != 1 or matching[0]['targetPort'] != 53:
+        raise ValueError('DNS recovery must select one declared DNS listener')
     for field in ['node_uid', 'service_uid', 'old_pod_uid', 'candidate_pod_uid']:
         if not isinstance(recovery[field], str) or not re.fullmatch(r'[a-f0-9-]{36}', recovery[field]):
             raise ValueError('DNS recovery requires exact Kubernetes identities')

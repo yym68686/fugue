@@ -48,7 +48,9 @@ must be correlated with the original decision receipt, loaded artifact,
 record-specific proof quorum, selector and evidence expiry. A healthy listener
 can correctly refuse one unsafe record while answering unrelated records.
 
-Decision receipts are bounded to the last 64 entries. Query counters establish
+The recent-query journal is bounded to the last 64 entries. Failed queries also
+use an independent queue and a 1,024-file bounded disk history, documented in
+`dns-decision-receipts.md`. Query counters establish
 that failures happened but cannot reconstruct their hostnames or reasons after
 receipt eviction. For an incident requiring long-term attribution, export
 failure receipts to independent observation storage with explicit retention and
@@ -58,3 +60,23 @@ artifact, extend proof validity or replace a positive checkpoint.
 Regression coverage verifies stage-specific decode errors, preserved wrapped
 causes, reference authority boundaries, and rejection of a signed incompatible
 candidate while the previous positive release continues serving unchanged.
+
+## Declarative executor retirement
+
+`scripts/retire_dns_slots.py` consumes a separate retirement declaration from the
+production configuration lane. It verifies an active public backend and a distinct
+standby against the current signed release, exact Pod identities, checkpoint
+signatures and complete record readiness. It rejects any obsolete workload still
+selected by a Service, using host listeners, or holding active TCP DNS connections.
+Each mutation tests the workload UID, resource version and complete prior spec.
+DaemonSets receive an impossible scheduling constraint; Deployments scale to zero.
+Neither operation deletes checkpoint volumes or changes an image, signed artifact,
+record policy or public selector. Replays require the exact recorded stopped spec.
+The lane shares the DNS transport concurrency fence and retains prewrite and result
+evidence independently of code compilation. Reactivation requires a fresh explicit
+release and compatible executor; retired slots leave the active component registry.
+
+Diagnostic DNS listeners can recover through the same signature-verified transport
+handoff as port 53. The listener port is explicitly declared; the backend still
+must own both UDP and TCP DNS on target port 53. An unhealthy predecessor is never
+silently treated as a valid rollback target.

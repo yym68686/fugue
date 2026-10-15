@@ -2242,6 +2242,70 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
+  dns_slot_retirement:
+    # Executor retirement cannot depend on a successful code build.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-dns-transport, cancel-in-progress: false}
+    timeout-minutes: 25
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select exact independent DNS executor retirement
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/dns-slot-retirement/intent.json
+          if [[ ! -f "$config" ]]; then exit 0; fi
+          paths=("$config" scripts/retire_dns_slots.py scripts/test_retire_dns_slots.py)
+          if ! git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "${paths[@]}" scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/retire_dns_hostport.py cmd/fugue-dns-observation-verify internal/dnsserver .github/workflows/ci.yml; then
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        if: steps.selected.outputs.changed == 'true'
+        with: {go-version-file: go.mod, cache: false}
+      - name: Verify positive public and standby replacements before retirement
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_retire_dns_slots scripts.test_retire_dns_hostport scripts.test_recover_dns_transport scripts.test_reconcile_dns_transport
+          export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
+          go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
+          python3 -m scripts.retire_dns_slots deploy/environments/production/dns-slot-retirement/intent.json --evidence "$RUNNER_TEMP/dns-slot-retirement-prewrite.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-dns-slot-retirement-prewrite-${{ github.run_id }}
+          path: ${{ runner.temp }}/dns-slot-retirement-prewrite.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop only unselected obsolete executors and preserve checkpoint volumes
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/dns-slot-retirement scripts/retire_dns_slots.py scripts/test_retire_dns_slots.py scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/retire_dns_hostport.py cmd/fugue-dns-observation-verify internal/dnsserver .github/workflows/ci.yml
+          export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
+          python3 -m scripts.retire_dns_slots deploy/environments/production/dns-slot-retirement/intent.json --apply --evidence "$RUNNER_TEMP/dns-slot-retirement-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-dns-slot-retirement-result-${{ github.run_id }}
+          path: ${{ runner.temp }}/dns-slot-retirement-result.json
+          if-no-files-found: warn
+          retention-days: 90
+
   dns_port_retirement:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

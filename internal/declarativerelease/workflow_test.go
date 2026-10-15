@@ -157,7 +157,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_image_gc", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_offline_configuration", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "managed_postgres_cpu_policy", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_transport", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_slot_retirement", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_offline_configuration", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "managed_postgres_cpu_policy", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_transport", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -807,6 +807,33 @@ func TestControllerPlanIncludesDeliveryAndProbeDependencies(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("controller plan omits dependency %s", path)
+		}
+	}
+}
+
+func TestDNSSlotRetirementIsIndependentAndSharesTransportFence(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	jobs := yamlMappingValue(t, document.Content[0], "jobs")
+	job := yamlMappingValue(t, jobs, "dns_slot_retirement")
+	for i := 0; i+1 < len(job.Content); i += 2 {
+		if job.Content[i].Value == "needs" {
+			t.Fatal("configuration retirement must not depend on component builds")
+		}
+	}
+	encoded, err := yaml.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"fugue-production-dns-transport", "git diff --exit-code HEAD origin/main", "--evidence", "--apply", "scripts.test_retire_dns_slots", "internal/dnsserver", "production"} {
+		if !strings.Contains(string(encoded), required) {
+			t.Fatal("retirement lost a required release fence", required)
 		}
 	}
 }
