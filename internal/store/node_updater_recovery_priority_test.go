@@ -31,10 +31,7 @@ func TestHostPolicyRecoveryCannotStarveBehindReplenishedInventory(t *testing.T) 
 			policy := model.NodeUpdateTask{ID: "policy", Type: taskType, CreatedAt: now.Add(-10 * time.Minute)}
 			freshPriority, agedPriority := 4, 3
 			wantOrder := []string{"upgrade", "overdue-inventory", "rescue", "deploy", "policy", "fresh-inventory"}
-			if taskType == noderesourcepolicy.TaskType {
-				freshPriority, agedPriority = 1, 1
-				wantOrder = []string{"upgrade", "overdue-inventory", "policy", "rescue", "deploy", "fresh-inventory"}
-			}
+
 			if got := nodeUpdateTaskDeliveryPriority(policy, now.Add(-time.Nanosecond)); got != freshPriority {
 				t.Fatal("fresh policy changed its priority", got)
 			}
