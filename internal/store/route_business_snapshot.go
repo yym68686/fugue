@@ -94,6 +94,11 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 	for i := range snapshot.RoutePolicies {
 		snapshot.RoutePolicies[i].ExclusionLifecycle = model.EdgeRoutePolicyExclusionLifecycleAt(snapshot.RoutePolicies[i], snapshot.CapturedAt)
 	}
+	for i := range snapshot.Releases {
+		if spec := snapshot.Releases[i].SpecSnapshot; spec != nil {
+			snapshot.Releases[i].SpecSnapshot = &model.AppSpec{Image: spec.Image, RuntimeID: spec.RuntimeID}
+		}
+	}
 	sort.Slice(snapshot.Releases, func(i, j int) bool { return snapshot.Releases[i].ID < snapshot.Releases[j].ID })
 	sort.Slice(snapshot.TrafficPolicies, func(i, j int) bool { return snapshot.TrafficPolicies[i].AppID < snapshot.TrafficPolicies[j].AppID })
 	// Keep tombstones in the migration snapshot to distinguish deleted zones

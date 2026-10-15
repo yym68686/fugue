@@ -42,23 +42,13 @@ func (s *Service) scheduleHostJournaldPolicyReconciliation(ctx context.Context) 
 	}
 	now := time.Now().UTC()
 
-	tasks, err := s.Store.ListNodeUpdateTasks("", true, "", "")
+	latestByUpdater, inFlight, err := s.Store.ReadHostJournaldPolicyTaskState(ctx)
 	if err != nil {
 		return err
 	}
-	latestByUpdater := map[string]model.NodeUpdateTask{}
-	for _, task := range tasks {
-		if task.Type != model.NodeUpdateTaskTypeReconcileHostJournaldPolicy {
-			continue
-		}
-		if task.Status == model.NodeUpdateTaskStatusPending || task.Status == model.NodeUpdateTaskStatusRunning {
-			// Only one host mutation may be in flight across the fleet.
-			return nil
-		}
-		current, ok := latestByUpdater[task.NodeUpdaterID]
-		if !ok || task.CreatedAt.After(current.CreatedAt) {
-			latestByUpdater[task.NodeUpdaterID] = task
-		}
+	if inFlight {
+		// Includes old pending tasks, even for inactive or removed updaters.
+		return nil
 	}
 
 	updaters, err := s.Store.ListNodeUpdaters("", true)

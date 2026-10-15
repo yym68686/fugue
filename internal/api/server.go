@@ -411,6 +411,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_api_observability_enabled", "Whether Fugue Observability is enabled for the API process.", nil, boolMetric(status.Enabled))
 	observability.WriteGaugeMetric(w, "fugue_api_observability_exporters", "Number of active observability exporters visible to the API process.", nil, float64(len(status.Exporters)))
 	s.metricsSnapshot.Write(w, "api")
+	s.store.WriteReadMetrics(w)
 }
 
 func (s *Server) collectMetrics(ctx context.Context, w io.Writer) error {

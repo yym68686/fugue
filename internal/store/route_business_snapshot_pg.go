@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -54,7 +55,7 @@ func readRouteBusinessSnapshotTx(ctx context.Context, tx *sql.Tx) (RouteBusiness
 	if err != nil {
 		return out, fmt.Errorf("capture route policies: %w", err)
 	}
-	out.Releases, err = readRouteBusinessRows(ctx, tx, `SELECT `+appReleaseSelectColumns+` FROM fugue_app_releases`, scanAppRelease)
+	out.Releases, err = readRouteBusinessRows(ctx, tx, `SELECT `+routeBusinessReleaseSelectColumns+` FROM fugue_app_releases`, scanAppRelease)
 	if err != nil {
 		return out, fmt.Errorf("capture route releases: %w", err)
 	}
@@ -93,3 +94,7 @@ func readRouteBusinessRows[T any](ctx context.Context, tx *sql.Tx, query string,
 	}
 	return values, rows.Err()
 }
+
+// Route readiness consumes only immutable image/runtime identity from a release
+// spec. Keep nil distinguishable from an empty spec, and retain workload proof.
+var routeBusinessReleaseSelectColumns = strings.Replace(appReleaseSelectColumns, "spec_snapshot_json", `CASE WHEN spec_snapshot_json IS NULL OR spec_snapshot_json = 'null'::jsonb THEN NULL ELSE jsonb_build_object('image', spec_snapshot_json->'image', 'runtime_id', spec_snapshot_json->'runtime_id') END AS spec_snapshot_json`, 1)

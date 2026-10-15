@@ -33,6 +33,10 @@ var (
 )
 
 type Store struct {
+	readMetrics           [2]storeReadCounters
+	platformContentHintMu sync.Mutex
+	platformContentHints  map[string][32]byte
+
 	path          string
 	databaseURL   string
 	db            *sql.DB

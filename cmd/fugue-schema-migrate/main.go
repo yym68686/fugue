@@ -161,6 +161,9 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigratePlatformArtifactReadIndex(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate platform-artifact read index: %w", err)
 	}
+	if err := schemamigrate.MigrateNodeUpdateTaskScheduler(ctx, databaseURL); err != nil {
+		return err
+	}
 	if err := schemamigrate.MigratePlatformRuntimeFactIndexes(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate runtime fact read indexes: %w", err)
 	}

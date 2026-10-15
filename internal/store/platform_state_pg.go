@@ -287,7 +287,7 @@ FROM fugue_platform_artifacts WHERE true`
 func (s *Store) pgGetPlatformArtifact(idOrGeneration string) (model.PlatformArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	artifact, err := pgGetPlatformArtifactForUpdate(ctx, s.db, idOrGeneration, false)
+	artifact, err := s.pgReadPlatformArtifact(ctx, idOrGeneration)
 	if err != nil {
 		return model.PlatformArtifact{}, mapDBErr(err)
 	}
@@ -1430,7 +1430,7 @@ LIMIT 1`, kind, scopeKey, channel, model.PlatformArtifactReleaseStatusActive))
 	if read != nil {
 		artifact, err = read(release.ArtifactID)
 	} else {
-		artifact, err = pgGetPlatformArtifactForUpdate(ctx, s.db, release.ArtifactID, false)
+		artifact, err = s.pgReadPlatformArtifact(ctx, release.ArtifactID)
 	}
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, false, mapDBErr(err)
@@ -2098,6 +2098,10 @@ LIMIT $3`, kind, scopeKey, limit)
 }
 
 func scanPlatformArtifact(scanner sqlScanner) (model.PlatformArtifact, error) {
+	return scanPlatformArtifactWithDecoder(scanner, platformContentDecodings.decode)
+}
+
+func scanPlatformArtifactWithDecoder(scanner sqlScanner, decodeContent func([]byte) (map[string]any, error)) (model.PlatformArtifact, error) {
 	var artifact model.PlatformArtifact
 	var scopeRaw, contentRaw, validationRaw, metadataRaw, provenanceRaw []byte
 	if err := scanner.Scan(
@@ -2126,7 +2130,7 @@ func scanPlatformArtifact(scanner sqlScanner) (model.PlatformArtifact, error) {
 	if err != nil {
 		return model.PlatformArtifact{}, err
 	}
-	content, err := platformContentDecodings.decode(contentRaw)
+	content, err := decodeContent(contentRaw)
 	if err != nil {
 		return model.PlatformArtifact{}, err
 	}

@@ -56,6 +56,7 @@ func (s *Service) MetricsHandler() http.Handler {
 }
 
 func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	defer s.Store.WriteReadMetrics(w)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	observability.WriteComponentRuntimeMetrics(w, "controller", s.metricsStartedAt)
 	s.metricsSnapshot.Write(w, "controller")

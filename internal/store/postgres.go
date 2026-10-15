@@ -227,6 +227,7 @@ var postgresSchemaStatements = []string{
 		)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_node_update_tasks_updater_status_created ON fugue_node_update_tasks (node_updater_id, status, created_at ASC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_node_update_tasks_tenant_created ON fugue_node_update_tasks (tenant_id, created_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_node_update_tasks_type_updater_created ON fugue_node_update_tasks (task_type, node_updater_id, created_at DESC, id DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_runtimes (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
