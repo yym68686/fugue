@@ -139,6 +139,20 @@ func revisionAppliedFieldsMatch(path string, actual, desired any) bool {
 		if !ok {
 			return false
 		}
+		// EnvVar.Value has an empty-string default and the Kubernetes API omits
+		// it on serialization. Accept only a named literal EnvVar with no source;
+		// an injected valueFrom must never masquerade as an empty literal.
+		if strings.HasSuffix(path, ".env") && want["name"] != nil && want["value"] == "" && want["valueFrom"] == nil && got["value"] == nil {
+			if got["valueFrom"] != nil {
+				return false
+			}
+			copy := make(map[string]any, len(got)+1)
+			for key, value := range got {
+				copy[key] = value
+			}
+			copy["value"] = ""
+			got = copy
+		}
 		for key, value := range want {
 			if !revisionAppliedFieldsMatch(path+"."+key, got[key], value) {
 				return false

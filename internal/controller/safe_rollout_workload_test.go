@@ -25,6 +25,7 @@ func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testin
 				t.Fatal("claim", err)
 			}
 			app.Spec.RuntimeID = "runtime"
+			app.Spec.Env = map[string]string{"OPTIONAL_SETTING": "", "NORMAL_SETTING": "configured"}
 			svc := &Service{Store: st, Renderer: runtime.Renderer{StrictDrain: runtime.DefaultStrictDrainConfig()}}
 			app = svc.Renderer.PrepareApp(app)
 			release, err := st.CreateAppRelease(model.AppRelease{ID: "candidate", TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusCreating, RuntimeID: app.Spec.RuntimeID, ResolvedImageRef: app.Spec.Image, SpecSnapshot: cloneControllerAppSpec(&app.Spec)})
@@ -244,5 +245,28 @@ func TestRevisionAppliedFieldsPreservesEmptyListMembership(t *testing.T) {
 				t.Fatalf("match = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRevisionIdentityEmptyLiteralEnvironmentDefault(t *testing.T) {
+	cases := []struct {
+		name            string
+		actual, desired any
+		match           bool
+	}{
+		{"omitted-empty", map[string]any{"name": "OPTIONAL_SETTING"}, map[string]any{"name": "OPTIONAL_SETTING", "value": ""}, true},
+		{"injected-source", map[string]any{"name": "OPTIONAL_SETTING", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "injected", "key": "setting"}}}, map[string]any{"name": "OPTIONAL_SETTING", "value": ""}, false},
+		{"missing-nonempty", map[string]any{"name": "OPTIONAL_SETTING"}, map[string]any{"name": "OPTIONAL_SETTING", "value": "configured"}, false},
+		{"changed-literal", map[string]any{"name": "OPTIONAL_SETTING", "value": "changed"}, map[string]any{"name": "OPTIONAL_SETTING", "value": ""}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := revisionAppliedFieldsMatch("spec.template.spec.containers.env", tc.actual, tc.desired); got != tc.match {
+				t.Fatalf("identity match=%t want %t", got, tc.match)
+			}
+		})
+	}
+	if revisionAppliedFieldsMatch("spec.template.metadata.annotations", map[string]any{}, map[string]any{"arbitrary": ""}) {
+		t.Fatal("empty default allowance escaped EnvVar scope")
 	}
 }
