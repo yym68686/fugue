@@ -801,6 +801,12 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	if journal != nil {
 		fmt.Fprintf(w, "fugue_dns_decision_audit_dropped_total %d\nfugue_dns_decision_audit_evicted_total %d\nfugue_dns_decision_audit_persistence_errors_total %d\nfugue_dns_decision_audit_recovery_errors_total %d\nfugue_dns_decision_audit_queue_depth %d\n", journal.dropped.Load(), journal.evicted.Load(), journal.persistenceErrors.Load(), journal.recoveryErrors.Load(), len(journal.queue))
 	}
+	if journal != nil && journal.failures != nil {
+		failed := journal.failures
+		fmt.Fprintf(w, "fugue_dns_failure_audit_dropped_total %d\nfugue_dns_failure_audit_persisted_total %d\nfugue_dns_failure_audit_persistence_errors_total %d\nfugue_dns_failure_audit_recovery_errors_total %d\nfugue_dns_failure_audit_queue_depth %d\nfugue_dns_failure_audit_retention_limit %d\n",
+			failed.dropped.Load(), failed.persisted.Load(), failed.persistenceErrors.Load(), failed.recoveryErrors.Load(), len(failed.queue), failed.retention())
+	}
+
 	fmt.Fprintln(w, "# HELP fugue_dns_health Whether fugue-dns has a usable DNS bundle.")
 	fmt.Fprintln(w, "# TYPE fugue_dns_health gauge")
 	if snapshot.Status.Healthy {

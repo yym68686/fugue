@@ -9,19 +9,22 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformsafety"
 	"fugue/internal/routeprobe"
 	"github.com/miekg/dns"
 )
 
 func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t *testing.T) {
-	for _, scenario := range []string{"parent-download", "parent-signature", "replay", "candidate-readiness", "listener", "equivalent-successor", "persistence", "foreign-old-proof", "expired-checkpoint", "cancelled"} {
+	for _, scenario := range []string{"parent-download", "parent-signature", "policy-decode", "replay", "candidate-readiness", "listener", "equivalent-successor", "persistence", "foreign-old-proof", "expired-checkpoint", "cancelled"} {
 		t.Run(scenario, func(t *testing.T) {
 			parent, baseline := dnsServingFixture(t, true)
 			candidate := baseline
@@ -35,6 +38,25 @@ func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t 
 			if scenario == "replay" {
 				candidate.Release.FencingToken = 1
 				candidate.Assignment.FencingToken = 1
+			}
+			if scenario == "policy-decode" {
+				// A trusted publisher can send a policy this reader cannot decode.
+				// Reject it without changing the independent positive checkpoint.
+				candidate.Artifact = model.PlatformArtifact{}
+				if err := json.Unmarshal(mustDNSJSON(t, baseline.Artifact), &candidate.Artifact); err != nil {
+					t.Fatal(err)
+				}
+				candidate.Artifact.Content["policy"].(map[string]any)["dns_query_policy"] = map[string]any{"ranking_mode": "active"}
+				var err error
+				candidate.Artifact.ContentHash, err = platformconfig.Digest(candidate.Artifact.Content)
+				if err != nil {
+					t.Fatal(err)
+				}
+				candidate.Artifact, err = platformsafety.SignPlatformArtifact(candidate.Artifact, bundleauth.NewKeyring("synthetic-dns-serving-secret", "key", "", "", nil))
+				if err != nil {
+					t.Fatal(err)
+				}
+				candidate.Assignment.ContentHash = candidate.Artifact.ContentHash
 			}
 			var reports atomic.Int32
 			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +154,9 @@ func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t 
 			})
 			if err == nil {
 				t.Fatal("candidate failure hidden")
+			}
+			if scenario == "policy-decode" && (!strings.Contains(err.Error(), "DNS artifact policy cannot be decoded") || !strings.Contains(err.Error(), "DNS query strategy requires complete explicit fields")) {
+				t.Fatalf("policy failure lost its actual cause: %v", err)
 			}
 			actual := s.platformServing.Load()
 			if !reflect.DeepEqual(actual.record, checkpoint) {

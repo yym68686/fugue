@@ -23,6 +23,9 @@ import (
 const dnsDecisionRetention = 64
 const dnsDecisionQueue = 32
 
+// Independent disk history: successful traffic cannot evict failed queries.
+const dnsFailureDecisionRetention = 1024
+
 type DNSDecisionSnapshot struct {
 	NodeID            string                      `json:"node_id"`
 	ProcessID         string                      `json:"process_id"`
@@ -47,6 +50,10 @@ type dnsDecisionJournal struct {
 	nodeID            string
 	processID         string
 	directory         string
+	diskLimit         int
+	nextSlot          uint64 // owned by the journal worker, restored from disk
+	failures          *dnsDecisionJournal
+	persisted         atomic.Uint64
 	queue             chan dnsDecisionPending
 	sequence          atomic.Uint64
 	dropped           atomic.Uint64
@@ -72,13 +79,33 @@ func (s *Service) startDNSDecisionJournal(ctx context.Context) {
 	}
 	empty := []DNSDecisionReceipt{}
 	journal.records.Store(&empty)
+	failures := &dnsDecisionJournal{nodeID: journal.nodeID, processID: journal.processID + "-failure",
+		queue: make(chan dnsDecisionPending, dnsDecisionQueue), diskLimit: dnsFailureDecisionRetention, write: journal.write}
+	if s.Config.CachePath != "" {
+		failures.directory = s.Config.CachePath + ".failed-decisions"
+	}
+	failureRecords := []DNSDecisionReceipt{}
+	failures.records.Store(&failureRecords)
+	journal.failures = failures
 	if !s.decisionAudit.CompareAndSwap(nil, journal) {
 		return
 	}
 	go journal.run(ctx)
+	go failures.run(ctx)
 }
 
+// Capture inputs are immutable after answering. Each worker owns its record
+// descriptions; copying that slice avoids sharing append storage across workers.
 func (journal *dnsDecisionJournal) enqueue(request, response *dns.Msg, capture *dnsDecisionCapture, publication DNSDecisionPublicationState, transport string, observedAt time.Time, written bool) {
+	if journal.failures != nil && (!written || response.Rcode != dns.RcodeSuccess && response.Rcode != dns.RcodeNameError) {
+		var failedCapture *dnsDecisionCapture
+		if capture != nil {
+			copy := *capture
+			copy.records = append([]DNSDecisionRecord{}, capture.records...)
+			failedCapture = &copy
+		}
+		journal.failures.enqueue(request, response, failedCapture, publication, transport, observedAt, written)
+	}
 	if capture == nil || capture.err != nil || len(capture.input.Stages) == 0 && !capture.input.NoServingState || len(request.Question) != 1 {
 		journal.dropped.Add(1)
 		return
@@ -156,7 +183,8 @@ func (journal *dnsDecisionJournal) append(pending dnsDecisionPending) {
 		journal.persistenceErrors.Add(1)
 		return
 	}
-	slot := journal.sequenceForReceipt(receipt.DecisionID) % dnsDecisionRetention
+	slot := journal.nextSlot % uint64(journal.retention())
+	journal.nextSlot++
 	filename := filepath.Join(journal.directory, fmt.Sprintf("%02d.json", slot))
 	if err := os.MkdirAll(journal.directory, 0700); err != nil {
 		journal.persistenceErrors.Add(1)
@@ -164,13 +192,16 @@ func (journal *dnsDecisionJournal) append(pending dnsDecisionPending) {
 	}
 	if err := journal.write(filename, raw); err != nil {
 		journal.persistenceErrors.Add(1)
+		return
 	}
+	journal.persisted.Add(1)
 }
 
-func (journal *dnsDecisionJournal) sequenceForReceipt(identity string) uint64 {
-	var sequence uint64
-	_, _ = fmt.Sscanf(identity, journal.processID+"-%d", &sequence)
-	return sequence
+func (journal *dnsDecisionJournal) retention() int {
+	if journal.diskLimit > 0 {
+		return journal.diskLimit
+	}
+	return dnsDecisionRetention
 }
 
 func (journal *dnsDecisionJournal) recover() {
@@ -178,7 +209,8 @@ func (journal *dnsDecisionJournal) recover() {
 		return
 	}
 	receipts := []DNSDecisionReceipt{}
-	for index := 0; index < dnsDecisionRetention; index++ {
+	var newest time.Time
+	for index := 0; index < journal.retention(); index++ {
 		filename := filepath.Join(journal.directory, fmt.Sprintf("%02d.json", index))
 		raw, err := platformconsumer.ReadFile(filename, DNSDecisionMaxBytes)
 		if os.IsNotExist(err) {
@@ -189,9 +221,16 @@ func (journal *dnsDecisionJournal) recover() {
 			journal.recoveryErrors.Add(1)
 			continue
 		}
+		if !receipt.ObservedAt.Before(newest) {
+			newest = receipt.ObservedAt
+			journal.nextSlot = uint64(index + 1)
+		}
 		receipts = append(receipts, receipt)
+		sort.Slice(receipts, func(first, second int) bool { return receipts[first].ObservedAt.Before(receipts[second].ObservedAt) })
+		if len(receipts) > dnsDecisionRetention {
+			receipts = receipts[1:]
+		}
 	}
-	sort.Slice(receipts, func(first, second int) bool { return receipts[first].ObservedAt.Before(receipts[second].ObservedAt) })
 	journal.records.Store(&receipts)
 }
 

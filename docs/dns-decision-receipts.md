@@ -74,3 +74,31 @@ Before considering a routing-policy change, correlate a specific receipt with
 its loaded and answer artifacts, scope source, original scores, readiness facts,
 cooldown window and exploration result. Publication, current rankings, a present
 DNS lookup, or a screenshot alone cannot establish why an earlier answer occurred.
+
+## Independent failed-query history
+
+SERVFAIL and other error responses (excluding ordinary NXDOMAIN), plus failed
+response writes, also enter a separate 32-entry queue and worker. Successful
+queries cannot fill that queue or evict its disk history. The worker stores up
+to 1,024 complete replayable receipts in `<cache-path>.failed-decisions`, capped
+at 256 KiB per file (256 MiB total). It retains only the latest 64 in memory.
+The host-mounted directory survives executor restarts and upgrades; recovery
+validates each evidence digest and resumes ring rotation after the newest entry.
+This is bounded local observation storage, not an unbounded audit service.
+
+Export these administrator-only JSON files from the DNS node's configured cache
+volume for long-term incident retention. Each file is accepted directly by
+`fugue admin dns decisions replay <file>` with the matching release of the CLI.
+The ordinary `decisions explain` API continues to expose the recent-query ring.
+Failed-history receipts have independent decision IDs ending in
+`-failure-<sequence>`; correlate duplicates with node, query ID, clock and query.
+They contain the original hostname, loaded/answer publications, readiness proofs,
+record rejection reasons and captured replay inputs, with the same client-address
+redaction as ordinary receipts. Never use them as serving configuration.
+
+`fugue_dns_failure_audit_dropped_total`, `persisted_total`,
+`persistence_errors_total`, `recovery_errors_total`, `queue_depth` and
+`retention_limit` expose this worker independently. A full failure queue, oversized
+receipt, disk failure or corruption remains an observation loss and cannot change
+an answer or positive LKG. These bounds are by count and size: a sustained failure
+storm can fill the ring in less than 24 hours, so export promptly and monitor loss.
