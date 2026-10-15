@@ -835,10 +835,12 @@ func TestDNSSlotRetirementIsIndependentAndSharesTransportFence(t *testing.T) {
 	}
 	jobs := yamlMappingValue(t, document.Content[0], "jobs")
 	job := yamlMappingValue(t, jobs, "dns_slot_retirement")
-	for i := 0; i+1 < len(job.Content); i += 2 {
-		if job.Content[i].Value == "needs" && job.Content[i+1].Value != "dns_configuration_plan" {
-			t.Fatal("configuration retirement may depend only on declaration selection")
-		}
+	dependencies := yamlMappingValue(t, job, "needs")
+	if dependencies.Kind != yaml.SequenceNode || len(dependencies.Content) != 2 || dependencies.Content[0].Value != "dns_configuration_plan" || dependencies.Content[1].Value != "dns_transport" {
+		t.Fatal("retirement must follow independent transport configuration, never code builds")
+	}
+	if !strings.Contains(yamlMappingValue(t, job, "if").Value, "needs.dns_transport.result == 'success'") {
+		t.Fatal("retirement cannot run after a failed selected handoff")
 	}
 	encoded, err := yaml.Marshal(job)
 	if err != nil {

@@ -2298,8 +2298,8 @@ jobs:
           retention-days: 90
 
   dns_slot_retirement:
-    needs: dns_configuration_plan
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dns_configuration_plan.outputs.slots == 'true' }}
+    needs: [dns_configuration_plan, dns_transport]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dns_configuration_plan.outputs.slots == 'true' && (needs.dns_transport.result == 'success' || needs.dns_transport.result == 'skipped') }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-dns-transport, cancel-in-progress: false}
