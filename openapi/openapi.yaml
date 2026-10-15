@@ -11866,6 +11866,13 @@ paths:
     get:
       operationId: nodeUpdaterTasks
       summary: Node Updater Tasks
+      description: >-
+        Returns pending tasks in delivery priority order, then by creation time and task ID.
+        Host journald and inotify policy tasks waiting at least ten minutes share the
+        normal inventory priority so newer inventory tasks cannot indefinitely pass them.
+        Upgrader, storage rescue, overdue inventory, and deploy-blocking image work retain
+        higher priority. Ordering does not bypass claim or execution checks and does not
+        guarantee an execution deadline.
       tags: [Node Updater]
       x-fugue-handler: handleNodeUpdaterTasks
       security:

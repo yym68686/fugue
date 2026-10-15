@@ -2,6 +2,7 @@ package store
 
 import (
 	"fugue/internal/model"
+	"fugue/internal/noderesourcepolicy"
 	"fugue/internal/storagerecovery"
 	"testing"
 	"time"
@@ -20,6 +21,39 @@ func TestStorageRescueCannotStarveBehindFreshInventoryOrPruning(t *testing.T) {
 		if tasks[i].ID != want {
 			t.Fatalf("position %d: %s, want %s", i, tasks[i].ID, want)
 		}
+	}
+}
+
+func TestHostPolicyRecoveryCannotStarveBehindReplenishedInventory(t *testing.T) {
+	now := time.Now().UTC()
+	for _, taskType := range []string{noderesourcepolicy.TaskType, model.NodeUpdateTaskTypeReconcileHostJournaldPolicy} {
+		t.Run(taskType, func(t *testing.T) {
+			policy := model.NodeUpdateTask{ID: "policy", Type: taskType, CreatedAt: now.Add(-10 * time.Minute)}
+			if got := nodeUpdateTaskDeliveryPriority(policy, now.Add(-time.Nanosecond)); got != 4 {
+				t.Fatal("fresh policy changed its priority", got)
+			}
+			if got := nodeUpdateTaskDeliveryPriority(policy, now); got != 3 {
+				t.Fatal("waiting policy was not promoted at the boundary", got)
+			}
+			tasks := []model.NodeUpdateTask{
+				{ID: "fresh-inventory", Type: model.NodeUpdateTaskTypeReportImageCache, CreatedAt: now.Add(-time.Minute)},
+				policy,
+				{ID: "upgrade", Type: model.NodeUpdateTaskTypeUpgradeUpdater, CreatedAt: now},
+				{ID: "rescue", Type: storagerecovery.ExpandPoolTask, CreatedAt: now},
+				{ID: "overdue-inventory", Type: model.NodeUpdateTaskTypeReportLocalPV, CreatedAt: now.Add(-31 * time.Minute)},
+				{ID: "deploy", Type: model.NodeUpdateTaskTypeReplicateAppImage, CreatedAt: now, Payload: map[string]string{"priority": model.ImageReplicationPriorityDeployBlocking}},
+			}
+			sortNodeUpdateTasksForDelivery(tasks)
+			for i, want := range []string{"upgrade", "overdue-inventory", "rescue", "deploy", "policy", "fresh-inventory"} {
+				if tasks[i].ID != want {
+					t.Fatalf("%d: %s want %s", i, tasks[i].ID, want)
+				}
+			}
+			policy.CreatedAt = time.Time{}
+			if got := nodeUpdateTaskDeliveryPriority(policy, now); got != 4 {
+				t.Fatal("missing creation time authorized priority promotion", got)
+			}
+		})
 	}
 }
 
