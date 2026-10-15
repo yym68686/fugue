@@ -1,0 +1,114 @@
+{
+  "schema": "fugue.tls-issuance-policy/v1",
+  "generation": 1,
+  "enabled": false,
+  "directory_url": "https://acme-v02.api.letsencrypt.org/directory",
+  "issuer_id": "fugue-central-acme",
+  "contact": "",
+  "renew_before_hours": 720,
+  "retry_base_seconds": 3600,
+  "domains": [
+    {
+      "hostname": "0-0.pro",
+      "app_id": "app_1778958829_13cb779ba5a4",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "external"
+    },
+    {
+      "hostname": "api.0-0.pro",
+      "app_id": "app_1778958829_13cb779ba5a4",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "external"
+    },
+    {
+      "hostname": "api2.0-0.pro",
+      "app_id": "app_1778958829_13cb779ba5a4",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "http-01",
+      "validation_targets": [
+        "15.204.94.71",
+        "51.38.126.103",
+        "154.51.41.196"
+      ]
+    },
+    {
+      "hostname": "app-logseq.chikai.de",
+      "app_id": "app_1780249558_7069f860e36b",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "http-01",
+      "validation_targets": [
+        "15.204.94.71",
+        "51.38.126.103",
+        "154.51.41.196"
+      ]
+    },
+    {
+      "hostname": "i00.pro",
+      "app_id": "app_1778958829_7a965e0863ed",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "dns-01",
+      "dns_zone": "i00.pro",
+      "validation_targets": [
+        "15.204.94.71:53",
+        "51.38.126.103:53"
+      ],
+      "not_before": "2026-10-16T09:50:16Z"
+    },
+    {
+      "hostname": "music.chikai.de",
+      "app_id": "app_1774720664_ef855e625cae",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "http-01",
+      "validation_targets": [
+        "15.204.94.71",
+        "51.38.126.103",
+        "154.51.41.196"
+      ]
+    },
+    {
+      "hostname": "myder.us.ci",
+      "app_id": "app_1778958829_13cb779ba5a4",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "http-01",
+      "validation_targets": [
+        "15.204.94.71",
+        "51.38.126.103",
+        "154.51.41.196"
+      ]
+    },
+    {
+      "hostname": "oaix.cc",
+      "app_id": "app_1776071893_eb3c67828c53",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "dns-01",
+      "dns_zone": "oaix.cc",
+      "validation_targets": [
+        "15.204.94.71:53",
+        "51.38.126.103:53"
+      ]
+    },
+    {
+      "hostname": "oiuhu89.chikai.de",
+      "app_id": "app_1780127710_d93379954287",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "http-01",
+      "validation_targets": [
+        "15.204.94.71",
+        "51.38.126.103",
+        "154.51.41.196"
+      ],
+      "not_before": "2026-10-17T03:19:36Z"
+    },
+    {
+      "hostname": "sync3.chikai.de",
+      "app_id": "app_1780076837_8bcaf316b939",
+      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "mode": "http-01",
+      "validation_targets": [
+        "15.204.94.71",
+        "51.38.126.103",
+        "154.51.41.196"
+      ]
+    }
+  ]
+}

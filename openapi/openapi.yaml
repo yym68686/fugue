@@ -1871,6 +1871,55 @@ paths:
                 $ref: "#/components/schemas/PlatformDomainBindingListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/tls-issuance/policy:
+    get:
+      operationId: getTLSIssuancePolicy
+      summary: Read independent certificate issuance policy
+      tags: [Admin]
+      x-fugue-handler: handleGetTLSIssuancePolicy
+      security: [{BearerAuth: []}]
+      responses:
+        '200':
+          description: Current issuance intent
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TLSIssuancePolicy'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+    put:
+      operationId: putTLSIssuancePolicy
+      summary: Compare and replace independent certificate issuance policy
+      tags: [Admin]
+      x-fugue-handler: handlePutTLSIssuancePolicy
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TLSIssuancePolicy'}
+      responses:
+        '200':
+          description: Persisted policy; generation must advance exactly once
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TLSIssuancePolicy'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+  /v1/acme/http-01/{hostname}/{token}:
+    get:
+      operationId: getHTTP01Challenge
+      summary: Read a current public ACME HTTP-01 proof
+      tags: [Edge]
+      x-fugue-handler: handleHTTP01Challenge
+      security: []
+      parameters:
+        - {in: path, name: hostname, required: true, schema: {type: string}}
+        - {in: path, name: token, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Only the matching unexpired public key authorization
+          content:
+            text/plain:
+              schema: {type: string}
+        default: {$ref: '#/components/responses/ErrorResponse'}
   /v1/admin/image-cache/orphan-policy:
     get:
       operationId: adminGetImageOrphanPolicy
@@ -28532,6 +28581,39 @@ components:
           type: string
         deep_health:
           $ref: "#/components/schemas/NodeDeepHealthResult"
+    TLSIssuancePolicy:
+      type: object
+      additionalProperties: false
+      required: [schema, generation, enabled, directory_url, issuer_id, contact, renew_before_hours, retry_base_seconds, domains]
+      properties:
+        schema: {type: string, enum: ['fugue.tls-issuance-policy/v1']}
+        generation: {type: integer, format: int64, minimum: 1}
+        enabled: {type: boolean}
+        directory_url: {type: string, format: uri}
+        issuer_id: {type: string}
+        contact: {type: string}
+        renew_before_hours: {type: integer, minimum: 168, maximum: 1440}
+        retry_base_seconds: {type: integer, minimum: 3600, maximum: 86400}
+        domains:
+          type: array
+          maxItems: 10000
+          items: {$ref: '#/components/schemas/TLSIssuanceDomainPolicy'}
+    TLSIssuanceDomainPolicy:
+      type: object
+      additionalProperties: false
+      required: [hostname, app_id, tenant_id, mode]
+      properties:
+        hostname: {type: string}
+        app_id: {type: string}
+        tenant_id: {type: string}
+        mode: {type: string, enum: [http-01, dns-01, external]}
+        dns_zone: {type: string}
+        validation_targets:
+          type: array
+          maxItems: 32
+          description: Explicit public entry IPs for HTTP-01, or authoritative IP:port endpoints for DNS-01. Every target must expose the same proof before CA acceptance.
+          items: {type: string}
+        not_before: {type: string, format: date-time}
     CreateNodeUpdateTaskRequest:
       type: object
       description: |

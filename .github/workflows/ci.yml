@@ -2623,6 +2623,30 @@ jobs:
           python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --upgrade-updaters --wait-seconds 2100
           python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply --wait-seconds 900
 
+  tls_issuance_policy:
+    # Certificate intent is recoverable independently of executable releases.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency: {group: fugue-tls-issuance-policy, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Publish explicit certificate issuance intent
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          set -euo pipefail
+          paths=(deploy/environments/production/tls-issuance scripts/publish_tls_issuance_policy.py scripts/test_publish_tls_issuance_policy.py)
+          if git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then exit 0; fi
+          git fetch origin main
+          if ! git diff --quiet HEAD origin/main -- "${paths[@]}"; then exit 0; fi
+          python3 -m unittest scripts.test_publish_tls_issuance_policy
+          python3 scripts/publish_tls_issuance_policy.py deploy/environments/production/tls-issuance/config.json
+
   storage_policy:
     # Writer activation and budget recovery are independent of code builds.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

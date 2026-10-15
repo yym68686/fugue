@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -2950,24 +2949,9 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	if err != nil {
 		return nil, err
 	}
-	tmpDir, err := os.MkdirTemp("", "fugue-app-db-backup-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tmpDir)
-	dumpPath := path.Join(tmpDir, "database.dump")
 	pgDump := strings.TrimSpace(os.Getenv("FUGUE_PG_DUMP_BIN"))
 	if pgDump == "" {
 		pgDump = "pg_dump"
-	}
-	cmd := exec.CommandContext(ctx, pgDump, "--format=custom", "--no-owner", "--no-privileges", "--file", dumpPath, databaseURL)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("pg_dump failed: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	size, sha256sum, err := fileSizeAndSHA256(dumpPath)
-	if err != nil {
-		return nil, err
 	}
 	version := strings.TrimSpace(run.Version)
 	if version == "" {
@@ -2992,15 +2976,13 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	uploadRun.Target = target
 	upload := newBackupObjectUploadTransaction(s, uploadRun, objectBackend)
 	defer upload.cleanupOnError(ctx, &retErr)
-	file, err := os.Open(dumpPath)
+	// App databases can be larger than the API node. Use the same bounded
+	// stream and failure cleanup as control-plane backups, retaining checksum
+	// verification before publishing the artifact.
+	size, sha256sum, err := upload.streamPGDump(ctx, pgDump, databaseURL, dumpKey)
 	if err != nil {
-		return nil, err
-	}
-	if err := upload.putObject(ctx, dumpKey, file, size); err != nil {
-		_ = file.Close()
 		return nil, fmt.Errorf("upload app database dump: %w", err)
 	}
-	_ = file.Close()
 	if err := verifyBackupObjectSHA256(ctx, objectBackend, dumpKey, size, sha256sum); err != nil {
 		return nil, fmt.Errorf("verify app database dump: %w", err)
 	}

@@ -61,6 +61,31 @@ func TestTrackedPlatformSourcesContainNoBusinessCoupling(t *testing.T) {
 // data. Exempt only that typed value, never an entire file or configuration tree:
 // executable fields, comments, unknown schema and adjacent strings stay scanned.
 func businessCouplingSource(path string, body []byte) []byte {
+	if path == "deploy/environments/production/tls-issuance/policy.json" {
+		var declaration map[string]json.RawMessage
+		var domains []map[string]json.RawMessage
+		if json.Unmarshal(body, &declaration) != nil || string(declaration["schema"]) != `"fugue.tls-issuance-policy/v1"` || json.Unmarshal(declaration["domains"], &domains) != nil {
+			return body
+		}
+		for _, domain := range domains {
+			for _, field := range []string{"hostname", "dns_zone"} {
+				if _, exists := domain[field]; !exists {
+					continue
+				}
+				var hostname string
+				if json.Unmarshal(domain[field], &hostname) != nil || hostname == "" {
+					return body
+				}
+				domain[field] = json.RawMessage(`"configuration-hostname"`)
+			}
+		}
+		declaration["domains"], _ = json.Marshal(domains)
+		out, err := json.Marshal(declaration)
+		if err != nil {
+			return body
+		}
+		return out
+	}
 	const offlineDirectory = "deploy/environments/production/edge-offline/"
 	if strings.HasPrefix(path, offlineDirectory) && !strings.Contains(strings.TrimPrefix(path, offlineDirectory), "/") && strings.HasSuffix(path, ".json") {
 		return orderedProjectionHostnameSource(body, "fugue.edge-offline-reconfiguration/v1")
@@ -107,6 +132,24 @@ func businessCouplingSource(path string, body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+func TestTLSIssuanceExceptionOnlyCoversTypedDomainNames(t *testing.T) {
+	const path = "deploy/environments/production/tls-issuance/policy.json"
+	const body = `{"schema":"fugue.tls-issuance-policy/v1","domains":[{"hostname":"tenant.example.test","dns_zone":"example.test","command":"branch on tenant.example.test"}]}`
+	masked := string(businessCouplingSource(path, []byte(body)))
+	if strings.Count(masked, "configuration-hostname") != 2 || !strings.Contains(masked, "branch on tenant.example.test") {
+		t.Fatal("TLS policy exception hid executable fields")
+	}
+	for _, other := range []string{"internal/api/tls_issuance.go", path + ".go", strings.Replace(path, "/policy", "/nested/policy", 1)} {
+		if string(businessCouplingSource(other, []byte(body))) != body {
+			t.Fatal("TLS exception escaped typed declaration")
+		}
+	}
+	unknown := strings.Replace(body, "fugue.tls-issuance-policy/v1", "unknown/v1", 1)
+	if string(businessCouplingSource(path, []byte(unknown))) != unknown {
+		t.Fatal("unknown TLS schema exempted")
+	}
 }
 
 func retirementHostnameSource(body []byte) []byte {

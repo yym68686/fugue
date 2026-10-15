@@ -285,6 +285,9 @@ func TestAppDatabaseBackupVerificationFailureDeletesUploadedDump(t *testing.T) {
 	}
 	pgDump := writeFailedUploadPGDump(t)
 	t.Setenv("FUGUE_PG_DUMP_BIN", pgDump)
+	// Large app backups must work without staging the dump on the API disk.
+	// A nonexistent temporary root would fail before upload in the old path.
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "unavailable"))
 	server := &Server{store: stateStore}
 	run := model.BackupRun{
 		ID:        "backup_run_verify_app",

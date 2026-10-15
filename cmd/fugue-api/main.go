@@ -152,6 +152,7 @@ func main() {
 	go server.StartBackgroundEdgeQualityRollups(ctx)
 	go server.StartBackgroundDNSObservations(ctx)
 	go server.StartBackgroundPlatformConfiguration(ctx)
+	go server.StartBackgroundTLSIssuance(ctx)
 	go server.StartBackgroundAppDatabaseImports(ctx)
 	go server.StartBackgroundBackups(ctx)
 	go server.StartBackgroundBackupInventory(ctx)
