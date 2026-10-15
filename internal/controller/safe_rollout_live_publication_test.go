@@ -82,3 +82,50 @@ func TestSafeRolloutPublicationOrderRejectsMalformedVersions(t *testing.T) {
 		t.Fatal("valid ordering rejected")
 	}
 }
+
+func TestSafeRolloutWaitCoversPublicationAndHeartbeatConvergence(t *testing.T) {
+	for _, converges := range []bool{true, false} {
+		t.Run(fmt.Sprintf("converges=%v", converges), func(t *testing.T) {
+			now := time.Now().UTC()
+			start := now
+			o, app, release, node, proof := appTrafficObserverFixture(t, now)
+			node.RouteBundleVersion = rolloutPublication("a", 42, 3)
+			node.CaddyAppliedVersion = node.RouteBundleVersion
+			inventory := &changingEdgeNodeLister{nodes: []model.EdgeNode{node}}
+			o.Store = inventory
+			o.Now = func() time.Time { return now }
+			o.Interval = 30 * time.Second
+			o.Sleep = func(context.Context, time.Duration) error {
+				now = now.Add(30 * time.Second)
+				heartbeat := now
+				inventory.nodes[0].LastHeartbeatAt = &heartbeat
+				return nil
+			}
+			o.Probe = func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+				p := proof
+				p.Version = node.RouteBundleVersion
+				p.CheckedAt, p.ValidUntil = now, now.Add(time.Minute)
+				if !converges || now.Sub(start) < 6*time.Minute {
+					p.AppTrafficDigest = "sha256:" + strings.Repeat("c", 64)
+				}
+				return p, nil
+			}
+			got, err := o.WaitForSafeRolloutEdgeRouteBundle(context.Background(), app, release, 20, start.Add(-time.Minute))
+			if err != nil || got.Ready != converges {
+				t.Fatalf("unexpected convergence: %+v error=%v", got, err)
+			}
+			wantElapsed := safeRolloutEdgeBundleWaitTimeout
+			if converges {
+				wantElapsed = 6 * time.Minute
+			}
+			if now.Sub(start) != wantElapsed {
+				t.Fatalf("elapsed=%v want=%v", now.Sub(start), wantElapsed)
+			}
+			if got.Summary["wait_reason_counts"].(map[string]int)[node.ID+":app_traffic_proof_mismatch"] == 0 ||
+				got.Summary["inventory_applied_versions"].(map[string]string)[node.ID] != node.RouteBundleVersion ||
+				got.Summary["observed_proof_versions"].(map[string]string)[node.ID] != node.RouteBundleVersion {
+				t.Fatalf("missing bounded wait evidence: %+v", got.Summary)
+			}
+		})
+	}
+}

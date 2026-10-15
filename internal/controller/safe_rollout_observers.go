@@ -17,8 +17,9 @@ import (
 
 const (
 	// Signed publication includes an independently scheduled producer, readiness
-	// capture and consumer application; preserve the old route during that cycle.
-	safeRolloutEdgeBundleWaitTimeout  = 5 * time.Minute
+	// capture and consumer application. Allow two publication/verification cycles
+	// plus heartbeat convergence while preserving the old route and exact proofs.
+	safeRolloutEdgeBundleWaitTimeout  = 10 * time.Minute
 	safeRolloutEdgeBundlePollInterval = 3 * time.Second
 	safeRolloutDrainMetricsLookback   = 20 * time.Minute
 )
@@ -142,6 +143,8 @@ func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ct
 	deadline := o.now().Add(timeout)
 	wait := safeRolloutEdgeWait{groups: map[string]string{}}
 	var last safeRolloutEdgeBundleObservation
+	waitReasons := map[string]int{}
+	observations := 0
 	for {
 		observation, err := o.observeWait(ctx, app, release, targetCandidateWeight, since, &wait)
 		if err != nil {
@@ -149,6 +152,18 @@ func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ct
 				return last, err
 			}
 			return observation, err
+		}
+		observations++
+		for _, reason := range observation.WaitingNodes {
+			waitReasons[reason]++
+		}
+		if observation.Summary != nil {
+			observation.Summary["observation_count"] = observations
+			reasons := make(map[string]int, len(waitReasons))
+			for reason, count := range waitReasons {
+				reasons[reason] = count
+			}
+			observation.Summary["wait_reason_counts"] = reasons
 		}
 		last = observation
 		if observation.Ready || !o.now().Before(deadline) {
@@ -218,11 +233,14 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	versions := map[string]struct{}{}
 	proofs := make(map[string]routeprobe.Proof, len(ids))
 	observedDigests := make(map[string]string, len(ids))
+	inventoryVersions := make(map[string]string, len(ids))
+	observedVersions := make(map[string]string, len(ids))
 	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return observation, err
 		}
 		node, exists := current[id]
+		inventoryVersions[id] = node.CaddyAppliedVersion
 		reason := ""
 		switch {
 		case !exists:
@@ -247,6 +265,7 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 			started := o.now()
 			proof, probeErr := o.probeNode(ctx, app, node)
 			observedDigests[id] = proof.AppTrafficDigest
+			observedVersions[id] = proof.Version
 			excluded := proof.State == routeproof.StateExcluded && proof.AppTrafficDigest == ""
 			switch {
 			case probeErr != nil:
@@ -350,6 +369,8 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	observation.Summary["serving_nodes"] = servingNodes
 	observation.Summary["excluded_nodes"] = excludedNodes
 	observation.Summary["observed_app_traffic_digests"] = observedDigests
+	observation.Summary["inventory_applied_versions"] = inventoryVersions
+	observation.Summary["observed_proof_versions"] = observedVersions
 	observation.Summary["required_nodes"] = observation.RequiredNodes
 	observation.Summary["ready_nodes"] = observation.ReadyNodes
 	observation.Summary["waiting_nodes"] = observation.WaitingNodes
