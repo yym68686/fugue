@@ -1233,6 +1233,10 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			}
 			if safeRollout != nil && safeRollout.StableAlignmentAllowed {
 				alignedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, app, scheduling)
+				if errors.Is(err, errSafeCanonicalHandoffPending) {
+					s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "promoted candidate serves while original canonical connections drain; reconciliation will retry", safeRollout.Candidate.ID, nil)
+					break
+				}
 				if err != nil {
 					return fmt.Errorf("align managed app desired state after safe rollout %s: %w", app.ID, err)
 				}
@@ -1243,6 +1247,17 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 					return fmt.Errorf("wait for managed app alignment after safe rollout %s: %w", app.ID, err)
 				}
 				timer.Mark("stable_alignment_wait")
+				// The first apply keeps Services on the independent revision
+				// while the drained canonical Deployment rolls. A second pass
+				// restores canonical selectors only once it is ready.
+				if _, err := s.applyManagedAppDesiredStateResult(applyCtx, app, scheduling); err != nil {
+					if errors.Is(err, errSafeCanonicalHandoffPending) {
+						s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "canonical replacement ready; service handoff awaits renewed safety evidence", safeRollout.Candidate.ID, nil)
+						break
+					}
+					return fmt.Errorf("finish canonical service handoff: %w", err)
+				}
+
 				stableReleaseAligned, err := s.alignSafeRolloutPromotedStableRelease(ctx, op, safeRollout)
 				if err != nil {
 					return err

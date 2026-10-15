@@ -25,6 +25,7 @@ type kubeSafeRolloutDrainObserver struct{ service *Service }
 
 type releaseDrainPod struct {
 	Name              string            `json:"name"`
+	IP                string            `json:"ip,omitempty"`
 	UID               string            `json:"uid"`
 	ReplicaUID        string            `json:"replica_set_uid"`
 	AgentImage        string            `json:"agent_image"`
@@ -193,6 +194,15 @@ func (s *Service) captureReleaseDrainWorkload(ctx context.Context, client *kubeC
 }
 
 func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease, stopped bool) (releaseDrainWorkload, error) {
+	return s.captureDrainWorkload(ctx, client, app, release, stopped, false)
+}
+
+// Canonical alignment observes the still-running original Deployment before
+// replacing it. This does not grant permission to retire a canonical release.
+func (s *Service) captureDrainWorkload(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease, stopped, canonical bool) (releaseDrainWorkload, error) {
+	if canonical && (stopped || release.ID != "" || release.DeploymentName != runtime.RuntimeAppResourceName(app)) {
+		return releaseDrainWorkload{}, fmt.Errorf("invalid canonical drain observation")
+	}
 	out := releaseDrainWorkload{RuntimeStopped: stopped}
 	ns := runtime.NamespaceForTenant(app.TenantID)
 	deployment, found, err := client.getRawObject(ctx, deploymentAPIPath(ns, release.DeploymentName))
@@ -202,7 +212,7 @@ func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *k
 	meta := objectMapField(deployment, "metadata")
 	owner := func(metadata map[string]any) bool {
 		labels := objectStringMapValue(metadata["labels"])
-		return appWorkloadOwnerMatches(metadata, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) && labels[runtime.FugueLabelAppReleaseID] == release.ID
+		return appWorkloadOwnerMatches(metadata, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) && (canonical || labels[runtime.FugueLabelAppReleaseID] == release.ID)
 	}
 	if !owner(meta) || objectStringField(meta, "deletionTimestamp") != "" {
 		return out, fmt.Errorf("release Deployment ownership or lifecycle differs")
@@ -211,16 +221,20 @@ func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *k
 	if binding == nil || binding.DeploymentUID != objectStringField(meta, "uid") || binding.ReleaseKey != objectStringMapValue(nestedObjectValue(deployment, "spec", "template", "metadata", "annotations"))[runtime.FugueAnnotationReleaseKey] {
 		return out, fmt.Errorf("drain Deployment differs from immutable binding")
 	}
-	service, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(ns)+"/services/"+url.PathEscape(binding.ServiceName))
-	if err != nil || !found {
-		return out, fmt.Errorf("drain Service unavailable")
-	}
-	sm := objectMapField(service, "metadata")
-	selector := objectStringMapValue(nestedObjectValue(service, "spec", "selector"))
+	serviceVersion := ""
 	legacyStopped := stopped && binding.BoundAt.IsZero()
 	workloadLabelMatches := func(value string) bool { return value == binding.DeploymentName || legacyStopped && value == "" }
-	if objectStringField(sm, "uid") != binding.ServiceUID || objectStringField(sm, "deletionTimestamp") != "" || !owner(sm) || !workloadLabelMatches(selector[runtime.FugueLabelAppWorkload]) || selector[runtime.FugueLabelAppReleaseID] != release.ID {
-		return out, fmt.Errorf("drain Service differs from immutable binding")
+	if !canonical {
+		service, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(ns)+"/services/"+url.PathEscape(binding.ServiceName))
+		if err != nil || !found {
+			return out, fmt.Errorf("drain Service unavailable")
+		}
+		sm := objectMapField(service, "metadata")
+		selector := objectStringMapValue(nestedObjectValue(service, "spec", "selector"))
+		if objectStringField(sm, "uid") != binding.ServiceUID || objectStringField(sm, "deletionTimestamp") != "" || !owner(sm) || !workloadLabelMatches(selector[runtime.FugueLabelAppWorkload]) || selector[runtime.FugueLabelAppReleaseID] != release.ID {
+			return out, fmt.Errorf("drain Service differs from immutable binding")
+		}
+		serviceVersion = objectStringField(sm, "resourceVersion")
 	}
 	var dep kubeDeployment
 	data, _ := json.Marshal(deployment)
@@ -231,7 +245,7 @@ func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *k
 		return out, fmt.Errorf("drain Deployment generation regressed")
 	}
 	out.DeploymentUID, out.Generation = dep.Metadata.UID, dep.Metadata.Generation
-	out.DeploymentVersion, out.ServiceVersion = objectStringField(meta, "resourceVersion"), objectStringField(sm, "resourceVersion")
+	out.DeploymentVersion, out.ServiceVersion = objectStringField(meta, "resourceVersion"), serviceVersion
 	var replicas, pods kubeObjectList
 	// Follow ownership even when a child's selector labels have changed. A
 	// label-only list could hide an old Pod that still owns active connections.
@@ -256,7 +270,10 @@ func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *k
 	}
 	for _, pod := range pods.Items {
 		pm := objectMapField(pod, "metadata")
-		belongs := objectStringMapValue(pm["labels"])[runtime.FugueLabelAppReleaseID] == release.ID
+		belongs := !canonical && objectStringMapValue(pm["labels"])[runtime.FugueLabelAppReleaseID] == release.ID
+		if canonical && objectStringMapValue(pm["labels"])[runtime.FugueLabelAppWorkload] == release.DeploymentName {
+			belongs = true
+		}
 		for _, ref := range mapSlice(pm["ownerReferences"]) {
 			if uid := owned[objectStringField(ref, "name")]; uid != "" && ref["uid"] == uid {
 				belongs = true
@@ -271,7 +288,7 @@ func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *k
 		if objectStringMapValue(pm["annotations"])[runtime.FugueAnnotationReleaseKey] != binding.ReleaseKey || !workloadLabelMatches(objectStringMapValue(pm["labels"])[runtime.FugueLabelAppWorkload]) {
 			return out, fmt.Errorf("drain Pod belongs to another executable revision")
 		}
-		p := releaseDrainPod{Name: objectStringField(pm, "name"), UID: objectStringField(pm, "uid")}
+		p := releaseDrainPod{Name: objectStringField(pm, "name"), UID: objectStringField(pm, "uid"), IP: objectStringField(objectMapField(pod, "status"), "podIP")}
 		appContainers := mapSlice(nestedObjectValue(pod, "spec", "containers"))
 		if len(appContainers) == 0 || !s.migrationImageRefsEquivalent(app, objectStringField(appContainers[0], "image"), release.ResolvedImageRef) {
 			return out, fmt.Errorf("release Pod application image differs")

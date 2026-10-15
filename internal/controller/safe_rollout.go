@@ -1024,6 +1024,17 @@ func (s *Service) reconcileServingReleaseCanonicalTargetIfReady(ctx context.Cont
 		strings.EqualFold(strings.TrimSpace(release.ServiceName), canonicalService) {
 		return nil
 	}
+
+	// A canonical handoff keeps the Service on its immutable candidate until
+	// the new canonical template has converged. Rebinding the release here
+	// would hide that independent destination from the recovery reconciler.
+	liveCanonical, exists, readErr := client.getRawObject(ctx, deploymentAPIPath(namespace, canonicalDeployment))
+	if readErr != nil {
+		return readErr
+	}
+	if exists && objectStringMapValue(nestedObjectValue(liveCanonical, "metadata", "annotations"))[safeCanonicalHandoffAnnotation] != "" {
+		return nil
+	}
 	deployment, found, err := client.getDeployment(ctx, namespace, canonicalDeployment)
 	if err != nil || !found {
 		return err

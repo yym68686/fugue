@@ -39,14 +39,24 @@ func newDrainWorkloadFixture(t *testing.T) (*Service, model.App, model.AppReleas
 }
 
 func newDrainWorkloadFixtureWithOutcome(t *testing.T, failed bool, historical ...bool) (*Service, model.App, model.AppRelease, *drainWorkloadFixture) {
+	return newDrainWorkloadFixtureWithSnapshot(t, failed, false, historical...)
+}
+
+func newDrainWorkloadFixtureWithSnapshot(t *testing.T, failed, snapshot bool, historical ...bool) (*Service, model.App, model.AppRelease, *drainWorkloadFixture) {
 	t.Helper()
 	st, app, _, op := newSafeRolloutTestState(t)
 	if _, ok, err := st.TryClaimPendingOperation(op.ID); err != nil || !ok {
 		t.Fatal("claim", err)
 	}
+	var specSnapshot *model.AppSpec
+	if snapshot {
+		specSnapshot = cloneControllerAppSpec(&app.Spec)
+		specSnapshot.RuntimeID = "runtime-old"
+		specSnapshot.Replicas = 2
+	}
 	old, err := st.CreateAppRelease(model.AppRelease{ID: "release-old", TenantID: app.TenantID, AppID: app.ID,
 		RuntimeID: "runtime-old", ResolvedImageRef: app.Spec.Image, DeploymentName: "workload-old", ServiceName: "service-old",
-		Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusCreating})
+		Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusCreating, SpecSnapshot: specSnapshot})
 	if err != nil {
 		t.Fatal(err)
 	}

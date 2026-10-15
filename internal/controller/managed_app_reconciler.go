@@ -359,6 +359,11 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, err)
 	}
 	childObjects = s.preserveManagedAppServingDeploymentTemplate(ctx, client, namespace, app, childObjects)
+	childObjects, err = s.prepareSafeCanonicalHandoff(ctx, client, app, childObjects)
+	if err != nil {
+		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, err)
+	}
+
 	fenceEpoch, err := s.currentAppFenceEpoch(ctx, client, app)
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app fence epoch: %w", err))
