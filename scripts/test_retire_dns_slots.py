@@ -132,6 +132,23 @@ class RetirementTests(unittest.TestCase):
             inspect.assert_not_called()
             kube.assert_not_called()
 
+    def test_publication_races_retry_the_complete_witness_with_a_bound(self):
+        config, _, _ = self.fixture()
+        pending = ValueError('DNS recovery observation failed cryptographic or readiness verification: authority_or_freshness')
+        with patch.object(retirement, 'replacements_once', side_effect=[pending, ['fresh']]) as observe, patch.object(retirement.time, 'sleep'):
+            self.assertEqual(retirement.replacements(config), ['fresh'])
+            self.assertEqual(observe.call_count, 2)
+        with patch.object(retirement, 'replacements_once', side_effect=pending) as observe, patch.object(retirement.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'authority_or_freshness'):
+                retirement.replacements(config)
+            self.assertEqual(observe.call_count, 24)
+        for message in ['replacement public Service changed', 'DNS recovery candidate identity or image changed',
+                        'DNS recovery observation failed cryptographic or readiness verification: checkpoint_authentication']:
+            with patch.object(retirement, 'replacements_once', side_effect=ValueError(message)) as observe, patch.object(retirement.time, 'sleep'):
+                with self.assertRaises(ValueError):
+                    retirement.replacements(config)
+                self.assertEqual(observe.call_count, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

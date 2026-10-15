@@ -123,6 +123,28 @@ def ensure_unselected(workload, services, quiescent=()):
 
 
 def replacements(config):
+    # Checkpoint and runtime-fact reads can straddle a signed publication or a
+    # normal proof refresh. Retry the entire read-only witness, never reuse a
+    # partial witness or relax cryptographic/record readiness checks.
+    for attempt in range(24):
+        try:
+            return replacements_once(config)
+        except (ValueError, transport.ObservationUnavailable) as error:
+            retryable = isinstance(error, transport.ObservationUnavailable) or any(fragment in str(error) for fragment in [
+                'DNS recovery observation failed cryptographic or readiness verification: authority_or_freshness',
+                'DNS recovery observation failed cryptographic or readiness verification: record_readiness',
+                'DNS recovery observation failed cryptographic or readiness verification: wire_materialization',
+                'DNS recovery candidate does not match current verified full authority',
+                'exactly one live Ready backend', 'backend changed while reading runtime facts',
+                'different artifact assignments', 'different probe membership',
+                'expired or future observations', 'proof is expired or from the future',
+            ])
+            if not retryable or attempt == 23:
+                raise
+            time.sleep(5)
+
+
+def replacements_once(config):
     namespace = config['namespace']
     publication = recovery.current_publication({'recovery': config})
     witnesses = []
@@ -192,6 +214,7 @@ def save(path, report):
 def reconcile(config, path, apply=False):
     validate(config)
     report = {'schema': config['schema'], 'generation': config['generation'], 'declaration_digest': digest(config), 'workloads': []}
+    save(path, report)
     report['replacements'] = replacements(config)
     save(path, report)
     for item in config['workloads']:
