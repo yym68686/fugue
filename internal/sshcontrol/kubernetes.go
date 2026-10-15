@@ -496,7 +496,11 @@ func (runtime *KubernetesRuntime) Observe(ctx context.Context, slot managedssh.S
 	if err != nil {
 		return evidence, managedssh.ErrIdentityChange
 	}
-	probe, err := sshidentity.Probe(ctx, net.JoinHostPort(pod.Status.PodIP, "2222"), publicKey, 5*time.Second)
+	probeSSH := runtime.probeSSH
+	if probeSSH == nil {
+		probeSSH = sshidentity.Probe
+	}
+	probe, err := probeSSH(ctx, net.JoinHostPort(pod.Status.PodIP, "2222"), publicKey, 5*time.Second)
 	if err != nil || !probe.KeyExchangeVerified || !probe.IdentityMatched {
 		return evidence, errors.Join(managedssh.ErrCandidateUnverified, err)
 	}
@@ -532,7 +536,7 @@ func (runtime *KubernetesRuntime) Observe(ctx context.Context, slot managedssh.S
 	if !servingEndpoint {
 		return evidence, managedssh.ErrCandidateUnverified
 	}
-	serviceProbe, err := sshidentity.Probe(ctx, net.JoinHostPort(service.Spec.ClusterIP, "2222"), publicKey, 5*time.Second)
+	serviceProbe, err := probeSSH(ctx, net.JoinHostPort(service.Spec.ClusterIP, "2222"), publicKey, 5*time.Second)
 	if err != nil || !serviceProbe.KeyExchangeVerified || !serviceProbe.IdentityMatched {
 		return evidence, errors.Join(managedssh.ErrCandidateUnverified, err)
 	}
@@ -543,8 +547,8 @@ func (runtime *KubernetesRuntime) Observe(ctx context.Context, slot managedssh.S
 	}
 	observed := slot
 	observed.Evidence = &evidence
-	if !observed.Verified(time.Now().UTC()) {
-		return evidence, fmt.Errorf("runtime bound evidence: %s: %w", observed.VerificationFailure(time.Now().UTC()), managedssh.ErrCandidateUnverified)
+	if failure := observed.ServingFailure(time.Now().UTC()); failure != "" {
+		return evidence, fmt.Errorf("runtime bound evidence: %s: %w", failure, managedssh.ErrCandidateUnverified)
 	}
 	return evidence, nil
 }

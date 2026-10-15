@@ -105,4 +105,46 @@ func verifyManagedSSHControlStore(test *testing.T, stateStore *Store, app model.
 	if err := stateStore.SaveManagedSSHControl(3, staleIntent); err != nil {
 		test.Fatal(err)
 	}
+	// A renewed desired artifact may retain only previously published history.
+	pending, err := stateStore.GetManagedSSHControl(app.TenantID, app.ID)
+	if err != nil {
+		test.Fatal(err)
+	}
+	renewed := configuration
+	renewed.Generation = 2
+	renewed.ValidUntil = renewed.ValidUntil.Add(time.Minute)
+	newArtifact, err := managedssh.SignArtifact(renewed, "config-signer", signingKey)
+	if err != nil {
+		test.Fatal(err)
+	}
+	pending.Active.BeginApply(newArtifact, now)
+	pending.Generation, pending.Revision = 2, 5
+	if err := stateStore.SaveManagedSSHControl(4, pending); err != nil {
+		test.Fatal(err)
+	}
+	if pending.Active.Verified(now) || !pending.Active.Serving(now) {
+		test.Fatal("old receipt verified renewed artifact")
+	}
+	for _, scenario := range []string{"deadline reset", "unknown history"} {
+		rejected, err := stateStore.GetManagedSSHControl(app.TenantID, app.ID)
+		if err != nil {
+			test.Fatal(err)
+		}
+		rejected.Revision++
+		if scenario == "deadline reset" {
+			rejected.Active.PendingApply.StartedAt = rejected.Active.PendingApply.StartedAt.Add(time.Second)
+			rejected.Active.PendingApply.Deadline = rejected.Active.PendingApply.Deadline.Add(time.Second)
+		} else {
+			unknown := configuration
+			unknown.ValidUntil = unknown.ValidUntil.Add(time.Second)
+			artifact, err := managedssh.SignArtifact(unknown, "config-signer", signingKey)
+			if err != nil {
+				test.Fatal(err)
+			}
+			rejected.Active.LoadedArtifact, rejected.Active.LastValidEvidence = &artifact, nil
+		}
+		if err := stateStore.SaveManagedSSHControl(5, rejected); !errors.Is(err, ErrConflict) {
+			test.Fatal(scenario, "was accepted", err)
+		}
+	}
 }

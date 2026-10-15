@@ -1,0 +1,40 @@
+# Managed SSH configuration convergence
+
+A Kubernetes Secret write acknowledges publication, not loading by the SSH runtime.
+The controller persists these facts independently for each active, candidate and
+retained draining slot:
+
+- `artifact` is the desired signed authorization.
+- `loaded_artifact` is the last known signed artifact confirmed by bound runtime evidence.
+- `evidence` is the latest accepted or rejected observation. Failed runtime probes
+  invalidate its binding proof, or clear it if no digest could be read.
+- `last_valid_evidence` retains the last positive receipt for diagnosis; it never
+  substitutes for fresh evidence after an error or expiry.
+- `pending_apply` persists the start and deadline of an outstanding publication.
+
+A publication has a two-minute propagation window. Reconciliation and controller
+restarts preserve that deadline. A pending authorization is not periodically
+reissued, avoiding a moving digest target. Permission changes still publish
+immediately, without waiting for target discovery or old publication completion.
+An expired desired authorization is renewed to permit recovery after a long outage;
+this does not extend the original deadline or authorize an old runtime snapshot.
+
+`verified` continues to mean fresh, exact confirmation of the **desired** digest.
+Activation, rollback, route publication and retirement require this exact gate.
+`serving` can additionally describe a known previous artifact during propagation,
+provided its host identity, target, permissions, key grants, authorization and
+bound receipt remain valid. Removed keys, changed permissions, expired grants,
+unknown digests and elapsed deadlines fail closed. A new exact confirmation can
+recover an overdue publication. No last-positive receipt can prove a new artifact.
+
+The status API adds `convergence_state` (`applied`, `pending_apply`, `rejected`),
+`loaded_artifact_digest`, `loaded_generation`, `pending_apply`, `serving`,
+`last_valid_evidence`, and `verification_failure`. Existing `artifact_digest`,
+`generation`, `valid_until` and `verified` continue to refer to desired state.
+These are additive persisted JSON and API fields; existing control records remain
+readable. Published artifact history and pending deadlines are checked on writes.
+
+During `pending_apply`, compare desired and loaded digests and the persisted
+deadline. Investigate rejected observations; do not relax digest, identity or
+revocation checks to silence a controller error. The underlying SSH server retains
+its signed authorization checks and enforces authorization expiry independently.

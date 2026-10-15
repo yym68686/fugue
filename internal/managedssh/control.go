@@ -31,15 +31,18 @@ type CandidateEvidence struct {
 }
 
 type ServingSlot struct {
-	ID            string             `json:"id"`
-	Namespace     string             `json:"namespace"`
-	Release       RuntimeRelease     `json:"release"`
-	Artifact      Artifact           `json:"artifact"`
-	Evidence      *CandidateEvidence `json:"evidence,omitempty"`
-	CreatedAt     time.Time          `json:"created_at"`
-	DrainingSince *time.Time         `json:"draining_since,omitempty"`
-	RetiringAt    *time.Time         `json:"retiring_at,omitempty"`
-	RetiredAt     *time.Time         `json:"retired_at,omitempty"`
+	ID                string             `json:"id"`
+	Namespace         string             `json:"namespace"`
+	Release           RuntimeRelease     `json:"release"`
+	Artifact          Artifact           `json:"artifact"`
+	LoadedArtifact    *Artifact          `json:"loaded_artifact,omitempty"`
+	LastValidEvidence *CandidateEvidence `json:"last_valid_evidence,omitempty"`
+	PendingApply      *ApplyProgress     `json:"pending_apply,omitempty"`
+	Evidence          *CandidateEvidence `json:"evidence,omitempty"`
+	CreatedAt         time.Time          `json:"created_at"`
+	DrainingSince     *time.Time         `json:"draining_since,omitempty"`
+	RetiringAt        *time.Time         `json:"retiring_at,omitempty"`
+	RetiredAt         *time.Time         `json:"retired_at,omitempty"`
 }
 
 type ControlState struct {
@@ -87,11 +90,15 @@ func (slot ServingSlot) Verified(now time.Time) bool {
 
 func (slot ServingSlot) VerificationFailure(now time.Time) string {
 	evidence := slot.Evidence
-	configuration := slot.Artifact.Configuration
+	return evidenceFailure(slot.Artifact, evidence, now)
+}
+
+func evidenceFailure(artifact Artifact, evidence *CandidateEvidence, now time.Time) string {
+	configuration := artifact.Configuration
 	switch {
 	case evidence == nil:
 		return "evidence_missing"
-	case evidence.ArtifactDigest != slot.Artifact.Digest:
+	case evidence.ArtifactDigest != artifact.Digest:
 		return "artifact_digest_mismatch"
 	case evidence.IdentityID != configuration.Identity.ID || evidence.Fingerprint != configuration.Identity.Fingerprint:
 		return "host_identity_mismatch"
@@ -146,6 +153,9 @@ func (state ControlState) Validate() error {
 		digest := sha256.Sum256(raw)
 		if slot.Artifact.Digest != "sha256:"+hex.EncodeToString(digest[:]) {
 			return ErrArtifact
+		}
+		if err := slot.validateConvergence(); err != nil {
+			return err
 		}
 		seen[slot.ID] = true
 	}

@@ -23027,12 +23027,34 @@ components:
           $ref: "#/components/schemas/ManagedSSHTarget"
         evidence:
           $ref: "#/components/schemas/ManagedSSHCandidateEvidence"
+        last_valid_evidence:
+          $ref: "#/components/schemas/ManagedSSHCandidateEvidence"
+        loaded_artifact_digest:
+          type: string
+          description: Last observed or last accepted loaded digest; serving indicates whether its evidence is currently valid. Never proves the desired artifact is applied.
+        loaded_generation: {type: integer, format: int64}
+        convergence_state:
+          type: string
+          enum: [applied, pending_apply, rejected]
+        pending_apply:
+          $ref: "#/components/schemas/ManagedSSHApplyProgress"
+        serving:
+          type: boolean
+          description: Fresh bound evidence for the desired artifact or a known, still-authorized previous artifact within its propagation deadline.
+        verification_failure: {type: string}
         verified: {type: boolean}
         valid_until: {type: string, format: date-time}
         created_at: {type: string, format: date-time}
         draining_since: {type: string, format: date-time}
         retiring_at: {type: string, format: date-time}
         retired_at: {type: string, format: date-time}
+    ManagedSSHApplyProgress:
+      type: object
+      additionalProperties: false
+      required: [started_at, deadline]
+      properties:
+        started_at: {type: string, format: date-time}
+        deadline: {type: string, format: date-time}
     ManagedSSHControlStatus:
       type: object
       additionalProperties: false

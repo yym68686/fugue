@@ -110,14 +110,14 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 		for index := range comparison.Keys {
 			comparison.Keys[index].ExpiresAt = previous.ValidUntil
 		}
-		if reflect.DeepEqual(comparison, previous) && previous.ValidUntil.Sub(now) > managedssh.GrantLifetime-time.Minute {
+		if reflect.DeepEqual(comparison, previous) && ((slot.PendingApply != nil && previous.ValidUntil.After(now)) || previous.ValidUntil.Sub(now) > managedssh.GrantLifetime-time.Minute) {
 			return nil
 		}
 		artifact, err := managedssh.SignArtifact(configuration, signer.KeyID, signer.PrivateKey)
 		if err != nil {
 			return err
 		}
-		slot.Artifact, slot.Evidence = artifact, nil
+		slot.BeginApply(artifact, now)
 		state.Generation++
 		changed = true
 		return nil
@@ -195,7 +195,8 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 						if err != nil {
 							return err
 						}
-						state.Candidate = &managedssh.ServingSlot{ID: wanted, Namespace: reconciler.Namespace, Release: release, Artifact: artifact, CreatedAt: now}
+						state.Candidate = &managedssh.ServingSlot{ID: wanted, Namespace: reconciler.Namespace, Release: release, CreatedAt: now}
+						state.Candidate.BeginApply(artifact, now)
 						for index, retired := range state.Retired {
 							if retired.ID == wanted {
 								state.Retired = append(state.Retired[:index:index], state.Retired[index+1:]...)
@@ -232,14 +233,24 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 		}
 		evidence, err := reconciler.Runtime.Observe(ctx, slot)
 		observed := slot
-		observed.Evidence = &evidence
 		verifiedAt := reconciler.currentTime()
-		if err != nil || !observed.Verified(verifiedAt) {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("verify slot %s: reason=%s observed_after_check_ms=%d: %w", slot.ID, observed.VerificationFailure(verifiedAt), evidence.ObservedAt.Sub(verifiedAt).Milliseconds(), errors.Join(managedssh.ErrCandidateUnverified, err)))
-			if slot.Evidence == nil {
-				continue
-			}
+		failure := "runtime_observation_failed"
+		if err == nil && evidence.ArtifactDigest != slot.Artifact.Digest && slot.LoadedArtifact != nil {
+			_, err = managedssh.VerifyArtifact(*slot.LoadedArtifact, signer.PublicKeys)
+		}
+		if err == nil {
+			failure = observed.AcceptEvidence(evidence, verifiedAt)
+		} else {
 			observed.Evidence = nil
+			if evidence.ArtifactDigest != "" {
+				// Preserve the reported digest as a runtime fact without treating a
+				// failed Pod/Service/host-key binding probe as serving evidence.
+				evidence.KeyExchangeVerified = false
+				observed.Evidence = &evidence
+			}
+		}
+		if err != nil || failure != "" {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("verify slot %s: reason=%s observed_after_check_ms=%d: %w", slot.ID, failure, evidence.ObservedAt.Sub(verifiedAt).Milliseconds(), errors.Join(managedssh.ErrCandidateUnverified, err)))
 		}
 		*state.Slot(slot.ID) = observed
 		state.Revision++
@@ -260,7 +271,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 			reconcileErrors = append(reconcileErrors, err)
 		}
 	}
-	if publisher, supported := reconciler.Runtime.(BindingRuntime); supported && intent.Spec.Enabled && state.Active != nil {
+	if publisher, supported := reconciler.Runtime.(BindingRuntime); supported && intent.Spec.Enabled && state.Active != nil && state.Active.Verified(reconciler.currentTime()) {
 		binding, err := reconciler.Store.GetManagedSSHBinding(tenantID, appID)
 		if err == nil {
 			err = publisher.ReconcilePublicBinding(ctx, binding, state, reconciler.Store.GetEdgeSSHAcknowledgement)

@@ -42,7 +42,7 @@ func (reconciler *Reconciler) retireSlots(ctx context.Context, state managedssh.
 	}
 	now := reconciler.currentTime()
 	if !state.Active.Verified(now) {
-		return managedssh.ErrCandidateUnverified
+		return nil // Await exact active confirmation before making retirement progress.
 	}
 	for index := range state.Draining {
 		slot := state.Draining[index]
@@ -62,7 +62,8 @@ func (reconciler *Reconciler) retireSlots(ctx context.Context, state managedssh.
 			if err != nil {
 				return err
 			}
-			slot.Artifact, slot.Evidence, slot.RetiringAt = artifact, nil, &now
+			slot.BeginApply(artifact, now)
+			slot.RetiringAt = &now
 			state.Draining[index] = slot
 			state.Generation++
 			state.Revision++

@@ -3,21 +3,28 @@ package managedssh
 import "time"
 
 type SlotStatus struct {
-	ID             string             `json:"id"`
-	Namespace      string             `json:"namespace"`
-	Image          string             `json:"image"`
-	HelperDigest   string             `json:"helper_digest"`
-	Architecture   string             `json:"architecture"`
-	ArtifactDigest string             `json:"artifact_digest"`
-	Generation     uint64             `json:"generation"`
-	Target         Target             `json:"target"`
-	Evidence       *CandidateEvidence `json:"evidence,omitempty"`
-	Verified       bool               `json:"verified"`
-	ValidUntil     time.Time          `json:"valid_until"`
-	CreatedAt      time.Time          `json:"created_at"`
-	DrainingSince  *time.Time         `json:"draining_since,omitempty"`
-	RetiringAt     *time.Time         `json:"retiring_at,omitempty"`
-	RetiredAt      *time.Time         `json:"retired_at,omitempty"`
+	LoadedArtifactDigest string             `json:"loaded_artifact_digest,omitempty"`
+	LoadedGeneration     uint64             `json:"loaded_generation,omitempty"`
+	LastValidEvidence    *CandidateEvidence `json:"last_valid_evidence,omitempty"`
+	PendingApply         *ApplyProgress     `json:"pending_apply,omitempty"`
+	ConvergenceState     string             `json:"convergence_state"`
+	Serving              bool               `json:"serving"`
+	VerificationFailure  string             `json:"verification_failure,omitempty"`
+	ID                   string             `json:"id"`
+	Namespace            string             `json:"namespace"`
+	Image                string             `json:"image"`
+	HelperDigest         string             `json:"helper_digest"`
+	Architecture         string             `json:"architecture"`
+	ArtifactDigest       string             `json:"artifact_digest"`
+	Generation           uint64             `json:"generation"`
+	Target               Target             `json:"target"`
+	Evidence             *CandidateEvidence `json:"evidence,omitempty"`
+	Verified             bool               `json:"verified"`
+	ValidUntil           time.Time          `json:"valid_until"`
+	CreatedAt            time.Time          `json:"created_at"`
+	DrainingSince        *time.Time         `json:"draining_since,omitempty"`
+	RetiringAt           *time.Time         `json:"retiring_at,omitempty"`
+	RetiredAt            *time.Time         `json:"retired_at,omitempty"`
 }
 
 type ControlStatus struct {
@@ -57,5 +64,21 @@ func (state ControlState) PublicStatus(now time.Time) ControlStatus {
 }
 
 func (slot ServingSlot) PublicStatus(now time.Time) SlotStatus {
-	return SlotStatus{ID: slot.ID, Namespace: slot.Namespace, Image: slot.Release.Image, HelperDigest: slot.Release.HelperDigest, Architecture: slot.Release.Architecture, ArtifactDigest: slot.Artifact.Digest, Generation: slot.Artifact.Configuration.Generation, Target: slot.Artifact.Configuration.Target, Evidence: slot.Evidence, Verified: slot.RetiringAt == nil && slot.RetiredAt == nil && slot.Verified(now), ValidUntil: slot.Artifact.Configuration.ValidUntil, CreatedAt: slot.CreatedAt, DrainingSince: slot.DrainingSince, RetiringAt: slot.RetiringAt, RetiredAt: slot.RetiredAt}
+	status := SlotStatus{ID: slot.ID, Namespace: slot.Namespace, Image: slot.Release.Image, HelperDigest: slot.Release.HelperDigest, Architecture: slot.Release.Architecture, ArtifactDigest: slot.Artifact.Digest, Generation: slot.Artifact.Configuration.Generation, Target: slot.Artifact.Configuration.Target, Evidence: slot.Evidence, Verified: slot.RetiringAt == nil && slot.RetiredAt == nil && slot.Verified(now), ValidUntil: slot.Artifact.Configuration.ValidUntil, CreatedAt: slot.CreatedAt, DrainingSince: slot.DrainingSince, RetiringAt: slot.RetiringAt, RetiredAt: slot.RetiredAt}
+	status.PendingApply, status.LastValidEvidence = slot.PendingApply, slot.LastValidEvidence
+	if slot.LoadedArtifact != nil {
+		status.LoadedArtifactDigest, status.LoadedGeneration = slot.LoadedArtifact.Digest, slot.LoadedArtifact.Configuration.Generation
+	}
+	if slot.Evidence != nil && slot.Evidence.ArtifactDigest != status.LoadedArtifactDigest {
+		status.LoadedArtifactDigest, status.LoadedGeneration = slot.Evidence.ArtifactDigest, 0
+	}
+	status.Serving = slot.RetiringAt == nil && slot.RetiredAt == nil && slot.Serving(now)
+	status.VerificationFailure = slot.ServingFailure(now)
+	status.ConvergenceState = "rejected"
+	if status.Verified {
+		status.ConvergenceState = "applied"
+	} else if slot.PendingApply != nil && slot.PendingApply.Deadline.After(now) && (status.Serving || (slot.Evidence == nil && slot.LastValidEvidence == nil)) {
+		status.ConvergenceState = "pending_apply"
+	}
+	return status
 }

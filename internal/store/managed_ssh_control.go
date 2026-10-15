@@ -109,6 +109,13 @@ func validateManagedSSHControlChange(expected uint64, previous managedssh.Contro
 		oldSlots[slot.ID] = slot
 	}
 	for _, slot := range next.Slots() {
+		old := oldSlots[slot.ID]
+		if loaded := slot.LoadedArtifact; loaded != nil && !reflect.DeepEqual(*loaded, slot.Artifact) && !reflect.DeepEqual(*loaded, old.Artifact) && (old.LoadedArtifact == nil || !reflect.DeepEqual(*loaded, *old.LoadedArtifact)) {
+			return ErrConflict // A receipt cannot introduce an unknown historical artifact.
+		}
+		if old.PendingApply != nil && slot.PendingApply != nil && *old.PendingApply != *slot.PendingApply {
+			return ErrConflict // Retrying or superseding a publication cannot reset its clock.
+		}
 		if old, exists := oldSlots[slot.ID]; exists {
 			if old.Namespace != slot.Namespace || old.Release != slot.Release || old.Artifact.Configuration.Target != slot.Artifact.Configuration.Target || !old.CreatedAt.Equal(slot.CreatedAt) || old.Artifact.Configuration.Generation > slot.Artifact.Configuration.Generation {
 				return ErrConflict
