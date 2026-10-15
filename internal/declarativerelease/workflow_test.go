@@ -168,6 +168,17 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		}
 	}
 	cpuPolicy := yamlMappingValue(t, jobs, "managed_postgres_cpu_policy")
+	// Both lanes mutate the controller but are independent release intents.
+	// GitHub's default single pending slot lets a no-op configuration job
+	// cancel an already-built executable release before it gets a runner.
+	for _, name := range []string{"managed_postgres_cpu_policy", "deploy_controller"} {
+		concurrency := yamlMappingValue(t, yamlMappingValue(t, jobs, name), "concurrency")
+		if yamlMappingValue(t, concurrency, "group").Value != "fugue-production-controller" ||
+			yamlMappingValue(t, concurrency, "cancel-in-progress").Value != "false" ||
+			yamlMappingValue(t, concurrency, "queue").Value != "max" {
+			t.Fatal("controller configuration and executable lanes must serialize without replacing pending intents")
+		}
+	}
 	for _, key := range yamlMappingKeys(t, cpuPolicy) {
 		if key == "needs" {
 			t.Fatal("CPU policy recovery must not depend on code compilation")
