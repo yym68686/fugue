@@ -1,0 +1,10 @@
+{
+  "schema": "fugue.managed-postgres-cpu-policy/v1",
+  "namespace": "fugue-system",
+  "deployment": "fugue-fugue-controller",
+  "container": "controller",
+  "expectedImage": "ghcr.io/yym68686/fugue-controller@sha256:bd6b75cec862b4a19c5d9e4e27e08aa83005602ae36198e3a07c176ec27a8335",
+  "expectedConfigSha": "9a2b5c066cb9afdc92fb2bddb071d03852f7a677",
+  "cpuRequestUpscale": true,
+  "cpuLimitUpscale": true
+}

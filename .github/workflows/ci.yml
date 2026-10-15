@@ -10,6 +10,57 @@ permissions:
   contents: read
 
 jobs:
+  managed_postgres_cpu_policy:
+    # Configuration recovery stays independent of component compilation.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-controller, cancel-in-progress: false}
+    timeout-minutes: 8
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select the exact independent CPU policy declaration
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/managed-postgres/cpu-upscale-policy.json
+          paths=("$config" scripts/configure_postgres_cpu_policy.py scripts/test_configure_postgres_cpu_policy.py)
+          if ! git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "${paths[@]}" .github/workflows/ci.yml; then
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Test and prepare the image-preserving policy change
+        if: steps.selected.outputs.changed == 'true'
+        run: |
+          python3 -m unittest scripts.test_configure_postgres_cpu_policy
+          python3 -m scripts.configure_postgres_cpu_policy deploy/environments/production/managed-postgres/cpu-upscale-policy.json --evidence "$RUNNER_TEMP/postgres-cpu-policy-prepared.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-postgres-cpu-policy-prepared-${{ github.sha }}
+          path: ${{ runner.temp }}/postgres-cpu-policy-prepared.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Apply the fenced CPU policy and verify controller availability
+        if: steps.selected.outputs.changed == 'true'
+        run: |
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/managed-postgres/cpu-upscale-policy.json scripts/configure_postgres_cpu_policy.py scripts/test_configure_postgres_cpu_policy.py .github/workflows/ci.yml
+          python3 -m scripts.configure_postgres_cpu_policy deploy/environments/production/managed-postgres/cpu-upscale-policy.json --apply --evidence "$RUNNER_TEMP/postgres-cpu-policy-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-postgres-cpu-policy-result-${{ github.sha }}
+          path: ${{ runner.temp }}/postgres-cpu-policy-result.json
+          if-no-files-found: warn
+          retention-days: 30
+
   managed_ssh_identity_maintenance:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
