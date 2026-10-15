@@ -2550,7 +2550,36 @@ jobs:
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-node-resource-policy, cancel-in-progress: false}
-    timeout-minutes: 45
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Publish and verify independent node resource policy
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          paths=(deploy/environments/production/node-resource-policy scripts/publish_node_resource_policy.py scripts/install_local_node_resource_policy.py scripts/test_publish_node_resource_policy.py)
+          if [[ "$EVENT_NAME" == "push" ]] && git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then exit 0; fi
+          if ! python3 -c 'import json,sys; sys.exit(0 if json.load(open("deploy/environments/production/node-resource-policy/targets.json"))["enabled"] else 1)'; then exit 0; fi
+          git fetch origin main
+          if ! git diff --quiet HEAD origin/main -- "${paths[@]}"; then
+            echo "A newer node resource policy supersedes this run."
+            exit 0
+          fi
+          python3 -m unittest scripts.test_publish_node_resource_policy scripts.test_install_local_node_resource_policy
+          python3 scripts/install_local_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json
+          python3 scripts/install_local_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply
+
+  node_resource_policy_tasks:
+    # Persisted intent remains writable even when a component build fails.
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency: {group: fugue-node-resource-policy-tasks, cancel-in-progress: false}
+    timeout-minutes: 60
     permissions: {contents: read}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -2571,10 +2600,8 @@ jobs:
             exit 0
           fi
           python3 -m unittest scripts.test_publish_node_resource_policy scripts.test_install_local_node_resource_policy
-          python3 scripts/install_local_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json
-          python3 scripts/install_local_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply
           python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --upgrade-updaters --wait-seconds 2100
-          python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply --wait-seconds 300
+          python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply --wait-seconds 900
 
   storage_policy:
     # Writer activation and budget recovery are independent of code builds.
