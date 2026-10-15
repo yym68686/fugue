@@ -301,9 +301,7 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 			entry.Failure = captureErr.Error()
 			entry.Compiled = compiledPhysicalDNSSelection{}
 		}
-		s.dynamicQuality.mu.Lock()
-		s.dynamicQuality.entries[job.Key] = entry
-		s.dynamicQuality.mu.Unlock()
+		s.dynamicQuality.finish(job.Key, entry, job.Route.Policy, time.Now().UTC())
 	})
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -313,7 +311,7 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 		entry := s.dynamicQuality.entries[job.Key]
 		s.dynamicQuality.mu.Unlock()
 		if entry.Failure != "" && s.log != nil {
-			s.log.Printf("dynamic quality evidence unavailable; hostname=%s dns_node=%s error=%s", job.Route.Hostname, job.NodeID, entry.Failure)
+			s.log.Printf("dynamic quality refresh failed; hostname=%s dns_node=%s error=%s", job.Route.Hostname, job.NodeID, entry.Failure)
 		}
 	}
 	byHost := map[string][]dynamicQualityJob{}
@@ -362,6 +360,19 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 	return nil
 }
 
+// Failed refreshes retain same-context evidence only until its original expiry.
+// applyPhysicalDNSSelections still revalidates the complete receipt before use.
+func (state *dynamicQualityState) finish(key string, entry dynamicQualityEntry, policy model.PhysicalEdgeQualityPolicy, now time.Time) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	previous := state.entries[key]
+	if entry.Failure != "" && entry.Compiled.Selection == nil && entry.ContextDigest != "" &&
+		dynamicQualityEntryUnavailable(previous, entry.ContextDigest, nil, policy, now) == "" {
+		entry.Compiled = previous.Compiled
+	}
+	state.entries[key] = entry
+}
+
 func dynamicQualityEntryUnavailable(entry dynamicQualityEntry, contextDigest string, contextErr error, policy model.PhysicalEdgeQualityPolicy, now time.Time) string {
 	if contextErr != nil {
 		return "configuration_context_unavailable"
@@ -371,6 +382,9 @@ func dynamicQualityEntryUnavailable(entry dynamicQualityEntry, contextDigest str
 	}
 	if entry.Compiled.Selection == nil {
 		return "selection_not_compiled"
+	}
+	if entry.Compiled.Selection.CapturedAt.After(now) {
+		return "selection_evidence_in_future"
 	}
 	if now.Sub(entry.Compiled.Selection.CapturedAt) > time.Duration(policy.EvidenceMaxAgeSeconds)*time.Second {
 		return "selection_evidence_expired"

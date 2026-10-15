@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -246,5 +248,126 @@ func TestDynamicCaptureUnstartedQueriesKeepPriorityAfterBudgetExhaustion(t *test
 	next := state.schedule(jobs, 2, now.Add(time.Minute))
 	if len(next) != 2 || next[0].Key != "second" || next[1].Key != "third" {
 		t.Fatal("unstarted domains were delayed as if actually probed", next)
+	}
+}
+
+func TestDynamicQualityRefreshFailureRetainsValidCachedSelection(t *testing.T) {
+	now := time.Now().UTC()
+	compiled := compiledPhysicalDNSSelection{Selection: &model.DNSPhysicalSelection{CapturedAt: now.Add(-time.Minute)}, Evidence: json.RawMessage(`{"receipt":"original"}`)}
+	state := dynamicQualityState{entries: map[string]dynamicQualityEntry{
+		"job": {ContextDigest: "same", Compiled: compiled},
+	}}
+	policy := model.PhysicalEdgeQualityPolicy{EvidenceMaxAgeSeconds: 120}
+	for _, elapsed := range []time.Duration{0, 30 * time.Second, time.Minute} {
+		at := now.Add(elapsed)
+		state.started("job", at)
+		state.finish("job", dynamicQualityEntry{Attempted: at, ContextDigest: "same", Failure: "probe timeout"}, policy, at)
+		got := state.entries["job"]
+		if !reflect.DeepEqual(got.Compiled, compiled) || got.Failure != "probe timeout" || !got.Attempted.Equal(at) {
+			t.Fatalf("refresh changed evidence or lost the failed attempt: %+v", got)
+		}
+	}
+	expired := now.Add(time.Minute + time.Nanosecond)
+	state.finish("job", dynamicQualityEntry{Attempted: expired, ContextDigest: "same", Failure: "probe timeout"}, policy, expired)
+	if got := state.entries["job"]; got.Compiled.Selection != nil || len(got.Compiled.Evidence) != 0 {
+		t.Fatal("repeated refresh failures extended the original evidence expiry", got)
+	}
+}
+
+func TestDynamicQualityRefreshFailureDropsChangedOrExpiredSelection(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name string
+		ctx  string
+		at   time.Time
+	}{
+		{name: "context changed", ctx: "new", at: now.Add(-time.Minute)},
+		{name: "context missing", at: now.Add(-time.Minute)},
+		{name: "evidence expired", ctx: "same", at: now.Add(-3 * time.Minute)},
+		{name: "evidence in future", ctx: "same", at: now.Add(time.Nanosecond)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := dynamicQualityState{entries: map[string]dynamicQualityEntry{
+				"job": {ContextDigest: "same", Compiled: compiledPhysicalDNSSelection{Selection: &model.DNSPhysicalSelection{CapturedAt: tc.at}}},
+			}}
+			state.finish("job", dynamicQualityEntry{Attempted: now, ContextDigest: tc.ctx, Failure: "probe timeout"}, model.PhysicalEdgeQualityPolicy{EvidenceMaxAgeSeconds: 120}, now)
+			got := state.entries["job"]
+			if got.Compiled.Selection != nil {
+				t.Fatalf("invalid cached evidence survived %s: %+v", tc.name, got)
+			}
+		})
+	}
+}
+
+func TestDynamicQualitySuccessfulRefreshReplacesRetainedEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	state := dynamicQualityState{entries: map[string]dynamicQualityEntry{
+		"job": {ContextDigest: "same", Failure: "probe timeout", Compiled: compiledPhysicalDNSSelection{Selection: &model.DNSPhysicalSelection{CapturedAt: now.Add(-time.Minute)}}},
+	}}
+	entry := dynamicQualityEntry{Attempted: now, ContextDigest: "same", Compiled: compiledPhysicalDNSSelection{Selection: &model.DNSPhysicalSelection{CapturedAt: now}, Evidence: json.RawMessage(`{"receipt":"new"}`)}}
+	state.finish("job", entry, model.PhysicalEdgeQualityPolicy{EvidenceMaxAgeSeconds: 120}, now)
+	if !reflect.DeepEqual(state.entries["job"], entry) {
+		t.Fatal("successful refresh retained old evidence or failure", state.entries["job"])
+	}
+}
+
+func TestDynamicQualityRetainedEvidenceRequiresPublicationRevalidation(t *testing.T) {
+	for _, scenario := range []string{"valid", "tampered receipt", "removed candidate", "changed owner", "expired"} {
+		t.Run(scenario, func(t *testing.T) {
+			receipt, route := businessPublicationFixture(t)
+			route.BusinessExploration = nil
+			route.PathPrefix = ""
+			captured := receipt.Snapshot.CapturedAt
+			selection, err := compileBoundPhysicalQualitySelection(receipt, captured)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			projection, policy, _, _ := physicalQueryProjectionFixture(t)
+			policy.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{route}
+			policy.DynamicQuality = &platformconfig.DynamicQualityPolicy{Mode: "all_dynamic", Policy: route.Policy, RefreshQueriesPerCycle: 4, RefreshConcurrency: 2}
+			key := "dns-a\x00" + route.Hostname
+			state := dynamicQualityState{entries: map[string]dynamicQualityEntry{
+				key: {ContextDigest: "same", Compiled: compiledPhysicalDNSSelection{Selection: selection, Evidence: raw}},
+			}}
+			now := captured.Add(time.Second)
+			state.finish(key, dynamicQualityEntry{Attempted: now, ContextDigest: "same", Failure: "probe timeout"}, route.Policy, now)
+			compiled := state.entries[key].Compiled
+			if compiled.Selection == nil {
+				t.Fatal("refresh failure discarded the valid selection")
+			}
+			switch scenario {
+			case "tampered receipt":
+				receipt.Snapshot.Hostname = "foreign.example.test"
+				compiled.Evidence, _ = json.Marshal(receipt)
+			case "removed candidate":
+				projection.RuntimeSnapshot.DNSSelections[0].Candidates = nil
+			case "changed owner":
+				projection.Intent.Routes[0].PathPrefix = "/different"
+			case "expired":
+				now = captured.Add(time.Duration(route.Policy.EvidenceMaxAgeSeconds+1) * time.Second)
+			}
+			before, _ := json.Marshal(projection)
+			err = applyPhysicalDNSSelections(&projection, policy, map[string]compiledPhysicalDNSSelection{key: compiled}, now)
+			if scenario == "valid" {
+				if err != nil {
+					t.Fatal("valid retained evidence could not preserve dynamic quality", err)
+				}
+				if projection.Policy.DNSAnswerRules[0].SelectionMode != model.DNSAnswerPolicyKindPhysicalQuality || !projection.RuntimeSnapshot.DNSSelections[0].PhysicalSelection.CapturedAt.Equal(captured) {
+					t.Fatal("retained evidence changed policy mode or freshness")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("cached selection bypassed publication validation")
+			}
+			after, _ := json.Marshal(projection)
+			if string(before) != string(after) {
+				t.Fatal("rejected cache entry partially changed the projection")
+			}
+		})
 	}
 }
