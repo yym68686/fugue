@@ -118,3 +118,15 @@ The regression test demonstrates the old five-second delay, prompt recovery
 only after a fresh signed and measured grant, and bounded retry without extending
 the previous permission when the authority is unavailable. The declarative
 runtime-agent-canary lane publishes the change for live verification.
+
+
+A follow-up sample still showed one heartbeat arriving while fresh authorization
+was being acquired. The selected transport now allows an unsent request to join
+one acquisition already in progress, within its existing client/context timeout.
+It then re-reads trust, permission, expiry and fresh measurements before making
+its only network attempt. Requests never start acquisitions or extend old grants;
+failed, unmeasured, expired or revoked replacements remain unavailable. A request
+already sent to an Edge is never replayed. Acquisition requests bypass this wait
+to prevent waiting on their own completion, and valid selected requests retain
+the immediate path. This removes a local pre-send race while preserving genuine
+authority failures; it cannot guarantee availability when no eligible Edge exists.

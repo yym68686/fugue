@@ -36,6 +36,7 @@ type Control struct {
 	options       ControlOptions
 	checkpoint    clientCheckpoint
 	keys          map[string]TrustKey
+	refreshDone   chan struct{}
 	selector      *Selector
 	selected      *http.Client
 	acquisition   *http.Client
@@ -94,6 +95,7 @@ func NewControl(o ControlOptions) (*Control, error) {
 	if err != nil {
 		return nil, err
 	}
+	m.selected.Transport.(*transport).refreshDone = m.pendingRefresh
 	m.acquisition = &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{Proxy: nil, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, ForceAttemptHTTP2: true, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 20 * time.Second, IdleConnTimeout: 30 * time.Second, MaxIdleConns: 4, MaxIdleConnsPerHost: 2}}
 	m.fetch = m.fetchGrant
 	m.probe = m.probeCandidate
@@ -105,6 +107,12 @@ func (m *Control) currentKeys() map[string]TrustKey {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.keys
+}
+
+func (m *Control) pendingRefresh() <-chan struct{} {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.refreshDone
 }
 
 func (m *Control) HTTPClient(legacy *http.Client) *http.Client {
@@ -222,7 +230,7 @@ func (m *Control) fetchGrant(ctx context.Context, hint string) ([]byte, error) {
 }
 
 func (m *Control) fetchGrantThrough(ctx context.Context, hint string, client *http.Client) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.options.Origin+"/v1/agent/edge-candidates", nil)
+	req, err := http.NewRequestWithContext(context.WithValue(ctx, grantAcquisitionContextKey{}, true), http.MethodGet, m.options.Origin+"/v1/agent/edge-candidates", nil)
 	if err != nil {
 		return nil, errors.New("Agent Edge acquisition request invalid")
 	}
@@ -258,6 +266,16 @@ func (m *Control) Step(ctx context.Context) error {
 	if permissionErr != nil || !m.now().Before(m.refreshAt) {
 		attemptedRefresh = true
 		m.refreshUrgent = false
+		done := make(chan struct{})
+		m.mu.Lock()
+		m.refreshDone = done
+		m.mu.Unlock()
+		defer func() {
+			m.mu.Lock()
+			m.refreshDone = nil
+			close(done)
+			m.mu.Unlock()
+		}()
 		hint := ""
 		if choice, err := m.selector.Current(keys, m.now()); err == nil {
 			hint = choice.Primary.EdgeID

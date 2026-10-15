@@ -25,13 +25,18 @@ func NewHTTPClient(selector *Selector, keys func() map[string]TrustKey, timeout 
 		Transport: &transport{selector: selector, keys: keys, now: time.Now, pools: map[string]*http.Transport{}}}, nil
 }
 
+// grantAcquisitionContextKey prevents acquisition from waiting for itself when
+// its selected Edge becomes unavailable between selection and dispatch.
+type grantAcquisitionContextKey struct{}
+
 type transport struct {
-	selector *Selector
-	keys     func() map[string]TrustKey
-	now      func() time.Time
-	mu       sync.Mutex
-	digest   string
-	pools    map[string]*http.Transport
+	selector    *Selector
+	refreshDone func() <-chan struct{}
+	keys        func() map[string]TrustKey
+	now         func() time.Time
+	mu          sync.Mutex
+	digest      string
+	pools       map[string]*http.Transport
 	// Tests supply a trusted local CA and map synthetic public endpoints to
 	// local listeners. Production uses system roots and an ordinary dialer.
 	roots *x509.CertPool
@@ -47,6 +52,22 @@ func (t *transport) RoundTrip(request *http.Request) (*http.Response, error) {
 	}
 	keys, now := t.keys(), t.now()
 	choice, err := t.selector.Current(keys, now)
+	if err != nil && request != nil && t.refreshDone != nil && request.Context().Value(grantAcquisitionContextKey{}) == nil {
+		// No request bytes have been sent. Join at most the refresh already
+		// in progress, within the client's existing timeout, then recheck all
+		// authority and measurement rules. This never starts a refresh or
+		// retries a request which may have reached the server.
+		if done := t.refreshDone(); done != nil {
+			select {
+			case <-request.Context().Done():
+				return reject(request.Context().Err())
+			case <-done:
+			}
+		}
+		// The acquisition may have completed between Current and refreshDone.
+		keys, now = t.keys(), t.now()
+		choice, err = t.selector.Current(keys, now)
+	}
 	if err != nil {
 		return reject(err)
 	}
