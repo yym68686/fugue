@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -31,6 +32,25 @@ func (s *Store) recordEdgeNetworkSamples(ctx context.Context, samples []model.Ed
 		}
 	}
 	if s.usingDatabase() {
+		// A heartbeat may carry 128 observations. Send one bounded INSERT so
+		// the caller's deadline does not pay one database round trip per row.
+		// Keep retention and insertion atomic and preserve first-write wins.
+		var query strings.Builder
+		query.WriteString("INSERT INTO fugue_edge_network_samples (edge_id, id, hostname, observed_at, sample_json) VALUES ")
+		args := make([]any, 0, len(samples)*5)
+		for i, sample := range samples {
+			raw, err := json.Marshal(sample)
+			if err != nil {
+				return err
+			}
+			if i > 0 {
+				query.WriteString(", ")
+			}
+			base := len(args)
+			fmt.Fprintf(&query, "($%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5)
+			args = append(args, sample.EdgeID, sample.ID, networkObservationHostnameKey(sample.Hostname, witnesses), sample.ObservedAt, raw)
+		}
+		query.WriteString(" ON CONFLICT (edge_id, id) DO NOTHING")
 		transaction, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -41,12 +61,8 @@ func (s *Store) recordEdgeNetworkSamples(ctx context.Context, samples []model.Ed
 				return err
 			}
 		}
-		for _, sample := range samples {
-			raw, err := json.Marshal(sample)
-			if err != nil {
-				return err
-			}
-			if _, err := transaction.ExecContext(ctx, `INSERT INTO fugue_edge_network_samples (edge_id, id, hostname, observed_at, sample_json) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (edge_id, id) DO NOTHING`, sample.EdgeID, sample.ID, networkObservationHostnameKey(sample.Hostname, witnesses), sample.ObservedAt, raw); err != nil {
+		if len(samples) > 0 {
+			if _, err := transaction.ExecContext(ctx, query.String(), args...); err != nil {
 				return err
 			}
 		}

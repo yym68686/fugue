@@ -79,3 +79,20 @@ report candidate coverage and content inclusion. `limit` supports 1–200;
 `include_content=true` defaults to five candidates per kind and rejects larger
 explicit limits. Individual artifact retrieval remains available. These are
 OpenAPI-declared diagnostic semantics, not changes to serving authorization.
+
+
+## Bounded network-observation writes
+
+Post-rollout verification found a 65-witness persistence deadline on the existing
+one-second write budget. `RecordEdgeNetworkSamples` previously executed one INSERT
+per sample (up to 128), in addition to retention and transaction round trips.
+It now sends one parameterized, bounded multi-row INSERT. The original transaction,
+retention delete, `ON CONFLICT DO NOTHING`, validation, witness namespace and
+128-sample cap are preserved. Serialization happens before opening the transaction.
+No timeout is extended and no runtime evidence is cached or synthesized.
+
+Real PostgreSQL tests cover a full 128-entry batch, duplicate keys within and across
+batches, parity with file storage, 65 route witnesses, collection isolation, empty
+batch pruning, constraint-failure rollback of both inserts and pruning, cancellation,
+and rejection above the cap. A separate SQL expectation checks the single-INSERT
+round-trip contract. Long-term deadline rates remain part of rollout monitoring.
