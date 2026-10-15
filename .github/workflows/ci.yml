@@ -319,8 +319,31 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  managed_ssh_runtime:
+  managed_ssh_runtime_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      changed: ${{ steps.selected.outputs.changed }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select SSH configuration before acquiring the publication fence
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/managed-ssh/runtime.json scripts/reconcile_managed_ssh_runtime.py scripts/test_reconcile_managed_ssh_runtime.py; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  managed_ssh_runtime:
+    needs: managed_ssh_runtime_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.managed_ssh_runtime_plan.outputs.changed == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-managed-ssh-runtime, cancel-in-progress: false}

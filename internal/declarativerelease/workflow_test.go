@@ -157,7 +157,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_image_gc", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_configuration_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_slot_retirement", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_offline_configuration", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "managed_postgres_cpu_policy", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_transport", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_configuration_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_slot_retirement", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_offline_configuration", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "managed_postgres_cpu_policy", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_runtime_plan", "managed_ssh_transport", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -244,9 +244,16 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		}
 	}
 	sshRuntime := yamlMappingValue(t, jobs, "managed_ssh_runtime")
-	for _, key := range yamlMappingKeys(t, sshRuntime) {
-		if key == "needs" {
-			t.Fatal("SSH runtime recovery must remain independent of code builds")
+	sshRuntimePlan := yamlMappingValue(t, jobs, "managed_ssh_runtime_plan")
+	if yamlMappingValue(t, sshRuntime, "needs").Value != "managed_ssh_runtime_plan" || !strings.Contains(yamlMappingValue(t, sshRuntime, "if").Value, "needs.managed_ssh_runtime_plan.outputs.changed == 'true'") {
+		t.Fatal("SSH runtime must select configuration before acquiring its concurrency fence")
+	}
+	if yamlMappingValue(t, sshRuntimePlan, "runs-on").Value != "ubuntu-latest" {
+		t.Fatal("SSH runtime selection must not occupy the production runner")
+	}
+	for _, key := range yamlMappingKeys(t, sshRuntimePlan) {
+		if key == "needs" || key == "concurrency" || key == "environment" {
+			t.Fatal("SSH runtime selection must remain independent of code builds and writer fences")
 		}
 	}
 	if yamlMappingValue(t, sshRuntime, "environment").Value != "production" {
