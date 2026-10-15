@@ -2569,9 +2569,9 @@ jobs:
             echo "A newer node resource policy supersedes this run."
             exit 0
           fi
-          python3 -m unittest scripts.test_publish_node_resource_policy
-          sudo -n python3 scripts/install_local_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json
-          sudo -n python3 scripts/install_local_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply
+          python3 -m unittest scripts.test_publish_node_resource_policy scripts.test_install_local_node_resource_policy
+          python3 scripts/install_local_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json
+          python3 scripts/install_local_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply
           python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --upgrade-updaters --wait-seconds 2100
           python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply --wait-seconds 300
 
