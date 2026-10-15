@@ -10,8 +10,8 @@ import (
 	"fugue/internal/edgetopology"
 )
 
-func TestNeutralDNSCandidateIsPrivateAndKeepsIndependentState(t *testing.T) {
-	f, err := os.Open("../../deploy/releases/components.json")
+func TestRetiredNeutralDNSCandidateTemplatesKeepIndependentState(t *testing.T) {
+	f, err := os.Open("../../deploy/releases/retired-dns-components.json")
 	if err != nil {
 		t.Fatal(err)
 	}

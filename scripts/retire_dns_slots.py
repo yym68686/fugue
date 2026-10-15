@@ -21,11 +21,13 @@ def digest(value):
 
 
 def validate(config):
-    fields = {'schema', 'generation', 'namespace', 'origin', 'api_address', 'replacements', 'workloads'}
+    fields = {'schema', 'generation', 'namespace', 'origin', 'api_address', 'replacements', 'workloads', 'quiescent_services', 'verifier_revision'}
     if set(config) != fields or config['schema'] != 'fugue.dns-slot-retirement/v1':
         raise ValueError('complete DNS slot retirement declaration required')
     if type(config['generation']) is not int or config['generation'] < 1:
         raise ValueError('positive retirement generation required')
+    if not re.fullmatch(r'[a-f0-9]{40}', config['verifier_revision']):
+        raise ValueError('verified reader source revision required')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', config['namespace']):
         raise ValueError('canonical namespace required')
     if not isinstance(config['workloads'], list) or not 1 <= len(config['workloads']) <= 32:
@@ -55,6 +57,12 @@ def validate(config):
         for key in ['active_image', 'standby_image']:
             if not re.fullmatch(r'[^\s@]+@sha256:[a-f0-9]{64}', replacement[key]):
                 raise ValueError('immutable replacement image required')
+    services = config['quiescent_services']
+    if not isinstance(services, list) or len(services) > 32 or len({s['name'] for s in services}) != len(services):
+        raise ValueError('bounded unique internal quiescent Services required')
+    for service in services:
+        if set(service) != {'name', 'uid', 'spec_digest'} or not re.fullmatch(r'[a-f0-9-]{36}', service['uid']) or not re.fullmatch(r'sha256:[a-f0-9]{64}', service['spec_digest']):
+            raise ValueError('quiescent Service identity and exact spec required')
     return config
 
 
@@ -100,11 +108,17 @@ def retirement_patch(workload, item, config):
             {'op': 'replace', 'path': '/spec', 'value': desired}]
 
 
-def ensure_unselected(workload, services):
+def ensure_unselected(workload, services, quiescent=()):
     labels = workload['spec']['template']['metadata']['labels']
+    declared = {entry['name']: entry for entry in quiescent}
     for service in services:
-        selector = service.get('spec', {}).get('selector')
+        spec = service.get('spec', {})
+        selector = spec.get('selector')
         if selector and all(labels.get(key) == value for key, value in selector.items()):
+            expected = declared.get(service['metadata']['name'])
+            if expected and service['metadata'].get('uid') == expected['uid'] and digest(spec) == expected['spec_digest']:
+                if spec.get('type') == 'ClusterIP' and not spec.get('externalIPs') and not any(port.get('nodePort') or port.get('port') == 53 for port in spec.get('ports', [])):
+                    continue
             raise ValueError('obsolete DNS slot is still selected by Service ' + service['metadata']['name'])
 
 
@@ -142,7 +156,7 @@ def inspect_workload(config, item):
     workload = transport.read_json('get', item['kind'], item['name'], '-n', namespace, '-o', 'json')
     operations = retirement_patch(workload, item, config)
     services = transport.read_json('get', 'services', '-n', namespace, '-o', 'json')['items']
-    ensure_unselected(workload, services)
+    ensure_unselected(workload, services, config['quiescent_services'])
     selector = workload['spec']['selector']['matchLabels']
     query = ','.join(key + '=' + value for key, value in sorted(selector.items()))
     pods = transport.read_json('get', 'pods', '-n', namespace, '-l', query, '-o', 'json')['items']
@@ -163,7 +177,9 @@ def inspect_workload(config, item):
             raise ValueError('obsolete selector includes foreign Pods')
         if operations and pod.get('status', {}).get('phase') == 'Running':
             raw = transport.kubectl('exec', '-n', namespace, pod['metadata']['name'], '-c', 'dns', '--', 'cat', '/proc/net/tcp', '/proc/net/tcp6')
-            if len(raw) > 2 << 20 or active_dns_connections(raw):
+            tcp_ports = {port['containerPort'] for container in pod['spec']['containers'] for port in container.get('ports', [])
+                         if port.get('protocol', 'TCP') == 'TCP' and port.get('name') == 'dns-tcp'}
+            if not tcp_ports or len(raw) > 2 << 20 or active_dns_connections(raw, tcp_ports):
                 raise ValueError('obsolete DNS slot still has active TCP connections')
     return workload, operations, pods
 

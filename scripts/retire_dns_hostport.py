@@ -64,7 +64,7 @@ def port_patch(workload, config):
             {'op': 'replace', 'path': '/spec/template/spec/containers/0/ports', 'value': updated}]
 
 
-def active_dns_connections(raw):
+def active_dns_connections(raw, ports=(53,)):
     active = 0
     for line in raw.splitlines():
         columns = line.split()
@@ -72,7 +72,7 @@ def active_dns_connections(raw):
             continue
         if len(columns) < 4 or ':' not in columns[1]:
             raise ValueError('DNS connection observation is malformed')
-        if columns[1].rsplit(':', 1)[1].upper() == '0035' and columns[3] not in {'0A', '06'}:
+        if int(columns[1].rsplit(':', 1)[1], 16) in ports and columns[3] not in {'0A', '06'}:
             active += 1
     return active
 

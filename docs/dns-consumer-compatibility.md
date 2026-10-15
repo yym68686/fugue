@@ -67,7 +67,10 @@ candidate while the previous positive release continues serving unchanged.
 production configuration lane. It verifies an active public backend and a distinct
 standby against the current signed release, exact Pod identities, checkpoint
 signatures and complete record readiness. It rejects any obsolete workload still
-selected by a Service, using host listeners, or holding active TCP DNS connections.
+selected by a Service unless that exact internal validation/health Service is
+explicitly declared quiescent by UID and spec digest. Public port 53, external IPs
+and NodePorts cannot use this exception. Host listeners and active TCP DNS
+connections also block retirement, including alternate DNS validation ports.
 Each mutation tests the workload UID, resource version and complete prior spec.
 DaemonSets receive an impossible scheduling constraint; Deployments scale to zero.
 Neither operation deletes checkpoint volumes or changes an image, signed artifact,
@@ -75,8 +78,14 @@ record policy or public selector. Replays require the exact recorded stopped spe
 The lane shares the DNS transport concurrency fence and retains prewrite and result
 evidence independently of code compilation. Reactivation requires a fresh explicit
 release and compatible executor; retired slots leave the active component registry.
+Their retained templates and isolation tests use `retired-dns-components.json`,
+which the production planner does not load. Existing LKG/PVC data and internal
+Service objects are preserved.
 
 Diagnostic DNS listeners can recover through the same signature-verified transport
 handoff as port 53. The listener port is explicitly declared; the backend still
-must own both UDP and TCP DNS on target port 53. An unhealthy predecessor is never
-silently treated as a valid rollback target.
+must own both UDP and TCP DNS on target port 53. Version 3 transport declarations
+can bind multiple independent listener recoveries, each with its own exact old/new
+Pod identities and immutable candidate image. Duplicate listener recovery entries
+are rejected. An unhealthy predecessor is never silently treated as a valid
+rollback target.

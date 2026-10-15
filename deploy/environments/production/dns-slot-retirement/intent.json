@@ -1,0 +1,171 @@
+{
+  "api_address": "15.204.94.71",
+  "generation": 1,
+  "namespace": "fugue-system",
+  "origin": "https://api.fugue.pro",
+  "quiescent_services": [
+    {
+      "name": "fugue-dns-neutral-a-candidate",
+      "spec_digest": "sha256:9ba87a155037d20da3121ea5c692dca2fdf295734da166685fa5e8ef08a7436d",
+      "uid": "bce7accc-5eda-4fa4-841d-07a296577e3c"
+    },
+    {
+      "name": "fugue-dns-neutral-a-candidate-validation",
+      "spec_digest": "sha256:4fe54990ba6e1e91eff63bafdd385bc835bb3e1e962457d82ec8525da5a4bbed",
+      "uid": "9347bda6-376a-4df9-af74-b46b785ad0eb"
+    },
+    {
+      "name": "fugue-dns-neutral-b-candidate",
+      "spec_digest": "sha256:915fafe31b00cf3c657facae325c96e747ef3671b1b15dbe3aa5556aeec038c8",
+      "uid": "7748d9ea-ddac-4a3c-969b-98370f464ad4"
+    },
+    {
+      "name": "fugue-dns-neutral-b-candidate-validation",
+      "spec_digest": "sha256:b3c7a019dbe03bd0569ddd8dffe87db4368172b16a7410156761ddda7c88f877",
+      "uid": "59b11ee1-4f2f-4746-a282-6cfc1c27c8ad"
+    },
+    {
+      "name": "fugue-dns-public-a-candidate",
+      "spec_digest": "sha256:50951a4ddbe4fb24317dd530c5c55622c74b3888d69a370aa841f88014e1da2c",
+      "uid": "21c4f474-410d-4550-9bf9-c94ffb76b6f6"
+    }
+  ],
+  "replacements": [
+    {
+      "active_image": "ghcr.io/yym68686/fugue-edge@sha256:23c3b556502aec1f06286a5f755a9199b3f1794a683309a4982729d0a8f46b45",
+      "active_uid": "204d2793-cde3-4689-9785-20a3e7ac2aa7",
+      "node": "vps-84c8f0a9",
+      "service": "fugue-dns-public-de",
+      "service_uid": "be149bb0-24a0-4835-9f82-40aae5645323",
+      "standby_image": "ghcr.io/yym68686/fugue-edge@sha256:07278b74a2c53a35b07d13e1301b0f0d881ccb4c0a91d6c51449c12c3f54297a",
+      "standby_selector": {
+        "app.kubernetes.io/component": "dns-de-e",
+        "app.kubernetes.io/instance": "fugue",
+        "app.kubernetes.io/name": "fugue"
+      },
+      "standby_uid": "14e8fcf1-8108-4411-8276-6ed40823a583"
+    },
+    {
+      "active_image": "ghcr.io/yym68686/fugue-edge@sha256:2d82a2558236756133c96318b37b5ce2e6151e2968dbfab6b79fa267f58b25a0",
+      "active_uid": "22ce018b-b1cc-464d-8f6e-282beffced2a",
+      "node": "vps-591f4447",
+      "service": "fugue-dns-public-us",
+      "service_uid": "182da187-4dbc-4a7b-a42b-5725d72e0ca1",
+      "standby_image": "ghcr.io/yym68686/fugue-edge@sha256:db1775db90b558bfefb13e1aca03af9d8206b66a8b87d817dd2499c8288feb40",
+      "standby_selector": {
+        "app.kubernetes.io/component": "dns-us-e",
+        "app.kubernetes.io/instance": "fugue",
+        "app.kubernetes.io/name": "fugue"
+      },
+      "standby_uid": "b37d98fd-b59c-4aca-a4b7-4860861094b1"
+    }
+  ],
+  "schema": "fugue.dns-slot-retirement/v1",
+  "verifier_revision": "5424944999799019af59793e127f8e10cf226c78",
+  "workloads": [
+    {
+      "before_spec_digest": "sha256:df29d7a629b4fddbf531364ac1b86caa02359c98374cf9fc3b71fd97fbcfd7f7",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:db9085c2e112b9f45b8c130b00451f4ada4ebbca8ed4f4ff3287720d2c1bfa81",
+      "kind": "DaemonSet",
+      "name": "fugue-dns-de-a",
+      "retired_spec_digest": "sha256:30ce7c4a0f8414f7b917d0c80cdfe59b034fc016e696b04ae570c9d557319dbb",
+      "uid": "61339758-0b7b-4f82-8edf-9cf4e2cd4d0d"
+    },
+    {
+      "before_spec_digest": "sha256:a871120d722b6f3434b53a1f20397c1a8362737f41ff4c4eab18cfacc985c4ef",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:de5205d9603945f9a8012742f0107f59ae49271e073983326f413454f5cd3281",
+      "kind": "DaemonSet",
+      "name": "fugue-dns-de-b",
+      "retired_spec_digest": "sha256:cb5e6d8bc5cdfbf5dd0f00e7574403def1f4dd8ad54bd0c18a35c0768a817a5a",
+      "uid": "28b6ee61-e6f0-4479-a609-150233c21545"
+    },
+    {
+      "before_spec_digest": "sha256:43a787eaa1b2fd2a4346fbaf8b335dc0662a332ab1fce1e79b6300a7381b2d9b",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:1f4b4f60cc27d6a951ce66c87d97b331001e1a97d3238cedc450e05fdd082336",
+      "kind": "DaemonSet",
+      "name": "fugue-dns-de-c",
+      "retired_spec_digest": "sha256:912e6ccca94889d0849562d24ba4323d8faa992420994dd3d2e74c26ff254ad0",
+      "uid": "9358b662-ed3a-4d20-ba28-2bdc0b2475fa"
+    },
+    {
+      "before_spec_digest": "sha256:75baa4112d1653629ef9da0e56082ef1caa88d2d2af32c4a0299e506c96dfe0b",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:da53fa2047f1aa95fe74f5812b351250cd15400b60d0a19fc87e5b38d7025350",
+      "kind": "DaemonSet",
+      "name": "fugue-dns-de-d",
+      "retired_spec_digest": "sha256:4deff1c58cd7effa0b92d7da0396413c1b7a7295ba11c9344d6955816db42c2e",
+      "uid": "e5ea002e-7e28-4df1-88da-1ac9e03ddbed"
+    },
+    {
+      "before_spec_digest": "sha256:aa72d279b685b028164dab94574af287daeb8c80617800274855ace4112a1a1e",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:fe5c2bbcc9c926eda8efb8f6c098324b566d37fbb651f7a4833b7cc5ff86978a",
+      "kind": "Deployment",
+      "name": "fugue-dns-neutral-a-candidate",
+      "retired_spec_digest": "sha256:0195237625563e587e31f6eeb6b4d360131f654de49d5fe87f90044a80a1c965",
+      "uid": "5c159dee-0444-4d02-a465-b6543a890621"
+    },
+    {
+      "before_spec_digest": "sha256:f6659d0e1329935267e8079110c34f4c97c81665b1cac6e6b8607229ba5bb6ee",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:5569266af4b6af5ecd126ed13f7172647e00710753197b6178b4e7d659321578",
+      "kind": "Deployment",
+      "name": "fugue-dns-neutral-b-candidate",
+      "retired_spec_digest": "sha256:e25a788834e49633a1c5dd68a9c1c5f1eaf5135742102565e0d3de8b334f23b8",
+      "uid": "8406ca72-fa19-40fa-924e-1119c5f81e58"
+    },
+    {
+      "before_spec_digest": "sha256:d7b98acf8f5780e86a747357bb535d8feb49919f482ff596ad6dd48c907c1679",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:a8d3456615d57f0ab0dcc895ec3b608b63bb305037c51c70e9e3dd61f02ca10c",
+      "kind": "Deployment",
+      "name": "fugue-dns-public-a-candidate",
+      "retired_spec_digest": "sha256:c0f88d58c738e2fdff9d2da87d5a535325b13f00eadcae2716fba7da5cdf28d1",
+      "uid": "4e0fa13b-eae6-4f57-852e-ec835e197574"
+    },
+    {
+      "before_spec_digest": "sha256:f9f8a5b065056b05fe13456fba84f77d527d9f2f812f38e812417f4d53b45c84",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:87528c08b53d201f95ab7be6e30e7a289af7685a8f3aa2a1e90e48f6722a186b",
+      "kind": "DaemonSet",
+      "name": "fugue-dns-us-a",
+      "retired_spec_digest": "sha256:722b08d7036edb80ca493f614980db3f40fe03258b303975b3d1579b71680b61",
+      "uid": "1ab21ba6-fc74-45f1-b80e-90ba00ac8cd8"
+    },
+    {
+      "before_spec_digest": "sha256:97e2311f0133cbea9bce75a16eaa4465e925878ab50372d64317203a4401e256",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:ab7ec9c1ad2f969598d06f69650bfcfa160212e8d562f8e8805412c6e9c91524",
+      "kind": "DaemonSet",
+      "name": "fugue-dns-us-b",
+      "retired_spec_digest": "sha256:9760f1f65f1cb86f8535b13e0fd5f3e71c4c7257eaf2bdfea7730779762632dc",
+      "uid": "61a5fd4e-87c9-4e1b-9530-e7be9876841a"
+    },
+    {
+      "before_spec_digest": "sha256:11aa0937aa490ccdc23035431e9c206ab059f084f21490c675f5889098c42a21",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:b85d77b32cac4706bc2c27a5109398054211dd97b891138449c0b0aaae0877c3",
+      "kind": "DaemonSet",
+      "name": "fugue-dns-us-c",
+      "retired_spec_digest": "sha256:12b0f6b4083eb2a48bf2e3bff4f84eadbc1663f869566f0cddde2c213d937f72",
+      "uid": "a86b1656-943c-41eb-81a9-d494045324d9"
+    },
+    {
+      "before_spec_digest": "sha256:fea799941a910303f7942c5c71cb8d742f9eee665a9363a7b8471ab806acd4b7",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:6e1a40288c1806c7ffa81e42a90685206fcaec49ffce29a4e9b449b8bcf6ffa8",
+      "kind": "DaemonSet",
+      "name": "fugue-dns-us-d",
+      "retired_spec_digest": "sha256:c900e7611c547f51cf4d32e18a3ef03d8897e60bd49405bfaede7bf54db231ec",
+      "uid": "e03aa763-f331-49b1-8a05-54174089dd5a"
+    },
+    {
+      "before_spec_digest": "sha256:416c65c6ad0ada01207df6c41c382575568d926f41549775c3cf87eb5955b00c",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:210c6e181b1ab6cc3bb4edc5fd88f2edc45821fc5b8001dff7c5e000bb851d89",
+      "kind": "DaemonSet",
+      "name": "fugue-fugue-dns",
+      "retired_spec_digest": "sha256:04b430c4626349089cc7f5f1a32c8d8775df7aebcfd845303aacee67f6d0b464",
+      "uid": "b2559411-6a5b-4b8d-bab7-776498c2d878"
+    },
+    {
+      "before_spec_digest": "sha256:38577e628efaae96caf308ca71c3486e03aa82b9e964b43b6cb0fd1434f3be56",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:2c261e3b55db94fb5ec7ae3c33e7d85694b3d5e2f3e3583084ca5ceadcaefd89",
+      "kind": "DaemonSet",
+      "name": "fugue-fugue-dns-country-de",
+      "retired_spec_digest": "sha256:1a5fd173e5b5953faa5fbf9208e6c1f0331c73cadee1daa8d2aef2803d0e7f88",
+      "uid": "a21b5d35-ca3e-44b3-897c-1786c41576b4"
+    }
+  ]
+}

@@ -24,7 +24,7 @@ class RetirementTests(unittest.TestCase):
                 'before_spec_digest': retirement.digest(workload['spec']),
                 'retired_spec_digest': retirement.digest(retirement.retired_spec(workload))}
         config = {'schema': 'fugue.dns-slot-retirement/v1', 'generation': 1, 'namespace': 'system',
-                  'origin': 'https://api.example.test', 'api_address': '8.8.8.8', 'workloads': [item],
+                  'origin': 'https://api.example.test', 'api_address': '8.8.8.8', 'workloads': [item], 'quiescent_services': [], 'verifier_revision': 'a' * 40,
                   'replacements': [{'node': 'dns-node', 'service': 'public-dns', 'service_uid': '22222222-2222-2222-2222-222222222222',
                                     'active_uid': '33333333-3333-3333-3333-333333333333', 'active_image': 'registry.example/dns@sha256:' + 'b' * 64,
                                     'standby_selector': {'app': 'standby'}, 'standby_uid': '44444444-4444-4444-4444-444444444444',
@@ -93,6 +93,35 @@ class RetirementTests(unittest.TestCase):
             self.assertIn('--dry-run=server', kube.call_args.args)
             self.assertFalse(json.loads(evidence.read_text())['workloads'][0]['applied'])
             self.assertEqual(evidence.stat().st_mode & 0o777, 0o600)
+
+    def test_only_exact_internal_nonpublic_services_can_be_quiesced(self):
+        _, workload, _ = self.fixture()
+        service = {'metadata': {'name': 'validation', 'uid': 'uid'},
+                   'spec': {'selector': {'app': 'obsolete'}, 'type': 'ClusterIP', 'ports': [{'port': 5353}]}}
+        quiescent = [{'name': 'validation', 'uid': 'uid', 'spec_digest': retirement.digest(service['spec'])}]
+        retirement.ensure_unselected(workload, [service], quiescent)
+        for mutation in [lambda s: s['metadata'].update(uid='changed'),
+                         lambda s: s['spec'].update(type='LoadBalancer'),
+                         lambda s: s['spec'].update(externalIPs=['8.8.8.8']),
+                         lambda s: s['spec']['ports'][0].update(port=53)]:
+            changed = copy.deepcopy(service)
+            mutation(changed)
+            with self.assertRaises(ValueError):
+                retirement.ensure_unselected(workload, [changed], quiescent)
+        self.assertEqual(retirement.active_dns_connections('0: 00000000:14E9 00000000:1000 01 rest\n', {5353}), 1)
+
+    def test_even_explicit_quiescence_never_allows_a_public_dns_service(self):
+        _, workload, _ = self.fixture()
+        for spec in [
+            {'type': 'ClusterIP', 'ports': [{'port': 53}]},
+            {'type': 'ClusterIP', 'externalIPs': ['8.8.8.8'], 'ports': [{'port': 5353}]},
+            {'type': 'NodePort', 'ports': [{'port': 5353, 'nodePort': 30053}]},
+        ]:
+            spec['selector'] = {'app': 'obsolete'}
+            service = {'metadata': {'name': 'listener', 'uid': 'uid'}, 'spec': spec}
+            quiescent = [{'name': 'listener', 'uid': 'uid', 'spec_digest': retirement.digest(spec)}]
+            with self.assertRaises(ValueError):
+                retirement.ensure_unselected(workload, [service], quiescent)
 
     def test_no_write_without_both_verified_replacements(self):
         config, _, _ = self.fixture()
