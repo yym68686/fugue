@@ -1027,3 +1027,39 @@ func TestBatchExporterFlushesByBytesBeforeRecordLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestReplayableAdmissionPreservesCapacityAndDoesNotReportLoss(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"slots", Config{Enabled: true, QueueSize: 8, MemoryLimitBytes: 1 << 20}},
+		{"bytes", Config{Enabled: true, QueueSize: 100, MemoryLimitBytes: 4096}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewPipeline(tc.cfg, nil)
+			event := Event{Kind: EventKindLog, Source: "cursor", Message: strings.Repeat("pending", 60)}
+			for i := 0; i < 1000 && p.ingest(t.Context(), event, true); i++ {
+			}
+			if p.kubernetesLogAdmissionDeferred.Load() != 1 || p.dropped.Load() != 0 || p.lastErrorString() != "" {
+				t.Fatal("replayable admission reported a loss")
+			}
+			beforeBytes, beforeSlots := p.queuedBytes.Load(), p.ordinaryQueuedSlots.Load()
+			if p.ingest(t.Context(), event, true) || p.queuedBytes.Load() != beforeBytes || p.ordinaryQueuedSlots.Load() != beforeSlots {
+				t.Fatal("deferral leaked reservations")
+			}
+			if p.Ingest(t.Context(), event) || p.dropped.Load() != 1 {
+				t.Fatal("live admission no longer reports actual loss")
+			}
+			for len(p.queue) > 0 {
+				q := <-p.queue
+				p.queuedBytes.Add(-int64(len(q.payload)))
+				p.ordinaryQueuedSlots.Add(-1)
+				p.queueDepth.Add(-1)
+			}
+			if !p.ingest(t.Context(), event, true) || p.dropped.Load() != 1 {
+				t.Fatal("record did not resume after capacity returned")
+			}
+		})
+	}
+}

@@ -240,7 +240,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			cur.PendingAt = ts
 			break
 		}
-		if !c.pipeline.IngestLogLineWithAttributes(ctx, source, msg, attrs, ts) {
+		if !c.pipeline.ingestLogLine(ctx, source, msg, attrs, ts, true) {
 			observation.Outcome = "queue_rejected"
 			budget.Add(1)
 			truncated = true
@@ -276,6 +276,10 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	if err == nil && !invalid {
 		cur.Failures = 0
 		cur.NextAttempt = time.Time{}
+		if observation.Outcome == "queue_rejected" {
+			// Do not repeatedly reopen the same unread record in catch-up passes.
+			cur.NextAttempt = c.logNow().Add(c.pipeline.cfg.KubernetesLogPollInterval)
+		}
 	}
 	if err == nil && !invalid && !truncated {
 		cur.PendingAt = time.Time{}

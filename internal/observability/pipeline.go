@@ -119,16 +119,17 @@ type telemetryTenantMeterSnapshot struct {
 }
 
 type Pipeline struct {
-	sourceObservationMu          sync.Mutex
-	sourceObservations           map[string]logSourceObservation
-	sourceObservationEvicted     uint64
-	sourceObservationCycle       logCycleObservation
-	kubernetesLogCycleMillis     atomic.Int64
-	kubernetesLogBacklogMillis   atomic.Int64
-	kubernetesLogDeferredTargets atomic.Int64
-	kubernetesLogCursorGaps      atomic.Uint64
-	kubernetesLogBackoffSkips    atomic.Uint64
-	kubernetesLogBackoffNodes    atomic.Int64
+	sourceObservationMu            sync.Mutex
+	sourceObservations             map[string]logSourceObservation
+	sourceObservationEvicted       uint64
+	sourceObservationCycle         logCycleObservation
+	kubernetesLogCycleMillis       atomic.Int64
+	kubernetesLogBacklogMillis     atomic.Int64
+	kubernetesLogDeferredTargets   atomic.Int64
+	kubernetesLogCursorGaps        atomic.Uint64
+	kubernetesLogBackoffSkips      atomic.Uint64
+	kubernetesLogBackoffNodes      atomic.Int64
+	kubernetesLogAdmissionDeferred atomic.Uint64
 
 	cfg        Config
 	logger     *log.Logger
@@ -308,6 +309,12 @@ func (p *Pipeline) Snapshot() PipelineSnapshot {
 }
 
 func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
+	return p.ingest(ctx, event, false)
+}
+
+// Replayable source records remain behind their cursor when admission is deferred.
+// Live ingestion still reports capacity rejection as an actual dropped event.
+func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) bool {
 	event = classifyPlatformRequestFact(event)
 	criticalDecisionEvidence := edgeRouteDecisionEvidenceEvent(event)
 	if criticalDecisionEvidence {
@@ -354,6 +361,10 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 		}
 		if p.ordinaryQueuedSlots.Add(1) > ordinaryLimit {
 			p.ordinaryQueuedSlots.Add(-1)
+			if replayable {
+				p.kubernetesLogAdmissionDeferred.Add(1)
+				return false
+			}
 			p.dropped.Add(1)
 			p.recordTenantMeter(event, "dropped")
 			p.recordError(errors.New("telemetry queue reserved capacity dropped event"))
@@ -371,6 +382,10 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 			p.queuedBytes.Add(-size)
 			if ordinarySlotReserved {
 				p.ordinaryQueuedSlots.Add(-1)
+			}
+			if replayable {
+				p.kubernetesLogAdmissionDeferred.Add(1)
+				return false
 			}
 			p.dropped.Add(1)
 			p.recordTenantMeter(event, "dropped")
@@ -395,6 +410,10 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 		if ordinarySlotReserved {
 			p.ordinaryQueuedSlots.Add(-1)
 		}
+		if replayable {
+			p.kubernetesLogAdmissionDeferred.Add(1)
+			return false
+		}
 		p.dropped.Add(1)
 		p.recordTenantMeter(event, "dropped")
 		p.recordError(ctx.Err())
@@ -408,6 +427,10 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 		}
 		if ordinarySlotReserved {
 			p.ordinaryQueuedSlots.Add(-1)
+		}
+		if replayable {
+			p.kubernetesLogAdmissionDeferred.Add(1)
+			return false
 		}
 		p.dropped.Add(1)
 		p.recordTenantMeter(event, "dropped")
@@ -527,6 +550,7 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_backlog_max_seconds %f\n", float64(p.kubernetesLogBacklogMillis.Load())/1000)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_deferred_targets %d\n", p.kubernetesLogDeferredTargets.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_backoff_skips_total", p.kubernetesLogBackoffSkips.Load())
+	writeMetric("fugue_telemetry_pipeline_kubernetes_log_admission_deferred_total", p.kubernetesLogAdmissionDeferred.Load())
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_backoff_nodes %d\n", p.kubernetesLogBackoffNodes.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_cursor_gaps_total", p.kubernetesLogCursorGaps.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_lines_total", snap.KubernetesLogLines)
@@ -646,6 +670,10 @@ func (p *Pipeline) IngestLogLine(ctx context.Context, source string, line string
 }
 
 func (p *Pipeline) IngestLogLineWithAttributes(ctx context.Context, source string, line string, attrs map[string]string, timestamp time.Time) bool {
+	return p.ingestLogLine(ctx, source, line, attrs, timestamp, false)
+}
+
+func (p *Pipeline) ingestLogLine(ctx context.Context, source string, line string, attrs map[string]string, timestamp time.Time, replayable bool) bool {
 	event, redacted := EventFromLogLine(source, line)
 	p.redacted.Add(uint64(redacted))
 	if !timestamp.IsZero() {
@@ -662,7 +690,7 @@ func (p *Pipeline) IngestLogLineWithAttributes(ctx context.Context, source strin
 			event.Attributes[key] = value
 		}
 	}
-	return p.Ingest(ctx, event)
+	return p.ingest(ctx, event, replayable)
 }
 
 func EventFromLogLine(source string, line string) (Event, int) {

@@ -356,3 +356,45 @@ func TestBacklogUsesUnreadRecordTimeInsteadOfIdleCursor(t *testing.T) {
 		t.Fatalf("idle period reported as backlog or cursor advanced: %+v", cur)
 	}
 }
+
+func TestCursorCapacityDeferralRetainsRecordAndBoundsCatchup(t *testing.T) {
+	ts := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	var reads atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		fmt.Fprintf(w, "%s retained-record\n", ts.Format(time.RFC3339Nano))
+	}))
+	defer server.Close()
+	client, _ := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+	p := NewPipeline(Config{Enabled: true, QueueSize: 8, KubernetesLogPollInterval: time.Second}, nil)
+	for i := 0; i < 8; i++ {
+		if !p.IngestLogLine(t.Context(), "test", "occupied") {
+			t.Fatal("fixture admission failed")
+		}
+	}
+	c := newKubernetesLogCollectorWithClient(p, client)
+	target := kubernetesLogTarget{pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pod"}}, container: "app"}
+	var budget atomic.Int64
+	budget.Store(10)
+	c.collectCursorTarget(t.Context(), target, &budget)
+	cur := c.cursors[logTargetKey(target)]
+	if !cur.PendingAt.Equal(ts) || !cur.Time.Before(ts) || cur.NextAttempt.IsZero() || p.dropped.Load() != 0 || p.kubernetesLogAdmissionDeferred.Load() != 1 {
+		t.Fatalf("invalid deferral: %+v", cur)
+	}
+	c.catchupCursorTargets(t.Context(), []kubernetesLogTarget{target}, &budget)
+	if reads.Load() != 1 || budget.Load() != 10 {
+		t.Fatal("catchup retried saturated source")
+	}
+	for len(p.queue) > 0 {
+		q := <-p.queue
+		p.queuedBytes.Add(-int64(len(q.payload)))
+		p.ordinaryQueuedSlots.Add(-1)
+		p.queueDepth.Add(-1)
+	}
+	cur.NextAttempt = time.Time{}
+	c.cursors[logTargetKey(target)] = cur
+	c.collectCursorTarget(t.Context(), target, &budget)
+	if reads.Load() != 2 || p.kubernetesLogLines.Load() != 1 || p.dropped.Load() != 0 || !c.cursors[logTargetKey(target)].PendingAt.IsZero() {
+		t.Fatal("retained record failed to resume")
+	}
+}

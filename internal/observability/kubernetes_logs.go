@@ -147,6 +147,14 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	spare := min(int64(c.pipeline.cfg.BatchSize), ordinaryLimit/8)
 	available := max(int64(0), ordinaryLimit-c.pipeline.ordinaryQueuedSlots.Load()-spare)
 	budget = min(budget, available)
+	// Slot capacity alone cannot predict admission when log records vary in size.
+	// Retain a byte reserve for concurrent live ingestion as well.
+	if limit := c.pipeline.cfg.MemoryLimitBytes; limit > 0 {
+		ordinaryBytes := limit - limit/telemetryCriticalQueueReserveDivisor
+		if c.pipeline.queuedBytes.Load() >= ordinaryBytes-ordinaryBytes/8 {
+			budget = 0
+		}
+	}
 	var remaining atomic.Int64
 	remaining.Store(budget)
 	workers := min(8, len(targets))
