@@ -34,7 +34,7 @@
     {
       "hostname": "app-logseq.chikai.de",
       "app_id": "app_1780249558_7069f860e36b",
-      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "tenant_id": "tenant_1774720388_5c9ca0db3d42",
       "mode": "http-01",
       "validation_targets": [
         "15.204.94.71",
@@ -57,7 +57,7 @@
     {
       "hostname": "music.chikai.de",
       "app_id": "app_1774720664_ef855e625cae",
-      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "tenant_id": "tenant_1774720388_5c9ca0db3d42",
       "mode": "http-01",
       "validation_targets": [
         "15.204.94.71",
@@ -90,7 +90,7 @@
     {
       "hostname": "oiuhu89.chikai.de",
       "app_id": "app_1780127710_d93379954287",
-      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "tenant_id": "tenant_1774720388_5c9ca0db3d42",
       "mode": "http-01",
       "validation_targets": [
         "15.204.94.71",
@@ -102,7 +102,7 @@
     {
       "hostname": "sync3.chikai.de",
       "app_id": "app_1780076837_8bcaf316b939",
-      "tenant_id": "tenant_1774393589_e35b60a6fc11",
+      "tenant_id": "tenant_1774720388_5c9ca0db3d42",
       "mode": "http-01",
       "validation_targets": [
         "15.204.94.71",
