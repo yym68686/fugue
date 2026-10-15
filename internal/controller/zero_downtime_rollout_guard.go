@@ -497,6 +497,16 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	desiredKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), desiredScheduling))
 	servingLKGKey := strings.TrimSpace(managed.Status.CurrentReleaseKey)
 	var recoveredOperation *model.Operation
+	if liveKey != currentKey && liveKey != desiredKey {
+		source, scheduling, recovered, err := s.recoverSafeCanonicalHandoffSource(deployment, current, desired)
+		if err != nil {
+			return model.App{}, err
+		}
+		if recovered {
+			current, currentScheduling = source, scheduling
+			currentKey = liveKey
+		}
+	}
 	// The ManagedApp scheduling projection can advance before its Deployment
 	// is replaced (for example, adding the same-node pin for an online RWO
 	// rollout). Recover the serving baseline only if rendering the unchanged

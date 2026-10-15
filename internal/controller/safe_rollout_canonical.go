@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -24,6 +25,65 @@ type safeCanonicalHandoff struct {
 	DeploymentUID string `json:"deployment_uid"`
 	ReleaseKey    string `json:"release_key"`
 	Image         string `json:"image"`
+}
+
+// Promotion commits the desired snapshot before the old canonical workload is
+// drained. Recover its exact source snapshot without treating the marker itself
+// as permission to replace Pods; the ordinary rollout and drain guards still run.
+func (s *Service) recoverSafeCanonicalHandoffSource(deployment kubeDeployment, current, desired model.App) (model.App, runtime.SchedulingConstraints, bool, error) {
+	var scheduling runtime.SchedulingConstraints
+	marker := deployment.Metadata.Annotations[safeCanonicalHandoffAnnotation]
+	if marker == "" || s.Store == nil || !model.AppSafeZeroDowntimeRolloutEnabled(desired.Spec) {
+		return current, scheduling, false, nil
+	}
+	var handoff safeCanonicalHandoff
+	liveKey := deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey]
+	if json.Unmarshal([]byte(marker), &handoff) != nil || handoff.DeploymentUID != deployment.Metadata.UID ||
+		handoff.ReleaseKey == "" || handoff.ReleaseKey != liveKey ||
+		deployment.Spec.Template.Metadata.Annotations[runtime.FugueAnnotationReleaseKey] != liveKey ||
+		!s.migrationImageRefsEquivalent(current, handoff.Image, deploymentPrimaryContainerImage(deployment)) {
+		return current, scheduling, false, fmt.Errorf("canonical handoff source identity differs")
+	}
+	policy, err := s.Store.GetAppTrafficPolicy(current.TenantID, true, current.ID)
+	if err != nil {
+		return current, scheduling, false, err
+	}
+	if policy.Mode != model.AppTrafficModeSingle || policy.StableWeight != 100 || policy.CandidateWeight != 0 ||
+		policy.CandidateReleaseID != "" || policy.StableReleaseID != handoff.ReleaseID {
+		return current, scheduling, false, fmt.Errorf("canonical handoff promoted policy differs")
+	}
+	promoted, err := s.Store.GetAppRelease(current.TenantID, true, handoff.ReleaseID)
+	if err != nil {
+		return current, scheduling, false, err
+	}
+	if promoted.RevisionWorkload == nil || promoted.DeploymentName == deployment.Metadata.Name ||
+		promoted.Role != model.AppReleaseRoleStable || promoted.Status != model.AppReleaseStatusServing ||
+		!s.safeRolloutBoundReleaseMatchesApp(desired, promoted) {
+		return current, scheduling, false, fmt.Errorf("canonical handoff promoted executable differs")
+	}
+	scheduling = runtime.SchedulingConstraints{
+		NodeSelector: clonePlacementStringMap(deployment.Spec.Template.Spec.NodeSelector),
+		Tolerations:  append([]runtime.Toleration(nil), deployment.Spec.Template.Spec.Tolerations...),
+	}
+	if promoted.RollbackTargetID == "" || promoted.RollbackTargetID == promoted.ID {
+		return current, scheduling, false, fmt.Errorf("canonical handoff has no source release identity")
+	}
+	release, err := s.Store.GetAppRelease(current.TenantID, true, promoted.RollbackTargetID)
+	if err != nil {
+		return current, scheduling, false, err
+	}
+	if release.SpecSnapshot != nil && release.AppID == current.ID && release.TenantID == current.TenantID {
+		source := current
+		source.Spec = *cloneControllerAppSpec(release.SpecSnapshot)
+		if normalized, changed := s.normalizeManagedAppRuntimeImageRefs(source); changed {
+			source = normalized
+		}
+		key := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(source), scheduling))
+		if key == liveKey && s.migrationImageRefsEquivalent(source, source.Spec.Image, handoff.Image) {
+			return source, scheduling, true, nil
+		}
+	}
+	return current, scheduling, false, fmt.Errorf("canonical handoff has no verified source snapshot")
 }
 
 // A Service can have consumers outside managed Edge (including autonomous

@@ -15,6 +15,80 @@ import (
 	"fugue/internal/runtime"
 )
 
+func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *testing.T) {
+	for _, scenario := range []string{"valid", "wrong_uid", "wrong_image", "wrong_key", "changed_desired", "missing_source"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			st, source, desired, op := newSafeRolloutTestState(t)
+			svc := &Service{Store: st, Renderer: runtime.Renderer{}}
+			promoted, err := st.CreateAppRelease(model.AppRelease{ID: "promoted", AppID: desired.ID, TenantID: desired.TenantID,
+				Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusCreating, SpecSnapshot: cloneControllerAppSpec(&desired.Spec),
+				DeploymentName: "independent-revision", ServiceName: "independent-revision", RuntimeID: desired.Spec.RuntimeID, ResolvedImageRef: desired.Spec.Image, RollbackTargetID: "previous-canonical"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, err := st.TryClaimPendingOperation(op.ID); err != nil || !ok {
+				t.Fatal("claim", err)
+			}
+			promoted, err = st.BindAppReleaseWorkload(context.Background(), promoted, model.AppReleaseWorkload{OperationID: op.ID,
+				Namespace: runtime.NamespaceForTenant(desired.TenantID), DeploymentName: promoted.DeploymentName, DeploymentUID: "candidate-uid",
+				DeploymentGeneration: 1, ServiceName: promoted.ServiceName, ServiceUID: "candidate-service-uid", ReleaseKey: "candidate-key",
+				RuntimeID: desired.Spec.RuntimeID, ImageRef: desired.Spec.Image})
+			if err != nil {
+				t.Fatal(err)
+			}
+			promoted.Role, promoted.Status = model.AppReleaseRoleStable, model.AppReleaseStatusServing
+			if _, err := st.UpdateAppRelease(promoted); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.UpsertAppTrafficPolicy(model.AppTrafficPolicy{AppID: desired.ID, TenantID: desired.TenantID,
+				Mode: model.AppTrafficModeSingle, StableReleaseID: promoted.ID, StableWeight: 100}); err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "missing_source" {
+				if _, err := st.CreateAppRelease(model.AppRelease{ID: "previous-canonical", AppID: source.ID, TenantID: source.TenantID,
+					Role: model.AppReleaseRolePrevious, Status: model.AppReleaseStatusDraining, SpecSnapshot: cloneControllerAppSpec(&source.Spec)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			live, _ := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(source), runtime.SchedulingConstraints{})
+			managedAppLiveGuardMarkReady(&live, 1)
+			live.Metadata.UID = "canonical-uid"
+			marker := safeCanonicalHandoff{ReleaseID: promoted.ID, DeploymentUID: live.Metadata.UID,
+				ReleaseKey: live.Metadata.Annotations[runtime.FugueAnnotationReleaseKey], Image: source.Spec.Image}
+			switch scenario {
+			case "wrong_uid":
+				marker.DeploymentUID = "recreated-uid"
+			case "wrong_image":
+				marker.Image = "ghcr.io/example/api:unverified"
+			case "wrong_key":
+				marker.ReleaseKey = "unverified-key"
+			case "changed_desired":
+				desired.Spec.Image = "ghcr.io/example/api:later"
+			}
+			encoded, _ := json.Marshal(marker)
+			live.Metadata.Annotations[safeCanonicalHandoffAnnotation] = string(encoded)
+			// Promotion already advanced both config projections; the source Pod
+			// remains alive until the separate canonical drain guard permits apply.
+			managed := managedAppLiveGuardObject(t, desired, runtime.SchedulingConstraints{})
+			managed.Status.CurrentReleaseKey = marker.ReleaseKey
+			var writes int
+			client := managedAppLiveGuardClient(t, managed, live, true, true, &writes)
+			got, err := svc.prepareManagedAppReconcileRolloutWithEvidence(context.Background(), client, managed.Metadata.Namespace,
+				managed, desired, "", runtime.SchedulingConstraints{})
+			if (err == nil) != (scenario == "valid") {
+				t.Fatalf("scenario %s: %v", scenario, err)
+			}
+			if err == nil && (got.Spec.Image != desired.Spec.Image || got.Spec.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate) {
+				t.Fatalf("lost guarded desired rollout: image=%s intent=%s", got.Spec.Image, got.Spec.RolloutIntent)
+			}
+			if writes != 0 {
+				t.Fatal("source recovery mutated the workload before drain")
+			}
+		})
+	}
+}
+
 func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 	for _, scenario := range []string{"idle", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image"} {
 		t.Run(scenario, func(t *testing.T) {
