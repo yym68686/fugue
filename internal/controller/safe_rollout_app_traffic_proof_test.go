@@ -12,6 +12,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/routeprobe"
 	"fugue/internal/routeproof"
+	"fugue/internal/store"
 )
 
 type safeRolloutTrafficStoreFixture struct {
@@ -476,5 +477,77 @@ func TestSafeRolloutWaitAllowsIndependentPublicationWithoutRelaxingTrafficProof(
 	got, err := o.WaitForSafeRolloutEdgeRouteBundle(context.Background(), a, r, 20, start.Add(-time.Minute))
 	if err != nil || !got.Ready || now.Sub(start) != 2*time.Minute {
 		t.Fatalf("publication must converge with its exact proof: %+v %v elapsed=%v", got, err, now.Sub(start))
+	}
+}
+
+// The callback can model independently scheduled producer verification without
+// substituting a stale or unverified membership list.
+type changingRolloutServingEdges func([]model.EdgeNode) ([]model.EdgeNode, error)
+
+func (f changingRolloutServingEdges) SelectSafeRolloutServingEdges(nodes []model.EdgeNode) ([]model.EdgeNode, error) {
+	return f(nodes)
+}
+
+func TestSafeRolloutWaitForVerifiedServingPublication(t *testing.T) {
+	for _, mode := range []string{"converges", "changes during probe", "times out", "invalid evidence", "retains earlier member"} {
+		t.Run(mode, func(t *testing.T) {
+			now := time.Now().UTC()
+			start := now
+			o, a, r, node, proof := appTrafficObserverFixture(t, now)
+			o.Now = func() time.Time { return now }
+			o.Timeout = 3 * time.Second
+			o.Interval = time.Second
+			o.Membership = &rolloutMembershipFixture{machines: []model.Machine{{ClusterNodeName: node.ID, Policy: model.MachinePolicy{AllowEdge: true}}}}
+			polls, probes := 0, 0
+			o.ServingEdges = changingRolloutServingEdges(func(nodes []model.EdgeNode) ([]model.EdgeNode, error) {
+				polls++
+				if mode == "invalid evidence" {
+					return nil, fmt.Errorf("invalid signature")
+				}
+				if (mode == "retains earlier member" || mode == "changes during probe") && polls == 1 {
+					return nodes, nil
+				}
+				if polls <= 2 || mode == "times out" {
+					return nil, fmt.Errorf("awaiting ACKs: %w", store.ErrSafeRolloutServingPublicationPending)
+				}
+				if mode == "retains earlier member" {
+					return nil, nil
+				}
+				return nodes, nil
+			})
+			o.Probe = func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+				probes++
+				if mode == "retains earlier member" {
+					return routeprobe.Proof{}, fmt.Errorf("not applied yet")
+				}
+				p := proof
+				p.CheckedAt = now
+				return p, nil
+			}
+			o.Sleep = func(context.Context, time.Duration) error { now = now.Add(time.Second); return nil }
+			got, err := o.WaitForSafeRolloutEdgeRouteBundle(context.Background(), a, r, 20, start.Add(-time.Minute))
+			switch mode {
+			case "converges":
+				if err != nil || !got.Ready || polls != 4 || probes != 1 {
+					t.Fatalf("did not await exact proof: %+v %v polls=%d probes=%d", got, err, polls, probes)
+				}
+			case "changes during probe":
+				if err != nil || !got.Ready || polls != 4 || probes != 2 || now.Sub(start) != time.Second {
+					t.Fatalf("did not repeat proof after publication switched: %+v %v polls=%d probes=%d", got, err, polls, probes)
+				}
+			case "times out":
+				if err != nil || got.Ready || polls != 4 || probes != 0 || got.Summary["serving_publication_pending"] == nil {
+					t.Fatalf("pending evidence did not fail closed within deadline: %+v %v polls=%d probes=%d", got, err, polls, probes)
+				}
+			case "invalid evidence":
+				if err == nil || got.Ready || polls != 1 || probes != 0 {
+					t.Fatalf("invalid evidence retried or accepted: %+v %v", got, err)
+				}
+			case "retains earlier member":
+				if err != nil || got.Ready || got.RequiredNodes != 1 {
+					t.Fatalf("pending publication forgot required member: %+v %v", got, err)
+				}
+			}
+		})
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/routeprobe"
 	"fugue/internal/routeproof"
+	"fugue/internal/store"
 )
 
 const (
@@ -185,6 +186,12 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	}
 	observation.Summary["expected_app_traffic_digest"] = digest
 	nodes, err := o.requiredNodes()
+	if errors.Is(err, store.ErrSafeRolloutServingPublicationPending) {
+		observation.RequiredNodes = len(wait.groups)
+		observation.WaitingNodes = append(observation.WaitingNodes, "serving-publication")
+		observation.Summary["serving_publication_pending"] = err.Error()
+		return observation, nil
+	}
 	if err != nil {
 		return observation, err
 	}
@@ -276,6 +283,12 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	// Confirm that the inventory used for this batch still describes serving
 	// nodes. A topology change requires another complete observation batch.
 	after, err := o.requiredNodes()
+	if errors.Is(err, store.ErrSafeRolloutServingPublicationPending) {
+		observation.RequiredNodes = len(wait.groups)
+		observation.WaitingNodes = append(observation.WaitingNodes, "serving-publication")
+		observation.Summary["serving_publication_pending"] = err.Error()
+		return observation, nil
+	}
 	if err != nil {
 		return observation, err
 	}

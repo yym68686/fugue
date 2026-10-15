@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 )
 
 func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testing.T) {
-	for _, scenario := range []string{"verified", "unverified_full", "expired_lkg", "tampered_source", "wrong_identity", "still_in_dns", "missing_dns_plan", "cell_publication", "producer_mismatch"} {
+	for _, scenario := range []string{"verified", "unverified_full", "missing_lkg", "previous_lkg", "failed_verification", "expired_lkg", "tampered_source", "wrong_identity", "still_in_dns", "missing_dns_plan", "cell_publication", "producer_mismatch"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newServingFixture(t, "")
 			source, err := f.s.GetPlatformArtifact(f.policy.DNSPolicyArtifactID)
@@ -53,7 +54,10 @@ func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testi
 			now := time.Now().UTC()
 			full := model.PlatformArtifactRelease{ID: "offline-full", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, Scope: parent.Scope, ScopeKey: parent.ScopeKey, Generation: parent.Generation, ReleaseChannel: "full", Status: model.PlatformArtifactReleaseStatusActive, FencingToken: 1, VerificationState: model.PlatformArtifactVerificationStateVerified, ReleasedAt: now}
 			if scenario == "unverified_full" {
-				full.VerificationState = "pending"
+				full.VerificationState = model.PlatformArtifactVerificationStateServingUnverified
+			}
+			if scenario == "failed_verification" {
+				full.VerificationState = model.PlatformArtifactVerificationStateFailed
 			}
 			expires := now.Add(time.Hour)
 			if scenario == "expired_lkg" {
@@ -65,7 +69,12 @@ func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testi
 			}
 			if err := f.s.withLockedState(true, func(state *model.State) error {
 				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, ownerRelease, full)
-				state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, lkg)
+				if scenario == "previous_lkg" {
+					lkg.VerifiedByReleaseID = "previous-full"
+				}
+				if scenario != "missing_lkg" {
+					state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, lkg)
+				}
 				if scenario == "tampered_source" {
 					state.PlatformArtifacts[platformArtifactIndex(state.PlatformArtifacts, source.ID)].Provenance.Signature = "forged"
 				}
@@ -82,8 +91,14 @@ func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testi
 				if err != nil || len(selected) != 1 || selected[0].ID != "edge-b" {
 					t.Fatalf("verified offline member retained: %+v %v", selected, err)
 				}
-			} else if err == nil {
-				t.Fatalf("unsafe exclusion accepted for %s: %+v", scenario, selected)
+			} else {
+				if err == nil || len(selected) != 0 {
+					t.Fatalf("unsafe exclusion accepted for %s: %+v %v", scenario, selected, err)
+				}
+				pending := scenario == "unverified_full" || scenario == "missing_lkg" || scenario == "previous_lkg"
+				if errors.Is(err, ErrSafeRolloutServingPublicationPending) != pending {
+					t.Fatalf("incorrect retry classification for %s: %v", scenario, err)
+				}
 			}
 		})
 	}

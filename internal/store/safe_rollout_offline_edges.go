@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -11,6 +12,11 @@ import (
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
 )
+
+// ErrSafeRolloutServingPublicationPending means membership cannot yet be proved
+// across an in-progress publication. Callers may wait, but must not use an
+// unverified hold or an older publication to exclude an observer.
+var ErrSafeRolloutServingPublicationPending = errors.New("offline rollout membership is waiting for verified serving publication")
 
 // SelectSafeRolloutServingEdges follows the exact verified serving publication.
 // A draft or merely published producer hold cannot remove a rollout observer.
@@ -41,10 +47,24 @@ func (s *Store) SelectSafeRolloutServingEdges(nodes []model.EdgeNode) ([]model.E
 	if err != nil {
 		return nil, err
 	}
-	if lkg == nil || !trusted(parent) || !trusted(source) || source.ContentHash != parent.Metadata[platformproducer.DNSPolicyDigestMetadata] ||
-		release.Status != model.PlatformArtifactReleaseStatusActive || release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.ArtifactID != parent.ID || release.Generation != parent.Generation || release.FencingToken <= 0 ||
-		lkg.VerifiedByReleaseID != release.ID || !platformsafety.EvaluatePlatformLKGSnapshot(*lkg, parent, s.platformArtifactSigningKeyring(), time.Now().UTC()).Pass ||
+	if !trusted(parent) || !trusted(source) || source.ContentHash != parent.Metadata[platformproducer.DNSPolicyDigestMetadata] ||
+		release.Status != model.PlatformArtifactReleaseStatusActive || release.ArtifactID != parent.ID || release.Generation != parent.Generation || release.FencingToken <= 0 ||
 		parent.CreatedByType != model.ActorTypeBootstrap || parent.CreatedByID != platformproducer.Actor || parent.Content["consumer_topology"] != nil || parent.Content["publication_role"] != nil {
+		return fail()
+	}
+	// A new full publication becomes active before consumer ACKs establish its
+	// LKG. This is expected during each canary step, not permission to omit any
+	// observer. Keep waiting within the caller's existing deadline.
+	if release.VerificationState == model.PlatformArtifactVerificationStateServingUnverified {
+		return nil, fmt.Errorf("%w: active release %s is awaiting verification", ErrSafeRolloutServingPublicationPending, release.ID)
+	}
+	if release.VerificationState != model.PlatformArtifactVerificationStateVerified {
+		return fail()
+	}
+	if lkg == nil || lkg.VerifiedByReleaseID != release.ID || lkg.ArtifactID != parent.ID {
+		return nil, fmt.Errorf("%w: active release %s and LKG have not converged", ErrSafeRolloutServingPublicationPending, release.ID)
+	}
+	if !platformsafety.EvaluatePlatformLKGSnapshot(*lkg, parent, s.platformArtifactSigningKeyring(), time.Now().UTC()).Pass {
 		return fail()
 	}
 	authorityRelease, err := s.GetPlatformArtifactRelease(parent.Metadata[platformproducer.PolicyReleaseMetadata])
@@ -106,8 +126,11 @@ func (s *Store) SelectSafeRolloutServingEdges(nodes []model.EdgeNode) ([]model.E
 	}
 	// Do not return evidence assembled across a concurrent publication switch.
 	_, current, found, err := s.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", model.PlatformArtifactReleaseChannelFull)
-	if err != nil || !found || current.ID != release.ID || current.FencingToken != release.FencingToken || current.Status != release.Status || current.VerificationState != release.VerificationState {
-		return fail()
+	if err != nil {
+		return nil, err
+	}
+	if !found || current.ID != release.ID || current.FencingToken != release.FencingToken || current.Status != release.Status || current.VerificationState != release.VerificationState {
+		return nil, fmt.Errorf("%w: active publication changed while verifying membership", ErrSafeRolloutServingPublicationPending)
 	}
 	return selected, nil
 }
