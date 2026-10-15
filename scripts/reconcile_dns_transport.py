@@ -19,6 +19,7 @@ GENERATION = "transport.fugue.dev/generation"
 DIGEST = "transport.fugue.dev/digest"
 HANDOFF_ATTEMPTS = 6
 HANDOFF_RETRY_SECONDS = 5
+RECOVERY_ATTEMPTS = 24
 
 
 class ObservationUnavailable(RuntimeError):
@@ -251,10 +252,11 @@ def handoff_witness(config, listener, current):
         raise ValueError("DNS handoff listener must belong to one live node")
     node = owners[0]["metadata"]["name"]
     last_error = None
-    for attempt in range(HANDOFF_ATTEMPTS):
+    recoveries = config.get('recoveries', [config.get('recovery', {})])
+    selected = [recovery for recovery in recoveries if recovery.get('listener') == listener['name']]
+    attempts = RECOVERY_ATTEMPTS if selected else HANDOFF_ATTEMPTS
+    for attempt in range(attempts):
         try:
-            recoveries = config.get('recoveries', [config.get('recovery', {})])
-            selected = [recovery for recovery in recoveries if recovery.get('listener') == listener['name']]
             if selected:
                 from scripts.recover_dns_transport import witness
                 return witness(dict(config, recovery=selected[0]), listener, current, owners[0])
@@ -279,8 +281,9 @@ def handoff_witness(config, listener, current):
                 "proof is expired or from the future",
                 "proof belongs to another release", "backend changed while reading runtime facts",
                 "DNS recovery observation",
+                "DNS recovery candidate does not match current verified full authority",
             ])
-            if not retryable or attempt + 1 == HANDOFF_ATTEMPTS:
+            if not retryable or attempt + 1 == attempts:
                 raise
             time.sleep(HANDOFF_RETRY_SECONDS)
     raise last_error or ValueError("DNS handoff witness unavailable")

@@ -109,6 +109,26 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(transport.handoff_witness(config, listener, current), {'verified': True})
             self.assertEqual(verify.call_args.args[0]['recovery'], config['recoveries'][1])
 
+    def test_recovery_rechecks_publication_until_verified_with_a_bound(self):
+        config = self.config()
+        listener = config['listeners'][0]
+        current = {'spec': {'selector': {'app': 'old'}}}
+        node = {'metadata': {'name': 'node', 'uid': 'uid'}, 'status': {'addresses': [{'address': listener['address']}]}}
+        pending = ValueError('DNS recovery candidate does not match current verified full authority')
+        for failures, succeeds in [(2, True), (transport.RECOVERY_ATTEMPTS, False)]:
+            outcomes = [pending] * failures + ([{'verified': True}] if succeeds else [])
+            with patch.object(transport, 'read_json', return_value={'items': [node]}), patch.object(recovery, 'witness', side_effect=outcomes) as verify, patch.object(transport.time, 'sleep'):
+                if succeeds:
+                    self.assertEqual(transport.handoff_witness(config, listener, current), {'verified': True})
+                else:
+                    with self.assertRaisesRegex(ValueError, 'current verified full authority'):
+                        transport.handoff_witness(config, listener, current)
+                self.assertEqual(verify.call_count, failures + int(succeeds))
+        with patch.object(transport, 'read_json', return_value={'items': [node]}), patch.object(recovery, 'witness', side_effect=ValueError('candidate identity or image changed')) as verify, patch.object(transport.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'identity'):
+                transport.handoff_witness(config, listener, current)
+            self.assertEqual(verify.call_count, 1)
+
     def test_recovery_rejects_noncurrent_unverified_or_foreign_authority(self):
         snapshot = self.candidate()['snapshot']
         publication = self.publication(snapshot)
