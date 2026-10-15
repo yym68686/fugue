@@ -197,6 +197,14 @@
                   {
                     "name": "FUGUE_EDGE_INVENTORY_BOOTSTRAP_FILE",
                     "value": "/var/run/fugue-cell-bootstrap/authorization.json"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CADDY_HTTP_LISTEN_ADDR",
+                    "value": ":18080"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_ACME_CHALLENGE_API_URL",
+                    "value": "https://api.fugue.pro"
                   }
                 ],
                 "image": "fugue-artifact://edge-worker",
@@ -296,13 +304,13 @@
                     "readOnly": true
                   },
                   {
-                    "name": "cell-bootstrap",
                     "mountPath": "/var/run/fugue-cell-bootstrap",
+                    "name": "cell-bootstrap",
                     "readOnly": true
                   },
                   {
-                    "name": "diagnostic-socket",
-                    "mountPath": "/tmp"
+                    "mountPath": "/tmp",
+                    "name": "diagnostic-socket"
                   }
                 ]
               },
@@ -583,18 +591,18 @@
                 }
               },
               {
-                "name": "cell-bootstrap",
                 "configMap": {
+                  "defaultMode": 292,
                   "name": "fugue-cell-public-b-inventory-bootstrap",
-                  "optional": true,
-                  "defaultMode": 292
-                }
+                  "optional": true
+                },
+                "name": "cell-bootstrap"
               },
               {
-                "name": "diagnostic-socket",
                 "emptyDir": {
                   "sizeLimit": "4Mi"
-                }
+                },
+                "name": "diagnostic-socket"
               }
             ]
           }

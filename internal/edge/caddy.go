@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -321,6 +322,24 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 			},
 		},
 	}
+	if httpListen := strings.TrimSpace(s.Config.CaddyHTTPListenAddr); httpListen != "" {
+		if _, _, err := net.SplitHostPort(httpListen); err != nil || httpListen == listenAddr {
+			return nil, 0, fmt.Errorf("invalid independent HTTP challenge listener")
+		}
+		httpServer := map[string]any{"listen": []string{httpListen}, "automatic_https": map[string]any{"disable": true}, "routes": []any{
+			map[string]any{"match": []any{map[string]any{"path": []string{"/.well-known/acme-challenge/*"}}}, "handle": []any{map[string]any{"handler": "reverse_proxy", "upstreams": []any{map[string]string{"dial": proxyDial}}}}, "terminal": true},
+			map[string]any{"handle": []any{map[string]any{"handler": "static_response", "status_code": 308, "headers": map[string][]string{"Location": {"https://{http.request.host}{http.request.uri}"}}}}, "terminal": true},
+		}}
+		if s.Config.CaddyProxyProtocolEnabled {
+			wrappers, err := s.caddyListenerWrappers(caddyTLSModeOff)
+			if err != nil {
+				return nil, 0, err
+			}
+			httpServer["listener_wrappers"] = wrappers
+		}
+		apps["http"].(map[string]any)["servers"].(map[string]any)["fugue_http_challenges"] = httpServer
+		server["automatic_https"] = map[string]any{"disable_redirects": true}
+	}
 	switch tlsMode {
 	case caddyTLSModeOff:
 		server["automatic_https"] = map[string]any{
@@ -576,6 +595,7 @@ func (s *Service) caddyConfigSignature(bundle model.EdgeRouteBundle) (string, er
 		"proxy_pool=shared-v1",
 		"hosts=" + strings.Join(s.uniqueBundleHosts(bundle), ","),
 		"listen=" + strings.TrimSpace(s.Config.CaddyListenAddr),
+		"http_challenge_listen=" + strings.TrimSpace(s.Config.CaddyHTTPListenAddr),
 		"protocols=" + strings.Join(caddyHTTPProtocols(), ","),
 		"proxy=" + caddyProxyDialAddress(s.Config.CaddyProxyListenAddr),
 		"tls_mode=" + s.normalizedCaddyTLSMode(),
@@ -673,7 +693,7 @@ func (s *Service) loadedCaddyTLSFiles(host string) (certFile, keyFile, fingerpri
 	if err != nil || !validCaddyStorageSegment(bundle.IssuerStorage) {
 		return "", "", "", false
 	}
-	if bundle.IssuerStorage == tlscertificate.ImportedIssuerStorage {
+	if bundle.IssuerStorage == tlscertificate.ImportedIssuerStorage || bundle.IssuerStorage == "fugue-central-acme" {
 		_, err = tlscertificate.ValidatePublic(host, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC(), s.caddyImportedTLSRoots)
 	} else {
 		_, err = tlscertificate.Validate(host, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC())
@@ -683,7 +703,58 @@ func (s *Service) loadedCaddyTLSFiles(host string) (certFile, keyFile, fingerpri
 	}
 	dir := filepath.Join(s.caddyDataDir(), "certificates", bundle.IssuerStorage, host)
 	sum := sha256.Sum256([]byte(bundle.CertificatePEM + "\x00" + bundle.PrivateKeyPEM))
+	if s.normalizedCaddyTLSMode() == caddyTLSModeSharedOnly {
+		cert, key, err := s.immutableCaddyTLSFiles(host, bundle, hex.EncodeToString(sum[:]))
+		if err != nil {
+			return "", "", "", false
+		}
+		return cert, key, hex.EncodeToString(sum[:]), true
+	}
 	return filepath.Join(dir, host+".crt"), filepath.Join(dir, host+".key"), hex.EncodeToString(sum[:]), true
+}
+
+// Configurations reference immutable material so a rejected load or restart
+// retains the exact previous certificate and key, even after a renewal arrives.
+func (s *Service) immutableCaddyTLSFiles(host string, bundle caddyTLSCertificateBundle, fingerprint string) (string, string, error) {
+	parent := filepath.Join(s.caddyDataDir(), "fugue-loaded-certificates", host)
+	dir := filepath.Join(parent, fingerprint)
+	cert, key := filepath.Join(dir, "certificate.pem"), filepath.Join(dir, "private.pem")
+	if existing, err := os.ReadFile(cert); err == nil {
+		private, keyErr := os.ReadFile(key)
+		if keyErr == nil && string(existing) == bundle.CertificatePEM+"\n" && string(private) == bundle.PrivateKeyPEM+"\n" {
+			return cert, key, nil
+		}
+		return "", "", fmt.Errorf("immutable certificate material differs")
+	}
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		return "", "", err
+	}
+	stage, err := os.MkdirTemp(parent, ".stage-")
+	if err != nil {
+		return "", "", err
+	}
+	defer os.RemoveAll(stage)
+	if err = writeSyncedFile(filepath.Join(stage, "certificate.pem"), []byte(bundle.CertificatePEM+"\n"), 0644); err != nil {
+		return "", "", err
+	}
+	if err = writeSyncedFile(filepath.Join(stage, "private.pem"), []byte(bundle.PrivateKeyPEM+"\n"), 0600); err != nil {
+		return "", "", err
+	}
+	if err = syncDirectory(stage); err != nil {
+		return "", "", err
+	}
+	if err = os.Rename(stage, dir); err != nil {
+		// Another warmup may have published the same immutable generation.
+		existing, readErr := os.ReadFile(cert)
+		private, keyErr := os.ReadFile(key)
+		if readErr != nil || keyErr != nil || string(existing) != bundle.CertificatePEM+"\n" || string(private) != bundle.PrivateKeyPEM+"\n" {
+			return "", "", err
+		}
+	}
+	if err = syncDirectory(parent); err != nil {
+		return "", "", err
+	}
+	return cert, key, nil
 }
 
 func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.EdgeRouteBundle, configSignature string) error {
@@ -1001,7 +1072,7 @@ func (s *Service) installSharedCaddyTLSCertificate(hostname string, bundle caddy
 		return false, fmt.Errorf("shared TLS certificate issuer storage for %s is invalid", hostname)
 	}
 	var certErr error
-	if bundle.IssuerStorage == tlscertificate.ImportedIssuerStorage {
+	if bundle.IssuerStorage == tlscertificate.ImportedIssuerStorage || bundle.IssuerStorage == "fugue-central-acme" {
 		_, certErr = tlscertificate.ValidatePublic(hostname, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC(), s.caddyImportedTLSRoots)
 	} else {
 		_, certErr = tlscertificate.Validate(hostname, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC())
@@ -1013,6 +1084,13 @@ func (s *Service) installSharedCaddyTLSCertificate(hostname string, bundle caddy
 	defer s.caddyTLSInstallMu.Unlock()
 	if current, err := s.readLocalCaddyTLSCertificate(hostname); err == nil && normalizeCaddyTLSCertificateBundle(current) == bundle {
 		return false, nil
+	}
+	if current, err := s.readLocalCaddyTLSCertificate(hostname); err == nil {
+		oldLeaf, oldErr := tlscertificate.Validate(hostname, current.CertificatePEM, current.PrivateKeyPEM, time.Now())
+		newLeaf, newErr := tlscertificate.Validate(hostname, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now())
+		if oldErr == nil && newErr == nil && newLeaf.NotAfter.Before(oldLeaf.NotAfter) {
+			return false, fmt.Errorf("refuse older shared certificate for %s", hostname)
+		}
 	}
 	issuerDir := filepath.Join(s.caddyDataDir(), "certificates", bundle.IssuerStorage)
 	if err := os.MkdirAll(issuerDir, 0o700); err != nil {
@@ -1130,6 +1208,8 @@ func (s *Service) readLocalCaddyTLSCertificate(hostname string) (caddyTLSCertifi
 		return caddyTLSCertificateBundle{}, fmt.Errorf("search Caddy certificate for %s: %w", hostname, err)
 	}
 	sort.Strings(matches)
+	var best caddyTLSCertificateBundle
+	var bestLeaf *x509.Certificate
 	for _, certPath := range matches {
 		hostDir := filepath.Dir(certPath)
 		keyPath := filepath.Join(hostDir, hostname+".key")
@@ -1144,12 +1224,23 @@ func (s *Service) readLocalCaddyTLSCertificate(hostname string) (caddyTLSCertifi
 		metadataPath := filepath.Join(hostDir, hostname+".json")
 		metadata, _ := os.ReadFile(metadataPath)
 		issuerStorage := filepath.Base(filepath.Dir(hostDir))
-		return caddyTLSCertificateBundle{
+		leaf, validateErr := tlscertificate.Validate(hostname, string(certPEM), string(keyPEM), time.Now())
+		if issuerStorage == "fugue-central-acme" {
+			leaf, validateErr = tlscertificate.ValidatePublic(hostname, string(certPEM), string(keyPEM), time.Now(), s.caddyImportedTLSRoots)
+		}
+		if validateErr != nil || bestLeaf != nil && !leaf.NotAfter.After(bestLeaf.NotAfter) {
+			continue
+		}
+		bestLeaf = leaf
+		best = caddyTLSCertificateBundle{
 			CertificatePEM: strings.TrimSpace(string(certPEM)),
 			PrivateKeyPEM:  strings.TrimSpace(string(keyPEM)),
 			MetadataJSON:   strings.TrimSpace(string(metadata)),
 			IssuerStorage:  strings.Trim(strings.TrimSpace(issuerStorage), "/"),
-		}, nil
+		}
+	}
+	if bestLeaf != nil {
+		return best, nil
 	}
 	return caddyTLSCertificateBundle{}, fmt.Errorf("Caddy certificate files for %s were not found under %s", hostname, filepath.Join(s.caddyDataDir(), "certificates"))
 }

@@ -2330,7 +2330,8 @@ func TestApplyCaddyConfigWarmsPendingCustomDomainAndReportsReady(t *testing.T) {
 	defer admin.Close()
 
 	dataDir := t.TempDir()
-	writeLocalCaddyTLSBundle(t, dataDir, "www.customer.com", "local-cert-pem", "local-key-pem", `{"issuer":"test"}`)
+	certPEM, keyPEM := testCaddyTLSKeyPair(t, "www.customer.com")
+	writeLocalCaddyTLSBundle(t, dataDir, "www.customer.com", certPEM, keyPEM, `{"issuer":"test"}`)
 
 	var reports []map[string]string
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2406,7 +2407,7 @@ func TestApplyCaddyConfigWarmsPendingCustomDomainAndReportsReady(t *testing.T) {
 	if reports[0]["hostname"] != "www.customer.com" || reports[0]["tls_status"] != model.AppDomainTLSStatusReady || reports[0]["tls_last_message"] != "" {
 		t.Fatalf("unexpected TLS report: %+v", reports[0])
 	}
-	if reports[0]["certificate_pem"] != "local-cert-pem" || reports[0]["private_key_pem"] != "local-key-pem" {
+	if reports[0]["certificate_pem"] != certPEM || reports[0]["private_key_pem"] != keyPEM {
 		t.Fatalf("expected TLS report to include local Caddy certificate bundle, got %+v", reports[0])
 	}
 	if reports[0]["issuer_storage"] != defaultCaddyIssuerStorage {
@@ -2426,7 +2427,8 @@ func TestApplyCaddyConfigBackfillsSharedCertificateForReadyCustomDomain(t *testi
 	defer admin.Close()
 
 	dataDir := t.TempDir()
-	writeLocalCaddyTLSBundle(t, dataDir, "www.customer.com", "ready-cert-pem", "ready-key-pem", `{"issuer":"test"}`)
+	certPEM, keyPEM := testCaddyTLSKeyPair(t, "www.customer.com")
+	writeLocalCaddyTLSBundle(t, dataDir, "www.customer.com", certPEM, keyPEM, `{"issuer":"test"}`)
 
 	var reports []map[string]string
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2499,7 +2501,7 @@ func TestApplyCaddyConfigBackfillsSharedCertificateForReadyCustomDomain(t *testi
 	if reports[0]["hostname"] != "www.customer.com" || reports[0]["tls_status"] != model.AppDomainTLSStatusReady || reports[0]["tls_last_message"] != "" {
 		t.Fatalf("unexpected TLS report: %+v", reports[0])
 	}
-	if reports[0]["certificate_pem"] != "ready-cert-pem" || reports[0]["private_key_pem"] != "ready-key-pem" {
+	if reports[0]["certificate_pem"] != certPEM || reports[0]["private_key_pem"] != keyPEM {
 		t.Fatalf("expected TLS report to include local Caddy certificate bundle, got %+v", reports[0])
 	}
 }

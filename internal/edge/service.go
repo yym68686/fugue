@@ -1239,6 +1239,10 @@ func (s *Service) routeCanIssueTLS(route model.EdgeRouteBinding, allowlist []mod
 }
 
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") && s.Config.CaddyHTTPListenAddr != "" {
+		s.handleSharedHTTP01Challenge(w, r)
+		return
+	}
 	if _, requested := r.Header[http.CanonicalHeaderKey("X-Fugue-Network-Probe")]; requested {
 		s.handleClientMeasurement(w, r)
 		return

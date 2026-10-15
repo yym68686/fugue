@@ -33,6 +33,40 @@ func sharedOnlyTLSFixture(t *testing.T) (*Service, model.EdgeRouteBundle, string
 	return s, bundle, host
 }
 
+func TestSharedOnlyRenewalRetainsPreviousConfigurationMaterial(t *testing.T) {
+	s, _, host := sharedOnlyTLSFixture(t)
+	now := time.Now().UTC()
+	oldCert, oldKey := testCaddyTLSKeyPairAt(t, host, now.Add(-time.Hour), now.Add(24*time.Hour))
+	if _, err := s.installSharedCaddyTLSCertificate(host, caddyTLSCertificateBundle{CertificatePEM: oldCert, PrivateKeyPEM: oldKey, IssuerStorage: defaultCaddyIssuerStorage}); err != nil {
+		t.Fatal(err)
+	}
+	oldCertPath, oldKeyPath, _, ok := s.loadedCaddyTLSFiles(host)
+	if !ok {
+		t.Fatal("old certificate not loadable")
+	}
+	oldCertificate, _ := os.ReadFile(oldCertPath)
+	oldPrivate, _ := os.ReadFile(oldKeyPath)
+	newCert, newKey := testCaddyTLSKeyPairAt(t, host, now.Add(-time.Hour), now.Add(60*24*time.Hour))
+	if _, err := s.installSharedCaddyTLSCertificate(host, caddyTLSCertificateBundle{CertificatePEM: newCert, PrivateKeyPEM: newKey, IssuerStorage: defaultCaddyIssuerStorage}); err != nil {
+		t.Fatal(err)
+	}
+	newCertPath, newKeyPath, _, ok := s.loadedCaddyTLSFiles(host)
+	if !ok || newCertPath == oldCertPath || newKeyPath == oldKeyPath {
+		t.Fatal("renewal reused mutable configuration paths")
+	}
+	retainedCert, err := os.ReadFile(oldCertPath)
+	if err != nil || string(retainedCert) != string(oldCertificate) {
+		t.Fatal("previous certificate lost", err)
+	}
+	retainedKey, err := os.ReadFile(oldKeyPath)
+	if err != nil || string(retainedKey) != string(oldPrivate) {
+		t.Fatal("previous private key lost", err)
+	}
+	if _, err := s.installSharedCaddyTLSCertificate(host, caddyTLSCertificateBundle{CertificatePEM: oldCert, PrivateKeyPEM: oldKey, IssuerStorage: defaultCaddyIssuerStorage}); err == nil {
+		t.Fatal("older certificate replaced renewal")
+	}
+}
+
 func TestSharedOnlyTLSValidatesAndReloadsSharedCertificate(t *testing.T) {
 	s, bundle, host := sharedOnlyTLSFixture(t)
 	loads := 0
