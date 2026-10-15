@@ -86,14 +86,22 @@ func TestDeclaredPrivateDNSServicesMatchExecutorIdentityAndDigest(t *testing.T) 
 			ManifestPath string `json:"manifestPath"`
 		} `json:"components"`
 	}
-	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "releases", "components.json"))
-	if err != nil || json.Unmarshal(raw, &registry) != nil {
-		t.Fatal("registry unavailable", err)
+	// Archived executors remain compatibility fixtures for private transport
+	// receipts even after they leave the production build registry.
+	var manifests []string
+	for _, name := range []string{"components.json", "retired-dns-components.json"} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "releases", name))
+		if err != nil || json.Unmarshal(raw, &registry) != nil {
+			t.Fatal("registry unavailable", name, err)
+		}
+		for _, component := range registry.Components {
+			manifests = append(manifests, component.ManifestPath)
+		}
 	}
 	seenMembers, seenClaims := map[string]bool{}, map[string]bool{}
 	count := 0
-	for _, component := range registry.Components {
-		raw, err := os.ReadFile(filepath.Join("..", "..", component.ManifestPath))
+	for _, manifest := range manifests {
+		raw, err := os.ReadFile(filepath.Join("..", "..", manifest))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -148,7 +156,7 @@ func TestDeclaredPrivateDNSServicesMatchExecutorIdentityAndDigest(t *testing.T) 
 			}
 			svc.UID, svc.ResourceVersion = "observed-service", "1"
 			if !validDNSPrivateTransport(svc, owner.Namespace, policy.AuthorityID, owner.Spec.NodeName) {
-				t.Fatal("private DNS declaration differs from transport digest/identity", component.ManifestPath)
+				t.Fatal("private DNS declaration differs from transport digest/identity", manifest)
 			}
 			if _, ok := dnsBackendObservationPort(*owner, svc); !ok {
 				t.Fatal("private DNS observation has no unique socket owner")
