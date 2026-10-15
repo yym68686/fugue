@@ -389,3 +389,92 @@ func TestSafeRolloutMembershipFollowsServingOfflineIntent(t *testing.T) {
 		t.Fatalf("removed hold did not restore required proof: %+v %v", got, err)
 	}
 }
+
+func TestSafeRolloutHostnameExclusionRequiresAppliedAuthenticatedProofAndServingCapacity(t *testing.T) {
+	for _, mode := range []string{"excluded and serving", "all excluded", "unreachable", "wrong edge", "wrong group", "expired", "unapplied exclusion", "proof has traffic"} {
+		t.Run(mode, func(t *testing.T) {
+			now := time.Now().UTC()
+			o, a, r, node, proof := appTrafficObserverFixture(t, now)
+			other := node
+			other.ID = "excluded-edge"
+			other.PublicIPv4 = "203.0.113.10"
+			o.Store = staticEdgeNodeLister{nodes: []model.EdgeNode{node, other}}
+			excludedCalls := 0
+			o.Probe = func(_ context.Context, host, path, ip, state string, _ time.Duration) (routeprobe.Proof, error) {
+				if host != a.Route.Hostname || path != a.Route.PathPrefix {
+					t.Fatal("probe target changed")
+				}
+				if ip == node.PublicIPv4 && mode != "all excluded" {
+					return proof, nil
+				}
+				if state == "" {
+					return routeprobe.Proof{}, fmt.Errorf("not a serving route")
+				}
+				if state != routeproof.StateExcluded {
+					t.Fatal("incorrect exclusion protocol")
+				}
+				excludedCalls++
+				p := proof
+				p.State = routeproof.StateExcluded
+				p.AppTrafficDigest = ""
+				p.EdgeID = other.ID
+				if ip == node.PublicIPv4 {
+					p.EdgeID = node.ID
+				}
+				switch mode {
+				case "unreachable":
+					return routeprobe.Proof{}, fmt.Errorf("offline")
+				case "wrong edge":
+					p.EdgeID = "unexpected"
+				case "wrong group":
+					p.GroupID = "unexpected"
+				case "expired":
+					p.ValidUntil = now
+				case "unapplied exclusion":
+					p.Version = "unapplied"
+				case "proof has traffic":
+					p.AppTrafficDigest = proof.AppTrafficDigest
+				}
+				return p, nil
+			}
+			got, err := o.observe(context.Background(), a, r, 20, now.Add(-time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if excludedCalls == 0 || got.Ready != (mode == "excluded and serving") {
+				t.Fatalf("mode=%s observation=%+v calls=%d", mode, got, excludedCalls)
+			}
+			if got.Ready && (got.Summary["serving_nodes"] != 1 || got.Summary["excluded_nodes"] != 1) {
+				t.Fatalf("capacity and exclusions conflated: %+v", got)
+			}
+		})
+	}
+}
+
+func TestSafeRolloutWaitAllowsIndependentPublicationWithoutRelaxingTrafficProof(t *testing.T) {
+	now := time.Now().UTC()
+	start := now
+	o, a, r, node, proof := appTrafficObserverFixture(t, now)
+	inventory := &changingEdgeNodeLister{nodes: []model.EdgeNode{node}}
+	o.Store = inventory
+	o.Now = func() time.Time { return now }
+	o.Probe = func(_ context.Context, _, _, _, state string, _ time.Duration) (routeprobe.Proof, error) {
+		if now.Sub(start) < 2*time.Minute || state != "" {
+			return routeprobe.Proof{}, fmt.Errorf("publication still applying")
+		}
+		p := proof
+		p.CheckedAt = now
+		p.ValidUntil = now.Add(time.Minute)
+		return p, nil
+	}
+	o.Sleep = func(context.Context, time.Duration) error {
+		now = now.Add(30 * time.Second)
+		heartbeat := now
+		inventory.nodes[0].LastHeartbeatAt = &heartbeat
+		return nil
+	}
+	got, err := o.WaitForSafeRolloutEdgeRouteBundle(context.Background(), a, r, 20, start.Add(-time.Minute))
+	if err != nil || !got.Ready || now.Sub(start) != 2*time.Minute {
+		t.Fatalf("publication must converge with its exact proof: %+v %v elapsed=%v", got, err, now.Sub(start))
+	}
+}

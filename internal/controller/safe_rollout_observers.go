@@ -15,7 +15,9 @@ import (
 )
 
 const (
-	safeRolloutEdgeBundleWaitTimeout  = 90 * time.Second
+	// Signed publication includes an independently scheduled producer, readiness
+	// capture and consumer application; preserve the old route during that cycle.
+	safeRolloutEdgeBundleWaitTimeout  = 5 * time.Minute
 	safeRolloutEdgeBundlePollInterval = 3 * time.Second
 	safeRolloutDrainMetricsLookback   = 20 * time.Minute
 )
@@ -208,6 +210,7 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	observation.RequiredNodes = len(ids)
 	versions := map[string]struct{}{}
 	proofs := make(map[string]routeprobe.Proof, len(ids))
+	observedDigests := make(map[string]string, len(ids))
 	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return observation, err
@@ -236,16 +239,18 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 		if reason == "" {
 			started := o.now()
 			proof, probeErr := o.probeNode(ctx, app, node)
+			observedDigests[id] = proof.AppTrafficDigest
+			excluded := proof.State == routeproof.StateExcluded && proof.AppTrafficDigest == ""
 			switch {
 			case probeErr != nil:
 				reason = "app_traffic_probe_failed"
-			case proof.AppTrafficDigest != digest:
+			case !excluded && proof.AppTrafficDigest != digest:
 				reason = "app_traffic_proof_mismatch"
 			case proof.EdgeID != id || proof.GroupID != wait.groups[id]:
 				reason = "app_traffic_identity_mismatch"
-			case !safeRolloutProofPublicationAtLeast(proof.Version, node.RouteBundleVersion):
+			case !safeRolloutProofPublicationAtLeast(proof.Version, node.RouteBundleVersion) || (excluded && proof.Version != node.CaddyAppliedVersion):
 				reason = "app_traffic_bundle_mismatch"
-			case proof.State != "" || proof.CheckedAt.Before(started) || proof.CheckedAt.After(o.now()) || !proof.ValidUntil.After(o.now()):
+			case (proof.State != "" && !excluded) || proof.CheckedAt.Before(started) || proof.CheckedAt.After(o.now()) || !proof.ValidUntil.After(o.now()):
 				reason = "app_traffic_proof_stale"
 			default:
 				proofs[id] = proof
@@ -294,6 +299,7 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 		before := current[id]
 		if !exists || node.EdgeGroupID != wait.groups[id] || node.Draining || !node.Healthy || node.Status != model.EdgeHealthHealthy ||
 			!safeRolloutProofPublicationAtLeast(proof.Version, node.RouteBundleVersion) ||
+			(proof.State == routeproof.StateExcluded && proof.Version != node.CaddyAppliedVersion) ||
 			!safeRolloutProofPublicationAtLeast(node.RouteBundleVersion, before.RouteBundleVersion) ||
 			node.CaddyAppliedVersion != node.RouteBundleVersion || node.PublicIPv4 != before.PublicIPv4 || node.PublicIPv6 != before.PublicIPv6 ||
 			node.LastHeartbeatAt == nil || node.LastHeartbeatAt.Before(o.now().Add(-2*time.Minute)) || node.LastHeartbeatAt.After(o.now().Add(5*time.Second)) || node.CaddyLastError != "" || node.LastError != "" {
@@ -301,11 +307,19 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 			observation.WaitingNodes = append(observation.WaitingNodes, id+":edge_changed_during_probes")
 		}
 	}
+	// Exclusion is fresh evidence that this Edge cannot forward the route, not
+	// evidence of serving capacity. At least one Edge must prove the exact traffic.
+	servingNodes, excludedNodes := 0, 0
 	// A slow later probe must not make an earlier expired proof count as success.
 	for _, id := range ids {
 		if proof, ok := proofs[id]; ok {
 			if proof.ValidUntil.After(o.now()) {
 				observation.ReadyNodes++
+				if proof.State == routeproof.StateExcluded {
+					excludedNodes++
+				} else {
+					servingNodes++
+				}
 			} else {
 				observation.WaitingNodes = append(observation.WaitingNodes, id+":app_traffic_proof_expired")
 			}
@@ -315,11 +329,14 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 		return observation, err
 	}
 	sort.Strings(observation.WaitingNodes)
-	observation.Ready = observation.RequiredNodes > 0 && observation.ReadyNodes == observation.RequiredNodes
+	observation.Ready = servingNodes > 0 && observation.ReadyNodes == observation.RequiredNodes
 	if observation.RequiredNodes == 0 {
 		observation.Summary["reason"] = "no edge serving evidence available"
 	}
 	observation.ServingVersions = sortedStringSet(versions)
+	observation.Summary["serving_nodes"] = servingNodes
+	observation.Summary["excluded_nodes"] = excludedNodes
+	observation.Summary["observed_app_traffic_digests"] = observedDigests
 	observation.Summary["required_nodes"] = observation.RequiredNodes
 	observation.Summary["ready_nodes"] = observation.ReadyNodes
 	observation.Summary["waiting_nodes"] = observation.WaitingNodes
@@ -446,7 +463,24 @@ func (o storeSafeRolloutEdgeBundleObserver) probeNode(ctx context.Context, app m
 	if probe == nil {
 		probe = routeprobe.Probe
 	}
-	return probe(ctx, app.Route.Hostname, model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix), address, "", 5*time.Second)
+	proof, err := probe(ctx, app.Route.Hostname, model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix), address, "", 5*time.Second)
+	if err == nil {
+		if proof.State != "" {
+			return routeprobe.Proof{}, fmt.Errorf("unexpected active route proof state")
+		}
+		return proof, nil
+	}
+	if ctx.Err() != nil {
+		return proof, err
+	}
+	// A hostname may deliberately exclude an otherwise healthy physical Edge.
+	// Never infer this from failure or inventory: require a new authenticated,
+	// nonce-bound exclusion proof from that Edge's applied route publication.
+	proof, err = probe(ctx, app.Route.Hostname, model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix), address, routeproof.StateExcluded, 5*time.Second)
+	if err == nil && proof.State != routeproof.StateExcluded {
+		return routeprobe.Proof{}, fmt.Errorf("expected explicit route exclusion proof")
+	}
+	return proof, err
 }
 
 func safeRolloutEdgeNodeBundleApplied(node model.EdgeNode, since time.Time) (bool, string) {

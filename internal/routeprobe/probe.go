@@ -70,7 +70,7 @@ func Probe(ctx context.Context, host, path, address, expectedState string, timeo
 	if timeout < time.Second || timeout > 10*time.Second {
 		return Proof{}, errors.New("invalid route probe timeout")
 	}
-	if expectedState != "" && expectedState != "disabled" && expectedState != "unavailable" {
+	if expectedState != "" && expectedState != "disabled" && expectedState != "unavailable" && expectedState != routeproof.StateExcluded {
 		return Proof{}, errors.New("invalid placement probe state")
 	}
 	ip, err := netip.ParseAddr(address)

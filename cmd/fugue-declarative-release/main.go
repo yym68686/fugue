@@ -707,6 +707,10 @@ func runPrepare(args []string, output io.Writer) error {
 			return err
 		}
 	}
+	rendered, err = bindPostgresCPUPolicy(release, rendered)
+	if err != nil {
+		return err
+	}
 	cluster, err := newKubectlCluster()
 	if err != nil {
 		return err
