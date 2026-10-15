@@ -2191,7 +2191,7 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          python3 -m unittest scripts.test_select_dns_configuration
+          python3 -m unittest scripts.test_select_dns_configuration scripts.test_verify_dns_configuration_revision
           python3 -m scripts.select_dns_configuration "$BASE_SHA" HEAD > dns-configuration-selection.json
           python3 - <<'PYTHON'
           import json, os
@@ -2230,7 +2230,7 @@ jobs:
           fi
           if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_dns_transport.py scripts/test_reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/test_recover_dns_transport.py .github/workflows/ci.yml; then
             git fetch origin main
-            if ! git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py cmd/fugue-dns-observation-verify internal/dnsserver .github/workflows/ci.yml; then
+            if ! git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/build_dns_observation_verifier.sh scripts/verify_dns_configuration_revision.py scripts/select_dns_configuration.py || ! python3 -m scripts.verify_dns_configuration_revision HEAD origin/main transport; then
               echo "Newer DNS transport configuration supersedes this run."
               exit 0
             fi
@@ -2319,7 +2319,7 @@ jobs:
           paths=("$config" scripts/retire_dns_slots.py scripts/test_retire_dns_slots.py)
           if ! git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "${paths[@]}" scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/retire_dns_hostport.py cmd/fugue-dns-observation-verify internal/dnsserver .github/workflows/ci.yml; then
+            if git diff --quiet HEAD origin/main -- "${paths[@]}" scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/retire_dns_hostport.py scripts/build_dns_observation_verifier.sh scripts/verify_dns_configuration_revision.py scripts/select_dns_configuration.py && python3 -m scripts.verify_dns_configuration_revision HEAD origin/main slots; then
               echo 'changed=true' >> "$GITHUB_OUTPUT"
             fi
           fi
@@ -2351,7 +2351,8 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- deploy/environments/production/dns-slot-retirement scripts/retire_dns_slots.py scripts/test_retire_dns_slots.py scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/retire_dns_hostport.py cmd/fugue-dns-observation-verify internal/dnsserver .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/dns-slot-retirement scripts/retire_dns_slots.py scripts/test_retire_dns_slots.py scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/retire_dns_hostport.py scripts/build_dns_observation_verifier.sh scripts/verify_dns_configuration_revision.py scripts/select_dns_configuration.py
+          python3 -m scripts.verify_dns_configuration_revision HEAD origin/main slots
           export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
           python3 -m scripts.retire_dns_slots deploy/environments/production/dns-slot-retirement/intent.json --apply --evidence "$RUNNER_TEMP/dns-slot-retirement-result.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

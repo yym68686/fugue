@@ -857,7 +857,7 @@ func TestDNSSlotRetirementIsIndependentAndSharesTransportFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"fugue-production-dns-transport", "git diff --exit-code HEAD origin/main", "--evidence", "--apply", "scripts.test_retire_dns_slots", "internal/dnsserver", "production"} {
+	for _, required := range []string{"fugue-production-dns-transport", "git diff --exit-code HEAD origin/main", "--evidence", "--apply", "scripts.test_retire_dns_slots", "scripts.verify_dns_configuration_revision", "production"} {
 		if !strings.Contains(string(encoded), required) {
 			t.Fatal("retirement lost a required release fence", required)
 		}
