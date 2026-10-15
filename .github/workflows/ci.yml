@@ -10,9 +10,29 @@ permissions:
   contents: read
 
 jobs:
+  managed_postgres_cpu_policy_plan:
+    # Select config-only work before acquiring the shared production lock.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.selected.outputs.changed }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select CPU policy intent without compiling application code
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          changed=false
+          if ! git diff --quiet "$BASE_SHA" HEAD -- deploy/environments/production/managed-postgres/cpu-upscale-policy.json scripts/configure_postgres_cpu_policy.py scripts/test_configure_postgres_cpu_policy.py; then changed=true; fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
   managed_postgres_cpu_policy:
     # Configuration recovery stays independent of component compilation.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: managed_postgres_cpu_policy_plan
+    if: ${{ needs.managed_postgres_cpu_policy_plan.outputs.changed == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-controller, cancel-in-progress: false, queue: max}

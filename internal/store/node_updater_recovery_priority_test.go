@@ -29,10 +29,16 @@ func TestHostPolicyRecoveryCannotStarveBehindReplenishedInventory(t *testing.T) 
 	for _, taskType := range []string{noderesourcepolicy.TaskType, model.NodeUpdateTaskTypeReconcileHostJournaldPolicy} {
 		t.Run(taskType, func(t *testing.T) {
 			policy := model.NodeUpdateTask{ID: "policy", Type: taskType, CreatedAt: now.Add(-10 * time.Minute)}
-			if got := nodeUpdateTaskDeliveryPriority(policy, now.Add(-time.Nanosecond)); got != 4 {
+			freshPriority, agedPriority := 4, 3
+			wantOrder := []string{"upgrade", "overdue-inventory", "rescue", "deploy", "policy", "fresh-inventory"}
+			if taskType == noderesourcepolicy.TaskType {
+				freshPriority, agedPriority = 1, 1
+				wantOrder = []string{"upgrade", "overdue-inventory", "policy", "rescue", "deploy", "fresh-inventory"}
+			}
+			if got := nodeUpdateTaskDeliveryPriority(policy, now.Add(-time.Nanosecond)); got != freshPriority {
 				t.Fatal("fresh policy changed its priority", got)
 			}
-			if got := nodeUpdateTaskDeliveryPriority(policy, now); got != 3 {
+			if got := nodeUpdateTaskDeliveryPriority(policy, now); got != agedPriority {
 				t.Fatal("waiting policy was not promoted at the boundary", got)
 			}
 			tasks := []model.NodeUpdateTask{
@@ -44,13 +50,13 @@ func TestHostPolicyRecoveryCannotStarveBehindReplenishedInventory(t *testing.T) 
 				{ID: "deploy", Type: model.NodeUpdateTaskTypeReplicateAppImage, CreatedAt: now, Payload: map[string]string{"priority": model.ImageReplicationPriorityDeployBlocking}},
 			}
 			sortNodeUpdateTasksForDelivery(tasks)
-			for i, want := range []string{"upgrade", "overdue-inventory", "rescue", "deploy", "policy", "fresh-inventory"} {
+			for i, want := range wantOrder {
 				if tasks[i].ID != want {
 					t.Fatalf("%d: %s want %s", i, tasks[i].ID, want)
 				}
 			}
 			policy.CreatedAt = time.Time{}
-			if got := nodeUpdateTaskDeliveryPriority(policy, now); got != 4 {
+			if got := nodeUpdateTaskDeliveryPriority(policy, now); got != freshPriority {
 				t.Fatal("missing creation time authorized priority promotion", got)
 			}
 		})
