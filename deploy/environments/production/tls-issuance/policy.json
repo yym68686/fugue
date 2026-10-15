@@ -1,7 +1,7 @@
 {
   "schema": "fugue.tls-issuance-policy/v1",
-  "generation": 1,
-  "enabled": false,
+  "generation": 2,
+  "enabled": true,
   "directory_url": "https://acme-v02.api.letsencrypt.org/directory",
   "issuer_id": "fugue-central-acme",
   "contact": "",
