@@ -13,7 +13,7 @@ import (
 	"fugue/internal/platformsafety"
 )
 
-func validateProducerMembershipInputs(state *model.State, previous, next platformproducer.Policy, keys bundleauth.Keyring) error {
+func validateProducerMembershipInputs(state *model.State, previous, next platformproducer.Policy, keys bundleauth.Keyring, operation string) error {
 	inputs := make([]model.PlatformArtifact, 0, 4)
 	for _, p := range []platformproducer.Policy{previous, next} {
 		for _, ref := range []struct{ id, digest, kind string }{
@@ -31,7 +31,11 @@ func validateProducerMembershipInputs(state *model.State, previous, next platfor
 			inputs = append(inputs, a)
 		}
 	}
-	if inputs[2].GenerationSequence <= inputs[0].GenerationSequence || inputs[3].GenerationSequence <= inputs[1].GenerationSequence || platformproducer.ValidateMembershipExpansion(previous, next, inputs[0], inputs[2], inputs[1], inputs[3]) != nil {
+	validate := platformproducer.ValidateMembershipExpansion
+	if operation == "shrink_membership" {
+		validate = platformproducer.ValidateMembershipShrink
+	}
+	if inputs[2].GenerationSequence <= inputs[0].GenerationSequence || inputs[3].GenerationSequence <= inputs[1].GenerationSequence || validate(previous, next, inputs[0], inputs[2], inputs[1], inputs[3]) != nil {
 		return ErrConflict
 	}
 	return nil

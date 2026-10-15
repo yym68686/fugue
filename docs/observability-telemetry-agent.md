@@ -228,3 +228,21 @@ For an incident, query `app_events` by app, event type and time, then parse
 `attributes_json.material_json`. Missing historical rows remain missing; this
 instrumentation does not reconstruct past Kubernetes state or authorize weaker
 serving checks.
+
+## Unavailable Kubernetes log nodes
+
+A log-open transport failure opens a circuit shared by all sources on that
+physical node. Initially in-flight reads are bounded by collector concurrency;
+subsequent cycles skip the node until one half-open probe is due. Retries grow
+from the normal poll interval (at least 15 seconds) to a five-minute ceiling,
+with jitter. A late success from an earlier request cannot reset a newer failure.
+Container-specific errors, authentication failures and API throttling use
+source-local backoff instead of suppressing other containers on the node.
+
+Backoff preserves inclusive cursors and unread timestamps. Successful recovery
+resumes ordinary fair collection; retention loss remains an explicit cursor-gap
+counter. This mechanism does not alter serving membership or DNS intent.
+Observe `fugue_telemetry_pipeline_kubernetes_log_backoff_nodes`,
+`fugue_telemetry_pipeline_kubernetes_log_backoff_skips_total`, actual read errors,
+and backlog age together. Skipped sources do not count as attempted reads in
+source diagnostics; `next_attempt` and `node_backoff` expose the wait explicitly.

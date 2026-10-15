@@ -13,8 +13,19 @@ import (
 // already declared Edge can join the static execution membership. This grants
 // neither process enrollment nor serving/public transport authority.
 func ValidateMembershipExpansion(previous, next Policy, oldStatic, newStatic, oldProjection, newProjection model.PlatformArtifact) error {
+	return validateMembershipChange(previous, next, oldStatic, newStatic, oldProjection, newProjection, false)
+}
+
+// ValidateMembershipShrink removes one explicitly selected execution member.
+// Runtime health cannot alter membership, and no observation from the removed
+// member is needed to validate the signed configuration change.
+func ValidateMembershipShrink(previous, next Policy, oldStatic, newStatic, oldProjection, newProjection model.PlatformArtifact) error {
+	return validateMembershipChange(previous, next, oldStatic, newStatic, oldProjection, newProjection, true)
+}
+
+func validateMembershipChange(previous, next Policy, oldStatic, newStatic, oldProjection, newProjection model.PlatformArtifact, shrink bool) error {
 	fail := func() error {
-		return fmt.Errorf("membership expansion must add one declared Edge without changing other configuration")
+		return fmt.Errorf("membership change must add or remove exactly one declared Edge without changing other configuration")
 	}
 	before, err := DecodeStaticIntent(oldStatic)
 	if err != nil {
@@ -45,7 +56,7 @@ func ValidateMembershipExpansion(previous, next Policy, oldStatic, newStatic, ol
 	if oldStatic.Generation == newStatic.Generation || oldProjection.Generation == newProjection.Generation ||
 		!reflect.DeepEqual(without(oldStatic.Content, "generation", "edge_topology"), without(newStatic.Content, "generation", "edge_topology")) ||
 		!reflect.DeepEqual(without(oldProjection.Content, "generation", "consumer_topology_digest"), without(newProjection.Content, "generation", "consumer_topology_digest")) ||
-		before.EdgeTopology == nil || after.EdgeTopology == nil || len(after.EdgeTopology.Edges) != len(before.EdgeTopology.Edges)+1 {
+		before.EdgeTopology == nil || after.EdgeTopology == nil || len(after.EdgeTopology.Edges) != len(before.EdgeTopology.Edges)+membershipDelta(shrink) {
 		return fail()
 	}
 	oldTopology, newTopology := before.EdgeTopology.Clone(), after.EdgeTopology.Clone()
@@ -53,14 +64,30 @@ func ValidateMembershipExpansion(previous, next Policy, oldStatic, newStatic, ol
 	if !reflect.DeepEqual(oldTopology, newTopology) {
 		return fail()
 	}
-	newEdges := make(map[string]edgetopology.Edge, len(after.EdgeTopology.Edges))
-	for _, edge := range after.EdgeTopology.Edges {
+	if shrink && (len(after.EdgeTopology.Edges) == 0 || newPolicy.MinimumHealthyEdges != nil && len(after.EdgeTopology.Edges) < *newPolicy.MinimumHealthyEdges) {
+		return fail()
+	}
+	// Compare the smaller set with the larger: every retained identity must be
+	// byte-for-byte unchanged; replacement is not a membership-only operation.
+	smaller, larger := before.EdgeTopology.Edges, after.EdgeTopology.Edges
+	if shrink {
+		smaller, larger = larger, smaller
+	}
+	newEdges := make(map[string]edgetopology.Edge, len(larger))
+	for _, edge := range larger {
 		newEdges[edge.ID] = edge
 	}
-	for _, edge := range before.EdgeTopology.Edges {
+	for _, edge := range smaller {
 		if !reflect.DeepEqual(edge, newEdges[edge.ID]) {
 			return fail()
 		}
 	}
 	return nil
+}
+
+func membershipDelta(shrink bool) int {
+	if shrink {
+		return -1
+	}
+	return 1
 }

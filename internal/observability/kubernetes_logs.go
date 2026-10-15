@@ -40,6 +40,8 @@ type kubernetesLogCollector struct {
 	deduper      *logLineDeduper
 	cursorsMu    sync.Mutex
 	cursors      map[string]kubernetesLogCursor
+	nodeRetries  map[string]kubernetesLogNodeRetry
+	clock        func() time.Time
 	targetOffset int
 	cycleVisited atomic.Int64
 }
@@ -256,6 +258,17 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 			delete(c.cursors, key)
 		}
 	}
+	var backingOff int64
+	for node, retry := range c.nodeRetries {
+		if c.logNow().Sub(retry.Visited) > time.Hour {
+			delete(c.nodeRetries, node)
+			continue
+		}
+		if retry.Failures > 0 {
+			backingOff++
+		}
+	}
+	c.pipeline.kubernetesLogBackoffNodes.Store(backingOff)
 	c.cursorsMu.Unlock()
 	c.pipeline.kubernetesPriorityTargets.Store(int64(priorityTargets))
 	c.pipeline.kubernetesLogPods.Store(int64(podCount))

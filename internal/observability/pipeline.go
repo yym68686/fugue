@@ -127,6 +127,8 @@ type Pipeline struct {
 	kubernetesLogBacklogMillis   atomic.Int64
 	kubernetesLogDeferredTargets atomic.Int64
 	kubernetesLogCursorGaps      atomic.Uint64
+	kubernetesLogBackoffSkips    atomic.Uint64
+	kubernetesLogBackoffNodes    atomic.Int64
 
 	cfg        Config
 	logger     *log.Logger
@@ -524,6 +526,8 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_cycle_seconds %f\n", float64(p.kubernetesLogCycleMillis.Load())/1000)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_backlog_max_seconds %f\n", float64(p.kubernetesLogBacklogMillis.Load())/1000)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_deferred_targets %d\n", p.kubernetesLogDeferredTargets.Load())
+	writeMetric("fugue_telemetry_pipeline_kubernetes_log_backoff_skips_total", p.kubernetesLogBackoffSkips.Load())
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_backoff_nodes %d\n", p.kubernetesLogBackoffNodes.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_cursor_gaps_total", p.kubernetesLogCursorGaps.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_lines_total", snap.KubernetesLogLines)
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_pods Last Kubernetes pod count considered by the log collector.")

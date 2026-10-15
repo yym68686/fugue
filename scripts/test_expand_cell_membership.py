@@ -91,3 +91,34 @@ class MembershipTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ShrinkMembershipTests(unittest.TestCase):
+    def test_one_member_can_leave_continuous_producer_without_waiting_for_it(self):
+        c, api = fixture()
+        old = api.artifacts['static-old']
+        old['content']['edge_topology']['edges'] = copy.deepcopy(c['static_intent']['edge_topology']['edges'])
+        old['content_hash'] = expansion.digest(old['content'])
+        projection = api.artifacts['projection-old']
+        projection['content']['consumer_topology_digest'] = expansion.topology_digest(old['content'])
+        projection['content_hash'] = expansion.digest(projection['content'])
+        previous = copy.deepcopy(api.artifacts[c['precondition']['previous_policy']['artifact_id']]['content'])
+        previous.update(static_intent_digest=old['content_hash'], dns_policy_digest=projection['content_hash'])
+        previous['serving']['single_publication'] = False
+        before = copy.deepcopy(old['content'])
+        after = copy.deepcopy(c['static_intent'])
+        after['edge_topology']['edges'] = after['edge_topology']['edges'][:1]
+        target_projection = copy.deepcopy(c['projection_policy'])
+        target_projection['consumer_topology_digest'] = expansion.topology_digest(after)
+        expansion.validate_expansion(previous, before, after, projection['content'], target_projection, 'shrink_membership')
+        c.update(schema='fugue.cell-membership-shrink/v1', static_intent=after, projection_policy=target_projection)
+        c['precondition']['operation'] = 'shrink_membership'
+        expansion.validate(c)
+        for change in ('empty', 'replacement', 'floor', 'other-input'):
+            with self.subTest(change=change):
+                altered, policy = copy.deepcopy(after), copy.deepcopy(target_projection)
+                if change == 'empty': altered['edge_topology']['edges'] = []
+                if change == 'replacement': altered['edge_topology']['edges'][0]['id'] = 'replacement'
+                if change == 'floor': policy['minimum_healthy_edges'] = 2
+                if change == 'other-input': altered['routes'] = [{'hostname':'changed.example.test'}]
+                with self.assertRaises(ValueError):
+                    expansion.validate_expansion(previous, before, altered, projection['content'], policy, 'shrink_membership')

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add one declared Edge to an established Cell's shadow execution membership.
+"""Add or remove one declared Edge in a Cell's shadow execution membership.
 
 Configuration inputs are immutable; the established full and positive LKG are
 transactionally pinned. This does not enroll processes or select public traffic.
@@ -19,7 +19,7 @@ from scripts import reconfigure_cell_producer as reconfigure
 
 
 def validate(c):
-    if set(c) != {"schema", "generation", "origin", "authority_cell_id", "producer_generation", "precondition", "static_intent", "projection_policy"} or c["schema"] != "fugue.cell-membership-expansion/v1" or type(c["generation"]) is not int or c["generation"] < 1 or not reconfigure.IDENTITY.fullmatch(c.get("producer_generation", "")):
+    if set(c) != {"schema", "generation", "origin", "authority_cell_id", "producer_generation", "precondition", "static_intent", "projection_policy"} or c["schema"] not in ("fugue.cell-membership-expansion/v1", "fugue.cell-membership-shrink/v1") or type(c["generation"]) is not int or c["generation"] < 1 or not reconfigure.IDENTITY.fullmatch(c.get("producer_generation", "")):
         raise ValueError("explicit membership expansion declaration required")
     cell = c["authority_cell_id"]
     if not isinstance(cell, str) or len(cell) > 128 or not re.fullmatch(r"cell-[a-z0-9]+(?:-[a-z0-9]+)*", cell):
@@ -28,7 +28,7 @@ def validate(c):
     if origin.scheme != "https" or c["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
         raise ValueError("canonical HTTPS origin required")
     pre = c["precondition"]
-    if set(pre) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or pre["operation"] != "expand_membership" or not reconfigure.DIGEST.fullmatch(pre["verification_evidence_hash"]):
+    if set(pre) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or pre["operation"] != ("shrink_membership" if c["schema"] == "fugue.cell-membership-shrink/v1" else "expand_membership") or not reconfigure.DIGEST.fullmatch(pre["verification_evidence_hash"]):
         raise ValueError("exact membership expansion preconditions required")
     for k in ["previous_policy", "serving_full"]:
         reconfigure.validate_ref(pre[k])
@@ -60,18 +60,24 @@ def read_input(api, policy, prefix, kind):
     return artifact
 
 
-def validate_expansion(previous, old_static, new_static, old_projection, new_projection):
+def validate_expansion(previous, old_static, new_static, old_projection, new_projection, operation="expand_membership"):
+    shrink = operation == "shrink_membership"
+    if operation not in ("expand_membership", "shrink_membership"):
+        raise ValueError("explicit membership operation required")
     def without(value, *fields):
         return {k: v for k, v in value.items() if k not in fields}
     if not previous.get("route_placement_transition") or old_static.get("generation") == new_static.get("generation") or old_projection.get("generation") == new_projection.get("generation") or without(old_static, "generation", "edge_topology") != without(new_static, "generation", "edge_topology") or without(old_projection, "generation", "consumer_topology_digest") != without(new_projection, "generation", "consumer_topology_digest"):
         raise ValueError("membership expansion changes unrelated input configuration")
     before, after = old_static["edge_topology"], new_static["edge_topology"]
-    if without(before, "edges") != without(after, "edges") or len(after["edges"]) != len(before["edges"]) + 1 or old_projection.get("consumer_topology_digest") != topology_digest(old_static) or new_projection.get("consumer_topology_digest") != topology_digest(new_static):
+    if without(before, "edges") != without(after, "edges") or len(after["edges"]) != len(before["edges"]) + (-1 if shrink else 1) or old_projection.get("consumer_topology_digest") != topology_digest(old_static) or new_projection.get("consumer_topology_digest") != topology_digest(new_static):
         raise ValueError("only one exact declared member may join")
     old = {e["id"]: e for e in before["edges"]}
     new = {e["id"]: e for e in after["edges"]}
     declared = {e["id"]: e for e in previous["route_placement_transition"]["next_topology"]["edges"]}
-    if any(new.get(k) != e for k, e in old.items()) or any(declared.get(k) != e for k, e in new.items()):
+    if shrink and len(after["edges"]) < max(1, new_projection.get("minimum_healthy_edges", 1)):
+        raise ValueError("remaining membership violates minimum healthy floor")
+    smaller, larger = (new, old) if shrink else (old, new)
+    if any(larger.get(k) != e for k, e in smaller.items()) or any(declared.get(k) != e for k, e in new.items()):
         raise ValueError("member properties differ from exact previous or declared topology")
 
 
@@ -81,11 +87,11 @@ def publish(c, api, save):
     owner = "platform-config-producer:" + c["authority_cell_id"]
     old = api("GET", "/v1/admin/artifacts/" + ref["artifact_id"])["artifact"]
     previous = old.get("content", {})
-    if old.get("id") != ref["artifact_id"] or old.get("content_hash") != ref["content_hash"] or digest(previous) != ref["content_hash"] or old.get("scope_key") != owner or old.get("status") != "validated" or previous.get("mode") != "serving" or previous.get("serving", {}).get("single_publication") is not True:
-        raise ValueError("completed single serving predecessor required")
+    if old.get("id") != ref["artifact_id"] or old.get("content_hash") != ref["content_hash"] or digest(previous) != ref["content_hash"] or old.get("scope_key") != owner or old.get("status") != "validated" or previous.get("mode") != "serving" or type(previous.get("serving", {}).get("single_publication")) is not bool:
+        raise ValueError("verified serving predecessor required")
     old_static = read_input(api, previous, "static_intent", "platform_intent")
     old_projection = read_input(api, previous, "dns_policy", "policy_snapshot")
-    validate_expansion(previous, old_static["content"], c["static_intent"], old_projection["content"], c["projection_policy"])
+    validate_expansion(previous, old_static["content"], c["static_intent"], old_projection["content"], c["projection_policy"], c["precondition"]["operation"])
     # No immutable writes until the exact current full and positive checkpoint
     # pass preflight. The store repeats these checks under both scope locks.
     check = {"policy": previous, "precondition": c["precondition"]}

@@ -15,6 +15,10 @@ import (
 	"fugue/internal/platformsafety"
 )
 
+func membershipReconfiguration(operation string) bool {
+	return operation == "expand_membership" || operation == "shrink_membership"
+}
+
 func globalDNSReconfiguration(operation string) bool {
 	return operation == "physical_dns" || operation == "retire_dns_selector" || operation == "dynamic_quality" || operation == "edge_offline" || operation == "business_exploration"
 }
@@ -60,8 +64,8 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "serving" || p.Serving == nil || p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
-	case "expand_membership":
-		if p.Mode != "shadow" || p.Serving == nil || !p.Serving.SinglePublication {
+	case "expand_membership", "shrink_membership":
+		if p.Mode != "shadow" || p.Serving == nil {
 			return p, ErrInvalidInput
 		}
 	default:
@@ -127,7 +131,11 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		if previous.Mode != "serving" || previous.Serving == nil || previous.Serving.SinglePublication {
 			return ErrConflict
 		}
-	} else if r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" {
+	} else if membershipReconfiguration(r.Operation) {
+		if previous.Mode != "serving" || previous.Serving == nil {
+			return ErrConflict
+		}
+	} else if r.Operation == "refresh_serving" || r.Operation == "continuous_serving" {
 		if previous.Mode != "serving" || previous.Serving == nil || !previous.Serving.SinglePublication {
 			return ErrConflict
 		}
@@ -155,8 +163,8 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 			return err
 		}
 	}
-	if r.Operation == "expand_membership" {
-		if err := validateProducerMembershipInputs(state, previous, p, keys); err != nil {
+	if membershipReconfiguration(r.Operation) {
+		if err := validateProducerMembershipInputs(state, previous, p, keys, r.Operation); err != nil {
 			return err
 		}
 	}
@@ -171,7 +179,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		copy := *previous.Serving
 		copy.SinglePublication = false
 		previous.Serving = &copy
-	} else if r.Operation == "expand_membership" {
+	} else if membershipReconfiguration(r.Operation) {
 		previous.StaticIntentArtifactID, p.StaticIntentArtifactID = "", ""
 		previous.StaticIntentDigest, p.StaticIntentDigest = "", ""
 		previous.DNSPolicyArtifactID, p.DNSPolicyArtifactID = "", ""
@@ -206,7 +214,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	if _, err := platformconfig.ValidateReleaseComposition(full); err != nil {
 		return ErrConflict
 	}
-	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" || globalDNSReconfiguration(r.Operation) {
+	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation) {
 		// Resolve the cohort against the exact current baseline before enabling
 		// automatic publication; fresh candidate admission remains independent.
 		target, err := platformproducer.Decode(a)
@@ -219,13 +227,13 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		if release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.VerifiedLKGGeneration != full.Generation {
 			return ErrConflict
 		}
-		if (r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || r.Operation == "expand_membership" || globalDNSReconfiguration(r.Operation)) && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
+		if (r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation)) && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
 			return ErrConflict
 		}
-		if (r.Operation == "expand_membership" || globalDNSReconfiguration(r.Operation)) && (full.Metadata[platformproducer.StaticIntentIDMetadata] != oldSources.StaticIntentArtifactID || full.Metadata[platformproducer.StaticIntentDigestMetadata] != oldSources.StaticIntentDigest || full.Metadata[platformproducer.DNSPolicyIDMetadata] != oldSources.DNSPolicyArtifactID || full.Metadata[platformproducer.DNSPolicyDigestMetadata] != oldSources.DNSPolicyDigest) {
+		if (membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation)) && (full.Metadata[platformproducer.StaticIntentIDMetadata] != oldSources.StaticIntentArtifactID || full.Metadata[platformproducer.StaticIntentDigestMetadata] != oldSources.StaticIntentDigest || full.Metadata[platformproducer.DNSPolicyIDMetadata] != oldSources.DNSPolicyArtifactID || full.Metadata[platformproducer.DNSPolicyDigestMetadata] != oldSources.DNSPolicyDigest) {
 			return ErrConflict
 		}
-		if r.Operation == "expand_membership" {
+		if membershipReconfiguration(r.Operation) {
 			if err := validateMembershipBaseline(state, oldSources, full, release); err != nil {
 				return err
 			}
@@ -293,7 +301,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 		state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	}
-	if r.Operation == "expand_membership" || globalDNSReconfiguration(r.Operation) {
+	if membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation) {
 		index := platformArtifactIndex(state.PlatformArtifacts, r.PreviousPolicy.ArtifactID)
 		if index < 0 {
 			return ErrConflict
@@ -317,7 +325,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 		platformsafety.ReleaseLaneKey(a.ArtifactKind, a.ScopeKey, "full"),
 		platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, p.TargetScope, "full"),
 	}
-	if r.Operation == "expand_membership" || globalDNSReconfiguration(r.Operation) {
+	if membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation) {
 		laneKeys = append(laneKeys, platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, p.TargetScope, "gray"))
 	}
 	for _, key := range laneKeys {
@@ -329,7 +337,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 			return err
 		}
 		state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, lane)
-		if (r.Operation == "expand_membership" || globalDNSReconfiguration(r.Operation)) && lane.ArtifactKind == model.PlatformArtifactKindReleaseSet && lane.ReleaseChannel == "gray" && lane.ActiveReleaseID != "" {
+		if (membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation)) && lane.ArtifactKind == model.PlatformArtifactKindReleaseSet && lane.ReleaseChannel == "gray" && lane.ActiveReleaseID != "" {
 			gray, err := pgGetPlatformArtifactRelease(ctx, tx, lane.ActiveReleaseID, false)
 			if err != nil {
 				return err

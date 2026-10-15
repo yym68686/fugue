@@ -13,6 +13,7 @@ type logSourceObservation struct {
 	ObservedAt      time.Time `json:"observed_at"`
 	CursorBefore    time.Time `json:"cursor_before"`
 	CursorAfter     time.Time `json:"cursor_after"`
+	NextAttempt     time.Time `json:"next_attempt,omitempty"`
 	PendingAt       time.Time `json:"pending_at,omitempty"`
 	DrainedThrough  time.Time `json:"drained_through,omitempty"`
 	OpenMillis      int64     `json:"open_ms"`
@@ -59,7 +60,10 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 		delete(p.sourceObservations, oldest)
 		p.sourceObservationEvicted++
 	}
-	v.Attempts = prior.Attempts + 1
+	v.Attempts = prior.Attempts
+	if v.Outcome != "node_backoff" {
+		v.Attempts++
+	}
 	v.Errors = prior.Errors
 	v.TotalLines = prior.TotalLines + uint64(v.Lines)
 	v.LastErrorAt, v.LastErrorClass = prior.LastErrorAt, prior.LastErrorClass

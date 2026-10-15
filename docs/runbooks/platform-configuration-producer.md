@@ -157,3 +157,36 @@ signed TrafficReleaseSet diagnostics. Their evidence binds the selected parent,
 all three member digests and the actual publication's authenticated consumers.
 Use artifact/hostname lineage and Runtime Facts for provenance and history.
 An old migration-equivalence result cannot prove current serving health.
+
+## Planned Cell member removal and return
+
+A node missing from live inventory remains a required consumer until a signed
+configuration explicitly changes membership. DNS draining and the global
+`offline_edges` policy do not edit a Cell's execution membership. Log collection
+backoff is independent of both configuration mechanisms.
+
+Use `python3 -m scripts.expand_cell_membership <declaration> --evidence <file>`
+with schema `fugue.cell-membership-shrink/v1` and precondition operation
+`shrink_membership` to remove one execution member. The declaration carries the
+exact predecessor policy, current full publication and positive LKG evidence
+hash, plus a new static intent and matching projection policy. The static intent
+may change only generation and remove one Edge; the projection changes only
+generation and consumer topology digest. At least one member and the existing
+minimum-healthy floor must remain. All retained identities and other constraints
+stay unchanged. Single and continuous serving predecessors are supported.
+
+The server checks signatures, source pins, full/LKG, lane fences and absence of
+pending gray publication under producer-before-target locks. Removal does not
+require an offline member's ACK. The successor policy enters shadow, preserving
+serving settings and current full/LKG. Preview the output, then use the existing
+`activate_serving` operation to authorize one bounded gray/full/verified-LKG
+cycle. Candidate admission continues to require fresh authenticated route/TLS
+capabilities and receipts for all remaining members. After that cycle, explicitly
+restore continuous serving if desired. Failure leaves the positive LKG intact.
+
+Keep independent DNS offline intent until public routing is separately verified.
+A heartbeat cannot re-enroll the removed execution member. When it returns, use
+`fugue.cell-membership-expansion/v1` / `expand_membership` with the same pinned
+checks, prepare the member, verify candidate convergence, and only then consider
+removing its DNS offline hold. Historical artifacts and rollback records are
+retained throughout; do not edit expected-consumer rows or bypass freshness.

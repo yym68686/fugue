@@ -20,6 +20,7 @@ type kubernetesLogCursor struct {
 	DrainedThrough    time.Time
 	Complete          bool
 	NextAttempt       time.Time
+	Failures          uint32
 	SourceUnavailable bool
 	PendingAt         time.Time
 }
@@ -93,7 +94,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	}
 	c.cycleVisited.Add(1)
 	key := logTargetKey(target)
-	now := time.Now().UTC()
+	now := c.logNow()
 	c.cursorsMu.Lock()
 	if c.cursors == nil {
 		c.cursors = map[string]kubernetesLogCursor{}
@@ -106,6 +107,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	finished := logTargetFinishedAt(target)
 	if cur.Complete || now.Before(cur.NextAttempt) || (!finished.IsZero() && finished.Before(cur.Time)) {
 		cur.Visited = now
+		if now.Before(cur.NextAttempt) {
+			c.pipeline.kubernetesLogBackoffSkips.Add(1)
+		}
 		if !finished.IsZero() && finished.Before(cur.Time) {
 			cur.Complete = true
 		}
@@ -123,11 +127,25 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			c.pipeline.kubernetesLogCursorGaps.Add(1)
 		}
 	}
+	ticket, retryAt, allowed := c.beginLogNodeRead(target.pod.Spec.NodeName, now)
+	if !allowed {
+		cur.Visited = now
+		if cur.PendingAt.IsZero() {
+			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
+		}
+		c.cursorsMu.Lock()
+		c.cursors[key] = cur
+		c.cursorsMu.Unlock()
+		c.pipeline.kubernetesLogBackoffSkips.Add(1)
+		c.pipeline.observeLogSource(logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, CursorAfter: cur.Time, PendingAt: cur.PendingAt, DrainedThrough: cur.DrainedThrough, Outcome: "node_backoff", NextAttempt: retryAt})
+		return
+	}
 	original := cur.Time
 	observation := logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, Outcome: "drained", LineLimitBytes: c.pipeline.cfg.KubernetesLogMaxLineBytes}
 	defer func() {
 		observation.CursorAfter = cur.Time
 		observation.PendingAt = cur.PendingAt
+		observation.NextAttempt = cur.NextAttempt
 		observation.DrainedThrough = cur.DrainedThrough
 		observation.TotalMillis = time.Since(now).Milliseconds()
 		c.pipeline.observeLogSource(observation)
@@ -138,14 +156,24 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	defer cancel()
 	since := metav1.NewTime(cur.Time)
 	stream, err := c.client.CoreV1().Pods(target.pod.Namespace).GetLogs(target.pod.Name, &corev1.PodLogOptions{Container: target.container, Timestamps: true, SinceTime: &since, Previous: target.previous}).Stream(ctx)
-	observation.OpenMillis = time.Since(now).Milliseconds()
+	observation.OpenMillis = c.logNow().Sub(now).Milliseconds()
+	nodeResult := err
+	if isBenignKubernetesLogReadError(err) {
+		nodeResult = nil
+	}
+	if parent.Err() != nil {
+		nodeResult = parent.Err()
+	}
+	emitWarning := c.finishLogNodeRead(ticket, nodeResult, c.logNow())
 	if err != nil {
 		observation.Outcome = "open_error"
 		observation.ErrorClass = logReadErrorClass(err)
 		benign := isBenignKubernetesLogReadError(err)
 		if !benign && parent.Err() == nil {
 			c.pipeline.kubernetesLogErrors.Add(1)
-			c.pipeline.recordError(fmt.Errorf("read Kubernetes cursor logs: %w", err))
+			if emitWarning {
+				c.pipeline.recordError(fmt.Errorf("read Kubernetes cursor logs node=%s source=%s: %w", target.pod.Spec.NodeName, key, err))
+			}
 		}
 		// Persist the newly initialized cursor even when the stream cannot be
 		// opened. Without this write, the next poll recreates a fresh five-minute
@@ -153,9 +181,11 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		if !benign && parent.Err() == nil && cur.PendingAt.IsZero() {
 			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
 		}
-		// Retry at the next normal poll, not again in the catch-up pass intended
-		// for streams with successfully observed unread records.
-		cur.NextAttempt = time.Now().UTC().Add(c.pipeline.cfg.KubernetesLogPollInterval)
+		// Failures retain their cursor and back off independently of successful
+		// catch-up reads. The node circuit additionally bounds all sibling sources.
+		if parent.Err() == nil {
+			c.deferLogSource(&cur)
+		}
 		cur.Visited = now
 		c.cursorsMu.Lock()
 		c.cursors[key] = cur
@@ -238,9 +268,14 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		}
 		c.pipeline.kubernetesLogErrors.Add(1)
 		c.pipeline.recordError(fmt.Errorf("scan Kubernetes cursor logs: %w", err))
+		c.deferLogSource(&cur)
 	}
 	if parent.Err() != nil {
 		observation.Outcome = "canceled"
+	}
+	if err == nil && !invalid {
+		cur.Failures = 0
+		cur.NextAttempt = time.Time{}
 	}
 	if err == nil && !invalid && !truncated {
 		cur.PendingAt = time.Time{}

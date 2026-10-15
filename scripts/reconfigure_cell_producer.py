@@ -38,7 +38,7 @@ def validate(config):
     precondition, policy = config["precondition"], config["policy"]
     required = {"previous_policy", "serving_full", "verification_evidence_hash"}
     operation = precondition.get("operation", "placement")
-    if not required.issubset(precondition) or set(precondition) - required - {"operation"} or operation not in ["placement", "activate_serving", "refresh_serving", "continuous_serving", "expand_membership"] or not DIGEST.fullmatch(precondition.get("verification_evidence_hash", "")):
+    if not required.issubset(precondition) or set(precondition) - required - {"operation"} or operation not in ["placement", "activate_serving", "refresh_serving", "continuous_serving", "expand_membership", "shrink_membership"] or not DIGEST.fullmatch(precondition.get("verification_evidence_hash", "")):
         raise ValueError("exact producer and verified serving baseline required")
     for field in ["previous_policy", "serving_full"]:
         validate_ref(precondition[field])
@@ -46,7 +46,7 @@ def validate(config):
     allowed = {"require_dns_query_policy", "hosted_zone_templates"}
     if operation != "placement":
         allowed.add("serving")
-    if not fields.issubset(policy) or set(policy) - fields - allowed or policy["schema_version"] != "fugue.platform.producer/v1" or policy["publication_role"] != "cell-routes" or policy["mode"] != ("shadow" if operation in ["placement", "expand_membership"] else "serving") or policy["input_source"] != "business-static-intent" or policy["authority_cell_id"] != cell or policy["target_scope"] != "authority-cell:" + cell or policy["require_application_domains"] is not True or policy["require_route_defaults"] is not True or policy.get("require_dns_query_policy", False) is not False or policy.get("hosted_zone_templates", []) != []:
+    if not fields.issubset(policy) or set(policy) - fields - allowed or policy["schema_version"] != "fugue.platform.producer/v1" or policy["publication_role"] != "cell-routes" or policy["mode"] != ("shadow" if operation in ["placement", "expand_membership", "shrink_membership"] else "serving") or policy["input_source"] != "business-static-intent" or policy["authority_cell_id"] != cell or policy["target_scope"] != "authority-cell:" + cell or policy["require_application_domains"] is not True or policy["require_route_defaults"] is not True or policy.get("require_dns_query_policy", False) is not False or policy.get("hosted_zone_templates", []) != []:
         raise ValueError("only an explicitly authorized pinned route-only successor is allowed")
     for k in ["generation", "static_intent_artifact_id", "dns_policy_artifact_id"]:
         if not IDENTITY.fullmatch(policy[k]):
@@ -56,7 +56,7 @@ def validate(config):
     if operation != "placement":
         serving = policy.get("serving", {})
         limits = ["gray_min_seconds", "full_min_seconds", "rollout_timeout_seconds"]
-        if set(serving) != {"single_publication", "canary_rule_ref", *limits} or serving["single_publication"] is not (operation != "continuous_serving") or not re.fullmatch(r"cohort=[a-z0-9][a-z0-9_-]{0,63}", serving["canary_rule_ref"]) or any(type(serving[k]) is not int for k in limits) or not all(1 <= serving[k] <= 1800 for k in limits[:2]) or not max(30, max(serving[k] for k in limits[:2]) + policy["interval_seconds"]) <= serving["rollout_timeout_seconds"] <= 3600:
+        if set(serving) != {"single_publication", "canary_rule_ref", *limits} or (type(serving["single_publication"]) is not bool or operation not in ("expand_membership", "shrink_membership") and serving["single_publication"] is not (operation != "continuous_serving")) or not re.fullmatch(r"cohort=[a-z0-9][a-z0-9_-]{0,63}", serving["canary_rule_ref"]) or any(type(serving[k]) is not int for k in limits) or not all(1 <= serving[k] <= 1800 for k in limits[:2]) or not max(30, max(serving[k] for k in limits[:2]) + policy["interval_seconds"]) <= serving["rollout_timeout_seconds"] <= 3600:
             raise ValueError("explicit bounded single serving publication required")
     transition = policy["route_placement_transition"]
     if not isinstance(transition, dict) or set(transition) != {"previous_topology", "next_topology", "constraints"}:
@@ -130,15 +130,15 @@ def publish(config, api, save):
     current = selected(api, scope, "shadow")
     old = api("GET", "/v1/admin/artifacts/" + config["precondition"]["previous_policy"]["artifact_id"])["artifact"]
     previous = old.get("content", {})
-    modes = ["serving"] if operation in ["refresh_serving", "continuous_serving", "expand_membership"] else ["shadow", "paused"]
+    modes = ["serving"] if operation in ["refresh_serving", "continuous_serving", "expand_membership", "shrink_membership"] else ["shadow", "paused"]
     if old.get("content_hash") != config["precondition"]["previous_policy"]["content_hash"] or digest(previous) != old.get("content_hash") or old.get("scope_key") != scope or old.get("status") != "validated" or previous.get("mode") not in modes:
         raise ValueError("previous producer policy is untrusted or has incompatible mode")
-    if operation in ["refresh_serving", "continuous_serving", "expand_membership"] and (previous.get("serving", {}).get("single_publication") is not True or full["artifact"].get("metadata", {}).get("producer_policy_release_id") != config["precondition"]["previous_policy"]["release_id"] or full["release"].get("released_by_type") != "bootstrap" or full["release"].get("released_by_id") != "platform-config-producer" or full["release"].get("verification_state") != "verified" or full["release"].get("verified_lkg_generation") != full["artifact"]["generation"]):
+    if operation in ["refresh_serving", "continuous_serving", "expand_membership", "shrink_membership"] and ((operation not in ("expand_membership", "shrink_membership") and previous.get("serving", {}).get("single_publication") is not True) or full["artifact"].get("metadata", {}).get("producer_policy_release_id") != config["precondition"]["previous_policy"]["release_id"] or full["release"].get("released_by_type") != "bootstrap" or full["release"].get("released_by_id") != "platform-config-producer" or full["release"].get("verification_state") != "verified" or full["release"].get("verified_lkg_generation") != full["artifact"]["generation"]):
         raise ValueError("refresh requires the predecessor's own verified single full publication")
     prior, target = copy.deepcopy(previous), copy.deepcopy(config["policy"])
     for value in [prior, target]:
         fields = ["generation"]
-        if operation == "expand_membership":
+        if operation in ("expand_membership", "shrink_membership"):
             fields.extend(["static_intent_artifact_id", "static_intent_digest", "dns_policy_artifact_id", "dns_policy_digest"])
         elif operation == "continuous_serving":
             value["serving"]["single_publication"] = False
@@ -149,7 +149,7 @@ def publish(config, api, save):
         value["mode"] = "shadow"
     if prior != target:
         raise ValueError("successor changes unrelated producer configuration")
-    if operation == "expand_membership":
+    if operation in ("expand_membership", "shrink_membership"):
         # Recheck typed immutable inputs even for a resolved direct declaration;
         # the API repeats signature/content checks inside the release transaction.
         from scripts.expand_cell_membership import validate_expansion, read_input
@@ -157,7 +157,7 @@ def publish(config, api, save):
         old_projection = read_input(api, previous, "dns_policy", "policy_snapshot")
         new_static = read_input(api, config["policy"], "static_intent", "platform_intent")
         new_projection = read_input(api, config["policy"], "dns_policy", "policy_snapshot")
-        validate_expansion(previous, old_static["content"], new_static["content"], old_projection["content"], new_projection["content"])
+        validate_expansion(previous, old_static["content"], new_static["content"], old_projection["content"], new_projection["content"], operation)
     if authority_identity(current) != config["precondition"]["previous_policy"] and not exact(current.get("artifact", {}), "policy_snapshot", scope, config["policy"]):
         raise ValueError("current producer policy changed")
     artifact = ensure_input(api, "policy_snapshot", scope, config["policy"])
@@ -172,7 +172,7 @@ def publish(config, api, save):
     current = selected(api, scope, "shadow")
     if not exact(current.get("artifact", {}), "policy_snapshot", scope, config["policy"]) or current.get("release", {}).get("idempotency_key") != key or authority_identity(current) is None:
         raise ValueError("successor is not the current transaction-bound policy")
-    if operation in ["placement", "expand_membership"]:
+    if operation in ["placement", "expand_membership", "shrink_membership"]:
         baseline(config, api)
         evidence["serving_publication_changed"] = False
     evidence.update(authority=authority_identity(current), completed_at=now().isoformat(), mode=config["policy"]["mode"], operation=operation, serving_publication_authorized=operation in ["activate_serving", "refresh_serving", "continuous_serving"])
