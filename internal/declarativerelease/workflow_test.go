@@ -776,3 +776,37 @@ func TestEveryRegisteredComponentHasDeploymentJob(t *testing.T) {
 		}
 	}
 }
+
+// The controller delivery lane builds the release command and uses the same
+// TLS route probe client as DNS. Changes to either dependency must be owned by
+// the selected controller intent without selecting unrelated components.
+func TestControllerPlanIncludesDeliveryAndProbeDependencies(t *testing.T) {
+	file, err := os.Open("../../deploy/releases/components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	registry, err := DecodeRegistry(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := []string{"cmd/fugue-declarative-release/main.go", "cmd/fugue-declarative-release/postgres_cpu_policy.go", "internal/controller/safe_rollout_observers.go", "internal/routeprobe/probe.go", "deploy/releases/controller/intent.json"}
+	plan, err := BuildPlan(registry, strings.Repeat("a", 40), strings.Repeat("b", 40), changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Releases) != 1 || plan.Releases[0].ComponentID != "controller" {
+		t.Fatalf("unexpected release selection: %#v", plan.Releases)
+	}
+	for _, path := range changed[:len(changed)-1] {
+		found := false
+		for _, selected := range plan.Releases[0].ChangedPaths {
+			if selected == path {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("controller plan omits dependency %s", path)
+		}
+	}
+}
