@@ -11,6 +11,18 @@ from scripts import reconcile_dns_transport as transport
 
 
 class TransportTests(unittest.TestCase):
+    def test_checkpoint_transport_failure_is_retryable_only_for_read_commands(self):
+        failure = RuntimeError('error sending request: Post "https://node/exec": EOF')
+        for args in [('get', 'pod', 'dns'), ('exec', 'dns', '--', 'cat', '/state/checkpoint')]:
+            with patch.object(transport, 'kubectl', side_effect=failure):
+                with self.assertRaises(transport.ObservationUnavailable):
+                    transport.read_json(*args)
+        for args in [('patch', 'daemonset', 'dns'), ('exec', 'dns', '--', 'sh', '-c', 'mutation')]:
+            with patch.object(transport, 'kubectl', side_effect=failure):
+                with self.assertRaises(RuntimeError) as error:
+                    transport.read_json(*args)
+                self.assertNotIsInstance(error.exception, transport.ObservationUnavailable)
+
     def test_production_listeners_select_declared_dns_workloads(self):
         root = Path(__file__).resolve().parents[1]
         config = transport.load_config(root / 'deploy/environments/production/dns-transport/transport.json')

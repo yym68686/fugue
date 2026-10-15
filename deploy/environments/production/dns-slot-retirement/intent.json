@@ -1,6 +1,7 @@
 {
   "api_address": "15.204.94.71",
   "generation": 4,
+
   "namespace": "fugue-system",
   "origin": "https://api.fugue.pro",
   "quiescent_services": [

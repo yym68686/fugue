@@ -151,7 +151,19 @@ def kubectl(*args, body=None):
 
 
 def read_json(*args):
-    raw = kubectl(*args)
+    read_only = args and args[0] == 'get'
+    if args and args[0] == 'exec' and '--' in args:
+        command = args[args.index('--') + 1:]
+        read_only = len(command) == 2 and command[0] == 'cat' and command[1].startswith('/')
+    try:
+        raw = kubectl(*args)
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        message = str(error)
+        if read_only and (isinstance(error, subprocess.TimeoutExpired) or
+                          'error sending request:' in message and message.rstrip().endswith('EOF') or
+                          'connection reset by peer' in message or 'TLS handshake timeout' in message):
+            raise ObservationUnavailable('DNS observation read transport temporarily unavailable') from error
+        raise
     if len(raw) > 8 << 20:
         raise ValueError("DNS transport observation exceeds limit")
     return json.loads(raw)
