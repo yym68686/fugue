@@ -21,7 +21,7 @@ import (
 	"fugue/internal/store"
 )
 
-func releaseReadinessFixture(t *testing.T, candidate bool) (model.App, model.AppRelease, managedAppKubeSnapshot) {
+func releaseReadinessFixture(t *testing.T, candidate bool, independentStable ...bool) (model.App, model.AppRelease, managedAppKubeSnapshot) {
 	t.Helper()
 	app := model.App{ID: "app-a", TenantID: "tenant-a", Name: "sample", Spec: model.AppSpec{Image: "registry.example/app@sha256:" + strings.Repeat("a", 64), Replicas: 2, RuntimeID: model.DefaultManagedRuntimeID, Ports: []int{8080}}}
 	app.Route = &model.AppRoute{Hostname: "app.example.test", ServicePort: 8080}
@@ -34,6 +34,9 @@ func releaseReadinessFixture(t *testing.T, candidate bool) (model.App, model.App
 		role = model.AppReleaseRoleCandidate
 		target.Spec.Image = "registry.example/app@sha256:" + strings.Repeat("b", 64)
 		revision = runtime.AppRevisionRenderOptions{Role: runtime.AppRevisionRoleCandidate, ReleaseID: id}
+	}
+	if !candidate && len(independentStable) > 0 && independentStable[0] {
+		revision = runtime.AppRevisionRenderOptions{Role: runtime.AppRevisionRoleCandidate, ReleaseID: id, Suffix: "previous-candidate"}
 	}
 	options := runtime.RenderOptions{Revision: revision}
 	release := model.AppRelease{ID: id, AppID: app.ID, TenantID: app.TenantID, Role: role, Status: model.AppReleaseStatusReady, RuntimeID: app.Spec.RuntimeID, ResolvedImageRef: target.Spec.Image, SpecSnapshot: &target.Spec, DeploymentName: runtime.RuntimeAppResourceNameWithOptions(target, options), ServiceName: runtime.RuntimeAppServiceNameWithOptions(target, options), UpstreamURL: runtime.AppRevisionServiceURL(target, options)}
@@ -203,9 +206,24 @@ func TestReleaseRuntimeReadinessUsesExactIndependentWorkload(t *testing.T) {
 }
 
 func TestCaptureReleaseRuntimeReadinessAllowsCanaryBeforeServing(t *testing.T) {
-	app, stable, stableSnap := releaseReadinessFixture(t, false)
+	for _, draining := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canonical_draining=%v", draining), func(t *testing.T) {
+			testCaptureReleaseRuntimeReadiness(t, draining)
+		})
+	}
+}
+
+func testCaptureReleaseRuntimeReadiness(t *testing.T, draining bool) {
+	app, stable, stableSnap := releaseReadinessFixture(t, false, draining)
 	_, candidate, candidateSnap := releaseReadinessFixture(t, true)
 	deployments := []any{}
+	if draining {
+		_, _, old := releaseReadinessFixture(t, false)
+		for _, deployment := range old.deployments {
+			deployment.Spec.Template.Spec.Containers[0].Image = "registry.example/app@sha256:" + strings.Repeat("c", 64)
+			deployments = append(deployments, deployment)
+		}
+	}
 	services := []any{}
 	slices := []any{}
 	pods := []any{}
@@ -381,6 +399,9 @@ func TestCaptureReleaseRuntimeReadinessAllowsCanaryBeforeServing(t *testing.T) {
 				draft, err := fullServer.capturePlatformIntentWithInputs(context.Background(), platformProducerPrincipal(), static, &dnsPolicy, nil)
 				if err != nil {
 					t.Fatal("full capture", err)
+				}
+				if len(draft.RuntimeSnapshot.DNSSelections) == 0 {
+					t.Fatal("ready release routes lost owned dynamic DNS queries")
 				}
 				if len(draft.Intent.Routes) != 1 {
 					t.Fatalf("expected one route, got %d", len(draft.Intent.Routes))

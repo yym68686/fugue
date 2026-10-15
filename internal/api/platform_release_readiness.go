@@ -124,7 +124,7 @@ func (s *Server) captureReleaseRuntimeReadiness(ctx context.Context, projection 
 	projection.RuntimeSnapshot.Facts["release_readiness"] = value
 	projection.CapturedAt = time.Now().UTC()
 	projection.RuntimeSnapshot.CapturedAt = &projection.CapturedAt
-	return nil
+	return projectReadyReleaseOrigins(projection, proofs)
 }
 
 func (s *Server) observeReleaseRuntimeReadiness(app model.App, release model.AppRelease, stable bool, snapshot managedAppKubeSnapshot, observedAt time.Time) (platformconfig.ReleaseObservation, releaseRuntimeReadiness) {
@@ -231,4 +231,57 @@ func (s *Server) observeReleaseRuntimeReadiness(app model.App, release model.App
 	fact.StatusReason = ""
 	proof.Ready = true
 	return fact, proof
+}
+
+// The canonical workload may still be draining an earlier code version. A
+// release-owned route instead obtains origin readiness from the exact workloads
+// selected by its frozen traffic policy. This changes only captured facts;
+// explicit intent, policy, release weights and edge publication gates stay intact.
+func projectReadyReleaseOrigins(projection *platformIntentProjectionResponse, proofs []releaseRuntimeReadiness) error {
+	ready := make(map[string]bool, len(proofs))
+	for _, proof := range proofs {
+		ready[proof.ReleaseID] = proof.Ready
+	}
+	routes := make([]platformconfig.CompiledRoute, 0, len(projection.Intent.Routes))
+	for _, route := range projection.Intent.Routes {
+		routes = append(routes, platformconfig.CompiledRoute{RouteIntent: route})
+	}
+	routes, err := platformconfig.ApplyRoutePolicyConstraints(routes, projection.Policy, projection.RuntimeSnapshot.CapturedAt)
+	if err != nil {
+		return err
+	}
+	routes, err = platformconfig.ApplyTrafficPolicyConstraints(routes, projection.Policy, projection.RuntimeSnapshot)
+	if err != nil {
+		return err
+	}
+	observed := make(map[string]time.Time, len(projection.RuntimeSnapshot.Releases))
+	for _, release := range projection.RuntimeSnapshot.Releases {
+		observed[release.ID] = release.ObservedAt
+	}
+	origins := make(map[string]time.Time)
+	for _, route := range routes {
+		if route.OriginRef == "" || len(route.Upstreams) == 0 {
+			continue
+		}
+		valid := true
+		var oldest time.Time
+		for _, upstream := range route.Upstreams {
+			valid = valid && ready[upstream.ReleaseID] && upstream.RuntimeID == route.RuntimeID
+			if at := observed[upstream.ReleaseID]; oldest.IsZero() || at.Before(oldest) {
+				oldest = at
+			}
+		}
+		if valid && !oldest.IsZero() {
+			origins[route.OriginRef] = oldest
+		}
+	}
+	for i := range projection.RuntimeSnapshot.Origins {
+		origin := &projection.RuntimeSnapshot.Origins[i]
+		if at, ok := origins[origin.Ref]; ok {
+			origin.ObservedAt = at
+			origin.Status = model.EdgeRouteStatusActive
+			origin.StatusReason = ""
+		}
+	}
+	return nil
 }

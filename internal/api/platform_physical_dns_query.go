@@ -81,7 +81,7 @@ func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *plat
 			selections[key] = compiledPhysicalDNSSelection{Selection: selection, Evidence: raw}
 		}
 		if !matched {
-			return fmt.Errorf("physical route lacks an owned dynamic DNS query")
+			return fmt.Errorf("physical route %q lacks an owned dynamic DNS query", route.Hostname)
 		}
 		if len(unifiedSources) > 0 {
 			compiled, err := captureUnifiedBusinessPublications(unifiedSources, route, time.Now().UTC())
