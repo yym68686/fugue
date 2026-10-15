@@ -51,6 +51,7 @@ func dnsReleaseCompatibilityForProof(old *dnsServingState, bridge *dnsReleaseBri
 		retainDNSSelectionComparison(newQueries)
 	}
 	oldTraffic, newTraffic := dnsBridgeTrafficConstraints(previous), dnsBridgeTrafficConstraints(next)
+	oldIntents, newIntents := dnsBridgeRecordIntents(previous.Records), dnsBridgeRecordIntents(next.Records)
 	oldPlan, newPlan := previous.Plan, next.Plan
 	previous.Plan, next.Plan = nil, nil
 	previous.Generation, next.Generation = "", ""
@@ -59,6 +60,7 @@ func dnsReleaseCompatibilityForProof(old *dnsServingState, bridge *dnsReleaseBri
 	previous.Policy.DNSAnswerRules, next.Policy.DNSAnswerRules = nil, nil
 	previous.Policy.TrafficConstraints, next.Policy.TrafficConstraints = nil, nil
 	previous.Queries, next.Queries = nil, nil
+	previous.Records, next.Records = nil, nil
 	if !reflect.DeepEqual(previous, next) {
 		return nil, nil
 	}
@@ -81,12 +83,24 @@ func dnsReleaseCompatibilityForProof(old *dnsServingState, bridge *dnsReleaseBri
 		if next, exists := nextRecords[record.Hostname]; exists && reflect.DeepEqual(record, next) &&
 			len(oldQueries[record.Hostname]) > 0 &&
 			reflect.DeepEqual(oldQueries[record.Hostname], newQueries[record.Hostname]) &&
+			reflect.DeepEqual(oldIntents[record.Hostname], newIntents[record.Hostname]) &&
 			reflect.DeepEqual(oldRules[record.Hostname], newRules[record.Hostname]) &&
 			reflect.DeepEqual(oldTraffic[record.Hostname], newTraffic[record.Hostname]) {
 			records[record.Hostname] = true
 		}
 	}
 	return allowed, records
+}
+
+// An unrelated record addition (for example a bounded TXT challenge) must not
+// veto an unchanged hostname's exact route proofs. Keep all intent fields and
+// all record types for this hostname, including ownership and value expiry.
+func dnsBridgeRecordIntents(records []platformconfig.DNSIntent) map[string][]platformconfig.DNSIntent {
+	byHost := make(map[string][]platformconfig.DNSIntent)
+	for _, record := range records {
+		byHost[record.Hostname] = append(byHost[record.Hostname], record)
+	}
+	return byHost
 }
 
 // The compiler can represent an unchanged verified order either as an explicit
