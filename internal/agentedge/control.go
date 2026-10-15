@@ -31,20 +31,21 @@ type ControlOptions struct {
 // acquisition uses ordinary hostname resolution after dynamic routing has
 // activated; heartbeat, operation polling and completion never fall back to it.
 type Control struct {
-	stepMu      sync.Mutex
-	mu          sync.RWMutex
-	options     ControlOptions
-	checkpoint  clientCheckpoint
-	keys        map[string]TrustKey
-	selector    *Selector
-	selected    *http.Client
-	acquisition *http.Client
-	now         func() time.Time
-	lastProbe   time.Time
-	refreshAt   time.Time
-	fetch       func(context.Context, string) ([]byte, error)
-	probe       func(context.Context, Grant, Candidate) Measurement
-	routeProbe  func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
+	stepMu        sync.Mutex
+	mu            sync.RWMutex
+	options       ControlOptions
+	checkpoint    clientCheckpoint
+	keys          map[string]TrustKey
+	selector      *Selector
+	selected      *http.Client
+	acquisition   *http.Client
+	now           func() time.Time
+	lastProbe     time.Time
+	refreshAt     time.Time
+	refreshUrgent bool
+	fetch         func(context.Context, string) ([]byte, error)
+	probe         func(context.Context, Grant, Candidate) Measurement
+	routeProbe    func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
 }
 
 type ControlStatus struct {
@@ -253,7 +254,10 @@ func (m *Control) Step(ctx context.Context) error {
 	keys := m.currentKeys()
 	v, permissionErr := m.selector.permission(keys, m.now())
 	var fetchErr, probeErr error
+	attemptedRefresh := false
 	if permissionErr != nil || !m.now().Before(m.refreshAt) {
+		attemptedRefresh = true
+		m.refreshUrgent = false
 		hint := ""
 		if choice, err := m.selector.Current(keys, m.now()); err == nil {
 			hint = choice.Primary.EdgeID
@@ -295,8 +299,12 @@ func (m *Control) Step(ctx context.Context) error {
 				m.lastProbe = round.ObservedAt
 				m.refreshDegradedSooner(g, keys)
 				for _, measurement := range round.Measurements {
-					if measurement.Disqualified {
+					if measurement.Disqualified && !attemptedRefresh {
+						// A new authenticated negative proof needs fresh signed
+						// authority promptly. One follow-up is allowed; failed
+						// acquisition retains the ordinary retry deadline.
 						m.refreshAt = time.Time{}
+						m.refreshUrgent = true
 					}
 				}
 			}
@@ -313,6 +321,9 @@ func (m *Control) NextStepDelay() time.Duration {
 	m.stepMu.Lock()
 	defer m.stepMu.Unlock()
 	now := m.now()
+	if m.refreshUrgent {
+		return 10 * time.Millisecond
+	}
 	next := now.Add(5 * time.Second)
 	consider := func(deadline time.Time) {
 		if deadline.After(now) && deadline.Before(next) {

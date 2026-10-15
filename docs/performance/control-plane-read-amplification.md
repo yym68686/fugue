@@ -96,3 +96,25 @@ batches, parity with file storage, 65 route witnesses, collection isolation, emp
 batch pruning, constraint-failure rollback of both inserts and pruning, cancellation,
 and rejection above the cap. A separate SQL expectation checks the single-INSERT
 round-trip contract. Long-term deadline rates remain part of rollout monitoring.
+
+## Agent recovery follow-up
+
+Post-release observation found a pre-existing recovery delay in the runtime
+Agent. An authenticated negative route proof immediately removes local
+eligibility, but the scheduler previously waited its generic five-second tick
+before requesting a new signed grant. Production canary logs showed short
+missing-primary intervals and failed heartbeat/operation requests; the same
+pattern was present before the read optimizations.
+
+The Agent now schedules one prompt acquisition after a newly observed negative
+proof. An attempted acquisition clears that urgency; if it fails, the ordinary
+five-second retry deadline remains in effect. The acquisition, signature,
+publication watermarks, fresh measurements, capacity requirements and absolute
+expiry checks are unchanged. Negative evidence never grants permission to reuse
+an ineligible route, and this scheduling fix does not claim to eliminate genuine
+capacity or publication-convergence failures.
+
+The regression test demonstrates the old five-second delay, prompt recovery
+only after a fresh signed and measured grant, and bounded retry without extending
+the previous permission when the authority is unavailable. The declarative
+runtime-agent-canary lane publishes the change for live verification.

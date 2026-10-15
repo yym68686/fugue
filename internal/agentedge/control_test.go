@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -498,5 +499,101 @@ func TestControlDegradedRefreshMeasuresCadenceFromObservation(t *testing.T) {
 	want := observed.Add(time.Duration(g.Policy.ProbeIntervalSeconds) * time.Second)
 	if m.refreshAt != want {
 		t.Fatal("network time was added to every degraded renewal", m.refreshAt, want)
+	}
+}
+
+// A negative publication proof revokes local eligibility immediately. Acquiring
+// replacement authority must not then wait for the generic five-second retry.
+func TestControlNegativeProofSchedulesOnePromptAcquisition(t *testing.T) {
+	for _, replacementAvailable := range []bool{true, false} {
+		t.Run(fmt.Sprint(replacementAvailable), func(t *testing.T) {
+			m, g, private, _, now := controlFixture(t)
+			if err := m.Step(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			g = activateControl(t, m, g, private, now)
+			original := m.Status()
+			*now = now.Add(time.Duration(g.Policy.ProbeIntervalSeconds) * time.Second)
+			m.refreshAt = now.Add(time.Minute)
+			next := cloneGrant(g)
+			next.IssuedAt = now.Add(10 * time.Millisecond)
+			for i := range next.Candidates {
+				next.Candidates[i].RouteDigests = []string{"sha256:" + strings.Repeat("b", 64)}
+				next.Candidates[i].Publication.ReleaseID = "next-release"
+				next.Candidates[i].Publication.PublishedAt = next.IssuedAt
+				next.Candidates[i].Publication.FencingToken++
+			}
+			fetches := 0
+			m.fetch = func(context.Context, string) ([]byte, error) {
+				fetches++
+				if !replacementAvailable {
+					return nil, errors.New("authority temporarily unavailable")
+				}
+				return encodeGrant(t, next, private), nil
+			}
+			m.probe = func(_ context.Context, grant Grant, c Candidate) Measurement {
+				fresh := grant.IssuedAt.Equal(next.IssuedAt)
+				return Measurement{EdgeID: c.EdgeID, Address: c.Address, Success: fresh, Disqualified: !fresh, Latency: time.Millisecond}
+			}
+			if err := m.Step(context.Background()); err == nil || m.Status().Primary != "" {
+				t.Fatal("negative proof retained unauthorized eligibility", err, m.Status())
+			}
+			if got := m.NextStepDelay(); got != 10*time.Millisecond || fetches != 0 {
+				t.Fatal("publication invalidation waits for generic retry or fetches recursively", got, fetches)
+			}
+			if m.Status().GrantDigest != original.GrantDigest || m.Status().ValidUntil != original.ValidUntil {
+				t.Fatal("scheduling changed signed authority")
+			}
+			*now = now.Add(m.NextStepDelay())
+			err := m.Step(context.Background())
+			if fetches != 1 {
+				t.Fatal("prompt recovery exceeded one acquisition", fetches)
+			}
+			if replacementAvailable {
+				if err != nil || m.Status().Primary == "" || m.Status().GrantDigest == original.GrantDigest {
+					t.Fatal("fresh signed and measured publication did not recover promptly", err, m.Status())
+				}
+			} else {
+				if err == nil || m.Status().Primary != "" || m.Status().ValidUntil != original.ValidUntil {
+					t.Fatal("failed acquisition regained or extended authority", err, m.Status())
+				}
+				if got := m.NextStepDelay(); got != 5*time.Second {
+					t.Fatal("failed acquisition created a busy retry loop", got)
+				}
+				if err = m.Step(context.Background()); err != nil || fetches != 1 {
+					t.Fatal("failed acquisition ignored retry deadline", err, fetches)
+				}
+			}
+		})
+	}
+}
+
+func TestControlNegativeProofAfterFailedAcquisitionKeepsBackoff(t *testing.T) {
+	m, g, private, _, now := controlFixture(t)
+	if err := m.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	g = activateControl(t, m, g, private, now)
+	original := m.Status()
+	*now = now.Add(time.Duration(g.Policy.ProbeIntervalSeconds) * time.Second)
+	m.refreshAt = time.Time{}
+	fetches := 0
+	m.fetch = func(context.Context, string) ([]byte, error) {
+		fetches++
+		return nil, errors.New("authority temporarily unavailable")
+	}
+	m.probe = func(_ context.Context, _ Grant, c Candidate) Measurement {
+		return Measurement{EdgeID: c.EdgeID, Address: c.Address, Disqualified: true}
+	}
+	if err := m.Step(context.Background()); err == nil || m.Status().Primary != "" {
+		t.Fatal("failed authority and negative proof allowed a route", err)
+	}
+	if got := m.NextStepDelay(); got != 5*time.Second {
+		t.Fatal("negative evidence bypassed failed acquisition backoff", got)
+	}
+	*now = now.Add(10 * time.Millisecond)
+	_ = m.Step(context.Background())
+	if fetches != 1 || m.Status().ValidUntil != original.ValidUntil || m.Status().Primary != "" {
+		t.Fatal("backoff reacquired or renewed failed permission", fetches, m.Status())
 	}
 }
