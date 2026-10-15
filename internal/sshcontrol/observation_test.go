@@ -3,12 +3,14 @@ package sshcontrol
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"fugue/internal/managedssh"
 	"fugue/internal/sshidentity"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
@@ -39,8 +41,12 @@ func TestKubernetesObserveBindsKnownPreviousArtifactBeforePendingAcceptance(test
 	ready := true
 	endpoints := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "endpoints", Namespace: slot.Namespace, Labels: map[string]string{"kubernetes.io/service-name": slot.ID}, OwnerReferences: []metav1.OwnerReference{{Kind: "Service", UID: service.UID}}}, Endpoints: []discoveryv1.Endpoint{{Conditions: discoveryv1.EndpointConditions{Ready: &ready}, TargetRef: &corev1.ObjectReference{Kind: "Pod", UID: pod.UID, Namespace: slot.Namespace}}}}
 	client := fake.NewClientset(pod, service, endpoints)
-	probes := 0
+	probes, requests := 0, 0
 	runtime := &KubernetesRuntime{client: client, httpClient: &http.Client{Transport: observationTransport(func(*http.Request) (*http.Response, error) {
+		requests++
+		if requests%2 == 1 {
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("snapshot changed"))}, nil
+		}
 		raw, err := json.Marshal(evidence)
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(raw)))}, err
 	})}, probeSSH: func(context.Context, string, ssh.PublicKey, time.Duration) (sshidentity.Observation, error) {
@@ -48,7 +54,7 @@ func TestKubernetesObserveBindsKnownPreviousArtifactBeforePendingAcceptance(test
 		return sshidentity.Observation{KeyExchangeVerified: true, IdentityMatched: true}, nil
 	}}
 	observed, err := runtime.Observe(ctx, slot)
-	if err != nil || observed.ArtifactDigest != slot.LoadedArtifact.Digest || probes != 2 {
+	if err != nil || observed.ArtifactDigest != slot.LoadedArtifact.Digest || probes != 2 || requests != 2 {
 		test.Fatal("known loaded authorization rejected or binding probes skipped", err, probes)
 	}
 	slot.Evidence = &observed
@@ -68,5 +74,36 @@ func TestKubernetesObserveBindsKnownPreviousArtifactBeforePendingAcceptance(test
 	slot.Artifact.Configuration.Keys = nil
 	if _, err := runtime.Observe(ctx, slot); err == nil {
 		test.Fatal("revoked loaded grants accepted by runtime")
+	}
+}
+
+func TestReadinessRecaptureRemainsBoundedAndCancellationAware(test *testing.T) {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusTooManyRequests, http.StatusForbidden} {
+		requests := 0
+		runtime := &KubernetesRuntime{httpClient: &http.Client{Transport: observationTransport(func(*http.Request) (*http.Response, error) {
+			requests++
+			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("unavailable"))}, nil
+		})}}
+		if _, err := runtime.runtimeEvidence(context.Background(), "http://runtime/readyz"); !errors.Is(err, managedssh.ErrUnavailable) {
+			test.Fatal("persistent failure admitted", status, err)
+		}
+		wanted := 2
+		if status == http.StatusForbidden {
+			wanted = 1
+		}
+		if requests != wanted {
+			test.Fatal("retry was not bounded", status, requests)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requests := 0
+	runtime := &KubernetesRuntime{httpClient: &http.Client{Transport: observationTransport(func(*http.Request) (*http.Response, error) {
+		requests++
+		cancel()
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("changed"))}, nil
+	})}}
+	if _, err := runtime.runtimeEvidence(ctx, "http://runtime/readyz"); !errors.Is(err, context.Canceled) || requests != 1 {
+		test.Fatal("cancelled observation retried", err, requests)
 	}
 }

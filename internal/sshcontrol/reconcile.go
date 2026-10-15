@@ -250,7 +250,11 @@ func (reconciler *Reconciler) reconcile(ctx context.Context, tenantID, appID str
 			}
 		}
 		if err != nil || failure != "" {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("verify slot %s: reason=%s observed_after_check_ms=%d: %w", slot.ID, failure, evidence.ObservedAt.Sub(verifiedAt).Milliseconds(), errors.Join(managedssh.ErrCandidateUnverified, err)))
+			observationDelay := int64(0)
+			if !evidence.ObservedAt.IsZero() {
+				observationDelay = evidence.ObservedAt.Sub(verifiedAt).Milliseconds()
+			}
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("verify slot %s: reason=%s observed_after_check_ms=%d: %w", slot.ID, failure, observationDelay, errors.Join(managedssh.ErrCandidateUnverified, err)))
 		}
 		*state.Slot(slot.ID) = observed
 		state.Revision++

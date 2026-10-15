@@ -39,6 +39,13 @@ deadline. Investigate rejected observations; do not relax digest, identity or
 revocation checks to silence a controller error. The underlying SSH server retains
 its signed authorization checks and enforces authorization expiry independently.
 
+The runtime rejects a readiness snapshot if configuration changes during target
+validation. The controller recaptures HTTP 503 or 429 once after 100 milliseconds,
+within the original observation deadline, then repeats all receipt binding checks.
+Persistent failure, cancellation, unknown digests and revoked permissions still
+fail closed. Failed observations without a timestamp do not emit a synthetic
+negative observation age.
+
 ## Production Consumer Maintenance
 
 Runtime intent generation 13 removes the quota-exhausted `bwg` front from the

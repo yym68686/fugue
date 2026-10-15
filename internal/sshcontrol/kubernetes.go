@@ -473,21 +473,9 @@ func (runtime *KubernetesRuntime) Observe(ctx context.Context, slot managedssh.S
 	if len(pod.Status.ContainerStatuses) != 1 || pod.Status.ContainerStatuses[0].ContainerID == "" || !pod.Status.ContainerStatuses[0].Ready {
 		return managedssh.CandidateEvidence{}, managedssh.ErrUnavailable
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(pod.Status.PodIP, "7837")+"/readyz", nil)
+	evidence, err := runtime.runtimeEvidence(ctx, "http://"+net.JoinHostPort(pod.Status.PodIP, "7837")+"/readyz")
 	if err != nil {
-		return managedssh.CandidateEvidence{}, err
-	}
-	response, err := runtime.httpClient.Do(request)
-	if err != nil {
-		return managedssh.CandidateEvidence{}, managedssh.ErrUnavailable
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return managedssh.CandidateEvidence{}, managedssh.ErrUnavailable
-	}
-	var evidence managedssh.CandidateEvidence
-	if err := json.NewDecoder(io.LimitReader(response.Body, 65536)).Decode(&evidence); err != nil {
-		return evidence, managedssh.ErrCandidateUnverified
+		return evidence, err
 	}
 	if evidence.ServerPodUID != string(pod.UID) {
 		return evidence, managedssh.ErrCandidateUnverified
@@ -551,4 +539,41 @@ func (runtime *KubernetesRuntime) Observe(ctx context.Context, slot managedssh.S
 		return evidence, fmt.Errorf("runtime bound evidence: %s: %w", failure, managedssh.ErrCandidateUnverified)
 	}
 	return evidence, nil
+}
+
+func (runtime *KubernetesRuntime) runtimeEvidence(ctx context.Context, address string) (managedssh.CandidateEvidence, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+		if err != nil {
+			return managedssh.CandidateEvidence{}, err
+		}
+		response, err := runtime.httpClient.Do(request)
+		if err != nil {
+			return managedssh.CandidateEvidence{}, fmt.Errorf("runtime readiness request: %w", errors.Join(managedssh.ErrUnavailable, err))
+		}
+		if response.StatusCode == http.StatusOK {
+			var evidence managedssh.CandidateEvidence
+			err := json.NewDecoder(io.LimitReader(response.Body, 65536)).Decode(&evidence)
+			response.Body.Close()
+			if err != nil {
+				return evidence, managedssh.ErrCandidateUnverified
+			}
+			return evidence, nil
+		}
+		response.Body.Close()
+		if attempt != 0 || (response.StatusCode != http.StatusServiceUnavailable && response.StatusCode != http.StatusTooManyRequests) {
+			return managedssh.CandidateEvidence{}, fmt.Errorf("runtime readiness HTTP %d: %w", response.StatusCode, managedssh.ErrUnavailable)
+		}
+		// Runtime validation rejects a snapshot changed by concurrent projection.
+		// Recapture once within the original observation deadline; every subsequent
+		// Pod, host-key, target and digest check still applies to the new receipt.
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return managedssh.CandidateEvidence{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return managedssh.CandidateEvidence{}, managedssh.ErrUnavailable
 }
