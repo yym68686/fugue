@@ -28535,6 +28535,15 @@ components:
         a fresh task, and allow_restart=true outside dry-run. Memory requests and
         other scheduler resource constraints remain enforced. It never renumbers
         an existing PodCIDR. pod_capacity_mode=default restores kubelet defaults.
+        reconcile-host-inotify-policy requires platform-admin and a policy_json
+        payload containing a fugue.node-resource-policy/v1 JSON document. It
+        persists node-local intent independently of updater releases, sizes
+        inotify capacity by running container density and observed UID usage,
+        and never lowers an existing kernel limit. dry_run defaults to true.
+        Policy fields are enabled, min_instances, max_instances,
+        instances_per_container, base_instances, headroom_percent, min_watches,
+        max_watches, watches_per_container, and warning_percent. Values are
+        bounded and unknown fields rejected. No service restart is required.
       additionalProperties: false
       required: [type]
       properties:

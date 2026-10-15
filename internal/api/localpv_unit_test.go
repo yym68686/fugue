@@ -6,8 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"fugue/internal/model"
-	"fugue/internal/storagerecovery"
+	"fugue/internal/noderesourcepolicy"
 )
 
 func mustLocalPVUnitProgramPath(t *testing.T) string {
@@ -30,11 +29,8 @@ func TestLocalPVUnitRecoveryAndConvergence(t *testing.T) {
 }
 
 func TestNodeUpdaterIncludesLocalPVUnitConvergenceAndFreshEvidence(t *testing.T) {
-	if nodeUpdaterScriptVersion != storagerecovery.NodeUpdaterVersion {
-		t.Fatalf("API script generation %s differs from optional recovery target %s", nodeUpdaterScriptVersion, storagerecovery.NodeUpdaterVersion)
-	}
-	if model.NodeUpdaterCurrentVersion == storagerecovery.NodeUpdaterVersion {
-		t.Fatal("optional recovery release must not advance the global rollout baseline")
+	if nodeUpdaterScriptVersion != noderesourcepolicy.UpdaterVersion {
+		t.Fatalf("API script generation %s differs from node diagnostics rollout target %s", nodeUpdaterScriptVersion, noderesourcepolicy.UpdaterVersion)
 	}
 	script := (&Server{}).nodeUpdaterInstallScript("https://control.example.test")
 	for _, want := range []string{

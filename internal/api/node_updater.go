@@ -16,13 +16,13 @@ import (
 	"fugue/internal/imagecachegraph"
 	"fugue/internal/model"
 	"fugue/internal/model/edgecohort"
+	"fugue/internal/noderesourcepolicy"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/storagerecovery"
 	"fugue/internal/store"
 )
 
 const (
-	nodeUpdaterScriptVersion        = storagerecovery.NodeUpdaterVersion
+	nodeUpdaterScriptVersion        = noderesourcepolicy.UpdaterVersion
 	staleNodeUpdateTaskTimeout      = 2 * time.Hour
 	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
 	nodeRepairTaskMaxAge            = 45 * time.Minute
@@ -659,7 +659,7 @@ func nodeUpdateTaskIsRepair(taskType string) bool {
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeRunDeepHealth,
 		model.NodeUpdateTaskTypeReconcileHostZRAM,
-		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy, noderesourcepolicy.TaskType:
 		return true
 	default:
 		return false
@@ -988,6 +988,8 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		} else if task.Status == model.NodeUpdateTaskStatusFailed {
 			action = "localpv_decommission_refused"
 		}
+	case noderesourcepolicy.TaskType:
+		action = "host_inotify_policy_" + task.Status
 	case model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
 		if task.Status == model.NodeUpdateTaskStatusCompleted && taskPayloadTruthy(task.Payload, "dry_run") {
 			action = "host_journald_policy_dry_run_completed"
@@ -1354,7 +1356,7 @@ set -euo pipefail
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
 FUGUE_NODE_UPDATER_SCRIPT_VERSION="__FUGUE_NODE_UPDATER_SCRIPT_VERSION__"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,expand-lvm-localpv,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,reconcile-host-zram,reconcile-host-journald-policy,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,expand-lvm-localpv,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,reconcile-host-zram,reconcile-host-journald-policy,reconcile-host-inotify-policy,time-sync"
 export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
@@ -3420,6 +3422,7 @@ node_deep_health_heartbeat_json() {
   FUGUE_HEARTBEAT_LAST_ERROR="$(last_error)" \
   FUGUE_HEARTBEAT_CLUSTER_NODE_NAME="$(node_deep_health_cluster_node_name)" \
   FUGUE_HEARTBEAT_EDGE_ROLE="$(node_deep_health_edge_role)" \
+  FUGUE_HEARTBEAT_INOTIFY="$(node_resource_policy observe)" \
   FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT="$(localpv_boot_unit_observation observe)" \
   FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT_APPLY="${FUGUE_LOCALPV_UNIT_LAST_APPLY:-}" \
   FUGUE_HEARTBEAT_DESIRED_STATE_FILE="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" \
@@ -3474,6 +3477,16 @@ def check(name, category, status, observed="", expected="", hard=False, message=
     }
 
 checks = []
+
+try:
+    inotify = json.loads(os.environ.get("FUGUE_HEARTBEAT_INOTIFY", ""))
+    checks.append(check("host_inotify_capacity", "resource", inotify.get("status", "warning"),
+        json.dumps(inotify.get("probe", {}), separators=(",", ":")),
+        "fresh inotify instance and watch allocation; UID usage below node policy threshold", False,
+        evidence={key: json.dumps(value, separators=(",", ":")) for key, value in inotify.items()}))
+except Exception as exc:
+    checks.append(check("host_inotify_capacity", "resource", "warning", str(exc), "inotify capacity observed", False,
+        evidence={"observation_state": "not_observed"}))
 
 try:
     localpv = json.loads(os.environ.get("FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT", ""))
@@ -3837,19 +3850,14 @@ def pod_netns_contexts(limit=30):
 def pod_netns_run(ctx, argv, timeout=5):
     return run(["nsenter", "--target", str(ctx["pid"]), "--net", "--"] + argv, timeout)
 
-def pod_dns_query(ctx, server, name):
-    if shutil.which("nslookup"):
-        argv = ["nslookup", name]
-        if server:
-            argv.append(server)
-        return pod_netns_run(ctx, argv, 5)
-    if shutil.which("dig"):
-        argv = ["dig"]
-        if server:
-            argv.append("@%s" % server)
-        argv.extend([name, "+time=3", "+tries=1"])
-        return pod_netns_run(ctx, argv, 6)
-    return None, "missing nslookup/dig"
+DNS_PROBE_CODE = __FUGUE_NODE_DNS_PROBE_PYTHON__
+
+def pod_dns_query(ctx, server, name, expected=""):
+    if not shutil.which("python3") or not shutil.which("nsenter"):
+        return None, "missing python3/nsenter"
+    if not server:
+        return None, "DNS server not observed"
+    return pod_netns_run(ctx, ["python3", "-c", DNS_PROBE_CODE, server, name, expected], 6)
 
 def pod_tcp_connect(ctx, host, port):
     code = "import socket,sys; s=socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3); s.close()"
@@ -3928,7 +3936,9 @@ def pod_context_evidence(ctx, extra=None):
     return evidence
 
 def optional_probe_skipped(name, category, observed, expected, evidence=None):
-    checks.append(check(name, category, "pass", "optional probe skipped: " + (observed or "target unavailable"), expected, False, evidence=evidence or {}))
+    details = dict(evidence or {})
+    details["observation_state"] = "not_observed"
+    checks.append(check(name, category, "warning", "probe not observed: " + (observed or "target unavailable"), expected, False, evidence=details))
 
 def pod_context_probe_eligible(ctx):
     # Edge-control Pods intentionally have egress policy limited to Fugue API
@@ -3983,14 +3993,11 @@ if not pod_ctx:
     checks.append(check("same_namespace_service_dns", "dns", "warning", unavailable, "pod-netns resolver resolves a same-namespace ClusterIP service"))
     checks.append(check("same_namespace_service_tcp", "network", "warning", unavailable, "pod-netns TCP connect to a same-namespace ClusterIP service"))
 else:
-    ok, out = pod_dns_query(pod_ctx, kube_dns_service_ip, kube_service_dns_name)
+    ok, out = pod_dns_query(pod_ctx, kube_dns_service_ip, kube_service_dns_name, kubernetes_service_ip)
     kube_dns_evidence = pod_context_evidence(pod_ctx, {"dns_server": kube_dns_service_ip, "query": kube_service_dns_name})
     if ok is None:
-        # A missing resolver binary is an inability to run this optional
-        # probe, not evidence that DNS is broken. Keep the result explicit so
-        # node health does not degrade merely because a minimal host image
-        # omits nslookup and dig. The independent TCP probes below still
-        # validate service reachability.
+        # Missing probe prerequisites are explicitly unobserved. They do not
+        # establish health or authorize a destructive network repair.
         optional_probe_skipped("pod_dns_to_kube_dns_service", "dns", out, "pod-netns DNS query to kube-dns service IP", kube_dns_evidence)
         optional_probe_skipped("kubernetes_default_svc_dns", "dns", out, "pod-netns resolver resolves kubernetes.default.svc.cluster.local", kube_dns_evidence)
     elif ok:
@@ -4001,7 +4008,7 @@ else:
         checks.append(check("kubernetes_default_svc_dns", "dns", "fail", out, "pod-netns resolver resolves kubernetes.default.svc.cluster.local", True, evidence=kube_dns_evidence))
 
     if coredns_ip:
-        ok, out = pod_dns_query(pod_ctx, coredns_ip, kube_service_dns_name)
+        ok, out = pod_dns_query(pod_ctx, coredns_ip, kube_service_dns_name, kubernetes_service_ip)
         coredns_evidence = pod_context_evidence(pod_ctx, {"dns_server": coredns_ip, "query": kube_service_dns_name})
         if ok is None:
             optional_probe_skipped("pod_dns_to_coredns_pod", "dns", out, "pod-netns DNS query to CoreDNS pod IP", coredns_evidence)
@@ -4020,7 +4027,7 @@ else:
             "service_port": str(same_service["port"]),
             "dns_server": kube_dns_service_ip,
         })
-        ok, out = pod_dns_query(pod_ctx, kube_dns_service_ip, same_service["fqdn"])
+        ok, out = pod_dns_query(pod_ctx, kube_dns_service_ip, same_service["fqdn"], same_service["cluster_ip"])
         if ok is None:
             optional_probe_skipped("same_namespace_service_dns", "dns", out, "pod-netns resolver resolves same-namespace ClusterIP service FQDN", service_evidence)
         elif ok:
@@ -4028,18 +4035,16 @@ else:
         else:
             checks.append(check("same_namespace_service_dns", "dns", "fail", out, "pod-netns resolver resolves same-namespace ClusterIP service FQDN", True, evidence=service_evidence))
 
-        kube_service_evidence = pod_context_evidence(pod_ctx, {
-            "service": "default/kubernetes",
-            "service_ip": kubernetes_service_ip,
-            "service_port": "443",
-        })
-        ok, out = pod_tcp_connect(pod_ctx, kubernetes_service_ip, 443)
+        ok, out = pod_tcp_connect(pod_ctx, same_service["cluster_ip"], same_service["port"])
         if ok is None:
-            checks.append(check("same_namespace_service_tcp", "network", "warning", out, "pod-netns TCP connect to Kubernetes default ClusterIP service", evidence=kube_service_evidence))
+            optional_probe_skipped("same_namespace_service_tcp", "network", out, "pod-netns TCP connect to a same-namespace ClusterIP service", service_evidence)
         elif ok:
-            checks.append(check("same_namespace_service_tcp", "network", "pass", "%s:443 connected" % kubernetes_service_ip, "pod-netns TCP connect to Kubernetes default ClusterIP service", evidence=kube_service_evidence))
+            checks.append(check("same_namespace_service_tcp", "network", "pass", "%s:%d connected" % (same_service["cluster_ip"], same_service["port"]), "pod-netns TCP connect to a same-namespace ClusterIP service", evidence=service_evidence))
         else:
-            checks.append(check("same_namespace_service_tcp", "network", "fail", out, "pod-netns TCP connect to Kubernetes default ClusterIP service", True, evidence=kube_service_evidence))
+            # An arbitrary Service may be down or intentionally denied by its
+            # workload policy; do not drain a node on this observation alone.
+            checks.append(check("same_namespace_service_tcp", "network", "fail", out, "pod-netns TCP connect to a same-namespace ClusterIP service", False, evidence=service_evidence))
+
     else:
         optional_probe_skipped("same_namespace_service_dns", "dns", same_service_reason or "same-namespace service unavailable", "pod-netns resolver resolves a same-namespace ClusterIP service", pod_context_evidence(pod_ctx))
         optional_probe_skipped("same_namespace_service_tcp", "network", same_service_reason or "same-namespace service unavailable", "pod-netns TCP connect to a same-namespace ClusterIP service", pod_context_evidence(pod_ctx))
@@ -5723,6 +5728,10 @@ run_task() {
     reconcile-host-zram)
       reconcile_host_zram_task
       ;;
+    reconcile-host-inotify-policy)
+      export FUGUE_NODE_UPDATE_TASK_POLICY_JSON FUGUE_NODE_UPDATE_TASK_DRY_RUN
+      node_resource_policy task
+      ;;
     reconcile-host-journald-policy)
       reconcile_host_journald_policy_task
       ;;
@@ -5731,6 +5740,12 @@ run_task() {
       return 2
       ;;
   esac
+}
+
+node_resource_policy() {
+  python3 - "$1" <<'PY_NODE_RESOURCE_POLICY'
+__FUGUE_NODE_RESOURCE_POLICY_PYTHON__
+PY_NODE_RESOURCE_POLICY
 }
 
 run_once() {
@@ -5749,6 +5764,7 @@ run_once() {
   else
     log "node state reconciliation did not make changes or could not complete"
   fi
+  node_resource_policy reconcile || log "node resource policy reconciliation failed; existing limits retained"
   heartbeat || log "heartbeat failed"
   task_env="$(mktemp)"
   if ! api_form GET "/v1/node-updater/tasks?format=env&limit=1" >"${task_env}"; then
@@ -5824,6 +5840,8 @@ esac
 		"__FUGUE_API_BASE__", apiBase,
 		"__FUGUE_NODE_UPDATER_SCRIPT_VERSION__", nodeUpdaterScriptVersion,
 		"__FUGUE_LOCALPV_EXPAND_PYTHON__", localPVExpandPython,
+		"__FUGUE_NODE_DNS_PROBE_PYTHON__", nodeDNSProbePythonLiteral(),
+		"__FUGUE_NODE_RESOURCE_POLICY_PYTHON__", nodeResourcePolicyPython,
 		"__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary(),
 		"__FUGUE_POD_CAPACITY_LIBRARY__", podCapacityShellLibrary(),
 		"__FUGUE_HOST_JOURNALD_POLICY_LIBRARY__", hostJournaldPolicyShellLibrary(),

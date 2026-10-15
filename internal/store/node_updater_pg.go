@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/noderesourcepolicy"
 )
 
 func (s *Store) pgUpsertNodeUpdater(key model.NodeKey, machine model.Machine, runtimeID, updaterVersion, joinScriptVersion string, capabilities []string) (model.NodeUpdater, string, error) {
@@ -300,7 +301,7 @@ func (s *Store) pgDuplicatePendingNodeUpdateTask(ctx context.Context, updaterID,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeRunDeepHealth,
 		model.NodeUpdateTaskTypeReconcileHostZRAM,
-		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy, noderesourcepolicy.TaskType:
 	default:
 		return model.NodeUpdateTask{}, false, nil
 	}

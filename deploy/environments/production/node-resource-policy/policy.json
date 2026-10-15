@@ -1,0 +1,13 @@
+{
+  "schema": "fugue.node-resource-policy/v1",
+  "enabled": true,
+  "min_instances": 1024,
+  "max_instances": 16384,
+  "instances_per_container": 4,
+  "base_instances": 256,
+  "headroom_percent": 100,
+  "min_watches": 524288,
+  "max_watches": 4194304,
+  "watches_per_container": 8192,
+  "warning_percent": 80
+}

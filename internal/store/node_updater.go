@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/noderesourcepolicy"
 )
 
 const nodeUpdateTaskInventoryMaxWait = 30 * time.Minute
@@ -198,6 +199,17 @@ func (s *Store) NodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtim
 
 func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clusterNodeName, runtimeID, taskType string, payload map[string]string) (model.NodeUpdateTask, error) {
 	taskType = normalizeNodeUpdateTaskType(taskType)
+	if taskType == noderesourcepolicy.TaskType {
+		if !principal.IsPlatformAdmin() {
+			return model.NodeUpdateTask{}, fmt.Errorf("%w: node resource policy requires platform administrator permission", ErrInvalidInput)
+		}
+		if _, err := noderesourcepolicy.Parse(payload["policy_json"]); err != nil {
+			return model.NodeUpdateTask{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		}
+		if payload["dry_run"] != "" && payload["dry_run"] != "true" && payload["dry_run"] != "false" {
+			return model.NodeUpdateTask{}, fmt.Errorf("%w: dry_run must be true or false", ErrInvalidInput)
+		}
+	}
 	if taskType == model.NodeUpdateTaskTypeRefreshJoinConfig && strings.TrimSpace(payload["pod_capacity_mode"]) != "" {
 		mode := strings.TrimSpace(payload["pod_capacity_mode"])
 		if !principal.IsPlatformAdmin() || (mode != "resources" && mode != "default") {
@@ -276,7 +288,7 @@ func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType stri
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeRunDeepHealth,
 		model.NodeUpdateTaskTypeReconcileHostZRAM,
-		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy, noderesourcepolicy.TaskType:
 	default:
 		return model.NodeUpdateTask{}, false
 	}
@@ -460,7 +472,7 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask, now time.Time) in
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeReconcileHostZRAM,
-		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy, noderesourcepolicy.TaskType:
 		return 4
 	default:
 		return 5
@@ -742,6 +754,8 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypeRunDeepHealth
 	case model.NodeUpdateTaskTypeReconcileHostZRAM:
 		return model.NodeUpdateTaskTypeReconcileHostZRAM
+	case noderesourcepolicy.TaskType:
+		return noderesourcepolicy.TaskType
 	case model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
 		return model.NodeUpdateTaskTypeReconcileHostJournaldPolicy
 	default:
