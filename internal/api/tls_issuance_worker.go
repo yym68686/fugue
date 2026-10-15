@@ -98,7 +98,13 @@ func (b tlsIssuanceBackend) PresentDNS(ctx context.Context, p tlsissuance.Policy
 }
 
 func (b tlsIssuanceBackend) VerifyChallenges(ctx context.Context, d tlsissuance.DomainPolicy, token, value string) error {
-	deadline, done := context.WithTimeout(ctx, 2*time.Minute)
+	propagationTimeout := 2 * time.Minute
+	if d.Mode == "dns-01" {
+		// Include capture plus the producer's bounded gray/full rollout. A
+		// successful write is not evidence that either authority serves it.
+		propagationTimeout = 12 * time.Minute
+	}
+	deadline, done := context.WithTimeout(ctx, propagationTimeout)
 	defer done()
 	targets := append([]string(nil), d.ValidationTargets...)
 	if d.Mode == "http-01" {

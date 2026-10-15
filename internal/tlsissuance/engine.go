@@ -17,8 +17,11 @@ import (
 	"golang.org/x/crypto/acme"
 )
 
-const AttemptTimeout = 5 * time.Minute
-const LeaseDuration = 15 * time.Minute
+// DNS proofs use the normal signed publication and gray/full observation path.
+// Its configured rollout budget can be ten minutes, so an issuer must retain
+// ownership and proof validity beyond that budget without weakening its gates.
+const AttemptTimeout = 20 * time.Minute
+const LeaseDuration = 30 * time.Minute
 
 var ErrDeferred = errors.New("certificate issuance deferred")
 var ErrLeaseLost = errors.New("certificate issuance lease lost")

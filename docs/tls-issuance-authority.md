@@ -5,7 +5,7 @@ Each domain binds its verified tenant/app owner to HTTP-01, DNS-01 or external
 issuance. A generation CAS prevents stale configuration writers from changing
 the current issuer. The API's independent issuer workers use durable per-domain
 leases; worker identity changes do not reset CA/domain retry barriers or account
-keys. The five-minute operation deadline is shorter than the fifteen-minute
+keys. The twenty-minute operation deadline is shorter than the thirty-minute
 takeover lease. No new CA work starts during a control-plane state outage.
 
 Before any CA request, a retry barrier of at least one hour is persisted.
@@ -28,6 +28,11 @@ leased DNS challenge intents carry the TXT proof through the DNS artifact path.
 Every declared authority must answer with the proof authoritatively over both
 UDP and TCP before acceptance. Cleanup removes only the specific challenge;
 expiration bounds a failed cleanup.
+
+DNS propagation can wait up to twelve minutes for the existing signed producer's
+capture and gray/full observation gates. HTTP proof propagation has a separate
+two-minute deadline. Both remain bounded by the issuance deadline and lease;
+neither path bypasses a publication gate or treats a stored intent as a live proof.
 
 Non-issuing workers use `shared-only`. An explicit HTTP listener handles
 challenges and redirects normal requests to HTTPS. Existing valid certificates
