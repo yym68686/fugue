@@ -16,7 +16,7 @@ import (
 )
 
 func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *testing.T) {
-	for _, scenario := range []string{"valid", "wrong_uid", "wrong_image", "wrong_key", "changed_desired", "missing_source"} {
+	for _, scenario := range []string{"valid", "next_desired", "wrong_uid", "wrong_image", "wrong_key", "changed_desired", "missing_source"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			st, source, desired, op := newSafeRolloutTestState(t)
@@ -72,11 +72,15 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 			// remains alive until the separate canonical drain guard permits apply.
 			managed := managedAppLiveGuardObject(t, desired, runtime.SchedulingConstraints{})
 			managed.Status.CurrentReleaseKey = marker.ReleaseKey
+			if scenario == "next_desired" {
+				desired.Spec = *cloneControllerAppSpec(&desired.Spec)
+				desired.Spec.Image = "ghcr.io/example/api:v3"
+			}
 			var writes int
 			client := managedAppLiveGuardClient(t, managed, live, true, true, &writes)
 			got, err := svc.prepareManagedAppReconcileRolloutWithEvidence(context.Background(), client, managed.Metadata.Namespace,
 				managed, desired, "", runtime.SchedulingConstraints{})
-			if (err == nil) != (scenario == "valid") {
+			if (err == nil) != (scenario == "valid" || scenario == "next_desired") {
 				t.Fatalf("scenario %s: %v", scenario, err)
 			}
 			if err == nil && (got.Spec.Image != desired.Spec.Image || got.Spec.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate) {
@@ -90,7 +94,7 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 }
 
 func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
-	for _, scenario := range []string{"idle", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image"} {
+	for _, scenario := range []string{"idle", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			s, app, candidate, f := newDrainWorkloadFixtureWithSnapshot(t, false, true)
@@ -149,11 +153,59 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			rm["name"], rm["uid"], rm["labels"] = "original-rs", "original-rs-uid", cLabels
 			rm["ownerReferences"] = []map[string]any{{"kind": "Deployment", "name": name, "uid": "canonical-uid", "controller": true}}
 			targetSelector := objectStringMapValue(nestedObjectValue(f.service, "spec", "selector"))
-			marked := scenario == "resume" || strings.HasPrefix(scenario, "restore_")
+			advancing := strings.HasPrefix(scenario, "advance_")
+			expectedSourceID, expectedSourceKey, expectedSourceImage := "original-source", "old-key", oldImage
+			var previousService map[string]any
+			var predecessor model.AppRelease
+			if advancing {
+				predecessor = createCanonicalHandoffTestRevision(t, s, app, "previous-target", "original-source")
+				predecessor.Role, predecessor.Status = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
+				if _, err := s.Store.UpdateAppRelease(predecessor); err != nil {
+					t.Fatal(err)
+				}
+				candidate.RollbackTargetID = predecessor.ID
+				if scenario == "advance_wrong_predecessor" {
+					candidate.RollbackTargetID = "unrelated"
+				}
+				if _, err := s.Store.UpdateAppRelease(candidate); err != nil {
+					t.Fatal(err)
+				}
+				previousService = cloneKubeMap(f.service)
+				pm := objectMapField(previousService, "metadata")
+				pm["name"], pm["uid"] = predecessor.ServiceName, predecessor.RevisionWorkload.ServiceUID
+				pl := objectMapField(pm, "labels")
+				pl[runtime.FugueLabelAppReleaseID], pl[runtime.FugueLabelAppWorkload] = predecessor.ID, predecessor.DeploymentName
+				objectMapField(previousService, "spec")["selector"] = pl
+				if scenario == "advance_wrong_service_uid" {
+					pm["uid"] = "recreated-service"
+				}
+			}
+			marked := scenario == "resume" || strings.HasPrefix(scenario, "restore_") || advancing
 			if marked {
-				b, _ := json.Marshal(safeCanonicalHandoff{ReleaseID: candidate.ID, DeploymentUID: "canonical-uid", ReleaseKey: "old-key", Image: oldImage})
+				handoff := safeCanonicalHandoff{ReleaseID: candidate.ID, DeploymentUID: "canonical-uid", ReleaseKey: "old-key", Image: oldImage}
+				if advancing {
+					handoff.ReleaseID = predecessor.ID
+					if scenario == "advance_resume_busy" {
+						handoff.ReleaseID, handoff.SourceReleaseID, handoff.PreviousTargetReleaseID = candidate.ID, "original-source", predecessor.ID
+					}
+				}
+				b, _ := json.Marshal(handoff)
 				objectMapField(cm, "annotations")[safeCanonicalHandoffAnnotation] = string(b)
 				objectMapField(canonicalService, "spec")["selector"] = targetSelector
+				if advancing {
+					objectMapField(canonicalService, "spec")["selector"] = objectStringMapValue(nestedObjectValue(previousService, "spec", "selector"))
+				}
+			}
+			if scenario == "advance_after_replacement_busy" {
+				expectedSourceID, expectedSourceImage = predecessor.ID, app.Spec.Image
+				expectedSourceKey = s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(app), runtime.SchedulingConstraints{})
+				objectMapField(cm, "annotations")[runtime.FugueAnnotationReleaseKey] = expectedSourceKey
+				objectMapField(tm, "annotations")[runtime.FugueAnnotationReleaseKey] = expectedSourceKey
+				mapSlice(nestedObjectValue(canonical, "spec", "template", "spec", "containers"))[0]["image"] = expectedSourceImage
+				for _, pod := range sourcePods {
+					objectMapField(objectMapField(pod, "metadata"), "annotations")[runtime.FugueAnnotationReleaseKey] = expectedSourceKey
+					mapSlice(nestedObjectValue(pod, "spec", "containers"))[0]["image"] = expectedSourceImage
+				}
 			}
 			if strings.HasPrefix(scenario, "restore_") {
 				canonical["spec"] = cloneKubeMap(objectMapField(desired, "spec"))
@@ -170,7 +222,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					objectMapField(canonical, "status")["updatedReplicas"] = 0
 				}
 			}
-			if scenario == "wrong_selector" || scenario == "restore_wrong_selector" {
+			if scenario == "wrong_selector" || scenario == "restore_wrong_selector" || scenario == "advance_wrong_selector" {
 				objectMapField(canonicalService, "spec")["selector"] = map[string]string{"unexpected": "workload"}
 			}
 			if scenario == "candidate_unhealthy" {
@@ -178,6 +230,10 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			}
 			sourceReads, sourceProbes, servicePatches, templateWrites := 0, 0, 0, 0
 			f.extra = func(w http.ResponseWriter, r *http.Request) bool {
+				if advancing && strings.HasSuffix(r.URL.Path, "/services/"+predecessor.ServiceName) {
+					_ = json.NewEncoder(w).Encode(previousService)
+					return true
+				}
 				switch {
 				case strings.HasSuffix(r.URL.Path, "/deployments/"+name):
 					if r.Method == http.MethodGet {
@@ -186,6 +242,10 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 							cm["uid"] = "replaced-uid"
 						}
 						_ = json.NewEncoder(w).Encode(canonical)
+						return true
+					}
+					if scenario == "advance_marker_conflict" {
+						http.Error(w, "marker version conflict", http.StatusConflict)
 						return true
 					}
 					var patch map[string]any
@@ -206,7 +266,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					return true
 				case strings.HasSuffix(r.URL.Path, "/services/"+serviceName):
 					if r.Method == http.MethodPatch {
-						if scenario == "restore_patch_failure" {
+						if scenario == "restore_patch_failure" || scenario == "advance_service_conflict" {
 							http.Error(w, "conflicting selector update", http.StatusConflict)
 							return true
 						}
@@ -246,7 +306,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					}
 					pod := strings.Split(strings.Split(r.URL.Path, "/pods/")[1], ":")[0]
 					active := 0
-					if scenario == "busy" {
+					if scenario == "busy" || strings.HasSuffix(scenario, "_busy") {
 						active = 1
 					}
 					_ = json.NewEncoder(w).Encode(drainprotocol.Snapshot{APIVersion: drainprotocol.Version, Nonce: r.URL.Query().Get("nonce"), Pod: pod, Namespace: runtime.NamespaceForTenant(app.TenantID), AppPorts: []int{8080}, ActiveConnections: &active})
@@ -257,7 +317,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			client, _ := s.kubeClient()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if scenario == "busy" || scenario == "stale_endpoints" || scenario == "restore_stale_endpoints" {
+			if scenario == "busy" || scenario == "stale_endpoints" || scenario == "restore_stale_endpoints" || advancing {
 				ctx, cancel = context.WithTimeout(context.Background(), 150*time.Millisecond)
 				defer cancel()
 			}
@@ -293,6 +353,159 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			}
 			if scenario == "candidate_unhealthy" && servicePatches != 0 {
 				t.Fatal("unhealthy candidate received canonical service")
+			}
+			if advancing && strings.HasSuffix(scenario, "_busy") {
+				var checkpoint safeCanonicalHandoff
+				_ = json.Unmarshal([]byte(objectStringMapValue(cm["annotations"])[safeCanonicalHandoffAnnotation]), &checkpoint)
+				if servicePatches != 1 || sourceProbes == 0 || !reflect.DeepEqual(objectStringMapValue(nestedObjectValue(canonicalService, "spec", "selector")), targetSelector) ||
+					checkpoint.ReleaseID != candidate.ID || checkpoint.SourceReleaseID != expectedSourceID || checkpoint.DeploymentUID != "canonical-uid" || checkpoint.ReleaseKey != expectedSourceKey || checkpoint.Image != expectedSourceImage {
+					t.Fatal("successor did not retain original drain cohort while moving new connections", checkpoint, servicePatches, sourceProbes)
+				}
+			}
+			if strings.HasPrefix(scenario, "advance_wrong_") && servicePatches != 0 {
+				t.Fatal("unverified promotion changed canonical traffic")
+			}
+			if (scenario == "advance_marker_conflict" || scenario == "advance_service_conflict") && servicePatches != 0 {
+				t.Fatal("failed checkpoint CAS moved traffic")
+			}
+		})
+	}
+}
+
+func createCanonicalHandoffTestRevision(t *testing.T, s *Service, app model.App, id, predecessorID string) model.AppRelease {
+	t.Helper()
+	operationSpec := cloneControllerAppSpec(&app.Spec)
+	operationSpec.RuntimeID = model.DefaultManagedRuntimeID
+	op, err := s.Store.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeDeploy, DesiredSpec: operationSpec, ExecutionMode: model.ExecutionModeManaged})
+	if err != nil {
+		t.Fatal("create predecessor operation", err)
+	}
+	if _, claimed, err := s.Store.TryClaimPendingOperation(op.ID); err != nil || !claimed {
+		t.Fatal("claim successor fixture", err)
+	}
+	r, err := s.Store.CreateAppRelease(model.AppRelease{ID: id, AppID: app.ID, TenantID: app.TenantID, RuntimeID: app.Spec.RuntimeID,
+		Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusCreating, SpecSnapshot: cloneControllerAppSpec(&app.Spec),
+		DeploymentName: id + "-deployment", ServiceName: id + "-service", ResolvedImageRef: app.Spec.Image, RollbackTargetID: predecessorID})
+	if err != nil {
+		t.Fatal("create predecessor release", err)
+	}
+	r, err = s.Store.BindAppReleaseWorkload(context.Background(), r, model.AppReleaseWorkload{OperationID: op.ID, Namespace: runtime.NamespaceForTenant(app.TenantID),
+		DeploymentName: r.DeploymentName, DeploymentUID: id + "-deployment-uid", DeploymentGeneration: 1, ServiceName: r.ServiceName, ServiceUID: id + "-service-uid",
+		ReleaseKey: id + "-key", RuntimeID: app.Spec.RuntimeID, ImageRef: app.Spec.Image})
+	if err != nil {
+		t.Fatal("bind predecessor", err)
+	}
+	if _, err := s.Store.CompleteManagedOperation(op.ID, "", "fixture complete"); err != nil {
+		t.Fatal("complete predecessor operation", err)
+	}
+	return r
+}
+
+func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
+	for _, scenario := range []string{"legacy_successor", "retained_source", "completed_replacement", "unrelated_successor", "missing_source", "retired_predecessor"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			st, original, desired, _ := newSafeRolloutTestState(t)
+			s := &Service{Store: st, Renderer: runtime.Renderer{}}
+			if _, err := st.CreateAppRelease(model.AppRelease{ID: "original", AppID: original.ID, TenantID: original.TenantID,
+				Role: model.AppReleaseRolePrevious, Status: model.AppReleaseStatusDraining, SpecSnapshot: cloneControllerAppSpec(&original.Spec)}); err != nil {
+				t.Fatal(err)
+			}
+			previous := createCanonicalHandoffTestRevision(t, s, desired, "first-promoted", "original")
+			previous.Role, previous.Status = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
+			if scenario == "retired_predecessor" {
+				previous.Role, previous.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
+			}
+			if _, err := st.UpdateAppRelease(previous); err != nil {
+				t.Fatal(err)
+			}
+			desired.Spec = *cloneControllerAppSpec(&desired.Spec)
+			desired.Spec.Env = map[string]string{"FEATURE_ENABLED": "true"}
+			promoted := createCanonicalHandoffTestRevision(t, s, desired, "next-promoted", previous.ID)
+			promoted.Role, promoted.Status = model.AppReleaseRoleStable, model.AppReleaseStatusServing
+			if scenario == "unrelated_successor" {
+				promoted.RollbackTargetID = "unrelated"
+			}
+			if _, err := st.UpdateAppRelease(promoted); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.UpsertAppTrafficPolicy(model.AppTrafficPolicy{AppID: desired.ID, TenantID: desired.TenantID,
+				Mode: model.AppTrafficModeSingle, StableReleaseID: promoted.ID, StableWeight: 100}); err != nil {
+				t.Fatal(err)
+			}
+			live, _ := s.expectedManagedAppDeployment(s.Renderer.PrepareApp(original), runtime.SchedulingConstraints{})
+			managedAppLiveGuardMarkReady(&live, 1)
+			live.Metadata.UID = "original-uid"
+			handoff := safeCanonicalHandoff{ReleaseID: previous.ID, DeploymentUID: live.Metadata.UID,
+				ReleaseKey: live.Metadata.Annotations[runtime.FugueAnnotationReleaseKey], Image: original.Spec.Image}
+			if scenario == "retained_source" {
+				handoff.ReleaseID, handoff.SourceReleaseID, handoff.PreviousTargetReleaseID = promoted.ID, "original", previous.ID
+			}
+			if scenario == "missing_source" {
+				handoff.SourceReleaseID = "missing"
+			}
+			expectedImage := original.Spec.Image
+			if scenario == "completed_replacement" {
+				replacement := original
+				replacement.Spec = *cloneControllerAppSpec(previous.SpecSnapshot)
+				live, _ = s.expectedManagedAppDeployment(s.Renderer.PrepareApp(replacement), runtime.SchedulingConstraints{})
+				managedAppLiveGuardMarkReady(&live, 1)
+				live.Metadata.UID = handoff.DeploymentUID
+				expectedImage = replacement.Spec.Image
+			}
+			b, _ := json.Marshal(handoff)
+			live.Metadata.Annotations[safeCanonicalHandoffAnnotation] = string(b)
+			got, _, recovered, err := s.recoverSafeCanonicalHandoffSource(live, desired, desired)
+			want := scenario == "legacy_successor" || scenario == "retained_source" || scenario == "completed_replacement"
+			if (err == nil && recovered) != want || (want && got.Spec.Image != expectedImage) {
+				t.Fatal("lost immutable original source across promotion", scenario, got.Spec.Image, recovered, err)
+			}
+		})
+	}
+}
+
+func TestPolicyUpdateCompletionRetainsExecutableChangesOnPendingHandoff(t *testing.T) {
+	for _, scenario := range []string{"policy", "wrapped_pending", "image", "environment", "database", "replicas", "source", "disable", "unchanged", "other_error", "no_error", "not_deploy", "missing_spec"} {
+		t.Run(scenario, func(t *testing.T) {
+			_, current, _, _ := newDrainWorkloadFixtureWithSnapshot(t, false, true)
+			current.Spec.Continuity = &model.AppContinuityPolicy{ZeroDowntime: &model.AppZeroDowntimePolicy{
+				Enabled: true, Mode: model.AppZeroDowntimeModeSafe, RetireGraceSeconds: 60,
+			}}
+			op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: cloneControllerAppSpec(&current.Spec)}
+			op.DesiredSpec.Continuity.ZeroDowntime.RetireGraceSeconds = 120
+			var applyErr error = errSafeCanonicalHandoffPending
+			switch scenario {
+			case "wrapped_pending":
+				applyErr = fmt.Errorf("reconcile: %w", applyErr)
+			case "image":
+				op.DesiredSpec.Image = "ghcr.io/example/api:other"
+			case "environment":
+				op.DesiredSpec.Env = map[string]string{"FEATURE": "enabled"}
+			case "database":
+				op.DesiredSpec.Postgres = &model.AppPostgresSpec{}
+			case "replicas":
+				op.DesiredSpec.Replicas++
+			case "source":
+				op.DesiredSource = &model.AppSource{}
+			case "disable":
+				op.DesiredSpec.Continuity = nil
+			case "unchanged":
+				op.DesiredSpec = cloneControllerAppSpec(&current.Spec)
+			case "other_error":
+				applyErr = fmt.Errorf("failed to persist desired state")
+			case "no_error":
+				applyErr = nil
+			case "not_deploy":
+				op.Type = model.OperationTypeMigrate
+			case "missing_spec":
+				op.DesiredSpec = nil
+			}
+			want := scenario == "policy" || scenario == "wrapped_pending"
+			if got := safeRolloutPolicyUpdateCanComplete(op, current, applyErr); got != want {
+				t.Fatalf("policy update completion = %v, want %v", got, want)
+			}
+			if current.Spec.Continuity.ZeroDowntime.RetireGraceSeconds != 60 {
+				t.Fatal("classification mutated stored policy")
 			}
 		})
 	}

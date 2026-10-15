@@ -874,6 +874,16 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 	if s.Config.KubectlApply && previous.RevisionWorkload == nil {
 		return
 	}
+	if s.Config.KubectlApply {
+		client, err := s.kubeClient()
+		if err != nil {
+			return
+		}
+		referenced, err := s.canonicalServicesReferenceRelease(ctx, client, state.CandidateApp, previous)
+		if err != nil || referenced {
+			return
+		}
+	}
 	metrics, ok := s.querySafeRolloutDrainMetrics(ctx, op, state.CandidateApp, previous, state.Candidate.PromotedAt)
 	if !ok {
 		return
@@ -896,6 +906,9 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 		target.ServiceName = previous.RevisionWorkload.ServiceName
 		fresh, err := s.captureReleaseDrainWorkloadMode(ctx, client, state.CandidateApp, target, metrics.Workload.RuntimeStopped)
 		if err != nil || !reflect.DeepEqual(metrics.Workload, &fresh) {
+			return
+		}
+		if referenced, err := s.canonicalServicesReferenceRelease(ctx, client, state.CandidateApp, previous); err != nil || referenced {
 			return
 		}
 	}
@@ -954,6 +967,9 @@ func (s *Service) cleanupSafeRolloutRetiredResources(ctx context.Context, app mo
 	client, err := s.kubeClient()
 	if err != nil {
 		return fmt.Errorf("initialize retired release cleanup client: %w", err)
+	}
+	if referenced, err := s.canonicalServicesReferenceRelease(ctx, client, app, retired); err != nil || referenced {
+		return fmt.Errorf("retired release still has a canonical Service reference or its absence is unconfirmed")
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	for _, target := range []struct{ path, uid, kind string }{

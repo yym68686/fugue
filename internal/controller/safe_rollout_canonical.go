@@ -20,11 +20,88 @@ var errSafeCanonicalHandoffPending = errors.New("canonical handoff awaits positi
 
 const safeCanonicalHandoffAnnotation = "fugue.io/safe-canonical-handoff"
 
+// Constraint policy is independent of executable convergence. Only an exact
+// policy-only update may complete while the existing promoted executable and
+// original drain cohort are retained. Mixed deployment changes still fail closed.
+func safeRolloutPolicyUpdateCanComplete(op model.Operation, current model.App, applyErr error) bool {
+	if !errors.Is(applyErr, errSafeCanonicalHandoffPending) || op.Type != model.OperationTypeDeploy ||
+		op.DesiredSpec == nil || op.DesiredSource != nil ||
+		!model.AppSafeZeroDowntimeRolloutEnabled(current.Spec) || !model.AppSafeZeroDowntimeRolloutEnabled(*op.DesiredSpec) {
+		return false
+	}
+	previous, desired := cloneControllerAppSpec(&current.Spec), cloneControllerAppSpec(op.DesiredSpec)
+	if reflect.DeepEqual(previous.Continuity, desired.Continuity) {
+		return false
+	}
+	desired.Continuity = model.CloneAppContinuityPolicy(previous.Continuity)
+	return reflect.DeepEqual(previous, desired)
+}
+
 type safeCanonicalHandoff struct {
-	ReleaseID     string `json:"release_id"`
-	DeploymentUID string `json:"deployment_uid"`
-	ReleaseKey    string `json:"release_key"`
-	Image         string `json:"image"`
+	ReleaseID               string `json:"release_id"`
+	SourceReleaseID         string `json:"source_release_id,omitempty"`
+	PreviousTargetReleaseID string `json:"previous_target_release_id,omitempty"`
+	DeploymentUID           string `json:"deployment_uid"`
+	ReleaseKey              string `json:"release_key"`
+	Image                   string `json:"image"`
+}
+
+// A long original connection may outlive more than one independent revision.
+// Only the immediate, durable promotion predecessor can advance a handoff;
+// the original source identity never advances with its traffic destination.
+func (s *Service) canonicalHandoffSourceReleaseID(app model.App, handoff safeCanonicalHandoff, promoted model.AppRelease) (string, error) {
+	recorded, err := s.Store.GetAppRelease(app.TenantID, true, handoff.ReleaseID)
+	if err != nil {
+		return "", err
+	}
+	if recorded.AppID != app.ID || recorded.TenantID != app.TenantID || recorded.RevisionWorkload == nil {
+		return "", fmt.Errorf("canonical handoff recorded target has no verified binding")
+	}
+	if promoted.ID != recorded.ID && (promoted.RollbackTargetID != recorded.ID ||
+		recorded.Role != model.AppReleaseRolePrevious || recorded.Status != model.AppReleaseStatusDraining) {
+		return "", fmt.Errorf("canonical handoff target is not the verified promotion successor")
+	}
+	sourceID := handoff.SourceReleaseID
+	if sourceID == "" {
+		sourceID = recorded.RollbackTargetID
+	}
+	if sourceID == "" || sourceID == promoted.ID || (sourceID == recorded.ID && handoff.SourceReleaseID == "") {
+		return "", fmt.Errorf("canonical handoff has no source release identity")
+	}
+	return sourceID, nil
+}
+
+func (s *Service) verifiedCanonicalHandoffSource(app model.App, handoff safeCanonicalHandoff, deployment kubeDeployment) (safeCanonicalHandoff, error) {
+	liveKey := deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey]
+	image := deploymentPrimaryContainerImage(deployment)
+	if handoff.DeploymentUID != deployment.Metadata.UID || liveKey == "" ||
+		deployment.Spec.Template.Metadata.Annotations[runtime.FugueAnnotationReleaseKey] != liveKey {
+		return handoff, fmt.Errorf("canonical handoff source identity differs")
+	}
+	if liveKey == handoff.ReleaseKey {
+		if !s.migrationImageRefsEquivalent(app, handoff.Image, image) {
+			return handoff, fmt.Errorf("canonical handoff source image differs")
+		}
+		return handoff, nil
+	}
+	// The prior target may have replaced the original after positive drain,
+	// while its Service restoration was interrupted. Only its exact executable
+	// snapshot can become the next drain cohort, never an arbitrary live image.
+	previous, err := s.Store.GetAppRelease(app.TenantID, true, handoff.ReleaseID)
+	if err != nil || previous.AppID != app.ID || previous.TenantID != app.TenantID || previous.SpecSnapshot == nil || previous.RevisionWorkload == nil {
+		return handoff, fmt.Errorf("canonical handoff replacement source unavailable")
+	}
+	source := app
+	source.Spec = *cloneControllerAppSpec(previous.SpecSnapshot)
+	if normalized, changed := s.normalizeManagedAppRuntimeImageRefs(source); changed {
+		source = normalized
+	}
+	scheduling := runtime.SchedulingConstraints{NodeSelector: deployment.Spec.Template.Spec.NodeSelector, Tolerations: deployment.Spec.Template.Spec.Tolerations}
+	if s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(source), scheduling) != liveKey || !s.migrationImageRefsEquivalent(source, source.Spec.Image, image) {
+		return handoff, fmt.Errorf("canonical handoff replacement is not the prior promoted executable")
+	}
+	handoff.SourceReleaseID, handoff.ReleaseKey, handoff.Image = previous.ID, liveKey, image
+	return handoff, nil
 }
 
 // Promotion commits the desired snapshot before the old canonical workload is
@@ -38,37 +115,40 @@ func (s *Service) recoverSafeCanonicalHandoffSource(deployment kubeDeployment, c
 	}
 	var handoff safeCanonicalHandoff
 	liveKey := deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey]
-	if json.Unmarshal([]byte(marker), &handoff) != nil || handoff.DeploymentUID != deployment.Metadata.UID ||
-		handoff.ReleaseKey == "" || handoff.ReleaseKey != liveKey ||
-		deployment.Spec.Template.Metadata.Annotations[runtime.FugueAnnotationReleaseKey] != liveKey ||
-		!s.migrationImageRefsEquivalent(current, handoff.Image, deploymentPrimaryContainerImage(deployment)) {
+	if json.Unmarshal([]byte(marker), &handoff) != nil || handoff.ReleaseKey == "" {
 		return current, scheduling, false, fmt.Errorf("canonical handoff source identity differs")
+	}
+	handoff, err := s.verifiedCanonicalHandoffSource(current, handoff, deployment)
+	if err != nil {
+		return current, scheduling, false, err
 	}
 	policy, err := s.Store.GetAppTrafficPolicy(current.TenantID, true, current.ID)
 	if err != nil {
 		return current, scheduling, false, err
 	}
 	if policy.Mode != model.AppTrafficModeSingle || policy.StableWeight != 100 || policy.CandidateWeight != 0 ||
-		policy.CandidateReleaseID != "" || policy.StableReleaseID != handoff.ReleaseID {
+		policy.CandidateReleaseID != "" || policy.StableReleaseID == "" {
 		return current, scheduling, false, fmt.Errorf("canonical handoff promoted policy differs")
 	}
-	promoted, err := s.Store.GetAppRelease(current.TenantID, true, handoff.ReleaseID)
+	promoted, err := s.Store.GetAppRelease(current.TenantID, true, policy.StableReleaseID)
 	if err != nil {
 		return current, scheduling, false, err
 	}
 	if promoted.RevisionWorkload == nil || promoted.DeploymentName == deployment.Metadata.Name ||
 		promoted.Role != model.AppReleaseRoleStable || promoted.Status != model.AppReleaseStatusServing ||
-		!s.safeRolloutBoundReleaseMatchesApp(desired, promoted) {
+		(!s.safeRolloutBoundReleaseMatchesApp(desired, promoted) &&
+			!(promoted.ID == handoff.ReleaseID && s.safeRolloutBoundReleaseMatchesApp(current, promoted))) {
 		return current, scheduling, false, fmt.Errorf("canonical handoff promoted executable differs")
 	}
 	scheduling = runtime.SchedulingConstraints{
 		NodeSelector: clonePlacementStringMap(deployment.Spec.Template.Spec.NodeSelector),
 		Tolerations:  append([]runtime.Toleration(nil), deployment.Spec.Template.Spec.Tolerations...),
 	}
-	if promoted.RollbackTargetID == "" || promoted.RollbackTargetID == promoted.ID {
-		return current, scheduling, false, fmt.Errorf("canonical handoff has no source release identity")
+	sourceID, err := s.canonicalHandoffSourceReleaseID(current, handoff, promoted)
+	if err != nil {
+		return current, scheduling, false, err
 	}
-	release, err := s.Store.GetAppRelease(current.TenantID, true, promoted.RollbackTargetID)
+	release, err := s.Store.GetAppRelease(current.TenantID, true, sourceID)
 	if err != nil {
 		return current, scheduling, false, err
 	}
@@ -84,6 +164,69 @@ func (s *Service) recoverSafeCanonicalHandoffSource(deployment kubeDeployment, c
 		}
 	}
 	return current, scheduling, false, fmt.Errorf("canonical handoff has no verified source snapshot")
+}
+
+func (s *Service) canonicalHandoffPreviousTargetSelector(ctx context.Context, client *kubeClient, app model.App, handoff safeCanonicalHandoff, promoted model.AppRelease) (map[string]string, error) {
+	if handoff.PreviousTargetReleaseID == "" {
+		return nil, nil
+	}
+	if handoff.PreviousTargetReleaseID != promoted.RollbackTargetID {
+		return nil, fmt.Errorf("canonical handoff previous target differs from promotion predecessor")
+	}
+	previous, err := s.Store.GetAppRelease(app.TenantID, true, handoff.PreviousTargetReleaseID)
+	if err != nil {
+		return nil, err
+	}
+	binding := previous.RevisionWorkload
+	withdrawn := previous.Role == model.AppReleaseRolePrevious && previous.Status == model.AppReleaseStatusDraining ||
+		previous.Role == model.AppReleaseRoleRetired && previous.Status == model.AppReleaseStatusRetired
+	if previous.AppID != app.ID || previous.TenantID != app.TenantID || binding == nil || !withdrawn {
+		return nil, fmt.Errorf("canonical handoff previous target has no verified binding")
+	}
+	service, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(runtime.NamespaceForTenant(app.TenantID))+"/services/"+url.PathEscape(binding.ServiceName))
+	if err != nil {
+		return nil, err
+	}
+	// A retired predecessor can disappear after the Service moved. Its absence
+	// grants no additional allowed selector on a later retry.
+	if !found && previous.Status == model.AppReleaseStatusRetired {
+		return nil, nil
+	}
+	metadata := objectMapField(service, "metadata")
+	selector := objectStringMapValue(nestedObjectValue(service, "spec", "selector"))
+	if !found || objectStringField(metadata, "uid") != binding.ServiceUID || objectStringField(metadata, "deletionTimestamp") != "" ||
+		!appWorkloadOwnerMatches(metadata, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) ||
+		selector[runtime.FugueLabelAppReleaseID] != previous.ID || selector[runtime.FugueLabelAppWorkload] != binding.DeploymentName {
+		return nil, fmt.Errorf("canonical handoff previous target Service identity differs")
+	}
+	return selector, nil
+}
+
+// A promotion and its canonical Service handoff are separate durable writes.
+// Keep a previous target alive if reconciliation stopped between those writes.
+func (s *Service) canonicalServicesReferenceRelease(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease) (bool, error) {
+	if release.RevisionWorkload == nil {
+		return false, nil
+	}
+	name := runtime.RuntimeAppResourceName(app)
+	objects := s.Renderer.BuildManagedAppChildObjects(app, runtime.SchedulingConstraints{}, nil)
+	for _, object := range objects {
+		if object["kind"] != "Service" || objectStringMapValue(nestedObjectValue(object, "spec", "selector"))[runtime.FugueLabelAppWorkload] != name {
+			continue
+		}
+		serviceName := objectStringField(objectMapField(object, "metadata"), "name")
+		service, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(runtime.NamespaceForTenant(app.TenantID))+"/services/"+url.PathEscape(serviceName))
+		if err != nil {
+			return false, err
+		}
+		if found {
+			selector := objectStringMapValue(nestedObjectValue(service, "spec", "selector"))
+			if selector[runtime.FugueLabelAppReleaseID] == release.ID || selector[runtime.FugueLabelAppWorkload] == release.RevisionWorkload.DeploymentName {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // A Service can have consumers outside managed Edge (including autonomous
@@ -173,7 +316,7 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	}
 	var handoff safeCanonicalHandoff
 	if marker != "" {
-		if err := json.Unmarshal([]byte(marker), &handoff); err != nil || handoff.ReleaseID != release.ID || handoff.DeploymentUID != objectStringField(metadata, "uid") || handoff.ReleaseKey == "" || handoff.Image == "" {
+		if err := json.Unmarshal([]byte(marker), &handoff); err != nil || handoff.DeploymentUID != objectStringField(metadata, "uid") || handoff.ReleaseKey == "" || handoff.Image == "" {
 			return nil, fmt.Errorf("canonical handoff identity changed")
 		}
 	} else {
@@ -181,7 +324,29 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		if len(containers) == 0 {
 			return nil, fmt.Errorf("canonical handoff source container missing")
 		}
-		handoff = safeCanonicalHandoff{ReleaseID: release.ID, DeploymentUID: objectStringField(metadata, "uid"), ReleaseKey: liveKey, Image: objectStringField(containers[0], "image")}
+		handoff = safeCanonicalHandoff{ReleaseID: release.ID, SourceReleaseID: release.RollbackTargetID, DeploymentUID: objectStringField(metadata, "uid"), ReleaseKey: liveKey, Image: objectStringField(containers[0], "image")}
+	}
+	advanceTarget := marker != "" && handoff.ReleaseID != release.ID
+	if advanceTarget {
+		var observed kubeDeployment
+		raw, _ := json.Marshal(live)
+		if err := json.Unmarshal(raw, &observed); err != nil {
+			return nil, err
+		}
+		handoff, err = s.verifiedCanonicalHandoffSource(app, handoff, observed)
+		if err != nil {
+			return nil, err
+		}
+		sourceID, err := s.canonicalHandoffSourceReleaseID(app, handoff, release)
+		if err != nil {
+			return nil, err
+		}
+		handoff.SourceReleaseID = sourceID
+		handoff.PreviousTargetReleaseID, handoff.ReleaseID = handoff.ReleaseID, release.ID
+	}
+	previousSelector, err := s.canonicalHandoffPreviousTargetSelector(ctx, client, app, handoff, release)
+	if err != nil {
+		return nil, err
 	}
 	if !appWorkloadOwnerMatches(metadata, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) || objectStringField(metadata, "deletionTimestamp") != "" {
 		return nil, fmt.Errorf("canonical handoff source ownership changed")
@@ -210,7 +375,7 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	if err != nil {
 		return nil, fmt.Errorf("capture original canonical workload: %w", err)
 	}
-	if marker == "" {
+	if marker == "" || advanceTarget {
 		encoded, _ := json.Marshal(handoff)
 		marker = string(encoded)
 		if err := client.patchAppWorkloadObject(ctx, deploymentAPIPath(namespace, name), live, map[string]any{"metadata": map[string]any{"annotations": map[string]any{safeCanonicalHandoffAnnotation: marker}}}); err != nil {
@@ -244,7 +409,8 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 			return nil, fmt.Errorf("canonical handoff Service ownership differs")
 		}
 		existing := objectStringMapValue(nestedObjectValue(current, "spec", "selector"))
-		if !reflect.DeepEqual(existing, ownSelector) && !reflect.DeepEqual(existing, selector) {
+		if !reflect.DeepEqual(existing, ownSelector) && !reflect.DeepEqual(existing, selector) &&
+			(len(previousSelector) == 0 || !reflect.DeepEqual(existing, previousSelector)) {
 			return nil, fmt.Errorf("canonical handoff Service has an unexpected selector")
 		}
 		if !reflect.DeepEqual(existing, selector) {

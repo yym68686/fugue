@@ -361,6 +361,14 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	childObjects = s.preserveManagedAppServingDeploymentTemplate(ctx, client, namespace, app, childObjects)
 	childObjects, err = s.prepareSafeCanonicalHandoff(ctx, client, app, childObjects)
 	if err != nil {
+		// A long original connection must not retain unrelated withdrawn
+		// revisions indefinitely. Retirement still verifies traffic withdrawal,
+		// canonical Service references and every candidate's own positive drain.
+		if errors.Is(err, errSafeCanonicalHandoffPending) {
+			if retireErr := s.retryDrainingAppReleaseRetirement(ctx, app); retireErr != nil && s.Logger != nil {
+				s.Logger.Printf("retire withdrawn revisions during canonical handoff app=%s: %v", app.ID, retireErr)
+			}
+		}
 		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, err)
 	}
 

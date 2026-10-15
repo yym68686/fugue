@@ -1171,6 +1171,10 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				}
 			} else {
 				appliedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, app, scheduling)
+				if safeRolloutPolicyUpdateCanComplete(op, currentApp, err) {
+					s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "rollout policy recorded while promoted executable serves and original connections drain", "", map[string]any{"error": err.Error()})
+					break
+				}
 				if err != nil {
 					return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 				}

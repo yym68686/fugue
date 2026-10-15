@@ -322,7 +322,7 @@ func TestBoundRevisionRetiresAfterCanonicalAlignmentAndRetriesFailedDeletion(t *
 }
 
 func TestBoundRetirementRetainsResourcesWhenPostDrainStateChanges(t *testing.T) {
-	for _, change := range []string{"policy", "stable", "workload", "cancel", "retention"} {
+	for _, change := range []string{"policy", "stable", "workload", "cancel", "retention", "canonical_reference"} {
 		t.Run(change, func(t *testing.T) {
 			s, app, old, f := newDrainWorkloadFixture(t)
 			p, _ := s.Store.GetAppTrafficPolicy(app.TenantID, false, app.ID)
@@ -358,6 +358,14 @@ func TestBoundRetirementRetainsResourcesWhenPostDrainStateChanges(t *testing.T) 
 					if _, err := s.Store.UpdateAppRelease(old); err != nil {
 						t.Fatal(err)
 					}
+				case "canonical_reference":
+					f.extra = func(w http.ResponseWriter, r *http.Request) bool {
+						if strings.HasSuffix(r.URL.Path, "/services/"+runtime.RuntimeAppServiceName(app)) {
+							_ = json.NewEncoder(w).Encode(f.service)
+							return true
+						}
+						return false
+					}
 				}
 			})
 			state := &safeRolloutState{Enabled: true, StableAlignmentAllowed: true, CandidateApp: app, Candidate: stable, StableRelease: old}
@@ -367,6 +375,30 @@ func TestBoundRetirementRetainsResourcesWhenPostDrainStateChanges(t *testing.T) 
 				t.Fatal("post-drain change authorized deletion", change, err, kept.Status, f.deleteCalls)
 			}
 		})
+	}
+}
+
+func TestRetirementRetainsRevisionSelectedByCanonicalService(t *testing.T) {
+	s, app, old, f := newDrainWorkloadFixture(t)
+	f.extra = func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.HasSuffix(r.URL.Path, "/services/"+runtime.RuntimeAppServiceName(app)) {
+			_ = json.NewEncoder(w).Encode(f.service)
+			return true
+		}
+		return false
+	}
+	policy, _ := s.Store.GetAppTrafficPolicy(app.TenantID, false, app.ID)
+	stable, _ := s.Store.GetAppRelease(app.TenantID, false, policy.StableReleaseID)
+	op, _ := s.Store.GetOperation(old.RevisionWorkload.OperationID)
+	s.safeRolloutDrainMetricsQuerier = kubeSafeRolloutDrainObserver{service: s}
+	s.finalizeSafeZeroDowntimePreviousRetire(context.Background(), op, &safeRolloutState{Enabled: true, StableAlignmentAllowed: true, CandidateApp: app, Candidate: stable, StableRelease: old})
+	kept, err := s.Store.GetAppRelease(app.TenantID, false, old.ID)
+	if err != nil || kept.Status != model.AppReleaseStatusDraining || f.deleteCalls != 0 {
+		t.Fatal("canonical target retired before Service handoff", err, kept.Status, f.deleteCalls)
+	}
+	old.Role, old.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
+	if err := s.cleanupSafeRolloutRetiredResources(context.Background(), app, old); err == nil || f.deleteCalls != 0 {
+		t.Fatal("cleanup ignored a canonical Service reference", err)
 	}
 }
 
