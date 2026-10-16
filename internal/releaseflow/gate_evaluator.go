@@ -333,6 +333,12 @@ func ReleaseGateComparisonFailures(metrics map[string]any, policy model.AppRelea
 			failures = append(failures, fmt.Sprintf("candidate 2xx rate %.4f is lower than stable %.4f by more than 0.0500", candidate2xx, stable2xx))
 		}
 	}
+	// The production querier evaluates latency using equally scoped cohorts.
+	// Keep aggregate error/status checks, but do not repeat an unstratified
+	// latency ratio whose request mix differs across the two releases.
+	if BoolMetric(metrics, "latency_cohorts_evaluated") {
+		return failures
+	}
 	stableP95 := FloatMetric(metrics, "stable_p95_ttfb_ms")
 	candidateP95 := FloatMetric(metrics, "candidate_p95_ttfb_ms")
 	if stableP95 > 0 && candidateP95 > stableP95*1.75+250 {

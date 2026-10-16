@@ -128,3 +128,22 @@ retained publication/source deadline. Original probe timestamps remain intact
 and their validity is capped by the retained policy. Offline proofs still expire
 normally. Roll out DNS code to an unselected standby, verify all readiness probes
 and UDP/TCP answers, then use the separate signed transport intent for handoff.
+
+## Comparing application latency with different request mixes
+
+Comparative canary latency uses the same hostname, redacted path without query
+string, HTTP method and streaming mode on both releases in one query window.
+Every compared cohort must meet the existing minimum request count on both
+sides. The P95 TTFB and non-streaming P99 thresholds are unchanged. A streaming
+response remains subject to TTFB but is not treated as an ordinary duration.
+
+Global absolute latency, error and status-class checks still include all
+requests. Unmatched and undersampled requests are counted in gate warnings;
+they must not be compared to a different operation. No sufficiently sampled
+matching cohort fails the gate. The existing low-weight sample-deficit next
+step applies only while the candidate's total request count is below minimum.
+
+The query is bounded to 512 cohorts, and its full row count detects partial
+backend results. Missing identities, truncation or backend errors fail closed.
+Use the gate's `latency_comparison` evidence to distinguish a same-operation
+regression from a shifted mix of health checks, ordinary calls and long streams.

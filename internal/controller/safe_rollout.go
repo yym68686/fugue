@@ -791,6 +791,20 @@ func (s *Service) evaluateSafeRolloutCandidateCanaryGate(ctx context.Context, st
 		return gate
 	}
 	comparison := releaseflow.BuildReleaseGateComparisonMetrics(candidateMetrics, stableMetrics)
+	if querier, ok := s.releaseGateMetricsQuerier.(releaseflow.ReleaseGateLatencyCohortsQuerier); ok {
+		cohorts, err := querier.QueryReleaseGateLatencyCohorts(ctx, state.CandidateApp.ID, state.Candidate.ID, state.StableRelease.ID, window)
+		if err != nil {
+			gate.Failures = append(gate.Failures, "comparative latency cohorts unavailable: "+err.Error())
+			gate.Status = model.AppReleaseGateStatusFail
+			return gate
+		}
+		cohortMetrics, failures, warnings := releaseflow.ReleaseGateLatencyCohortComparison(cohorts, state.Candidate.ID, state.StableRelease.ID, policy)
+		comparison["latency_comparison"] = cohortMetrics
+		comparison["latency_cohorts_evaluated"] = true
+		gate.Failures = append(gate.Failures, failures...)
+		gate.Warnings = append(gate.Warnings, warnings...)
+		gate.Evidence = append(gate.Evidence, fmt.Sprintf("matched latency cohorts=%d candidate_requests=%.0f", len(cohortMetrics["cohorts"].([]map[string]any)), releaseflow.FloatMetric(cohortMetrics, "matched_candidate_requests")))
+	}
 	if gate.Metrics == nil {
 		gate.Metrics = map[string]any{}
 	}
