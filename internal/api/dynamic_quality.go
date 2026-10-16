@@ -198,33 +198,57 @@ func (state *dynamicQualityState) started(key string, now time.Time) {
 	state.entries[key] = entry
 }
 
-func dynamicQualityContext(projection platformIntentProjectionResponse, job dynamicQualityJob) (string, error) {
-	var record platformconfig.DNSIntent
-	var owners []platformconfig.CompiledRoute
-	for _, candidate := range projection.Intent.DNS {
-		if candidate.Hostname != job.Route.Hostname || platformconfig.DNSPlacementOptions(candidate) == nil {
-			continue
-		}
-		record = candidate
-		var err error
-		owners, _, err = placementRecordRoutes(projection, candidate)
-		if err != nil {
-			return "", err
-		}
-		break
+// The reader belongs to one frozen projection phase. Only pure route compilation
+// is shared between DNS consumers; candidate topology and quality policy still
+// participate in each digest. Never retain it across captures or policy changes.
+func newDynamicQualityContextReader(projection platformIntentProjectionResponse, jobs []dynamicQualityJob) func(dynamicQualityJob) (string, error) {
+	type routeContext struct {
+		record platformconfig.DNSIntent
+		once   sync.Once
+		owners []platformconfig.CompiledRoute
+		err    error
 	}
-	var candidates []platformconfig.DNSSelectionCandidate
+	type queryKey struct{ node, hostname string }
+	requestedHosts := map[string]bool{}
+	requestedQueries := map[queryKey]bool{}
+	for _, job := range jobs {
+		requestedHosts[job.Route.Hostname] = true
+		requestedQueries[queryKey{job.NodeID, job.Route.Hostname}] = true
+	}
+	routes := map[string]*routeContext{}
+	for _, record := range projection.Intent.DNS {
+		if requestedHosts[record.Hostname] && routes[record.Hostname] == nil && platformconfig.DNSPlacementOptions(record) != nil {
+			routes[record.Hostname] = &routeContext{record: record}
+		}
+	}
+	candidates := map[queryKey][]platformconfig.DNSSelectionCandidate{}
 	for _, fact := range projection.RuntimeSnapshot.DNSSelections {
-		if fact.NodeID == job.NodeID && fact.Hostname == job.Route.Hostname && fact.Type == "A" {
-			candidates = fact.Candidates
+		if fact.Type == "A" && requestedQueries[queryKey{fact.NodeID, fact.Hostname}] {
+			candidates[queryKey{fact.NodeID, fact.Hostname}] = fact.Candidates
 		}
 	}
-	return platformconfig.Digest(struct {
-		Record     platformconfig.DNSIntent
-		Owners     []platformconfig.CompiledRoute
-		Policy     model.PhysicalEdgeQualityPolicy
-		Candidates []platformconfig.DNSSelectionCandidate
-	}{record, owners, job.Route.Policy, candidates})
+	return func(job dynamicQualityJob) (string, error) {
+		if !requestedQueries[queryKey{job.NodeID, job.Route.Hostname}] {
+			return "", fmt.Errorf("dynamic quality query outside captured context")
+		}
+		var record platformconfig.DNSIntent
+		var owners []platformconfig.CompiledRoute
+		if route := routes[job.Route.Hostname]; route != nil {
+			route.once.Do(func() {
+				route.owners, _, route.err = placementRecordRoutes(projection, route.record)
+			})
+			if route.err != nil {
+				return "", route.err
+			}
+			record, owners = route.record, route.owners
+		}
+		return platformconfig.Digest(struct {
+			Record     platformconfig.DNSIntent
+			Owners     []platformconfig.CompiledRoute
+			Policy     model.PhysicalEdgeQualityPolicy
+			Candidates []platformconfig.DNSSelectionCandidate
+		}{record, owners, job.Route.Policy, candidates[queryKey{job.NodeID, job.Route.Hostname}]})
+	}
 }
 
 func (s *Server) captureDynamicQualityEvidence(ctx context.Context, job dynamicQualityJob, answer dnsserver.DNSDecisionReceipt) (edgequality.Receipt, error) {
@@ -273,12 +297,13 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 		return err
 	}
 	work := s.dynamicQuality.schedule(jobs, policy.DynamicQuality.RefreshQueriesPerCycle, time.Now().UTC())
+	contextFor := newDynamicQualityContextReader(*projection, work)
 	captureBudget, cancelBudget := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelBudget()
 	completed := captureDynamicQualityJobs(captureBudget, work, policy.DynamicQuality.RefreshConcurrency, func(captureContext context.Context, job dynamicQualityJob) {
 		entry := dynamicQualityEntry{Attempted: time.Now().UTC()}
 		s.dynamicQuality.started(job.Key, entry.Attempted)
-		contextDigest, contextErr := dynamicQualityContext(*projection, job)
+		contextDigest, contextErr := contextFor(job)
 		if contextErr != nil {
 			if s.log != nil {
 				s.log.Printf("dynamic quality context unavailable; hostname=%s dns_node=%s error=%v", job.Route.Hostname, job.NodeID, contextErr)
@@ -319,9 +344,12 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 		byHost[job.Route.Hostname] = append(byHost[job.Route.Hostname], job)
 	}
 	for hostname, hostJobs := range byHost {
+		// The preceding hostname may have published new DNS policy. Rebuild
+		// the reader at that boundary, then share only within this host.
+		contextFor := newDynamicQualityContextReader(*projection, hostJobs)
 		selections := map[string]compiledPhysicalDNSSelection{}
 		for _, job := range hostJobs {
-			digest, digestErr := dynamicQualityContext(*projection, job)
+			digest, digestErr := contextFor(job)
 			s.dynamicQuality.mu.Lock()
 			entry := s.dynamicQuality.entries[job.Key]
 			s.dynamicQuality.mu.Unlock()
@@ -562,6 +590,7 @@ func (s *Server) restorePublishedQualityEvidence(projection platformIntentProjec
 	for _, job := range jobs {
 		requested[job.Key] = job
 	}
+	contextFor := newDynamicQualityContextReader(projection, jobs)
 	for _, fact := range snapshot.DNSSelections {
 		job, found := requested[fact.NodeID+"\x00"+fact.Hostname]
 		if !found || fact.PhysicalSelection == nil || len(fact.PhysicalEvidence) == 0 {
@@ -598,7 +627,7 @@ func (s *Server) restorePublishedQualityEvidence(projection platformIntentProjec
 		if declared != derived {
 			continue
 		}
-		contextDigest, err := dynamicQualityContext(projection, job)
+		contextDigest, err := contextFor(job)
 		if err != nil {
 			continue
 		}
