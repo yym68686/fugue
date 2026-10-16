@@ -140,8 +140,11 @@ response remains subject to TTFB but is not treated as an ordinary duration.
 Global absolute latency, error and status-class checks still include all
 requests. Unmatched and undersampled requests are counted in gate warnings;
 they must not be compared to a different operation. No sufficiently sampled
-matching cohort fails the gate. The existing low-weight sample-deficit next
-step applies only while the candidate's total request count is below minimum.
+matching cohort fails the gate. A deficit in total or matched samples is
+inconclusive when another bounded canary step remains. For example, 25% may
+advance to 50% to collect samples; 50% cannot advance to 100% without sufficient
+matched evidence. Errors, latency regressions, missing stable metrics and query
+failures are never classified as a sample deficit.
 
 The query is bounded to 512 cohorts, and its full row count detects partial
 backend results. Missing identities, truncation or backend errors fail closed.

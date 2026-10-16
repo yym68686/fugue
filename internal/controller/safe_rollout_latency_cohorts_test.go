@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -13,14 +15,73 @@ import (
 
 type matchedLatencyGateQuerier struct {
 	rawPreferredReleaseMetricsQuerier
-	cohorts []releaseflow.ReleaseGateLatencyCohort
-	err     error
-	calls   int
+	cohorts  []releaseflow.ReleaseGateLatencyCohort
+	sequence [][]releaseflow.ReleaseGateLatencyCohort
+	err      error
+	calls    int
 }
 
 func (q *matchedLatencyGateQuerier) QueryReleaseGateLatencyCohorts(context.Context, string, string, string, time.Duration) ([]releaseflow.ReleaseGateLatencyCohort, error) {
 	q.calls++
+	if len(q.sequence) > 0 {
+		return q.sequence[min(q.calls-1, len(q.sequence)-1)], q.err
+	}
 	return q.cohorts, q.err
+}
+
+func TestMatchedSampleDeficitOnlyAdvancesToAnotherCanary(t *testing.T) {
+	for _, enoughAtFinal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "final_deficit_aborts", true: "more_samples_allow_promotion"}[enoughAtFinal], func(t *testing.T) {
+			stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+			candidate.Spec.Continuity.ZeroDowntime.Canary = &model.AppRolloutCanarySpec{Enabled: true, InitialWeight: 25, MaxWeight: 100, StepWeights: []int{25, 50, 100}}
+			candidate.Spec.Continuity.ZeroDowntime.Gate = &model.AppReleaseGatePolicy{MinCandidateRequests: 20, MaxP95TTFBMilliseconds: 60000, MaxP99DurationMilliseconds: 30000}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+			defer upstream.Close()
+			svc := newSafeRolloutIntegrationService(stateStore, upstream.URL, safeRolloutDrainMetrics{Ready: true, ActiveConnections: 0, MaxActiveConnections: 1, FinalCount: 1, Summary: map[string]any{"active_connections": 0}})
+			svc.safeRolloutSleep = func(context.Context, time.Duration) error { return nil }
+			state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := &matchedLatencyGateQuerier{rawPreferredReleaseMetricsQuerier: rawPreferredReleaseMetricsQuerier{raw: map[string]map[string]any{
+				state.Candidate.ID:     {"request_count": 35., "p95_ttfb_ms": 10000., "p99_duration_ms": 500.},
+				state.StableRelease.ID: {"request_count": 100., "p95_ttfb_ms": 10000., "p99_duration_ms": 500.},
+			}}}
+			first := []releaseflow.ReleaseGateLatencyCohort{{ReleaseID: state.Candidate.ID, Hostname: "app.example.test", Path: "/events", Method: "POST", Streaming: true, Requests: 15, P95TTFB: 10000}, {ReleaseID: state.StableRelease.ID, Hostname: "app.example.test", Path: "/events", Method: "POST", Streaming: true, Requests: 40, P95TTFB: 10000}}
+			second := append([]releaseflow.ReleaseGateLatencyCohort(nil), first...)
+			if enoughAtFinal {
+				second[0].Requests = 30
+			}
+			q.sequence = [][]releaseflow.ReleaseGateLatencyCohort{first, second}
+			svc.releaseGateMetricsQuerier = q
+			err = svc.completeSafeZeroDowntimeRollout(context.Background(), op, state)
+			if enoughAtFinal && err != nil || !enoughAtFinal && (err == nil || !strings.Contains(err.Error(), "50%")) {
+				t.Fatal("incorrect final gate result", err)
+			}
+			expectedCalls := 2
+			if enoughAtFinal {
+				expectedCalls++ // final pre-promotion comparison also remains mandatory
+			}
+			if q.calls != expectedCalls {
+				t.Fatal("did not evaluate the bounded steps and final promotion", q.calls)
+			}
+			traffic, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := state.StableRelease.ID
+			if enoughAtFinal {
+				expected = state.Candidate.ID
+			}
+			if traffic.StableReleaseID != expected || traffic.StableWeight != 100 || traffic.CandidateWeight != 0 {
+				t.Fatal("incorrect serving release after final sample gate", traffic)
+			}
+			steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+			if err != nil || !releaseStepsContainPhase(steps, "canary_gate", model.ReleaseStepStatusSkipped) {
+				t.Fatal("missing inconclusive early step", err, steps)
+			}
+		})
+	}
 }
 
 func TestSafeRolloutMatchedLatencyRetainsAbsoluteErrorsAndEvidenceFailures(t *testing.T) {
@@ -73,8 +134,8 @@ func TestSafeRolloutMatchedLatencyRetainsAbsoluteErrorsAndEvidenceFailures(t *te
 			if scenario == "candidate_sample_deficit" && !safeRolloutCanaryGateOnlySampleDeficit(gate, policy) {
 				t.Fatal("low-weight sample deficit cannot use existing bounded next step", gate)
 			}
-			if scenario == "matched_sample_deficit" && safeRolloutCanaryGateOnlySampleDeficit(gate, policy) {
-				t.Fatal("missing stable cohort incorrectly bypassed", gate)
+			if scenario == "matched_sample_deficit" && !safeRolloutCanaryGateOnlySampleDeficit(gate, policy) {
+				t.Fatal("matched sample deficit cannot use an existing later canary step", gate)
 			}
 		})
 	}

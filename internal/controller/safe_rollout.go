@@ -230,14 +230,14 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 					s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_gate", model.ReleaseStepStatusSkipped, fmt.Sprintf("candidate canary gate inconclusive at %d%%; continuing to next canary weight", weight), state.Candidate.ID, map[string]any{
 						"candidate_weight": weight,
 						"gate":             gate,
-						"reason":           "candidate sample count below minimum",
+						"reason":           "candidate or matched latency cohort samples below minimum",
 					})
 					s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.gate.inconclusive", state.Candidate.ID, map[string]string{
 						"operation_id":      op.ID,
 						"phase":             "canary_gate",
 						"candidate_weight":  fmt.Sprintf("%d", weight),
 						"candidate_release": state.Candidate.ID,
-						"reason":            "candidate sample count below minimum",
+						"reason":            "candidate or matched latency cohort samples below minimum",
 					})
 					continue
 				}
@@ -1387,14 +1387,25 @@ func safeRolloutCanaryGateOnlySampleDeficit(gate model.AppReleaseGateResult, pol
 	if policy.MinCandidateRequests <= 0 {
 		return false
 	}
-	if releaseflow.FloatMetric(gate.Metrics, "request_count") >= float64(policy.MinCandidateRequests) {
+	minimum := float64(policy.MinCandidateRequests)
+	sampleDeficit := releaseflow.FloatMetric(gate.Metrics, "request_count") < minimum
+	if comparison, ok := gate.Metrics["comparison"].(map[string]any); ok && releaseflow.BoolMetric(comparison, "latency_cohorts_evaluated") {
+		if cohorts, ok := comparison["latency_comparison"].(map[string]any); ok && cohorts["mode"] == "matched_latency_cohorts" {
+			// Splitting requests into comparable operations can leave too few
+			// matched samples even when the total count meets the minimum. It
+			// remains inconclusive, subject to the same later-canary-step guard;
+			// it cannot authorize the final transition to 100%.
+			sampleDeficit = sampleDeficit || releaseflow.FloatMetric(cohorts, "matched_candidate_requests") < minimum
+		}
+	}
+	if !sampleDeficit {
 		return false
 	}
 	if len(gate.Failures) == 0 {
 		return false
 	}
 	for _, failure := range gate.Failures {
-		if strings.Contains(failure, "request count") && strings.Contains(failure, "below minimum") {
+		if (strings.HasPrefix(failure, "release request count ") || strings.HasPrefix(failure, "matched latency cohort request count ")) && strings.Contains(failure, "below minimum") {
 			continue
 		}
 		return false
