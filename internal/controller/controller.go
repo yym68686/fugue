@@ -310,10 +310,14 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 
 	stopOperationRecovery := s.startPeriodicReconcile(ctx, time.Minute, "operation finalization recovery", s.recoverCompletedManagedDeploys)
 	defer stopOperationRecovery()
-	foregroundImports := s.startPendingOperationWorkers(ctx, operationLaneForegroundImport, s.Config.ForegroundImportWorkers)
-	foregroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, s.Config.ForegroundActivateWorkers)
-	backgroundImports := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, s.Config.GitHubSyncImportWorkers)
-	backgroundActivations := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, s.Config.GitHubSyncActivateWorkers)
+	foregroundImports, stopForegroundImports := s.startPendingOperationWorkers(ctx, operationLaneForegroundImport, s.Config.ForegroundImportWorkers)
+	defer stopForegroundImports()
+	foregroundActivations, stopForegroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, s.Config.ForegroundActivateWorkers)
+	defer stopForegroundActivations()
+	backgroundImports, stopBackgroundImports := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, s.Config.GitHubSyncImportWorkers)
+	defer stopBackgroundImports()
+	backgroundActivations, stopBackgroundActivations := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, s.Config.GitHubSyncActivateWorkers)
+	defer stopBackgroundActivations()
 	triggerBackgroundOps := func() {
 		triggerPendingOperationWorkers(backgroundImports...)
 		triggerPendingOperationWorkers(backgroundActivations...)
@@ -321,7 +325,8 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	triggerPendingOperationWorkers(foregroundImports...)
 	triggerPendingOperationWorkers(foregroundActivations...)
 	triggerBackgroundOps()
-	s.startDatabaseMigrationWorker(ctx)
+	stopMigrations := s.startDatabaseMigrationWorker(ctx)
+	defer stopMigrations()
 	stopSourceSync := s.startGitHubSourceSync(ctx, triggerBackgroundOps)
 	defer stopSourceSync()
 	if s.Config.HostJournaldPolicyEnabled {
@@ -712,13 +717,26 @@ func (lane operationLane) String() string {
 	}
 }
 
-func (s *Service) startPendingOperationWorkers(ctx context.Context, lane operationLane, count int) []chan struct{} {
+type operationWorkerLifetimeKey struct{}
+
+type operationWorkerLifetime struct {
+	ctx   context.Context
+	tasks *sync.WaitGroup
+}
+
+func (s *Service) startPendingOperationWorkers(ctx context.Context, lane operationLane, count int) ([]chan struct{}, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	ctx = context.WithValue(ctx, operationWorkerLifetimeKey{}, operationWorkerLifetime{ctx: ctx, tasks: &workers})
+	stop := func() { cancel(); workers.Wait() }
 	if count < 0 {
 		count = 0
 	}
 	if count == 0 {
 		trigger := make(chan struct{}, 1)
+		workers.Add(1)
 		go func(trigger chan struct{}) {
+			defer workers.Done()
 			ticker := time.NewTicker(s.Config.PollInterval)
 			defer ticker.Stop()
 
@@ -729,18 +747,20 @@ func (s *Service) startPendingOperationWorkers(ctx context.Context, lane operati
 				case <-trigger:
 				case <-ticker.C:
 				}
-				if err := s.dispatchPendingOperationsInLane(ctx, lane); err != nil && !errors.Is(err, context.Canceled) {
+				if err := s.dispatchPendingOperationsInLane(ctx, lane, &workers); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("dispatch pending operations (%s) error: %v", lane, err)
 				}
 			}
 		}(trigger)
-		return []chan struct{}{trigger}
+		return []chan struct{}{trigger}, stop
 	}
 	triggers := make([]chan struct{}, 0, count)
 	for range count {
 		trigger := make(chan struct{}, 1)
 		triggers = append(triggers, trigger)
+		workers.Add(1)
 		go func(trigger chan struct{}) {
+			defer workers.Done()
 			ticker := time.NewTicker(s.Config.PollInterval)
 			defer ticker.Stop()
 
@@ -757,11 +777,14 @@ func (s *Service) startPendingOperationWorkers(ctx context.Context, lane operati
 			}
 		}(trigger)
 	}
-	return triggers
+	return triggers, stop
 }
 
-func (s *Service) dispatchPendingOperationsInLane(ctx context.Context, lane operationLane) error {
+func (s *Service) dispatchPendingOperationsInLane(ctx context.Context, lane operationLane, workers *sync.WaitGroup) error {
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		op, found, err := s.claimNextPendingOperationInLane(lane)
 		if err != nil {
 			return fmt.Errorf("claim pending operation: %w", err)
@@ -770,7 +793,12 @@ func (s *Service) dispatchPendingOperationsInLane(ctx context.Context, lane oper
 			return nil
 		}
 
+		// The dispatcher itself remains in the group until it stops adding
+		// operations, so shutdown cannot return before a claimed operation's
+		// guarded cancellation/requeue has completed.
+		workers.Add(1)
 		go func(op model.Operation) {
+			defer workers.Done()
 			if err := s.handleClaimedOperation(ctx, op); err != nil && !errors.Is(err, context.Canceled) && s.Logger != nil {
 				s.Logger.Printf("operation %s async lane %s error: %v", op.ID, lane, err)
 			}
@@ -859,6 +887,9 @@ func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Ope
 
 func (s *Service) drainPendingOperationsInLane(ctx context.Context, lane operationLane) error {
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		op, found, err := s.claimNextPendingOperationInLane(lane)
 		if err != nil {
 			return fmt.Errorf("claim pending operation: %w", err)
@@ -1319,7 +1350,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				s.Logger.Printf("reload deployed app %s after completion failed: %v", app.ID, appErr)
 			}
 		} else {
-			runPostOperationMaintenance(s.Logger, fmt.Sprintf("post-deploy image maintenance for app=%s tenant=%s", deployedApp.ID, deployedApp.TenantID), func(ctx context.Context) error {
+			runPostOperationMaintenance(ctx, s.Logger, fmt.Sprintf("post-deploy image maintenance for app=%s tenant=%s", deployedApp.ID, deployedApp.TenantID), func(ctx context.Context) error {
 				var errs []error
 				if err := s.pruneExcessManagedAppImages(ctx, deployedApp); err != nil {
 					errs = append(errs, fmt.Errorf("prune excess managed app images: %w", err))
@@ -1333,7 +1364,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		timer.Mark("post_deploy_cleanup")
 	}
 	if op.Type == model.OperationTypeDelete {
-		runPostOperationMaintenance(s.Logger, fmt.Sprintf("post-delete image maintenance for app=%s tenant=%s", app.ID, app.TenantID), func(ctx context.Context) error {
+		runPostOperationMaintenance(ctx, s.Logger, fmt.Sprintf("post-delete image maintenance for app=%s tenant=%s", app.ID, app.TenantID), func(ctx context.Context) error {
 			var errs []error
 			if err := s.cleanupDeletedAppImages(ctx, app); err != nil {
 				errs = append(errs, fmt.Errorf("cleanup deleted app images: %w", err))

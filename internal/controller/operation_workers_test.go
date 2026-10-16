@@ -968,7 +968,8 @@ func TestGitHubSyncActivateWorkersProcessDifferentAppsInParallel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	workers := svc.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, 2)
+	workers, stop := svc.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, 2)
+	defer stop()
 	triggerPendingOperationWorkers(workers...)
 
 	select {
@@ -982,7 +983,7 @@ func TestGitHubSyncActivateWorkersProcessDifferentAppsInParallel(t *testing.T) {
 	close(release)
 	waitForOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
 	cancel()
-	time.Sleep(200 * time.Millisecond)
+	stop()
 }
 
 func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testing.T) {

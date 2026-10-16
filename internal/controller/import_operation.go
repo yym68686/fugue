@@ -372,7 +372,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		"queued_deploy_operation_id": strings.TrimSpace(deployOp.ID),
 		"elapsed_ms":                 operationElapsedMilliseconds(completed, time.Now().UTC()),
 	})
-	runPostOperationMaintenance(s.Logger, fmt.Sprintf("billing image storage sync after import op=%s tenant=%s", op.ID, app.TenantID), func(ctx context.Context) error {
+	runPostOperationMaintenance(ctx, s.Logger, fmt.Sprintf("billing image storage sync after import op=%s tenant=%s", op.ID, app.TenantID), func(ctx context.Context) error {
 		return s.syncTenantBillingImageStorage(ctx, app.TenantID)
 	})
 	timer.Mark("billing_sync")
@@ -756,6 +756,7 @@ func registryBasePort(raw string) string {
 }
 
 func (s *Service) startImportOperationProgressHeartbeat(ctx context.Context, operationID string) func() {
+	ctx, cancel := context.WithCancel(ctx)
 	now := time.Now
 	if s != nil && s.now != nil {
 		now = s.now
@@ -768,15 +769,17 @@ func (s *Service) startImportOperationProgressHeartbeat(ctx context.Context, ope
 
 	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-done:
-				return
 			case <-ticker.C:
+				if ctx.Err() != nil {
+					return
+				}
 				elapsed := now().Sub(startedAt)
 				if elapsed < 0 {
 					elapsed = time.Since(startedAt)
@@ -786,7 +789,8 @@ func (s *Service) startImportOperationProgressHeartbeat(ctx context.Context, ope
 		}
 	}()
 	return func() {
-		close(done)
+		cancel()
+		<-done
 	}
 }
 

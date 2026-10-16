@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -157,12 +158,18 @@ func appendDatabaseMigrationNodeAffinity(existing map[string]any, nodeNames []st
 
 const controlPlaneDatabaseMigrationKind = "managed-postgres"
 
-func (s *Service) startDatabaseMigrationWorker(ctx context.Context) {
+func (s *Service) startDatabaseMigrationWorker(ctx context.Context) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
-			if err := s.processDatabaseMigrations(ctx); err != nil && s.Logger != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if err := s.processDatabaseMigrations(ctx); err != nil && !errors.Is(err, context.Canceled) && s.Logger != nil {
 				s.Logger.Printf("database migration worker: %v", err)
 			}
 			select {
@@ -172,14 +179,21 @@ func (s *Service) startDatabaseMigrationWorker(ctx context.Context) {
 			}
 		}
 	}()
+	return func() { cancel(); <-done }
 }
 
 func (s *Service) processDatabaseMigrations(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	migrations, err := s.Store.ListPendingDatabaseMigrations()
 	if err != nil {
 		return err
 	}
 	for _, migration := range migrations {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := s.executeDatabaseMigration(ctx, migration); err != nil && s.Logger != nil {
 			s.Logger.Printf("database migration %s: %v", migration.ID, err)
 		}
