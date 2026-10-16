@@ -52,6 +52,7 @@ type frontAuthorityConfig struct {
 }
 
 type authorityWorkerHealth struct {
+	CaddyAppliedVersion   string `json:"caddy_applied_version"`
 	Status                string `json:"status"`
 	Healthy               bool   `json:"healthy"`
 	EdgeGroupID           string `json:"edge_group_id"`
@@ -194,6 +195,9 @@ func (activator *frontAuthorityActivator) beginWithOperation(ctx context.Context
 		return nil, err
 	}
 	preflight, err := activator.preflightForOperation(ctx, target, operation)
+	if err == nil && operation == edgegroupfront.ActivationOperationPromote {
+		err = activator.prepareWorkerPublications(ctx, target, preflight)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -887,6 +891,9 @@ func (activator *frontAuthorityActivator) activationCAS(ctx context.Context, pod
 		"--target-slot", request.TargetSlot, "--bundle-generation", request.BundleGeneration, "--worker-source-commit", request.WorkerSourceCommit,
 		"--worker-image-digest", request.WorkerImageDigest, "--operation", request.Operation,
 		"--rollback-of-generation", strconv.FormatUint(request.RollbackOfGeneration, 10), "--reason", request.Reason}
+	if request.Operation == edgegroupfront.ActivationOperationPromote {
+		args = append(args, "--require-publication-preparation")
+	}
 	raw, err := activator.executor.Exec(ctx, activator.config.Namespace, pod, "edge", args...)
 	if err != nil {
 		state, readErr := activator.readActivation(ctx, pod)

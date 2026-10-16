@@ -225,6 +225,9 @@ func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, targ
 	}
 	target.FrontBundleGeneration = frontBundleGeneration
 	preflight, err := activator.front.preflight(ctx, target)
+	if err == nil {
+		err = activator.front.prepareWorkerPublications(ctx, target, preflight)
+	}
 	if err != nil {
 		if recoveryErr := activator.recoverControl(context.WithoutCancel(ctx), promotion, target.PreviousServingGeneration); recoveryErr != nil {
 			releaseOnError = false

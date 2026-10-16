@@ -148,6 +148,7 @@ type configEdgeRouteSource struct {
 }
 
 type routeSourceSelection struct {
+	preparation                 *edgegroupfront.PublicationPreparation
 	enrollment                  model.EdgeNodeEnrollment
 	config                      configEdgeRouteSource
 	candidate                   bool
@@ -219,6 +220,20 @@ func (s *Service) selectRouteBundleSource() (routeSourceSelection, error) {
 	if activation.ActiveSlot != slot {
 		selection.candidate = true
 		selection.config.url = cfg.candidateURL
+		prepared, found, prepareErr := edgegroupfront.ReadPublicationPreparation(cfg.activationFile)
+		if prepareErr != nil {
+			return routeSourceSelection{}, prepareErr
+		}
+		if found && prepared.Matches(activation, slot, strings.TrimSpace(s.Config.EdgeReleaseEpoch), time.Now().UTC()) {
+			generation, sequence, recovery, parseErr := parseActivatedPublicationVersion(prepared.BundleGeneration)
+			if parseErr != nil {
+				return routeSourceSelection{}, parseErr
+			}
+			selection.candidate = false
+			selection.config.url = cfg.url
+			selection.preparation = &prepared
+			selection.expectedGeneration, selection.expectedPublicationSequence, selection.expectedRecoveryEpoch = generation, sequence, recovery
+		}
 	} else {
 		// Front activation is the traffic authority. Until Edge Control has
 		// promoted the exact verified candidate into its current stream, an
@@ -304,6 +319,13 @@ func (s *Service) validateRouteBundleSourceSelection(selection routeSourceSelect
 	if err != nil || !exists || activation.GroupID != strings.TrimSpace(s.Config.EdgeGroupID) ||
 		activation.Generation != selection.activationGeneration || activation.ActiveSlot != selection.activeSlot {
 		return errors.New("edge route authority changed while loading a bundle")
+	}
+	if selection.preparation != nil {
+		prepared, found, err := edgegroupfront.ReadPublicationPreparation(selection.config.activationFile)
+		if err != nil || !found || prepared != *selection.preparation || !prepared.Matches(activation, strings.TrimSpace(s.Config.EdgeSlot), strings.TrimSpace(s.Config.EdgeReleaseEpoch), time.Now().UTC()) {
+			return errors.New("publication preparation changed while loading a bundle")
+		}
+		return nil
 	}
 	isCandidate := activation.ActiveSlot != strings.TrimSpace(s.Config.EdgeSlot)
 	if isCandidate != selection.candidate {
@@ -489,13 +511,20 @@ func validateRoutePublicationAdvance(current, candidate routePublicationMetadata
 	if current.Source == "" {
 		return nil
 	}
-	if current.Source != candidate.Source || current.GroupID != candidate.GroupID || candidate.PublicationSequence <= current.PublicationSequence {
+	if current.Source != candidate.Source || current.GroupID != candidate.GroupID {
+		return errors.New("edge-control route publication authority changed")
+	}
+	if candidate.PublicationSequence <= current.PublicationSequence {
 		// Candidate and current are separate publication streams. Once the
 		// activation CAS promotes this worker, the first current observation
 		// may legitimately have a lower sequence but must carry a newer
 		// recovery epoch. The activation-bound source selection is validated
 		// by the caller before this transition is accepted.
-		if !(current.Candidate && !candidate.Candidate && candidate.RecoveryEpoch > current.RecoveryEpoch) {
+		// The exact candidate can also become current without a recovery. Its
+		// signed generation and sequence must then remain identical. The caller
+		// separately validates the activation/preparation binding and signature.
+		exactPromotion := candidate.Generation == current.Generation && candidate.PublicationSequence == current.PublicationSequence && candidate.RecoveryEpoch >= current.RecoveryEpoch
+		if !(current.Candidate && !candidate.Candidate && (exactPromotion || candidate.RecoveryEpoch > current.RecoveryEpoch)) {
 			return errors.New("edge-control route publication CAS regressed or replayed")
 		}
 	}

@@ -52,8 +52,9 @@ type ActivationState struct {
 }
 
 type ActivationCASRequest struct {
-	GroupID            string
-	ExpectedGeneration uint64
+	RequirePublicationPreparation bool
+	GroupID                       string
+	ExpectedGeneration            uint64
 	// InitialGeneration joins a verified existing Cell fence on a fresh node.
 	// Zero preserves first-cell initialization at one. It never rebases a file.
 	InitialGeneration    uint64
@@ -113,6 +114,14 @@ func ApplyActivationCAS(path string, request ActivationCASRequest, now time.Time
 		}
 		if request.Operation == ActivationOperationRollback && (request.RollbackOfGeneration == 0 || request.RollbackOfGeneration != previous.Generation) {
 			return ActivationReceipt{}, errors.New("edge front rollback must bind the exact current generation")
+		}
+	}
+	if request.RequirePublicationPreparation {
+		prepared, found, err := ReadPublicationPreparation(path)
+		if err != nil || !found || request.Operation != ActivationOperationPromote ||
+			!prepared.Matches(previous, request.TargetSlot, request.WorkerSourceCommit, now) ||
+			prepared.BundleGeneration != request.BundleGeneration || prepared.WorkerImageDigest != request.WorkerImageDigest {
+			return ActivationReceipt{}, errors.New("Front activation lacks exact unexpired publication preparation")
 		}
 	}
 

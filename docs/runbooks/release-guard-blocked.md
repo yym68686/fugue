@@ -88,3 +88,27 @@ conditions remain blocked; preserve their failed record for explicit recovery.
 - Robustness status has no platform `block_publish` incident.
 - Public synthetic probes do not return Fugue routing 503 classes.
 - Deploy logs include the pre-deploy and post-deploy release guard summary.
+
+## Preparing an ordinary Worker publication before Front activation
+
+Worker code promotion prepares the signed current publication before changing
+Front's active slot. Guardian first persists a separate, 90-second preparation
+record using the same local activation lock. The record binds the complete
+predecessor activation, target slot, source revision, image digest and promoted
+publication version. It never changes Front activation or creates configuration.
+Only the named inactive Worker may use it to fetch the ordinary signed stream.
+Signature, group, publication sequence, recovery epoch and expiry checks remain
+mandatory; the record is rechecked before accepting the fetched bundle.
+
+Guardian requires every exact target Pod to load an ordinary publication and
+apply the same version to Caddy before it attempts Front CAS. Missing capability,
+partial cohort, invalid signatures, timeout or expired preparation preserve
+the old traffic pointer. CAS rechecks the same unexpired preparation under its
+file lock. Replays do not extend its deadline, and any predecessor change fences
+the record automatically. Rollback remains independent of preparation.
+
+Release Guardian before the supporting Worker code. An older Worker CAS binary
+rejects the preparation flag without activating traffic; do not bypass that
+capability failure. This ordering avoids the prior interval in which HTTP traffic
+reached a candidate bundle that was correctly unable to issue ordinary DNS route
+proofs. Candidate proof rejection and DNS eligibility policy remain unchanged.

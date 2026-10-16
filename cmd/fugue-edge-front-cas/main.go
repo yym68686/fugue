@@ -41,14 +41,24 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 	operation := flags.String("operation", "", "initialize, promote, or rollback")
 	rollbackOfGeneration := flags.Uint64("rollback-of-generation", 0, "exact failed generation for rollback")
 	reason := flags.String("reason", "", "auditable activation reason")
+	prepare := flags.Bool("prepare-publication", false, "prepare signed current publication without changing Front activation")
+	requirePreparation := flags.Bool("require-publication-preparation", false, "require exact unexpired preparation before activation")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("invalid edge front CAS arguments")
 	}
-	receipt, err := edgegroupfront.ApplyActivationCAS(*stateFile, edgegroupfront.ActivationCASRequest{
-		GroupID: *groupID, ExpectedGeneration: *expectedGeneration, InitialGeneration: *initialGeneration, ExpectedSlot: *expectedSlot, TargetSlot: *targetSlot,
+	request := edgegroupfront.ActivationCASRequest{
+		RequirePublicationPreparation: *requirePreparation,
+		GroupID:                       *groupID, ExpectedGeneration: *expectedGeneration, InitialGeneration: *initialGeneration, ExpectedSlot: *expectedSlot, TargetSlot: *targetSlot,
 		BundleGeneration: *bundleGeneration, WorkerSourceCommit: *workerSourceCommit, WorkerImageDigest: *workerImageDigest,
 		Operation: *operation, RollbackOfGeneration: *rollbackOfGeneration, Reason: *reason,
-	}, now)
+	}
+	var receipt any
+	var err error
+	if *prepare {
+		receipt, err = edgegroupfront.PreparePublication(*stateFile, request, now)
+	} else {
+		receipt, err = edgegroupfront.ApplyActivationCAS(*stateFile, request, now)
+	}
 	if err != nil {
 		return err
 	}
