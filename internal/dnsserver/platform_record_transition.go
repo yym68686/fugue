@@ -55,6 +55,82 @@ type dnsRecordTransition struct {
 	hosts map[string]bool
 }
 
+// A worker may activate between the candidate scan and a later retained-plan
+// probe. Re-evaluate only those newly collected observations against the exact
+// successor plan and publication. Never renew timestamps or copy old readiness
+// decisions; cached observations from before the candidate scan are excluded.
+func dnsSupplementTransitionFacts(successor, retained *dnsServingState, now time.Time) ([]dnsReadinessFact, bool) {
+	if successor == nil || retained == nil || successor.payload.Plan == nil || retained.payload.Plan == nil {
+		return nil, false
+	}
+	nextRequirements := make(map[string]*platformconfig.DNSReadinessProbe, len(successor.payload.Plan.Probes))
+	for index := range successor.payload.Plan.Probes {
+		probe := &successor.payload.Plan.Probes[index]
+		key := dnsroutesource.ProbeKey(*probe)
+		if _, exists := nextRequirements[key]; exists {
+			nextRequirements[key] = nil
+		} else {
+			nextRequirements[key] = probe
+		}
+	}
+	oldRequirements := make(map[string]*platformconfig.DNSReadinessProbe, len(retained.payload.Plan.Probes))
+	for index := range retained.payload.Plan.Probes {
+		probe := &retained.payload.Plan.Probes[index]
+		if _, exists := oldRequirements[probe.ID]; exists {
+			oldRequirements[probe.ID] = nil
+		} else {
+			oldRequirements[probe.ID] = probe
+		}
+	}
+	counts := make(map[string]int, len(retained.facts))
+	for _, fact := range retained.facts {
+		counts[fact.ProbeID]++
+	}
+	positions := make(map[string]int, len(successor.facts))
+	for index, fact := range successor.facts {
+		if _, exists := positions[fact.ProbeID]; exists {
+			positions[fact.ProbeID] = -1
+		} else {
+			positions[fact.ProbeID] = index
+		}
+	}
+	result, changed := successor.facts, false
+	for _, observation := range retained.facts {
+		// A failed or cached probe is not a newly authenticated observation,
+		// even if a future probe implementation supplies partial proof fields.
+		eligible := observation.Ready && observation.Reason == "" ||
+			observation.Reason == "route_digest_mismatch" || observation.Reason == "traffic_release_mismatch"
+		prior := oldRequirements[observation.ProbeID]
+		if !eligible || prior == nil || counts[observation.ProbeID] != 1 || !observation.Proof.CheckedAt.After(successor.checkedAt) {
+			continue
+		}
+		requirement := nextRequirements[dnsroutesource.ProbeKey(*prior)]
+		if requirement == nil {
+			continue
+		}
+		index, exists := positions[requirement.ID]
+		if exists && (index < 0 || !observation.Proof.CheckedAt.After(result[index].Proof.CheckedAt)) {
+			continue
+		}
+		fact := evaluateDNSReadinessFact(*requirement, successor.payload.Policy.DNSReadiness, observation.Proof, nil, now)
+		if !fact.Ready || !dnsFactMatchesRelease(fact, successor.record.Parent, successor.record.Candidate, successor.routeID, successor.payload) {
+			continue
+		}
+		fact.ObservationID = observation.ObservationID
+		if !changed {
+			result = slices.Clone(result)
+			changed = true
+		}
+		if exists {
+			result[index] = fact
+		} else {
+			positions[fact.ProbeID] = len(result)
+			result = append(result, fact)
+		}
+	}
+	return result, changed
+}
+
 func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[string]bool {
 	if old == nil || bridge == nil || old.payload.Plan == nil || bridge.payload.Plan == nil {
 		return nil
@@ -65,8 +141,8 @@ func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[st
 	previous, next := *old, *bridge
 	previous.payload.Plan = dnsTransitionRequirementShape(old.payload.Plan)
 	next.payload.Plan = dnsTransitionRequirementShape(bridge.payload.Plan)
-	previous.payload.Policy.TrafficConstraints = dnsTransitionTrafficConstraints(old.payload.Policy.TrafficConstraints)
-	next.payload.Policy.TrafficConstraints = dnsTransitionTrafficConstraints(bridge.payload.Policy.TrafficConstraints)
+	previous.payload.Policy.TrafficConstraints, next.payload.Policy.TrafficConstraints =
+		dnsTransitionTrafficConstraintPair(old.payload.Policy.TrafficConstraints, bridge.payload.Policy.TrafficConstraints)
 	if previous.payload.Plan == nil || next.payload.Plan == nil {
 		return nil
 	}
@@ -89,11 +165,57 @@ func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[st
 	return hosts
 }
 
+// Starting a canary changes application execution, not DNS endpoint authority.
+// A signed successor may recover its records when it keeps the exact stable
+// release and every other policy boundary, with positive shares for both
+// releases. A previously configured candidate cannot be replaced or revived.
+// This projection is used only for forward recovery, never old-proof bridging.
+func dnsTransitionTrafficConstraintPair(before, after []platformconfig.TrafficPolicyConstraint) ([]platformconfig.TrafficPolicyConstraint, []platformconfig.TrafficPolicyConstraint) {
+	previous, next := slices.Clone(before), slices.Clone(after)
+	previousCounts := make(map[string]int, len(before))
+	for _, constraint := range before {
+		previousCounts[constraint.ID]++
+	}
+	nextIndex := make(map[string]int, len(after))
+	for index, constraint := range after {
+		if _, exists := nextIndex[constraint.ID]; exists {
+			nextIndex[constraint.ID] = -1
+		} else {
+			nextIndex[constraint.ID] = index
+		}
+	}
+	for index, single := range previous {
+		if single.ID == "" || single.AppID == "" || single.TenantID == "" || single.StableReleaseID == "" ||
+			previousCounts[single.ID] != 1 || single.Mode != model.AppTrafficModeSingle ||
+			single.CandidateReleaseID != "" || single.StableWeight != 100 || single.CandidateWeight != 0 {
+			continue
+		}
+		nextPosition, exists := nextIndex[single.ID]
+		if !exists || nextPosition < 0 {
+			continue
+		}
+		canary := next[nextPosition]
+		if canary.Mode != model.AppTrafficModeCanary || canary.CandidateReleaseID == "" ||
+			canary.CandidateReleaseID == canary.StableReleaseID || canary.StableWeight <= 0 ||
+			canary.CandidateWeight <= 0 || canary.StableWeight+canary.CandidateWeight != 100 {
+			continue
+		}
+		retained := canary
+		retained.Mode, retained.CandidateReleaseID = model.AppTrafficModeSingle, ""
+		retained.StableWeight, retained.CandidateWeight = 100, 0
+		if retained == single {
+			previous[index] = canary
+		}
+	}
+	return dnsTransitionTrafficConstraints(previous), dnsTransitionTrafficConstraints(next)
+}
+
 // A signed canary step between the same two already-active releases changes
 // route digests, not DNS endpoint authority. Only this comparison omits weights;
 // the successor still answers with its original policy and exact fresh proofs.
-// Enabling/disabling a release, changing identity, fallback or stickiness remains
-// incompatible. The old-proof bridge deliberately retains its stricter checks.
+// Replacing or disabling an existing release, changing identity, fallback or
+// stickiness remains incompatible. Initial canary admission is compared above;
+// the old-proof bridge deliberately retains its stricter checks.
 func dnsTransitionTrafficConstraints(constraints []platformconfig.TrafficPolicyConstraint) []platformconfig.TrafficPolicyConstraint {
 	result := slices.Clone(constraints)
 	for index := range result {

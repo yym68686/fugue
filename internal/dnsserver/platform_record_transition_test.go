@@ -211,12 +211,37 @@ func TestDNSRecordTransitionIsolatesChangedAliasSharingRouteProofs(t *testing.T)
 // Neither whole DNS artifact is ready, although each hostname has a complete,
 // fresh quorum authorized by one exact signed publication.
 func TestDNSDeploymentTransitionKeepsPerRecordAnswersWithoutPromotingLKG(t *testing.T) {
+	testDNSDeploymentTransition(t, false)
+}
+
+func TestDNSInitialCanaryTransitionKeepsPerRecordAnswersWithoutPromotingLKG(t *testing.T) {
+	testDNSDeploymentTransition(t, true)
+}
+
+func testDNSDeploymentTransition(t *testing.T, initialCanary bool) {
+	t.Helper()
 	stamp := time.Now().UTC().Truncate(time.Second)
 	fixture := func(generation string) (model.PlatformArtifact, dnsPlatformCandidate) {
 		return dnsServingFixtureWithIntent(t, "edge-group-a", "global", func(r *platformconfig.CompileRequest) {
 			r.Intent.Generation = generation
 			r.Intent.Routes[0].DeploymentGeneration = generation
 			r.Intent.Routes[0].CacheNamespace = generation
+			if initialCanary {
+				constraint := platformconfig.TrafficPolicyConstraint{ID: "policy-a", AppID: r.Intent.Routes[0].AppID,
+					TenantID: r.Intent.Routes[0].TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: "stable-a",
+					StableWeight: 100, UnavailableCandidate: "stable", StickyCookie: "Fugue-Release-Stickiness"}
+				if generation == "deploy-after" {
+					constraint.Mode, constraint.CandidateReleaseID = model.AppTrafficModeCanary, "candidate-a"
+					constraint.StableWeight, constraint.CandidateWeight = 99, 1
+				}
+				r.Policy.TrafficConstraints = []platformconfig.TrafficPolicyConstraint{constraint}
+				r.RuntimeSnapshot.Releases = []platformconfig.ReleaseObservation{
+					{ID: "stable-a", AppID: constraint.AppID, TenantID: constraint.TenantID, ObservedAt: stamp,
+						Status: model.EdgeRouteStatusActive, RuntimeID: "runtime-a", DeploymentGeneration: "stable-code", UpstreamURL: "http://stable:8080"},
+					{ID: "candidate-a", AppID: constraint.AppID, TenantID: constraint.TenantID, ObservedAt: stamp,
+						Status: model.EdgeRouteStatusActive, RuntimeID: "runtime-a", DeploymentGeneration: "candidate-code", UpstreamURL: "http://candidate:8080"},
+				}
+			}
 			other := r.Intent.Routes[0]
 			other.Hostname, other.AppID, other.DeploymentGeneration, other.CacheNamespace = "other.example.test", "other-app", "fixed", "fixed"
 			r.Intent.Routes = append(r.Intent.Routes, other)
@@ -301,9 +326,17 @@ func TestDNSDeploymentTransitionKeepsPerRecordAnswersWithoutPromotingLKG(t *test
 	}
 	var next, complete atomic.Bool
 	var badProof atomic.Int32
+	var lateProof atomic.Bool
+	var lateCalls atomic.Int32
 	probe := func(_ context.Context, host, path, address, state string, _ time.Duration) (routeprobe.Proof, error) {
 		if next.Load() && (host == "app.example.test" || complete.Load()) {
+			if lateProof.Load() && host == "app.example.test" && lateCalls.Add(1) == 1 {
+				return proof(oldPayload, previousParent, previous, oldRoute, host, address)
+			}
 			p, err := proof(nextPayload, parent, candidate, nextRoute, host, address)
+			if lateProof.Load() {
+				p.CheckedAt = time.Now().UTC()
+			}
 			switch badProof.Load() {
 			case 1:
 				p.TrafficRelease.FencingToken++
@@ -366,6 +399,37 @@ func TestDNSDeploymentTransitionKeepsPerRecordAnswersWithoutPromotingLKG(t *test
 		}
 	}
 	badProof.Store(0)
+	// The worker can activate after the candidate scan and before the retained
+	// release's additional probe. That newly authenticated successor proof must
+	// not be discarded until another whole scan, or the record loses both paths.
+	lateProof.Store(true)
+	for _, race := range []bool{true, false} {
+		lateCalls.Store(0)
+		assignmentChecks.Store(0)
+		raceAssignment.Store(race)
+		s.platformServing.Store(old)
+		if err := s.syncPlatformDNSServingOnce(context.Background(), probe, s.probeDNSServingListener); err == nil {
+			t.Fatal("partial candidate reported whole-artifact success")
+		}
+		if race {
+			if s.platformServing.Load() != old || reports.Load() != 0 {
+				t.Fatal("late successor evidence bypassed the final assignment check")
+			}
+			continue
+		}
+		q := new(dns.Msg)
+		q.SetQuestion("app.example.test.", dns.TypeA)
+		active := s.platformServing.Load()
+		if got := active.answer(q, "", time.Now()); got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 {
+			t.Fatal("new successor proof from the retained scan was lost", got)
+		}
+		receipt := captureDecision(t, active, q, "", time.Now())
+		replayed, err := ReplayDNSDecision(receipt)
+		if err != nil || !replayed.Matched || !reflect.DeepEqual(active.record, checkpoint) || reports.Load() != 0 {
+			t.Fatal("late proof changed publication authority or replay", replayed, err)
+		}
+	}
+	lateProof.Store(false)
 	s.platformServing.Store(old)
 	if err := s.syncPlatformDNSServingOnce(context.Background(), probe, s.probeDNSServingListener); err == nil {
 		t.Fatal("partial candidate reported whole-artifact success")

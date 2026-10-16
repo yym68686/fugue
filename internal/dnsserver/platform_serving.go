@@ -347,6 +347,15 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			if err := client.CheckServingAssignment(ctx, id, a); err != nil {
 				return err
 			}
+			if supplemented, changed := dnsSupplementTransitionFacts(st, retained, time.Now().UTC()); changed {
+				if err := s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
+					return err
+				}
+				st, err = buildDNSServingState(st.record, p, routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, supplemented, time.Now().UTC())
+				if err != nil {
+					return err
+				}
+			}
 			st.record.Positive = false
 			st.record.AppliedAt = old.record.AppliedAt
 			retained.transition = &dnsRecordTransition{state: st, hosts: hosts}
