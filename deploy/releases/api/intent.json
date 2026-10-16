@@ -1,1 +1,5 @@
+<<<<<<< HEAD
 {"apiVersion":"release.fugue.dev/v2","component":"api","expectedPreviousConfigSha":"2182eca5ac3b52759792e0ec297ac5dfaaf27349","expectedPreviousImageDigest":"sha256:76ab025cffe4788bb81f358529b3d34e5701ec299d4d557fc82744b3f0750c19","expectedPreviousManifestSha":"2182eca5ac3b52759792e0ec297ac5dfaaf27349","expectedPreviousOciRevision":"2182eca5ac3b52759792e0ec297ac5dfaaf27349","expectedPreviousPresent":true,"generation":778,"kind":"ProductionComponentIntent","rollback":"previous-git-lkg"}
+=======
+{"apiVersion":"release.fugue.dev/v2","component":"api","expectedPreviousConfigSha":"2182eca5ac3b52759792e0ec297ac5dfaaf27349","expectedPreviousImageDigest":"sha256:76ab025cffe4788bb81f358529b3d34e5701ec299d4d557fc82744b3f0750c19","expectedPreviousManifestSha":"2182eca5ac3b52759792e0ec297ac5dfaaf27349","expectedPreviousOciRevision":"2182eca5ac3b52759792e0ec297ac5dfaaf27349","expectedPreviousPresent":true,"generation":778,"kind":"ProductionComponentIntent","rollback":"previous-git-lkg","supersedesFailedConfigSha":"7a105abbdb2e14afbfa9d28d23106c8277203dbd"}
+>>>>>>> fb68ad75 (chore(release): advance api intent generation)
