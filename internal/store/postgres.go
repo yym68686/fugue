@@ -1822,6 +1822,8 @@ var postgresSchemaStatements = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_operations_oom_right_sizing_event ON fugue_operations (tenant_id, requested_by_id) WHERE requested_by_type = 'system' AND requested_by_id LIKE 'fugue-api/oom-right-sizing/%'`,
 	// This narrow projection is maintained by the database, so image summaries do
 	// not repeatedly deserialize full historical deployment configurations.
+	// A source envelope may contain only config_base_spec; strip that field
+	// from legacy object shapes too, while preserving actual source fields.
 	`CREATE TABLE IF NOT EXISTS fugue_image_candidate_operations (
 		operation_id TEXT PRIMARY KEY REFERENCES fugue_operations(id) ON DELETE CASCADE,
 		tenant_id TEXT NOT NULL,
@@ -1855,6 +1857,7 @@ BEGIN
 		NEW.desired_spec_json->>'image',
 		CASE WHEN NEW.desired_source_json ? 'desired_source' OR NEW.desired_source_json ? 'desired_origin_source'
 			THEN jsonb_build_object('desired_source', NEW.desired_source_json->'desired_source')
+			WHEN jsonb_typeof(NEW.desired_source_json) = 'object' THEN NEW.desired_source_json - 'config_base_spec'
 			ELSE NEW.desired_source_json END,
 		NEW.created_at, NEW.updated_at, NEW.started_at, NEW.completed_at
 	) ON CONFLICT (operation_id) DO UPDATE SET
@@ -1889,6 +1892,7 @@ $$`,
 	SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image',
 		CASE WHEN desired_source_json ? 'desired_source' OR desired_source_json ? 'desired_origin_source'
 			THEN jsonb_build_object('desired_source', desired_source_json->'desired_source')
+			WHEN jsonb_typeof(desired_source_json) = 'object' THEN desired_source_json - 'config_base_spec'
 			ELSE desired_source_json END,
 		created_at, updated_at, started_at, completed_at
 	FROM fugue_operations

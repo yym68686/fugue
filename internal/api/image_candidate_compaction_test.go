@@ -31,6 +31,7 @@ func TestImageCandidateCompactionPreservesInterleavedHistory(t *testing.T) {
 		for i := range ops {
 			observed := now.Add(time.Duration(rng.Intn(30)) * time.Second)
 			op := model.Operation{ID: fmt.Sprint(i), AppID: app.ID, DesiredSource: sources[rng.Intn(len(sources))], CreatedAt: now.Add(time.Duration(i) * time.Millisecond), UpdatedAt: observed}
+			op.Status = []string{model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusCompleted, model.OperationStatusFailed}[rng.Intn(4)]
 			if rng.Intn(3) != 0 {
 				op.DesiredSpec = &model.AppSpec{Image: fmt.Sprintf("pull.example/fugue-apps/app:v%d", rng.Intn(3))}
 			}

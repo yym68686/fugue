@@ -10,11 +10,12 @@ import (
 )
 
 // CompactImageCandidateOperations retains the first source occurrence and the
-// first greatest observation time for each identical source/runtime input.
+// first greatest observation time for each identical source/runtime input, plus
+// the last completed operation for historical immutable-image provenance.
 // Candidate folding uses first source richness, first nonempty runtime ref and
 // the greatest observation time; intermediate repeats cannot change its result.
 func CompactImageCandidateOperations(ops []model.Operation) []model.Operation {
-	type representatives struct{ first, latest int }
+	type representatives struct{ first, latest, completed int }
 	groups := make(map[string]representatives, len(ops))
 	for i, op := range ops {
 		image := ""
@@ -29,18 +30,28 @@ func CompactImageCandidateOperations(ops []model.Operation) []model.Operation {
 		key := string(keyBytes)
 		group, exists := groups[key]
 		if !exists {
-			groups[key] = representatives{i, i}
+			completed := -1
+			if op.Status == model.OperationStatusCompleted {
+				completed = i
+			}
+			groups[key] = representatives{i, i, completed}
 			continue
 		}
 		if imageOperationObservedAt(op).After(imageOperationObservedAt(ops[group.latest])) {
 			group.latest = i
-			groups[key] = group
 		}
+		if op.Status == model.OperationStatusCompleted {
+			group.completed = i
+		}
+		groups[key] = group
 	}
-	keep := make(map[int]bool, len(groups)*2)
+	keep := make(map[int]bool, len(groups)*3)
 	for _, group := range groups {
 		keep[group.first] = true
 		keep[group.latest] = true
+		if group.completed >= 0 {
+			keep[group.completed] = true
+		}
 	}
 	result := make([]model.Operation, 0, len(keep))
 	for i, op := range ops {
@@ -108,11 +119,12 @@ func (s *Store) listImageCandidateOperationsByApps(tenantID string, platformAdmi
 ), ranked AS (
  SELECT *,
    row_number() OVER (PARTITION BY app_id,image,source ORDER BY created_at,id) AS first_input,
-   row_number() OVER (PARTITION BY app_id,image,source ORDER BY COALESCE(completed_at,started_at,NULLIF(updated_at,'0001-01-01 00:00:00+00'::timestamptz),created_at) DESC,created_at,id) AS latest_input
+   row_number() OVER (PARTITION BY app_id,image,source ORDER BY COALESCE(completed_at,started_at,NULLIF(updated_at,'0001-01-01 00:00:00+00'::timestamptz),created_at) DESC,created_at,id) AS latest_input,
+   row_number() OVER (PARTITION BY app_id,image,source ORDER BY (status='completed') DESC,created_at DESC,id DESC) AS completed_input
  FROM inputs
 )
 SELECT id,tenant_id,type,status,app_id,image,source,created_at,updated_at,started_at,completed_at
-FROM ranked WHERE first_input=1 OR latest_input=1 ORDER BY app_id,created_at,id`
+FROM ranked WHERE first_input=1 OR latest_input=1 OR (status='completed' AND completed_input=1) ORDER BY app_id,created_at,id`
 	reader, release, err := acquireSQLRead(ctx, s.db, timing)
 	if err != nil {
 		return nil, err
