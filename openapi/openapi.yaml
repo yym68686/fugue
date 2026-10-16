@@ -26606,6 +26606,12 @@ components:
         window_seconds:
           type: integer
           format: int32
+        latency_comparison_window_seconds:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 3600
+          description: Optional longer window for matched latency cohorts when sticky traffic leaves the ordinary window undersampled. Zero inherits window_seconds. Must not be shorter than the ordinary window. Recent absolute errors, latency limits, candidate sample minimum and comparable recent cohort regressions remain mandatory; the longer window never authorizes promotion without matched samples.
         min_candidate_requests:
           type: integer
           format: int32

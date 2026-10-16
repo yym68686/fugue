@@ -792,13 +792,12 @@ func (s *Service) evaluateSafeRolloutCandidateCanaryGate(ctx context.Context, st
 	}
 	comparison := releaseflow.BuildReleaseGateComparisonMetrics(candidateMetrics, stableMetrics)
 	if querier, ok := s.releaseGateMetricsQuerier.(releaseflow.ReleaseGateLatencyCohortsQuerier); ok {
-		cohorts, err := querier.QueryReleaseGateLatencyCohorts(ctx, state.CandidateApp.ID, state.Candidate.ID, state.StableRelease.ID, window)
+		cohortMetrics, failures, warnings, err := safeRolloutLatencyComparison(ctx, querier, state, policy, window)
 		if err != nil {
 			gate.Failures = append(gate.Failures, "comparative latency cohorts unavailable: "+err.Error())
 			gate.Status = model.AppReleaseGateStatusFail
 			return gate
 		}
-		cohortMetrics, failures, warnings := releaseflow.ReleaseGateLatencyCohortComparison(cohorts, state.Candidate.ID, state.StableRelease.ID, policy)
 		comparison["latency_comparison"] = cohortMetrics
 		comparison["latency_cohorts_evaluated"] = true
 		gate.Failures = append(gate.Failures, failures...)

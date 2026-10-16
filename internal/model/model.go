@@ -2071,6 +2071,17 @@ func NormalizeAppZeroDowntimePolicy(policy *AppZeroDowntimePolicy) *AppZeroDownt
 }
 
 func ValidateAppZeroDowntimePolicy(policy *AppZeroDowntimePolicy) error {
+	if policy != nil && policy.Enabled && policy.Gate != nil {
+		gate := policy.Gate
+		window := gate.WindowSeconds
+		if window <= 0 {
+			window = 600 // default release gate observation window
+		}
+		if gate.LatencyComparisonWindowSeconds < 0 || gate.LatencyComparisonWindowSeconds > 3600 ||
+			(gate.LatencyComparisonWindowSeconds > 0 && gate.LatencyComparisonWindowSeconds < window) {
+			return fmt.Errorf("latency comparison window must be zero or at least window_seconds and at most 3600 seconds")
+		}
+	}
 	if policy != nil && policy.Enabled && policy.Canary != nil {
 		if policy.Canary.InitialWeight < 0 || policy.Canary.InitialWeight > 100 {
 			return fmt.Errorf("continuity.zero_downtime.canary.initial_weight must be between 0 and 100")
@@ -2470,13 +2481,14 @@ type AppTrafficPolicy struct {
 }
 
 type AppReleaseGatePolicy struct {
-	WindowSeconds              int               `json:"window_seconds,omitempty"`
-	MinCandidateRequests       int               `json:"min_candidate_requests,omitempty"`
-	Max5xxRate                 float64           `json:"max_5xx_rate,omitempty"`
-	MaxEdgeUpstreamErrorRate   float64           `json:"max_edge_upstream_error_rate,omitempty"`
-	MaxP95TTFBMilliseconds     int               `json:"max_p95_ttfb_ms,omitempty"`
-	MaxP99DurationMilliseconds int               `json:"max_p99_duration_ms,omitempty"`
-	Probes                     []AppReleaseProbe `json:"probes,omitempty"`
+	WindowSeconds                  int               `json:"window_seconds,omitempty"`
+	LatencyComparisonWindowSeconds int               `json:"latency_comparison_window_seconds,omitempty"`
+	MinCandidateRequests           int               `json:"min_candidate_requests,omitempty"`
+	Max5xxRate                     float64           `json:"max_5xx_rate,omitempty"`
+	MaxEdgeUpstreamErrorRate       float64           `json:"max_edge_upstream_error_rate,omitempty"`
+	MaxP95TTFBMilliseconds         int               `json:"max_p95_ttfb_ms,omitempty"`
+	MaxP99DurationMilliseconds     int               `json:"max_p99_duration_ms,omitempty"`
+	Probes                         []AppReleaseProbe `json:"probes,omitempty"`
 }
 
 type AppReleaseProbe struct {

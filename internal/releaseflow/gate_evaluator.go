@@ -53,6 +53,7 @@ func (e ReleaseGateEvaluator) NormalizePolicy(raw *model.AppReleaseGatePolicy) m
 	if raw.WindowSeconds > 0 {
 		policy.WindowSeconds = raw.WindowSeconds
 	}
+	policy.LatencyComparisonWindowSeconds = raw.LatencyComparisonWindowSeconds
 	if raw.MinCandidateRequests > 0 {
 		policy.MinCandidateRequests = raw.MinCandidateRequests
 	}
