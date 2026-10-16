@@ -207,14 +207,44 @@ func dnsTransitionTrafficConstraintPair(before, after []platformconfig.TrafficPo
 			previous[index] = canary
 		}
 	}
+	// Finishing or aborting an already-authorized rollout keeps the same DNS
+	// owner. The successor may select either known release as its sole stable
+	// target, or reduce one member's weight to zero. These comparison copies
+	// never authorize reviving a zero-weight candidate or an unrelated release.
+	for _, canary := range previous {
+		if canary.ID == "" || canary.AppID == "" || canary.TenantID == "" || previousCounts[canary.ID] != 1 ||
+			canary.Mode != model.AppTrafficModeCanary || canary.StableReleaseID == "" || canary.CandidateReleaseID == "" ||
+			canary.StableReleaseID == canary.CandidateReleaseID || canary.StableWeight < 0 || canary.CandidateWeight < 0 || canary.StableWeight+canary.CandidateWeight != 100 {
+			continue
+		}
+		position, exists := nextIndex[canary.ID]
+		if !exists || position < 0 {
+			continue
+		}
+		candidate := next[position]
+		comparison := candidate
+		switch {
+		case candidate.Mode == model.AppTrafficModeSingle && candidate.CandidateReleaseID == "" && candidate.StableWeight == 100 && candidate.CandidateWeight == 0 &&
+			(candidate.StableReleaseID == canary.StableReleaseID || candidate.StableReleaseID == canary.CandidateReleaseID):
+			comparison.Mode, comparison.StableReleaseID, comparison.CandidateReleaseID = canary.Mode, canary.StableReleaseID, canary.CandidateReleaseID
+		case candidate.Mode == model.AppTrafficModeCanary && canary.StableWeight > 0 && canary.CandidateWeight > 0 &&
+			candidate.StableWeight >= 0 && candidate.CandidateWeight >= 0 && candidate.StableWeight+candidate.CandidateWeight == 100:
+		default:
+			continue
+		}
+		comparison.StableWeight, comparison.CandidateWeight = canary.StableWeight, canary.CandidateWeight
+		if comparison == canary {
+			next[position] = canary
+		}
+	}
 	return dnsTransitionTrafficConstraints(previous), dnsTransitionTrafficConstraints(next)
 }
 
 // A signed canary step between the same two already-active releases changes
 // route digests, not DNS endpoint authority. Only this comparison omits weights;
 // the successor still answers with its original policy and exact fresh proofs.
-// Replacing or disabling an existing release, changing identity, fallback or
-// stickiness remains incompatible. Initial canary admission is compared above;
+// Unrelated releases, changed identity, fallback or stickiness remain incompatible.
+// Initial admission and finishing an existing rollout are compared above;
 // the old-proof bridge deliberately retains its stricter checks.
 func dnsTransitionTrafficConstraints(constraints []platformconfig.TrafficPolicyConstraint) []platformconfig.TrafficPolicyConstraint {
 	result := slices.Clone(constraints)

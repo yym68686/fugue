@@ -23,15 +23,37 @@ func TestDNSCanaryWeightTransitionUsesSuccessorProofWithoutRebindingLKG(t *testi
 			StableReleaseID: "stable-a", CandidateReleaseID: "candidate-a", StableWeight: 99, CandidateWeight: 1, UnavailableCandidate: "stable", StickyCookie: "release"}},
 	}}
 	raw := mustDNSJSON(t, previous)
-	for _, scenario := range []string{"weight", "candidate", "stable", "tenant", "app", "fallback", "cookie", "mode", "enable", "disable", "invalid weights", "address", "quorum"} {
+	for _, scenario := range []string{"weight", "start", "abort", "promote", "foreign stable", "candidate", "stable", "tenant", "app", "fallback", "cookie", "mode", "enable", "disable", "invalid weights", "address", "quorum"} {
 		t.Run(scenario, func(t *testing.T) {
-			var next dnsServingPayload
+			var previous, next dnsServingPayload
+			if err := json.Unmarshal(raw, &previous); err != nil {
+				t.Fatal(err)
+			}
 			if err := json.Unmarshal(raw, &next); err != nil {
 				t.Fatal(err)
 			}
 			constraint := &next.Policy.TrafficConstraints[0]
 			constraint.StableWeight, constraint.CandidateWeight = 95, 5
 			switch scenario {
+			case "start":
+				// Keep the retained single-release checkpoint distinct from the
+				// successor's newly authorized candidate and its exact proofs.
+				previous = dnsServingPayload{}
+				if err := json.Unmarshal(raw, &previous); err != nil {
+					t.Fatal(err)
+				}
+				previous.Policy.TrafficConstraints[0].Mode = model.AppTrafficModeSingle
+				previous.Policy.TrafficConstraints[0].CandidateReleaseID = ""
+				previous.Policy.TrafficConstraints[0].StableWeight, previous.Policy.TrafficConstraints[0].CandidateWeight = 100, 0
+			case "abort", "promote", "foreign stable":
+				constraint.Mode, constraint.StableWeight, constraint.CandidateWeight = model.AppTrafficModeSingle, 100, 0
+				constraint.CandidateReleaseID = ""
+				if scenario == "promote" {
+					constraint.StableReleaseID = "candidate-a"
+				}
+				if scenario == "foreign stable" {
+					constraint.StableReleaseID = "foreign"
+				}
 			case "candidate":
 				constraint.CandidateReleaseID = "foreign"
 			case "stable":
@@ -75,12 +97,13 @@ func TestDNSCanaryWeightTransitionUsesSuccessorProofWithoutRebindingLKG(t *testi
 			record := dnsServingCheckpoint{Positive: true, AppliedAt: now.Add(-time.Minute), Candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "old", ReleasedAt: now.Add(-time.Minute)}}}
 			old := &dnsServingState{payload: previous, record: record}
 			bridge := &dnsReleaseBridge{payload: next, candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "next", ReleasedAt: now}}}
+			previousRaw := mustDNSJSON(t, previous)
 			nextRaw := mustDNSJSON(t, next)
 			hosts := dnsTransitionRecords(old, bridge)
-			if hosts[plan.Records[0].Hostname] != (scenario == "weight") {
+			if hosts[plan.Records[0].Hostname] != (scenario == "weight" || scenario == "start" || scenario == "abort" || scenario == "promote" || scenario == "enable" || scenario == "disable") {
 				t.Fatal("weight transition authorization", scenario, hosts)
 			}
-			if string(raw) != string(mustDNSJSON(t, previous)) || string(nextRaw) != string(mustDNSJSON(t, next)) {
+			if string(previousRaw) != string(mustDNSJSON(t, previous)) || string(nextRaw) != string(mustDNSJSON(t, next)) {
 				t.Fatal("comparison mutated signed policies")
 			}
 			for _, allowed := range compatibleDNSReleaseProbes(old, bridge) {
@@ -88,7 +111,7 @@ func TestDNSCanaryWeightTransitionUsesSuccessorProofWithoutRebindingLKG(t *testi
 					t.Fatal("weight transition rebound old-publication proofs")
 				}
 			}
-			if scenario != "weight" {
+			if !hosts[plan.Records[0].Hostname] {
 				return
 			}
 			old, err := buildDNSServingState(record, previous, "old-route", view.NodeID, view.EdgeGroupID, nil, now)

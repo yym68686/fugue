@@ -211,14 +211,20 @@ func TestDNSRecordTransitionIsolatesChangedAliasSharingRouteProofs(t *testing.T)
 // Neither whole DNS artifact is ready, although each hostname has a complete,
 // fresh quorum authorized by one exact signed publication.
 func TestDNSDeploymentTransitionKeepsPerRecordAnswersWithoutPromotingLKG(t *testing.T) {
-	testDNSDeploymentTransition(t, false)
+	testDNSDeploymentTransition(t, "deployment")
+}
+
+func TestDNSRolloutLifecyclePreservesWireAnswersWithExactSuccessorProofs(t *testing.T) {
+	for _, phase := range []string{"abort", "promote"} {
+		t.Run(phase, func(t *testing.T) { testDNSDeploymentTransition(t, phase) })
+	}
 }
 
 func TestDNSInitialCanaryTransitionKeepsPerRecordAnswersWithoutPromotingLKG(t *testing.T) {
-	testDNSDeploymentTransition(t, true)
+	testDNSDeploymentTransition(t, "start")
 }
 
-func testDNSDeploymentTransition(t *testing.T, initialCanary bool) {
+func testDNSDeploymentTransition(t *testing.T, phase string) {
 	t.Helper()
 	stamp := time.Now().UTC().Truncate(time.Second)
 	fixture := func(generation string) (model.PlatformArtifact, dnsPlatformCandidate) {
@@ -226,7 +232,7 @@ func testDNSDeploymentTransition(t *testing.T, initialCanary bool) {
 			r.Intent.Generation = generation
 			r.Intent.Routes[0].DeploymentGeneration = generation
 			r.Intent.Routes[0].CacheNamespace = generation
-			if initialCanary {
+			if phase == "start" {
 				constraint := platformconfig.TrafficPolicyConstraint{ID: "policy-a", AppID: r.Intent.Routes[0].AppID,
 					TenantID: r.Intent.Routes[0].TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: "stable-a",
 					StableWeight: 100, UnavailableCandidate: "stable", StickyCookie: "Fugue-Release-Stickiness"}
@@ -252,6 +258,21 @@ func testDNSDeploymentTransition(t *testing.T, initialCanary bool) {
 			rule := r.Policy.DNSAnswerRules[0]
 			rule.Hostname = other.Hostname
 			r.Policy.DNSAnswerRules = append(r.Policy.DNSAnswerRules, rule)
+			if phase == "abort" || phase == "promote" {
+				traffic := platformconfig.TrafficPolicyConstraint{ID: "app-traffic", AppID: r.Intent.Routes[0].AppID, TenantID: r.Intent.Routes[0].TenantID,
+					Mode: model.AppTrafficModeCanary, StableReleaseID: "stable-code", CandidateReleaseID: "candidate-code", StableWeight: 75, CandidateWeight: 25, UnavailableCandidate: "stable"}
+				if phase == "start" && generation == "deploy-before" || (phase == "abort" || phase == "promote") && generation == "deploy-after" {
+					traffic.Mode, traffic.CandidateReleaseID, traffic.StableWeight, traffic.CandidateWeight = model.AppTrafficModeSingle, "", 100, 0
+					if phase == "promote" {
+						traffic.StableReleaseID = "candidate-code"
+					}
+				}
+				r.Policy.TrafficConstraints = []platformconfig.TrafficPolicyConstraint{traffic}
+				for _, id := range []string{"stable-code", "candidate-code"} {
+					r.RuntimeSnapshot.Releases = append(r.RuntimeSnapshot.Releases, platformconfig.ReleaseObservation{ID: id, AppID: traffic.AppID, TenantID: traffic.TenantID,
+						ObservedAt: stamp, Status: model.EdgeRouteStatusActive, UpstreamURL: "http://" + id + ":8080", DeploymentGeneration: id})
+				}
+			}
 			r.RuntimeSnapshot.CapturedAt = &stamp
 			r.RuntimeSnapshot.DNSConsumers[0].ObservedAt = stamp
 			r.RuntimeSnapshot.DNSEdgeEndpoints[0].ObservedAt = stamp
