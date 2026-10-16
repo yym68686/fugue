@@ -45,17 +45,32 @@ rollback to the dual-format reader.
 One cluster-wide advisory transaction lock bounds concurrent compiler-input
 database writers. Each SQL parameter carries one chunk, never a whole-object
 batch or aggregation. Chunks and the manifest become visible atomically after
-the stored sequence, lengths, per-chunk hashes, whole digest and typed v1
-roundtrip have been verified. Retries verify existing bytes; corruption is
-reported rather than silently replaced. The maximum document is 1 GiB, each
-chunk is 256 KiB, and the operation has a 30-second database deadline. These
-limits do not grant release authority or bypass signatures.
+the canonical input stream's whole digest and every stored chunk's sequence,
+length and actual SHA-256 have been verified. PostgreSQL computes hashes from
+the stored bytes; the writer compares them with independent hashes from the
+input stream. This preserves read-after-write verification without returning
+the complete stored body or decoding it again. Retried writes verify existing
+bytes too; corruption is reported rather than silently replaced. The maximum
+document is 1 GiB, each chunk is 256 KiB, and the operation has a 30-second
+database deadline. These limits do not grant release authority or bypass
+signatures.
 
 Canonical hashing/encoding streams array elements and preserves the existing
 v1 byte representation. Decoding buffers one array element rather than the
 entire JSON document. The typed runtime snapshot remains O(N), and individual
 large values (including `facts` entries and physical evidence) still need
 their own encoding buffers. This does not claim constant total API memory.
+
+DNS selection recovery can read only the chunks containing observations the
+caller still needs. A store-local cache retains at most eight entries within
+4 MiB: chunk hashes, byte ranges and selection summaries, never receipt bodies
+or validation results. A cache hit still reads the current manifest and checks
+every stored chunk's actual SHA-256, ordinal and length, including chunks whose
+bodies are omitted. Returned chunks are hashed again before selected observations
+are decoded. The caller still validates receipt authority, policy, freshness and
+context. Cold or legacy inputs, incompatible manifests and unsupported indexes
+retain the full verified read path. These optimizations reduce bytes transferred
+to the API; they do not eliminate PostgreSQL's work to read and hash stored data.
 
 Inventory maps use stable hash partitions, each at most 64 KiB. The metadata
 contains page digests and references the scan generation. Completing a scan

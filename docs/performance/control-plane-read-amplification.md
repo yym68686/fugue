@@ -68,6 +68,29 @@ These counters omit protocol/metadata bytes and must not be interpreted as total
 network throughput. No tenant IDs, SQL text, artifact content or credentials are
 included in metrics.
 
+## Compiler-input verification and selective recovery
+
+Chunked compiler-input writes verify the actual stored bytes before committing
+without returning the full input body. The canonical input stream determines
+the whole digest and independent per-chunk hashes; PostgreSQL returns each stored
+chunk's actual SHA-256, ordinal and length for comparison. Existing-input retries
+retain the same checks. Legacy inputs and unusually small historical chunks keep
+their bounded full-read compatibility path.
+
+DNS selection recovery uses a separate eight-entry/4 MiB index of hashes, byte
+ranges and summaries. It returns bodies only for needed observations while
+checking every current stored chunk, including unselected chunks. No receipt
+body, authority decision or freshness result is cached. Cold readers retain the
+full verified path; selected observations still undergo normal receipt checks.
+See [the storage invariants](../control-plane-memory-optimization.md).
+
+Regression coverage includes real PostgreSQL checks for altered stored bytes on
+new and retried writes, corrupt unselected chunks, selected/full-read equivalence
+and result isolation. Additional checks cover cache bounds, legacy storage and
+noncanonical/invalid-UTF-8 fallback. The live body-elision metrics for
+`platform_artifact` do not measure this compiler-input path, and neither metric
+establishes that database hashing CPU or I/O is zero.
+
 ## Bounded hostname lineage diagnostics
 
 Post-rollout verification found an adjacent read amplification bug: hostname
