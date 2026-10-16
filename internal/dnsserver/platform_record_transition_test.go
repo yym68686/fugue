@@ -224,6 +224,10 @@ func TestDNSInitialCanaryTransitionKeepsPerRecordAnswersWithoutPromotingLKG(t *t
 	testDNSDeploymentTransition(t, "start")
 }
 
+func TestDNSWireRejectionKeepsHealthyRecordSuccessorProofs(t *testing.T) {
+	testDNSDeploymentTransition(t, "wire-rejection")
+}
+
 func testDNSDeploymentTransition(t *testing.T, phase string) {
 	t.Helper()
 	stamp := time.Now().UTC().Truncate(time.Second)
@@ -283,6 +287,18 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 			selection := r.RuntimeSnapshot.DNSSelections[0]
 			selection.Hostname = other.Hostname
 			r.RuntimeSnapshot.DNSSelections = append(r.RuntimeSnapshot.DNSSelections, selection)
+			if phase == "wire-rejection" {
+				// Both hosts have a one-edge quorum. The second host's signed
+				// selector permits only edge-b, which changes publication later.
+				r.RuntimeSnapshot.DNSEdgeEndpoints = append(r.RuntimeSnapshot.DNSEdgeEndpoints,
+					platformconfig.DNSEdgeEndpoint{EdgeID: "edge-b", EdgeGroupID: "edge-group-a", ObservedAt: stamp, A: []string{"9.9.9.9"}})
+				for i := range r.RuntimeSnapshot.DNSSelections {
+					r.RuntimeSnapshot.DNSSelections[i].Candidates = append(r.RuntimeSnapshot.DNSSelections[i].Candidates,
+						platformconfig.DNSSelectionCandidate{IP: "9.9.9.9", EdgeID: "edge-b", EdgeGroupID: "edge-group-a"})
+				}
+				r.Policy.DNSAnswerRules[0].PhysicalOrder = &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}
+				r.Policy.DNSAnswerRules[1].PhysicalOrder = &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-b"}}
+			}
 		}, true)
 	}
 	previousParent, previous := fixture("deploy-before")
@@ -353,7 +369,7 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 	var lateProof atomic.Bool
 	var lateCalls atomic.Int32
 	probe := func(_ context.Context, host, path, address, state string, _ time.Duration) (routeprobe.Proof, error) {
-		if next.Load() && (host == "app.example.test" || complete.Load()) {
+		if next.Load() && (host == "app.example.test" || complete.Load() || phase == "wire-rejection" && address == "8.8.8.8") {
 			if lateProof.Load() && host == "app.example.test" && lateCalls.Add(1) == 1 {
 				return proof(oldPayload, previousParent, previous, oldRoute, host, address)
 			}
@@ -405,6 +421,63 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 	defer u.Shutdown()
 	defer v.Shutdown()
 	next.Store(true)
+	if phase == "wire-rejection" {
+		candidateFacts := collectDNSReadinessFacts(context.Background(), nextPayload.Plan, nextPayload.Policy.DNSReadiness, probe)
+		for i := range candidateFacts {
+			if !dnsFactMatchesRelease(candidateFacts[i], parent, candidate, nextRoute, nextPayload) {
+				candidateFacts[i].Ready = false
+				candidateFacts[i].Reason = "traffic_release_mismatch"
+			}
+		}
+		candidateState, err := buildDNSServingState(dnsServingCheckpoint{Positive: true, AppliedAt: stamp, Candidate: candidate}, nextPayload, nextRoute, cfg.DNSNodeID, cfg.EdgeGroupID, candidateFacts, stamp)
+		if err != nil || !dnsServingReady(candidateState, stamp) || probeDNSServingSnapshot(candidateState) == nil {
+			t.Fatal("fixture must pass route quorum but fail signed wire selection", err)
+		}
+		raceAssignment.Store(true)
+		if err := s.syncPlatformDNSServingOnce(context.Background(), probe, s.probeDNSServingListener); err == nil || s.platformServing.Load() != old || reports.Load() != 0 {
+			t.Fatal("superseded wire-failed candidate changed serving authority", err)
+		}
+		raceAssignment.Store(false)
+		if err := s.syncPlatformDNSServingOnce(context.Background(), probe, s.probeDNSServingListener); err == nil {
+			t.Fatal("wire-incomplete candidate promoted")
+		}
+		active := s.platformServing.Load()
+		if !reflect.DeepEqual(active.record, checkpoint) || reports.Load() != 0 {
+			t.Fatal("wire rejection changed positive checkpoint or emitted success")
+		}
+		for _, network := range []string{"udp", "tcp"} {
+			address := s.Config.UDPAddr
+			if network == "tcp" {
+				address = s.Config.TCPAddr
+			}
+			for _, host := range []string{"app.example.test", "other.example.test"} {
+				q := new(dns.Msg)
+				q.SetQuestion(dns.Fqdn(host), dns.TypeA)
+				answer, _, err := (&dns.Client{Net: network, Timeout: time.Second}).Exchange(q, address)
+				if err != nil || answer.Rcode != dns.RcodeSuccess || len(answer.Answer) != 1 {
+					t.Fatalf("wire rejection discarded a usable per-record publication (%s %s): %v %v", network, host, answer, err)
+				}
+				receipt := captureDecision(t, active, q, "", time.Now())
+				if replay, err := ReplayDNSDecision(receipt); err != nil || !replay.Matched {
+					t.Fatal("transition did not preserve exact replay evidence", replay, err)
+				}
+			}
+		}
+		after, err := os.ReadFile(cfg.CachePath + ".platform-serving.json")
+		if err != nil || string(after) != string(saved) {
+			t.Fatal("wire rejection overwrote positive LKG", err)
+		}
+		q := new(dns.Msg)
+		q.SetQuestion("app.example.test.", dns.TypeA)
+		if got := active.answer(q, "", stamp.Add(2*time.Minute)); got.Rcode != dns.RcodeServerFailure {
+			t.Fatal("wire fallback extended successor proof lifetime")
+		}
+		complete.Store(true)
+		if err := s.syncPlatformDNSServingOnce(context.Background(), probe, s.probeDNSServingListener); err != nil || reports.Load() != 1 {
+			t.Fatal("complete successor did not activate normally", err)
+		}
+		return
+	}
 	raceAssignment.Store(true)
 	if err := s.syncPlatformDNSServingOnce(context.Background(), probe, s.probeDNSServingListener); err == nil || s.platformServing.Load() != old || reports.Load() != 0 {
 		t.Fatal("authority changed during retained scan but pending records activated", err)

@@ -318,7 +318,16 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	if err != nil {
 		return err
 	}
-	if !dnsServingReady(st, now) {
+	ready := dnsServingReady(st, now)
+	var snapshotErr error
+	if ready {
+		snapshotErr = probeDNSServingSnapshot(st)
+	}
+	// A route quorum may consist only of endpoints excluded by a record's
+	// signed selector. Keep exact successor proofs for other records through
+	// the same guarded transition used by an incomplete readiness scan.
+	// Neither condition authorizes a positive checkpoint or successful ACK.
+	if !ready || snapshotErr != nil {
 		// Negative observations also belong to an exact assignment. A publisher
 		// may advance while probing, so check authority before replacing any
 		// previously positive facts or refreshing with this candidate's bridge.
@@ -370,15 +379,15 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			retained.transition = &dnsRecordTransition{state: st, hosts: hosts}
 			s.platformServing.Store(retained)
 		}
+		if snapshotErr != nil {
+			return snapshotErr
+		}
 		summary := dnsReadinessFailureSummary(p.Plan, p.Policy.DNSReadiness, facts, now)
 		if !same && old != nil && old.record.Positive && a.ConvergenceDeadline.After(now) &&
 			dnsServingReady(s.platformServing.Load(), now) && dnsKnownReleaseOverlap(old, p, observations, facts, now) {
 			return fmt.Errorf("%w: %s", errDNSReleaseConverging, summary)
 		}
 		return fmt.Errorf("DNS candidate required readiness is incomplete: %s", summary)
-	}
-	if err = probeDNSServingSnapshot(st); err != nil {
-		return err
 	}
 	if err = client.CheckServingAssignment(ctx, id, a); err != nil {
 		return err
