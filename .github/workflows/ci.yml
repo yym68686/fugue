@@ -3206,8 +3206,8 @@ jobs:
         with: {component: controller, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   deploy_edge_control:
-    needs: [prepush, component-build, deploy_api]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && needs.prepush.outputs.edge_control_count != '0' }}
+    needs: [prepush, component-build, deploy_api, deploy_release_guardian]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_release_guardian.result == 'success' || needs.deploy_release_guardian.result == 'skipped') && needs.prepush.outputs.edge_control_count != '0' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false

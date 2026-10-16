@@ -659,7 +659,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"environment: production",
 		"needs: [prepush, component-build, deploy_schema]",
 		"needs: [prepush, component-build, deploy_schema, deploy_release_guardian]",
-		"needs: [prepush, component-build, deploy_api]",
+		"needs: [prepush, component-build, deploy_api, deploy_release_guardian]",
 		"needs: [prepush, component-build, deploy_api, deploy_edge_control, deploy_release_guardian]",
 		"edge_control_matrix",
 		"edge_client_matrix",

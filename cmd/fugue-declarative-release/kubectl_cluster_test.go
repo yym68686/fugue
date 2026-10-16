@@ -1941,39 +1941,81 @@ func TestRemovedLegacyOwnershipManagersAreRejected(t *testing.T) {
 	}
 }
 
-func TestHelmOwnershipTransferAllowsOnlyDeclaredEnvironmentScalar(t *testing.T) {
-	pointer := "/spec/template/spec/containers[name=controller]/env[name=FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE]/value"
-	desired := map[string]any{"metadata": map[string]any{
-		"uid": "controller-uid", "resourceVersion": "42",
-		"annotations": map[string]any{},
-	}, "spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
-		"name": "controller", "env": []any{map[string]any{"name": "FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE", "value": "delete"}},
-	}}}}}}
-	live := deepCopyJSONMap(t, desired)
-	metadata := mapField(live, "metadata")
-	metadata["managedFields"] = []any{map[string]any{
-		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
-		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
-	}}
-	env := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)["env"].([]any)[0].(map[string]any)
-	env["value"] = "dry-run"
-	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: ` + ssaFieldForPointer(pointer))
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "fugue-controller-declarative", applyErr); err != nil {
-		t.Fatalf("declared Helm environment scalar conflict was rejected: %v", err)
+func TestLegacyOwnershipTransferAllowsOnlyDeclaredEnvironmentScalar(t *testing.T) {
+	for _, manager := range []string{"helm", "before-first-apply"} {
+		t.Run(manager, func(t *testing.T) {
+			pointer := "/spec/template/spec/containers[name=controller]/env[name=WORKER_RECONCILE_INTERVAL]/value"
+			desired := map[string]any{"metadata": map[string]any{
+				"uid": "controller-uid", "resourceVersion": "42",
+				"annotations": map[string]any{},
+			}, "spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+				"name": "controller", "env": []any{map[string]any{"name": "WORKER_RECONCILE_INTERVAL", "value": "10s"}},
+			}}}}}}
+			live := deepCopyJSONMap(t, desired)
+			metadata := mapField(live, "metadata")
+			metadata["managedFields"] = []any{map[string]any{
+				"manager": manager, "operation": "Update", "fieldsType": "FieldsV1",
+				"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
+			}}
+			env := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)["env"].([]any)[0].(map[string]any)
+			env["value"] = "30s"
+			applyErr := errors.New(`Apply failed with 1 conflict: conflict with "` + manager + `" using apps/v1: ` + ssaFieldForPointer(pointer))
+			if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "fugue-controller-declarative", applyErr); err != nil {
+				t.Fatalf("declared legacy environment scalar conflict was rejected: %v", err)
+			}
+			patch, found, err := nextOwnershipTransferPatch(desired, live, []string{pointer}, "fugue-controller-declarative", applyErr)
+			expected := []map[string]any{
+				{"op": "test", "path": "/metadata/uid", "value": "controller-uid"},
+				{"op": "test", "path": "/metadata/resourceVersion", "value": "42"},
+				{"op": "test", "path": "/spec/template/spec/containers/0/name", "value": "controller"},
+				{"op": "test", "path": "/spec/template/spec/containers/0/env/0/name", "value": "WORKER_RECONCILE_INTERVAL"},
+				{"op": "test", "path": "/spec/template/spec/containers/0/env/0/value", "value": "30s"},
+				{"op": "replace", "path": "/spec/template/spec/containers/0/env/0/value", "value": "10s"},
+			}
+			if err != nil || !found || !reflect.DeepEqual(patch, expected) {
+				t.Fatalf("declared legacy environment scalar transfer patch=%v found=%v err=%v", patch, found, err)
+			}
+			for _, operation := range patch {
+				path := fmt.Sprint(operation["path"])
+				if strings.Contains(path, "managedFields") || path == "/spec/replicas" {
+					t.Fatalf("broad legacy witness expanded the exact environment write: %v", patch)
+				}
+			}
+			outside := errors.New(`Apply failed with 1 conflict: conflict with "` + manager + `" using apps/v1: .spec.template.spec.containers[name="controller"].image`)
+			if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer, "/spec/template/spec/containers[name=controller]/image"}, "fugue-controller-declarative", outside); err == nil || !strings.Contains(err.Error(), "legacy scalar ownership") {
+				t.Fatalf("legacy image ownership conflict was accepted: %v", err)
+			}
+		})
 	}
-	patch, found, err := nextOwnershipTransferPatch(desired, live, []string{pointer}, "fugue-controller-declarative", applyErr)
-	if err != nil || !found || len(patch) != 6 || patch[len(patch)-1]["op"] != "replace" || patch[len(patch)-1]["value"] != "delete" {
-		t.Fatalf("declared Helm environment scalar transfer patch=%v found=%v err=%v", patch, found, err)
-	}
-	for _, operation := range patch {
-		path := fmt.Sprint(operation["path"])
-		if strings.Contains(path, "managedFields") || path == "/spec/replicas" {
-			t.Fatalf("broad Helm witness expanded the exact environment write: %v", patch)
+}
+
+func TestClientSideApplyOwnershipPreservesNarrowBoundary(t *testing.T) {
+	const manager = "before-first-apply"
+	env := "/spec/template/spec/containers[name=worker]/env[name=WORKER_RECONCILE_INTERVAL]/value"
+	desired := map[string]any{"metadata": map[string]any{"uid": "worker-uid", "resourceVersion": "42"}}
+	for _, pointer := range []string{
+		"/metadata/annotations/fugue.pro~1source-commit",
+		"/spec/template/spec/containers[name=worker]/image",
+		"/spec/template/spec/containers[name=worker]/resources/limits/cpu",
+		"/spec/template/spec/containers[name=worker]/resources/limits/memory",
+		"/spec/template/spec/containers[name=worker]/readinessProbe/httpGet/path",
+		"/spec/template/spec/containers[name=worker]/env[name=WORKER_RECONCILE_INTERVAL]/valueFrom",
+		"/spec/replicas",
+	} {
+		live := deepCopyJSONMap(t, desired)
+		mapField(live, "metadata")["managedFields"] = []any{map[string]any{"manager": manager, "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{pointer})}}
+		failure := errors.New(`Apply failed with 1 conflict: conflict with "before-first-apply" using apps/v1: ` + ssaFieldForPointer(pointer))
+		if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "worker-declarative", failure); err == nil {
+			t.Fatalf("client-side apply witness admitted %s", pointer)
 		}
 	}
-	outside := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="controller"].image`)
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer, "/spec/template/spec/containers[name=controller]/image"}, "fugue-controller-declarative", outside); err == nil || !strings.Contains(err.Error(), "legacy scalar ownership") {
-		t.Fatalf("Helm image ownership conflict was accepted: %v", err)
+	failure := errors.New(`Apply failed with 1 conflict: conflict with "before-first-apply" using apps/v1: ` + ssaFieldForPointer(env))
+	for _, operation := range []string{"Apply", ""} {
+		live := deepCopyJSONMap(t, desired)
+		mapField(live, "metadata")["managedFields"] = []any{map[string]any{"manager": manager, "operation": operation, "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{env})}}
+		if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{env}, "worker-declarative", failure); err == nil {
+			t.Fatalf("non-Update witness %q accepted", operation)
+		}
 	}
 }
 

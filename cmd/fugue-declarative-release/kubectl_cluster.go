@@ -60,12 +60,14 @@ var emergencyOwnershipManagers = map[string]bool{
 	"kubectl-set":   true,
 }
 
-// Helm may still own declared environment values, HTTP probe paths and CPU/memory quantities on
-// workloads created before declarative ownership. Transfer only those leaves
+// Legacy workloads may retain Helm or client-side apply field ownership.
+// Helm may own declared environment values, HTTP probe paths and CPU/memory quantities;
+// before-first-apply is restricted to declared literal environment values. Transfer only those leaves
 // through the UID/RV-bound scalar bridge. Images, annotations, probe timing, other
 // resources and structural fields remain outside this legacy boundary.
 var legacyScalarOwnershipManagers = map[string]bool{
-	"helm": true,
+	"helm":               true,
+	"before-first-apply": true,
 }
 
 var releaseArtifactAnnotationKeys = map[string]bool{
@@ -1592,7 +1594,7 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 		if pointer == "" || (!emergencyOwnershipManager(conflict.manager) && !legacyScalarOwnership && !ownDeclarativeUpdate) {
 			return fmt.Errorf("emergency ownership conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
 		}
-		if legacyScalarOwnership && !legacyScalarOwnershipPointer(pointer) {
+		if legacyScalarOwnership && !legacyScalarOwnershipPointerForManager(conflict.manager, pointer) {
 			return fmt.Errorf("legacy ownership conflict %s:%s is outside the exact allowlist for legacy scalar ownership", conflict.manager, conflict.field)
 		}
 		key := conflict.manager + "\x00" + pointer
@@ -1653,7 +1655,7 @@ func nextOwnershipTransferPatch(desired, live map[string]any, allowed []string, 
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
 		if pointer != "" && ownershipTransferPointer(pointer) &&
 			(emergencyOwnershipManager(conflict.manager) ||
-				(legacyScalarOwnershipManagers[conflict.manager] && legacyScalarOwnershipPointer(pointer)) ||
+				legacyScalarOwnershipPointerForManager(conflict.manager, pointer) ||
 				(declarativeManager != "" && conflict.manager == declarativeManager)) {
 			hasTransfer = true
 		} else {
@@ -1873,6 +1875,16 @@ func emergencyEnvValuePointer(pointer string) bool {
 	}
 	_, ok = envValueTail(tail)
 	return ok
+}
+
+// The synthetic client-side apply owner can cover an entire workload. Only
+// transfer a reviewed literal env value; other leaves stay fail-closed even
+// when they are transferable from a different legacy manager.
+func legacyScalarOwnershipPointerForManager(manager, pointer string) bool {
+	if manager == "before-first-apply" {
+		return emergencyEnvValuePointer(pointer)
+	}
+	return legacyScalarOwnershipManagers[manager] && legacyScalarOwnershipPointer(pointer)
 }
 
 // CPU and memory quantities belong to the reviewed emergency rollback boundary.
