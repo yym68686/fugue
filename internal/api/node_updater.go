@@ -151,7 +151,13 @@ func (s *Server) handleGetNodeUpdaterDesiredState(w http.ResponseWriter, r *http
 	}
 	state, err := s.nodeUpdaterDesiredState(r.Context(), r, principal)
 	if err != nil {
-		s.writeStoreError(w, err)
+		if errors.Is(err, errDiscoveryRoutesUnavailable) {
+			w.Header().Set("Cache-Control", "no-store")
+			s.log.Printf("node updater desired state unavailable: %v", errDiscoveryRoutesUnavailable)
+			httpx.WriteError(w, http.StatusServiceUnavailable, errDiscoveryRoutesUnavailable.Error())
+		} else {
+			s.writeStoreError(w, err)
+		}
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

@@ -11731,6 +11731,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NodeUpdaterDesiredStateResponse"
+        '503':
+          description: Verified discovery configuration is temporarily unavailable. Retain the previously verified desired state and retry later; no replacement configuration is returned.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/node-updater/image-locations:
