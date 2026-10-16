@@ -62,27 +62,50 @@ func imageCachePrunePlanMetrics(p model.ImageCachePrunePlan) model.ImageCachePru
 }
 
 // ListImageCachePruneTaskMetrics excludes unrelated maintenance history and
-// task logs. It intentionally keeps all completed prune tasks: the caller
-// selects the latest per label set before checking its prune_reason.
+// task logs, and returns only the latest completed task per raw metric label set.
+// Do not filter prune_reason before selecting the latest task: a newer manual
+// prune must still suppress an older orphan-prune result. The caller retains
+// its final reduction over trimmed labels; raw grouping here conservatively
+// preserves distinct whitespace spellings without duplicating Go normalization
+// rules in SQL.
 func (s *Store) ListImageCachePruneTaskMetrics(parent context.Context) ([]model.NodeUpdateTask, error) {
 	if !s.usingDatabase() {
-		var tasks []model.NodeUpdateTask
+		latest := make(map[[5]string]model.NodeUpdateTask)
 		err := s.withLockedState(false, func(state *model.State) error {
 			for _, t := range state.NodeUpdateTasks {
 				if strings.TrimSpace(t.Status) == model.NodeUpdateTaskStatusCompleted && t.Type == model.NodeUpdateTaskTypePruneImageCache {
-					tasks = append(tasks, imageCachePruneTaskMetrics(t))
+					key := [5]string{t.MachineID, t.ClusterNodeName, t.RuntimeID, t.Payload["dry_run"], t.Payload["allow_delete"]}
+					current, ok := latest[key]
+					if !ok || t.UpdatedAt.After(current.UpdatedAt) || (t.UpdatedAt.Equal(current.UpdatedAt) && (t.CreatedAt.After(current.CreatedAt) || (t.CreatedAt.Equal(current.CreatedAt) && t.ID > current.ID))) {
+						latest[key] = imageCachePruneTaskMetrics(t)
+					}
 				}
 			}
 			return nil
 		})
-		sort.Slice(tasks, func(i, j int) bool { return tasks[i].CreatedAt.After(tasks[j].CreatedAt) })
+		var tasks []model.NodeUpdateTask
+		for _, task := range latest {
+			tasks = append(tasks, task)
+		}
+		sort.Slice(tasks, func(i, j int) bool {
+			if tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
+				return tasks[i].ID > tasks[j].ID
+			}
+			return tasks[i].CreatedAt.After(tasks[j].CreatedAt)
+		})
 		return tasks, err
 	}
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `SELECT id, machine_id, cluster_node_name, runtime_id, created_at, updated_at, result_message,
-  payload_json->>'dry_run', payload_json->>'allow_delete', payload_json->>'prune_reason'
- FROM fugue_node_update_tasks WHERE status = $1 AND task_type = $2 ORDER BY created_at DESC`, model.NodeUpdateTaskStatusCompleted, model.NodeUpdateTaskTypePruneImageCache)
+  dry_run, allow_delete, prune_reason
+ FROM (
+  SELECT DISTINCT ON (machine_id, cluster_node_name, runtime_id, COALESCE(payload_json->>'dry_run', ''), COALESCE(payload_json->>'allow_delete', ''))
+   id, machine_id, cluster_node_name, runtime_id, created_at, updated_at, result_message,
+   payload_json->>'dry_run' AS dry_run, payload_json->>'allow_delete' AS allow_delete, payload_json->>'prune_reason' AS prune_reason
+  FROM fugue_node_update_tasks WHERE status = $1 AND task_type = $2
+  ORDER BY machine_id, cluster_node_name, runtime_id, COALESCE(payload_json->>'dry_run', ''), COALESCE(payload_json->>'allow_delete', ''), updated_at DESC, created_at DESC, id DESC
+ ) latest ORDER BY created_at DESC, id DESC`, model.NodeUpdateTaskStatusCompleted, model.NodeUpdateTaskTypePruneImageCache)
 	if err != nil {
 		return nil, mapDBErr(err)
 	}

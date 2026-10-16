@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +73,7 @@ func TestImageCacheMetricProjectionsMatchFullPostgresReads(t *testing.T) {
 	}
 	var want []model.NodeUpdateTask
 	for _, x := range all {
-		if x.Type == model.NodeUpdateTaskTypePruneImageCache {
+		if x.ID == "0" || x.ID == "2" {
 			want = append(want, imageCachePruneTaskMetrics(x))
 		}
 	}
@@ -131,13 +133,156 @@ func BenchmarkImageCachePruneTaskMetricRead(b *testing.B) {
 			_, err := s.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusCompleted)
 			return err
 		},
-		"metric_projection": func() error { _, err := s.ListImageCachePruneTaskMetrics(context.Background()); return err },
+		"projected_history": func() error {
+			rows, err := s.db.QueryContext(context.Background(), `SELECT id, machine_id, cluster_node_name, runtime_id, created_at, updated_at, result_message,
+ payload_json->>'dry_run', payload_json->>'allow_delete', payload_json->>'prune_reason'
+ FROM fugue_node_update_tasks WHERE status = $1 AND task_type = $2 ORDER BY created_at DESC`, model.NodeUpdateTaskStatusCompleted, model.NodeUpdateTaskTypePruneImageCache)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			var tasks []model.NodeUpdateTask
+			for rows.Next() {
+				var task model.NodeUpdateTask
+				var dryRun, allowDelete, reason *string
+				if err := rows.Scan(&task.ID, &task.MachineID, &task.ClusterNodeName, &task.RuntimeID, &task.CreatedAt, &task.UpdatedAt, &task.ResultMessage, &dryRun, &allowDelete, &reason); err != nil {
+					return err
+				}
+				task.Type = model.NodeUpdateTaskTypePruneImageCache
+				task.Status = model.NodeUpdateTaskStatusCompleted
+				task.Payload = map[string]string{}
+				for k, v := range map[string]*string{"dry_run": dryRun, "allow_delete": allowDelete, "prune_reason": reason} {
+					if v != nil {
+						task.Payload[k] = *v
+					}
+				}
+				tasks = append(tasks, task)
+			}
+			if len(tasks) != 200 {
+				return fmt.Errorf("projected history: got %d rows, want 200", len(tasks))
+			}
+			return rows.Err()
+		},
+		"metric_projection": func() error {
+			tasks, err := s.ListImageCachePruneTaskMetrics(context.Background())
+			if err == nil && len(tasks) != 1 {
+				return fmt.Errorf("latest projection: got %d rows, want 1", len(tasks))
+			}
+			return err
+		},
 	} {
 		b.Run(name, func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				if err := fn(); err != nil {
 					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestImageCacheTaskMetricReadBoundsHistoryWithoutChangingLatestResults(t *testing.T) {
+	for _, backend := range []string{"file", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			var s *Store
+			if backend == "postgres" {
+				s = metricsProjectionTestDB(t)
+			} else {
+				s = New(filepath.Join(t.TempDir(), "state.json"))
+				if err := s.Init(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			var history []model.NodeUpdateTask
+			add := func(id, node, runtime, dryRun, reason string, created, updated int) {
+				history = append(history, model.NodeUpdateTask{ID: id, MachineID: node, ClusterNodeName: "worker", RuntimeID: runtime,
+					Type: model.NodeUpdateTaskTypePruneImageCache, Status: model.NodeUpdateTaskStatusCompleted,
+					Payload:       map[string]string{"dry_run": dryRun, "allow_delete": "true", "prune_reason": reason},
+					ResultMessage: "deleted_bytes=" + fmt.Sprint(updated), CreatedAt: now.Add(time.Duration(created) * time.Second), UpdatedAt: now.Add(time.Duration(updated) * time.Second)})
+			}
+			for i := 0; i < 2000; i++ {
+				add(fmt.Sprintf("history-%04d", i), "node", "runtime", "false", "image-cache-orphan", i, i)
+			}
+			// UpdatedAt, not CreatedAt, chooses the current result. A manual prune
+			// must suppress all older orphan-prune results for these same labels.
+			add("manual-latest", "node", "runtime", "false", "manual", -1, 3000)
+			add("dry-run", "node", "runtime", "true", "image-cache-orphan", 2001, 2001)
+			add("new-runtime", "node", "runtime-2", "false", "image-cache-orphan", 2002, 2002)
+			add("other-node", "node-2", "runtime", "false", "image-cache-orphan", 2003, 2003)
+			// Preserve raw whitespace variants in the store. The existing controller
+			// reducer must still pick the newer normalized label across those groups.
+			add("whitespace", " node ", "runtime", " false ", "image-cache-orphan", 2004, 4000)
+			add("nil-payload", "node", "runtime", "", "", 2005, 2005)
+			history[len(history)-1].Payload = nil
+			add("missing-payload", "node", "runtime", "", "", 2006, 2006)
+			history[len(history)-1].Payload = map[string]string{}
+			add("failed", "node", "runtime", "false", "image-cache-orphan", 5000, 5000)
+			history[len(history)-1].Status = model.NodeUpdateTaskStatusFailed
+			add("other-type", "node", "runtime", "false", "image-cache-orphan", 6000, 6000)
+			history[len(history)-1].Type = model.NodeUpdateTaskTypeReportImageCache
+			if backend == "postgres" {
+				tx, err := s.db.Begin()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, task := range history {
+					payload, _ := json.Marshal(task.Payload)
+					if _, err = tx.Exec(`INSERT INTO fugue_node_update_tasks(id,machine_id,cluster_node_name,runtime_id,task_type,status,payload_json,result_message,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, task.ID, task.MachineID, task.ClusterNodeName, task.RuntimeID, task.Type, task.Status, payload, task.ResultMessage, task.CreatedAt, task.UpdatedAt); err != nil {
+						_ = tx.Rollback()
+						t.Fatal(err)
+					}
+				}
+				if err = tx.Commit(); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := s.withLockedState(true, func(state *model.State) error { state.NodeUpdateTasks = history; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.ListImageCachePruneTaskMetrics(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := make([]string, 0, len(got))
+			for _, task := range got {
+				ids = append(ids, task.ID)
+			}
+			sort.Strings(ids)
+			want := []string{"dry-run", "manual-latest", "missing-payload", "new-runtime", "other-node", "whitespace"}
+			if !reflect.DeepEqual(ids, want) {
+				t.Fatalf("history was not reduced to latest raw label groups: got %v want %v", ids, want)
+			}
+			// Reproduce the consumer's trim-and-select behavior independently, using
+			// the full history as an oracle (including its post-selection reason filter).
+			selected := func(tasks []model.NodeUpdateTask) map[[5]string]string {
+				latest := map[[5]string]model.NodeUpdateTask{}
+				for _, task := range tasks {
+					if task.Type != model.NodeUpdateTaskTypePruneImageCache || task.Status != model.NodeUpdateTaskStatusCompleted {
+						continue
+					}
+					key := [5]string{strings.TrimSpace(task.MachineID), strings.TrimSpace(task.ClusterNodeName), strings.TrimSpace(task.RuntimeID), strings.TrimSpace(task.Payload["dry_run"]), strings.TrimSpace(task.Payload["allow_delete"])}
+					old, ok := latest[key]
+					if !ok || task.UpdatedAt.After(old.UpdatedAt) {
+						latest[key] = task
+					}
+				}
+				out := map[[5]string]string{}
+				for key, task := range latest {
+					if strings.TrimSpace(task.Payload["prune_reason"]) == "image-cache-orphan" {
+						out[key] = task.ResultMessage
+					}
+				}
+				return out
+			}
+			if !reflect.DeepEqual(selected(got), selected(history)) {
+				t.Fatalf("metric values changed: got %v want %v", selected(got), selected(history))
+			}
+			if backend == "file" {
+				got[0].Payload["prune_reason"] = "mutated"
+				again, err := s.ListImageCachePruneTaskMetrics(context.Background())
+				if err != nil || again[0].Payload["prune_reason"] == "mutated" {
+					t.Fatal("projection mutated durable state", err)
 				}
 			}
 		})
