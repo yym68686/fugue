@@ -94,7 +94,7 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 }
 
 func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
-	for _, scenario := range []string{"idle", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector"} {
+	for _, scenario := range []string{"idle", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_generation_lag_busy", "advance_interrupted_predecessor_busy", "advance_interrupted_wrong_service_uid", "advance_interrupted_wrong_lineage", "advance_generation_stuck", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			s, app, candidate, f := newDrainWorkloadFixtureWithSnapshot(t, false, true)
@@ -155,10 +155,31 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			targetSelector := objectStringMapValue(nestedObjectValue(f.service, "spec", "selector"))
 			advancing := strings.HasPrefix(scenario, "advance_")
 			expectedSourceID, expectedSourceKey, expectedSourceImage := "original-source", "old-key", oldImage
-			var previousService map[string]any
+			var previousService, olderService map[string]any
+			var older model.AppRelease
 			var predecessor model.AppRelease
 			if advancing {
 				predecessor = createCanonicalHandoffTestRevision(t, s, app, "previous-target", "original-source")
+				if strings.HasPrefix(scenario, "advance_interrupted_") {
+					older = createCanonicalHandoffTestRevision(t, s, app, "older-target", "original-source")
+					older.Role, older.Status = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
+					if _, err := s.Store.UpdateAppRelease(older); err != nil {
+						t.Fatal(err)
+					}
+					predecessor.RollbackTargetID = older.ID
+					if scenario == "advance_interrupted_wrong_lineage" {
+						predecessor.RollbackTargetID = "unrelated-history"
+					}
+					olderService = cloneKubeMap(f.service)
+					om := objectMapField(olderService, "metadata")
+					om["name"], om["uid"] = older.ServiceName, older.RevisionWorkload.ServiceUID
+					if scenario == "advance_interrupted_wrong_service_uid" {
+						om["uid"] = "recreated-older-service"
+					}
+					ol := objectMapField(om, "labels")
+					ol[runtime.FugueLabelAppReleaseID], ol[runtime.FugueLabelAppWorkload] = older.ID, older.DeploymentName
+					objectMapField(olderService, "spec")["selector"] = ol
+				}
 				predecessor.Role, predecessor.Status = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
 				if _, err := s.Store.UpdateAppRelease(predecessor); err != nil {
 					t.Fatal(err)
@@ -185,6 +206,9 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				handoff := safeCanonicalHandoff{ReleaseID: candidate.ID, DeploymentUID: "canonical-uid", ReleaseKey: "old-key", Image: oldImage}
 				if advancing {
 					handoff.ReleaseID = predecessor.ID
+					if strings.HasPrefix(scenario, "advance_interrupted_") {
+						handoff.SourceReleaseID, handoff.PreviousTargetReleaseID = "original-source", older.ID
+					}
 					if scenario == "advance_resume_busy" {
 						handoff.ReleaseID, handoff.SourceReleaseID, handoff.PreviousTargetReleaseID = candidate.ID, "original-source", predecessor.ID
 					}
@@ -194,6 +218,9 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				objectMapField(canonicalService, "spec")["selector"] = targetSelector
 				if advancing {
 					objectMapField(canonicalService, "spec")["selector"] = objectStringMapValue(nestedObjectValue(previousService, "spec", "selector"))
+					if olderService != nil {
+						objectMapField(canonicalService, "spec")["selector"] = objectStringMapValue(nestedObjectValue(olderService, "spec", "selector"))
+					}
 				}
 			}
 			if scenario == "advance_after_replacement_busy" {
@@ -229,7 +256,13 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				objectMapField(f.deployment, "status")["readyReplicas"] = 0
 			}
 			sourceReads, sourceProbes, servicePatches, templateWrites := 0, 0, 0, 0
+			markerReads := 0
+			markerPatched := false
 			f.extra = func(w http.ResponseWriter, r *http.Request) bool {
+				if olderService != nil && strings.HasSuffix(r.URL.Path, "/services/"+older.ServiceName) {
+					_ = json.NewEncoder(w).Encode(olderService)
+					return true
+				}
 				if advancing && strings.HasSuffix(r.URL.Path, "/services/"+predecessor.ServiceName) {
 					_ = json.NewEncoder(w).Encode(previousService)
 					return true
@@ -238,6 +271,12 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				case strings.HasSuffix(r.URL.Path, "/deployments/"+name):
 					if r.Method == http.MethodGet {
 						sourceReads++
+						if (scenario == "advance_generation_lag_busy" || scenario == "advance_generation_stuck") && markerPatched {
+							markerReads++
+							if markerReads >= 2 && scenario != "advance_generation_stuck" {
+								objectMapField(canonical, "status")["observedGeneration"] = cm["generation"]
+							}
+						}
 						if scenario == "changed_original" && sourceProbes > 0 {
 							cm["uid"] = "replaced-uid"
 						}
@@ -261,6 +300,10 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 						} else {
 							objectMapField(cm, "annotations")[k] = v
 						}
+					}
+					if scenario == "advance_generation_lag_busy" || scenario == "advance_generation_stuck" {
+						markerPatched = true
+						cm["generation"] = float64(99)
 					}
 					_ = json.NewEncoder(w).Encode(canonical)
 					return true
@@ -362,7 +405,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					t.Fatal("successor did not retain original drain cohort while moving new connections", checkpoint, servicePatches, sourceProbes)
 				}
 			}
-			if strings.HasPrefix(scenario, "advance_wrong_") && servicePatches != 0 {
+			if (strings.HasPrefix(scenario, "advance_wrong_") || strings.HasPrefix(scenario, "advance_interrupted_wrong_") || scenario == "advance_generation_stuck") && servicePatches != 0 {
 				t.Fatal("unverified promotion changed canonical traffic")
 			}
 			if (scenario == "advance_marker_conflict" || scenario == "advance_service_conflict") && servicePatches != 0 {

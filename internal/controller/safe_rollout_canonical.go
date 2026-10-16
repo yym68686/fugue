@@ -166,40 +166,65 @@ func (s *Service) recoverSafeCanonicalHandoffSource(deployment kubeDeployment, c
 	return current, scheduling, false, fmt.Errorf("canonical handoff has no verified source snapshot")
 }
 
-func (s *Service) canonicalHandoffPreviousTargetSelector(ctx context.Context, client *kubeClient, app model.App, handoff safeCanonicalHandoff, promoted model.AppRelease) (map[string]string, error) {
+// A previous selector CAS may be interrupted by another safe promotion. Only
+// selectors from the exact bounded rollback chain can finish that handoff.
+func (s *Service) canonicalHandoffPreviousTargetSelectors(ctx context.Context, client *kubeClient, app model.App, handoff safeCanonicalHandoff, promoted model.AppRelease) ([]map[string]string, error) {
 	if handoff.PreviousTargetReleaseID == "" {
 		return nil, nil
 	}
-	if handoff.PreviousTargetReleaseID != promoted.RollbackTargetID {
-		return nil, fmt.Errorf("canonical handoff previous target differs from promotion predecessor")
+	var selectors []map[string]string
+	seen := map[string]bool{}
+	id := promoted.RollbackTargetID
+	for depth := 0; depth < 32 && id != "" && !seen[id]; depth++ {
+		seen[id] = true
+		previous, err := s.Store.GetAppRelease(app.TenantID, true, id)
+		if err != nil {
+			return nil, err
+		}
+		binding := previous.RevisionWorkload
+		withdrawn := previous.Role == model.AppReleaseRolePrevious && previous.Status == model.AppReleaseStatusDraining || previous.Role == model.AppReleaseRoleRetired && previous.Status == model.AppReleaseStatusRetired
+		if previous.AppID != app.ID || previous.TenantID != app.TenantID || binding == nil || !withdrawn {
+			return nil, fmt.Errorf("canonical handoff previous target has no verified binding")
+		}
+		service, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(runtime.NamespaceForTenant(app.TenantID))+"/services/"+url.PathEscape(binding.ServiceName))
+		if err != nil {
+			return nil, err
+		}
+		if found || previous.Status != model.AppReleaseStatusRetired {
+			metadata := objectMapField(service, "metadata")
+			selector := objectStringMapValue(nestedObjectValue(service, "spec", "selector"))
+			if !found || objectStringField(metadata, "uid") != binding.ServiceUID || objectStringField(metadata, "deletionTimestamp") != "" ||
+				!appWorkloadOwnerMatches(metadata, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) ||
+				selector[runtime.FugueLabelAppReleaseID] != previous.ID || selector[runtime.FugueLabelAppWorkload] != binding.DeploymentName {
+				return nil, fmt.Errorf("canonical handoff previous target Service identity differs")
+			}
+			selectors = append(selectors, selector)
+		}
+		if id == handoff.PreviousTargetReleaseID {
+			return selectors, nil
+		}
+		id = previous.RollbackTargetID
 	}
-	previous, err := s.Store.GetAppRelease(app.TenantID, true, handoff.PreviousTargetReleaseID)
-	if err != nil {
-		return nil, err
+	return nil, fmt.Errorf("canonical handoff previous target is outside the verified promotion chain")
+}
+
+// Deployment annotations advance metadata.generation. Wait for Kubernetes to
+// acknowledge the unchanged source template before moving Service selectors;
+// a successful marker CAS alone is not workload readiness.
+func (s *Service) captureCanonicalAfterMarker(ctx context.Context, client *kubeClient, app model.App, original model.AppRelease) (releaseDrainWorkload, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for {
+		observed, err := s.captureDrainWorkload(waitCtx, client, app, original, false, true)
+		if err == nil {
+			return observed, nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return releaseDrainWorkload{}, fmt.Errorf("%w: refresh source after marker: %v", errSafeCanonicalHandoffPending, err)
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
-	binding := previous.RevisionWorkload
-	withdrawn := previous.Role == model.AppReleaseRolePrevious && previous.Status == model.AppReleaseStatusDraining ||
-		previous.Role == model.AppReleaseRoleRetired && previous.Status == model.AppReleaseStatusRetired
-	if previous.AppID != app.ID || previous.TenantID != app.TenantID || binding == nil || !withdrawn {
-		return nil, fmt.Errorf("canonical handoff previous target has no verified binding")
-	}
-	service, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(runtime.NamespaceForTenant(app.TenantID))+"/services/"+url.PathEscape(binding.ServiceName))
-	if err != nil {
-		return nil, err
-	}
-	// A retired predecessor can disappear after the Service moved. Its absence
-	// grants no additional allowed selector on a later retry.
-	if !found && previous.Status == model.AppReleaseStatusRetired {
-		return nil, nil
-	}
-	metadata := objectMapField(service, "metadata")
-	selector := objectStringMapValue(nestedObjectValue(service, "spec", "selector"))
-	if !found || objectStringField(metadata, "uid") != binding.ServiceUID || objectStringField(metadata, "deletionTimestamp") != "" ||
-		!appWorkloadOwnerMatches(metadata, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) ||
-		selector[runtime.FugueLabelAppReleaseID] != previous.ID || selector[runtime.FugueLabelAppWorkload] != binding.DeploymentName {
-		return nil, fmt.Errorf("canonical handoff previous target Service identity differs")
-	}
-	return selector, nil
 }
 
 // A promotion and its canonical Service handoff are separate durable writes.
@@ -342,9 +367,24 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 			return nil, err
 		}
 		handoff.SourceReleaseID = sourceID
-		handoff.PreviousTargetReleaseID, handoff.ReleaseID = handoff.ReleaseID, release.ID
+		if handoff.PreviousTargetReleaseID != "" {
+			pending, err := s.Store.GetAppRelease(app.TenantID, true, handoff.PreviousTargetReleaseID)
+			if err != nil {
+				return nil, err
+			}
+			retained, err := s.canonicalServicesReferenceRelease(ctx, client, app, pending)
+			if err != nil {
+				return nil, err
+			}
+			if !retained {
+				handoff.PreviousTargetReleaseID = handoff.ReleaseID
+			}
+		} else {
+			handoff.PreviousTargetReleaseID = handoff.ReleaseID
+		}
+		handoff.ReleaseID = release.ID
 	}
-	previousSelector, err := s.canonicalHandoffPreviousTargetSelector(ctx, client, app, handoff, release)
+	previousSelectors, err := s.canonicalHandoffPreviousTargetSelectors(ctx, client, app, handoff, release)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +421,7 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		if err := client.patchAppWorkloadObject(ctx, deploymentAPIPath(namespace, name), live, map[string]any{"metadata": map[string]any{"annotations": map[string]any{safeCanonicalHandoffAnnotation: marker}}}); err != nil {
 			return nil, err
 		}
-		before, err = s.captureDrainWorkload(ctx, client, app, original, false, true)
+		before, err = s.captureCanonicalAfterMarker(ctx, client, app, original)
 		if err != nil {
 			return nil, err
 		}
@@ -409,8 +449,11 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 			return nil, fmt.Errorf("canonical handoff Service ownership differs")
 		}
 		existing := objectStringMapValue(nestedObjectValue(current, "spec", "selector"))
-		if !reflect.DeepEqual(existing, ownSelector) && !reflect.DeepEqual(existing, selector) &&
-			(len(previousSelector) == 0 || !reflect.DeepEqual(existing, previousSelector)) {
+		previousMatch := false
+		for _, prior := range previousSelectors {
+			previousMatch = previousMatch || reflect.DeepEqual(existing, prior)
+		}
+		if !reflect.DeepEqual(existing, ownSelector) && !reflect.DeepEqual(existing, selector) && !previousMatch {
 			return nil, fmt.Errorf("canonical handoff Service has an unexpected selector")
 		}
 		if !reflect.DeepEqual(existing, selector) {
