@@ -1,11 +1,14 @@
 package store
 
 import (
-	"bytes"
+	"container/list"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -17,36 +20,168 @@ type ObservationPages struct {
 }
 type ObservationPageUpdate func(ObservationPages, []byte) (ObservationPages, error)
 
+// Only bytes are cached. Every read obtains the current head, complete page
+// membership, sizes and SHA-256 of actual database values. Mutable buffers
+// belong to the caller; neither revision nor integrity decisions are cached.
+var observationPageBodies = newObservationPageBodyCache(16<<20, 1024)
+
+type observationPageBodyCache struct {
+	mu                          sync.Mutex
+	lru                         *list.List
+	entries                     map[string]*list.Element
+	bytes, maxBytes, maxEntries int
+}
+type observationPageBodyEntry struct {
+	key, hash string
+	body      []byte
+	cost      int
+}
+
+func newObservationPageBodyCache(maxBytes, maxEntries int) *observationPageBodyCache {
+	return &observationPageBodyCache{lru: list.New(), entries: map[string]*list.Element{}, maxBytes: maxBytes, maxEntries: maxEntries}
+}
+func (c *observationPageBodyCache) get(key, hash string) ([]byte, bool) {
+	c.mu.Lock()
+	e := c.entries[key]
+	if e == nil || e.Value.(observationPageBodyEntry).hash != hash {
+		c.mu.Unlock()
+		return nil, false
+	}
+	c.lru.MoveToFront(e)
+	body := e.Value.(observationPageBodyEntry).body
+	c.mu.Unlock()
+	return append([]byte{}, body...), true
+}
+func (c *observationPageBodyCache) put(key, hash string, body []byte) {
+	cost := 192 + len(key) + len(hash) + len(body)
+	if cost > c.maxBytes || c.maxEntries <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e := c.entries[key]; e != nil {
+		c.bytes -= e.Value.(observationPageBodyEntry).cost
+		c.lru.Remove(e)
+		delete(c.entries, key)
+	}
+	for len(c.entries) >= c.maxEntries || c.bytes+cost > c.maxBytes {
+		e := c.lru.Back()
+		entry := e.Value.(observationPageBodyEntry)
+		c.bytes -= entry.cost
+		delete(c.entries, entry.key)
+		c.lru.Remove(e)
+	}
+	c.entries[key] = c.lru.PushFront(observationPageBodyEntry{key: key, hash: hash, body: append([]byte{}, body...), cost: cost})
+	c.bytes += cost
+}
+
+const observationPageReferencesSQL = "SELECT entry_key,octet_length(value),encode(sha256(value),'hex') FROM fugue_observation_checkpoint_entries WHERE checkpoint_key=$1 AND bucket='pages' ORDER BY entry_key"
+
+type observationPageRef struct {
+	size int
+	hash string
+}
+
 func readObservationPages(ctx context.Context, db inputQueryer, key string) (ObservationPages, int64, error) {
+	return readObservationPagesWithCache(ctx, db, key, observationPageBodies)
+}
+func readObservationPagesWithCache(ctx context.Context, db inputQueryer, key string, cache *observationPageBodyCache) (ObservationPages, int64, error) {
 	var out ObservationPages
 	var revision int64
-	err := db.QueryRowContext(ctx, `SELECT revision,metadata FROM fugue_observation_checkpoint_heads WHERE checkpoint_key=$1`, key).Scan(&revision, &out.Metadata)
+	err := db.QueryRowContext(ctx, "SELECT revision,metadata FROM fugue_observation_checkpoint_heads WHERE checkpoint_key=$1", key).Scan(&revision, &out.Metadata)
 	if err != nil {
 		return out, 0, err
 	}
 	if revision < 1 || len(out.Metadata) > inputChunkBytes {
 		return out, 0, ErrConflict
 	}
-	rows, err := db.QueryContext(ctx, `SELECT entry_key,value FROM fugue_observation_checkpoint_entries WHERE checkpoint_key=$1 AND bucket='pages' ORDER BY entry_key`, key)
+	rows, err := db.QueryContext(ctx, observationPageReferencesSQL, key)
 	if err != nil {
 		return out, 0, err
 	}
 	defer rows.Close()
+	refs := map[string]observationPageRef{}
+	missing := []string{}
 	out.Pages = map[string][]byte{}
 	size := len(out.Metadata)
 	for rows.Next() {
 		var k string
-		var raw []byte
-		if err = rows.Scan(&k, &raw); err != nil {
+		var ref observationPageRef
+		if err = rows.Scan(&k, &ref.size, &ref.hash); err != nil {
 			return out, 0, err
 		}
-		size += len(raw)
-		if len(raw) > 64<<10 || len(k) > 4096 || size > 16<<20 {
+		digest, decodeErr := hex.DecodeString(ref.hash)
+		if len(k) > 4096 || ref.size < 0 || ref.size > 64<<10 || decodeErr != nil || len(digest) != sha256.Size {
+			return out, 0, fmt.Errorf("observation page reference is invalid")
+		}
+		if _, exists := refs[k]; exists {
+			return out, 0, fmt.Errorf("duplicate observation page reference")
+		}
+		size += ref.size
+		if size > 16<<20 {
 			return out, 0, fmt.Errorf("observation pages exceed bounded size")
 		}
-		out.Pages[k] = raw
+		refs[k] = ref
+		if raw, ok := cache.get(key+"\x00"+k, ref.hash); ok && len(raw) == ref.size {
+			out.Pages[k] = raw
+		} else {
+			missing = append(missing, k)
+		}
 	}
-	return out, revision, rows.Err()
+	if err = rows.Err(); err != nil {
+		return out, 0, err
+	}
+	if err = rows.Close(); err != nil {
+		return out, 0, err
+	}
+	// Bound statement parameters; all requested bodies remain in the same
+	// transaction. Keyed lookups avoid quadratic work on a cold cache.
+	for start := 0; start < len(missing); start += 128 {
+		keys := missing[start:min(start+128, len(missing))]
+		if err = readObservationPageBodies(ctx, db, key, keys, refs, out.Pages, cache); err != nil {
+			return out, 0, err
+		}
+	}
+	return out, revision, nil
+}
+func readObservationPageBodies(ctx context.Context, db inputQueryer, key string, keys []string, refs map[string]observationPageRef, pages map[string][]byte, cache *observationPageBodyCache) error {
+	args := make([]any, 1, len(keys)+1)
+	args[0] = key
+	pending := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		args = append(args, k)
+		pending[k] = true
+	}
+	rows, err := db.QueryContext(ctx, "SELECT entry_key,value FROM fugue_observation_checkpoint_entries WHERE checkpoint_key=$1 AND bucket='pages' AND entry_key IN ("+sqlPlaceholderList(2, len(keys))+")", args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var raw []byte
+		if err = rows.Scan(&k, &raw); err != nil {
+			return err
+		}
+		ref, known := refs[k]
+		if !known || !pending[k] {
+			return fmt.Errorf("observation page body is unexpected")
+		}
+		actual := sha256.Sum256(raw)
+		if len(raw) != ref.size || hex.EncodeToString(actual[:]) != ref.hash {
+			return fmt.Errorf("observation page body hash or size differs")
+		}
+		delete(pending, k)
+		pages[k] = raw
+		cache.put(key+"\x00"+k, ref.hash, raw)
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if len(pending) != 0 {
+		return fmt.Errorf("observation page body is missing")
+	}
+	return rows.Close()
 }
 
 func (s *Store) ReadObservationPages(ctx context.Context, key string) (ObservationPages, []byte, error) {
@@ -121,6 +256,12 @@ func (s *Store) UpdateObservationPages(ctx context.Context, key string, update O
 			return true, tx.Commit()
 		}
 	}
+	// The callback owns mutable pages. Capture comparison evidence before it
+	// can replace, mutate or delete entries in the same map.
+	oldHashes := make(map[string][sha256.Size]byte, len(old.Pages))
+	for k, b := range old.Pages {
+		oldHashes[k] = sha256.Sum256(b)
+	}
 	next, err := update(old, raw)
 	if err != nil {
 		return true, err
@@ -139,14 +280,17 @@ func (s *Store) UpdateObservationPages(ctx context.Context, key string, update O
 		}
 	}
 	for k, b := range next.Pages {
-		if bytes.Equal(old.Pages[k], b) {
+		if previous, exists := oldHashes[k]; exists && previous == sha256.Sum256(b) {
 			continue
+		}
+		if b == nil {
+			b = []byte{}
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_observation_checkpoint_entries(checkpoint_key,bucket,entry_key,value) VALUES($1,'pages',$2,$3) ON CONFLICT(checkpoint_key,bucket,entry_key) DO UPDATE SET value=EXCLUDED.value`, key, k, b); err != nil {
 			return true, err
 		}
 	}
-	for k := range old.Pages {
+	for k := range oldHashes {
 		if _, ok := next.Pages[k]; !ok {
 			if _, err = tx.ExecContext(ctx, `DELETE FROM fugue_observation_checkpoint_entries WHERE checkpoint_key=$1 AND bucket='pages' AND entry_key=$2`, key, k); err != nil {
 				return true, err

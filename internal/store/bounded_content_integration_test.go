@@ -214,6 +214,25 @@ func TestObservationPagesPostgresAtomicCursorAndReplicaLock(t *testing.T) {
 	if before != unchanged {
 		t.Fatal("unchanged page rewritten")
 	}
+	read, _, err = s.ReadObservationPages(t.Context(), key)
+	if err != nil || string(read.Pages["a"]) != "changed" {
+		t.Fatalf("callback page replacement was not persisted: %q %v", read.Pages["a"], err)
+	}
+	_, err = s.UpdateObservationPages(t.Context(), key, func(p ObservationPages, _ []byte) (ObservationPages, error) {
+		p.Pages["a"][0] = 'C'
+		delete(p.Pages, "b")
+		p.Pages["empty"] = nil
+		return p, nil
+	}, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, _, err = s.ReadObservationPages(t.Context(), key)
+	_, deletedPresent := read.Pages["b"]
+	empty, emptyPresent := read.Pages["empty"]
+	if err != nil || string(read.Pages["a"]) != "Changed" || deletedPresent || !emptyPresent || len(empty) != 0 {
+		t.Fatalf("callback mutation/deletion/empty page lost: %v %v", read.Pages, err)
+	}
 	var legacyValue string
 	s.db.QueryRow(`SELECT value FROM fugue_meta WHERE key=$1`, observationCheckpointKey(key)).Scan(&legacyValue)
 	if legacyValue != string(raw) {
