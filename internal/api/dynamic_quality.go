@@ -14,6 +14,7 @@ import (
 	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/store"
 )
 
 type dynamicQualityJob struct {
@@ -578,17 +579,46 @@ func preservedDynamicQualityOrder(previous, bootstrap []string, candidates []pla
 }
 
 func (s *Server) restorePublishedQualityEvidence(projection platformIntentProjectionResponse, jobs []dynamicQualityJob, parent model.PlatformArtifact) {
-	digest := parent.Metadata["input_snapshot_digest"]
-	snapshot, err := s.store.GetPlatformCompilerInput(digest)
-	if err != nil {
-		return
-	}
-	if snapshot.IntentGeneration != parent.Metadata["intent_generation"] || snapshot.PolicyGeneration != parent.Metadata["policy_generation"] || snapshot.IntentGeneration != projection.Intent.Generation {
+	s.restorePublishedQualityEvidenceAt(projection, jobs, parent, time.Now)
+}
+
+func (s *Server) restorePublishedQualityEvidenceAt(projection platformIntentProjectionResponse, jobs []dynamicQualityJob, parent model.PlatformArtifact, now func() time.Time) {
+	if len(jobs) == 0 || parent.Metadata["intent_generation"] != projection.Intent.Generation {
 		return
 	}
 	requested := map[string]dynamicQualityJob{}
 	for _, job := range jobs {
 		requested[job.Key] = job
+	}
+	needed := func(summary store.CompilerDNSSelectionSummary) bool {
+		job, found := requested[summary.NodeID+"\x00"+summary.Hostname]
+		if !found {
+			return false
+		}
+		s.dynamicQuality.mu.Lock()
+		entry := s.dynamicQuality.entries[job.Key]
+		s.dynamicQuality.mu.Unlock()
+		return dynamicQualityRestoreNeeded(summary, job, entry, now())
+	}
+	digest := parent.Metadata["input_snapshot_digest"]
+	snapshot, err := s.store.GetPlatformCompilerInputDNSSelections(digest, needed)
+	if err != nil {
+		return
+	}
+	// Refreshes from another capture may replace/clear an entry during the
+	// database read. Recheck omissions and use the full verified fallback if
+	// any formerly redundant evidence has become useful in the meantime.
+	for _, omitted := range snapshot.Omitted {
+		if needed(omitted) {
+			snapshot, err = s.store.GetPlatformCompilerInputDNSSelections(digest, nil)
+			if err != nil {
+				return
+			}
+			break
+		}
+	}
+	if snapshot.IntentGeneration != parent.Metadata["intent_generation"] || snapshot.PolicyGeneration != parent.Metadata["policy_generation"] || snapshot.IntentGeneration != projection.Intent.Generation {
+		return
 	}
 	contextFor := newDynamicQualityContextReader(projection, jobs)
 	for _, fact := range snapshot.DNSSelections {
@@ -615,7 +645,7 @@ func (s *Server) restorePublishedQualityEvidence(projection platformIntentProjec
 		}
 		expectedPolicy, _ := platformconfig.Digest(job.Route.Policy)
 		capturedPolicy, _ := platformconfig.Digest(receipt.Snapshot.Policy)
-		if expectedPolicy != capturedPolicy || time.Since(receipt.Snapshot.CapturedAt) > time.Duration(job.Route.Policy.EvidenceMaxAgeSeconds)*time.Second {
+		if expectedPolicy != capturedPolicy || now().Sub(receipt.Snapshot.CapturedAt) > time.Duration(job.Route.Policy.EvidenceMaxAgeSeconds)*time.Second {
 			continue
 		}
 		compiled, err := compileBoundPhysicalQualitySelection(receipt, receipt.Snapshot.CapturedAt)
@@ -643,4 +673,17 @@ func (s *Server) restorePublishedQualityEvidence(projection platformIntentProjec
 		}
 		s.dynamicQuality.mu.Unlock()
 	}
+}
+
+// These are necessary conditions for the existing replay-and-replacement path:
+// a replayed selection has the receipt's captured time, and can replace only
+// an older entry. All receipt, topology, policy and context checks still run.
+func dynamicQualityRestoreNeeded(summary store.CompilerDNSSelectionSummary, job dynamicQualityJob, entry dynamicQualityEntry, now time.Time) bool {
+	if !summary.HasSelection || !summary.HasEvidence {
+		return false
+	}
+	if now.Sub(summary.CapturedAt) > time.Duration(job.Route.Policy.EvidenceMaxAgeSeconds)*time.Second {
+		return false
+	}
+	return entry.Compiled.Selection == nil || entry.Compiled.Selection.CapturedAt.Before(summary.CapturedAt)
 }

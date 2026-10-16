@@ -79,6 +79,8 @@ func DecodeRuntimeSnapshotReader(r io.Reader) (RuntimeSnapshot, error) {
 // at a time. Hashing/persistence need not allocate another snapshot-sized byte
 // buffer. Individual values still use encoding/json, retaining its escaping,
 // numbers and custom marshaler semantics. Their maximum size still matters.
+// Writers implementing ObserveRuntimeSnapshotDNSSelection receive exact byte
+// ranges after each successfully encoded observation; this does not change v1 bytes.
 func WriteRuntimeSnapshot(w io.Writer, snapshot RuntimeSnapshot) error {
 	s := snapshotJSONWriter{w: w}
 	s.text("{")
@@ -125,7 +127,13 @@ func WriteRuntimeSnapshot(w io.Writer, snapshot RuntimeSnapshot) error {
 					}
 					fact.PhysicalEvidence = canonical
 				}
+				start := s.bytes
 				s.value(fact)
+				if observer, ok := w.(interface {
+					ObserveRuntimeSnapshotDNSSelection(int64, int64, DNSSelectionObservation)
+				}); ok && s.err == nil {
+					observer.ObserveRuntimeSnapshotDNSSelection(start, s.bytes-start, fact)
+				}
 				if s.err != nil {
 					return s.err
 				}
@@ -174,14 +182,16 @@ func WriteRuntimeSnapshot(w io.Writer, snapshot RuntimeSnapshot) error {
 }
 
 type snapshotJSONWriter struct {
-	w   io.Writer
-	err error
+	w     io.Writer
+	err   error
+	bytes int64
 }
 
 func (s *snapshotJSONWriter) text(value string) {
 	if s.err == nil {
 		var n int
 		n, s.err = io.WriteString(s.w, value)
+		s.bytes += int64(n)
 		if s.err == nil && n != len(value) {
 			s.err = io.ErrShortWrite
 		}
@@ -196,6 +206,7 @@ func (s *snapshotJSONWriter) value(value any) {
 	if s.err == nil {
 		var n int
 		n, s.err = s.w.Write(raw)
+		s.bytes += int64(n)
 		if s.err == nil && n != len(raw) {
 			s.err = io.ErrShortWrite
 		}

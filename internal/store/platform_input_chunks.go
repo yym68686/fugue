@@ -120,14 +120,16 @@ func (r *inputChunkReader) Read(p []byte) (int, error) {
 }
 
 type inputChunkWriter struct {
-	ctx      context.Context
-	tx       *sql.Tx
-	digest   string
-	hash     hash.Hash
-	chunk    []byte
-	count    int
-	size     int64
-	expected [][sha256.Size]byte
+	ctx               context.Context
+	tx                *sql.Tx
+	digest            string
+	hash              hash.Hash
+	chunk             []byte
+	count             int
+	size              int64
+	expected          [][sha256.Size]byte
+	dnsRanges         []compilerDNSRange
+	dnsRangesOverflow bool
 }
 
 func (w *inputChunkWriter) Write(p []byte) (int, error) {
@@ -219,6 +221,11 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			if err := verifyInputChunkHashes(ctx, tx, m, w.expected); err != nil {
 				return err
 			}
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			s.rememberCompilerDNSInput(snapshot, m, w)
+			return nil
 		}
 		return tx.Commit()
 	}
@@ -276,7 +283,11 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	if err = verifyInputChunkHashes(ctx, tx, m, w.expected); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.rememberCompilerDNSInput(snapshot, m, w)
+	return nil
 }
 
 // The canonical input stream has already been hashed to m.Digest. Each stored
