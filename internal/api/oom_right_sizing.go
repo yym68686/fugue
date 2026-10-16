@@ -48,6 +48,9 @@ func (s *Server) startOOMRightSizingLoop(ctx context.Context) <-chan struct{} {
 }
 
 func (s *Server) applyOOMRightSizingOnce(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	apps, err := s.store.ListApps("", true)
 	if err != nil {
 		if s.log != nil {
@@ -55,9 +58,22 @@ func (s *Server) applyOOMRightSizingOnce(ctx context.Context) {
 		}
 		return
 	}
+	// Clients are owned by this pass. Reuse within one namespace without
+	// retaining credentials or transports across subsequent scans.
+	clients := make(map[string]appLogsClient)
+	defer func() {
+		for _, client := range clients {
+			if closer, ok := client.(interface{ closeIdleConnections() }); ok {
+				closer.closeIdleConnections()
+			}
+		}
+	}()
 	now := time.Now().UTC()
 	cutoff := now.Add(-oomRightSizingLookback)
 	for _, app := range apps {
+		if ctx.Err() != nil {
+			return
+		}
 		rightSizing := model.AppRightSizingSpec{Mode: model.AppRightSizingModeAuto}
 		if app.Spec.RightSizing != nil {
 			rightSizing = model.NormalizeAppRightSizingSpec(*app.Spec.RightSizing)
@@ -69,7 +85,22 @@ func (s *Server) applyOOMRightSizingOnce(ctx context.Context) {
 		if err != nil || runtimeObj.Type == model.RuntimeTypeExternalOwned {
 			continue
 		}
-		targets, err := s.appOOMRightSizingTargets(ctx, app, cutoff, now)
+		namespace := runtime.NamespaceForTenant(app.TenantID)
+		client, found := clients[namespace]
+		if !found {
+			client, err = s.newLogsClient(namespace)
+			if err != nil {
+				if s.log != nil {
+					s.log.Printf("inspect OOM events for app=%s failed: %v", app.ID, err)
+				}
+				continue
+			}
+			clients[namespace] = client
+		}
+		targets, err := s.appOOMRightSizingTargets(ctx, client, app, cutoff, now)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			if s.log != nil {
 				s.log.Printf("inspect OOM events for app=%s failed: %v", app.ID, err)
@@ -98,12 +129,8 @@ func (s *Server) applyOOMRightSizingOnce(ctx context.Context) {
 	}
 }
 
-func (s *Server) appOOMRightSizingTargets(ctx context.Context, app model.App, cutoff, now time.Time) ([]oomRightSizingTarget, error) {
+func (s *Server) appOOMRightSizingTargets(ctx context.Context, client appLogsClient, app model.App, cutoff, now time.Time) ([]oomRightSizingTarget, error) {
 	namespace := runtime.NamespaceForTenant(app.TenantID)
-	client, err := s.newLogsClient(namespace)
-	if err != nil {
-		return nil, err
-	}
 
 	targets := make([]oomRightSizingTarget, 0, 2)
 	appSelector, _, err := runtimeLogTarget(app, "app")

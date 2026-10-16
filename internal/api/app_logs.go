@@ -206,6 +206,18 @@ func newKubeLogsClient(namespace string) (*kubeLogsClient, error) {
 	}, nil
 }
 
+func (c *kubeLogsClient) closeIdleConnections() {
+	if c == nil {
+		return
+	}
+	if c.client != nil {
+		c.client.CloseIdleConnections()
+	}
+	if c.streamClient != nil && c.streamClient != c.client {
+		c.streamClient.CloseIdleConnections()
+	}
+}
+
 func (c *kubeLogsClient) effectiveNamespace(namespace string) string {
 	namespace = strings.TrimSpace(namespace)
 	if namespace != "" {
