@@ -1661,6 +1661,13 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if observed != nil && resp != nil {
+				// The client may omit Accept (or use */*); classify the actual
+				// response before release-gate metrics are recorded. This keeps
+				// streamed responses out of the non-stream duration percentile.
+				if edgeResponseIsSSE(resp) {
+					observed.SSE = true
+					observed.Streaming = true
+				}
 				if observed.HealthProbe {
 					resp.Header.Set(edgeHealthProbeReachedHeader, "1")
 				}
@@ -1689,6 +1696,18 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			return nil
 		},
 	}
+}
+
+func edgeResponseIsSSE(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err == nil {
+		return strings.EqualFold(mediaType, "text/event-stream")
+	}
+	return strings.EqualFold(strings.TrimSpace(strings.Split(contentType, ";")[0]), "text/event-stream")
 }
 
 func edgeProxyErrorIsClientCanceled(req *http.Request, proxyErr error) bool {
