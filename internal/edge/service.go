@@ -447,6 +447,10 @@ type edgeProxyObservation struct {
 	MinWindowBPS            int64
 	EdgeProxyTCPInfo        tcpdiag.Snapshot
 	ResponseBytes           int64
+
+	OriginConnectionWasIdle  bool
+	OriginConnectionIdle     time.Duration
+	OriginTransportErrorKind string
 }
 
 func (o *edgeProxyObservation) initializeOriginTrace() {
@@ -2652,6 +2656,8 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 				t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
 					observed.OriginGotConn = true
 					observed.OriginConnectionReused = info.Reused
+					observed.OriginConnectionWasIdle = info.WasIdle
+					observed.OriginConnectionIdle = info.IdleTime
 					if info.Conn != nil {
 						observed.OriginRemoteAddr = info.Conn.RemoteAddr().String()
 						observed.OriginLocalAddr = info.Conn.LocalAddr().String()
@@ -2704,6 +2710,7 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if t.observation != nil {
 		t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
 			observed.Upstream = time.Since(started)
+			observed.OriginTransportErrorKind = originTransportErrorKind(err)
 			if resp != nil && observed.OriginTTFB <= 0 {
 				observed.OriginTTFB = observed.Upstream
 			}
@@ -4824,7 +4831,7 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		requestBodyMissing = observed.RequestBytes - observed.RequestBodyReadBytes
 	}
 	s.Logger.Printf(
-		"edge_proxy_request received_at=%s edge_request_id=%s trace_id=%s request_id=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s decision_id=%s bundle_version=%s status_reason=%s fallback_reason=%s client_ip=%s client_remote_addr=%s protocol=%s method=%s path=%s status=%d duration_ms=%d request_bytes=%d request_body_read_bytes=%d request_body_missing_bytes=%d request_body_complete=%t request_body_eof=%t request_body_read_error=%s request_body_buffered=%t request_body_buffer_bytes=%d request_body_buffer_ms=%d request_body_buffer_error=%s request_body_buffer_budget_bytes=%d request_body_buffer_used_bytes=%d request_body_buffer_active_requests=%d body_read_block_ms=%d file_write_ms=%d first_body_byte_ms=%d last_body_byte_ms=%d max_read_gap_ms=%d read_calls=%d avg_bps=%d min_window_bps=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_dns_ms=%d origin_dns_error=%s origin_connect_ms=%d origin_connect_error=%s origin_got_conn=%t origin_conn_reused=%t origin_remote_addr=%s origin_local_addr=%s origin_wrote_headers=%t origin_wrote_request=%t origin_request_write_ms=%d origin_request_write_error=%s origin_response_wait_ms=%d origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t request_source=%s",
+		"edge_proxy_request received_at=%s edge_request_id=%s trace_id=%s request_id=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s decision_id=%s bundle_version=%s status_reason=%s fallback_reason=%s client_ip=%s client_remote_addr=%s protocol=%s method=%s path=%s status=%d duration_ms=%d request_bytes=%d request_body_read_bytes=%d request_body_missing_bytes=%d request_body_complete=%t request_body_eof=%t request_body_read_error=%s request_body_buffered=%t request_body_buffer_bytes=%d request_body_buffer_ms=%d request_body_buffer_error=%s request_body_buffer_budget_bytes=%d request_body_buffer_used_bytes=%d request_body_buffer_active_requests=%d body_read_block_ms=%d file_write_ms=%d first_body_byte_ms=%d last_body_byte_ms=%d max_read_gap_ms=%d read_calls=%d avg_bps=%d min_window_bps=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_dns_ms=%d origin_dns_error=%s origin_connect_ms=%d origin_connect_error=%s origin_got_conn=%t origin_conn_reused=%t origin_conn_was_idle=%t origin_conn_idle_ms=%d origin_transport_error_kind=%s origin_remote_addr=%s origin_local_addr=%s origin_wrote_headers=%t origin_wrote_request=%t origin_request_write_ms=%d origin_request_write_error=%s origin_response_wait_ms=%d origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t request_source=%s",
 		observed.ReceivedAt.Format(time.RFC3339Nano),
 		logSafeValue(observed.EdgeRequestID),
 		logSafeValue(observed.TraceID),
@@ -4882,6 +4889,9 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		logSafeValue(observed.OriginConnectError),
 		observed.OriginGotConn,
 		observed.OriginConnectionReused,
+		observed.OriginConnectionWasIdle,
+		observed.OriginConnectionIdle.Milliseconds(),
+		logSafeValue(observed.OriginTransportErrorKind),
 		logSafeValue(observed.OriginRemoteAddr),
 		logSafeValue(observed.OriginLocalAddr),
 		observed.OriginWroteHeaders,

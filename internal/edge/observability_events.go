@@ -105,10 +105,15 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		"path":                    strings.TrimSpace(observed.Path),
 		"origin_got_conn":         observed.OriginGotConn,
 		"origin_conn_reused":      observed.OriginConnectionReused,
+		"origin_conn_was_idle":    observed.OriginConnectionWasIdle,
+		"origin_conn_idle_ms":     observed.OriginConnectionIdle.Milliseconds(),
 		"origin_wrote_headers":    observed.OriginWroteHeaders,
 		"origin_wrote_request":    observed.OriginWroteRequest,
 		"origin_first_byte":       observed.OriginTTFB > 0,
 		"request_body_eof":        observed.RequestBodyEOF,
+	}
+	if observed.OriginTransportErrorKind != "" {
+		summary["origin_transport_error_kind"] = observed.OriginTransportErrorKind
 	}
 	if observed.RequestBytes > 0 {
 		summary["request_content_length"] = observed.RequestBytes
