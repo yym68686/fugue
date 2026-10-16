@@ -75,6 +75,14 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 			compressedStateWrites := 0
 			for _, raw := range copyContainer["env"].([]any) {
 				env := raw.(map[string]any)
+				if env["name"] == "FUGUE_EDGE_CONTROL_AUTHORITY_RECONCILE_INTERVAL" {
+					if !reflect.DeepEqual(env, map[string]any{"name": "FUGUE_EDGE_CONTROL_AUTHORITY_RECONCILE_INTERVAL", "value": "10s"}) {
+						t.Fatalf("US authority reconcile interval configuration=%v", env)
+					}
+					// The production interval is intentionally shorter than
+					// the generic template; keep all other fields exact.
+					env["value"] = "30s"
+				}
 				if env["name"] == "GOMEMLIMIT" {
 					memoryBudget, _ = env["value"].(string)
 					continue
