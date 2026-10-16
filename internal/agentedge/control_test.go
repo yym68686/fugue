@@ -504,7 +504,7 @@ func TestControlDegradedRefreshMeasuresCadenceFromObservation(t *testing.T) {
 
 // A negative publication proof revokes local eligibility immediately. Acquiring
 // replacement authority must not then wait for the generic five-second retry.
-func TestControlNegativeProofSchedulesOnePromptAcquisition(t *testing.T) {
+func TestControlNegativeProofCompletesOneBoundedAcquisition(t *testing.T) {
 	for _, replacementAvailable := range []bool{true, false} {
 		t.Run(fmt.Sprint(replacementAvailable), func(t *testing.T) {
 			m, g, private, _, now := controlFixture(t)
@@ -516,7 +516,7 @@ func TestControlNegativeProofSchedulesOnePromptAcquisition(t *testing.T) {
 			*now = now.Add(time.Duration(g.Policy.ProbeIntervalSeconds) * time.Second)
 			m.refreshAt = now.Add(time.Minute)
 			next := cloneGrant(g)
-			next.IssuedAt = now.Add(10 * time.Millisecond)
+			next.IssuedAt = *now
 			for i := range next.Candidates {
 				next.Candidates[i].RouteDigests = []string{"sha256:" + strings.Repeat("b", 64)}
 				next.Candidates[i].Publication.ReleaseID = "next-release"
@@ -526,6 +526,10 @@ func TestControlNegativeProofSchedulesOnePromptAcquisition(t *testing.T) {
 			fetches := 0
 			m.fetch = func(context.Context, string) ([]byte, error) {
 				fetches++
+				if m.Status().Primary != "" || m.pendingRefresh() == nil || m.Status().GrantDigest != original.GrantDigest || m.Status().ValidUntil != original.ValidUntil {
+					t.Fatal("negative proof did not revoke before a joinable refresh", m.Status())
+				}
+				*now = now.Add(time.Millisecond)
 				if !replacementAvailable {
 					return nil, errors.New("authority temporarily unavailable")
 				}
@@ -535,18 +539,8 @@ func TestControlNegativeProofSchedulesOnePromptAcquisition(t *testing.T) {
 				fresh := grant.IssuedAt.Equal(next.IssuedAt)
 				return Measurement{EdgeID: c.EdgeID, Address: c.Address, Success: fresh, Disqualified: !fresh, Latency: time.Millisecond}
 			}
-			if err := m.Step(context.Background()); err == nil || m.Status().Primary != "" {
-				t.Fatal("negative proof retained unauthorized eligibility", err, m.Status())
-			}
-			if got := m.NextStepDelay(); got != 10*time.Millisecond || fetches != 0 {
-				t.Fatal("publication invalidation waits for generic retry or fetches recursively", got, fetches)
-			}
-			if m.Status().GrantDigest != original.GrantDigest || m.Status().ValidUntil != original.ValidUntil {
-				t.Fatal("scheduling changed signed authority")
-			}
-			*now = now.Add(m.NextStepDelay())
 			err := m.Step(context.Background())
-			if fetches != 1 {
+			if fetches != 1 || m.pendingRefresh() != nil {
 				t.Fatal("prompt recovery exceeded one acquisition", fetches)
 			}
 			if replacementAvailable {

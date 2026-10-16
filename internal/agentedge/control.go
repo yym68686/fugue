@@ -31,22 +31,21 @@ type ControlOptions struct {
 // acquisition uses ordinary hostname resolution after dynamic routing has
 // activated; heartbeat, operation polling and completion never fall back to it.
 type Control struct {
-	stepMu        sync.Mutex
-	mu            sync.RWMutex
-	options       ControlOptions
-	checkpoint    clientCheckpoint
-	keys          map[string]TrustKey
-	refreshDone   chan struct{}
-	selector      *Selector
-	selected      *http.Client
-	acquisition   *http.Client
-	now           func() time.Time
-	lastProbe     time.Time
-	refreshAt     time.Time
-	refreshUrgent bool
-	fetch         func(context.Context, string) ([]byte, error)
-	probe         func(context.Context, Grant, Candidate) Measurement
-	routeProbe    func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
+	stepMu      sync.Mutex
+	mu          sync.RWMutex
+	options     ControlOptions
+	checkpoint  clientCheckpoint
+	keys        map[string]TrustKey
+	refreshDone chan struct{}
+	selector    *Selector
+	selected    *http.Client
+	acquisition *http.Client
+	now         func() time.Time
+	lastProbe   time.Time
+	refreshAt   time.Time
+	fetch       func(context.Context, string) ([]byte, error)
+	probe       func(context.Context, Grant, Candidate) Measurement
+	routeProbe  func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
 }
 
 type ControlStatus struct {
@@ -263,19 +262,27 @@ func (m *Control) Step(ctx context.Context) error {
 	v, permissionErr := m.selector.permission(keys, m.now())
 	var fetchErr, probeErr error
 	attemptedRefresh := false
-	if permissionErr != nil || !m.now().Before(m.refreshAt) {
-		attemptedRefresh = true
-		m.refreshUrgent = false
-		done := make(chan struct{})
+	var done chan struct{}
+	beginRefresh := func() {
+		if done != nil {
+			return
+		}
+		done = make(chan struct{})
 		m.mu.Lock()
 		m.refreshDone = done
 		m.mu.Unlock()
-		defer func() {
+	}
+	defer func() {
+		if done != nil {
 			m.mu.Lock()
 			m.refreshDone = nil
 			close(done)
 			m.mu.Unlock()
-		}()
+		}
+	}()
+	refresh := func() {
+		beginRefresh()
+		attemptedRefresh = true
 		hint := ""
 		if choice, err := m.selector.Current(keys, m.now()); err == nil {
 			hint = choice.Primary.EdgeID
@@ -307,22 +314,35 @@ func (m *Control) Step(ctx context.Context) error {
 		}
 		v, permissionErr = m.selector.permission(keys, m.now())
 	}
+	if permissionErr != nil || !m.now().Before(m.refreshAt) {
+		refresh()
+	}
 	if permissionErr == nil {
 		g := v.View()
 		if m.lastProbe.IsZero() || m.now().Sub(m.lastProbe) >= time.Duration(g.Policy.ProbeIntervalSeconds)*time.Second {
 			var round Round
 			round, probeErr = m.measure(ctx, v)
 			if probeErr == nil {
+				negative := false
+				for _, measurement := range round.Measurements {
+					negative = negative || measurement.Disqualified
+				}
+				followup := negative && !attemptedRefresh
+				if followup {
+					// Publish the pending refresh before revoking eligibility so
+					// unsent requests can join it without an unprotected gap.
+					beginRefresh()
+				}
 				_, probeErr = m.selector.Observe(round, keys, m.now())
 				m.lastProbe = round.ObservedAt
 				m.refreshDegradedSooner(g, keys)
-				for _, measurement := range round.Measurements {
-					if measurement.Disqualified && !attemptedRefresh {
-						// A new authenticated negative proof needs fresh signed
-						// authority promptly. One follow-up is allowed; failed
-						// acquisition retains the ordinary retry deadline.
-						m.refreshAt = time.Time{}
-						m.refreshUrgent = true
+				if followup {
+					// Complete one signed and freshly measured replacement in
+					// this round. Failure retains the normal retry deadline,
+					// absolute lease and immediate negative-proof revocation.
+					refresh()
+					if fetchErr == nil && permissionErr == nil {
+						probeErr = nil
 					}
 				}
 			}
@@ -339,9 +359,6 @@ func (m *Control) NextStepDelay() time.Duration {
 	m.stepMu.Lock()
 	defer m.stepMu.Unlock()
 	now := m.now()
-	if m.refreshUrgent {
-		return 10 * time.Millisecond
-	}
 	next := now.Add(5 * time.Second)
 	consider := func(deadline time.Time) {
 		if deadline.After(now) && deadline.Before(next) {

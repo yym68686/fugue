@@ -233,8 +233,14 @@ func TestLeaseBodyRejectsSuccessfulEOFAfterAbsoluteExpiry(t *testing.T) {
 }
 
 func TestSelectedTransportJoinsInFlightGrantBeforeSending(t *testing.T) {
-	for _, scenario := range []string{"replacement", "authority-unavailable", "tampered-grant", "unmeasured-grant", "revoked-key", "expired-grant", "canceled-request"} {
+	scenarios := []string{"replacement", "authority-unavailable", "tampered-grant", "unmeasured-grant", "revoked-key", "expired-grant", "canceled-request"}
+	for _, scenario := range append([]string{}, scenarios...) {
+		scenarios = append(scenarios, "negative-proof/"+scenario)
+	}
+	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
+			negativeProof := strings.HasPrefix(scenario, "negative-proof/")
+			scenario = strings.TrimPrefix(scenario, "negative-proof/")
 			m, g, private, _, now := controlFixture(t)
 			if err := m.Step(context.Background()); err != nil {
 				t.Fatal(err)
@@ -250,8 +256,10 @@ func TestSelectedTransportJoinsInFlightGrantBeforeSending(t *testing.T) {
 				round.Measurements[i].Success = false
 				round.Measurements[i].Disqualified = true
 			}
-			if _, err = m.selector.Observe(round, m.currentKeys(), *now); err == nil {
-				t.Fatal("negative evidence did not remove eligibility")
+			if !negativeProof {
+				if _, err = m.selector.Observe(round, m.currentKeys(), *now); err == nil {
+					t.Fatal("negative evidence did not remove eligibility")
+				}
 			}
 			*now = now.Add(time.Second)
 			next := cloneGrant(g)
@@ -270,6 +278,15 @@ func TestSelectedTransportJoinsInFlightGrantBeforeSending(t *testing.T) {
 					return Measurement{EdgeID: c.EdgeID, Address: c.Address}
 				}
 			}
+			if negativeProof {
+				probe := m.probe
+				m.probe = func(ctx context.Context, grant Grant, c Candidate) Measurement {
+					if !grant.IssuedAt.Equal(next.IssuedAt) {
+						return Measurement{EdgeID: c.EdgeID, Address: c.Address, Disqualified: true}
+					}
+					return probe(ctx, grant, c)
+				}
+			}
 			var clock atomic.Value
 			clock.Store(*now)
 			m.now = func() time.Time { return clock.Load().(time.Time) }
@@ -277,6 +294,9 @@ func TestSelectedTransportJoinsInFlightGrantBeforeSending(t *testing.T) {
 			var fetches, calls, dials atomic.Int32
 			m.fetch = func(context.Context, string) ([]byte, error) {
 				fetches.Add(1)
+				if negativeProof {
+					clock.Store(clock.Load().(time.Time).Add(time.Millisecond))
+				}
 				close(entered)
 				<-release
 				if scenario == "authority-unavailable" {
@@ -285,9 +305,17 @@ func TestSelectedTransportJoinsInFlightGrantBeforeSending(t *testing.T) {
 				return raw, nil
 			}
 			m.refreshAt = time.Time{}
+			if negativeProof {
+				m.refreshAt = now.Add(time.Minute)
+			}
 			finished := make(chan error, 1)
 			go func() { finished <- m.Step(context.Background()) }()
 			<-entered
+			if m.Status().Primary != "" || m.pendingRefresh() == nil {
+				close(release)
+				<-finished
+				t.Fatal("replacement must revoke old eligibility and expose one pending refresh")
+			}
 			server, roots := edgeTLSServer(t, "api.example.test", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
 				body, _ := io.ReadAll(r.Body)
