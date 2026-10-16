@@ -3892,35 +3892,67 @@ def first_same_namespace_service(ctx):
     except Exception as exc:
         service_cache[namespace] = (None, str(exc)[-240:])
         return service_cache[namespace]
+    # A Service can remain resolvable while intentionally scaled to zero. Its
+    # ClusterIP is a valid DNS target, but not evidence of node TCP reachability.
+    ok_endpoints, endpoints_out = kubectl_json(["-n", namespace, "get", "endpointslices.discovery.k8s.io"], 6)
+    endpoint_reason = "no observed ready TCP backend"
+    endpoint_slices = []
+    if ok_endpoints:
+        try:
+            endpoint_slices = json.loads(endpoints_out).get("items") or []
+        except Exception:
+            endpoint_reason = "EndpointSlice response could not be decoded"
+    else:
+        endpoint_reason = "EndpointSlice observation unavailable: " + endpoints_out[-240:]
+    ready_ports = set()
+    for endpoint_slice in endpoint_slices:
+        service_name = (endpoint_slice.get("metadata") or {}).get("labels", {}).get("kubernetes.io/service-name")
+        address_type = endpoint_slice.get("addressType")
+        ready = any(
+            endpoint.get("addresses") and
+            (endpoint.get("conditions") or {}).get("ready") is True and
+            (endpoint.get("conditions") or {}).get("serving") is not False and
+            (endpoint.get("conditions") or {}).get("terminating") is not True
+            for endpoint in endpoint_slice.get("endpoints") or []
+        )
+        if not service_name or not ready:
+            continue
+        for port in endpoint_slice.get("ports") or []:
+            number = port.get("port")
+            if str(port.get("protocol") or "TCP").upper() == "TCP" and isinstance(number, int) and 0 < number <= 65535:
+                ready_ports.add((service_name, address_type, port.get("name") or ""))
+    dns_fallback = None
     for item in payload.get("items") or []:
         spec = item.get("spec") or {}
         cluster_ip = spec.get("clusterIP") or ""
         if not cluster_ip or cluster_ip == "None":
             continue
-        selected_port = None
-        for port in spec.get("ports") or []:
-            protocol = str(port.get("protocol") or "TCP").upper()
-            if protocol != "TCP":
-                continue
-            raw_port = port.get("port")
-            if isinstance(raw_port, int) and raw_port > 0:
-                selected_port = raw_port
-                break
-        if not selected_port:
-            continue
         metadata = item.get("metadata") or {}
         name = str(metadata.get("name") or "")
         if not name:
             continue
-        service_cache[namespace] = ({
-            "name": name,
-            "namespace": namespace,
-            "cluster_ip": str(cluster_ip),
-            "port": int(selected_port),
-            "fqdn": "%s.%s.svc.cluster.local" % (name, namespace),
-        }, "")
-        return service_cache[namespace]
-    service_cache[namespace] = (None, "no TCP ClusterIP service in namespace %s" % namespace)
+        address_type = "IPv6" if ":" in cluster_ip else "IPv4"
+        for port in spec.get("ports") or []:
+            protocol = str(port.get("protocol") or "TCP").upper()
+            raw_port = port.get("port")
+            if protocol != "TCP" or not isinstance(raw_port, int) or not 0 < raw_port <= 65535:
+                continue
+            ready = (name, address_type, port.get("name") or "") in ready_ports
+            candidate = {
+                "name": name,
+                "namespace": namespace,
+                "cluster_ip": str(cluster_ip),
+                "port": int(raw_port),
+                "fqdn": "%s.%s.svc.cluster.local" % (name, namespace),
+                "tcp_backend_observed": ready,
+                "tcp_probe_reason": "" if ready else endpoint_reason,
+            }
+            if ready:
+                service_cache[namespace] = (candidate, "")
+                return service_cache[namespace]
+            if dns_fallback is None:
+                dns_fallback = candidate
+    service_cache[namespace] = (dns_fallback, "" if dns_fallback else "no TCP ClusterIP service in namespace %s" % namespace)
     return service_cache[namespace]
 
 def pod_context_evidence(ctx, extra=None):
@@ -4035,15 +4067,18 @@ else:
         else:
             checks.append(check("same_namespace_service_dns", "dns", "fail", out, "pod-netns resolver resolves same-namespace ClusterIP service FQDN", True, evidence=service_evidence))
 
-        ok, out = pod_tcp_connect(pod_ctx, same_service["cluster_ip"], same_service["port"])
-        if ok is None:
-            optional_probe_skipped("same_namespace_service_tcp", "network", out, "pod-netns TCP connect to a same-namespace ClusterIP service", service_evidence)
-        elif ok:
-            checks.append(check("same_namespace_service_tcp", "network", "pass", "%s:%d connected" % (same_service["cluster_ip"], same_service["port"]), "pod-netns TCP connect to a same-namespace ClusterIP service", evidence=service_evidence))
+        if not same_service.get("tcp_backend_observed"):
+            optional_probe_skipped("same_namespace_service_tcp", "network", same_service.get("tcp_probe_reason"), "pod-netns TCP connect to a same-namespace ClusterIP service", service_evidence)
         else:
-            # An arbitrary Service may be down or intentionally denied by its
-            # workload policy; do not drain a node on this observation alone.
-            checks.append(check("same_namespace_service_tcp", "network", "fail", out, "pod-netns TCP connect to a same-namespace ClusterIP service", False, evidence=service_evidence))
+            ok, out = pod_tcp_connect(pod_ctx, same_service["cluster_ip"], same_service["port"])
+            if ok is None:
+                optional_probe_skipped("same_namespace_service_tcp", "network", out, "pod-netns TCP connect to a same-namespace ClusterIP service", service_evidence)
+            elif ok:
+                checks.append(check("same_namespace_service_tcp", "network", "pass", "%s:%d connected" % (same_service["cluster_ip"], same_service["port"]), "pod-netns TCP connect to a same-namespace ClusterIP service", evidence=service_evidence))
+            else:
+                # An arbitrary Service may be down or intentionally denied by its
+                # workload policy; do not drain a node on this observation alone.
+                checks.append(check("same_namespace_service_tcp", "network", "fail", out, "pod-netns TCP connect to a same-namespace ClusterIP service", False, evidence=service_evidence))
 
     else:
         optional_probe_skipped("same_namespace_service_dns", "dns", same_service_reason or "same-namespace service unavailable", "pod-netns resolver resolves a same-namespace ClusterIP service", pod_context_evidence(pod_ctx))

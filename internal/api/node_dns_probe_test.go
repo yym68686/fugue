@@ -17,3 +17,9 @@ func TestNodeResourcePolicyExecution(t *testing.T) {
 		t.Fatalf("node resource policy: %v\n%s", err, out)
 	}
 }
+
+func TestNodeServiceProbeTargetSelection(t *testing.T) {
+	if out, err := exec.Command("python3", "-B", "node_service_probe_test.py").CombinedOutput(); err != nil {
+		t.Fatalf("Service probe: %v\n%s", err, out)
+	}
+}

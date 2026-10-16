@@ -10,7 +10,7 @@ import (
 )
 
 const TaskType = "reconcile-host-inotify-policy"
-const UpdaterVersion = "v46"
+const UpdaterVersion = "v47"
 
 type Policy struct {
 	Schema                string `json:"schema"`
