@@ -151,8 +151,8 @@ func TestSetRuntimePoolModeRequiresPlatformAdminAndReconcilesNode(t *testing.T) 
 	if err != nil {
 		t.Fatalf("load shared-pool machine: %v", err)
 	}
-	if !machine.Policy.AllowBuilds {
-		t.Fatalf("expected shared-pool machine to default builds enabled, got %#v", machine.Policy)
+	if machine.Policy.AllowBuilds {
+		t.Fatalf("pool membership must not overwrite saved build permission, got %#v", machine.Policy)
 	}
 	if !machine.Policy.AllowSharedPool {
 		t.Fatalf("expected shared-pool machine workloads enabled, got %#v", machine.Policy)

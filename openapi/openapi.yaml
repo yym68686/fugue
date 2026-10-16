@@ -28710,7 +28710,11 @@ components:
         is configuration intent and is never inferred from country or hostname.
         node_reconciled only describes Kubernetes labels and taints; callers must
         separately verify Edge workload and serving readiness before reporting a
-        completed Edge enrollment.
+        completed Edge enrollment. Build permission is independent of shared-pool
+        membership: an explicit allow_builds=false remains disabled during policy
+        normalization and runtime refresh while application placement and serving
+        configuration are preserved. A shared-pool change does not override saved
+        build permission.
       properties:
         allow_app_runtime:
           type: boolean

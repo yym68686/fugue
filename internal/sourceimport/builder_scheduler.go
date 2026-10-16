@@ -847,6 +847,11 @@ func builderSafetyBuffer(allocatable builderResourceDemand, profile builderWorkl
 }
 
 func builderNodeEligibleForBuilders(policy BuilderPodPolicy, snapshot builderNodeSnapshot) bool {
+	for _, key := range []string{runtime.BuildNodeLabelKey, runtime.BuilderRoleLabelKey, policy.BuildNodeLabelKey} {
+		if strings.EqualFold(strings.TrimSpace(snapshot.Labels[key]), "false") {
+			return false
+		}
+	}
 	if !builderNodeTaintsTolerated(policy.Tolerations, snapshot.Taints) {
 		return false
 	}

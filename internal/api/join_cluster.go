@@ -551,6 +551,11 @@ func machineJoinLabelMap(machine model.Machine) map[string]string {
 	if machine.Policy.AllowBuilds {
 		labels[runtime.BuildNodeLabelKey] = runtime.BuildNodeLabelValue
 		labels[runtime.BuilderRoleLabelKey] = runtime.NodeRoleLabelValue
+	} else if machine.Policy.AllowSharedPool {
+		// Explicit false distinguishes saved isolation from legacy shared nodes
+		// that have never declared a builder role. Schedulers must honor it.
+		labels[runtime.BuildNodeLabelKey] = "false"
+		labels[runtime.BuilderRoleLabelKey] = "false"
 	}
 	if machine.Policy.AllowAppRuntime {
 		labels[runtime.AppRuntimeRoleLabelKey] = runtime.NodeRoleLabelValue

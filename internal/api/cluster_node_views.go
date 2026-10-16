@@ -263,6 +263,10 @@ func effectiveAppRuntimePolicy(snapshot clusterNodeSnapshot, allowRuntimeIdentit
 }
 
 func effectiveBuildPolicy(snapshot clusterNodeSnapshot) bool {
+	if strings.EqualFold(strings.TrimSpace(snapshot.labels[runtimepkg.BuildNodeLabelKey]), "false") ||
+		strings.EqualFold(strings.TrimSpace(snapshot.labels[runtimepkg.BuilderRoleLabelKey]), "false") {
+		return false
+	}
 	return snapshot.sharedPool ||
 		strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuildNodeLabelKey), runtimepkg.BuildNodeLabelValue) ||
 		strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuilderRoleLabelKey), runtimepkg.NodeRoleLabelValue)

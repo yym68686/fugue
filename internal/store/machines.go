@@ -93,7 +93,6 @@ func normalizeMachinePolicy(scope string, policy model.MachinePolicy) model.Mach
 	normalized.AllowInternalMaintenance = policy.AllowInternalMaintenance
 	if normalized.AllowSharedPool {
 		normalized.AllowAppRuntime = true
-		normalized.AllowBuilds = true
 	}
 	if role := model.NormalizeMachineControlPlaneRole(policy.DesiredControlPlaneRole); role != "" {
 		normalized.DesiredControlPlaneRole = role
@@ -146,8 +145,9 @@ func machinePolicyFromRuntime(runtime model.Runtime, existing *model.Machine) mo
 		policy.AllowSharedPool = model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode) == model.RuntimePoolModeInternalShared
 		if policy.AllowSharedPool {
 			policy.AllowAppRuntime = true
-			policy.AllowBuilds = true
 		}
+		// Sharing application capacity does not grant build permission. The
+		// saved role must survive runtime heartbeats and pool-mode refreshes.
 		return normalizeMachinePolicy(model.MachineScopeTenantRuntime, policy)
 	}
 

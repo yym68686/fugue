@@ -4505,8 +4505,8 @@ func TestSetRuntimePoolModeOnlyAllowsManagedOwnedRuntimes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get managed runtime machine: %v", err)
 	}
-	if !machine.Policy.AllowBuilds {
-		t.Fatalf("expected shared-pool runtime machine builds enabled, got %#v", machine.Policy)
+	if machine.Policy.AllowBuilds {
+		t.Fatalf("pool membership must preserve saved build permission, got %#v", machine.Policy)
 	}
 	if !machine.Policy.AllowSharedPool {
 		t.Fatalf("expected shared-pool runtime machine workloads enabled, got %#v", machine.Policy)

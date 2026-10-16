@@ -930,6 +930,12 @@ func (c *CLI) newAdminClusterNodePolicySetCommand() *cobra.Command {
 			if response.ReconcileError != "" {
 				return fmt.Errorf("node policy saved but reconciliation failed: %s", response.ReconcileError)
 			}
+			if opts.Builds != "" && request.AllowBuilds != nil {
+				policy := response.ClusterNode.Policy
+				if policy == nil || policy.AllowBuilds != *request.AllowBuilds || policy.EffectiveBuilds != *request.AllowBuilds {
+					return fmt.Errorf("requested build permission is not confirmed in saved and effective node policy; inspect node-policy get %s", args[0])
+				}
+			}
 			edgeReady := false
 			if enrollEdge {
 				if _, err = client.CreateNodeUpdateTask(nodeUpdateTaskCreateRequest{ClusterNodeName: args[0], Type: model.NodeUpdateTaskTypeRefreshDesiredState}); err != nil {
