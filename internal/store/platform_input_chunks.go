@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -119,13 +120,14 @@ func (r *inputChunkReader) Read(p []byte) (int, error) {
 }
 
 type inputChunkWriter struct {
-	ctx    context.Context
-	tx     *sql.Tx
-	digest string
-	hash   hash.Hash
-	chunk  []byte
-	count  int
-	size   int64
+	ctx      context.Context
+	tx       *sql.Tx
+	digest   string
+	hash     hash.Hash
+	chunk    []byte
+	count    int
+	size     int64
+	expected [][sha256.Size]byte
 }
 
 func (w *inputChunkWriter) Write(p []byte) (int, error) {
@@ -134,12 +136,12 @@ func (w *inputChunkWriter) Write(p []byte) (int, error) {
 	}
 	total := len(p)
 	for len(p) > 0 {
-		n := min(inputChunkBytes-len(w.chunk), len(p))
+		n := min(cap(w.chunk)-len(w.chunk), len(p))
 		w.chunk = append(w.chunk, p[:n]...)
 		w.hash.Write(p[:n])
 		w.size += int64(n)
 		p = p[n:]
-		if len(w.chunk) == inputChunkBytes {
+		if len(w.chunk) == cap(w.chunk) {
 			if err := w.flush(); err != nil {
 				return total - len(p), err
 			}
@@ -151,10 +153,16 @@ func (w *inputChunkWriter) flush() error {
 	if len(w.chunk) == 0 {
 		return nil
 	}
-	h := sha256.Sum256(w.chunk)
-	if _, err := w.tx.ExecContext(w.ctx, `INSERT INTO fugue_platform_input_chunks(content_hash,ordinal,chunk_hash,data) VALUES($1,$2,$3,$4)`, w.digest, w.count, "sha256:"+hex.EncodeToString(h[:]), w.chunk); err != nil {
-		return err
+	if w.count >= inputMaxBytes/inputChunkBytes {
+		return fmt.Errorf("compiler input verification chunk inventory exceeds bound: %w", ErrConflict)
 	}
+	h := sha256.Sum256(w.chunk)
+	if w.tx != nil {
+		if _, err := w.tx.ExecContext(w.ctx, `INSERT INTO fugue_platform_input_chunks(content_hash,ordinal,chunk_hash,data) VALUES($1,$2,$3,$4)`, w.digest, w.count, "sha256:"+hex.EncodeToString(h[:]), w.chunk); err != nil {
+			return err
+		}
+	}
+	w.expected = append(w.expected, h)
 	w.count++
 	w.chunk = w.chunk[:0]
 	return nil
@@ -178,21 +186,39 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	}
 	m, err := readInputManifest(ctx, tx, digest)
 	if err == nil {
-		actual, hashErr := platformconfig.RuntimeSnapshotDigest(snapshot)
-		if hashErr != nil {
-			return hashErr
-		}
-		if actual != digest {
-			return ErrConflict
-		}
-		r, err := openInputChunks(ctx, tx, m)
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(io.Discard, r)
-		r.rows.Close()
-		if err != nil {
-			return err
+		// Older manifests may use unusually small chunks. Keep the witness
+		// vector bounded to the same maximum as a newly written input.
+		if m.Count > inputMaxBytes/inputChunkBytes {
+			actual, hashErr := platformconfig.RuntimeSnapshotDigest(snapshot)
+			if hashErr != nil {
+				return hashErr
+			}
+			if actual != digest {
+				return ErrConflict
+			}
+			r, err := openInputChunks(ctx, tx, m)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(io.Discard, r)
+			r.rows.Close()
+			if err != nil {
+				return err
+			}
+		} else {
+			w := &inputChunkWriter{ctx: ctx, digest: digest, hash: sha256.New(), chunk: make([]byte, 0, m.ChunkSize)}
+			if err := platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
+				return err
+			}
+			if err := w.flush(); err != nil {
+				return err
+			}
+			if w.size != m.Size || w.count != m.Count || "sha256:"+hex.EncodeToString(w.hash.Sum(nil)) != digest {
+				return ErrConflict
+			}
+			if err := verifyInputChunkHashes(ctx, tx, m, w.expected); err != nil {
+				return err
+			}
 		}
 		return tx.Commit()
 	}
@@ -244,21 +270,51 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_platform_input_manifests(content_hash,format,size_bytes,chunk_size,chunk_count,created_at) VALUES($1,$2,$3,$4,$5,$6)`, m.Digest, m.Format, m.Size, m.ChunkSize, m.Count, m.Created); err != nil {
 		return err
 	}
-	// Verify actual stored bytes with a bounded read before making the manifest
-	// visible. A failed write/read/hash leaves no committed partial content.
-	r, err := openInputChunks(ctx, tx, m)
-	if err != nil {
+	// Hash the actual stored bytes in PostgreSQL and compare with the hashes
+	// of the input just written. A claimed chunk_hash alone is not proof. This
+	// retains read-after-write verification without returning the entire body.
+	if err = verifyInputChunkHashes(ctx, tx, m, w.expected); err != nil {
 		return err
-	}
-	_, err = io.Copy(io.Discard, r)
-	r.rows.Close()
-	if err != nil {
-		return err
-	}
-	if !r.done || r.err != nil {
-		return ErrConflict
 	}
 	return tx.Commit()
+}
+
+// The canonical input stream has already been hashed to m.Digest. Each stored
+// chunk must match that stream's independent SHA-256, position and length, so
+// even changing both stored data and its declared chunk_hash cannot pass.
+func verifyInputChunkHashes(ctx context.Context, db inputQueryer, m inputManifest, expected [][sha256.Size]byte) error {
+	if len(expected) != m.Count {
+		return ErrConflict
+	}
+	rows, err := db.QueryContext(ctx, `SELECT ordinal,chunk_hash,octet_length(data),sha256(data) FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal`, m.Digest)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var ordinal, size int
+		var declared string
+		var actual []byte
+		if err := rows.Scan(&ordinal, &declared, &size, &actual); err != nil {
+			return err
+		}
+		want := m.ChunkSize
+		if count == m.Count-1 {
+			want = int(m.Size - int64(count)*int64(m.ChunkSize))
+		}
+		if count >= m.Count || ordinal != count || size != want || !bytes.Equal(actual, expected[count][:]) || declared != "sha256:"+hex.EncodeToString(expected[count][:]) {
+			return fmt.Errorf("compiler input chunk identity/size/hash differs: %w", ErrConflict)
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if count != m.Count {
+		return fmt.Errorf("compiler input chunk count differs: %w", ErrConflict)
+	}
+	return nil
 }
 
 func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeSnapshot, error) {

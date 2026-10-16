@@ -15,7 +15,7 @@ import (
 	"fugue/internal/schemamigrate"
 )
 
-func boundedContentTestStore(t *testing.T) *Store {
+func boundedContentTestStore(t testing.TB) *Store {
 	t.Helper()
 	dsn := os.Getenv("FUGUE_MEMORY_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -40,7 +40,7 @@ func boundedContentTestStore(t *testing.T) *Store {
 	s.storagePolicy.value = StoragePolicy{Version: 1, CompilerInputChunks: true, CheckpointPages: true}
 	return s
 }
-func chunkedInputFixture(t *testing.T) (platformconfig.RuntimeSnapshot, string) {
+func chunkedInputFixture(t testing.TB) (platformconfig.RuntimeSnapshot, string) {
 	t.Helper()
 	s := platformconfig.RuntimeSnapshot{IntentGeneration: fmt.Sprintf("input-%d", time.Now().UnixNano()), PolicyGeneration: "policy"}
 	for i := 0; i < 12; i++ {
