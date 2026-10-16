@@ -215,7 +215,7 @@ func TestDNSDeploymentTransitionKeepsPerRecordAnswersWithoutPromotingLKG(t *test
 }
 
 func TestDNSRolloutLifecyclePreservesWireAnswersWithExactSuccessorProofs(t *testing.T) {
-	for _, phase := range []string{"abort", "promote"} {
+	for _, phase := range []string{"abort", "promote", "replace"} {
 		t.Run(phase, func(t *testing.T) { testDNSDeploymentTransition(t, phase) })
 	}
 }
@@ -258,9 +258,12 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 			rule := r.Policy.DNSAnswerRules[0]
 			rule.Hostname = other.Hostname
 			r.Policy.DNSAnswerRules = append(r.Policy.DNSAnswerRules, rule)
-			if phase == "abort" || phase == "promote" {
+			if phase == "abort" || phase == "promote" || phase == "replace" {
 				traffic := platformconfig.TrafficPolicyConstraint{ID: "app-traffic", AppID: r.Intent.Routes[0].AppID, TenantID: r.Intent.Routes[0].TenantID,
 					Mode: model.AppTrafficModeCanary, StableReleaseID: "stable-code", CandidateReleaseID: "candidate-code", StableWeight: 75, CandidateWeight: 25, UnavailableCandidate: "stable"}
+				if phase == "replace" && generation == "deploy-after" {
+					traffic.CandidateReleaseID, traffic.StableWeight, traffic.CandidateWeight = "successor-code", 99, 1
+				}
 				if phase == "start" && generation == "deploy-before" || (phase == "abort" || phase == "promote") && generation == "deploy-after" {
 					traffic.Mode, traffic.CandidateReleaseID, traffic.StableWeight, traffic.CandidateWeight = model.AppTrafficModeSingle, "", 100, 0
 					if phase == "promote" {
@@ -268,7 +271,7 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 					}
 				}
 				r.Policy.TrafficConstraints = []platformconfig.TrafficPolicyConstraint{traffic}
-				for _, id := range []string{"stable-code", "candidate-code"} {
+				for _, id := range []string{"stable-code", "candidate-code", "successor-code"} {
 					r.RuntimeSnapshot.Releases = append(r.RuntimeSnapshot.Releases, platformconfig.ReleaseObservation{ID: id, AppID: traffic.AppID, TenantID: traffic.TenantID,
 						ObservedAt: stamp, Status: model.EdgeRouteStatusActive, UpstreamURL: "http://" + id + ":8080", DeploymentGeneration: id})
 				}

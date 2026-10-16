@@ -158,8 +158,61 @@ func TestDNSInitialCanaryPreservesIdentityAndExistingReleaseBoundaries(t *testin
 			case "older publication":
 				bridge.candidate.Release.ReleasedAt = old.record.Candidate.Release.ReleasedAt
 			}
-			if dnsTransitionRecords(old, bridge)[old.payload.Plan.Records[0].Hostname] {
+			if dnsTransitionRecords(old, bridge)[old.payload.Plan.Records[0].Hostname] != (scenario == "prior canary") {
 				t.Fatal("initial canary bypassed an independent authorization boundary")
+			}
+		})
+	}
+}
+
+func TestDNSReplacementCanaryPreservesStableAndDNSAuthority(t *testing.T) {
+	for _, scenario := range []string{"replace", "stable", "tenant", "app", "policy", "fallback", "cookie", "header", "old inactive", "new inactive", "invalid total", "same release", "endpoint", "quorum", "duplicate previous", "duplicate next", "older publication"} {
+		t.Run(scenario, func(t *testing.T) {
+			old, bridge, _, _ := initialCanaryDNSFixture(t)
+			before, after := &old.payload.Policy.TrafficConstraints[0], &bridge.payload.Policy.TrafficConstraints[0]
+			before.Mode, before.CandidateReleaseID = model.AppTrafficModeCanary, "previous-candidate"
+			before.StableWeight, before.CandidateWeight = 75, 25
+			switch scenario {
+			case "stable":
+				after.StableReleaseID = "other"
+			case "tenant":
+				after.TenantID = "other"
+			case "app":
+				after.AppID = "other"
+			case "policy":
+				after.ID = "other"
+			case "fallback":
+				after.UnavailableCandidate = "fail"
+			case "cookie":
+				after.StickyCookie = "other"
+			case "header":
+				after.StickyHeader = "other"
+			case "old inactive":
+				before.StableWeight, before.CandidateWeight = 100, 0
+			case "new inactive":
+				after.StableWeight, after.CandidateWeight = 100, 0
+			case "invalid total":
+				after.StableWeight = 100
+			case "same release":
+				after.CandidateReleaseID = after.StableReleaseID
+			case "endpoint":
+				bridge.payload.Queries[0].Records[0].Candidates[0].IP = "192.0.2.99"
+			case "quorum":
+				bridge.payload.Plan.Records[0].MinimumHealthyEdges--
+			case "duplicate previous":
+				old.payload.Policy.TrafficConstraints = append(old.payload.Policy.TrafficConstraints, *before)
+			case "duplicate next":
+				bridge.payload.Policy.TrafficConstraints = append(bridge.payload.Policy.TrafficConstraints, *after)
+			case "older publication":
+				bridge.candidate.Release.ReleasedAt = old.record.Candidate.Release.ReleasedAt
+			}
+			if dnsTransitionRecords(old, bridge)[old.payload.Plan.Records[0].Hostname] != (scenario == "replace") {
+				t.Fatal("replacement changed independent authority", scenario)
+			}
+			for _, allowed := range compatibleDNSReleaseProbes(old, bridge) {
+				if allowed {
+					t.Fatal("replacement proofs rebound to old publication")
+				}
 			}
 		})
 	}

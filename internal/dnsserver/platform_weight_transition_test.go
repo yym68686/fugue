@@ -100,7 +100,7 @@ func TestDNSCanaryWeightTransitionUsesSuccessorProofWithoutRebindingLKG(t *testi
 			previousRaw := mustDNSJSON(t, previous)
 			nextRaw := mustDNSJSON(t, next)
 			hosts := dnsTransitionRecords(old, bridge)
-			if hosts[plan.Records[0].Hostname] != (scenario == "weight" || scenario == "start" || scenario == "abort" || scenario == "promote" || scenario == "enable" || scenario == "disable") {
+			if hosts[plan.Records[0].Hostname] != (scenario == "weight" || scenario == "start" || scenario == "abort" || scenario == "promote" || scenario == "enable" || scenario == "disable" || scenario == "candidate") {
 				t.Fatal("weight transition authorization", scenario, hosts)
 			}
 			if string(previousRaw) != string(mustDNSJSON(t, previous)) || string(nextRaw) != string(mustDNSJSON(t, next)) {

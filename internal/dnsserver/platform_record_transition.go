@@ -168,7 +168,8 @@ func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[st
 // Starting a canary changes application execution, not DNS endpoint authority.
 // A signed successor may recover its records when it keeps the exact stable
 // release and every other policy boundary, with positive shares for both
-// releases. A previously configured candidate cannot be replaced or revived.
+// releases. A signed replacement canary may retain the same stable authority;
+// previously zero-weight releases still cannot be revived by this comparison.
 // This projection is used only for forward recovery, never old-proof bridging.
 func dnsTransitionTrafficConstraintPair(before, after []platformconfig.TrafficPolicyConstraint) ([]platformconfig.TrafficPolicyConstraint, []platformconfig.TrafficPolicyConstraint) {
 	previous, next := slices.Clone(before), slices.Clone(after)
@@ -205,6 +206,32 @@ func dnsTransitionTrafficConstraintPair(before, after []platformconfig.TrafficPo
 		retained.StableWeight, retained.CandidateWeight = 100, 0
 		if retained == single {
 			previous[index] = canary
+		}
+	}
+	// A consumer can miss the brief single-stable publication between aborting
+	// one canary and starting another. The newer signed artifact independently
+	// authorizes its candidate; DNS may use its complete exact per-record proofs
+	// when stable release and every non-weight policy boundary are unchanged.
+	// This never rebinds new proofs to the old artifact or promotes its LKG.
+	for index, before := range previous {
+		if before.ID == "" || before.AppID == "" || before.TenantID == "" || previousCounts[before.ID] != 1 ||
+			before.Mode != model.AppTrafficModeCanary || before.StableReleaseID == "" || before.CandidateReleaseID == "" ||
+			before.StableReleaseID == before.CandidateReleaseID || before.StableWeight <= 0 || before.CandidateWeight <= 0 || before.StableWeight+before.CandidateWeight != 100 {
+			continue
+		}
+		position, exists := nextIndex[before.ID]
+		if !exists || position < 0 {
+			continue
+		}
+		after := next[position]
+		if after.Mode != model.AppTrafficModeCanary || after.CandidateReleaseID == "" || after.CandidateReleaseID == before.CandidateReleaseID ||
+			after.StableReleaseID == after.CandidateReleaseID || after.StableWeight <= 0 || after.CandidateWeight <= 0 || after.StableWeight+after.CandidateWeight != 100 {
+			continue
+		}
+		comparison := after
+		comparison.CandidateReleaseID, comparison.StableWeight, comparison.CandidateWeight = before.CandidateReleaseID, before.StableWeight, before.CandidateWeight
+		if comparison == before {
+			previous[index] = after
 		}
 	}
 	// Finishing or aborting an already-authorized rollout keeps the same DNS
