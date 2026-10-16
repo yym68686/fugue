@@ -139,16 +139,6 @@ func main() {
 		logger.Printf("runtime observations unavailable: %v", err)
 	}
 	warmersDone := server.StartBackgroundWarmers(ctx)
-	defer func() {
-		stop()
-		timer := time.NewTimer(cfg.ShutdownTimeout)
-		defer timer.Stop()
-		select {
-		case <-warmersDone:
-		case <-timer.C:
-			logger.Printf("background warmer shutdown deadline exceeded")
-		}
-	}()
 	go server.StartBackgroundEdgeQualityRollups(ctx)
 	go server.StartBackgroundDNSObservations(ctx)
 	go server.StartBackgroundPlatformConfiguration(ctx)
@@ -196,7 +186,9 @@ func main() {
 		}()
 	}
 
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		server.SetReady(false)
 		if cfg.ShutdownDrainDelay > 0 {
@@ -217,10 +209,17 @@ func main() {
 				logger.Printf("edge-control RouteIntent TLS shutdown error: %v", err)
 			}
 		}
+		// Workers share the HTTP shutdown deadline; waiting here must not
+		// start another full timeout after the Kubernetes grace budget.
+		select {
+		case <-warmersDone:
+		case <-shutdownCtx.Done():
+			logger.Printf("background warmer shutdown deadline exceeded")
+		}
 	}()
 
 	logger.Printf("fugue-api listening on %s", cfg.BindAddr)
-	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := serveUntilShutdownCompletes(httpServer.ListenAndServe, shutdownDone); err != nil {
 		logger.Fatalf("listen and serve: %v", err)
 	}
 }
