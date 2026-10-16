@@ -1,6 +1,7 @@
 {
   "enabled": true,
-  "generation": 3,
+  "generation": 4,
+  "minimum_updater_version": "v47",
   "origin": "https://api.fugue.pro",
   "policy_file": "policy.json",
   "local_node": "vps-d6d20fa1",

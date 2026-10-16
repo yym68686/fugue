@@ -5,7 +5,7 @@ import datetime
 import json
 import os
 from pathlib import Path
-import subprocess
+import re
 import sys
 import time
 import urllib.error
@@ -40,8 +40,15 @@ class API:
             raise RuntimeError("node policy API %s %s returned %d" % (method, path.split("?")[0], exc.code)) from None
 
 
-def publish(api, targets, policy, apply=False, wait_seconds=0, upgrade_updaters=False):
+def version_number(value):
+    return int(value[1:]) if isinstance(value, str) and re.fullmatch(r"v[1-9][0-9]*", value) else 0
+
+
+def publish(api, targets, policy, apply=False, wait_seconds=0, upgrade_updaters=False, minimum_updater_version=None):
     validate(policy)
+    minimum = version_number(minimum_updater_version)
+    if minimum_updater_version is not None and not minimum:
+        raise ValueError("minimum_updater_version must be a numbered v release")
     if not targets or len(set(targets)) != len(targets):
         raise ValueError("explicit unique node target list required")
     deadline = time.monotonic() + wait_seconds
@@ -49,6 +56,7 @@ def publish(api, targets, policy, apply=False, wait_seconds=0, upgrade_updaters=
     while remaining:
         updaters = api("GET", "/v1/node-updaters")["node_updaters"]
         by_node = {}
+        upgrade_candidates = []
         for updater in updaters:
             if updater.get("status") != "active":
                 continue
@@ -67,12 +75,12 @@ def publish(api, targets, policy, apply=False, wait_seconds=0, upgrade_updaters=
             updater = by_node.get(node)
             if not updater:
                 continue
-            if TASK not in updater.get("capabilities", []):
-                if node not in upgrades and upgrade_updaters:
-                    script = api("GET", "/install/node-updater.sh")
-                    if 'FUGUE_NODE_UPDATER_SCRIPT_VERSION="v46"' in script:
-                        api("POST", "/v1/node-update-tasks", {"node_updater_id": updater["id"], "type": "upgrade-node-updater", "payload": {"target_version": "v46", "reason": "node-resource-policy-capability"}})
-                        upgrades.add(node)
+            capable = TASK in updater.get("capabilities", [])
+            current = version_number(updater.get("updater_version"))
+            upgrade_needed = not capable or (upgrade_updaters and current < minimum)
+            if upgrade_needed and node not in upgrades and upgrade_updaters:
+                upgrade_candidates.append((node, updater["id"], current))
+            if not capable:
                 continue
             if node not in submitted:
                 task = api("POST", "/v1/node-update-tasks", {"node_updater_id": updater["id"], "type": TASK, "payload": {"policy_json": json.dumps(policy, sort_keys=True, separators=(",", ":")), "dry_run": "false" if apply else "true", "reason": "git-node-resource-policy"}})["task"]
@@ -86,7 +94,18 @@ def publish(api, targets, policy, apply=False, wait_seconds=0, upgrade_updaters=
                 raise RuntimeError("node policy task %s on %s %s: %s" % (task["id"], node, task["status"], task.get("error_message", "")))
             if task["status"] == "completed":
                 results[node] = {"task_id": task["id"], "status": task["status"], "message": task.get("result_message", "")}
-                remaining.remove(node)
+                if not upgrade_needed:
+                    remaining.remove(node)
+        # Publish configuration to all capable targets before depending on code
+        # availability. A script download/build failure must not gate recovery.
+        if upgrade_candidates:
+            script = api("GET", "/install/node-updater.sh")
+            match = re.search(r'^FUGUE_NODE_UPDATER_SCRIPT_VERSION="(v[1-9][0-9]*)"$', script, re.MULTILINE)
+            served = version_number(match[1]) if match else 0
+            for node, updater_id, current in upgrade_candidates:
+                if served >= minimum and served > current and TASK in script:
+                    api("POST", "/v1/node-update-tasks", {"node_updater_id": updater_id, "type": "upgrade-node-updater", "payload": {"target_version": match[1], "reason": "node-resource-policy-version"}})
+                    upgrades.add(node)
         if not remaining:
             return results
         if time.monotonic() >= deadline:
@@ -107,7 +126,7 @@ def main():
     token = os.environ.pop("FUGUE_API_KEY", "")
     if not token:
         raise ValueError("configuration writer credential missing")
-    results = publish(API(config["origin"], token), config["nodes"], policy, args.apply, args.wait_seconds, args.upgrade_updaters)
+    results = publish(API(config["origin"], token), config["nodes"], policy, args.apply, args.wait_seconds, args.upgrade_updaters, config.get("minimum_updater_version"))
     print(json.dumps({"applied": args.apply, "results": results}, sort_keys=True))
 
 

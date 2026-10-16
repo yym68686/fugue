@@ -2620,8 +2620,7 @@ jobs:
             exit 0
           fi
           python3 -m unittest scripts.test_publish_node_resource_policy scripts.test_install_local_node_resource_policy
-          python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --upgrade-updaters --wait-seconds 2100
-          python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply --wait-seconds 900
+          python3 scripts/publish_node_resource_policy.py deploy/environments/production/node-resource-policy/targets.json --apply --upgrade-updaters --wait-seconds 3000
 
   tls_issuance_policy:
     # Certificate intent is recoverable independently of executable releases.
