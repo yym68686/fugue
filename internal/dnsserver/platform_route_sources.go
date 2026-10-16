@@ -97,10 +97,10 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 		selected = append(selected, byID[requirement.ID])
 	}
 	if err = s.checkDNSRouteSources(ctx, client, id, c, selection); err != nil {
-		return p, nil, err
+		return p, selected, err
 	}
 	if err = s.advanceDNSRouteCursor(snapshot); err != nil {
-		return p, nil, err
+		return p, selected, err
 	}
 	return p, selected, nil
 }

@@ -112,3 +112,19 @@ rejects the preparation flag without activating traffic; do not bypass that
 capability failure. This ordering avoids the prior interval in which HTTP traffic
 reached a candidate bundle that was correctly unable to issue ordinary DNS route
 proofs. Candidate proof rejection and DNS eligibility policy remain unchanged.
+
+## Retained DNS observations during assignment churn
+
+A changed assignment rejects the candidate publication and its transition
+bridge. It does not invalidate a newly collected physical proof that exactly
+matches the retained signed release and the identical probe requirement. DNS
+keeps those fresh observations in memory while retrying authority at most three
+times. Foreign-release, changed-endpoint, negative, duplicate, expired, future
+and older observations cannot replace the retained proof.
+
+This refresh does not persist a checkpoint, acknowledge the rejected assignment,
+advance the completed-scan clock, renew a pending transition, or extend the
+retained publication/source deadline. Original probe timestamps remain intact
+and their validity is capped by the retained policy. Offline proofs still expire
+normally. Roll out DNS code to an unselected standby, verify all readiness probes
+and UDP/TCP answers, then use the separate signed transport intent for handoff.

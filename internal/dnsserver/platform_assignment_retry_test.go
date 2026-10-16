@@ -24,14 +24,16 @@ import (
 
 func TestDNSAssignmentRacePreservesServingAndRetriesBoundedly(t *testing.T) {
 	for _, scenario := range []struct {
-		name       string
-		continuous bool
-		negative   bool
+		name          string
+		continuous    bool
+		negative      bool
+		retainedProof bool
 	}{
-		{"converges", false, false},
-		{"bounded_churn", true, false},
-		{"negative_observation_converges", false, true},
-		{"negative_observation_bounded_churn", true, true},
+		{"converges", false, false, false},
+		{"bounded_churn", true, false, false},
+		{"negative_observation_converges", false, true, false},
+		{"negative_observation_bounded_churn", true, true, false},
+		{"fresh_retained_proofs_survive_bounded_churn", true, false, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			continuous := scenario.continuous
@@ -51,8 +53,16 @@ func TestDNSAssignmentRacePreservesServingAndRetriesBoundedly(t *testing.T) {
 					attempts++
 					if attempts > 1 {
 						actual := s.platformServing.Load()
-						if actual != old || !reflect.DeepEqual(actual.facts, old.facts) {
-							t.Error("assignment race replaced the retained proof snapshot")
+						if !reflect.DeepEqual(actual.record, old.record) || actual.transition != old.transition {
+							t.Error("assignment race replaced the retained publication")
+						}
+						if scenario.negative && actual != old {
+							t.Error("foreign proof replaced the retained facts")
+						}
+						for _, fact := range actual.facts {
+							if !dnsFactMatchesRelease(fact, old.record.Parent, old.record.Candidate, old.routeID, old.payload) {
+								t.Error("superseded successor proof entered retained state")
+							}
 						}
 						if got := actual.answer(query, "", time.Now()); got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 {
 							t.Error("assignment race interrupted the retained DNS answer")
@@ -103,6 +113,10 @@ func TestDNSAssignmentRacePreservesServingAndRetriesBoundedly(t *testing.T) {
 					if requirement.Hostname == host && requirement.Path == path && requirement.Address == address {
 						now := time.Now().UTC()
 						proof := routeprobe.Proof{Digest: requirement.RouteDigest, Version: "serving", EdgeID: requirement.EdgeID, GroupID: requirement.EdgeGroupID, State: state, CheckedAt: now, ValidUntil: now.Add(time.Minute), TrafficRelease: &model.TrafficReleaseBinding{ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, RouteArtifactID: routeID, PolicyDigest: payload.Lineage.PolicyDigest, IntentDigest: payload.Lineage.IntentDigest, InputSnapshotDigest: payload.Lineage.InputSnapshotDigest, ReleaseID: candidate.Release.ID, ReleaseChannel: candidate.Release.ReleaseChannel, FencingToken: candidate.Release.FencingToken, ScopeKey: "global"}}
+						if scenario.retainedProof {
+							proof.TrafficRelease.ReleaseID = baseline.Release.ID
+							proof.TrafficRelease.FencingToken = baseline.Release.FencingToken
+						}
 						if scenario.negative && attempts > 0 && (continuous || attempts == 1) {
 							proof.TrafficRelease.FencingToken++
 						}
@@ -121,6 +135,12 @@ func TestDNSAssignmentRacePreservesServingAndRetriesBoundedly(t *testing.T) {
 				t.Fatal(err)
 			}
 			facts := collectDNSReadinessFacts(context.Background(), payload.Plan, payload.Policy.DNSReadiness, probe)
+			if scenario.retainedProof {
+				for i := range facts {
+					facts[i].Proof.CheckedAt = now.Add(-59 * time.Second)
+					facts[i].Proof.ValidUntil = now.Add(time.Second)
+				}
+			}
 			old, err = buildDNSServingState(checkpoint, payload, routeID, cfg.DNSNodeID, cfg.EdgeGroupID, facts, now.Add(-time.Hour))
 			if err != nil {
 				t.Fatal(err)
@@ -129,15 +149,24 @@ func TestDNSAssignmentRacePreservesServingAndRetriesBoundedly(t *testing.T) {
 			s.platformServingBound.Store(true)
 			err = s.syncPlatformDNSServing(context.Background(), probe, func(*dnsServingState) error { return nil })
 			if continuous {
-				if !errors.Is(err, platformconsumer.ErrAssignmentChanged) || attempts != 3 || reports != 0 || s.platformServing.Load() != old {
+				actual := s.platformServing.Load()
+				if !errors.Is(err, platformconsumer.ErrAssignmentChanged) || attempts != 3 || reports != 0 || !reflect.DeepEqual(actual.record, old.record) {
 					t.Fatal("churning publication was acknowledged or retried without bounds", attempts, reports, err)
 				}
 				after, readErr := os.ReadFile(cfg.CachePath + ".platform-serving.json")
 				if readErr != nil || string(after) != string(saved) {
 					t.Fatal("publication race overwrote positive LKG", readErr)
 				}
-				if got := old.answer(query, "", now.Add(2*time.Minute)); got.Rcode != dns.RcodeServerFailure {
-					t.Fatal("assignment retry renewed proof validity")
+				if scenario.retainedProof {
+					if got := old.answer(query, "", now.Add(2*time.Second)); got.Rcode != dns.RcodeServerFailure {
+						t.Fatal("fixture does not expire during publication churn")
+					}
+					if got := actual.answer(query, "", now.Add(2*time.Second)); got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 {
+						t.Fatal("assignment churn discarded fresh exact retained proofs")
+					}
+				}
+				if got := actual.answer(query, "", now.Add(2*time.Minute)); got.Rcode != dns.RcodeServerFailure {
+					t.Fatal("assignment retry extended actual probe validity")
 				}
 			} else if err != nil || attempts != 2 || reports != 1 || !reflect.DeepEqual(s.platformServing.Load().record.Candidate.Assignment, candidate.Assignment) {
 				t.Fatal("assignment race did not converge with fresh authority", attempts, reports, err)

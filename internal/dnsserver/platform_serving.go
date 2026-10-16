@@ -206,11 +206,19 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	var bridge *dnsReleaseBridge
 	var observations []dnsReadinessFact
 	defer func() {
-		// An assignment race invalidates this observation, including the bridge
-		// just downloaded. Do not replace still-valid serving facts with probes
-		// checked against that superseded publication. The bounded outer retry
-		// rereads authority; existing proof deadlines continue to expire normally.
-		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) || errors.Is(syncErr, platformconsumer.ErrDNSBackendNotSelected) {
+		// A superseded assignment cannot authorize a bridge or a new checkpoint.
+		// Its scan may nevertheless contain fresh physical proofs of the exact
+		// retained release. Keep those independent runtime observations so that
+		// bounded retries do not starve serving proofs during publication churn.
+		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) {
+			if ctx.Err() == nil && old != nil && bridge != nil && s.platformServing.Load() == old {
+				if refreshed := s.refreshRetainedDNSFactsFromObservations(old, bridge.payload.Plan, observations, time.Now().UTC()); refreshed != nil {
+					s.platformServing.Store(refreshed)
+				}
+			}
+			return
+		}
+		if errors.Is(syncErr, platformconsumer.ErrDNSBackendNotSelected) {
 			return
 		}
 		// Rejection must not starve the retained artifact's independent probes.
@@ -274,10 +282,11 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		previousSources = old.record.RouteSources
 	}
 	p, sourceFacts, err := s.observeDNSRouteSources(ctx, client, id, candidate, p, previousSources, probe)
+	bridge.payload = p
+	observations = append([]dnsReadinessFact(nil), sourceFacts...)
 	if err != nil {
 		return err
 	}
-	bridge.payload = p
 	facts := sourceFacts
 	if p.routeSources == nil {
 		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.bind(a, s.Logger, s.Config.CachePath))
