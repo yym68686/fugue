@@ -83,6 +83,8 @@ type contentFingerprinter struct {
 	writer  *bufio.Writer
 	scratch [8]byte
 	size    int
+	keys    [256]string
+	keyUsed int
 }
 
 var contentFingerprinters = sync.Pool{New: func() any {
@@ -104,6 +106,7 @@ func fingerprintContent(content map[string]any) ([32]byte, int, bool) {
 	f.hash.Reset()
 	f.writer.Reset(f.hash)
 	f.size = 0
+	f.keyUsed = 0
 	defer contentFingerprinters.Put(f)
 	_, _ = f.writer.WriteString("fugue-json-tree/v1\x00")
 	ok := f.value(content, 0)
@@ -170,9 +173,24 @@ func (f *contentFingerprinter) value(value any, depth int) bool {
 		}
 		_ = f.writer.WriteByte('m')
 		f.number(uint64(len(v)))
-		keys := make([]string, 0, len(v))
+		// Keep each parent's keys separate while visiting child maps. Large
+		// maps use temporary storage, never growing the pooled workspace.
+		mark := f.keyUsed
+		var keys []string
+		if len(v) <= len(f.keys)-mark {
+			keys = f.keys[mark : mark+len(v)]
+			f.keyUsed += len(v)
+		} else {
+			keys = make([]string, len(v))
+		}
+		defer func() {
+			clear(keys) // Do not retain caller strings through the pool.
+			f.keyUsed = mark
+		}()
+		i := 0
 		for key := range v {
-			keys = append(keys, key)
+			keys[i] = key
+			i++
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
