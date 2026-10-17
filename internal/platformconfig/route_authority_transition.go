@@ -151,12 +151,19 @@ func PreviousTrafficPublicationBinding(p PreviousTrafficPublicationInput, group 
 }
 
 func DecodePreviousTrafficPublication(a model.PlatformArtifact) (*PreviousTrafficPublicationInput, error) {
+	raw, err := json.Marshal(a.Content)
+	if err != nil {
+		return nil, fmt.Errorf("previous traffic publication cannot be decoded")
+	}
+	return decodePreviousTrafficPublication(raw)
+}
+
+func decodePreviousTrafficPublication(raw []byte) (*PreviousTrafficPublicationInput, error) {
 	var payload struct {
 		Previous *PreviousTrafficPublicationInput `json:"previous_traffic_publication"`
 		Source   *CellDNSPlanSource               `json:"cell_dns_source"`
 	}
-	raw, err := json.Marshal(a.Content)
-	if err != nil || json.Unmarshal(raw, &payload) != nil {
+	if json.Unmarshal(raw, &payload) != nil {
 		return nil, fmt.Errorf("previous traffic publication cannot be decoded")
 	}
 	declared := payload.Source != nil && payload.Source.Intent.RouteAuthorityTransition != nil

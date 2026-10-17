@@ -144,6 +144,18 @@ func CellRoutePublicationBinding(p CellRoutePublicationInput) (*model.TrafficRel
 }
 
 func DecodeCellRoutePublications(artifact model.PlatformArtifact) ([]CellRoutePublicationInput, error) {
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return nil, fmt.Errorf("DNS artifact content cannot be encoded: %w", err)
+	}
+	publications, _, err := decodeCellRoutePublications(raw)
+	return publications, err
+}
+
+// Reuse decoded policy only within this validation, never across artifact reads
+// or network observations. The caller still owns all authority checks.
+func decodeCellRoutePublications(raw []byte) ([]CellRoutePublicationInput, PolicySnapshot, error) {
+	var policy PolicySnapshot
 	// Policy contains versioned nested decoders even for ordinary DNS artifacts
 	// without Cell references. Keep its failure separate from reference decoding:
 	// an older policy reader must not diagnose an absent Cell topology as corrupt.
@@ -151,41 +163,36 @@ func DecodeCellRoutePublications(artifact model.PlatformArtifact) ([]CellRoutePu
 		Publications json.RawMessage `json:"cell_route_publications"`
 		Policy       json.RawMessage `json:"policy"`
 	}
-	raw, err := json.Marshal(artifact.Content)
-	if err != nil {
-		return nil, fmt.Errorf("DNS artifact content cannot be encoded: %w", err)
-	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil, fmt.Errorf("DNS artifact envelope cannot be decoded: %w", err)
+		return nil, policy, fmt.Errorf("DNS artifact envelope cannot be decoded: %w", err)
 	}
-	var policy PolicySnapshot
 	if len(payload.Policy) > 0 {
 		if err := json.Unmarshal(payload.Policy, &policy); err != nil {
-			return nil, fmt.Errorf("DNS artifact policy cannot be decoded: %w", err)
+			return nil, policy, fmt.Errorf("DNS artifact policy cannot be decoded: %w", err)
 		}
 	}
 	var publications []CellRoutePublicationInput
 	if len(payload.Publications) > 0 {
 		if err := json.Unmarshal(payload.Publications, &publications); err != nil {
-			return nil, fmt.Errorf("DNS Cell references cannot be decoded: %w", err)
+			return nil, policy, fmt.Errorf("DNS Cell references cannot be decoded: %w", err)
 		}
 	}
 	if policy.PublicationRole != PublicationRoleCellDNS {
 		if len(publications) != 0 {
-			return nil, fmt.Errorf("Cell references require DNS publication authority")
+			return nil, policy, fmt.Errorf("Cell references require DNS publication authority")
 		}
-		return nil, nil
+		return nil, policy, nil
 	}
 	if len(publications) < 1 || len(publications) > 16 {
-		return nil, fmt.Errorf("DNS Cell references must be nonempty and bounded")
+		return nil, policy, fmt.Errorf("DNS Cell references must be nonempty and bounded")
 	}
 	for i, p := range publications {
 		if p.Reference.AuthorityCellID == policy.AuthorityCellID || i > 0 && publications[i-1].Reference.AuthorityCellID >= p.Reference.AuthorityCellID {
-			return nil, fmt.Errorf("DNS Cell references must be independent, sorted and unique")
+			return nil, policy, fmt.Errorf("DNS Cell references must be independent, sorted and unique")
 		}
 		if err := ValidateCellRoutePublication(p); err != nil {
-			return nil, err
+			return nil, policy, err
 		}
 	}
-	return publications, nil
+	return publications, policy, nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"fugue/internal/edgetopology"
@@ -288,17 +289,40 @@ type CellDNSPlanSource struct {
 }
 
 func ValidateDNSCellPlan(artifact model.PlatformArtifact) error {
-	pubs, err := DecodeCellRoutePublications(artifact)
+	// Freeze serialization for this call only. Independent public decoder calls
+	// still reread their input, and no validation result grants serving authority.
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return fmt.Errorf("DNS artifact content cannot be encoded: %w", err)
+	}
+	pubs, policy, err := decodeCellRoutePublications(raw)
 	if err != nil {
 		return err
 	}
 	var payload struct {
 		Plan   *DNSReadinessPlan  `json:"readiness_plan"`
 		Source *CellDNSPlanSource `json:"cell_dns_source"`
-		Policy PolicySnapshot     `json:"policy"`
 	}
-	raw, _ := json.Marshal(artifact.Content)
-	if json.Unmarshal(raw, &payload) != nil {
+	policyFields := 0
+	for key := range artifact.Content {
+		if strings.EqualFold(key, "policy") {
+			policyFields++
+		}
+	}
+	if policyFields > 1 {
+		// encoding/json merges case-insensitive aliases into typed structs but
+		// replaces RawMessage fields. Retain the previous typed merge and error
+		// ordering for noncanonical envelopes instead of trusting the last alias.
+		var merged struct {
+			Plan   *DNSReadinessPlan  `json:"readiness_plan"`
+			Source *CellDNSPlanSource `json:"cell_dns_source"`
+			Policy PolicySnapshot     `json:"policy"`
+		}
+		if json.Unmarshal(raw, &merged) != nil {
+			return fmt.Errorf("invalid DNS readiness content")
+		}
+		payload.Plan, payload.Source, policy = merged.Plan, merged.Source, merged.Policy
+	} else if json.Unmarshal(raw, &payload) != nil {
 		return fmt.Errorf("invalid DNS readiness content")
 	}
 	if len(pubs) == 0 {
@@ -314,22 +338,22 @@ func ValidateDNSCellPlan(artifact model.PlatformArtifact) error {
 		}
 		return nil
 	}
-	if payload.Plan == nil || payload.Source == nil || payload.Source.Intent.PublicationRole != PublicationRoleCellDNS || ValidatePlatformIntent(payload.Source.Intent) != nil || ValidatePolicySnapshot(payload.Policy) != nil {
+	if payload.Plan == nil || payload.Source == nil || payload.Source.Intent.PublicationRole != PublicationRoleCellDNS || ValidatePlatformIntent(payload.Source.Intent) != nil || ValidatePolicySnapshot(policy) != nil {
 		return fmt.Errorf("DNS Cell requirements or source missing")
 	}
 	intentDigest, _ := Digest(NormalizePlatformIntent(payload.Source.Intent))
-	policyDigest, _ := Digest(payload.Policy)
+	policyDigest, _ := Digest(policy)
 	if intentDigest != artifact.Metadata["intent_digest"] || policyDigest != artifact.Metadata["policy_digest"] {
 		return fmt.Errorf("DNS Cell source differs from signed lineage")
 	}
-	if _, err := CompileTrafficConsumerTopology(payload.Source.Intent, payload.Policy); err != nil {
+	if _, err := CompileTrafficConsumerTopology(payload.Source.Intent, policy); err != nil {
 		return err
 	}
-	previous, err := DecodePreviousTrafficPublication(artifact)
+	previous, err := decodePreviousTrafficPublication(raw)
 	if err != nil {
 		return err
 	}
-	want, err := compileCellDNSReadiness(payload.Source.Intent, pubs, RuntimeSnapshot{DNSEdgeEndpoints: payload.Source.Endpoints, CapturedAt: payload.Source.CapturedAt}, payload.Policy, previous)
+	want, err := compileCellDNSReadiness(payload.Source.Intent, pubs, RuntimeSnapshot{DNSEdgeEndpoints: payload.Source.Endpoints, CapturedAt: payload.Source.CapturedAt}, policy, previous)
 	if err != nil {
 		return err
 	}
