@@ -318,6 +318,12 @@ func placementGroupEligible(record platformconfig.DNSIntent, routes []platformco
 func placementHostnameRoutes(result platformIntentProjectionResponse, host string) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error) {
 	intent := platformconfig.NormalizePlatformIntent(result.Intent)
 	policy := platformconfig.NormalizePolicySnapshot(result.Policy)
+	return placementHostnameRoutesFromSnapshot(result, intent, policy, host, func(compiled []platformconfig.CompiledRoute) (model.EdgeRouteIntentSnapshot, error) {
+		return projectPlatformRouteArtifact(model.PlatformArtifact{Generation: result.SourceGeneration, Content: map[string]any{"routes": compiled, "policy": policy, "cache_policies": intent.CachePolicies}})
+	})
+}
+
+func placementHostnameRoutesFromSnapshot(result platformIntentProjectionResponse, intent platformconfig.PlatformIntent, policy platformconfig.PolicySnapshot, host string, project func([]platformconfig.CompiledRoute) (model.EdgeRouteIntentSnapshot, error)) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error) {
 	routes := []platformconfig.RouteIntent{}
 	originRefs, apps, releaseIDs := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, r := range intent.Routes {
@@ -376,15 +382,48 @@ func placementHostnameRoutes(result platformIntentProjectionResponse, host strin
 		}
 		return nil, nil, fmt.Errorf("DNS hostname %q traffic policy evidence unavailable (unobserved releases %v): %w", host, missing, err)
 	}
-	projection, err := projectPlatformRouteArtifact(model.PlatformArtifact{Generation: result.SourceGeneration, Content: map[string]any{"routes": compiled, "policy": policy, "cache_policies": intent.CachePolicies}})
+	projection, err := project(compiled)
 	return compiled, projection.Routes, err
 }
 
 func placementRecordRoutes(result platformIntentProjectionResponse, record platformconfig.DNSIntent) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error) {
+	return placementRecordRoutesWithReader(record, func(host string) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error) {
+		return placementHostnameRoutes(result, host)
+	})
+}
+
+// One reader belongs to one fixed compilation phase. It normalizes the intent
+// and snapshots the complete policy once; it does not cache route results or
+// runtime evidence. Rebuild after policy publication or captured-time changes.
+// Callers must not mutate this phase's input while it is in use.
+func newPlacementRecordRouteReader(result platformIntentProjectionResponse) func(platformconfig.DNSIntent) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error) {
+	var once sync.Once
+	var intent platformconfig.PlatformIntent
+	var policy platformconfig.PolicySnapshot
+	var projectRoutes func([]platformconfig.CompiledRoute) (model.EdgeRouteIntentSnapshot, error)
+	readHostname := func(host string) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error) {
+		once.Do(func() {
+			// Empty/static inventories need no route-policy work. Initialize only
+			// when this phase actually compiles a hostname.
+			intent = platformconfig.NormalizePlatformIntent(result.Intent)
+			policy = platformconfig.NormalizePolicySnapshot(result.Policy)
+			project := platformconfig.NewFrozenPolicyRouteProjector(policy)
+			projectRoutes = func(compiled []platformconfig.CompiledRoute) (model.EdgeRouteIntentSnapshot, error) {
+				return project(model.PlatformArtifact{Generation: result.SourceGeneration, Content: map[string]any{"routes": compiled, "cache_policies": intent.CachePolicies}})
+			}
+		})
+		return placementHostnameRoutesFromSnapshot(result, intent, policy, host, projectRoutes)
+	}
+	return func(record platformconfig.DNSIntent) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error) {
+		return placementRecordRoutesWithReader(record, readHostname)
+	}
+}
+
+func placementRecordRoutesWithReader(record platformconfig.DNSIntent, readHostname func(string) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error)) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error) {
 	compiled := []platformconfig.CompiledRoute{}
 	projected := []model.EdgeRouteIntent{}
 	for _, host := range platformconfig.DNSPlacementHostnames(record) {
-		c, p, err := placementHostnameRoutes(result, host)
+		c, p, err := readHostname(host)
 		if err != nil {
 			return nil, nil, err
 		}

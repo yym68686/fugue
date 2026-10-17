@@ -50,12 +50,13 @@ func projectOrderedDNSQueries(result *platformIntentProjectionResponse, strategy
 	}
 	rules := []platformconfig.DNSAnswerRule{}
 	facts := []platformconfig.DNSSelectionObservation{}
+	readRoutes := newPlacementRecordRouteReader(*result)
 	for _, record := range result.Intent.DNS {
 		options := platformconfig.DNSPlacementOptions(record)
 		if options == nil {
 			continue
 		}
-		owners, _, err := placementRecordRoutes(*result, record)
+		owners, _, err := readRoutes(record)
 		if err != nil {
 			return err
 		}

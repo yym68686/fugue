@@ -22,6 +22,23 @@ var platformRouteArtifactGroupID = regexp.MustCompile(edgetopology.AuthorityIDPa
 // ProjectRouteArtifact preserves the established RouteIntent wire semantics for a verified
 // artifact. It never reads business state or grants serving authorization.
 func ProjectRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRouteIntentSnapshot, error) {
+	readPolicy := func() (routeProjectionPolicy, error) {
+		// Preserve the ordinary entry point's lookup order even when a custom
+		// route encoder changes the input map while encoding routes.
+		value, exists := artifact.Content["policy"]
+		if !exists {
+			return routeProjectionPolicy{minimumHealthy: 1}, nil
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return routeProjectionPolicy{}, err
+		}
+		return decodeRouteProjectionPolicy(raw)
+	}
+	return projectRouteArtifact(artifact, readPolicy)
+}
+
+func projectRouteArtifact(artifact model.PlatformArtifact, readPolicy func() (routeProjectionPolicy, error)) (model.EdgeRouteIntentSnapshot, error) {
 	if schema, ok := artifact.Content["schema_version"]; ok && schema != SchemaVersion {
 		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("unsupported route artifact payload schema")
 	}
@@ -84,24 +101,12 @@ func ProjectRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRouteInten
 	}
 	minimumHealthy := 1
 	compiledTraffic := map[string]TrafficPolicyConstraint{}
-	if value, exists := artifact.Content["policy"]; exists {
-		rawPolicy, err := json.Marshal(value)
+	if readPolicy != nil {
+		policy, err := readPolicy()
 		if err != nil {
 			return model.EdgeRouteIntentSnapshot{}, err
 		}
-		var policy PolicySnapshot
-		if err := json.Unmarshal(rawPolicy, &policy); err != nil {
-			return model.EdgeRouteIntentSnapshot{}, err
-		}
-		if err := ValidatePolicySnapshot(policy); err != nil {
-			return model.EdgeRouteIntentSnapshot{}, err
-		}
-		if policy.MinimumHealthyEdges > 0 {
-			minimumHealthy = policy.MinimumHealthyEdges
-		}
-		for _, rule := range policy.TrafficConstraints {
-			compiledTraffic[rule.AppID] = rule
-		}
+		minimumHealthy, compiledTraffic = policy.minimumHealthy, policy.compiledTraffic
 	}
 	intents := make([]model.EdgeRouteIntent, 0, len(routes))
 	seen := make(map[string]bool, len(routes))

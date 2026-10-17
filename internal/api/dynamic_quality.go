@@ -66,6 +66,7 @@ func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy pl
 	for _, route := range policy.PhysicalRoutes {
 		explicit[route.Hostname] = true
 	}
+	readRoutes := newPlacementRecordRouteReader(projection)
 	for _, record := range projection.Intent.DNS {
 		if platformconfig.DNSPlacementOptions(record) == nil {
 			if _, present := states[record.Hostname]; !present {
@@ -77,7 +78,7 @@ func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy pl
 			states[record.Hostname] = "explicit_quality_policy"
 			continue
 		}
-		owners, _, err := placementRecordRoutes(projection, record)
+		owners, _, err := readRoutes(record)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -203,6 +204,7 @@ func (state *dynamicQualityState) started(key string, now time.Time) {
 // is shared between DNS consumers; candidate topology and quality policy still
 // participate in each digest. Never retain it across captures or policy changes.
 func newDynamicQualityContextReader(projection platformIntentProjectionResponse, jobs []dynamicQualityJob) func(dynamicQualityJob) (string, error) {
+	readRoutes := newPlacementRecordRouteReader(projection)
 	type routeContext struct {
 		record platformconfig.DNSIntent
 		once   sync.Once
@@ -236,7 +238,7 @@ func newDynamicQualityContextReader(projection platformIntentProjectionResponse,
 		var owners []platformconfig.CompiledRoute
 		if route := routes[job.Route.Hostname]; route != nil {
 			route.once.Do(func() {
-				route.owners, _, route.err = placementRecordRoutes(projection, route.record)
+				route.owners, _, route.err = readRoutes(route.record)
 			})
 			if route.err != nil {
 				return "", route.err

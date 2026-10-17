@@ -149,6 +149,7 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 	evidenceHosts := map[string]string{}
 	ownerSets := map[string]map[string]bool{}
 	serviceSets := map[string]map[string]bool{}
+	readRoutes := newPlacementRecordRouteReader(*projection)
 	for _, route := range policy.PhysicalRoutes {
 		requested[route.Hostname] = route
 		ownerSets[route.Hostname] = map[string]bool{}
@@ -164,7 +165,7 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 				}
 				continue
 			}
-			owners, _, err := placementRecordRoutes(*projection, record)
+			owners, _, err := readRoutes(record)
 			if err != nil {
 				return err
 			}
