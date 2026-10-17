@@ -40,7 +40,7 @@ type safeRolloutEdgeBundleObservation struct {
 
 type safeRolloutTrafficStore interface {
 	GetAppTrafficPolicy(tenantID string, platformAdmin bool, appID string) (model.AppTrafficPolicy, error)
-	ListAppReleases(filter model.AppReleaseFilter) ([]model.AppRelease, error)
+	ListAppReleaseMetadata(filter model.AppReleaseFilter) ([]model.AppRelease, error)
 }
 
 type safeRolloutRouteProbe func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
@@ -448,7 +448,9 @@ func (o storeSafeRolloutEdgeBundleObserver) expectedAppTrafficDigest(app model.A
 	if policy.StickyHeader != "" || (policy.StickyCookie != "" && policy.StickyCookie != "Fugue-Release-Stickiness") {
 		return "", fmt.Errorf("app traffic policy uses unsupported sticky semantics")
 	}
-	releases, err := o.Traffic.ListAppReleases(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, IncludeRetired: false, PlatformAdmin: true})
+	// Traffic proof uses current release identities and targets, not executable
+	// configuration. Keep re-reading those facts on each observation.
+	releases, err := o.Traffic.ListAppReleaseMetadata(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, IncludeRetired: false, PlatformAdmin: true})
 	if err != nil {
 		return "", fmt.Errorf("read app releases for edge proof: %w", err)
 	}

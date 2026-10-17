@@ -24,8 +24,12 @@ func (f safeRolloutTrafficStoreFixture) GetAppTrafficPolicy(string, bool, string
 	return f.policy, nil
 }
 
-func (f safeRolloutTrafficStoreFixture) ListAppReleases(model.AppReleaseFilter) ([]model.AppRelease, error) {
-	return append([]model.AppRelease(nil), f.releases...), nil
+func (f safeRolloutTrafficStoreFixture) ListAppReleaseMetadata(model.AppReleaseFilter) ([]model.AppRelease, error) {
+	releases := append([]model.AppRelease(nil), f.releases...)
+	for i := range releases {
+		releases[i].SpecSnapshot = nil
+	}
+	return releases, nil
 }
 
 func appTrafficObserverFixture(t *testing.T, now time.Time) (storeSafeRolloutEdgeBundleObserver, model.App, model.AppRelease, model.EdgeNode, routeprobe.Proof) {

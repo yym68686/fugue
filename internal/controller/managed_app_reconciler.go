@@ -457,7 +457,7 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	releases, err := s.Store.ListAppReleases(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true, IncludeRetired: true})
+	releases, err := s.Store.ListAppReleaseRetirementState(ctx, model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true, IncludeRetired: true})
 	if err != nil {
 		return fmt.Errorf("list draining releases: %w", err)
 	}
@@ -3118,7 +3118,9 @@ func (s *Service) preserveActiveAppReleaseResources(app model.App, desiredByKind
 	if s == nil || s.Store == nil {
 		return nil
 	}
-	releases, err := s.Store.ListAppReleases(model.AppReleaseFilter{
+	// Protect every retained name and immutable binding without transferring
+	// configurations that this resource-identity check never interprets.
+	releases, err := s.Store.ListAppReleaseMetadata(model.AppReleaseFilter{
 		TenantID:       app.TenantID,
 		AppID:          app.ID,
 		PlatformAdmin:  true,

@@ -14,6 +14,14 @@ import (
 const appReleaseSelectColumns = `id, tenant_id, app_id, role, source_ref, resolved_image_ref, upstream_url, runtime_id, deployment_name, service_name, status, status_reason, rollback_target_release_id, release_message, spec_snapshot_json, ready_at, promoted_at, retired_at, retention_until, created_at, updated_at, revision_workload_json`
 const appTrafficPolicySelectColumns = `id, tenant_id, app_id, mode, stable_release_id, candidate_release_id, stable_weight, candidate_weight, sticky_header, sticky_cookie, updated_by_type, updated_by_id, created_at, updated_at`
 
+type appReleaseSpecProjection uint8
+
+const (
+	appReleaseFullSpec appReleaseSpecProjection = iota
+	appReleaseNoSpec
+	appReleaseDrainSpec
+)
+
 func (s *Store) pgCreateAppRelease(release model.AppRelease) (model.AppRelease, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -105,6 +113,14 @@ func (s *Store) pgListAppReleaseView(filter model.AppReleaseFilter, includeSpec 
 	return s.pgListAppReleaseViewContext(context.Background(), filter, includeSpec)
 }
 func (s *Store) pgListAppReleaseViewContext(ctx context.Context, filter model.AppReleaseFilter, includeSpec bool) ([]model.AppRelease, error) {
+	projection := appReleaseFullSpec
+	if !includeSpec {
+		projection = appReleaseNoSpec
+	}
+	return s.pgListAppReleaseProjectionContext(ctx, filter, projection)
+}
+
+func (s *Store) pgListAppReleaseProjectionContext(ctx context.Context, filter model.AppReleaseFilter, projection appReleaseSpecProjection) ([]model.AppRelease, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -147,8 +163,19 @@ func (s *Store) pgListAppReleaseViewContext(ctx context.Context, filter model.Ap
 	}
 
 	columns := appReleaseSelectColumns
-	if !includeSpec {
+	switch projection {
+	case appReleaseFullSpec:
+	case appReleaseNoSpec:
 		columns = strings.Replace(columns, "spec_snapshot_json", "NULL AS spec_snapshot_json", 1)
+	case appReleaseDrainSpec:
+		// Same exact role/status predicate as AppReleaseAwaitingDrain. All rows,
+		// ordering, ownership filters and revision bindings remain unchanged.
+		expression := fmt.Sprintf(`CASE WHEN (role = '%s' AND status = '%s') OR (role = '%s' AND status = '%s') THEN spec_snapshot_json ELSE NULL END AS spec_snapshot_json`,
+			model.AppReleaseRolePrevious, model.AppReleaseStatusDraining,
+			model.AppReleaseRoleCandidate, model.AppReleaseStatusFailed)
+		columns = strings.Replace(columns, "spec_snapshot_json", expression, 1)
+	default:
+		return nil, ErrInvalidInput
 	}
 	query := `SELECT ` + columns + ` FROM fugue_app_releases`
 	if len(clauses) > 0 {

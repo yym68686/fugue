@@ -125,6 +125,33 @@ func (s *Store) ListAppReleaseMetadata(filter model.AppReleaseFilter) ([]model.A
 	return releases, nil
 }
 
+// ListAppReleaseRetirementState preserves all matching release facts and only
+// includes executable configuration for releases awaiting drain. The retirement
+// gate needs those complete snapshots; already-retired cleanup only uses the
+// immutable workload binding. This view must not be persisted as a full release.
+func (s *Store) ListAppReleaseRetirementState(ctx context.Context, filter model.AppReleaseFilter) ([]model.AppRelease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	filter = normalizeAppReleaseFilter(filter)
+	if s.usingDatabase() {
+		return s.pgListAppReleaseProjectionContext(ctx, filter, appReleaseDrainSpec)
+	}
+	releases, err := s.ListAppReleases(filter)
+	if err != nil {
+		return nil, err
+	}
+	for i := range releases {
+		if !AppReleaseAwaitingDrain(releases[i]) {
+			releases[i].SpecSnapshot = nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return releases, nil
+}
+
 func (s *Store) GetAppTrafficPolicy(tenantID string, platformAdmin bool, appID string) (model.AppTrafficPolicy, error) {
 	appID = strings.TrimSpace(appID)
 	if appID == "" {
