@@ -3187,6 +3187,10 @@ func (s *Service) HeartbeatOnce(ctx context.Context) error {
 	if !s.heartbeatEnabled() {
 		return nil
 	}
+	// The successful response body is optional telemetry. Give its bounded
+	// drain a request-owned cancellation path without changing other clients.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	req, performanceMetrics, err := s.newHeartbeatRequest(ctx)
 	if err != nil {
 		s.logHeartbeatFailure(err)
@@ -3208,6 +3212,7 @@ func (s *Service) HeartbeatOnce(ctx context.Context) error {
 		s.logHeartbeatFailure(err)
 		return err
 	}
+	drainSuccessfulHeartbeatResponse(resp, cancel)
 	s.commitHeartbeatPerformanceBaseline(performanceMetrics)
 	if s.Logger != nil {
 		status := s.Status()
