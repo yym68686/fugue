@@ -124,6 +124,21 @@ func TestHostJournaldStatePostgresIgnoresUnrelatedHistory(t *testing.T) {
 		t.Fatalf("scheduler guard/projection changed: %+v %t %v", latest, busy, err)
 	}
 	t.Logf("200004 tasks -> %d projected rows in %s", len(latest), time.Since(started))
+	// Updating task metadata must not renew the scheduler's terminal-time
+	// interval. Keep both same-updater creation times tied to also preserve
+	// deterministic selection while checking every timing/ownership input.
+	terminal := time.Now().UTC().Truncate(time.Microsecond).Add(-25 * time.Hour)
+	if _, err := s.db.Exec(`UPDATE fugue_node_update_tasks
+SET created_at=$1::timestamptz-interval '1 hour', updated_at=now(),
+    completed_at=CASE WHEN id='tie-z' THEN $1::timestamptz ELSE NULL END
+WHERE id IN ('tie-a','tie-z')`, terminal); err != nil {
+		t.Fatal(err)
+	}
+	latest, busy, err = s.ReadHostJournaldPolicyTaskState(context.Background())
+	task := latest["worker"]
+	if err != nil || !busy || task.ID != "tie-z" || task.CompletedAt == nil || !task.CompletedAt.Equal(terminal) || !task.UpdatedAt.After(terminal) || task.RequestedByID != "scheduler" || task.Payload["policy_hash"] != "new" {
+		t.Fatalf("terminal time or scheduler ownership lost in projection: %+v busy=%t error=%v", task, busy, err)
+	}
 }
 
 func TestHostJournaldStateFilePreservesOldInflightAndTieOrder(t *testing.T) {
