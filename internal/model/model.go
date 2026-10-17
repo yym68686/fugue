@@ -2483,6 +2483,7 @@ type AppTrafficPolicy struct {
 type AppReleaseGatePolicy struct {
 	WindowSeconds                  int               `json:"window_seconds,omitempty"`
 	LatencyComparisonWindowSeconds int               `json:"latency_comparison_window_seconds,omitempty"`
+	LatencyCohortModel             bool              `json:"latency_cohort_model,omitempty"`
 	MinCandidateRequests           int               `json:"min_candidate_requests,omitempty"`
 	Max5xxRate                     float64           `json:"max_5xx_rate,omitempty"`
 	MaxEdgeUpstreamErrorRate       float64           `json:"max_edge_upstream_error_rate,omitempty"`

@@ -18,6 +18,8 @@ type ReleaseGateLatencyCohort struct {
 	Path        string  `json:"path"`
 	Method      string  `json:"method"`
 	Streaming   bool    `json:"streaming"`
+	ModelScoped bool    `json:"model_scoped,omitempty"`
+	Model       string  `json:"model,omitempty"`
 	Requests    float64 `json:"request_count"`
 	P95TTFB     float64 `json:"p95_ttfb_ms"`
 	P99Duration float64 `json:"p99_duration_ms"`
@@ -25,6 +27,10 @@ type ReleaseGateLatencyCohort struct {
 
 type ReleaseGateLatencyCohortsQuerier interface {
 	QueryReleaseGateLatencyCohorts(context.Context, string, string, string, time.Duration) ([]ReleaseGateLatencyCohort, error)
+}
+
+type ReleaseGateModelLatencyCohortsQuerier interface {
+	QueryReleaseGateModelLatencyCohorts(context.Context, string, string, string, time.Duration) ([]ReleaseGateLatencyCohort, error)
 }
 
 // One raw query puts both releases in the same time window. The redacted path
@@ -48,6 +54,10 @@ func (q ClickHouseReleaseGateMetricsQuerier) QueryReleaseGateLatencyCohorts(ctx 
 		" AND ts <= " + clickHouseDateTime64Literal(until) +
 		" AND JSONExtractString(summary_json, 'release_id') IN (" + quoteClickHouseString(candidateID) + ", " + quoteClickHouseString(stableID) + ")" +
 		" GROUP BY release_id, hostname, method, request_path, is_stream ORDER BY release_id, hostname, method, request_path, is_stream LIMIT 513 FORMAT JSONEachRow"
+	return q.queryLatencyCohorts(ctx, query, candidateID, stableID, false)
+}
+
+func (q ClickHouseReleaseGateMetricsQuerier) queryLatencyCohorts(ctx context.Context, query, candidateID, stableID string, modelScoped bool) ([]ReleaseGateLatencyCohort, error) {
 	client := q.HTTPClient
 	if client == nil {
 		client = http.DefaultClient
@@ -74,10 +84,16 @@ func (q ClickHouseReleaseGateMetricsQuerier) QueryReleaseGateLatencyCohorts(ctx 
 		host, _ := row["hostname"].(string)
 		path, _ := row["request_path"].(string)
 		method, _ := row["method"].(string)
+		modelName, _ := row["model_name"].(string)
+		if modelScoped {
+			if _, present := row["model_name"].(string); !present {
+				return nil, fmt.Errorf("release latency model evidence is missing")
+			}
+		}
 		if (id != candidateID && id != stableID) || host == "" || path == "" || method == "" || cohortNumber(row, "request_count") <= 0 {
 			return nil, fmt.Errorf("release latency cohort identity or count is invalid")
 		}
-		cohorts = append(cohorts, ReleaseGateLatencyCohort{ReleaseID: id, Hostname: host, Path: path, Method: method, Streaming: BoolMetric(row, "is_stream") || cohortNumber(row, "is_stream") != 0, Requests: cohortNumber(row, "request_count"), P95TTFB: FloatMetric(row, "p95_ttfb_ms"), P99Duration: FloatMetric(row, "p99_duration_ms")})
+		cohorts = append(cohorts, ReleaseGateLatencyCohort{ReleaseID: id, Hostname: host, Path: path, Method: method, Streaming: BoolMetric(row, "is_stream") || cohortNumber(row, "is_stream") != 0, ModelScoped: modelScoped, Model: modelName, Requests: cohortNumber(row, "request_count"), P95TTFB: FloatMetric(row, "p95_ttfb_ms"), P99Duration: FloatMetric(row, "p99_duration_ms")})
 	}
 	return cohorts, nil
 }
@@ -95,13 +111,16 @@ func cohortNumber(row map[string]any, key string) float64 {
 // releases. Unmatched traffic remains subject to all absolute and error gates.
 func ReleaseGateLatencyCohortComparison(cohorts []ReleaseGateLatencyCohort, candidateID, stableID string, policy model.AppReleaseGatePolicy) (map[string]any, []string, []string) {
 	type key struct {
-		host, path, method string
-		streaming          bool
+		host, path, method, model string
+		streaming                 bool
 	}
 	stable := map[key]ReleaseGateLatencyCohort{}
 	for _, c := range cohorts {
 		if c.ReleaseID == stableID {
-			stable[key{c.Hostname, c.Path, c.Method, c.Streaming}] = c
+			if policy.LatencyCohortModel && (!c.ModelScoped || c.Model == "") {
+				continue
+			}
+			stable[key{c.Hostname, c.Path, c.Method, c.Model, c.Streaming}] = c
 		}
 	}
 	minimum := float64(policy.MinCandidateRequests)
@@ -115,7 +134,11 @@ func ReleaseGateLatencyCohortComparison(cohorts []ReleaseGateLatencyCohort, cand
 		if c.ReleaseID != candidateID {
 			continue
 		}
-		b, ok := stable[key{c.Hostname, c.Path, c.Method, c.Streaming}]
+		if policy.LatencyCohortModel && (!c.ModelScoped || c.Model == "") {
+			unmatched += c.Requests
+			continue
+		}
+		b, ok := stable[key{c.Hostname, c.Path, c.Method, c.Model, c.Streaming}]
 		if !ok {
 			unmatched += c.Requests
 			continue
@@ -127,6 +150,10 @@ func ReleaseGateLatencyCohortComparison(cohorts []ReleaseGateLatencyCohort, cand
 		matched += c.Requests
 		comparisons = append(comparisons, map[string]any{"hostname": c.Hostname, "path": c.Path, "method": c.Method, "streaming": c.Streaming, "candidate_requests": c.Requests, "stable_requests": b.Requests, "candidate_p95_ttfb_ms": c.P95TTFB, "stable_p95_ttfb_ms": b.P95TTFB, "candidate_p99_duration_ms": c.P99Duration, "stable_p99_duration_ms": b.P99Duration})
 		label := fmt.Sprintf("%s %s%s streaming=%t", c.Method, c.Hostname, c.Path, c.Streaming)
+		if policy.LatencyCohortModel {
+			comparisons[len(comparisons)-1]["model"] = c.Model
+			label += " model=" + c.Model
+		}
 		if b.P95TTFB > 0 && c.P95TTFB > b.P95TTFB*1.75+250 {
 			failures = append(failures, fmt.Sprintf("candidate p95 ttfb %.0fms is worse than stable %.0fms in cohort %s", c.P95TTFB, b.P95TTFB, label))
 		}
@@ -141,5 +168,8 @@ func ReleaseGateLatencyCohortComparison(cohorts []ReleaseGateLatencyCohort, cand
 		warnings = append(warnings, fmt.Sprintf("comparative latency excludes %.0f unmatched and %.0f undersampled candidate requests; absolute gates still include all requests", unmatched, undersampled))
 	}
 	metrics := map[string]any{"mode": "matched_latency_cohorts", "matched_candidate_requests": matched, "unmatched_candidate_requests": unmatched, "undersampled_candidate_requests": undersampled, "cohorts": comparisons}
+	if policy.LatencyCohortModel {
+		metrics["model_dimension"] = true
+	}
 	return metrics, failures, warnings
 }

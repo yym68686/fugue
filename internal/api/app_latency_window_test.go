@@ -34,7 +34,7 @@ func TestAppContinuityKeepsExplicitLatencyHistoryInQueuedIntent(t *testing.T) {
 	}
 	server := NewServer(s, auth.New(s, "bootstrap-fixture"), nil, ServerConfig{})
 	for _, seconds := range []int{1800, 300, 3601} {
-		request := map[string]any{"zero_downtime": map[string]any{"enabled": true, "mode": "safe", "strategy": "stable_candidate", "gate": map[string]any{"window_seconds": 600, "latency_comparison_window_seconds": seconds, "min_candidate_requests": 20, "max_5xx_rate": .01}}}
+		request := map[string]any{"zero_downtime": map[string]any{"enabled": true, "mode": "safe", "strategy": "stable_candidate", "gate": map[string]any{"window_seconds": 600, "latency_comparison_window_seconds": seconds, "latency_cohort_model": true, "min_candidate_requests": 20, "max_5xx_rate": .01}}}
 		rec := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/continuity", "bootstrap-fixture", request)
 		if seconds != 1800 {
 			if rec.Code != http.StatusBadRequest {
@@ -55,7 +55,7 @@ func TestAppContinuityKeepsExplicitLatencyHistoryInQueuedIntent(t *testing.T) {
 			t.Fatal(err)
 		}
 		gate := op.DesiredSpec.Continuity.ZeroDowntime.Gate
-		if gate.LatencyComparisonWindowSeconds != 1800 || gate.WindowSeconds != 600 || gate.MinCandidateRequests != 20 || gate.Max5xxRate != .01 || response.ZeroDowntime.Gate.LatencyComparisonWindowSeconds != 1800 {
+		if !gate.LatencyCohortModel || !response.ZeroDowntime.Gate.LatencyCohortModel || gate.LatencyComparisonWindowSeconds != 1800 || gate.WindowSeconds != 600 || gate.MinCandidateRequests != 20 || gate.Max5xxRate != .01 || response.ZeroDowntime.Gate.LatencyComparisonWindowSeconds != 1800 {
 			t.Fatalf("policy lost or gates changed: %+v", gate)
 		}
 		current, err := s.GetApp(app.ID)

@@ -803,6 +803,8 @@ func (s *Service) evaluateSafeRolloutCandidateCanaryGate(ctx context.Context, st
 		gate.Failures = append(gate.Failures, failures...)
 		gate.Warnings = append(gate.Warnings, warnings...)
 		gate.Evidence = append(gate.Evidence, fmt.Sprintf("matched latency cohorts=%d candidate_requests=%.0f", len(cohortMetrics["cohorts"].([]map[string]any)), releaseflow.FloatMetric(cohortMetrics, "matched_candidate_requests")))
+	} else if policy.LatencyCohortModel {
+		gate.Failures = append(gate.Failures, "model latency cohort correlation is unavailable")
 	}
 	if gate.Metrics == nil {
 		gate.Metrics = map[string]any{}

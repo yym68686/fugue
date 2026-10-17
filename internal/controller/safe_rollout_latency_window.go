@@ -19,7 +19,15 @@ func safeRolloutLatencyComparison(ctx context.Context, q releaseflow.ReleaseGate
 	if seconds < 0 || seconds > 3600 || (seconds > 0 && time.Duration(seconds)*time.Second < recentWindow) {
 		return nil, nil, nil, fmt.Errorf("invalid latency comparison window")
 	}
-	cohorts, err := q.QueryReleaseGateLatencyCohorts(ctx, state.CandidateApp.ID, state.Candidate.ID, state.StableRelease.ID, recentWindow)
+	query := q.QueryReleaseGateLatencyCohorts
+	if policy.LatencyCohortModel {
+		modelQuerier, ok := q.(releaseflow.ReleaseGateModelLatencyCohortsQuerier)
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("model latency cohort correlation is unavailable")
+		}
+		query = modelQuerier.QueryReleaseGateModelLatencyCohorts
+	}
+	cohorts, err := query(ctx, state.CandidateApp.ID, state.Candidate.ID, state.StableRelease.ID, recentWindow)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -29,7 +37,7 @@ func safeRolloutLatencyComparison(ctx context.Context, q releaseflow.ReleaseGate
 		!strings.HasPrefix(failures[0], "matched latency cohort request count ") || !strings.Contains(failures[0], "below minimum") {
 		return metrics, failures, warnings, nil
 	}
-	longer, err := q.QueryReleaseGateLatencyCohorts(ctx, state.CandidateApp.ID, state.Candidate.ID, state.StableRelease.ID, time.Duration(seconds)*time.Second)
+	longer, err := query(ctx, state.CandidateApp.ID, state.Candidate.ID, state.StableRelease.ID, time.Duration(seconds)*time.Second)
 	if err != nil {
 		return nil, nil, nil, err
 	}

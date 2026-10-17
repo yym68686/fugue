@@ -26623,6 +26623,10 @@ components:
           minimum: 0
           maximum: 3600
           description: Optional longer window for matched latency cohorts when sticky traffic leaves the ordinary window undersampled. Zero inherits window_seconds. Must not be shorter than the ordinary window. Recent absolute errors, latency limits, candidate sample minimum and comparable recent cohort regressions remain mandatory; the longer window never authorizes promotion without matched samples.
+        latency_cohort_model:
+          type: boolean
+          default: false
+          description: Opt in to model-specific latency comparison using application-provided request facts. Correlation requires the same app, nonempty request and trace IDs, method, normalized path, streaming mode and completion time within five seconds, with exactly one application model receipt and one edge request. Conflicting tenant identities, missing or ambiguous model evidence are unmatched, never a generic fallback. The telemetry operator must trust this application's model labels; this is not model routing or billing authority. Edge HTTP timings and all ordinary absolute and error gates remain unchanged.
         min_candidate_requests:
           type: integer
           format: int32
