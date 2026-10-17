@@ -519,9 +519,20 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 		if op.AppID != app.ID || op.TenantID != app.TenantID || op.Type != model.OperationTypeDeploy {
 			continue
 		}
-		if previous.Status == model.AppReleaseStatusFailed && op.Status != model.OperationStatusFailed ||
-			previous.Status == model.AppReleaseStatusDraining && op.Status != model.OperationStatusCompleted {
+		if previous.Status == model.AppReleaseStatusFailed && op.Status != model.OperationStatusFailed {
 			continue
+		}
+		if previous.Status == model.AppReleaseStatusDraining && op.Status != model.OperationStatusCompleted {
+			// A release can serve successfully before its deploy operation fails
+			// during canonical alignment. Once superseded, that terminal outcome
+			// must not prevent the independent traffic, retention and drain proofs
+			// below from retiring its immutable workload. An unpromoted or active
+			// operation still cannot gain this retirement path.
+			promoted := previous.PromotedAt
+			if op.Status != model.OperationStatusFailed || promoted == nil || promoted.IsZero() ||
+				promoted.Before(previous.CreatedAt) || promoted.After(time.Now().UTC()) {
+				continue
+			}
 		}
 		previousApp := app
 		if previous.SpecSnapshot != nil {
