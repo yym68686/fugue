@@ -915,20 +915,28 @@ func (s *Server) populateImageCacheMinimumReplicaRefs(protected *imageCacheProte
 		return nil
 	}
 	now := time.Now().UTC()
+	imageIDs := make([]string, 0, len(images))
+	for _, image := range images {
+		switch strings.TrimSpace(image.LifecycleState) {
+		case "", model.ImageLifecycleAvailable, model.ImageLifecycleImporting:
+			imageIDs = append(imageIDs, image.ID)
+		}
+	}
+	// Read present replicas again after the candidate pass. Keeping this
+	// independent read preserves the final minimum-replica safety check.
+	replicasByImage, err := s.store.ListImageReplicasByImageIDs(model.ImageReplicaFilter{
+		Status: model.ImageReplicaStatusPresent, PlatformAdmin: true,
+	}, imageIDs)
+	if err != nil {
+		return err
+	}
 	for _, image := range images {
 		switch strings.TrimSpace(image.LifecycleState) {
 		case "", model.ImageLifecycleAvailable, model.ImageLifecycleImporting:
 		default:
 			continue
 		}
-		replicas, err := s.store.ListImageReplicas(model.ImageReplicaFilter{
-			ImageID:       image.ID,
-			Status:        model.ImageReplicaStatusPresent,
-			PlatformAdmin: true,
-		})
-		if err != nil {
-			return err
-		}
+		replicas := replicasByImage[strings.TrimSpace(image.ID)]
 		healthy := healthyImageReplicasAPI(replicas, now)
 		keys := exactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
 		if len(healthy) == 0 {
@@ -979,15 +987,16 @@ func (s *Server) populateImageCacheReplicaCandidateRefs(protected *imageCachePro
 	if protected == nil {
 		return nil
 	}
+	imageIDs := make([]string, 0, len(images))
 	for _, image := range images {
-		replicas, err := s.store.ListImageReplicas(model.ImageReplicaFilter{
-			ImageID:       image.ID,
-			TenantID:      image.TenantID,
-			PlatformAdmin: true,
-		})
-		if err != nil {
-			return err
-		}
+		imageIDs = append(imageIDs, image.ID)
+	}
+	replicasByImage, err := s.store.ListImageReplicasByImageIDs(model.ImageReplicaFilter{PlatformAdmin: true}, imageIDs)
+	if err != nil {
+		return err
+	}
+	for _, image := range images {
+		replicas := replicasByImage[strings.TrimSpace(image.ID)]
 		keys := exactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
 		for _, replica := range replicas {
 			reason := imageCacheReplicaCandidateReason(replica.Status)

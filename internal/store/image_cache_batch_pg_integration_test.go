@@ -53,8 +53,18 @@ func TestImageCacheInventoryBatchPostgresPreservesSnapshotSemantics(t *testing.T
 		t.Fatal("partial chunk hid earlier manifests")
 	}
 	node.SnapshotComplete = true
-	if _, err := s.UpsertImageCacheInventory(node, nil); err != nil {
-		t.Fatal(err)
+	// Completion is only authoritative when the reported count matches the
+	// distinct manifests observed in this snapshot. A malformed final chunk
+	// must retain the previous inventory instead of permitting deletion.
+	if observed, err := s.UpsertImageCacheInventory(node, nil); err != nil || observed.SnapshotComplete {
+		t.Fatalf("mismatched manifest count became complete: %+v %v", observed, err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM fugue_image_cache_manifests WHERE node_id=$1 AND present`, id).Scan(&count); err != nil || count != len(manifests) {
+		t.Fatalf("incomplete snapshot hid previous manifests: %d %v", count, err)
+	}
+	node.ManifestCount = 1
+	if observed, err := s.UpsertImageCacheInventory(node, nil); err != nil || !observed.SnapshotComplete {
+		t.Fatalf("matching manifest count did not complete snapshot: %+v %v", observed, err)
 	}
 	if err := s.db.QueryRow(`SELECT count(*) FROM fugue_image_cache_manifests WHERE node_id=$1 AND present`, id).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("complete snapshot did not mark omitted manifests absent: %d %v", count, err)
