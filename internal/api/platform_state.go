@@ -21,6 +21,7 @@ import (
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
+	"fugue/internal/routeartifact"
 	"fugue/internal/store"
 )
 
@@ -1323,6 +1324,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 		return
 	}
 	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	readBinding := routeartifact.NewRequestBindingReader()
 	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
@@ -1351,7 +1353,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 						break
 					}
 				}
-				isSelected, err := s.consumerAssignmentIsSelected(item, group, readArtifact)
+				isSelected, err := s.consumerAssignmentIsSelectedWithBindingReader(item, group, readArtifact, readBinding)
 				if err != nil {
 					return false, errors.New("serving release unavailable")
 				}
@@ -1411,6 +1413,10 @@ func selectServingConsumerAssignments(resolved []consumerArtifactLookup, resolve
 // assignment resolver. DNS-only authority has no route projection; select its
 // exact parent and fence without manufacturing an Edge route assignment.
 func (s *Server) consumerAssignmentIsSelected(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error)) (bool, error) {
+	return s.consumerAssignmentIsSelectedWithBindingReader(item, group, readArtifact, nil)
+}
+
+func (s *Server) consumerAssignmentIsSelectedWithBindingReader(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (bool, error) {
 	parent, err := readArtifact(item.Assignment.ReleaseSetID)
 	if err != nil {
 		return false, err
@@ -1422,7 +1428,7 @@ func (s *Server) consumerAssignmentIsSelected(item consumerArtifactLookup, group
 		current, release, found, err := s.selectTrafficRouteReleaseInScope(group, item.Assignment.ScopeKey)
 		return found && current.ID == parent.ID && current.ContentHash == parent.ContentHash && release.ID == item.Release.ID && release.FencingToken == item.Assignment.FencingToken, err
 	}
-	projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, item.Assignment.ScopeKey, readArtifact)
+	projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScopeWithBindingReader(group, item.Assignment.ScopeKey, readArtifact, readBinding)
 	return found && projection.TrafficRelease != nil && projection.TrafficRelease.ReleaseID == item.Release.ID && projection.TrafficRelease.FencingToken == item.Assignment.FencingToken, err
 }
 

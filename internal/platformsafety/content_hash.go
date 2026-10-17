@@ -90,6 +90,15 @@ var contentFingerprinters = sync.Pool{New: func() any {
 	return &contentFingerprinter{hash: h, writer: bufio.NewWriterSize(h, 8192)}
 }}
 
+// FingerprintArtifactContent identifies the actual typed content tree for a
+// caller-owned computation. It is not an artifact digest or an integrity
+// verdict. Unsupported values must bypass reuse; callers must still check
+// current signatures, trust, release selection and expected membership.
+func FingerprintArtifactContent(content map[string]any) ([32]byte, bool) {
+	key, _, supported := fingerprintContent(content)
+	return key, supported
+}
+
 func fingerprintContent(content map[string]any) ([32]byte, int, bool) {
 	f := contentFingerprinters.Get().(*contentFingerprinter)
 	f.hash.Reset()

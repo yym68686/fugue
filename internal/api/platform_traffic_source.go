@@ -29,8 +29,16 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group strin
 }
 
 func (s *Server) edgeRouteIntentSnapshotFromTrafficScope(group, scope string, readArtifact func(string) (model.PlatformArtifact, error)) (model.EdgeRouteIntentSnapshot, bool, error) {
+	return s.edgeRouteIntentSnapshotFromTrafficScopeWithBindingReader(group, scope, readArtifact, nil)
+}
+
+// A non-nil binding reader is used only by assignment selection, which needs
+// provenance rather than a route table. The ordinary source path always
+// returns a complete projection. Both paths perform the same fresh authority
+// and topology reads, including the final publication-change check.
+func (s *Server) edgeRouteIntentSnapshotFromTrafficScopeWithBindingReader(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (model.EdgeRouteIntentSnapshot, bool, error) {
 	for attempt := 0; ; attempt++ {
-		snapshot, found, err := s.observeTrafficRouteSource(group, scope, readArtifact)
+		snapshot, found, err := s.observeTrafficRouteSourceWithBindingReader(group, scope, readArtifact, readBinding)
 		if !errors.Is(err, errTrafficSourceChanged) || attempt == 2 {
 			return snapshot, found, err
 		}
@@ -38,6 +46,10 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficScope(group, scope string, re
 }
 
 func (s *Server) observeTrafficRouteSource(group, scope string, readArtifact func(string) (model.PlatformArtifact, error)) (model.EdgeRouteIntentSnapshot, bool, error) {
+	return s.observeTrafficRouteSourceWithBindingReader(group, scope, readArtifact, nil)
+}
+
+func (s *Server) observeTrafficRouteSourceWithBindingReader(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (model.EdgeRouteIntentSnapshot, bool, error) {
 	defer s.observeOperation("traffic-source")()
 	parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, scope)
 	if err != nil || !found {
@@ -97,7 +109,12 @@ func (s *Server) observeTrafficRouteSource(group, scope string, readArtifact fun
 		}
 	}
 	a := model.PlatformConsumerAssignment{ExpectedConsumerSetID: latest.ID, Revision: latest.Revision, ArtifactReleaseID: release.ID, ReleaseSetID: parent.ID, ArtifactID: child.ID, ArtifactKind: child.ArtifactKind, ScopeKey: parent.ScopeKey, ExpectedGeneration: child.Generation, ContentHash: child.ContentHash, GenerationSequence: child.GenerationSequence, FencingToken: release.FencingToken, ReleaseChannel: release.ReleaseChannel}
-	snapshot, err := routeartifact.ProjectRelease(parent, child, a, release, s.bundleKeyring())
+	var snapshot model.EdgeRouteIntentSnapshot
+	if readBinding == nil {
+		snapshot, err = routeartifact.ProjectRelease(parent, child, a, release, s.bundleKeyring())
+	} else {
+		snapshot.TrafficRelease, err = readBinding(parent, child, a, release, s.bundleKeyring())
+	}
 	if err != nil || trafficbinding.ValidateGroup(snapshot.TrafficRelease, group, true) != nil {
 		return fail()
 	}
