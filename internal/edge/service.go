@@ -65,6 +65,11 @@ const (
 	// while avoiding net/http's two-idle-connection default under API traffic.
 	edgeOriginMaxIdleConns        = 16
 	edgeOriginMaxIdleConnsPerHost = 16
+
+	// A speculative HTTP/1 dial may enter the idle pool without ever sending
+	// a request. Retire API connections before its 10s initial header deadline;
+	// replaying a POST after that deadline would be unsafe.
+	edgeControlPlaneOriginIdleTimeout = 5 * time.Second
 )
 
 type Service struct {
@@ -2529,6 +2534,10 @@ func (s *Service) edgeProxyBaseForObservation(observation *edgeProxyObservation)
 		return transport
 	}
 	transport := prototype.Clone()
+	if strings.EqualFold(strings.TrimSpace(observation.Route.RouteKind), model.EdgeRouteKindControlPlaneAPI) &&
+		(transport.IdleConnTimeout <= 0 || transport.IdleConnTimeout > edgeControlPlaneOriginIdleTimeout) {
+		transport.IdleConnTimeout = edgeControlPlaneOriginIdleTimeout
+	}
 	if s.proxyTransportBundleSet {
 		if _, active := s.proxyTransportActiveKeys[key]; !active {
 			// A request can race a bundle swap after reading the old route. Let it
@@ -2560,7 +2569,12 @@ func edgeOriginTransportKeyForRoute(route model.EdgeRouteBinding, releaseID stri
 	if generation == "" {
 		generation = strings.TrimSpace(route.RouteGeneration)
 	}
+	idlePolicy := ""
+	if strings.EqualFold(strings.TrimSpace(route.RouteKind), model.EdgeRouteKindControlPlaneAPI) {
+		idlePolicy = model.EdgeRouteKindControlPlaneAPI
+	}
 	return strings.Join([]string{
+		idlePolicy,
 		strings.TrimSpace(route.AppID),
 		strings.TrimSpace(route.RuntimeID),
 		upstreamURL,

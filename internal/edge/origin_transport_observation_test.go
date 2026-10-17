@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"fugue/internal/config"
+	"fugue/internal/model"
 )
 
 func TestOriginTransportErrorsRetainBoundedDiagnostics(t *testing.T) {
@@ -80,6 +81,14 @@ func TestOriginTransportErrorsRetainBoundedDiagnostics(t *testing.T) {
 
 func TestProxyHandlerObservesIdleConnectionEOFWithoutReplayingPOST(t *testing.T) {
 	t.Parallel()
+	for _, kind := range []string{model.EdgeRouteKindPlatform, model.EdgeRouteKindControlPlaneAPI} {
+		t.Run(kind, func(t *testing.T) {
+			testProxyHandlerIdleConnectionEOFWithoutReplay(t, kind)
+		})
+	}
+}
+
+func testProxyHandlerIdleConnectionEOFWithoutReplay(t *testing.T, routeKind string) {
 	var requests atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -103,6 +112,7 @@ func TestProxyHandlerObservesIdleConnectionEOFWithoutReplayingPOST(t *testing.T)
 	defer service.closeEdgeProxyTransports()
 	bundle := testBundle("routegen_transport_observation")
 	bundle.Routes[0].UpstreamURL = backend.URL
+	bundle.Routes[0].RouteKind = routeKind
 	service.recordSyncSuccess(bundle, `"routegen_transport_observation"`, time.Now().UTC(), false)
 	handler := service.ProxyHandler()
 	for i, wantStatus := range []int{http.StatusOK, http.StatusBadGateway} {
