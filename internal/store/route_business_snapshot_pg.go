@@ -35,7 +35,7 @@ func readRouteBusinessSnapshotTx(ctx context.Context, tx *sql.Tx) (RouteBusiness
 	}
 	out.Revision = "postgres:" + out.Revision
 	var err error
-	out.Apps, err = readRouteBusinessRows(ctx, tx, `SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at FROM fugue_apps WHERE `+appVisiblePhasePredicate, scanApp)
+	out.Apps, err = readRouteBusinessRows(ctx, tx, `SELECT `+routeBusinessAppSelectColumns+` FROM fugue_apps WHERE `+appVisiblePhasePredicate, scanApp)
 	if err != nil {
 		return out, fmt.Errorf("capture route apps: %w", err)
 	}
@@ -77,6 +77,13 @@ func readRouteBusinessSnapshotTx(ctx context.Context, tx *sql.Tx) (RouteBusiness
 	}
 	return out, nil
 }
+
+// Omit executable payloads before transfer. All rows and route-affecting fields
+// (including Env) remain in the same repeatable-read transaction. Preserve
+// non-object JSON for the existing decoder instead of masking malformed specs.
+const routeBusinessAppSelectColumns = `id, tenant_id, project_id, name, description, source_json, route_json,
+CASE WHEN jsonb_typeof(spec_json)='object' THEN spec_json - ARRAY['files','generated_env','command','args'] ELSE spec_json END AS spec_json,
+status_json, created_at, updated_at`
 
 func readRouteBusinessRows[T any](ctx context.Context, tx *sql.Tx, query string, scan func(sqlScanner) (T, error)) ([]T, error) {
 	rows, err := tx.QueryContext(ctx, query)

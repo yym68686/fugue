@@ -37,7 +37,10 @@ func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusiness
 	}
 	var snapshot RouteBusinessSnapshot
 	err := s.withLockedState(false, func(state *model.State) error {
-		snapshot = RouteBusinessSnapshot{CapturedAt: time.Now().UTC(), Apps: state.Apps, Domains: state.AppDomains, RouteTables: state.ProjectRouteTables, Runtimes: state.Runtimes, RoutePolicies: state.EdgeRoutePolicies, Releases: state.AppReleases, TrafficPolicies: state.AppTrafficPolicies, HostedZones: state.HostedZones, DNSRecords: state.DNSRecords, ACMEChallenges: state.DNSACMEChallenges}
+		snapshot = RouteBusinessSnapshot{CapturedAt: time.Now().UTC(), Domains: state.AppDomains, RouteTables: state.ProjectRouteTables, Runtimes: state.Runtimes, RoutePolicies: state.EdgeRoutePolicies, Releases: state.AppReleases, TrafficPolicies: state.AppTrafficPolicies, HostedZones: state.HostedZones, DNSRecords: state.DNSRecords, ACMEChallenges: state.DNSACMEChallenges}
+		for _, app := range state.Apps {
+			snapshot.Apps = append(snapshot.Apps, routeBusinessAppProjection(app))
+		}
 		raw, err := json.Marshal(snapshot)
 		if err != nil {
 			return err
@@ -76,7 +79,7 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 		}
 		app.Bindings = nil
 		app.BackingServices = nil
-		apps = append(apps, app)
+		apps = append(apps, routeBusinessAppProjection(app))
 	}
 	snapshot.Apps = apps
 	domains := make([]model.AppDomain, 0, len(snapshot.Domains))
@@ -111,6 +114,17 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 		snapshot.DNSRecords[i] = normalizeDNSRecordForRead(snapshot.DNSRecords[i])
 	}
 	snapshot.DNSRecords = filterAndSortDNSRecords(snapshot.DNSRecords)
+}
+
+// Compiler snapshots describe route intent and runtime identity, not workload
+// execution. Keep Env: it carries the app-scoped request-body policy envelope.
+// This detached read view must never be persisted as the application's spec.
+func routeBusinessAppProjection(app model.App) model.App {
+	app.Spec.Files = nil
+	app.Spec.GeneratedEnv = nil
+	app.Spec.Command = nil
+	app.Spec.Args = nil
+	return app
 }
 
 func filterAndSortDNSRecords(records []model.DNSRecord) []model.DNSRecord {
