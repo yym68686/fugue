@@ -4077,6 +4077,11 @@ func (s *Store) completeOperationGuarded(id, runtimeID, manifestPath, message st
 		if state.Operations[index].StartedAt == nil {
 			state.Operations[index].StartedAt = &now
 		}
+		if guard != nil && guard.ConstraintPolicyOnly {
+			applyRolloutConstraintPolicy(&state.Apps[findApp(state, state.Operations[index].AppID)], state.Operations[index])
+			op = state.Operations[index]
+			return nil
+		}
 		if err := applyOperationToApp(state, &state.Operations[index]); err != nil {
 			return err
 		}
@@ -5304,6 +5309,9 @@ func applyInFlightOperationToApp(state *model.State, op *model.Operation) error 
 	if appIndex < 0 {
 		return ErrNotFound
 	}
+	if operationOnlyChangesRolloutConstraints(state.Apps[appIndex], *op) {
+		return nil
+	}
 	if isManagedPostgresServiceOperation(op.Type) {
 		return nil
 	}
@@ -5470,7 +5478,9 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 	}
 	now := time.Now().UTC()
 	app := &state.Apps[appIndex]
-	app.Status.Phase = failedPhaseForApp(*app)
+	if !operationOnlyChangesRolloutConstraints(*app, *op) {
+		app.Status.Phase = failedPhaseForApp(*app)
+	}
 	app.Status.LastOperationID = op.ID
 	app.Status.LastMessage = strings.TrimSpace(op.ErrorMessage)
 	app.Status.LastFailedOperation = model.AppOperationFailureFromOperation(*op)
@@ -5484,14 +5494,16 @@ func applyCanceledOperationToApp(state *model.State, op *model.Operation) {
 		return
 	}
 	app := &state.Apps[appIndex]
-	if phase, ok := fallbackLiveAppPhase(*app); ok {
-		app.Status.Phase = phase
-	} else {
-		app.Status.Phase = "unknown"
+	if !operationOnlyChangesRolloutConstraints(*app, *op) {
+		if phase, ok := fallbackLiveAppPhase(*app); ok {
+			app.Status.Phase = phase
+		} else {
+			app.Status.Phase = "unknown"
+		}
+		app.Status.LastFailedOperation = nil
 	}
 	app.Status.LastOperationID = op.ID
 	app.Status.LastMessage = strings.TrimSpace(op.ResultMessage)
-	app.Status.LastFailedOperation = nil
 	app.Status.UpdatedAt = time.Now().UTC()
 	app.UpdatedAt = app.Status.UpdatedAt
 }

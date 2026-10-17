@@ -11,9 +11,10 @@ import (
 // but a requeue, cancellation, changed intent or newer configuration invalidates
 // a previously observed result. This is internal, not an API-supplied assertion.
 type operationFinalizationGuard struct {
-	Operation   model.Operation
-	App         *model.App
-	AttemptOnly bool
+	Operation            model.Operation
+	App                  *model.App
+	AttemptOnly          bool
+	ConstraintPolicyOnly bool
 }
 
 func validateOperationFinalization(op model.Operation, app model.App, guard *operationFinalizationGuard) error {
@@ -38,7 +39,35 @@ func validateOperationFinalization(op model.Operation, app model.App, guard *ope
 		!finalizationIntentEqual(backingServiceIntent(app.BackingServices), backingServiceIntent(previous.BackingServices)) || app.Name != previous.Name) {
 		return ErrConflict
 	}
+	if guard.ConstraintPolicyOnly && (guard.App == nil || !model.RolloutConstraintPolicyOnlyChange(app.Spec, op)) {
+		return ErrConflict
+	}
 	return nil
+}
+
+// CompleteRolloutConstraintPolicyOperation changes durable policy without
+// claiming that an image, workload, traffic bundle or runtime has converged.
+func (s *Store) CompleteRolloutConstraintPolicyOperation(expected model.Operation, current model.App, message string) (model.Operation, error) {
+	return s.completeOperationGuarded(expected.ID, "", "", message, nil, nil, nil,
+		&operationFinalizationGuard{Operation: expected, App: &current, ConstraintPolicyOnly: true})
+}
+
+func applyRolloutConstraintPolicy(app *model.App, op model.Operation) {
+	app.Spec.Continuity = model.CloneAppContinuityPolicy(op.DesiredSpec.Continuity)
+	app.UpdatedAt = op.UpdatedAt
+	app.Status.LastOperationID, app.Status.LastMessage = op.ID, op.ResultMessage
+	// Runtime phase, replicas, readiness timestamps and prior failure history
+	// belong to actual runtime observations, not configuration publication.
+}
+
+func operationOnlyChangesRolloutConstraints(app model.App, op model.Operation) bool {
+	if model.RolloutConstraintPolicyOnlyChange(app.Spec, op) {
+		return true
+	}
+	// A later code release can change the app between enqueue and claim. The
+	// immutable baseline still identifies a policy intent; execution rebases and
+	// verifies it against current configuration before committing anything.
+	return op.ConfigBaseSpec != nil && model.RolloutConstraintPolicyOnlyChange(*op.ConfigBaseSpec, op)
 }
 
 // CompleteManagedOperationGuarded commits only the observed attempt. expectedApp

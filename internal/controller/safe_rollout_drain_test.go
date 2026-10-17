@@ -284,6 +284,33 @@ func TestFailedCandidateRetiresOnlyAfterVerifiedRollbackAndDrain(t *testing.T) {
 	}
 }
 
+func TestIdleRetirementRunsBeforeUnreadyCanonicalReconciliation(t *testing.T) {
+	s, app, failed, f := newDrainWorkloadFixtureWithOutcome(t, true)
+	s.safeRolloutDrainMetricsQuerier = kubeSafeRolloutDrainObserver{service: s}
+	stored, err := s.Store.GetApp(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(stored, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake cluster deliberately has no canonical Deployment. Executable
+	// reconciliation cannot establish readiness, but that must not starve the
+	// independent failed revision's verified zero-connection retirement.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.reconcileManagedAppObject(ctx, client, managed)
+	got, err := s.Store.GetAppRelease(app.TenantID, true, failed.ID)
+	if err != nil || got.Status != model.AppReleaseStatusRetired || f.deleteCalls != 2 || f.proxyCalls < 4 {
+		t.Fatalf("unready canonical starved guarded retirement: status=%s deletes=%d observations=%d err=%v", got.Status, f.deleteCalls, f.proxyCalls, err)
+	}
+}
+
 func TestBoundRevisionRetiresAfterCanonicalAlignmentAndRetriesFailedDeletion(t *testing.T) {
 	s, app, old, f := newDrainWorkloadFixture(t)
 	old.DeploymentName, old.ServiceName = runtime.RuntimeAppResourceName(app), runtime.RuntimeAppServiceName(app)

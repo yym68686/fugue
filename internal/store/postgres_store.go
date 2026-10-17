@@ -4685,6 +4685,19 @@ func (s *Store) pgCompleteOperationGuarded(id, runtimeID, manifestPath, message 
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
+	if guard != nil && guard.ConstraintPolicyOnly {
+		applyRolloutConstraintPolicy(&app, op)
+		if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+			return model.Operation{}, err
+		}
+		if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+			return model.Operation{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return model.Operation{}, fmt.Errorf("commit rollout constraint policy: %w", err)
+		}
+		return op, nil
+	}
 	if op.DesiredSpec != nil {
 		if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
 			return model.Operation{}, err
@@ -6426,6 +6439,9 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 }
 
 func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error {
+	if operationOnlyChangesRolloutConstraints(*app, *op) {
+		return nil
+	}
 	if isManagedPostgresServiceOperation(op.Type) {
 		return nil
 	}
@@ -6453,7 +6469,9 @@ func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 		return
 	}
 	now := time.Now().UTC()
-	app.Status.Phase = failedPhaseForApp(*app)
+	if !operationOnlyChangesRolloutConstraints(*app, *op) {
+		app.Status.Phase = failedPhaseForApp(*app)
+	}
 	app.Status.LastOperationID = op.ID
 	app.Status.LastMessage = strings.TrimSpace(op.ErrorMessage)
 	app.Status.LastFailedOperation = model.AppOperationFailureFromOperation(*op)
@@ -6465,14 +6483,16 @@ func applyCanceledOperationToAppModel(app *model.App, op *model.Operation) {
 	if app == nil || isManagedPostgresServiceOperation(op.Type) || isDeletedApp(*app) {
 		return
 	}
-	if phase, ok := fallbackLiveAppPhase(*app); ok {
-		app.Status.Phase = phase
-	} else {
-		app.Status.Phase = "unknown"
+	if !operationOnlyChangesRolloutConstraints(*app, *op) {
+		if phase, ok := fallbackLiveAppPhase(*app); ok {
+			app.Status.Phase = phase
+		} else {
+			app.Status.Phase = "unknown"
+		}
+		app.Status.LastFailedOperation = nil
 	}
 	app.Status.LastOperationID = op.ID
 	app.Status.LastMessage = strings.TrimSpace(op.ResultMessage)
-	app.Status.LastFailedOperation = nil
 	app.Status.UpdatedAt = time.Now().UTC()
 	app.UpdatedAt = app.Status.UpdatedAt
 }

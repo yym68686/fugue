@@ -1013,6 +1013,20 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			timer.Mark("stale_deploy_skip")
 			return nil
 		}
+		if model.RolloutConstraintPolicyOnlyChange(currentApp.Spec, op) {
+			if err := s.ensureOperationStillActiveContext(ctx, op.ID); err != nil {
+				return err
+			}
+			message := "rollout constraint policy recorded; executable and serving state unchanged"
+			completed, err := s.finalizeManagedOperation(ctx, op, model.OperationStatusCompleted, func() (model.Operation, error) {
+				return s.Store.CompleteRolloutConstraintPolicyOperation(op, currentApp, message)
+			})
+			if err != nil {
+				return fmt.Errorf("record rollout constraint policy: %w", err)
+			}
+			s.logOperationAppEvent("completed", "info", completed, currentApp, message, nil)
+			return nil
+		}
 		app.Spec = *op.DesiredSpec
 		buildSource := model.AppBuildSource(app)
 		if op.DesiredSource != nil {
@@ -1277,10 +1291,18 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				}
 				app = alignedApp
 				alignmentResult := s.waitForManagedAppRolloutResultWithScheduling(ctx, app, op.ID, scheduling)
-				s.recordRolloutReadinessResultStep(op, app, alignmentResult)
 				if err := alignmentResult.Error(); err != nil {
+					if ctx.Err() == nil && alignmentResult.SchedulingReason != "" && alignmentResult.PodFailureReason == "" &&
+						s.verifyPromotedServingDuringCanonicalWait(ctx, app, safeRollout, scheduling) == nil {
+						s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped,
+							"promoted revision serves all endpoints; canonical replica scheduling deferred to reconciliation", safeRollout.Candidate.ID,
+							map[string]any{"scheduling_reason": alignmentResult.SchedulingReason})
+						break
+					}
+					s.recordRolloutReadinessResultStep(op, app, alignmentResult)
 					return fmt.Errorf("wait for managed app alignment after safe rollout %s: %w", app.ID, err)
 				}
+				s.recordRolloutReadinessResultStep(op, app, alignmentResult)
 				timer.Mark("stable_alignment_wait")
 				// The first apply keeps Services on the independent revision
 				// while the drained canonical Deployment rolls. A second pass

@@ -217,6 +217,12 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		case hasActiveOp:
 			return nil
 		default:
+			// A pending canonical replacement may itself need the capacity held
+			// by drained revisions. Run their independent, fully guarded cleanup
+			// before executable readiness can stop this reconciliation pass.
+			if err := s.retryDrainingAppReleaseRetirement(ctx, storedApp); err != nil && s.Logger != nil {
+				s.Logger.Printf("background release retirement deferred for app %s: %v", storedApp.ID, err)
+			}
 			recoverStoredBaseline = managedAppBaselineNeedsRecovery(storedApp)
 			if recoverStoredBaseline {
 				recoverable, recoverErr := s.managedAppSnapshotRecoverable(ctx, client, namespace, managed, app)
@@ -430,14 +436,6 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	}
 	if err := s.pruneManagedAppStaleObjects(ctx, client, namespace, app, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("prune stale managed app child objects: %w", err))
-	}
-	if err := s.retryDrainingAppReleaseRetirement(ctx, app); err != nil {
-		// Retirement is deliberately independent from serving reconciliation.
-		// Keep the workload and retry on the next fallback/event pass when the
-		// drain observer or edge proof is temporarily unavailable.
-		if s.Logger != nil {
-			s.Logger.Printf("background release retirement deferred for app %s: %v", app.ID, err)
-		}
 	}
 	if err := s.reconcileWorkspaceReplicationSource(ctx, client, app, ownerRef); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile workspace replication source: %w", err))
