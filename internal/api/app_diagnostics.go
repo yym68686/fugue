@@ -259,7 +259,7 @@ func (s *Server) handleRequestAppInternalHTTP(w http.ResponseWriter, r *http.Req
 
 	httpClient := s.appRequestHTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = newAppDiagnosticHTTPClient()
 	}
 	response, err := doObservedHTTPRequest(httpClient, httpReq, req.MaxBodyBytes)
 	if err != nil {

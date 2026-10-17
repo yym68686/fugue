@@ -425,7 +425,7 @@ func (s *Server) diagnoseAppHTTPAvailability(ctx context.Context, app model.App)
 
 	client := s.appRequestHTTPClient
 	if client == nil {
-		client = http.DefaultClient
+		client = newAppDiagnosticHTTPClient()
 	}
 
 	for _, requestPath := range appDiagnosisHTTPProbePaths {

@@ -1544,7 +1544,7 @@ func (s *Server) probeClusterWebSocketAttempt(ctx context.Context, target, rawUR
 func (s *Server) newClusterProbeHTTPClient(timeout time.Duration) *http.Client {
 	baseClient := s.appRequestHTTPClient
 	if baseClient == nil {
-		baseClient = &http.Client{}
+		baseClient = newAppDiagnosticHTTPClient()
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()

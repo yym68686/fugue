@@ -96,7 +96,7 @@ func (s *Server) handleRequestAppInternalHTTPStream(w http.ResponseWriter, r *ht
 	}
 	httpClient := s.appRequestHTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = newAppDiagnosticHTTPClient()
 	}
 
 	probes := make([]model.HTTPStreamProbe, 0, len(accepts))

@@ -10123,6 +10123,10 @@ paths:
     post:
       operationId: requestAppInternalHTTP
       summary: Request App Internal HTTP Endpoint
+      description: >-
+        Uses a fresh upstream connection for each diagnostic request so repeated
+        probes follow the current Service endpoints after a workload handoff.
+        The connection is released after the response body is consumed or closed.
       tags: [Apps]
       x-fugue-handler: handleRequestAppInternalHTTP
       security:
@@ -10148,6 +10152,10 @@ paths:
     post:
       operationId: requestAppInternalHTTPStream
       summary: Diagnose App Internal HTTP Streaming Behavior
+      description: >-
+        Each diagnostic probe uses a fresh upstream connection. An active response
+        stream remains open until completion or the configured probe limits;
+        completed probes do not retain connections to withdrawn workloads.
       tags: [Apps]
       x-fugue-handler: handleRequestAppInternalHTTPStream
       security:
@@ -10173,6 +10181,9 @@ paths:
     get:
       operationId: getAppDiagnosis
       summary: Get App Diagnosis
+      description: >-
+        Internal HTTP availability probes use fresh upstream connections so
+        connection reuse does not pin observations to a withdrawn workload.
       tags: [Apps]
       x-fugue-handler: handleGetAppDiagnosis
       security:
