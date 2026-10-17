@@ -66,10 +66,10 @@ const (
 	edgeOriginMaxIdleConns        = 16
 	edgeOriginMaxIdleConnsPerHost = 16
 
-	// A speculative HTTP/1 dial may enter the idle pool without ever sending
-	// a request. Retire API connections before its 10s initial header deadline;
-	// replaying a POST after that deadline would be unsafe.
-	edgeControlPlaneOriginIdleTimeout = 5 * time.Second
+	// The API allows 120s for the first byte on an unused HTTP/1 connection.
+	// Keep the normal 90s idle reuse with a margin before that deadline. API
+	// initial-idle support must be deployed before this policy is activated.
+	edgeControlPlaneOriginIdleTimeout = 90 * time.Second
 )
 
 type Service struct {

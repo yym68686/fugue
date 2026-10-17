@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/api/httpserver"
 	"fugue/internal/config"
 	"fugue/internal/model"
 )
@@ -56,7 +57,7 @@ func (c *delayedOriginEOFConn) Close() error {
 	return c.Conn.Close()
 }
 
-func TestControlPlaneOriginRetiresUnusedDialBeforeInitialHeaderDeadline(t *testing.T) {
+func TestControlPlaneOriginReusesUnusedDialBeyondHeaderBudget(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -82,8 +83,10 @@ func TestControlPlaneOriginRetiresUnusedDialBeforeInitialHeaderDeadline(t *testi
 		}
 		_, _ = io.WriteString(w, "ok")
 	}))
-	// Matches the API listener's initial request-header deadline.
+	// Matches the API listener: idle waiting precedes its header-read budget.
 	backend.Config.ReadHeaderTimeout = 10 * time.Second
+	backend.Config.IdleTimeout = 2 * time.Minute
+	backend.Listener = httpserver.WithInitialIdleTimeout(backend.Listener, backend.Config.IdleTimeout)
 	backend.Start()
 	defer backend.Close()
 	defer cancel()
@@ -153,25 +156,23 @@ func TestControlPlaneOriginRetiresUnusedDialBeforeInitialHeaderDeadline(t *testi
 	}
 	unused := <-second
 	close(returnDial)
-	retiredBeforeEOF := false
 	select {
 	case <-unused.closed:
-		retiredBeforeEOF = true
+		t.Fatal("unused connection retired before the API idle deadline")
 	case <-unused.eofSeen:
+		t.Fatal("API closed the unused connection at its header deadline")
+	case <-time.After(11 * time.Second):
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
 	observed, err := doRequest(http.MethodPost, "/mutation", strings.NewReader("payload"))
 	if err != nil {
 		snapshot := observed.originTraceSnapshot()
-		t.Fatalf("POST after unused origin dial: %v; retired=%t reused=%t idle=%s wrote=%t kind=%s", err, retiredBeforeEOF,
+		t.Fatalf("POST after unused origin dial: %v; reused=%t idle=%s wrote=%t kind=%s", err,
 			snapshot.OriginConnectionReused, snapshot.OriginConnectionIdle, snapshot.OriginWroteRequest, snapshot.OriginTransportErrorKind)
 	}
-	if !retiredBeforeEOF {
-		t.Fatal("unused origin connection reached the server's initial header deadline")
-	}
-	if count, ok := uses.Load(unused.LocalAddr().String()); ok && count.(*atomic.Int32).Load() != 0 {
-		t.Fatal("unused connection unexpectedly carried a request")
+	if count, ok := uses.Load(unused.LocalAddr().String()); !ok || count.(*atomic.Int32).Load() != 1 {
+		t.Fatal("POST did not reuse the previously unused connection exactly once")
 	}
 	if got := posts.Load(); got != 1 {
 		t.Fatalf("POST count=%d, want exactly one", got)
@@ -184,12 +185,14 @@ func TestControlPlaneOriginIdlePolicyKeepsActiveRequestsAndReuse(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if requests.Add(1) == 1 {
 			// This request remains active beyond the idle pool's timeout.
-			time.Sleep(edgeControlPlaneOriginIdleTimeout + 250*time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 		}
 		_, _ = io.WriteString(w, r.RemoteAddr)
 	}))
 	defer backend.Close()
 	service := NewService(config.EdgeConfig{}, log.New(io.Discard, "", 0))
+	// A stricter injected transport policy still affects only idle time.
+	service.proxyBase.(*http.Transport).IdleConnTimeout = 50 * time.Millisecond
 	defer service.closeEdgeProxyTransports()
 	route := model.EdgeRouteBinding{RouteKind: model.EdgeRouteKindControlPlaneAPI, UpstreamURL: backend.URL, RouteGeneration: "generation_active"}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -225,7 +228,7 @@ func TestControlPlaneOriginIdlePolicySeparatesRouteKinds(t *testing.T) {
 	app := service.edgeProxyBaseForObservation(&edgeProxyObservation{Route: route}).(*http.Transport)
 	route.RouteKind = model.EdgeRouteKindControlPlaneAPI
 	api := service.edgeProxyBaseForObservation(&edgeProxyObservation{Route: route}).(*http.Transport)
-	if api == app || api.IdleConnTimeout <= 0 || api.IdleConnTimeout >= 10*time.Second || app.IdleConnTimeout != prototype.IdleConnTimeout {
+	if api == app || api.IdleConnTimeout != 90*time.Second || api.IdleConnTimeout >= 2*time.Minute || app.IdleConnTimeout != prototype.IdleConnTimeout {
 		t.Fatalf("origin policy mixed: app=%s API=%s prototype=%s", app.IdleConnTimeout, api.IdleConnTimeout, prototype.IdleConnTimeout)
 	}
 	// Retiring an artifact still closes the obsolete route pool. The API pool
