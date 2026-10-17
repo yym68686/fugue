@@ -35,3 +35,38 @@ its EOF delivery. It fails with EOF before the fix and verifies exactly one POST
 after the fix. Companion tests cover requests active beyond five seconds,
 connection reuse, route-kind separation, artifact pool retirement, and the
 existing consumed-POST EOF test.
+
+## Separating initial idle waiting from header reads
+
+The five-second pool limit increases connection churn for low-frequency API
+requests, which is especially visible on intercontinental origins. The API now
+allows an unused plain HTTP/1 TCP connection to wait up to two minutes for its
+first byte. Receiving that byte starts the existing ten-second header budget
+exactly once: sending more partial header bytes does not extend it. Established
+keep-alive connections also have a two-minute idle limit. Previously their idle
+wait was unbounded. Bodies, active handlers, streams and explicit deadlines
+remain under net/http's normal lifecycle and request-specific controls.
+
+The listener adapter uses socket deadlines and no additional timer goroutine.
+It preserves TCP half-close and response-copy behavior, honors newer explicit
+read/whole-connection deadlines, and fails closed if installing the header
+deadline fails. It accepts only plain TCP and is used only on the public API's
+HTTP/1 listener. The separate metrics and mTLS RouteIntent listeners are
+unchanged. This is a connection lifecycle change, not a new route or API schema;
+no artifact, configuration intent, admission rule or positive LKG is rewritten.
+
+Roll this server change through the API lane first, while Edge retains its
+five-second compatibility limit. Verify both API replicas and a direct health
+request on a connection left unused beyond ten seconds before changing the
+Edge pool policy in a separate release. A later Edge release may restore its
+normal ninety-second idle reuse once all origins support the initial idle
+window. An explicit rollback to an older API implementation must restore the
+five-second Edge policy first; never rely on POST replay to bridge incompatible
+timeout policies. A failed server release leaves the existing Edge mitigation
+in place.
+
+Regression coverage includes unused and previously used connections, a genuine
+speculative transport dial, exactly-once POST handling without GetBody,
+dripped headers on first and subsequent requests, a body arriving after the
+header budget, an active handler exceeding the idle budget, explicit deadline
+replacement, empty-connection expiry, bind failure, and graceful shutdown.

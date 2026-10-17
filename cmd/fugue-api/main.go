@@ -164,11 +164,7 @@ func main() {
 		}()
 	}
 
-	httpServer := &http.Server{
-		Addr:              cfg.BindAddr,
-		Handler:           server.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	httpServer := newAPIHTTPServer(cfg.BindAddr, server.Handler())
 	edgeControlTLSConfig, err := edgeControlRouteIntentTLSConfigFromEnv(os.Getenv)
 	if err != nil {
 		logger.Fatalf("configure edge-control RouteIntent TLS: %v", err)
@@ -219,7 +215,7 @@ func main() {
 	}()
 
 	logger.Printf("fugue-api listening on %s", cfg.BindAddr)
-	if err := serveUntilShutdownCompletes(httpServer.ListenAndServe, shutdownDone); err != nil {
+	if err := serveUntilShutdownCompletes(func() error { return serveAPIHTTP(httpServer) }, shutdownDone); err != nil {
 		logger.Fatalf("listen and serve: %v", err)
 	}
 }

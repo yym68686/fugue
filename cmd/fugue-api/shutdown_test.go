@@ -8,16 +8,18 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"fugue/internal/api/httpserver"
 )
 
 func TestServeUntilShutdownCompletesDrainsActiveRequest(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newAPIHTTPServer("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)
 		<-release
 		_, _ = io.WriteString(w, "completed")
-	})}
+	}))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +30,7 @@ func TestServeUntilShutdownCompletesDrainsActiveRequest(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() {
 		runDone <- serveUntilShutdownCompletes(func() error {
-			err := server.Serve(listener)
+			err := server.Serve(httpserver.WithInitialIdleTimeout(listener, server.IdleTimeout))
 			close(serveReturned)
 			return err
 		}, shutdownDone)

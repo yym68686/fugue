@@ -256,6 +256,8 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				objectMapField(f.deployment, "status")["readyReplicas"] = 0
 			}
 			sourceReads, sourceProbes, servicePatches, templateWrites := 0, 0, 0, 0
+			busyObservation := make(chan struct{})
+			waitForBusyObservation := scenario == "busy" || (advancing && strings.HasSuffix(scenario, "_busy"))
 			markerReads := 0
 			markerPatched := false
 			f.extra = func(w http.ResponseWriter, r *http.Request) bool {
@@ -353,6 +355,10 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 						active = 1
 					}
 					_ = json.NewEncoder(w).Encode(drainprotocol.Snapshot{APIVersion: drainprotocol.Version, Nonce: r.URL.Query().Get("nonce"), Pod: pod, Namespace: runtime.NamespaceForTenant(app.TenantID), AppPorts: []int{8080}, ActiveConnections: &active})
+					if waitForBusyObservation && sourceProbes == len(sourcePods) {
+						w.(http.Flusher).Flush()
+						close(busyObservation)
+					}
 					return true
 				}
 				return false
@@ -360,7 +366,18 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			client, _ := s.kubeClient()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if scenario == "busy" || scenario == "stale_endpoints" || scenario == "restore_stale_endpoints" || advancing {
+			if waitForBusyObservation {
+				// Cancel only after the guarded handoff has observed every busy
+				// source Pod. A 150ms wall budget could expire before those checks
+				// under concurrent package load, never exercising drain retention.
+				go func() {
+					select {
+					case <-busyObservation:
+						cancel()
+					case <-ctx.Done():
+					}
+				}()
+			} else if scenario == "stale_endpoints" || scenario == "restore_stale_endpoints" || advancing {
 				ctx, cancel = context.WithTimeout(context.Background(), 150*time.Millisecond)
 				defer cancel()
 			}
@@ -371,6 +388,9 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			}
 			if templateWrites != 0 || f.deleteCalls != 0 {
 				t.Fatal("handoff changed or deleted the original workload")
+			}
+			if waitForBusyObservation && sourceProbes < len(sourcePods) {
+				t.Fatal("handoff stopped before observing the busy source cohort")
 			}
 			if success && scenario != "restore_ready" {
 				if sourceProbes < 4 {
