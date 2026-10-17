@@ -122,6 +122,8 @@ ON CONFLICT (artifact_kind, scope_key) DO NOTHING`,
 		return 0, mapDBErr(err)
 	}
 	var sequence int64
+	// Only allocated sequences can advance the counter. Match the existing
+	// partial index so recovering the high-water mark does not scan history.
 	if err := db.QueryRowContext(ctx, `
 UPDATE fugue_platform_artifact_generation_sequences
 SET last_sequence = GREATEST(
@@ -129,7 +131,7 @@ SET last_sequence = GREATEST(
 		COALESCE((
 			SELECT MAX(generation_sequence)
 			FROM fugue_platform_artifacts
-			WHERE artifact_kind = $1 AND scope_key = $2
+			WHERE artifact_kind = $1 AND scope_key = $2 AND generation_sequence > 0
 		), 0)
 	) + 1,
 	updated_at = $3
