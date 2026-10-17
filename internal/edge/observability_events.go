@@ -195,6 +195,12 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 	if observed.OriginTotal > 0 {
 		summary["origin_total_ms"] = durationMilliseconds(observed.OriginTotal)
 	}
+	if observed.OriginResponseBodyErrorKind != "" {
+		summary["origin_response_body_error_kind"] = observed.OriginResponseBodyErrorKind
+	}
+	if observed.ResponseWriteErrorKind != "" {
+		summary["response_write_error_kind"] = observed.ResponseWriteErrorKind
+	}
 	if observed.ClientCanceled {
 		summary["client_canceled"] = true
 	} else if strings.TrimSpace(observed.UpstreamError) != "" {
@@ -249,6 +255,12 @@ const edgeReleaseEvidenceLatencyThreshold = 5 * time.Second
 func edgePlatformErrorClass(observed edgeProxyObservation) string {
 	if observed.ClientCanceled {
 		return model.PlatformErrorClassNone
+	}
+	if observed.ResponseWriteErrorKind != "" {
+		// A downstream write can fail without an explicit client cancellation
+		// (for example, a server write deadline). Do not call it an origin
+		// failure, or silently use it as successful release evidence.
+		return model.PlatformErrorClassEvidenceUnknown
 	}
 	if class := model.PlatformErrorClassForRouteStatus(observed.Route.Status, observed.Route.StatusReason); class != model.PlatformErrorClassNone {
 		return class
@@ -311,6 +323,9 @@ func edgeStatusClass(statusCode int) string {
 func edgeObservationErrorType(observed edgeProxyObservation) string {
 	if observed.ClientCanceled {
 		return "client_closed"
+	}
+	if observed.ResponseWriteErrorKind != "" {
+		return "response_write_error"
 	}
 	if strings.TrimSpace(observed.UpstreamError) != "" {
 		return "upstream_error"

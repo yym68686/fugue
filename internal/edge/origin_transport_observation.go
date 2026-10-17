@@ -9,7 +9,7 @@ import (
 )
 
 // Classify typed transport errors without logging their text, which can contain
-// origin URLs or credentials. This describes RoundTrip failure before a response;
+// origin URLs or credentials. This describes transport or response-body failures;
 // it does not infer whether the origin processed the request or make it retryable.
 func originTransportErrorKind(err error) string {
 	if err == nil {

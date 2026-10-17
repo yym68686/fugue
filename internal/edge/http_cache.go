@@ -578,6 +578,12 @@ func (s *Service) edgeCacheShouldStore(decision edgeHTTPCacheDecision, capture *
 	if decision.PolicyID == "" || !decision.Cacheable || capture == nil || capture.overflow {
 		return false
 	}
+	if capture.observation != nil {
+		observed := capture.observation.originTraceSnapshot()
+		if observed.OriginResponseBodyErrorKind != "" || observed.ResponseWriteErrorKind != "" || observed.ClientCanceled {
+			return false
+		}
+	}
 	if capture.statusCode() != http.StatusOK {
 		return false
 	}

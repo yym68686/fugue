@@ -453,9 +453,11 @@ type edgeProxyObservation struct {
 	EdgeProxyTCPInfo        tcpdiag.Snapshot
 	ResponseBytes           int64
 
-	OriginConnectionWasIdle  bool
-	OriginConnectionIdle     time.Duration
-	OriginTransportErrorKind string
+	OriginConnectionWasIdle     bool
+	OriginConnectionIdle        time.Duration
+	OriginTransportErrorKind    string
+	OriginResponseBodyErrorKind string
+	ResponseWriteErrorKind      string
 }
 
 func (o *edgeProxyObservation) initializeOriginTrace() {
@@ -1328,8 +1330,19 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	observed.CachePolicyID = cacheDecision.PolicyID
 	observed.CacheKeyHash = cacheDecision.KeyHash
 	observed.AssetClass = cacheDecision.AssetClass
+	// The request-body policy below can install and cancel an internal child
+	// context during cleanup. Only the incoming context proves client cancel.
+	clientContext := r.Context()
 	defer func() {
 		completed := observed.originTraceSnapshot()
+		// ReverseProxy aborts the handler when copying an already-started
+		// response fails. Keep that panic intact, but retain its outcome even
+		// though the code after ServeHTTP is not reached. A canceled client
+		// must not be counted as an origin failure.
+		if errors.Is(clientContext.Err(), context.Canceled) &&
+			(completed.OriginResponseBodyErrorKind != "" || completed.ResponseWriteErrorKind != "") {
+			completed.ClientCanceled = true
+		}
 		completed.Duration = time.Since(startedAt)
 		if !completed.InternalWarmup {
 			s.recordProxyObservation(completed)
@@ -2750,6 +2763,16 @@ type edgeOriginTimingBody struct {
 func (b *edgeOriginTimingBody) Read(data []byte) (int, error) {
 	n, err := b.ReadCloser.Read(data)
 	if errors.Is(err, io.EOF) {
+		b.finish()
+	} else if err != nil {
+		kind := originTransportErrorKind(err)
+		b.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+			observed.OriginResponseBodyErrorKind = kind
+			observed.OriginTransportErrorKind = kind
+			// Keep only the bounded classification: error text may contain URLs
+			// or credentials, and a failed read does not make a POST replayable.
+			observed.UpstreamError = "origin response body: " + kind
+		})
 		b.finish()
 	}
 	return n, err
@@ -4631,6 +4654,9 @@ func edgeProxyObservationResult(observed edgeProxyObservation) string {
 	if observed.ClientCanceled {
 		return "client_closed"
 	}
+	if observed.ResponseWriteErrorKind != "" {
+		return "error"
+	}
 	if strings.TrimSpace(observed.UpstreamError) != "" {
 		return "error"
 	}
@@ -5141,6 +5167,11 @@ func (w *edgeProxyObservationResponseWriter) WriteHeader(statusCode int) {
 	writeStarted := time.Now()
 	w.wroteHeader = true
 	w.status = statusCode
+	if w.observation != nil {
+		w.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+			observed.StatusCode = statusCode
+		})
+	}
 	w.headerSnapshot = cloneHTTPHeader(w.ResponseWriter.Header())
 	if w.observation != nil && w.observation.TTFB == 0 && !w.startedAt.IsZero() {
 		w.observation.TTFB = time.Since(w.startedAt)
@@ -5166,9 +5197,23 @@ func (w *edgeProxyObservationResponseWriter) Write(data []byte) (int, error) {
 			w.overflow = true
 		}
 	}
-	w.bytesWritten += int64(len(data))
 	writeStarted := time.Now()
 	n, err := w.ResponseWriter.Write(data)
+	w.bytesWritten += int64(n)
+	if w.observation != nil {
+		w.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+			observed.ResponseBytes = w.bytesWritten
+			if err != nil {
+				observed.ResponseWriteErrorKind = originTransportErrorKind(err)
+			} else if n != len(data) {
+				observed.ResponseWriteErrorKind = "short_write"
+			}
+		})
+	}
+	if err != nil || n != len(data) {
+		// A partial response can never be used to populate the HTTP cache.
+		w.overflow = true
+	}
 	w.addResponseWriteDuration(time.Since(writeStarted))
 	return n, err
 }
