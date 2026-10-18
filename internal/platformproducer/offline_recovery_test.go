@@ -49,6 +49,41 @@ func TestOfflineRecoveryNeedsConsecutiveFreshProofsAndIdentity(t *testing.T) {
 	}
 }
 
+func TestOfflineRecoveryDateDoesNotGateProbeBasedReadmission(t *testing.T) {
+	base := time.Date(2030, 1, 2, 0, 0, 0, 0, time.UTC)
+	for _, zone := range []struct {
+		name   string
+		offset int
+	}{{name: "UTC"}, {name: "UTC-12", offset: -12 * 60 * 60}, {name: "UTC+14", offset: 14 * 60 * 60}} {
+		t.Run(zone.name, func(t *testing.T) {
+			local := time.FixedZone(zone.name, zone.offset)
+			for _, scenario := range []struct {
+				name       string
+				recoveryAt string
+				attempts   int
+				admitted   bool
+			}{
+				{name: "healthy before informational date", recoveryAt: "2030-01-10", attempts: 3, admitted: true},
+				{name: "past date without enough successful probes", recoveryAt: "2030-01-01", attempts: 2, admitted: false},
+			} {
+				t.Run(scenario.name, func(t *testing.T) {
+					hold := recoveryHold()
+					hold.ExpectedRecoveryDate = scenario.recoveryAt
+					observation := OfflineRecoveryObservation{}
+					for index := 0; index < scenario.attempts; index++ {
+						at := base.Add(time.Duration(index) * time.Duration(hold.Recovery.ProbeIntervalSeconds) * time.Second).In(local)
+						observation = observation.Record(hold, at, true, at.Add(time.Hour))
+					}
+					at := base.Add(time.Duration(scenario.attempts-1) * time.Duration(hold.Recovery.ProbeIntervalSeconds) * time.Second).In(local)
+					if got := observation.Ready(hold, at); got != scenario.admitted {
+						t.Fatalf("recovery readiness=%t, want %t for informational date %s after %d successful probes", got, scenario.admitted, scenario.recoveryAt, scenario.attempts)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestEffectiveOfflineHoldsUsesOnlyReadyObservations(t *testing.T) {
 	h := recoveryHold()
 	nodes := []model.EdgeNode{{ID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8"}, {ID: "edge-b", EdgeGroupID: "edge-group-a", PublicIPv4: "9.9.9.9"}}
