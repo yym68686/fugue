@@ -1,0 +1,14 @@
+--- a/pkg/daemons/control/tunnel.go
++++ b/pkg/daemons/control/tunnel.go
+@@ -253,8 +253,9 @@
+        dialContext := t.server.Dialer(nodeName)
+        if conn, err := dialContext(ctx, "tcp", addr); err != nil {
+                logrus.Debugf("Tunnel server egress proxy dial error: %v", err)
+-			if toKubelet && strings.HasPrefix(err.Error(), "failed to find Session for client") {
+-				// Don't have a session and we're trying to remote dial the kubelet via loopback, reject the connection.
++			if toKubelet {
++				// A remote kubelet address was rewritten to loopback for tunneling.
++				// Never use that loopback address as a local direct fallback.
+                        return conn, err
+                }
+                // any other error is ignored; fall back to to dialing directly.

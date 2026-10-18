@@ -11,6 +11,45 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestK3sTransportVerificationIsIsolatedFromProduction(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	job := yamlMappingValue(t, yamlMappingValue(t, document.Content[0], "jobs"), "k3s_transport_integration")
+	if yamlMappingValue(t, job, "runs-on").Value != "ubuntu-latest" || yamlMappingValue(t, job, "needs").Value != "prepush" {
+		t.Fatal("upstream verification must use a disposable runner after repository checks")
+	}
+	for _, key := range yamlMappingKeys(t, job) {
+		if key == "environment" || key == "concurrency" {
+			t.Fatal("dependency verification must not acquire production environment access or rollout locks")
+		}
+	}
+	permissions := yamlMappingValue(t, job, "permissions")
+	if !reflect.DeepEqual(yamlMappingKeys(t, permissions), []string{"contents"}) || yamlMappingValue(t, permissions, "contents").Value != "read" {
+		t.Fatal("dependency verification only requires repository read permission")
+	}
+	encoded, err := yaml.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(encoded)
+	for _, required := range []string{"scripts.test_verify_k3s_transport", "verify_k3s_transport.py prepare", "verify_k3s_transport.py verify", "k3s-transport-evidence", "if-no-files-found: error"} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("missing transport verification gate: %s", required)
+		}
+	}
+	for _, forbidden := range []string{"secrets.", "self-hosted", "systemctl", "kubectl", "--push"} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("isolated verification gained production or publication capability: %s", forbidden)
+		}
+	}
+}
+
 func TestFrontObservationSelectsOnlyExplicitChangedProfiles(t *testing.T) {
 	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
@@ -157,7 +196,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_image_gc", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_configuration_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_slot_retirement", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_offline_configuration", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "managed_postgres_cpu_policy", "managed_postgres_cpu_policy_plan", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_runtime_plan", "managed_ssh_transport", "node_resource_policy", "node_resource_policy_tasks", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "tls_issuance_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_stage", "dns_authority_stage_plan", "dns_configuration_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_slot_retirement", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_offline_configuration", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "k3s_transport_integration", "managed_postgres_cpu_policy", "managed_postgres_cpu_policy_plan", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_runtime_plan", "managed_ssh_transport", "node_resource_policy", "node_resource_policy_tasks", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_protection", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "tls_issuance_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}

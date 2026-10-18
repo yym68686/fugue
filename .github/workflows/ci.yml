@@ -10,6 +10,50 @@ permissions:
   contents: read
 
 jobs:
+  k3s_transport_integration:
+    # Dependency verification runs on a disposable runner without production access.
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select changed pinned transport verification inputs
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          changed=false
+          if ! git diff --quiet "$BASE_SHA" HEAD -- tests/k3s-transport scripts/verify_k3s_transport.py scripts/test_verify_k3s_transport.py; then changed=true; fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      - name: Prepare the exact upstream source and regression fixture
+        if: steps.selected.outputs.changed == 'true'
+        run: |
+          python3 -m unittest scripts.test_verify_k3s_transport
+          python3 scripts/verify_k3s_transport.py prepare --workspace "$RUNNER_TEMP/k3s-transport" --evidence "$RUNNER_TEMP/k3s-transport-evidence"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        if: steps.selected.outputs.changed == 'true'
+        with:
+          go-version-file: ${{ runner.temp }}/k3s-transport/k3s/go.mod
+          cache: false
+      - name: Reproduce the defect and test the patched upstream package
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+        run: |
+          python3 scripts/verify_k3s_transport.py verify --workspace "$RUNNER_TEMP/k3s-transport" --evidence "$RUNNER_TEMP/k3s-transport-evidence"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-k3s-transport-verification-${{ github.sha }}
+          path: ${{ runner.temp }}/k3s-transport-evidence
+          if-no-files-found: error
+          retention-days: 14
+
   managed_postgres_cpu_policy_plan:
     # Select config-only work before acquiring the shared production lock.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

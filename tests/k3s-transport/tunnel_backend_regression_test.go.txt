@@ -1,0 +1,243 @@
+package control
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/rancher/remotedialer"
+	"github.com/yl2chen/cidranger"
+)
+
+// These tests are copied into the pinned upstream control package. They call
+// its real dialBackend; no implementation of the routing decision lives here.
+type fugueFaultListener struct {
+	net.Listener
+	armed atomic.Bool
+	fault error
+}
+
+type fugueFaultConn struct {
+	net.Conn
+	owner *fugueFaultListener
+}
+
+func (l *fugueFaultListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &fugueFaultConn{Conn: c, owner: l}, nil
+}
+
+func (c *fugueFaultConn) Write(p []byte) (int, error) {
+	if c.owner.armed.Load() {
+		return 0, c.owner.fault
+	}
+	return c.Conn.Write(p)
+}
+
+func fugueMarkerListener(t *testing.T, marker string) (net.Listener, *atomic.Int32) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accepted atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = c.SetWriteDeadline(time.Now().Add(time.Second))
+			_, _ = io.WriteString(c, marker)
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = l.Close(); <-done })
+	return l, &accepted
+}
+
+func fugueReadMarker(t *testing.T, conn net.Conn) string {
+	t.Helper()
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	raw, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func fugueTunnelFixture(t *testing.T, localAddress, remoteAddress, cidr, reservedPort string, fault error) (*TunnelServer, *fugueFaultListener) {
+	t.Helper()
+	server := remotedialer.New(func(*http.Request) (string, bool, error) {
+		return "probe-agent", true, nil
+	}, remotedialer.DefaultErrorWriter)
+	endpoint := httptest.NewUnstartedServer(server)
+	listener := &fugueFaultListener{Listener: endpoint.Listener, fault: fault}
+	endpoint.Listener = listener
+	endpoint.Start()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- remotedialer.ConnectToProxyWithDialer(ctx,
+			"ws"+strings.TrimPrefix(endpoint.URL, "http"), nil,
+			func(proto, address string) bool { return proto == "tcp" && address == localAddress }, nil,
+			func(ctx context.Context, network, address string) (net.Conn, error) {
+				if address != localAddress {
+					return nil, errors.New("unexpected tunneled address")
+				}
+				return (&net.Dialer{}).DialContext(ctx, network, remoteAddress)
+			}, nil)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("remotedialer client did not exit")
+		}
+		endpoint.CloseClientConnections()
+		endpoint.Close()
+	})
+	until := time.Now().Add(5 * time.Second)
+	for !server.HasSession("probe-agent") && time.Now().Before(until) {
+		time.Sleep(time.Millisecond)
+	}
+	if !server.HasSession("probe-agent") {
+		t.Fatal("real WebSocket session was not registered")
+	}
+	ranger := cidranger.NewPCTrieRanger()
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ranger.Insert(&tunnelEntry{nodeName: "probe-agent", kubeletPort: reservedPort, cidr: *network}); err != nil {
+		t.Fatal(err)
+	}
+	return &TunnelServer{
+		config: &config.Control{ServerNodeName: "probe-control", BindAddress: "127.0.0.1"},
+		cidrs:  ranger, server: server, egress: map[string]bool{"probe-agent": true},
+	}, listener
+}
+
+func TestFugueTunnelRemoteKubeletFailClosed(t *testing.T) {
+	for _, destination := range []struct{ name, host, cidr string }{
+		{"node", "probe-agent", "192.0.2.10/32"},
+		{"ipv4", "192.0.2.10", "192.0.2.10/32"},
+		{"ipv6", "2001:db8::10", "2001:db8::10/128"},
+	} {
+		for _, failure := range []struct {
+			name string
+			err  error
+		}{{"healthy", nil}, {"EOF", io.EOF}, {"timeout", os.ErrDeadlineExceeded}} {
+			t.Run(destination.name+"_"+failure.name, func(t *testing.T) {
+				local, localConnections := fugueMarkerListener(t, "LOCAL_CONTROL_KUBELET")
+				remote, _ := fugueMarkerListener(t, "REMOTE_AGENT_KUBELET")
+				_, port, err := net.SplitHostPort(local.Addr().String())
+				if err != nil {
+					t.Fatal(err)
+				}
+				tunnel, listener := fugueTunnelFixture(t, local.Addr().String(), remote.Addr().String(), destination.cidr, port, failure.err)
+				address := net.JoinHostPort(destination.host, port)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				warm, err := tunnel.dialBackend(ctx, address)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fugueReadMarker(t, warm) != "REMOTE_AGENT_KUBELET" {
+					t.Fatal("tunnel did not exchange real remote bytes before injection")
+				}
+				if failure.err != nil {
+					listener.armed.Store(true)
+				}
+				conn, err := tunnel.dialBackend(ctx, address)
+				if failure.err != nil {
+					if conn != nil {
+						marker := fugueReadMarker(t, conn)
+						t.Fatalf("unsafe_local_kubelet_fallback: marker=%q error=%v", marker, err)
+					}
+					if err == nil || localConnections.Load() != 0 {
+						t.Fatalf("broken remote tunnel was not rejected: error=%v local_connections=%d", err, localConnections.Load())
+					}
+					return
+				}
+				if err != nil || conn == nil {
+					t.Fatalf("healthy remote tunnel failed: %v", err)
+				}
+				if fugueReadMarker(t, conn) != "REMOTE_AGENT_KUBELET" || localConnections.Load() != 0 {
+					t.Fatal("healthy tunnel reached the wrong backend")
+				}
+			})
+		}
+	}
+}
+
+func TestFugueTunnelLocalKubeletRemainsDirect(t *testing.T) {
+	local, accepted := fugueMarkerListener(t, "LOCAL_CONTROL_KUBELET")
+	_, port, _ := net.SplitHostPort(local.Addr().String())
+	tunnel := &TunnelServer{config: &config.Control{ServerNodeName: "probe-control", BindAddress: "127.0.0.1"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := tunnel.dialBackend(ctx, net.JoinHostPort("probe-control", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fugueReadMarker(t, conn) != "LOCAL_CONTROL_KUBELET" || accepted.Load() != 1 {
+		t.Fatal("local kubelet routing changed")
+	}
+}
+
+func TestFugueTunnelMissingRemoteSessionRemainsRejected(t *testing.T) {
+	local, accepted := fugueMarkerListener(t, "LOCAL_CONTROL_KUBELET")
+	_, port, _ := net.SplitHostPort(local.Addr().String())
+	server := remotedialer.New(func(*http.Request) (string, bool, error) { return "probe-agent", true, nil }, remotedialer.DefaultErrorWriter)
+	tunnel := &TunnelServer{config: &config.Control{ServerNodeName: "probe-control", BindAddress: "127.0.0.1"}, server: server}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := tunnel.dialBackend(ctx, net.JoinHostPort("probe-agent", port))
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil || conn != nil || accepted.Load() != 0 {
+		t.Fatalf("missing remote session reached local kubelet: error=%v local_connections=%d", err, accepted.Load())
+	}
+}
+
+func TestFugueTunnelPodFallbackKeepsOriginalAddress(t *testing.T) {
+	pod, accepted := fugueMarkerListener(t, "ORIGINAL_POD_ADDRESS")
+	remote, _ := fugueMarkerListener(t, "REMOTE_AGENT_KUBELET")
+	tunnel, listener := fugueTunnelFixture(t, pod.Addr().String(), remote.Addr().String(), "127.0.0.1/32", "1", io.EOF)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	warm, err := tunnel.dialBackend(ctx, pod.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fugueReadMarker(t, warm) != "REMOTE_AGENT_KUBELET" {
+		t.Fatal("pod tunnel did not exchange real remote bytes")
+	}
+	listener.armed.Store(true)
+	conn, err := tunnel.dialBackend(ctx, pod.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fugueReadMarker(t, conn) != "ORIGINAL_POD_ADDRESS" || accepted.Load() != 1 {
+		t.Fatal("non-kubelet direct fallback changed destination")
+	}
+}
