@@ -124,6 +124,10 @@ x-fugue-dns-runtime-facts:
     probe identities and proof bindings, without hostnames, origin URLs, tokens,
     artifact payloads or raw probe errors. No request performs probing or writes
     serving, cache, heartbeat, intent, policy or LKG state.
+    Successful responses may use Content-Encoding gzip when accepted by the
+    reader, and vary on Accept-Encoding. Decompression yields the same JSON
+    snapshot schema and original proof timestamps. Both representations remain
+    private, no-store; compression does not cache observations or authorization.
 x-fugue-edge-cache-recovery:
   semantics: >-
     An empty inactive-slot candidate response retains the previously verified

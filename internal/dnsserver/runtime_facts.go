@@ -66,12 +66,24 @@ func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
 	listenerFailed := s.listenerFailed.Load()
 	observed.Ready = observed.Ready && !listenerFailed
 	raw, err := json.Marshal(observed)
-	if err != nil || len(raw) > 32<<20 || r.Context().Err() != nil || s.platformServing.Load() != st || s.listenerFailed.Load() != listenerFailed {
+	if err != nil || len(raw) > 32<<20 {
+		fail()
+		return
+	}
+	compressed := acceptsRuntimeFactsGzip(r.Header)
+	if compressed {
+		raw, err = gzipRuntimeFacts(raw)
+	}
+	if err != nil || r.Context().Err() != nil || s.platformServing.Load() != st || s.listenerFailed.Load() != listenerFailed {
 		fail()
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Add("Vary", "Accept-Encoding")
+	if compressed {
+		w.Header().Set("Content-Encoding", "gzip")
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
 }
