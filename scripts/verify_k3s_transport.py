@@ -120,6 +120,8 @@ def evaluate_test_events(raw: str, returncode: int, *, baseline: bool, repetitio
             skipped.append(test)
     if skipped:
         raise ValueError("transport verification skipped tests")
+    if "WARNING: DATA RACE" in "".join(output):
+        raise ValueError("an unrelated data race cannot count as the expected baseline failure")
     if baseline:
         expected_failures = FAULT_TESTS | {REMOTE_TEST}
         if returncode != 1 or set(failed) != expected_failures or any(failed[t] != 1 for t in expected_failures):

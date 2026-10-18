@@ -17,6 +17,7 @@ class TestTransportEvidence(unittest.TestCase):
         self.assertTrue(evaluate_test_events(self.baseline(), 1, baseline=True, repetitions=1)["accepted"])
         for text, code in [("build failed", 1), (self.baseline(), 0),
                            (self.baseline().replace("unsafe_local_kubelet_fallback:", "unrelated failure:"), 1),
+                           (self.baseline() + "\n" + json.dumps({"Action": "output", "Output": "WARNING: DATA RACE\n"}), 1),
                            ("\n".join(events("fail", FAULT_TESTS | {REMOTE_TEST})), 1)]:
             with self.subTest(text=text[:50], code=code), self.assertRaises(ValueError):
                 evaluate_test_events(text, code, baseline=True, repetitions=1)
