@@ -156,8 +156,8 @@ def publish(config, api, save):
     if authority_identity(current) != precondition["previous_policy"] and not exact(current.get("artifact", {}), "policy_snapshot", SCOPE, successor):
         raise ValueError("successor publication differs from declaration")
     artifact = ensure_input(api, "policy_snapshot", SCOPE, successor)
-    previous_preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"])
-    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
+    previous_preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"] + "&view=runtime")
+    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
     summaries = validate_preview(config, preview, previous_preview)
     baseline(config, api)
     evidence = {"schema": "fugue.physical-dns-reconfiguration-result/v1", "declaration_digest": declaration_digest, "declared_precondition": declared_precondition, "resolved_precondition": precondition, "artifact_id": artifact["id"], "hostname": config["hostname"], "business_snapshot_revision": preview["business_snapshot_revision"], "unchanged_projection_issues": preview.get("issues", []), "selections": summaries, "serving_full_precondition": precondition["serving_full"], "routing_acceptance_complete": False, "producer_activated": False}

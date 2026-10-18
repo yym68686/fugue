@@ -190,3 +190,23 @@ A heartbeat cannot re-enroll the removed execution member. When it returns, use
 checks, prepare the member, verify candidate convergence, and only then consider
 removing its DNS offline hold. Historical artifacts and rollback records are
 retained throughout; do not edit expected-consumer rows or bypass freshness.
+
+## Configuration preview and runtime export
+
+`GET /v1/admin/platform-config/routes/project?producer_policy_artifact_id=<id>`
+now defaults to `view=configuration`. This reads the pinned sources and one
+consistent business snapshot, including static TXT/MX records, without contacting
+Kubernetes or probing DNS/TLS/origins. A temporarily unavailable DNS backend no
+longer prevents reviewing an independent configuration change. The response has
+`preview_mode: configuration`, `migration_ready: false` and an explicit
+`runtime_evidence_not_collected` issue. Its `runtime_snapshot` contains only the
+intent/policy generation bindings; it cannot substitute for publication evidence.
+
+Use `&view=runtime` when deliberately capturing full observations for diagnostics,
+replay or existing evidence-dependent configuration tools. This may be slow or
+large, and unavailable or mismatched evidence still returns an error. The
+repository's configuration publishers explicitly opt into that mode. Automatic
+producers, compilation and publication safety gates retain their strict capture
+and verification behavior. Neither view publishes configuration, renews leases,
+changes backend identity, or advances LKG. Invalid/duplicate views return 400;
+untrusted pinned input and conflicting configuration still fail closed.

@@ -122,8 +122,8 @@ def publish_once(config, api, save):
     if authority_identity(current) != precondition["previous_policy"] and not exact(current.get("artifact", {}), "policy_snapshot", SCOPE, successor):
         raise ValueError("successor differs")
     artifact = ensure_input(api, "policy_snapshot", SCOPE, successor)
-    before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"])
-    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
+    before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"] + "&view=runtime")
+    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
     coverage = validate_preview(before, preview)
     if business:
         coverage = validate_business_preview(preview, config["projection_policy"], changed_hostname)

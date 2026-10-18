@@ -61,7 +61,7 @@ func TestStaticIntentCaptureIgnoresAmbientRoutesAndDNS(t *testing.T) {
 		}
 	}
 	policy := createTestProjectionPolicy(t, s, base, "preview-static", "shadow")
-	path := "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + policy.ID
+	path := "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + policy.ID + "&view=runtime"
 	r := performJSONRequest(t, s, http.MethodGet, path, admin, nil)
 	if r.Code != 200 {
 		t.Fatal(r.Body.String())

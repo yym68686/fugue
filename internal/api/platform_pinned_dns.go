@@ -14,6 +14,10 @@ import (
 )
 
 func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal model.Principal, policy platformproducer.Policy) (platformIntentProjectionResponse, error) {
+	return s.projectPlatformIntentForProducer(ctx, principal, policy, true)
+}
+
+func (s *Server) projectPlatformIntentForProducer(ctx context.Context, principal model.Principal, policy platformproducer.Policy, collectRuntime bool) (platformIntentProjectionResponse, error) {
 	if policy.InputSource != "business-static-intent" {
 		return platformIntentProjectionResponse{}, fmt.Errorf("producer requires pinned static intent")
 	}
@@ -56,7 +60,7 @@ func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal
 			return platformIntentProjectionResponse{}, fmt.Errorf("pinned route defaults required")
 		}
 	}
-	projection, err := s.capturePlatformIntentWithInputs(ctx, principal, static, dns, policy.HostedZoneTemplates)
+	projection, err := s.projectPlatformIntentWithInputs(ctx, principal, static, dns, policy.HostedZoneTemplates, collectRuntime)
 	if err != nil || policy.RoutePlacementTransition == nil {
 		return projection, err
 	}
@@ -69,33 +73,9 @@ func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal
 }
 
 func projectPinnedDNSInputs(result *platformIntentProjectionResponse, declared []platformconfig.DNSConsumerIntent, p platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate, nodes []model.DNSNode, hosted []model.HostedZone, now time.Time) error {
-	consumers := platformconfig.NormalizePlatformIntent(platformconfig.PlatformIntent{DNSConsumers: declared}).DNSConsumers
-	authority := append([]platformconfig.DNSAuthorityPolicy(nil), p.Authorities...)
-	zones := edgeDNSPublishableHostedZoneNames(hosted)
-	for _, t := range templates {
-		var template platformconfig.DNSAuthorityPolicy
-		for _, a := range p.Authorities {
-			if a.NodeID == t.NodeID && a.Zone == t.TemplateZone {
-				template = a
-			}
-		}
-		if template.NodeID == "" {
-			return fmt.Errorf("hosted zone template absent")
-		}
-		for i, c := range consumers {
-			if c.NodeID != t.NodeID {
-				continue
-			}
-			for _, zone := range zones {
-				if slices.Contains(consumers[i].Zones, zone) {
-					continue
-				}
-				consumers[i].Zones = append(consumers[i].Zones, zone)
-				a := template
-				a.Zone = zone
-				authority = append(authority, a)
-			}
-		}
+	consumers, authority, err := pinnedDNSDeclarations(declared, p, templates, hosted)
+	if err != nil {
+		return err
 	}
 	byNode := map[string]platformconfig.DNSConsumerIntent{}
 	for _, c := range consumers {
@@ -165,4 +145,44 @@ func projectPinnedDNSInputs(result *platformIntentProjectionResponse, declared [
 	draft.RuntimeSnapshot.PolicyGeneration = gen
 	*result = draft
 	return nil
+}
+
+// Derive ownership from signed declarations only; endpoint observations are separate.
+func pinnedDNSDeclarations(declared []platformconfig.DNSConsumerIntent, p platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate, hosted []model.HostedZone) ([]platformconfig.DNSConsumerIntent, []platformconfig.DNSAuthorityPolicy, error) {
+	consumers := platformconfig.NormalizePlatformIntent(platformconfig.PlatformIntent{DNSConsumers: declared}).DNSConsumers
+	authority := append([]platformconfig.DNSAuthorityPolicy(nil), p.Authorities...)
+	zones := edgeDNSPublishableHostedZoneNames(hosted)
+	for _, t := range templates {
+		var template platformconfig.DNSAuthorityPolicy
+		for _, a := range p.Authorities {
+			if a.NodeID == t.NodeID && a.Zone == t.TemplateZone {
+				template = a
+			}
+		}
+		if template.NodeID == "" {
+			return nil, nil, fmt.Errorf("hosted zone template absent")
+		}
+		for i, c := range consumers {
+			if c.NodeID != t.NodeID {
+				continue
+			}
+			for _, zone := range zones {
+				if slices.Contains(consumers[i].Zones, zone) {
+					continue
+				}
+				consumers[i].Zones = append(consumers[i].Zones, zone)
+				a := template
+				a.Zone = zone
+				authority = append(authority, a)
+			}
+		}
+	}
+
+	if err := platformconfig.ValidateDNSAuthorityOwnership(authority, consumers); err != nil {
+		return nil, nil, err
+	}
+	if err := platformconfig.ValidateDNSClientPolicyOwnership(p.Clients, consumers); err != nil {
+		return nil, nil, err
+	}
+	return consumers, authority, nil
 }

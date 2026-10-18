@@ -17,6 +17,7 @@ import (
 	"fugue/internal/platformcontrol"
 	"fugue/internal/routeartifact"
 	"fugue/internal/store"
+	"fugue/internal/trafficepoch"
 )
 
 type edgeRouteIntentSource interface {
@@ -93,6 +94,10 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithStatic(ctx context.Context, so
 }
 
 func (s *Server) deriveEdgeRouteIntentSnapshotWithDomains(ctx context.Context, source edgeRouteIntentSource, capture func([]model.App), configuredRoutes []model.PlatformRoute, domainsConfig applicationDomainConfig) (model.EdgeRouteIntentSnapshot, error) {
+	return s.deriveEdgeRouteIntentSnapshotWithCapture(ctx, source, capture, configuredRoutes, domainsConfig, true)
+}
+
+func (s *Server) deriveEdgeRouteIntentSnapshotWithCapture(ctx context.Context, source edgeRouteIntentSource, capture func([]model.App), configuredRoutes []model.PlatformRoute, domainsConfig applicationDomainConfig, collectRuntime bool) (model.EdgeRouteIntentSnapshot, error) {
 	apps, err := source.ListAppsMetadata("", true)
 	if err != nil {
 		return model.EdgeRouteIntentSnapshot{}, err
@@ -130,8 +135,16 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithDomains(ctx context.Context, s
 	for _, runtimeObj := range runtimes {
 		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
 	}
-	runtimeNodeLabelsByID := s.edgeRouteRuntimeNodeLabels(ctx)
-	apps, provenanceByAppID := s.overlayManagedAppStatusesForEdgeRoutesCachedWithProvenance(apps, runtimeByID)
+	var runtimeNodeLabelsByID map[string]map[string]string
+	var provenanceByAppID map[string]managedAppObservationProvenance
+	if collectRuntime {
+		runtimeNodeLabelsByID = s.edgeRouteRuntimeNodeLabels(ctx)
+		apps, provenanceByAppID = s.overlayManagedAppStatusesForEdgeRoutesCachedWithProvenance(apps, runtimeByID)
+	}
+	compileBinding := func(app model.App, hostname, path string, port int, kind, tls string, created, updated time.Time) model.EdgeRouteBinding {
+		input := s.edgeRouteBindingInputWithCapture(ctx, app, hostname, path, port, kind, tls, created, updated, runtimeByID, runtimeNodeLabelsByID, collectRuntime)
+		return trafficepoch.CompileRouteBinding(input)
+	}
 	if capture != nil {
 		capture(apps)
 	}
@@ -180,7 +193,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithDomains(ctx context.Context, s
 		if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
 			continue
 		}
-		appendBinding(s.compileTrafficEpochRouteBinding(ctx, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID))
+		appendBinding(compileBinding(app, strings.TrimSpace(app.Route.Hostname), edgeRoutePathPrefix(app, model.EdgeRouteKindPlatform), 0, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt))
 	}
 	for _, route := range platformRoutes {
 		intents = append(intents, edgeRouteIntentFromPlatformRoute(route))
@@ -201,7 +214,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithDomains(ctx context.Context, s
 		default:
 			continue
 		}
-		binding := s.compileTrafficEpochRouteBinding(ctx, app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		binding := compileBinding(app, hostname, edgeRoutePathPrefix(app, routeKind), 0, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt)
 		binding = applyCustomDomainReadiness(binding, domain)
 		appendBinding(binding)
 		tlsAllowlist = append(tlsAllowlist, model.EdgeTLSAllowlistEntry{Hostname: hostname, AppID: domain.AppID, TenantID: domain.TenantID, Status: domain.Status, TLSStatus: domain.TLSStatus})
@@ -217,7 +230,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithDomains(ctx context.Context, s
 			if !ok {
 				continue
 			}
-			binding := s.compileTrafficEpochRouteBindingForRoute(ctx, app, hostname, routeBinding.PathPrefix, routeBinding.ServicePort, routeKind, tlsPolicy, table.CreatedAt, table.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+			binding := compileBinding(app, hostname, routeBinding.PathPrefix, routeBinding.ServicePort, routeKind, tlsPolicy, table.CreatedAt, table.UpdatedAt)
 			if domain != nil {
 				binding = applyCustomDomainReadiness(binding, *domain)
 			}
@@ -243,7 +256,9 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithDomains(ctx context.Context, s
 		}
 	}
 	snapshot.Generation = edgeRouteIntentSnapshotGeneration(snapshot)
-	s.logEdgeRouteIntentObservations(snapshot, appByID, provenanceByAppID)
+	if collectRuntime {
+		s.logEdgeRouteIntentObservations(snapshot, appByID, provenanceByAppID)
+	}
 	return snapshot, nil
 }
 

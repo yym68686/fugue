@@ -138,8 +138,8 @@ def publish(config, api, save):
     evidence = {'schema': config['schema'], 'declaration_digest': declaration, 'resolved_precondition': precondition, 'artifact_id': artifact['id'], 'changed_edge': changed,
                 'offline_edges': holds(config['projection_policy']), 'producer_activated': False, 'routing_acceptance_complete': False, 'automatic_readmission': False, 'phase': 'reading_previews'}
     save(evidence)
-    before = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + old['id'])
-    preview = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + artifact['id'])
+    before = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + old['id'] + "&view=runtime")
+    preview = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + artifact['id'] + "&view=runtime")
     evidence.update(phase='validating_previews', preview=preview_evidence(before, preview))
     save(evidence)
     candidates = validate_preview(before, preview, config['projection_policy'])

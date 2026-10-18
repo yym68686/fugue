@@ -29,6 +29,7 @@ type platformProjectionIssue struct {
 }
 
 type platformIntentProjectionResponse struct {
+	PreviewMode              string                         `json:"preview_mode"`
 	DNSExclusions            []platformDNSExclusion         `json:"dns_exclusions"`
 	Intent                   platformconfig.PlatformIntent  `json:"intent"`
 	Policy                   platformconfig.PolicySnapshot  `json:"policy"`
@@ -83,6 +84,14 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusBadRequest, "one producer_policy_artifact_id required")
 		return
 	}
+	view := "configuration"
+	if values, exists := r.URL.Query()["view"]; exists {
+		if len(values) != 1 || (values[0] != "configuration" && values[0] != "runtime") {
+			httpx.WriteError(w, http.StatusBadRequest, "one view value required: configuration or runtime")
+			return
+		}
+		view = values[0]
+	}
 	var projection platformIntentProjectionResponse
 	a, err := s.store.GetPlatformArtifact(refs[0])
 	if err == nil && (a.ID != refs[0] || a.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(a) != nil || !platformsafety.EvaluateArtifactIntegrity(a, s.bundleKeyring()).Pass) {
@@ -92,18 +101,26 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		var policy platformproducer.Policy
 		policy, err = platformproducer.Decode(a)
 		if err == nil {
-			projection, err = s.capturePlatformIntentForProducer(r.Context(), mustPrincipal(r), policy)
+			projection, err = s.projectPlatformIntentForProducer(r.Context(), mustPrincipal(r), policy, view == "runtime")
 		}
 	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	projection.PreviewMode = view
+	if view == "configuration" {
+		configurationPreview(&projection)
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, projection)
 }
 
 func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate) (platformIntentProjectionResponse, error) {
+	return s.projectPlatformIntentWithInputs(ctx, principal, static, dnsPolicy, templates, true)
+}
+
+func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate, collectRuntime bool) (platformIntentProjectionResponse, error) {
 	domainsConfig, err := s.applicationDomainsForProjection(static.ApplicationDomains)
 	if err != nil {
 		return platformIntentProjectionResponse{}, err
@@ -120,11 +137,11 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	}
 	source := &platformProjectionSource{edgeRouteIntentSource: routeBusinessSource{business}}
 	observed := map[string]model.App{}
-	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithDomains(ctx, source, func(apps []model.App) {
+	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithCapture(ctx, source, func(apps []model.App) {
 		for _, app := range apps {
 			observed[app.ID] = app
 		}
-	}, static.Routes, domainsConfig)
+	}, static.Routes, domainsConfig, collectRuntime)
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("business route projection unavailable")
 	}
@@ -159,8 +176,10 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 			return platformIntentProjectionResponse{}, err
 		}
 	}
-	if err := s.captureReleaseRuntimeReadiness(ctx, &projection, business); err != nil {
-		return platformIntentProjectionResponse{}, err
+	if collectRuntime {
+		if err := s.captureReleaseRuntimeReadiness(ctx, &projection, business); err != nil {
+			return platformIntentProjectionResponse{}, err
+		}
 	}
 	projection.BusinessSnapshotRevision = business.Revision
 	projection.BusinessSnapshotAt = business.CapturedAt
@@ -192,6 +211,14 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	}
 	if err := projectACMEChallengeIntents(&projection, business.ACMEChallenges); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("ACME migration configuration invalid")
+	}
+	if !collectRuntime {
+		if dnsPolicy != nil {
+			if err := projectConfigurationDNS(&projection, static.Consumers, *dnsPolicy, templates, business.HostedZones); err != nil {
+				return platformIntentProjectionResponse{}, err
+			}
+		}
+		return projection, nil
 	}
 	var dnsNodes []model.DNSNode
 	var cellEdges []model.EdgeNode

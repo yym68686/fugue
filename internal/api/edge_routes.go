@@ -72,6 +72,10 @@ func (s *Server) compileTrafficEpochRouteBindingForRoute(ctx context.Context, ap
 }
 
 func (s *Server) edgeRouteBindingInput(ctx context.Context, app model.App, hostname, pathPrefix string, servicePort int, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) trafficepoch.RouteBindingInput {
+	return s.edgeRouteBindingInputWithCapture(ctx, app, hostname, pathPrefix, servicePort, routeKind, tlsPolicy, createdAt, updatedAt, runtimeByID, runtimeNodeLabelsByID, true)
+}
+
+func (s *Server) edgeRouteBindingInputWithCapture(ctx context.Context, app model.App, hostname, pathPrefix string, servicePort int, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string, collectRuntime bool) trafficepoch.RouteBindingInput {
 	runtimeID := appProxyRuntimeID(app)
 	runtimeObj, runtimeFound := runtimeByID[runtimeID]
 	edgeGroupID := derivedEdgeGroupIDForRuntime(runtimeObj, runtimeFound, runtimeNodeLabelsByID[runtimeID])
@@ -79,7 +83,7 @@ func (s *Server) edgeRouteBindingInput(ctx context.Context, app model.App, hostn
 	if servicePort <= 0 {
 		servicePort = edgeServicePortForApp(app)
 	}
-	upstream := s.edgeRouteUpstream(ctx, app, runtimeObj, runtimeFound)
+	upstream := s.edgeRouteUpstreamWithCapture(ctx, app, runtimeObj, runtimeFound, collectRuntime)
 	input := trafficepoch.RouteBindingInput{
 		Hostname:                    hostname,
 		PathPrefix:                  pathPrefix,
@@ -174,6 +178,10 @@ type edgeRouteUpstream struct {
 }
 
 func (s *Server) edgeRouteUpstream(ctx context.Context, app model.App, runtimeObj model.Runtime, runtimeFound bool) edgeRouteUpstream {
+	return s.edgeRouteUpstreamWithCapture(ctx, app, runtimeObj, runtimeFound, true)
+}
+
+func (s *Server) edgeRouteUpstreamWithCapture(ctx context.Context, app model.App, runtimeObj model.Runtime, runtimeFound bool, collectRuntime bool) edgeRouteUpstream {
 	out := edgeRouteUpstream{
 		Kind:   model.EdgeRouteUpstreamKindKubernetesService,
 		Scope:  model.EdgeRouteUpstreamScopeLocalService,
@@ -184,7 +192,9 @@ func (s *Server) edgeRouteUpstream(ctx context.Context, app model.App, runtimeOb
 	}
 	switch strings.TrimSpace(runtimeObj.Type) {
 	case "", model.RuntimeTypeManagedShared, model.RuntimeTypeManagedOwned:
-		out.URL = s.serviceURLForApp(ctx, app)
+		if collectRuntime {
+			out.URL = s.serviceURLForApp(ctx, app)
+		}
 		return out
 	case model.RuntimeTypeExternalOwned:
 		out.Kind = model.EdgeRouteUpstreamKindMesh

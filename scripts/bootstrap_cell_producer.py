@@ -144,7 +144,7 @@ def publish(config, api):
     policy = ensure_input(api, "policy_snapshot", target, config["projection_policy"])
     producer.update(static_intent_artifact_id=intent["id"], static_intent_digest=intent["content_hash"], dns_policy_artifact_id=policy["id"], dns_policy_digest=policy["content_hash"])
     artifact = ensure_input(api, "policy_snapshot", owner, producer)
-    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
+    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
     if preview.get("intent", {}).get("scope") != target or preview["intent"].get("authority_cell_id") != config["authority_cell_id"] or preview["intent"].get("publication_role") != producer.get("publication_role") or preview.get("policy", {}).get("publication_role") != producer.get("publication_role") or preview.get("policy", {}).get("consumer_topology_digest") != policy["content"]["consumer_topology_digest"] or not preview.get("business_snapshot_revision"):
         raise ValueError("current business projection does not match declared cell")
     reject_serving(api, target, owner)

@@ -44,6 +44,7 @@ class ArtifactAPI:
         if method == "GET" and path.startswith("/v1/admin/artifacts/"):
             return {"artifact": copy.deepcopy(self.artifacts[path.rsplit("/", 1)[1]])}
         if method == "GET" and path == "/v1/admin/platform-config/routes/project":
+            assert query.get("view") == ["runtime"]
             producer = self.artifacts[query["producer_policy_artifact_id"][0]]
             assert producer["status"] == "validated"
             content = producer["content"]

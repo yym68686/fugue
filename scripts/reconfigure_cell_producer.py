@@ -161,7 +161,7 @@ def publish(config, api, save):
     if authority_identity(current) != config["precondition"]["previous_policy"] and not exact(current.get("artifact", {}), "policy_snapshot", scope, config["policy"]):
         raise ValueError("current producer policy changed")
     artifact = ensure_input(api, "policy_snapshot", scope, config["policy"])
-    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
+    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
     validate_output(config, preview.get("policy", {}))
     if not preview.get("business_snapshot_revision"):
         raise ValueError("projection lacks fixed business snapshot")

@@ -55,7 +55,7 @@ func TestCellProducerPlacementTransitionCapturesAndGuardsExactSource(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + policyArtifact.ID
+	path := "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + policyArtifact.ID + "&view=runtime"
 	response := performJSONRequest(t, s, http.MethodGet, path, adminKey, nil)
 	if response.Code != http.StatusOK {
 		t.Fatal(response.Body.String())

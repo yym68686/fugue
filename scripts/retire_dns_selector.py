@@ -187,8 +187,8 @@ def publish(config, api, save):
     if authority_identity(current) != precondition["previous_policy"] and not exact(current.get("artifact", {}), "policy_snapshot", physical.SCOPE, successor):
         raise ValueError("same-generation successor differs")
     artifact = ensure_input(api, "policy_snapshot", physical.SCOPE, successor)
-    previous_preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"])
-    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
+    previous_preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"] + "&view=runtime")
+    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
     summaries = validate_preview(config, preview, previous_preview)
     physical.baseline(config, api)
     evidence = {"schema": "fugue.dns-selector-retirement-result/v1", "declaration_digest": declaration, "resolved_precondition": precondition, "baseline_dns_artifact_id": baseline["id"], "baseline_dns_digest": baseline["content_hash"], "preserved_order_count": len(orders), "resolved_orders_digest": digest(orders), "resolved_source_artifact_id": source["id"], "resolved_source_digest": source["content_hash"], "selections": summaries, "artifact_id": artifact["id"], "producer_activated": False, "routing_acceptance_complete": False}

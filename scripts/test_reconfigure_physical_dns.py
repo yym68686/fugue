@@ -48,6 +48,7 @@ class Ledger(ArtifactAPI):
         if method == "GET" and path.endswith("/lkg"):
             return {"lkg": copy.deepcopy(self.lkg)}
         if method == "GET" and path.startswith("/v1/admin/platform-config/routes/project?"):
+            assert "&view=runtime" in path
             if self.on_capture:
                 self.on_capture(self)
             return copy.deepcopy(self.preview)

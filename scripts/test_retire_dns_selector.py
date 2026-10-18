@@ -44,6 +44,7 @@ class Ledger(PhysicalLedger):
     def __call__(self, method, path, body=None):
         result = super().__call__(method, path, body)
         if method == "GET" and path.startswith("/v1/admin/platform-config/routes/project?"):
+            assert "&view=runtime" in path
             rule = {key: self.order[key] for key in ["node_id", "hostname", "type"]}
             rule.update(selection_mode="physical_order", physical_order=self.order["order"])
             result["policy"]["dns_answer_rules"] = [rule]

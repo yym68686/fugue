@@ -29,7 +29,7 @@ func TestPlatformIntentProjectionRequiresPlatformAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/routes/project?producer_policy_artifact_id="+authority.ArtifactID, admin, nil)
+	response := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/routes/project?producer_policy_artifact_id="+authority.ArtifactID+"&view=runtime", admin, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("unexpected admin result %d %s", response.Code, response.Body.String())
 	}
