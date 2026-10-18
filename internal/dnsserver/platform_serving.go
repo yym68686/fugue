@@ -289,7 +289,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	}
 	facts := sourceFacts
 	if p.routeSources == nil {
-		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.bind(a, s.Logger, s.Config.CachePath))
+		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.bind(a, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(p, s.Config.DNSNodeID)))
 	}
 	// Keep the original observations for the retained release. Candidate
 	// assignment filtering below must not erase a valid old-release proof.
@@ -454,7 +454,7 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	return status.ReadyRecords == status.Records
 }
 func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact) (*dnsServingState, error) {
-	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath))
+	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(old.payload, s.Config.DNSNodeID)))
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe
 	// has a transient transport failure. Keep only proofs that are still valid;
@@ -513,7 +513,9 @@ func collectRetainedDNSReadinessFacts(ctx context.Context, old *dnsServingState,
 		fact, found := byID[requirement.ID]
 		usable := !fact.Ready || dnsFactMatchesRelease(fact, old.record.Parent, old.record.Candidate, old.routeID, old.payload) ||
 			bridgeAllowed[requirement.ID] && dnsFactMatchesRelease(fact, bridge.parent, bridge.candidate, bridge.routeID, bridge.payload)
-		if observedRequirements[requirement.ID] == requirement && found && !duplicates[requirement.ID] && usable {
+		// A skipped probe is not a negative observation. The bounded retained
+		// scan must still try it before the old serving proof expires.
+		if observedRequirements[requirement.ID] == requirement && found && !duplicates[requirement.ID] && usable && fact.Reason != "not_observed" {
 			limit := fact.Proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, old.payload.Policy.DNSReadiness)) * time.Second)
 			if limit.Before(fact.Proof.ValidUntil) {
 				fact.Proof.ValidUntil = limit

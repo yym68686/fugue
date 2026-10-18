@@ -218,7 +218,7 @@ func TestRetainedDNSRefreshReusesOnlyBoundObservations(t *testing.T) {
 		}})
 	}
 	old := &dnsServingState{record: dnsServingCheckpoint{Parent: parent, Candidate: candidate}, payload: payload, routeID: routeID}
-	for _, scenario := range []string{"unchanged", "missing", "changed requirement", "duplicate", "foreign release", "negative", "stricter freshness"} {
+	for _, scenario := range []string{"unchanged", "missing", "not observed", "changed requirement", "duplicate", "foreign release", "negative", "stricter freshness"} {
 		t.Run(scenario, func(t *testing.T) {
 			observed := append([]dnsReadinessFact(nil), facts...)
 			binding := *observed[0].Proof.TrafficRelease
@@ -228,6 +228,9 @@ func TestRetainedDNSRefreshReusesOnlyBoundObservations(t *testing.T) {
 			switch scenario {
 			case "missing":
 				observed = observed[1:]
+				wantCalls = 1
+			case "not observed":
+				observed[0] = dnsReadinessFact{ProbeID: observed[0].ProbeID, Reason: "not_observed"}
 				wantCalls = 1
 			case "changed requirement":
 				plan := *payload.Plan

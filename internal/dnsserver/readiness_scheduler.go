@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"maps"
 	"os"
 	"sort"
 	"sync"
 	"time"
 
+	"fugue/internal/dnsroutesource"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -22,15 +24,23 @@ type dnsProbeTargetState struct {
 }
 
 type dnsReadinessScheduler struct {
-	mu       sync.Mutex
-	scope    string
-	digest   string
-	cursor   int
-	attempts map[string]time.Time
-	expires  map[string]time.Time
-	targets  map[string]dnsProbeTargetState
-	logger   *log.Logger
-	path     string
+	mu        sync.Mutex
+	scope     string
+	digest    string
+	cursor    int
+	attempts  map[string]time.Time
+	expires   map[string]time.Time
+	targets   map[string]dnsProbeTargetState
+	preferred map[string]bool
+	logger    *log.Logger
+	path      string
+}
+
+func (scheduler *dnsReadinessScheduler) prioritize(keys map[string]bool) *dnsReadinessScheduler {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	scheduler.preferred = maps.Clone(keys)
+	return scheduler
 }
 
 func (scheduler *dnsReadinessScheduler) bind(assignment model.PlatformConsumerAssignment, logger *log.Logger, paths ...string) *dnsReadinessScheduler {
@@ -109,6 +119,13 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 				return firstAged
 			}
 			if firstAged {
+				if firstAttempt.Equal(secondAttempt) {
+					firstPreferred := scheduler.preferred[dnsroutesource.ProbeKey(plan.Probes[indices[left]])]
+					secondPreferred := scheduler.preferred[dnsroutesource.ProbeKey(plan.Probes[indices[right]])]
+					if firstPreferred != secondPreferred {
+						return firstPreferred
+					}
+				}
 				return firstAttempt.Before(secondAttempt)
 			}
 			refresh := func(identity string, attempted time.Time) time.Time {
