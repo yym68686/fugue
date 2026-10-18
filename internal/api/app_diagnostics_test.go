@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
@@ -138,6 +140,60 @@ func TestQueryAppDatabaseUsesEffectiveConnection(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("sql expectations: %v", err)
+	}
+}
+
+func TestQueryAppDatabaseMapsExecutionErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		want     int
+		wantCode string
+	}{
+		{name: "invalid SQL reference", err: &pgconn.PgError{Code: "42703", Message: "column does not exist"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "invalid data expression", err: &pgconn.PgError{Code: "22012", Message: "division by zero"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "unsupported SQL feature", err: &pgconn.PgError{Code: "0A000", Message: "feature not supported"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "integrity constraint", err: &pgconn.PgError{Code: "23505", Message: "unique constraint violation"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "PostgreSQL query canceled", err: &pgconn.PgError{Code: "57014", Message: "canceling statement due to user request"}, want: http.StatusGatewayTimeout, wantCode: "temporarily_unavailable"},
+		{name: "context deadline", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout, wantCode: "temporarily_unavailable"},
+		{name: "database unavailable", err: errors.New("connection reset"), want: http.StatusServiceUnavailable, wantCode: "temporarily_unavailable"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+				Image:     "ghcr.io/example/demo:latest",
+				Ports:     []int{8080},
+				Replicas:  1,
+				RuntimeID: "runtime_managed_shared",
+				Env:       map[string]string{"DATABASE_URL": "postgresql://demo:secret@db.internal:5432/demo"},
+			})
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock new: %v", err)
+			}
+			defer db.Close()
+			server.openAppDatabase = func(string, string) (*sql.DB, error) { return db, nil }
+			mock.ExpectBegin()
+			mock.ExpectQuery("select missing_column").WillReturnError(tc.err)
+			mock.ExpectRollback()
+
+			recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/database/query", apiKey, map[string]any{
+				"sql": "select missing_column from diagnostic_table",
+			})
+			if recorder.Code != tc.want {
+				t.Fatalf("unexpected status: got=%d want=%d body=%s", recorder.Code, tc.want, recorder.Body.String())
+			}
+			var apiError struct {
+				Code string `json:"code"`
+			}
+			mustDecodeJSON(t, recorder, &apiError)
+			if apiError.Code != tc.wantCode {
+				t.Fatalf("unexpected error code: got=%q want=%q", apiError.Code, tc.wantCode)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("sql expectations: %v", err)
+			}
+		})
 	}
 }
 

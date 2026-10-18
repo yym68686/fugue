@@ -9921,6 +9921,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppDatabaseQueryResponse"
+        '400':
+          description: SQL is invalid for the selected application database
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: Application database is unavailable or the query failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '504':
+          description: Application database query exceeded its execution deadline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/database/import:

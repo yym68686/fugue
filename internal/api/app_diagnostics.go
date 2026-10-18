@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +22,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 )
@@ -151,7 +153,7 @@ func (s *Server) handleQueryAppDatabase(w http.ResponseWriter, r *http.Request) 
 	startedAt := time.Now()
 	response, err := queryAppDatabase(ctx, db, connection, req.SQL, req.MaxRows)
 	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		httpx.WriteError(w, appDatabaseQueryErrorStatus(err), err.Error())
 		return
 	}
 	response.DurationMS = time.Since(startedAt).Milliseconds()
@@ -162,6 +164,25 @@ func (s *Server) handleQueryAppDatabase(w http.ResponseWriter, r *http.Request) 
 		"max_rows": strconv.Itoa(req.MaxRows),
 	})
 	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+func appDatabaseQueryErrorStatus(err error) int {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return http.StatusGatewayTimeout
+	}
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		if len(postgresError.Code) >= 2 {
+			switch postgresError.Code[:2] {
+			case "0A", "22", "23", "42":
+				return http.StatusBadRequest
+			}
+		}
+		if postgresError.Code == "57014" {
+			return http.StatusGatewayTimeout
+		}
+	}
+	return http.StatusServiceUnavailable
 }
 
 func openAppDiagnosticDatabase(driver, dsn string) (*sql.DB, error) {
