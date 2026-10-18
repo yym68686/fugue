@@ -127,6 +127,7 @@ type Pipeline struct {
 	kubernetesLogBacklogMillis     atomic.Int64
 	kubernetesLogDeferredTargets   atomic.Int64
 	kubernetesLogCursorGaps        atomic.Uint64
+	kubernetesLogRotationReplays   atomic.Uint64
 	kubernetesLogBackoffSkips      atomic.Uint64
 	kubernetesLogBackoffNodes      atomic.Int64
 	kubernetesLogAdmissionDeferred atomic.Uint64
@@ -553,6 +554,7 @@ func (p *Pipeline) PrometheusMetrics() string {
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_admission_deferred_total", p.kubernetesLogAdmissionDeferred.Load())
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_backoff_nodes %d\n", p.kubernetesLogBackoffNodes.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_cursor_gaps_total", p.kubernetesLogCursorGaps.Load())
+	writeMetric("fugue_telemetry_pipeline_kubernetes_log_rotation_replays_total", p.kubernetesLogRotationReplays.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_lines_total", snap.KubernetesLogLines)
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_pods Last Kubernetes pod count considered by the log collector.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_pods gauge")

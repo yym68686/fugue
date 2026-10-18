@@ -231,6 +231,29 @@ serving checks.
 
 ## Unavailable Kubernetes log nodes
 
+An inclusive container-log read must still contain the last admitted timestamp
+and its recorded occurrences. If that boundary disappears, the collector reads
+retained CRI files through the existing authenticated `nodes/proxy` log handler.
+The Pod UID and container restart number select the directory; other restart
+files and external or traversing links are rejected. Two directory observations
+bracket opening the current file, so a concurrent rotation retries before the
+cursor advances. Compressed and plain retained files use the same source order.
+
+Recovery retains the existing admission, line and cycle budgets and poll
+deadline. It resumes across budget stops, reconstructs partial CRI records, and
+preserves equal-timestamp occurrence counts. A replay reads at most 16 files and
+64 MiB of decoded data, with bounded directory and record buffers. A failed read
+keeps the cursor and backs off. If retention has already removed the boundary,
+the remaining records are collected with an explicit `rotation_gap` outcome;
+missing history is not declared recovered. Initial lookback and exporter
+delivery guarantees remain unchanged.
+
+`fugue_telemetry_pipeline_kubernetes_log_rotation_replays_total` counts recovery
+passes, including passes resumed after a budget stop. Source diagnostics include
+`rotation_files` and `rotation_bytes`; inspect those with cursor gaps and read
+errors. The service account needs read access to `nodes/proxy`, and the kubelet
+log handler must expose retained container logs.
+
 A log-open transport failure opens a circuit shared by all sources on that
 physical node. Initially in-flight reads are bounded by collector concurrency;
 subsequent cycles skip the node until one half-open probe is due. Retries grow

@@ -30,6 +30,8 @@ type logSourceObservation struct {
 	LineLimitBytes  int       `json:"line_limit_bytes"`
 	MaxLineBytes    int       `json:"max_line_bytes"`
 	TotalLines      uint64    `json:"total_lines"`
+	RotationFiles   int       `json:"rotation_files,omitempty"`
+	RotationBytes   int64     `json:"rotation_bytes,omitempty"`
 }
 
 type sourceErrorSummary struct {
@@ -68,7 +70,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	v.TotalLines = prior.TotalLines + uint64(v.Lines)
 	v.LastErrorAt, v.LastErrorClass = prior.LastErrorAt, prior.LastErrorClass
 	v.LastErrorStage, v.LastErrorMillis = prior.LastErrorStage, prior.LastErrorMillis
-	if v.Outcome == "open_error" || v.Outcome == "scan_error" {
+	if v.Outcome == "open_error" || v.Outcome == "scan_error" || v.Outcome == "rotation_recovery_error" {
 		v.Errors++
 		v.LastErrorAt, v.LastErrorClass = v.ObservedAt, v.ErrorClass
 		v.LastErrorStage, v.LastErrorMillis = v.Outcome, v.TotalMillis

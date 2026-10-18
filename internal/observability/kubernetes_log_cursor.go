@@ -14,15 +14,16 @@ import (
 )
 
 type kubernetesLogCursor struct {
-	Time              time.Time
-	Boundary          map[[32]byte]int
-	Visited           time.Time
-	DrainedThrough    time.Time
-	Complete          bool
-	NextAttempt       time.Time
-	Failures          uint32
-	SourceUnavailable bool
-	PendingAt         time.Time
+	Time               time.Time
+	Boundary           map[[32]byte]int
+	Visited            time.Time
+	DrainedThrough     time.Time
+	Complete           bool
+	NextAttempt        time.Time
+	Failures           uint32
+	SourceUnavailable  bool
+	PendingAt          time.Time
+	RecoveringRotation bool
 }
 
 func logTargetFinishedAt(t kubernetesLogTarget) time.Time {
@@ -202,7 +203,45 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	n := 0
 	truncated := false
 	invalid := false
-	for scanner.Scan() {
+	rotationAttempted, rotationGap := false, false
+	var rotationReplay *rotationLogReader
+	defer func() {
+		if rotationReplay != nil {
+			observation.RotationBytes = rotationReplay.decodedBytes
+			rotationReplay.Close()
+		}
+	}()
+	recoverRotation := func() {
+		rotationAttempted = true
+		cur.RecoveringRotation = true
+		stream.Close()
+		replay, recoveryErr := c.openRotationLogs(ctx, target)
+		if recoveryErr != nil {
+			observation.Outcome = "rotation_recovery_error"
+			observation.ErrorClass = logReadErrorClass(recoveryErr)
+			c.pipeline.kubernetesLogErrors.Add(1)
+			c.pipeline.recordError(fmt.Errorf("recover rotated Kubernetes logs source=%s: %w", key, recoveryErr))
+			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
+			c.deferLogSource(&cur)
+			invalid = true
+			return
+		}
+		rotationReplay = replay
+		observation.RotationFiles = len(replay.files)
+		c.pipeline.kubernetesLogRotationReplays.Add(1)
+		original = cur.Time
+		boundary = make(map[[32]byte]int, len(cur.Boundary))
+		for hash, count := range cur.Boundary {
+			boundary[hash] = count
+		}
+		seen = map[[32]byte]int{}
+		scanner = bufio.NewScanner(replay)
+		scanner.Buffer(make([]byte, 0, min(64<<10, c.pipeline.cfg.KubernetesLogMaxLineBytes+64)), c.pipeline.cfg.KubernetesLogMaxLineBytes+64)
+	}
+	if cur.RecoveringRotation {
+		recoverRotation()
+	}
+	for !invalid && scanner.Scan() {
 		observation.MaxLineBytes = max(observation.MaxLineBytes, len(scanner.Bytes()))
 		ts, msg := splitKubernetesLogLine(scanner.Text())
 		if ts.IsZero() {
@@ -219,6 +258,23 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		}
 		if ts.Before(original) {
 			continue
+		}
+		// An inclusive read must return the cursor boundary before newer
+		// records. Its absence means the API's current file lost that prefix.
+		// Recover retained files before admitting any newer record.
+		if ts.After(original) && logBoundaryMissing(boundary, seen) && !rotationGap {
+			if _, _, eligible := rotationLogDirectory(target); eligible && !rotationAttempted {
+				recoverRotation()
+				continue
+			}
+			if rotationAttempted {
+				// Retention may already have removed the boundary. Preserve the
+				// remaining records, but never report this as complete recovery.
+				rotationGap = true
+				observation.Outcome = "rotation_gap"
+				c.pipeline.kubernetesLogCursorGaps.Add(1)
+				c.pipeline.recordError(fmt.Errorf("retained Kubernetes logs no longer contain cursor boundary source=%s", key))
+			}
 		}
 		hash := sha256.Sum256([]byte(msg))
 		if ts.Equal(original) {
@@ -282,6 +338,16 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		}
 	}
 	if err == nil && !invalid && !truncated {
+		if rotationAttempted && !rotationGap && logBoundaryMissing(boundary, seen) {
+			rotationGap = true
+			observation.Outcome = "rotation_gap"
+			c.pipeline.kubernetesLogCursorGaps.Add(1)
+			c.pipeline.recordError(fmt.Errorf("retained Kubernetes logs no longer contain cursor boundary source=%s", key))
+		}
+		cur.RecoveringRotation = false
+		if rotationAttempted && !rotationGap {
+			observation.Outcome = "rotation_recovered"
+		}
 		cur.PendingAt = time.Time{}
 		cur.DrainedThrough = now
 		cur.Complete = !finished.IsZero()
@@ -298,6 +364,15 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	c.cursors[key] = cur
 	c.cursorsMu.Unlock()
 	return
+}
+
+func logBoundaryMissing(boundary, seen map[[32]byte]int) bool {
+	for hash, count := range boundary {
+		if seen[hash] < count {
+			return true
+		}
+	}
+	return false
 }
 
 func logReadErrorClass(err error) string {
