@@ -256,3 +256,57 @@ func TestSafeRolloutRequeuedOperationKeepsOriginalCandidate(t *testing.T) {
 		t.Fatalf("duplicate release: count=%d err=%v", len(releases), err)
 	}
 }
+
+// An operator promotion can arrive while the controller waits for the former
+// canary route to appear. The superseded observation must not fail the release.
+type manualPromotionObserver struct {
+	s        *Service
+	app      model.App
+	promoted bool
+	weights  []int
+}
+
+func (o *manualPromotionObserver) WaitForSafeRolloutEdgeRouteBundle(ctx context.Context, app model.App, release model.AppRelease, weight int, _ time.Time) (safeRolloutEdgeBundleObservation, error) {
+	o.weights = append(o.weights, weight)
+	if weight > 0 && !o.promoted {
+		o.promoted = true
+		_, err := o.s.appReleaseService().PromoteRelease(ctx, model.Principal{TenantID: app.TenantID, ActorType: model.ActorTypeSystem, ActorID: "operator"}, app, release, 100)
+		if err != nil {
+			return safeRolloutEdgeBundleObservation{}, err
+		}
+		return safeRolloutEdgeBundleObservation{}, errors.New("superseded canary target")
+	}
+	return safeRolloutEdgeBundleObservation{Ready: true}, nil
+}
+func TestSafeRolloutManualPromotionDuringCanaryWait(t *testing.T) {
+	st, previous, candidate, op := newSafeRolloutTestState(t)
+	candidate.Spec.Continuity.ZeroDowntime.Canary = &model.AppRolloutCanarySpec{Enabled: true, InitialWeight: 10, MaxWeight: 100, StepWeights: []int{10, 50, 100}}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer upstream.Close()
+	s := newSafeRolloutIntegrationService(st, upstream.URL, safeRolloutDrainMetrics{})
+	observer := &manualPromotionObserver{s: s, app: candidate}
+	s.safeRolloutEdgeBundleObserver = observer
+	state, err := s.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatal(err)
+	}
+	current, err := st.GetAppRelease(candidate.TenantID, true, state.Candidate.ID)
+	if err != nil || current.Status != model.AppReleaseStatusServing || current.RollbackTargetID != state.StableRelease.ID {
+		t.Fatal("manual promotion lost verified lineage", err)
+	}
+	policy, err := st.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil || policy.StableReleaseID != current.ID || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatal("manual promotion overwritten", err)
+	}
+	for _, weight := range observer.weights {
+		if weight == 50 {
+			t.Fatal("continued obsolete canary steps")
+		}
+	}
+	if !state.StableAlignmentAllowed {
+		t.Fatal("did not continue through normal canonical readiness gates")
+	}
+}

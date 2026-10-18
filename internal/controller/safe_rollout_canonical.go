@@ -46,9 +46,9 @@ type safeCanonicalHandoff struct {
 	Image                   string `json:"image"`
 }
 
-// A long original connection may outlive more than one independent revision.
-// Only the immediate, durable promotion predecessor can advance a handoff;
-// the original source identity never advances with its traffic destination.
+// A retained canonical workload can outlive several promoted revisions. Follow
+// only their bounded, same-app rollback chain; unrelated or retired releases
+// cannot authorize a handoff.
 func (s *Service) canonicalHandoffSourceReleaseID(app model.App, handoff safeCanonicalHandoff, promoted model.AppRelease) (string, error) {
 	recorded, err := s.Store.GetAppRelease(app.TenantID, true, handoff.ReleaseID)
 	if err != nil {
@@ -57,9 +57,25 @@ func (s *Service) canonicalHandoffSourceReleaseID(app model.App, handoff safeCan
 	if recorded.AppID != app.ID || recorded.TenantID != app.TenantID || recorded.RevisionWorkload == nil {
 		return "", fmt.Errorf("canonical handoff recorded target has no verified binding")
 	}
-	if promoted.ID != recorded.ID && (promoted.RollbackTargetID != recorded.ID ||
-		recorded.Role != model.AppReleaseRolePrevious || recorded.Status != model.AppReleaseStatusDraining) {
-		return "", fmt.Errorf("canonical handoff target is not the verified promotion successor")
+	if promoted.ID != recorded.ID {
+		seen := map[string]bool{promoted.ID: true}
+		id, found := promoted.RollbackTargetID, false
+		for depth := 0; depth < 32 && id != "" && !seen[id]; depth++ {
+			seen[id] = true
+			previous, readErr := s.Store.GetAppRelease(app.TenantID, true, id)
+			if readErr != nil || previous.AppID != app.ID || previous.TenantID != app.TenantID ||
+				previous.RevisionWorkload == nil || previous.Role != model.AppReleaseRolePrevious || previous.Status != model.AppReleaseStatusDraining {
+				return "", fmt.Errorf("canonical handoff target is not the verified promotion successor")
+			}
+			if previous.ID == recorded.ID {
+				found = true
+				break
+			}
+			id = previous.RollbackTargetID
+		}
+		if !found {
+			return "", fmt.Errorf("canonical handoff target is not the verified promotion successor")
+		}
 	}
 	sourceID := handoff.SourceReleaseID
 	if sourceID == "" {
@@ -69,6 +85,60 @@ func (s *Service) canonicalHandoffSourceReleaseID(app model.App, handoff safeCan
 		return "", fmt.Errorf("canonical handoff has no source release identity")
 	}
 	return sourceID, nil
+}
+
+// Logical rollback ancestry is not proof of what the canonical Pods execute.
+// Older handoffs recorded a promoted revision while those Pods still ran an
+// earlier snapshot. Recovery requires its exact runtime key and image, alongside
+// the caller's UID, ownership and lineage checks.
+func (s *Service) canonicalHandoffSourceSnapshot(app model.App, sourceID string, handoff safeCanonicalHandoff, scheduling runtime.SchedulingConstraints) (model.App, string, error) {
+	matches := func(release model.AppRelease) (model.App, bool) {
+		source := app
+		if release.SpecSnapshot == nil || release.AppID != app.ID || release.TenantID != app.TenantID {
+			return source, false
+		}
+		source.Spec = *cloneControllerAppSpec(release.SpecSnapshot)
+		if normalized, changed := s.normalizeManagedAppRuntimeImageRefs(source); changed {
+			source = normalized
+		}
+		return source, strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(source), scheduling)) == handoff.ReleaseKey &&
+			s.migrationImageRefsEquivalent(source, source.Spec.Image, handoff.Image)
+	}
+	declared, err := s.Store.GetAppRelease(app.TenantID, true, sourceID)
+	if err != nil {
+		return app, "", err
+	}
+	if source, ok := matches(declared); ok {
+		return source, declared.ID, nil
+	}
+	if declared.AppID != app.ID || declared.TenantID != app.TenantID || declared.RevisionWorkload == nil ||
+		declared.Role != model.AppReleaseRolePrevious || declared.Status != model.AppReleaseStatusDraining {
+		return app, "", fmt.Errorf("canonical handoff has no verified source snapshot")
+	}
+	// Load metadata first; only snapshots with the observed image are candidates.
+	history, err := s.Store.ListAppReleaseMetadata(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRolePrevious, ActiveOnly: true})
+	if err != nil {
+		return app, "", err
+	}
+	reads := 0
+	for _, meta := range history {
+		if meta.ID == declared.ID || meta.Status != model.AppReleaseStatusDraining || meta.ResolvedImageRef == "" ||
+			!s.migrationImageRefsEquivalent(app, meta.ResolvedImageRef, handoff.Image) {
+			continue
+		}
+		reads++
+		if reads > 32 {
+			break
+		}
+		release, readErr := s.Store.GetAppRelease(app.TenantID, true, meta.ID)
+		if readErr != nil {
+			return app, "", readErr
+		}
+		if source, ok := matches(release); ok {
+			return source, release.ID, nil
+		}
+	}
+	return app, "", fmt.Errorf("canonical handoff has no verified source snapshot")
 }
 
 func (s *Service) verifiedCanonicalHandoffSource(app model.App, handoff safeCanonicalHandoff, deployment kubeDeployment) (safeCanonicalHandoff, error) {
@@ -114,7 +184,6 @@ func (s *Service) recoverSafeCanonicalHandoffSource(deployment kubeDeployment, c
 		return current, scheduling, false, nil
 	}
 	var handoff safeCanonicalHandoff
-	liveKey := deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey]
 	if json.Unmarshal([]byte(marker), &handoff) != nil || handoff.ReleaseKey == "" {
 		return current, scheduling, false, fmt.Errorf("canonical handoff source identity differs")
 	}
@@ -148,22 +217,11 @@ func (s *Service) recoverSafeCanonicalHandoffSource(deployment kubeDeployment, c
 	if err != nil {
 		return current, scheduling, false, err
 	}
-	release, err := s.Store.GetAppRelease(current.TenantID, true, sourceID)
+	source, _, err := s.canonicalHandoffSourceSnapshot(current, sourceID, handoff, scheduling)
 	if err != nil {
 		return current, scheduling, false, err
 	}
-	if release.SpecSnapshot != nil && release.AppID == current.ID && release.TenantID == current.TenantID {
-		source := current
-		source.Spec = *cloneControllerAppSpec(release.SpecSnapshot)
-		if normalized, changed := s.normalizeManagedAppRuntimeImageRefs(source); changed {
-			source = normalized
-		}
-		key := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(source), scheduling))
-		if key == liveKey && s.migrationImageRefsEquivalent(source, source.Spec.Image, handoff.Image) {
-			return source, scheduling, true, nil
-		}
-	}
-	return current, scheduling, false, fmt.Errorf("canonical handoff has no verified source snapshot")
+	return source, scheduling, true, nil
 }
 
 // A previous selector CAS may be interrupted by another safe promotion. Only
@@ -407,6 +465,21 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		}
 		return objects, nil
 	}
+	verified, err := s.verifiedCanonicalHandoffSource(app, handoff, deployment)
+	if err != nil {
+		return nil, err
+	}
+	sourceID, err := s.canonicalHandoffSourceReleaseID(app, verified, release)
+	if err != nil {
+		return nil, err
+	}
+	sourceScheduling := runtime.SchedulingConstraints{NodeSelector: deployment.Spec.Template.Spec.NodeSelector, Tolerations: deployment.Spec.Template.Spec.Tolerations}
+	_, verifiedSourceID, err := s.canonicalHandoffSourceSnapshot(app, sourceID, verified, sourceScheduling)
+	if err != nil {
+		return nil, err
+	}
+	sourceChanged := handoff.SourceReleaseID != verifiedSourceID
+	handoff.SourceReleaseID = verifiedSourceID
 	if liveKey != handoff.ReleaseKey {
 		return nil, fmt.Errorf("%w: replacement readiness", errSafeCanonicalHandoffPending)
 	}
@@ -415,7 +488,7 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	if err != nil {
 		return nil, fmt.Errorf("capture original canonical workload: %w", err)
 	}
-	if marker == "" || advanceTarget {
+	if marker == "" || advanceTarget || sourceChanged {
 		encoded, _ := json.Marshal(handoff)
 		marker = string(encoded)
 		if err := client.patchAppWorkloadObject(ctx, deploymentAPIPath(namespace, name), live, map[string]any{"metadata": map[string]any{"annotations": map[string]any{safeCanonicalHandoffAnnotation: marker}}}); err != nil {

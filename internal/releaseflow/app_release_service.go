@@ -214,6 +214,15 @@ func (s AppReleaseService) PromoteRelease(ctx context.Context, principal model.P
 	if err != nil {
 		return model.AppTrafficPolicy{}, err
 	}
+	// A controller may hold a stale candidate after an operator promoted it.
+	// Repeating that promotion must preserve its original rollback ancestry,
+	// and a later automatic canary step must not demote an already stable target.
+	release = current
+	if policy.StableReleaseID == current.ID && current.Role == model.AppReleaseRoleStable &&
+		current.Status == model.AppReleaseStatusServing && policy.Mode == model.AppTrafficModeSingle &&
+		policy.StableWeight == 100 && policy.CandidateWeight == 0 && policy.CandidateReleaseID == "" {
+		return policy, nil
+	}
 	if candidateWeight < 100 {
 		policy.Mode = model.AppTrafficModeCanary
 		policy.CandidateReleaseID = release.ID

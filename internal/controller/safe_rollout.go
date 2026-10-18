@@ -110,6 +110,13 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if !state.AlreadyPromoted && !state.PromotionPending {
+		promoted, err := s.safeRolloutAlreadyPromoted(state)
+		if err != nil {
+			return err
+		}
+		state.AlreadyPromoted = promoted
+	}
 	if state.AlreadyPromoted || state.PromotionPending {
 		if !s.recheckSafeRolloutCandidateBeforeRetire(ctx, op, state, "resume_promoted_gate") {
 			if err := ctx.Err(); err != nil {
@@ -192,6 +199,12 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 			if weight < state.ResumeWeight {
 				continue
 			}
+			if promoted, err := s.safeRolloutAlreadyPromoted(state); err != nil {
+				return err
+			} else if promoted {
+				observedCanaryTraffic = false
+				break
+			}
 			traffic, err := s.Store.GetAppTrafficPolicy(state.CandidateApp.TenantID, true, state.CandidateApp.ID)
 			if err == nil && !(state.Resumed && weight == state.ResumeWeight) {
 				traffic, err = service.PromoteRelease(ctx, principal, state.CandidateApp, state.Candidate, weight)
@@ -210,6 +223,12 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 			})
 			routePolicyUpdatedAt := time.Now().UTC()
 			if !s.waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx, op, state, weight, routePolicyUpdatedAt) {
+				if promoted, err := s.safeRolloutAlreadyPromoted(state); err != nil {
+					return err
+				} else if promoted {
+					observedCanaryTraffic = false
+					break
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -220,6 +239,12 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 			observedCanaryTraffic = true
 			if err := s.sleepSafeRolloutObservation(ctx, time.Duration(plan.Canary.MinObservationSeconds)*time.Second); err != nil {
 				return err
+			}
+			if promoted, err := s.safeRolloutAlreadyPromoted(state); err != nil {
+				return err
+			} else if promoted {
+				observedCanaryTraffic = false
+				break
 			}
 			gate = s.evaluateSafeRolloutCandidateCanaryGate(ctx, state, plan.Gate)
 			if err := ctx.Err(); err != nil {
@@ -320,6 +345,29 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	}
 	state.StableAlignmentAllowed = true
 	return nil
+}
+
+// Manual promotion is authoritative traffic intent. Resume at the normal
+// readiness and canonical-drain gates instead of overwriting it with a stale step.
+func (s *Service) safeRolloutAlreadyPromoted(state *safeRolloutState) (bool, error) {
+	policy, err := s.Store.GetAppTrafficPolicy(state.CandidateApp.TenantID, true, state.CandidateApp.ID)
+	if err != nil {
+		return false, err
+	}
+	if policy.Mode != model.AppTrafficModeSingle || policy.StableReleaseID != state.Candidate.ID ||
+		policy.StableWeight != 100 || policy.CandidateWeight != 0 || policy.CandidateReleaseID != "" {
+		return false, nil
+	}
+	current, err := s.Store.GetAppRelease(state.CandidateApp.TenantID, true, state.Candidate.ID)
+	if err != nil {
+		return false, err
+	}
+	if current.Role != model.AppReleaseRoleStable || current.Status != model.AppReleaseStatusServing ||
+		!s.safeRolloutBoundReleaseMatchesApp(state.CandidateApp, current) {
+		return false, fmt.Errorf("promoted release does not match the verified candidate")
+	}
+	state.Candidate = current
+	return true, nil
 }
 
 func (s *Service) alignSafeRolloutPromotedStableRelease(ctx context.Context, op model.Operation, state *safeRolloutState) (bool, error) {

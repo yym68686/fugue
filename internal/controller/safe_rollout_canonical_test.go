@@ -110,6 +110,19 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			oldImage := "ghcr.io/example/api:old"
+			sourceApp := app
+			sourceApp.Spec = *cloneControllerAppSpec(&app.Spec)
+			sourceApp.Spec.Image = oldImage
+			oldKey := s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(sourceApp), runtime.SchedulingConstraints{})
+			desiredKey := "release-key"
+			if _, err := s.Store.CreateAppRelease(model.AppRelease{ID: "original-source", AppID: app.ID, TenantID: app.TenantID, RuntimeID: app.Spec.RuntimeID, Role: model.AppReleaseRolePrevious, Status: model.AppReleaseStatusDraining, ResolvedImageRef: oldImage, SpecSnapshot: cloneControllerAppSpec(&sourceApp.Spec)}); err != nil {
+				t.Fatal(err)
+			}
+			candidate.RollbackTargetID = "original-source"
+			if _, err := s.Store.UpdateAppRelease(candidate); err != nil {
+				t.Fatal(err)
+			}
 			name := runtime.RuntimeAppResourceName(app)
 			serviceName := runtime.RuntimeAppServiceName(app)
 			canonical := cloneKubeMap(f.deployment)
@@ -120,15 +133,14 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			cLabels := objectMapField(cm, "labels")
 			delete(cLabels, runtime.FugueLabelAppReleaseID)
 			cLabels[runtime.FugueLabelAppWorkload] = name
-			objectMapField(cm, "annotations")[runtime.FugueAnnotationReleaseKey] = "old-key"
+			objectMapField(cm, "annotations")[runtime.FugueAnnotationReleaseKey] = oldKey
 			tm := objectMapValue(nestedObjectValue(canonical, "spec", "template", "metadata"))
 			tm["labels"] = cLabels
-			objectMapField(tm, "annotations")[runtime.FugueAnnotationReleaseKey] = "old-key"
-			oldImage := "ghcr.io/example/api:old"
+			objectMapField(tm, "annotations")[runtime.FugueAnnotationReleaseKey] = oldKey
 			mapSlice(nestedObjectValue(canonical, "spec", "template", "spec", "containers"))[0]["image"] = oldImage
 			desired := cloneKubeMap(canonical)
-			objectMapField(objectMapField(desired, "metadata"), "annotations")[runtime.FugueAnnotationReleaseKey] = "release-key"
-			objectMapField(objectMapValue(nestedObjectValue(desired, "spec", "template", "metadata")), "annotations")[runtime.FugueAnnotationReleaseKey] = "release-key"
+			objectMapField(objectMapField(desired, "metadata"), "annotations")[runtime.FugueAnnotationReleaseKey] = desiredKey
+			objectMapField(objectMapValue(nestedObjectValue(desired, "spec", "template", "metadata")), "annotations")[runtime.FugueAnnotationReleaseKey] = desiredKey
 			mapSlice(nestedObjectValue(desired, "spec", "template", "spec", "containers"))[0]["image"] = app.Spec.Image
 			canonicalService := cloneKubeMap(f.service)
 			canonicalService["kind"] = "Service"
@@ -143,7 +155,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				old := cloneKubeMap(p)
 				m := objectMapField(old, "metadata")
 				m["name"], m["uid"], m["labels"] = fmt.Sprintf("original-%d", i), fmt.Sprintf("original-uid-%d", i), cLabels
-				objectMapField(m, "annotations")[runtime.FugueAnnotationReleaseKey] = "old-key"
+				objectMapField(m, "annotations")[runtime.FugueAnnotationReleaseKey] = oldKey
 				m["ownerReferences"] = []map[string]any{{"kind": "ReplicaSet", "name": "original-rs", "uid": "original-rs-uid", "controller": true}}
 				mapSlice(nestedObjectValue(old, "spec", "containers"))[0]["image"] = oldImage
 				sourcePods = append(sourcePods, old)
@@ -154,7 +166,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			rm["ownerReferences"] = []map[string]any{{"kind": "Deployment", "name": name, "uid": "canonical-uid", "controller": true}}
 			targetSelector := objectStringMapValue(nestedObjectValue(f.service, "spec", "selector"))
 			advancing := strings.HasPrefix(scenario, "advance_")
-			expectedSourceID, expectedSourceKey, expectedSourceImage := "original-source", "old-key", oldImage
+			expectedSourceID, expectedSourceKey, expectedSourceImage := "original-source", oldKey, oldImage
 			var previousService, olderService map[string]any
 			var older model.AppRelease
 			var predecessor model.AppRelease
@@ -203,7 +215,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			}
 			marked := scenario == "resume" || strings.HasPrefix(scenario, "restore_") || advancing
 			if marked {
-				handoff := safeCanonicalHandoff{ReleaseID: candidate.ID, DeploymentUID: "canonical-uid", ReleaseKey: "old-key", Image: oldImage}
+				handoff := safeCanonicalHandoff{ReleaseID: candidate.ID, DeploymentUID: "canonical-uid", ReleaseKey: oldKey, Image: oldImage}
 				if advancing {
 					handoff.ReleaseID = predecessor.ID
 					if strings.HasPrefix(scenario, "advance_interrupted_") {
@@ -236,9 +248,9 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			}
 			if strings.HasPrefix(scenario, "restore_") {
 				canonical["spec"] = cloneKubeMap(objectMapField(desired, "spec"))
-				objectMapField(cm, "annotations")[runtime.FugueAnnotationReleaseKey] = "release-key"
+				objectMapField(cm, "annotations")[runtime.FugueAnnotationReleaseKey] = desiredKey
 				for i, pod := range sourcePods {
-					objectMapField(objectMapField(pod, "metadata"), "annotations")[runtime.FugueAnnotationReleaseKey] = "release-key"
+					objectMapField(objectMapField(pod, "metadata"), "annotations")[runtime.FugueAnnotationReleaseKey] = desiredKey
 					mapSlice(nestedObjectValue(pod, "spec", "containers"))[0]["image"] = app.Spec.Image
 					objectMapField(pod, "status")["podIP"] = fmt.Sprintf("10.0.1.%d", i+10)
 				}
@@ -465,13 +477,13 @@ func createCanonicalHandoffTestRevision(t *testing.T, s *Service, app model.App,
 }
 
 func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
-	for _, scenario := range []string{"legacy_successor", "retained_source", "completed_replacement", "unrelated_successor", "missing_source", "retired_predecessor"} {
+	for _, scenario := range []string{"legacy_successor", "retained_source", "completed_replacement", "unrelated_successor", "missing_source", "retired_predecessor", "multiple_successors", "logical_source_differs", "logical_source_wrong_snapshot"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			st, original, desired, _ := newSafeRolloutTestState(t)
 			s := &Service{Store: st, Renderer: runtime.Renderer{}}
 			if _, err := st.CreateAppRelease(model.AppRelease{ID: "original", AppID: original.ID, TenantID: original.TenantID,
-				Role: model.AppReleaseRolePrevious, Status: model.AppReleaseStatusDraining, SpecSnapshot: cloneControllerAppSpec(&original.Spec)}); err != nil {
+				Role: model.AppReleaseRolePrevious, Status: model.AppReleaseStatusDraining, ResolvedImageRef: original.Spec.Image, SpecSnapshot: cloneControllerAppSpec(&original.Spec)}); err != nil {
 				t.Fatal(err)
 			}
 			previous := createCanonicalHandoffTestRevision(t, s, desired, "first-promoted", "original")
@@ -482,9 +494,18 @@ func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
 			if _, err := st.UpdateAppRelease(previous); err != nil {
 				t.Fatal(err)
 			}
+			predecessorID := previous.ID
+			if scenario == "multiple_successors" {
+				middle := createCanonicalHandoffTestRevision(t, s, desired, "intermediate-promoted", previous.ID)
+				middle.Role, middle.Status = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
+				if _, err := st.UpdateAppRelease(middle); err != nil {
+					t.Fatal(err)
+				}
+				predecessorID = middle.ID
+			}
 			desired.Spec = *cloneControllerAppSpec(&desired.Spec)
 			desired.Spec.Env = map[string]string{"FEATURE_ENABLED": "true"}
-			promoted := createCanonicalHandoffTestRevision(t, s, desired, "next-promoted", previous.ID)
+			promoted := createCanonicalHandoffTestRevision(t, s, desired, "next-promoted", predecessorID)
 			promoted.Role, promoted.Status = model.AppReleaseRoleStable, model.AppReleaseStatusServing
 			if scenario == "unrelated_successor" {
 				promoted.RollbackTargetID = "unrelated"
@@ -501,6 +522,17 @@ func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
 			live.Metadata.UID = "original-uid"
 			handoff := safeCanonicalHandoff{ReleaseID: previous.ID, DeploymentUID: live.Metadata.UID,
 				ReleaseKey: live.Metadata.Annotations[runtime.FugueAnnotationReleaseKey], Image: original.Spec.Image}
+			if scenario == "logical_source_differs" || scenario == "logical_source_wrong_snapshot" {
+				handoff.SourceReleaseID = previous.ID
+				if scenario == "logical_source_wrong_snapshot" {
+					bad, _ := st.GetAppRelease(original.TenantID, true, "original")
+					bad.SpecSnapshot = cloneControllerAppSpec(bad.SpecSnapshot)
+					bad.SpecSnapshot.Env = map[string]string{"UNVERIFIED": "change"}
+					if _, err := st.UpdateAppRelease(bad); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			if scenario == "retained_source" {
 				handoff.ReleaseID, handoff.SourceReleaseID, handoff.PreviousTargetReleaseID = promoted.ID, "original", previous.ID
 			}
@@ -519,7 +551,7 @@ func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
 			b, _ := json.Marshal(handoff)
 			live.Metadata.Annotations[safeCanonicalHandoffAnnotation] = string(b)
 			got, _, recovered, err := s.recoverSafeCanonicalHandoffSource(live, desired, desired)
-			want := scenario == "legacy_successor" || scenario == "retained_source" || scenario == "completed_replacement"
+			want := scenario == "legacy_successor" || scenario == "retained_source" || scenario == "completed_replacement" || scenario == "multiple_successors" || scenario == "logical_source_differs"
 			if (err == nil && recovered) != want || (want && got.Spec.Image != expectedImage) {
 				t.Fatal("lost immutable original source across promotion", scenario, got.Spec.Image, recovered, err)
 			}

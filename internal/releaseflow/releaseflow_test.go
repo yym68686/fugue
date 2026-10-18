@@ -79,6 +79,22 @@ func TestAppReleaseServicePromoteReplacesStable(t *testing.T) {
 	if updatedCandidate.RollbackTargetID != stable.ID || updatedCandidate.ReleaseMessage == "" {
 		t.Fatalf("expected promoted candidate to remember rollback target, got %+v", updatedCandidate)
 	}
+
+	firstPromotedAt := *updatedCandidate.PromotedAt
+	now = now.Add(time.Minute)
+	for _, weight := range []int{100, 25, 100} {
+		next, err := service.PromoteRelease(context.Background(), principal, app, candidate, weight)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next.Mode != model.AppTrafficModeSingle || next.StableWeight != 100 || next.StableReleaseID != candidate.ID || next.CandidateReleaseID != "" {
+			t.Fatal("stale promotion changed stable traffic")
+		}
+		stored, err := stateStore.GetAppRelease(app.TenantID, true, candidate.ID)
+		if err != nil || stored.RollbackTargetID != stable.ID || stored.PromotedAt == nil || !stored.PromotedAt.Equal(firstPromotedAt) {
+			t.Fatal("repeated promotion rewrote original ancestry")
+		}
+	}
 }
 
 func TestAppReleaseServiceAbortRestoresStableTraffic(t *testing.T) {
