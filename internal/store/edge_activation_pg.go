@@ -131,7 +131,7 @@ func pgVerifyEdgeActivationReadinessSnapshot(ctx context.Context, db sqlQueryer)
 	if err != nil {
 		return err
 	}
-	instances, err := pgReadEdgeNodeInstances(ctx, db, "")
+	instances, err := pgReadEdgeReadinessInstances(ctx, db, edgeReadinessBodies)
 	if err != nil {
 		return err
 	}
