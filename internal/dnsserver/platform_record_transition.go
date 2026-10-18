@@ -165,8 +165,9 @@ func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[st
 	return hosts
 }
 
-// Starting a canary changes application execution, not DNS endpoint authority.
-// A signed successor may recover its records when it keeps the exact stable
+// An application release transition does not change DNS endpoint authority.
+// A signed successor may recover its records when it replaces a sole stable
+// target while preserving every other policy field, or keeps the exact stable
 // release and every other policy boundary, with positive shares for both
 // releases. A signed replacement canary may retain the same stable authority;
 // previously zero-weight releases still cannot be revived by this comparison.
@@ -183,6 +184,32 @@ func dnsTransitionTrafficConstraintPair(before, after []platformconfig.TrafficPo
 			nextIndex[constraint.ID] = -1
 		} else {
 			nextIndex[constraint.ID] = index
+		}
+	}
+	// A DNS consumer can observe a direct deployment, or miss an intermediate
+	// canary, and see one sole stable release replaced by another. The current
+	// signed successor authorizes its own target; the old stable ID is not a
+	// DNS ownership boundary. Compare only after both policies explicitly assign
+	// all traffic to one target with the same tenant, app, policy and behavior.
+	// Execution still uses the successor's original exact route/release proofs.
+	// This does not permit a zero-weight candidate to become active, nor does it
+	// rebind successor proofs to the retained positive checkpoint.
+	for index, before := range previous {
+		if !dnsSingleTrafficConstraint(before) || previousCounts[before.ID] != 1 {
+			continue
+		}
+		position, exists := nextIndex[before.ID]
+		if !exists || position < 0 {
+			continue
+		}
+		after := next[position]
+		if !dnsSingleTrafficConstraint(after) || after.StableReleaseID == before.StableReleaseID {
+			continue
+		}
+		comparison := after
+		comparison.StableReleaseID = before.StableReleaseID
+		if comparison == before {
+			previous[index] = after
 		}
 	}
 	for index, single := range previous {
@@ -265,6 +292,12 @@ func dnsTransitionTrafficConstraintPair(before, after []platformconfig.TrafficPo
 		}
 	}
 	return dnsTransitionTrafficConstraints(previous), dnsTransitionTrafficConstraints(next)
+}
+
+func dnsSingleTrafficConstraint(constraint platformconfig.TrafficPolicyConstraint) bool {
+	return constraint.ID != "" && constraint.AppID != "" && constraint.TenantID != "" &&
+		constraint.Mode == model.AppTrafficModeSingle && constraint.StableReleaseID != "" &&
+		constraint.CandidateReleaseID == "" && constraint.StableWeight == 100 && constraint.CandidateWeight == 0
 }
 
 // A signed canary step between the same two already-active releases changes

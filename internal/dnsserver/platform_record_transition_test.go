@@ -228,6 +228,10 @@ func TestDNSWireRejectionKeepsHealthyRecordSuccessorProofs(t *testing.T) {
 	testDNSDeploymentTransition(t, "wire-rejection")
 }
 
+func TestDNSStableReplacementKeepsPerRecordAnswersWithoutPromotingLKG(t *testing.T) {
+	testDNSDeploymentTransition(t, "replace-stable")
+}
+
 func testDNSDeploymentTransition(t *testing.T, phase string) {
 	t.Helper()
 	stamp := time.Now().UTC().Truncate(time.Second)
@@ -236,13 +240,16 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 			r.Intent.Generation = generation
 			r.Intent.Routes[0].DeploymentGeneration = generation
 			r.Intent.Routes[0].CacheNamespace = generation
-			if phase == "start" {
+			if phase == "start" || phase == "replace-stable" {
 				constraint := platformconfig.TrafficPolicyConstraint{ID: "policy-a", AppID: r.Intent.Routes[0].AppID,
 					TenantID: r.Intent.Routes[0].TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: "stable-a",
 					StableWeight: 100, UnavailableCandidate: "stable", StickyCookie: "Fugue-Release-Stickiness"}
-				if generation == "deploy-after" {
+				if generation == "deploy-after" && phase == "start" {
 					constraint.Mode, constraint.CandidateReleaseID = model.AppTrafficModeCanary, "candidate-a"
 					constraint.StableWeight, constraint.CandidateWeight = 99, 1
+				}
+				if generation == "deploy-after" && phase == "replace-stable" {
+					constraint.StableReleaseID = "candidate-a"
 				}
 				r.Policy.TrafficConstraints = []platformconfig.TrafficPolicyConstraint{constraint}
 				r.RuntimeSnapshot.Releases = []platformconfig.ReleaseObservation{
