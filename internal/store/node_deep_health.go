@@ -37,12 +37,26 @@ func (s *Store) RecordNodeDeepHealthResult(result model.NodeDeepHealthResult) (m
 }
 
 func (s *Store) ListNodeDeepHealthResults() ([]model.NodeDeepHealthResult, error) {
+	return s.listNodeDeepHealthResults(false)
+}
+
+// Only enforced reports can affect route eligibility. Read their complete
+// current values on every call; freshness and expiry remain caller decisions.
+func (s *Store) ListNodeDeepHealthEnforcementCandidates() ([]model.NodeDeepHealthResult, error) {
+	return s.listNodeDeepHealthResults(true)
+}
+
+func (s *Store) listNodeDeepHealthResults(enforcedOnly bool) ([]model.NodeDeepHealthResult, error) {
 	if s.usingDatabase() {
-		return s.pgListNodeDeepHealthResults()
+		return s.pgListNodeDeepHealthResults(enforcedOnly)
 	}
 	results := []model.NodeDeepHealthResult{}
 	err := s.withLockedState(false, func(state *model.State) error {
-		results = append(results, state.NodeDeepHealthResults...)
+		for _, result := range state.NodeDeepHealthResults {
+			if !enforcedOnly || !result.ObservedOnly {
+				results = append(results, result)
+			}
+		}
 		return nil
 	})
 	if err != nil {

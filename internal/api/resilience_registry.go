@@ -414,9 +414,13 @@ func (s *Server) activeNodeQuarantineByName() map[string]model.NodeDeepHealthRes
 	if s == nil || s.store == nil {
 		return out
 	}
-	results, err := s.listNodeDeepHealthResults(time.Now().UTC())
+	observedAt := time.Now().UTC()
+	results, err := s.store.ListNodeDeepHealthEnforcementCandidates()
 	if err != nil {
 		return out
+	}
+	for index := range results {
+		results[index] = projectNodeDeepHealthFreshness(results[index], observedAt)
 	}
 	now := time.Now().UTC()
 	for _, result := range results {

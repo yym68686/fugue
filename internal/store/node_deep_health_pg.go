@@ -57,16 +57,20 @@ RETURNING node_updater_id, cluster_node_name, runtime_id, machine_id, observed_o
 	return saved, nil
 }
 
-func (s *Store) pgListNodeDeepHealthResults() ([]model.NodeDeepHealthResult, error) {
+func (s *Store) pgListNodeDeepHealthResults(enforcedOnly bool) ([]model.NodeDeepHealthResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 SELECT node_updater_id, cluster_node_name, runtime_id, machine_id, observed_only, overall_status,
 	quarantine_state, quarantine_reason, quarantine_expires_at, recovery_conditions_json,
 	checks_json, reported_at, updated_at
-FROM fugue_node_deep_health_results
-ORDER BY updated_at DESC, node_updater_id ASC`)
+FROM fugue_node_deep_health_results`
+	if enforcedOnly {
+		query += ` WHERE observed_only = false`
+	}
+	query += ` ORDER BY updated_at DESC, node_updater_id ASC`
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
