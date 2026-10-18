@@ -171,3 +171,35 @@ func TestConfigurationPreviewDoesNotExportRetainedReplayEvidence(t *testing.T) {
 		t.Fatal("preview mutated evidence cache")
 	}
 }
+
+func TestConfigurationPreviewDistinguishesUncollectedEvidenceFromInvalidConfiguration(t *testing.T) {
+	app := model.App{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{Replicas: 1, RuntimeID: "runtime-a", Ports: []int{80}}}
+	apps := map[string]model.App{app.ID: app}
+	release := model.AppRelease{ID: "release-a", AppID: app.ID, TenantID: app.TenantID, RuntimeID: "runtime-a", Status: model.AppReleaseStatusServing, UpstreamURL: "http://app:80"}
+	traffic := model.AppTrafficPolicy{ID: "traffic-a", AppID: app.ID, TenantID: app.TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: release.ID, StableWeight: 100}
+	snapshot := model.EdgeRouteIntentSnapshot{GeneratedAt: time.Now().UTC(), Routes: []model.EdgeRouteIntent{{Hostname: "app.example.test", PathPrefix: "/", AppID: app.ID, TenantID: app.TenantID, RuntimeID: "runtime-a", ServicePort: 80}}}
+	zone := model.HostedZone{ID: "zone-a", TenantID: app.TenantID, ZoneName: "example.test", Status: model.HostedZoneStatusActive}
+	record := model.DNSRecord{ID: "record-a", ZoneID: zone.ID, TenantID: app.TenantID, FQDN: "missing.example.test", Type: model.DNSRecordTypeFUGUEAPP, Values: []string{"missing-app"}, TTL: 60}
+	result, err := projectBusinessRouteDraft(snapshot, apps, apps, nil, nil, []model.AppTrafficPolicy{traffic}, []model.AppRelease{release}, []model.HostedZone{zone}, []model.DNSRecord{record}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasIssue := func(code string) bool {
+		for _, issue := range result.Issues {
+			if issue.Code == code {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasIssue("release_observations_require_repair") || !hasIssue("dns_app_placement_not_projected") || !hasIssue("dns_app_reference_unresolved") {
+		t.Fatal("fixture must exercise missing observations and a genuine unresolved application")
+	}
+	configurationPreview(&result)
+	if hasIssue("release_observations_require_repair") || hasIssue("dns_app_placement_not_projected") || !hasIssue("runtime_evidence_not_collected") {
+		t.Fatal("uncollected evidence was presented as a runtime failure")
+	}
+	if !hasIssue("dns_app_reference_unresolved") || len(result.Policy.TrafficConstraints) != 1 || result.MigrationReady {
+		t.Fatal("configuration defect or signed traffic intent was hidden")
+	}
+}

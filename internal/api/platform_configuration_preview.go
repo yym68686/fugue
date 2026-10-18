@@ -39,7 +39,8 @@ func configurationPreview(result *platformIntentProjectionResponse) {
 	// These describe observations intentionally not collected, not configuration defects.
 	result.Issues = slices.DeleteFunc(result.Issues, func(issue platformProjectionIssue) bool {
 		switch issue.Code {
-		case "transaction_snapshot_not_frozen", "origin_observation_not_fresh", "origin_observation_time_missing", "origin_status_missing", "resolved_upstream_differs":
+		case "transaction_snapshot_not_frozen", "origin_observation_not_fresh", "origin_observation_time_missing", "origin_status_missing", "resolved_upstream_differs",
+			"release_observations_require_repair", "dns_app_placement_not_projected", "dns_flatten_observation_not_captured":
 			return true
 		}
 		return false
