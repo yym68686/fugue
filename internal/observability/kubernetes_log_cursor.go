@@ -314,7 +314,13 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			cur.Time = ts
 			cur.Boundary = map[[32]byte]int{}
 		}
-		cur.Boundary[hash]++
+		// CRI stdout/stderr writes can be interleaved out of timestamp order.
+		// Only records at the cursor timestamp belong to its inclusive boundary;
+		// an earlier record was admitted above but cannot be found at that time
+		// in the next read. Recording it there would fabricate a rotation gap.
+		if ts.Equal(cur.Time) {
+			cur.Boundary[hash]++
+		}
 	}
 	if err = scanner.Err(); err != nil && parent.Err() == nil {
 		observation.Outcome = "scan_error"

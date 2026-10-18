@@ -241,7 +241,9 @@ cursor advances. Compressed and plain retained files use the same source order.
 
 Recovery retains the existing admission, line and cycle budgets and poll
 deadline. It resumes across budget stops, reconstructs partial CRI records, and
-preserves equal-timestamp occurrence counts. A replay reads at most 16 files and
+preserves equal-timestamp occurrence counts. A boundary contains only records
+at its timestamp; interleaved earlier stdout/stderr records admitted in the same
+read do not become missing-boundary evidence. A replay reads at most 16 files and
 64 MiB of decoded data, with bounded directory and record buffers. A failed read
 keeps the cursor and backs off. If retention has already removed the boundary,
 the remaining records are collected with an explicit `rotation_gap` outcome;
