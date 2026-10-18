@@ -101,7 +101,17 @@ func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy pl
 			states[record.Hostname] = "pinned_constraint"
 			continue
 		}
-		states[record.Hostname] = "learning_queued"
+		// Match ordered projection eligibility: an intentionally omitted route
+		// has no observation work and must not look like a starved queue.
+		enabled := record.Status == "" || record.Status == model.EdgeRouteStatusActive
+		for _, owner := range owners {
+			enabled = enabled && platformconfig.DNSRouteStateAllowed(record, owner, projection.Policy)
+		}
+		if !enabled {
+			states[record.Hostname] = "inactive_route_constraint"
+			continue
+		}
+		states[record.Hostname] = "learning_no_eligible_query"
 		if len(serviceSet) > 8 || evidenceHostname == "" {
 			states[record.Hostname] = "learning_shared_owner_evidence_required"
 			continue
@@ -131,9 +141,12 @@ func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy pl
 				continue
 			}
 			if fact.Type != "A" {
-				states[record.Hostname] = "learning_address_family_evidence_required"
+				if states[record.Hostname] != "learning_queued" {
+					states[record.Hostname] = "learning_address_family_evidence_required"
+				}
 				continue
 			}
+			states[record.Hostname] = "learning_queued"
 			jobs = append(jobs, dynamicQualityJob{NodeID: fact.NodeID, Key: fact.NodeID + "\x00" + record.Hostname, EvidenceHostname: evidenceHostname, EvidenceHostnames: evidenceHostnames, EvidenceServices: services, Route: platformconfig.PhysicalQualityRoute{Hostname: record.Hostname, TrafficClass: class, Policy: policy.DynamicQuality.Policy}})
 		}
 	}
