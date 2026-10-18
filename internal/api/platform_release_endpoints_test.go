@@ -175,6 +175,14 @@ func TestReleaseEndpointReadinessCapturedKubernetesObjects(t *testing.T) {
 	if err := json.Unmarshal(raw, &input); err != nil {
 		t.Fatal(err)
 	}
+	// Older sanitized captures stored a list; serve its exact objects at
+	// their GET identities for the bounded owner reader too.
+	var replicaSets kubeTypedResourceList[kubeReleaseReplicaSetEvidence]
+	if raw := input.Resources["/apis/apps/v1/replicasets"]; raw != nil {
+		if err := json.Unmarshal(raw, &replicaSets); err != nil {
+			t.Fatal(err)
+		}
+	}
 	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/namespaces/kube-system" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]string{"uid": input.ClusterID}})
@@ -183,6 +191,12 @@ func TestReleaseEndpointReadinessCapturedKubernetesObjects(t *testing.T) {
 		if data, found := input.Resources[r.URL.Path]; found {
 			_, _ = w.Write(data)
 			return
+		}
+		for _, rs := range replicaSets.Items {
+			if r.URL.Path == "/apis/apps/v1/namespaces/"+rs.Metadata.Namespace+"/replicasets/"+rs.Metadata.Name {
+				_ = json.NewEncoder(w).Encode(rs)
+				return
+			}
 		}
 		http.NotFound(w, r)
 	}))

@@ -282,16 +282,26 @@ func testCaptureReleaseRuntimeReadiness(t *testing.T, draining bool) {
 					}
 					data = map[string]any{"items": pods}
 				case "/apis/apps/v1/replicasets":
-					if scenario == "replicas denied" {
-						http.Error(w, "denied", http.StatusForbidden)
-						return
-					}
-					data = map[string]any{"items": replicas}
+					t.Error("release capture listed unrelated ReplicaSet history")
+					http.NotFound(w, r)
+					return
 				case "/api/v1/endpoints":
 					data = map[string]any{"items": []any{}}
 				case "/apis/discovery.k8s.io/v1/endpointslices":
 					data = map[string]any{"items": slices}
 				default:
+					for _, item := range replicas {
+						rs := item.(kubeReleaseReplicaSetEvidence)
+						if r.URL.Path != "/apis/apps/v1/namespaces/"+rs.Metadata.Namespace+"/replicasets/"+rs.Metadata.Name {
+							continue
+						}
+						if scenario == "replicas denied" {
+							http.Error(w, "denied", http.StatusForbidden)
+							return
+						}
+						json.NewEncoder(w).Encode(rs)
+						return
+					}
 					http.NotFound(w, r)
 					return
 				}
