@@ -24,8 +24,15 @@ x-fugue-edge-offline:
     input signatures and source bindings are checked under normal transaction
     locks. A draft has no serving effect. Existing artifacts remain active until
     normal gray/full rollout, fresh per-route proofs, unchanged quorum and
-    observation windows pass. Removing a hold is an explicit new publication;
-    neither a date nor a fresh heartbeat can resume traffic by itself.
+    observation windows pass. An optional recovery policy authorizes low-frequency
+    nonce-bound HTTPS HEAD probes of one declared static route on the pinned public
+    endpoint. Consecutive successful probes restore candidate eligibility; repeated
+    failures or stale evidence suspend it again. The date never triggers recovery.
+    Probe state is rebuildable runtime evidence, not a configuration write or a
+    serving grant. Normal route/TLS, capacity, ranking and gray/full/LKG gates
+    remain mandatory. Without recovery, removing a hold is an explicit publication.
+    Historical parent membership follows its signed recovery evidence, never a
+    later mutable checkpoint or the current clock.
     Global release preparation also removes a held physical Worker from the
     new candidate's required execution set only when that exact signed parent
     pins the verified producer/input publications and its complete DNS plan
@@ -19253,6 +19260,19 @@ components:
           type: string
           enum: [observations_missing, observation_from_future, heartbeat_stale, draining, admission_rejected, node_unhealthy, route_state_missing, tls_state_missing, inventory_checks_passed]
         route_proof_status: {type: string, enum: [not_evaluated]}
+    EdgeOfflineRecoveryPolicy:
+      type: object
+      additionalProperties: false
+      required: [hostname, path, probe_interval_seconds, probe_timeout_seconds, success_threshold, failure_threshold, freshness_seconds]
+      description: Explicit authorization for low-volume recovery probes of a pinned static platform route. TLS identity, random nonce, exact Edge identity and fresh route proof are required. Recovery only restores candidate eligibility, never claims provider quota or traffic authorization. Consecutive successes must come from distinct scheduled probes; failed or stale observations reset the success streak. No clock date enables admission.
+      properties:
+        hostname: {type: string, minLength: 1, maxLength: 253}
+        path: {type: string, minLength: 1, maxLength: 1024, pattern: '^/'}
+        probe_interval_seconds: {type: integer, minimum: 300, maximum: 3600}
+        probe_timeout_seconds: {type: integer, minimum: 1, maximum: 5}
+        success_threshold: {type: integer, minimum: 2, maximum: 5}
+        failure_threshold: {type: integer, minimum: 1, maximum: 3}
+        freshness_seconds: {type: integer, minimum: 600, maximum: 10800}
     EdgeDNSAdmissionIntent:
       type: object
       additionalProperties: false
@@ -19262,6 +19282,8 @@ components:
         evaluated_at: {type: string, format: date-time}
         scope: {type: string, enum: [global]}
         state: {type: string, enum: [not_configured, allowed, suspended, unavailable, identity_conflict]}
+        recovery_state: {type: string, enum: [probing, ready, unavailable]}
+        recovery_last_probe_at: {type: string, format: date-time}
         serving_evidence: {type: string, enum: [not_evaluated]}
         reason: {type: string, enum: [quota_exhausted, maintenance, network_unavailable]}
         expected_recovery_date: {type: string, format: date}
@@ -36063,7 +36085,7 @@ components:
         offline_edges:
           type: array
           maxItems: 64
-          description: Pinned global producer input only. Explicitly suspends these exact physical endpoint identities from future DNS candidate publications. Current serving artifacts remain unchanged until normal signed rollout succeeds. Expected recovery dates are informational and never expire the hold; removing a hold requires another fenced configuration publication and fresh route proofs. Runtime heartbeats cannot alter this intent.
+          description: Pinned global producer input only. Suspends exact endpoint identities. An optional recovery policy authorizes bounded low-frequency probes and automatic reevaluation on consecutive success, independent of estimated dates. Current serving artifacts remain unchanged until normal signed rollout and fresh per-route proofs succeed. Runtime observations never mutate the signed input. Historical membership uses the parent's signed recovery evidence. Holds without recovery require explicit configuration removal.
           items:
             type: object
             additionalProperties: false
@@ -36074,6 +36096,8 @@ components:
               public_ipv4: {type: string, format: ipv4}
               reason: {type: string, enum: [quota_exhausted, maintenance, network_unavailable]}
               expected_recovery_date: {type: string, format: date}
+              recovery:
+                $ref: '#/components/schemas/EdgeOfflineRecoveryPolicy'
         publication_role:
           type: string
           enum: [cell-routes, cell-dns]

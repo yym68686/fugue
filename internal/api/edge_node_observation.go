@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"time"
 
 	"fugue/internal/model"
@@ -98,5 +99,32 @@ func (s *Server) observeEdgeNode(node model.EdgeNode, now time.Time) *model.Edge
 	observation := observeEdgeNodeInventory(node, now)
 	intent, holds := s.observeGlobalDNSAdmission(now)
 	observation.DNSAdmissionIntent = dnsAdmissionForNode(node, intent, holds)
+	s.observeOfflineRecovery(node, observation.DNSAdmissionIntent, holds, now)
 	return observation
+}
+
+func (s *Server) observeOfflineRecovery(node model.EdgeNode, intent *model.EdgeDNSAdmissionIntent, holds []platformproducer.OfflineEdge, now time.Time) {
+	if intent.State != "suspended" {
+		return
+	}
+	for _, hold := range holds {
+		if hold.EdgeID != node.ID || hold.Recovery == nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		o, err := s.readOfflineRecovery(ctx, hold)
+		cancel()
+		intent.RecoveryState = "probing"
+		if err != nil {
+			intent.RecoveryState = "unavailable"
+			return
+		}
+		if !o.LastAttempt.IsZero() {
+			intent.RecoveryLastProbeAt = &o.LastAttempt
+		}
+		if o.Ready(hold, now) {
+			intent.State, intent.Reason, intent.RecoveryState = "allowed", "", "ready"
+		}
+		return
+	}
 }

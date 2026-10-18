@@ -278,7 +278,7 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 			}
 			edges = activeEdgeNodesForPolicy(edges, nodePolicies)
 		}
-		if err := projectDNSReadinessWithPolicy(&projection, edges, time.Now().UTC(), dnsPolicy); err != nil {
+		if err := s.projectDNSReadinessWithRecovery(ctx, &projection, edges, time.Now().UTC(), dnsPolicy); err != nil {
 			return platformIntentProjectionResponse{}, errors.New("DNS readiness topology invalid")
 		}
 	}

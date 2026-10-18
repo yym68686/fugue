@@ -12,11 +12,12 @@ import (
 )
 
 type OfflineEdge struct {
-	EdgeID               string `json:"edge_id"`
-	EdgeGroupID          string `json:"edge_group_id"`
-	PublicIPv4           string `json:"public_ipv4"`
-	Reason               string `json:"reason"`
-	ExpectedRecoveryDate string `json:"expected_recovery_date,omitempty"`
+	EdgeID               string                     `json:"edge_id"`
+	EdgeGroupID          string                     `json:"edge_group_id"`
+	PublicIPv4           string                     `json:"public_ipv4"`
+	Reason               string                     `json:"reason"`
+	ExpectedRecoveryDate string                     `json:"expected_recovery_date,omitempty"`
+	Recovery             *OfflineEdgeRecoveryPolicy `json:"recovery,omitempty"`
 }
 
 var offlineIdentity = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,127}$`)
@@ -37,6 +38,11 @@ func ValidateOfflineEdges(holds []OfflineEdge) error {
 		if hold.ExpectedRecoveryDate != "" {
 			if _, err := time.Parse(time.DateOnly, hold.ExpectedRecoveryDate); err != nil {
 				return fmt.Errorf("offline recovery date invalid")
+			}
+		}
+		if hold.Recovery != nil {
+			if err := hold.Recovery.Validate(); err != nil {
+				return err
 			}
 		}
 	}
@@ -91,7 +97,7 @@ func validateOfflinePolicyDelta(previous, next ProjectionPolicyInput) error {
 	}
 	changes := 0
 	for _, hold := range next.OfflineEdges {
-		if old, exists := before[hold.EdgeID]; !exists || old != hold {
+		if old, exists := before[hold.EdgeID]; !exists || !reflect.DeepEqual(old, hold) {
 			changes++
 		}
 		delete(before, hold.EdgeID)

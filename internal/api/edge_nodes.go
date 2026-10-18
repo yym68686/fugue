@@ -115,6 +115,7 @@ func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
 	for index := range nodes {
 		nodes[index].Observation = observeEdgeNodeInventory(nodes[index], now)
 		nodes[index].Observation.DNSAdmissionIntent = dnsAdmissionForNode(nodes[index], intent, holds)
+		s.observeOfflineRecovery(nodes[index], nodes[index].Observation.DNSAdmissionIntent, holds, now)
 	}
 	groups = activeEdgeGroupsForInventory(groups, nodes, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{

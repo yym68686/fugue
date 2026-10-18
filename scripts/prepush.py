@@ -476,8 +476,8 @@ def main() -> int:
     non_go_tasks: dict[str, list[str] | None] = {}
     if any(name in {"scripts/observe_dns_failure_timeline.py", "scripts/test_observe_dns_failure_timeline.py"} for name in paths):
         non_go_tasks["dns-failure-timeline-tests"] = ["python3", "-m", "unittest", "scripts.test_observe_dns_failure_timeline"]
-    if any(name in {"scripts/configure_edge_offline.py", "scripts/test_configure_edge_offline.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/edge-offline/") for name in paths):
-        non_go_tasks["edge-offline-configuration-tests"] = ["python3", "-m", "unittest", "scripts.test_configure_edge_offline"]
+    if any(name in {"scripts/configure_edge_offline.py", "scripts/test_configure_edge_offline.py", "scripts/test_configure_edge_offline_recovery.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/edge-offline/") for name in paths):
+        non_go_tasks["edge-offline-configuration-tests"] = ["python3", "-m", "unittest", "scripts.test_configure_edge_offline", "scripts.test_configure_edge_offline_recovery"]
     for script in ("reconcile_managed_ssh_keys", "reconcile_managed_ssh_runtime", "verify_managed_ssh_image", "verify_ssh_front_image", "stage_managed_ssh_fronts", "reconcile_fixed_node_retention", "observe_managed_ssh_front", "select_managed_ssh_transport", "run_ssh_identity_maintenance"):
         if any(name in {f"scripts/{script}.py", f"scripts/test_{script}.py"} for name in paths):
             non_go_tasks[script.replace("_", "-")+"-tests"] = ["python3", "-m", "unittest", f"scripts.test_{script}"]

@@ -191,6 +191,37 @@ checks, prepare the member, verify candidate convergence, and only then consider
 removing its DNS offline hold. Historical artifacts and rollback records are
 retained throughout; do not edit expected-consumer rows or bypass freshness.
 
+## Automatic recovery of a suspended public endpoint
+
+An `offline_edges` entry may include a `recovery` policy. It declares a static
+platform hostname/path to probe, an interval of 300–3600 seconds, a timeout of
+1–5 seconds, 2–5 consecutive successes, a failure threshold of 1–3, and bounded
+evidence freshness. The freshness bound must cover at least two intervals plus
+the timeout. Estimated recovery dates remain informational and never trigger
+readmission.
+
+The elected global producer sends a nonce-bound HTTPS HEAD directly to the
+pinned public IP. It verifies TLS and the fresh route proof's exact Edge and group
+identity. Only an enabled route in the signed static intent can be a probe target.
+Each cycle attempts at most two due endpoints, oldest first. Durable checkpoint
+claims prevent duplicate probes across replicas and restarts; a crash after a
+claim waits for the next interval. Preview and inventory reads do not send probes.
+
+Consecutive successes make the endpoint a candidate again, without changing the
+signed hold or asserting provider quota. Failed or stale observations retract
+candidate eligibility. Normal fresh per-route readiness, capacity, routing,
+gray/full convergence and LKG verification still decide actual traffic. Endpoint
+identity changes force compilation; observation timestamps alone do not. Failed
+recovery retains the positive LKG. A historical parent's signed recovery evidence
+determines its membership, independent of later checkpoints or clock changes.
+
+Deploy support in API and controller before adding a recovery policy through the
+independent `edge_offline_configuration` lane. Updating one hold still requires
+the exact signed producer/full/LKG preconditions and preserves other constraints.
+An omitted recovery policy retains manual suspension, including intentional
+maintenance. Inventory exposes `recovery_state` and `recovery_last_probe_at`;
+`state=allowed` is candidate eligibility, while serving evidence remains separate.
+
 ## Configuration preview and runtime export
 
 `GET /v1/admin/platform-config/routes/project?producer_policy_artifact_id=<id>`

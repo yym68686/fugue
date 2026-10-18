@@ -173,6 +173,9 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 		if sources[0].DNSPolicyID != "" {
 			parent.Metadata[platformproducer.DNSPolicyIDMetadata] = sources[0].DNSPolicyID
 			parent.Metadata[platformproducer.DNSPolicyDigestMetadata] = sources[0].DNSPolicyDigest
+			if err := pinOfflineRecoveryEvidence(&parent, compiled.InputSnapshot); err != nil {
+				return platformConfigCompileResponse{}, err
+			}
 		}
 	}
 	parent.CreatedByType, parent.CreatedByID = strings.TrimSpace(principal.ActorType), strings.TrimSpace(principal.ActorID)

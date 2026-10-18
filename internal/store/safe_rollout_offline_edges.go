@@ -94,6 +94,13 @@ func (s *Store) SelectSafeRolloutServingEdges(nodes []model.EdgeNode) ([]model.E
 	if len(policy.OfflineEdges) == 0 {
 		return nodes, nil
 	}
+	if _, err := platformproducer.EffectiveOfflineHolds(nodes, policy.OfflineEdges, nil, parent.Provenance.SignedAt); err != nil {
+		return fail()
+	}
+	policy.OfflineEdges, err = platformproducer.PublicationOfflineHolds(parent, policy.OfflineEdges)
+	if err != nil {
+		return fail()
+	}
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
 	if !ok || !kindsOK || len(ids) != len(kinds) {

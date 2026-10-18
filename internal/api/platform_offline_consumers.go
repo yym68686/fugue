@@ -55,6 +55,13 @@ func (s *Server) applyGlobalOfflineConsumerIntent(parent model.PlatformArtifact,
 	if len(policy.OfflineEdges) == 0 {
 		return topology, nil
 	}
+	if _, err := platformproducer.EffectiveOfflineHolds(topology.EdgeNodes, policy.OfflineEdges, nil, parent.Provenance.SignedAt); err != nil {
+		return fail()
+	}
+	policy.OfflineEdges, err = platformproducer.PublicationOfflineHolds(parent, policy.OfflineEdges)
+	if err != nil {
+		return fail()
+	}
 	identities, ok := parent.Content["artifact_ids"].([]any)
 	kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
 	if !ok || !kindsOK || len(identities) != len(kinds) {

@@ -165,6 +165,10 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if policy.Mode == "paused" {
 		return interval, nil
 	}
+	advance("offline_recovery")
+	if err := s.reconcileOfflineEdgeRecovery(ctx, policy); err != nil {
+		return interval, err
+	}
 	if policy.Mode == "serving" {
 		advance("reconcile_pending")
 		if handled, err := s.reconcilePendingProducedTraffic(ctx, policy, authority); handled || err != nil {
@@ -306,12 +310,28 @@ func platformProducerSourceDigest(projection platformIntentProjectionResponse, a
 		}
 		return routes[i].PathPrefix < routes[j].PathPrefix
 	})
+	// Endpoint eligibility can change when recovery evidence passes even when
+	// the current winner has not changed. Fingerprint identities, not heartbeat
+	// timestamps, so recovery is compiled on the next producer cycle.
+	type endpointIdentity struct {
+		EdgeID, EdgeGroupID string
+		A, AAAA             []string
+	}
+	endpoints := make([]endpointIdentity, 0, len(projection.RuntimeSnapshot.DNSEdgeEndpoints))
+	for _, endpoint := range projection.RuntimeSnapshot.DNSEdgeEndpoints {
+		addresses, addresses6 := append([]string(nil), endpoint.A...), append([]string(nil), endpoint.AAAA...)
+		sort.Strings(addresses)
+		sort.Strings(addresses6)
+		endpoints = append(endpoints, endpointIdentity{endpoint.EdgeID, endpoint.EdgeGroupID, addresses, addresses6})
+	}
+	sort.Slice(endpoints, func(i, j int) bool { return endpoints[i].EdgeID < endpoints[j].EdgeID })
 	source := struct {
 		Intent    platformconfig.PlatformIntent
 		Policy    platformconfig.PolicySnapshot
 		Authority string
 		Routes    []platformconfig.CompiledRoute
-	}{projection.Intent, projection.Policy, authority, routes}
+		Endpoints []endpointIdentity
+	}{projection.Intent, projection.Policy, authority, routes, endpoints}
 	type assignment struct {
 		QualityState   string `json:"QualityState,omitempty"`
 		NodeID         string

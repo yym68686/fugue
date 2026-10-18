@@ -23,7 +23,7 @@ def holds(policy):
     previous = ''
     for hold in result:
         required = {'edge_id', 'edge_group_id', 'public_ipv4', 'reason'}
-        if not isinstance(hold, dict) or not required <= set(hold) or set(hold) - required - {'expected_recovery_date'}:
+        if not isinstance(hold, dict) or not required <= set(hold) or set(hold) - required - {'expected_recovery_date', 'recovery'}:
             raise ValueError('complete offline endpoint identity required')
         if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', hold['edge_id']) or hold['edge_id'] <= previous or not re.fullmatch(r'edge-group-[a-z0-9]+(?:-[a-z0-9]+)*', hold['edge_group_id']):
             raise ValueError('ordered unique offline endpoint identities required')
@@ -32,6 +32,17 @@ def holds(policy):
             raise ValueError('canonical public endpoint and typed reason required')
         if hold.get('expected_recovery_date'):
             datetime.date.fromisoformat(hold['expected_recovery_date'])
+        if 'recovery' in hold:
+            p = hold['recovery']
+            numeric = {'probe_interval_seconds', 'probe_timeout_seconds', 'success_threshold', 'failure_threshold', 'freshness_seconds'}
+            if not isinstance(p, dict) or set(p) != numeric | {'hostname', 'path'} or any(type(p[k]) is not int for k in numeric):
+                raise ValueError('complete bounded recovery probe policy required')
+            if not isinstance(p['hostname'], str) or len(p['hostname']) > 253 or '.' not in p['hostname'] or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in p['hostname'].split('.')):
+                raise ValueError('canonical recovery probe hostname required')
+            if not isinstance(p['path'], str) or not p['path'].startswith('/') or p['path'].startswith('//') or len(p['path']) > 1024 or any(c in p['path'] for c in ['?', '#', '\n', '\r']):
+                raise ValueError('canonical recovery probe path required')
+            if not (300 <= p['probe_interval_seconds'] <= 3600 and 1 <= p['probe_timeout_seconds'] <= 5 and 2 <= p['success_threshold'] <= 5 and 1 <= p['failure_threshold'] <= 3 and max(600, 2*p['probe_interval_seconds']+p['probe_timeout_seconds']) <= p['freshness_seconds'] <= 10800):
+                raise ValueError('recovery probe bounds invalid')
         previous = hold['edge_id']
     return result
 
@@ -83,7 +94,24 @@ def validate_preview(previous, current, policy):
     if any(issue not in previous.get('issues', []) for issue in current.get('issues', [])):
         raise ValueError('offline preview introduced a configuration issue')
     endpoints = current.get('runtime_snapshot', {}).get('dns_edge_endpoints', [])
-    if not endpoints or len(endpoints) > 4096 or any(endpoint['edge_id'] in {hold['edge_id'] for hold in holds(policy)} for endpoint in endpoints):
+    suspended = {hold['edge_id'] for hold in holds(policy)}
+    fact = current.get('runtime_snapshot', {}).get('facts', {}).get('offline_edge_recovery', {})
+    recovered = fact.get('observations', [])
+    for hold in holds(policy):
+        p = hold.get('recovery')
+        if not p:
+            continue
+        for o in recovered:
+            if o.get('edge_id') != hold['edge_id'] or o.get('declaration_digest') != digest(hold) or o.get('admitted') is not True:
+                continue
+            at = datetime.datetime.fromisoformat(fact['captured_at'].replace('Z', '+00:00'))
+            attempt = datetime.datetime.fromisoformat(o['last_attempt'].replace('Z', '+00:00'))
+            success = datetime.datetime.fromisoformat(o['last_success'].replace('Z', '+00:00'))
+            expiry = datetime.datetime.fromisoformat(o['proof_valid_until'].replace('Z', '+00:00'))
+            if at.tzinfo is not None and success <= attempt <= at < expiry and (at-success).total_seconds() <= p['freshness_seconds'] and 0 <= o.get('failures', -1) < p['failure_threshold'] and 0 <= o.get('successes', -1) <= p['success_threshold']:
+                suspended.remove(hold['edge_id'])
+                break
+    if not endpoints or len(endpoints) > 4096 or any(endpoint['edge_id'] in suspended for endpoint in endpoints):
         raise ValueError('offline preview failed to remove held candidates')
     return sorted(endpoint['edge_id'] for endpoint in endpoints)
 
@@ -136,7 +164,7 @@ def publish(config, api, save):
         raise ValueError('successor differs')
     artifact = ensure_input(api, 'policy_snapshot', SCOPE, successor)
     evidence = {'schema': config['schema'], 'declaration_digest': declaration, 'resolved_precondition': precondition, 'artifact_id': artifact['id'], 'changed_edge': changed,
-                'offline_edges': holds(config['projection_policy']), 'producer_activated': False, 'routing_acceptance_complete': False, 'automatic_readmission': False, 'phase': 'reading_previews'}
+                'offline_edges': holds(config['projection_policy']), 'producer_activated': False, 'routing_acceptance_complete': False, 'automatic_readmission': any(hold.get('recovery') for hold in holds(config['projection_policy'])), 'phase': 'reading_previews'}
     save(evidence)
     before = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + old['id'] + "&view=runtime")
     preview = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + artifact['id'] + "&view=runtime")

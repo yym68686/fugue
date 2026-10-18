@@ -10,6 +10,7 @@ test:
 	python3 -m unittest scripts.test_verify_ssh_front_image
 	python3 -m unittest scripts.test_stage_managed_ssh_fronts scripts.test_reconcile_fixed_node_retention
 	python3 -m unittest scripts.test_configure_edge_offline
+	python3 -m unittest scripts.test_configure_edge_offline_recovery
 	python3 -m unittest scripts.test_observe_dns_failure_timeline
 	python3 -m unittest scripts.test_observe_managed_ssh_front
 	python3 -m unittest scripts.test_select_managed_ssh_transport
@@ -39,6 +40,7 @@ test:
 	$(MAKE) test-static-edge-observability
 
 test-scripts:
+	python3 -m unittest scripts.test_configure_edge_offline scripts.test_configure_edge_offline_recovery
 	python3 -m unittest scripts.test_run_ssh_identity_maintenance
 	python3 -m unittest scripts.test_observe_worker_standby
 	python3 -m unittest scripts.test_enroll_cell_member
