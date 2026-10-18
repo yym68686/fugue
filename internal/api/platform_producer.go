@@ -177,7 +177,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		}
 		if handled {
 			advance("refresh_pending_quality")
-			return interval, s.refreshPendingProducerQuality(ctx, policy, capture)
+			return interval, s.refreshPendingProducerQuality(ctx, policy)
 		}
 		if policy.Serving.SinglePublication {
 			done, err := s.store.HasVerifiedProducerPublication(policy.TargetScope, authority.ID)
@@ -211,6 +211,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
+	s.rememberProducerQualityPlan(policy, projection)
 	advance("source_digest")
 	sourceDigest, err := platformProducerSourceDigest(projection, authority.ID)
 	if err != nil {

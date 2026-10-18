@@ -443,7 +443,13 @@ func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected D
 							return status, nil
 						}
 					case StateRecoveryRequired:
-						if status.TargetRecordDigest == expected.RecordDigest {
+						// A committed target can briefly lack continuous health
+						// evidence while old Pods disappear and its independent
+						// canary catches up. Keep waiting for a defined terminal
+						// result within the caller's deadline. A candidate
+						// that has not become the LKG still fails immediately.
+						if status.TargetRecordDigest == expected.RecordDigest &&
+							(status.CurrentRecordDigest != expected.RecordDigest || status.LastSuccessfulLKG != expected.RecordDigest) {
 							return status, fmt.Errorf("Guardian release ended in %s: %s", status.State, status.Reason)
 						}
 					case StateLKGStable:

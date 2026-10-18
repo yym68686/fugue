@@ -53,8 +53,9 @@ type dynamicQualityEntry struct {
 }
 
 type dynamicQualityState struct {
-	mu      sync.Mutex
-	entries map[string]dynamicQualityEntry
+	mu            sync.Mutex
+	entries       map[string]dynamicQualityEntry
+	producerPlans map[string]*producerQualityPlan
 }
 
 func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy) ([]dynamicQualityJob, map[string]string, error) {
@@ -301,36 +302,7 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 	}
 	work := s.dynamicQuality.schedule(jobs, policy.DynamicQuality.RefreshQueriesPerCycle, time.Now().UTC())
 	contextFor := newDynamicQualityContextReader(*projection, work)
-	captureBudget, cancelBudget := context.WithTimeout(ctx, 30*time.Second)
-	defer cancelBudget()
-	completed := captureDynamicQualityJobs(captureBudget, work, policy.DynamicQuality.RefreshConcurrency, func(captureContext context.Context, job dynamicQualityJob) {
-		entry := dynamicQualityEntry{Attempted: time.Now().UTC()}
-		s.dynamicQuality.started(job.Key, entry.Attempted)
-		contextDigest, contextErr := contextFor(job)
-		if contextErr != nil {
-			if s.log != nil {
-				s.log.Printf("dynamic quality context unavailable; hostname=%s dns_node=%s error=%v", job.Route.Hostname, job.NodeID, contextErr)
-			}
-			return
-		}
-		entry.ContextDigest = contextDigest
-		answer, captureErr := s.observePhysicalDNSAnswer(captureContext, projection.RuntimeSnapshot.DNSConsumers, job.NodeID, job.Route.Hostname)
-		if captureErr == nil {
-			receipt, readErr := s.captureDynamicQualityEvidence(captureContext, job, answer)
-			captureErr = readErr
-			if captureErr == nil {
-				entry.Compiled.Selection, captureErr = compileBoundPhysicalQualitySelection(receipt, time.Now().UTC())
-				if captureErr == nil {
-					entry.Compiled.Evidence, captureErr = json.Marshal(receipt)
-				}
-			}
-		}
-		if captureErr != nil {
-			entry.Failure = captureErr.Error()
-			entry.Compiled = compiledPhysicalDNSSelection{}
-		}
-		s.dynamicQuality.finish(job.Key, entry, job.Route.Policy, time.Now().UTC())
-	})
+	completed, exhausted := s.refreshDynamicQualityBatch(ctx, work, *policy.DynamicQuality, projection.RuntimeSnapshot.DNSConsumers, contextFor)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -387,8 +359,44 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 	if projection.RuntimeSnapshot.Facts == nil {
 		projection.RuntimeSnapshot.Facts = map[string]any{}
 	}
-	projection.RuntimeSnapshot.Facts["dynamic_quality_coverage"] = map[string]any{"mode": policy.DynamicQuality.Mode, "query_count": len(jobs), "scheduled_queries": len(work), "refreshed_queries": completed, "capture_budget_exhausted": captureBudget.Err() != nil, "hostnames": states}
+	projection.RuntimeSnapshot.Facts["dynamic_quality_coverage"] = map[string]any{"mode": policy.DynamicQuality.Mode, "query_count": len(jobs), "scheduled_queries": len(work), "refreshed_queries": completed, "capture_budget_exhausted": exhausted, "hostnames": states}
 	return nil
+}
+
+// Observation refresh is independent of compiling or publishing the enclosing
+// DNS projection. Every stored receipt is still revalidated by its future user.
+func (s *Server) refreshDynamicQualityBatch(ctx context.Context, work []dynamicQualityJob, policy platformconfig.DynamicQualityPolicy, consumers []platformconfig.DNSConsumerObservation, contextFor func(dynamicQualityJob) (string, error)) (int, bool) {
+	captureBudget, cancelBudget := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelBudget()
+	completed := captureDynamicQualityJobs(captureBudget, work, policy.RefreshConcurrency, func(captureContext context.Context, job dynamicQualityJob) {
+		entry := dynamicQualityEntry{Attempted: time.Now().UTC()}
+		s.dynamicQuality.started(job.Key, entry.Attempted)
+		contextDigest, contextErr := contextFor(job)
+		if contextErr != nil {
+			if s.log != nil {
+				s.log.Printf("dynamic quality context unavailable; hostname=%s dns_node=%s error=%v", job.Route.Hostname, job.NodeID, contextErr)
+			}
+			return
+		}
+		entry.ContextDigest = contextDigest
+		answer, captureErr := s.observePhysicalDNSAnswer(captureContext, consumers, job.NodeID, job.Route.Hostname)
+		if captureErr == nil {
+			receipt, readErr := s.captureDynamicQualityEvidence(captureContext, job, answer)
+			captureErr = readErr
+			if captureErr == nil {
+				entry.Compiled.Selection, captureErr = compileBoundPhysicalQualitySelection(receipt, time.Now().UTC())
+				if captureErr == nil {
+					entry.Compiled.Evidence, captureErr = json.Marshal(receipt)
+				}
+			}
+		}
+		if captureErr != nil {
+			entry.Failure = captureErr.Error()
+			entry.Compiled = compiledPhysicalDNSSelection{}
+		}
+		s.dynamicQuality.finish(job.Key, entry, job.Route.Policy, time.Now().UTC())
+	})
+	return completed, captureBudget.Err() != nil
 }
 
 // Failed refreshes retain same-context evidence only until its original expiry.

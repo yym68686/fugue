@@ -184,71 +184,45 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic bool) {
 	if nextGray.ArtifactID == first.ID {
 		t.Fatal("new source not staged")
 	}
-	// Rollout waits must keep the bounded observation queue moving without
-	// publishing the captured projection or treating it as convergence evidence.
-	jobs := make([]dynamicQualityJob, 512)
-	for i := range jobs {
-		jobs[i] = dynamicQualityJob{Key: fmt.Sprintf("query-%03d", i)}
+	// Observation refresh must not re-enter the publishable projection's
+	// business readiness gates. Exercise the actual queue, even when its public
+	// DNS evidence is unavailable, and retain every publication/LKG identity.
+	beforeAttempts := map[string]time.Time{}
+	for key, entry := range server.dynamicQuality.entries {
+		beforeAttempts[key] = entry.Attempted
 	}
-	refreshed := map[string]int{}
-	observed := time.Now().UTC()
-	for cycle := 0; cycle < 4; cycle++ {
-		_, err := server.reconcilePlatformConfigurationWithCapture(ctx, func(captureCtx context.Context, _ model.Principal) (platformIntentProjectionResponse, error) {
-			if !dynamic {
-				t.Fatal("static DNS policy started quality work")
-			}
-			deadline, ok := captureCtx.Deadline()
-			if !ok || time.Until(deadline) > time.Minute {
-				t.Fatal("pending quality refresh is not bounded")
-			}
-			for _, job := range server.dynamicQuality.schedule(jobs, 128, observed) {
-				server.dynamicQuality.started(job.Key, observed)
-				refreshed[job.Key]++
-			}
-			// This deliberately invalid desired configuration must be discarded.
-			return platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Generation: "not-a-publishable-capture"}}, nil
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		observed = observed.Add(90 * time.Second)
-	}
-	if dynamic && len(refreshed) != len(jobs) {
-		t.Fatal("pending rollout starved quality queue", len(refreshed))
-	}
-	for key, count := range refreshed {
-		if count != 1 {
-			t.Fatal("queue repeated before covering all observations", key, count)
-		}
-	}
-	failure := errors.New("observation dependency unavailable")
 	_, refreshErr := server.reconcilePlatformConfigurationWithCapture(ctx, func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
-		return platformIntentProjectionResponse{}, failure
+		t.Fatal("pending quality refresh re-entered configuration capture")
+		return platformIntentProjectionResponse{}, errors.New("business publication inputs not ready")
 	})
-	if dynamic && !errors.Is(refreshErr, failure) || !dynamic && refreshErr != nil {
-		t.Fatal("quality refresh failure classification differs", refreshErr)
+	if refreshErr != nil {
+		t.Fatal(refreshErr)
 	}
 	if dynamic {
-		unexpected := func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
-			t.Fatal("untrusted or disabled policy triggered capture")
-			return platformIntentProjectionResponse{}, nil
+		if len(beforeAttempts) == 0 {
+			t.Fatal("fixture has no dynamic observation job")
+		}
+		for key, before := range beforeAttempts {
+			if !server.dynamicQuality.entries[key].Attempted.After(before) {
+				t.Fatal("pending publication stopped observation refresh", key)
+			}
 		}
 		changed := p
 		changed.DNSPolicyDigest = "sha256:untrusted"
-		if server.refreshPendingProducerQuality(ctx, changed, unexpected) == nil {
+		if server.refreshPendingProducerQuality(ctx, changed) == nil {
 			t.Fatal("quality refresh accepted a different pinned policy digest")
 		}
 		single := *p.Serving
 		single.SinglePublication = true
 		changed = p
 		changed.Serving = &single
-		if err := server.refreshPendingProducerQuality(ctx, changed, unexpected); err != nil {
+		if err := server.refreshPendingProducerQuality(ctx, changed); err != nil {
 			t.Fatal("single publication started continuous observation", err)
 		}
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
-		if err := server.refreshPendingProducerQuality(cancelled, p, unexpected); !errors.Is(err, context.Canceled) {
-			t.Fatal("cancelled refresh started capture", err)
+		if err := server.refreshPendingProducerQuality(cancelled, p); !errors.Is(err, context.Canceled) {
+			t.Fatal("cancelled refresh started observation", err)
 		}
 	}
 	_, pendingShadow := active("shadow")
