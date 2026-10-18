@@ -9934,7 +9934,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         '504':
-          description: Application database query exceeded its execution deadline
+          description: Application database query was canceled or exceeded its execution deadline
           content:
             application/json:
               schema:

@@ -172,13 +172,16 @@ func appDatabaseQueryErrorStatus(err error) int {
 	}
 	var postgresError *pgconn.PgError
 	if errors.As(err, &postgresError) {
-		if len(postgresError.Code) >= 2 {
-			switch postgresError.Code[:2] {
-			case "0A", "22", "23", "42":
-				return http.StatusBadRequest
-			}
-		}
-		if postgresError.Code == "57014" {
+		switch postgresError.Code {
+		case "0A000", // feature_not_supported
+			"22012", // division_by_zero
+			"42601", // syntax_error
+			"42P01", // undefined_table
+			"42P02", // undefined_parameter
+			"42703", // undefined_column
+			"42883": // undefined_function
+			return http.StatusBadRequest
+		case "57014": // query_canceled (statement timeout/cancellation)
 			return http.StatusGatewayTimeout
 		}
 	}

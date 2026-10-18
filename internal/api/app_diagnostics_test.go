@@ -151,9 +151,12 @@ func TestQueryAppDatabaseMapsExecutionErrors(t *testing.T) {
 		wantCode string
 	}{
 		{name: "invalid SQL reference", err: &pgconn.PgError{Code: "42703", Message: "column does not exist"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "SQL syntax error", err: &pgconn.PgError{Code: "42601", Message: "syntax error"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "undefined relation", err: &pgconn.PgError{Code: "42P01", Message: "relation does not exist"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
 		{name: "invalid data expression", err: &pgconn.PgError{Code: "22012", Message: "division by zero"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
 		{name: "unsupported SQL feature", err: &pgconn.PgError{Code: "0A000", Message: "feature not supported"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
-		{name: "integrity constraint", err: &pgconn.PgError{Code: "23505", Message: "unique constraint violation"}, want: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "database privilege failure", err: &pgconn.PgError{Code: "42501", Message: "insufficient privilege"}, want: http.StatusServiceUnavailable, wantCode: "temporarily_unavailable"},
+		{name: "integrity constraint", err: &pgconn.PgError{Code: "23505", Message: "unique constraint violation"}, want: http.StatusServiceUnavailable, wantCode: "temporarily_unavailable"},
 		{name: "PostgreSQL query canceled", err: &pgconn.PgError{Code: "57014", Message: "canceling statement due to user request"}, want: http.StatusGatewayTimeout, wantCode: "temporarily_unavailable"},
 		{name: "context deadline", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout, wantCode: "temporarily_unavailable"},
 		{name: "database unavailable", err: errors.New("connection reset"), want: http.StatusServiceUnavailable, wantCode: "temporarily_unavailable"},
