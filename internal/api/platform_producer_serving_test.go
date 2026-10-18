@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -17,6 +20,14 @@ import (
 )
 
 func TestServingProducerProgressesRecoversAndDoesNotRetryFailedSource(t *testing.T) {
+	for _, dynamic := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dynamic_quality_%t", dynamic), func(t *testing.T) {
+			testServingProducerProgressesRecovers(t, dynamic)
+		})
+	}
+}
+
+func testServingProducerProgressesRecovers(t *testing.T, dynamic bool) {
 	path := t.TempDir() + "/state.json"
 	state := store.New(path)
 	if err := state.Init(); err != nil {
@@ -159,6 +170,12 @@ func TestServingProducerProgressesRecoversAndDoesNotRetryFailedSource(t *testing
 	report(first, full)
 	verify(full, false)
 	// A policy revision creates a new source and starts real gray publication.
+	if dynamic {
+		input.Generation += "-dynamic"
+		input.DNSQueryPolicy.DynamicQuality = &platformconfig.DynamicQualityPolicy{Mode: "all_dynamic", Policy: edgequality.DefaultDeliveryNetworkPolicy(), RefreshQueriesPerCycle: 128, RefreshConcurrency: 8}
+		source = save(model.PlatformArtifactKindPolicySnapshot, "global", input.Generation, input)
+		p.DNSPolicyArtifactID, p.DNSPolicyDigest = source.ID, source.ContentHash
+	}
 	p.Generation = "producer-two"
 	authority = activate()
 	reconcile()
@@ -166,6 +183,80 @@ func TestServingProducerProgressesRecoversAndDoesNotRetryFailedSource(t *testing
 	_, shadow = active("shadow")
 	if nextGray.ArtifactID == first.ID {
 		t.Fatal("new source not staged")
+	}
+	// Rollout waits must keep the bounded observation queue moving without
+	// publishing the captured projection or treating it as convergence evidence.
+	jobs := make([]dynamicQualityJob, 512)
+	for i := range jobs {
+		jobs[i] = dynamicQualityJob{Key: fmt.Sprintf("query-%03d", i)}
+	}
+	refreshed := map[string]int{}
+	observed := time.Now().UTC()
+	for cycle := 0; cycle < 4; cycle++ {
+		_, err := server.reconcilePlatformConfigurationWithCapture(ctx, func(captureCtx context.Context, _ model.Principal) (platformIntentProjectionResponse, error) {
+			if !dynamic {
+				t.Fatal("static DNS policy started quality work")
+			}
+			deadline, ok := captureCtx.Deadline()
+			if !ok || time.Until(deadline) > time.Minute {
+				t.Fatal("pending quality refresh is not bounded")
+			}
+			for _, job := range server.dynamicQuality.schedule(jobs, 128, observed) {
+				server.dynamicQuality.started(job.Key, observed)
+				refreshed[job.Key]++
+			}
+			// This deliberately invalid desired configuration must be discarded.
+			return platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Generation: "not-a-publishable-capture"}}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed = observed.Add(90 * time.Second)
+	}
+	if dynamic && len(refreshed) != len(jobs) {
+		t.Fatal("pending rollout starved quality queue", len(refreshed))
+	}
+	for key, count := range refreshed {
+		if count != 1 {
+			t.Fatal("queue repeated before covering all observations", key, count)
+		}
+	}
+	failure := errors.New("observation dependency unavailable")
+	_, refreshErr := server.reconcilePlatformConfigurationWithCapture(ctx, func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
+		return platformIntentProjectionResponse{}, failure
+	})
+	if dynamic && !errors.Is(refreshErr, failure) || !dynamic && refreshErr != nil {
+		t.Fatal("quality refresh failure classification differs", refreshErr)
+	}
+	if dynamic {
+		unexpected := func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
+			t.Fatal("untrusted or disabled policy triggered capture")
+			return platformIntentProjectionResponse{}, nil
+		}
+		changed := p
+		changed.DNSPolicyDigest = "sha256:untrusted"
+		if server.refreshPendingProducerQuality(ctx, changed, unexpected) == nil {
+			t.Fatal("quality refresh accepted a different pinned policy digest")
+		}
+		single := *p.Serving
+		single.SinglePublication = true
+		changed = p
+		changed.Serving = &single
+		if err := server.refreshPendingProducerQuality(ctx, changed, unexpected); err != nil {
+			t.Fatal("single publication started continuous observation", err)
+		}
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		if err := server.refreshPendingProducerQuality(cancelled, p, unexpected); !errors.Is(err, context.Canceled) {
+			t.Fatal("cancelled refresh started capture", err)
+		}
+	}
+	_, pendingShadow := active("shadow")
+	_, pendingGray := active("gray")
+	_, pendingFull := active("full")
+	unchangedLKG, err := state.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
+	if err != nil || pendingShadow.ID != shadow.ID || pendingGray.ID != nextGray.ID || pendingFull.ID != full.ID || unchangedLKG == nil || unchangedLKG.ArtifactID != first.ID {
+		t.Fatal("quality refresh changed publication or LKG", err)
 	}
 	age(full.ID, 10)
 	age(shadow.ID, 5)
@@ -311,6 +402,7 @@ func reportServingProducerAPI(t *testing.T, s *Server, parent model.PlatformArti
 				t.Fatal(err)
 			}
 			h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: member.ConsumerID, Component: member.Component, NodeID: member.NodeID, ArtifactKind: child.ArtifactKind, ScopeKey: "global", ReleaseSetID: parent.ID, ExpectedConsumerSetID: set.ID, FencingToken: r.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: seq, IssuedAt: now, Nonce: model.NewID("nonce"), GenerationSequence: child.GenerationSequence, DesiredGeneration: child.Generation, ActualGeneration: child.Generation, LKGGeneration: child.Generation, ApplyStatus: "applied", ProbeStatus: "passed", CompatibilityCapabilities: []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.PhysicalOrderCapabilityV1, platformcontrol.PhysicalOrderProjectionCapabilityV1}}
+			h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalDynamicQualityCapabilityV1)
 			if r.ReleaseChannel == "shadow" {
 				h.ActualGeneration = ""
 				h.LKGGeneration = ""

@@ -171,8 +171,13 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	}
 	if policy.Mode == "serving" {
 		advance("reconcile_pending")
-		if handled, err := s.reconcilePendingProducedTraffic(ctx, policy, authority); handled || err != nil {
+		handled, err := s.reconcilePendingProducedTraffic(ctx, policy, authority)
+		if err != nil {
 			return interval, err
+		}
+		if handled {
+			advance("refresh_pending_quality")
+			return interval, s.refreshPendingProducerQuality(ctx, policy, capture)
 		}
 		if policy.Serving.SinglePublication {
 			done, err := s.store.HasVerifiedProducerPublication(policy.TargetScope, authority.ID)
