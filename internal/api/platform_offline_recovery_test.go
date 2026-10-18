@@ -191,3 +191,45 @@ func TestOfflineRecoveryRejectsForeignAndExpiredProofs(t *testing.T) {
 		})
 	}
 }
+
+func TestOfflineRecoveryDoesNotProbeExplicitlyDisabledStaticRoute(t *testing.T) {
+	s, policy, _, _ := offlineRecoveryFixture(t)
+	static, err := s.store.GetPlatformArtifact(policy.StaticIntentArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var intent platformconfig.PlatformIntent
+	raw, err := json.Marshal(static.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(raw, &intent); err != nil {
+		t.Fatal(err)
+	}
+	intent.Generation = "disabled-probe-route"
+	intent.Routes[0].Enabled = false
+	raw, err = json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content map[string]any
+	if err = json.Unmarshal(raw, &content); err != nil {
+		t.Fatal(err)
+	}
+	static, err = s.store.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPlatformIntent, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: "global"}, Generation: intent.Generation, Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	static, err = s.store.ValidatePlatformArtifact(static.ID, []model.PlatformArtifactValidationResult{{Name: "fixture", Pass: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.StaticIntentArtifactID, policy.StaticIntentDigest = static.ID, static.ContentHash
+	s.offlineEdgeRecoveryProbe = func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+		t.Error("disabled route was probed")
+		return routeprobe.Proof{}, nil
+	}
+	if err = s.reconcileOfflineEdgeRecovery(context.Background(), policy); err == nil {
+		t.Fatal("disabled route authorized recovery")
+	}
+}

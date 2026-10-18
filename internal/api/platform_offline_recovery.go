@@ -61,7 +61,7 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 		}
 		authorized := false
 		for _, route := range static.Routes {
-			if route.Hostname == hold.Recovery.Hostname && model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
+			if route.Hostname == hold.Recovery.Hostname && route.Status != model.EdgeRouteStatusDisabled && model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
 				authorized = true
 			}
 		}
