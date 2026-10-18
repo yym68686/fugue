@@ -11,6 +11,16 @@ func recoveryHold() OfflineEdge {
 	return OfflineEdge{EdgeID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8", Reason: "quota_exhausted", Recovery: &OfflineEdgeRecoveryPolicy{Hostname: "api.example.test", Path: "/", ProbeIntervalSeconds: 300, ProbeTimeoutSeconds: 5, SuccessThreshold: 3, FailureThreshold: 1, FreshnessSeconds: 1800}}
 }
 
+func TestOfflineRecoveryDeclarationWireDigestMatchesConfigurationPublisher(t *testing.T) {
+	h := recoveryHold()
+	h.ExpectedRecoveryDate = "2030-01-01"
+	h.Recovery.Path = "/a&b"
+	const wireDigest = "sha256:5f2a440655b056227813ab50cd3fe4ff772704af0fdc5b4f07c1c0e13ddb0dc0"
+	if got := OfflineRecoveryDigest(h); got != wireDigest {
+		t.Fatalf("typed declaration digest drifted from configuration publisher contract: %s", got)
+	}
+}
+
 func TestOfflineRecoveryNeedsConsecutiveFreshProofsAndIdentity(t *testing.T) {
 	h := recoveryHold()
 	base := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)

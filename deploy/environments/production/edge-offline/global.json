@@ -1,24 +1,24 @@
 {
   "schema": "fugue.edge-offline-reconfiguration/v1",
-  "generation": 2,
+  "generation": 3,
   "origin": "https://api.fugue.pro",
-  "producer_generation": "edge-offline-20261012-v1",
+  "producer_generation": "edge-probe-recovery-20261018-v1",
   "baseline_mode": "latest_verified_same_policy",
   "precondition": {
     "operation": "edge_offline",
     "previous_policy": {
-      "artifact_id": "artifact_1791652775_a51f03b36448",
-      "content_hash": "sha256:b544bcc0e89729c7498f86cca09c4a016fd21466c5a9f64205013710d451b742",
-      "release_id": "artifactrel_1791652888_0edac82a6c60",
-      "fencing_token": 37
+      "artifact_id": "artifact_1792314984_6537eb990074",
+      "content_hash": "sha256:0afdc3ff258ca6e254b6f48ce43c71d14babdc0ba9ef88f1f566d68da3b9bd9c",
+      "release_id": "artifactrel_1792315115_08dfddf4824a",
+      "fencing_token": 43
     },
     "serving_full": {
-      "artifact_id": "artifact_1791756338_c0c944bee589",
-      "content_hash": "sha256:ae07bf0cce57b38e63b2e1f6ed7b1c19ef989e6f33310e5ac126e2e8acf4f390",
-      "release_id": "artifactrel_1791756466_b425e7ec05d0",
-      "fencing_token": 3201
+      "artifact_id": "artifact_1792323020_7fafebba6cec",
+      "content_hash": "sha256:35f4bb98e3e2c61b9b2ea2e06c219f283a40f1a6cb3b0abd77206dc2c4a71ddf",
+      "release_id": "artifactrel_1792323145_26cb430a9555",
+      "fencing_token": 4626
     },
-    "verification_evidence_hash": "sha256:78929419d667c392a95264f9890275445b49dfeee8a1bbca86ccfd50e15cc092"
+    "verification_evidence_hash": "sha256:0c641b3ddd70e21bbdaed09e5e4d0925a9c742b2e5682d93e3f8e837d0c707e8"
   },
   "projection_policy": {
     "dns_authorities": [
@@ -6634,6 +6634,79 @@
           }
         ]
       },
+      "physical_routes": [
+        {
+          "business_exploration": {
+            "baseline_edge_id": "86eabf26-42a9-4f9d-998a-754115f8b829",
+            "bucket_seconds": 300,
+            "candidate_edge_ids": [
+              "86eabf26-42a9-4f9d-998a-754115f8b829",
+              "vps-591f4447"
+            ],
+            "cooldown_seconds": 120,
+            "delivery_advantage_ratio": 0.2,
+            "evidence_max_age_seconds": 600,
+            "expires_at": "2026-10-15T20:07:50Z",
+            "exploration_basis_points": 200,
+            "initial_dns_publications": {
+              "vps-591f4447": {
+                "baseline_edge_id": "86eabf26-42a9-4f9d-998a-754115f8b829",
+                "digest": "sha256:d3e7084283f2b1294bd6fd5c45302dcb97a47f6a0258c14a7b19959c842422cc",
+                "fencing_token": 3552
+              },
+              "vps-84c8f0a9": {
+                "baseline_edge_id": "vps-591f4447",
+                "digest": "sha256:d3e7084283f2b1294bd6fd5c45302dcb97a47f6a0258c14a7b19959c842422cc",
+                "fencing_token": 3552
+              }
+            },
+            "intent_id": "business-unified-20261013T200750Z",
+            "maximum_candidate_basis_points": 10000,
+            "maximum_delivery_regression_ratio": 0.1,
+            "maximum_retransmission_increase": 0.01,
+            "maximum_rtt_regression_ratio": 0.1,
+            "maximum_step_basis_points": 1000,
+            "minimum_cohort_coverage_basis_points": 3000,
+            "minimum_connections_per_bucket": 1,
+            "mode": "adaptive",
+            "required_buckets": 3,
+            "rtt_advantage_ratio": 0.15,
+            "starts_at": "2026-10-13T20:07:50Z",
+            "stop_retransmission_rate": 0.1,
+            "stop_rtt_ms": 2000,
+            "unified": {
+              "minimum_connections_per_cohort": 5,
+              "promotion_minimum_connections": 8,
+              "promotion_minimum_coverage_basis_points": 5000,
+              "rtt_advantage_ms": 20
+            },
+            "version": "business-edge-unified-v2"
+          },
+          "hostname": "i00.pro",
+          "path_prefix": "/",
+          "policy": {
+            "advantage_ms": 20,
+            "advantage_ratio": 0.15,
+            "bucket_seconds": 300,
+            "capacity_cost_ms": 200,
+            "cooldown_seconds": 900,
+            "evidence_max_age_seconds": 600,
+            "failure_cost_ms": 1000,
+            "maximum_node_utilization": 0.85,
+            "minimum_records": 3,
+            "probe_budget_per_interval": 1,
+            "probe_interval_seconds": 300,
+            "required_buckets": 3,
+            "throughput_cost_ms": 100,
+            "throughput_target_bps": 1048576,
+            "uncertainty_ms": 5,
+            "unknown_cost_ms": 30,
+            "version": "physical-network-comparable-delivery-v6",
+            "window_seconds": 1800
+          },
+          "traffic_class": "streaming"
+        }
+      ],
       "preference_mode": "runtime_locality",
       "ranking_mode": "active",
       "switch_cooldown_seconds": 1800
@@ -6651,9 +6724,27 @@
         "record_kind": "custom-domain-target"
       }
     ],
-    "generation": "edge-offline-20261012-v1",
+    "generation": "edge-probe-recovery-20261018-v1",
     "max_stale_seconds": 86400,
     "minimum_healthy_edges": 1,
+    "offline_edges": [
+      {
+        "edge_group_id": "edge-group-country-us",
+        "edge_id": "bwg",
+        "expected_recovery_date": "2026-10-18",
+        "public_ipv4": "95.169.10.156",
+        "reason": "quota_exhausted",
+        "recovery": {
+          "hostname": "api.fugue.pro",
+          "path": "/",
+          "probe_interval_seconds": 300,
+          "probe_timeout_seconds": 5,
+          "success_threshold": 3,
+          "failure_threshold": 1,
+          "freshness_seconds": 1800
+        }
+      }
+    ],
     "route_constraints": [
       {
         "enabled": true,
@@ -6691,15 +6782,6 @@
           "edge-group-country-us"
         ],
         "id": "edge-group-country-us"
-      }
-    ],
-    "offline_edges": [
-      {
-        "edge_id": "bwg",
-        "edge_group_id": "edge-group-country-us",
-        "public_ipv4": "95.169.10.156",
-        "reason": "quota_exhausted",
-        "expected_recovery_date": "2026-10-18"
       }
     ]
   }

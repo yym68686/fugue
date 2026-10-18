@@ -1,7 +1,9 @@
 import argparse
 import copy
 import datetime
+import hashlib
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
@@ -80,6 +82,21 @@ def check_delta(previous, successor):
     return changed[0]
 
 
+def recovery_declaration_digest(hold):
+    # The runtime binds the typed OfflineEdge JSON, whose field order differs
+    # from artifact map canonicalization. Keep the wire digest identical to Go,
+    # including encoding/json's HTML and JavaScript separator escaping.
+    value = {key: hold[key] for key in ('edge_id', 'edge_group_id', 'public_ipv4', 'reason')}
+    if hold.get('expected_recovery_date'):
+        value['expected_recovery_date'] = hold['expected_recovery_date']
+    if hold.get('recovery'):
+        value['recovery'] = {key: hold['recovery'][key] for key in ('hostname', 'path', 'probe_interval_seconds', 'probe_timeout_seconds', 'success_threshold', 'failure_threshold', 'freshness_seconds')}
+    raw = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    for character, escape in [('<', r'\u003c'), ('>', r'\u003e'), ('&', r'\u0026'), ('\u2028', r'\u2028'), ('\u2029', r'\u2029')]:
+        raw = raw.replace(character, escape)
+    return 'sha256:' + hashlib.sha256(raw.encode()).hexdigest()
+
+
 def validate_preview(previous, current, policy):
     if not previous.get('business_snapshot_revision') or not current.get('business_snapshot_revision') or not previous.get('intent') or previous['intent'] != current.get('intent'):
         raise ValueError('offline preview changed business intent or unrelated compiled policy')
@@ -102,7 +119,7 @@ def validate_preview(previous, current, policy):
         if not p:
             continue
         for o in recovered:
-            if o.get('edge_id') != hold['edge_id'] or o.get('declaration_digest') != digest(hold) or o.get('admitted') is not True:
+            if o.get('edge_id') != hold['edge_id'] or o.get('declaration_digest') != recovery_declaration_digest(hold) or o.get('admitted') is not True:
                 continue
             at = datetime.datetime.fromisoformat(fact['captured_at'].replace('Z', '+00:00'))
             attempt = datetime.datetime.fromisoformat(o['last_attempt'].replace('Z', '+00:00'))
