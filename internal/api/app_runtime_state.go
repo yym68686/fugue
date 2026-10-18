@@ -50,15 +50,11 @@ func (s *Server) handleGetAppRuntimeState(w http.ResponseWriter, r *http.Request
 	result := model.AppRuntimeState{SchemaVersion: 1, AppID: app.ID, Namespace: runtime.NamespaceForTenant(app.TenantID), DesiredSpecHash: model.AppSpecSHA256(app.Spec), DesiredSource: "committed_app_spec", ObservedAt: time.Now().UTC(), State: "inconclusive", ReadyPods: []string{}, ServingPods: []string{}, PodUIDs: map[string]string{}, Revisions: map[string]string{}, PendingOperations: []string{}, Checks: []model.AppRuntimeCheck{}, MissingEvidence: []string{}}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	operations, err := s.store.ListOperationsWithDesiredSourceByApp(app.TenantID, true, app.ID)
+	operationIDs, err := s.store.ListActiveSourceOperationIDsByApp(ctx, app.TenantID, true, app.ID)
 	if err != nil {
 		result.MissingEvidence = append(result.MissingEvidence, "pending_operations")
 	} else {
-		for _, op := range operations {
-			if op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning || op.Status == model.OperationStatusWaitingAgent {
-				result.PendingOperations = append(result.PendingOperations, op.ID)
-			}
-		}
+		result.PendingOperations = append(result.PendingOperations, operationIDs...)
 	}
 	runtimeObj, runtimeErr := s.store.GetRuntime(app.Spec.RuntimeID)
 	if runtimeErr != nil || runtimeObj.Type == model.RuntimeTypeExternalOwned {
@@ -83,15 +79,6 @@ func (s *Server) handleGetAppRuntimeState(w http.ResponseWriter, r *http.Request
 		httpx.WriteJSON(w, 200, result)
 		return
 	}
-	releases, releaseErr := s.store.ListAppReleases(model.AppReleaseFilter{AppID: app.ID, TenantID: app.TenantID, PlatformAdmin: true})
-	releaseByID := map[string]model.AppRelease{}
-	if releaseErr != nil {
-		result.MissingEvidence = append(result.MissingEvidence, "release_spec_snapshots")
-	} else {
-		for _, release := range releases {
-			releaseByID[release.ID] = release
-		}
-	}
 	ready := []kubePodInfo{}
 	for _, pod := range pods {
 		for _, status := range pod.Status.ContainerStatuses {
@@ -114,8 +101,26 @@ func (s *Server) handleGetAppRuntimeState(w http.ResponseWriter, r *http.Request
 	if model.AppHasClusterService(app.Spec) {
 		services[runtime.RuntimeAppServiceName(app)] = true
 	}
-	if len(ready) > runtimeStateMaxPods {
+	inspectionLimited := len(ready) > runtimeStateMaxPods
+	if inspectionLimited {
 		ready = ready[:runtimeStateMaxPods]
+	}
+	releaseIDs := make([]string, 0, len(ready))
+	for _, pod := range ready {
+		if id := pod.Metadata.Labels[runtime.FugueLabelAppReleaseID]; id != "" {
+			releaseIDs = append(releaseIDs, id)
+		}
+	}
+	releases, releaseErr := s.store.ListAppReleasesByIDs(ctx, model.AppReleaseFilter{AppID: app.ID, TenantID: app.TenantID, PlatformAdmin: true}, releaseIDs)
+	releaseByID := map[string]model.AppRelease{}
+	if releaseErr != nil {
+		result.MissingEvidence = append(result.MissingEvidence, "release_spec_snapshots")
+	} else {
+		for _, release := range releases {
+			releaseByID[release.ID] = release
+		}
+	}
+	if inspectionLimited {
 		result.MissingEvidence = append(result.MissingEvidence, "pod_inspection_limit")
 	}
 	for _, pod := range ready {

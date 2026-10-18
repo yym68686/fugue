@@ -121,11 +121,21 @@ func (s *Store) pgListAppReleaseViewContext(ctx context.Context, filter model.Ap
 }
 
 func (s *Store) pgListAppReleaseProjectionContext(ctx context.Context, filter model.AppReleaseFilter, projection appReleaseSpecProjection) ([]model.AppRelease, error) {
+	return s.pgListAppReleaseProjectionIDsContext(ctx, filter, projection, nil)
+}
+
+func (s *Store) pgListAppReleaseProjectionIDsContext(ctx context.Context, filter model.AppReleaseFilter, projection appReleaseSpecProjection, releaseIDs []string) ([]model.AppRelease, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	clauses := []string{}
 	args := []any{}
+	if len(releaseIDs) > 0 {
+		clauses = append(clauses, "id IN ("+sqlPlaceholderList(1, len(releaseIDs))+")")
+		for _, id := range releaseIDs {
+			args = append(args, id)
+		}
+	}
 	if !filter.PlatformAdmin {
 		args = append(args, strings.TrimSpace(filter.TenantID))
 		clauses = append(clauses, fmt.Sprintf("tenant_id = $%d", len(args)))
