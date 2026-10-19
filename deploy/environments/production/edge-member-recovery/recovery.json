@@ -1,0 +1,43 @@
+{
+  "schema": "fugue.edge-member-recovery/v1",
+  "namespace": "fugue-system",
+  "component": "edge-worker-us",
+  "group": "edge-group-country-us",
+  "node": "bwg",
+  "front": "fugue-fugue-edge-front-p2zg9",
+  "frontUID": "9b8dfa66-f2df-4f40-818e-93acc434e74d",
+  "worker": "fugue-fugue-edge-worker-b-mcn99",
+  "workerUID": "8731e7c6-71e7-4024-8804-476d2113778c",
+  "referenceFront": "fugue-fugue-edge-front-lwqt8",
+  "referenceFrontUID": "70077f53-5218-40c6-ac4b-5e32525183e0",
+  "referenceWorker": "fugue-fugue-edge-worker-b-4fx2l",
+  "referenceWorkerUID": "1feb8228-7c60-48e2-aa2c-62f1dde089d8",
+  "authorityUID": "66eaa9de-92aa-4493-82b2-daa9133dce10",
+  "authorityRecord": "sha256:8492150b5c71a00d2fa121809b4460fd264a1d6344408e80f46a5c9b7052d3e4",
+  "previousState": {
+    "schema": "edge-front-group-activation/v1",
+    "edge_group_id": "edge-group-country-us",
+    "generation": 877,
+    "active_slot": "a",
+    "previous_slot": "b",
+    "bundle_generation": "edgegroupbundle_ce0b0616c528b3116e1b2ec848ae8e2fe151505bc8cdb58c5f282db7e0a59bf7.p54104.r182",
+    "worker_source_commit": "4c1072032e868cf55e5c8ee26cc7a85f49f57999",
+    "worker_image_digest": "sha256:e0176ddcc130d1e6e688613e2be9198f79fb8a80531b5b97071b85406ea74bcf",
+    "authority": "edge-control",
+    "operation": "promote",
+    "reason": "promote Guardian verified candidate authority",
+    "updated_at": "2026-10-11T07:16:35.836653481Z"
+  },
+  "activationPath": "/var/lib/fugue-edge-front/activation.json",
+  "workerPort": 28443,
+  "probes": [
+    {
+      "host": "fugue.pro",
+      "path": "/"
+    },
+    {
+      "host": "api.fugue.pro",
+      "path": "/"
+    }
+  ]
+}

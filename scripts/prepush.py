@@ -476,6 +476,8 @@ def main() -> int:
     non_go_tasks: dict[str, list[str] | None] = {}
     if any(name in {"scripts/observe_dns_failure_timeline.py", "scripts/test_observe_dns_failure_timeline.py"} for name in paths):
         non_go_tasks["dns-failure-timeline-tests"] = ["python3", "-m", "unittest", "scripts.test_observe_dns_failure_timeline"]
+    if any(name in {"scripts/reconcile_edge_member.py", "scripts/test_reconcile_edge_member.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/edge-member-recovery/") for name in paths):
+        non_go_tasks["edge-member-recovery-tests"] = ["python3", "-m", "unittest", "scripts.test_reconcile_edge_member"]
     if any(name in {"scripts/expand_postgres_volume.py", "scripts/test_expand_postgres_volume.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/postgres-volume-expansion/") for name in paths):
         non_go_tasks["postgres-volume-expansion-tests"] = ["python3", "-m", "unittest", "scripts.test_expand_postgres_volume"]
     if any(name in {"scripts/configure_edge_offline.py", "scripts/test_configure_edge_offline.py", "scripts/test_configure_edge_offline_recovery.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/edge-offline/") for name in paths):

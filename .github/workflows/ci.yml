@@ -10,6 +10,62 @@ permissions:
   contents: read
 
 jobs:
+  edge_member_recovery_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+      concurrency: ${{ steps.plan.outputs.concurrency }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/edge-member-recovery/recovery.json
+          if git diff --quiet "$BASE_SHA" HEAD -- "$config" scripts/reconcile_edge_member.py scripts/test_reconcile_edge_member.py; then exit 0; fi
+          python3 -m unittest scripts.test_reconcile_edge_member
+          python3 - <<'PY'
+          import json, os, re
+          c=json.load(open('deploy/environments/production/edge-member-recovery/recovery.json'))
+          if not re.fullmatch(r'edge-worker-[a-z0-9-]+', c['component']): raise SystemExit('invalid recovery component')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write('selected=true\nconcurrency=fugue-production-'+c['component']+'\n')
+          PY
+
+  edge_member_recovery:
+    # Repair a returned member using existing committed authority and fresh
+    # local proofs; no code build or application API is required.
+    needs: edge_member_recovery_plan
+    if: ${{ needs.edge_member_recovery_plan.outputs.selected == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: '${{ needs.edge_member_recovery_plan.outputs.concurrency }}', cancel-in-progress: false, queue: max}
+    timeout-minutes: 8
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Validate the exact returned-member declaration
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/edge-member-recovery scripts/reconcile_edge_member.py .github/workflows/ci.yml
+          python3 -m unittest scripts.test_reconcile_edge_member
+          python3 -m scripts.reconcile_edge_member deploy/environments/production/edge-member-recovery/recovery.json --evidence "$RUNNER_TEMP/edge-member-preview.json"
+      - name: Prepare and prove the inactive worker before recovering its Front
+        run: |
+          python3 -m scripts.reconcile_edge_member deploy/environments/production/edge-member-recovery/recovery.json --apply --evidence "$RUNNER_TEMP/edge-member-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: fugue-edge-member-recovery-${{ github.sha }}
+          path: ${{ runner.temp }}/edge-member-*.json
+          if-no-files-found: error
+          retention-days: 90
+
   postgres_volume_recovery:
     # A full database must be recoverable without its API or a component build.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
