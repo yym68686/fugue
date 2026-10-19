@@ -46,25 +46,31 @@ func compileBoundPhysicalQualitySelectionWithDeadline(receipt edgequality.Receip
 		return nil, time.Time{}, err
 	}
 	deadline := selection.CapturedAt.Add(time.Duration(receipt.Snapshot.Policy.EvidenceMaxAgeSeconds) * time.Second)
-	wanted := map[string]bool{selection.PrimaryEdgeID: true}
-	for _, edgeID := range selection.OrderedEdgeIDs {
-		wanted[edgeID] = true
+	if until := evidence.ObservedAt.Add(time.Duration(receipt.Snapshot.Policy.EvidenceMaxAgeSeconds) * time.Second); until.Before(deadline) {
+		deadline = until
 	}
-	for _, proof := range evidence.Proofs {
-		if !wanted[proof.EdgeID] {
+	// Match CompileSelection's time-dependent branches exactly. Measured
+	// candidates are evaluated at capture time; only a learning primary or an
+	// unmeasured fallback rechecks proof age at publication time. A historical
+	// route lease's ValidUntil is not the lifetime of this quality observation;
+	// serving separately requires fresh route/TLS evidence.
+	ordered := map[string]bool{}
+	for _, edgeID := range selection.OrderedEdgeIDs {
+		ordered[edgeID] = true
+	}
+	dependent := map[string]bool{}
+	for _, candidate := range receipt.Result.Candidates {
+		if ordered[candidate.EdgeID] && !candidate.Ready && len(candidate.HardGates) == 0 {
+			dependent[candidate.EdgeID] = true
+		}
+	}
+	for _, candidate := range receipt.Snapshot.Candidates {
+		if !dependent[candidate.EdgeID] || candidate.ProofObservedAt == nil {
 			continue
 		}
-		delete(wanted, proof.EdgeID)
-		observedDeadline := proof.Proof.CheckedAt.Add(time.Duration(receipt.Snapshot.Policy.EvidenceMaxAgeSeconds) * time.Second)
-		if observedDeadline.Before(deadline) {
-			deadline = observedDeadline
+		if until := candidate.ProofObservedAt.Add(time.Duration(receipt.Snapshot.Policy.EvidenceMaxAgeSeconds) * time.Second); until.Before(deadline) {
+			deadline = until
 		}
-		if proof.Proof.ValidUntil.Before(deadline) {
-			deadline = proof.Proof.ValidUntil
-		}
-	}
-	if len(wanted) != 0 {
-		return nil, time.Time{}, errors.New("physical publication selection lacks a route proof deadline")
 	}
 	return selection, deadline, nil
 }
