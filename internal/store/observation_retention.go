@@ -238,6 +238,10 @@ func pruneObservationTable(ctx context.Context, conn *sql.Conn, table observatio
 const heartbeatRetentionAnchorPrefix = "observation-retention/heartbeat-boundary/"
 const auditObservationColumns = `id,tenant_id,actor_type,actor_id,action,target_type,target_id,metadata_json,chain_id,chain_sequence,previous_hash,event_hash,provenance_json,created_at`
 
+// Include the partial index predicate explicitly: a generic prepared plan
+// cannot infer that the parameter can never be an empty chain ID.
+const heartbeatRetentionSelectSQL = `SELECT ` + auditObservationColumns + ` FROM fugue_audit_events WHERE chain_id=$1 AND chain_id<>'' AND chain_sequence>0 ORDER BY chain_sequence LIMIT $2`
+
 func (s *Store) pruneHeartbeatHistories(ctx context.Context, conn *sql.Conn, p ObservationRetentionPolicy, keys bundleauth.Keyring, now time.Time) (int64, error) {
 	s.retention.mu.Lock()
 	cursor := s.retention.chainCursor
@@ -306,7 +310,7 @@ func pruneHeartbeatChain(ctx context.Context, conn *sql.Conn, chain string, p Ob
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT `+auditObservationColumns+` FROM fugue_audit_events WHERE chain_id=$1 AND chain_sequence>0 ORDER BY chain_sequence LIMIT $2`, chain, p.BatchRows)
+	rows, err := tx.QueryContext(ctx, heartbeatRetentionSelectSQL, chain, p.BatchRows)
 	if err != nil {
 		return 0, err
 	}

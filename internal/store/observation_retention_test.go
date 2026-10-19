@@ -224,3 +224,33 @@ func TestObservationRetentionCapacityNeverRemovesProtectedRecentSamples(t *testi
 		t.Fatal("row budget overrode protected recent evidence", n, err)
 	}
 }
+
+func TestHeartbeatRetentionGenericPlanUsesPartialChainIndex(t *testing.T) {
+	s := retentionPostgres(t)
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX idx_retention_chain ON fugue_audit_events(chain_id,chain_sequence) WHERE chain_id<>'' AND chain_sequence>0; SET plan_cache_mode='force_generic_plan'; SET enable_seqscan=off`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`PREPARE retention_history(text,integer) AS ` + heartbeatRetentionSelectSQL); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.db.Query(`EXPLAIN EXECUTE retention_history('platform-consumer-heartbeat:consumer-a',500)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err = rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan.WriteString(line)
+		plan.WriteByte('\n')
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.String(), "Index Scan using idx_retention_chain") || strings.Contains(plan.String(), "Seq Scan") {
+		t.Fatal("retention fell back to scanning all audit history", plan.String())
+	}
+}
