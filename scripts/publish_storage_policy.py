@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def manifest(document):
-    if set(document) != {"namespace", "name", "policy"}:
+    if set(document) not in ({"namespace", "name", "policy"}, {"namespace", "name", "policy", "observationRetention"}):
         raise ValueError("unexpected storage policy configuration")
     for field in ("namespace", "name"):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", document[field]):
@@ -23,7 +23,17 @@ def manifest(document):
             raise ValueError("invalid database budget")
     if p["database_max_open"] and (p["database_max_idle"] > p["database_max_open"] or not p["database_idle_seconds"]):
         raise ValueError("invalid connection/idle budget")
-    return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"namespace": document["namespace"], "name": document["name"]}, "data": {"policy.json": json.dumps(p, sort_keys=True, separators=(",", ":"))}}
+    data = {"policy.json": json.dumps(p, sort_keys=True, separators=(",", ":"))}
+    if "observationRetention" in document:
+        r = document["observationRetention"]
+        bounds = {"interval_seconds": (30, 3600), "batch_rows": (1, 1000), "heartbeat_days": (1, 90),
+                  "heartbeat_rows_per_chain": (1000, 100000), "probe_days": (7, 90), "probe_rows_per_table": (10000, 10000000)}
+        if set(r) != {"version", "enabled", *bounds} or type(r["version"]) is not int or r["version"] != 1 or type(r["enabled"]) is not bool:
+            raise ValueError("invalid observation retention policy")
+        if any(type(r[k]) is not int or not low <= r[k] <= high for k, (low, high) in bounds.items()):
+            raise ValueError("observation retention exceeds safety bounds")
+        data["observation-retention.json"] = json.dumps(r, sort_keys=True, separators=(",", ":"))
+    return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"namespace": document["namespace"], "name": document["name"]}, "data": data}
 
 
 def main():

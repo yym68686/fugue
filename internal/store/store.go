@@ -44,6 +44,7 @@ type Store struct {
 	dbInitMu      sync.Mutex
 	dbReady       bool
 	storagePolicy storagePolicyState
+	retention     observationRetentionState
 
 	advisoryLockMu sync.Mutex
 	advisoryLocks  map[string]bool

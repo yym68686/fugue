@@ -235,6 +235,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	wasBound := s.platformServingBound.Load()
 	if err != nil {
 		fallbackReason = "control_plane_unavailable"
+		if !platformconsumer.IsUnavailable(err) {
+			fallbackReason = "control_plane_rejected"
+		}
 		if errors.Is(err, platformconsumer.ErrNoServingAssignment) && !s.platformServingBound.Load() {
 			s.mu.Lock()
 			s.platformServingError = ""

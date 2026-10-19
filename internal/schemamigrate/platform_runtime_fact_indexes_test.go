@@ -30,6 +30,10 @@ func TestPlatformRuntimeFactIndexesPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Exec(`DROP TABLE fugue_audit_events`)
+	if _, err := db.ExecContext(ctx, `CREATE TABLE fugue_edge_performance_samples (id text PRIMARY KEY,sampled_at timestamptz NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Exec(`DROP TABLE fugue_edge_performance_samples`)
 	if _, err := db.ExecContext(ctx, `INSERT INTO fugue_audit_events SELECT n::text,'platform_consumer','consumer-'||n,'2026-01-01'::timestamptz+n*interval '1 second',jsonb_build_object('release_set_id','release-'||(n/3)) FROM generate_series(1,50000)n`); err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +93,10 @@ func TestPlatformRuntimeFactIndexesPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := oids()
-	if before[0] != after[0] || before[1] != after[1] {
-		t.Fatal("idempotent migration rebuilt indexes")
+	for i := range before {
+		if before[i] != after[i] {
+			t.Fatal("idempotent migration rebuilt indexes")
+		}
 	}
 	if _, err := db.ExecContext(ctx, `ANALYZE fugue_audit_events`); err != nil {
 		t.Fatal(err)

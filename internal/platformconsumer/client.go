@@ -34,6 +34,15 @@ var ErrDNSBackendNotSelected = errors.New("DNS backend is not selected by public
 
 var ErrNoServingAssignment = errors.New("no serving traffic assignment")
 
+var ErrUnavailable = errors.New("platform request unavailable")
+
+// IsUnavailable distinguishes loss of the control plane from an explicit
+// identity/assignment rejection. Only outages may request offline LKG proofs.
+func IsUnavailable(err error) bool {
+	var status *responseStatusError
+	return errors.Is(err, ErrUnavailable) || (errors.As(err, &status) && status.Code >= 500 && status.Code <= 599)
+}
+
 // ErrNoShadowAssignment is returned only after authenticated assignment
 // discovery finds no shadow lane. Artifact and identity failures stay errors.
 var ErrNoShadowAssignment = errors.New("no shadow traffic assignment")
@@ -233,7 +242,7 @@ func (c Client) jsonLimit(ctx context.Context, endpoint, token, method string, i
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := client.Do(req)
 	if err != nil {
-		return errors.New("platform request unavailable")
+		return ErrUnavailable
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

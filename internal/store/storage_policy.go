@@ -92,6 +92,7 @@ func (s *Store) StorageObservation(ctx context.Context) (any, error) {
 	p, loaded, failed := s.storagePolicy.value, s.storagePolicy.loaded, s.storagePolicy.lastError
 	s.storagePolicy.mu.RUnlock()
 	out := map[string]any{"schema": "fugue.storage.observation.v1", "observed_at": time.Now().UTC(), "policy": p, "policy_loaded_at": loaded, "policy_read_failed": failed, "compiler_input_chunk_bytes": inputChunkBytes, "compiler_input_database_writer_limit": 1}
+	out["observation_retention"] = s.retentionObservation()
 	if s.db != nil {
 		out["database_pool"] = s.db.Stats()
 	}

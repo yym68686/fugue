@@ -12,6 +12,7 @@ import (
 var runtimeFactIndexes = []struct{ name, definition, create string }{
 	{"idx_fugue_audit_target_history", "CREATE INDEX idx_fugue_audit_target_history ON public.fugue_audit_events USING btree (target_type, target_id, created_at DESC, id DESC)", "CREATE INDEX CONCURRENTLY idx_fugue_audit_target_history ON fugue_audit_events (target_type,target_id,created_at DESC,id DESC)"},
 	{"idx_fugue_audit_metadata_lookup", "CREATE INDEX idx_fugue_audit_metadata_lookup ON public.fugue_audit_events USING gin (metadata_json jsonb_path_ops)", "CREATE INDEX CONCURRENTLY idx_fugue_audit_metadata_lookup ON fugue_audit_events USING gin (metadata_json jsonb_path_ops)"},
+	{"idx_fugue_edge_performance_retention_time", "CREATE INDEX idx_fugue_edge_performance_retention_time ON public.fugue_edge_performance_samples USING btree (sampled_at)", "CREATE INDEX CONCURRENTLY idx_fugue_edge_performance_retention_time ON fugue_edge_performance_samples (sampled_at)"},
 }
 
 func MigratePlatformRuntimeFactIndexes(ctx context.Context, databaseURL string) error {
