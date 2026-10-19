@@ -10,6 +10,48 @@ permissions:
   contents: read
 
 jobs:
+  postgres_volume_recovery:
+    # A full database must be recoverable without its API or a component build.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-postgres-protection, cancel-in-progress: false, queue: max}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select the declared volume expansion
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          paths=(deploy/environments/production/postgres-volume-expansion scripts/expand_postgres_volume.py scripts/test_expand_postgres_volume.py)
+          if ! git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then
+            git fetch origin main
+            git diff --exit-code HEAD origin/main -- "${paths[@]}" .github/workflows/ci.yml
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Test and preview the identity-fenced expansion
+        if: steps.selected.outputs.changed == 'true'
+        run: |
+          python3 -m unittest scripts.test_expand_postgres_volume
+          python3 -m scripts.expand_postgres_volume deploy/environments/production/postgres-volume-expansion/recovery.json --evidence "$RUNNER_TEMP/postgres-volume-preview.json"
+      - name: Expand the declared claim and preserve the desired size
+        if: steps.selected.outputs.changed == 'true'
+        run: |
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/postgres-volume-expansion scripts/expand_postgres_volume.py scripts/test_expand_postgres_volume.py .github/workflows/ci.yml
+          python3 -m scripts.expand_postgres_volume deploy/environments/production/postgres-volume-expansion/recovery.json --apply --evidence "$RUNNER_TEMP/postgres-volume-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.selected.outputs.changed == 'true'
+        with:
+          name: fugue-postgres-volume-recovery-${{ github.sha }}
+          path: ${{ runner.temp }}/postgres-volume-*.json
+          if-no-files-found: error
+          retention-days: 30
+
   k3s_transport_integration:
     # Dependency verification runs on a disposable runner without production access.
     needs: prepush
