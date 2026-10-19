@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 43,
+    "generation": 44,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,11 +18,161 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
-      {"id":"runtime-storage-budget","description":"Live storage format policy, database connection occupancy and wait counters","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":120,"parameters":{},"config":{"collectors":[{"name":"storage-budget","kind":"runtime-json","path":"/v1/snapshots/storage","interval_seconds":15,"fields":["schema","observed_at","policy","policy_loaded_at","policy_read_failed","compiler_input_chunk_bytes","compiler_input_database_writer_limit","database_pool"]}]}},
-      {"id":"runtime-database-queries","description":"Bounded query fingerprints, backend PID, operation lineage and known input/output buffer sizes; excludes SQL text and values","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":120,"parameters":{},"config":{"collectors":[{"name":"database-queries","kind":"runtime-json","path":"/v1/snapshots/database","interval_seconds":15,"fields":["schema","observed_at","queries","large_queries","active","completed_total","large_completed_total","overwritten","dropped_events","note"]}]}},
-      {"id":"runtime-heap-export","description":"Export one bounded raw heap profile with frozen process identity and SHA256 for offline analysis; no live analyzer","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":30,"parameters":{},"config":{"collectors":[{"name":"profile","kind":"runtime-profile-export","path":"/v1/profile/heap","interval_seconds":60}]}},
-      {"id":"runtime-allocs-export","description":"Export one bounded raw allocs profile with frozen process identity and SHA256 for offline analysis; no live analyzer","image":"$runner","profile":"process-profile","target_types":["platform_component"],"max_duration_seconds":30,"parameters":{},"config":{"collectors":[{"name":"profile","kind":"runtime-profile-export","path":"/v1/profile/allocs","interval_seconds":60}]}},
-      {"id":"postgres-memory-window","description":"Bounded PostgreSQL process/cgroup memory and SQL fingerprints through one fixed read-only statement; preserves pre-exit evidence","image":"$runner","profile":"process-profile","target_types":["node"],"max_duration_seconds":360,"parameters":{"namespace":{"required":true,"max_length":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},"pod":{"required":true,"max_length":253,"pattern":"^[a-z0-9][a-z0-9.-]*$"},"pod_uid":{"required":true,"max_length":36,"pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},"container":{"required":true,"max_length":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}},"config":{"collectors":[{"name":"postgres-memory","kind":"postgres-memory-window","capture_seconds":300,"interval_seconds":360,"namespace":"{{param.namespace}}","object_name":"{{param.pod}}","pod_uid":"{{param.pod_uid}}","container":"{{param.container}}","runtime_binary":"/var/lib/rancher/k3s/data/current/bin/crictl","path":"/run/k3s/containerd/containerd.sock"}]}},
+      {
+        "id": "runtime-storage-budget",
+        "description": "Live storage format, connection budgets and bounded observation-history cleanup status",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": [
+          "platform_component"
+        ],
+        "max_duration_seconds": 120,
+        "parameters": {},
+        "config": {
+          "collectors": [
+            {
+              "name": "storage-budget",
+              "kind": "runtime-json",
+              "path": "/v1/snapshots/storage",
+              "interval_seconds": 15,
+              "fields": [
+                "schema",
+                "observed_at",
+                "policy",
+                "policy_loaded_at",
+                "policy_read_failed",
+                "compiler_input_chunk_bytes",
+                "compiler_input_database_writer_limit",
+                "database_pool",
+                "observation_retention"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "runtime-database-queries",
+        "description": "Bounded query fingerprints, backend PID, operation lineage and known input/output buffer sizes; excludes SQL text and values",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": [
+          "platform_component"
+        ],
+        "max_duration_seconds": 120,
+        "parameters": {},
+        "config": {
+          "collectors": [
+            {
+              "name": "database-queries",
+              "kind": "runtime-json",
+              "path": "/v1/snapshots/database",
+              "interval_seconds": 15,
+              "fields": [
+                "schema",
+                "observed_at",
+                "queries",
+                "large_queries",
+                "active",
+                "completed_total",
+                "large_completed_total",
+                "overwritten",
+                "dropped_events",
+                "note"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "runtime-heap-export",
+        "description": "Export one bounded raw heap profile with frozen process identity and SHA256 for offline analysis; no live analyzer",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": [
+          "platform_component"
+        ],
+        "max_duration_seconds": 30,
+        "parameters": {},
+        "config": {
+          "collectors": [
+            {
+              "name": "profile",
+              "kind": "runtime-profile-export",
+              "path": "/v1/profile/heap",
+              "interval_seconds": 60
+            }
+          ]
+        }
+      },
+      {
+        "id": "runtime-allocs-export",
+        "description": "Export one bounded raw allocs profile with frozen process identity and SHA256 for offline analysis; no live analyzer",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": [
+          "platform_component"
+        ],
+        "max_duration_seconds": 30,
+        "parameters": {},
+        "config": {
+          "collectors": [
+            {
+              "name": "profile",
+              "kind": "runtime-profile-export",
+              "path": "/v1/profile/allocs",
+              "interval_seconds": 60
+            }
+          ]
+        }
+      },
+      {
+        "id": "postgres-memory-window",
+        "description": "Bounded PostgreSQL process/cgroup memory and SQL fingerprints through one fixed read-only statement; preserves pre-exit evidence",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": [
+          "node"
+        ],
+        "max_duration_seconds": 360,
+        "parameters": {
+          "namespace": {
+            "required": true,
+            "max_length": 63,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "pod": {
+            "required": true,
+            "max_length": 253,
+            "pattern": "^[a-z0-9][a-z0-9.-]*$"
+          },
+          "pod_uid": {
+            "required": true,
+            "max_length": 36,
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "container": {
+            "required": true,
+            "max_length": 63,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "config": {
+          "collectors": [
+            {
+              "name": "postgres-memory",
+              "kind": "postgres-memory-window",
+              "capture_seconds": 300,
+              "interval_seconds": 360,
+              "namespace": "{{param.namespace}}",
+              "object_name": "{{param.pod}}",
+              "pod_uid": "{{param.pod_uid}}",
+              "container": "{{param.container}}",
+              "runtime_binary": "/var/lib/rancher/k3s/data/current/bin/crictl",
+              "path": "/run/k3s/containerd/containerd.sock"
+            }
+          ]
+        }
+      },
       {
         "id": "process-memory-profile",
         "image": "$runner",
@@ -122,52 +272,172 @@
         "description": "Bounded per-thread runnable wait from filtered scheduler events without changing schedstats",
         "image": "$runner",
         "profile": "kernel-profile",
-        "target_types": ["node_process", "platform_component"],
+        "target_types": [
+          "node_process",
+          "platform_component"
+        ],
         "max_duration_seconds": 60,
         "parameters": {},
-        "config": {"collectors": [{"name": "node-resources", "kind": "node-snapshot", "interval_seconds": 10}, {"name": "runqueue", "kind": "process-runqueue-latency", "capture_seconds": 1, "interval_seconds": 120}]}
+        "config": {
+          "collectors": [
+            {
+              "name": "node-resources",
+              "kind": "node-snapshot",
+              "interval_seconds": 10
+            },
+            {
+              "name": "runqueue",
+              "kind": "process-runqueue-latency",
+              "capture_seconds": 1,
+              "interval_seconds": 120
+            }
+          ]
+        }
       },
       {
         "id": "process-page-faults",
         "description": "Bounded major-fault addresses attributed to stable process file mappings",
         "image": "$runner",
         "profile": "kernel-profile",
-        "target_types": ["node_process"],
+        "target_types": [
+          "node_process"
+        ],
         "max_duration_seconds": 60,
         "parameters": {
-          "unit": {"default": "k3s.service", "max_length": 120, "pattern": "^[a-zA-Z0-9_@.:-]+\\.service$"},
-          "since_seconds": {"default": "900", "max_length": 5, "pattern": "^[0-9]{1,5}$"},
-          "match": {"max_length": 256, "pattern": "^[^\\r\\n]+$"}
+          "unit": {
+            "default": "k3s.service",
+            "max_length": 120,
+            "pattern": "^[a-zA-Z0-9_@.:-]+\\.service$"
+          },
+          "since_seconds": {
+            "default": "900",
+            "max_length": 5,
+            "pattern": "^[0-9]{1,5}$"
+          },
+          "match": {
+            "max_length": 256,
+            "pattern": "^[^\\r\\n]+$"
+          }
         },
-        "config": {"collectors": [
-          {"name": "compaction-window", "kind": "host-loopback-metrics", "port": 2381, "interval_seconds": 15, "fields": ["etcd_server_slow_apply_total", "etcd_debugging_mvcc_index_compaction_pause_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_pause_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_total_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_last", "etcd_debugging_mvcc_db_compaction_keys_total", "go_gc_duration_seconds", "process_cpu_seconds_total"]},
-          {"name": "compaction-journal", "kind": "host-journal", "unit": "{{param.unit}}", "since_seconds": 900, "since_seconds_param": "{{param.since_seconds}}", "match_param": "{{param.match}}", "interval_seconds": 30, "match": ["finished scheduled compaction", "slow apply", "trace"]},
-          {"name": "page-faults", "kind": "process-page-faults", "capture_seconds": 20, "interval_seconds": 120}
-        ]}
+        "config": {
+          "collectors": [
+            {
+              "name": "compaction-window",
+              "kind": "host-loopback-metrics",
+              "port": 2381,
+              "interval_seconds": 15,
+              "fields": [
+                "etcd_server_slow_apply_total",
+                "etcd_debugging_mvcc_index_compaction_pause_duration_milliseconds",
+                "etcd_debugging_mvcc_db_compaction_pause_duration_milliseconds",
+                "etcd_debugging_mvcc_db_compaction_total_duration_milliseconds",
+                "etcd_debugging_mvcc_db_compaction_last",
+                "etcd_debugging_mvcc_db_compaction_keys_total",
+                "go_gc_duration_seconds",
+                "process_cpu_seconds_total"
+              ]
+            },
+            {
+              "name": "compaction-journal",
+              "kind": "host-journal",
+              "unit": "{{param.unit}}",
+              "since_seconds": 900,
+              "since_seconds_param": "{{param.since_seconds}}",
+              "match_param": "{{param.match}}",
+              "interval_seconds": 30,
+              "match": [
+                "finished scheduled compaction",
+                "slow apply",
+                "trace"
+              ]
+            },
+            {
+              "name": "page-faults",
+              "kind": "process-page-faults",
+              "capture_seconds": 20,
+              "interval_seconds": 120
+            }
+          ]
+        }
       },
       {
         "id": "kubernetes-build-provenance",
         "description": "Selected embedded storage, API server and HTTP transport dependency versions from the running executable",
         "image": "$runner",
         "profile": "process-profile",
-        "target_types": ["node_process"],
+        "target_types": [
+          "node_process"
+        ],
         "max_duration_seconds": 30,
         "parameters": {},
-        "config": {"collectors": [{"name": "build-provenance", "kind": "process-identity", "interval_seconds": 120, "go_modules": ["go.etcd.io/etcd/server/v3", "go.etcd.io/etcd/api/v3", "go.etcd.io/etcd/client/v3", "go.etcd.io/bbolt", "k8s.io/apiserver", "golang.org/x/net"]}]}
+        "config": {
+          "collectors": [
+            {
+              "name": "build-provenance",
+              "kind": "process-identity",
+              "interval_seconds": 120,
+              "go_modules": [
+                "go.etcd.io/etcd/server/v3",
+                "go.etcd.io/etcd/api/v3",
+                "go.etcd.io/etcd/client/v3",
+                "go.etcd.io/bbolt",
+                "k8s.io/apiserver",
+                "golang.org/x/net"
+              ]
+            }
+          ]
+        }
       },
       {
         "id": "storage-scan-cost",
         "description": "Correlated storage reads, Go heap/GC, process faults and node reclaim in one bounded window",
         "image": "$runner",
         "profile": "kernel-profile",
-        "target_types": ["node_process"],
+        "target_types": [
+          "node_process"
+        ],
         "max_duration_seconds": 360,
         "parameters": {},
         "config": {
           "collectors": [
-            {"name": "node-resources", "kind": "node-snapshot", "interval_seconds": 10},
-            {"name": "process-scheduling", "kind": "process-scheduling", "interval_seconds": 10},
-            {"name": "storage-runtime", "kind": "host-loopback-metrics", "port": 2381, "interval_seconds": 15, "fields": ["etcd_disk_wal_fsync_duration_seconds", "etcd_disk_backend_commit_duration_seconds", "etcd_server_has_leader", "etcd_server_proposals_pending", "etcd_server_slow_apply_total", "etcd_server_slow_read_indexes_total", "etcd_server_read_indexes_failed_total", "etcd_mvcc_db_total_size_in_bytes", "etcd_mvcc_db_total_size_in_use_in_bytes", "process_cpu_seconds_total", "process_resident_memory_bytes", "go_gc_duration_seconds", "go_memstats_alloc_bytes", "go_memstats_alloc_bytes_total", "go_memstats_heap_inuse_bytes", "go_memstats_heap_alloc_bytes", "go_memstats_next_gc_bytes", "go_memstats_heap_sys_bytes", "go_memstats_mallocs_total", "go_memstats_frees_total"]}
+            {
+              "name": "node-resources",
+              "kind": "node-snapshot",
+              "interval_seconds": 10
+            },
+            {
+              "name": "process-scheduling",
+              "kind": "process-scheduling",
+              "interval_seconds": 10
+            },
+            {
+              "name": "storage-runtime",
+              "kind": "host-loopback-metrics",
+              "port": 2381,
+              "interval_seconds": 15,
+              "fields": [
+                "etcd_disk_wal_fsync_duration_seconds",
+                "etcd_disk_backend_commit_duration_seconds",
+                "etcd_server_has_leader",
+                "etcd_server_proposals_pending",
+                "etcd_server_slow_apply_total",
+                "etcd_server_slow_read_indexes_total",
+                "etcd_server_read_indexes_failed_total",
+                "etcd_mvcc_db_total_size_in_bytes",
+                "etcd_mvcc_db_total_size_in_use_in_bytes",
+                "process_cpu_seconds_total",
+                "process_resident_memory_bytes",
+                "go_gc_duration_seconds",
+                "go_memstats_alloc_bytes",
+                "go_memstats_alloc_bytes_total",
+                "go_memstats_heap_inuse_bytes",
+                "go_memstats_heap_alloc_bytes",
+                "go_memstats_next_gc_bytes",
+                "go_memstats_heap_sys_bytes",
+                "go_memstats_mallocs_total",
+                "go_memstats_frees_total"
+              ]
+            }
           ]
         }
       },
@@ -176,39 +446,64 @@
         "description": "Storage range reads, watch cache lifecycle and consistency checks",
         "image": "$runner",
         "profile": "cluster-read",
-        "target_types": ["node", "platform_component"],
+        "target_types": [
+          "node",
+          "platform_component"
+        ],
         "max_duration_seconds": 120,
         "parameters": {},
         "config": {
-          "collectors": [{
-            "name": "storage-read-paths",
-            "kind": "prometheus",
-            "interval_seconds": 15,
-            "service": {"namespace": "fugue-system", "name": "fugue-fugue-observability-prometheus", "port": "http"},
-            "queries": {
-              "families": "count by(__name__)({__name__=~\"apiserver_(storage_(consistency_checks_total|list_.*)|watch_cache_(initializations_total|consistent_read_total)|cache_list_.*)\"})",
-              "consistency_checks": "sum by(group,resource,status)(apiserver_storage_consistency_checks_total)",
-              "cache_initializations": "sum by(group,resource)(apiserver_watch_cache_initializations_total)",
-              "consistent_cache_reads": "sum by(group,resource,success,fallback)(apiserver_watch_cache_consistent_read_total)",
-              "storage_lists": "sum by(resource)(apiserver_storage_list_total)",
-              "storage_fetched": "sum by(resource)(apiserver_storage_list_fetched_objects_total)",
-              "cache_lists": "sum by(resource)(apiserver_cache_list_total)",
-              "list_requests": "sum by(group,resource,code)(apiserver_request_total{verb=\"LIST\"})"
+          "collectors": [
+            {
+              "name": "storage-read-paths",
+              "kind": "prometheus",
+              "interval_seconds": 15,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-observability-prometheus",
+                "port": "http"
+              },
+              "queries": {
+                "families": "count by(__name__)({__name__=~\"apiserver_(storage_(consistency_checks_total|list_.*)|watch_cache_(initializations_total|consistent_read_total)|cache_list_.*)\"})",
+                "consistency_checks": "sum by(group,resource,status)(apiserver_storage_consistency_checks_total)",
+                "cache_initializations": "sum by(group,resource)(apiserver_watch_cache_initializations_total)",
+                "consistent_cache_reads": "sum by(group,resource,success,fallback)(apiserver_watch_cache_consistent_read_total)",
+                "storage_lists": "sum by(resource)(apiserver_storage_list_total)",
+                "storage_fetched": "sum by(resource)(apiserver_storage_list_fetched_objects_total)",
+                "cache_lists": "sum by(resource)(apiserver_cache_list_total)",
+                "list_requests": "sum by(group,resource,code)(apiserver_request_total{verb=\"LIST\"})"
+              },
+              "required_queries": [
+                "families",
+                "list_requests",
+                "consistency_checks",
+                "cache_initializations",
+                "storage_lists",
+                "storage_fetched"
+              ]
             },
-            "required_queries": ["families", "list_requests", "consistency_checks", "cache_initializations", "storage_lists", "storage_fetched"]
-          }, {
-            "name": "recent-storage-read-window",
-            "kind": "prometheus",
-            "interval_seconds": 120,
-            "service": {"namespace": "fugue-system", "name": "fugue-fugue-observability-prometheus", "port": "http"},
-            "queries": {
-              "consistency_checks": "apiserver_storage_consistency_checks_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\"}[1h]",
-              "storage_fetched": "apiserver_storage_list_fetched_objects_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\"}[1h]",
-              "cache_initializations": "apiserver_watch_cache_initializations_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\"}[1h]",
-              "cache_fallback": "apiserver_watch_cache_consistent_read_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\",fallback=\"true\"}[1h]"
-            },
-            "required_queries": ["consistency_checks", "storage_fetched", "cache_initializations"]
-          }]
+            {
+              "name": "recent-storage-read-window",
+              "kind": "prometheus",
+              "interval_seconds": 120,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-observability-prometheus",
+                "port": "http"
+              },
+              "queries": {
+                "consistency_checks": "apiserver_storage_consistency_checks_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\"}[1h]",
+                "storage_fetched": "apiserver_storage_list_fetched_objects_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\"}[1h]",
+                "cache_initializations": "apiserver_watch_cache_initializations_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\"}[1h]",
+                "cache_fallback": "apiserver_watch_cache_consistent_read_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\",fallback=\"true\"}[1h]"
+              },
+              "required_queries": [
+                "consistency_checks",
+                "storage_fetched",
+                "cache_initializations"
+              ]
+            }
+          ]
         }
       },
       {
@@ -216,86 +511,267 @@
         "description": "Short resource-version-bound watch of an exact object's status",
         "image": "$runner",
         "profile": "cluster-read",
-        "target_types": ["platform_component"],
+        "target_types": [
+          "platform_component"
+        ],
         "max_duration_seconds": 30,
         "parameters": {
-          "resource": {"default": "clusters", "max_length": 80, "pattern": "^[a-z][a-z0-9.-]*$"},
-          "group": {"default": "postgresql.cnpg.io", "max_length": 100, "pattern": "^[a-z][a-z0-9.-]*$"},
-          "namespace": {"required": true, "max_length": 63, "pattern": "^[a-z0-9][a-z0-9-]*$"},
-          "name": {"required": true, "max_length": 253, "pattern": "^[a-z0-9][a-z0-9.-]*$"}
+          "resource": {
+            "default": "clusters",
+            "max_length": 80,
+            "pattern": "^[a-z][a-z0-9.-]*$"
+          },
+          "group": {
+            "default": "postgresql.cnpg.io",
+            "max_length": 100,
+            "pattern": "^[a-z][a-z0-9.-]*$"
+          },
+          "namespace": {
+            "required": true,
+            "max_length": 63,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "name": {
+            "required": true,
+            "max_length": 253,
+            "pattern": "^[a-z0-9][a-z0-9.-]*$"
+          }
         },
-        "config": {"collectors": [{"name": "object-changes", "kind": "kubernetes-object-changes", "group": "{{param.group}}", "resource": "{{param.resource}}", "namespace": "{{param.namespace}}", "object_name": "{{param.name}}", "fields": ["status"], "capture_seconds": 5, "interval_seconds": 120}]}
+        "config": {
+          "collectors": [
+            {
+              "name": "object-changes",
+              "kind": "kubernetes-object-changes",
+              "group": "{{param.group}}",
+              "resource": "{{param.resource}}",
+              "namespace": "{{param.namespace}}",
+              "object_name": "{{param.name}}",
+              "fields": [
+                "status"
+              ],
+              "capture_seconds": 5,
+              "interval_seconds": 120
+            }
+          ]
+        }
       },
       {
         "id": "kubernetes-audit-object-activity",
         "description": "Bounded object-level caller and write activity for an explicit Kubernetes resource",
         "image": "$runner",
         "profile": "process-profile",
-        "target_types": ["node_process"],
+        "target_types": [
+          "node_process"
+        ],
         "max_duration_seconds": 60,
-        "parameters": {"resource": {"default": "clusters", "max_length": 80, "pattern": "^[a-z][a-z0-9.-]*$"}},
-        "config": {"collectors": [{"name": "object-activity", "kind": "kubernetes-audit", "path": "/var/log/fugue/kubernetes/audit*.log", "policy_path": "/etc/rancher/k3s/audit-policy.yaml", "resource": "{{param.resource}}", "fields": ["object_name"], "since_seconds": 300, "interval_seconds": 120}]}
+        "parameters": {
+          "resource": {
+            "default": "clusters",
+            "max_length": 80,
+            "pattern": "^[a-z][a-z0-9.-]*$"
+          }
+        },
+        "config": {
+          "collectors": [
+            {
+              "name": "object-activity",
+              "kind": "kubernetes-audit",
+              "path": "/var/log/fugue/kubernetes/audit*.log",
+              "policy_path": "/etc/rancher/k3s/audit-policy.yaml",
+              "resource": "{{param.resource}}",
+              "fields": [
+                "object_name"
+              ],
+              "since_seconds": 300,
+              "interval_seconds": 120
+            }
+          ]
+        }
       },
       {
         "id": "host-storage-metrics",
         "description": "Bounded loopback storage metrics in the host network namespace",
         "image": "$runner",
         "profile": "kernel-profile",
-        "target_types": ["node_process"],
+        "target_types": [
+          "node_process"
+        ],
         "max_duration_seconds": 120,
         "parameters": {},
-        "config": {"collectors": [{"name": "storage-metrics", "kind": "host-loopback-metrics", "port": 2381, "interval_seconds": 15, "fields": ["etcd_disk_wal_fsync_duration_seconds", "etcd_disk_backend_commit_duration_seconds", "etcd_server_has_leader", "etcd_server_proposals_pending", "etcd_server_slow_apply_total", "etcd_server_slow_read_indexes_total", "etcd_server_read_indexes_failed_total", "etcd_mvcc_db_total_size_in_bytes", "etcd_mvcc_db_total_size_in_use_in_bytes", "process_cpu_seconds_total", "process_resident_memory_bytes", "go_gc_duration_seconds", "grpc_server_handled_total"]}]}
+        "config": {
+          "collectors": [
+            {
+              "name": "storage-metrics",
+              "kind": "host-loopback-metrics",
+              "port": 2381,
+              "interval_seconds": 15,
+              "fields": [
+                "etcd_disk_wal_fsync_duration_seconds",
+                "etcd_disk_backend_commit_duration_seconds",
+                "etcd_server_has_leader",
+                "etcd_server_proposals_pending",
+                "etcd_server_slow_apply_total",
+                "etcd_server_slow_read_indexes_total",
+                "etcd_server_read_indexes_failed_total",
+                "etcd_mvcc_db_total_size_in_bytes",
+                "etcd_mvcc_db_total_size_in_use_in_bytes",
+                "process_cpu_seconds_total",
+                "process_resident_memory_bytes",
+                "go_gc_duration_seconds",
+                "grpc_server_handled_total"
+              ]
+            }
+          ]
+        }
       },
       {
         "id": "process-cpu-frame-pointer",
         "description": "Bounded frame-pointer CPU capture with Go stack symbol resolution",
         "image": "$runner",
         "profile": "kernel-profile",
-        "target_types": ["node_process", "platform_component"],
+        "target_types": [
+          "node_process",
+          "platform_component"
+        ],
         "max_duration_seconds": 120,
         "parameters": {},
-        "config": {"collectors": [{"name": "cpu-profile", "kind": "process-cpu-profile", "capture_seconds": 20, "call_graph": "fp", "interval_seconds": 120}]}
+        "config": {
+          "collectors": [
+            {
+              "name": "cpu-profile",
+              "kind": "process-cpu-profile",
+              "capture_seconds": 20,
+              "call_graph": "fp",
+              "interval_seconds": 120
+            }
+          ]
+        }
       },
       {
         "id": "runtime-stage-cost",
         "description": "Fixed-cardinality operation counts and elapsed work from the runtime operations provider",
         "image": "$runner",
         "profile": "process-profile",
-        "target_types": ["platform_component"],
+        "target_types": [
+          "platform_component"
+        ],
         "max_duration_seconds": 120,
         "parameters": {},
-        "config": {"collectors": [{"name": "stage-cost", "kind": "runtime-json", "path": "/v1/snapshots/operations", "interval_seconds": 30, "fields": ["schema", "started_at", "observed_at", "stages", "note"]}]}
+        "config": {
+          "collectors": [
+            {
+              "name": "stage-cost",
+              "kind": "runtime-json",
+              "path": "/v1/snapshots/operations",
+              "interval_seconds": 30,
+              "fields": [
+                "schema",
+                "started_at",
+                "observed_at",
+                "stages",
+                "note"
+              ]
+            }
+          ]
+        }
       },
       {
         "id": "workload-log-window",
         "description": "Bounded recent workload logs from an exact admitted container",
         "image": "$runner",
         "profile": "cluster-read",
-        "target_types": ["platform_component"],
+        "target_types": [
+          "platform_component"
+        ],
         "max_duration_seconds": 30,
-        "parameters": {"container": {"required": true, "max_length": 63, "pattern": "^[a-z0-9][a-z0-9-]*$"}, "since": {"max_length": 40, "pattern": "^[0-9T:.Z+-]+$"}},
-        "config": {"collectors": [{"name": "workload-log", "kind": "kubernetes-logs", "namespace": "{{namespace}}", "object_name": "{{pod}}", "container": "{{param.container}}", "since_seconds": 900, "since_time": "{{param.since}}", "interval_seconds": 120}]}
+        "parameters": {
+          "container": {
+            "required": true,
+            "max_length": 63,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "since": {
+            "max_length": 40,
+            "pattern": "^[0-9T:.Z+-]+$"
+          }
+        },
+        "config": {
+          "collectors": [
+            {
+              "name": "workload-log",
+              "kind": "kubernetes-logs",
+              "namespace": "{{namespace}}",
+              "object_name": "{{pod}}",
+              "container": "{{param.container}}",
+              "since_seconds": 900,
+              "since_time": "{{param.since}}",
+              "interval_seconds": 120
+            }
+          ]
+        }
       },
       {
         "id": "runtime-http-requests",
         "description": "Bounded Kubernetes client resource, cache, latency and response-size observations",
         "image": "$runner",
         "profile": "process-profile",
-        "target_types": ["platform_component"],
+        "target_types": [
+          "platform_component"
+        ],
         "max_duration_seconds": 60,
         "parameters": {},
-        "config": {"collectors": [{"name": "http-requests", "kind": "runtime-json", "path": "/v1/snapshots/http-client", "interval_seconds": 30, "fields": ["schema", "observed_at", "requests", "completed_total", "in_flight", "retained_limit", "overwritten", "note"]}]}
+        "config": {
+          "collectors": [
+            {
+              "name": "http-requests",
+              "kind": "runtime-json",
+              "path": "/v1/snapshots/http-client",
+              "interval_seconds": 30,
+              "fields": [
+                "schema",
+                "observed_at",
+                "requests",
+                "completed_total",
+                "in_flight",
+                "retained_limit",
+                "overwritten",
+                "note"
+              ]
+            }
+          ]
+        }
       },
       {
         "id": "runtime-source-progress",
         "description": "Read bounded runtime provider snapshots of source cursors, stages and collection budgets",
         "image": "$runner",
         "profile": "process-profile",
-        "target_types": ["platform_component"],
+        "target_types": [
+          "platform_component"
+        ],
         "max_duration_seconds": 120,
         "parameters": {},
         "config": {
-          "collectors": [{"name": "source-progress", "kind": "runtime-json", "path": "/v1/snapshots/log-sources", "interval_seconds": 15, "fields": ["schema", "observed_at", "sources", "source_count", "truncated", "evicted_sources", "error_summary", "cycle", "queue_depth", "queued_bytes"]}]
+          "collectors": [
+            {
+              "name": "source-progress",
+              "kind": "runtime-json",
+              "path": "/v1/snapshots/log-sources",
+              "interval_seconds": 15,
+              "fields": [
+                "schema",
+                "observed_at",
+                "sources",
+                "source_count",
+                "truncated",
+                "evicted_sources",
+                "error_summary",
+                "cycle",
+                "queue_depth",
+                "queued_bytes"
+              ]
+            }
+          ]
         }
       },
       {
@@ -303,11 +779,20 @@
         "description": "Compare frozen PID and cgroup CPU capture with raw bounded perf summaries",
         "image": "$runner",
         "profile": "kernel-profile",
-        "target_types": ["node_process", "platform_component"],
+        "target_types": [
+          "node_process",
+          "platform_component"
+        ],
         "max_duration_seconds": 60,
         "parameters": {},
         "config": {
-          "collectors": [{"name": "capture-comparison", "kind": "perf-capture-check", "interval_seconds": 120}]
+          "collectors": [
+            {
+              "name": "capture-comparison",
+              "kind": "perf-capture-check",
+              "interval_seconds": 120
+            }
+          ]
         }
       },
       {
@@ -315,11 +800,22 @@
         "description": "Bounded audit request rates, callers, cache options and completed-request durations",
         "image": "$runner",
         "profile": "process-profile",
-        "target_types": ["node_process"],
+        "target_types": [
+          "node_process"
+        ],
         "max_duration_seconds": 30,
         "parameters": {},
         "config": {
-          "collectors": [{"name": "audit-requests", "kind": "kubernetes-audit", "path": "/var/log/fugue/kubernetes/audit*.log", "policy_path": "/etc/rancher/k3s/audit-policy.yaml", "since_seconds": 300, "interval_seconds": 120}]
+          "collectors": [
+            {
+              "name": "audit-requests",
+              "kind": "kubernetes-audit",
+              "path": "/var/log/fugue/kubernetes/audit*.log",
+              "policy_path": "/etc/rancher/k3s/audit-policy.yaml",
+              "since_seconds": 300,
+              "interval_seconds": 120
+            }
+          ]
         }
       },
       {
@@ -327,11 +823,21 @@
         "description": "Bounded process CPU sample counts, cgroup pressure and symbol coverage",
         "image": "$runner",
         "profile": "kernel-profile",
-        "target_types": ["node_process", "platform_component"],
+        "target_types": [
+          "node_process",
+          "platform_component"
+        ],
         "max_duration_seconds": 120,
         "parameters": {},
         "config": {
-          "collectors": [{"name": "cpu-profile", "kind": "process-cpu-profile", "capture_seconds": 20, "interval_seconds": 120}]
+          "collectors": [
+            {
+              "name": "cpu-profile",
+              "kind": "process-cpu-profile",
+              "capture_seconds": 20,
+              "interval_seconds": 120
+            }
+          ]
         }
       },
       {
@@ -339,17 +845,57 @@
         "description": "Read-only bounded host service logs with explicit coverage and timestamps",
         "image": "$runner",
         "profile": "process-profile",
-        "target_types": ["node_process"],
+        "target_types": [
+          "node_process"
+        ],
         "max_duration_seconds": 30,
         "parameters": {
-          "unit": {"default": "k3s.service", "max_length": 120, "pattern": "^[a-zA-Z0-9_@.:-]+\\.service$"},
-          "since_seconds": {"default": "900", "max_length": 5, "pattern": "^[0-9]{1,5}$"},
-          "since": {"max_length": 40, "pattern": "^[0-9T:.Z+-]+$"},
-          "until": {"max_length": 40, "pattern": "^[0-9T:.Z+-]+$"},
-          "match": {"max_length": 256, "pattern": "^[^\r\n]+$"}
+          "unit": {
+            "default": "k3s.service",
+            "max_length": 120,
+            "pattern": "^[a-zA-Z0-9_@.:-]+\\.service$"
+          },
+          "since_seconds": {
+            "default": "900",
+            "max_length": 5,
+            "pattern": "^[0-9]{1,5}$"
+          },
+          "since": {
+            "max_length": 40,
+            "pattern": "^[0-9T:.Z+-]+$"
+          },
+          "until": {
+            "max_length": 40,
+            "pattern": "^[0-9T:.Z+-]+$"
+          },
+          "match": {
+            "max_length": 256,
+            "pattern": "^[^\r\n]+$"
+          }
         },
         "config": {
-          "collectors": [{"name": "service-log", "kind": "host-journal", "unit": "{{param.unit}}", "since_seconds": 900, "since_seconds_param": "{{param.since_seconds}}", "since_time": "{{param.since}}", "until_time": "{{param.until}}", "match_param": "{{param.match}}", "interval_seconds": 120, "match": ["took too long", "slow", "timeout", "deadline", "error", "warn", "trace"]}]
+          "collectors": [
+            {
+              "name": "service-log",
+              "kind": "host-journal",
+              "unit": "{{param.unit}}",
+              "since_seconds": 900,
+              "since_seconds_param": "{{param.since_seconds}}",
+              "since_time": "{{param.since}}",
+              "until_time": "{{param.until}}",
+              "match_param": "{{param.match}}",
+              "interval_seconds": 120,
+              "match": [
+                "took too long",
+                "slow",
+                "timeout",
+                "deadline",
+                "error",
+                "warn",
+                "trace"
+              ]
+            }
+          ]
         }
       },
       {
