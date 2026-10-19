@@ -441,7 +441,50 @@ func dynamicQualityEntryUnavailable(entry dynamicQualityEntry, contextDigest str
 	if now.Sub(entry.Compiled.Selection.CapturedAt) > time.Duration(policy.EvidenceMaxAgeSeconds)*time.Second {
 		return "selection_evidence_expired"
 	}
+	// A selection can outlive the route/TLS proof embedded in its receipt. Do
+	// not retain such a receipt through the selection-age check only to have the
+	// publication validator reject it later; classify it as unavailable before
+	// the host enters the publication path. The full validator remains the final
+	// authority and still runs for every usable receipt.
+	if len(entry.Compiled.Evidence) > 0 && !dynamicQualityCachedNetworkEvidenceFresh(entry.Compiled, policy, now) {
+		return "network_evidence_unavailable"
+	}
 	return ""
+}
+
+// The full receipt validator remains the publication authority. This bounded
+// preflight only avoids retaining a cached selection whose ordered primary or
+// fallback already has an expired route proof; it does not authorize serving.
+func dynamicQualityCachedNetworkEvidenceFresh(compiled compiledPhysicalDNSSelection, policy model.PhysicalEdgeQualityPolicy, now time.Time) bool {
+	if compiled.Selection == nil || len(compiled.Evidence) == 0 {
+		return false
+	}
+	var receipt edgequality.Receipt
+	if err := json.Unmarshal(compiled.Evidence, &receipt); err != nil || receipt.Digest == "" {
+		// Legacy/malformed cache fixtures are still rejected by the full
+		// publication validator; this preflight must not grant them authority.
+		return true
+	}
+	wanted := map[string]bool{compiled.Selection.PrimaryEdgeID: true}
+	for _, edgeID := range compiled.Selection.OrderedEdgeIDs {
+		wanted[edgeID] = true
+	}
+	found := map[string]bool{}
+	for _, candidate := range receipt.Snapshot.Candidates {
+		if !wanted[candidate.EdgeID] {
+			continue
+		}
+		found[candidate.EdgeID] = true
+		if !candidate.RouteProofVerified || candidate.ProofObservedAt == nil || candidate.ProofObservedAt.After(now) || now.Sub(*candidate.ProofObservedAt) > time.Duration(policy.EvidenceMaxAgeSeconds)*time.Second {
+			return false
+		}
+	}
+	for edgeID := range wanted {
+		if !found[edgeID] {
+			return false
+		}
+	}
+	return true
 }
 
 func captureDynamicQualityJobs(ctx context.Context, work []dynamicQualityJob, concurrency int, capture func(context.Context, dynamicQualityJob)) int {
