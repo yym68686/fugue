@@ -86,3 +86,55 @@ audit events. Its exact limits and signature-preserving boundary mechanism are
 documented in [observation history retention](../observation-history-retention.md).
 The largest protected tables still require capacity planning; observation-only
 retention cannot promise a bounded total database size.
+
+## Completed rollout and final checks
+
+The retention implementation (`403e2efc`) and its generic-plan index correction
+(`75de4daf`) are running on both API replicas. The live PostgreSQL generic query
+plan uses the heartbeat-chain partial index. The production policy (`e2a5b239`)
+is enabled independently of code, with a 30-second interval and batches of 500.
+Heartbeat history uses seven days and 10,000 rows per chain, subject to the
+24-hour minimum and preserved current head. Probe history uses seven days and
+1,000,000 rows per table, subject to the seven-day safety floor. Diagnostic Jobs
+retain their existing one-hour completion TTL.
+
+Two independently targeted `runtime-storage-budget` diagnostic results reported
+the accepted policy, no policy-read error and no sweep error. At **06:49:30** and
+**06:54:37**, their process counters recorded 51,372 and 69,500 deleted heartbeat
+rows, 51 and 33 performance samples, and 656 and 328 resource samples. These are
+logical deletion counts, not reclaimed physical bytes. The diagnostic catalog
+was updated (`73a6ee68`) so these counters and failure stages remain observable.
+
+The US edge release initially stopped before changing serving state: its node
+count was three after a suspended member returned, and that member still had
+activation generation 877 while its peers were at 890. The baseline and Guardian
+declarations were corrected. The independent recovery lane (`40de9f17`) checked
+the exact old identity, prepared the current approved publication in an inactive
+worker, and verified fresh TLS/nonce route proofs against a healthy peer before
+atomically reconciling the returned member. The recovery reported
+`activated=true, verified=true`. The subsequent US release (`e12693ba`) succeeded
+at **06:58:35**; all three new workers and fronts were ready with zero restarts
+in the final snapshot. German edge rollout also succeeded. Both public DNS
+Services select the verified new `e` backends (`841b09d6`, `1d00521d`). Existing
+standby workers and serving artifacts were preserved.
+
+At **07:06**, both DNS backends reported **675/675 ready probes and 257/257 ready
+records**. At **07:08:53**, the current CLI's `admin dns answer-check fugue.pro`
+passed with consistent authoritative answers, both DNS nodes healthy, both edge
+groups route-ready, and successful HTTPS/TLS/SNI/Host validation. A transient
+earlier management observation had returned `unknown`; subsequent direct and
+selected-backend observations both passed. It was not treated as a proven new
+code defect. The homepage, `/auth/sign-in`, and API `/healthz` each returned 200
+with normal TLS verification. Frontend static assets also returned 200. The
+database reported `Cluster in healthy state`, one ready primary and the retained
+140 GiB volume declaration; both API replicas were ready with zero restarts.
+
+The final `make test` completed successfully, including generated OpenAPI checks
+and static-edge observability tests. Isolated PostgreSQL tests covered retention
+boundaries, protected rows, signed-chain continuity, concurrent ingestion and
+the online timestamp-index migration. Pre-push checks passed. The latest CLI
+build (`5009e260`, run `39337652092`) succeeded. Individual production deployment
+lanes succeeded; some enclosing CI runs are marked cancelled because later
+commits superseded unrelated configuration lanes. That aggregate status does not
+describe the completed deployment jobs. No production outage was deliberately
+injected for verification.

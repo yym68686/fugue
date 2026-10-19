@@ -53,6 +53,25 @@ filesystem size reduction. No `VACUUM FULL`, table rewrite or data-file deletion
 is performed. Capacity planning must include protected tables: this mechanism
 cannot bound a database whose retained configuration or source data grows forever.
 
+Production enabled the following policy on 2026-10-20 (Asia/Shanghai):
+
+| Setting | Value |
+| --- | ---: |
+| Sweep interval | 30 seconds |
+| Maximum rows per table/chain batch | 500 |
+| Heartbeat age budget | 7 days |
+| Heartbeat row budget | 10,000 per chain |
+| Probe age budget | 7 days |
+| Probe row budget | 1,000,000 per table |
+| Completed diagnostic Job TTL | 1 hour |
+
+The row budgets are soft where the minimum-history floor prevents deletion:
+heartbeats younger than 24 hours and probe samples younger than seven days stay
+protected even when the row budget is exceeded. Heartbeat chain heads are always
+retained. The production declaration is in
+`deploy/environments/production/storage-policy/policy.json`; the published
+retention document remains separate from code and other storage-policy data.
+
 Verification uses an isolated loopback PostgreSQL database named `fugue_test_*`
 via `FUGUE_RETENTION_TEST_DATABASE_URL`. Tests cover batch limits, protected data,
 signed boundaries, corruption rollback and replay-head preservation. The online
