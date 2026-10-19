@@ -18,6 +18,8 @@ import (
 type compiledPhysicalDNSSelection struct {
 	Selection *model.DNSPhysicalSelection
 	Evidence  json.RawMessage
+	// Cache eligibility only; the publisher still revalidates Evidence.
+	proofFreshUntil time.Time
 }
 
 func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy) error {

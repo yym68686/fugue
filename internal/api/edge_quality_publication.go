@@ -13,30 +13,60 @@ import (
 )
 
 func compileBoundPhysicalQualitySelection(receipt edgequality.Receipt, now time.Time) (*model.DNSPhysicalSelection, error) {
+	selection, _, err := compileBoundPhysicalQualitySelectionWithDeadline(receipt, now)
+	return selection, err
+}
+
+func compileBoundPhysicalQualitySelectionWithDeadline(receipt edgequality.Receipt, now time.Time) (*model.DNSPhysicalSelection, time.Time, error) {
 	if !edgequality.IsNetworkPolicy(receipt.Snapshot.Policy.Version) {
-		return nil, errors.New("physical publication requires the supported network policy")
+		return nil, time.Time{}, errors.New("physical publication requires the supported network policy")
 	}
 	if _, err := edgequality.Replay(receipt); err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	var answer dnsserver.DNSDecisionReceipt
 	if len(receipt.Snapshot.ActualDNSReceipt) == 0 || json.Unmarshal(receipt.Snapshot.ActualDNSReceipt, &answer) != nil {
-		return nil, errors.New("physical publication lacks a captured actual DNS answer")
+		return nil, time.Time{}, errors.New("physical publication lacks a captured actual DNS answer")
 	}
 	if answer.QType != dns.TypeA {
-		return nil, errors.New("physical publication requires actual IPv4 DNS evidence")
+		return nil, time.Time{}, errors.New("physical publication requires actual IPv4 DNS evidence")
 	}
 	evidence, err := dnsserver.QualityEvidenceFromCapturedDNSDecision(answer, receipt.Snapshot.CapturedAt, now, time.Duration(receipt.Snapshot.Policy.EvidenceMaxAgeSeconds)*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	if err := validateBoundPhysicalQualitySnapshot(receipt.Snapshot, evidence); err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	binding := edgequality.DNSBinding{ReceiptID: evidence.ReceiptID, Hostname: evidence.Hostname, Scope: evidence.Scope,
 		CurrentEdgeID: evidence.EdgeID, ObservedAt: evidence.ObservedAt, ReplayMatched: true, WriteSucceeded: true,
 		LoadedDigest: evidence.Publication.Digest, PolicyDigest: evidence.Publication.PolicyDigest}
-	return edgequality.CompileSelection(receipt, binding, now)
+	selection, err := edgequality.CompileSelection(receipt, binding, now)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	deadline := selection.CapturedAt.Add(time.Duration(receipt.Snapshot.Policy.EvidenceMaxAgeSeconds) * time.Second)
+	wanted := map[string]bool{selection.PrimaryEdgeID: true}
+	for _, edgeID := range selection.OrderedEdgeIDs {
+		wanted[edgeID] = true
+	}
+	for _, proof := range evidence.Proofs {
+		if !wanted[proof.EdgeID] {
+			continue
+		}
+		delete(wanted, proof.EdgeID)
+		observedDeadline := proof.Proof.CheckedAt.Add(time.Duration(receipt.Snapshot.Policy.EvidenceMaxAgeSeconds) * time.Second)
+		if observedDeadline.Before(deadline) {
+			deadline = observedDeadline
+		}
+		if proof.Proof.ValidUntil.Before(deadline) {
+			deadline = proof.Proof.ValidUntil
+		}
+	}
+	if len(wanted) != 0 {
+		return nil, time.Time{}, errors.New("physical publication selection lacks a route proof deadline")
+	}
+	return selection, deadline, nil
 }
 
 func validateBoundPhysicalQualitySnapshot(snapshot edgequality.Snapshot, evidence dnsserver.QualityAnswerEvidence) error {
