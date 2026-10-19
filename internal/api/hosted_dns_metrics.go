@@ -72,7 +72,7 @@ func (s *Server) writeHostedDNSMetrics(w io.Writer) {
 }
 
 func (s *Server) countManagedAppDomainDNSPendingMetric(w io.Writer) int {
-	apps, err := s.store.ListApps("", true)
+	apps, _, err := s.store.ListAppWorkloadIdentitiesWithTiming("", true)
 	if err != nil {
 		observability.WriteGaugeMetric(w, "fugue_hosted_dns_metrics_error", "Whether hosted DNS metrics collection failed.", map[string]string{"stage": "app_domains", "error": truncateMetricLabel(err.Error(), 160)}, 1)
 		return 0

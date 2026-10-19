@@ -280,7 +280,7 @@ func (s *Server) startResourceUsageSamplingLoop(ctx context.Context) <-chan stru
 }
 
 func (s *Server) recordCurrentResourceUsageSamples(ctx context.Context) error {
-	apps, err := s.store.ListApps("", true)
+	apps, _, err := s.store.ListAppWorkloadIdentitiesWithTiming("", true)
 	if err != nil {
 		return err
 	}
