@@ -1,8 +1,6 @@
 package api
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -10,53 +8,10 @@ import (
 
 // Decode the exact typed consumer view after its caller verifies artifact
 // integrity and publication. No business state or legacy compiler is consulted.
-type platformDNSArtifactPayload struct {
-	PreviousTrafficPublication *platformconfig.PreviousTrafficPublicationInput `json:"previous_traffic_publication,omitempty"`
-	CellRoutePublications      []platformconfig.CellRoutePublicationInput      `json:"cell_route_publications,omitempty"`
-	CellDNSSource              *platformconfig.CellDNSPlanSource               `json:"cell_dns_source,omitempty"`
-	Schema                     string                                          `json:"schema_version"`
-	Generation                 string                                          `json:"generation"`
-	Records                    []platformconfig.DNSIntent                      `json:"records"`
-	ConsumerViews              []platformconfig.DNSConsumerView                `json:"consumer_views,omitempty"`
-	ReadinessPlan              *platformconfig.DNSReadinessPlan                `json:"readiness_plan,omitempty"`
-	QueryViews                 []platformconfig.DNSQueryView                   `json:"query_views,omitempty"`
-	Policy                     platformconfig.PolicySnapshot                   `json:"policy"`
-	Lineage                    platformconfig.Lineage                          `json:"lineage"`
-}
+type platformDNSArtifactPayload = platformconfig.DNSArtifactPayload
 
 func decodePlatformDNSArtifact(artifact model.PlatformArtifact) (platformDNSArtifactPayload, error) {
-	var payload platformDNSArtifactPayload
-	raw, err := json.Marshal(artifact.Content)
-	if err != nil {
-		return payload, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&payload) != nil || payload.Schema != platformconfig.SchemaVersion || payload.Generation != artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
-		return payload, fmt.Errorf("invalid DNS candidate schema")
-	}
-	digest, err := platformconfig.Digest(payload.Policy)
-	if err != nil || payload.Policy.Scope != artifact.ScopeKey || digest != payload.Lineage.PolicyDigest || payload.Lineage.IntentGeneration != payload.Generation || payload.Lineage.PolicyGeneration != payload.Policy.Generation {
-		return payload, fmt.Errorf("invalid DNS policy binding")
-	}
-	for key, value := range platformconfig.LineageMetadata(payload.Lineage) {
-		if value == "" || artifact.Metadata[key] != value {
-			return payload, fmt.Errorf("invalid DNS lineage")
-		}
-	}
-	if err := platformconfig.ValidateDNSCellPlan(artifact); err != nil {
-		return payload, err
-	}
-	if err := platformconfig.ValidateDNSIntents(payload.Records); err != nil {
-		return payload, err
-	}
-	if err := platformconfig.ValidateDNSReadinessPlan(payload.ReadinessPlan, payload.Policy.DNSReadiness); err != nil {
-		return payload, err
-	}
-	if err := platformconfig.ValidateDNSQueryViews(payload.QueryViews, payload.Records, payload.ConsumerViews, payload.ReadinessPlan, payload.Policy); err != nil {
-		return payload, err
-	}
-	return payload, nil
+	return platformconfig.DecodeDNSArtifact(artifact)
 }
 
 func platformDNSArtifactView(artifact model.PlatformArtifact, nodeID, zone string) ([]model.EdgeDNSRecord, string, error) {

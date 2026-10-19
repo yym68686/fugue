@@ -20,6 +20,15 @@ The background metrics and resumable R2 inventory collectors introduced in
 `aa09ad20` remain independent of the scrape request. Runtime observation changes
 do not renew signed configuration, serving authority, or LKG freshness.
 
+DNS artifact decoding shares one JSON encoding within the same synchronous
+schema, lineage, Cell-plan, readiness and query-view validation. It still runs
+each validation, including the existing handling of noncanonical field aliases.
+The encoded bytes and decoded result are not retained between calls. Runtime
+facts still resolve authorization and immutable inputs again after the network
+observation. This removes a redundant linear encoding pass and its temporary
+allocations; it does not change the algorithmic complexity or authorize reuse
+of a previous request's serving facts.
+
 Release history collection retains the transitive closure of immutable execution,
 Guardian rollback, monitor and route dependencies. It reads a paginated snapshot
 of both managers together, defers while a component is not settled or the

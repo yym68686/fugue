@@ -295,6 +295,12 @@ func ValidateDNSCellPlan(artifact model.PlatformArtifact) error {
 	if err != nil {
 		return fmt.Errorf("DNS artifact content cannot be encoded: %w", err)
 	}
+	return validateDNSCellPlanEncoded(artifact, raw)
+}
+
+// Reuse only the bytes produced for this synchronous decode. This helper is
+// private so a caller cannot supply encoding detached from the artifact.
+func validateDNSCellPlanEncoded(artifact model.PlatformArtifact, raw []byte) error {
 	pubs, policy, err := decodeCellRoutePublications(raw)
 	if err != nil {
 		return err
