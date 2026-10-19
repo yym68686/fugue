@@ -18,6 +18,7 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 	"fugue/internal/routeprobe"
 	"github.com/miekg/dns"
@@ -78,7 +79,13 @@ func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t 
 					}
 					json.NewEncoder(w).Encode(map[string]any{"artifact": p, "assignment": candidate.Assignment, "release": candidate.Release})
 				case "/v1/platform-state/consumers/trusted-heartbeat":
-					reports.Add(1)
+					var h platformcontrol.PlatformConsumerHeartbeatEnvelope
+					json.NewDecoder(r.Body).Decode(&h)
+					if h.ApplyStatus == "applied" && h.ProbeStatus == "passed" {
+						reports.Add(1)
+					} else if h.ApplyStatus != "failed" || h.ProbeStatus != "failed" || !h.ServingLKG {
+						t.Error("invalid rejected-candidate observation", h)
+					}
 					w.WriteHeader(500)
 				default:
 					t.Error("unexpected endpoint", r.URL.Path)

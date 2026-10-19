@@ -265,6 +265,19 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 	}
 	bridge = &dnsReleaseBridge{parent: parent, candidate: candidate, payload: p, routeID: routeID}
+	defer func() {
+		if syncErr == nil || ctx.Err() != nil || errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) || errors.Is(syncErr, platformconsumer.ErrDNSBackendNotSelected) {
+			return
+		}
+		retained := s.platformServing.Load()
+		if retained == nil || !retained.record.Positive || reflect.DeepEqual(retained.record.Candidate.Assignment, a) {
+			return // Same-assignment readiness failures already report their observation.
+		}
+		// A rejected successor must not make the running backend disappear.
+		// Report the current assignment's failure and the retained generation;
+		// this cannot acknowledge or checkpoint the candidate.
+		syncErr = errors.Join(syncErr, s.reportDNSRejectedSuccessor(ctx, client, id, a, retained))
+	}()
 	// Same-release observations use only volatile fresh proof cache. Persisted
 	// checkpoint readiness is never reused after restart.
 	same := old != nil && reflect.DeepEqual(old.record.Candidate.Assignment, a)
@@ -612,8 +625,36 @@ func (s *Service) reportDNSServingState(ctx context.Context, client platformcons
 	if (positive && !dnsServingReady(st, time.Now())) || s.platformServing.Load() != st {
 		return errors.New("DNS serving evidence changed")
 	}
+	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ActualGeneration: a.ExpectedGeneration, LKGGeneration: a.ExpectedGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
+	if !positive {
+		h.ProbeStatus = "failed"
+		h.LastError = "DNS serving readiness or listener probe failed"
+		h.ServingLKG = true
+	}
+	return s.reportDNSAssignmentState(ctx, client, id, a, st, h)
+}
+
+func (s *Service) reportDNSRejectedSuccessor(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, retained *dnsServingState) error {
+	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{
+		ActualGeneration:    retained.record.Candidate.Assignment.ExpectedGeneration,
+		LKGGeneration:       retained.record.Candidate.Assignment.ExpectedGeneration,
+		CandidateGeneration: a.ExpectedGeneration,
+		ApplyStatus:         "failed", ProbeStatus: "failed", ServingLKG: true,
+		LKGExpired: retained.record.AppliedAt.Add(time.Duration(retained.payload.Policy.MaxStaleSeconds) * time.Second).Before(time.Now()),
+		LastError:  "DNS successor validation failed; retained previous configuration",
+	}
+	return s.reportDNSAssignmentState(ctx, client, id, a, retained, h)
+}
+
+func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope) error {
+	if s.platformServing.Load() != loaded {
+		return errors.New("DNS serving evidence changed")
+	}
 	if err := client.CheckServingAssignment(ctx, id, a); err != nil {
 		return err
+	}
+	if s.platformServing.Load() != loaded {
+		return errors.New("DNS serving evidence changed")
 	}
 	path := s.Config.CachePath + ".platform-serving-cursor.json"
 	var sequence int64
@@ -633,13 +674,13 @@ func (s *Service) reportDNSServingState(ctx context.Context, client platformcons
 	if _, err := rand.Read(nonce); err != nil {
 		return err
 	}
-	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: a.GenerationSequence, DesiredGeneration: a.ExpectedGeneration, ActualGeneration: a.ExpectedGeneration, LKGGeneration: a.ExpectedGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
+	h.ConsumerID, h.Component, h.NodeID = id.BoundConsumerID(), id.Component, id.NodeID
+	h.ArtifactKind, h.ScopeKey, h.ReleaseSetID = a.ArtifactKind, a.ScopeKey, a.ReleaseSetID
+	h.ExpectedConsumerSetID, h.FencingToken = a.ExpectedConsumerSetID, a.FencingToken
+	h.ProtocolVersion, h.SchemaVersion = "v1", "v1"
+	h.Sequence, h.IssuedAt, h.Nonce = sequence, time.Now().UTC(), hex.EncodeToString(nonce)
+	h.GenerationSequence, h.DesiredGeneration = a.GenerationSequence, a.ExpectedGeneration
 	h.CompatibilityCapabilities = dnsExecutionCapabilities()
-	if !positive {
-		h.ProbeStatus = "failed"
-		h.LastError = "DNS serving readiness or listener probe failed"
-		h.ServingLKG = true
-	}
 	h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 	var receipt model.PlatformConsumerHeartbeatResponse
 	if err := client.PostJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id.Token, h, &receipt); err != nil {

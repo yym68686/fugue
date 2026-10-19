@@ -307,7 +307,11 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 					t.Error("serving heartbeat downgraded executor capability", capability)
 				}
 			}
-			if h.ApplyStatus != "applied" || (h.ProbeStatus != "passed" && !(allowFailed && h.ProbeStatus == "failed")) {
+			if h.ApplyStatus == "failed" && h.ProbeStatus == "failed" {
+				if !h.ServingLKG || h.LastError == "" || h.ExpectedConsumerSetID != candidate.Assignment.ExpectedConsumerSetID || h.FencingToken != candidate.Assignment.FencingToken {
+					t.Error("invalid rejected-candidate observation", h)
+				}
+			} else if h.ApplyStatus != "applied" || (h.ProbeStatus != "passed" && !(allowFailed && h.ProbeStatus == "failed")) {
 				t.Error("invalid receipt")
 			}
 			lastProbeStatus = h.ProbeStatus

@@ -339,9 +339,13 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 		case "/v1/platform-state/consumers/artifacts/parent":
 			json.NewEncoder(w).Encode(map[string]any{"artifact": parent, "assignment": candidate.Assignment, "release": candidate.Release})
 		case "/v1/platform-state/consumers/trusted-heartbeat":
-			reports.Add(1)
 			var h platformcontrol.PlatformConsumerHeartbeatEnvelope
 			json.NewDecoder(r.Body).Decode(&h)
+			if h.ApplyStatus == "applied" && h.ProbeStatus == "passed" {
+				reports.Add(1) // Only a positive receipt can acknowledge the candidate.
+			} else if h.ApplyStatus != "failed" || h.ProbeStatus != "failed" || !h.ServingLKG || h.ExpectedConsumerSetID != candidate.Assignment.ExpectedConsumerSetID {
+				t.Error("invalid rejected-candidate observation", h)
+			}
 			json.NewEncoder(w).Encode(model.PlatformConsumerHeartbeatResponse{Consumer: model.PlatformConsumerInstance{IdentityVerified: true, ConsumerID: h.ConsumerID, Sequence: h.Sequence, EvidenceHash: h.EvidenceHash, ExpectedConsumerSetID: h.ExpectedConsumerSetID}})
 		default:
 			t.Error("unexpected endpoint", r.URL.Path)
