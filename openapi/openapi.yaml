@@ -358,6 +358,12 @@ x-fugue-dns-artifact-serving:
     persistence failures cannot starve its proof refresh. Refresh preserves
     original artifact, release, applied-at and static-value expiry, uses only
     proofs bound to that retained release, and never reports candidate success.
+    During control-plane unavailability, an already positive checkpoint within
+    its signed max_stale_seconds may explicitly request retained-lkg route
+    observations. These still require fresh authenticated HTTPS probes and exact
+    route/release identity. They never move the checkpoint's applied-at deadline,
+    admit a candidate, or report a successful new release. Unreachable, excluded,
+    invalid, revoked or beyond-window edges remain ineligible.
 x-fugue-dns-observation-authority:
   semantics: >-
     The API background DNS loop only refreshes flatten observations and ranking
@@ -547,6 +553,7 @@ x-fugue-edge-route-probe:
     headers:
       X-Fugue-Route-Probe: '1'
       X-Fugue-Route-Probe-Nonce: 32 lowercase hexadecimal characters from a fresh random nonce
+      X-Fugue-Route-Probe-Mode: Optional retained-lkg, only for independent observation of an already accepted positive DNS checkpoint during control-plane unavailability. Ordinary and candidate probes omit it.
       X-Fugue-Route-Probe-State: Optional disabled, unavailable, or excluded. Disabled/unavailable prove an exact loaded local error-page route with no upstream; excluded proves this exact worker or group is excluded by the loaded route. Omission requires active routing.
   response:
     success: 204
@@ -555,11 +562,13 @@ x-fugue-edge-route-probe:
       X-Fugue-App-Traffic-Proof: Optional sha256 digest under fugue.edge.app-traffic-proof/v1; only emitted for an active application route with explicit release weights and the exact current bundle successfully applied to Caddy.
       X-Fugue-Route-Probe-Nonce: The request nonce
       X-Fugue-Route-Bundle-Version: Loaded immutable bundle version
-      X-Fugue-Route-Valid-Until: Original signed bundle expiry in RFC3339Nano
+      X-Fugue-Route-Valid-Until: Original signed bundle expiry in RFC3339Nano; for an explicitly marked retained-lkg response, the fixed original expiry plus configured edge max-stale window, independently bounded by the client's TLS and signed DNS checkpoint deadlines.
+      X-Fugue-Route-Probe-Mode: retained-lkg only when observing an expired but still applied and signature-verified bundle inside its configured offline window. Default proof parsers reject this response.
+      X-Fugue-Route-Bundle-Valid-Until: Original expired bundle deadline in RFC3339Nano, mandatory only with retained-lkg. The immutable bundle and its expiry are never rewritten.
       X-Fugue-Route-Edge-Id: Loaded worker identity
       X-Fugue-Route-Edge-Group: Loaded worker group identity
       X-Fugue-Route-Probe-State: Echoes the explicitly requested inactive state for a local route without upstreams, or excluded only when this worker/group is explicitly excluded by the exact loaded route.
-    errors: Invalid probe requests return 400; missing routes return 404; mismatched state, inactive routes without an explicit state request, foreign-group, expired, or excluded routes without an explicit excluded-state request return 503. Errors contain no proof headers.
+    errors: Invalid probe requests return 400; missing routes return 404; mismatched state, inactive routes without an explicit state request, foreign-group, expired without an eligible retained-lkg request, or excluded routes without an explicit excluded-state request return 503. Errors contain no proof headers.
   semantics: |-
     This protocol runs on the Edge proxy listener, not the control API. It reads one
     immutable route index snapshot and never proxies to an origin or peer. Responses
@@ -573,6 +582,13 @@ x-fugue-edge-route-probe:
     must separately attest all inactive routes were verified. Default policy omits
     inactive targets. TLS verification, ownership, exclusions, quorum and original
     evidence expiry remain mandatory.
+    Retained-lkg observations additionally require the exact current index to be
+    successfully applied to Caddy and the bundle to verify against current trust
+    including revoked keys. They carry the original expired bundle deadline
+    separately, never contain application-rollout proof, and are rejected by
+    default parsers. Repeated requests and restarts cannot move the offline
+    deadline. DNS clamps each observation to fresh-probe policy and its existing
+    signed checkpoint deadline. This is continuity evidence, not new authority.
     Digest material is Go encoding/json of {schema,route}, with schema set to
     fugue.edge.route-proof/v1 and route in EdgeRouteBinding field order. Hostname is
     lowercase without a trailing dot and path uses NormalizeAppRoutePathPrefix.

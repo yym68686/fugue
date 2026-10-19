@@ -467,6 +467,10 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	return status.ReadyRecords == status.Records
 }
 func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact) (*dnsServingState, error) {
+	if reason == "control_plane_unavailable" && bridge == nil && old.record.Positive &&
+		old.record.AppliedAt.Add(time.Duration(old.payload.Policy.MaxStaleSeconds)*time.Second).After(time.Now()) {
+		ctx = routeprobe.WithRetainedLKG(ctx)
+	}
 	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(old.payload, s.Config.DNSNodeID)))
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe

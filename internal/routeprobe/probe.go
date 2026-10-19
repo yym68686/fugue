@@ -26,6 +26,9 @@ import (
 // Proof is a newly collected HTTPS observation. ValidUntil is bounded by
 // the original serving bundle and the certificate chain, never renewed here.
 type Proof struct {
+	// Nonzero only for an explicitly requested retained-LKG observation.
+	// ValidUntil then bounds offline observation, not a renewed bundle lease.
+	BundleValidUntil time.Time                    `json:"bundle_valid_until,omitzero"`
 	AppTrafficDigest string                       `json:"app_traffic_digest,omitempty"`
 	TrafficRelease   *model.TrafficReleaseBinding `json:"traffic_release,omitempty"`
 	Digest           string                       `json:"digest"`
@@ -43,6 +46,19 @@ type Proof struct {
 var ErrUnavailable = errors.New("placement probe transport timed out")
 
 var ErrConnectionUnavailable = errors.New("placement probe connection unavailable")
+
+type retainedLKGContextKey struct{}
+
+// WithRetainedLKG is used only when re-observing an already accepted positive
+// DNS checkpoint. Candidate probes and rollout proofs remain strict.
+func WithRetainedLKG(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retainedLKGContextKey{}, true)
+}
+
+func RetainedLKGAllowed(ctx context.Context) bool {
+	allowed, _ := ctx.Value(retainedLKGContextKey{}).(bool)
+	return allowed
+}
 
 type connectionError struct {
 	err error
@@ -102,6 +118,10 @@ func Probe(ctx context.Context, host, path, address, expectedState string, timeo
 	}
 	req.Header.Set(routeproof.RequestHeader, "1")
 	req.Header.Set(routeproof.NonceHeader, nonce)
+	retained := RetainedLKGAllowed(ctx)
+	if retained {
+		req.Header.Set(routeproof.ModeHeader, routeproof.RetainedLKGMode)
+	}
 	if expectedState != "" {
 		req.Header.Set(routeproof.StateHeader, expectedState)
 	}
@@ -111,7 +131,7 @@ func Probe(ctx context.Context, host, path, address, expectedState string, timeo
 	}
 	defer response.Body.Close()
 	checkedAt := time.Now().UTC()
-	proof, err := ParseResponse(response, nonce, checkedAt)
+	proof, err := parseResponse(response, nonce, checkedAt, retained)
 	if err != nil {
 		return Proof{}, err
 	}
@@ -132,6 +152,10 @@ func Probe(ctx context.Context, host, path, address, expectedState string, timeo
 }
 
 func ParseResponse(response *http.Response, nonce string, now time.Time) (Proof, error) {
+	return parseResponse(response, nonce, now, false)
+}
+
+func parseResponse(response *http.Response, nonce string, now time.Time, allowRetained bool) (Proof, error) {
 	fail := errors.New("placement route proof invalid")
 	if response.StatusCode != http.StatusNoContent || !routeproof.ValidNonce(nonce) {
 		return Proof{}, fail
@@ -158,6 +182,18 @@ func ParseResponse(response *http.Response, nonce string, now time.Time) (Proof,
 	if err != nil || !expires.After(now) {
 		return Proof{}, fail
 	}
+	var bundleExpiry time.Time
+	mode, hasMode := response.Header[http.CanonicalHeaderKey(routeproof.ModeHeader)]
+	original, hasOriginal := response.Header[http.CanonicalHeaderKey(routeproof.BundleExpiryHeader)]
+	if hasMode || hasOriginal {
+		if !allowRetained || !hasMode || !hasOriginal || len(mode) != 1 || mode[0] != routeproof.RetainedLKGMode || len(original) != 1 {
+			return Proof{}, fail
+		}
+		bundleExpiry, err = time.Parse(time.RFC3339Nano, original[0])
+		if err != nil || bundleExpiry.IsZero() || bundleExpiry.After(now) || !expires.After(bundleExpiry) || response.Header.Get(routeproof.AppTrafficHeader) != "" {
+			return Proof{}, fail
+		}
+	}
 	var binding *model.TrafficReleaseBinding
 	appTraffic := response.Header.Get(routeproof.AppTrafficHeader)
 	if values, ok := response.Header[http.CanonicalHeaderKey(routeproof.AppTrafficHeader)]; ok {
@@ -180,5 +216,5 @@ func ParseResponse(response *http.Response, nonce string, now time.Time) (Proof,
 			return Proof{}, fail
 		}
 	}
-	return Proof{AppTrafficDigest: appTraffic, TrafficRelease: binding, Digest: digest, Version: response.Header.Get(routeproof.VersionHeader), EdgeID: response.Header.Get(routeproof.EdgeHeader), GroupID: response.Header.Get(routeproof.GroupHeader), ValidUntil: expires, State: state}, nil
+	return Proof{BundleValidUntil: bundleExpiry, AppTrafficDigest: appTraffic, TrafficRelease: binding, Digest: digest, Version: response.Header.Get(routeproof.VersionHeader), EdgeID: response.Header.Get(routeproof.EdgeHeader), GroupID: response.Header.Get(routeproof.GroupHeader), ValidUntil: expires, State: state}, nil
 }

@@ -12,10 +12,15 @@ import (
 	"fugue/internal/routeproof"
 )
 
-// A proof uses exactly one published index. It cannot execute an origin, read
-// business state, renew a lease, or turn an emergency expired LKG into new evidence.
+// A proof uses exactly one published index. Retained observations require an
+// explicit mode and cannot become candidate/application rollout evidence.
 func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	mode, hasMode := r.Header[http.CanonicalHeaderKey(routeproof.ModeHeader)]
+	if hasMode && (len(mode) != 1 || mode[0] != routeproof.RetainedLKGMode) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	expectedState := r.Header.Get(routeproof.StateHeader)
 	if len(r.Header.Values(routeproof.StateHeader)) > 1 || (len(r.Header.Values(routeproof.StateHeader)) == 1 && expectedState != model.EdgeRouteStatusDisabled && expectedState != model.EdgeRouteStatusUnavailable && expectedState != routeproof.StateExcluded) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -45,9 +50,15 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 		// local. Check actual ownership and forbid any remaining upstream.
 		stateMatches = !excluded && route.Status == expectedState && routeMatchesCurrentEdgeGroup(route, s.Config.EdgeGroupID) && route.UpstreamURL == "" && len(route.Upstreams) == 0
 	}
+	now := time.Now().UTC()
+	until := index.validUntil
+	retained := hasMode && !until.IsZero() && !until.After(now)
+	if retained {
+		until = s.retainedRouteProofUntil(index, now)
+	}
 	if index.publication.Candidate || !stateMatches || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) ||
 		strings.TrimSpace(s.Config.EdgeID) == "" || strings.TrimSpace(s.Config.EdgeGroupID) == "" || version == "" ||
-		!index.validUntil.After(time.Now()) {
+		!until.After(now) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
@@ -59,10 +70,14 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(routeproof.DigestHeader, digest)
 	w.Header().Set(routeproof.NonceHeader, r.Header.Get(routeproof.NonceHeader))
 	w.Header().Set(routeproof.VersionHeader, version)
-	w.Header().Set(routeproof.ExpiryHeader, index.validUntil.UTC().Format(time.RFC3339Nano))
+	w.Header().Set(routeproof.ExpiryHeader, until.UTC().Format(time.RFC3339Nano))
+	if retained {
+		w.Header().Set(routeproof.ModeHeader, routeproof.RetainedLKGMode)
+		w.Header().Set(routeproof.BundleExpiryHeader, index.validUntil.UTC().Format(time.RFC3339Nano))
+	}
 	w.Header().Set(routeproof.EdgeHeader, s.Config.EdgeID)
 	w.Header().Set(routeproof.GroupHeader, s.Config.EdgeGroupID)
-	if expectedState == "" && s.appTrafficProofApplied(index) {
+	if !retained && expectedState == "" && s.appTrafficProofApplied(index) {
 		active := true
 		for _, upstream := range route.Upstreams {
 			if upstream.Status != "" && upstream.Status != model.EdgeRouteStatusActive {
@@ -85,6 +100,39 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(routeproof.StateHeader, expectedState)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) retainedRouteProofUntil(index *edgeRouteIndex, now time.Time) time.Time {
+	if index == nil || index.publication.Candidate || index.validUntil.IsZero() || s.Config.MaxStale <= 0 {
+		return time.Time{}
+	}
+	until := index.validUntil.Add(s.Config.MaxStale)
+	if !until.After(now) {
+		return time.Time{}
+	}
+	s.mu.Lock()
+	if !s.Config.CaddyEnabled || s.bundle == nil || s.routeIndex.Load() != index || s.bundle.Version != index.bundleVersion ||
+		s.snapshot.CaddyAppliedVersion != index.bundleVersion || s.snapshot.CaddyLastError != "" || !s.snapshot.Healthy {
+		s.mu.Unlock()
+		return time.Time{}
+	}
+	bundle := *s.bundle
+	s.mu.Unlock()
+	if (!s.edgeControlRouteSourceEnabled() && strings.TrimSpace(s.Config.BundleSigningKey) == "" && strings.TrimSpace(s.Config.BundleSigningPreviousKey) == "") ||
+		(bundle.Signature == "" && len(bundle.Signatures) == 0) {
+		return time.Time{}
+	}
+	// Recheck signatures and current trust, including revoked keys. This never
+	// reads the API, rewrites the bundle, renews CachedAt or extends MaxStale.
+	if s.verifyCachedBundle(cacheFile{Bundle: bundle}, now) != nil {
+		return time.Time{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.routeIndex.Load() != index || s.snapshot.CaddyAppliedVersion != index.bundleVersion || s.snapshot.CaddyLastError != "" || !s.snapshot.Healthy {
+		return time.Time{}
+	}
+	return until
 }
 
 // Check the exact immutable index against the applied proxy snapshot under the

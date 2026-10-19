@@ -23,7 +23,12 @@ const (
 	GroupHeader   = "X-Fugue-Route-Edge-Group"
 	StateHeader   = "X-Fugue-Route-Probe-State"
 	TrafficHeader = "X-Fugue-Traffic-Release"
-	StateExcluded = "excluded"
+	// Retained observations describe a previously applied LKG within its
+	// configured offline window. They cannot admit a new release.
+	ModeHeader         = "X-Fugue-Route-Probe-Mode"
+	RetainedLKGMode    = "retained-lkg"
+	BundleExpiryHeader = "X-Fugue-Route-Bundle-Valid-Until"
+	StateExcluded      = "excluded"
 	// AppTrafficHeader carries a digest of the release identities, upstream
 	// metadata and weights actually loaded by Edge for an application route.
 	// The payload is intentionally never returned.
