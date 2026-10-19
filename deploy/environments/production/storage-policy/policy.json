@@ -1,1 +1,22 @@
-{"namespace":"fugue-system","name":"fugue-storage-policy","policy":{"version":1,"compiler_input_chunks":true,"checkpoint_pages":true,"database_max_open":24,"database_max_idle":8,"database_idle_seconds":60}}
+{
+  "namespace": "fugue-system",
+  "name": "fugue-storage-policy",
+  "policy": {
+    "version": 1,
+    "compiler_input_chunks": true,
+    "checkpoint_pages": true,
+    "database_max_open": 24,
+    "database_max_idle": 8,
+    "database_idle_seconds": 60
+  },
+  "observationRetention": {
+    "version": 1,
+    "enabled": true,
+    "interval_seconds": 30,
+    "batch_rows": 500,
+    "heartbeat_days": 7,
+    "heartbeat_rows_per_chain": 10000,
+    "probe_days": 7,
+    "probe_rows_per_table": 1000000
+  }
+}
