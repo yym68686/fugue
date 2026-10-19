@@ -12,6 +12,7 @@ import (
 	"hash"
 	"io"
 	"regexp"
+	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -22,6 +23,10 @@ import (
 
 const inputChunkBytes = 256 << 10
 const inputMaxBytes = 1 << 30
+
+// Bound the additional write buffer to four MiB while amortizing database
+// round trips. The stored chunk format and transaction are unchanged.
+const inputChunkBatchSize = 16
 
 var inputDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
@@ -130,6 +135,14 @@ type inputChunkWriter struct {
 	expected          [][sha256.Size]byte
 	dnsRanges         []compilerDNSRange
 	dnsRangesOverflow bool
+	pending           []inputPendingChunk
+	batch             []byte
+}
+
+type inputPendingChunk struct {
+	ordinal int
+	digest  string
+	data    []byte
 }
 
 func (w *inputChunkWriter) Write(p []byte) (int, error) {
@@ -144,7 +157,7 @@ func (w *inputChunkWriter) Write(p []byte) (int, error) {
 		w.size += int64(n)
 		p = p[n:]
 		if len(w.chunk) == cap(w.chunk) {
-			if err := w.flush(); err != nil {
+			if err := w.stageChunk(); err != nil {
 				return total - len(p), err
 			}
 		}
@@ -152,6 +165,13 @@ func (w *inputChunkWriter) Write(p []byte) (int, error) {
 	return total, nil
 }
 func (w *inputChunkWriter) flush() error {
+	if err := w.stageChunk(); err != nil {
+		return err
+	}
+	return w.flushPending()
+}
+
+func (w *inputChunkWriter) stageChunk() error {
 	if len(w.chunk) == 0 {
 		return nil
 	}
@@ -160,13 +180,51 @@ func (w *inputChunkWriter) flush() error {
 	}
 	h := sha256.Sum256(w.chunk)
 	if w.tx != nil {
-		if _, err := w.tx.ExecContext(w.ctx, `INSERT INTO fugue_platform_input_chunks(content_hash,ordinal,chunk_hash,data) VALUES($1,$2,$3,$4)`, w.digest, w.count, "sha256:"+hex.EncodeToString(h[:]), w.chunk); err != nil {
-			return err
+		// The encoder immediately reuses w.chunk. Retain independent bounded
+		// bytes until this batch has been synchronously written.
+		if w.batch == nil {
+			w.batch = make([]byte, 0, inputChunkBatchSize*cap(w.chunk))
 		}
+		start := len(w.batch)
+		w.batch = append(w.batch, w.chunk...)
+		w.pending = append(w.pending, inputPendingChunk{ordinal: w.count, digest: "sha256:" + hex.EncodeToString(h[:]), data: w.batch[start:len(w.batch):len(w.batch)]})
 	}
 	w.expected = append(w.expected, h)
 	w.count++
 	w.chunk = w.chunk[:0]
+	if len(w.pending) == inputChunkBatchSize {
+		return w.flushPending()
+	}
+	return nil
+}
+
+func (w *inputChunkWriter) flushPending() error {
+	if len(w.pending) == 0 {
+		return nil
+	}
+	var statement strings.Builder
+	statement.WriteString(`INSERT INTO fugue_platform_input_chunks(content_hash,ordinal,chunk_hash,data) VALUES`)
+	args := make([]any, 1, 2+4*len(w.pending))
+	args[0] = w.digest
+	// Send one binary buffer after the small parameters. Many separate bytea
+	// parameters repeatedly grow the driver's encoding buffers for every batch.
+	// PostgreSQL splits the bounded payload back into the original stored chunks.
+	payloadParameter, offset := 2+4*len(w.pending), 1
+	for index, chunk := range w.pending {
+		if index > 0 {
+			statement.WriteByte(',')
+		}
+		fmt.Fprintf(&statement, "($1,$%d,$%d,substring($%d::bytea from $%d::int for $%d::int))", 2+4*index, 3+4*index, payloadParameter, 4+4*index, 5+4*index)
+		args = append(args, chunk.ordinal, chunk.digest, offset, len(chunk.data))
+		offset += len(chunk.data)
+	}
+	args = append(args, w.batch)
+	if _, err := w.tx.ExecContext(w.ctx, statement.String(), args...); err != nil {
+		return err
+	}
+	clear(w.pending)
+	w.pending = w.pending[:0]
+	w.batch = w.batch[:0]
 	return nil
 }
 
