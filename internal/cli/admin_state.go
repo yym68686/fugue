@@ -20,11 +20,41 @@ type artifactStateView struct {
 	Authority          string                                    `json:"verification_authority"`
 }
 
+const artifactStateReadAttempts = 3
+
 func (c *CLI) loadArtifactState(client *Client, id, channel string) (artifactStateView, error) {
+	return c.loadArtifactStateWithMode(client, id, channel, false)
+}
+
+func (c *CLI) loadCurrentArtifactState(client *Client, id, channel string) (artifactStateView, error) {
+	return c.loadArtifactStateWithMode(client, id, channel, true)
+}
+
+func (c *CLI) loadArtifactStateWithMode(client *Client, id, channel string, requireCurrent bool) (artifactStateView, error) {
+	artifactID := id
+	var last artifactStateView
+	for attempt := 0; attempt < artifactStateReadAttempts; attempt++ {
+		view, nextID, stable, err := c.loadArtifactStateOnce(client, artifactID, channel, requireCurrent)
+		last = view
+		if err != nil {
+			return view, err
+		}
+		if stable {
+			return view, nil
+		}
+		if nextID != "" {
+			artifactID = nextID
+		}
+	}
+	last.MissingEvidence = append(last.MissingEvidence, "state_snapshot_changed_during_read")
+	return last, withExitCode(fmt.Errorf("platform state changed during read; no single release snapshot was established"), ExitCodeIndeterminate)
+}
+
+func (c *CLI) loadArtifactStateOnce(client *Client, id, channel string, requireCurrent bool) (artifactStateView, string, bool, error) {
 	result := artifactStateView{ObservedAt: time.Now().UTC(), Authority: "control_plane", Consumers: []model.PlatformConsumerInstance{}, Convergence: []model.PlatformConsumerConvergenceStatus{}, MissingEvidence: []string{}}
 	artifact, err := client.GetPlatformArtifact(id)
 	if err != nil {
-		return result, err
+		return result, "", false, err
 	}
 	result.Artifact = artifact
 	current, err := client.GetPlatformStateArtifact(artifact.ArtifactKind, artifact.ScopeKey, channel)
@@ -32,6 +62,9 @@ func (c *CLI) loadArtifactState(client *Client, id, channel string) (artifactSta
 		result.MissingEvidence = append(result.MissingEvidence, "current_release")
 	} else {
 		result.Current = current
+	}
+	if requireCurrent && current.Artifact != nil && current.Artifact.ID != artifact.ID {
+		return result, current.Artifact.ID, false, nil
 	}
 	consumers, err := client.ListPlatformArtifactConsumers(artifact.ID)
 	if err != nil {
@@ -83,11 +116,46 @@ func (c *CLI) loadArtifactState(client *Client, id, channel string) (artifactSta
 			}
 		}
 	}
+	// The producer may publish while the evidence reads are in flight. Re-read
+	// the serving pointer and only return a positive snapshot when its
+	// artifact/release/LKG watermark is unchanged.
+	finalCurrent, finalErr := client.GetPlatformStateArtifact(artifact.ArtifactKind, artifact.ScopeKey, channel)
+	if finalErr != nil {
+		result.MissingEvidence = append(result.MissingEvidence, "final_current_release")
+		return result, "", false, nil
+	}
+	if requireCurrent && finalCurrent.Artifact != nil && finalCurrent.Artifact.ID != artifact.ID {
+		return result, finalCurrent.Artifact.ID, false, nil
+	}
+	if !samePlatformStateSnapshot(current, finalCurrent) {
+		nextID := artifact.ID
+		if finalCurrent.Artifact != nil && finalCurrent.Artifact.ID != "" {
+			nextID = finalCurrent.Artifact.ID
+		}
+		return result, nextID, false, nil
+	}
+	result.Current = finalCurrent
 	if current.Artifact != nil && current.Release != nil && current.LKG != nil {
 		lkg := current.LKG
 		result.VerifiedLKG = current.Artifact.ID == artifact.ID && current.Release.ArtifactID == artifact.ID && current.Release.Status == model.PlatformArtifactReleaseStatusActive && current.Release.VerificationState == model.PlatformArtifactVerificationStateVerified && lkg.ArtifactID == artifact.ID && lkg.ContentHash == artifact.ContentHash && lkg.Generation == artifact.Generation && lkg.ExpiresAt.After(result.ObservedAt) && lkg.GenerationSequence > 0 && lkg.VerifiedByReleaseID == current.Release.ID && lkg.VerificationEvidenceHash != "" && lkg.SnapshotProvenance.Signature != "" && lkg.ArtifactProvenance.Signature != ""
 	}
-	return result, nil
+	return result, artifact.ID, true, nil
+}
+
+func samePlatformStateSnapshot(a, b platformStateArtifactEnvelope) bool {
+	if (a.Artifact == nil) != (b.Artifact == nil) || (a.Release == nil) != (b.Release == nil) || (a.LKG == nil) != (b.LKG == nil) {
+		return false
+	}
+	if a.Artifact != nil && (a.Artifact.ID != b.Artifact.ID || a.Artifact.Generation != b.Artifact.Generation || a.Artifact.ContentHash != b.Artifact.ContentHash) {
+		return false
+	}
+	if a.Release != nil && (a.Release.ID != b.Release.ID || a.Release.ArtifactID != b.Release.ArtifactID || a.Release.FencingToken != b.Release.FencingToken || a.Release.VerificationState != b.Release.VerificationState) {
+		return false
+	}
+	if a.LKG != nil && (a.LKG.ID != b.LKG.ID || a.LKG.ArtifactID != b.LKG.ArtifactID || a.LKG.Generation != b.LKG.Generation || a.LKG.VerifiedByReleaseID != b.LKG.VerifiedByReleaseID || a.LKG.VerificationEvidenceHash != b.LKG.VerificationEvidenceHash) {
+		return false
+	}
+	return true
 }
 func (c *CLI) newAdminStateCommand() *cobra.Command {
 	var kind, scope, channel string
@@ -107,7 +175,7 @@ func (c *CLI) newAdminStateCommand() *cobra.Command {
 		if current.Artifact == nil {
 			return c.renderResourceResult(map[string]any{"kind": kind, "scope": scope, "state": "empty", "verified_lkg": false})
 		}
-		view, err := c.loadArtifactState(client, current.Artifact.ID, channel)
+		view, err := c.loadCurrentArtifactState(client, current.Artifact.ID, channel)
 		if err != nil {
 			return err
 		}

@@ -109,3 +109,48 @@ func TestCLIUsesAuthoritativeConvergenceAndRequiresAllReleaseMembers(t *testing.
 		t.Fatal("partial authoritative assessments became full convergence", view)
 	}
 }
+
+func TestCLIStateRetriesWhenServingArtifactChangesDuringRead(t *testing.T) {
+	artifactA := model.PlatformArtifact{ID: "artifact-a", ArtifactKind: model.PlatformArtifactKindReleaseSet, ScopeKey: "global", Generation: "generation-a", ContentHash: "hash-a", Content: map[string]any{"artifact_kinds": []any{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig}}}
+	artifactB := model.PlatformArtifact{ID: "artifact-b", ArtifactKind: model.PlatformArtifactKindReleaseSet, ScopeKey: "global", Generation: "generation-b", ContentHash: "hash-b", Content: map[string]any{"artifact_kinds": []any{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig}}}
+	releaseB := model.PlatformArtifactRelease{ID: "release-b", ArtifactID: artifactB.ID, Status: model.PlatformArtifactReleaseStatusActive, FencingToken: 2}
+	currentReads := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("state inspection mutated: %s", r.Method)
+		}
+		switch r.URL.Path {
+		case "/v1/admin/artifacts/artifact-a":
+			json.NewEncoder(w).Encode(map[string]any{"artifact": artifactA})
+		case "/v1/admin/artifacts/artifact-b":
+			json.NewEncoder(w).Encode(map[string]any{"artifact": artifactB})
+		case "/v1/platform-state/artifacts/release_set":
+			currentReads++
+			if currentReads == 1 {
+				json.NewEncoder(w).Encode(map[string]any{"artifact": artifactB, "release": releaseB})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"artifact": artifactB, "release": releaseB})
+		case "/v1/admin/artifacts/artifact-b/consumers":
+			fmt.Fprint(w, `{"consumers":[]}`)
+		case "/v1/admin/platform-state/convergence":
+			if r.URL.Query().Get("release_set_id") != artifactB.ID || r.URL.Query().Get("artifact_release_id") != releaseB.ID || r.URL.Query().Get("artifact_kind") != "" {
+				t.Fatalf("convergence was not bound to retried release: %s", r.URL.RawQuery)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"convergence": []model.PlatformConsumerConvergenceStatus{{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ExpectedGeneration: "route-b", Pass: true}, {ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ExpectedGeneration: "dns-b", Pass: true}, {ArtifactKind: model.PlatformArtifactKindCaddyRouteConfig, ExpectedGeneration: "tls-b", Pass: true}}})
+		default:
+			t.Errorf("unexpected state read %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	client, _ := newClientWithOptions(srv.URL, "test", clientOptions{RequireToken: true})
+	c := newCLI(&bytes.Buffer{}, &bytes.Buffer{})
+	view, err := c.loadCurrentArtifactState(client, artifactA.ID, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Artifact.ID != artifactB.ID || view.Current.Artifact == nil || view.Current.Artifact.ID != artifactB.ID || !view.ConsumersConverged || currentReads < 3 {
+		t.Fatalf("state read did not retry to one serving snapshot: reads=%d view=%+v", currentReads, view)
+	}
+}
