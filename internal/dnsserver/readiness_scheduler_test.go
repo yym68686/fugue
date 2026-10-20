@@ -208,7 +208,6 @@ func TestDNSReadinessRefreshPrioritizesExpiryWithoutStarvingUnobservedOrAgedWork
 				scheduler.attempts[requirement.ID] = now.Add(-time.Second)
 				scheduler.expires[requirement.ID] = now.Add(2 * time.Minute)
 			}
-			scheduler.expires["expiring"] = now.Add(5 * time.Second)
 			want := "expiring.example.test"
 			if scenario == "never observed" {
 				delete(scheduler.attempts, "waiting")
@@ -217,6 +216,9 @@ func TestDNSReadinessRefreshPrioritizesExpiryWithoutStarvingUnobservedOrAgedWork
 			if scenario == "aged" {
 				scheduler.attempts["waiting"] = now.Add(-time.Minute)
 				want = "waiting.example.test"
+			}
+			if scenario == "expiry" {
+				scheduler.expires["expiring"] = now.Add(5 * time.Second)
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -230,6 +232,41 @@ func TestDNSReadinessRefreshPrioritizesExpiryWithoutStarvingUnobservedOrAgedWork
 				t.Fatal("expiry scheduling lost bounded fairness", scenario, first, want)
 			}
 		})
+	}
+}
+
+func TestDNSReadinessRefreshesProofNearExpiryBeforeUnobservedRoutes(t *testing.T) {
+	started := time.Now().UTC()
+	plan := &platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{
+		{ID: "unobserved", Hostname: "unobserved.example.test", Address: "192.0.2.1"},
+		{ID: "primary", Hostname: "primary.example.test", Address: "192.0.2.1"},
+		{ID: "comfortable", Hostname: "comfortable.example.test", Address: "192.0.2.1"},
+	}}
+	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, MaxConcurrency: 1}
+	scheduler := &dnsReadinessScheduler{targets: map[string]dnsProbeTargetState{}}
+	scheduler.digest, _ = platformconfig.Digest(struct {
+		Scope  string
+		Plan   *platformconfig.DNSReadinessPlan
+		Policy *platformconfig.DNSReadinessPolicy
+	}{scheduler.scope, plan, policy})
+	scheduler.attempts = map[string]time.Time{
+		"primary":     started.Add(-110 * time.Second),
+		"comfortable": started.Add(-20 * time.Second),
+	}
+	scheduler.expires = map[string]time.Time{
+		"primary":     started.Add(10 * time.Second),
+		"comfortable": started.Add(10 * time.Minute),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := ""
+	scheduler.collect(ctx, plan, policy, func(_ context.Context, hostname, _, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+		first = hostname
+		cancel()
+		return routeprobe.Proof{}, errors.New("synthetic probe")
+	})
+	if first != "primary.example.test" {
+		t.Fatalf("readiness scheduler spent its bounded window before refreshing the expiring primary: got %q", first)
 	}
 }
 

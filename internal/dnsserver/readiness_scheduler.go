@@ -109,10 +109,24 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 	queues := make([]dnsProbeTargetQueue, 0, len(addresses))
 	for _, address := range addresses {
 		indices := byAddress[address]
+		interval := time.Duration(policy.ProbeIntervalSeconds) * time.Second
 		sort.SliceStable(indices, func(left, right int) bool {
 			first, second := plan.Probes[indices[left]].ID, plan.Probes[indices[right]].ID
 			firstAttempt, secondAttempt := scheduler.attempts[first], scheduler.attempts[second]
-			interval := time.Duration(policy.ProbeIntervalSeconds) * time.Second
+			firstExpiry, secondExpiry := scheduler.expires[first], scheduler.expires[second]
+			// A sweep can occupy an entire interval. Renew an existing proof
+			// before that sweep plus the next interval can exhaust its lease.
+			// Never-observed work otherwise sorts ahead of every old proof and
+			// can repeatedly leave a healthy serving endpoint without evidence.
+			refreshHorizon := started.Add(2 * interval)
+			firstRefreshDue := !firstExpiry.IsZero() && !firstExpiry.After(refreshHorizon)
+			secondRefreshDue := !secondExpiry.IsZero() && !secondExpiry.After(refreshHorizon)
+			if firstRefreshDue != secondRefreshDue {
+				return firstRefreshDue
+			}
+			if firstRefreshDue && !firstExpiry.Equal(secondExpiry) {
+				return firstExpiry.Before(secondExpiry)
+			}
 			firstAged := firstAttempt.IsZero() || started.Sub(firstAttempt) >= 2*interval
 			secondAged := secondAttempt.IsZero() || started.Sub(secondAttempt) >= 2*interval
 			if firstAged != secondAged {
