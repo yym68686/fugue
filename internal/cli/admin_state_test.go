@@ -7,6 +7,7 @@ import (
 	"fugue/internal/model"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -42,9 +43,9 @@ func TestArtifactStateDoesNotTreatPublishedAsVerified(t *testing.T) {
 	}
 }
 func TestArtifactWaitDeadlineNeverPublishesOrVerifies(t *testing.T) {
-	calls := 0
+	var calls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		calls.Add(1)
 		if r.Method != "GET" {
 			t.Errorf("unexpected mutation %s", r.Method)
 		}
@@ -63,8 +64,8 @@ func TestArtifactWaitDeadlineNeverPublishesOrVerifies(t *testing.T) {
 	var out, stderr bytes.Buffer
 	start := time.Now()
 	err := runWithStreams([]string{"--base-url", srv.URL, "--token", "test", "--json", "admin", "artifact", "wait", "artifact_test", "--timeout", "30ms", "--interval", "1ms"}, &out, &stderr)
-	if ExitCodeForError(err) != 6 || time.Since(start) > time.Second || calls == 0 {
-		t.Fatalf("err=%v calls=%d", err, calls)
+	if ExitCodeForError(err) != 6 || time.Since(start) > time.Second || calls.Load() == 0 {
+		t.Fatalf("err=%v calls=%d", err, calls.Load())
 	}
 	var result artifactStateView
 	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
@@ -152,5 +153,73 @@ func TestCLIStateRetriesWhenServingArtifactChangesDuringRead(t *testing.T) {
 	}
 	if view.Artifact.ID != artifactB.ID || view.Current.Artifact == nil || view.Current.Artifact.ID != artifactB.ID || !view.ConsumersConverged || currentReads < 3 {
 		t.Fatalf("state read did not retry to one serving snapshot: reads=%d view=%+v", currentReads, view)
+	}
+}
+
+func TestCLIExplicitArtifactNeverRetargetsDuringServingChurn(t *testing.T) {
+	pinned := model.PlatformArtifact{ID: "artifact-pinned", ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ScopeKey: "global", Generation: "generation-pinned", ContentHash: "hash-pinned"}
+	current := model.PlatformArtifact{ID: "artifact-current", ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ScopeKey: "global", Generation: "generation-current", ContentHash: "hash-current"}
+	reads := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected mutation %s", r.Method)
+		}
+		switch r.URL.Path {
+		case "/v1/admin/artifacts/artifact-pinned":
+			json.NewEncoder(w).Encode(map[string]any{"artifact": pinned})
+		case "/v1/platform-state/artifacts/edge_route_bundle":
+			reads++
+			if reads == 1 {
+				json.NewEncoder(w).Encode(map[string]any{"artifact": pinned, "release": model.PlatformArtifactRelease{ID: "release-pinned", ArtifactID: pinned.ID}})
+			} else {
+				json.NewEncoder(w).Encode(map[string]any{"artifact": current, "release": model.PlatformArtifactRelease{ID: "release-current", ArtifactID: current.ID}})
+			}
+		case "/v1/admin/artifacts/artifact-pinned/consumers":
+			fmt.Fprint(w, `{"consumers":[]}`)
+		case "/v1/admin/platform-state/convergence":
+			json.NewEncoder(w).Encode(map[string]any{"convergence": []model.PlatformConsumerConvergenceStatus{{ArtifactKind: pinned.ArtifactKind, ExpectedGeneration: current.Generation, Pass: true}, {ArtifactKind: pinned.ArtifactKind, ExpectedGeneration: pinned.Generation, Pass: false}}})
+		default:
+			t.Errorf("explicit artifact was replaced by another target: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	client, _ := newClientWithOptions(srv.URL, "test", clientOptions{RequireToken: true})
+	c := newCLI(&bytes.Buffer{}, &bytes.Buffer{})
+	view, err := c.loadArtifactState(client, pinned.ID, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Artifact.ID != pinned.ID || view.ConsumersConverged || view.VerifiedLKG || reads < 4 {
+		t.Fatalf("explicit target lost or false-positive after retry: reads=%d view=%+v", reads, view)
+	}
+}
+
+func TestCLIPinnedReleaseSetDoesNotUseUnrelatedCurrentRelease(t *testing.T) {
+	artifact := model.PlatformArtifact{ID: "release-set-pinned", ArtifactKind: model.PlatformArtifactKindReleaseSet, ScopeKey: "global", Content: map[string]any{"artifact_kinds": []any{model.PlatformArtifactKindEdgeRouteBundle}}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/admin/artifacts/release-set-pinned":
+			json.NewEncoder(w).Encode(map[string]any{"artifact": artifact})
+		case "/v1/platform-state/artifacts/release_set":
+			json.NewEncoder(w).Encode(platformStateArtifactEnvelope{Artifact: &model.PlatformArtifact{ID: "release-set-current"}, Release: &model.PlatformArtifactRelease{ID: "release-current", ArtifactID: "release-set-current"}})
+		case "/v1/admin/artifacts/release-set-pinned/consumers":
+			fmt.Fprint(w, `{"consumers":[]}`)
+		case "/v1/admin/platform-state/convergence":
+			if r.URL.Query().Get("release_set_id") != artifact.ID || r.URL.Query().Get("artifact_release_id") != "" {
+				t.Errorf("pinned release set mixed with unrelated current release: %s", r.URL.RawQuery)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"convergence": []model.PlatformConsumerConvergenceStatus{{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, Pass: false}}})
+		default:
+			t.Errorf("unexpected target %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	client, _ := newClientWithOptions(srv.URL, "test", clientOptions{RequireToken: true})
+	c := newCLI(&bytes.Buffer{}, &bytes.Buffer{})
+	view, err := c.loadArtifactState(client, artifact.ID, "full")
+	if err != nil || view.Artifact.ID != artifact.ID || view.ConsumersConverged || view.VerifiedLKG {
+		t.Fatalf("pinned release set inspection changed its target/evidence: err=%v view=%+v", err, view)
 	}
 }
