@@ -11,6 +11,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -113,7 +114,8 @@ func (c *Client) doPreparedOnce(httpReq *http.Request) (httpPreparedResponse, er
 	}
 
 	startedAt := time.Now()
-	metrics := httpTimingMetrics{}
+	traceMetrics := httpTimingMetrics{}
+	var traceMu sync.Mutex
 	var (
 		dnsStartedAt     time.Time
 		connectStartedAt time.Time
@@ -123,39 +125,67 @@ func (c *Client) doPreparedOnce(httpReq *http.Request) (httpPreparedResponse, er
 
 	trace := &httptrace.ClientTrace{
 		DNSStart: func(_ httptrace.DNSStartInfo) {
+			traceMu.Lock()
+			defer traceMu.Unlock()
 			dnsStartedAt = time.Now()
 		},
 		DNSDone: func(_ httptrace.DNSDoneInfo) {
-			if !dnsStartedAt.IsZero() && metrics.DNS == 0 {
-				metrics.DNS = time.Since(dnsStartedAt)
+			traceMu.Lock()
+			defer traceMu.Unlock()
+			if !dnsStartedAt.IsZero() && traceMetrics.DNS == 0 {
+				traceMetrics.DNS = time.Since(dnsStartedAt)
 			}
 		},
 		ConnectStart: func(_, _ string) {
+			traceMu.Lock()
+			defer traceMu.Unlock()
 			if connectStartedAt.IsZero() {
 				connectStartedAt = time.Now()
 			}
 		},
 		ConnectDone: func(_, _ string, _ error) {
-			if !connectStartedAt.IsZero() && metrics.Connect == 0 {
-				metrics.Connect = time.Since(connectStartedAt)
+			traceMu.Lock()
+			defer traceMu.Unlock()
+			if !connectStartedAt.IsZero() && traceMetrics.Connect == 0 {
+				traceMetrics.Connect = time.Since(connectStartedAt)
 			}
 		},
 		GotConn: func(info httptrace.GotConnInfo) {
-			metrics.ReusedConnection = info.Reused
+			traceMu.Lock()
+			defer traceMu.Unlock()
+			traceMetrics.ReusedConnection = info.Reused
 		},
 		TLSHandshakeStart: func() {
+			traceMu.Lock()
+			defer traceMu.Unlock()
 			tlsStartedAt = time.Now()
 		},
 		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
-			if !tlsStartedAt.IsZero() && metrics.TLS == 0 {
-				metrics.TLS = time.Since(tlsStartedAt)
+			traceMu.Lock()
+			defer traceMu.Unlock()
+			if !tlsStartedAt.IsZero() && traceMetrics.TLS == 0 {
+				traceMetrics.TLS = time.Since(tlsStartedAt)
 			}
 		},
 		GotFirstResponseByte: func() {
+			traceMu.Lock()
+			defer traceMu.Unlock()
 			if firstByteAt.IsZero() {
 				firstByteAt = time.Now()
 			}
 		},
+	}
+	// Hooks may run concurrently or after the request has completed. Publish
+	// a value snapshot so late callbacks cannot race with timing consumers.
+	snapshotTiming := func() httpTimingMetrics {
+		traceMu.Lock()
+		defer traceMu.Unlock()
+		metrics := traceMetrics
+		metrics.Total = time.Since(startedAt)
+		if !firstByteAt.IsZero() {
+			metrics.TTFB = firstByteAt.Sub(startedAt)
+		}
+		return metrics
 	}
 
 	ctx := httpReq.Context()
@@ -166,7 +196,7 @@ func (c *Client) doPreparedOnce(httpReq *http.Request) (httpPreparedResponse, er
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		metrics.Total = time.Since(startedAt)
+		metrics := snapshotTiming()
 		if c.observer != nil {
 			c.observer(httpObservedRequest{
 				Method: httpReq.Method,
@@ -180,10 +210,7 @@ func (c *Client) doPreparedOnce(httpReq *http.Request) (httpPreparedResponse, er
 	defer resp.Body.Close()
 
 	payload, readErr := io.ReadAll(resp.Body)
-	metrics.Total = time.Since(startedAt)
-	if !firstByteAt.IsZero() {
-		metrics.TTFB = firstByteAt.Sub(startedAt)
-	}
+	metrics := snapshotTiming()
 
 	result := httpPreparedResponse{
 		Method:     httpReq.Method,
