@@ -18,5 +18,9 @@
     "heartbeat_rows_per_chain": 10000,
     "probe_days": 7,
     "probe_rows_per_table": 1000000
+  },
+  "compilerInputCodec": {
+    "version": 1,
+    "enabled": true
   }
 }
