@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -22,10 +23,13 @@ type StoragePolicy struct {
 	DatabaseIdleSeconds int  `json:"database_idle_seconds"`
 }
 type storagePolicyState struct {
-	mu        sync.RWMutex
-	value     StoragePolicy
-	lastError bool
-	loaded    time.Time
+	mu              sync.RWMutex
+	value           StoragePolicy
+	lastError       bool
+	loaded          time.Time
+	codec           compilerInputCodecPolicy
+	codecReadFailed bool
+	codecObservedAt time.Time
 }
 
 func (s *Store) StoragePolicy() StoragePolicy {
@@ -54,6 +58,7 @@ func (s *Store) RunStoragePolicy(ctx context.Context, path string) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
+		s.loadCompilerInputCodecPolicy(filepath.Join(filepath.Dir(path), "compiler-input-codec.json"))
 		f, err := os.Open(path)
 		var p StoragePolicy
 		if err == nil {
@@ -89,9 +94,13 @@ func (s *Store) StorageObservation(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	s.storagePolicy.mu.RLock()
+	codec, codecFailed, codecAt := s.storagePolicy.codec, s.storagePolicy.codecReadFailed, s.storagePolicy.codecObservedAt
 	p, loaded, failed := s.storagePolicy.value, s.storagePolicy.loaded, s.storagePolicy.lastError
 	s.storagePolicy.mu.RUnlock()
 	out := map[string]any{"schema": "fugue.storage.observation.v1", "observed_at": time.Now().UTC(), "policy": p, "policy_loaded_at": loaded, "policy_read_failed": failed, "compiler_input_chunk_bytes": inputChunkBytes, "compiler_input_database_writer_limit": 1}
+	out["compiler_input_codec"] = codec
+	out["compiler_input_codec_read_failed"] = codecFailed
+	out["compiler_input_codec_observed_at"] = codecAt
 	out["observation_retention"] = s.retentionObservation()
 	if s.db != nil {
 		out["database_pool"] = s.db.Stats()

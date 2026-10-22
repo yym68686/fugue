@@ -149,6 +149,7 @@ type inputChunkWriter struct {
 	dnsRangesOverflow bool
 	pending           []inputPendingChunk
 	batch             []byte
+	codec             *inputChunkEncoder
 }
 
 type inputPendingChunk struct {
@@ -187,18 +188,27 @@ func (w *inputChunkWriter) stageChunk() error {
 	if len(w.chunk) == 0 {
 		return nil
 	}
-	if w.count >= inputMaxBytes/inputChunkBytes {
+	if w.count >= (inputMaxBytes+cap(w.chunk)-1)/cap(w.chunk) {
 		return fmt.Errorf("compiler input verification chunk inventory exceeds bound: %w", ErrConflict)
 	}
-	h := sha256.Sum256(w.chunk)
+	stored := w.chunk
+	if w.codec != nil {
+		var err error
+		stored, err = w.codec.encode(w.chunk)
+		if err != nil {
+			return err
+		}
+		w.storedSizes = append(w.storedSizes, len(stored))
+	}
+	h := sha256.Sum256(stored)
 	if w.tx != nil {
 		// The encoder immediately reuses w.chunk. Retain independent bounded
 		// bytes until this batch has been synchronously written.
 		if w.batch == nil {
-			w.batch = make([]byte, 0, inputChunkBatchSize*cap(w.chunk))
+			w.batch = make([]byte, 0, inputChunkBatchSize*inputChunkBytes)
 		}
 		start := len(w.batch)
-		w.batch = append(w.batch, w.chunk...)
+		w.batch = append(w.batch, stored...)
 		w.pending = append(w.pending, inputPendingChunk{ordinal: w.count, digest: "sha256:" + hex.EncodeToString(h[:]), data: w.batch[start:len(w.batch):len(w.batch)]})
 	}
 	w.expected = append(w.expected, h)
@@ -268,6 +278,14 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			if actual != digest {
 				return ErrConflict
 			}
+			if m.Format == inputFormatCodecV2 {
+				if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest.Format == m.Format && cached.Manifest.Size == m.Size && cached.Manifest.Count == m.Count && cached.Manifest.ChunkSize == m.ChunkSize {
+					if err := verifyInputChunkHashes(ctx, tx, m, cached.Hashes, cached.StoredSizes); err != nil {
+						return err
+					}
+					return tx.Commit()
+				}
+			}
 			r, err := openInputChunks(ctx, tx, m)
 			if err != nil {
 				return err
@@ -276,6 +294,21 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			r.rows.Close()
 			if err != nil {
 				return err
+			}
+			if m.Format == inputFormatCodecV2 && len(r.storedHashes) == m.Count {
+				w := &inputChunkWriter{digest: digest, hash: sha256.New(), chunk: make([]byte, 0, m.ChunkSize)}
+				if err := platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
+					return err
+				}
+				if err := w.flush(); err != nil {
+					return err
+				}
+				w.expected, w.storedSizes = r.storedHashes, r.storedSizes
+				if err := tx.Commit(); err != nil {
+					return err
+				}
+				s.rememberCompilerDNSInput(snapshot, m, w)
+				return nil
 			}
 		} else {
 			w := &inputChunkWriter{ctx: ctx, digest: digest, hash: sha256.New(), chunk: make([]byte, 0, m.ChunkSize)}
@@ -333,7 +366,14 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 		}
 		return tx.Commit()
 	}
-	w := &inputChunkWriter{ctx: ctx, tx: tx, digest: digest, hash: sha256.New(), chunk: make([]byte, 0, inputChunkBytes)}
+	format, chunkSize := inputFormatV1, inputChunkBytes
+	var codec *inputChunkEncoder
+	if s.compilerInputCodecEnabled() {
+		format = inputFormatCodecV2
+		chunkSize -= inputCodecHeaderBytes
+		codec = &inputChunkEncoder{}
+	}
+	w := &inputChunkWriter{ctx: ctx, tx: tx, digest: digest, hash: sha256.New(), chunk: make([]byte, 0, chunkSize), codec: codec}
 	if err = platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
 		return err
 	}
@@ -343,14 +383,14 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	if "sha256:"+hex.EncodeToString(w.hash.Sum(nil)) != digest {
 		return ErrConflict
 	}
-	m = inputManifest{Digest: digest, Format: inputFormatV1, Size: w.size, Count: w.count, ChunkSize: inputChunkBytes, Created: time.Now().UTC()}
+	m = inputManifest{Digest: digest, Format: format, Size: w.size, Count: w.count, ChunkSize: chunkSize, Created: time.Now().UTC()}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_platform_input_manifests(content_hash,format,size_bytes,chunk_size,chunk_count,created_at) VALUES($1,$2,$3,$4,$5,$6)`, m.Digest, m.Format, m.Size, m.ChunkSize, m.Count, m.Created); err != nil {
 		return err
 	}
 	// Hash the actual stored bytes in PostgreSQL and compare with the hashes
 	// of the input just written. A claimed chunk_hash alone is not proof. This
 	// retains read-after-write verification without returning the entire body.
-	if err = verifyInputChunkHashes(ctx, tx, m, w.expected); err != nil {
+	if err = verifyInputChunkHashes(ctx, tx, m, w.expected, w.storedSizes); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -363,9 +403,16 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 // The canonical input stream has already been hashed to m.Digest. Each stored
 // chunk must match that stream's independent SHA-256, position and length, so
 // even changing both stored data and its declared chunk_hash cannot pass.
-func verifyInputChunkHashes(ctx context.Context, db inputQueryer, m inputManifest, expected [][sha256.Size]byte) error {
+func verifyInputChunkHashes(ctx context.Context, db inputQueryer, m inputManifest, expected [][sha256.Size]byte, storedSizes ...[]int) error {
 	if len(expected) != m.Count {
 		return ErrConflict
+	}
+	var physicalSizes []int
+	if m.Format == inputFormatCodecV2 {
+		if len(storedSizes) != 1 || len(storedSizes[0]) != m.Count {
+			return ErrConflict
+		}
+		physicalSizes = storedSizes[0]
 	}
 	rows, err := db.QueryContext(ctx, `SELECT ordinal,chunk_hash,octet_length(data),sha256(data) FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal`, m.Digest)
 	if err != nil {
@@ -383,6 +430,9 @@ func verifyInputChunkHashes(ctx context.Context, db inputQueryer, m inputManifes
 		want := m.ChunkSize
 		if count == m.Count-1 {
 			want = int(m.Size - int64(count)*int64(m.ChunkSize))
+		}
+		if physicalSizes != nil && count < len(physicalSizes) {
+			want = physicalSizes[count]
 		}
 		if count >= m.Count || ordinal != count || size != want || !bytes.Equal(actual, expected[count][:]) || declared != "sha256:"+hex.EncodeToString(expected[count][:]) {
 			return fmt.Errorf("compiler input chunk identity/size/hash differs: %w", ErrConflict)
