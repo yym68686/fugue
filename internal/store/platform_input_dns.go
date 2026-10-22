@@ -41,6 +41,7 @@ type compilerDNSInput struct {
 	Manifest       inputManifest
 	Intent, Policy string
 	Hashes         [][sha256.Size]byte
+	StoredSizes    []int
 	Ranges         []compilerDNSRange
 	Bytes          int
 }
@@ -106,8 +107,8 @@ func (s *Store) rememberCompilerDNSInput(snapshot platformconfig.RuntimeSnapshot
 		return
 	}
 	entry := &compilerDNSInput{Manifest: m, Intent: snapshot.IntentGeneration, Policy: snapshot.PolicyGeneration,
-		Hashes: append([][sha256.Size]byte(nil), w.expected...), Ranges: append([]compilerDNSRange(nil), w.dnsRanges...)}
-	entry.Bytes = 512 + len(entry.Intent) + len(entry.Policy) + 32*len(entry.Hashes)
+		Hashes: append([][sha256.Size]byte(nil), w.expected...), StoredSizes: append([]int(nil), w.storedSizes...), Ranges: append([]compilerDNSRange(nil), w.dnsRanges...)}
+	entry.Bytes = 512 + len(entry.Intent) + len(entry.Policy) + 32*len(entry.Hashes) + 8*len(entry.StoredSizes)
 	for _, r := range entry.Ranges {
 		entry.Bytes += 256 + len(r.Summary.NodeID) + len(r.Summary.Hostname) + len(r.Summary.Type)
 	}
@@ -145,7 +146,7 @@ func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		m, err := readInputManifest(ctx, s.db, digest)
 		cancel()
-		if err == nil && m.Count <= inputMaxBytes/inputChunkBytes {
+		if err == nil && m.Format == inputFormatV1 && m.Count <= inputMaxBytes/inputChunkBytes {
 			w := &inputChunkWriter{digest: digest, hash: sha256.New(), chunk: make([]byte, 0, m.ChunkSize)}
 			if platformconfig.WriteRuntimeSnapshot(w, snapshot) == nil && w.flush() == nil {
 				s.rememberCompilerDNSInput(snapshot, m, w)
@@ -167,6 +168,9 @@ func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func
 const compilerDNSSelectiveReadSQL = `SELECT ordinal,chunk_hash,octet_length(data),sha256(data),CASE WHEN ordinal = ANY($2::int[]) THEN data ELSE NULL END FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal`
 
 func (s *Store) readCompilerDNSSelections(ctx context.Context, m inputManifest, c *compilerDNSInput, needed func(CompilerDNSSelectionSummary) bool) (CompilerInputDNSSelections, error) {
+	if len(c.Hashes) != m.Count || m.Format == inputFormatCodecV2 && len(c.StoredSizes) != m.Count {
+		return CompilerInputDNSSelections{}, ErrConflict
+	}
 	out := CompilerInputDNSSelections{IntentGeneration: c.Intent, PolicyGeneration: c.Policy}
 	selected := make([]bool, m.Count)
 	ordinals := []int32{}
@@ -205,13 +209,21 @@ func (s *Store) readCompilerDNSSelections(ctx context.Context, m inputManifest, 
 		if count == m.Count-1 {
 			want = int(m.Size - int64(count)*int64(m.ChunkSize))
 		}
-		if count >= m.Count || ordinal != count || size != want || !bytes.Equal(actual, c.Hashes[count][:]) || declared != "sha256:"+hex.EncodeToString(c.Hashes[count][:]) {
+		storedWant := want
+		if m.Format == inputFormatCodecV2 && count < len(c.StoredSizes) {
+			storedWant = c.StoredSizes[count]
+		}
+		if count >= m.Count || ordinal != count || size != storedWant || !bytes.Equal(actual, c.Hashes[count][:]) || declared != "sha256:"+hex.EncodeToString(c.Hashes[count][:]) {
 			return CompilerInputDNSSelections{}, fmt.Errorf("compiler DNS input chunk identity/size/hash differs: %w", ErrConflict)
 		}
 		if selected[count] {
 			h := sha256.Sum256(raw)
-			if len(raw) != want || h != c.Hashes[count] {
+			if len(raw) != storedWant || h != c.Hashes[count] {
 				return CompilerInputDNSSelections{}, ErrConflict
+			}
+			raw, err = decodeInputChunk(m.Format, raw, want)
+			if err != nil {
+				return CompilerInputDNSSelections{}, err
 			}
 			chunks[count] = raw
 		} else if raw != nil {

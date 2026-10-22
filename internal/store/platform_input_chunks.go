@@ -48,7 +48,7 @@ func readInputManifest(ctx context.Context, db inputQueryer, digest string) (inp
 	if err != nil {
 		return m, err
 	}
-	if !inputDigestPattern.MatchString(digest) || m.Format != "runtime-snapshot-json-v1" || m.Size <= 0 || m.Size > inputMaxBytes || m.ChunkSize < 1 || m.ChunkSize > inputChunkBytes || m.Count != int((m.Size+int64(m.ChunkSize)-1)/int64(m.ChunkSize)) || m.Created.IsZero() {
+	if !inputDigestPattern.MatchString(digest) || (m.Format != inputFormatV1 && m.Format != inputFormatCodecV2) || m.Size <= 0 || m.Size > inputMaxBytes || m.ChunkSize < 1 || m.ChunkSize > inputChunkBytes || m.Count != int((m.Size+int64(m.ChunkSize)-1)/int64(m.ChunkSize)) || m.Created.IsZero() || m.Format == inputFormatCodecV2 && m.ChunkSize > inputChunkBytes-inputCodecHeaderBytes {
 		return m, fmt.Errorf("invalid compiler input manifest: %w", ErrConflict)
 	}
 	return m, nil
@@ -60,14 +60,16 @@ func absentInputManifest(err error) bool {
 }
 
 type inputChunkReader struct {
-	rows     *sql.Rows
-	manifest inputManifest
-	ordinal  int
-	size     int64
-	pending  []byte
-	hash     hash.Hash
-	done     bool
-	err      error
+	rows         *sql.Rows
+	manifest     inputManifest
+	ordinal      int
+	size         int64
+	pending      []byte
+	hash         hash.Hash
+	done         bool
+	err          error
+	storedHashes [][sha256.Size]byte
+	storedSizes  []int
 }
 
 func openInputChunks(ctx context.Context, db inputQueryer, m inputManifest) (*inputChunkReader, error) {
@@ -110,9 +112,18 @@ func (r *inputChunkReader) Read(p []byte) (int, error) {
 		if ordinal == r.manifest.Count-1 {
 			want = int(r.manifest.Size - int64(ordinal)*int64(r.manifest.ChunkSize))
 		}
-		if ordinal != r.ordinal || ordinal >= r.manifest.Count || len(raw) != want || digest != "sha256:"+hex.EncodeToString(h[:]) {
+		if ordinal != r.ordinal || ordinal >= r.manifest.Count || digest != "sha256:"+hex.EncodeToString(h[:]) {
 			r.err = fmt.Errorf("compiler input chunk identity/size/hash differs: %w", ErrConflict)
 			return 0, r.err
+		}
+		storedSize := len(raw)
+		raw, r.err = decodeInputChunk(r.manifest.Format, raw, want)
+		if r.err != nil {
+			return 0, r.err
+		}
+		if r.manifest.Format == inputFormatCodecV2 && r.manifest.Count <= inputMaxBytes/inputChunkBytes {
+			r.storedHashes = append(r.storedHashes, h)
+			r.storedSizes = append(r.storedSizes, storedSize)
 		}
 		r.ordinal++
 		r.size += int64(len(raw))
@@ -133,6 +144,7 @@ type inputChunkWriter struct {
 	count             int
 	size              int64
 	expected          [][sha256.Size]byte
+	storedSizes       []int
 	dnsRanges         []compilerDNSRange
 	dnsRangesOverflow bool
 	pending           []inputPendingChunk
@@ -248,7 +260,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	if err == nil {
 		// Older manifests may use unusually small chunks. Keep the witness
 		// vector bounded to the same maximum as a newly written input.
-		if m.Count > inputMaxBytes/inputChunkBytes {
+		if m.Count > inputMaxBytes/inputChunkBytes || m.Format == inputFormatCodecV2 {
 			actual, hashErr := platformconfig.RuntimeSnapshotDigest(snapshot)
 			if hashErr != nil {
 				return hashErr
@@ -331,7 +343,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	if "sha256:"+hex.EncodeToString(w.hash.Sum(nil)) != digest {
 		return ErrConflict
 	}
-	m = inputManifest{Digest: digest, Format: "runtime-snapshot-json-v1", Size: w.size, Count: w.count, ChunkSize: inputChunkBytes, Created: time.Now().UTC()}
+	m = inputManifest{Digest: digest, Format: inputFormatV1, Size: w.size, Count: w.count, ChunkSize: inputChunkBytes, Created: time.Now().UTC()}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_platform_input_manifests(content_hash,format,size_bytes,chunk_size,chunk_count,created_at) VALUES($1,$2,$3,$4,$5,$6)`, m.Digest, m.Format, m.Size, m.ChunkSize, m.Count, m.Created); err != nil {
 		return err
 	}
@@ -406,6 +418,15 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 			}
 			if !r.done || r.err != nil {
 				return platformconfig.RuntimeSnapshot{}, ErrConflict
+			}
+			if m.Format == inputFormatCodecV2 && len(r.storedHashes) == m.Count {
+				// Positions come from canonical JSON; physical witnesses come
+				// from the verified stream, never recompression assumptions.
+				w := &inputChunkWriter{digest: digest, hash: sha256.New(), chunk: make([]byte, 0, m.ChunkSize)}
+				if platformconfig.WriteRuntimeSnapshot(w, out) == nil && w.flush() == nil {
+					w.expected, w.storedSizes = r.storedHashes, r.storedSizes
+					s.rememberCompilerDNSInput(out, m, w)
+				}
 			}
 			return out, nil
 		}
