@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -143,14 +144,48 @@ func TestDNSRuntimeFactsHTTPReadsOnlyTheCurrentVerifiedSnapshot(t *testing.T) {
 	s.Config.BundleRevokedKeyIDs = []string{"key"}
 	r = httptest.NewRecorder()
 	s.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/runtime-facts", nil))
-	if r.Code != 503 {
+	if r.Code != 503 || r.Header().Get("X-Fugue-DNS-Observation-Rejection") != "checkpoint_validation" {
 		t.Fatal("revoked artifact returned observations", r.Code)
 	}
 	s.Config.BundleRevokedKeyIDs = nil
 	s.platformServing.Store(nil)
 	r = httptest.NewRecorder()
 	s.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/runtime-facts", nil))
-	if r.Code != 503 || strings.Contains(r.Body.String(), "unpublished-candidate") {
+	if r.Code != 503 || r.Header().Get("X-Fugue-DNS-Observation-Rejection") != "state_missing" || r.Header().Get("Cache-Control") != "private, no-store" || strings.Contains(r.Body.String(), "unpublished-candidate") {
 		t.Fatal("missing serving state used candidate", r.Code, r.Body.String())
+	}
+}
+
+func TestDNSRuntimeFactsRejectionClassificationPreservesFailClosed(t *testing.T) {
+	for _, reason := range []string{"request_cancelled", "route_identity", "plan_mismatch", "policy_mismatch", "checkpoint_not_positive", "node_identity", "fact_snapshot"} {
+		t.Run(reason, func(t *testing.T) {
+			s, state, _ := runtimeFactsFixture(t)
+			request := httptest.NewRequest(http.MethodGet, "/runtime-facts", nil)
+			switch reason {
+			case "request_cancelled":
+				ctx, cancel := context.WithCancel(request.Context())
+				cancel()
+				request = request.WithContext(ctx)
+			case "route_identity":
+				state.routeID = "other"
+			case "plan_mismatch":
+				plan := *state.payload.Plan
+				plan.Probes = nil
+				state.payload.Plan = &plan
+			case "policy_mismatch":
+				state.payload.Policy.MaxStaleSeconds++
+			case "checkpoint_not_positive":
+				state.record.Positive = false
+			case "node_identity":
+				state.record.NodeID = "other"
+			case "fact_snapshot":
+				state.checkedAt = time.Time{}
+			}
+			response := httptest.NewRecorder()
+			s.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || response.Header().Get("X-Fugue-DNS-Observation-Rejection") != reason || strings.Contains(response.Body.String(), "private-token") {
+				t.Fatal("rejection classification changed readiness or leaked details", response.Code, response.Header(), response.Body.String())
+			}
+		})
 	}
 }

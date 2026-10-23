@@ -43,39 +43,74 @@ func dnsRuntimeFacts(st *dnsServingState, now time.Time) (dnsfacts.Snapshot, err
 }
 
 func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
-	fail := func() {
+	fail := func(reason string) {
+		w.Header().Set("X-Fugue-DNS-Observation-Rejection", reason)
+		w.Header().Set("Cache-Control", "private, no-store")
 		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS serving observations unavailable")
 	}
 	st := s.platformServing.Load()
-	if st == nil || r.Context().Err() != nil {
-		fail()
+	if st == nil {
+		fail("state_missing")
+		return
+	}
+	if r.Context().Err() != nil {
+		fail("request_cancelled")
 		return
 	}
 	// Validate against the current trust keys even if this checkpoint was
 	// accepted before a key was revoked. No assignment or cache is changed.
 	payload, routeID, err := s.verifiedDNSCheckpointPayload(st.record)
-	if err != nil || routeID != st.routeID || !reflect.DeepEqual(payload.Plan, st.payload.Plan) || !reflect.DeepEqual(payload.Policy, st.payload.Policy) || !st.record.Positive || st.record.NodeID != s.Config.DNSNodeID || st.record.GroupID != s.Config.EdgeGroupID {
-		fail()
+	rejection := ""
+	switch {
+	case err != nil:
+		rejection = "checkpoint_validation"
+	case routeID != st.routeID:
+		rejection = "route_identity"
+	case !reflect.DeepEqual(payload.Plan, st.payload.Plan):
+		rejection = "plan_mismatch"
+	case !reflect.DeepEqual(payload.Policy, st.payload.Policy):
+		rejection = "policy_mismatch"
+	case !st.record.Positive:
+		rejection = "checkpoint_not_positive"
+	case st.record.NodeID != s.Config.DNSNodeID || st.record.GroupID != s.Config.EdgeGroupID:
+		rejection = "node_identity"
+	}
+	if rejection != "" {
+		fail(rejection)
 		return
 	}
 	observed, err := dnsRuntimeFacts(st, time.Now().UTC())
 	if err != nil {
-		fail()
+		fail("fact_snapshot")
 		return
 	}
 	listenerFailed := s.listenerFailed.Load()
 	observed.Ready = observed.Ready && !listenerFailed
 	raw, err := json.Marshal(observed)
-	if err != nil || len(raw) > 32<<20 {
-		fail()
+	if err != nil {
+		fail("response_encoding")
+		return
+	}
+	if len(raw) > 32<<20 {
+		fail("response_size")
 		return
 	}
 	compressed := acceptsRuntimeFactsGzip(r.Header)
 	if compressed {
 		raw, err = gzipRuntimeFacts(raw)
 	}
-	if err != nil || r.Context().Err() != nil || s.platformServing.Load() != st || s.listenerFailed.Load() != listenerFailed {
-		fail()
+	switch {
+	case err != nil:
+		rejection = "response_encoding"
+	case r.Context().Err() != nil:
+		rejection = "request_cancelled"
+	case s.platformServing.Load() != st:
+		rejection = "state_replaced"
+	case s.listenerFailed.Load() != listenerFailed:
+		rejection = "listener_changed"
+	}
+	if rejection != "" {
+		fail(rejection)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

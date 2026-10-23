@@ -151,3 +151,22 @@ Also verify capability rejection and exact transaction rollback/idempotency.
 The HTTPS route-proof path retains its existing protocol scope; do not claim
 unverified HTTP/3 failover. DNS caching and broken existing connections remain
 outside an authoritative answer's ability to repair.
+
+Private promotion verifies recent shadow evaluation separately from serving
+leases. The signed DNS-only membership, authenticated executor capabilities and
+three advancing observations precede gray publication. Gray and full each need
+fresh signed-checkpoint verification and positive per-record readiness before
+LKG is retained. A proof that expires in transit is removed from the current
+quorum; it cannot invalidate another endpoint's complete fresh proof set or
+renew its own deadline. A claim already invalid at capture is rejected.
+
+A provider quota restriction must keep the endpoint outside an explicitly
+configured availability pool until recovery is demonstrated. Small route-proof
+responses and Kubernetes Ready do not measure sustainable transfer capacity.
+The current availability history is not a provider quota-reset detector.
+
+The runtime-facts HTTP endpoint reports a bounded
+`X-Fugue-DNS-Observation-Rejection` classification on failure. It distinguishes
+missing state, failed checkpoint validation, identity/plan/policy mismatches,
+encoding/size limits and concurrent state replacement. These diagnostics expose
+no raw error or credential and never change serving or proof eligibility.

@@ -141,6 +141,12 @@ x-fugue-dns-readiness:
 x-fugue-dns-runtime-facts:
   endpoint: GET /runtime-facts on the DNS node HTTP listener
   response_schema: '#/components/schemas/DNSServingRuntimeFacts'
+  rejection_header:
+    name: X-Fugue-DNS-Observation-Rejection
+    schema:
+      type: string
+      enum: [state_missing, request_cancelled, checkpoint_validation, route_identity, plan_mismatch, policy_mismatch, checkpoint_not_positive, node_identity, fact_snapshot, response_encoding, response_size, state_replaced, listener_changed]
+    description: Bounded failure classification on HTTP 503. It contains no credential, hostname, route, artifact payload or raw upstream error and grants no serving readiness.
   semantics: >-
     Read-only observations from the exact in-memory DNS serving snapshot, never
     from a staged candidate, legacy bundle or persisted probe cache. This is a
