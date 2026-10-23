@@ -23,6 +23,14 @@ required member remains. Changed Node UIDs, malformed holds and mixed or missing
 remaining processes fail closed. Health evidence identifies the required and
 held Node UIDs, without labeling the held node healthy.
 
+Generic preflight and final image verification also freeze and use this same
+membership. They retain the actual workload UID, generation, template and field
+ownership, then verify the exact remaining Pod count, owners, unique nodes,
+source revisions, readiness and runtime image digests. Declared workload status
+is never patched to manufacture convergence; the observation's member counters
+are derived only after every required physical Pod passes. HTTP health probes
+use the same inventory so a held member cannot re-enter through a generic probe.
+
 `scripts/configure_edge_release_hold.py` is a configuration-only executor in the
 main CI workflow. It requires exact deployed Guardian and canary-reader revisions,
 images, Deployment UIDs, their advertised hold capability and healthy process

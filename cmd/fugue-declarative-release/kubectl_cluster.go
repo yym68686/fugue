@@ -2419,6 +2419,11 @@ func verifyNoEmergencyOwnership(release declarativerelease.PlanRelease, identity
 }
 
 func (cluster *kubectlCluster) observeExpected(ctx context.Context, release declarativerelease.PlanRelease, expectedOCI string, manifest []byte) (declarativerelease.Observation, error) {
+	if release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil {
+		if _, err := cluster.managedEdgeTransition(ctx, *release.Transition.EdgeGroupAB); err != nil {
+			return declarativerelease.Observation{}, err
+		}
+	}
 	primary := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
 	workloadRaw, err := cluster.getResource(ctx, primary)
 	if err != nil {
@@ -2448,7 +2453,11 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	partial, err := parseObservation(workloadRaw, podsRaw, release)
+	podsRaw, members, err := cluster.edgeObservationMembers(release, workloadRaw, podsRaw)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	partial, err := parseObservationWithCohort(workloadRaw, podsRaw, release, members)
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
@@ -3212,6 +3221,10 @@ func (cluster *kubectlCluster) readyPodHTTPEndpoints(ctx context.Context, releas
 	if err != nil {
 		return nil, err
 	}
+	podsRaw, _, err = cluster.edgeObservationMembers(release, workloadRaw, podsRaw)
+	if err != nil {
+		return nil, err
+	}
 	return podHTTPEndpointsFromJSON(podsRaw, release.Workload.Container, portName)
 }
 
@@ -3474,6 +3487,10 @@ func selectorFromWorkload(raw []byte) (string, error) {
 }
 
 func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.PlanRelease) (declarativerelease.Observation, error) {
+	return parseObservationWithCohort(workloadRaw, podsRaw, release, nil)
+}
+
+func parseObservationWithCohort(workloadRaw, podsRaw []byte, release declarativerelease.PlanRelease, expectedMembers *int32) (declarativerelease.Observation, error) {
 	workload, err := decodeJSONObject(workloadRaw)
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -3546,6 +3563,12 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 	default:
 		return declarativerelease.Observation{}, errors.New("workload kind is not implemented")
 	}
+	if expectedMembers != nil {
+		if release.Workload.Kind != "DaemonSet" || *expectedMembers < 1 || release.Workload.PreservedUnavailable != 0 {
+			return declarativerelease.Observation{}, errors.New("invalid Edge observation membership count")
+		}
+		observation.Desired = *expectedMembers
+	}
 	var imageID, healthDigest string
 	if release.Workload.Kind == "Job" {
 		imageID, healthDigest, err = parseSucceededJobPod(podsRaw, release, manifestSHA)
@@ -3557,6 +3580,11 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 	}
 	observation.ImageID = imageID
 	observation.HealthDigest = healthDigest
+	if expectedMembers != nil {
+		// parseReadyPods above proves each member is Ready at the exact source;
+		// runtime digest checks still run on this same filtered inventory.
+		observation.Updated, observation.Ready, observation.Available, observation.Unavailable = *expectedMembers, *expectedMembers, *expectedMembers, 0
+	}
 	return observation, nil
 }
 
