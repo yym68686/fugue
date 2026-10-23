@@ -65,6 +65,19 @@ configuration lane and exact producer/full/LKG fences; it does not itself mark
 a route ready, hand off DNS transport or replace LKG. Configuration uses the
 existing `scripts/configure_dynamic_quality.py` executor with operation
 `dns_availability`; its preview separately reports `runtime_verified: false`.
+An explicit `dns_availability_recovery` transaction additionally accepts a current
+rollback of the **same** unexpired, signed positive LKG. It binds the exact
+producer/full fences, original verified producer release, immutable source
+digests, and real rollback ledger message. It cannot accept an ordinary
+unverified release or a newer pending gray publication. The configuration delta
+may add at most one automatically recoverable quota/network hold inside the
+changed host's declared pool; existing holds and all other constraints remain
+immutable. This operation requires `baseline_mode: declared` and refuses silent
+fence renewal. Configuration previews compare frozen intent without requiring a
+successful failed DNS answer; the successor still needs live preview, normal
+consumer capability checks and gray/full evidence. It changes neither serving
+publication nor positive LKG and never fabricates an ACK.
+
 Consumers of the route, DNS and TLS policy must advertise authenticated
 `dns_availability_v1` capability before serving publication. An unsupported
 reader cannot silently ignore the policy.

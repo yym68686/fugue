@@ -20,7 +20,7 @@ func membershipReconfiguration(operation string) bool {
 }
 
 func globalDNSReconfiguration(operation string) bool {
-	return operation == "physical_dns" || operation == "retire_dns_selector" || operation == "dynamic_quality" || operation == "edge_offline" || operation == "business_exploration" || operation == "dns_availability"
+	return operation == "physical_dns" || operation == "retire_dns_selector" || operation == "dynamic_quality" || operation == "edge_offline" || operation == "business_exploration" || operation == "dns_availability" || operation == "dns_availability_recovery"
 }
 
 func producerReconfigurationKey(a model.PlatformArtifact, precondition model.PlatformProducerReconfiguration) (string, error) {
@@ -60,7 +60,7 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
-	case "continuous_serving", "physical_dns", "retire_dns_selector", "dynamic_quality", "edge_offline", "business_exploration", "dns_availability":
+	case "continuous_serving", "physical_dns", "retire_dns_selector", "dynamic_quality", "edge_offline", "business_exploration", "dns_availability", "dns_availability_recovery":
 		if p.Mode != "serving" || p.Serving == nil || p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
@@ -143,6 +143,11 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		return ErrConflict
 	}
 	oldSources := previous
+	if r.Operation == "dns_availability_recovery" {
+		if err := validateProducerDNSInputChange(state, previous, p, keys, platformproducer.ValidateDNSAvailabilityRecoveryUpdate); err != nil {
+			return err
+		}
+	}
 	if r.Operation == "dns_availability" {
 		if err := validateProducerDNSInputChange(state, previous, p, keys, platformproducer.ValidateDNSAvailabilityUpdate); err != nil {
 			return err
@@ -230,7 +235,9 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 			return ErrConflict
 		}
 		if release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.VerifiedLKGGeneration != full.Generation {
-			return ErrConflict
+			if r.Operation != "dns_availability_recovery" || !availabilityVerifiedRollbackBaseline(state, full, release, keys, now) {
+				return ErrConflict
+			}
 		}
 		if (r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation)) && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
 			return ErrConflict
@@ -255,7 +262,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		}
 	}
 	lkg := verifiedPlatformLKGSnapshotFromState(state, model.PlatformArtifactKindReleaseSet, p.TargetScope, now, keys)
-	if lkg == nil || lkg.ArtifactID != full.ID || lkg.ContentHash != full.ContentHash || lkg.VerifiedByReleaseID != release.ID || lkg.VerificationEvidenceHash != r.VerificationEvidenceHash {
+	if lkg == nil || lkg.ArtifactID != full.ID || lkg.ContentHash != full.ContentHash || lkg.VerificationEvidenceHash != r.VerificationEvidenceHash || lkg.VerifiedByReleaseID != release.ID && (r.Operation != "dns_availability_recovery" || !availabilityVerifiedRollbackBaseline(state, full, release, keys, now)) {
 		return ErrConflict
 	}
 	return nil
@@ -361,6 +368,21 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 	}
 	if lkg != nil {
 		state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, *lkg)
+		if r.Operation == "dns_availability_recovery" {
+			original, err := pgGetPlatformArtifactRelease(ctx, tx, lkg.VerifiedByReleaseID, false)
+			if err != nil {
+				return err
+			}
+			if platformArtifactReleaseIndex(state.PlatformArtifactReleases, original.ID) < 0 {
+				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, original)
+			}
+			message, err := scanPlatformReleaseMessage(tx.QueryRowContext(ctx, `SELECT id, release_id, artifact_id, artifact_kind, scope_key, scope_json, generation, release_channel, message_type, created_at, expires_at, ack_count FROM fugue_platform_release_messages WHERE release_id=$1 AND message_type=$2 ORDER BY created_at ASC LIMIT 1`, r.ServingFull.ReleaseID, model.PlatformReleaseMessageTypeRollback))
+			if err == nil {
+				state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
+			} else if err != ErrNotFound {
+				return err
+			}
+		}
 	}
 	return validateProducerReconfiguration(state, a, req, s.platformArtifactSigningKeyring(), time.Now().UTC())
 }

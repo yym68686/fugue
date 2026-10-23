@@ -57,3 +57,50 @@ func TestAvailabilityConfigurationChangesOnlyOneExplicitHost(t *testing.T) {
 		}
 	}
 }
+
+func TestAvailabilityRecoveryPreservesConstraintsAndRequiresAutomaticReadmission(t *testing.T) {
+	for _, scenario := range []string{"success", "without_hold", "two_holds", "outside_pool", "no_recovery", "administrative_hold", "remove_hold", "change_hold", "two_hosts", "other_constraint"} {
+		t.Run(scenario, func(t *testing.T) {
+			hold := OfflineEdge{EdgeID: "edge-c", EdgeGroupID: "edge-group-test", PublicIPv4: "8.8.4.4", Reason: "maintenance"}
+			before := ProjectionPolicyInput{Generation: "before", Scope: "global", OfflineEdges: []OfflineEdge{hold}, DNSQueryPolicy: &platformconfig.DNSQueryPolicy{RankingMode: "active"}}
+			next := cloneBusinessProjectionPolicy(before)
+			next.Generation = "after"
+			next.DNSQueryPolicy.AvailabilityRoutes = []platformconfig.DNSAvailabilityRoute{{Hostname: "app.example.test", Policy: model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}}}
+			added := OfflineEdge{EdgeID: "edge-a", EdgeGroupID: "edge-group-test", PublicIPv4: "8.8.8.8", Reason: "network_unavailable", Recovery: &OfflineEdgeRecoveryPolicy{Hostname: "app.example.test", Path: "/", ProbeIntervalSeconds: 300, ProbeTimeoutSeconds: 5, SuccessThreshold: 3, FailureThreshold: 1, FreshnessSeconds: 1800}}
+			next.OfflineEdges = []OfflineEdge{added, hold}
+			switch scenario {
+			case "without_hold":
+				next.OfflineEdges = []OfflineEdge{hold}
+			case "two_holds":
+				second := added
+				second.EdgeID = "edge-b"
+				next.OfflineEdges = []OfflineEdge{added, second, hold}
+			case "outside_pool":
+				next.DNSQueryPolicy.AvailabilityRoutes[0].Policy.OrderedEdgeIDs = []string{"edge-b"}
+			case "no_recovery":
+				next.OfflineEdges[0].Recovery = nil
+			case "administrative_hold":
+				next.OfflineEdges[0].Reason = "maintenance"
+			case "remove_hold":
+				next.OfflineEdges = []OfflineEdge{added}
+			case "change_hold":
+				next.OfflineEdges[1].Reason = "quota_exhausted"
+			case "two_hosts":
+				route := next.DNSQueryPolicy.AvailabilityRoutes[0]
+				route.Hostname = "other.example.test"
+				next.DNSQueryPolicy.AvailabilityRoutes = append(next.DNSQueryPolicy.AvailabilityRoutes, route)
+			case "other_constraint":
+				next.DNSQueryPolicy.ECSEnabled = true
+			}
+			original, _ := json.Marshal(next)
+			err := validateDNSAvailabilityRecoveryDelta(before, next)
+			if (scenario == "success" || scenario == "without_hold") != (err == nil) {
+				t.Fatalf("unexpected result: %v", err)
+			}
+			after, _ := json.Marshal(next)
+			if string(original) != string(after) {
+				t.Fatal("validation mutated immutable input")
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@ package platformproducer
 import (
 	"fmt"
 	"reflect"
+	"slices"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -47,4 +48,50 @@ func validateDNSAvailabilityDelta(old, next ProjectionPolicyInput) error {
 		return fmt.Errorf("availability transition changed unrelated constraints")
 	}
 	return nil
+}
+
+// Recovery can add one explicit offline guard to the selected availability pool.
+// Existing suspensions and unrelated services remain immutable. Restoring a node
+// later is based on real recovery observations, not on a date or a code release.
+func ValidateDNSAvailabilityRecoveryUpdate(previous, next Policy, static, oldDNS, newDNS model.PlatformArtifact) error {
+	return validatePhysicalDNSUpdate(previous, next, static, oldDNS, newDNS, "dns_availability_recovery")
+}
+
+func validateDNSAvailabilityRecoveryDelta(old, next ProjectionPolicyInput) error {
+	old, next = cloneBusinessProjectionPolicy(old), cloneBusinessProjectionPolicy(next)
+	if old.DNSQueryPolicy == nil || next.DNSQueryPolicy == nil || ValidateOfflineEdges(old.OfflineEdges) != nil || ValidateOfflineEdges(next.OfflineEdges) != nil {
+		return fmt.Errorf("invalid availability recovery sources")
+	}
+	var changed *model.DNSAvailabilityPolicy
+	for _, route := range next.DNSQueryPolicy.AvailabilityRoutes {
+		if !reflect.DeepEqual(platformconfig.DNSAvailabilityForHost(old.DNSQueryPolicy, route.Hostname), &route.Policy) {
+			changed = &route.Policy
+		}
+	}
+	if changed == nil {
+		return fmt.Errorf("recovery must explicitly enable or revise availability")
+	}
+	before := map[string]OfflineEdge{}
+	for _, hold := range old.OfflineEdges {
+		before[hold.EdgeID] = hold
+	}
+	added := 0
+	for _, hold := range next.OfflineEdges {
+		if prior, found := before[hold.EdgeID]; found {
+			if !reflect.DeepEqual(prior, hold) {
+				return fmt.Errorf("recovery cannot alter an existing offline hold")
+			}
+			delete(before, hold.EdgeID)
+		} else {
+			added++
+			if !slices.Contains(changed.OrderedEdgeIDs, hold.EdgeID) || hold.Recovery == nil || hold.Reason != "quota_exhausted" && hold.Reason != "network_unavailable" {
+				return fmt.Errorf("new recovery hold must belong to the availability pool and declare automatic readmission")
+			}
+		}
+	}
+	if added > 1 || len(before) > 0 {
+		return fmt.Errorf("recovery may add at most one hold and cannot remove holds")
+	}
+	old.OfflineEdges, next.OfflineEdges = nil, nil
+	return validateDNSAvailabilityDelta(old, next)
 }

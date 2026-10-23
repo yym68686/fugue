@@ -8,6 +8,7 @@ import re
 import time
 import urllib.parse
 
+from scripts import dns_availability_recovery
 from scripts.bootstrap_cell_producer import authority_identity, digest, ensure_input, exact, selected
 from scripts.observe_front_candidate import now
 from scripts.publish_agent_edge_shadow import API, canonical
@@ -24,10 +25,12 @@ def validate(config):
     if origin.scheme != "https" or config["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
         raise ValueError("canonical HTTPS API origin required")
     precondition = config["precondition"]
-    if set(precondition) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or precondition["operation"] not in ["dynamic_quality", "business_exploration", "dns_availability"] or not DIGEST.fullmatch(precondition["verification_evidence_hash"]):
+    if set(precondition) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or precondition["operation"] not in ["dynamic_quality", "business_exploration", "dns_availability", "dns_availability_recovery"] or not DIGEST.fullmatch(precondition["verification_evidence_hash"]):
         raise ValueError("fenced dynamic quality precondition required")
     if config.get("business_anchor_mode", "declared") not in ["declared", "latest_verified_same_baseline"] or "business_anchor_mode" in config and precondition["operation"] != "business_exploration" or config.get("business_anchor_mode") == "latest_verified_same_baseline" and config["baseline_mode"] != "latest_verified_same_policy":
         raise ValueError("business anchor resolution requires explicit same-policy baseline mode")
+    if precondition["operation"] == "dns_availability_recovery" and config["baseline_mode"] != "declared":
+        raise ValueError("availability recovery requires exact declared publication fences")
     for field in ["previous_policy", "serving_full"]:
         validate_ref(precondition[field])
     policy = config["projection_policy"]
@@ -144,7 +147,8 @@ def publish_once(config, api, save):
     validate(config)
     declaration = digest(config)
     config = wait_verified_baseline(config, api)
-    serving = baseline(config, api)
+    recovery = config["precondition"]["operation"] == "dns_availability_recovery"
+    serving = dns_availability_recovery.baseline(config, api) if recovery else baseline(config, api)
     precondition = config["precondition"]
     old = api("GET", "/v1/admin/artifacts/" + precondition["previous_policy"]["artifact_id"])["artifact"]
     previous = old["content"]
@@ -154,8 +158,10 @@ def publish_once(config, api, save):
     if source.get("content_hash") != previous["dns_policy_digest"] or not exact(source, "policy_snapshot", "global", source["content"]):
         raise ValueError("pinned source integrity mismatch")
     business = precondition["operation"] == "business_exploration"
-    availability = precondition["operation"] == "dns_availability"
-    if availability:
+    availability = precondition["operation"] in ["dns_availability", "dns_availability_recovery"]
+    if recovery:
+        changed_hostname = dns_availability_recovery.check_delta(source["content"], config["projection_policy"])
+    elif availability:
         changed_hostname = check_availability_delta(source["content"], config["projection_policy"])
     elif business:
         changed_hostname = check_business_delta(source["content"], config["projection_policy"])
@@ -173,9 +179,14 @@ def publish_once(config, api, save):
     if authority_identity(current) != precondition["previous_policy"] and not exact(current.get("artifact", {}), "policy_snapshot", SCOPE, successor):
         raise ValueError("successor differs")
     artifact = ensure_input(api, "policy_snapshot", SCOPE, successor)
-    before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"] + "&view=runtime")
+    prior_view = "configuration" if recovery else "runtime"
+    before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"] + "&view=" + prior_view)
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
-    coverage = validate_preview(before, preview)
+    if recovery:
+        after = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=configuration")
+        coverage = dns_availability_recovery.validate_preview(before, after, preview, config["projection_policy"], changed_hostname)
+    else:
+        coverage = validate_preview(before, preview)
     if availability:
         coverage = validate_availability_preview(preview, config["projection_policy"], changed_hostname)
     elif business:
@@ -205,6 +216,9 @@ def publish_once(config, api, save):
 
 
 def wait_verified_baseline(config, api):
+    if config["precondition"]["operation"] == "dns_availability_recovery":
+        dns_availability_recovery.baseline(config, api)
+        return config
     transient = {"baseline is not the predecessor's verified producer publication", "serving full publication changed", "exact unexpired positive LKG required"}
     for attempt in range(25):
         try:

@@ -221,7 +221,8 @@ func TestPhysicalDNSProducerReconfigurationPreservesPositivePublication(t *testi
 	}
 }
 
-func TestPhysicalDNSProducerReconfigurationPostgres(t *testing.T) {
+func disposablePhysicalDNSDatabase(t *testing.T) string {
+	t.Helper()
 	database := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if database == "" {
 		t.Skip("disposable PostgreSQL not configured")
@@ -269,7 +270,11 @@ func TestPhysicalDNSProducerReconfigurationPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	fixture := physicalDNSReconfigurationFixture(t, database)
+	return database
+}
+
+func TestPhysicalDNSProducerReconfigurationPostgres(t *testing.T) {
+	fixture := physicalDNSReconfigurationFixture(t, disposablePhysicalDNSDatabase(t))
 	before, err := fixture.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
 	if err != nil {
 		t.Fatal(err)

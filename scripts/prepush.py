@@ -489,8 +489,8 @@ def main() -> int:
         non_go_tasks["worker-standby-observation-tests"] = ["python3", "-m", "unittest", "scripts.test_observe_worker_standby"]
     if any(name in {"scripts/reconcile_cell_trust.py", "scripts/test_reconcile_cell_trust.py"} or name.startswith("deploy/environments/production/cell-trust/") for name in paths):
         non_go_tasks["cell-trust-tests"] = ["python3", "-m", "unittest", "scripts.test_reconcile_cell_trust"]
-    if any(name in {"scripts/configure_dynamic_quality.py", "scripts/test_configure_dynamic_quality.py", "scripts/configure_business_exploration.py", "scripts/test_configure_business_exploration.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/routing-dynamic-quality/") for name in paths):
-        non_go_tasks["dynamic-quality-configuration-tests"] = ["python3", "-m", "unittest", "scripts.test_configure_dynamic_quality", "scripts.test_configure_business_exploration"]
+    if any(name in {"scripts/configure_dynamic_quality.py", "scripts/test_configure_dynamic_quality.py", "scripts/dns_availability_recovery.py", "scripts/test_dns_availability_recovery.py", "scripts/configure_business_exploration.py", "scripts/test_configure_business_exploration.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/routing-dynamic-quality/") for name in paths):
+        non_go_tasks["dynamic-quality-configuration-tests"] = ["python3", "-m", "unittest", "scripts.test_configure_dynamic_quality", "scripts.test_configure_business_exploration", "scripts.test_dns_availability_recovery"]
     if any(name in {"scripts/replace_front_executor.py", "scripts/test_replace_front_executor.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/front-executor-replacement/") for name in paths):
         non_go_tasks["front-executor-replacement-tests"] = ["python3", "-m", "unittest", "scripts.test_replace_front_executor"]
     if packages:
