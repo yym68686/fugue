@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"time"
 
@@ -225,11 +226,15 @@ func materializeDNSQueries(view platformconfig.DNSQueryView, plan *platformconfi
 		targets := map[string]platformconfig.DNSReadinessTarget{}
 		deadlines := map[string]time.Time{}
 		for _, target := range requirement.Targets {
+			availability := r.AnswerPolicy.Availability
+			if availability != nil && (model.ValidateDNSAvailabilityPolicy(availability) != nil || !slices.Contains(availability.OrderedEdgeIDs, target.EdgeID)) {
+				continue
+			}
 			ready := len(target.ProbeIDs) > 0
 			until := time.Time{}
 			for _, id := range target.ProbeIDs {
 				f, ok := valid[id]
-				if !ok {
+				if !ok || availability != nil && !dnsAvailabilityRecovered(availability, f, time.Duration(policy.FactFreshnessSeconds)*time.Second, now) {
 					ready = false
 					break
 				}

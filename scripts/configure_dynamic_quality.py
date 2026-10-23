@@ -24,7 +24,7 @@ def validate(config):
     if origin.scheme != "https" or config["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
         raise ValueError("canonical HTTPS API origin required")
     precondition = config["precondition"]
-    if set(precondition) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or precondition["operation"] not in ["dynamic_quality", "business_exploration"] or not DIGEST.fullmatch(precondition["verification_evidence_hash"]):
+    if set(precondition) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or precondition["operation"] not in ["dynamic_quality", "business_exploration", "dns_availability"] or not DIGEST.fullmatch(precondition["verification_evidence_hash"]):
         raise ValueError("fenced dynamic quality precondition required")
     if config.get("business_anchor_mode", "declared") not in ["declared", "latest_verified_same_baseline"] or "business_anchor_mode" in config and precondition["operation"] != "business_exploration" or config.get("business_anchor_mode") == "latest_verified_same_baseline" and config["baseline_mode"] != "latest_verified_same_policy":
         raise ValueError("business anchor resolution requires explicit same-policy baseline mode")
@@ -42,9 +42,57 @@ def validate(config):
     network = dynamic["policy"]
     if set(network) != POLICY_FIELDS or network.get("version") not in ["physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6"] or any(network[key] is None for key in POLICY_FIELDS):
         raise ValueError("complete explicit delivery policy required")
+    validate_availability_routes(query.get("availability_routes", []))
     if precondition["operation"] == "business_exploration":
         validate_business_routes(query.get("physical_routes", []))
     return config
+
+
+def validate_availability_routes(values):
+    if not isinstance(values, list) or len(values) > 256:
+        raise ValueError("bounded availability routes required")
+    result = {}
+    for route in values:
+        if set(route) != {"hostname", "policy"} or not isinstance(route["hostname"], str) or not 1 <= len(route["hostname"]) <= 253 or route["hostname"] in result:
+            raise ValueError("explicit unique availability hostname required")
+        policy = route["policy"]
+        if set(policy) != {"version", "ordered_edge_ids", "recovery_successes", "recovery_min_seconds"} or policy["version"] != "dns-availability-v1":
+            raise ValueError("complete versioned availability policy required")
+        ids = policy["ordered_edge_ids"]
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 256 or any(not isinstance(value,str) or not re.fullmatch(r"[^\s\x00]{1,128}", value) for value in ids) or len(set(ids)) != len(ids):
+            raise ValueError("explicit availability membership required")
+        if type(policy["recovery_successes"]) is not int or not 2 <= policy["recovery_successes"] <= 5 or type(policy["recovery_min_seconds"]) is not int or not 10 <= policy["recovery_min_seconds"] <= 300:
+            raise ValueError("bounded independent recovery observations required")
+        result[route["hostname"]] = route
+    return result
+
+
+def check_availability_delta(previous, successor):
+    old, new = copy.deepcopy(previous), copy.deepcopy(successor)
+    if old.pop("generation", None) == new.pop("generation", None):
+        raise ValueError("availability generation must advance")
+    before = old.get("dns_query_policy", {}).pop("availability_routes", [])
+    after = new.get("dns_query_policy", {}).pop("availability_routes", [])
+    left, right = validate_availability_routes(before), validate_availability_routes(after)
+    changed = [host for host in left.keys() | right.keys() if left.get(host) != right.get(host)]
+    if old != new or len(changed) != 1:
+        raise ValueError("availability may change one hostname and no unrelated constraints")
+    return changed[0]
+
+
+def validate_availability_preview(preview, policy, hostname):
+    routes = [r for r in policy["dns_query_policy"].get("availability_routes", []) if r["hostname"] == hostname]
+    facts = [f for f in preview.get("runtime_snapshot", {}).get("dns_selections", []) if f.get("hostname") == hostname]
+    rules = [r for r in preview.get("policy", {}).get("dns_answer_rules", []) if r.get("hostname") == hostname]
+    if not facts or not rules:
+        raise ValueError("availability lacks owned dynamic query preview")
+    if routes:
+        allowed = set(routes[0]["policy"]["ordered_edge_ids"])
+        for fact in facts:
+            candidates = {c["edge_id"] for c in fact.get("candidates", [])}
+            if not allowed & candidates:
+                raise ValueError("availability preview has no authorized candidate")
+    return {"hostname": hostname, "availability_enabled": bool(routes), "queries": len(facts), "runtime_verified": False}
 
 
 def check_delta(previous, successor):
@@ -106,7 +154,10 @@ def publish_once(config, api, save):
     if source.get("content_hash") != previous["dns_policy_digest"] or not exact(source, "policy_snapshot", "global", source["content"]):
         raise ValueError("pinned source integrity mismatch")
     business = precondition["operation"] == "business_exploration"
-    if business:
+    availability = precondition["operation"] == "dns_availability"
+    if availability:
+        changed_hostname = check_availability_delta(source["content"], config["projection_policy"])
+    elif business:
         changed_hostname = check_business_delta(source["content"], config["projection_policy"])
         config = resolve_business_anchors(config, api, serving, changed_hostname)
         validate(config)
@@ -125,7 +176,9 @@ def publish_once(config, api, save):
     before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"] + "&view=runtime")
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
     coverage = validate_preview(before, preview)
-    if business:
+    if availability:
+        coverage = validate_availability_preview(preview, config["projection_policy"], changed_hostname)
+    elif business:
         coverage = validate_business_preview(preview, config["projection_policy"], changed_hostname)
     if config.get("business_anchor_mode") == "latest_verified_same_baseline":
         try:
@@ -142,7 +195,7 @@ def publish_once(config, api, save):
         evidence.update(resolved_policy_digest=digest(config["projection_policy"]), resolved_dns_anchors=next(route["business_exploration"]["initial_dns_publications"] for route in config["projection_policy"]["dns_query_policy"]["physical_routes"] if route["hostname"] == changed_hostname))
     save(evidence)
     key = "producer-reconfiguration/" + digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": precondition})
-    api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/release", {"release_channel": "shadow", "producer_reconfiguration": precondition, "idempotency_key": key, "reason": "Declarative universal dynamic quality policy with preserved explicit constraints"})
+    api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/release", {"release_channel": "shadow", "producer_reconfiguration": precondition, "idempotency_key": key, "reason": "Declarative per-host availability policy with preserved explicit constraints" if availability else "Declarative universal dynamic quality policy with preserved explicit constraints"})
     current = selected(api, SCOPE, "shadow")
     if not exact(current.get("artifact", {}), "policy_snapshot", SCOPE, successor):
         raise ValueError("producer activation not confirmed")

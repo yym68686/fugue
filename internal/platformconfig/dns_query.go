@@ -335,6 +335,10 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 					}
 					record.ScopedCandidates = append(record.ScopedCandidates, scoped)
 				}
+				record.AnswerPolicy.Availability = DNSAvailabilityForHost(policy.DNSQueryPolicy, record.Name)
+				if err := validateDNSAvailabilityIntent(record, policy); err != nil {
+					return nil, err
+				}
 				if err := validateDNSPhysicalQuery(record); err != nil {
 					return nil, fmt.Errorf("compile physical query %s/%s/%s: %w", view.NodeID, r.Hostname, r.Type, err)
 				}
@@ -458,6 +462,9 @@ func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNS
 			if err := validate(r.Candidates); err != nil {
 				return err
 			}
+			if err := validateDNSAvailabilityIntent(r, policy); err != nil {
+				return err
+			}
 			if err := validateDNSPhysicalQuery(r); err != nil {
 				return fmt.Errorf("validate physical query %s/%s/%s: %w", view.NodeID, r.Name, r.Type, err)
 			}
@@ -551,6 +558,23 @@ func validateDNSBusinessIntent(record model.EdgeDNSRecord, policy PolicySnapshot
 	selection := record.AnswerPolicy.PhysicalSelection
 	if selection == nil || selection.BusinessAllocation == nil {
 		if declared != nil && record.Type == "A" {
+			// Availability is separately authorized by the exact host policy.
+			// It does not reset or fabricate a business allocation.
+			if availability := DNSAvailabilityForHost(policy.DNSQueryPolicy, record.Name); availability != nil && record.AnswerPolicy.PolicyKind == model.DNSAnswerPolicyKindPhysicalOrder && record.AnswerPolicy.PhysicalOrder != nil {
+				allowed := map[string]bool{}
+				for _, candidate := range record.Candidates {
+					allowed[candidate.EdgeID] = true
+				}
+				var order []string
+				for _, id := range availability.OrderedEdgeIDs {
+					if allowed[id] {
+						order = append(order, id)
+					}
+				}
+				if len(order) > 0 && slices.Equal(order, record.AnswerPolicy.PhysicalOrder.OrderedEdgeIDs) && reflect.DeepEqual(availability, record.AnswerPolicy.Availability) {
+					return nil
+				}
+			}
 			return fmt.Errorf("business exploration intent lacks an exact signed allocation")
 		}
 		return nil

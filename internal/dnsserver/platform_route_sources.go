@@ -61,7 +61,7 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 		union.Probes = append(union.Probes, requirement)
 	}
 	sort.Slice(union.Probes, func(i, j int) bool { return union.Probes[i].ID < union.Probes[j].ID })
-	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, s.servingDNSProbes.bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(p, s.Config.DNSNodeID)))
+	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, s.servingDNSProbes.shareHistory(&s.dnsProbeHistories).bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(p, s.Config.DNSNodeID)))
 	facts = retainValidDNSReadinessFacts(union, p.Policy.DNSReadiness, s.platformDNSRouteFacts, facts, time.Now().UTC())
 	boundDNSRouteSourceFacts(dnsServingPayload{routeSources: &dnsroutesource.Context{Snapshot: snapshot}}, facts, time.Now().UTC())
 	valid := validDNSReadinessFacts(union, p.Policy.DNSReadiness, facts, time.Now().UTC())

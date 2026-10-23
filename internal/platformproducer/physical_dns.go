@@ -49,6 +49,9 @@ func validatePhysicalDNSUpdate(previous, next Policy, static, oldDNS, newDNS mod
 	if oldPolicy.DNSQueryPolicy == nil || newPolicy.DNSQueryPolicy == nil || oldPolicy.Generation == newPolicy.Generation {
 		return fmt.Errorf("physical DNS transition requires versioned explicit query policy")
 	}
+	if operation == "dns_availability" {
+		return validateDNSAvailabilityDelta(oldPolicy, newPolicy)
+	}
 	if operation == "edge_offline" {
 		return validateOfflinePolicyDelta(oldPolicy, newPolicy)
 	}

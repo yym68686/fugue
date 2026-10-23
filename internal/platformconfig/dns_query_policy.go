@@ -12,6 +12,7 @@ import (
 
 // DNSQueryPolicy declares strategy, never current candidates or ranking results.
 type DNSQueryPolicy struct {
+	AvailabilityRoutes    []DNSAvailabilityRoute `json:"availability_routes,omitempty"`
 	DynamicQuality        *DynamicQualityPolicy  `json:"dynamic_quality,omitempty"`
 	OrderedProjection     *DNSOrderedProjection  `json:"ordered_projection,omitempty"`
 	PhysicalRoutes        []PhysicalQualityRoute `json:"physical_routes,omitempty"`
@@ -179,6 +180,12 @@ func (p *DNSQueryPolicy) UnmarshalJSON(raw []byte) error {
 			return fmt.Errorf("physical routes cannot be null")
 		}
 	}
+	if raw, present := fields["availability_routes"]; present {
+		optional++
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("availability routes cannot be null")
+		}
+	}
 	if len(fields) != len(keys)+optional {
 		return fmt.Errorf("DNS query strategy requires complete explicit fields")
 	}
@@ -204,6 +211,16 @@ func (p *DNSQueryPolicy) UnmarshalJSON(raw []byte) error {
 func ValidateDNSQueryPolicy(p *DNSQueryPolicy) error {
 	if p == nil {
 		return nil
+	}
+	if len(p.AvailabilityRoutes) > 256 {
+		return fmt.Errorf("too many DNS availability routes")
+	}
+	availabilityHosts := map[string]bool{}
+	for _, route := range p.AvailabilityRoutes {
+		if !validDNSConsumerZone(route.Hostname) || availabilityHosts[route.Hostname] || model.ValidateDNSAvailabilityPolicy(&route.Policy) != nil || p.RankingMode != "active" || p.ECSEnabled || p.ExplorationPercent != 0 {
+			return fmt.Errorf("invalid or duplicate DNS availability route")
+		}
+		availabilityHosts[route.Hostname] = true
 	}
 	if dynamic := p.DynamicQuality; dynamic != nil {
 		if dynamic.Mode != "all_dynamic" || p.RankingMode != "active" || p.OrderedProjection == nil || !model.IsDeliveryPhysicalNetworkPolicy(dynamic.Policy.Version) || model.ValidatePhysicalEdgeQualityPolicy(dynamic.Policy) != nil || dynamic.RefreshQueriesPerCycle < 1 || dynamic.RefreshQueriesPerCycle > 128 || dynamic.RefreshConcurrency < 1 || dynamic.RefreshConcurrency > 8 || dynamic.RefreshConcurrency > dynamic.RefreshQueriesPerCycle {

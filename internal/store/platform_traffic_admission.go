@@ -165,6 +165,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if required.businessDNSBaseline && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.BusinessDNSBaselineCapabilityV1) {
 					return fail("required consumer lacks business DNS baseline v1 capability")
 				}
+				if required.availability && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAvailabilityCapabilityV1) {
+					return fail("required consumer lacks DNS availability v1 capability")
+				}
 				if required.businessUnified && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.BusinessUnifiedCapabilityV2) {
 					return fail("required consumer lacks unified business decision v2 capability")
 				}
@@ -200,7 +203,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	return nil
 }
 
-type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified bool }
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability bool }
 
 func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
 	var out physicalCapabilities
@@ -218,6 +221,7 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 		return out, err
 	}
 	if query := payload.Policy.Query; query != nil {
+		out.availability = len(query.AvailabilityRoutes) > 0
 		out.projection = query.OrderedProjection != nil
 		if query.DynamicQuality != nil {
 			out.network = true

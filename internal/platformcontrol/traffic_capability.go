@@ -32,3 +32,6 @@ const PhysicalOrderProjectionCapabilityV1 = "physical_order_projection_v1"
 const BusinessEdgeExplorationCapabilityV1 = "business_edge_exploration_v1"
 const BusinessDNSBaselineCapabilityV1 = "business_dns_baseline_v1"
 const BusinessUnifiedCapabilityV2 = "business_edge_unified_v2"
+
+// DNSAvailabilityCapabilityV1 understands independently signed availability pools and bounded recovery evidence.
+const DNSAvailabilityCapabilityV1 = "dns_availability_v1"

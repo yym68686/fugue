@@ -631,6 +631,11 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 			p.DynamicQuality = &dynamic
 		}
 		p.OrderedProjection = CloneDNSOrderedProjection(in.DNSQueryPolicy.OrderedProjection)
+		p.AvailabilityRoutes = append([]DNSAvailabilityRoute(nil), p.AvailabilityRoutes...)
+		for i := range p.AvailabilityRoutes {
+			p.AvailabilityRoutes[i].Policy = *model.CloneDNSAvailabilityPolicy(&p.AvailabilityRoutes[i].Policy)
+		}
+		sort.Slice(p.AvailabilityRoutes, func(i, j int) bool { return p.AvailabilityRoutes[i].Hostname < p.AvailabilityRoutes[j].Hostname })
 		p.PhysicalRoutes = append([]PhysicalQualityRoute(nil), p.PhysicalRoutes...)
 		for index := range p.PhysicalRoutes {
 			if exploration := p.PhysicalRoutes[index].BusinessExploration; exploration != nil {

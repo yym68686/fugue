@@ -20,7 +20,7 @@ func membershipReconfiguration(operation string) bool {
 }
 
 func globalDNSReconfiguration(operation string) bool {
-	return operation == "physical_dns" || operation == "retire_dns_selector" || operation == "dynamic_quality" || operation == "edge_offline" || operation == "business_exploration"
+	return operation == "physical_dns" || operation == "retire_dns_selector" || operation == "dynamic_quality" || operation == "edge_offline" || operation == "business_exploration" || operation == "dns_availability"
 }
 
 func producerReconfigurationKey(a model.PlatformArtifact, precondition model.PlatformProducerReconfiguration) (string, error) {
@@ -60,7 +60,7 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
-	case "continuous_serving", "physical_dns", "retire_dns_selector", "dynamic_quality", "edge_offline", "business_exploration":
+	case "continuous_serving", "physical_dns", "retire_dns_selector", "dynamic_quality", "edge_offline", "business_exploration", "dns_availability":
 		if p.Mode != "serving" || p.Serving == nil || p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
@@ -143,6 +143,11 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		return ErrConflict
 	}
 	oldSources := previous
+	if r.Operation == "dns_availability" {
+		if err := validateProducerDNSInputChange(state, previous, p, keys, platformproducer.ValidateDNSAvailabilityUpdate); err != nil {
+			return err
+		}
+	}
 	if r.Operation == "business_exploration" {
 		if err := validateProducerDNSInputChange(state, previous, p, keys, platformproducer.ValidateBusinessExplorationUpdate); err != nil {
 			return err

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,7 +56,16 @@ type DNSDecisionRank struct {
 	SortScore int                          `json:"sort_score"`
 }
 
+type DNSAvailabilityDecision struct {
+	AuthorizedCandidates int    `json:"authorized_candidates"`
+	RecoveredCandidates  int    `json:"recovered_candidates"`
+	QualityPrimary       string `json:"quality_primary"`
+	ServingPrimary       string `json:"serving_primary"`
+	FallbackUsed         bool   `json:"fallback_used"`
+}
+
 type DNSDecisionRecord struct {
+	Availability           *DNSAvailabilityDecision       `json:"availability,omitempty"`
 	RecordName             string                         `json:"record_name"`
 	Policy                 model.DNSAnswerPolicy          `json:"policy"`
 	InputCandidates        []model.EdgeDNSAnswerCandidate `json:"input_candidates"`
@@ -358,6 +368,21 @@ func (capture *dnsDecisionCapture) describeRecord(entry dnsServingRecord, materi
 		CooldownUntil: cooldownUntil, CooldownResult: cooldownResult, ScopeSource: firstNonEmpty(hint.Source, "none"),
 		ScopeResolution: firstNonEmpty(audit.ClientScopeResolution, edgeDNSClientScopeResolution(hint, false)), MatchedScopeKey: firstNonEmpty(audit.MatchedScopeKey, "global"),
 		Answered: append([]model.EdgeDNSAnswerCandidate{}, audit.Answered...)}
+	if availability := policy.Availability; availability != nil {
+		summary := &DNSAvailabilityDecision{RecoveredCandidates: len(output), FallbackUsed: audit.SelectionResult == "availability_readiness_failover"}
+		for _, candidate := range input {
+			if slices.Contains(availability.OrderedEdgeIDs, candidate.EdgeID) {
+				summary.AuthorizedCandidates++
+			}
+		}
+		if quality := policy.PhysicalSelection; quality != nil {
+			summary.QualityPrimary = quality.PrimaryEdgeID
+		}
+		if len(audit.Answered) > 0 {
+			summary.ServingPrimary = audit.Answered[0].EdgeID
+		}
+		record.Availability = summary
+	}
 	materializedCandidates := make(map[string]model.EdgeDNSAnswerCandidate, len(output))
 	for _, candidate := range output {
 		materializedCandidates[edgeDNSCandidateDecisionKey(candidate)] = candidate
@@ -387,6 +412,17 @@ func (capture *dnsDecisionCapture) describeRecord(entry dnsServingRecord, materi
 					reason = "route_ready_required"
 				case policy.PolicyKind != model.DNSAnswerPolicyKindDisabled && !actual.TLSReady:
 					reason = "tls_ready_required"
+				}
+			}
+			if availability := policy.Availability; availability != nil {
+				if !slices.Contains(availability.OrderedEdgeIDs, candidate.EdgeID) {
+					reason = "outside_availability_pool"
+				} else if _, ok := materializedCandidates[key]; !ok {
+					reason = availabilityMaterializationReason(entry, candidate, at)
+				} else if !record.Availability.FallbackUsed {
+					if quality := policy.PhysicalSelection; quality != nil && quality.BusinessAllocation != nil && quality.BusinessAllocation.State.Stopped[candidate.EdgeID] != "" {
+						reason = "quality_stopped"
+					}
 				}
 			}
 			record.Filtered = append(record.Filtered, DNSDecisionFilter{EdgeID: candidate.EdgeID, IP: candidate.IP, Reason: reason})

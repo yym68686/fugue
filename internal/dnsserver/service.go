@@ -77,6 +77,7 @@ type Service struct {
 	platformParent                *Service
 	PlatformTokenFile             string
 	platformConsumerMu            sync.Mutex
+	dnsProbeHistories             dnsProbeHistoryStore
 	servingDNSProbes              dnsReadinessScheduler
 	candidateDNSProbes            dnsReadinessScheduler
 	retainedDNSProbes             dnsReadinessScheduler
@@ -214,6 +215,7 @@ type edgeDNSAnswerAudit struct {
 }
 
 type edgeDNSCandidateOrderDecision struct {
+	AvailabilityFallback      bool
 	Policy                    model.DNSAnswerPolicy
 	ClientScopeResolution     string
 	MatchedScopeKey           string
@@ -2080,6 +2082,9 @@ func (s *Service) verifyBundle(bundle model.EdgeDNSBundle, now time.Time) error 
 		return fmt.Errorf("dns bundle version is required")
 	}
 	for _, record := range bundle.Records {
+		if record.AnswerPolicy.Availability != nil {
+			return fmt.Errorf("DNS availability requires immutable platform serving authority and independent proofs")
+		}
 		if len(record.ValueExpirations) > 0 {
 			if _, err := filterDNSRecordValues(record, now); err != nil {
 				return fmt.Errorf("invalid DNS value expiration: %w", err)
@@ -2965,6 +2970,7 @@ func rrForEdgeDNSRecordWithGeoAuditAt(record model.EdgeDNSRecord, ownerName stri
 
 func edgeDNSAnswerCandidateDecision(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc) ([]model.EdgeDNSAnswerCandidate, []edgeDNSFilteredCandidate, edgeDNSCandidateOrderDecision) {
 	ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, hint, now, liveHealth != nil)
+	ordered, decision = availabilityFallback(record, ordered, decision)
 	return filterOrderedDNSCandidates(record, ordered, decision, liveHealth, peerHealth)
 }
 
@@ -3009,6 +3015,9 @@ func filterOrderedDNSCandidates(record model.EdgeDNSRecord, ordered []model.Edge
 }
 
 func edgeDNSSelectionResult(decision edgeDNSCandidateOrderDecision, answered []model.EdgeDNSAnswerCandidate, filtered []edgeDNSFilteredCandidate) string {
+	if decision.AvailabilityFallback && len(answered) > 0 {
+		return "availability_readiness_failover"
+	}
 	if decision.Policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalOrder {
 		if len(answered) == 0 {
 			return "physical_order_no_ready_endpoint"

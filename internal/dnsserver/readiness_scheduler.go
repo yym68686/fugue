@@ -24,16 +24,17 @@ type dnsProbeTargetState struct {
 }
 
 type dnsReadinessScheduler struct {
-	mu        sync.Mutex
-	scope     string
-	digest    string
-	cursor    int
-	attempts  map[string]time.Time
-	expires   map[string]time.Time
-	targets   map[string]dnsProbeTargetState
-	preferred map[string]bool
-	logger    *log.Logger
-	path      string
+	historyStore *dnsProbeHistoryStore
+	mu           sync.Mutex
+	scope        string
+	digest       string
+	cursor       int
+	attempts     map[string]time.Time
+	expires      map[string]time.Time
+	targets      map[string]dnsProbeTargetState
+	preferred    map[string]bool
+	logger       *log.Logger
+	path         string
 }
 
 func (scheduler *dnsReadinessScheduler) prioritize(keys map[string]bool) *dnsReadinessScheduler {
@@ -214,6 +215,7 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 		}
 		queue.outcomes[outcome]++
 		result.fact.ObservationID = observationID
+		scheduler.observeProbeHistory(&result.fact, policy)
 		facts[result.index] = result.fact
 		if result.fact.Ready {
 			scheduler.expires[result.fact.ProbeID] = result.fact.Proof.ValidUntil

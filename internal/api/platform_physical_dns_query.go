@@ -22,7 +22,7 @@ type compiledPhysicalDNSSelection struct {
 	proofFreshUntil time.Time
 }
 
-func (s *Server) capturePhysicalDNSQueries(ctx context.Context, projection *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy) error {
+func (s *Server) capturePhysicalDNSQueriesStrict(ctx context.Context, projection *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy) error {
 	if len(policy.PhysicalRoutes) == 0 {
 		return nil
 	}

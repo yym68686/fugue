@@ -305,7 +305,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	}
 	facts := sourceFacts
 	if p.routeSources == nil {
-		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.bind(a, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(p, s.Config.DNSNodeID)))
+		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.shareHistory(&s.dnsProbeHistories).bind(a, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(p, s.Config.DNSNodeID)))
 	}
 	// Keep the original observations for the retained release. Candidate
 	// assignment filtering below must not erase a valid old-release proof.
@@ -474,7 +474,7 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 		old.record.AppliedAt.Add(time.Duration(old.payload.Policy.MaxStaleSeconds)*time.Second).After(time.Now()) {
 		ctx = routeprobe.WithRetainedLKG(ctx)
 	}
-	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(old.payload, s.Config.DNSNodeID)))
+	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.shareHistory(&s.dnsProbeHistories).bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(old.payload, s.Config.DNSNodeID)))
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe
 	// has a transient transport failure. Keep only proofs that are still valid;

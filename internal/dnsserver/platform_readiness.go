@@ -30,6 +30,7 @@ type DNSReadinessStatus struct {
 }
 
 type dnsReadinessFact struct {
+	ProbeHistory  []time.Time      `json:"probe_history,omitempty"`
 	ObservationID string           `json:"observation_id,omitempty"`
 	ProbeID       string           `json:"probe_id"`
 	Ready         bool             `json:"ready"`
@@ -89,7 +90,7 @@ func (s *Service) observePlatformDNSReadiness(ctx context.Context, c dnsPlatform
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("DNS readiness facts cache unavailable")
 	}
-	facts := collectDNSReadinessFacts(ctx, payload.Plan, payload.Policy.DNSReadiness, routeprobe.Probe, s.candidateDNSProbes.bind(a, s.Logger, s.Config.CachePath))
+	facts := collectDNSReadinessFacts(ctx, payload.Plan, payload.Policy.DNSReadiness, routeprobe.Probe, s.candidateDNSProbes.shareHistory(&s.dnsProbeHistories).bind(a, s.Logger, s.Config.CachePath))
 	checkedAt := time.Now().UTC()
 	receipt.Facts = facts
 	receipt.Status = summarizeDNSReadiness(payload.Plan, payload.Policy.DNSReadiness, facts, planDigest, checkedAt, checkedAt)
@@ -146,6 +147,11 @@ func retainValidDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy 
 		}
 		if fact, ok := validPrevious[retained[i].ProbeID]; ok {
 			fact.Reason = "retained_valid_proof"
+			// A failed refresh cannot retain recovery progress. The old proof
+			// itself keeps its deadline for historical policies only.
+			if retained[i].Reason == "probe_unavailable" {
+				fact.ProbeHistory = nil
+			}
 			retained[i] = fact
 		}
 	}
