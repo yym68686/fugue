@@ -146,6 +146,37 @@ func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool,
 		if err := VerifyServingObservation(s.Config, raw, snapshot, now); err != nil {
 			t.Fatal("runtime snapshot lost availability recovery evidence", err)
 		}
+		// Transport delay may consume one endpoint's lease while the other
+		// still provides all route proofs. Never renew or trust a proof that
+		// was already invalid when the snapshot was captured.
+		for _, scenario := range []string{"one endpoint expires in transit", "all expire in transit", "already expired at capture", "expired foreign binding"} {
+			t.Run(scenario, func(t *testing.T) {
+				encoded, _ := json.Marshal(snapshot)
+				var delayed dnsfacts.Snapshot
+				if json.Unmarshal(encoded, &delayed) != nil {
+					t.Fatal("snapshot copy failed")
+				}
+				for i := range delayed.Facts {
+					f := &delayed.Facts[i]
+					if f.Proof.EdgeID == "edge-a" || scenario == "all expire in transit" {
+						f.Proof.ValidUntil = now.Add(500 * time.Millisecond)
+						if scenario == "already expired at capture" {
+							f.Proof.ValidUntil = now.Add(-time.Millisecond)
+						}
+						if scenario == "expired foreign binding" {
+							f.Proof.TrafficRelease.FencingToken++
+						}
+					}
+				}
+				err := VerifyServingObservation(s.Config, raw, delayed, now.Add(time.Second))
+				if scenario == "one endpoint expires in transit" && err != nil {
+					t.Fatal("expiring redundant endpoint blocked still-proven DNS answers", err)
+				}
+				if scenario != "one endpoint expires in transit" && err == nil {
+					t.Fatal("expired or untrusted observation authorized serving")
+				}
+			})
+		}
 		declared := request.Policy.DNSQueryPolicy.AvailabilityRoutes[0]
 		if err := VerifyServingAuthorityHandoff(s.Config, raw, snapshot, request.PreviousTrafficPublication.DNS, &declared, now); err != nil {
 			t.Fatal("exact available handoff failed authenticated observation", err)

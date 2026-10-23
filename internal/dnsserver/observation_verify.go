@@ -65,11 +65,17 @@ func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte,
 		seen[observed.ProbeID] = true
 		fact := dnsReadinessFact{ProbeID: observed.ProbeID, Proof: observed.Proof}
 		if observed.Ready {
-			fact = evaluateDNSReadinessFact(requirement, payload.Policy.DNSReadiness, observed.Proof, nil, now)
-			if !fact.Ready || !reflect.DeepEqual(fact.Proof, observed.Proof) || observed.Proof.CheckedAt.After(snapshot.EvaluatedAt) ||
+			// A positive claim must be valid at capture, including its original
+			// expiry and release binding. In transit a redundant endpoint may
+			// expire; drop its readiness without renewing its lease or rejecting
+			// another endpoint's still-valid proof. The final materialization
+			// independently requires every record's quorum at verification time.
+			fact = evaluateDNSReadinessFact(requirement, payload.Policy.DNSReadiness, observed.Proof, nil, snapshot.EvaluatedAt)
+			if !fact.Ready || !reflect.DeepEqual(fact.Proof, observed.Proof) ||
 				!dnsFactMatchesRelease(fact, record.Parent, record.Candidate, routeID, payload) {
 				return errors.New("DNS observation contains an invalid positive proof")
 			}
+			fact = evaluateDNSReadinessFact(requirement, payload.Policy.DNSReadiness, observed.Proof, nil, now)
 		}
 		if len(observed.ProbeHistory) > dnsProbeHistoryLimit {
 			return errors.New("DNS observation recovery history exceeds bound")
