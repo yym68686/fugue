@@ -6,6 +6,7 @@ Public Services, workloads, routing sources and the global producer are untouche
 """
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import json
 import os
@@ -171,9 +172,13 @@ def observe_shadow_reader(c, reader):
     health = shadow_health(c, reader)
     candidate = health.get("platform_candidate", {})
     readiness, query = candidate.get("readiness", {}), candidate.get("query", {})
+    # Shadow means a recent successful dry run, not a serving lease. The
+    # shortest individual proof may expire before this read even when another
+    # endpoint still satisfies its record. Check the dry-run evaluation time;
+    # gray/full use the independent signed, current-time serving verifier below.
     if (candidate.get("state") != "shadow_verified" or candidate.get("artifact_id") != c["dns_artifact"]["id"] or candidate.get("digest") != c["dns_artifact"]["digest"] or candidate.get("release_set_id") != c["release_set"]["id"] or candidate.get("last_error") or
-            type(readiness.get("records")) is not int or readiness.get("records") < 1 or readiness.get("ready_records") != readiness.get("records") or not HASH.fullmatch(readiness.get("plan_digest", "")) or timestamp(readiness["checked_at"]) > now() or timestamp(readiness["fresh_until"]) <= now() or
-            type(query.get("records")) is not int or query.get("records") < 1 or query.get("eligible_records") != query.get("records") or query.get("answers", 0) < 1 or query.get("serving") is not False or timestamp(query["evaluated_at"]) < timestamp(readiness["checked_at"])):
+            type(readiness.get("records")) is not int or readiness.get("records") < 1 or readiness.get("ready_records") != readiness.get("records") or not HASH.fullmatch(readiness.get("plan_digest", "")) or timestamp(readiness["checked_at"]) > now() or timestamp(readiness["fresh_until"]) <= timestamp(query["evaluated_at"]) or
+            type(query.get("records")) is not int or query.get("records") < 1 or query.get("eligible_records") != query.get("records") or query.get("answers", 0) < 1 or query.get("serving") is not False or timestamp(query["evaluated_at"]) < timestamp(readiness["checked_at"]) or not datetime.timedelta(0) <= now() - timestamp(query["evaluated_at"]) <= datetime.timedelta(seconds=90)):
         raise ValueError("private DNS signed shadow has no fresh complete answer proof")
     current = read_json("get", "pod", reader["pod"], "-n", c["namespace"], "-o", "json")
     if current["metadata"].get("uid") != meta["uid"] or current["metadata"].get("resourceVersion") != meta["resourceVersion"]:
@@ -207,7 +212,8 @@ def shadow_convergence(c, api, release):
                 not required_caps.issubset(set(observed.get("compatibility_capabilities", [])))):
             raise ValueError("private DNS shadow capability receipt is stale or belongs to another executor")
         observed_nodes.add(node)
-    return [observe_shadow_reader(c, reader) for reader in c["readers"]]
+    with ThreadPoolExecutor(max_workers=len(c["readers"])) as pool:
+        return list(pool.map(lambda reader: observe_shadow_reader(c, reader), c["readers"]))
 
 
 def observe_shadow(c, api, release):
@@ -306,7 +312,8 @@ def observe(c, api, release):
             raise ValueError("private DNS publication changed during observation")
         try:
             convergence(c, api, release)
-            readers = [observe_reader(c, r, release) for r in c["readers"]]
+            with ThreadPoolExecutor(max_workers=len(c["readers"])) as pool:
+                readers = list(pool.map(lambda reader: observe_reader(c, reader, release), c["readers"]))
             samples.append({"at": now().isoformat(), "readers": readers})
         except (ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             samples, error = [], str(exc)

@@ -111,6 +111,20 @@ class PrivateDNSPromotionTests(unittest.TestCase):
             p.promote(c, lambda *args: writes.append(args), lambda value: None)
         self.assertEqual([], writes)
 
+    def test_shadow_evidence_is_a_recent_dry_run_and_not_a_serving_lease(self):
+        c, t = config(), p.now()
+        reader = c["readers"][0]
+        pod = {"metadata": {"uid": reader["uid"], "resourceVersion": "12", "annotations": {"fugue.pro/authority-transition-role": "isolated-candidate", "fugue.pro/consumer-identity": json.dumps({"version": "v1", "component": "dns-server", "scope_key": p.scope(c), "authority_id": c["authority_cell_id"], "artifact_kinds": ["dns_answer_bundle"]})}}, "spec": {"nodeName": reader["node_id"], "serviceAccountName": reader["service_account"], "containers": [{"name": "dns", "image": reader["image"], "readinessProbe": {"httpGet": {"port": 8080}}}]}, "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}}
+        candidate = {"state": "shadow_verified", "artifact_id": "dns", "digest": c["dns_artifact"]["digest"], "release_set_id": "parent", "readiness": {"records": 2, "ready_records": 2, "plan_digest": "sha256:" + "f" * 64, "checked_at": (t - datetime.timedelta(seconds=20)).isoformat(), "fresh_until": (t - datetime.timedelta(seconds=1)).isoformat()}, "query": {"records": 3, "eligible_records": 3, "answers": 3, "view_digest": "sha256:" + "a" * 64, "serving": False, "evaluated_at": (t - datetime.timedelta(seconds=19)).isoformat()}}
+        with patch.object(p, "read_json", return_value=pod), patch.object(p, "shadow_health", return_value={"platform_candidate": candidate}):
+            self.assertEqual(2, p.observe_shadow_reader(c, reader)["ready_records"])
+        mutations = [lambda v: v.update(artifact_id="foreign"), lambda v: v["readiness"].update(ready_records=1), lambda v: v["query"].update(eligible_records=2), lambda v: v["query"].update(serving=True), lambda v: v["query"].update(evaluated_at=(t - datetime.timedelta(seconds=100)).isoformat()), lambda v: v["query"].update(evaluated_at=(t + datetime.timedelta(seconds=10)).isoformat()), lambda v: v["readiness"].update(fresh_until=(t - datetime.timedelta(seconds=20)).isoformat())]
+        for mutate in mutations:
+            value = copy.deepcopy(candidate)
+            mutate(value)
+            with patch.object(p, "read_json", return_value=pod), patch.object(p, "shadow_health", return_value={"platform_candidate": value}), self.assertRaisesRegex(ValueError, "complete answer proof"):
+                p.observe_shadow_reader(c, reader)
+
     def test_shadow_receipts_bind_fresh_physical_executors_without_claiming_serving(self):
         c, r, t = config(), release(config(), "shadow"), p.now()
         expected = {"id": "set-one", "expected_generation": "g-one"}
