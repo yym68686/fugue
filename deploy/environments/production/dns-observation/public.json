@@ -1,14 +1,62 @@
 {
   "schema": "fugue.dns-public-observation/v1",
-  "servers": ["15.204.94.71", "51.38.126.103"],
-  "recursive_servers": ["1.1.1.1", "8.8.8.8"],
+  "servers": [
+    "15.204.94.71",
+    "51.38.126.103"
+  ],
+  "recursive_servers": [
+    "1.1.1.1",
+    "8.8.8.8"
+  ],
   "timeout_seconds": 4,
   "queries": [
-    {"hostname": "api.fugue.pro", "type": "A", "minimum_answers": 1, "allowed_answers": ["15.204.94.71", "51.38.126.103", "154.51.41.196"]},
-    {"hostname": "i00.pro", "type": "A", "minimum_answers": 1, "allowed_answers": ["15.204.94.71", "154.51.41.196"]},
-    {"hostname": "ssh.fugue.pro", "type": "A", "minimum_answers": 1, "allowed_answers": ["15.204.94.71"]},
-    {"hostname": "api.fugue.pro", "type": "AAAA", "minimum_answers": 0, "allowed_answers": []},
-    {"hostname": "fugue.pro", "type": "NS", "minimum_answers": 2, "allowed_answers": ["ns1.dns.fugue.pro.", "ns2.dns.fugue.pro."]},
-    {"hostname": "fugue.pro", "type": "SOA", "minimum_answers": 1, "allowed_answers": []}
+    {
+      "hostname": "api.fugue.pro",
+      "type": "A",
+      "minimum_answers": 1,
+      "allowed_answers": [
+        "15.204.94.71",
+        "51.38.126.103",
+        "95.169.10.156"
+      ]
+    },
+    {
+      "hostname": "i00.pro",
+      "type": "A",
+      "minimum_answers": 1,
+      "allowed_answers": [
+        "15.204.94.71",
+        "95.169.10.156"
+      ]
+    },
+    {
+      "hostname": "ssh.fugue.pro",
+      "type": "A",
+      "minimum_answers": 1,
+      "allowed_answers": [
+        "15.204.94.71"
+      ]
+    },
+    {
+      "hostname": "api.fugue.pro",
+      "type": "AAAA",
+      "minimum_answers": 0,
+      "allowed_answers": []
+    },
+    {
+      "hostname": "fugue.pro",
+      "type": "NS",
+      "minimum_answers": 2,
+      "allowed_answers": [
+        "ns1.dns.fugue.pro.",
+        "ns2.dns.fugue.pro."
+      ]
+    },
+    {
+      "hostname": "fugue.pro",
+      "type": "SOA",
+      "minimum_answers": 1,
+      "allowed_answers": []
+    }
   ]
 }
