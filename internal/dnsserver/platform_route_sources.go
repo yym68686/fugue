@@ -62,6 +62,22 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 	}
 	sort.Slice(union.Probes, func(i, j int) bool { return union.Probes[i].ID < union.Probes[j].ID })
 	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, s.servingDNSProbes.shareHistory(&s.dnsProbeHistories).bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(p, s.Config.DNSNodeID)))
+	// A physical request can satisfy a different authorized publication than
+	// its scheduling representative. Record continuity under each immutable
+	// requirement only after its complete publication binding is verified.
+	// Do this before retaining old proofs: a timed-out refresh must reset
+	// recovery even when an older proof still has an unexpired lease.
+	s.servingDNSProbes.mu.Lock()
+	for i := range facts {
+		fact := &facts[i]
+		if fact.Ready && !plans.Matches(plans.Probes[fact.ProbeID], fact.Proof) {
+			fact.Ready, fact.Reason = false, "traffic_release_mismatch"
+		}
+		if fact.Reason != "not_observed" {
+			s.servingDNSProbes.observeProbeHistory(fact, p.Policy.DNSReadiness, time.Now().UTC())
+		}
+	}
+	s.servingDNSProbes.mu.Unlock()
 	facts = retainValidDNSReadinessFacts(union, p.Policy.DNSReadiness, s.platformDNSRouteFacts, facts, time.Now().UTC())
 	boundDNSRouteSourceFacts(dnsServingPayload{routeSources: &dnsroutesource.Context{Snapshot: snapshot}}, facts, time.Now().UTC())
 	valid := validDNSReadinessFacts(union, p.Policy.DNSReadiness, facts, time.Now().UTC())

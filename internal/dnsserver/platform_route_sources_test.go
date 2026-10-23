@@ -88,7 +88,7 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 					if scenario == "wrong-binding" {
 						b.FencingToken++
 					}
-					return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: p.RouteDigest, Version: "observed", State: state, TrafficRelease: &b, CheckedAt: time.Now().Add(-time.Millisecond), ValidUntil: time.Now().Add(20 * time.Second)}, nil
+					return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: p.RouteDigest, Version: "observed", State: state, TrafficRelease: &b, CheckedAt: time.Now(), ValidUntil: time.Now().Add(20 * time.Second)}, nil
 				}
 				return routeprobe.Proof{}, errors.New("missing physical probe")
 			}
@@ -118,6 +118,23 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if scenario == "success" {
+				for _, fact := range facts {
+					if fact.Ready && len(fact.ProbeHistory) != 1 {
+						t.Fatal("source projection lost original successful observation", fact.ProbeID, fact.ProbeHistory)
+					}
+				}
+				next, repeated, err := s.observeDNSRouteSources(context.Background(), client, platformconsumer.Identity{Token: "test"}, candidate, payload, effective.routeSources, probe)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, fact := range repeated {
+					if fact.Ready && len(fact.ProbeHistory) != 2 {
+						t.Fatal("source projection did not retain distinct probe continuity", fact.ProbeID, fact.ProbeHistory)
+					}
+				}
+				effective, facts = next, repeated
+			}
 			if strings.HasSuffix(scenario, "-refresh") {
 				original := map[string]dnsReadinessFact{}
 				for _, f := range facts {
@@ -140,6 +157,9 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 					t.Fatal(err)
 				}
 				for _, f := range refreshed {
+					if len(f.ProbeHistory) != 0 {
+						t.Fatal("failed source refresh retained recovery progress", f.ProbeID)
+					}
 					if scenario == "transient-refresh" {
 						old := original[f.ProbeID]
 						if f.Ready != old.Ready || !f.Proof.CheckedAt.Equal(old.Proof.CheckedAt) || !f.Proof.ValidUntil.Equal(old.Proof.ValidUntil) {

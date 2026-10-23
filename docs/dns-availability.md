@@ -129,6 +129,13 @@ Ready condition or one successful request cannot establish service recovery.
 The protocol readiness probe is not a bandwidth-capacity measurement; a
 provider quota notice must not be relabeled as a measured throughput value.
 
+When one physical probe is evaluated against multiple authorized routing
+publications, recovery history belongs to each exact immutable requirement.
+The source observer records a success only after validating the complete
+publication binding. It records failures before retaining any still-valid old
+proof, so retained proof leases cannot retain pre-failure recovery progress.
+Repeated evaluation of the same observation does not increase the count.
+
 Decision receipts include the constrained authorized/recovered candidate counts,
 quality primary, actual serving primary and whether availability fallback ran.
 Rejections distinguish an endpoint outside the availability pool, pending

@@ -65,6 +65,41 @@ func TestDNSReadinessBlackholeDoesNotStarveHealthyRoutes(t *testing.T) {
 	}
 }
 
+func TestDNSReadinessPartialTimeoutsDoNotStarveAnotherTarget(t *testing.T) {
+	plan := &platformconfig.DNSReadinessPlan{}
+	for i := 0; i < 30; i++ {
+		address := "192.0.2.1"
+		if i >= 24 {
+			address = "192.0.2.2"
+		}
+		plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{ID: fmt.Sprint(i), Address: address})
+	}
+	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 2, ProbeTimeoutSeconds: 1, MaxConcurrency: 4}
+	var slow, healthy atomic.Int32
+	started := time.Now()
+	collectDNSReadinessFacts(context.Background(), plan, policy, func(ctx context.Context, _, _, address, _ string, timeout time.Duration) (routeprobe.Proof, error) {
+		if address == "192.0.2.2" {
+			healthy.Add(1)
+			return routeprobe.Proof{}, errors.New("synthetic application response")
+		}
+		// This target remains connected and occasionally responds promptly.
+		// Read timeouts do not carry the connection-unavailable backoff flag.
+		if slow.Add(1)%3 == 0 {
+			return routeprobe.Proof{}, errors.New("synthetic application response")
+		}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		}
+		return routeprobe.Proof{}, routeprobe.ErrUnavailable
+	})
+	if healthy.Load() != 6 || slow.Load() < 3 || time.Since(started) >= 3*time.Second {
+		t.Fatal("partially responsive target monopolized observation window", healthy.Load(), slow.Load(), time.Since(started))
+	}
+}
+
 func TestDNSReadinessReusesCapacityAfterAnotherTargetCompletes(t *testing.T) {
 	plan := &platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{{ID: "fast", Address: "192.0.2.1"}}}
 	for index := 0; index < 8; index++ {

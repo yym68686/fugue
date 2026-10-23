@@ -162,6 +162,24 @@ func TestAvailabilityProbeHistoryRequiresDistinctSuccessAfterFailure(t *testing.
 	}
 }
 
+func TestAvailabilityIntermittentSuccessRequiresSustainedRecovery(t *testing.T) {
+	_, _, policy, facts, start := queryExecutionFixture()
+	scheduler := &dnsReadinessScheduler{}
+	fact := facts[0]
+	availability := availabilityTestPolicy()
+	availability.RecoverySuccesses, availability.RecoveryMinSeconds = 3, 20
+	// A limited link can answer occasionally for a long time. Elapsed time
+	// and cumulative successes cannot substitute for uninterrupted recovery.
+	for i, successful := range []bool{true, false, true, false, true, true, true} {
+		at := start.Add(time.Duration(i) * 10 * time.Second)
+		fact.Ready, fact.Proof.CheckedAt, fact.Proof.ValidUntil = successful, at, at.Add(time.Minute)
+		scheduler.observeProbeHistory(&fact, &policy, at)
+		if got := dnsAvailabilityRecovered(availability, fact, time.Minute, at); got != (i == 6) {
+			t.Fatalf("intermittent response misclassified at observation %d: %v", i, got)
+		}
+	}
+}
+
 func TestAvailabilityFailedRefreshDoesNotReuseRecoveryProgress(t *testing.T) {
 	_, plan, policy, facts, now := queryExecutionFixture()
 	for i := range facts {
