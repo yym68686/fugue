@@ -153,12 +153,20 @@ class PrivateDNSPromotionTests(unittest.TestCase):
             values = [{"node_id": "node-one", "observed_at": (p.now() - datetime.timedelta(seconds=20-i if advance else 20)).isoformat()} for i in range(3)]
             if not advance:
                 values = [values[0]] * 3
-            with patch.object(p, "publication", return_value=r), patch.object(p, "convergence"), patch.object(p, "observe_reader", side_effect=values), patch.object(p.time, "sleep"):
+            with patch.object(p, "publication", return_value=r), patch.object(p, "convergence"), patch.object(p, "observe_reader", side_effect=values), patch.object(p.time, "sleep"), patch.object(p.time, "monotonic", side_effect=[0, 0, 1, 2, 181]):
                 if advance:
                     self.assertEqual(3, len(p.observe(c, None, r)["samples"]))
                 else:
                     with self.assertRaisesRegex(ValueError, "did not renew"):
                         p.observe(c, None, r)
+
+    def test_watch_waits_for_real_renewal_within_original_deadline(self):
+        c, r, at = config(), release(config(), "full"), p.now()
+        values = [{"node_id": "node-one", "observed_at": (at + datetime.timedelta(seconds=i)).isoformat()} for i in [0, 0, 0, 1, 2]]
+        with patch.object(p, "publication", return_value=r), patch.object(p, "convergence"), patch.object(p, "observe_reader", side_effect=values), patch.object(p.time, "sleep"), patch.object(p.time, "monotonic", side_effect=[0, 0, 1, 2, 3, 4]):
+            witness = p.observe(c, None, r)
+        self.assertEqual(3, len(witness["samples"]))
+        self.assertGreater(p.timestamp(witness["samples"][-1]["readers"][0]["observed_at"]), p.timestamp(witness["samples"][0]["readers"][0]["observed_at"]))
 
     def test_failed_shadow_cannot_publish_gray(self):
         c, writes = config(), []

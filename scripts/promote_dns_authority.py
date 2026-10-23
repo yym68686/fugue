@@ -353,12 +353,16 @@ def observe(c, api, release):
         except (ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             samples, error = [], str(exc)
         if len(samples) >= c["observation"]["samples"]:
-            for i in range(len(c["readers"])):
-                if timestamp(samples[-1]["readers"][i]["observed_at"]) <= timestamp(samples[0]["readers"][i]["observed_at"]):
-                    raise ValueError("private DNS observation did not renew actual probes")
-            if publication(c, api, release["release_channel"])["id"] != release["id"]:
-                raise ValueError("private DNS publication changed after observation")
-            return {"declaration_digest": digest(c), "release_id": release["id"], "fencing_token": release["fencing_token"], "samples": samples, "completed_at": now().isoformat()}
+            advanced = all(timestamp(samples[-1]["readers"][i]["observed_at"]) > timestamp(samples[0]["readers"][i]["observed_at"]) for i in range(len(c["readers"])))
+            if not advanced:
+                # Sampling can finish before the next bounded probe sweep.
+                # Keep waiting within the original deadline, never count repeated
+                # observations as a successful watch or renew any evidence.
+                samples, error = samples[-1:], "private DNS observation did not renew actual probes"
+            else:
+                if publication(c, api, release["release_channel"])["id"] != release["id"]:
+                    raise ValueError("private DNS publication changed after observation")
+                return {"declaration_digest": digest(c), "release_id": release["id"], "fencing_token": release["fencing_token"], "samples": samples, "completed_at": now().isoformat()}
         time.sleep(c["observation"]["interval_seconds"])
     raise ValueError(error)
 
