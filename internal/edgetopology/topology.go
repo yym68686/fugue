@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const SchemaVersion = "edge-topology/v1"
@@ -121,7 +123,7 @@ func (intent Intent) Validate() error {
 	usedCells := make(map[string]struct{}, len(cells))
 	usedPools := make(map[string]struct{}, len(pools))
 	for i, edge := range intent.Edges {
-		if !validID(edge.ID) {
+		if !validEdgeID(edge.ID) {
 			return fmt.Errorf("edge %d has an invalid identity", i)
 		}
 		if i > 0 && intent.Edges[i-1].ID >= edge.ID {
@@ -172,6 +174,10 @@ func (intent Intent) Validate() error {
 }
 
 func validID(value string) bool { return identityPattern.MatchString(value) && len(value) <= 128 }
+
+// Physical identities are existing Kubernetes node names, not logical pool,
+// capability or failure-domain names. Keep their exact spelling and binding.
+func validEdgeID(value string) bool { return len(validation.IsDNS1123Subdomain(value)) == 0 }
 
 func (cell AuthorityCell) ServingGroupID() string {
 	if cell.LegacyGroupID != "" {

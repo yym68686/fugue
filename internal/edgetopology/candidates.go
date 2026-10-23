@@ -86,12 +86,15 @@ func (grant RouteGrant) Validate(intent Intent) error {
 	for _, pool := range intent.Pools {
 		knownPools[pool.ID] = struct{}{}
 	}
-	for _, list := range [][]string{grant.AllowedPoolIDs, grant.RequiredCapabilities, grant.ExcludedEdgeIDs, grant.AllowedCountries} {
-		if len(list) > 10000 {
+	for _, list := range []struct {
+		values []string
+		valid  func(string) bool
+	}{{grant.AllowedPoolIDs, validID}, {grant.RequiredCapabilities, validID}, {grant.ExcludedEdgeIDs, validEdgeID}, {grant.AllowedCountries, validID}} {
+		if len(list.values) > 10000 {
 			return fmt.Errorf("route grant list is too large")
 		}
-		for i, value := range list {
-			if !validID(value) || (i > 0 && list[i-1] >= value) {
+		for i, value := range list.values {
+			if !list.valid(value) || (i > 0 && list.values[i-1] >= value) {
 				return fmt.Errorf("route grant lists must be ordered and unique")
 			}
 		}

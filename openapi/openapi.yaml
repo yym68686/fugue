@@ -35805,7 +35805,12 @@ components:
             additionalProperties: false
             required: [id, authority_cell_id, serving_pool_ids, capabilities, failure_domains]
             properties:
-              id: {type: string}
+              id:
+                type: string
+                minLength: 1
+                maxLength: 253
+                pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                description: Exact opaque Kubernetes node identity, including registered numeric-leading UUIDs. Never normalized, renamed or inferred from locality.
               authority_cell_id: {type: string}
               serving_pool_ids: {type: array, minItems: 1, items: {type: string}}
               capabilities: {type: array, minItems: 1, items: {type: string}}
