@@ -4,7 +4,7 @@
     "digest": "sha256:4921a25c27caf9a8e747a08130d41f9fa26445720cb8ea92e8be3e54798e249d",
     "id": "artifact_1792759734_e2cfee92e6c0"
   },
-  "generation": 4,
+  "generation": 5,
   "namespace": "fugue-system",
   "observation": {
     "interval_seconds": 20,
@@ -15,21 +15,21 @@
   "readers": [
     {
       "container": "dns",
-      "image": "ghcr.io/yym68686/fugue-edge@sha256:2ac3a3dc216dbbb8b149e1630c0c902681351b79293bcffd2a930885c78234da",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:d2b4b2040f93d970bc7ebd753fa8b3325ae490e4aa935c7711d21b8057b9c6d6",
       "node_id": "vps-591f4447",
-      "pod": "fugue-dns-independent-b-85c878dc5f-mh9gs",
+      "pod": "fugue-dns-independent-b-dc4cffdf8-mfpck",
       "port": 7834,
       "service_account": "fugue-dns-independent-b",
-      "uid": "76bc09ab-931a-488e-8784-cfd4a2d90022"
+      "uid": "503d65d9-75dc-4a5d-b166-f54c1297b567"
     },
     {
       "container": "dns",
-      "image": "ghcr.io/yym68686/fugue-edge@sha256:7c13f7c45c3d61fdd356b185ef1f7f6a7ac253104e9f33f3f1aef810031c6f6c",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:a50a0ecbb2dc30ba4b694a437dde0d865e6cd88b4ecca0298ae6a47ea1b06d2e",
       "node_id": "vps-84c8f0a9",
-      "pod": "fugue-dns-independent-a-984bd7687-x5tlc",
+      "pod": "fugue-dns-independent-a-5c8884f779-wvw2p",
       "port": 7834,
       "service_account": "fugue-dns-independent-a",
-      "uid": "0e6a701a-1c52-49aa-b23e-4a08ac322a8b"
+      "uid": "3b691910-3a1f-465e-ba2b-df9c333feddf"
     }
   ],
   "release_set": {
@@ -92,5 +92,5 @@
     "fencing_token": 3,
     "id": "artifactrel_1792759742_74ad8e9b31e5"
   },
-  "verifier_revision": "fd97be3192e0f2aa6244073f47458a8564656d86"
+  "verifier_revision": "f65cecd60d2e09ebf7edb2ece20f96f619467527"
 }
