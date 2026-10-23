@@ -215,7 +215,7 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 		}
 		queue.outcomes[outcome]++
 		result.fact.ObservationID = observationID
-		scheduler.observeProbeHistory(&result.fact, policy)
+		scheduler.observeProbeHistory(&result.fact, policy, result.finished)
 		facts[result.index] = result.fact
 		if result.fact.Ready {
 			scheduler.expires[result.fact.ProbeID] = result.fact.Proof.ValidUntil

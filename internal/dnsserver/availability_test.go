@@ -140,23 +140,23 @@ func TestAvailabilityProbeHistoryRequiresDistinctSuccessAfterFailure(t *testing.
 	scheduler := &dnsReadinessScheduler{}
 	f := facts[0]
 	first := f.Proof.CheckedAt
-	scheduler.observeProbeHistory(&f, &policy)
-	scheduler.observeProbeHistory(&f, &policy)
+	scheduler.observeProbeHistory(&f, &policy, f.Proof.CheckedAt)
+	scheduler.observeProbeHistory(&f, &policy, f.Proof.CheckedAt)
 	if len(f.ProbeHistory) != 1 {
 		t.Fatal("reused observation advanced recovery")
 	}
 	f.Proof.CheckedAt = first.Add(10 * time.Second)
 	f.Proof.ValidUntil = f.Proof.CheckedAt.Add(time.Minute)
-	scheduler.observeProbeHistory(&f, &policy)
+	scheduler.observeProbeHistory(&f, &policy, f.Proof.CheckedAt)
 	if !dnsAvailabilityRecovered(availabilityTestPolicy(), f, time.Minute, now.Add(10*time.Second)) {
 		t.Fatal("fresh independent probes did not recover")
 	}
 	failed := f
 	failed.Ready = false
 	failed.Reason = "probe_unavailable"
-	scheduler.observeProbeHistory(&failed, &policy)
+	scheduler.observeProbeHistory(&failed, &policy, failed.Proof.CheckedAt)
 	f.Proof.CheckedAt = f.Proof.CheckedAt.Add(time.Second)
-	scheduler.observeProbeHistory(&f, &policy)
+	scheduler.observeProbeHistory(&f, &policy, f.Proof.CheckedAt)
 	if len(f.ProbeHistory) != 1 {
 		t.Fatal("failure did not reset recovery")
 	}
@@ -188,32 +188,53 @@ func TestAvailabilityControlPlaneLossPreservesProbeContinuityWithoutReusingSucce
 	serving := (&dnsReadinessScheduler{}).shareHistory(history)
 	retained := (&dnsReadinessScheduler{}).shareHistory(history)
 	fact := facts[0]
-	serving.observeProbeHistory(&fact, &policy)
+	serving.observeProbeHistory(&fact, &policy, fact.Proof.CheckedAt)
 	fact.Proof.CheckedAt = fact.Proof.CheckedAt.Add(10 * time.Second)
 	fact.Proof.ValidUntil = fact.Proof.CheckedAt.Add(time.Minute)
-	serving.observeProbeHistory(&fact, &policy)
+	serving.observeProbeHistory(&fact, &policy, fact.Proof.CheckedAt)
 	// Another observer consuming the same proof is not another success.
-	retained.observeProbeHistory(&fact, &policy)
+	retained.observeProbeHistory(&fact, &policy, fact.Proof.CheckedAt)
 	if len(fact.ProbeHistory) != 2 {
 		t.Fatal("scheduler switch duplicated or lost existing observations")
 	}
 	fact.Proof.CheckedAt = fact.Proof.CheckedAt.Add(time.Second)
-	retained.observeProbeHistory(&fact, &policy)
+	retained.observeProbeHistory(&fact, &policy, fact.Proof.CheckedAt)
 	if len(fact.ProbeHistory) != 3 || !dnsAvailabilityRecovered(availabilityTestPolicy(), fact, time.Minute, now.Add(12*time.Second)) {
 		t.Fatal("control-plane loss invented recovery downtime")
 	}
 	failed := fact
 	failed.Ready = false
-	retained.observeProbeHistory(&failed, &policy)
+	retained.observeProbeHistory(&failed, &policy, failed.Proof.CheckedAt)
 	fact.Proof.CheckedAt = fact.Proof.CheckedAt.Add(time.Second)
-	serving.observeProbeHistory(&fact, &policy)
+	serving.observeProbeHistory(&fact, &policy, fact.Proof.CheckedAt)
 	if len(fact.ProbeHistory) != 1 {
 		t.Fatal("another scheduler hid an actual failure")
 	}
 	// A restarted process has no runtime history and must probe afresh.
 	restarted := &dnsReadinessScheduler{}
-	restarted.observeProbeHistory(&fact, &policy)
+	restarted.observeProbeHistory(&fact, &policy, fact.Proof.CheckedAt)
 	if len(fact.ProbeHistory) != 1 || dnsAvailabilityRecovered(availabilityTestPolicy(), fact, time.Minute, now.Add(13*time.Second)) {
 		t.Fatal("restart manufactured continuity")
+	}
+}
+
+func TestAvailabilityDelayedSuccessCannotCrossAnotherSchedulersFailure(t *testing.T) {
+	_, _, policy, facts, now := queryExecutionFixture()
+	shared := &dnsProbeHistoryStore{}
+	serving := (&dnsReadinessScheduler{}).shareHistory(shared)
+	retained := (&dnsReadinessScheduler{}).shareHistory(shared)
+	stale := facts[0]
+	failed := stale
+	failed.Ready = false
+	failed.Proof.CheckedAt = stale.Proof.CheckedAt.Add(5 * time.Second)
+	retained.observeProbeHistory(&failed, &policy, failed.Proof.CheckedAt)
+	// A probe started before the failure returns later on another scheduler.
+	serving.observeProbeHistory(&stale, &policy, stale.Proof.CheckedAt)
+	fresh := facts[0]
+	fresh.Proof.CheckedAt = fresh.Proof.CheckedAt.Add(10 * time.Second)
+	fresh.Proof.ValidUntil = fresh.Proof.CheckedAt.Add(time.Minute)
+	serving.observeProbeHistory(&fresh, &policy, fresh.Proof.CheckedAt)
+	if dnsAvailabilityRecovered(availabilityTestPolicy(), fresh, time.Minute, now.Add(10*time.Second)) {
+		t.Fatal("delayed success counted across an intervening failure")
 	}
 }

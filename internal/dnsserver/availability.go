@@ -36,7 +36,13 @@ func dnsAvailabilityRecovered(policy *model.DNSAvailabilityPolicy, fact dnsReadi
 // endpoint's recovery merely because another scheduler performs the probe.
 type dnsProbeHistoryStore struct {
 	mu     sync.Mutex
-	values map[string][]time.Time
+	values map[string]dnsProbeHistory
+}
+
+type dnsProbeHistory struct {
+	successes  []time.Time
+	failedAt   time.Time
+	observedAt time.Time
 }
 
 func (scheduler *dnsReadinessScheduler) shareHistory(history *dnsProbeHistoryStore) *dnsReadinessScheduler {
@@ -46,7 +52,7 @@ func (scheduler *dnsReadinessScheduler) shareHistory(history *dnsProbeHistorySto
 	return scheduler
 }
 
-func (scheduler *dnsReadinessScheduler) observeProbeHistory(fact *dnsReadinessFact, policy *platformconfig.DNSReadinessPolicy) {
+func (scheduler *dnsReadinessScheduler) observeProbeHistory(fact *dnsReadinessFact, policy *platformconfig.DNSReadinessPolicy, observedAt time.Time) {
 	if scheduler.historyStore == nil {
 		scheduler.historyStore = &dnsProbeHistoryStore{}
 	}
@@ -54,34 +60,48 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistory(fact *dnsReadinessFa
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.values == nil {
-		store.values = map[string][]time.Time{}
+		store.values = map[string]dnsProbeHistory{}
 	}
-	if !fact.Ready {
-		delete(store.values, fact.ProbeID)
+	fact.ProbeHistory = nil
+	if observedAt.IsZero() {
 		return
 	}
-	history := store.values[fact.ProbeID]
-	at := fact.Proof.CheckedAt
-	if at.IsZero() {
-		fact.ProbeHistory = nil
-		return
-	}
-	if len(history) == 0 && len(store.values) >= 16384 {
-		// Three executor plans fit without unbounded retention. Stale entries
-		// are discarded, never persisted as serving or recovery authority.
+	entry, exists := store.values[fact.ProbeID]
+	if !exists && len(store.values) >= 16384 {
+		// Keep failed observations as barriers too. Delayed success from
+		// another scheduler must never resurrect pre-failure continuity.
 		for id, prior := range store.values {
-			if len(prior) == 0 || at.Sub(prior[len(prior)-1]) > 10*time.Minute {
+			if observedAt.Sub(prior.observedAt) > 10*time.Minute {
 				delete(store.values, id)
 			}
 		}
 		if len(store.values) >= 16384 {
-			fact.ProbeHistory = nil
 			return
 		}
 	}
+	if !fact.Ready {
+		if observedAt.After(entry.failedAt) {
+			entry.failedAt = observedAt
+		}
+		entry.successes = nil
+		if observedAt.After(entry.observedAt) {
+			entry.observedAt = observedAt
+		}
+		store.values[fact.ProbeID] = entry
+		return
+	}
+	at := fact.Proof.CheckedAt
+	if at.IsZero() || at.After(observedAt) || !entry.failedAt.IsZero() && !at.After(entry.failedAt) {
+		return
+	}
+	history := entry.successes
 	if len(history) > 0 {
 		last := history[len(history)-1]
-		if at.Before(last) || at.Sub(last) > time.Duration(policy.FactFreshnessSeconds)*time.Second {
+		// A delayed positive result may not roll shared history backwards.
+		if at.Before(last) {
+			return
+		}
+		if at.Sub(last) > time.Duration(policy.FactFreshnessSeconds)*time.Second {
 			history = nil
 		}
 	}
@@ -91,7 +111,11 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistory(fact *dnsReadinessFa
 	if len(history) > dnsProbeHistoryLimit {
 		history = slices.Clone(history[len(history)-dnsProbeHistoryLimit:])
 	}
-	store.values[fact.ProbeID] = history
+	entry.successes = history
+	if observedAt.After(entry.observedAt) {
+		entry.observedAt = observedAt
+	}
+	store.values[fact.ProbeID] = entry
 	fact.ProbeHistory = slices.Clone(history)
 }
 
