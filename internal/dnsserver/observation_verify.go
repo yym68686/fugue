@@ -5,10 +5,30 @@ import (
 	"reflect"
 	"time"
 
+	"fugue/internal/cellpublication"
 	"fugue/internal/config"
 	"fugue/internal/dnsfacts"
+	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
+
+// Transport still checks the current publication fences and exact Pod/Service
+// identities. This combines fresh actual serving readiness with immutable
+// handoff equivalence (or one explicitly declared availability addition).
+func VerifyServingAuthorityHandoff(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, previous model.PlatformArtifact, availability *platformconfig.DNSAvailabilityRoute, now time.Time) error {
+	if err := VerifyServingObservation(configuration, checkpoint, snapshot, now); err != nil {
+		return err
+	}
+	service := &Service{Config: configuration}
+	record, err := service.decodeDNSCheckpoint(checkpoint)
+	if err != nil {
+		return errors.New("DNS handoff checkpoint authentication failed")
+	}
+	if availability != nil {
+		return cellpublication.VerifyDNSAvailabilityHandoff(previous, record.Candidate.Artifact, configuration.DNSNodeID, service.platformDNSKeys(), *availability)
+	}
+	return cellpublication.VerifyDNSAuthorityHandoff(previous, record.Candidate.Artifact, configuration.DNSNodeID, service.platformDNSKeys())
+}
 
 func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time) error {
 	service := &Service{Config: configuration}
@@ -51,6 +71,18 @@ func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte,
 				return errors.New("DNS observation contains an invalid positive proof")
 			}
 		}
+		if len(observed.ProbeHistory) > dnsProbeHistoryLimit {
+			return errors.New("DNS observation recovery history exceeds bound")
+		}
+		for i, at := range observed.ProbeHistory {
+			if at.IsZero() || at.After(observed.Proof.CheckedAt) || i > 0 && !at.After(observed.ProbeHistory[i-1]) {
+				return errors.New("DNS observation recovery history is invalid")
+			}
+		}
+		if len(observed.ProbeHistory) > 0 && !observed.ProbeHistory[len(observed.ProbeHistory)-1].Equal(observed.Proof.CheckedAt) {
+			return errors.New("DNS observation recovery history belongs to another proof")
+		}
+		fact.ProbeHistory = append([]time.Time(nil), observed.ProbeHistory...)
 		facts = append(facts, fact)
 	}
 	boundDNSRouteSourceFacts(payload, facts, now)

@@ -26,7 +26,7 @@ CELL = re.compile(r"cell-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def retained_reference(config):
-    return config.get("schema") == "fugue.dns-authority-transition-stage/v4"
+    return config.get("schema") in ["fugue.dns-authority-transition-stage/v4", "fugue.dns-authority-transition-stage/v5"]
 
 
 class API:
@@ -68,7 +68,11 @@ def validate(config):
     required = {"schema", "generation", "origin", "authority_cell_id", "previous_topology", route_field, "dns_node_ids", "expected_previous_shadow", "capture"}
     if runtime_sources:
         required.add("global_producer_policy")
-    if set(config) != required or config["schema"] not in ["fugue.dns-authority-transition-stage/v1", "fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3", "fugue.dns-authority-transition-stage/v4"] or type(config["generation"]) is not int or config["generation"] < 1:
+    if config.get("schema") == "fugue.dns-authority-transition-stage/v5":
+        required.add("availability_route")
+        from scripts.configure_dynamic_quality import validate_availability_routes
+        validate_availability_routes([config.get("availability_route")])
+    if set(config) != required or config["schema"] not in ["fugue.dns-authority-transition-stage/v1", "fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3", "fugue.dns-authority-transition-stage/v4", "fugue.dns-authority-transition-stage/v5"] or type(config["generation"]) is not int or config["generation"] < 1:
         raise ValueError("explicit versioned DNS shadow staging declaration required")
     if not CELL.fullmatch(config.get("authority_cell_id", "")):
         raise ValueError("neutral DNS authority required")
@@ -265,6 +269,15 @@ def compose(config, previous, cells, source_intent, source_policy, snapshot):
             if key in record:
                 record[key] = remap(record[key])
     policy.update(publication_role="cell-dns", authority_cell_id=cell, scope=intent["scope"], generation="dns-transition-policy-" + digest(config)[7:])
+    if "availability_route" in config:
+        route = config["availability_route"]
+        query = policy.get("dns_query_policy")
+        if not isinstance(query, dict):
+            raise ValueError("availability requires an existing DNS query policy")
+        existing = query.get("availability_routes", [])
+        if any(r["hostname"] == route["hostname"] for r in existing):
+            raise ValueError("initial DNS availability cannot replace existing host policy")
+        query["availability_routes"] = sorted([*existing, copy.deepcopy(route)], key=lambda r: r["hostname"])
     for field in ["route_constraints", "traffic_constraints", "tls_readiness"]:
         policy.pop(field, None)
     policy["traffic_rollout_cohorts"] = [{"id": "complete", "edge_group_ids": [cell]}]
@@ -333,6 +346,10 @@ def stage(config, api, save):
         expected_mode = "retained-global-v1" if retained_reference(config) else ""
         if transition.get("reference_mode", "") != expected_mode:
             raise ValueError("resumed DNS routing reference mode differs")
+        if "availability_route" in config:
+            policies = dns["content"].get("policy", {}).get("dns_query_policy", {}).get("availability_routes", [])
+            if [p for p in policies if p.get("hostname") == config["availability_route"]["hostname"]] != [config["availability_route"]]:
+                raise ValueError("resumed DNS availability policy differs")
         refs = source.get("cell_route_publications", [])
         if source.get("authority_cell_id") != config["authority_cell_id"] or transition.get("previous_topology") != config["previous_topology"]:
             raise ValueError("completed DNS staging differs from declaration")

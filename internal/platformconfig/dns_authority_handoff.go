@@ -15,6 +15,21 @@ import (
 // Callers must authenticate both artifacts and separately verify fresh complete
 // runtime snapshots, selected publication fences and Service/Pod identities.
 func ValidateDNSAuthorityHandoff(previous, next model.PlatformArtifact, node string) error {
+	return validateDNSAuthorityHandoff(previous, next, node, nil)
+}
+
+// An availability handoff permits exactly one explicitly declared host policy
+// addition, while preserving every other configured answer behavior. The new
+// policy intersects the original signed candidate/route proof requirements.
+// Authentication, current publication and fresh runtime checks remain separate.
+func ValidateDNSAvailabilityHandoff(previous, next model.PlatformArtifact, node string, route DNSAvailabilityRoute) error {
+	if !validDNSConsumerZone(route.Hostname) || model.ValidateDNSAvailabilityPolicy(&route.Policy) != nil {
+		return fmt.Errorf("DNS availability handoff requires one exact host policy")
+	}
+	return validateDNSAuthorityHandoff(previous, next, node, &route)
+}
+
+func validateDNSAuthorityHandoff(previous, next model.PlatformArtifact, node string, availability *DNSAvailabilityRoute) error {
 	if node == "" || previous.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || next.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
 		return fmt.Errorf("DNS handoff requires two DNS artifacts and a physical node")
 	}
@@ -51,6 +66,14 @@ func ValidateDNSAuthorityHandoff(previous, next model.PlatformArtifact, node str
 	if err != nil {
 		return err
 	}
+	if availability != nil {
+		if !DNSUsesRetainedRoutes(source.Source.Intent) {
+			return fmt.Errorf("availability handoff requires retained routing authority")
+		}
+		if err := removeDeclaredAvailabilityDelta(old, current, *availability); err != nil {
+			return err
+		}
+	}
 	if !reflect.DeepEqual(old, current) {
 		for key, before := range old {
 			if !reflect.DeepEqual(before, current[key]) {
@@ -58,6 +81,85 @@ func ValidateDNSAuthorityHandoff(previous, next model.PlatformArtifact, node str
 			}
 		}
 		return fmt.Errorf("DNS handoff changes node behavior")
+	}
+	return nil
+}
+
+func removeDeclaredAvailabilityDelta(previous, next map[string]any, route DNSAvailabilityRoute) error {
+	oldQuery, oldOK := previous["dns_query_policy"].(map[string]any)
+	newQuery, newOK := next["dns_query_policy"].(map[string]any)
+	if !oldOK || !newOK {
+		return fmt.Errorf("availability handoff lacks DNS policy")
+	}
+	before, _ := oldQuery["availability_routes"].([]any)
+	after, _ := newQuery["availability_routes"].([]any)
+	raw, _ := json.Marshal(route)
+	var declared map[string]any
+	if json.Unmarshal(raw, &declared) != nil {
+		return fmt.Errorf("availability handoff policy invalid")
+	}
+	for _, item := range before {
+		if row, ok := item.(map[string]any); !ok || row["hostname"] == route.Hostname {
+			return fmt.Errorf("availability handoff cannot replace an existing policy")
+		}
+	}
+	remaining, count := []any{}, 0
+	for _, item := range after {
+		row, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("availability handoff policy invalid")
+		}
+		if row["hostname"] == route.Hostname {
+			if !reflect.DeepEqual(row, declared) {
+				return fmt.Errorf("availability handoff differs from declared host policy")
+			}
+			count++
+		} else {
+			remaining = append(remaining, row)
+		}
+	}
+	if count != 1 || len(remaining) != len(before) {
+		return fmt.Errorf("availability handoff changes unrelated host policy")
+	}
+	for i := range before {
+		if !reflect.DeepEqual(before[i], remaining[i]) {
+			return fmt.Errorf("availability handoff changes unrelated host policy")
+		}
+	}
+	if v, ok := oldQuery["availability_routes"]; ok {
+		newQuery["availability_routes"] = v
+	} else {
+		delete(newQuery, "availability_routes")
+	}
+	matched := 0
+	views, ok := next["query_views"].([]any)
+	if !ok {
+		return fmt.Errorf("availability handoff query views missing")
+	}
+	for _, item := range views {
+		view, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("availability handoff view invalid")
+		}
+		records, ok := view["records"].([]any)
+		if !ok {
+			return fmt.Errorf("availability handoff records missing")
+		}
+		for _, item := range records {
+			record := item.(map[string]any)
+			if record["name"] != route.Hostname {
+				continue
+			}
+			policy, ok := record["answer_policy"].(map[string]any)
+			if !ok || !reflect.DeepEqual(policy["availability_policy"], declared["policy"]) {
+				return fmt.Errorf("availability handoff record lacks exact policy")
+			}
+			delete(policy, "availability_policy")
+			matched++
+		}
+	}
+	if matched == 0 {
+		return fmt.Errorf("availability handoff has no owned node query")
 	}
 	return nil
 }

@@ -67,6 +67,14 @@ func VerifyPreviousInput(p platformconfig.PreviousTrafficPublicationInput, keys 
 // node's complete DNS behavior. It is only the immutable-input gate; fresh
 // serving snapshots and transport identity CAS remain separate requirements.
 func VerifyDNSAuthorityHandoff(previous, next model.PlatformArtifact, node string, keys bundleauth.Keyring) error {
+	return verifyDNSHandoff(previous, next, node, keys, nil)
+}
+
+func VerifyDNSAvailabilityHandoff(previous, next model.PlatformArtifact, node string, keys bundleauth.Keyring, route platformconfig.DNSAvailabilityRoute) error {
+	return verifyDNSHandoff(previous, next, node, keys, &route)
+}
+
+func verifyDNSHandoff(previous, next model.PlatformArtifact, node string, keys bundleauth.Keyring, availability *platformconfig.DNSAvailabilityRoute) error {
 	for _, artifact := range []model.PlatformArtifact{previous, next} {
 		if !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass {
 			return fmt.Errorf("DNS handoff artifact signature rejected")
@@ -74,6 +82,9 @@ func VerifyDNSAuthorityHandoff(previous, next model.PlatformArtifact, node strin
 	}
 	if _, err := VerifyDNSArtifact(next, keys); err != nil {
 		return err
+	}
+	if availability != nil {
+		return platformconfig.ValidateDNSAvailabilityHandoff(previous, next, node, *availability)
 	}
 	return platformconfig.ValidateDNSAuthorityHandoff(previous, next, node)
 }

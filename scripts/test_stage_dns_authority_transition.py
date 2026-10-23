@@ -23,6 +23,30 @@ def fixture():
 
 
 class DNSAuthorityStageTest(unittest.TestCase):
+    def test_retained_availability_stage_changes_only_one_declared_host_policy(self):
+        cfg, old, _, intent, policy, facts = self.retained_fixture()
+        policy['dns_query_policy'] = {'ranking_mode': 'active'}
+        cfg['schema'] = 'fugue.dns-authority-transition-stage/v5'
+        cfg['availability_route'] = {'hostname': 'app.example.test', 'policy': {'version': 'dns-availability-v1', 'ordered_edge_ids': ['edge-a'], 'recovery_successes': 3, 'recovery_min_seconds': 60}}
+        p.validate(cfg)
+        base = copy.deepcopy(cfg)
+        base['schema'] = 'fugue.dns-authority-transition-stage/v4'
+        del base['availability_route']
+        before = p.compose(base, old, [], intent, policy, facts)
+        after = p.compose(cfg, old, [], intent, policy, facts)
+        self.assertEqual([cfg['availability_route']], after['policy']['dns_query_policy']['availability_routes'])
+        after['policy']['dns_query_policy'].pop('availability_routes')
+        for request in [before, after]:
+            request['policy'].pop('generation')
+            request['intent'].pop('generation')
+            request['runtime_snapshot'].pop('policy_generation')
+            request['runtime_snapshot'].pop('intent_generation')
+        self.assertEqual(before, after)
+        existing = copy.deepcopy(policy)
+        existing.setdefault('dns_query_policy', {})['availability_routes'] = [cfg['availability_route']]
+        with self.assertRaisesRegex(ValueError, 'replace'):
+            p.compose(cfg, old, [], intent, existing, facts)
+
     def retained_fixture(self):
         cfg, old, cell, intent, policy, facts = fixture()
         cfg.update(schema="fugue.dns-authority-transition-stage/v4", route_sources=[], global_producer_policy={"artifact_id": "global-producer", "content_hash": "sha256:" + "e" * 64, "release_id": "global-producer-release", "fencing_token": 3})

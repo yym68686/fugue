@@ -13,9 +13,10 @@ import (
 const Schema = "fugue.dns.runtime-facts/v1"
 
 type Probe struct {
-	ProbeID string           `json:"probe_id"`
-	Ready   bool             `json:"ready"`
-	Proof   routeprobe.Proof `json:"proof"`
+	ProbeHistory []time.Time      `json:"probe_history,omitempty"`
+	ProbeID      string           `json:"probe_id"`
+	Ready        bool             `json:"ready"`
+	Proof        routeprobe.Proof `json:"proof"`
 }
 
 type Snapshot struct {

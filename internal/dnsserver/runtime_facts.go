@@ -34,7 +34,7 @@ func dnsRuntimeFacts(st *dnsServingState, now time.Time) (dnsfacts.Snapshot, err
 		filtered = append(filtered, fact)
 		// Raw probe errors may contain hostnames or upstream details. The shared
 		// response carries only opaque requirements and their original proof.
-		out.Facts = append(out.Facts, dnsfacts.Probe{ProbeID: fact.ProbeID, Ready: fact.Ready, Proof: fact.Proof})
+		out.Facts = append(out.Facts, dnsfacts.Probe{ProbeID: fact.ProbeID, Ready: fact.Ready, Proof: fact.Proof, ProbeHistory: append([]time.Time(nil), fact.ProbeHistory...)})
 	}
 	sort.Slice(out.Facts, func(i, j int) bool { return out.Facts[i].ProbeID < out.Facts[j].ProbeID })
 	status := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, filtered, digest, st.checkedAt, now)

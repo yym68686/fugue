@@ -13,8 +13,19 @@ import (
 // TransitionRequest supplies a complete previous publication and two neutral
 // Cells with identical serving behavior. All identities are synthetic.
 func TransitionRequest(t testing.TB, minimum ...int) platformconfig.CompileRequest {
+	return transitionRequest(t, false, minimum...)
+}
+
+func AvailabilityRequest(t testing.TB) platformconfig.CompileRequest {
+	return transitionRequest(t, true, 1)
+}
+
+func transitionRequest(t testing.TB, activeQuality bool, minimum ...int) platformconfig.CompileRequest {
 	t.Helper()
 	req := Request(t)
+	if activeQuality {
+		req.Policy.DNSQueryPolicy.RankingMode = "active"
+	}
 	if len(minimum) > 0 {
 		req.Policy.MinimumHealthyEdges = minimum[0]
 		for i := range req.Policy.EdgeSelectionConstraints {

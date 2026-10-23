@@ -37708,6 +37708,11 @@ components:
             additionalProperties: false
             required: [probe_id, ready, proof]
             properties:
+              probe_history:
+                type: array
+                maxItems: 16
+                items: {type: string, format: date-time}
+                description: Distinct successful observation timestamps for this exact immutable probe identity, ending at proof.checked_at. Empty after failure or restart. Used only with separately verified current proof, signed recovery policy and bounded continuity; never renews the proof or checkpoint lease.
               probe_id: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
               observation_id: {type: string, pattern: '^sha256:[a-f0-9]{64}$', description: Diagnostic sweep identity retained with the original observation; it grants no authority and does not renew a proof deadline.}
               reason: {type: string}

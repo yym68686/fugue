@@ -111,6 +111,24 @@ new Worker release. It never refreshes captured observation timestamps. Its
 stored input, with a separate projection digest; bulky replay evidence remains
 available from the unchanged default full view.
 
+The v5 staging declaration adds one explicit `availability_route` to that
+retained DNS policy. It cannot replace an existing host policy and still only
+publishes shadow. An availability handoff verifier authenticates the old and
+new artifacts, requires this exact declared addition, and compares every other
+per-node DNS behavior, including unrelated records, TTLs and query policy.
+It separately replays the current signed checkpoint and fresh runtime facts;
+the immutable comparison alone never authorizes a public selector change.
+
+Runtime facts include at most sixteen original successful `probe_history`
+timestamps. External observation verification checks strict ordering, association
+with the current proof, and the signed recovery count, span and continuity.
+Missing history cannot establish availability recovery; duplicated timestamps,
+future observations and observations ending at another proof are rejected.
+This is relevant to rate-limited nodes that remain connected: a Kubernetes
+Ready condition or one successful request cannot establish service recovery.
+The protocol readiness probe is not a bandwidth-capacity measurement; a
+provider quota notice must not be relabeled as a measured throughput value.
+
 Decision receipts include the constrained authorized/recovered candidate counts,
 quality primary, actual serving primary and whether availability fallback ran.
 Rejections distinguish an endpoint outside the availability pool, pending

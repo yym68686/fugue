@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"fugue/internal/config"
+	"fugue/internal/dnsfacts"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/routeprobe"
@@ -34,7 +35,7 @@ func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool,
 		request = celldns.TransitionRequest(t)
 	}
 	if retained {
-		request = celldns.TransitionRequest(t, 1)
+		request = celldns.AvailabilityRequest(t)
 		celldns.RetainGlobalOnly(&request)
 		request.Policy.DNSQueryPolicy.RankingMode = "active"
 		request.Policy.DNSQueryPolicy.AvailabilityRoutes = []platformconfig.DNSAvailabilityRoute{{Hostname: "app.example.test", Policy: model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 2, RecoveryMinSeconds: 10}}}
@@ -140,6 +141,50 @@ func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool,
 	snapshot, err := dnsRuntimeFacts(st, now)
 	if err != nil || !snapshot.Ready || snapshot.RouteArtifactID != "" || len(snapshot.Facts) != len(p.Plan.Probes) {
 		t.Fatal("independent runtime observations invalid", err)
+	}
+	if retained {
+		if err := VerifyServingObservation(s.Config, raw, snapshot, now); err != nil {
+			t.Fatal("runtime snapshot lost availability recovery evidence", err)
+		}
+		declared := request.Policy.DNSQueryPolicy.AvailabilityRoutes[0]
+		if err := VerifyServingAuthorityHandoff(s.Config, raw, snapshot, request.PreviousTrafficPublication.DNS, &declared, now); err != nil {
+			t.Fatal("exact available handoff failed authenticated observation", err)
+		}
+		if VerifyServingAuthorityHandoff(s.Config, raw, snapshot, request.PreviousTrafficPublication.DNS, nil, now) == nil {
+			t.Fatal("undeclared availability change authorized transport")
+		}
+		forged := request.PreviousTrafficPublication.DNS
+		forged.Provenance.Signature = "forged"
+		if VerifyServingAuthorityHandoff(s.Config, raw, snapshot, forged, &declared, now) == nil {
+			t.Fatal("forged predecessor authorized transport")
+		}
+		for _, bad := range []string{"missing", "duplicate", "future", "too many", "short span"} {
+			t.Run("recovery observation "+bad, func(t *testing.T) {
+				encoded, _ := json.Marshal(snapshot)
+				var changed dnsfacts.Snapshot
+				if err := json.Unmarshal(encoded, &changed); err != nil {
+					t.Fatal(err)
+				}
+				for i := range changed.Facts {
+					at := changed.Facts[i].Proof.CheckedAt
+					switch bad {
+					case "missing":
+						changed.Facts[i].ProbeHistory = nil
+					case "duplicate":
+						changed.Facts[i].ProbeHistory = []time.Time{at, at}
+					case "future":
+						changed.Facts[i].ProbeHistory = []time.Time{at, at.Add(time.Second)}
+					case "too many":
+						changed.Facts[i].ProbeHistory = make([]time.Time, 17)
+					case "short span":
+						changed.Facts[i].ProbeHistory = []time.Time{at.Add(-time.Second), at}
+					}
+				}
+				if VerifyServingObservation(s.Config, raw, changed, now) == nil {
+					t.Fatal("incomplete recovery observation authorized transport")
+				}
+			})
+		}
 	}
 	if transition && !retained {
 		// Both sources are individually valid, but one old path plus one new
