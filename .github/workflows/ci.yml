@@ -1599,7 +1599,7 @@ jobs:
             python3 -m unittest scripts.test_promote_dns_authority
             python3 -m scripts.promote_dns_authority "$config" --validate-only
             revision="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["verifier_revision"])' "$config")"
-            scripts/build_dns_observation_verifier.sh "$revision" "$RUNNER_TEMP/private-dns-verifier"
+            bash scripts/build_dns_observation_verifier.sh "$revision" "$RUNNER_TEMP/private-dns-verifier"
             echo "config=$config" >> "$GITHUB_OUTPUT"
             echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi
