@@ -31,6 +31,8 @@ func TestDNSDynamicSourceIdenticalVerifiedRenewal(t *testing.T) {
 	next.ID += "-renewed"
 	next.FencingToken++
 	next.ReleasedAt = old.ReleasedAt.Add(time.Minute)
+	next.VerificationState = model.PlatformArtifactVerificationStateServingUnverified
+	next.VerifiedLKGGeneration = ""
 	state.PlatformArtifactReleases[index].Status = model.PlatformArtifactReleaseStatusSuperseded
 	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, next)
 	for i := range state.PlatformReleaseLanes {
@@ -48,7 +50,7 @@ func TestDNSDynamicSourceIdenticalVerifiedRenewal(t *testing.T) {
 }
 
 func TestDNSIdenticalSourceRenewalRejectsChangedAuthority(t *testing.T) {
-	for _, scenario := range []string{"static", "different artifact", "unverified", "old fence", "wrong channel", "missing history", "rolled back history", "unverified history", "wrong original fence", "time regression"} {
+	for _, scenario := range []string{"static", "different artifact", "failed renewal", "old fence", "wrong channel", "missing history", "rolled back history", "unverified history", "wrong original fence", "time regression"} {
 		t.Run(scenario, func(t *testing.T) {
 			state, child := dnsSourceObservationFixture(t, true)
 			previous, err := platformconfig.DecodePreviousTrafficPublication(child)
@@ -85,8 +87,8 @@ func TestDNSIdenticalSourceRenewalRejectsChangedAuthority(t *testing.T) {
 				child.Content["cell_dns_source"] = source
 			case "different artifact":
 				selected.ArtifactID = "foreign"
-			case "unverified":
-				selected.VerificationState = model.PlatformArtifactVerificationStateServingUnverified
+			case "failed renewal":
+				selected.VerificationState = model.PlatformArtifactVerificationStateFailed
 			case "old fence":
 				selected.FencingToken = dependency.FencingToken
 			case "wrong channel":

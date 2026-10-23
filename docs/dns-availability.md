@@ -198,11 +198,12 @@ proofs already bind that newer release, but an exact historical baseline fence
 previously blocked the LKG transaction. Static DNS references remain exact pins.
 
 For dynamic sources only, configuration reference validation accepts this narrow
-renewal when both the original superseded full and current active full are
-verified for the exact same parent and generation, the fence increases, and the
-release time advances. The original publication row is loaded explicitly in the
+renewal when the original superseded full is verified for the exact same parent and
+generation, the current full is active and not failed, the fence increases, and
+the release time advances. The new full may still be awaiting its own verification:
+that status cannot erase verification of the unchanged historical configuration. The original publication row is loaded explicitly in the
 PostgreSQL transaction. Different parent content, gray candidates, missing or
-rolled-back history and unverified renewals remain rejected. Producer policy
+rolled-back history and failed renewals remain rejected. Producer policy
 bindings, artifact signatures, current lane locks and fresh DNS convergence still
 run. No runtime proof is relabeled or assigned a newer fence by this rule.
 
@@ -226,3 +227,11 @@ consumer now retains only the old application time when sources differ. The new
 context still passes signature, plan replay, current assignment and ledger checks;
 old physical proof deadlines and the checkpoint lease are never extended. A
 synthetic mixed-source renewal regression verifies exact replay and lease bounds.
+
+The current DNS publication still requires complete positive consumer convergence
+and fresh exact-release physical proofs. An unverified source renewal is never
+marked verified by DNS, and its fencing token is never copied onto an old proof.
+This prevents a redundant old DNS consumer from blocking recovery of an
+independent DNS authority that already proves the same unchanged route behavior.
+Both memory-store and PostgreSQL regressions explicitly reject negative current
+DNS observations even when the historical source was verified.

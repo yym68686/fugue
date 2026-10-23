@@ -312,6 +312,8 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		renewed.ID += "-renewed"
 		renewed.FencingToken++
 		renewed.ReleasedAt = renewed.ReleasedAt.Add(time.Minute)
+		renewed.VerificationState = model.PlatformArtifactVerificationStateServingUnverified
+		renewed.VerifiedLKGGeneration = ""
 		if s.db != nil {
 			if _, err := s.db.Exec("UPDATE fugue_platform_artifact_releases SET status=$1 WHERE id=$2", model.PlatformArtifactReleaseStatusSuperseded, originalID); err != nil {
 				t.Fatal(err)
@@ -336,6 +338,13 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 			}
 		}
 	}
+	if len(sources) > 2 && sources[2] {
+		report(gray, 4, fullCaps, false)
+		if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(gray.ID, completePlatformVerificationRequest(gray.FencingToken, true), testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
+			t.Fatal("historical route verification bypassed current DNS failure", err)
+		}
+		report(gray, 5, fullCaps, true)
+	}
 	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(gray.ID, completePlatformVerificationRequest(gray.FencingToken, true), testPlatformPrincipal()); err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +355,7 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(full.ID, completePlatformVerificationRequest(full.FencingToken, false), testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
 		t.Fatal("gray facts verified full LKG", err)
 	}
-	report(full, 4, fullCaps, true)
+	report(full, 6, fullCaps, true)
 	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(full.ID, completePlatformVerificationRequest(full.FencingToken, false), testPlatformPrincipal()); err != nil {
 		t.Fatal(err)
 	}
