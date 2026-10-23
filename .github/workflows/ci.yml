@@ -1545,6 +1545,79 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  dns_authority_promotion_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select an explicit private DNS promotion declaration
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/dns-authority-promotion; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  dns_authority_promotion:
+    needs: dns_authority_promotion_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dns_authority_promotion_plan.outputs.selected == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-dns-authority-configuration, cancel-in-progress: false}
+    timeout-minutes: 25
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Validate the exact private DNS promotion without a code rollout
+        id: configuration
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/dns-authority-promotion)
+          (( ${#declarations[@]} == 1 )) || { echo 'one private DNS promotion per configuration atom is required' >&2; exit 1; }
+          config="${declarations[0]}"
+          [[ "$config" =~ ^deploy/environments/production/dns-authority-promotion/cell-[a-z0-9-]+\.json$ ]]
+          git fetch origin main
+          if git diff --quiet HEAD origin/main -- "$config" scripts/promote_dns_authority.py scripts/test_promote_dns_authority.py scripts/stage_dns_authority_transition.py scripts/bootstrap_cell_producer.py scripts/reconcile_dns_transport.py scripts/observe_front_candidate.py scripts/publish_agent_edge_shadow.py scripts/build_dns_observation_verifier.sh; then
+            python3 -m unittest scripts.test_promote_dns_authority
+            python3 -m scripts.promote_dns_authority "$config" --validate-only
+            revision="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["verifier_revision"])' "$config")"
+            scripts/build_dns_observation_verifier.sh "$revision" "$RUNNER_TEMP/private-dns-verifier"
+            echo "config=$config" >> "$GITHUB_OUTPUT"
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Observe private DNS gray and full before retaining positive LKG
+        if: steps.configuration.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+          FUGUE_DNS_OBSERVATION_VERIFIER: ${{ runner.temp }}/private-dns-verifier
+        run: python3 -m scripts.promote_dns_authority "${{ steps.configuration.outputs.config }}" --evidence "$RUNNER_TEMP/private-dns-promotion.json"
+      - name: Retain private DNS promotion evidence
+        if: always() && steps.configuration.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-private-dns-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/private-dns-promotion.json
+          if-no-files-found: warn
+          retention-days: 30
+
   cell_member_enrollment:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

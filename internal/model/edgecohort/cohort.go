@@ -54,7 +54,14 @@ func FromNodes(nodes []corev1.Node, group string, baseline int) (Snapshot, error
 			return s, errors.New("unknown managed Edge enrollment phase")
 		}
 	}
-	s.Expected += len(s.Admitted)
+	// Count the same explicitly enrolled extensions that FilterPods includes.
+	// A suspended extension must not leave an impossible extra required slot.
+	// The fixed baseline remains intact, including when its nodes are absent.
+	for node := range s.Admitted {
+		if !s.Suspended[node] {
+			s.Expected++
+		}
+	}
 	if s.Expected > 100 {
 		return s, errors.New("managed Edge cohort exceeds capacity")
 	}

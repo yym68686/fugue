@@ -49,3 +49,19 @@ func TestExplicitSuspensionFiltersPlacementButNeverLowersDeclaredBaseline(t *tes
 		t.Fatal("unidentified suspension accepted")
 	}
 }
+
+func TestAdmittedSuspensionUsesTheSameMembershipForCountAndPods(t *testing.T) {
+	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "elastic-edge", UID: "elastic-uid", ResourceVersion: "12", Labels: map[string]string{"fugue.io/edge-group-id": "edge-pool-a", "fugue.io/role.edge": "true", "fugue.io/edge-workload": "dynamic", "fugue.io/schedulable": "false", PhaseLabel: Admitted}}}
+	pods := []corev1.Pod{{Spec: corev1.PodSpec{NodeName: "fixed-a"}}, {Spec: corev1.PodSpec{NodeName: "fixed-b"}}, {Spec: corev1.PodSpec{NodeName: node.Name}}}
+	suspended, err := FromNodes([]corev1.Node{node}, "edge-pool-a", 2)
+	if err != nil || suspended.Expected != len(suspended.FilterPods(pods)) || suspended.Expected != 2 {
+		t.Fatal("suspended extension leaves an impossible release cohort", suspended, err)
+	}
+	// A later enrollment snapshot may include the node again, but it cannot
+	// mutate the cohort frozen for the current release or fabricate health.
+	node.Labels["fugue.io/schedulable"] = "true"
+	recovered, err := FromNodes([]corev1.Node{node}, "edge-pool-a", 2)
+	if err != nil || recovered.Expected != 3 || len(recovered.FilterPods(pods)) != 3 || suspended.Expected != 2 || len(suspended.FilterPods(pods)) != 2 {
+		t.Fatal("recovery changed a frozen release or bypassed member accounting", suspended, recovered, err)
+	}
+}
