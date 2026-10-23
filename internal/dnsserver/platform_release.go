@@ -48,7 +48,8 @@ func (s *Service) verifyDNSRelease(parent model.PlatformArtifact, c dnsPlatformC
 	if a.ReleaseChannel != "gray" && a.ReleaseChannel != "full" && (serving || a.ReleaseChannel != "shadow") {
 		return fail()
 	}
-	if _, err := s.verifyPlatformDNSCandidate(c, a); err != nil {
+	_, p, err := s.decodePlatformDNSCandidate(c, a)
+	if err != nil {
 		return dnsServingPayload{}, "", err
 	}
 	keys := s.platformDNSKeys()
@@ -95,9 +96,7 @@ func (s *Service) verifyDNSRelease(parent model.PlatformArtifact, c dnsPlatformC
 	} else if r.CanaryRuleRef != "" {
 		return fail()
 	}
-	var p dnsServingPayload
-	raw, _ = json.Marshal(child.Content)
-	if json.Unmarshal(raw, &p) != nil || !reflect.DeepEqual(p.Lineage, set.Lineage) || p.Plan == nil || p.Policy.DNSReadiness == nil || len(p.Queries) == 0 || len(p.Policy.DNSAuthorities) == 0 {
+	if !reflect.DeepEqual(p.Lineage, set.Lineage) || p.Plan == nil || p.Policy.DNSReadiness == nil || len(p.Queries) == 0 || len(p.Policy.DNSAuthorities) == 0 {
 		return fail()
 	}
 	if err := populateDNSCellBindings(&p); err != nil {

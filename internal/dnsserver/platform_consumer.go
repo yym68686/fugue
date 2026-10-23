@@ -289,106 +289,101 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 type dnsCandidateCounts struct{ records, views, probes int }
 
 func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.PlatformConsumerAssignment) (dnsCandidateCounts, error) {
+	counts, _, err := s.decodePlatformDNSCandidate(c, a)
+	return counts, err
+}
+
+// Return the strictly decoded, validated payload to the release validator in
+// this call. No cross-call payload cache and no trust decision is reused.
+func (s *Service) decodePlatformDNSCandidate(c dnsPlatformCandidate, a model.PlatformConsumerAssignment) (dnsCandidateCounts, dnsServingPayload, error) {
 	if platformcontrol.ValidateConsumerScope(s.Config.PlatformScopeKey, s.Config.EdgeGroupID) != nil || a.ScopeKey != platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey) {
-		return dnsCandidateCounts{}, errors.New("DNS candidate belongs to another configured scope")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate belongs to another configured scope")
 	}
 	if !reflect.DeepEqual(a, c.Assignment) || a.ExpectedConsumerSetID == "" ||
 		a.FencingToken <= 0 || a.GenerationSequence <= 0 || !slices.Contains([]string{"shadow", "gray", "full"}, a.ReleaseChannel) {
-		return dnsCandidateCounts{}, errors.New("DNS candidate assignment mismatch")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate assignment mismatch")
 	}
 	artifact := c.Artifact
 	if artifact.ID != a.ArtifactID || artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle ||
 		artifact.ScopeKey != a.ScopeKey || artifact.Generation != a.ExpectedGeneration ||
 		artifact.ContentHash != a.ContentHash || artifact.GenerationSequence != a.GenerationSequence ||
 		artifact.Status != model.PlatformArtifactStatusValidated {
-		return dnsCandidateCounts{}, errors.New("DNS candidate artifact binding mismatch")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate artifact binding mismatch")
 	}
 	if c.Release.ID != a.ArtifactReleaseID || c.Release.ArtifactID != a.ReleaseSetID ||
 		c.Release.ArtifactKind != model.PlatformArtifactKindReleaseSet ||
 		artifact.Metadata["release_set_generation"] != c.Release.Generation ||
 		c.Release.ReleaseChannel != a.ReleaseChannel ||
 		c.Release.FencingToken != a.FencingToken || c.Release.Status != model.PlatformArtifactReleaseStatusActive {
-		return dnsCandidateCounts{}, errors.New("DNS candidate release binding mismatch")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate release binding mismatch")
 	}
 	if !platformsafety.EvaluateArtifactIntegrity(c.Artifact, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)).Pass {
-		return dnsCandidateCounts{}, errors.New("DNS candidate signature or digest rejected")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate signature or digest rejected")
 	}
 	if _, err := cellpublication.VerifyDNSArtifact(artifact, s.platformDNSKeys()); err != nil {
-		return dnsCandidateCounts{}, err
+		return dnsCandidateCounts{}, dnsServingPayload{}, err
 	}
-	var payload struct {
-		PreviousTrafficPublication *platformconfig.PreviousTrafficPublicationInput `json:"previous_traffic_publication,omitempty"`
-		CellRoutePublications      []platformconfig.CellRoutePublicationInput      `json:"cell_route_publications,omitempty"`
-		CellDNSSource              *platformconfig.CellDNSPlanSource               `json:"cell_dns_source,omitempty"`
-		Schema                     string                                          `json:"schema_version"`
-		Generation                 string                                          `json:"generation"`
-		Records                    []platformconfig.DNSIntent                      `json:"records"`
-		ConsumerViews              []platformconfig.DNSConsumerView                `json:"consumer_views,omitempty"`
-		ReadinessPlan              *platformconfig.DNSReadinessPlan                `json:"readiness_plan,omitempty"`
-		QueryViews                 []platformconfig.DNSQueryView                   `json:"query_views,omitempty"`
-		Policy                     platformconfig.PolicySnapshot                   `json:"policy"`
-		Lineage                    platformconfig.Lineage                          `json:"lineage"`
-	}
+	var payload dnsServingPayload
 	raw, err := json.Marshal(c.Artifact.Content)
 	if err != nil {
-		return dnsCandidateCounts{}, errors.New("DNS candidate content invalid")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate content invalid")
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if dec.Decode(&payload) != nil || payload.Schema != platformconfig.SchemaVersion || payload.Generation != c.Artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
-		return dnsCandidateCounts{}, errors.New("DNS candidate schema invalid")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate schema invalid")
 	}
 	owners := map[string]bool{}
 	consumers := []platformconfig.DNSConsumerIntent{}
-	for _, v := range payload.ConsumerViews {
+	for _, v := range payload.Views {
 		if !owners[v.NodeID] {
 			consumers = append(consumers, platformconfig.DNSConsumerIntent{NodeID: v.NodeID})
 			owners[v.NodeID] = true
 		}
 	}
 	if err := platformconfig.ValidateDNSClientPolicyOwnership(payload.Policy.DNSClientPolicies, consumers); err != nil {
-		return dnsCandidateCounts{}, err
+		return dnsCandidateCounts{}, dnsServingPayload{}, err
 	}
 	if err := platformconfig.ValidateDNSIntents(payload.Records); err != nil {
-		return dnsCandidateCounts{}, errors.New("DNS candidate intent semantics invalid")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate intent semantics invalid")
 	}
 	policyDigest, err := platformconfig.Digest(payload.Policy)
 	if err != nil || payload.Policy.Scope != a.ScopeKey || payload.Lineage.PolicyDigest != policyDigest || payload.Lineage.IntentGeneration != payload.Generation || payload.Lineage.PolicyGeneration != payload.Policy.Generation {
-		return dnsCandidateCounts{}, errors.New("DNS candidate policy lineage invalid")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate policy lineage invalid")
 	}
 	for key, value := range platformconfig.LineageMetadata(payload.Lineage) {
 		if value == "" || c.Artifact.Metadata[key] != value {
-			return dnsCandidateCounts{}, errors.New("DNS candidate lineage binding invalid")
+			return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate lineage binding invalid")
 		}
 	}
-	if err := platformconfig.ValidateDNSReadinessPlan(payload.ReadinessPlan, payload.Policy.DNSReadiness); err != nil {
-		return dnsCandidateCounts{}, errors.New("DNS readiness plan invalid")
+	if err := platformconfig.ValidateDNSReadinessPlan(payload.Plan, payload.Policy.DNSReadiness); err != nil {
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS readiness plan invalid")
 	}
-	if err := platformconfig.ValidateDNSQueryViews(payload.QueryViews, payload.Records, payload.ConsumerViews, payload.ReadinessPlan, payload.Policy); err != nil {
-		return dnsCandidateCounts{}, errors.New("DNS query view invalid")
+	if err := platformconfig.ValidateDNSQueryViews(payload.Queries, payload.Records, payload.Views, payload.Plan, payload.Policy); err != nil {
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS query view invalid")
 	}
-	if err := validateServingDNSSelectors(payload.QueryViews); err != nil {
-		return dnsCandidateCounts{}, err
+	if err := validateServingDNSSelectors(payload.Queries); err != nil {
+		return dnsCandidateCounts{}, dnsServingPayload{}, err
 	}
 	active, err := platformconfig.DNSRecordsAt(payload.Records, time.Now().UTC())
 	if err != nil {
-		return dnsCandidateCounts{}, errors.New("DNS candidate expiry invalid")
+		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate expiry invalid")
 	}
 	counts := dnsCandidateCounts{records: len(active)}
 	wireRecords := active
-	if len(payload.ConsumerViews) > 0 {
+	if len(payload.Views) > 0 {
 		wireRecords = nil
-		if err := platformconfig.ValidateDNSConsumerViews(payload.ConsumerViews, payload.Records); err != nil {
-			return dnsCandidateCounts{}, errors.New("DNS consumer views invalid")
+		if err := platformconfig.ValidateDNSConsumerViews(payload.Views, payload.Records); err != nil {
+			return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS consumer views invalid")
 		}
 		foundPrimary := false
-		for _, view := range payload.ConsumerViews {
+		for _, view := range payload.Views {
 			if view.NodeID != s.Config.DNSNodeID {
 				continue
 			}
-			materialized, viewErr := platformconfig.MaterializeDNSConsumerView(payload.Records, payload.ConsumerViews, s.Config.DNSNodeID, s.Config.EdgeGroupID, view.Zone, time.Now().UTC())
+			materialized, viewErr := platformconfig.MaterializeDNSConsumerView(payload.Records, payload.Views, s.Config.DNSNodeID, s.Config.EdgeGroupID, view.Zone, time.Now().UTC())
 			if viewErr != nil {
-				return dnsCandidateCounts{}, errors.New("DNS signed consumer view binding rejected")
+				return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS signed consumer view binding rejected")
 			}
 			if view.Zone == s.Config.Zone {
 				foundPrimary = true
@@ -399,22 +394,22 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 			wireRecords = append(wireRecords, materialized...)
 		}
 		if !foundPrimary {
-			return dnsCandidateCounts{}, errors.New("DNS consumer has no assigned primary zone")
+			return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS consumer has no assigned primary zone")
 		}
 	}
 	for _, record := range wireRecords {
 		if record.Hostname == "" || record.TTL <= 0 || record.TTL > 2147483647 || len(record.Values) == 0 {
-			return dnsCandidateCounts{}, errors.New("DNS candidate record is incomplete")
+			return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate record is incomplete")
 		}
 		rrs := rrForEdgeDNSRecord(model.EdgeDNSRecord{Name: record.Hostname, Type: record.Type, Values: record.Values, TTL: record.TTL}, record.Hostname)
 		if len(rrs) != len(record.Values) {
-			return dnsCandidateCounts{}, errors.New("DNS candidate record cannot be decoded")
+			return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate record cannot be decoded")
 		}
 		response := new(dns.Msg)
 		response.Answer = rrs
 		if _, err := response.Pack(); err != nil {
-			return dnsCandidateCounts{}, errors.New("DNS candidate record cannot be encoded")
+			return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate record cannot be encoded")
 		}
 	}
-	return counts, nil
+	return counts, payload, nil
 }

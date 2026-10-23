@@ -216,3 +216,13 @@ No node address is embedded in the client. This recovery path does not change
 public DNS answers or grant serving authority and still runs all promotion gates.
 Transport errors identify whether connection/headers or the response body failed,
 without exposing credentials or raw exception details.
+
+
+When a routing source changes while some physical proofs remain valid, the DNS
+checkpoint must bind the newly replayed source context. Previously retaining any
+old proof copied the entire old checkpoint over that current context, yielding
+`plan_mismatch` from runtime observation and rejection of refreshed proofs. The
+consumer now retains only the old application time when sources differ. The new
+context still passes signature, plan replay, current assignment and ledger checks;
+old physical proof deadlines and the checkpoint lease are never extended. A
+synthetic mixed-source renewal regression verifies exact replay and lease bounds.

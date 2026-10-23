@@ -57,3 +57,11 @@ release metadata, timestamps and selections remain distinct. A 4,096-record
 synthetic benchmark retained about 1.98 MB for the duplicate graph before reuse
 and under 1 KB after; the equality walk adds CPU work and download allocations
 still occur. This is a retained-heap result, not an online RSS guarantee.
+
+
+Candidate validation now returns its strictly decoded payload to the enclosing
+release validation call, eliminating another complete decode in that same call.
+No result crosses a request boundary; unknown nested fields remain rejected. A
+synthetic 512-record full release verification benchmark decreased from median
+13,167,888 to 10,799,736 allocated bytes per operation (about 18%). This is an
+allocation benchmark; online RSS must still be measured after release.

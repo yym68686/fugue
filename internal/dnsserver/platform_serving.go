@@ -328,14 +328,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 	}
 	checkpoint := dnsServingCheckpoint{Schema: "fugue.dns.positive-checkpoint/v1", NodeID: s.Config.DNSNodeID, GroupID: s.Config.EdgeGroupID, Parent: parent, Candidate: candidate, AppliedAt: now, Positive: true, RouteSources: p.routeSources}
-	if same {
-		for _, fact := range facts {
-			if fact.Reason == "retained_valid_proof" {
-				checkpoint = old.record
-				break
-			}
-		}
-	}
+	checkpoint = preserveDNSCheckpointAge(checkpoint, old, facts)
 	st, err := buildDNSServingState(checkpoint, p, routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, facts, now)
 	if err != nil {
 		return err
@@ -707,4 +700,23 @@ func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformc
 	s.platformServingError = h.LastError
 	s.mu.Unlock()
 	return nil
+}
+
+// Retained observations cannot renew a positive checkpoint's lease.
+func preserveDNSCheckpointAge(next dnsServingCheckpoint, old *dnsServingState, facts []dnsReadinessFact) dnsServingCheckpoint {
+	if old != nil && reflect.DeepEqual(old.record.Candidate.Assignment, next.Candidate.Assignment) {
+		for _, fact := range facts {
+			if fact.Reason == "retained_valid_proof" {
+				if dnsSameSourceContext(old.record.RouteSources, next.RouteSources) {
+					return old.record
+				}
+				// The current plan was replayed from this new authenticated
+				// source context. Keep it bound to the checkpoint, but never
+				// extend the old lease using a retained physical proof.
+				next.AppliedAt = old.record.AppliedAt
+				return next
+			}
+		}
+	}
+	return next
 }
