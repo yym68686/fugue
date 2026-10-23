@@ -106,3 +106,12 @@ Both returned a positive answer for the affected hostname after startup recovery
 Relative to the 218.8 MiB baseline, these bounded peaks are about 71–72% lower.
 The public DNS transport still selects the legacy readers; this measurement does
 not establish public recovery or a tenfold reduction.
+
+A later capture at about 28 minutes of uptime measured 65.6 MiB RSS on the
+German reader and 69.1 MiB on the US reader, with no OOM. CPU costs were 18.64
+and 46.43 core-seconds per 60-second window. A subsequent US frame-pointer CPU
+profile captured 91 samples without loss: TLS certificate verification appeared
+in 50 cumulative stack samples and GC drain in 24 (overlap is possible). Its
+separate 24.64-second accounting window consumed 6.11 core-seconds. It cannot
+explain the earlier CPU peak or establish a sustained regression; the 48 MiB
+soft budget is retained. Initial post-startup peaks are not all-time bounds.
