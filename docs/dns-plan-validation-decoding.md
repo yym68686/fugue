@@ -9,7 +9,9 @@ same policy twice inside one validation.
 The validator now serializes once and passes those exact local bytes to its
 existing decoding stages. It reuses the first decoded policy only inside that
 invocation. Independently callable public decoders still serialize their own
-input; there is no cross-request or accepted-authority cache. Embedded Cell
+input; the separate bounded pure-validation cache is described in
+[dns-memory-validation.md](dns-memory-validation.md). No cached result grants
+serving authority. Embedded Cell
 references, predecessor intent, policy decoders, lineage, quorum, deterministic
 plan replay, and rejection ordering remain checked. Store signatures, mutable
 release/consumer reads, network rechecks and LKG behavior are unchanged.

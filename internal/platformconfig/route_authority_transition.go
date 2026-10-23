@@ -105,6 +105,18 @@ func RouteAuthorityAliases(intent PlatformIntent) (map[string]string, error) {
 }
 
 func ValidatePreviousTrafficPublication(p PreviousTrafficPublicationInput) error {
+	key, cacheable := dnsPreviousValidationKey(p)
+	if cacheable && dnsPreviousValidations.contains(key) {
+		return nil
+	}
+	err := validatePreviousTrafficPublication(p)
+	if err == nil && cacheable {
+		dnsPreviousValidations.remember(key)
+	}
+	return err
+}
+
+func validatePreviousTrafficPublication(p PreviousTrafficPublicationInput) error {
 	r := p.Reference
 	if err := r.Validate(); err != nil {
 		return err

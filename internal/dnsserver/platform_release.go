@@ -15,6 +15,7 @@ import (
 )
 
 type dnsServingPayload struct {
+	publicationInputsDigest    string
 	routeSources               *dnsroutesource.Context
 	sourceBindings             map[string]*model.TrafficReleaseBinding
 	sourceRequirements         map[string]platformconfig.DNSReadinessProbe
@@ -123,6 +124,9 @@ func (s *Service) verifyDNSRelease(parent model.PlatformArtifact, c dnsPlatformC
 		declared = append(declared, *c)
 	}
 	if platformconfig.ValidateDNSAuthorityOwnership(p.Policy.DNSAuthorities, declared) != nil {
+		return fail()
+	}
+	if err := compactDNSPublicationInputs(&p); err != nil {
 		return fail()
 	}
 	return p, routeID, nil
@@ -271,4 +275,20 @@ func (p *dnsServingPayload) indexSourceRequirements() {
 	for _, r := range p.Plan.Probes {
 		p.sourceRequirements[r.ID] = r
 	}
+}
+
+// The authenticated artifact already retains the complete publication inputs.
+// Serving needs only their derived bindings. Preserve a complete content digest
+// for release-bridge equivalence before dropping the second decoded object graph.
+func compactDNSPublicationInputs(p *dnsServingPayload) error {
+	digest, err := platformconfig.Digest(struct {
+		Previous *platformconfig.PreviousTrafficPublicationInput
+		Cells    []platformconfig.CellRoutePublicationInput
+	}{p.PreviousTrafficPublication, p.CellRoutePublications})
+	if err != nil {
+		return err
+	}
+	p.publicationInputsDigest = digest
+	p.PreviousTrafficPublication, p.CellRoutePublications = nil, nil
+	return nil
 }

@@ -15,10 +15,16 @@ import (
 // Type/length framing makes mutations, absent values and nested boundaries
 // distinguishable. Unsupported typed values use encoding/json and fail closed.
 func policyTreeFingerprint(value any) ([32]byte, int, bool) {
+	return fingerprintPolicyTree(value, false)
+}
+
+// Validation memoization accepts decoded JSON trees only. Custom marshalers
+// must execute exactly once in the ordinary validator, never in a cache probe.
+func fingerprintPolicyTree(value any, jsonOnly bool) ([32]byte, int, bool) {
 	w := policyTreeHashers.Get().(*policyTreeHasher)
 	w.hash.Reset()
 	w.buffer = w.buffer[:0]
-	w.size, w.keyUsed = 0, 0
+	w.size, w.keyUsed, w.jsonOnly = 0, 0, jsonOnly
 	defer policyTreeHashers.Put(w)
 	if !w.tree(value, 0) {
 		return [32]byte{}, 0, false
@@ -30,12 +36,13 @@ func policyTreeFingerprint(value any) ([32]byte, int, bool) {
 }
 
 type policyTreeHasher struct {
-	hash    hash.Hash
-	buffer  []byte
-	size    int
-	scratch [9]byte
-	keys    [256]string
-	keyUsed int
+	jsonOnly bool
+	hash     hash.Hash
+	buffer   []byte
+	size     int
+	scratch  [9]byte
+	keys     [256]string
+	keyUsed  int
 }
 
 // Pool only fixed-size scratch space, never a policy or validation result.
@@ -138,6 +145,9 @@ func (w *policyTreeHasher) tree(value any, depth int) bool {
 		}
 		w.write(']', nil)
 	default:
+		if w.jsonOnly {
+			return false
+		}
 		raw, err := json.Marshal(value)
 		if err != nil {
 			return false

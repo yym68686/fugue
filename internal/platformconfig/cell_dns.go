@@ -297,13 +297,21 @@ type CellDNSPlanSource struct {
 }
 
 func ValidateDNSCellPlan(artifact model.PlatformArtifact) error {
-	// Freeze serialization for this call only. Independent public decoder calls
-	// still reread their input, and no validation result grants serving authority.
+	key, size, cacheable := dnsValidationArtifactKey(artifact)
+	cacheable = cacheable && size >= 16<<10
+	if cacheable && dnsPlanValidations.contains(key) {
+		return nil
+	}
+	// A miss follows the original complete validation and error ordering.
 	raw, err := json.Marshal(artifact.Content)
 	if err != nil {
 		return fmt.Errorf("DNS artifact content cannot be encoded: %w", err)
 	}
-	return validateDNSCellPlanEncoded(artifact, raw)
+	err = validateDNSCellPlanEncoded(artifact, raw)
+	if err == nil && cacheable {
+		dnsPlanValidations.remember(key)
+	}
+	return err
 }
 
 // Reuse only the bytes produced for this synchronous decode. This helper is
