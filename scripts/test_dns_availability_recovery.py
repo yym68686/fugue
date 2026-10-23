@@ -1,5 +1,6 @@
 import copy
 import datetime
+import json
 import unittest
 
 from scripts import configure_dynamic_quality as quality
@@ -41,6 +42,33 @@ class RecoveryLedger(Ledger):
 
 
 class AvailabilityRecoveryTests(unittest.TestCase):
+    def test_preview_rejection_retains_bounded_differences_without_raw_values(self):
+        before = {'preview_mode': 'configuration', 'business_snapshot_revision': 'snapshot-a', 'intent': {'routes': [{'upstream_url': 'private-before'}]}}
+        after = copy.deepcopy(before)
+        runtime = copy.deepcopy(before)
+        runtime['intent']['routes'][0]['upstream_url'] = 'private-after'
+        evidence = recovery.preview_evidence(before, after, runtime)
+        self.assertTrue(evidence['comparisons']['before_after']['equal'])
+        self.assertEqual(evidence['comparisons']['after_runtime']['changed_paths'], ['/intent/routes/0/upstream_url'])
+        self.assertNotIn('private-before', json.dumps(evidence))
+        self.assertNotIn('private-after', json.dumps(evidence))
+        before['intent']['routes'] = [{'upstream_url': 'a'}]*200
+        runtime['intent']['routes'] = [{'upstream_url': 'b'}]*200
+        evidence = recovery.preview_evidence(before, before, runtime)['comparisons']['after_runtime']
+        self.assertEqual(len(evidence['changed_paths']), 128)
+        self.assertEqual(evidence['omitted_paths'], 72)
+
+    def test_actual_preview_failure_is_saved_before_guard_refuses_activation(self):
+        config, _, ledger = fixture()
+        ledger.preview['intent'] = {'generation': 'changed-business'}
+        evidence = []
+        with self.assertRaises(ValueError): quality.publish_once(config, ledger, evidence.append)
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]['phase'], 'validate_preview')
+        self.assertFalse(evidence[0]['producer_activated'])
+        self.assertFalse(evidence[0]['preview_comparison']['comparisons']['after_runtime']['equal'])
+        self.assertEqual(ledger.release_bodies, [])
+
     def test_explicit_same_artifact_renewal_resolves_current_transaction_fences(self):
         for phase in ['before', 'during_preview']:
             with self.subTest(phase=phase):

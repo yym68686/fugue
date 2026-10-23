@@ -187,8 +187,13 @@ def publish_once(config, api, save):
     prior_view = "configuration" if recovery else "runtime"
     before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"] + "&view=" + prior_view)
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
+    recovery_preview = None
     if recovery:
         after = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=configuration")
+        recovery_preview = dns_availability_recovery.preview_evidence(before, after, preview)
+        save({"schema": "fugue.dynamic-quality-reconfiguration-result/v1", "declaration_digest": declaration,
+              "resolved_precondition": precondition, "artifact_id": artifact["id"], "producer_activated": False,
+              "routing_acceptance_complete": False, "phase": "validate_preview", "preview_comparison": recovery_preview})
         coverage = dns_availability_recovery.validate_preview(before, after, preview, config["projection_policy"], changed_hostname)
     else:
         coverage = validate_preview(before, preview)
@@ -207,6 +212,8 @@ def publish_once(config, api, save):
         config = wait_verified_baseline(config, api)
     precondition = config["precondition"]
     evidence = {"schema": "fugue.dynamic-quality-reconfiguration-result/v1", "declaration_digest": declaration, "resolved_precondition": precondition, "artifact_id": artifact["id"], "coverage": coverage, "producer_activated": False, "routing_acceptance_complete": False}
+    if recovery_preview is not None:
+        evidence['preview_comparison'] = recovery_preview
     if config.get("business_anchor_mode") == "latest_verified_same_baseline":
         evidence.update(resolved_policy_digest=digest(config["projection_policy"]), resolved_dns_anchors=next(route["business_exploration"]["initial_dns_publications"] for route in config["projection_policy"]["dns_query_policy"]["physical_routes"] if route["hostname"] == changed_hostname))
     save(evidence)

@@ -7,7 +7,7 @@ No traffic publication, consumer ACK or LKG verification is performed here.
 import copy
 import re
 
-from scripts.bootstrap_cell_producer import authority_identity, selected
+from scripts.bootstrap_cell_producer import authority_identity, selected, digest
 from scripts.observe_front_candidate import now, timestamp
 
 FOLLOW_SAME_ARTIFACT = 'latest_positive_same_artifact'
@@ -100,3 +100,31 @@ def validate_preview(before, after, runtime, policy, hostname):
     if coverage.get('mode') != 'all_dynamic' or not coverage.get('hostnames') or type(coverage.get('query_count')) is not int or coverage['query_count'] < 1:
         raise ValueError('availability recovery lacks current coverage accounting')
     return validate_availability_preview(runtime, policy, hostname)
+
+
+def preview_evidence(before, after, runtime):
+    """Bounded structural diagnostics; never retain raw tenant values or secrets."""
+    views = {}
+    for name, view in [('before', before), ('after', after), ('runtime', runtime)]:
+        views[name] = {'preview_mode': view.get('preview_mode'), 'business_snapshot_revision': view.get('business_snapshot_revision'),
+                       'intent_present': bool(view.get('intent')), 'intent_digest': digest(view.get('intent')), 'issues_digest': digest(view.get('issues', []))}
+    comparisons = {}
+    for name, left, right in [('before_after', before, after), ('after_runtime', after, runtime)]:
+        paths, omitted = [], 0
+        def compare(a, b, path):
+            nonlocal omitted
+            if a == b:
+                return
+            if isinstance(a, dict) and isinstance(b, dict):
+                for key in sorted(a.keys() | b.keys()):
+                    compare(a.get(key), b.get(key), path+'/'+str(key).replace('~', '~0').replace('/', '~1'))
+            elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+                for index, (x, y) in enumerate(zip(a, b)):
+                    compare(x, y, path+'/'+str(index))
+            elif len(paths) < 128:
+                paths.append(path[:512])
+            else:
+                omitted += 1
+        compare(left.get('intent'), right.get('intent'), '/intent')
+        comparisons[name] = {'equal': left.get('intent') == right.get('intent'), 'changed_paths': paths, 'omitted_paths': omitted}
+    return {'schema': 'fugue.availability-preview-comparison/v1', 'views': views, 'comparisons': comparisons}
