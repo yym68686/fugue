@@ -28,7 +28,9 @@ HASH = re.compile(r"sha256:[a-f0-9]{64}")
 
 def validate(c):
     fields = {"schema", "generation", "origin", "authority_cell_id", "namespace", "release_set", "dns_artifact", "shadow_release", "readers", "observation", "verifier_revision"}
-    if set(c) != fields or c["schema"] != "fugue.private-dns-promotion/v1" or type(c["generation"]) is not int or c["generation"] < 1:
+    if c.get("schema") == "fugue.private-dns-promotion/v2":
+        fields.add("resume")
+    if set(c) != fields or c["schema"] not in {"fugue.private-dns-promotion/v1", "fugue.private-dns-promotion/v2"} or type(c["generation"]) is not int or c["generation"] < 1:
         raise ValueError("explicit private DNS promotion declaration required")
     origin = urllib.parse.urlsplit(c["origin"])
     if origin.scheme != "https" or c["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
@@ -51,6 +53,25 @@ def validate(c):
     o = c["observation"]
     if set(o) != {"samples", "interval_seconds", "timeout_seconds"} or any(type(v) is not int for v in o.values()) or not 3 <= o["samples"] <= 6 or not 20 <= o["interval_seconds"] <= 30 or not 180 <= o["timeout_seconds"] <= 600:
         raise ValueError("bounded independent DNS observation window required")
+    if c["schema"] == "fugue.private-dns-promotion/v2":
+        resume = c["resume"]
+        if not isinstance(resume, dict) or set(resume) != {"declaration", "gray_release"}:
+            raise ValueError("exact predecessor declaration and gray release required")
+        previous = resume["declaration"]
+        if not isinstance(previous, dict) or previous.get("schema") != "fugue.private-dns-promotion/v1":
+            raise ValueError("resume requires one original declaration without a chain")
+        validate(previous)
+        if c["generation"] <= previous["generation"]:
+            raise ValueError("resumed declaration generation must advance")
+        for key in ["origin", "namespace", "authority_cell_id", "release_set", "dns_artifact", "shadow_release", "observation"]:
+            if c[key] != previous[key]:
+                raise ValueError("executor replacement cannot change DNS configuration or observation policy")
+        logical = lambda r: {k: v for k, v in r.items() if k not in {"pod", "uid", "image"}}
+        if [logical(r) for r in c["readers"]] != [logical(r) for r in previous["readers"]]:
+            raise ValueError("executor replacement cannot change signed reader membership or identity")
+        gray = resume["gray_release"]
+        if not isinstance(gray, dict) or set(gray) != {"id", "fencing_token"} or not ID.fullmatch(gray["id"]) or type(gray["fencing_token"]) is not int or gray["fencing_token"] < 1:
+            raise ValueError("exact existing gray release required")
     return c
 
 
@@ -74,14 +95,22 @@ def publication(c, api, channel):
     state = selected(api, scope(c), channel, "release_set")
     a, r = state.get("artifact"), state.get("release")
     if not a and not r:
+        if channel == "gray" and c.get("resume"):
+            raise ValueError("declared gray predecessor is no longer selected")
         return None
     if a["id"] != c["release_set"]["id"] or a["content_hash"] != c["release_set"]["digest"] or r.get("status") != "active" or r.get("fencing_token", 0) <= 0:
         raise ValueError("private DNS publication differs from declaration")
     if channel == "shadow":
         if {"id": r["id"], "fencing_token": r["fencing_token"]} != c["shadow_release"]:
             raise ValueError("private DNS shadow predecessor changed")
-    elif r.get("idempotency_key") != "git-private-dns/" + digest(c) + "/" + channel or r.get("canary_rule_ref", "") != ("cohort=complete" if channel == "gray" else ""):
-        raise ValueError("private DNS serving lane belongs to another operation")
+    else:
+        operation = c
+        if channel == "gray" and c.get("resume"):
+            if {"id": r["id"], "fencing_token": r["fencing_token"]} != c["resume"]["gray_release"]:
+                raise ValueError("resumed gray release identity changed")
+            operation = c["resume"]["declaration"]
+        if r.get("idempotency_key") != "git-private-dns/" + digest(operation) + "/" + channel or r.get("canary_rule_ref", "") != ("cohort=complete" if channel == "gray" else ""):
+            raise ValueError("private DNS serving lane belongs to another operation")
     return r
 
 

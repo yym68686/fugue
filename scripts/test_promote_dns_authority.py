@@ -34,6 +34,35 @@ class PrivateDNSPromotionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 p.validate(c)
 
+    def test_resume_replaces_only_physical_executors_with_original_operation_pins(self):
+        previous = config()
+        c = copy.deepcopy(previous)
+        c.update(schema="fugue.private-dns-promotion/v2", generation=2, verifier_revision="f" * 40,
+                 resume={"declaration": previous, "gray_release": {"id": "gray", "fencing_token": 4}})
+        c["readers"][0].update(pod="replacement", uid="22222222-2222-2222-2222-222222222222", image="registry.example/dns@sha256:" + "f" * 64)
+        p.validate(c)
+        state = {"artifact": {"id": "parent", "content_hash": c["release_set"]["digest"]}, "release": release(previous, "gray")}
+        with patch.object(p, "selected", return_value=state):
+            self.assertEqual("gray", p.publication(c, None, "gray")["id"])
+        for mutate in [lambda v: v.update(generation=1), lambda v: v["release_set"].update(id="foreign"), lambda v: v["dns_artifact"].update(id="foreign"), lambda v: v["readers"][0].update(node_id="foreign"), lambda v: v["readers"][0].update(service_account="foreign"), lambda v: v["observation"].update(samples=4), lambda v: v["resume"]["declaration"].update(schema="fugue.private-dns-promotion/v2")]:
+            changed = copy.deepcopy(c)
+            mutate(changed)
+            with self.assertRaises(ValueError):
+                p.validate(changed)
+        for update in [{"id": "foreign"}, {"fencing_token": 5}, {"idempotency_key": "foreign"}]:
+            changed = copy.deepcopy(state)
+            changed["release"].update(update)
+            with patch.object(p, "selected", return_value=changed), self.assertRaises(ValueError):
+                p.publication(c, None, "gray")
+        with patch.object(p, "selected", return_value={}), self.assertRaisesRegex(ValueError, "no longer selected"):
+            p.publication(c, None, "gray")
+        with patch.object(p, "inputs"), patch.object(p, "publication", side_effect=lambda c, api, ch: state["release"] if ch in ["gray", "shadow"] else None), patch.object(p, "observe", side_effect=ValueError("replacement not ready")):
+            writes = []
+            with self.assertRaisesRegex(ValueError, "not ready"):
+                p.promote(c, lambda *args: writes.append(args), lambda value: None)
+            self.assertEqual(1, len(writes))
+            self.assertEqual("/v1/admin/platform-config/release-set/prepare-consumers", writes[0][1])
+
     def test_composition_cannot_enroll_workers_or_other_dns_readers(self):
         c = config()
         parent = {"content_hash": c["release_set"]["digest"], "content": {"publication_role": "cell-dns", "artifact_kinds": ["dns_answer_bundle"], "artifact_ids": ["dns"], "consumer_topology": {"schema_version": "fugue.traffic-consumer-topology/v1", "publication_role": "cell-dns", "authority_cell_id": c["authority_cell_id"], "edge_node_ids": [], "dns_node_ids": ["node-one"]}}}

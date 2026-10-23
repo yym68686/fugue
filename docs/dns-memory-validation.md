@@ -34,3 +34,13 @@ does not establish an online RSS reduction. Compare bounded Live Diagnostics
 process-memory profiles before and after deployment under the same workload.
 The first measured baseline peak was 210.9 MiB RSS; a tenfold target is 21.1 MiB.
 Do not claim this target from allocation benchmarks alone.
+
+
+Initial production comparison after the first optimization used the same private
+US DNS executor role, signed configuration and 60-second Live Diagnostics probe.
+RSS peak decreased from 218.8 MiB to 148.0 MiB (32.3%); sampled cumulative allocation
+in the window decreased from 1,493.39 MiB to 476.08 MiB (68.1%). Neither window had
+an OOM. The newer window began about 75 seconds after process start, whereas the
+baseline process had been running longer; a later steady-state capture is still
+needed. This does not establish a tenfold reduction. The remaining sampled live
+heap is about 49.6 MiB and still dominated by decoded JSON object trees.

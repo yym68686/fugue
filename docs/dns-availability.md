@@ -170,3 +170,21 @@ The runtime-facts HTTP endpoint reports a bounded
 missing state, failed checkpoint validation, identity/plan/policy mismatches,
 encoding/size limits and concurrent state replacement. These diagnostics expose
 no raw error or credential and never change serving or proof eligibility.
+
+
+### Resuming private promotion after executor replacement
+
+A code rollout can replace Pod UIDs while the exact signed DNS configuration
+remains active in gray. A v2 private promotion declaration may embed the original
+v1 declaration and pin the existing gray release ID and fence. Its generation
+must advance. Only Pod name, UID, immutable image and verifier revision can change;
+logical reader membership, service accounts, container/port, artifacts, scope,
+shadow predecessor and observation policy must remain identical.
+
+The original declaration digest must match the active gray operation's stored
+idempotency key. A missing gray or another release/fence/operation is rejected;
+resume never recreates gray or adopts an unrelated publication. New executors
+must pass the full current identity, signed checkpoint, fresh answer and advancing
+probe watch before a positive LKG is retained. Full publication belongs to the
+new declaration. This configuration lane does not change workloads or public DNS
+transport and remains independent of component build/deploy success.
