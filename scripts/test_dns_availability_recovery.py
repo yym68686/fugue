@@ -41,6 +41,54 @@ class RecoveryLedger(Ledger):
 
 
 class AvailabilityRecoveryTests(unittest.TestCase):
+    def test_explicit_same_artifact_renewal_resolves_current_transaction_fences(self):
+        for phase in ['before', 'during_preview']:
+            with self.subTest(phase=phase):
+                config, _, ledger = fixture()
+                config['baseline_mode'] = recovery.FOLLOW_SAME_ARTIFACT
+                original = copy.deepcopy(config)
+                def renew(_=None):
+                    full = ledger.authorities[('release_set', 'global', 'full')]
+                    full['release'].update(id='renewed-release', fencing_token=10)
+                    full['messages'][0]['release_id'] = 'renewed-release'
+                    ledger.lkg['verification_evidence_hash'] = 'sha256:'+'e'*64
+                    ledger.expected_precondition = copy.deepcopy(original['precondition'])
+                    ledger.expected_precondition['serving_full'].update(release_id='renewed-release', fencing_token=10)
+                    ledger.expected_precondition['verification_evidence_hash'] = 'sha256:'+'e'*64
+                    ledger.on_capture = None
+                if phase == 'before': renew()
+                else: ledger.on_capture = renew
+                result = quality.publish_once(config, ledger, lambda _: None)
+                precondition = ledger.release_bodies[0]['producer_reconfiguration']
+                self.assertEqual(precondition['serving_full']['release_id'], 'renewed-release')
+                self.assertEqual(precondition['serving_full']['fencing_token'], 10)
+                self.assertEqual(precondition['verification_evidence_hash'], 'sha256:'+'e'*64)
+                self.assertEqual(precondition['previous_policy'], original['precondition']['previous_policy'])
+                self.assertEqual(config, original)
+                self.assertTrue(result['producer_activated'])
+                self.assertFalse(result['routing_acceptance_complete'])
+
+    def test_same_artifact_resolution_never_adopts_new_content_or_weak_evidence(self):
+        for scenario in ['content', 'artifact', 'regressed', 'same-fence-other-release', 'same-release-other-fence', 'producer', 'ordinary-unverified', 'missing-ledger', 'expired', 'foreign-lkg', 'bad-evidence', 'other-operation']:
+            with self.subTest(scenario=scenario):
+                config, _, ledger = fixture()
+                config['baseline_mode'] = recovery.FOLLOW_SAME_ARTIFACT
+                full = ledger.authorities[('release_set', 'global', 'full')]
+                if scenario == 'content': full['artifact']['content_hash'] = 'sha256:'+'f'*64
+                if scenario == 'artifact': full['artifact']['id'] = 'other-artifact'; full['release']['artifact_id'] = 'other-artifact'
+                if scenario == 'regressed': full['release']['fencing_token'] = 8
+                if scenario == 'same-fence-other-release': full['release']['id'] = 'other-release'
+                if scenario == 'same-release-other-fence': full['release']['fencing_token'] = 10
+                if scenario == 'producer': ledger.authorities[('policy_snapshot', 'platform-config-producer', 'shadow')]['release']['fencing_token'] += 1
+                if scenario == 'ordinary-unverified': del full['release']['rollback_target_generation']
+                if scenario == 'missing-ledger': full['messages'] = []
+                if scenario == 'expired': ledger.lkg['expires_at'] = (recovery.now()-datetime.timedelta(seconds=1)).isoformat()
+                if scenario == 'foreign-lkg': ledger.lkg['artifact_id'] = 'foreign'
+                if scenario == 'bad-evidence': ledger.lkg['verification_evidence_hash'] = 'unverified'
+                if scenario == 'other-operation': config['precondition']['operation'] = 'dns_availability'
+                with self.assertRaises(ValueError): quality.publish_once(config, ledger, lambda _: None)
+                self.assertEqual(ledger.release_bodies, [])
+
     def test_fenced_configuration_uses_real_rollback_without_runtime_success(self):
         config, _, ledger = fixture()
         full = copy.deepcopy(ledger.authorities[('release_set','global','full')])

@@ -76,8 +76,15 @@ immutable. Recovery policy is optional. Without it, the hold remains until an
 authorized configuration change; a short successful request, Ready, a billing
 date or a code upgrade cannot release it. This permits safe recovery while a
 bandwidth-limited endpoint cannot yet demonstrate capacity. This operation
-requires `baseline_mode: declared` and refuses silent
-fence renewal. Configuration previews compare frozen intent without requiring a
+requires `baseline_mode: declared` by default and refuses silent fence renewal.
+An explicitly selected `latest_positive_same_artifact` mode may follow only the
+same artifact ID and complete content digest under the exact same producer
+policy. Release fences cannot regress or alias another release; the current
+unexpired positive LKG and, when needed, exact rollback ledger are revalidated.
+Resolution runs before preview and immediately before the transaction, whose
+normal atomic exact-fence checks remain unchanged. Different content, producer,
+ordinary unverified publication or missing historical evidence is rejected.
+Configuration previews compare frozen intent without requiring a
 successful failed DNS answer; the successor still needs live preview, normal
 consumer capability checks and gray/full evidence. It changes neither serving
 publication nor positive LKG and never fabricates an ACK.

@@ -5,14 +5,42 @@ signatures, original verified release, source bindings and fences under one lock
 No traffic publication, consumer ACK or LKG verification is performed here.
 """
 import copy
+import re
 
 from scripts.bootstrap_cell_producer import authority_identity, selected
 from scripts.observe_front_candidate import now, timestamp
 
+FOLLOW_SAME_ARTIFACT = 'latest_positive_same_artifact'
+
+
+def resolve_baseline(config, api):
+    if config.get('baseline_mode') != FOLLOW_SAME_ARTIFACT:
+        return config
+    precondition = config['precondition']
+    if authority_identity(selected(api, 'platform-config-producer', 'shadow')) != precondition['previous_policy']:
+        raise ValueError('recovery baseline producer authority changed')
+    full = selected(api, 'global', 'full', 'release_set')
+    reference = authority_identity(full)
+    declared = precondition['serving_full']
+    if any(reference[k] != declared[k] for k in ['artifact_id', 'content_hash']) or reference['fencing_token'] < declared['fencing_token'] or reference['fencing_token'] == declared['fencing_token'] and reference['release_id'] != declared['release_id']:
+        raise ValueError('recovery renewal changed immutable content or regressed authority')
+    if reference['fencing_token'] > declared['fencing_token'] and reference['release_id'] == declared['release_id']:
+        raise ValueError('recovery renewal reused a release with another fence')
+    lkg = api('GET', '/v1/admin/artifacts/' + reference['artifact_id'] + '/lkg').get('lkg', {})
+    evidence = lkg.get('verification_evidence_hash', '')
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', evidence):
+        raise ValueError('recovery renewal lacks positive LKG evidence')
+    resolved = copy.deepcopy(config)
+    resolved['precondition'].update(serving_full=reference, verification_evidence_hash=evidence)
+    # Same-content renewal never relaxes historical verification, exact
+    # rollback-ledger, producer ownership, expiry or live transaction checks.
+    baseline(resolved, api)
+    return resolved
+
 
 def baseline(config, api):
     precondition = config['precondition']
-    if precondition['operation'] != 'dns_availability_recovery' or config['baseline_mode'] != 'declared':
+    if precondition['operation'] != 'dns_availability_recovery' or config['baseline_mode'] not in ['declared', FOLLOW_SAME_ARTIFACT]:
         raise ValueError('availability recovery requires an exact declared baseline')
     full = selected(api, 'global', 'full', 'release_set')
     artifact, release = full.get('artifact', {}), full.get('release', {})

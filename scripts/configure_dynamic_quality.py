@@ -19,7 +19,7 @@ from scripts.configure_business_exploration import BusinessBaselineChanged, chec
 
 def validate(config):
     fields = {"schema", "generation", "origin", "producer_generation", "precondition", "projection_policy", "baseline_mode"}
-    if not isinstance(config, dict) or not fields.issubset(config) or set(config) - fields - {"business_anchor_mode", "api_connect_address"} or not bounded_json(config) or config["schema"] != "fugue.dynamic-quality-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config["baseline_mode"] not in ["declared", "latest_verified_same_policy"]:
+    if not isinstance(config, dict) or not fields.issubset(config) or set(config) - fields - {"business_anchor_mode", "api_connect_address"} or not bounded_json(config) or config["schema"] != "fugue.dynamic-quality-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config["baseline_mode"] not in ["declared", "latest_verified_same_policy", dns_availability_recovery.FOLLOW_SAME_ARTIFACT]:
         raise ValueError("complete explicit dynamic quality declaration required")
     origin = urllib.parse.urlsplit(config["origin"])
     if origin.scheme != "https" or config["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
@@ -32,8 +32,10 @@ def validate(config):
         raise ValueError("fenced dynamic quality precondition required")
     if config.get("business_anchor_mode", "declared") not in ["declared", "latest_verified_same_baseline"] or "business_anchor_mode" in config and precondition["operation"] != "business_exploration" or config.get("business_anchor_mode") == "latest_verified_same_baseline" and config["baseline_mode"] != "latest_verified_same_policy":
         raise ValueError("business anchor resolution requires explicit same-policy baseline mode")
-    if precondition["operation"] == "dns_availability_recovery" and config["baseline_mode"] != "declared":
+    if precondition["operation"] == "dns_availability_recovery" and config["baseline_mode"] not in ["declared", dns_availability_recovery.FOLLOW_SAME_ARTIFACT]:
         raise ValueError("availability recovery requires exact declared publication fences")
+    if config["baseline_mode"] == dns_availability_recovery.FOLLOW_SAME_ARTIFACT and precondition["operation"] != "dns_availability_recovery":
+        raise ValueError("same-artifact recovery requires the explicit recovery operation")
     for field in ["previous_policy", "serving_full"]:
         validate_ref(precondition[field])
     policy = config["projection_policy"]
@@ -220,6 +222,7 @@ def publish_once(config, api, save):
 
 def wait_verified_baseline(config, api):
     if config["precondition"]["operation"] == "dns_availability_recovery":
+        config = dns_availability_recovery.resolve_baseline(config, api)
         dns_availability_recovery.baseline(config, api)
         return config
     transient = {"baseline is not the predecessor's verified producer publication", "serving full publication changed", "exact unexpired positive LKG required"}
