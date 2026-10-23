@@ -284,6 +284,9 @@ def observe_reader(c, reader, release):
         raise ValueError("canonical DNS checkpoint path required")
     command = ["exec", "-n", c["namespace"], reader["pod"], "-c", reader["container"], "--"]
     checkpoint = read_json(*command, "cat", cache + ".platform-serving.json")
+    # Fetch stable verification material before the short-lived runtime facts.
+    # Secret reads must not consume the proof's remaining validity window.
+    verification = {"signing_key": secret("FUGUE_BUNDLE_SIGNING_KEY"), "signing_key_id": literal("FUGUE_BUNDLE_SIGNING_KEY_ID"), "previous_key": secret("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY"), "previous_key_id": literal("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID"), "revoked_key_ids": [v.strip() for v in literal("FUGUE_BUNDLE_REVOKED_KEY_IDS").split(",") if v.strip()]}
     # Loopback reads the claimed process even when the private network policy
     # intentionally rejects direct connections from the release runner.
     snapshot = read_json(*command, "wget", "-qO-", "http://127.0.0.1:" + str(reader["port"]) + "/runtime-facts")
@@ -291,7 +294,7 @@ def observe_reader(c, reader, release):
     if snapshot.get("node_id") != reader["node_id"] or snapshot.get("parent_digest") != c["release_set"]["digest"] or assignment.get("artifact_id") != c["dns_artifact"]["id"] or assignment.get("content_hash") != c["dns_artifact"]["digest"] or assignment.get("release_set_id") != c["release_set"]["id"] or assignment.get("artifact_release_id") != release["id"] or assignment.get("fencing_token") != release["fencing_token"] or assignment.get("release_channel") != release["release_channel"] or assignment.get("scope_key") != scope(c):
         raise ValueError("private DNS snapshot publication differs")
     request = {"node_id": reader["node_id"], "group_id": c["authority_cell_id"], "scope": scope(c), "zone": literal("FUGUE_DNS_ZONE"), "checkpoint": checkpoint, "snapshot": snapshot,
-               "signing_key": secret("FUGUE_BUNDLE_SIGNING_KEY"), "signing_key_id": literal("FUGUE_BUNDLE_SIGNING_KEY_ID"), "previous_key": secret("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY"), "previous_key_id": literal("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID"), "revoked_key_ids": [v.strip() for v in literal("FUGUE_BUNDLE_REVOKED_KEY_IDS").split(",") if v.strip()]}
+               **verification}
     verifier = os.environ.get("FUGUE_DNS_OBSERVATION_VERIFIER", "")
     if not os.path.isabs(verifier):
         raise ValueError("pinned DNS observation verifier unavailable")
