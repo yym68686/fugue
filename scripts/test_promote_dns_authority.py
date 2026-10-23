@@ -166,10 +166,11 @@ class PrivateDNSPromotionTests(unittest.TestCase):
         reader = c["readers"][0]
         env = [{"name": k, "value": v} for k, v in {"FUGUE_EDGE_GROUP_ID": c["authority_cell_id"], "FUGUE_PLATFORM_ARTIFACT_SCOPE": p.scope(c), "FUGUE_DNS_CACHE_PATH": "/state/cache", "FUGUE_DNS_ZONE": "example.test"}.items()]
         env.append({"name": "FUGUE_BUNDLE_SIGNING_KEY", "valueFrom": {"secretKeyRef": {"name": "signing", "key": "key"}}})
+        env.append({"name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY", "valueFrom": {"secretKeyRef": {"name": "signing", "key": "previous", "optional": True}}})
         pod = {"metadata": {"name": reader["pod"], "uid": reader["uid"], "resourceVersion": "12", "annotations": {"fugue.pro/authority-transition-role": "isolated-candidate", "fugue.pro/consumer-identity": json.dumps({"version": "v1", "component": "dns-server", "scope_key": p.scope(c), "authority_id": c["authority_cell_id"], "artifact_kinds": ["dns_answer_bundle"]})}},
                "spec": {"nodeName": reader["node_id"], "serviceAccountName": reader["service_account"], "containers": [{"name": "dns", "image": reader["image"], "env": env, "readinessProbe": {"httpGet": {"port": reader["port"]}}}]}, "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}}
         snapshot = {"node_id": reader["node_id"], "parent_digest": c["release_set"]["digest"], "assignment": {"artifact_id": "dns", "content_hash": c["dns_artifact"]["digest"], "release_set_id": "parent", "artifact_release_id": r["id"], "fencing_token": r["fencing_token"], "release_channel": "gray", "scope_key": p.scope(c)}, "observed_at": p.now().isoformat(), "evaluated_at": p.now().isoformat()}
-        for scenario in ["valid", "replaced", "wrong image", "wrong authority", "host network", "wrong port", "stale fence", "crypto rejection"]:
+        for scenario in ["valid", "replaced", "wrong image", "wrong authority", "host network", "wrong port", "stale fence", "crypto rejection", "required key empty"]:
             local, facts, calls = copy.deepcopy(pod), copy.deepcopy(snapshot), []
             if scenario == "wrong image":
                 local["spec"]["containers"][0]["image"] = "other"
@@ -189,7 +190,7 @@ class PrivateDNSPromotionTests(unittest.TestCase):
                         result["metadata"]["uid"] = "replacement"
                     return result
                 if args[:2] == ("get", "secret"):
-                    return {"data": {"key": "Zml4dHVyZS1rZXk="}}
+                    return {"data": {"key": "" if scenario == "required key empty" else "Zml4dHVyZS1rZXk=", "previous": ""}}
                 self.assertEqual("exec", args[0])
                 self.assertEqual(reader["pod"], args[3])
                 if args[-2:] == ("cat", "/state/cache.platform-serving.json"):

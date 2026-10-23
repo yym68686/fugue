@@ -272,7 +272,7 @@ def observe_reader(c, reader, release):
                 raise ValueError("inline signing material is forbidden")
             return ""
         value = read_json("get", "secret", ref["name"], "-n", c["namespace"], "-o", "json").get("data", {}).get(ref["key"])
-        if value is None and ref.get("optional"):
+        if value in [None, ""] and ref.get("optional"):
             return ""
         if not value:
             raise ValueError("DNS verification material unavailable")
