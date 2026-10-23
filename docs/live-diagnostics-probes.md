@@ -268,3 +268,12 @@ dropped completions and overwrites are explicit. Compiler input persistence
 propagates operation lineage without changing the store's existing timeout or
 cancellation semantics. Runtime requests never expose SQL text, parameters,
 result payloads, credentials or raw error messages.
+
+On Linux a non-root component's runtime profile socket accepts only kernel
+credentials identifying root or the component's own UID. Diagnostic Jobs drop
+DAC_OVERRIDE, so filesystem owner-only mode by itself prevents those Jobs from
+connecting to non-root providers. The listener validates SO_PEERCRED before
+HTTP parsing and closes other peers. Root-owned sockets keep mode 0600; non-root
+sockets permit connection but do not grant profile access without the peer
+check. No TCP listener or extra diagnostic capability is introduced. Non-Linux
+providers retain the owner-only filesystem mode.

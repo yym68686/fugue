@@ -14,8 +14,8 @@ import (
 
 const RuntimeSocketPath = "/tmp/fugue-runtime-diagnostics.sock"
 
-// StartRuntimeEndpoint exposes read-only Go runtime profiles on a root-only
-// Unix socket inside the component container. It never listens on the network.
+// StartRuntimeEndpoint exposes read-only Go runtime profiles to root and the
+// process owner over a Unix socket. It never listens on the network.
 func StartRuntimeEndpoint(ctx context.Context, component string) error {
 	return startRuntimeEndpointAt(ctx, component, RuntimeSocketPath)
 }
@@ -35,7 +35,7 @@ func startRuntimeEndpointAt(ctx context.Context, component, socketPath string) e
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(socketPath, 0o600); err != nil {
+	if err := os.Chmod(socketPath, runtimeSocketMode()); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(socketPath)
 		return err
@@ -69,6 +69,26 @@ func startRuntimeEndpointAt(ctx context.Context, component, socketPath string) e
 		_ = listener.Close()
 		_ = os.Remove(socketPath)
 	}()
-	go func() { _ = server.Serve(listener) }()
+	go func() { _ = server.Serve(runtimeProfileListener{Listener: listener, owner: uint32(os.Geteuid())}) }()
 	return nil
+}
+
+// Authenticate before HTTP parsing. SO_PEERCRED is supplied by the kernel;
+// a caller cannot claim another UID through a request header or socket path.
+type runtimeProfileListener struct {
+	net.Listener
+	owner uint32
+}
+
+func (l runtimeProfileListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if runtimePeerAllowed(conn, l.owner) {
+			return conn, nil
+		}
+		_ = conn.Close()
+	}
 }

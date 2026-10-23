@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestRuntimeEndpointUsesRootOnlyUnixSocketAndServesProfiles(t *testing.T) {
+func TestRuntimeEndpointUsesLocalAuthenticatedSocketAndServesProfiles(t *testing.T) {
 	temporary, err := os.CreateTemp("/tmp", "fugue-diagnostics-*.sock")
 	if err != nil {
 		t.Fatal(err)
@@ -33,8 +33,8 @@ func TestRuntimeEndpointUsesRootOnlyUnixSocketAndServesProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("socket permissions=%o, want 600", info.Mode().Perm())
+	if info.Mode().Perm() != runtimeSocketMode() {
+		t.Fatalf("socket permissions=%o, want %o", info.Mode().Perm(), runtimeSocketMode())
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", socketPath)
