@@ -32,6 +32,7 @@ func TestCellDNSPublicationAndLKGPostgres(t *testing.T) {
 	t.Run("authorized sources", func(t *testing.T) { testCellDNSPublication(t, address, false, true) })
 	t.Run("authorized transition", func(t *testing.T) { testCellDNSPublication(t, address, true, true) })
 	t.Run("retained routing only", func(t *testing.T) { testCellDNSPublication(t, address, true, true, true) })
+	t.Run("verified source renewal", func(t *testing.T) { testCellDNSPublication(t, address, true, true, true, true) })
 }
 
 func seedCellDNSRoutePublications(t *testing.T, s *Store, req *platformconfig.CompileRequest) {
@@ -95,6 +96,7 @@ func TestCellDNSPublicationWithSourceAuthorization(t *testing.T) {
 	t.Run("neutral", func(t *testing.T) { testCellDNSPublication(t, "", false, true) })
 	t.Run("transition", func(t *testing.T) { testCellDNSPublication(t, "", true, true) })
 	t.Run("retained routing only", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true) })
+	t.Run("verified source renewal", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true, true) })
 }
 
 func testCellDNSPublication(t *testing.T, address string, transition bool, sources ...bool) {
@@ -304,6 +306,36 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		t.Fatal(err)
 	}
 	report(gray, 3, fullCaps, true)
+	if len(sources) > 2 && sources[2] {
+		renewed := celldns.PreviousPublication(*req.PreviousTrafficPublication)
+		originalID := renewed.ID
+		renewed.ID += "-renewed"
+		renewed.FencingToken++
+		renewed.ReleasedAt = renewed.ReleasedAt.Add(time.Minute)
+		if s.db != nil {
+			if _, err := s.db.Exec("UPDATE fugue_platform_artifact_releases SET status=$1 WHERE id=$2", model.PlatformArtifactReleaseStatusSuperseded, originalID); err != nil {
+				t.Fatal(err)
+			}
+			seedDNSRouteRelease(t, s, renewed)
+		} else {
+			if err := s.withLockedState(true, func(state *model.State) error {
+				index := platformArtifactReleaseIndex(state.PlatformArtifactReleases, originalID)
+				state.PlatformArtifactReleases[index].Status = model.PlatformArtifactReleaseStatusSuperseded
+				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, renewed)
+				for i := range state.PlatformReleaseLanes {
+					lane := &state.PlatformReleaseLanes[i]
+					if lane.LaneKey == renewed.LaneKey {
+						lane.ActiveReleaseID = renewed.ID
+						lane.FencingToken = renewed.FencingToken
+						lane.Version++
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(gray.ID, completePlatformVerificationRequest(gray.FencingToken, true), testPlatformPrincipal()); err != nil {
 		t.Fatal(err)
 	}

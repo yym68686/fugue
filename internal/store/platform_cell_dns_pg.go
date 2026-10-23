@@ -109,6 +109,21 @@ func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent 
 		}
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	}
+	// A dynamic source can renew the same verified immutable full artifact.
+	// Preserve its exact original publication row for the historical identity
+	// check; active lane reads alone would lose that superseded authority.
+	if len(producerArtifacts) > 0 {
+		for _, dependency := range dependencies {
+			if platformArtifactReleaseIndex(state.PlatformArtifactReleases, dependency.ReleaseID) >= 0 {
+				continue
+			}
+			release, err := pgGetPlatformArtifactRelease(ctx, tx, dependency.ReleaseID, false)
+			if err != nil {
+				return err
+			}
+			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
+		}
+	}
 	loadedParents := map[string]bool{}
 	for _, p := range dependencies {
 		if loadedParents[p.Parent.ID] {

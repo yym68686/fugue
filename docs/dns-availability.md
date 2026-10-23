@@ -188,3 +188,20 @@ must pass the full current identity, signed checkpoint, fresh answer and advanci
 probe watch before a positive LKG is retained. Full publication belongs to the
 new declaration. This configuration lane does not change workloads or public DNS
 transport and remains independent of component build/deploy success.
+
+
+### Identical routing publication renewal
+
+An explicitly authorized dynamic routing source can republish the same immutable
+parent as a newer verified full release while a DNS gray watch runs. DNS runtime
+proofs already bind that newer release, but an exact historical baseline fence
+previously blocked the LKG transaction. Static DNS references remain exact pins.
+
+For dynamic sources only, configuration reference validation accepts this narrow
+renewal when both the original superseded full and current active full are
+verified for the exact same parent and generation, the fence increases, and the
+release time advances. The original publication row is loaded explicitly in the
+PostgreSQL transaction. Different parent content, gray candidates, missing or
+rolled-back history and unverified renewals remain rejected. Producer policy
+bindings, artifact signatures, current lane locks and fresh DNS convergence still
+run. No runtime proof is relabeled or assigned a newer fence by this rule.

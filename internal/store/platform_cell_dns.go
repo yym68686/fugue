@@ -59,7 +59,10 @@ func validateCellDNSReferencesInState(state *model.State, child model.PlatformAr
 				selected = &copy
 			}
 		}
-		if selected == nil || selected.ID != dependency.ReleaseID || selected.ArtifactID != dependency.Parent.ID || selected.Generation != dependency.Parent.Generation || selected.FencingToken != dependency.FencingToken || selected.ReleaseChannel != dependency.ReleaseChannel || selected.CanaryRuleRef != dependency.CanaryRuleRef {
+		if selected == nil || selected.ArtifactID != dependency.Parent.ID || selected.Generation != dependency.Parent.Generation || selected.ReleaseChannel != dependency.ReleaseChannel || selected.CanaryRuleRef != dependency.CanaryRuleRef {
+			return fail()
+		}
+		if (selected.ID != dependency.ReleaseID || selected.FencingToken != dependency.FencingToken) && !dnsIdenticalSourceRenewal(state, child, dependency, *selected) {
 			return fail()
 		}
 		if dependency.RequireVerified && (selected.VerificationState != model.PlatformArtifactVerificationStateVerified || selected.VerifiedLKGGeneration != dependency.Parent.Generation) {
@@ -77,6 +80,31 @@ func validateCellDNSReferencesInState(state *model.State, child model.PlatformAr
 		}
 	}
 	return nil
+}
+
+// Dynamic DNS source authority follows independently published routing facts.
+// Renewing a verified full release of the SAME immutable parent must not strand
+// its DNS baseline. Static pins, different content, gray, unverified recovery,
+// rollback and missing historical authority remain strict conflicts. This only
+// admits the configuration reference; live DNS proof fences are not rewritten.
+func dnsIdenticalSourceRenewal(state *model.State, child model.PlatformArtifact, dependency platformconfig.DNSRouteDependency, selected model.PlatformArtifactRelease) bool {
+	sources, err := platformconfig.DNSRouteSourceAuthorizations(child)
+	if err != nil {
+		return false
+	}
+	approved := false
+	for _, source := range sources {
+		approved = approved || source.ScopeKey == dependency.Parent.ScopeKey
+	}
+	if !approved || dependency.ReleaseChannel != "full" || dependency.CanaryRuleRef != "" || selected.ReleaseChannel != "full" || selected.CanaryRuleRef != "" || selected.ArtifactID != dependency.Parent.ID || selected.Generation != dependency.Parent.Generation || selected.ScopeKey != dependency.Parent.ScopeKey || selected.Status != model.PlatformArtifactReleaseStatusActive || selected.VerificationState != model.PlatformArtifactVerificationStateVerified || selected.VerifiedLKGGeneration != dependency.Parent.Generation || selected.FencingToken <= dependency.FencingToken {
+		return false
+	}
+	index := platformArtifactReleaseIndex(state.PlatformArtifactReleases, dependency.ReleaseID)
+	if index < 0 {
+		return false
+	}
+	original := state.PlatformArtifactReleases[index]
+	return original.ID == dependency.ReleaseID && original.ArtifactID == dependency.Parent.ID && original.ArtifactKind == model.PlatformArtifactKindReleaseSet && original.ScopeKey == dependency.Parent.ScopeKey && original.Generation == dependency.Parent.Generation && original.ReleaseChannel == "full" && original.CanaryRuleRef == "" && original.FencingToken == dependency.FencingToken && original.Status == model.PlatformArtifactReleaseStatusSuperseded && original.VerificationState == model.PlatformArtifactVerificationStateVerified && original.VerifiedLKGGeneration == dependency.Parent.Generation && !original.ReleasedAt.IsZero() && selected.ReleasedAt.After(original.ReleasedAt)
 }
 
 func validateDNSRouteProducerBindings(state *model.State, child model.PlatformArtifact, keys bundleauth.Keyring) error {
