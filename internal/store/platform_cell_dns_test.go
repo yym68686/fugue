@@ -31,6 +31,7 @@ func TestCellDNSPublicationAndLKGPostgres(t *testing.T) {
 	testCellDNSPublication(t, address, false)
 	t.Run("authorized sources", func(t *testing.T) { testCellDNSPublication(t, address, false, true) })
 	t.Run("authorized transition", func(t *testing.T) { testCellDNSPublication(t, address, true, true) })
+	t.Run("retained routing only", func(t *testing.T) { testCellDNSPublication(t, address, true, true, true) })
 }
 
 func seedCellDNSRoutePublications(t *testing.T, s *Store, req *platformconfig.CompileRequest) {
@@ -93,6 +94,7 @@ func seedDNSRouteRelease(t *testing.T, s *Store, r model.PlatformArtifactRelease
 func TestCellDNSPublicationWithSourceAuthorization(t *testing.T) {
 	t.Run("neutral", func(t *testing.T) { testCellDNSPublication(t, "", false, true) })
 	t.Run("transition", func(t *testing.T) { testCellDNSPublication(t, "", true, true) })
+	t.Run("retained routing only", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true) })
 }
 
 func testCellDNSPublication(t *testing.T, address string, transition bool, sources ...bool) {
@@ -149,6 +151,7 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		req = celldns.TransitionRequest(t)
 	}
 	withSources := len(sources) > 0 && sources[0]
+	retained := len(sources) > 1 && sources[1]
 	if withSources {
 		var policies []model.PlatformArtifact
 		var releases []model.PlatformArtifactRelease
@@ -161,6 +164,9 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		for _, release := range releases {
 			seedDNSRouteRelease(t, s, release)
 		}
+	}
+	if retained {
+		celldns.RetainGlobalOnly(&req)
 	}
 	seedCellDNSRoutePublications(t, s, &req)
 	compiled, err := platformconfig.Compile(req)
@@ -238,6 +244,10 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		legacyCaps = append([]string(nil), fullCaps...)
 		fullCaps = append(fullCaps, platformcontrol.DNSRouteSourcesCapabilityV1)
 	}
+	if retained {
+		legacyCaps = append([]string(nil), fullCaps...)
+		fullCaps = append(fullCaps, platformcontrol.DNSRetainedRoutesCapabilityV1)
+	}
 	report(shadow, 1, legacyCaps, false)
 	grayRequest := model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=complete"}
 	if _, _, _, _, err = s.ReleasePlatformArtifact(parent.ID, grayRequest, testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
@@ -250,9 +260,9 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		if err != nil {
 			t.Fatal(err)
 		}
-		scope := req.CellRoutePublications[0].Parent.ScopeKey
-		if transition {
-			scope = "global"
+		scope := "global"
+		if !transition {
+			scope = req.CellRoutePublications[0].Parent.ScopeKey
 		}
 		if err = pgLockPromotionScope(context.Background(), tx, scope, true); err != nil {
 			tx.Rollback()
@@ -269,7 +279,10 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 			t.Fatal("DNS did not fail promptly during a Cell mutation", err)
 		}
 		if withSources {
-			producerScope := "platform-config-producer:" + req.CellRoutePublications[0].Reference.AuthorityCellID
+			producerScope := "platform-config-producer"
+			if !retained {
+				producerScope += ":" + req.CellRoutePublications[0].Reference.AuthorityCellID
+			}
 			tx, err := s.db.BeginTx(context.Background(), nil)
 			if err != nil {
 				t.Fatal(err)
@@ -333,7 +346,14 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := pgGetPlatformArtifactForUpdate(context.Background(), tx, req.CellRoutePublications[0].Parent.ID, true); err != nil {
+			parentID := req.PreviousTrafficPublication
+			lockedID := ""
+			if retained {
+				lockedID = parentID.Parent.ID
+			} else {
+				lockedID = req.CellRoutePublications[0].Parent.ID
+			}
+			if _, err := pgGetPlatformArtifactForUpdate(context.Background(), tx, lockedID, true); err != nil {
 				tx.Rollback()
 				t.Fatal(err)
 			}

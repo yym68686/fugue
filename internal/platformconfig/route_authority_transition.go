@@ -40,8 +40,15 @@ type PreviousTrafficPublicationInput struct {
 }
 
 type RouteAuthorityTransition struct {
+	ReferenceMode       string                              `json:"reference_mode,omitempty"`
 	PreviousTopology    edgetopology.Intent                 `json:"previous_topology"`
 	PreviousPublication PreviousTrafficPublicationReference `json:"previous_publication"`
+}
+
+const DNSRetainedGlobalReferenceV1 = "retained-global-v1"
+
+func DNSUsesRetainedRoutes(intent PlatformIntent) bool {
+	return intent.RouteAuthorityTransition != nil && intent.RouteAuthorityTransition.ReferenceMode == DNSRetainedGlobalReferenceV1
 }
 
 func (r PreviousTrafficPublicationReference) Validate() error {
@@ -70,6 +77,12 @@ func RouteAuthorityAliases(intent PlatformIntent) (map[string]string, error) {
 	t := intent.RouteAuthorityTransition
 	if t == nil {
 		return nil, nil
+	}
+	if t.ReferenceMode != "" && t.ReferenceMode != DNSRetainedGlobalReferenceV1 {
+		return nil, fmt.Errorf("unsupported DNS routing reference mode")
+	}
+	if DNSUsesRetainedRoutes(intent) && len(intent.CellRoutePublications) != 0 {
+		return nil, fmt.Errorf("retained DNS cannot mix replacement routing publications")
 	}
 	if intent.PublicationRole != PublicationRoleCellDNS || intent.EdgeTopology == nil || intent.EdgeTopology.Validate() != nil || t.PreviousTopology.Validate() != nil || t.PreviousPublication.Validate() != nil {
 		return nil, fmt.Errorf("DNS authority transition requires exact valid publication and topology")
@@ -296,6 +309,9 @@ func validateRouteAuthorityTransitionInputs(intent PlatformIntent, publications 
 	}
 	if err := ValidatePreviousTrafficPublication(*previous); err != nil {
 		return err
+	}
+	if DNSUsesRetainedRoutes(intent) && len(publications) != 0 {
+		return fmt.Errorf("retained DNS cannot accept replacement routing publications")
 	}
 	for _, next := range publications {
 		if err := validateTransitionRouteEquivalence(*previous, next, aliases); err != nil {

@@ -3519,12 +3519,18 @@ paths:
     get:
       operationId: getPlatformArtifactCompilerInput
       summary: Read Frozen Compiler Runtime Input
-      description: Platform administrators with artifact.read can retrieve the exact normalized runtime snapshot bound by a trusted artifact's input_snapshot_digest. Recomputes the digest and checks intent/policy generation binding. Older artifacts without a retained snapshot return 404; missing or corrupt input never falls back to live business data.
+      description: Platform administrators with artifact.read can retrieve the exact normalized runtime snapshot bound by a trusted artifact's input_snapshot_digest. Recomputes the digest and checks intent/policy generation binding. The optional dns_configuration view returns only frozen DNS inputs and omits bulky physical replay evidence; it retains original observation times and selection identities, reports its own projection digest, and never claims that projected bytes match the original input digest. Older artifacts without a retained snapshot return 404; missing or corrupt input never falls back to live business data.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformArtifactCompilerInput
       security:
         - BearerAuth: []
       parameters:
+        - in: query
+          name: view
+          schema:
+            type: string
+            enum: [full, dns_configuration]
+            default: full
         - in: path
           name: artifact_id
           required: true
@@ -3540,6 +3546,12 @@ paths:
                 additionalProperties: false
                 required: [artifact_id, input_snapshot_digest, runtime_snapshot]
                 properties:
+                  projection:
+                    type: string
+                    enum: [dns_configuration]
+                  projection_digest:
+                    type: string
+                    pattern: '^sha256:[a-f0-9]{64}$'
                   artifact_id:
                     type: string
                   input_snapshot_digest:
@@ -36665,6 +36677,10 @@ components:
       required: [previous_topology, previous_publication]
       description: Optional cell-dns-only migration authorization. Removing every explicit legacy_group_id from previous_topology must exactly yield intent.edge_topology; physical membership, pools, capabilities, labels and failure domains cannot change. Every referenced neutral Cell must preserve the previous signed route/TLS behavior and hard policy, allowing only those explicit authority aliases to change. Fresh authenticated dns_authority_transition_v1 capability from every required DNS process gates gray/full publication. Each physical target requires one coherent complete publication proof set; alternatives never add quorum votes. Invalid or stale inputs retain the previous positive LKG and never select public transport.
       properties:
+        reference_mode:
+          type: string
+          enum: [retained-global-v1]
+          description: Explicit DNS-only reference to the current verified complete global publication without requiring replacement routing Cells or Worker upgrades. Cell route publications must be empty. The previous topology still fixes physical membership and aliases; retained signed route/TLS constraints, complete target dependencies and proof lifetimes remain mandatory. Fresh dns_retained_routes_v1 capability is required only from the declared DNS consumers. Omission retains the existing migration contract.
         previous_topology: {$ref: "#/components/schemas/PlatformEdgeTopology"}
         previous_publication: {$ref: "#/components/schemas/PlatformPreviousTrafficPublicationReference"}
     PlatformDNSRouteSourceAuthorization:

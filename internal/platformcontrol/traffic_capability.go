@@ -22,6 +22,10 @@ const DNSAuthorityTransitionCapabilityV1 = "dns_authority_transition_v1"
 // from exact observed serving publication bindings and DNS candidate policy.
 const DNSRouteSourcesCapabilityV1 = "dns_route_sources_v1"
 
+// DNSRetainedRoutesCapabilityV1 executes independent DNS policy against the
+// retained global route/TLS authority, without enrolling its Edge workers.
+const DNSRetainedRoutesCapabilityV1 = "dns_retained_routes_v1"
+
 const PhysicalNetworkBoundedCapabilityV3 = "physical_network_bounded_v3"
 const PhysicalNetworkDeliveryCapabilityV4 = "physical_network_delivery_v4"
 const PhysicalNetworkFailureAwareCapabilityV5 = "physical_network_failure_aware_v5"

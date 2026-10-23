@@ -16,7 +16,8 @@ func validateCellDNSIntent(in PlatformIntent) error {
 	if _, err := RouteAuthorityAliases(in); err != nil {
 		return err
 	}
-	if len(in.Routes) != 0 || len(in.TLS) != 0 || len(in.CachePolicies) != 0 || in.ApplicationDomains != nil || len(in.DNSConsumers) == 0 || ValidateDNSConsumers(in.DNSConsumers) != nil || in.EdgeTopology == nil || in.EdgeTopology.Validate() != nil || len(in.CellRoutePublications) < 1 || len(in.CellRoutePublications) > 16 {
+	retained := DNSUsesRetainedRoutes(in)
+	if len(in.Routes) != 0 || len(in.TLS) != 0 || len(in.CachePolicies) != 0 || in.ApplicationDomains != nil || len(in.DNSConsumers) == 0 || ValidateDNSConsumers(in.DNSConsumers) != nil || in.EdgeTopology == nil || in.EdgeTopology.Validate() != nil || !retained && len(in.CellRoutePublications) < 1 || len(in.CellRoutePublications) > 16 {
 		return fmt.Errorf("DNS-only intent requires independent consumers, explicit topology and exact Cell references, without route/TLS configuration")
 	}
 	cells := map[string]bool{}
@@ -26,11 +27,11 @@ func validateCellDNSIntent(in PlatformIntent) error {
 		}
 		cells[ref.AuthorityCellID] = true
 	}
-	if len(cells) != len(in.EdgeTopology.Cells) {
+	if !retained && len(cells) != len(in.EdgeTopology.Cells) {
 		return fmt.Errorf("DNS topology and referenced Cells differ")
 	}
 	for _, c := range in.EdgeTopology.Cells {
-		if !cells[c.ID] || c.LegacyGroupID != "" {
+		if !retained && !cells[c.ID] || c.LegacyGroupID != "" || c.ID == in.AuthorityCellID {
 			return fmt.Errorf("DNS topology must use exact neutral routing Cells")
 		}
 	}
@@ -70,7 +71,7 @@ func validateCellDNSInputs(intent PlatformIntent, publications []CellRoutePublic
 	}
 	declared := map[string]string{}
 	for _, edge := range intent.EdgeTopology.Edges {
-		if members[edge.ID] != edge.AuthorityCellID {
+		if !DNSUsesRetainedRoutes(intent) && members[edge.ID] != edge.AuthorityCellID {
 			return fmt.Errorf("DNS topology Edge lacks signed routing membership")
 		}
 		declared[edge.ID] = edge.AuthorityCellID
@@ -101,6 +102,13 @@ func compileCellDNSReadiness(intent PlatformIntent, publications []CellRoutePubl
 	}
 	if err := validateDNSRouteSourceBindings(intent, publications, previous); err != nil {
 		return nil, err
+	}
+	if DNSUsesRetainedRoutes(intent) {
+		projected, err := retainedDNSRouteProjections(intent, *previous)
+		if err != nil {
+			return nil, err
+		}
+		return compileCellDNSReadinessProjection(intent, projected, snapshot, policy, previous, false)
 	}
 	return compileCellDNSReadinessProjection(intent, publications, snapshot, policy, previous, false)
 }
@@ -331,7 +339,7 @@ func validateDNSCellPlanEncoded(artifact model.PlatformArtifact, raw []byte) err
 	} else if json.Unmarshal(raw, &payload) != nil {
 		return fmt.Errorf("invalid DNS readiness content")
 	}
-	if len(pubs) == 0 {
+	if len(pubs) == 0 && !(payload.Source != nil && DNSUsesRetainedRoutes(payload.Source.Intent)) {
 		if payload.Source != nil || artifact.Content["previous_traffic_publication"] != nil {
 			return fmt.Errorf("DNS Cell source in ordinary publication")
 		}

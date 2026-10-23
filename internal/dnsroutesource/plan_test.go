@@ -16,9 +16,13 @@ import (
 )
 
 func TestSourcePlansPreserveDNSOwnershipAndFollowAuthorizedReleases(t *testing.T) {
-	for _, transition := range []bool{false, true} {
-		t.Run(map[bool]string{false: "cells", true: "transition"}[transition], func(t *testing.T) {
+	for _, mode := range []string{"cells", "transition", "retained"} {
+		t.Run(mode, func(t *testing.T) {
+			transition := mode != "cells"
 			req, policies, activations := celldns.SourceAuthorizedRequest(t, transition)
+			if mode == "retained" {
+				celldns.RetainGlobalOnly(&req)
+			}
 			compiled := celldns.Compile(t, req)
 			now := time.Now().UTC()
 			snapshot := celldns.SourceSnapshot(t, req, compiled.DNSArtifact, policies, activations, now)
@@ -46,6 +50,9 @@ func TestSourcePlansPreserveDNSOwnershipAndFollowAuthorizedReleases(t *testing.T
 			}
 			for _, p := range plan.Probes {
 				proof := routeprobe.Proof{EdgeID: p.EdgeID, GroupID: p.EdgeGroupID, Digest: p.RouteDigest, TrafficRelease: plans.Bindings[p.CellPublicationDigest]}
+				if p.PreviousAuthority != nil {
+					proof.GroupID, proof.Digest = p.PreviousAuthority.EdgeGroupID, p.PreviousAuthority.RouteDigest
+				}
 				if !plans.Matches(p, proof) {
 					t.Fatal("exact authorized proof rejected")
 				}

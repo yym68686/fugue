@@ -195,7 +195,7 @@ func dnsProofMatchesRelease(proof routeprobe.Proof, parent model.PlatformArtifac
 }
 
 func populateDNSCellBindings(p *dnsServingPayload) error {
-	if len(p.CellRoutePublications) == 0 {
+	if len(p.CellRoutePublications) == 0 && p.PreviousTrafficPublication == nil {
 		return nil
 	}
 	p.previousBindings = map[string]*model.TrafficReleaseBinding{}
@@ -218,6 +218,11 @@ func populateDNSCellBindings(p *dnsServingPayload) error {
 	}
 	p.cellBindings = map[string]*model.TrafficReleaseBinding{}
 	p.cellNodes = map[string]string{}
+	if p.CellDNSSource != nil && platformconfig.DNSUsesRetainedRoutes(p.CellDNSSource.Intent) {
+		for _, edge := range p.CellDNSSource.Intent.EdgeTopology.Edges {
+			p.cellNodes[edge.ID] = edge.AuthorityCellID
+		}
+	}
 	for _, input := range p.CellRoutePublications {
 		b, err := platformconfig.CellRoutePublicationBinding(input)
 		if err != nil {

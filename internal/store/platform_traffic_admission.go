@@ -168,6 +168,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if required.availability && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAvailabilityCapabilityV1) {
 					return fail("required consumer lacks DNS availability v1 capability")
 				}
+				if required.retainedRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSRetainedRoutesCapabilityV1) {
+					return fail("retained route DNS capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
+				}
 				if required.businessUnified && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.BusinessUnifiedCapabilityV2) {
 					return fail("required consumer lacks unified business decision v2 capability")
 				}
@@ -203,11 +206,18 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	return nil
 }
 
-type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability bool }
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability, retainedRoutes bool }
 
 func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
 	var out physicalCapabilities
 	var payload struct {
+		Source struct {
+			Intent struct {
+				Transition *struct {
+					ReferenceMode string `json:"reference_mode"`
+				} `json:"route_authority_transition"`
+			} `json:"intent"`
+		} `json:"cell_dns_source"`
 		Policy struct {
 			Query *platformconfig.DNSQueryPolicy `json:"dns_query_policy"`
 			Rules []platformconfig.DNSAnswerRule `json:"dns_answer_rules"`
@@ -220,6 +230,7 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 	if err = json.Unmarshal(raw, &payload); err != nil {
 		return out, err
 	}
+	out.retainedRoutes = payload.Source.Intent.Transition != nil && payload.Source.Intent.Transition.ReferenceMode == platformconfig.DNSRetainedGlobalReferenceV1
 	if query := payload.Policy.Query; query != nil {
 		out.availability = len(query.AvailabilityRoutes) > 0
 		out.projection = query.OrderedProjection != nil

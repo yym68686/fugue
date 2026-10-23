@@ -160,8 +160,9 @@ func decodeCellRoutePublications(raw []byte) ([]CellRoutePublicationInput, Polic
 	// without Cell references. Keep its failure separate from reference decoding:
 	// an older policy reader must not diagnose an absent Cell topology as corrupt.
 	var payload struct {
-		Publications json.RawMessage `json:"cell_route_publications"`
-		Policy       json.RawMessage `json:"policy"`
+		Publications json.RawMessage    `json:"cell_route_publications"`
+		Policy       json.RawMessage    `json:"policy"`
+		Source       *CellDNSPlanSource `json:"cell_dns_source"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, policy, fmt.Errorf("DNS artifact envelope cannot be decoded: %w", err)
@@ -183,7 +184,11 @@ func decodeCellRoutePublications(raw []byte) ([]CellRoutePublicationInput, Polic
 		}
 		return nil, policy, nil
 	}
-	if len(publications) < 1 || len(publications) > 16 {
+	retained := payload.Source != nil && DNSUsesRetainedRoutes(payload.Source.Intent)
+	if retained && len(publications) != 0 {
+		return nil, policy, fmt.Errorf("retained DNS cannot mix replacement routing publications")
+	}
+	if !retained && len(publications) < 1 || len(publications) > 16 {
 		return nil, policy, fmt.Errorf("DNS Cell references must be nonempty and bounded")
 	}
 	for i, p := range publications {

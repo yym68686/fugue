@@ -23,10 +23,21 @@ func TestCellDNSServingUsesExactIndependentProofsAndOfflineRecovery(t *testing.T
 	}
 }
 
-func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool) {
+func TestDNSRetainedRoutesUseOriginalWorkerProofsAndRecoverOffline(t *testing.T) {
+	testCellDNSServingUsesExactIndependentProofs(t, true, true)
+}
+
+func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool, retainedOptions ...bool) {
+	retained := len(retainedOptions) > 0 && retainedOptions[0]
 	request := celldns.Request(t)
 	if transition {
 		request = celldns.TransitionRequest(t)
+	}
+	if retained {
+		request = celldns.TransitionRequest(t, 1)
+		celldns.RetainGlobalOnly(&request)
+		request.Policy.DNSQueryPolicy.RankingMode = "active"
+		request.Policy.DNSQueryPolicy.AvailabilityRoutes = []platformconfig.DNSAvailabilityRoute{{Hostname: "app.example.test", Policy: model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 2, RecoveryMinSeconds: 10}}}
 	}
 	c := celldns.Compile(t, request)
 	keys := celldns.Keys()
@@ -42,7 +53,7 @@ func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool)
 	facts := []dnsReadinessFact{}
 	for _, req := range p.Plan.Probes {
 		proof := routeprobe.Proof{Digest: req.RouteDigest, Version: "observed-bundle", EdgeID: req.EdgeID, GroupID: req.EdgeGroupID, CheckedAt: now, ValidUntil: now.Add(20 * time.Second), TrafficRelease: p.cellBindings[req.EdgeGroupID]}
-		if transition && req.EdgeID == "edge-a" {
+		if transition && (req.EdgeID == "edge-a" || retained) {
 			old := req.PreviousAuthority
 			proof.GroupID, proof.Digest, proof.TrafficRelease = old.EdgeGroupID, old.RouteDigest, p.previousBindings[old.EdgeGroupID]
 		}
@@ -51,6 +62,9 @@ func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool)
 			t.Fatal("exact Cell proof rejected")
 		}
 		facts = append(facts, dnsReadinessFact{ProbeID: req.ID, Ready: true, Proof: proof})
+		if retained {
+			facts[len(facts)-1].ProbeHistory = []time.Time{now.Add(-10 * time.Second), now}
+		}
 		for _, field := range []string{"fence", "parent", "route digest", "scope", "node", "group"} {
 			bad := proof
 			b := *proof.TrafficRelease
@@ -93,6 +107,26 @@ func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool)
 	if answer.Rcode != dns.RcodeSuccess || len(answer.Answer) == 0 || answer.Answer[0].Header().Ttl > 20 {
 		t.Fatal("fresh referenced routes did not authorize bounded answer", answer)
 	}
+	if retained {
+		offline := append([]dnsReadinessFact(nil), facts...)
+		for i := range offline {
+			if offline[i].Proof.EdgeID == "edge-a" {
+				offline[i].Ready, offline[i].Reason, offline[i].ProbeHistory = false, "probe_unavailable", nil
+			}
+		}
+		failover, err := buildDNSServingState(recovered, p, routeID, "dns-a", "cell-dns", offline, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := failover.answer(question, "", now)
+		if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 || response.Answer[0].(*dns.A).A.String() != "93.184.216.35" {
+			t.Fatal("offline primary blocked independently authorized backup", response)
+		}
+		receipt := captureDecision(t, failover, question, "", now)
+		if replay, err := ReplayDNSDecision(receipt); err != nil || !replay.Matched {
+			t.Fatal("independent authority failover cannot be replayed", err)
+		}
+	}
 	if answer := st.answer(question, "", now.Add(21*time.Second)); answer.Rcode != dns.RcodeServerFailure || len(answer.Answer) != 0 {
 		t.Fatal("expired Cell proofs revived", answer)
 	}
@@ -107,7 +141,7 @@ func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool)
 	if err != nil || !snapshot.Ready || snapshot.RouteArtifactID != "" || len(snapshot.Facts) != len(p.Plan.Probes) {
 		t.Fatal("independent runtime observations invalid", err)
 	}
-	if transition {
+	if transition && !retained {
 		// Both sources are individually valid, but one old path plus one new
 		// path on a single endpoint cannot satisfy that endpoint's dependency set.
 		mixed := append([]dnsReadinessFact(nil), facts...)
@@ -151,7 +185,11 @@ func testCellDNSServingUsesExactIndependentProofs(t *testing.T, transition bool)
 	copy := candidate
 	encoded, _ = json.Marshal(candidate.Artifact)
 	json.Unmarshal(encoded, &copy.Artifact)
-	copy.Artifact.Content["cell_route_publications"].([]any)[0].(map[string]any)["route"].(map[string]any)["provenance"].(map[string]any)["signature"] = "forged"
+	if retained {
+		copy.Artifact.Content["previous_traffic_publication"].(map[string]any)["route"].(map[string]any)["provenance"].(map[string]any)["signature"] = "forged"
+	} else {
+		copy.Artifact.Content["cell_route_publications"].([]any)[0].(map[string]any)["route"].(map[string]any)["provenance"].(map[string]any)["signature"] = "forged"
+	}
 	copy.Artifact = celldns.Sign(t, copy.Artifact, copy.Artifact.ID, 1)
 	copy.Assignment.ContentHash = copy.Artifact.ContentHash
 	if _, _, err := s.verifyDNSServingRelease(c.ReleaseArtifact, copy); err == nil {

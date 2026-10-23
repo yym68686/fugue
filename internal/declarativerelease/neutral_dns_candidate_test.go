@@ -11,7 +11,16 @@ import (
 )
 
 func TestRetiredNeutralDNSCandidateTemplatesKeepIndependentState(t *testing.T) {
-	f, err := os.Open("../../deploy/releases/retired-dns-components.json")
+	testIndependentDNSCandidateTemplates(t, "../../deploy/releases/retired-dns-components.json")
+}
+
+func TestIndependentDNSCandidateTemplatesDoNotOwnPublicTransport(t *testing.T) {
+	testIndependentDNSCandidateTemplates(t, "../../deploy/releases/components.json")
+}
+
+func testIndependentDNSCandidateTemplates(t *testing.T, registryPath string) {
+	t.Helper()
+	f, err := os.Open(registryPath)
 	if err != nil {
 		t.Fatal(err)
 	}

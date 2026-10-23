@@ -25,6 +25,10 @@ HASH = re.compile(r"sha256:[a-f0-9]{64}")
 CELL = re.compile(r"cell-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
+def retained_reference(config):
+    return config.get("schema") == "fugue.dns-authority-transition-stage/v4"
+
+
 class API:
     def __init__(self, origin, token):
         self.origin, self.token = origin, token
@@ -57,13 +61,14 @@ class API:
 
 
 def validate(config):
-    dynamic = config.get("schema") in ["fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3"]
-    runtime_sources = config.get("schema") == "fugue.dns-authority-transition-stage/v3"
+    retained = retained_reference(config)
+    dynamic = retained or config.get("schema") in ["fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3"]
+    runtime_sources = retained or config.get("schema") == "fugue.dns-authority-transition-stage/v3"
     route_field = "route_sources" if dynamic else "route_publications"
     required = {"schema", "generation", "origin", "authority_cell_id", "previous_topology", route_field, "dns_node_ids", "expected_previous_shadow", "capture"}
     if runtime_sources:
         required.add("global_producer_policy")
-    if set(config) != required or config["schema"] not in ["fugue.dns-authority-transition-stage/v1", "fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3"] or type(config["generation"]) is not int or config["generation"] < 1:
+    if set(config) != required or config["schema"] not in ["fugue.dns-authority-transition-stage/v1", "fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3", "fugue.dns-authority-transition-stage/v4"] or type(config["generation"]) is not int or config["generation"] < 1:
         raise ValueError("explicit versioned DNS shadow staging declaration required")
     if not CELL.fullmatch(config.get("authority_cell_id", "")):
         raise ValueError("neutral DNS authority required")
@@ -71,7 +76,8 @@ def validate(config):
     if origin.scheme != "https" or config["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
         raise ValueError("canonical HTTPS artifact origin required")
     capture = config["capture"]
-    if set(capture) != {"timeout_seconds", "poll_seconds", "max_source_age_seconds"} or any(type(v) is not int for v in capture.values()) or not 30 <= capture["timeout_seconds"] <= 900 or not 5 <= capture["poll_seconds"] <= 30 or not 30 <= capture["max_source_age_seconds"] <= 180:
+    capture_fields = {"timeout_seconds", "poll_seconds"} if retained else {"timeout_seconds", "poll_seconds", "max_source_age_seconds"}
+    if set(capture) != capture_fields or any(type(v) is not int for v in capture.values()) or not 30 <= capture["timeout_seconds"] <= 900 or not 5 <= capture["poll_seconds"] <= 30 or not retained and not 30 <= capture["max_source_age_seconds"] <= 180:
         raise ValueError("bounded source capture required")
     nodes = config["dns_node_ids"]
     if not isinstance(nodes, list) or not 1 <= len(nodes) <= 16 or nodes != sorted(set(nodes)) or any(not IDENTITY.fullmatch(n) for n in nodes):
@@ -90,7 +96,8 @@ def validate(config):
         raise ValueError("routing and DNS authority must be unique and independent")
     refs = config[route_field]
     if dynamic:
-        if not isinstance(refs, list) or [r.get("authority_cell_id") for r in refs] != sorted(aliases.values()):
+        expected_cells = [] if retained else sorted(aliases.values())
+        if not isinstance(refs, list) or [r.get("authority_cell_id") for r in refs] != expected_cells:
             raise ValueError("each routing cell requires one explicit producer policy authority")
         for source in refs:
             if set(source) != {"authority_cell_id", "producer_policy"}:
@@ -217,6 +224,8 @@ def source_input(api, parent, kind, generation_key):
 
 def compose(config, previous, cells, source_intent, source_policy, snapshot):
     """Mechanical projection only; API/compiler validates every resulting field."""
+    if retained_reference(config) and cells:
+        raise ValueError("retained DNS cannot accept replacement routing publications")
     aliases = {c["legacy_group_id"]: c["id"] for c in config["previous_topology"]["authority_cells"]}
     remap = lambda value: aliases.get(value, value)
     intent, policy, facts = copy.deepcopy(source_intent), copy.deepcopy(source_policy), copy.deepcopy(snapshot)
@@ -245,6 +254,8 @@ def compose(config, previous, cells, source_intent, source_policy, snapshot):
     if "global_producer_policy" in config:
         prior["producer_policy"] = copy.deepcopy(config["global_producer_policy"])
     intent["route_authority_transition"] = {"previous_topology": copy.deepcopy(config["previous_topology"]), "previous_publication": prior["reference"]}
+    if retained_reference(config):
+        intent["route_authority_transition"]["reference_mode"] = "retained-global-v1"
     if sorted(c["node_id"] for c in intent.get("dns_consumers", [])) != config["dns_node_ids"]:
         raise ValueError("DNS physical membership differs from explicit declaration")
     for consumer in intent["dns_consumers"]:
@@ -319,6 +330,9 @@ def stage(config, api, save):
         if source.get("dns_route_sources", []) != runtime_source_approvals(config):
             raise ValueError("completed DNS runtime source approval differs")
         transition = source.get("route_authority_transition", {})
+        expected_mode = "retained-global-v1" if retained_reference(config) else ""
+        if transition.get("reference_mode", "") != expected_mode:
+            raise ValueError("resumed DNS routing reference mode differs")
         refs = source.get("cell_route_publications", [])
         if source.get("authority_cell_id") != config["authority_cell_id"] or transition.get("previous_topology") != config["previous_topology"]:
             raise ValueError("completed DNS staging differs from declaration")
@@ -346,12 +360,22 @@ def stage(config, api, save):
                 cells = resolve_route_publications(config, api)
             source = full_source(api, "global")
             age = (now() - timestamp(source["release"]["released_at"])).total_seconds()
-            if not 0 <= age <= config["capture"]["max_source_age_seconds"]:
+            # A currently selected, verified, unexpired LKG is a valid routing
+            # source even during an outage which prevents new Worker releases.
+            # v4 retains its immutable timestamps; DNS still obtains fresh
+            # end-to-end proofs before serving. Older migration modes retain
+            # their coordinated source-age requirement.
+            if not retained_reference(config) and not 0 <= age <= config["capture"]["max_source_age_seconds"]:
                 raise ValueError("waiting for a fresh verified full source")
             previous = publication(api, source)
             if "global_producer_policy" in config:
                 authorize_global_source(api, config["global_producer_policy"], previous["parent"])
-            inputs = api("GET", "/v1/admin/artifacts/" + previous["parent"]["id"] + "/compiler-input")
+            path = "/v1/admin/artifacts/" + previous["parent"]["id"] + "/compiler-input"
+            if retained_reference(config):
+                path += "?view=dns_configuration"
+            inputs = api("GET", path)
+            if retained_reference(config) and (inputs.get("projection") != "dns_configuration" or inputs.get("input_snapshot_digest") != previous["parent"].get("metadata", {}).get("input_snapshot_digest") or not HASH.fullmatch(inputs.get("projection_digest", ""))):
+                raise ValueError("retained DNS requires a verified explicit input projection")
             request = compose(config, previous, cells, source_input(api, previous["parent"], "platform_intent", "intent_generation"), source_input(api, previous["parent"], "policy_snapshot", "policy_generation"), inputs["runtime_snapshot"])
             save({"schema": "fugue.dns-authority-transition-stage-result/v1", "declaration_digest": digest(config), "previous_publication": request["previous_traffic_publication"]["reference"], "route_publications": request["intent"]["cell_route_publications"], "public_transport_changed": False, "serving_published": False, "captured_at": now().isoformat()})
             result = api("POST", "/v1/admin/platform-config/compile", request)

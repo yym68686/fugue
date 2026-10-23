@@ -78,9 +78,38 @@ successful failed DNS answer; the successor still needs live preview, normal
 consumer capability checks and gray/full evidence. It changes neither serving
 publication nor positive LKG and never fabricates an ACK.
 
-Consumers of the route, DNS and TLS policy must advertise authenticated
-`dns_availability_v1` capability before serving publication. An unsupported
-reader cannot silently ignore the policy.
+In a complete traffic publication, consumers of the shared route, DNS and TLS
+policy must advertise authenticated `dns_availability_v1` capability. This legacy
+composition is not a suitable recovery path when a Worker cannot be upgraded.
+An unsupported reader cannot silently ignore the policy.
+
+An independent `cell-dns` publication can explicitly use
+`route_authority_transition.reference_mode: retained-global-v1`. It retains the
+exact current verified global parent, route, TLS and DNS artifacts. Replacement
+routing Cell publications are forbidden in this mode. Explicit topology aliases
+change no physical membership. Every compiled target must reproduce all original
+hostname/path dependencies, endpoint ownership, route constraints and quorum;
+proof and checkpoint lifetimes cannot increase. Only DNS processes belong to the
+new publication's immutable expected set. `dns_retained_routes_v1` gates those
+readers; no Worker capability or ACK is invented or skipped in its own authority.
+
+Approved global producer references use the existing independent routing-source
+observer. DNS can follow that producer's actual signed publications without a
+DNS code release, while preserving current exclusions, fresh exact route proofs,
+monotonic fences and positive LKG recovery. The DNS publication cannot change the
+referenced route/TLS artifacts or their LKG. Installing reader code, staging a
+shadow, promoting configuration, and handing off public transport remain separate
+operations. In particular, shadow success alone never authorizes public traffic.
+A complete migration must also preserve the original routing producer's ability
+to publish; moving listeners alone is not evidence of release-plane independence.
+
+`stage_dns_authority_transition.py` v4 stages this mode with an explicit empty
+`route_sources` list and the original global producer approval. It accepts an old
+but currently selected, verified and unexpired source, rather than waiting for a
+new Worker release. It never refreshes captured observation timestamps. Its
+`dns_configuration` compiler-input view is a projection of a fully verified
+stored input, with a separate projection digest; bulky replay evidence remains
+available from the unchanged default full view.
 
 Decision receipts include the constrained authorized/recovered candidate counts,
 quality primary, actual serving primary and whether availability fallback ran.

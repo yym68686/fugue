@@ -23,6 +23,61 @@ def fixture():
 
 
 class DNSAuthorityStageTest(unittest.TestCase):
+    def retained_fixture(self):
+        cfg, old, cell, intent, policy, facts = fixture()
+        cfg.update(schema="fugue.dns-authority-transition-stage/v4", route_sources=[], global_producer_policy={"artifact_id": "global-producer", "content_hash": "sha256:" + "e" * 64, "release_id": "global-producer-release", "fencing_token": 3})
+        del cfg["route_publications"]
+        del cfg["capture"]["max_source_age_seconds"]
+        old["release"]["released_at"] = (p.now() - datetime.timedelta(days=2)).isoformat()
+        old["parent"]["metadata"] = {"input_snapshot_digest": "sha256:" + "d" * 64}
+        return cfg, old, cell, intent, policy, facts
+
+    def test_retained_dns_requires_no_worker_publication_and_preserves_sources(self):
+        cfg, old, cell, intent, policy, facts = self.retained_fixture()
+        p.validate(cfg)
+        original = copy.deepcopy((old, intent, policy, facts))
+        request = p.compose(cfg, old, [], intent, policy, facts)
+        self.assertEqual([], request["cell_route_publications"])
+        self.assertEqual([], request["intent"]["cell_route_publications"])
+        self.assertEqual("retained-global-v1", request["intent"]["route_authority_transition"]["reference_mode"])
+        self.assertEqual(["global"], [v["scope_key"] for v in request["intent"]["dns_route_sources"]])
+        self.assertEqual(original, (old, intent, policy, facts))
+        with self.assertRaisesRegex(ValueError, "replacement"):
+            p.compose(cfg, old, [cell], intent, policy, facts)
+        cfg["route_sources"] = [{"authority_cell_id": "cell-a", "producer_policy": cfg["global_producer_policy"]}]
+        with self.assertRaises(ValueError):
+            p.validate(cfg)
+
+    def test_retained_staging_accepts_old_verified_source_without_renewing_facts(self):
+        cfg, old, _, intent, policy, facts = self.retained_fixture()
+        captured = (p.now() - datetime.timedelta(days=2)).isoformat()
+        facts["captured_at"] = captured
+        parent = {"id": "dns-parent", "content_hash": "sha256:" + "b" * 64, "content": {"publication_role": "cell-dns"}}
+        dns = {"id": "dns-child", "content_hash": "sha256:" + "c" * 64, "content": {}}
+        current = {"artifact": parent, "release": {"id": "dns-shadow", "fencing_token": 1}}
+        calls = []
+        def api(method, path, body=None):
+            calls.append((method, path, body))
+            if path.endswith("/compiler-input?view=dns_configuration"):
+                return {"runtime_snapshot": facts, "projection": "dns_configuration", "projection_digest": "sha256:" + "f" * 64, "input_snapshot_digest": old["parent"]["metadata"]["input_snapshot_digest"]}
+            if path.endswith("/compile"):
+                self.assertEqual(captured, body["runtime_snapshot"]["captured_at"])
+                self.assertEqual([], body["cell_route_publications"])
+                dns["content"]["previous_traffic_publication"] = body["previous_traffic_publication"]
+                return {"release_artifact": parent, "dns_artifact": dns}
+            if path.endswith("/release"):
+                self.assertEqual("shadow", body["release_channel"])
+                return {}
+            if path.endswith("/prepare-consumers"):
+                return {}
+            self.fail("unexpected API call " + path)
+        with patch.object(p, "no_serving_authority"), patch.object(p, "selected", side_effect=[{}, {}, current]), patch.object(p, "full_source", return_value=old), patch.object(p, "publication", return_value=old), patch.object(p, "source_input", side_effect=[intent, policy]), patch.object(p, "authorize_global_source"), patch.object(p.time, "sleep") as wait:
+            result = p.stage(cfg, api, lambda _: None)
+        wait.assert_not_called()
+        self.assertFalse(result["serving_published"])
+        self.assertFalse(result["public_transport_changed"])
+        self.assertEqual(1, sum(path.endswith("/release") for _, path, _ in calls))
+
     def continuous_fixture(self):
         cfg, old, cell, intent, policy, facts = fixture()
         cfg["schema"] = "fugue.dns-authority-transition-stage/v2"

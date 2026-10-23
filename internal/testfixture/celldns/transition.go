@@ -12,9 +12,17 @@ import (
 
 // TransitionRequest supplies a complete previous publication and two neutral
 // Cells with identical serving behavior. All identities are synthetic.
-func TransitionRequest(t testing.TB) platformconfig.CompileRequest {
+func TransitionRequest(t testing.TB, minimum ...int) platformconfig.CompileRequest {
 	t.Helper()
 	req := Request(t)
+	if len(minimum) > 0 {
+		req.Policy.MinimumHealthyEdges = minimum[0]
+		for i := range req.Policy.EdgeSelectionConstraints {
+			req.Policy.EdgeSelectionConstraints[i].MinCandidates = minimum[0]
+			req.Policy.EdgeSelectionConstraints[i].MinDistinctCells = minimum[0]
+			req.Policy.EdgeSelectionConstraints[i].MinDistinctDomains = map[string]int{"provider": minimum[0]}
+		}
+	}
 	routes := []platformconfig.RouteIntent{{Hostname: "app.example.test", AppID: "app-a", TenantID: "tenant-a", UpstreamURL: "http://origin:8080", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}}
 	second := routes[0]
 	second.PathPrefix = "/admin"
@@ -25,6 +33,9 @@ func TransitionRequest(t testing.TB) platformconfig.CompileRequest {
 		raw, _ := json.Marshal(p.Route.Content["policy"])
 		if err := json.Unmarshal(raw, &routePolicy); err != nil {
 			t.Fatal(err)
+		}
+		if len(minimum) > 0 {
+			routePolicy.MinimumHealthyEdges = minimum[0]
 		}
 		cell := p.Reference.AuthorityCellID
 		edge := req.Intent.EdgeTopology.Edges[i]

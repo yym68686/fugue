@@ -36,6 +36,29 @@ func TestCompilerInputIsFrozenReplayableAndAdminOnly(t *testing.T) {
 	if input.Digest != first.Lineage.InputSnapshotDigest || input.Snapshot.CapturedAt == nil || !input.Snapshot.CapturedAt.Equal(now) || input.Snapshot.Facts["source_revision"] != "original" {
 		t.Fatal("frozen input differs")
 	}
+	r = performJSONRequest(t, server, http.MethodGet, path+"?view=dns_configuration", admin, nil)
+	if r.Code != 200 {
+		t.Fatal(r.Body.String())
+	}
+	var projected struct {
+		Original   string                         `json:"input_snapshot_digest"`
+		Projection string                         `json:"projection"`
+		Digest     string                         `json:"projection_digest"`
+		Snapshot   platformconfig.RuntimeSnapshot `json:"runtime_snapshot"`
+	}
+	mustDecodeJSON(t, r, &projected)
+	wantDigest, _ := platformconfig.RuntimeSnapshotDigest(projected.Snapshot)
+	if projected.Original != input.Digest || projected.Projection != "dns_configuration" || projected.Digest != wantDigest || projected.Digest == input.Digest || projected.Snapshot.Facts != nil || projected.Snapshot.CapturedAt == nil || !projected.Snapshot.CapturedAt.Equal(now) {
+		t.Fatal("projection renewed observations or misrepresented original bytes")
+	}
+	for _, query := range []string{"?view=future", "?view=full&view=dns_configuration"} {
+		if r := performJSONRequest(t, server, http.MethodGet, path+query, admin, nil); r.Code != 400 {
+			t.Fatal("ambiguous projection accepted", r.Code)
+		}
+	}
+	if r := performJSONRequest(t, server, http.MethodGet, path+"?view=dns_configuration", tenant, nil); r.Code != 403 {
+		t.Fatal("projection bypassed administrative authorization")
+	}
 	r = performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile-from-artifacts", admin, platformConfigCompileArtifactsRequest{IntentArtifactID: first.IntentArtifact.ID, PolicyArtifactID: first.PolicyArtifact.ID, RuntimeSnapshot: input.Snapshot})
 	if r.Code != 201 {
 		t.Fatal("retained input cannot be replayed", r.Body.String())
@@ -58,5 +81,17 @@ func TestCompilerInputIsFrozenReplayableAndAdminOnly(t *testing.T) {
 		if lkg, err := state.GetPlatformLKG(kind, "global"); err != nil || lkg != nil {
 			t.Fatal("input retention activated LKG")
 		}
+	}
+}
+
+func TestDNSConfigurationProjectionRetainsSelectionAndDoesNotMutateReplay(t *testing.T) {
+	now := time.Now().UTC()
+	selection := &model.DNSPhysicalSelection{PrimaryEdgeID: "edge-a", CapturedAt: now}
+	original := platformconfig.RuntimeSnapshot{CapturedAt: &now, IntentGeneration: "intent", PolicyGeneration: "policy",
+		Facts:         map[string]any{"bulky_replay": "kept in full snapshot"},
+		DNSSelections: []platformconfig.DNSSelectionObservation{{NodeID: "dns-a", ObservedAt: now, PhysicalSelection: selection, PhysicalEvidence: []byte(`{"replay":"retained"}`)}}}
+	projected := dnsConfigurationInput(original)
+	if len(original.DNSSelections[0].PhysicalEvidence) == 0 || len(projected.DNSSelections[0].PhysicalEvidence) != 0 || projected.Facts != nil || projected.DNSSelections[0].PhysicalSelection != selection || !projected.DNSSelections[0].ObservedAt.Equal(now) {
+		t.Fatal("projection changed authority, observation time or stored replay")
 	}
 }
