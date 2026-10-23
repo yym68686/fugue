@@ -10,6 +10,63 @@ permissions:
   contents: read
 
 jobs:
+  edge_release_hold_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+      concurrency: ${{ steps.plan.outputs.concurrency }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_configure_edge_release_hold
+          config=deploy/environments/production/edge-release-hold/hold.json
+          if [ ! -f "$config" ]; then exit 0; fi
+          if git diff --quiet "$BASE_SHA" HEAD -- "$config" scripts/configure_edge_release_hold.py scripts/reconcile_edge_member.py; then exit 0; fi
+          python3 - <<'PY'
+          import json, os
+          from scripts.configure_edge_release_hold import validate
+          c=validate(json.load(open('deploy/environments/production/edge-release-hold/hold.json')))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write('selected=true\nconcurrency=fugue-production-'+c['component']+'\n')
+          PY
+
+  edge_release_hold:
+    # Configuration intent is independent of code builds. Exact live reader
+    # capability, release/authority leases and Node UID/RV fence every write.
+    needs: edge_release_hold_plan
+    if: ${{ needs.edge_release_hold_plan.outputs.selected == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: '${{ needs.edge_release_hold_plan.outputs.concurrency }}', cancel-in-progress: false, queue: max}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Verify the exact current hold declaration and executor
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/edge-release-hold scripts/configure_edge_release_hold.py scripts/reconcile_edge_member.py .github/workflows/ci.yml
+          python3 -m unittest scripts.test_configure_edge_release_hold
+          python3 -m scripts.configure_edge_release_hold deploy/environments/production/edge-release-hold/hold.json --evidence "$RUNNER_TEMP/edge-hold-preview.json"
+      - name: Apply the identity-bound hold without changing workloads
+        run: |
+          python3 -m scripts.configure_edge_release_hold deploy/environments/production/edge-release-hold/hold.json --apply --evidence "$RUNNER_TEMP/edge-hold-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: fugue-edge-release-hold-${{ github.sha }}
+          path: ${{ runner.temp }}/edge-hold-*.json
+          if-no-files-found: error
+          retention-days: 90
+
   edge_member_recovery_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest

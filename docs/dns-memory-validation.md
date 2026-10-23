@@ -97,3 +97,12 @@ unchanged signed full configuration and 256 MiB container hard limit:
 limit remains 256 MiB; a soft budget can be exceeded during required work. These
 are bounded captures, not a guarantee of the all-time peak. A tenfold RSS target
 of about 21 MiB has not been achieved and must not be claimed from heap sizes.
+
+Final 48 MiB rollout measurements on both private readers used complete 60-second
+Live Diagnostics captures. The German reader peaked at 61.4 MiB RSS and the US
+reader at 63.3 MiB; CPU consumption was 17.27 and 27.82 core-seconds respectively.
+Both had zero OOM events in the window and zero container restarts at readback.
+Both returned a positive answer for the affected hostname after startup recovery.
+Relative to the 218.8 MiB baseline, these bounded peaks are about 71–72% lower.
+The public DNS transport still selects the legacy readers; this measurement does
+not establish public recovery or a tenfold reduction.

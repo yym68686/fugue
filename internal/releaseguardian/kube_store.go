@@ -392,6 +392,16 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 		if err := workloadIdentityMatchesDaemonSet(workload, release, target); err != nil {
 			return degraded(err.Error())
 		}
+		if evidence, handled, err := store.heldEdgeWorkloadHealth(ctx, release, target, workload); handled {
+			if err != nil {
+				return degraded(err.Error())
+			}
+			members, err := store.componentWorkloadHealth(ctx, release, target, manifest)
+			if err != nil {
+				return degraded(err.Error())
+			}
+			return healthy(map[string]any{"requiredWorkload": evidence, "componentWorkloads": members, "membership": "explicit-release-hold"})
+		}
 		daemonSet = workload
 		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)
 		if err != nil {
@@ -437,14 +447,16 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 }
 
 type workloadHealthEvidence struct {
-	Kind        string                     `json:"kind"`
-	Name        string                     `json:"name"`
-	Desired     int32                      `json:"desired"`
-	Updated     int32                      `json:"updated"`
-	Ready       int32                      `json:"ready"`
-	Available   int32                      `json:"available"`
-	Generation  int64                      `json:"generation"`
-	RetiredPods []retiredPodHealthEvidence `json:"retired_pods,omitempty"`
+	Kind                string                     `json:"kind"`
+	Name                string                     `json:"name"`
+	Desired             int32                      `json:"desired"`
+	Updated             int32                      `json:"updated"`
+	Ready               int32                      `json:"ready"`
+	Available           int32                      `json:"available"`
+	Generation          int64                      `json:"generation"`
+	RetiredPods         []retiredPodHealthEvidence `json:"retired_pods,omitempty"`
+	RequiredNodeUIDs    map[string]string          `json:"required_node_uids,omitempty"`
+	ReleaseHoldNodeUIDs map[string]string          `json:"release_hold_node_uids,omitempty"`
 }
 
 // componentWorkloadHealth keeps continuous Guardian health component-scoped:
@@ -624,6 +636,9 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 		}
 		if err := workloadReleaseIdentity(release, target, "DaemonSet", name, workload.Annotations, workload.Spec.Template.Annotations, workload.Spec.Template.Spec.Containers, workload.Spec.Template.Spec.InitContainers); err != nil {
 			return workloadHealthEvidence{}, err
+		}
+		if evidence, handled, err := store.heldEdgeWorkloadHealth(ctx, release, target, workload); handled {
+			return evidence, err
 		}
 		daemonSet = workload
 		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)

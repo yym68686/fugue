@@ -174,7 +174,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		`"name":"FUGUE_RELEASE_GUARDIAN_ARTIFACT_PRUNE_INTERVAL","value":"5m"`,
 		`"resources":["pods"],"verbs":["get","list"]`,
 		`"apiGroups":["apps"],"resources":["daemonsets"],"verbs":["get"]`,
-		`"apiGroups":[""],"resources":["nodes"],"verbs":["get"]`,
+		`"apiGroups":[""],"resources":["nodes"],"verbs":["get","list"]`,
 		`"name":"fugue-release-canary-placement-reader"`,
 		`"resourceNames":["fugue-api-route-intent-ca-de","fugue-api-route-intent-ca-us","fugue-api-tls","fugue-app-wildcard-tls","fugue-edge-control-inventory-writer-de","fugue-edge-control-inventory-writer-us","fugue-edge-control-reader-de","fugue-edge-control-reader-us","fugue-edge-control-recovery-de","fugue-edge-control-recovery-us","fugue-edge-control-route-intent-identity-de","fugue-edge-control-route-intent-identity-us","fugue-edge-control-signing-de","fugue-edge-control-signing-us","fugue-edge-route-intent-identity","fugue-edge-token-vps-591f4447","fugue-edge-token-vps-84c8f0a9","fugue-edge-worker-reader-de","fugue-edge-worker-reader-us","fugue-fugue-config","fugue-fugue-edge-activation-signing-v1","fugue-fugue-platform-component-identity"],"resources":["secrets"],"verbs":["get"]`,
 		`"resources":["events"],"verbs":["get","list","watch"]`,
@@ -207,7 +207,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		}
 		if item["kind"] == "ClusterRole" && name != "fugue-release-guardian-edge-membership" {
 			rawRules, _ := json.Marshal(item["rules"])
-			if name != "fugue-release-canary-placement-reader" || string(rawRules) != `[{"apiGroups":[""],"resources":["nodes"],"verbs":["get"]}]` {
+			if name != "fugue-release-canary-placement-reader" || string(rawRules) != `[{"apiGroups":[""],"resources":["nodes"],"verbs":["get","list"]}]` {
 				t.Fatal("placement inspection must only grant exact Node reads")
 			}
 			placementReader = true

@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"fugue/internal/model/edgecohort"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,6 +18,33 @@ import (
 )
 
 func requiredCandidateWorkerPods(ctx context.Context, client kubernetes.Interface, namespace string, candidate releaseguardian.CandidateAuthority, pods []corev1.Pod) ([]corev1.Pod, error) {
+	// The canary and activation must observe the same explicit membership.
+	// A slow held node retains its local state and cannot reject a healthy
+	// candidate merely because it has an older image or an unready process.
+	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: labels.Set{"fugue.io/edge-group-id": candidate.GroupID}.AsSelector().String(), Limit: 1001})
+	if err != nil || nodes.Continue != "" || len(nodes.Items) > 1000 {
+		return nil, errors.New("candidate release hold inventory is incomplete")
+	}
+	held := map[string]corev1.Node{}
+	for _, node := range nodes.Items {
+		isHeld, err := edgecohort.ReleaseHeld(node, candidate.GroupID)
+		if err != nil {
+			return nil, err
+		}
+		if isHeld {
+			if _, duplicate := held[node.Name]; duplicate {
+				return nil, errors.New("candidate release hold identity is ambiguous")
+			}
+			held[node.Name] = node
+		}
+	}
+	eligible := make([]corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if _, excluded := held[pod.Spec.NodeName]; !excluded {
+			eligible = append(eligible, pod)
+		}
+	}
+	pods = eligible
 	checked := map[types.UID]bool{}
 	retired := map[types.UID]bool{}
 	for _, pod := range pods {
@@ -53,8 +81,17 @@ func requiredCandidateWorkerPods(ctx context.Context, client kubernetes.Interfac
 				owned = append(owned, observed)
 			}
 		}
+		desired := int(workload.Status.DesiredNumberScheduled)
+		placement := labels.SelectorFromSet(workload.Spec.Template.Spec.NodeSelector)
+		if len(workload.Spec.Template.Spec.NodeSelector) > 0 {
+			for _, node := range held {
+				if placement.Matches(labels.Set(node.Labels)) {
+					desired--
+				}
+			}
+		}
 		retained, evidence, err := releaseguardian.FilterRetiredDaemonSetPods(ctx, client, owned, workload)
-		if err != nil || len(evidence) == 0 || len(retained) != int(workload.Status.DesiredNumberScheduled) {
+		if err != nil || desired < 1 || len(evidence) == 0 || len(retained) != desired {
 			return nil, errors.New("candidate retiring placement does not preserve every required member")
 		}
 		for _, item := range evidence {

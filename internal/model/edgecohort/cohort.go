@@ -28,9 +28,22 @@ func FromNodes(nodes []corev1.Node, group string, baseline int) (Snapshot, error
 	if group == "" || baseline < 1 || baseline > 100 {
 		return s, errors.New("invalid Edge cohort baseline")
 	}
+	baselineMembers, baselineHolds := 0, 0
+	seen := map[string]bool{}
 	for _, n := range nodes {
 		if n.Labels["fugue.io/edge-group-id"] != group || n.Labels["fugue.io/role.edge"] != "true" {
 			continue
+		}
+		if seen[n.Name] {
+			return s, errors.New("duplicate Edge cohort identity")
+		}
+		seen[n.Name] = true
+		held, err := ReleaseHeld(n, group)
+		if err != nil {
+			return s, err
+		}
+		if held {
+			s.Suspended[n.Name] = true
 		}
 		if n.Labels["fugue.io/schedulable"] == "false" {
 			if n.Name == "" || n.UID == "" || n.ResourceVersion == "" || n.DeletionTimestamp != nil {
@@ -40,6 +53,10 @@ func FromNodes(nodes []corev1.Node, group string, baseline int) (Snapshot, error
 		}
 		phase := n.Labels[PhaseLabel]
 		if phase == "" {
+			baselineMembers++
+			if held {
+				baselineHolds++
+			}
 			continue
 		}
 		if n.Name == "" || n.UID == "" || n.DeletionTimestamp != nil || n.Labels["fugue.io/edge-workload"] != "dynamic" {
@@ -54,15 +71,25 @@ func FromNodes(nodes []corev1.Node, group string, baseline int) (Snapshot, error
 			return s, errors.New("unknown managed Edge enrollment phase")
 		}
 	}
+	// Only an explicit UID-bound hold may reduce the fixed baseline. Require
+	// its complete physical inventory so a missing or extra baseline member
+	// cannot be silently replaced by a lower minimum. Readiness never does so.
+	if baselineHolds > 0 {
+		if baselineMembers != baseline {
+			return s, errors.New("held Edge baseline membership is incomplete or ambiguous")
+		}
+		s.Expected -= baselineHolds
+	}
 	// Count the same explicitly enrolled extensions that FilterPods includes.
 	// A suspended extension must not leave an impossible extra required slot.
-	// The fixed baseline remains intact, including when its nodes are absent.
+	// Without an explicit identity-bound hold, the fixed baseline remains intact,
+	// including when nodes are absent or report scheduling failure.
 	for node := range s.Admitted {
 		if !s.Suspended[node] {
 			s.Expected++
 		}
 	}
-	if s.Expected > 100 {
+	if s.Expected < 1 || s.Expected > 100 {
 		return s, errors.New("managed Edge cohort exceeds capacity")
 	}
 	return s, nil
