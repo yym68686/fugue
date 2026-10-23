@@ -63,8 +63,9 @@ def inputs(c, api):
     if parent["content_hash"] != c["release_set"]["digest"] or dns["content_hash"] != c["dns_artifact"]["digest"] or parent["content"].get("publication_role") != "cell-dns" or parent["content"].get("artifact_kinds") != ["dns_answer_bundle"] or parent["content"].get("artifact_ids") != [dns["id"]]:
         raise ValueError("promotion is not the exact independent DNS-only composition")
     topology = parent["content"].get("consumer_topology", {})
-    if topology.get("dns_node_ids") != [r["node_id"] for r in c["readers"]] or topology.get("edge_node_ids") not in [[], None]:
+    if topology != {"schema_version": "fugue.traffic-consumer-topology/v1", "publication_role": "cell-dns", "authority_cell_id": c["authority_cell_id"], "edge_node_ids": [], "dns_node_ids": [r["node_id"] for r in c["readers"]]}:
         raise ValueError("promotion readers differ from signed execution membership")
+    expected_consumers(c, api, None)
     return parent
 
 
@@ -83,7 +84,39 @@ def publication(c, api, channel):
     return r
 
 
+def expected_consumers(c, api, release):
+    query = urllib.parse.urlencode({"release_set_id": c["release_set"]["id"], "artifact_kind": "dns_answer_bundle", "scope_key": scope(c), "limit": 20})
+    result = api("GET", "/v1/admin/expected-consumer-sets?" + query)
+    sets = result.get("expected_consumer_sets", [])
+    if not sets or len(sets) > 20:
+        raise ValueError("private DNS expected consumer sets are unavailable")
+    revision = max(value.get("revision", 0) for value in sets)
+    latest = [value for value in sets if value.get("revision") == revision]
+    if len(latest) != 1:
+        raise ValueError("private DNS expected consumer set is ambiguous")
+    selected = latest[0]
+    if selected.get("release_set_id") != c["release_set"]["id"] or selected.get("artifact_kind") != "dns_answer_bundle" or selected.get("scope_key") != scope(c) or selected.get("requires_consumers") is not True or selected.get("required_cardinality") != len(c["readers"]):
+        raise ValueError("private DNS expected consumer set has a different authority")
+    dns = artifact(api, c["dns_artifact"]["id"], "dns_answer_bundle", scope(c))
+    if selected.get("expected_generation") != dns.get("generation"):
+        raise ValueError("private DNS expected generation differs from its signed artifact")
+    if release is not None and selected.get("artifact_release_id") != release["id"]:
+        raise ValueError("private DNS consumer set is for another publication")
+    members = selected.get("consumers", [])
+    if len(members) != len(c["readers"]):
+        raise ValueError("private DNS expected member count differs")
+    readers = {value["node_id"]: value for value in c["readers"]}
+    if {member.get("node_id") for member in members} != set(readers):
+        raise ValueError("private DNS expected member identities differ or repeat")
+    for member in members:
+        reader = readers.get(member.get("node_id"))
+        if reader is None or member.get("required") is not True or member.get("component") != "dns-server" or member.get("authority_id") != c["authority_cell_id"] or member.get("scope_key") != scope(c) or member.get("artifact_kind") != "dns_answer_bundle" or member.get("expected_generation") != selected.get("expected_generation") or member.get("consumer_id") != "dns-server:" + c["authority_cell_id"] + ":" + reader["node_id"]:
+            raise ValueError("private DNS expected consumer identity differs")
+    return selected
+
+
 def convergence(c, api, release):
+    expected_consumers(c, api, release)
     query = urllib.parse.urlencode({"release_set_id": c["release_set"]["id"], "artifact_release_id": release["id"]})
     values = api("GET", "/v1/admin/platform-state/convergence?" + query)["convergence"]
     if len(values) != 1 or values[0].get("artifact_kind") != "dns_answer_bundle":
@@ -101,6 +134,100 @@ def convergence(c, api, release):
         if reader is None or node in seen or a.get("state") != "pass" or observed.get("identity_verified") is not True or observed.get("credential_id") != "kubernetes:" + c["namespace"] + ":" + reader["service_account"] + ":" + reader["uid"] or observed.get("release_set_id") != c["release_set"]["id"] or observed.get("fencing_token") != release["fencing_token"]:
             raise ValueError("private DNS receipt does not belong to the pinned executor")
         seen.add(node)
+
+
+def shadow_health(c, reader):
+    # A shadow-only process correctly returns 503 until it has a serving
+    # publication. Read that JSON without requiring an HTTP success status.
+    command = ["kubectl", "exec", "-i", "-n", c["namespace"], reader["pod"], "-c", reader["container"], "--", "nc", "-w", "10", "127.0.0.1", str(reader["port"])]
+    result = subprocess.run(command, input=b"GET /healthz HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n", capture_output=True, timeout=30)
+    if result.returncode or len(result.stdout) > 8 << 20:
+        raise ValueError("private DNS shadow health transport failed")
+    head, separator, body = result.stdout.partition(b"\r\n\r\n")
+    if not separator or head.split(b"\r\n", 1)[0] not in [b"HTTP/1.0 200 OK", b"HTTP/1.0 503 Service Unavailable"]:
+        raise ValueError("private DNS shadow health HTTP response is invalid")
+    return json.loads(body)
+
+
+def observe_shadow_reader(c, reader):
+    pod = read_json("get", "pod", reader["pod"], "-n", c["namespace"], "-o", "json")
+    meta, spec = pod["metadata"], pod["spec"]
+    if meta.get("uid") != reader["uid"] or not meta.get("resourceVersion") or spec.get("nodeName") != reader["node_id"] or spec.get("serviceAccountName") != reader["service_account"] or not ready_pod(pod) or any(spec.get(k) for k in ["hostNetwork", "hostPID", "hostIPC"]) or any(port.get("hostPort", 0) for container in spec.get("containers", []) + spec.get("initContainers", []) for port in container.get("ports", [])):
+        raise ValueError("private DNS shadow reader identity or isolation changed")
+    annotations = meta.get("annotations", {})
+    identity = json.loads(annotations.get("fugue.pro/consumer-identity", "{}"))
+    if annotations.get("fugue.pro/authority-transition-role") != "isolated-candidate" or identity != {"version": "v1", "component": "dns-server", "scope_key": scope(c), "authority_id": c["authority_cell_id"], "artifact_kinds": ["dns_answer_bundle"]}:
+        raise ValueError("private DNS shadow executor authorization differs")
+    containers = [v for v in spec["containers"] if v["name"] == reader["container"] and v["image"] == reader["image"]]
+    if len(containers) != 1:
+        raise ValueError("private DNS shadow executable changed")
+    probe = containers[0].get("readinessProbe", {}).get("httpGet", {})
+    port = probe.get("port")
+    if isinstance(port, str):
+        ports = [v["containerPort"] for v in containers[0].get("ports", []) if v.get("name") == port and v.get("protocol", "TCP") == "TCP"]
+        port = ports[0] if len(ports) == 1 else None
+    if port != reader["port"] or probe.get("host") or probe.get("scheme", "HTTP") != "HTTP":
+        raise ValueError("private DNS shadow observation port differs")
+    health = shadow_health(c, reader)
+    candidate = health.get("platform_candidate", {})
+    readiness, query = candidate.get("readiness", {}), candidate.get("query", {})
+    if (candidate.get("state") != "shadow_verified" or candidate.get("artifact_id") != c["dns_artifact"]["id"] or candidate.get("digest") != c["dns_artifact"]["digest"] or candidate.get("release_set_id") != c["release_set"]["id"] or candidate.get("last_error") or
+            type(readiness.get("records")) is not int or readiness.get("records") < 1 or readiness.get("ready_records") != readiness.get("records") or not HASH.fullmatch(readiness.get("plan_digest", "")) or timestamp(readiness["checked_at"]) > now() or timestamp(readiness["fresh_until"]) <= now() or
+            type(query.get("records")) is not int or query.get("records") < 1 or query.get("eligible_records") != query.get("records") or query.get("answers", 0) < 1 or query.get("serving") is not False or timestamp(query["evaluated_at"]) < timestamp(readiness["checked_at"])):
+        raise ValueError("private DNS signed shadow has no fresh complete answer proof")
+    current = read_json("get", "pod", reader["pod"], "-n", c["namespace"], "-o", "json")
+    if current["metadata"].get("uid") != meta["uid"] or current["metadata"].get("resourceVersion") != meta["resourceVersion"]:
+        raise ValueError("private DNS shadow reader changed during observation")
+    return {"node_id": reader["node_id"], "uid": reader["uid"], "readiness_plan_digest": readiness["plan_digest"], "readiness_checked_at": readiness["checked_at"], "readiness_fresh_until": readiness["fresh_until"], "query_view_digest": query["view_digest"], "query_evaluated_at": query["evaluated_at"], "ready_records": readiness["ready_records"], "records": readiness["records"], "answers": query["answers"]}
+
+
+def shadow_convergence(c, api, release):
+    expected = expected_consumers(c, api, release)
+    query = urllib.parse.urlencode({"release_set_id": c["release_set"]["id"], "artifact_release_id": release["id"]})
+    values = api("GET", "/v1/admin/platform-state/convergence?" + query).get("convergence", [])
+    if len(values) != 1 or values[0].get("artifact_kind") != "dns_answer_bundle":
+        raise ValueError("private DNS shadow consumer assessment is missing")
+    value = values[0]
+    readers = {r["node_id"]: r for r in c["readers"]}
+    assessments = value.get("assessments", [])
+    if value.get("expected_consumer_set_id") != expected.get("id") or value.get("required_expected") != len(readers) or len(assessments) != len(readers):
+        raise ValueError("private DNS shadow membership is incomplete")
+    observed_nodes = set()
+    fresh_after = now() - datetime.timedelta(seconds=90)
+    required_caps = {"cell_dns_v1", "dns_authority_transition_v1", "dns_availability_v1", "dns_route_sources_v1", "dns_retained_routes_v1", "traffic_release_v1"}
+    for assessment in assessments:
+        observed = assessment.get("observed", {})
+        node = observed.get("node_id")
+        reader = readers.get(node)
+        issued = timestamp(observed["issued_at"]) if observed.get("issued_at") else fresh_after - datetime.timedelta(seconds=1)
+        received = timestamp(assessment["observed_at"]) if assessment.get("observed_at") else fresh_after - datetime.timedelta(seconds=1)
+        if (reader is None or node in observed_nodes or observed.get("identity_verified") is not True or observed.get("credential_id") != "kubernetes:" + c["namespace"] + ":" + reader["service_account"] + ":" + reader["uid"] or
+                observed.get("release_set_id") != c["release_set"]["id"] or observed.get("expected_consumer_set_id") != expected["id"] or observed.get("fencing_token") != release["fencing_token"] or observed.get("desired_generation") != expected["expected_generation"] or
+                observed.get("apply_status") != "staged" or observed.get("probe_status") != "shadow_validated" or issued < fresh_after or issued > now() or received < issued or received > now() or timestamp(assessment["fresh_until"]) <= now() or not HASH.fullmatch(observed.get("evidence_hash", "")) or observed.get("generation_sequence") != release["fencing_token"] or
+                not required_caps.issubset(set(observed.get("compatibility_capabilities", [])))):
+            raise ValueError("private DNS shadow capability receipt is stale or belongs to another executor")
+        observed_nodes.add(node)
+    return [observe_shadow_reader(c, reader) for reader in c["readers"]]
+
+
+def observe_shadow(c, api, release):
+    deadline, samples, error = time.monotonic() + c["observation"]["timeout_seconds"], [], "awaiting private DNS shadow capability and answers"
+    while time.monotonic() < deadline:
+        current = publication(c, api, "shadow")
+        if current is None or (current["id"], current["fencing_token"]) != (release["id"], release["fencing_token"]):
+            raise ValueError("private DNS shadow publication changed during observation")
+        try:
+            samples.append({"at": now().isoformat(), "readers": shadow_convergence(c, api, release)})
+        except (ValueError, RuntimeError, subprocess.TimeoutExpired, KeyError) as exc:
+            samples, error = [], str(exc)
+        if len(samples) >= c["observation"]["samples"]:
+            for i, reader in enumerate(c["readers"]):
+                first, last = samples[0]["readers"][i], samples[-1]["readers"][i]
+                if last["node_id"] != reader["node_id"] or timestamp(last["readiness_checked_at"]) <= timestamp(first["readiness_checked_at"]) or timestamp(last["query_evaluated_at"]) <= timestamp(first["query_evaluated_at"]):
+                    raise ValueError("private DNS shadow observation did not advance real probes")
+            return {"declaration_digest": digest(c), "release_id": release["id"], "fencing_token": release["fencing_token"], "samples": samples, "completed_at": now().isoformat()}
+        time.sleep(c["observation"]["interval_seconds"])
+    raise ValueError(error)
 
 
 def observe_reader(c, reader, release):
@@ -219,7 +346,9 @@ def promote(c, api, save):
             continue
         if release is None:
             if channel == "gray":
-                convergence(c, api, publication(c, api, "shadow"))
+                shadow = publication(c, api, "shadow")
+                evidence["shadow"] = observe_shadow(c, api, shadow)
+                save(evidence)
             elif retained_lkg(c, api, [gray["id"]]) is None:
                 raise ValueError("private DNS full requires verified gray LKG")
             body = {"release_channel": channel, "idempotency_key": "git-private-dns/" + digest(c) + "/" + channel, "reason": "explicit private DNS configuration promotion with independent reader observations"}

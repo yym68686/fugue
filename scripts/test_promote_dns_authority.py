@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts import promote_dns_authority as p
+from scripts.stage_dns_authority_transition import digest as artifact_digest
 
 
 def config():
@@ -35,15 +36,43 @@ class PrivateDNSPromotionTests(unittest.TestCase):
 
     def test_composition_cannot_enroll_workers_or_other_dns_readers(self):
         c = config()
-        parent = {"content_hash": c["release_set"]["digest"], "content": {"publication_role": "cell-dns", "artifact_kinds": ["dns_answer_bundle"], "artifact_ids": ["dns"], "consumer_topology": {"dns_node_ids": ["node-one"], "edge_node_ids": []}}}
+        parent = {"content_hash": c["release_set"]["digest"], "content": {"publication_role": "cell-dns", "artifact_kinds": ["dns_answer_bundle"], "artifact_ids": ["dns"], "consumer_topology": {"schema_version": "fugue.traffic-consumer-topology/v1", "publication_role": "cell-dns", "authority_cell_id": c["authority_cell_id"], "edge_node_ids": [], "dns_node_ids": ["node-one"]}}}
         dns = {"id": "dns", "content_hash": c["dns_artifact"]["digest"]}
-        with patch.object(p, "artifact", side_effect=[parent, dns]):
+        member = {"node_id": "node-one", "required": True, "component": "dns-server", "authority_id": c["authority_cell_id"], "scope_key": p.scope(c), "artifact_kind": "dns_answer_bundle", "expected_generation": "generation", "consumer_id": "dns-server:cell-dns-one:node-one"}
+        expected = {"revision": 1, "release_set_id": "parent", "artifact_kind": "dns_answer_bundle", "scope_key": p.scope(c), "requires_consumers": True, "required_cardinality": 1, "consumers": [member]}
+        with patch.object(p, "artifact", side_effect=[parent, dns]), patch.object(p, "expected_consumers", return_value=expected):
             p.inputs(c, None)
-        for change in [{"publication_role": "cell-routes"}, {"artifact_ids": ["foreign"]}, {"consumer_topology": {"dns_node_ids": ["node-one"], "edge_node_ids": ["edge-one"]}}, {"consumer_topology": {"dns_node_ids": ["other"], "edge_node_ids": []}}]:
+        for change in [{"publication_role": "cell-routes"}, {"artifact_ids": ["foreign"]}, {"consumer_topology": {"dns_node_ids": ["foreign"]}}]:
             altered = copy.deepcopy(parent)
             altered["content"].update(change)
-            with patch.object(p, "artifact", side_effect=[altered, dns]), self.assertRaises(ValueError):
+            with patch.object(p, "artifact", side_effect=[altered, dns]), patch.object(p, "expected_consumers", return_value=expected), self.assertRaises(ValueError):
                 p.inputs(c, None)
+
+    def test_expected_members_are_the_exact_latest_dns_only_set(self):
+        c = config()
+        c["readers"].append({"node_id": "node-two", "pod": "dns-two", "uid": "22222222-2222-2222-2222-222222222222", "container": "dns", "image": "registry.example/dns@sha256:" + "d" * 64, "service_account": "dns-two", "port": 8080})
+        c["readers"].sort(key=lambda r: r["node_id"])
+        def member(node):
+            return {"node_id": node, "required": True, "component": "dns-server", "authority_id": c["authority_cell_id"], "scope_key": p.scope(c), "artifact_kind": "dns_answer_bundle", "expected_generation": "generation", "consumer_id": "dns-server:" + c["authority_cell_id"] + ":" + node}
+        current = {"release_set_id": "parent", "artifact_kind": "dns_answer_bundle", "scope_key": p.scope(c), "requires_consumers": True, "required_cardinality": 2, "revision": 2, "expected_generation": "generation", "artifact_release_id": "gray", "consumers": [member("node-one"), member("node-two")]}
+        older = dict(current, revision=1, consumers=[])
+        def api_with_artifact(method, path, body=None):
+            if method == "GET" and path.startswith("/v1/admin/artifacts/"):
+                content = {"fixture": True}
+                return {"artifact": {"id": "dns", "artifact_kind": "dns_answer_bundle", "scope_key": p.scope(c), "generation": "generation", "status": "validated", "content_hash": artifact_digest(content), "content": content}}
+            if method == "GET" and path.startswith("/v1/admin/expected-consumer-sets?"):
+                return {"expected_consumer_sets": [older, current]}
+            raise AssertionError((method, path))
+        self.assertEqual(current, p.expected_consumers(c, api_with_artifact, {"id": "gray"}))
+        for mutation in [lambda s: s.update(required_cardinality=1), lambda s: s.update(consumers=[member("node-one")]), lambda s: s["consumers"][0].update(component="edge-worker"), lambda s: s["consumers"][0].update(required=False), lambda s: s["consumers"][0].update(node_id="foreign"), lambda s: s.update(consumers=[member("node-one"), member("node-one")])]:
+            changed = copy.deepcopy(current)
+            mutation(changed)
+            def changed_api(method, path, body=None):
+                if method == "GET" and path.startswith("/v1/admin/artifacts/"):
+                    return {"artifact": {"id": "dns", "artifact_kind": "dns_answer_bundle", "scope_key": p.scope(c), "generation": "generation", "status": "validated", "content_hash": artifact_digest({"fixture": True}), "content": {"fixture": True}}}
+                return {"expected_consumer_sets": [changed]}
+            with self.assertRaises(ValueError):
+                p.expected_consumers(c, changed_api, {"id": "gray"})
 
     def test_publication_cannot_adopt_a_foreign_operation(self):
         c = config()
@@ -78,9 +107,45 @@ class PrivateDNSPromotionTests(unittest.TestCase):
 
     def test_failed_shadow_cannot_publish_gray(self):
         c, writes = config(), []
-        with patch.object(p, "inputs"), patch.object(p, "publication", side_effect=lambda c, api, ch: release(c, ch) if ch == "shadow" else None), patch.object(p, "convergence", side_effect=ValueError("no positive DNS answer")), self.assertRaisesRegex(ValueError, "positive DNS"):
+        with patch.object(p, "inputs"), patch.object(p, "publication", side_effect=lambda c, api, ch: release(c, ch) if ch == "shadow" else None), patch.object(p, "observe_shadow", side_effect=ValueError("no positive DNS answer")), self.assertRaisesRegex(ValueError, "positive DNS"):
             p.promote(c, lambda *args: writes.append(args), lambda value: None)
         self.assertEqual([], writes)
+
+    def test_shadow_receipts_bind_fresh_physical_executors_without_claiming_serving(self):
+        c, r, t = config(), release(config(), "shadow"), p.now()
+        expected = {"id": "set-one", "expected_generation": "g-one"}
+        observed = {"node_id": "node-one", "identity_verified": True, "credential_id": "kubernetes:system:dns-one:11111111-1111-1111-1111-111111111111", "release_set_id": "parent", "expected_consumer_set_id": "set-one", "fencing_token": 4, "generation_sequence": 4, "desired_generation": "g-one", "apply_status": "staged", "probe_status": "shadow_validated", "issued_at": (t - datetime.timedelta(seconds=3)).isoformat(), "evidence_hash": "sha256:" + "f" * 64, "compatibility_capabilities": ["cell_dns_v1", "dns_authority_transition_v1", "dns_availability_v1", "dns_route_sources_v1", "dns_retained_routes_v1", "traffic_release_v1"]}
+        assessment = {"observed": observed, "observed_at": (t - datetime.timedelta(seconds=2)).isoformat(), "fresh_until": (t + datetime.timedelta(seconds=87)).isoformat()}
+        value = {"artifact_kind": "dns_answer_bundle", "expected_consumer_set_id": "set-one", "required_expected": 1, "assessments": [assessment], "pass": False}
+        with patch.object(p, "expected_consumers", return_value=expected), patch.object(p, "observe_shadow_reader", return_value={"node_id": "node-one"}):
+            self.assertEqual([{"node_id": "node-one"}], p.shadow_convergence(c, lambda *a: {"convergence": [value]}, r))
+            for update in [{"credential_id": "foreign"}, {"apply_status": "applied"}, {"expected_consumer_set_id": "old-set"}, {"fencing_token": 3}, {"generation_sequence": 3}, {"issued_at": (t - datetime.timedelta(seconds=100)).isoformat()}, {"issued_at": (t + datetime.timedelta(seconds=100)).isoformat()}, {"compatibility_capabilities": []}, {"evidence_hash": ""}]:
+                altered = copy.deepcopy(value)
+                altered["assessments"][0]["observed"].update(update)
+                with self.assertRaisesRegex(ValueError, "capability receipt"):
+                    p.shadow_convergence(c, lambda *a: {"convergence": [altered]}, r)
+
+    def test_shadow_observation_requires_new_probes_not_repeated_status(self):
+        c, r, t = config(), release(config(), "shadow"), p.now()
+        for advances in [True, False]:
+            samples = [[{"node_id": "node-one", "readiness_checked_at": (t + datetime.timedelta(seconds=i if advances else 0)).isoformat(), "query_evaluated_at": (t + datetime.timedelta(seconds=i if advances else 0)).isoformat()}] for i in range(3)]
+            with patch.object(p, "publication", return_value=r), patch.object(p, "shadow_convergence", side_effect=samples), patch.object(p.time, "sleep"):
+                if advances:
+                    self.assertEqual(3, len(p.observe_shadow(c, None, r)["samples"]))
+                else:
+                    with self.assertRaisesRegex(ValueError, "did not advance"):
+                        p.observe_shadow(c, None, r)
+
+    def test_shadow_health_reads_candidate_json_even_before_serving(self):
+        c = config()
+        for status in [b"200 OK", b"503 Service Unavailable"]:
+            result = subprocess.CompletedProcess([], 0, b'HTTP/1.0 ' + status + b'\r\nContent-Type: application/json\r\n\r\n{"platform_candidate":{"state":"shadow_verified"}}', b"")
+            with patch.object(p.subprocess, "run", return_value=result) as run:
+                self.assertEqual("shadow_verified", p.shadow_health(c, c["readers"][0])["platform_candidate"]["state"])
+                self.assertEqual(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n", run.call_args.kwargs["input"])
+        for raw in [b'HTTP/1.0 403 Forbidden\r\n\r\n{}', b'{}']:
+            with patch.object(p.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, raw, b"")), self.assertRaisesRegex(ValueError, "HTTP response"):
+                p.shadow_health(c, c["readers"][0])
 
     def test_reader_binds_loopback_checkpoint_verifier_and_reread_identity(self):
         c, r = config(), release(config(), "gray")
@@ -150,7 +215,12 @@ class PrivateDNSPromotionTests(unittest.TestCase):
         def observe(c, api, r):
             events.append(("observe", r["release_channel"]))
             return {"completed_at": p.now().isoformat(), "release_id": r["id"], "fencing_token": r["fencing_token"]}
-        with patch.object(p, "inputs"), patch.object(p, "publication", side_effect=current), patch.object(p, "convergence"), patch.object(p, "observe", side_effect=observe):
+        def shadow(c, api, r):
+            self.assertEqual({"shadow"}, published)
+            self.assertEqual("shadow", r["release_channel"])
+            events.append(("shadow", r["id"]))
+            return {"release_id": r["id"]}
+        with patch.object(p, "inputs"), patch.object(p, "publication", side_effect=current), patch.object(p, "convergence"), patch.object(p, "observe_shadow", side_effect=shadow), patch.object(p, "observe", side_effect=observe):
             result = p.promote(c, api, lambda value: None)
         self.assertEqual(["gray", "full"], verified)
         self.assertFalse(result["public_transport_changed"])
