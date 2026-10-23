@@ -81,3 +81,19 @@ A synthetic 4,096-record fixture retained 5.19 MB without compaction versus
 1.75 MB after. Compaction adds about 11 ms and 2.1 MB temporary allocations to
 initial decoding in that fixture. It is not an RSS result. This targets retained
 heap rather than claiming to eliminate the transport/decode allocation peak.
+
+
+Production soft-budget comparison on the same private German DNS role, with
+unchanged signed full configuration and 256 MiB container hard limit:
+
+| Go soft budget | RSS peak | CPU core-seconds / 60 seconds | OOM |
+| --- | ---: | ---: | ---: |
+| Default | 119.9 MiB | 8.60 | 0 |
+| 48 MiB | 62.4 MiB | 11.63 | 0 |
+| 32 MiB | 56.2 MiB | 56.31 | 0 |
+
+32 MiB saved only another 6.2 MiB but increased CPU about 4.8 times relative to
+48 MiB. The selected budget is 48 MiB for both private readers. The kernel hard
+limit remains 256 MiB; a soft budget can be exceeded during required work. These
+are bounded captures, not a guarantee of the all-time peak. A tenfold RSS target
+of about 21 MiB has not been achieved and must not be claimed from heap sizes.
