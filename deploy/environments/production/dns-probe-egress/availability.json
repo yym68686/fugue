@@ -1,0 +1,33 @@
+{
+  "schema": "fugue.dns-probe-egress/v1",
+  "generation": 1,
+  "namespace": "fugue-system",
+  "policy_name": "fugue-dns-availability-public-probes",
+  "authority_cell_id": "cell-dns-availability",
+  "services": [
+    {
+      "name": "fugue-front-serving-public-a",
+      "uid": "935d3d0b-7a46-434e-9054-185fa8f3a017",
+      "generation": 3,
+      "digest": "sha256:73f03933740b117ce530475f6898a824484aed227200c8ada44299f90cda8bad"
+    },
+    {
+      "name": "fugue-front-serving-public-b-primary",
+      "uid": "50247fef-fbe9-43db-b5c4-5cf6f09e146f",
+      "generation": 3,
+      "digest": "sha256:49cf1ccf6384b029a110b34c4deb5ee535cfee79eb23c4db0466cef8e4be043a"
+    },
+    {
+      "name": "fugue-front-serving-public-b-secondary",
+      "uid": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c",
+      "generation": 3,
+      "digest": "sha256:67962d1666c134a468915f0a54481c7ff27da44b85c11f89e845d7c8a8fe0a9e"
+    },
+    {
+      "name": "fugue-front-serving-us-managed",
+      "uid": "33a28c0e-3dd2-4d49-84d9-c22b5531bfd0",
+      "generation": 5,
+      "digest": "sha256:b494591fd2356318997003c7700eaf3a417c67c247f0b7f3d3da2c0904a9f8a6"
+    }
+  ]
+}

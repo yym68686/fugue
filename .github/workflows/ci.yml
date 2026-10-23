@@ -1414,6 +1414,7 @@ jobs:
     permissions: {contents: read}
     outputs:
       selected: ${{ steps.plan.outputs.selected }}
+      config: ${{ steps.plan.outputs.config }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
@@ -1427,7 +1428,13 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/dns-probe-egress scripts/reconcile_dns_probe_egress.py scripts/test_reconcile_dns_probe_egress.py; then
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/dns-probe-egress)
+          (( ${#declarations[@]} <= 1 )) || { echo 'one DNS egress declaration per atom is required' >&2; exit 1; }
+          if (( ${#declarations[@]} == 1 )); then
+            config="${declarations[0]}"
+            [[ "$config" =~ ^deploy/environments/production/dns-probe-egress/[a-z0-9][a-z0-9-]*\.json$ ]]
+            test -f "$config"
+            echo "config=$config" >> "$GITHUB_OUTPUT"
             echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi
 
@@ -1439,6 +1446,8 @@ jobs:
     concurrency: {group: fugue-production-dns-probe-egress, cancel-in-progress: false}
     timeout-minutes: 10
     permissions: {contents: read}
+    env:
+      CONFIG: ${{ needs.dns_probe_egress_plan.outputs.config }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
@@ -1446,7 +1455,8 @@ jobs:
         id: configuration
         run: |
           set -euo pipefail
-          config=deploy/environments/production/dns-probe-egress/policy.json
+          config="$CONFIG"
+          [[ "$config" =~ ^deploy/environments/production/dns-probe-egress/[a-z0-9][a-z0-9-]*\.json$ ]]
           git fetch origin main
           if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_dns_probe_egress.py scripts/test_reconcile_dns_probe_egress.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py; then
             python3 -m unittest scripts.test_reconcile_dns_probe_egress
@@ -1455,7 +1465,7 @@ jobs:
           fi
       - name: Reconcile only DNS HTTPS probe egress
         if: steps.configuration.outputs.selected == 'true'
-        run: python3 -m scripts.reconcile_dns_probe_egress deploy/environments/production/dns-probe-egress/policy.json --apply --evidence "$RUNNER_TEMP/dns-probe-egress.json"
+        run: python3 -m scripts.reconcile_dns_probe_egress "$CONFIG" --apply --evidence "$RUNNER_TEMP/dns-probe-egress.json"
       - name: Retain exact network policy evidence
         if: always() && steps.configuration.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
