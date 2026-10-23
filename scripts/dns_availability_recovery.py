@@ -50,11 +50,11 @@ def check_delta(previous, successor):
         raise ValueError('availability recovery cannot remove or revise existing holds')
     added = after.keys() - before.keys()
     if len(added) > 1:
-        raise ValueError('availability recovery may add at most one automatic hold')
+        raise ValueError('availability recovery may add at most one explicit hold')
     for edge in added:
         hold = after[edge]
-        if edge not in routes[hostname]['policy']['ordered_edge_ids'] or not hold.get('recovery') or hold['reason'] not in ['quota_exhausted', 'network_unavailable']:
-            raise ValueError('new hold must be automatically recoverable and inside availability pool')
+        if edge not in routes[hostname]['policy']['ordered_edge_ids'] or hold['reason'] not in ['quota_exhausted', 'network_unavailable']:
+            raise ValueError('new quota or network hold must be inside the availability pool')
     return hostname
 
 

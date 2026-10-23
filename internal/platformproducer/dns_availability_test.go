@@ -58,7 +58,7 @@ func TestAvailabilityConfigurationChangesOnlyOneExplicitHost(t *testing.T) {
 	}
 }
 
-func TestAvailabilityRecoveryPreservesConstraintsAndRequiresAutomaticReadmission(t *testing.T) {
+func TestAvailabilityRecoveryPreservesConstraintsAndExplicitReadmissionPolicy(t *testing.T) {
 	for _, scenario := range []string{"success", "without_hold", "two_holds", "outside_pool", "no_recovery", "administrative_hold", "remove_hold", "change_hold", "two_hosts", "other_constraint"} {
 		t.Run(scenario, func(t *testing.T) {
 			hold := OfflineEdge{EdgeID: "edge-c", EdgeGroupID: "edge-group-test", PublicIPv4: "8.8.4.4", Reason: "maintenance"}
@@ -94,7 +94,7 @@ func TestAvailabilityRecoveryPreservesConstraintsAndRequiresAutomaticReadmission
 			}
 			original, _ := json.Marshal(next)
 			err := validateDNSAvailabilityRecoveryDelta(before, next)
-			if (scenario == "success" || scenario == "without_hold") != (err == nil) {
+			if (scenario == "success" || scenario == "without_hold" || scenario == "no_recovery") != (err == nil) {
 				t.Fatalf("unexpected result: %v", err)
 			}
 			after, _ := json.Marshal(next)

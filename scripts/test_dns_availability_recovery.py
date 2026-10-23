@@ -74,7 +74,7 @@ class AvailabilityRecoveryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):quality.publish_once(config,ledger,lambda _:None)
                 self.assertEqual(ledger.release_bodies,[])
 
-    def test_only_one_new_recoverable_pool_hold(self):
+    def test_only_one_new_explicit_pool_hold(self):
         hold={'edge_id':'edge-b','edge_group_id':'edge-group-test','public_ipv4':'8.8.8.8','reason':'quota_exhausted','recovery':{'hostname':'app.example.test','path':'/','probe_interval_seconds':300,'probe_timeout_seconds':5,'success_threshold':3,'failure_threshold':1,'freshness_seconds':1800}}
         for scenario in ['success','no_hold','outside_pool','no_recovery','maintenance','two_holds','remove_old','change_old','other_constraint']:
             with self.subTest(scenario=scenario):
@@ -90,7 +90,7 @@ class AvailabilityRecoveryTests(unittest.TestCase):
                 elif scenario=='remove_old':next['offline_edges'].pop()
                 elif scenario=='change_old':next['offline_edges'][1]['reason']='maintenance'
                 elif scenario=='other_constraint':next['dns_query_policy']['minimum_ttl_seconds']=30
-                if scenario in ['success','no_hold']:self.assertEqual(recovery.check_delta(previous,next),'app.example.test')
+                if scenario in ['success','no_hold','no_recovery']:self.assertEqual(recovery.check_delta(previous,next),'app.example.test')
                 else:
                     with self.assertRaises(ValueError):recovery.check_delta(previous,next)
 

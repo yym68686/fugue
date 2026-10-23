@@ -1,11 +1,33 @@
 package platformproducer
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
+
+func TestHoldWithoutRecoveryCannotBeReleasedByRuntimeProofOrDate(t *testing.T) {
+	h := recoveryHold()
+	h.Recovery = nil
+	h.ExpectedRecoveryDate = "2020-01-01"
+	at := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	o := OfflineRecoveryObservation{EdgeID: h.EdgeID, DeclarationDigest: OfflineRecoveryDigest(h), LastAttempt: at, LastSuccess: at, ProofValidUntil: at.Add(time.Hour), Successes: 3, Admitted: true}
+	if o.Ready(h, at) || o.Record(h, at, true, at.Add(time.Hour)).Admitted {
+		t.Fatal("unspecified recovery consumed runtime evidence")
+	}
+	nodes := []model.EdgeNode{{ID: h.EdgeID, EdgeGroupID: h.EdgeGroupID, PublicIPv4: h.PublicIPv4}}
+	retained, err := EffectiveOfflineHolds(nodes, []OfflineEdge{h}, []OfflineRecoveryObservation{o}, at)
+	if err != nil || len(retained) != 1 {
+		t.Fatal("indefinite hold was removed", retained, err)
+	}
+	raw, _ := json.Marshal(map[string]any{"captured_at": at, "observations": []OfflineRecoveryObservation{o}})
+	parent := model.PlatformArtifact{Metadata: map[string]string{OfflineRecoveryMetadata: string(raw)}, Provenance: model.PlatformArtifactProvenance{SignedAt: at.Add(time.Second)}}
+	if _, err := PublicationOfflineHolds(parent, []OfflineEdge{h}); err == nil {
+		t.Fatal("signed stale recovery evidence removed an indefinite hold")
+	}
+}
 
 func recoveryHold() OfflineEdge {
 	return OfflineEdge{EdgeID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8", Reason: "quota_exhausted", Recovery: &OfflineEdgeRecoveryPolicy{Hostname: "api.example.test", Path: "/", ProbeIntervalSeconds: 300, ProbeTimeoutSeconds: 5, SuccessThreshold: 3, FailureThreshold: 1, FreshnessSeconds: 1800}}

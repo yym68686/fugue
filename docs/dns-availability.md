@@ -70,9 +70,13 @@ rollback of the **same** unexpired, signed positive LKG. It binds the exact
 producer/full fences, original verified producer release, immutable source
 digests, and real rollback ledger message. It cannot accept an ordinary
 unverified release or a newer pending gray publication. The configuration delta
-may add at most one automatically recoverable quota/network hold inside the
+may add at most one explicit quota/network hold inside the
 changed host's declared pool; existing holds and all other constraints remain
-immutable. This operation requires `baseline_mode: declared` and refuses silent
+immutable. Recovery policy is optional. Without it, the hold remains until an
+authorized configuration change; a short successful request, Ready, a billing
+date or a code upgrade cannot release it. This permits safe recovery while a
+bandwidth-limited endpoint cannot yet demonstrate capacity. This operation
+requires `baseline_mode: declared` and refuses silent
 fence renewal. Configuration previews compare frozen intent without requiring a
 successful failed DNS answer; the successor still needs live preview, normal
 consumer capability checks and gray/full evidence. It changes neither serving

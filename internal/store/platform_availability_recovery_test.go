@@ -25,6 +25,9 @@ func availabilityRecoveryFixture(t *testing.T, database, scenario string) reconf
 		t.Fatal(err)
 	}
 	source.Content["generation"] = "recovery-source"
+	if scenario == "retained_hold" {
+		source.Content["offline_edges"] = []platformproducer.OfflineEdge{{EdgeID: "edge-b", EdgeGroupID: "edge-group-b", PublicIPv4: "8.8.4.4", Reason: "quota_exhausted"}}
+	}
 	source.Content["dns_query_policy"].(map[string]any)["availability_routes"] = []platformconfig.DNSAvailabilityRoute{{Hostname: "app.example.test", Policy: model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}}}
 	source = savePhysicalDNSTestArtifact(t, f.s, source.ArtifactKind, source.ScopeKey, "recovery-source", source.Content)
 	next := previous
@@ -146,10 +149,10 @@ func testAvailabilityRecoveryTransaction(t *testing.T, database, scenario string
 		t.Fatal(err)
 	}
 	released, err := f.release()
-	if (scenario == "success") != (err == nil) {
+	if (scenario == "success" || scenario == "retained_hold") != (err == nil) {
 		t.Fatalf("%s: unexpected result %v", scenario, err)
 	}
-	if scenario == "success" {
+	if scenario == "success" || scenario == "retained_hold" {
 		again, err := f.release()
 		if err != nil || again.ID != released.ID {
 			t.Fatal("non-idempotent recovery", err)
@@ -157,7 +160,7 @@ func testAvailabilityRecoveryTransaction(t *testing.T, database, scenario string
 	}
 	authority, _, found, err := f.s.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow")
 	wanted := f.old.ID
-	if scenario == "success" {
+	if scenario == "success" || scenario == "retained_hold" {
 		wanted = f.next.ID
 	}
 	if err != nil || !found || authority.ID != wanted {
@@ -174,13 +177,13 @@ func testAvailabilityRecoveryTransaction(t *testing.T, database, scenario string
 }
 
 func TestAvailabilityRecoveryRequiresExactVerifiedRollback(t *testing.T) {
-	for _, scenario := range []string{"success", "ordinary_unverified", "no_message", "wrong_message", "wrong_message_time", "unverified_original", "wrong_original_artifact", "original_nonproducer", "override", "bypassed", "wrong_rollback_target", "nonproducer", "future_rollback", "expired_lkg", "tampered_lkg", "normal_operation", "stale_full", "stale_policy", "wrong_evidence"} {
+	for _, scenario := range []string{"success", "retained_hold", "ordinary_unverified", "no_message", "wrong_message", "wrong_message_time", "unverified_original", "wrong_original_artifact", "original_nonproducer", "override", "bypassed", "wrong_rollback_target", "nonproducer", "future_rollback", "expired_lkg", "tampered_lkg", "normal_operation", "stale_full", "stale_policy", "wrong_evidence"} {
 		t.Run(scenario, func(t *testing.T) { testAvailabilityRecoveryTransaction(t, "", scenario) })
 	}
 }
 
 func TestAvailabilityRecoveryPostgres(t *testing.T) {
-	for _, scenario := range []string{"success", "no_message", "wrong_message", "normal_operation", "stale_full", "stale_policy", "wrong_evidence"} {
+	for _, scenario := range []string{"success", "retained_hold", "no_message", "wrong_message", "normal_operation", "stale_full", "stale_policy", "wrong_evidence"} {
 		t.Run(scenario, func(t *testing.T) { testAvailabilityRecoveryTransaction(t, disposablePhysicalDNSDatabase(t), scenario) })
 	}
 }

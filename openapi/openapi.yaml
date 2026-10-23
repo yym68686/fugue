@@ -4,8 +4,11 @@ x-fugue-dns-availability:
     dns_availability is an independently fenced producer transition that changes
     exactly one host availability declaration and no unrelated constraints.
     dns_availability_recovery additionally permits at most one newly declared
-    automatically recoverable offline hold belonging to that host's availability
-    pool. It preserves every existing hold and all other constraints. A current
+    offline hold belonging to that host's availability pool. Recovery is optional:
+    without an explicit recovery policy the hold remains in force until a later
+    authorized configuration change. Ready, a successful HEAD, a billing date,
+    or a code release cannot remove such a hold. It preserves every existing hold
+    and all other constraints. A current
     rollback of the identical unexpired signed positive LKG may be used as the
     configuration baseline only with its exact rollback ledger message, original
     verified release, current producer/full fences and unchanged source bindings.

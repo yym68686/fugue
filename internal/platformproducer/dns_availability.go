@@ -52,7 +52,9 @@ func validateDNSAvailabilityDelta(old, next ProjectionPolicyInput) error {
 
 // Recovery can add one explicit offline guard to the selected availability pool.
 // Existing suspensions and unrelated services remain immutable. Restoring a node
-// later is based on real recovery observations, not on a date or a code release.
+// later requires an explicitly configured recovery policy or a new authorized
+// configuration change, never a date, Ready, or a code release. Omitting probe
+// recovery deliberately keeps a capacity-impaired endpoint held.
 func ValidateDNSAvailabilityRecoveryUpdate(previous, next Policy, static, oldDNS, newDNS model.PlatformArtifact) error {
 	return validatePhysicalDNSUpdate(previous, next, static, oldDNS, newDNS, "dns_availability_recovery")
 }
@@ -84,8 +86,8 @@ func validateDNSAvailabilityRecoveryDelta(old, next ProjectionPolicyInput) error
 			delete(before, hold.EdgeID)
 		} else {
 			added++
-			if !slices.Contains(changed.OrderedEdgeIDs, hold.EdgeID) || hold.Recovery == nil || hold.Reason != "quota_exhausted" && hold.Reason != "network_unavailable" {
-				return fmt.Errorf("new recovery hold must belong to the availability pool and declare automatic readmission")
+			if !slices.Contains(changed.OrderedEdgeIDs, hold.EdgeID) || hold.Reason != "quota_exhausted" && hold.Reason != "network_unavailable" {
+				return fmt.Errorf("new recovery hold must belong to the availability pool and declare quota or network impairment")
 			}
 		}
 	}
