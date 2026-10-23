@@ -46,7 +46,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class API:
-    def __init__(self, origin, token, response_limit=1 << 20, timeout=30):
+    def __init__(self, origin, token, response_limit=1 << 20, timeout=30, connect_address=None):
         if type(response_limit) is not int or not 1 <= response_limit <= 128 << 20:
             raise ValueError("invalid bounded API response size")
         if type(timeout) is not int or not 1 <= timeout <= 120:
@@ -54,7 +54,13 @@ class API:
         self.origin, self.token = origin, token
         self.response_limit = response_limit
         self.timeout = timeout
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        handlers = [urllib.request.ProxyHandler({}), NoRedirect()]
+        if connect_address is not None:
+            # This changes only TCP routing. The existing reusable handler
+            # retains the HTTPS origin, SNI, certificate checks and Host.
+            from scripts.stage_dns_authority_transition import ExplicitAddressHTTPSHandler
+            handlers.append(ExplicitAddressHTTPSHandler(origin, connect_address))
+        self.opener = urllib.request.build_opener(*handlers)
 
     def __call__(self, method, path, body=None):
         if not path.startswith("/v1/") or "\n" in path:

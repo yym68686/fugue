@@ -207,6 +207,9 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	dnsPromotion := yamlMappingValue(t, jobs, "dns_authority_promotion")
 	releaseHold := yamlMappingValue(t, jobs, "edge_release_hold")
+	if yamlMappingValue(t, yamlMappingValue(t, jobs, "dynamic_quality_reconfiguration"), "needs").Value != "dynamic_quality_plan" {
+		t.Fatal("DNS availability configuration must not depend on code compilation or component deployment")
+	}
 	if yamlMappingValue(t, releaseHold, "needs").Value != "edge_release_hold_plan" ||
 		yamlMappingValue(t, yamlMappingValue(t, releaseHold, "concurrency"), "group").Value != "${{ needs.edge_release_hold_plan.outputs.concurrency }}" ||
 		yamlMappingValue(t, yamlMappingValue(t, releaseHold, "concurrency"), "cancel-in-progress").Value != "false" {

@@ -23,6 +23,22 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_explicit_api_address_preserves_identity_and_bounded_client(self):
+        from scripts.stage_dns_authority_transition import ExplicitAddressHTTPSHandler
+        import urllib.request
+        config, _ = fixture()
+        config['api_connect_address'] = '8.8.8.8'
+        quality.validate(config)
+        client = quality.API(config['origin'], 'synthetic-key', connect_address=config['api_connect_address'])
+        handlers = [h for h in client.opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
+        self.assertEqual(len(handlers), 1)
+        self.assertIsInstance(handlers[0], ExplicitAddressHTTPSHandler)
+        self.assertEqual(handlers[0].address, '8.8.8.8')
+        self.assertEqual(client.origin, config['origin'])
+        for value in [None, '', 'localhost', '127.0.0.1', '10.0.0.1', '8.8.8.8:443']:
+            config['api_connect_address'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError): quality.validate(config)
+
     def test_configuration_waits_only_for_verified_same_producer_baseline(self):
         config, _ = fixture()
         resolved = copy.deepcopy(config)

@@ -19,11 +19,14 @@ from scripts.configure_business_exploration import BusinessBaselineChanged, chec
 
 def validate(config):
     fields = {"schema", "generation", "origin", "producer_generation", "precondition", "projection_policy", "baseline_mode"}
-    if not isinstance(config, dict) or not fields.issubset(config) or set(config) - fields - {"business_anchor_mode"} or not bounded_json(config) or config["schema"] != "fugue.dynamic-quality-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config["baseline_mode"] not in ["declared", "latest_verified_same_policy"]:
+    if not isinstance(config, dict) or not fields.issubset(config) or set(config) - fields - {"business_anchor_mode", "api_connect_address"} or not bounded_json(config) or config["schema"] != "fugue.dynamic-quality-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config["baseline_mode"] not in ["declared", "latest_verified_same_policy"]:
         raise ValueError("complete explicit dynamic quality declaration required")
     origin = urllib.parse.urlsplit(config["origin"])
     if origin.scheme != "https" or config["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
         raise ValueError("canonical HTTPS API origin required")
+    if "api_connect_address" in config:
+        from scripts.stage_dns_authority_transition import public_api_connect_address
+        public_api_connect_address(config["api_connect_address"])
     precondition = config["precondition"]
     if set(precondition) != {"operation", "previous_policy", "serving_full", "verification_evidence_hash"} or precondition["operation"] not in ["dynamic_quality", "business_exploration", "dns_availability", "dns_availability_recovery"] or not DIGEST.fullmatch(precondition["verification_evidence_hash"]):
         raise ValueError("fenced dynamic quality precondition required")
@@ -250,7 +253,7 @@ def main():
         raise ValueError("configuration credential and evidence path required")
     def save(value):
         Path(args.evidence).write_text(canonical(value) + "\n")
-    print(canonical(publish(config, API(config["origin"], token, response_limit=128 << 20, timeout=120), save)))
+    print(canonical(publish(config, API(config["origin"], token, response_limit=128 << 20, timeout=120, connect_address=config.get("api_connect_address")), save)))
 
 
 if __name__ == "__main__":

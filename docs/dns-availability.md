@@ -222,6 +222,12 @@ public DNS answers or grant serving authority and still runs all promotion gates
 Transport errors identify whether connection/headers or the response body failed,
 without exposing credentials or raw exception details.
 
+The dynamic availability configuration lane accepts the same optional
+`api_connect_address`, preserving HTTPS origin, SNI, certificate and Host checks.
+Its configuration executor runs its own validation tests and is independent of
+component compilation and deployment. A broken code build cannot prevent a
+compatible deployed API from accepting a valid recovery declaration.
+
 
 When a routing source changes while some physical proofs remain valid, the DNS
 checkpoint must bind the newly replayed source context. Previously retaining any
