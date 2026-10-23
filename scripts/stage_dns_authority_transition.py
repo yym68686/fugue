@@ -8,6 +8,9 @@ signature, current-reference and whole-route behavior checks.
 import argparse
 import copy
 import json
+import http.client
+import ipaddress
+import socket
 import os
 from pathlib import Path
 import re
@@ -29,10 +32,48 @@ def retained_reference(config):
     return config.get("schema") in ["fugue.dns-authority-transition-stage/v4", "fugue.dns-authority-transition-stage/v5"]
 
 
+def public_api_connect_address(value):
+    try:
+        address = ipaddress.ip_address(value)
+    except (TypeError, ValueError):
+        raise ValueError("canonical public API connect address required") from None
+    if not address.is_global or str(address) != value:
+        raise ValueError("canonical public API connect address required")
+    return value
+
+
+class ExplicitAddressHTTPSHandler(urllib.request.HTTPSHandler):
+    """Change TCP routing only; preserve TLS SNI, certificate and Host identity."""
+    def __init__(self, origin, address):
+        super().__init__()
+        parsed = urllib.parse.urlsplit(origin)
+        if parsed.scheme != "https" or origin != "https://" + str(parsed.hostname):
+            raise ValueError("canonical HTTPS API identity required")
+        self.hostname = parsed.hostname
+        self.address = public_api_connect_address(address)
+
+    def connection(self, host, **kwargs):
+        connection = http.client.HTTPSConnection(host, **kwargs)
+        if connection.host != self.hostname or connection.port != 443:
+            raise ValueError("API connection differs from declared HTTPS identity")
+        def connect(endpoint, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+            if endpoint != (self.hostname, 443):
+                raise ValueError("API transport target changed")
+            return socket.create_connection((self.address, 443), timeout, source_address)
+        connection._create_connection = connect
+        return connection
+
+    def https_open(self, request):
+        return self.do_open(self.connection, request, context=self._context)
+
+
 class API:
-    def __init__(self, origin, token):
+    def __init__(self, origin, token, connect_address=None):
         self.origin, self.token = origin, token
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        handlers = [urllib.request.ProxyHandler({}), NoRedirect()]
+        if connect_address is not None:
+            handlers.append(ExplicitAddressHTTPSHandler(origin, connect_address))
+        self.opener = urllib.request.build_opener(*handlers)
 
     def __call__(self, method, path, body=None):
         if not path.startswith("/v1/") or "\n" in path:
@@ -42,8 +83,10 @@ class API:
             raise ValueError("DNS compiler request exceeds bound")
         request = urllib.request.Request(self.origin + path, method=method, data=encoded,
                                          headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
+        phase = "connect_and_headers"
         try:
             with self.opener.open(request, timeout=45) as response:
+                phase = "response_body"
                 raw = response.read((16 << 20) + 1)
         except urllib.error.HTTPError as error:
             detail = error.read(8193).decode("utf-8", "replace")
@@ -53,8 +96,10 @@ class API:
             # not credentials. Keep it bounded so a rejected immutable compile
             # is actionable without dumping a large artifact or token.
             raise RuntimeError("artifact API returned HTTP " + str(error.code) + ": " + detail) from None
-        except Exception:
-            raise RuntimeError("artifact API transport unavailable") from None
+        except Exception as error:
+            failure = error.reason if isinstance(error, urllib.error.URLError) else error
+            cause = "timeout" if isinstance(failure, (TimeoutError, socket.timeout)) else "io_or_protocol"
+            raise RuntimeError("artifact API transport unavailable (phase=" + phase + "; cause=" + cause + ")") from None
         if len(raw) > 16 << 20:
             raise ValueError("DNS compiler response exceeds bound")
         return json.loads(raw)

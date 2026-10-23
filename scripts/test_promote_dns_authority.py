@@ -3,6 +3,8 @@ import datetime
 import json
 import os
 import subprocess
+import ssl
+from unittest.mock import MagicMock
 import unittest
 from unittest.mock import patch
 
@@ -37,14 +39,14 @@ class PrivateDNSPromotionTests(unittest.TestCase):
     def test_resume_replaces_only_physical_executors_with_original_operation_pins(self):
         previous = config()
         c = copy.deepcopy(previous)
-        c.update(schema="fugue.private-dns-promotion/v2", generation=2, verifier_revision="f" * 40,
+        c.update(schema="fugue.private-dns-promotion/v2", generation=2, verifier_revision="f" * 40, api_connect_address="8.8.8.8",
                  resume={"declaration": previous, "gray_release": {"id": "gray", "fencing_token": 4}})
         c["readers"][0].update(pod="replacement", uid="22222222-2222-2222-2222-222222222222", image="registry.example/dns@sha256:" + "f" * 64)
         p.validate(c)
         state = {"artifact": {"id": "parent", "content_hash": c["release_set"]["digest"]}, "release": release(previous, "gray")}
         with patch.object(p, "selected", return_value=state):
             self.assertEqual("gray", p.publication(c, None, "gray")["id"])
-        for mutate in [lambda v: v.update(generation=1), lambda v: v["release_set"].update(id="foreign"), lambda v: v["dns_artifact"].update(id="foreign"), lambda v: v["readers"][0].update(node_id="foreign"), lambda v: v["readers"][0].update(service_account="foreign"), lambda v: v["observation"].update(samples=4), lambda v: v["resume"]["declaration"].update(schema="fugue.private-dns-promotion/v2")]:
+        for mutate in [lambda v: v.update(api_connect_address="127.0.0.1"), lambda v: v.update(generation=1), lambda v: v["release_set"].update(id="foreign"), lambda v: v["dns_artifact"].update(id="foreign"), lambda v: v["readers"][0].update(node_id="foreign"), lambda v: v["readers"][0].update(service_account="foreign"), lambda v: v["observation"].update(samples=4), lambda v: v["resume"]["declaration"].update(schema="fugue.private-dns-promotion/v2")]:
             changed = copy.deepcopy(c)
             mutate(changed)
             with self.assertRaises(ValueError):
@@ -62,6 +64,30 @@ class PrivateDNSPromotionTests(unittest.TestCase):
                 p.promote(c, lambda *args: writes.append(args), lambda value: None)
             self.assertEqual(1, len(writes))
             self.assertEqual("/v1/admin/platform-config/release-set/prepare-consumers", writes[0][1])
+
+    def test_explicit_recovery_transport_preserves_https_identity(self):
+        from scripts.stage_dns_authority_transition import ExplicitAddressHTTPSHandler
+        handler = ExplicitAddressHTTPSHandler("https://api.example.test", "8.8.8.8")
+        self.assertTrue(handler._context.check_hostname)
+        self.assertEqual(ssl.CERT_REQUIRED, handler._context.verify_mode)
+        peer = MagicMock()
+        with patch("socket.create_connection", return_value=peer) as dial, patch.object(handler._context, "wrap_socket", return_value=peer) as tls:
+            connection = handler.connection("api.example.test", context=handler._context, timeout=5)
+            connection.connect()
+            self.assertEqual(("8.8.8.8", 443), dial.call_args.args[0])
+            self.assertEqual("api.example.test", tls.call_args.kwargs["server_hostname"])
+            self.assertEqual("api.example.test", connection.host)
+            with self.assertRaises(ValueError):
+                connection._create_connection(("foreign.example.test", 443), 5)
+        with patch("socket.create_connection", return_value=peer), patch.object(handler._context, "wrap_socket", side_effect=ssl.SSLCertVerificationError("identity rejected")):
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                handler.connection("api.example.test", context=handler._context).connect()
+        for host in ["foreign.example.test", "api.example.test:8443"]:
+            with self.assertRaises(ValueError):
+                handler.connection(host, context=handler._context)
+        for address in ["127.0.0.1", "10.0.0.1", "169.254.169.254", "localhost", "8.8.8.8:443"]:
+            with self.assertRaises(ValueError):
+                ExplicitAddressHTTPSHandler("https://api.example.test", address)
 
     def test_composition_cannot_enroll_workers_or_other_dns_readers(self):
         c = config()

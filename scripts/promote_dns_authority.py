@@ -19,7 +19,7 @@ import urllib.parse
 from scripts.bootstrap_cell_producer import digest, selected
 from scripts.observe_front_candidate import now, timestamp
 from scripts.reconcile_dns_transport import read_json, ready_pod
-from scripts.stage_dns_authority_transition import API, artifact
+from scripts.stage_dns_authority_transition import API, artifact, public_api_connect_address
 
 ID = re.compile(r"[a-zA-Z0-9_.-]{1,256}")
 NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
@@ -30,6 +30,9 @@ def validate(c):
     fields = {"schema", "generation", "origin", "authority_cell_id", "namespace", "release_set", "dns_artifact", "shadow_release", "readers", "observation", "verifier_revision"}
     if c.get("schema") == "fugue.private-dns-promotion/v2":
         fields.add("resume")
+        if "api_connect_address" in c:
+            fields.add("api_connect_address")
+            public_api_connect_address(c["api_connect_address"])
     if set(c) != fields or c["schema"] not in {"fugue.private-dns-promotion/v1", "fugue.private-dns-promotion/v2"} or type(c["generation"]) is not int or c["generation"] < 1:
         raise ValueError("explicit private DNS promotion declaration required")
     origin = urllib.parse.urlsplit(c["origin"])
@@ -435,7 +438,7 @@ def main():
         raise ValueError("private DNS promotion credential and evidence path required")
     def save(value):
         Path(args.evidence).write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
-    promote(c, API(c["origin"], os.environ["FUGUE_API_KEY"]), save)
+    promote(c, API(c["origin"], os.environ["FUGUE_API_KEY"], c.get("api_connect_address")), save)
 
 
 if __name__ == "__main__":

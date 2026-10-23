@@ -205,3 +205,14 @@ PostgreSQL transaction. Different parent content, gray candidates, missing or
 rolled-back history and unverified renewals remain rejected. Producer policy
 bindings, artifact signatures, current lane locks and fresh DNS convergence still
 run. No runtime proof is relabeled or assigned a newer fence by this rule.
+
+
+Private promotion may declare an explicit public `api_connect_address` for
+recovery when authoritative DNS still selects an impaired Edge. The HTTPS origin,
+Host header, TLS SNI, certificate verification and API credential remain unchanged;
+only the TCP destination changes. Redirects and ambient proxies remain disabled.
+The address is configuration data and must be canonical and globally routable.
+No node address is embedded in the client. This recovery path does not change
+public DNS answers or grant serving authority and still runs all promotion gates.
+Transport errors identify whether connection/headers or the response body failed,
+without exposing credentials or raw exception details.
