@@ -11,10 +11,12 @@ import (
 // comparing the complete newly downloaded content, never its claimed digest.
 // Every envelope, release, signature and runtime fact is still checked normally.
 // The fresh transport response and assignment must succeed before this runs.
-func reuseDNSArtifactContent(next *model.PlatformArtifact, previous model.PlatformArtifact) {
+func reuseDNSArtifactContent(next *model.PlatformArtifact, previous model.PlatformArtifact) bool {
 	if next.ID == previous.ID && next.ContentHash == previous.ContentHash && reflect.DeepEqual(next.Content, previous.Content) {
 		next.Content = previous.Content
+		return true
 	}
+	return false
 }
 
 func reuseDNSRouteSourceContent(next *model.PlatformDNSRouteSourceSnapshot, previous *dnsroutesource.Context) {

@@ -97,6 +97,7 @@ func (s *Service) decodeDNSCheckpoint(raw []byte) (dnsServingCheckpoint, error) 
 	if _, _, err := s.verifiedDNSCheckpointPayload(c); err != nil {
 		return c, err
 	}
+	compactDNSArtifactContent(&c.Candidate.Artifact)
 	return c, nil
 }
 
@@ -246,8 +247,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		return err
 	}
+	reusedContent := false
 	if old != nil {
-		reuseDNSArtifactContent(&artifact, old.record.Candidate.Artifact)
+		reusedContent = reuseDNSArtifactContent(&artifact, old.record.Candidate.Artifact)
 	}
 	candidate := dnsPlatformCandidate{Artifact: artifact, Assignment: a, Release: release}
 	desired := dnsPublication(dnsServingCheckpoint{Candidate: candidate})
@@ -263,6 +265,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	p, routeID, err := s.verifyDNSServingRelease(parent, candidate)
 	if err != nil {
 		return err
+	}
+	if !reusedContent {
+		compactDNSArtifactContent(&candidate.Artifact)
 	}
 	if old != nil {
 		prev := old.record.Candidate.Release

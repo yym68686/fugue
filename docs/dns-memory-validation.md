@@ -65,3 +65,19 @@ No result crosses a request boundary; unknown nested fields remain rejected. A
 synthetic 512-record full release verification benchmark decreased from median
 13,167,888 to 10,799,736 allocated bytes per operation (about 18%). This is an
 allocation benchmark; online RSS must still be measured after release.
+
+
+The retained DNS artifact's decoded JSON tree now shares identical compound
+values after full signature and semantic validation and before publication to
+serving readers. The operation walks children once, hashes typed boundaries and
+sorted keys, and checks complete value equality before sharing. A per-call index
+has a hard 65,536-entry bound and is discarded afterward. It retains no authority
+or runtime facts. Unsupported typed values bypass sharing; normal JSON encoding
+and artifact digests remain byte-for-byte unchanged. Already shared serving
+content is never mutated during a refresh. New content compacts once; unchanged
+refreshes reuse the prior immutable graph.
+
+A synthetic 4,096-record fixture retained 5.19 MB without compaction versus
+1.75 MB after. Compaction adds about 11 ms and 2.1 MB temporary allocations to
+initial decoding in that fixture. It is not an RSS result. This targets retained
+heap rather than claiming to eliminate the transport/decode allocation peak.
