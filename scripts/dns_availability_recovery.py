@@ -60,8 +60,10 @@ def check_delta(previous, successor):
 
 def validate_preview(before, after, runtime, policy, hostname):
     from scripts.configure_dynamic_quality import validate_availability_preview
-    if before.get('preview_mode') != 'configuration' or after.get('preview_mode') != 'configuration' or not before.get('business_snapshot_revision') or before.get('business_snapshot_revision') != after.get('business_snapshot_revision') or not before.get('intent') or before['intent'] != after.get('intent') or before['intent'] != runtime.get('intent'):
+    if before.get('preview_mode') != 'configuration' or after.get('preview_mode') != 'configuration' or not before.get('business_snapshot_revision') or not after.get('business_snapshot_revision') or not runtime.get('business_snapshot_revision') or not before.get('intent') or before['intent'] != after.get('intent') or before['intent'] != runtime.get('intent'):
         raise ValueError('availability recovery changed frozen business or static intent')
+    # Each HTTP preview has a distinct transaction revision. Exact intent
+    # equality, not equality of unrelated MVCC counters, binds business content.
     if before.get('issues', []) != after.get('issues', []):
         raise ValueError('availability recovery introduced a configuration issue')
     # Live evidence is required for the successor, never synthesized from a

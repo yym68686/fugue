@@ -34,7 +34,7 @@ class RecoveryLedger(Ledger):
     def __call__(self,method,path,body=None):
         if path.startswith('/v1/admin/platform-config/routes/project?'):
             if '&view=configuration' in path:
-                return {'preview_mode':'configuration','business_snapshot_revision':'fixed','intent':{'generation':'unchanged'},'issues':[{'code':'runtime_evidence_not_collected'}]}
+                return {'preview_mode':'configuration','business_snapshot_revision':'old' if 'old-policy' in path else 'new','intent':{'generation':'unchanged'},'issues':[{'code':'runtime_evidence_not_collected'}]}
             if 'producer_policy_artifact_id=old-policy' in path:
                 raise AssertionError('recovery depended on successful old runtime/DNS')
         return super().__call__(method,path,body)
