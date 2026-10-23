@@ -1,97 +1,97 @@
 {
-    "api_connect_address": "15.204.94.71",
-    "authority_cell_id": "cell-dns-availability",
-    "dns_artifact": {
+  "api_connect_address": "15.204.94.71",
+  "authority_cell_id": "cell-dns-availability",
+  "dns_artifact": {
+    "digest": "sha256:4921a25c27caf9a8e747a08130d41f9fa26445720cb8ea92e8be3e54798e249d",
+    "id": "artifact_1792759734_e2cfee92e6c0"
+  },
+  "generation": 7,
+  "namespace": "fugue-system",
+  "observation": {
+    "interval_seconds": 20,
+    "samples": 3,
+    "timeout_seconds": 600
+  },
+  "origin": "https://api.fugue.pro",
+  "readers": [
+    {
+      "container": "dns",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:2140972611a90d2f54e8a9fcd741f34d1b0d741a3a5cff44e6684b7949b45a37",
+      "node_id": "vps-591f4447",
+      "pod": "fugue-dns-independent-b-758b65f678-ntgz4",
+      "port": 7834,
+      "service_account": "fugue-dns-independent-b",
+      "uid": "ff4b4b2f-cf92-4a4b-aba2-5492dcd5b543"
+    },
+    {
+      "container": "dns",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:910fbbb5daf755c2aeaf520e8be6e096b4a16a88dc6393473da0ecb398de7802",
+      "node_id": "vps-84c8f0a9",
+      "pod": "fugue-dns-independent-a-bffcf787-mjjzj",
+      "port": 7834,
+      "service_account": "fugue-dns-independent-a",
+      "uid": "80abcf42-a854-484d-a9f1-e379b03a8726"
+    }
+  ],
+  "release_set": {
+    "digest": "sha256:08ca4bf3d6b68d0109eda5719637bb8cba365f760bf0a589e48174ebd4dd0074",
+    "id": "artifact_1792759736_3206ccabcd78"
+  },
+  "resume": {
+    "declaration": {
+      "authority_cell_id": "cell-dns-availability",
+      "dns_artifact": {
         "digest": "sha256:4921a25c27caf9a8e747a08130d41f9fa26445720cb8ea92e8be3e54798e249d",
         "id": "artifact_1792759734_e2cfee92e6c0"
-    },
-    "generation": 7,
-    "namespace": "fugue-system",
-    "observation": {
+      },
+      "generation": 3,
+      "namespace": "fugue-system",
+      "observation": {
         "interval_seconds": 20,
         "samples": 3,
         "timeout_seconds": 600
-    },
-    "origin": "https://api.fugue.pro",
-    "readers": [
+      },
+      "origin": "https://api.fugue.pro",
+      "readers": [
         {
-            "container": "dns",
-            "image": "ghcr.io/yym68686/fugue-edge@sha256:2140972611a90d2f54e8a9fcd741f34d1b0d741a3a5cff44e6684b7949b45a37",
-            "node_id": "vps-591f4447",
-            "pod": "fugue-dns-independent-b-758b65f678-ntgz4",
-            "port": 7834,
-            "service_account": "fugue-dns-independent-b",
-            "uid": "ff4b4b2f-cf92-4a4b-aba2-5492dcd5b543"
+          "container": "dns",
+          "image": "ghcr.io/yym68686/fugue-edge@sha256:a2508e71e84f40983a46cc09a6088daff23cbc94e8990812c17684c535772743",
+          "node_id": "vps-591f4447",
+          "pod": "fugue-dns-independent-b-78c47cb548-6wf5x",
+          "port": 7834,
+          "service_account": "fugue-dns-independent-b",
+          "uid": "99b851a3-fce5-45fa-8e16-b63ca6e19d6a"
         },
         {
-            "container": "dns",
-            "image": "ghcr.io/yym68686/fugue-edge@sha256:910fbbb5daf755c2aeaf520e8be6e096b4a16a88dc6393473da0ecb398de7802",
-            "node_id": "vps-84c8f0a9",
-            "pod": "fugue-dns-independent-a-bffcf787-mjjzj",
-            "port": 7834,
-            "service_account": "fugue-dns-independent-a",
-            "uid": "80abcf42-a854-484d-a9f1-e379b03a8726"
+          "container": "dns",
+          "image": "ghcr.io/yym68686/fugue-edge@sha256:3da88a2b76f2e79cbd10d82748d20a3f9ae833d4e4776154bc9da3ffb0582ce7",
+          "node_id": "vps-84c8f0a9",
+          "pod": "fugue-dns-independent-a-7848476596-4dcjq",
+          "port": 7834,
+          "service_account": "fugue-dns-independent-a",
+          "uid": "a805c0eb-5833-440f-980e-12078894eb41"
         }
-    ],
-    "release_set": {
+      ],
+      "release_set": {
         "digest": "sha256:08ca4bf3d6b68d0109eda5719637bb8cba365f760bf0a589e48174ebd4dd0074",
         "id": "artifact_1792759736_3206ccabcd78"
-    },
-    "resume": {
-        "declaration": {
-            "authority_cell_id": "cell-dns-availability",
-            "dns_artifact": {
-                "digest": "sha256:4921a25c27caf9a8e747a08130d41f9fa26445720cb8ea92e8be3e54798e249d",
-                "id": "artifact_1792759734_e2cfee92e6c0"
-            },
-            "generation": 3,
-            "namespace": "fugue-system",
-            "observation": {
-                "interval_seconds": 20,
-                "samples": 3,
-                "timeout_seconds": 600
-            },
-            "origin": "https://api.fugue.pro",
-            "readers": [
-                {
-                    "container": "dns",
-                    "image": "ghcr.io/yym68686/fugue-edge@sha256:a2508e71e84f40983a46cc09a6088daff23cbc94e8990812c17684c535772743",
-                    "node_id": "vps-591f4447",
-                    "pod": "fugue-dns-independent-b-78c47cb548-6wf5x",
-                    "port": 7834,
-                    "service_account": "fugue-dns-independent-b",
-                    "uid": "99b851a3-fce5-45fa-8e16-b63ca6e19d6a"
-                },
-                {
-                    "container": "dns",
-                    "image": "ghcr.io/yym68686/fugue-edge@sha256:3da88a2b76f2e79cbd10d82748d20a3f9ae833d4e4776154bc9da3ffb0582ce7",
-                    "node_id": "vps-84c8f0a9",
-                    "pod": "fugue-dns-independent-a-7848476596-4dcjq",
-                    "port": 7834,
-                    "service_account": "fugue-dns-independent-a",
-                    "uid": "a805c0eb-5833-440f-980e-12078894eb41"
-                }
-            ],
-            "release_set": {
-                "digest": "sha256:08ca4bf3d6b68d0109eda5719637bb8cba365f760bf0a589e48174ebd4dd0074",
-                "id": "artifact_1792759736_3206ccabcd78"
-            },
-            "schema": "fugue.private-dns-promotion/v1",
-            "shadow_release": {
-                "fencing_token": 3,
-                "id": "artifactrel_1792759742_74ad8e9b31e5"
-            },
-            "verifier_revision": "0a5e29551c513fca54f3817f0da301bef9067ed3"
-        },
-        "gray_release": {
-            "fencing_token": 1,
-            "id": "artifactrel_1792761921_4971b4465f8d"
-        }
-    },
-    "schema": "fugue.private-dns-promotion/v2",
-    "shadow_release": {
+      },
+      "schema": "fugue.private-dns-promotion/v1",
+      "shadow_release": {
         "fencing_token": 3,
         "id": "artifactrel_1792759742_74ad8e9b31e5"
+      },
+      "verifier_revision": "0a5e29551c513fca54f3817f0da301bef9067ed3"
     },
-    "verifier_revision": "ee74967887385c3350f3a5217ed50b53577f4549"
+    "gray_release": {
+      "fencing_token": 1,
+      "id": "artifactrel_1792761921_4971b4465f8d"
+    }
+  },
+  "schema": "fugue.private-dns-promotion/v2",
+  "shadow_release": {
+    "fencing_token": 3,
+    "id": "artifactrel_1792759742_74ad8e9b31e5"
+  },
+  "verifier_revision": "ee74967887385c3350f3a5217ed50b53577f4549"
 }
