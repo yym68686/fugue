@@ -52,6 +52,7 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 	if previous != nil && !dnsroutesource.Monotonic(previous.Snapshot, snapshot) {
 		return p, nil, errors.New("DNS routing ledger replay rejected")
 	}
+	reuseDNSRouteSourceContent(&snapshot, previous)
 	plans, err := dnsroutesource.Build(c.Artifact, snapshot, s.platformDNSKeys(), now)
 	if err != nil {
 		return p, nil, err

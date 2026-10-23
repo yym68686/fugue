@@ -44,3 +44,16 @@ an OOM. The newer window began about 75 seconds after process start, whereas the
 baseline process had been running longer; a later steady-state capture is still
 needed. This does not establish a tenfold reduction. The remaining sampled live
 heap is about 49.6 MiB and still dominated by decoded JSON object trees.
+
+
+A later window during private promotion verification measured 178.2 MiB RSS and
+796.51 MiB of allocations in 60 seconds, with no OOM. Observation load is higher
+during promotion, so 148 MiB must not be treated as the stable peak bound.
+
+The next optimization reuses immutable artifact content storage across retained
+and newly downloaded states only after complete deep equality. It does not skip
+any download, input validation or trust check. Fresh envelopes, signatures,
+release metadata, timestamps and selections remain distinct. A 4,096-record
+synthetic benchmark retained about 1.98 MB for the duplicate graph before reuse
+and under 1 KB after; the equality walk adds CPU work and download allocations
+still occur. This is a retained-heap result, not an online RSS guarantee.

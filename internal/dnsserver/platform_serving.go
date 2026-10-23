@@ -246,12 +246,18 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		return err
 	}
+	if old != nil {
+		reuseDNSArtifactContent(&artifact, old.record.Candidate.Artifact)
+	}
 	candidate := dnsPlatformCandidate{Artifact: artifact, Assignment: a, Release: release}
 	desired := dnsPublication(dnsServingCheckpoint{Candidate: candidate})
 	publicationObservation.Desired, publicationObservation.DesiredKnown = &desired, true
 	parent, err := client.ReleaseSet(ctx, id, a, release)
 	if err != nil {
 		return err
+	}
+	if old != nil {
+		reuseDNSArtifactContent(&parent, old.record.Parent)
 	}
 	desired.ParentDigest = parent.ContentHash
 	p, routeID, err := s.verifyDNSServingRelease(parent, candidate)
