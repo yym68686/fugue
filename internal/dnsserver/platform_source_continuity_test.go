@@ -19,7 +19,23 @@ import (
 )
 
 func TestApprovedSourceAdvancePreservesContinuousRecovery(t *testing.T) {
-	req, policies, activations := celldns.SourceAuthorizedRequest(t, false)
+	testApprovedSourceAdvance(t, false)
+}
+
+func TestUnrelatedSourcePolicyChangePreservesContinuousRecovery(t *testing.T) {
+	testApprovedSourceAdvance(t, true)
+}
+
+func TestUnrelatedQualitySourcePolicyPreservesContinuousRecovery(t *testing.T) {
+	testApprovedSourceAdvance(t, true, true)
+}
+
+func testApprovedSourceAdvance(t *testing.T, changePolicy bool, retained ...bool) {
+	global := len(retained) > 0 && retained[0]
+	req, policies, activations := celldns.SourceAuthorizedRequest(t, global)
+	if global {
+		celldns.RetainGlobalOnly(&req)
+	}
 	compiled := celldns.Compile(t, req)
 	keys := celldns.Keys()
 	now := time.Now().UTC()
@@ -47,7 +63,11 @@ func TestApprovedSourceAdvancePreservesContinuousRecovery(t *testing.T) {
 	probe := func(_ context.Context, host, path, address, state string, _ time.Duration) (routeprobe.Proof, error) {
 		for _, p := range plans.Probes {
 			if p.Hostname == host && p.Path == path && p.Address == address {
-				return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: p.EdgeGroupID, Digest: p.RouteDigest, Version: "observed", State: state, TrafficRelease: plans.Bindings[p.CellPublicationDigest], CheckedAt: checkedAt, ValidUntil: checkedAt.Add(time.Duration(payload.Policy.DNSReadiness.FactFreshnessSeconds) * time.Second)}, nil
+				group, digest := p.EdgeGroupID, p.RouteDigest
+				if p.PreviousAuthority != nil {
+					group, digest = p.PreviousAuthority.EdgeGroupID, p.PreviousAuthority.RouteDigest
+				}
+				return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: digest, Version: "observed", State: state, TrafficRelease: plans.Bindings[p.CellPublicationDigest], CheckedAt: checkedAt, ValidUntil: checkedAt.Add(time.Duration(payload.Policy.DNSReadiness.FactFreshnessSeconds) * time.Second)}, nil
 			}
 		}
 		t.Fatal("unexpected physical probe")
@@ -81,6 +101,14 @@ func TestApprovedSourceAdvancePreservesContinuousRecovery(t *testing.T) {
 		scope.Lanes[0].FencingToken = pub.Release.FencingToken
 		scope.Lanes[0].Version++
 	}
+	if changePolicy {
+		snapshot = celldns.AdvanceSourcePolicy(t, snapshot, func(policy *platformconfig.PolicySnapshot) {
+			if global {
+				policy.DNSAnswerRules = append(policy.DNSAnswerRules, platformconfig.DNSAnswerRule{NodeID: "dns-a", Hostname: "other.example.test", Type: "A", SelectionMode: model.DNSAnswerPolicyKindPhysicalOrder, PhysicalOrder: &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-b", "edge-a"}}, TTLSeconds: 60})
+			}
+			policy.RouteConstraints = append(policy.RouteConstraints, platformconfig.RoutePolicyConstraint{ID: "unrelated-policy", Hostname: "other.example.test", TenantID: "tenant-other", AppID: "app-other", RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true})
+		})
+	}
 	snapshot.SelectionDigest, _ = dnsroutesource.SelectionDigest(snapshot)
 	plans, err = dnsroutesource.Build(compiled.DNSArtifact, snapshot, keys, now)
 	if err != nil {
@@ -102,7 +130,7 @@ func TestApprovedSourceAdvancePreservesContinuousRecovery(t *testing.T) {
 }
 
 func TestDNSRouteRecoverySemanticBoundaries(t *testing.T) {
-	for _, scenario := range []string{"failed", "retained failure", "unobserved", "cached", "wrong binding", "restart", "changed DNS", "changed producer", "changed source policy", "changed endpoint", "changed route", "overlap"} {
+	for _, scenario := range []string{"failed", "retained failure", "unobserved", "cached", "wrong binding", "restart", "changed DNS", "changed producer", "unrelated source policy", "changed constraints", "removed eligibility", "changed endpoint", "changed route", "overlap"} {
 		t.Run(scenario, func(t *testing.T) {
 			req, policies, activations := celldns.SourceAuthorizedRequest(t, false)
 			compiled := celldns.Compile(t, req)
@@ -187,9 +215,16 @@ func TestDNSRouteRecoverySemanticBoundaries(t *testing.T) {
 						plans.Snapshot.Scopes[i].Publications[j].ProducerPolicy.ID += "-new"
 					}
 				}
-			case "changed source policy":
+			case "unrelated source policy":
 				binding.PolicyDigest, _ = platformconfig.Digest("changed source policy")
 				plans.Bindings[requirement.CellPublicationDigest] = &binding
+			case "changed constraints":
+				plans.RecoveryConstraints[requirement.ID], _ = platformconfig.Digest("stricter current availability")
+			case "removed eligibility":
+				previous := plans.Probes
+				plans.Probes = map[string]platformconfig.DNSReadinessProbe{}
+				observe(nil)
+				plans.Probes = previous
 			case "changed endpoint":
 				requirement.Address = "93.184.216.99"
 				plans.Probes[requirement.ID] = requirement
@@ -201,6 +236,7 @@ func TestDNSRouteRecoverySemanticBoundaries(t *testing.T) {
 				alternate.ID += "-other"
 				alternate.CellPublicationDigest += "other"
 				plans.Probes[alternate.ID] = alternate
+				plans.RecoveryConstraints[alternate.ID] = plans.RecoveryConstraints[requirement.ID]
 				alternateBinding := binding
 				alternateBinding.ReleaseID += "-other"
 				plans.Bindings[alternate.CellPublicationDigest] = &alternateBinding
@@ -225,7 +261,7 @@ func TestDNSRouteRecoverySemanticBoundaries(t *testing.T) {
 			at = at.Add(time.Second)
 			facts = []dnsReadinessFact{makeFact()}
 			observe(facts)
-			if scenario == "unobserved" {
+			if scenario == "unobserved" || scenario == "unrelated source policy" {
 				if !dnsAvailabilityRecovered(recovery, facts[0], time.Minute, at) {
 					t.Fatal("unobserved sweep erased continuity")
 				}

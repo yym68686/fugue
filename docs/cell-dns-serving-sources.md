@@ -136,7 +136,7 @@ of legacy sources remain separate migration steps.
 
 Recovery continuity for approved dynamic sources is keyed independently of the
 routing publication ID. Its identity includes the selected DNS artifact ID and
-digest, producer policy ID and digest, source scope and signed source policy,
+digest, producer policy ID and digest, source scope and the relevant record/target availability constraints,
 and the complete physical probe requirement with only publication identities
 removed. Endpoint, route behavior, ownership, state, freshness constraints and
 previous-authority group/digest remain bound. Only a fresh exact-publication
@@ -149,3 +149,17 @@ that recovery history. Unobserved work and repeated cached proofs add no
 successes. Histories remain bounded and volatile; restart begins recovery again.
 The original proof validity deadlines, source selection recheck and DNS-owned
 membership, quorum and recovery thresholds remain enforced independently.
+
+The source policy's complete digest is still authenticated and bound to each
+fresh proof, but is not a recovery-history identity. Unrelated record and quality
+ranking changes cannot reset another record's recovery. Build derives the history
+constraint digest after applying current signed restrictions: quorum, dual-stack
+requirements, failure-domain requirements, target identity/failure domains,
+single-publication requirements and that target's complete semantic dependencies
+are retained. Generation labels and unrelated records are excluded. Projection
+streams record/target contributions into bounded per-probe hashers rather than
+materializing a record/probe cross-product in memory.
+
+When an authenticated source plan removes eligibility, its inactive history is
+retired; re-admission must collect recovery again. A probe skipped by the bounded
+scheduler remains authorized in that plan and does not retire its history.

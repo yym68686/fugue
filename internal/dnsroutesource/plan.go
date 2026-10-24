@@ -26,12 +26,13 @@ type variant struct {
 	target platformconfig.DNSReadinessTarget
 }
 type Plans struct {
-	Snapshot   model.PlatformDNSRouteSourceSnapshot
-	Probes     map[string]platformconfig.DNSReadinessProbe
-	Bindings   map[string]*model.TrafficReleaseBinding
-	records    []platformconfig.DNSReadinessRecord
-	targets    map[string][]variant
-	targetKeys map[string][]string
+	RecoveryConstraints map[string]string
+	Snapshot            model.PlatformDNSRouteSourceSnapshot
+	Probes              map[string]platformconfig.DNSReadinessProbe
+	Bindings            map[string]*model.TrafficReleaseBinding
+	records             []platformconfig.DNSReadinessRecord
+	targets             map[string][]variant
+	targetKeys          map[string][]string
 }
 
 func targetKey(host string, t platformconfig.DNSReadinessTarget) string {
@@ -51,7 +52,7 @@ func Build(dns model.PlatformArtifact, snapshot model.PlatformDNSRouteSourceSnap
 	if json.Unmarshal(raw, &p) != nil || p.Source == nil || p.Plan == nil {
 		return nil, fmt.Errorf("DNS runtime source missing")
 	}
-	out := &Plans{Snapshot: snapshot, Probes: map[string]platformconfig.DNSReadinessProbe{}, Bindings: map[string]*model.TrafficReleaseBinding{}, targets: map[string][]variant{}, targetKeys: map[string][]string{}}
+	out := &Plans{RecoveryConstraints: map[string]string{}, Snapshot: snapshot, Probes: map[string]platformconfig.DNSReadinessProbe{}, Bindings: map[string]*model.TrafficReleaseBinding{}, targets: map[string][]variant{}, targetKeys: map[string][]string{}}
 	baselines := map[string]bool{}
 	records := map[string]platformconfig.DNSReadinessRecord{}
 	for _, r := range p.Plan.Records {
@@ -81,7 +82,12 @@ func Build(dns model.PlatformArtifact, snapshot model.PlatformDNSRouteSourceSnap
 				if err := platformconfig.RestrictDNSRuntimeSourcePlan(plan, *p.Source, pub, selected); err != nil {
 					return nil, err
 				}
+				recovery, err := recoveryConstraints(plan)
+				if err != nil {
+					return nil, err
+				}
 				for _, probe := range plan.Probes {
+					out.RecoveryConstraints[probe.ID] = recovery[probe.ID]
 					out.Probes[probe.ID] = probe
 					out.Bindings[probe.CellPublicationDigest] = b
 				}
