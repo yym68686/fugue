@@ -406,6 +406,74 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 			}
 		}
 	}
+	testDNSPublicationSuccessorGuard(t, s, req, parent, shadow, gray, full)
+	// Complete the winning successor through the same real capability,
+	// convergence and LKG gates. The guard must not only reject unsafe changes.
+	parent, shadow, _, err = s.GetActivePlatformArtifact(parent.ArtifactKind, parent.ScopeKey, "shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err = s.GetPlatformArtifact(parent.Content["artifact_ids"].([]any)[0].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report(shadow, 7, fullCaps, false)
+	guarded := func(channel string) model.PlatformArtifactReleaseRequest {
+		t.Helper()
+		lkg, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
+		if err != nil || lkg == nil {
+			t.Fatal("missing guarded promotion baseline", err)
+		}
+		guard := &model.PlatformDNSPublicationPrecondition{LKGID: lkg.ID, VerificationEvidenceHash: lkg.VerificationEvidenceHash, Lanes: map[string]*model.PlatformPublicationPrecondition{}}
+		for _, lane := range []string{"shadow", "gray", "full"} {
+			a, r, found, err := s.GetActivePlatformArtifact(parent.ArtifactKind, parent.ScopeKey, lane)
+			if err != nil || !found {
+				t.Fatal("missing exact DNS lane", err)
+			}
+			ref := &model.PlatformPublicationPrecondition{ArtifactID: a.ID, ContentHash: a.ContentHash, ReleaseID: r.ID, FencingToken: r.FencingToken}
+			guard.Lanes[lane] = ref
+			if r.ID == lkg.VerifiedByReleaseID {
+				guard.LKGPublication = *ref
+			}
+		}
+		r := model.PlatformArtifactReleaseRequest{ReleaseChannel: channel, DNSPublicationPrecondition: guard}
+		if channel == "gray" {
+			r.CanaryRuleRef = "cohort=complete"
+		}
+		r.IdempotencyKey, err = dnsPublicationKey(parent, r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	_, gray, _, _, err = s.ReleasePlatformArtifact(parent.ID, guarded("gray"), testPlatformPrincipal())
+	if err != nil {
+		t.Fatal("guarded gray rejected despite valid capabilities", err)
+	}
+	report(gray, 8, fullCaps, true)
+	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(gray.ID, completePlatformVerificationRequest(gray.FencingToken, false), testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
+		t.Fatal("successor gray replaced existing positive LKG", err)
+	}
+	_, full, _, _, err = s.ReleasePlatformArtifact(parent.ID, guarded("full"), testPlatformPrincipal())
+	if err != nil {
+		t.Fatal("guarded full rejected despite observed gray", err)
+	}
+	previousLKG, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
+	if err != nil || previousLKG == nil || previousLKG.ArtifactID == parent.ID {
+		t.Fatal("publishing full replaced LKG before successor verification", err)
+	}
+	report(full, 9, fullCaps, false)
+	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(full.ID, completePlatformVerificationRequest(full.FencingToken, false), testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
+		t.Fatal("negative full observations replaced positive LKG", err)
+	}
+	stillRetained, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
+	if err != nil || stillRetained == nil || stillRetained.ID != previousLKG.ID {
+		t.Fatal("failed verification lost previous positive LKG", err)
+	}
+	report(full, 10, fullCaps, true)
+	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(full.ID, completePlatformVerificationRequest(full.FencingToken, false), testPlatformPrincipal()); err != nil {
+		t.Fatal("observed successor full LKG failed", err)
+	}
 }
 
 func TestCellDNSAdmissionRejectsChangedReferencedAuthority(t *testing.T) {

@@ -29,7 +29,7 @@ CELL = re.compile(r"cell-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def retained_reference(config):
-    return config.get("schema") in ["fugue.dns-authority-transition-stage/v4", "fugue.dns-authority-transition-stage/v5"]
+    return config.get("schema") in ["fugue.dns-authority-transition-stage/v4", "fugue.dns-authority-transition-stage/v5", "fugue.dns-authority-transition-stage/v6"]
 
 
 def public_api_connect_address(value):
@@ -117,7 +117,16 @@ def validate(config):
         required.add("availability_route")
         from scripts.configure_dynamic_quality import validate_availability_routes
         validate_availability_routes([config.get("availability_route")])
-    if set(config) != required or config["schema"] not in ["fugue.dns-authority-transition-stage/v1", "fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3", "fugue.dns-authority-transition-stage/v4", "fugue.dns-authority-transition-stage/v5"] or type(config["generation"]) is not int or config["generation"] < 1:
+    if config.get("schema") == "fugue.dns-authority-transition-stage/v6":
+        from scripts.dns_publication_precondition import validate as validate_guard
+        required.add("publication_precondition")
+        guard = validate_guard(config.get("publication_precondition"))
+        if config.get("expected_previous_shadow") != guard["lanes"]["shadow"]:
+            raise ValueError("DNS successor shadow preconditions differ")
+        if "api_connect_address" in config:
+            required.add("api_connect_address")
+            public_api_connect_address(config["api_connect_address"])
+    if set(config) != required or config["schema"] not in ["fugue.dns-authority-transition-stage/v1", "fugue.dns-authority-transition-stage/v2", "fugue.dns-authority-transition-stage/v3", "fugue.dns-authority-transition-stage/v4", "fugue.dns-authority-transition-stage/v5", "fugue.dns-authority-transition-stage/v6"] or type(config["generation"]) is not int or config["generation"] < 1:
         raise ValueError("explicit versioned DNS shadow staging declaration required")
     if not CELL.fullmatch(config.get("authority_cell_id", "")):
         raise ValueError("neutral DNS authority required")
@@ -368,6 +377,11 @@ def identity(state):
 
 def no_serving_authority(config, api):
     scope = "authority-cell:" + config["authority_cell_id"]
+    if "publication_precondition" in config:
+        from scripts.dns_publication_precondition import check
+        current = selected(api, scope, "shadow", "release_set")
+        check(api, scope, config["publication_precondition"], current.get("artifact"), "shadow")
+        return
     for channel in ["gray", "full"]:
         if selected(api, scope, channel, "release_set").get("artifact"):
             raise ValueError("serving DNS authority exists; initial shadow staging cannot continue")
@@ -378,8 +392,7 @@ def stage(config, api, save):
     scope = "authority-cell:" + config["authority_cell_id"]
     no_serving_authority(config, api)
     before = selected(api, scope, "shadow", "release_set")
-    prefix = "dns-transition-shadow/" + digest(config) + "/"
-    if before.get("artifact") and before.get("release", {}).get("idempotency_key") == prefix + before["artifact"]["content_hash"]:
+    if before.get("artifact") and before.get("release", {}).get("idempotency_key") == staging_key(config, before["artifact"]):
         parent = artifact(api, before["artifact"]["id"], "release_set", scope)
         if parent["content"].get("publication_role") != "cell-dns" or parent["content"].get("artifact_kinds") != ["dns_answer_bundle"] or len(parent["content"].get("artifact_ids", [])) != 1:
             raise ValueError("completed DNS staging has foreign composition")
@@ -463,7 +476,10 @@ def stage(config, api, save):
             authorize_route_source(api, item, pub["parent"])
     if "global_producer_policy" in config:
         authorize_global_source(api, config["global_producer_policy"], previous["parent"])
-    api("POST", "/v1/admin/artifacts/" + parent["id"] + "/release", {"release_channel": "shadow", "idempotency_key": "dns-transition-shadow/" + digest(config) + "/" + parent["content_hash"], "reason": "explicit DNS transition staging; no public transport or serving publication"})
+    body = {"release_channel": "shadow", "idempotency_key": staging_key(config, parent), "reason": "explicit DNS transition staging; no public transport or serving publication"}
+    if "publication_precondition" in config:
+        body["dns_publication_precondition"] = config["publication_precondition"]
+    api("POST", "/v1/admin/artifacts/" + parent["id"] + "/release", body)
     current = selected(api, scope, "shadow", "release_set")
     if current["artifact"]["id"] != parent["id"] or current["artifact"]["content_hash"] != parent["content_hash"]:
         raise ValueError("compiled DNS shadow is not current")
@@ -471,6 +487,13 @@ def stage(config, api, save):
     evidence.update(shadow_release_id=current["release"]["id"], fencing_token=current["release"]["fencing_token"], completed_at=now().isoformat())
     save(evidence)
     return evidence
+
+
+def staging_key(config, parent):
+    if "publication_precondition" in config:
+        from scripts.dns_publication_precondition import key
+        return key(parent, "shadow", "", config["publication_precondition"])
+    return "dns-transition-shadow/" + digest(config) + "/" + parent["content_hash"]
 
 
 def main():
@@ -491,7 +514,7 @@ def main():
         raise ValueError("independent configuration writer and retained evidence required")
     def save(value):
         Path(args.evidence).write_text(canonical(value) + "\n")
-    print(canonical(stage(config, API(config["origin"], token), save)))
+    print(canonical(stage(config, API(config["origin"], token, config.get("api_connect_address")), save)))
 
 
 if __name__ == "__main__":

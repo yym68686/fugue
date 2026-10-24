@@ -16,6 +16,9 @@ func TestProducerReconfigurationAPIRejectsNullAndForeignArtifactWithoutWrites(t 
 		{"release_channel": "shadow", "producer_reconfiguration": nil},
 		{"release_channel": "shadow", "producer_reconfiguration": map[string]any{}},
 		{"release_channel": "shadow", "producer_reconfiguration": map[string]any{"unrecognized": true}},
+		{"release_channel": "shadow", "dns_publication_precondition": nil},
+		{"release_channel": "shadow", "dns_publication_precondition": map[string]any{}},
+		{"release_channel": "shadow", "dns_publication_precondition": map[string]any{"unrecognized": true}},
 	} {
 		r := performJSONRequest(t, s, http.MethodPost, path, admin, body)
 		if r.Code != http.StatusBadRequest {
@@ -25,6 +28,10 @@ func TestProducerReconfigurationAPIRejectsNullAndForeignArtifactWithoutWrites(t 
 	r := performJSONRequest(t, s, http.MethodPost, path, tenant, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", ProducerReconfiguration: &model.PlatformProducerReconfiguration{}})
 	if r.Code != http.StatusForbidden {
 		t.Fatal("tenant reached configuration publication", r.Code)
+	}
+	r = performJSONRequest(t, s, http.MethodPost, path, tenant, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", DNSPublicationPrecondition: &model.PlatformDNSPublicationPrecondition{}})
+	if r.Code != http.StatusForbidden {
+		t.Fatal("tenant reached DNS successor publication", r.Code)
 	}
 	ledger, err := st.ListPlatformReleaseMessages(artifact.ArtifactKind, artifact.ScopeKey, time.Time{}, 100)
 	if err != nil || len(ledger) != 0 {

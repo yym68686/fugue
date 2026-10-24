@@ -33,7 +33,22 @@ def validate(c):
         if "api_connect_address" in c:
             fields.add("api_connect_address")
             public_api_connect_address(c["api_connect_address"])
-    if set(c) != fields or c["schema"] not in {"fugue.private-dns-promotion/v1", "fugue.private-dns-promotion/v2"} or type(c["generation"]) is not int or c["generation"] < 1:
+    if c.get("schema") == "fugue.private-dns-promotion/v3":
+        from scripts.dns_publication_precondition import validate as validate_guard
+        fields.update({"publication_precondition", "release_channel"})
+        guard = validate_guard(c.get("publication_precondition"))
+        if c.get("release_channel") not in ["gray", "full"]:
+            raise ValueError("one explicit DNS successor channel required")
+        if "api_connect_address" in c:
+            fields.add("api_connect_address")
+            public_api_connect_address(c["api_connect_address"])
+        expected_shadow = {"artifact_id": c["release_set"]["id"], "content_hash": c["release_set"]["digest"], "release_id": c["shadow_release"]["id"], "fencing_token": c["shadow_release"]["fencing_token"]}
+        if guard["lanes"]["shadow"] != expected_shadow:
+            raise ValueError("DNS successor shadow differs from the guarded declaration")
+        gray = guard["lanes"]["gray"]
+        if c["release_channel"] == "full" and (gray is None or gray["artifact_id"] != c["release_set"]["id"] or gray["content_hash"] != c["release_set"]["digest"]):
+            raise ValueError("successor full requires its own exact gray publication")
+    if set(c) != fields or c["schema"] not in {"fugue.private-dns-promotion/v1", "fugue.private-dns-promotion/v2", "fugue.private-dns-promotion/v3"} or type(c["generation"]) is not int or c["generation"] < 1:
         raise ValueError("explicit private DNS promotion declaration required")
     origin = urllib.parse.urlsplit(c["origin"])
     if origin.scheme != "https" or c["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
@@ -101,18 +116,31 @@ def publication(c, api, channel):
         if channel == "gray" and c.get("resume"):
             raise ValueError("declared gray predecessor is no longer selected")
         return None
+    if c.get("schema") == "fugue.private-dns-promotion/v3" and channel == c["release_channel"]:
+        from scripts.bootstrap_cell_producer import authority_identity
+        if authority_identity(state) == c["publication_precondition"]["lanes"][channel]:
+            return None
     if a["id"] != c["release_set"]["id"] or a["content_hash"] != c["release_set"]["digest"] or r.get("status") != "active" or r.get("fencing_token", 0) <= 0:
         raise ValueError("private DNS publication differs from declaration")
     if channel == "shadow":
         if {"id": r["id"], "fencing_token": r["fencing_token"]} != c["shadow_release"]:
             raise ValueError("private DNS shadow predecessor changed")
     else:
+        if c.get("schema") == "fugue.private-dns-promotion/v3" and channel != c["release_channel"]:
+            from scripts.bootstrap_cell_producer import authority_identity
+            if authority_identity(state) != c["publication_precondition"]["lanes"][channel]:
+                raise ValueError("successor prerequisite publication changed")
+            return r
         operation = c
         if channel == "gray" and c.get("resume"):
             if {"id": r["id"], "fencing_token": r["fencing_token"]} != c["resume"]["gray_release"]:
                 raise ValueError("resumed gray release identity changed")
             operation = c["resume"]["declaration"]
-        if r.get("idempotency_key") != "git-private-dns/" + digest(operation) + "/" + channel or r.get("canary_rule_ref", "") != ("cohort=complete" if channel == "gray" else ""):
+        expected_key = "git-private-dns/" + digest(operation) + "/" + channel
+        if c.get("schema") == "fugue.private-dns-promotion/v3":
+            from scripts.dns_publication_precondition import key
+            expected_key = key(a, channel, "cohort=complete" if channel == "gray" else "", c["publication_precondition"])
+        if r.get("idempotency_key") != expected_key or r.get("canary_rule_ref", "") != ("cohort=complete" if channel == "gray" else ""):
             raise ValueError("private DNS serving lane belongs to another operation")
     return r
 
@@ -377,6 +405,8 @@ def retained_lkg(c, api, accepted):
 def promote(c, api, save):
     validate(c)
     inputs(c, api)
+    if c["schema"] == "fugue.private-dns-promotion/v3":
+        return promote_successor(c, api, save)
     if publication(c, api, "shadow") is None:
         raise ValueError("private DNS shadow is missing")
     gray, full = publication(c, api, "gray"), publication(c, api, "full")
@@ -423,6 +453,63 @@ def promote(c, api, save):
         if evidence[channel]["lkg"] is None:
             raise ValueError("private DNS verified LKG was not retained")
         save(evidence)
+    evidence["completed_at"] = now().isoformat()
+    save(evidence)
+    return evidence
+
+
+def promote_successor(c, api, save):
+    from scripts.dns_publication_precondition import check, key
+    channel, guard = c["release_channel"], c["publication_precondition"]
+    shadow = publication(c, api, "shadow")
+    if shadow is None:
+        raise ValueError("successor shadow is missing")
+    release = publication(c, api, channel)
+    parent = {"id": c["release_set"]["id"], "content_hash": c["release_set"]["digest"]}
+    evidence = {"schema": "fugue.private-dns-promotion-result/v1", "declaration_digest": digest(c), "public_transport_changed": False, "route_configuration_changed": False, "channel": channel}
+    save(evidence)
+    if release is None:
+        check(api, scope(c), guard)
+        if channel == "gray":
+            evidence["shadow"] = observe_shadow(c, api, shadow)
+            save(evidence)
+        else:
+            gray = publication(c, api, "gray")
+            if gray is None:
+                raise ValueError("successor gray prerequisite is missing")
+            evidence["gray"] = observe(c, api, gray)
+            save(evidence)
+        check(api, scope(c), guard)
+        canary = "cohort=complete" if channel == "gray" else ""
+        body = {"release_channel": channel, "idempotency_key": key(parent, channel, canary, guard), "dns_publication_precondition": guard, "reason": "exact DNS successor promotion preserving the previous positive LKG"}
+        if canary:
+            body["canary_rule_ref"] = canary
+        api("POST", "/v1/admin/artifacts/" + parent["id"] + "/release", body)
+        release = publication(c, api, channel)
+        if release is None:
+            raise ValueError("guarded DNS successor was not selected")
+    api("POST", "/v1/admin/platform-config/release-set/prepare-consumers", {"release_set_id": parent["id"], "artifact_release_id": release["id"]})
+    witness = observe(c, api, release)
+    evidence[channel] = {"release": {"id": release["id"], "fencing_token": release["fencing_token"]}, "witness": witness}
+    save(evidence)
+    if channel == "gray":
+        # Gray observes the successor; only full may replace an existing LKG.
+        evidence["previous_lkg"] = check(api, scope(c), guard, parent, channel, "cohort=complete")
+        evidence["completed_at"] = now().isoformat()
+        save(evidence)
+        return evidence
+    lkg = api("GET", "/v1/admin/artifacts/" + parent["id"] + "/lkg").get("lkg")
+    if lkg and lkg.get("verified_by_release_id") == release["id"]:
+        evidence[channel]["lkg"] = retained_lkg(c, api, [release["id"]])
+    else:
+        check(api, scope(c), guard, parent, channel, "cohort=complete" if channel == "gray" else "")
+        if publication(c, api, channel)["id"] != release["id"] or not datetime.timedelta(0) <= now() - timestamp(witness["completed_at"]) < datetime.timedelta(seconds=60):
+            raise ValueError("successor observation is no longer current")
+        convergence(c, api, release)
+        api("POST", "/v1/admin/artifact-releases/" + release["id"] + "/verify-lkg", {"fencing_token": release["fencing_token"], "allow_initial_lkg": False, "reason": "verified DNS successor with exact predecessor and advancing reader proofs", "evidence": {"consumer_convergence": True, "local_probe": True, "platform_evidence": True, "watch_window": True, "baseline_monotonic": True, "database_rollback_compatible": True, "evidence_refs": [digest(witness), parent["id"], release["id"]]}})
+        evidence[channel]["lkg"] = retained_lkg(c, api, [release["id"]])
+    if evidence[channel]["lkg"] is None:
+        raise ValueError("successor positive LKG was not retained")
     evidence["completed_at"] = now().isoformat()
     save(evidence)
     return evidence

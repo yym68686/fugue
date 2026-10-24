@@ -1582,7 +1582,7 @@ jobs:
           config="${declarations[0]}"
           [[ "$config" =~ ^deploy/environments/production/dns-authority-stage/cell-[a-z0-9-]+\.json$ ]]
           git fetch origin main
-          if git diff --quiet HEAD origin/main -- "$config" scripts/stage_dns_authority_transition.py scripts/test_stage_dns_authority_transition.py scripts/bootstrap_cell_producer.py scripts/observe_front_candidate.py scripts/publish_agent_edge_shadow.py; then
+          if git diff --quiet HEAD origin/main -- "$config" scripts/stage_dns_authority_transition.py scripts/test_stage_dns_authority_transition.py scripts/dns_publication_precondition.py scripts/bootstrap_cell_producer.py scripts/observe_front_candidate.py scripts/publish_agent_edge_shadow.py; then
             python3 -m unittest scripts.test_stage_dns_authority_transition
             python3 -m scripts.stage_dns_authority_transition "$config" --validate-only
             echo "config=$config" >> "$GITHUB_OUTPUT"
@@ -1657,7 +1657,7 @@ jobs:
           config="${declarations[0]}"
           [[ "$config" =~ ^deploy/environments/production/dns-authority-promotion/cell-[a-z0-9-]+\.json$ ]]
           git fetch origin main
-          if git diff --quiet HEAD origin/main -- "$config" scripts/promote_dns_authority.py scripts/test_promote_dns_authority.py scripts/stage_dns_authority_transition.py scripts/bootstrap_cell_producer.py scripts/reconcile_dns_transport.py scripts/observe_front_candidate.py scripts/publish_agent_edge_shadow.py scripts/build_dns_observation_verifier.sh; then
+          if git diff --quiet HEAD origin/main -- "$config" scripts/promote_dns_authority.py scripts/test_promote_dns_authority.py scripts/dns_publication_precondition.py scripts/stage_dns_authority_transition.py scripts/bootstrap_cell_producer.py scripts/reconcile_dns_transport.py scripts/observe_front_candidate.py scripts/publish_agent_edge_shadow.py scripts/build_dns_observation_verifier.sh; then
             python3 -m unittest scripts.test_promote_dns_authority
             python3 -m scripts.promote_dns_authority "$config" --validate-only
             revision="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["verifier_revision"])' "$config")"

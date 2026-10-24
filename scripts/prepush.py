@@ -513,9 +513,9 @@ def main() -> int:
         non_go_tasks["dns-selector-retirement-tests"] = ["python3", "-m", "unittest", "scripts.test_retire_dns_selector", "scripts.test_reconfigure_physical_dns", "scripts.test_audit_dns_selector_retirement"]
     if any(name in {"scripts/bootstrap_cell_inventory.py", "scripts/test_bootstrap_cell_inventory.py"} or name.startswith("deploy/environments/production/cell-inventory/") for name in paths):
         non_go_tasks["cell-inventory-bootstrap-tests"] = ["python3", "-m", "unittest", "scripts.test_bootstrap_cell_inventory"]
-    if any(name in {"scripts/stage_dns_authority_transition.py", "scripts/test_stage_dns_authority_transition.py"} or name.startswith("deploy/environments/production/dns-authority-stage/") for name in paths):
+    if any(name in {"scripts/stage_dns_authority_transition.py", "scripts/test_stage_dns_authority_transition.py", "scripts/dns_publication_precondition.py"} or name.startswith("deploy/environments/production/dns-authority-stage/") for name in paths):
         non_go_tasks["dns-authority-stage-tests"] = ["python3", "-m", "unittest", "scripts.test_stage_dns_authority_transition"]
-    if any(name in {"scripts/promote_dns_authority.py", "scripts/test_promote_dns_authority.py"} or name.startswith("deploy/environments/production/dns-authority-promotion/") for name in paths):
+    if any(name in {"scripts/promote_dns_authority.py", "scripts/test_promote_dns_authority.py", "scripts/dns_publication_precondition.py"} or name.startswith("deploy/environments/production/dns-authority-promotion/") for name in paths):
         non_go_tasks["dns-authority-promotion-tests"] = ["python3", "-m", "unittest", "scripts.test_promote_dns_authority"]
     if any(name in {"scripts/reconcile_dns_probe_egress.py", "scripts/test_reconcile_dns_probe_egress.py"} or name.startswith("deploy/environments/production/dns-probe-egress/") for name in paths):
         non_go_tasks["dns-probe-egress-tests"] = ["python3", "-m", "unittest", "scripts.test_reconcile_dns_probe_egress"]

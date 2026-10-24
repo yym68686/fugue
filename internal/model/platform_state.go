@@ -359,15 +359,23 @@ type PlatformProducerReconfiguration struct {
 	VerificationEvidenceHash string                          `json:"verification_evidence_hash"`
 }
 
+type PlatformDNSPublicationPrecondition struct {
+	Lanes                    map[string]*PlatformPublicationPrecondition `json:"lanes"`
+	LKGID                    string                                      `json:"lkg_id"`
+	LKGPublication           PlatformPublicationPrecondition             `json:"lkg_publication"`
+	VerificationEvidenceHash string                                      `json:"verification_evidence_hash"`
+}
+
 type PlatformArtifactReleaseRequest struct {
-	ProducerReconfiguration *PlatformProducerReconfiguration `json:"producer_reconfiguration,omitempty"`
-	ReleaseChannel          string                           `json:"release_channel"`
-	CanaryRuleRef           string                           `json:"canary_rule_ref,omitempty"`
-	SoftOverride            bool                             `json:"soft_override,omitempty"`
-	ForcePublish            bool                             `json:"force_publish,omitempty"`
-	KernelBreakGlass        *PlatformKernelBreakGlassRequest `json:"kernel_break_glass,omitempty"`
-	Reason                  string                           `json:"reason,omitempty"`
-	IdempotencyKey          string                           `json:"idempotency_key,omitempty"`
+	DNSPublicationPrecondition *PlatformDNSPublicationPrecondition `json:"dns_publication_precondition,omitempty"`
+	ProducerReconfiguration    *PlatformProducerReconfiguration    `json:"producer_reconfiguration,omitempty"`
+	ReleaseChannel             string                              `json:"release_channel"`
+	CanaryRuleRef              string                              `json:"canary_rule_ref,omitempty"`
+	SoftOverride               bool                                `json:"soft_override,omitempty"`
+	ForcePublish               bool                                `json:"force_publish,omitempty"`
+	KernelBreakGlass           *PlatformKernelBreakGlassRequest    `json:"kernel_break_glass,omitempty"`
+	Reason                     string                              `json:"reason,omitempty"`
+	IdempotencyKey             string                              `json:"idempotency_key,omitempty"`
 }
 
 type PlatformArtifactRollbackRequest struct {

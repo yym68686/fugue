@@ -393,13 +393,16 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 			return ErrNotFound
 		}
 		artifact = state.PlatformArtifacts[index]
-		if req.ProducerReconfiguration != nil && artifact.ID != id {
+		if (req.ProducerReconfiguration != nil || req.DNSPublicationPrecondition != nil) && artifact.ID != id {
 			return ErrInvalidInput
 		}
 		if err := validateProducerPolicyPublication(artifact, channel); err != nil {
 			return err
 		}
 		if err := validateProducerReconfiguration(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+			return err
+		}
+		if err := validateDNSPublicationGuard(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
 			return err
 		}
 		if err := validateProducerReleaseGuard(state, artifact, req, principal, s.platformArtifactSigningKeyring(), guard); err != nil {
@@ -528,6 +531,9 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 			}
 		}
 		if err := validateProducerReconfiguration(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+			return err
+		}
+		if err := validateDNSPublicationGuard(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
 			return err
 		}
 		return validateLeasedTrafficAdmission(state, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC())

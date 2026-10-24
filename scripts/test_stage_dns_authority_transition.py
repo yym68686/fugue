@@ -23,6 +23,44 @@ def fixture():
 
 
 class DNSAuthorityStageTest(unittest.TestCase):
+    def test_successor_stage_requires_all_exact_lanes_and_preserves_existing_policy(self):
+        from scripts import dns_publication_precondition as guard
+        cfg, old, _, intent, policy, facts = self.retained_fixture()
+        pin = {"artifact_id": "old-dns", "content_hash": "sha256:" + "a" * 64, "release_id": "old-shadow", "fencing_token": 2}
+        lanes = {channel: dict(pin, release_id="old-" + channel) for channel in ["shadow", "gray", "full"]}
+        cfg.update(schema="fugue.dns-authority-transition-stage/v6", expected_previous_shadow=lanes["shadow"], publication_precondition={"lanes": lanes, "lkg_id": "positive", "lkg_publication": lanes["full"], "verification_evidence_hash": "sha256:" + "d" * 64}, api_connect_address="8.8.8.8")
+        p.validate(cfg)
+        policy["dns_query_policy"] = {"availability_routes": [{"hostname": "app.example.test", "policy": {"version": "dns-availability-v1", "ordered_edge_ids": ["edge-a"], "recovery_successes": 3, "recovery_min_seconds": 60}}]}
+        request = p.compose(cfg, old, [], intent, policy, facts)
+        self.assertEqual(policy["dns_query_policy"], request["policy"]["dns_query_policy"])
+        parent = {"id": "candidate", "content_hash": "sha256:" + "b" * 64}
+        self.assertEqual(guard.key(parent, "shadow", "", cfg["publication_precondition"]), p.staging_key(cfg, parent))
+        for change in [lambda c: c["publication_precondition"]["lanes"].pop("gray"), lambda c: c["publication_precondition"].update(lkg_id=""), lambda c: c.update(expected_previous_shadow=None), lambda c: c.update(availability_route=policy["dns_query_policy"]["availability_routes"][0]), lambda c: c.update(api_connect_address="127.0.0.1")]:
+            altered = copy.deepcopy(cfg)
+            change(altered)
+            with self.assertRaises(ValueError): p.validate(altered)
+
+    def test_successor_guard_rejects_drift_and_accepts_only_its_exact_active_retry(self):
+        from scripts import dns_publication_precondition as guard
+        pin = {"artifact_id": "old", "content_hash": "sha256:" + "a" * 64, "release_id": "old-full", "fencing_token": 2}
+        lanes = {channel: dict(pin, release_id="old-" + channel) for channel in ["shadow", "gray", "full"]}
+        condition = {"lanes": lanes, "lkg_id": "positive", "lkg_publication": pin, "verification_evidence_hash": "sha256:" + "b" * 64}
+        lkg = {"id": "positive", "artifact_id": "old", "artifact_kind": "release_set", "scope_key": "authority-cell:cell-dns", "content_hash": pin["content_hash"], "verified_by_release_id": pin["release_id"], "verification_evidence_hash": condition["verification_evidence_hash"], "expires_at": (p.now()+datetime.timedelta(minutes=10)).isoformat()}
+        states = {channel: {"artifact": {"id": "old", "content_hash": pin["content_hash"], "status": "validated"}, "release": {"id": ref["release_id"], "fencing_token": 2, "status": "active"}} for channel, ref in lanes.items()}
+        def selected(_api, _scope, channel, _kind): return states[channel]
+        api = lambda *args: {"lkg": lkg}
+        with patch.object(guard, "selected", side_effect=selected):
+            guard.check(api, "authority-cell:cell-dns", condition)
+            successor = {"id": "new", "content_hash": "sha256:" + "c" * 64, "status": "validated"}
+            states["shadow"] = {"artifact": successor, "release": {"id": "new-shadow", "status": "active", "fencing_token": 3, "idempotency_key": guard.key(successor, "shadow", "", condition)}}
+            guard.check(api, "authority-cell:cell-dns", condition, successor, "shadow")
+            for channel in ["shadow", "gray", "full"]:
+                states[channel]["release"]["fencing_token"] += 1
+                with self.assertRaisesRegex(ValueError, "lane changed"): guard.check(api, "authority-cell:cell-dns", condition, successor, "shadow")
+                states[channel]["release"]["fencing_token"] -= 1
+            lkg["expires_at"] = (p.now()-datetime.timedelta(seconds=1)).isoformat()
+            with self.assertRaisesRegex(ValueError, "expired"): guard.check(api, "authority-cell:cell-dns", condition, successor, "shadow")
+
     def test_retained_availability_stage_changes_only_one_declared_host_policy(self):
         cfg, old, _, intent, policy, facts = self.retained_fixture()
         policy['dns_query_policy'] = {'ranking_mode': 'active'}

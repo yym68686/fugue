@@ -347,13 +347,16 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
 	}
-	if err := pgLockPlatformReleaseMutation(ctx, tx, id, guard != nil || NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow); err != nil {
+	if err := pgLockPlatformReleaseMutation(ctx, tx, id, guard != nil || req.DNSPublicationPrecondition != nil || NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 
 	artifact, err := pgGetPlatformArtifactForUpdate(ctx, tx, id, true)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
+	}
+	if req.DNSPublicationPrecondition != nil && artifact.ID != id {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
 	}
 
 	now := time.Now().UTC()
@@ -362,6 +365,9 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := s.pgProducerReconfiguration(ctx, tx, artifact, req); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if err := s.pgDNSPublicationGuard(ctx, tx, artifact, req); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := s.pgProducerReleaseGuard(ctx, tx, artifact, req, principal, guard); err != nil {
@@ -526,6 +532,9 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := s.pgProducerReconfiguration(ctx, tx, artifact, req); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if err := s.pgDNSPublicationGuard(ctx, tx, artifact, req); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := tx.Commit(); err != nil {

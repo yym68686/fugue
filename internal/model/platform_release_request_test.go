@@ -6,7 +6,7 @@ import (
 )
 
 func TestReleaseRequestCannotSilentlyOmitRequestedPrecondition(t *testing.T) {
-	for _, raw := range []string{`{"release_channel":"shadow","producer_reconfiguration":null}`, `{"release_channel":"shadow","producer_reconfiguration":{"unknown":true}}`, `{"release_channel":"shadow","unknown":true}`} {
+	for _, raw := range []string{`{"release_channel":"shadow","producer_reconfiguration":null}`, `{"release_channel":"shadow","producer_reconfiguration":{"unknown":true}}`, `{"release_channel":"shadow","dns_publication_precondition":null}`, `{"release_channel":"shadow","dns_publication_precondition":{"unknown":true}}`, `{"release_channel":"shadow","unknown":true}`} {
 		var request PlatformArtifactReleaseRequest
 		if json.Unmarshal([]byte(raw), &request) == nil {
 			t.Fatal("invalid precondition accepted", raw)

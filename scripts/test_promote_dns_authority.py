@@ -28,6 +28,63 @@ def lkg(c, channel):
 
 
 class PrivateDNSPromotionTests(unittest.TestCase):
+    def successor_config(self, channel="gray"):
+        c = config()
+        pin = {"artifact_id": "previous-parent", "content_hash": "sha256:" + "f" * 64, "release_id": "previous-full", "fencing_token": 2}
+        lanes = {lane: dict(pin, release_id="previous-" + lane) for lane in ["gray", "full"]}
+        lanes["shadow"] = {"artifact_id": c["release_set"]["id"], "content_hash": c["release_set"]["digest"], "release_id": c["shadow_release"]["id"], "fencing_token": c["shadow_release"]["fencing_token"]}
+        if channel == "full":
+            lanes["gray"] = dict(lanes["shadow"], release_id="observed-gray", fencing_token=3)
+        c.update(schema="fugue.private-dns-promotion/v3", release_channel=channel, publication_precondition={"lanes": lanes, "lkg_id": "positive", "lkg_publication": pin, "verification_evidence_hash": "sha256:" + "e" * 64})
+        return c
+
+    def test_successor_promotes_one_channel_only_with_atomic_guard_and_keeps_initial_lkg_disabled(self):
+        from scripts import dns_publication_precondition as guard
+        for channel in ["gray", "full"]:
+            with self.subTest(channel=channel):
+                c = self.successor_config(channel)
+                p.validate(c)
+                candidate = release(c, channel)
+                before = c["publication_precondition"]
+                calls, receipts = [], []
+                selected = {"shadow": release(c, "shadow"), channel: None}
+                if channel == "full": selected["gray"] = release(c, "gray")
+                def api(method, path, body=None):
+                    calls.append((method, path, body))
+                    if path.endswith("/release"):
+                        self.assertEqual(before, body["dns_publication_precondition"])
+                        self.assertEqual(channel, body["release_channel"])
+                        self.assertEqual(guard.key({"id": c["release_set"]["id"], "content_hash": c["release_set"]["digest"]}, channel, "cohort=complete" if channel == "gray" else "", before), body["idempotency_key"])
+                        selected[channel] = candidate
+                    if path.endswith("/lkg"):
+                        return {"lkg": {"verified_by_release_id": "previous-full"}}
+                    if path.endswith("/verify-lkg"):
+                        self.assertFalse(body["allow_initial_lkg"])
+                    return {}
+                witness = {"completed_at": p.now().isoformat()}
+                with patch.object(p, "inputs"), patch.object(p, "publication", side_effect=lambda _c, _api, lane: selected[lane]), patch.object(guard, "check") as check, patch.object(p, "observe_shadow", return_value=witness), patch.object(p, "observe", return_value=witness), patch.object(p, "convergence"), patch.object(p, "retained_lkg", return_value={"verified_by_release_id": candidate["id"]}):
+                    p.promote(c, api, receipts.append)
+                    self.assertEqual(3, check.call_count)
+                self.assertEqual(1, sum(path.endswith("/release") for _, path, _ in calls))
+                self.assertEqual(1 if channel == "full" else 0, sum(path.endswith("/verify-lkg") for _, path, _ in calls))
+
+    def test_successor_cannot_promote_full_from_previous_artifacts_gray(self):
+        c = self.successor_config("gray")
+        c["release_channel"] = "full"
+        with self.assertRaisesRegex(ValueError, "own exact gray"):
+            p.validate(c)
+        c = self.successor_config("gray")
+        with patch.object(p, "inputs"), patch.object(p, "publication", return_value=None), self.assertRaisesRegex(ValueError, "shadow"):
+            p.promote(c, lambda *args: self.fail("missing shadow mutated API"), lambda _: None)
+
+    def test_failed_successor_observation_never_verifies_lkg(self):
+        from scripts import dns_publication_precondition as guard
+        c = self.successor_config()
+        calls = []
+        with patch.object(p, "inputs"), patch.object(p, "publication", return_value=release(c, "gray")), patch.object(guard, "check"), patch.object(p, "observe", side_effect=ValueError("fresh proof missing")), self.assertRaisesRegex(ValueError, "fresh proof"):
+            p.promote(c, lambda *args: calls.append(args), lambda _: None)
+        self.assertTrue(all(not args[1].endswith("/verify-lkg") for args in calls))
+
     def test_pins_and_bounded_watch_are_mandatory(self):
         p.validate(config())
         for mutate in [lambda c: c.update(scope="global"), lambda c: c.update(generation=True), lambda c: c.update(origin="http://api.example.test"), lambda c: c["shadow_release"].update(fencing_token=0), lambda c: c["readers"][0].update(image="registry.example/dns:latest"), lambda c: c["observation"].update(samples=1), lambda c: c["observation"].update(interval_seconds=0), lambda c: c.update(readers=[]), lambda c: c["readers"].append(c["readers"][0])]:

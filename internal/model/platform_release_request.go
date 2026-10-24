@@ -19,8 +19,10 @@ func (r *PlatformArtifactReleaseRequest) UnmarshalJSON(raw []byte) error {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return err
 	}
-	if guard, exists := fields["producer_reconfiguration"]; exists && bytes.Equal(bytes.TrimSpace(guard), []byte("null")) {
-		return fmt.Errorf("producer_reconfiguration cannot be null")
+	for _, field := range []string{"producer_reconfiguration", "dns_publication_precondition"} {
+		if guard, exists := fields[field]; exists && bytes.Equal(bytes.TrimSpace(guard), []byte("null")) {
+			return fmt.Errorf("%s cannot be null", field)
+		}
 	}
 	*r = PlatformArtifactReleaseRequest(value)
 	return nil
