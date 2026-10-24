@@ -65,6 +65,21 @@ complete elapsed time and report digest. Results distinguish route, reference,
 capacity, physical code and evidence persistence failures. They do not claim to
 know whether the provider has reset a quota.
 
+`capacity_below_policy` requires a complete, authenticated subject transfer and
+a passing reference transfer. An HTTP rejection, incomplete body, missing
+attestation or transport failure is `capacity_unavailable`. A failed or slow
+reference is `reference_unavailable`, even when the subject was also slow. All
+three results retain the hold and reset recovery progress. The bounded audit ring
+also keeps failed rounds so their attempt IDs, status and failure stage can be
+investigated without inventing a throughput diagnosis.
+
+Capacity observations must originate on a verified public path. A request to an
+Edge's public IP from inside the Kubernetes cluster can be redirected through a
+Service and source-NATed to a private address. Front rejects that private peer;
+the resulting HTTP 503 is not a capacity measurement. Preserve this public-peer
+check. Qualifying an external observer and its signed, identical-payload control
+round is required before using that path for automatic capacity recovery.
+
 Each declaration retains its latest eight full rounds separately from the compact
 recovery checkpoint, bounded to 1 MiB. Full reports are not copied into DNS bundles.
 The signed parent pins compact successful evidence for historical membership;

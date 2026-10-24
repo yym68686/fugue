@@ -122,10 +122,10 @@ func (s *Server) probeCapacityRecovery(parent context.Context, hold platformprod
 	evidence, reason := s.evaluateCapacityRound(hold, reference.ID, report, before, checked)
 	// Retain a bounded audit ring separately from the compact signed projection;
 	// raw reports never enter every DNS consumer's retained configuration graph.
-	if reason == "capacity_verified" || reason == "capacity_below_policy" {
-		if err := s.retainCapacityRound(ctx, hold, report, before, checked); err != nil {
-			return fail("evidence_unavailable")
-		}
+	// Failed measurements are diagnostic evidence too. Retaining one never
+	// grants admission; only the independently validated successful result can.
+	if err := s.retainCapacityRound(ctx, hold, report, before, checked); err != nil {
+		return fail("evidence_unavailable")
 	}
 	validUntil := proof.ValidUntil
 	if referenceProof.ValidUntil.Before(validUntil) {
@@ -147,7 +147,7 @@ func (s *Server) evaluateCapacityRound(hold platformproducer.OfflineEdge, refere
 	keys := s.clientProbeKeys()
 	var held *platformproducer.CapacityRecoveryEvidence
 	raw, _ := json.Marshal(report)
-	result := "capacity_verified"
+	subjectUnavailable, referenceUnavailable, belowPolicy := false, false, false
 	for _, permit := range report.Plan.Permits {
 		if permit.ObserverID != platformproducer.OfflineRecoveryDigest(hold) || permit.Hostname != hold.Recovery.Hostname || permit.Path != hold.Recovery.Path || permit.TrafficClass != hold.Recovery.Capacity.TrafficClass || (permit.EdgeID != hold.EdgeID && permit.EdgeID != reference) || clientmeasurement.VerifyPermit(permit, keys, at) != nil {
 			return nil, "capacity_unavailable"
@@ -158,13 +158,21 @@ func (s *Server) evaluateCapacityRound(hold platformproducer.OfflineEdge, refere
 			return nil, "capacity_unavailable"
 		}
 		if outcome.Failure != "" || outcome.HTTPStatus != 200 || outcome.Attestation == nil {
-			result = "capacity_below_policy"
+			if permit.EdgeID == reference {
+				referenceUnavailable = true
+			} else {
+				subjectUnavailable = true
+			}
 			continue
 		}
 		elapsed := outcome.CompletedAt.Sub(outcome.StartedAt).Seconds() * 1000
 		e := &platformproducer.CapacityRecoveryEvidence{CheckedAt: at, ReportDigest: clientmeasurement.Digest(raw), ReferenceEdgeID: reference, Bytes: outcome.BytesReceived, ElapsedMilliseconds: elapsed, BytesPerSecond: float64(outcome.BytesReceived) * 1000 / elapsed, Code: code, RouteDigest: permit.RouteDigest}
 		if !e.Passes(*hold.Recovery.Capacity, hold.EdgeID) {
-			result = "capacity_below_policy"
+			if permit.EdgeID == reference {
+				referenceUnavailable = true
+			} else {
+				belowPolicy = true
+			}
 		}
 		if permit.EdgeID == hold.EdgeID {
 			backend := outcome.Attestation.ClientNetwork.Backend
@@ -174,10 +182,16 @@ func (s *Server) evaluateCapacityRound(hold platformproducer.OfflineEdge, refere
 			held = e
 		}
 	}
-	if result != "capacity_verified" || held == nil {
+	if referenceUnavailable {
+		return nil, "reference_unavailable"
+	}
+	if subjectUnavailable || held == nil {
+		return nil, "capacity_unavailable"
+	}
+	if belowPolicy {
 		return nil, "capacity_below_policy"
 	}
-	return held, result
+	return held, "capacity_verified"
 }
 
 type retainedCapacityRound struct {

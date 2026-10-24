@@ -82,10 +82,12 @@ func TestCapacityRecoveryRoundRequiresBothSignaturesFullElapsedAndPhysicalIdenti
 		}
 		raw.Plan.Permits[i], _ = clientmeasurement.SignPermit(p, s.clientProbeKeys())
 	}
-	for _, scenario := range []string{"valid", "forged_permit", "forged_attestation", "revoked_key", "foreign_observer", "wrong_class", "held_slow_headers", "reference_slow_headers", "partial_body", "foreign_front", "foreign_service", "wrong_socket_slot", "future", "duplicate_edge", "missing_reference", "reference_failed"} {
+	for _, scenario := range []string{"valid", "forged_permit", "forged_attestation", "revoked_key", "foreign_observer", "wrong_class", "held_slow_headers", "reference_slow_headers", "partial_body", "foreign_front", "foreign_service", "wrong_socket_slot", "future", "duplicate_edge", "missing_reference", "reference_failed", "subject_failed", "subject_rejected", "subject_slow_reference_rejected"} {
 		t.Run(scenario, func(t *testing.T) {
 			issued := raw.Plan.Permits[0].IssuedAt
-			report := capacityReport(t, s, raw.Plan, issued.Add(time.Second), issued.Add(3*time.Second))
+			plan := raw.Plan
+			plan.Permits = append([]model.EdgeClientProbePermit(nil), raw.Plan.Permits...)
+			report := capacityReport(t, s, plan, issued.Add(time.Second), issued.Add(3*time.Second))
 			code := testCapacityCode()
 			revoked := s.bundleRevokedKeyIDs
 			defer func() { s.bundleRevokedKeyIDs = revoked }()
@@ -122,6 +124,20 @@ func TestCapacityRecoveryRoundRequiresBothSignaturesFullElapsedAndPhysicalIdenti
 				report.Outcomes = report.Outcomes[:1]
 			case "reference_failed":
 				report.Outcomes[1].Failure = "body"
+			case "subject_failed":
+				report.Outcomes[0].Failure = "body"
+				report.Outcomes[0].BytesReceived--
+			case "subject_rejected":
+				report.Outcomes[0].Failure = "response"
+				report.Outcomes[0].HTTPStatus = 503
+				report.Outcomes[0].Attestation = nil
+				report.Outcomes[0].BytesReceived = 0
+			case "subject_slow_reference_rejected":
+				report.Outcomes[0].CompletedAt = issued.Add(8 * time.Second)
+				report.Outcomes[1].Failure = "response"
+				report.Outcomes[1].HTTPStatus = 503
+				report.Outcomes[1].Attestation = nil
+				report.Outcomes[1].BytesReceived = 0
 			}
 			e, reason := s.evaluateCapacityRound(h, "edge-b", report, code, time.Now().UTC())
 			if (e != nil && reason == "capacity_verified") != (scenario == "valid") {
@@ -130,12 +146,21 @@ func TestCapacityRecoveryRoundRequiresBothSignaturesFullElapsedAndPhysicalIdenti
 			if e != nil && e.ElapsedMilliseconds != 2000 {
 				t.Fatal("used body-only time for capacity", e)
 			}
+			want := map[string]string{
+				"valid": "capacity_verified", "held_slow_headers": "capacity_below_policy",
+				"reference_slow_headers": "reference_unavailable", "reference_failed": "reference_unavailable",
+				"subject_failed": "capacity_unavailable", "subject_rejected": "capacity_unavailable",
+				"subject_slow_reference_rejected": "reference_unavailable",
+			}[scenario]
+			if want != "" && reason != want {
+				t.Fatalf("capacity classification: got %s, want %s", reason, want)
+			}
 		})
 	}
 }
 
 func TestCapacityRecoveryPersistsSignedRoundBeforeAdmittingAndRejectsCodeChange(t *testing.T) {
-	for _, scenario := range []string{"valid", "code_changed", "reference_failed", "report_replaced", "evidence_corrupt", "deadline", "code_missing"} {
+	for _, scenario := range []string{"valid", "code_changed", "reference_failed", "subject_rejected", "report_replaced", "evidence_corrupt", "deadline", "code_missing"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, p, h, _ := capacityRecoveryFixture(t)
 			code := testCapacityCode()
@@ -173,6 +198,12 @@ func TestCapacityRecoveryPersistsSignedRoundBeforeAdmittingAndRejectsCodeChange(
 				if scenario == "reference_failed" {
 					report.Outcomes[1].Failure = "body"
 				}
+				if scenario == "subject_rejected" {
+					report.Outcomes[0].Failure = "response"
+					report.Outcomes[0].HTTPStatus = 503
+					report.Outcomes[0].Attestation = nil
+					report.Outcomes[0].BytesReceived = 0
+				}
 				if scenario == "report_replaced" {
 					report.Plan.RoundID = "another-round"
 				}
@@ -203,6 +234,21 @@ func TestCapacityRecoveryPersistsSignedRoundBeforeAdmittingAndRejectsCodeChange(
 				}
 			} else if observed.Admitted || observed.Successes != 0 {
 				t.Fatal("failure retained old progress", observed)
+			}
+			if scenario == "subject_rejected" || scenario == "reference_failed" {
+				want := "capacity_unavailable"
+				index := 0
+				if scenario == "reference_failed" {
+					want, index = "reference_unavailable", 1
+				}
+				if observed.LastResult != want || observed.Capacity != nil {
+					t.Fatal("inconclusive round claimed a capacity measurement", observed)
+				}
+				raw, err := s.store.ReadObservationCheckpoint(context.Background(), platformproducer.OfflineRecoveryKey(h)+"/capacity-rounds")
+				var rounds []retainedCapacityRound
+				if err != nil || json.Unmarshal(raw, &rounds) != nil || len(rounds) != 1 || rounds[0].Report.Outcomes[index].Failure == "" {
+					t.Fatal("failed measurement was not retained for diagnosis", err)
+				}
 			}
 			// A second replica/restart cannot immediately reuse the round.
 			before := measureCalls
