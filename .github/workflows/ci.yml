@@ -13,7 +13,7 @@ env:
   PYTHONDONTWRITEBYTECODE: "1"
   # Checkout recovers independently of builds and other configuration jobs.
   FUGUE_RUNNER_WORKSPACE_REPAIR: |
-    import os, pathlib, stat, sys
+    import os, pathlib, stat, sys, uuid
     workspace, temporary = map(pathlib.Path, sys.argv[1:3])
     uid, gid = map(int, sys.argv[3:5])
     root = temporary.resolve().parent
@@ -43,9 +43,20 @@ env:
                     pending.append(path)
             if any((pathlib.Path(directory) / name).is_symlink() for name in dirs):
                 raise SystemExit('generated metadata contains a linked directory')
-    for path in pending:
-        os.chown(path, uid, gid, follow_symlinks=False)
-    print('Restored generated metadata entries:', len(pending))
+    if pending:
+        quarantine = workspace.parent / ('.' + workspace.name + '-generated-metadata-quarantine')
+        if quarantine.is_symlink():
+            raise SystemExit('metadata quarantine must not be a link')
+        quarantine.mkdir(mode=0o700, exist_ok=True)
+        if quarantine.stat().st_uid != uid or quarantine.stat().st_dev != owner.st_dev:
+            raise SystemExit('metadata quarantine ownership or device differs')
+        for relative in ['scripts/__pycache__', '.git/worktrees']:
+            target = workspace / relative
+            if any(path == target or target in path.parents for path in pending):
+                destination = quarantine / (target.name + '-' + uuid.uuid4().hex)
+                os.rename(target, destination)
+                print('Preserved generated metadata:', relative, destination.name)
+    print('Quarantined root-owned generated entries:', len(pending))
 
 jobs:
   edge_release_hold_plan:
@@ -85,9 +96,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Verify the exact current hold declaration and executor
@@ -144,9 +155,9 @@ jobs:
     timeout-minutes: 8
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Validate the exact returned-member declaration
@@ -176,9 +187,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select the declared volume expansion
@@ -285,9 +296,9 @@ jobs:
     timeout-minutes: 8
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select the exact independent CPU policy declaration
@@ -338,9 +349,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select exact independently declared identity maintenance operation
@@ -391,9 +402,9 @@ jobs:
     timeout-minutes: 40
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select exact independently declared SSH transport operation
@@ -447,9 +458,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one fixed-node retention declaration
@@ -500,9 +511,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read, actions: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select exact independently reviewed SSH front stage and provenance
@@ -631,9 +642,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read, actions: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select independent runtime intent and exact verified artifact receipt
@@ -742,9 +753,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select the current independently reviewed SSH keyring declaration
@@ -870,9 +881,9 @@ jobs:
     timeout-minutes: 30
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current explicit Agent activation intent
@@ -947,9 +958,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select declared Runtime Agent identity
@@ -984,9 +995,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current observational Agent policy
@@ -1046,9 +1057,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one explicit cell trust declaration and exact predecessor
@@ -1113,9 +1124,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select exact unchanged producer renewal declaration
@@ -1191,9 +1202,9 @@ jobs:
     timeout-minutes: 20
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one explicit cell producer declaration
@@ -1246,9 +1257,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one existing Cell producer reconfiguration
@@ -1341,9 +1352,9 @@ jobs:
     env:
       CONFIG: ${{ needs.physical_dns_plan.outputs.config }}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Validate unchanged physical routing configuration and executor
@@ -1379,9 +1390,9 @@ jobs:
     timeout-minutes: 15
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select independently declared endpoint maintenance
@@ -1463,9 +1474,9 @@ jobs:
     env:
       CONFIG: ${{ needs.dynamic_quality_plan.outputs.config }}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Validate exact unchanged quality configuration
@@ -1535,9 +1546,9 @@ jobs:
     env:
       CONFIG: ${{ needs.dns_selector_retirement_plan.outputs.config }}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Validate unchanged retirement declaration and executor
@@ -1607,9 +1618,9 @@ jobs:
     env:
       CONFIG: ${{ needs.dns_probe_egress_plan.outputs.config }}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Validate current exact public Service and DNS network declarations
@@ -1669,9 +1680,9 @@ jobs:
     timeout-minutes: 20
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one explicit DNS shadow transition declaration
@@ -1742,9 +1753,9 @@ jobs:
     timeout-minutes: 25
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Load the reviewed DNS verification toolchain
@@ -1798,9 +1809,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one established Cell member declaration
@@ -1876,9 +1887,9 @@ jobs:
     timeout-minutes: 20
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one explicit initial inventory declaration
@@ -1955,9 +1966,9 @@ jobs:
     timeout-minutes: 30
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one explicit private Cell promotion declaration
@@ -2009,9 +2020,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current independent trust declaration
@@ -2061,9 +2072,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one explicit read-only standby observation
@@ -2151,9 +2162,9 @@ jobs:
     env:
       CONFIG: ${{ needs.front_replacement_plan.outputs.config }}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Require unchanged explicit Front replacement
@@ -2215,9 +2226,9 @@ jobs:
     env:
       CONFIG: ${{ needs.front_replacement_plan.outputs.config }}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}'}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -2235,9 +2246,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current read-only Front observation
@@ -2294,9 +2305,9 @@ jobs:
       target: ${{ steps.transport.outputs.target }}
       observation_target: ${{ steps.transport.outputs.observation_target }}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current isolated Front probe transport
@@ -2391,9 +2402,9 @@ jobs:
     timeout-minutes: 15
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}'}
       - name: Verify public Fronts from actual restricted application networks
@@ -2422,9 +2433,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current internal Front transport stage
@@ -2483,9 +2494,9 @@ jobs:
     timeout-minutes: 10
     permissions: {actions: read, contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current explicit Front public handoff
@@ -2580,9 +2591,9 @@ jobs:
     timeout-minutes: 5
     permissions: {actions: read, contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}'}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -2603,9 +2614,9 @@ jobs:
     env:
       HANDOFF_CONFIG: ${{ needs.front_serving_handoff.outputs.target }}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current read-only Front drain observation
@@ -2668,9 +2679,9 @@ jobs:
     timeout-minutes: 12
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Load the reviewed DNS verification toolchain
@@ -2768,9 +2779,9 @@ jobs:
     timeout-minutes: 25
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select exact independent DNS executor retirement
@@ -2837,9 +2848,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select one independent DNS port retirement
@@ -2907,9 +2918,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Detect database protection configuration changes
@@ -2960,9 +2971,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Reconcile drain observation proxy access
@@ -2995,9 +3006,9 @@ jobs:
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Detect observability configuration change
@@ -3030,9 +3041,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Publish and verify independent node resource policy
@@ -3115,9 +3126,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Publish independent storage policy when changed
@@ -3145,9 +3156,9 @@ jobs:
     timeout-minutes: 15
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Detect memory policy configuration changes
@@ -3245,9 +3256,9 @@ jobs:
     timeout-minutes: 15
     permissions: {contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select the current declared external controller release
@@ -3477,9 +3488,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Detect diagnostic configuration or artifact updates
@@ -3514,9 +3525,9 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Activate the verified independent diagnostic package
@@ -3536,9 +3547,9 @@ jobs:
     concurrency: {group: fugue-production-traffic-safety-stage0, cancel-in-progress: false}
     permissions: {actions: write, contents: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - name: Checkout exact safety configuration
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
@@ -3594,9 +3605,9 @@ jobs:
     concurrency: {group: fugue-production-release-guardian, cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3611,9 +3622,9 @@ jobs:
     concurrency: {group: fugue-production-schema, cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3628,9 +3639,9 @@ jobs:
     concurrency: {group: fugue-production-telemetry, cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3645,9 +3656,9 @@ jobs:
     concurrency: {group: fugue-production-runtime-agent-canary, cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3662,9 +3673,9 @@ jobs:
     concurrency: {group: fugue-production-ssh-control, cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3679,9 +3690,9 @@ jobs:
     concurrency: {group: fugue-production-api, cancel-in-progress: false, queue: max}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3696,9 +3707,9 @@ jobs:
     concurrency: {group: fugue-production-controller, cancel-in-progress: false, queue: max}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3717,9 +3728,9 @@ jobs:
     concurrency: {group: '${{ matrix.concurrency }}', cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3738,9 +3749,9 @@ jobs:
     concurrency: {group: '${{ matrix.concurrency }}', cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3759,9 +3770,9 @@ jobs:
     concurrency: {group: '${{ matrix.concurrency }}', cancel-in-progress: false, queue: max}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3776,9 +3787,9 @@ jobs:
     concurrency: {group: fugue-production-edge-image-gc, cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
@@ -3794,9 +3805,9 @@ jobs:
     concurrency: {group: fugue-production-image-cache, cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Restore bounded generated metadata ownership before checkout
+      - name: Quarantine inaccessible generated metadata before checkout
         working-directory: ${{ runner.temp }}
-        run: sudo -n python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
