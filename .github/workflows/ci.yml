@@ -13,7 +13,7 @@ env:
   PYTHONDONTWRITEBYTECODE: "1"
   # Checkout recovers independently of builds and other configuration jobs.
   FUGUE_RUNNER_WORKSPACE_REPAIR: |
-    import os, pathlib, stat, sys
+    import os, pathlib, stat, sys, uuid
     workspace, temporary = map(pathlib.Path, sys.argv[1:3])
     uid, gid = map(int, sys.argv[3:5])
     root = temporary.resolve().parent
@@ -43,7 +43,18 @@ env:
                     pending.append(path)
             if any((pathlib.Path(directory) / name).is_symlink() for name in dirs):
                 raise SystemExit('generated metadata contains a linked directory')
-    print('Observed root-owned generated entries:', len(pending))
+    if pending:
+        parent = workspace.parent
+        parent_info = parent.stat()
+        if parent_info.st_uid != uid or parent_info.st_dev != owner.st_dev:
+            raise SystemExit('workspace parent ownership or device is unexpected')
+        quarantine = parent / ('.' + workspace.name + '-checkout-quarantine-' + uuid.uuid4().hex)
+        if quarantine.exists() or quarantine.is_symlink():
+            raise SystemExit('checkout quarantine path already exists')
+        os.rename(workspace, quarantine)
+        print('Preserved stale checkout:', quarantine.name, 'root-owned entries:', len(pending))
+    else:
+        print('Observed root-owned generated entries: 0')
 
 jobs:
   edge_release_hold_plan:

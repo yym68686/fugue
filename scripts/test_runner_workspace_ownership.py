@@ -10,7 +10,7 @@ WORKFLOW = Path(__file__).resolve().parent.parent / '.github/workflows/ci.yml'
 
 def repair_source():
     lines = WORKFLOW.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip() == 'import os, pathlib, stat, sys')
+    start = next(i for i, line in enumerate(lines) if line.strip() == 'import os, pathlib, stat, sys, uuid')
     end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'jobs:')
     return '\n'.join(line[4:] for line in lines[start:end])
 
@@ -46,18 +46,37 @@ class RunnerWorkspaceOwnershipTests(unittest.TestCase):
                     row[4] = uid + 1
                 return os.stat_result(row)
 
+            changes = []
+            actual_rename = os.rename
+
+            def rename(source, destination):
+                changes.append((source, destination))
+                actual_rename(source, destination)
+
             args = ['inspect', str(workspace), str(temporary), str(uid), str(gid)]
             if scenario == 'wrong path':
                 args[1] = str(root)
-            with patch.object(sys, 'argv', args), patch.object(Path, 'stat', observed):
+            with patch.object(sys, 'argv', args), patch.object(Path, 'stat', observed), patch.object(os, 'rename', side_effect=rename):
                 if scenario in ['symlink', 'hardlink', 'foreign', 'wrong path']:
                     with self.assertRaises(SystemExit):
                         exec(compile(repair_source(), str(WORKFLOW), 'exec'), {})
+                    self.assertEqual([], changes)
                 else:
                     exec(compile(repair_source(), str(WORKFLOW), 'exec'), {})
-            self.assertEqual('preserve', untouched.read_text())
-            self.assertTrue(all((workspace / rel / 'generated').read_text() == 'retained content'
-                                for rel in ['scripts/__pycache__', '.git/worktrees/fixture']))
+                    self.assertEqual(0 if scenario == 'owned' else 1, len(changes))
+                    if changes:
+                        source, destination = changes[0]
+                        self.assertEqual(workspace, source)
+                        self.assertEqual(workspace.parent, destination.parent)
+                        self.assertTrue(destination.name.startswith('.repository-checkout-quarantine-'))
+                        self.assertFalse(source.exists())
+                        self.assertEqual('preserve', (destination / 'business-input').read_text())
+                        self.assertEqual('retained content', (destination / 'scripts/__pycache__/generated').read_text())
+                        self.assertEqual('retained content', (destination / '.git/worktrees/fixture/generated').read_text())
+            if not changes:
+                self.assertEqual('preserve', untouched.read_text())
+                self.assertTrue(all((workspace / rel / 'generated').read_text() == 'retained content'
+                                    for rel in ['scripts/__pycache__', '.git/worktrees/fixture']))
 
     def test_bounded_metadata_audit(self):
         for scenario in ['root', 'owned', 'symlink', 'hardlink', 'foreign', 'wrong path']:
@@ -76,7 +95,9 @@ class RunnerWorkspaceOwnershipTests(unittest.TestCase):
             self.assertIn('working-directory: ${{ runner.temp }}', step)
             self.assertIn('python3 -B -c', step)
             checkout = step.index('actions/checkout')
-            self.assertIn('clean: false', step[checkout:step.find('\n', checkout) + 200])
+            with_line = step.find('with:', checkout)
+            self.assertNotEqual(-1, with_line)
+            self.assertIn('clean: false', step[with_line:step.find('\n', with_line) + 200])
             self.assertLess(step.index('FUGUE_RUNNER_WORKSPACE_REPAIR'), checkout)
 
 
