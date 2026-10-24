@@ -48,7 +48,6 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	base := "/api/v1/namespaces/" + url.PathEscape(s.controlPlaneNamespace)
 	var node corev1.Node
 	var authority corev1.ConfigMap
-	var journals corev1.ConfigMapList
 	var services corev1.ServiceList
 	var pods corev1.PodList
 	read := func(path string, out any) bool { return readCapacityMetadata(ctx, client, path, out) == nil }
@@ -65,11 +64,18 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	if authority.UID == "" || authority.DeletionTimestamp != nil || authority.Labels["fugue.pro/authority-store"] != "true" {
 		return fail("code_identity_conflict", "authority_metadata")
 	}
-	if !read(base+"/configmaps?"+url.Values{"labelSelector": {"fugue.pro/group=" + edge.EdgeGroupID + ",fugue.pro/authority-kind=transition-journal"}, "limit": {"1"}}.Encode(), &journals) || journals.Continue != "" {
-		return fail("code_observation_unavailable", "transition_journal")
-	}
-	if len(journals.Items) != 0 {
-		return fail("code_transition_in_progress", "transition_journal")
+	// Guardian's protocol has exactly two journal names. Reading those
+	// objects needs no ConfigMap enumeration permission. Only authenticated
+	// not-found responses establish absence; authorization/transport errors do not.
+	for _, prefix := range []string{"fugue-authority-transition-prepared-", "fugue-authority-transition-activated-"} {
+		var journal corev1.ConfigMap
+		err := readCapacityMetadata(ctx, client, base+"/configmaps/"+url.PathEscape(prefix+edge.EdgeGroupID), &journal)
+		if err == nil {
+			return fail("code_transition_in_progress", "transition_journal")
+		}
+		if !errors.Is(err, errCapacityMetadataNotFound) {
+			return fail("code_observation_unavailable", "transition_journal")
+		}
 	}
 	if !read(base+"/services?limit=256", &services) || services.Continue != "" {
 		return fail("code_observation_unavailable", "service_inventory")
@@ -214,6 +220,8 @@ func runningCapacityImage(pod corev1.Pod, containerName string) string {
 	return ""
 }
 
+var errCapacityMetadataNotFound = errors.New("capacity metadata object not found")
+
 // Kubernetes metadata is trusted for identity, but every response still has a
 // memory bound. Unlike the exact Front health contract, Kubernetes objects may
 // contain newer fields that this client does not consume.
@@ -231,6 +239,9 @@ func readCapacityMetadata(ctx context.Context, client *clusterNodeClient, path s
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return errCapacityMetadataNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
 		return errors.New("capacity metadata read unavailable")
 	}

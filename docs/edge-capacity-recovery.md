@@ -128,3 +128,7 @@ configuration, revalidate group/physical identities under bounded leases, drain
 old connections before replacing their Worker, and retain DNS/code isolation until
 all final capacity and publication gates pass. These execution steps are not
 implemented by the advisory planner.
+
+Recovery reads the two named prepared/activated transition journals with GET. It
+does not require listing ConfigMaps. Only an authenticated 404 means no journal;
+403, transport errors and timeouts remain unknown and keep isolation in place.

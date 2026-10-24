@@ -21,7 +21,7 @@ func testCapacityCode() platformproducer.CapacityCodeIdentity {
 }
 
 func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.T) {
-	for _, scenario := range []string{"valid", "old_worker_image", "wrong_source", "wrong_group", "foreign_target", "duplicate_target", "wrong_slot", "false_runtime_image", "unready_worker", "unready_front", "deleting_node", "no_authority_owner", "bad_authority_digest", "transition_in_progress", "front_old_authority", "front_target_loopback", "missing_endpoints", "truncated_inventory", "false_caddy_image", "wrong_caddy_port", "node_hostport", "foreign_node_hostport", "wrong_hostport", "bound_other_host", "node_unavailable", "front_unavailable", "authority_changed", "older_same_slot", "older_other_slot"} {
+	for _, scenario := range []string{"valid", "old_worker_image", "wrong_source", "wrong_group", "foreign_target", "duplicate_target", "wrong_slot", "false_runtime_image", "unready_worker", "unready_front", "deleting_node", "no_authority_owner", "bad_authority_digest", "transition_in_progress", "front_old_authority", "front_target_loopback", "missing_endpoints", "truncated_inventory", "false_caddy_image", "wrong_caddy_port", "node_hostport", "foreign_node_hostport", "wrong_hostport", "bound_other_host", "node_unavailable", "front_unavailable", "authority_changed", "older_same_slot", "older_other_slot", "activated_transition", "journal_forbidden"} {
 		t.Run(scenario, func(t *testing.T) {
 			node, service, front, endpoints := publicNetworkFixture()
 			code := testCapacityCode()
@@ -122,12 +122,17 @@ func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.
 						cm.Labels = nil
 					}
 					response = cm
-				case "/api/v1/namespaces/system/configmaps":
-					journals := corev1.ConfigMapList{}
-					if scenario == "transition_in_progress" {
-						journals.Items = []corev1.ConfigMap{{}}
+				case "/api/v1/namespaces/system/configmaps/fugue-authority-transition-prepared-group-a", "/api/v1/namespaces/system/configmaps/fugue-authority-transition-activated-group-a":
+					if scenario == "journal_forbidden" {
+						http.Error(w, "forbidden", http.StatusForbidden)
+						return
 					}
-					response = journals
+					if scenario == "transition_in_progress" && strings.Contains(r.URL.Path, "prepared-") || scenario == "activated_transition" && strings.Contains(r.URL.Path, "activated-") {
+						response = corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{UID: "journal-uid"}}
+					} else {
+						http.NotFound(w, r)
+						return
+					}
 				case "/api/v1/namespaces/system/services":
 					response = corev1.ServiceList{Items: []corev1.Service{service}}
 				case "/api/v1/namespaces/system/pods":
@@ -168,13 +173,13 @@ func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.
 			if (err == nil) != (scenario == "valid" || scenario == "node_hostport") {
 				t.Fatal(scenario, got, err)
 			}
-			if scenario == "node_unavailable" || scenario == "front_unavailable" || scenario == "transition_in_progress" || scenario == "authority_changed" || scenario == "older_same_slot" || scenario == "older_other_slot" {
+			if scenario == "node_unavailable" || scenario == "front_unavailable" || scenario == "transition_in_progress" || scenario == "authority_changed" || scenario == "activated_transition" || scenario == "journal_forbidden" || scenario == "older_same_slot" || scenario == "older_other_slot" {
 				var diagnostic *capacityCodeError
 				if !errors.As(err, &diagnostic) {
 					t.Fatal("missing typed code observation failure", err)
 				}
 				want := "code_observation_unavailable"
-				if scenario == "transition_in_progress" {
+				if scenario == "transition_in_progress" || scenario == "activated_transition" {
 					want = "code_transition_in_progress"
 				}
 				if scenario == "authority_changed" {
