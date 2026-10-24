@@ -5,7 +5,7 @@
     "digest": "sha256:d7f69c6fe64beb026ea801de0c523e6f85cb34071543c4bfec93c202c0b90078",
     "id": "artifact_1792840059_ad3dcf48fbc8"
   },
-  "generation": 10,
+  "generation": 11,
   "namespace": "fugue-system",
   "observation": {
     "interval_seconds": 20,
@@ -22,10 +22,10 @@
         "release_id": "artifactrel_1792781953_f9bfc2000ce9"
       },
       "gray": {
-        "artifact_id": "artifact_1792759736_3206ccabcd78",
-        "content_hash": "sha256:08ca4bf3d6b68d0109eda5719637bb8cba365f760bf0a589e48174ebd4dd0074",
-        "fencing_token": 1,
-        "release_id": "artifactrel_1792761921_4971b4465f8d"
+        "artifact_id": "artifact_1792840060_7560e6955647",
+        "content_hash": "sha256:82f5feb99e8423a9d3273b648e8650099d98575eac9fd1ae4f1b58cd2df24dcb",
+        "fencing_token": 2,
+        "release_id": "artifactrel_1792850949_05e4310a722b"
       },
       "shadow": {
         "artifact_id": "artifact_1792840060_7560e6955647",
@@ -46,21 +46,21 @@
   "readers": [
     {
       "container": "dns",
-      "image": "ghcr.io/yym68686/fugue-edge@sha256:6f5e8d8f2e4b3fefa0c0686a6bd08e86ab5b0cb8609a09f6984677bbe69ac31d",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:76c4db781f87e6bb6bb94f0bc19571c6d2102d093acde0f572ca00662fd5766b",
       "node_id": "vps-591f4447",
-      "pod": "fugue-dns-independent-b-d9846545b-njplg",
+      "pod": "fugue-dns-independent-b-b595996c4-wsxnv",
       "port": 7834,
       "service_account": "fugue-dns-independent-b",
-      "uid": "6a6ff60a-6a85-40b6-9a32-2a516e5182e1"
+      "uid": "6863b317-8da4-47c0-bb12-9cf180b8e14e"
     },
     {
       "container": "dns",
-      "image": "ghcr.io/yym68686/fugue-edge@sha256:550eab710f660172eae5688d6437f21b827af082d985c4672096e70979bd7eca",
+      "image": "ghcr.io/yym68686/fugue-edge@sha256:6ad6f501c1158b48df1966dcd61d6c580bce259e2c8c54eb226e5908403b12aa",
       "node_id": "vps-84c8f0a9",
-      "pod": "fugue-dns-independent-a-675574f556-fhvkq",
+      "pod": "fugue-dns-independent-a-57989777bb-g8vbl",
       "port": 7834,
       "service_account": "fugue-dns-independent-a",
-      "uid": "be597621-d321-4314-8634-f2772bef8461"
+      "uid": "4e96cdd6-d493-4aec-ac39-1500860937fb"
     }
   ],
   "release_channel": "gray",
@@ -73,5 +73,5 @@
     "fencing_token": 4,
     "id": "artifactrel_1792840062_b7f98ebbc242"
   },
-  "verifier_revision": "90bc509262291bf8bff240daa02ff3e4f8e3d21a"
+  "verifier_revision": "4783f5defbb3d4acceb4f4f458f06f8962f62d5c"
 }
