@@ -347,10 +347,11 @@ func (c *kubernetesLogCollector) kubernetesLogTargets(ctx context.Context, label
 			break
 		}
 		for _, container := range kubernetesLogContainerNames(pod) {
-			if !kubernetesContainerHasLogs(pod, container) {
-				continue
+			if kubernetesContainerHasLogs(pod, container) {
+				targets = append(targets, kubernetesLogTarget{pod: pod, container: container})
 			}
-			targets = append(targets, kubernetesLogTarget{pod: pod, container: container})
+			// A replacement waiting to start can still have unread logs from
+			// its previous process, especially during CrashLoopBackOff.
 			for _, status := range append(append([]corev1.ContainerStatus(nil), pod.Status.ContainerStatuses...), pod.Status.InitContainerStatuses...) {
 				if status.Name == container && status.LastTerminationState.Terminated != nil {
 					targets = append(targets, kubernetesLogTarget{pod: pod, container: container, previous: true})
