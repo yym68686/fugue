@@ -510,8 +510,12 @@ func TestCellDNSAdmissionRejectsChangedReferencedAuthority(t *testing.T) {
 				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, v)
 				state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: v.LaneKey, ActiveReleaseID: v.ID, FencingToken: v.FencingToken})
 			}
-			if !errors.Is(validateCellDNSReferencesInState(state, c.DNSArtifact, celldns.Keys()), ErrConflict) {
+			err := validateCellDNSReferencesInState(state, c.DNSArtifact, celldns.Keys())
+			if !errors.Is(err, ErrConflict) {
 				t.Fatal("stale dependency admitted")
+			}
+			if PlatformReleaseFailureStage(err) != "routing_source_selection" {
+				t.Fatal("source failure lost diagnostic stage", err)
 			}
 		})
 	}

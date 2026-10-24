@@ -23,7 +23,9 @@ func validateCellDNSReferencesInState(state *model.State, child model.PlatformAr
 	if err := validateDNSRouteProducerBindings(state, child, keys); err != nil {
 		return err
 	}
-	fail := func() error { return fmt.Errorf("%w: referenced Cell publication is no longer selected", ErrConflict) }
+	fail := func() error {
+		return platformReleaseRejected("routing_source_selection", fmt.Errorf("%w: referenced Cell publication is no longer selected", ErrConflict))
+	}
 	dependencies, err := platformconfig.DNSRouteDependencies(child)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrConflict, err)

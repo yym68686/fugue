@@ -398,6 +398,7 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 	}
 	artifact, release, message, lkg, err := s.store.ReleasePlatformArtifact(r.PathValue("artifact_id"), req, principal)
 	if err != nil {
+		s.logPlatformReleaseRejection(releaseArtifact, req.ReleaseChannel, err)
 		s.writeStoreError(w, err)
 		return
 	}

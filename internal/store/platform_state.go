@@ -397,16 +397,16 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 			return ErrInvalidInput
 		}
 		if err := validateProducerPolicyPublication(artifact, channel); err != nil {
-			return err
+			return platformReleaseRejected("producer_policy", err)
 		}
 		if err := validateProducerReconfiguration(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return err
+			return platformReleaseRejected("producer_reconfiguration", err)
 		}
 		if err := validateDNSPublicationGuard(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return err
+			return platformReleaseRejected("dns_precondition", err)
 		}
 		if err := validateProducerReleaseGuard(state, artifact, req, principal, s.platformArtifactSigningKeyring(), guard); err != nil {
-			return err
+			return platformReleaseRejected("producer_authority", err)
 		}
 		now := time.Now().UTC()
 		overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
@@ -465,7 +465,7 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 		}
 		if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelGray {
 			if err := validateTrafficCanary(artifact, req.CanaryRuleRef, state.PlatformArtifacts, s.platformArtifactSigningKeyring()); err != nil {
-				return err
+				return platformReleaseRejected("canary", err)
 			}
 		}
 		decision := platformsafety.EvaluateArtifactReleaseWithOverride(
@@ -478,16 +478,16 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 			s.platformArtifactSigningKeyring(),
 		)
 		if !decision.Pass {
-			return ErrConflict
+			return platformReleaseRejected("artifact_release_policy", ErrConflict)
 		}
 		if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelFull {
 			now = time.Now().UTC()
 			if err := validateFullReleaseSetInState(state, artifact, s.platformArtifactSigningKeyring(), now); err != nil {
-				return err
+				return platformReleaseRejected("serving_convergence", err)
 			}
 		}
 		if err := validateLeasedTrafficAdmission(state, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return err
+			return platformReleaseRejected("capability_admission", err)
 		}
 		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
 		if err != nil {
@@ -531,12 +531,12 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 			}
 		}
 		if err := validateProducerReconfiguration(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return err
+			return platformReleaseRejected("producer_reconfiguration", err)
 		}
 		if err := validateDNSPublicationGuard(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return err
+			return platformReleaseRejected("dns_precondition", err)
 		}
-		return validateLeasedTrafficAdmission(state, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC())
+		return platformReleaseRejected("capability_admission", validateLeasedTrafficAdmission(state, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()))
 	})
 	return artifact, release, message, lkg, err
 }

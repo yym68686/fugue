@@ -91,3 +91,11 @@ and replays materialization and selector validation at that original time. The
 witness is diagnostic evidence, not signed serving authorization; artifact and
 source signature verification remain separate. It never renews proof timestamps,
 modifies validation gates or writes a serving checkpoint.
+
+Rejected release requests emit a bounded `platform_release_rejected` operator
+log with a fixed validation stage, error class, hashed artifact/scope identity,
+content digest and channel. Raw errors, credentials, request bodies and artifact
+content are excluded. The original error chain and HTTP conflict behavior are
+unchanged. More specific source-selection failures retain their stage through
+outer admission checks; this distinguishes a routing-reference conflict from
+capability, convergence or lane/LKG precondition failures without weakening them.

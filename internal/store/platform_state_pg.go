@@ -362,16 +362,16 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
 	if err := validateProducerPolicyPublication(artifact, channel); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("producer_policy", err)
 	}
 	if err := s.pgProducerReconfiguration(ctx, tx, artifact, req); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("producer_reconfiguration", err)
 	}
 	if err := s.pgDNSPublicationGuard(ctx, tx, artifact, req); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("dns_precondition", err)
 	}
 	if err := s.pgProducerReleaseGuard(ctx, tx, artifact, req, principal, guard); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("producer_authority", err)
 	}
 	overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
 	if err != nil {
@@ -423,7 +423,7 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel != model.PlatformArtifactReleaseChannelShadow {
 		promotionSnapshot, err = s.pgFullReleaseSetSnapshot(ctx, tx, artifact)
 		if err != nil {
-			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("reference_snapshot", err)
 		}
 	}
 	lane, err := pgNextPlatformReleaseLane(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
@@ -451,7 +451,7 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	}
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelGray {
 		if err := s.pgValidateTrafficCanary(ctx, tx, artifact, req.CanaryRuleRef); err != nil {
-			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("canary", err)
 		}
 	}
 	decision := platformsafety.EvaluateArtifactReleaseWithOverride(
@@ -464,16 +464,16 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		s.platformArtifactSigningKeyring(),
 	)
 	if !decision.Pass {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("artifact_release_policy", ErrConflict)
 	}
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelFull {
 		if err := validateFullReleaseSetInState(promotionSnapshot, artifact, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("serving_convergence", err)
 		}
 		now = time.Now().UTC()
 	}
 	if err := validateLeasedTrafficAdmission(promotionSnapshot, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("capability_admission", err)
 	}
 	entry := buildPlatformArtifactReleaseLedgerEntry(
 		artifact,
@@ -525,17 +525,17 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	}
 	if promotionSnapshot != nil && channel == model.PlatformArtifactReleaseChannelFull {
 		if err := validateFullReleaseSetInState(promotionSnapshot, artifact, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("serving_convergence", err)
 		}
 	}
 	if err := validateLeasedTrafficAdmission(promotionSnapshot, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("capability_admission", err)
 	}
 	if err := s.pgProducerReconfiguration(ctx, tx, artifact, req); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("producer_reconfiguration", err)
 	}
 	if err := s.pgDNSPublicationGuard(ctx, tx, artifact, req); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("dns_precondition", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
