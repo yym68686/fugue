@@ -77,6 +77,8 @@ type Service struct {
 	platformParent                *Service
 	PlatformTokenFile             string
 	platformConsumerMu            sync.Mutex
+	isolatedShadowStarted         atomic.Bool
+	shadowValidationParent        *Service
 	dnsProbeHistories             dnsProbeHistoryStore
 	servingDNSProbes              dnsReadinessScheduler
 	candidateDNSProbes            dnsReadinessScheduler

@@ -71,3 +71,13 @@ release leaves current serving observations and artifacts intact. Readers must
 subsequently use separate local proof state and the isolated endpoint before an
 established authority can validate a successor; the storage/API release alone does
 not activate that reader behavior or promote gray/full.
+
+Scoped DNS readers run the isolated validator beside serving refresh. It has no
+listeners or serving sync, and owns a separate probe scheduler/history, route
+facts and source/receipt cache namespace. Candidate validation may observe the
+current serving generation for reporting only. It writes the new shadow endpoint
+without falling back to the serving endpoint on error. Only its candidate status
+is copied into `/healthz`; serving errors, checkpoints, readiness and LKG remain
+owned by serving refresh. Cancellation stops both loops. Regression tests hold
+the serving lock while the production loop validates a real signed successor,
+then reject a receipt, restart validation and check unchanged retained files.

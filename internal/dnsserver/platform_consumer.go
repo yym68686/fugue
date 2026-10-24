@@ -63,6 +63,15 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 	if s.PlatformTokenFile == "" {
 		return
 	}
+	// A separate validator owns its probe budget, facts and durable cursors.
+	// Slow or rejected serving state cannot prevent a successor dry run.
+	if worker := s.newIsolatedDNSShadowValidator(); worker != nil {
+		s.isolatedShadowStarted.Store(true)
+		ctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); s.runIsolatedDNSShadow(ctx, worker) }()
+		defer func() { cancel(); <-done }()
+	}
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -128,7 +137,7 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	// selected serving assignment and no retained serving state must still
 	// verify its signed shadow and advertise capabilities for initial promotion.
 	// Keep the authority lock: shadow evidence never becomes serving state.
-	if !s.platformServingBound.Load() || initialShadow {
+	if !s.isolatedShadowStarted.Load() && (!s.platformServingBound.Load() || initialShadow) {
 		if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
 			s.recordDNSSnapshotFailure(err)
 			s.mu.Lock()
@@ -260,6 +269,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		}
 	}
 	status := s.Status()
+	if s.shadowValidationParent != nil {
+		status = s.shadowValidationParent.Status()
+	}
 	nonce := make([]byte, 16)
 	if _, err = rand.Read(nonce); err != nil {
 		return errors.New("platform heartbeat nonce unavailable")
@@ -287,7 +299,11 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	var receipt model.PlatformConsumerHeartbeatResponse
-	if err = client.PostJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", identity.Token, heartbeat, &receipt); err != nil {
+	endpoint := "/v1/platform-state/consumers/trusted-heartbeat"
+	if s.shadowValidationParent != nil {
+		endpoint = "/v1/platform-state/consumers/shadow-heartbeat"
+	}
+	if err = client.PostJSON(ctx, endpoint, identity.Token, heartbeat, &receipt); err != nil {
 		return err
 	}
 	if !receipt.Consumer.IdentityVerified || receipt.Consumer.ConsumerID != heartbeat.ConsumerID || receipt.Consumer.Sequence != heartbeat.Sequence || receipt.Consumer.ExpectedConsumerSetID != chosen.ExpectedConsumerSetID || receipt.Consumer.EvidenceHash != heartbeat.EvidenceHash {
