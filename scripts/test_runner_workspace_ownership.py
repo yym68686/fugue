@@ -1,6 +1,5 @@
-import os
 from pathlib import Path
-import stat
+import os
 import sys
 import tempfile
 import unittest
@@ -8,11 +7,13 @@ from unittest.mock import patch
 
 WORKFLOW = Path(__file__).resolve().parent.parent / '.github/workflows/ci.yml'
 
+
 def repair_source():
     lines = WORKFLOW.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip() == 'import os, pathlib, stat, sys, uuid')
+    start = next(i for i, line in enumerate(lines) if line.strip() == 'import os, pathlib, stat, sys')
     end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'jobs:')
     return '\n'.join(line[4:] for line in lines[start:end])
+
 
 class RunnerWorkspaceOwnershipTests(unittest.TestCase):
     def execute(self, scenario):
@@ -34,6 +35,7 @@ class RunnerWorkspaceOwnershipTests(unittest.TestCase):
                 os.link(untouched, workspace / 'scripts/__pycache__/linked')
             actual_stat = Path.stat
             uid, gid = max(1001, os.getuid()), max(1001, os.getgid())
+
             def observed(path, *, follow_symlinks=True):
                 info = actual_stat(path, follow_symlinks=follow_symlinks)
                 row = list(info)
@@ -43,46 +45,40 @@ class RunnerWorkspaceOwnershipTests(unittest.TestCase):
                 if path.name == 'generated' and scenario == 'foreign':
                     row[4] = uid + 1
                 return os.stat_result(row)
-            changes = []
-            actual_rename = os.rename
-            def rename(source, destination):
-                changes.append((source, destination))
-                actual_rename(source, destination)
-            args = ['repair', str(workspace), str(temporary), str(uid), str(gid)]
-            if scenario == 'wrong path': args[1] = str(root)
-            with patch.object(sys, 'argv', args), patch.object(Path, 'stat', observed), patch.object(os, 'rename', side_effect=rename):
+
+            args = ['inspect', str(workspace), str(temporary), str(uid), str(gid)]
+            if scenario == 'wrong path':
+                args[1] = str(root)
+            with patch.object(sys, 'argv', args), patch.object(Path, 'stat', observed):
                 if scenario in ['symlink', 'hardlink', 'foreign', 'wrong path']:
-                    with self.assertRaises(SystemExit):exec(compile(repair_source(), str(WORKFLOW), 'exec'), {})
-                    self.assertEqual([], changes)
+                    with self.assertRaises(SystemExit):
+                        exec(compile(repair_source(), str(WORKFLOW), 'exec'), {})
                 else:
                     exec(compile(repair_source(), str(WORKFLOW), 'exec'), {})
-                    self.assertEqual(0 if scenario == 'owned' else 2, len(changes))
-                    for path, destination in changes:
-                        self.assertTrue('__pycache__' in path.parts or 'worktrees' in path.parts)
-                        self.assertEqual(workspace.parent / ('.repository-generated-metadata-quarantine'), destination.parent)
             self.assertEqual('preserve', untouched.read_text())
-            if changes:
-                for source, destination in changes:
-                    self.assertFalse(source.exists())
-                    preserved = destination / ('fixture/generated' if source.name == 'worktrees' else 'generated')
-                    self.assertEqual('retained content', preserved.read_text())
-            else:
-                self.assertTrue(all((workspace / rel / 'generated').read_text() == 'retained content' for rel in ['scripts/__pycache__', '.git/worktrees/fixture']))
+            self.assertTrue(all((workspace / rel / 'generated').read_text() == 'retained content'
+                                for rel in ['scripts/__pycache__', '.git/worktrees/fixture']))
 
-    def test_bounded_ownership_repair(self):
+    def test_bounded_metadata_audit(self):
         for scenario in ['root', 'owned', 'symlink', 'hardlink', 'foreign', 'wrong path']:
-            with self.subTest(scenario=scenario):self.execute(scenario)
+            with self.subTest(scenario=scenario):
+                self.execute(scenario)
 
-    def test_every_self_hosted_checkout_waits_for_repair(self):
+    def test_every_self_hosted_checkout_audits_without_cleanup(self):
         text = WORKFLOW.read_text()
         import re
         blocks = re.split(r'(?m)(?=^  [a-zA-Z0-9_-]+:$)', text)
         for block in blocks:
-            if 'runs-on: [self-hosted,' not in block:continue
+            if 'runs-on: [self-hosted,' not in block:
+                continue
             step = block.split('    steps:', 1)[1].lstrip()
-            self.assertTrue(step.startswith('- name: Quarantine inaccessible generated metadata before checkout'))
+            self.assertTrue(step.startswith('- name: Inspect generated metadata before checkout'))
             self.assertIn('working-directory: ${{ runner.temp }}', step)
             self.assertIn('python3 -B -c', step)
-            self.assertLess(step.index('FUGUE_RUNNER_WORKSPACE_REPAIR'), step.index('actions/checkout'))
+            checkout = step.index('actions/checkout')
+            self.assertIn('clean: false', step[checkout:step.find('\n', checkout) + 200])
+            self.assertLess(step.index('FUGUE_RUNNER_WORKSPACE_REPAIR'), checkout)
 
-if __name__ == '__main__':unittest.main()
+
+if __name__ == '__main__':
+    unittest.main()
