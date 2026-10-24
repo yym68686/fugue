@@ -40,9 +40,10 @@ type dnsProbeHistoryStore struct {
 }
 
 type dnsProbeHistory struct {
-	successes  []time.Time
-	failedAt   time.Time
-	observedAt time.Time
+	recoveryKey string // authenticated dynamic-source alias; never carries authority
+	successes   []time.Time
+	failedAt    time.Time
+	observedAt  time.Time
 }
 
 func (scheduler *dnsReadinessScheduler) shareHistory(history *dnsProbeHistoryStore) *dnsReadinessScheduler {
@@ -53,6 +54,22 @@ func (scheduler *dnsReadinessScheduler) shareHistory(history *dnsProbeHistorySto
 }
 
 func (scheduler *dnsReadinessScheduler) observeProbeHistory(fact *dnsReadinessFact, policy *platformconfig.DNSReadinessPolicy, observedAt time.Time) {
+	// A retained-LKG scheduler can observe a real failure while the current
+	// source refresh is unavailable. Propagate that barrier to its authenticated
+	// continuity key so a later source refresh cannot revive pre-failure history.
+	if !fact.Ready && scheduler.historyStore != nil {
+		store := scheduler.historyStore
+		store.mu.Lock()
+		key := store.values[fact.ProbeID].recoveryKey
+		store.mu.Unlock()
+		if key != "" {
+			scheduler.observeProbeHistoryKey(key, fact, policy, observedAt)
+		}
+	}
+	scheduler.observeProbeHistoryKey(fact.ProbeID, fact, policy, observedAt)
+}
+
+func (scheduler *dnsReadinessScheduler) observeProbeHistoryKey(key string, fact *dnsReadinessFact, policy *platformconfig.DNSReadinessPolicy, observedAt time.Time) {
 	if scheduler.historyStore == nil {
 		scheduler.historyStore = &dnsProbeHistoryStore{}
 	}
@@ -66,7 +83,7 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistory(fact *dnsReadinessFa
 	if observedAt.IsZero() {
 		return
 	}
-	entry, exists := store.values[fact.ProbeID]
+	entry, exists := store.values[key]
 	if !exists && len(store.values) >= 16384 {
 		// Keep failed observations as barriers too. Delayed success from
 		// another scheduler must never resurrect pre-failure continuity.
@@ -87,7 +104,7 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistory(fact *dnsReadinessFa
 		if observedAt.After(entry.observedAt) {
 			entry.observedAt = observedAt
 		}
-		store.values[fact.ProbeID] = entry
+		store.values[key] = entry
 		return
 	}
 	at := fact.Proof.CheckedAt
@@ -115,7 +132,7 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistory(fact *dnsReadinessFa
 	if observedAt.After(entry.observedAt) {
 		entry.observedAt = observedAt
 	}
-	store.values[fact.ProbeID] = entry
+	store.values[key] = entry
 	fact.ProbeHistory = slices.Clone(history)
 }
 

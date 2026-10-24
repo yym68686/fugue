@@ -21593,7 +21593,7 @@ components:
       type: object
       additionalProperties: false
       required: [version, ordered_edge_ids, recovery_successes, recovery_min_seconds]
-      description: 'Explicit availability authorization, not measured quality. The pool intersects the current signed endpoint/route/TLS constraints. Independent fresh observations gate initial admission and readmission. A failed observation resets recovery; unobserved or cached facts cannot count as successes. Every original proof deadline remains enforced. Quality primary resumes only after passing the same recovery gate.'
+      description: 'Explicit availability authorization, not measured quality. The pool intersects the current signed endpoint/route/TLS constraints. Independent fresh observations gate initial admission and readmission. For explicitly approved dynamic routing sources, recovery continuity is scoped to the same DNS artifact, immutable producer authorization, source scope/policy, physical endpoint and route behavior; advancing a routing publication alone does not reset it. Each success still requires a fresh proof matching the exact currently approved publication. Changed configuration, producer, endpoint or route behavior starts a separate history. A failed observation resets recovery; unobserved or cached facts cannot count as successes. Recovery history is volatile and is not restored as positive readiness after restart. Every original proof deadline remains enforced. Quality primary resumes only after passing the same recovery gate.'
       properties:
         version: {type: string, enum: [dns-availability-v1]}
         ordered_edge_ids: {type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}

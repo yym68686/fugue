@@ -133,3 +133,19 @@ readiness intersection and bounded checkpoint recovery. Existing artifacts witho
 source approvals retain exact-reference semantics. The independent DNS
 configuration producer, observed public handoff to neutral Cells and retirement
 of legacy sources remain separate migration steps.
+
+Recovery continuity for approved dynamic sources is keyed independently of the
+routing publication ID. Its identity includes the selected DNS artifact ID and
+digest, producer policy ID and digest, source scope and signed source policy,
+and the complete physical probe requirement with only publication identities
+removed. Endpoint, route behavior, ownership, state, freshness constraints and
+previous-authority group/digest remain bound. Only a fresh exact-publication
+match can append a success; a release advance cannot transfer authorization.
+
+One physical observation may match one of several authorized release variants.
+A mismatch against another variant of the same behavior does not erase the
+matched success. With no matching valid observation, the failure barrier resets
+that recovery history. Unobserved work and repeated cached proofs add no
+successes. Histories remain bounded and volatile; restart begins recovery again.
+The original proof validity deadlines, source selection recheck and DNS-owned
+membership, quorum and recovery thresholds remain enforced independently.

@@ -68,17 +68,10 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 	// requirement only after its complete publication binding is verified.
 	// Do this before retaining old proofs: a timed-out refresh must reset
 	// recovery even when an older proof still has an unexpired lease.
-	s.servingDNSProbes.mu.Lock()
-	for i := range facts {
-		fact := &facts[i]
-		if fact.Ready && !plans.Matches(plans.Probes[fact.ProbeID], fact.Proof) {
-			fact.Ready, fact.Reason = false, "traffic_release_mismatch"
-		}
-		if fact.Reason != "not_observed" {
-			s.servingDNSProbes.observeProbeHistory(fact, p.Policy.DNSReadiness, time.Now().UTC())
-		}
+	if err := s.observeDNSRouteRecovery(c.Artifact, plans, facts, p.Policy.DNSReadiness, time.Now().UTC()); err != nil {
+		return p, nil, err
 	}
-	s.servingDNSProbes.mu.Unlock()
+
 	facts = retainValidDNSReadinessFacts(union, p.Policy.DNSReadiness, s.platformDNSRouteFacts, facts, time.Now().UTC())
 	boundDNSRouteSourceFacts(dnsServingPayload{routeSources: &dnsroutesource.Context{Snapshot: snapshot}}, facts, time.Now().UTC())
 	valid := validDNSReadinessFacts(union, p.Policy.DNSReadiness, facts, time.Now().UTC())
