@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"reflect"
 	"regexp"
+	"slices"
 	"time"
 
 	"fugue/internal/model"
@@ -43,6 +44,9 @@ func ValidateOfflineEdges(holds []OfflineEdge) error {
 		if hold.Recovery != nil {
 			if err := hold.Recovery.Validate(); err != nil {
 				return err
+			}
+			if p := hold.Recovery.Capacity; p != nil && slices.Contains(p.ReferenceEdgeIDs, hold.EdgeID) {
+				return fmt.Errorf("capacity reference must be another physical Edge")
 			}
 		}
 	}

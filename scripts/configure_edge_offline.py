@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -37,7 +38,7 @@ def holds(policy):
         if 'recovery' in hold:
             p = hold['recovery']
             numeric = {'probe_interval_seconds', 'probe_timeout_seconds', 'success_threshold', 'failure_threshold', 'freshness_seconds'}
-            if not isinstance(p, dict) or set(p) != numeric | {'hostname', 'path'} or any(type(p[k]) is not int for k in numeric):
+            if not isinstance(p, dict) or not numeric | {'hostname', 'path'} <= set(p) or set(p) - numeric - {'hostname', 'path', 'capacity'} or any(type(p[k]) is not int for k in numeric):
                 raise ValueError('complete bounded recovery probe policy required')
             if not isinstance(p['hostname'], str) or len(p['hostname']) > 253 or '.' not in p['hostname'] or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in p['hostname'].split('.')):
                 raise ValueError('canonical recovery probe hostname required')
@@ -45,8 +46,52 @@ def holds(policy):
                 raise ValueError('canonical recovery probe path required')
             if not (300 <= p['probe_interval_seconds'] <= 3600 and 1 <= p['probe_timeout_seconds'] <= 5 and 2 <= p['success_threshold'] <= 5 and 1 <= p['failure_threshold'] <= 3 and max(600, 2*p['probe_interval_seconds']+p['probe_timeout_seconds']) <= p['freshness_seconds'] <= 10800):
                 raise ValueError('recovery probe bounds invalid')
+            if 'capacity' in p:
+                validate_capacity_policy(p['capacity'], hold['edge_id'], p['freshness_seconds'])
         previous = hold['edge_id']
     return result
+
+
+def validate_capacity_policy(p, edge_id, freshness):
+    required = {'version', 'traffic_class', 'reference_edge_ids', 'minimum_bytes_per_second', 'max_elapsed_milliseconds', 'minimum_stable_seconds'}
+    if not isinstance(p, dict) or set(p) != required or p['version'] != 'edge-capacity-recovery-v1' or p['traffic_class'] != 'streaming':
+        raise ValueError('explicit capacity recovery contract required')
+    ids = p['reference_edge_ids']
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 3 or any(not isinstance(i, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', i) or i == edge_id for i in ids) or len(set(ids)) != len(ids):
+        raise ValueError('unique other physical capacity references required')
+    for key, low, high in [('minimum_bytes_per_second', 65536, 16777216), ('max_elapsed_milliseconds', 1000, 15000), ('minimum_stable_seconds', 300, min(7200, freshness))]:
+        if type(p[key]) is not int or not low <= p[key] <= high:
+            raise ValueError('capacity recovery policy exceeds bound')
+
+
+def capacity_observation_ready(hold, observation, success):
+    policy = hold['recovery'].get('capacity')
+    if policy is None:
+        return True
+    try:
+        e = observation['capacity']
+        code = e['code']
+        if observation.get('last_result') != 'capacity_verified' or observation['successes'] != hold['recovery']['success_threshold'] or observation['failures'] != 0:
+            return False
+        first = datetime.datetime.fromisoformat(observation['first_success'].replace('Z', '+00:00'))
+        checked = datetime.datetime.fromisoformat(e['checked_at'].replace('Z', '+00:00'))
+        if checked != success or first.tzinfo is None or first > success or (success-first).total_seconds() < policy['minimum_stable_seconds']:
+            return False
+        if not DIGEST.fullmatch(e['report_digest']) or not DIGEST.fullmatch(e['route_digest']) or e['reference_edge_id'] not in policy['reference_edge_ids'] or e['reference_edge_id'] == hold['edge_id'] or e['bytes'] != 1 << 20:
+            return False
+        elapsed, rate = e['elapsed_milliseconds'], e['bytes_per_second']
+        if type(elapsed) not in (int, float) or type(rate) not in (int, float) or not math.isfinite(elapsed) or not math.isfinite(rate) or not 0 < elapsed <= policy['max_elapsed_milliseconds'] or rate < policy['minimum_bytes_per_second']:
+            return False
+        expected = e['bytes'] * 1000 / elapsed
+        if abs(expected-rate) > expected * 0.000001:
+            return False
+        if any(not isinstance(code[k], str) or not re.fullmatch(r'[^ \t\r\n\x00]{1,128}', code[k]) for k in ['node_uid', 'front_pod_uid', 'worker_pod_uid', 'service_uid', 'authority_uid']):
+            return False
+        if any(not DIGEST.fullmatch(code[k]) for k in ['authority_record_digest', 'worker_image_digest', 'front_image_digest', 'proxy_image_digest']):
+            return False
+        return bool(re.fullmatch(r'[a-f0-9]{40}', code['worker_source_sha'])) and code['slot'] in ['a', 'b'] and type(code['fence']) is int and 0 < code['fence'] < 2**64-1 and bool(re.fullmatch(r'[^ \t\r\n\x00]{1,512}', code['bundle']))
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def validate(config):
@@ -91,6 +136,8 @@ def recovery_declaration_digest(hold):
         value['expected_recovery_date'] = hold['expected_recovery_date']
     if hold.get('recovery'):
         value['recovery'] = {key: hold['recovery'][key] for key in ('hostname', 'path', 'probe_interval_seconds', 'probe_timeout_seconds', 'success_threshold', 'failure_threshold', 'freshness_seconds')}
+        if 'capacity' in hold['recovery']:
+            value['recovery']['capacity'] = {key: hold['recovery']['capacity'][key] for key in ('version', 'traffic_class', 'reference_edge_ids', 'minimum_bytes_per_second', 'max_elapsed_milliseconds', 'minimum_stable_seconds')}
     raw = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
     for character, escape in [('<', r'\u003c'), ('>', r'\u003e'), ('&', r'\u0026'), ('\u2028', r'\u2028'), ('\u2029', r'\u2029')]:
         raw = raw.replace(character, escape)
@@ -125,7 +172,7 @@ def validate_preview(previous, current, policy):
             attempt = datetime.datetime.fromisoformat(o['last_attempt'].replace('Z', '+00:00'))
             success = datetime.datetime.fromisoformat(o['last_success'].replace('Z', '+00:00'))
             expiry = datetime.datetime.fromisoformat(o['proof_valid_until'].replace('Z', '+00:00'))
-            if at.tzinfo is not None and success <= attempt <= at < expiry and (at-success).total_seconds() <= p['freshness_seconds'] and 0 <= o.get('failures', -1) < p['failure_threshold'] and 0 <= o.get('successes', -1) <= p['success_threshold']:
+            if at.tzinfo is not None and success <= attempt <= at < expiry and (at-success).total_seconds() <= p['freshness_seconds'] and 0 <= o.get('failures', -1) < p['failure_threshold'] and 0 <= o.get('successes', -1) <= p['success_threshold'] and capacity_observation_ready(hold, o, success):
                 suspended.remove(hold['edge_id'])
                 break
     if not endpoints or len(endpoints) > 4096 or any(endpoint['edge_id'] in suspended for endpoint in endpoints):

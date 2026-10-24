@@ -122,6 +122,12 @@ func (s *Server) observeOfflineRecovery(node model.EdgeNode, intent *model.EdgeD
 		if !o.LastAttempt.IsZero() {
 			intent.RecoveryLastProbeAt = &o.LastAttempt
 		}
+		intent.RecoveryLastResult = o.LastResult
+		if o.Capacity != nil {
+			intent.RecoveryCapacityBytesPerSecond = o.Capacity.BytesPerSecond
+			intent.RecoveryCapacityElapsedMilliseconds = o.Capacity.ElapsedMilliseconds
+			intent.RecoveryCapacityEvidenceDigest = o.Capacity.ReportDigest
+		}
 		if o.Ready(hold, now) {
 			intent.State, intent.Reason, intent.RecoveryState = "allowed", "", "ready"
 		}

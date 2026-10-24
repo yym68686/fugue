@@ -11,17 +11,20 @@ import (
 	"fugue/internal/platformconfig"
 )
 
+const MaxOfflineRecoveryEvidenceBytes = 64 * 4096
+
 const OfflineRecoveryFact = "offline_edge_recovery"
 const OfflineRecoveryMetadata = "producer_offline_recovery"
 
 type OfflineEdgeRecoveryPolicy struct {
-	Hostname             string `json:"hostname"`
-	Path                 string `json:"path"`
-	ProbeIntervalSeconds int    `json:"probe_interval_seconds"`
-	ProbeTimeoutSeconds  int    `json:"probe_timeout_seconds"`
-	SuccessThreshold     int    `json:"success_threshold"`
-	FailureThreshold     int    `json:"failure_threshold"`
-	FreshnessSeconds     int    `json:"freshness_seconds"`
+	Hostname             string                  `json:"hostname"`
+	Path                 string                  `json:"path"`
+	ProbeIntervalSeconds int                     `json:"probe_interval_seconds"`
+	ProbeTimeoutSeconds  int                     `json:"probe_timeout_seconds"`
+	SuccessThreshold     int                     `json:"success_threshold"`
+	FailureThreshold     int                     `json:"failure_threshold"`
+	FreshnessSeconds     int                     `json:"freshness_seconds"`
+	Capacity             *CapacityRecoveryPolicy `json:"capacity,omitempty"`
 }
 
 func (p OfflineEdgeRecoveryPolicy) Validate() error {
@@ -37,20 +40,26 @@ func (p OfflineEdgeRecoveryPolicy) Validate() error {
 	if p.ProbeIntervalSeconds < 300 || p.ProbeIntervalSeconds > 3600 || p.ProbeTimeoutSeconds < 1 || p.ProbeTimeoutSeconds > 5 || p.SuccessThreshold < 2 || p.SuccessThreshold > 5 || p.FailureThreshold < 1 || p.FailureThreshold > 3 || p.FreshnessSeconds < 600 || p.FreshnessSeconds > 10800 || p.FreshnessSeconds < 2*p.ProbeIntervalSeconds+p.ProbeTimeoutSeconds {
 		return fmt.Errorf("recovery probe bounds invalid")
 	}
+	if p.Capacity != nil && (p.Capacity.Validate() != nil || p.Capacity.MinimumStableSeconds > p.FreshnessSeconds) {
+		return fmt.Errorf("capacity recovery policy is invalid or exceeds observation continuity")
+	}
 	return nil
 }
 
 // This is a rebuildable observation. Only a signed candidate can pin it for
 // historical membership; this checkpoint is never serving authority.
 type OfflineRecoveryObservation struct {
-	EdgeID            string    `json:"edge_id"`
-	DeclarationDigest string    `json:"declaration_digest"`
-	LastAttempt       time.Time `json:"last_attempt"`
-	LastSuccess       time.Time `json:"last_success"`
-	ProofValidUntil   time.Time `json:"proof_valid_until"`
-	Successes         int       `json:"successes"`
-	Failures          int       `json:"failures"`
-	Admitted          bool      `json:"admitted"`
+	EdgeID            string                    `json:"edge_id"`
+	DeclarationDigest string                    `json:"declaration_digest"`
+	LastAttempt       time.Time                 `json:"last_attempt"`
+	LastSuccess       time.Time                 `json:"last_success"`
+	ProofValidUntil   time.Time                 `json:"proof_valid_until"`
+	Successes         int                       `json:"successes"`
+	Failures          int                       `json:"failures"`
+	Admitted          bool                      `json:"admitted"`
+	FirstSuccess      time.Time                 `json:"first_success,omitzero"`
+	LastResult        string                    `json:"last_result,omitempty"`
+	Capacity          *CapacityRecoveryEvidence `json:"capacity,omitempty"`
 }
 
 func OfflineRecoveryKey(hold OfflineEdge) string {
@@ -61,13 +70,33 @@ func OfflineRecoveryDigest(hold OfflineEdge) string { d, _ := platformconfig.Dig
 
 func (o OfflineRecoveryObservation) Ready(hold OfflineEdge, at time.Time) bool {
 	p := hold.Recovery
+	if p != nil && p.Capacity != nil && (o.Successes != p.SuccessThreshold || o.Failures != 0 || o.LastResult != "capacity_verified" || !o.Capacity.Passes(*p.Capacity, hold.EdgeID) || !o.Capacity.CheckedAt.Equal(o.LastSuccess) || o.FirstSuccess.IsZero() || o.FirstSuccess.After(o.LastSuccess) || o.LastSuccess.Sub(o.FirstSuccess) < time.Duration(p.Capacity.MinimumStableSeconds)*time.Second) {
+		return false
+	}
 	return p != nil && p.Validate() == nil && o.EdgeID == hold.EdgeID && o.DeclarationDigest == OfflineRecoveryDigest(hold) && o.Admitted && o.Successes >= 0 && o.Successes <= p.SuccessThreshold && o.Failures >= 0 && o.Failures < p.FailureThreshold && !at.IsZero() && !o.LastAttempt.IsZero() && !o.LastAttempt.After(at) && !o.LastSuccess.IsZero() && !o.LastSuccess.After(o.LastAttempt) && at.Sub(o.LastSuccess) <= time.Duration(p.FreshnessSeconds)*time.Second && at.Before(o.ProofValidUntil)
 }
 
 func (o OfflineRecoveryObservation) Record(hold OfflineEdge, at time.Time, passed bool, validUntil time.Time) OfflineRecoveryObservation {
+	return o.RecordCapacity(hold, at, passed, validUntil, nil, "")
+}
+
+func (o OfflineRecoveryObservation) RecordCapacity(hold OfflineEdge, at time.Time, passed bool, validUntil time.Time, capacity *CapacityRecoveryEvidence, result string) OfflineRecoveryObservation {
 	p := hold.Recovery
 	if p == nil {
 		return OfflineRecoveryObservation{}
+	}
+	if p.Capacity != nil {
+		// Replaying one outcome cannot manufacture consecutive observations.
+		if o.EdgeID == hold.EdgeID && o.DeclarationDigest == OfflineRecoveryDigest(hold) && !at.After(o.LastAttempt) {
+			return o
+		}
+		passed = passed && result == "capacity_verified" && capacity.Passes(*p.Capacity, hold.EdgeID) && capacity.CheckedAt.Equal(at)
+		if !sameCapacityCode(o.Capacity, capacity) {
+			o.Successes, o.FirstSuccess, o.Admitted = 0, time.Time{}, false
+		}
+		if passed && o.EdgeID == hold.EdgeID && o.DeclarationDigest == OfflineRecoveryDigest(hold) && at.Sub(o.LastAttempt) < time.Duration(p.ProbeIntervalSeconds)*time.Second {
+			return o
+		}
 	}
 	if o.EdgeID != hold.EdgeID || o.DeclarationDigest != OfflineRecoveryDigest(hold) || o.LastAttempt.After(at) || !o.LastAttempt.IsZero() && at.Sub(o.LastAttempt) > time.Duration(p.FreshnessSeconds)*time.Second {
 		o = OfflineRecoveryObservation{}
@@ -75,18 +104,32 @@ func (o OfflineRecoveryObservation) Record(hold OfflineEdge, at time.Time, passe
 	wasReady := o.Ready(hold, at)
 	if o.LastSuccess.IsZero() || o.LastSuccess.After(at) || at.Sub(o.LastSuccess) > time.Duration(p.FreshnessSeconds)*time.Second {
 		o.Successes = 0
+		o.FirstSuccess = time.Time{}
 	}
 	o.EdgeID, o.DeclarationDigest = hold.EdgeID, OfflineRecoveryDigest(hold)
 	o.LastAttempt = at
+	o.LastResult = result
 	if passed && validUntil.After(at) {
+		if p.Capacity != nil && o.Successes == 0 {
+			o.FirstSuccess = at
+		}
 		o.Successes = min(o.Successes+1, p.SuccessThreshold)
 		o.Failures = 0
 		o.LastSuccess, o.ProofValidUntil = at, validUntil
 		o.Admitted = wasReady || o.Successes >= p.SuccessThreshold
+		if p.Capacity != nil {
+			copy := *capacity
+			o.Capacity = &copy
+			o.Admitted = o.Admitted && at.Sub(o.FirstSuccess) >= time.Duration(p.Capacity.MinimumStableSeconds)*time.Second
+		}
 	} else {
 		o.Successes = 0
+		o.FirstSuccess = time.Time{}
 		o.Failures = min(o.Failures+1, p.FailureThreshold)
 		o.Admitted = wasReady && o.Failures < p.FailureThreshold
+		if p.Capacity != nil {
+			o.Capacity, o.Admitted = nil, false
+		}
 	}
 	return o
 }
@@ -136,7 +179,7 @@ func PublicationOfflineHolds(parent model.PlatformArtifact, holds []OfflineEdge)
 		CapturedAt   time.Time                    `json:"captured_at"`
 		Observations []OfflineRecoveryObservation `json:"observations"`
 	}
-	if len(raw) > 65536 || json.Unmarshal([]byte(raw), &evidence) != nil || evidence.CapturedAt.IsZero() || evidence.CapturedAt.After(parent.Provenance.SignedAt) || len(evidence.Observations) == 0 || len(evidence.Observations) > len(holds) {
+	if len(raw) > MaxOfflineRecoveryEvidenceBytes || json.Unmarshal([]byte(raw), &evidence) != nil || evidence.CapturedAt.IsZero() || evidence.CapturedAt.After(parent.Provenance.SignedAt) || len(evidence.Observations) == 0 || len(evidence.Observations) > len(holds) {
 		return nil, fmt.Errorf("invalid pinned recovery evidence")
 	}
 	known := map[string]OfflineEdge{}

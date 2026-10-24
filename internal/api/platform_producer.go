@@ -42,6 +42,8 @@ func (s *Server) StartBackgroundPlatformConfiguration(ctx context.Context) {
 		go func() { defer workers.Done(); s.runPlatformConfigurationScope(workerCtx, scope) }()
 	}
 	start(platformproducer.Scope)
+	workers.Add(1)
+	go func() { defer workers.Done(); s.runOfflineEdgeRecovery(ctx) }()
 	for ctx.Err() == nil {
 		scopes, err := s.store.ListPlatformProducerScopes()
 		if err != nil {
@@ -164,10 +166,6 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	interval = time.Duration(policy.IntervalSeconds) * time.Second
 	if policy.Mode == "paused" {
 		return interval, nil
-	}
-	advance("offline_recovery")
-	if err := s.reconcileOfflineEdgeRecovery(ctx, policy); err != nil {
-		return interval, err
 	}
 	if policy.Mode == "serving" {
 		advance("reconcile_pending")

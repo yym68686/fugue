@@ -1028,19 +1028,23 @@ type EdgeNodeInventoryObservation struct {
 }
 
 type EdgeDNSAdmissionIntent struct {
-	EvaluatedAt          time.Time  `json:"evaluated_at"`
-	Scope                string     `json:"scope"`
-	State                string     `json:"state"`
-	ServingEvidence      string     `json:"serving_evidence"`
-	Reason               string     `json:"reason,omitempty"`
-	ExpectedRecoveryDate string     `json:"expected_recovery_date,omitempty"`
-	RecoveryState        string     `json:"recovery_state,omitempty"`
-	RecoveryLastProbeAt  *time.Time `json:"recovery_last_probe_at,omitempty"`
-	ProducerPolicyID     string     `json:"producer_policy_id,omitempty"`
-	ProducerReleaseID    string     `json:"producer_release_id,omitempty"`
-	ProducerFencingToken int64      `json:"producer_fencing_token,omitempty"`
-	InputArtifactID      string     `json:"input_artifact_id,omitempty"`
-	InputDigest          string     `json:"input_digest,omitempty"`
+	EvaluatedAt                         time.Time  `json:"evaluated_at"`
+	Scope                               string     `json:"scope"`
+	State                               string     `json:"state"`
+	ServingEvidence                     string     `json:"serving_evidence"`
+	Reason                              string     `json:"reason,omitempty"`
+	ExpectedRecoveryDate                string     `json:"expected_recovery_date,omitempty"`
+	RecoveryState                       string     `json:"recovery_state,omitempty"`
+	RecoveryLastProbeAt                 *time.Time `json:"recovery_last_probe_at,omitempty"`
+	RecoveryLastResult                  string     `json:"recovery_last_result,omitempty"`
+	RecoveryCapacityBytesPerSecond      float64    `json:"recovery_capacity_bytes_per_second,omitempty"`
+	RecoveryCapacityElapsedMilliseconds float64    `json:"recovery_capacity_elapsed_milliseconds,omitempty"`
+	RecoveryCapacityEvidenceDigest      string     `json:"recovery_capacity_evidence_digest,omitempty"`
+	ProducerPolicyID                    string     `json:"producer_policy_id,omitempty"`
+	ProducerReleaseID                   string     `json:"producer_release_id,omitempty"`
+	ProducerFencingToken                int64      `json:"producer_fencing_token,omitempty"`
+	InputArtifactID                     string     `json:"input_artifact_id,omitempty"`
+	InputDigest                         string     `json:"input_digest,omitempty"`
 }
 
 type DNSNode struct {

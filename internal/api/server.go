@@ -27,6 +27,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
+	"fugue/internal/platformproducer"
 	"fugue/internal/runtime"
 	"fugue/internal/runtimeobservation"
 	"fugue/internal/sourceimport"
@@ -196,6 +197,8 @@ type Server struct {
 	agentEdgeSigningKeyFile                string
 	agentEdgeProbe                         agentEdgeProbeFunc
 	offlineEdgeRecoveryProbe               agentEdgeProbeFunc
+	offlineCapacityCode                    func(context.Context, model.EdgeNode) (platformproducer.CapacityCodeIdentity, error)
+	offlineCapacityMeasure                 func(context.Context, model.EdgeClientProbePlan) (model.EdgeClientProbeReport, error)
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
