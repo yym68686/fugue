@@ -281,3 +281,57 @@ func TestOfflineRecoveryWorkerDoesNotOwnConfigurationProducerLock(t *testing.T) 
 		t.Fatal("canceled recovery admitted subject", o, err)
 	}
 }
+
+func TestCapacityCodeFailuresCannotInventOrRetainACatchupPlan(t *testing.T) {
+	for _, scenario := range []string{"timeout", "code-old", "conflict", "recovered-observation"} {
+		t.Run(scenario, func(t *testing.T) {
+			s, policy, hold, _ := capacityRecoveryFixture(t)
+			current := model.EdgeCodeRecoveryTarget{Slot: "a", FrontGeneration: 3, BundleGeneration: "bundle-c", WorkerSourceSHA: strings.Repeat("c", 40), WorkerImageDigest: "sha256:" + strings.Repeat("c", 64)}
+			previous := model.EdgeCodeRecoveryTarget{Slot: "b", FrontGeneration: 2, BundleGeneration: "bundle-b", WorkerSourceSHA: strings.Repeat("b", 40), WorkerImageDigest: "sha256:" + strings.Repeat("b", 64)}
+			observed := model.EdgeCodeRecoveryTarget{Slot: "a", FrontGeneration: 1, BundleGeneration: "bundle-a", WorkerSourceSHA: strings.Repeat("a", 40), WorkerImageDigest: "sha256:" + strings.Repeat("a", 64)}
+			plan, err := model.PlanEdgeCodeRecovery("sha256:"+strings.Repeat("d", 64), observed, current, &previous)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := platformproducer.OfflineRecoveryObservation{EdgeID: hold.EdgeID, DeclarationDigest: platformproducer.OfflineRecoveryDigest(hold), LastAttempt: time.Now().Add(-6 * time.Minute), CodePlan: &plan, CodeDetail: "code_binding", LastResult: "code_not_current"}
+			_, err = s.store.UpdateObservationCheckpoint(context.Background(), platformproducer.OfflineRecoveryKey(hold), func([]byte) ([]byte, error) { return json.Marshal(before) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.offlineCapacityCode = func(context.Context, model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+				if scenario == "code-old" {
+					return testCapacityCode(), &capacityCodeError{reason: "code_not_current", detail: "code_binding", plan: &plan}
+				}
+				if scenario == "conflict" {
+					return testCapacityCode(), codeObservationError("code_identity_conflict", "worker_target")
+				}
+				if scenario == "recovered-observation" {
+					return testCapacityCode(), nil
+				}
+				return platformproducer.CapacityCodeIdentity{}, context.DeadlineExceeded
+			}
+			s.offlineCapacityMeasure = func(context.Context, model.EdgeClientProbePlan) (model.EdgeClientProbeReport, error) {
+				if scenario != "recovered-observation" {
+					t.Error("network transfer began without verified current code")
+				}
+				return model.EdgeClientProbeReport{}, context.DeadlineExceeded
+			}
+			if err = s.reconcileOfflineEdgeRecovery(context.Background(), policy); err != nil {
+				t.Fatal(err)
+			}
+			result, err := s.readOfflineRecovery(context.Background(), hold)
+			if err != nil || result.Admitted {
+				t.Fatal(result, err)
+			}
+			if (result.CodePlan != nil) != (scenario == "code-old") {
+				t.Fatal("stale or speculative code plan retained", result)
+			}
+			if scenario == "timeout" && result.LastResult != "code_observation_unavailable" {
+				t.Fatal("timeout claimed obsolete code", result)
+			}
+			if scenario == "recovered-observation" && (result.CodeDetail != "" || result.LastResult != "capacity_unavailable") {
+				t.Fatal("code plan contaminated later capacity failure", result)
+			}
+		})
+	}
+}

@@ -17,6 +17,8 @@ import (
 )
 
 type capacityRecoveryResult struct {
+	codeDetail string
+	codePlan   *model.EdgeCodeRecoveryPlan
 	evidence   *platformproducer.CapacityRecoveryEvidence
 	validUntil time.Time
 	reason     string
@@ -36,8 +38,11 @@ func (s *Server) probeCapacityRecovery(parent context.Context, hold platformprod
 		readCode = s.readCapacityCode
 	}
 	before, err := readCode(ctx, node)
-	if err != nil || !before.Valid() {
-		return fail("code_not_current")
+	if err != nil {
+		return capacityCodeFailureResult(err)
+	}
+	if !before.Valid() {
+		return capacityCodeFailureResult(codeObservationError("code_identity_conflict", "code_binding"))
 	}
 	probe := s.offlineEdgeRecoveryProbe
 	if probe == nil {
@@ -107,8 +112,11 @@ func (s *Server) probeCapacityRecovery(parent context.Context, hold platformprod
 		return fail("capacity_unavailable")
 	}
 	after, err := readCode(ctx, node)
-	if err != nil || before != after {
-		return fail("code_not_current")
+	if err != nil {
+		return capacityCodeFailureResult(err)
+	}
+	if before != after {
+		return capacityCodeFailureResult(codeObservationError("code_identity_conflict", "observation_changed"))
 	}
 	checked := time.Now().UTC()
 	evidence, reason := s.evaluateCapacityRound(hold, reference.ID, report, before, checked)

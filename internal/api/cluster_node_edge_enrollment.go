@@ -16,13 +16,19 @@ import (
 )
 
 type edgeEnrollmentAuthority struct {
-	GroupID string `json:"groupId"`
-	Record  string `json:"currentRecordDigest"`
-	Slot    string `json:"currentWorkerSlot"`
-	Fence   uint64 `json:"currentFrontGeneration"`
-	Bundle  string `json:"currentBundleGeneration"`
-	Source  string `json:"currentWorkerSourceSha"`
-	Image   string `json:"currentWorkerImageDigest"`
+	PreviousSlot   string `json:"previousWorkerSlot"`
+	PreviousFence  uint64 `json:"previousFrontGeneration"`
+	PreviousBundle string `json:"previousBundleGeneration"`
+	PreviousSource string `json:"previousWorkerSourceSha"`
+	PreviousImage  string `json:"previousWorkerImageDigest"`
+	PreviousRecord string `json:"previousRecordDigest"`
+	GroupID        string `json:"groupId"`
+	Record         string `json:"currentRecordDigest"`
+	Slot           string `json:"currentWorkerSlot"`
+	Fence          uint64 `json:"currentFrontGeneration"`
+	Bundle         string `json:"currentBundleGeneration"`
+	Source         string `json:"currentWorkerSourceSha"`
+	Image          string `json:"currentWorkerImageDigest"`
 }
 
 func (s *Server) prepareManagedEdgeEnrollment(ctx context.Context, machine model.Machine, group string) (model.EdgeNodeEnrollment, error) {

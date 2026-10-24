@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +21,7 @@ func testCapacityCode() platformproducer.CapacityCodeIdentity {
 }
 
 func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.T) {
-	for _, scenario := range []string{"valid", "old_worker_image", "wrong_source", "wrong_group", "foreign_target", "duplicate_target", "wrong_slot", "false_runtime_image", "unready_worker", "unready_front", "deleting_node", "no_authority_owner", "bad_authority_digest", "transition_in_progress", "front_old_authority", "front_target_loopback", "missing_endpoints", "truncated_inventory", "false_caddy_image", "wrong_caddy_port", "node_hostport", "foreign_node_hostport", "wrong_hostport", "bound_other_host"} {
+	for _, scenario := range []string{"valid", "old_worker_image", "wrong_source", "wrong_group", "foreign_target", "duplicate_target", "wrong_slot", "false_runtime_image", "unready_worker", "unready_front", "deleting_node", "no_authority_owner", "bad_authority_digest", "transition_in_progress", "front_old_authority", "front_target_loopback", "missing_endpoints", "truncated_inventory", "false_caddy_image", "wrong_caddy_port", "node_hostport", "foreign_node_hostport", "wrong_hostport", "bound_other_host", "node_unavailable", "front_unavailable", "authority_changed", "older_same_slot", "older_other_slot"} {
 		t.Run(scenario, func(t *testing.T) {
 			node, service, front, endpoints := publicNetworkFixture()
 			code := testCapacityCode()
@@ -78,15 +79,43 @@ func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.
 			case "missing_endpoints":
 				endpoints.Items = nil
 			}
+			if scenario == "older_same_slot" || scenario == "older_other_slot" {
+				state.Fence = code.Fence - 2
+				state.Source = strings.Repeat("b", 40)
+				state.Image = "sha256:" + strings.Repeat("c", 64)
+				if scenario == "older_other_slot" {
+					state.Slot = "b"
+					state.Fence = code.Fence - 1
+				}
+				worker.Labels["fugue.io/edge-slot"] = state.Slot
+				worker.Annotations["fugue.pro/source-commit"] = state.Source
+				worker.Spec.Containers[0].Image = "registry.example.test/worker@" + state.Image
+				worker.Status.ContainerStatuses[0].ImageID = worker.Spec.Containers[0].Image
+				current.PreviousSlot = "b"
+				current.PreviousFence = code.Fence - 1
+				current.PreviousSource = strings.Repeat("f", 40)
+				current.PreviousImage = "sha256:" + strings.Repeat("f", 64)
+				current.PreviousBundle = "previous.p1.r1"
+				current.PreviousRecord = "sha256:" + strings.Repeat("f", 64)
+			}
+			authorityReads := 0
 			kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet {
 					t.Error("recovery code read mutated cluster", r.Method)
+				}
+				if scenario == "node_unavailable" && r.URL.Path == "/api/v1/nodes/edge-a" || scenario == "front_unavailable" && strings.HasSuffix(r.URL.Path, "/proxy/healthz") {
+					http.Error(w, "unavailable", 503)
+					return
 				}
 				var response any
 				switch r.URL.Path {
 				case "/api/v1/nodes/edge-a":
 					response = kubeNode
 				case "/api/v1/namespaces/system/configmaps/fugue-current-authority-group-a":
+					authorityReads++
+					if scenario == "authority_changed" && authorityReads > 1 {
+						current.Record = "sha256:" + strings.Repeat("f", 64)
+					}
 					raw, _ := json.Marshal(current)
 					cm := corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{UID: "authority-uid", Labels: map[string]string{"fugue.pro/authority-store": "true"}}, Data: map[string]string{"authority.json": string(raw)}}
 					if scenario == "no_authority_owner" {
@@ -139,6 +168,32 @@ func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.
 			if (err == nil) != (scenario == "valid" || scenario == "node_hostport") {
 				t.Fatal(scenario, got, err)
 			}
+			if scenario == "node_unavailable" || scenario == "front_unavailable" || scenario == "transition_in_progress" || scenario == "authority_changed" || scenario == "older_same_slot" || scenario == "older_other_slot" {
+				var diagnostic *capacityCodeError
+				if !errors.As(err, &diagnostic) {
+					t.Fatal("missing typed code observation failure", err)
+				}
+				want := "code_observation_unavailable"
+				if scenario == "transition_in_progress" {
+					want = "code_transition_in_progress"
+				}
+				if scenario == "authority_changed" {
+					want = "code_identity_conflict"
+				}
+				if scenario == "older_same_slot" || scenario == "older_other_slot" {
+					want = "code_not_current"
+					count := 1
+					if scenario == "older_same_slot" {
+						count = 2
+					}
+					if diagnostic.plan == nil || len(diagnostic.plan.Stages) != count || diagnostic.plan.ExecutionAuthorized {
+						t.Fatal("verified old worker lacks correct recovery path", diagnostic)
+					}
+				}
+				if diagnostic.reason != want {
+					t.Fatal("unknown observation mislabeled as old code", diagnostic)
+				}
+			}
 			if err == nil && got != code {
 				t.Fatal("physical code identity drift", got, code)
 			}
@@ -157,6 +212,9 @@ func TestCapacityCodeCancellationBoundsUnavailableNode(t *testing.T) {
 	defer cancel()
 	started := time.Now()
 	_, err := s.readCapacityCode(ctx, node)
+	if result := capacityCodeFailureResult(err); result.reason != "code_observation_unavailable" || result.codePlan != nil {
+		t.Fatal("timeout authorized code recovery", result)
+	}
 	if err == nil || time.Since(started) > time.Second {
 		t.Fatal("unavailable metadata blocked recovery", err)
 	}

@@ -49,17 +49,19 @@ func (p OfflineEdgeRecoveryPolicy) Validate() error {
 // This is a rebuildable observation. Only a signed candidate can pin it for
 // historical membership; this checkpoint is never serving authority.
 type OfflineRecoveryObservation struct {
-	EdgeID            string                    `json:"edge_id"`
-	DeclarationDigest string                    `json:"declaration_digest"`
-	LastAttempt       time.Time                 `json:"last_attempt"`
-	LastSuccess       time.Time                 `json:"last_success"`
-	ProofValidUntil   time.Time                 `json:"proof_valid_until"`
-	Successes         int                       `json:"successes"`
-	Failures          int                       `json:"failures"`
-	Admitted          bool                      `json:"admitted"`
-	FirstSuccess      time.Time                 `json:"first_success,omitzero"`
-	LastResult        string                    `json:"last_result,omitempty"`
-	Capacity          *CapacityRecoveryEvidence `json:"capacity,omitempty"`
+	CodeDetail        string                      `json:"code_detail,omitempty"`
+	CodePlan          *model.EdgeCodeRecoveryPlan `json:"code_plan,omitempty"`
+	EdgeID            string                      `json:"edge_id"`
+	DeclarationDigest string                      `json:"declaration_digest"`
+	LastAttempt       time.Time                   `json:"last_attempt"`
+	LastSuccess       time.Time                   `json:"last_success"`
+	ProofValidUntil   time.Time                   `json:"proof_valid_until"`
+	Successes         int                         `json:"successes"`
+	Failures          int                         `json:"failures"`
+	Admitted          bool                        `json:"admitted"`
+	FirstSuccess      time.Time                   `json:"first_success,omitzero"`
+	LastResult        string                      `json:"last_result,omitempty"`
+	Capacity          *CapacityRecoveryEvidence   `json:"capacity,omitempty"`
 }
 
 func OfflineRecoveryKey(hold OfflineEdge) string {

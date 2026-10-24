@@ -37,12 +37,12 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	var result platformproducer.CapacityCodeIdentity
-	fail := func() (platformproducer.CapacityCodeIdentity, error) {
-		return result, errors.New("current physical Edge code unavailable")
+	fail := func(reason, detail string) (platformproducer.CapacityCodeIdentity, error) {
+		return result, codeObservationError(reason, detail)
 	}
 	client, err := s.edgeEnrollmentClusterClient()
 	if err != nil {
-		return result, err
+		return fail("code_observation_unavailable", "cluster_client")
 	}
 	defer client.closeIdleConnections()
 	base := "/api/v1/namespaces/" + url.PathEscape(s.controlPlaneNamespace)
@@ -52,37 +52,63 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	var services corev1.ServiceList
 	var pods corev1.PodList
 	read := func(path string, out any) bool { return readCapacityMetadata(ctx, client, path, out) == nil }
-	if !read("/api/v1/nodes/"+url.PathEscape(edge.ID), &node) || node.Name != edge.ID || node.UID == "" || node.DeletionTimestamp != nil ||
-		!read(base+"/configmaps/"+url.PathEscape("fugue-current-authority-"+edge.EdgeGroupID), &authority) || authority.UID == "" || authority.DeletionTimestamp != nil || authority.Labels["fugue.pro/authority-store"] != "true" ||
-		!read(base+"/configmaps?"+url.Values{"labelSelector": {"fugue.pro/group=" + edge.EdgeGroupID + ",fugue.pro/authority-kind=transition-journal"}, "limit": {"1"}}.Encode(), &journals) || journals.Continue != "" || len(journals.Items) != 0 ||
-		!read(base+"/services?limit=256", &services) || services.Continue != "" ||
-		!read(base+"/pods?"+url.Values{"fieldSelector": {"spec.nodeName=" + edge.ID}, "limit": {"256"}}.Encode(), &pods) || pods.Continue != "" {
-		return fail()
+	if !read("/api/v1/nodes/"+url.PathEscape(edge.ID), &node) {
+		return fail("code_observation_unavailable", "node_metadata")
+	}
+	if node.Name != edge.ID || node.UID == "" || node.DeletionTimestamp != nil {
+		return fail("code_identity_conflict", "node_metadata")
+	}
+	authorityPath := base + "/configmaps/" + url.PathEscape("fugue-current-authority-"+edge.EdgeGroupID)
+	if !read(authorityPath, &authority) {
+		return fail("code_observation_unavailable", "authority_metadata")
+	}
+	if authority.UID == "" || authority.DeletionTimestamp != nil || authority.Labels["fugue.pro/authority-store"] != "true" {
+		return fail("code_identity_conflict", "authority_metadata")
+	}
+	if !read(base+"/configmaps?"+url.Values{"labelSelector": {"fugue.pro/group=" + edge.EdgeGroupID + ",fugue.pro/authority-kind=transition-journal"}, "limit": {"1"}}.Encode(), &journals) || journals.Continue != "" {
+		return fail("code_observation_unavailable", "transition_journal")
+	}
+	if len(journals.Items) != 0 {
+		return fail("code_transition_in_progress", "transition_journal")
+	}
+	if !read(base+"/services?limit=256", &services) || services.Continue != "" {
+		return fail("code_observation_unavailable", "service_inventory")
+	}
+	if !read(base+"/pods?"+url.Values{"fieldSelector": {"spec.nodeName=" + edge.ID}, "limit": {"256"}}.Encode(), &pods) || pods.Continue != "" {
+		return fail("code_observation_unavailable", "pod_inventory")
 	}
 	var current edgeEnrollmentAuthority
 	if json.Unmarshal([]byte(authority.Data["authority.json"]), &current) != nil || current.GroupID != edge.EdgeGroupID {
-		return fail()
+		return fail("code_identity_conflict", "authority_metadata")
 	}
 	service, err := publicFrontService(services.Items, edge, s.controlPlaneNamespace)
 	if err != nil {
-		return fail()
+		return fail("code_identity_conflict", "public_service")
 	}
 	front, port, err := publicFrontPod(*service, pods.Items, edge)
 	if err != nil {
-		return fail()
+		return fail("code_observation_unavailable", "public_front")
 	}
 	var endpoints discoveryv1.EndpointSliceList
-	if !read("/apis/discovery.k8s.io/v1/namespaces/"+url.PathEscape(s.controlPlaneNamespace)+"/endpointslices?"+url.Values{"labelSelector": {discoveryv1.LabelServiceName + "=" + service.Name}, "limit": {"256"}}.Encode(), &endpoints) || endpoints.Continue != "" || !dnsBackendEndpointsMatch(*service, *front, endpoints.Items, true) {
-		return fail()
+	if !read("/apis/discovery.k8s.io/v1/namespaces/"+url.PathEscape(s.controlPlaneNamespace)+"/endpointslices?"+url.Values{"labelSelector": {discoveryv1.LabelServiceName + "=" + service.Name}, "limit": {"256"}}.Encode(), &endpoints) || endpoints.Continue != "" {
+		return fail("code_observation_unavailable", "endpoints")
+	}
+	if !dnsBackendEndpointsMatch(*service, *front, endpoints.Items, true) {
+		return fail("code_identity_conflict", "endpoints")
 	}
 	var health capacityFrontState
-	if readDNSPodObservation(ctx, client, base+"/pods/"+url.PathEscape(front.Name+":"+strconv.Itoa(port))+"/proxy/healthz", &health, 32<<10) != nil ||
-		health.Status != "ok" || health.Authority != edgegroupfront.ActivationAuthority || health.Slot != current.Slot || health.Fence != current.Fence || health.Bundle != current.Bundle || health.Source != current.Source || health.Image != current.Image {
-		return fail()
+	if readDNSPodObservation(ctx, client, base+"/pods/"+url.PathEscape(front.Name+":"+strconv.Itoa(port))+"/proxy/healthz", &health, 32<<10) != nil {
+		return fail("code_observation_unavailable", "front_health")
+	}
+	if health.Status != "ok" {
+		return fail("code_observation_unavailable", "front_health")
+	}
+	if health.Authority != edgegroupfront.ActivationAuthority {
+		return fail("code_identity_conflict", "front_health")
 	}
 	worker, err := capacityTargetWorker(*front, pods.Items, edge, node, health)
 	if err != nil {
-		return fail()
+		return fail("code_identity_conflict", "worker_target")
 	}
 	frontImage := ""
 	for _, c := range front.Spec.Containers {
@@ -90,10 +116,36 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 			_, frontImage, _ = strings.Cut(c.Image, "@")
 		}
 	}
-	result = platformproducer.CapacityCodeIdentity{NodeUID: string(node.UID), FrontPodUID: string(front.UID), WorkerPodUID: string(worker.UID), ServiceUID: string(service.UID), AuthorityUID: string(authority.UID), AuthorityRecordDigest: current.Record, WorkerSourceSHA: current.Source, WorkerImageDigest: current.Image, FrontImageDigest: frontImage, ProxyImageDigest: runningCapacityImage(*worker, "caddy"), Slot: current.Slot, Fence: current.Fence, Bundle: current.Bundle}
+	// Bind the observed code to the actual selected Worker first. A stale
+	// Front field without a matching running process cannot drive a recovery plan.
+	result = platformproducer.CapacityCodeIdentity{NodeUID: string(node.UID), FrontPodUID: string(front.UID), WorkerPodUID: string(worker.UID), ServiceUID: string(service.UID), AuthorityUID: string(authority.UID), AuthorityRecordDigest: current.Record, WorkerSourceSHA: health.Source, WorkerImageDigest: health.Image, FrontImageDigest: frontImage, ProxyImageDigest: runningCapacityImage(*worker, "caddy"), Slot: health.Slot, Fence: health.Fence, Bundle: health.Bundle}
 	if !result.Valid() {
-		return fail()
+		return fail("code_identity_conflict", "code_binding")
 	}
+	var latest corev1.ConfigMap
+	if !read(authorityPath, &latest) {
+		return fail("code_observation_unavailable", "authority_metadata")
+	}
+	if latest.UID != authority.UID || latest.ResourceVersion != authority.ResourceVersion || latest.Data["authority.json"] != authority.Data["authority.json"] {
+		return fail("code_identity_conflict", "authority_changed")
+	}
+	observed := model.EdgeCodeRecoveryTarget{Slot: health.Slot, FrontGeneration: health.Fence, BundleGeneration: health.Bundle, WorkerSourceSHA: health.Source, WorkerImageDigest: health.Image}
+	target := model.EdgeCodeRecoveryTarget{Slot: current.Slot, FrontGeneration: current.Fence, BundleGeneration: current.Bundle, WorkerSourceSHA: current.Source, WorkerImageDigest: current.Image}
+	var previous *model.EdgeCodeRecoveryTarget
+	if platformproducer.ValidDigest(current.PreviousRecord) && current.PreviousRecord != current.Record {
+		previous = &model.EdgeCodeRecoveryTarget{Slot: current.PreviousSlot, FrontGeneration: current.PreviousFence, BundleGeneration: current.PreviousBundle, WorkerSourceSHA: current.PreviousSource, WorkerImageDigest: current.PreviousImage}
+	}
+	plan, planErr := model.PlanEdgeCodeRecovery(current.Record, observed, target, previous)
+	if planErr != nil {
+		if target.Valid() && observed.FrontGeneration < target.FrontGeneration {
+			return fail("code_not_current", "recovery_history")
+		}
+		return fail("code_identity_conflict", "code_binding")
+	}
+	if len(plan.Stages) > 0 {
+		return result, &capacityCodeError{reason: "code_not_current", detail: "code_binding", plan: &plan}
+	}
+
 	return result, nil
 }
 

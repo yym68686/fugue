@@ -119,11 +119,13 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 		passed := false
 		var validUntil time.Time
 		var capacity *platformproducer.CapacityRecoveryEvidence
-		result := ""
+		result, codeDetail := "", ""
+		var codePlan *model.EdgeCodeRecoveryPlan
 		observedAt := time.Time{}
 		if hold.Recovery.Capacity != nil {
 			outcome := s.probeCapacityRecovery(ctx, hold, input.OfflineEdges)
 			capacity, result, validUntil = outcome.evidence, outcome.reason, outcome.validUntil
+			codeDetail, codePlan = outcome.codeDetail, outcome.codePlan
 			passed = capacity != nil && result == "capacity_verified"
 			if capacity != nil {
 				observedAt = capacity.CheckedAt
@@ -144,6 +146,7 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 				observedAt = time.Now().UTC()
 			}
 			observed := previous.RecordCapacity(hold, observedAt, passed, validUntil, capacity, result)
+			observed.CodeDetail, observed.CodePlan = codeDetail, codePlan
 			return json.Marshal(observed)
 		})
 		finish()

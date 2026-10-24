@@ -19358,6 +19358,30 @@ components:
         minimum_bytes_per_second: {type: integer, minimum: 65536, maximum: 16777216}
         max_elapsed_milliseconds: {type: integer, minimum: 1000, maximum: 15000}
         minimum_stable_seconds: {type: integer, minimum: 300, maximum: 7200}
+    EdgeCodeRecoveryPlan:
+      type: object
+      additionalProperties: false
+      required: [schema, authority_record_digest, observed, stages, execution_authorized]
+      description: Advisory code catch-up plan derived only from a verified physical member and the exact current group code authority. A member behind on the same slot needs the retained previous slot before the current slot. Each stage targets an inactive slot and keeps increasing published fences. The plan is not permission to restart, activate, change DNS, remove a hold, or replace a positive LKG; an executor must revalidate live identities, leases, capacity, preparation and route/TLS proofs for every step.
+      properties:
+        schema: {type: string, enum: [fugue.edge-code-recovery-plan/v1]}
+        authority_record_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        execution_authorized: {type: boolean, enum: [false]}
+        observed: {$ref: '#/components/schemas/EdgeCodeRecoveryTarget'}
+        stages:
+          type: array
+          maxItems: 2
+          items: {$ref: '#/components/schemas/EdgeCodeRecoveryTarget'}
+    EdgeCodeRecoveryTarget:
+      type: object
+      additionalProperties: false
+      required: [slot, front_generation, bundle_generation, worker_source_sha, worker_image_digest]
+      properties:
+        slot: {type: string, enum: [a, b]}
+        front_generation: {type: integer, format: int64, minimum: 1}
+        bundle_generation: {type: string, minLength: 1, maxLength: 512}
+        worker_source_sha: {type: string, pattern: '^[a-f0-9]{40}$'}
+        worker_image_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
     EdgeDNSAdmissionIntent:
       type: object
       additionalProperties: false
@@ -19371,7 +19395,12 @@ components:
         recovery_last_probe_at: {type: string, format: date-time}
         recovery_last_result:
           type: string
-          enum: [route_unavailable, reference_unavailable, capacity_unavailable, capacity_below_policy, code_not_current, evidence_unavailable, capacity_verified]
+          enum: [route_unavailable, reference_unavailable, capacity_unavailable, capacity_below_policy, code_not_current, code_observation_unavailable, code_identity_conflict, code_transition_in_progress, evidence_unavailable, capacity_verified]
+        recovery_code_detail:
+          type: string
+          enum: [cluster_client, node_metadata, authority_metadata, transition_journal, service_inventory, pod_inventory, public_service, public_front, endpoints, front_health, worker_target, code_binding, authority_changed, observation_changed, recovery_history]
+        recovery_code_plan:
+          $ref: '#/components/schemas/EdgeCodeRecoveryPlan'
         recovery_capacity_bytes_per_second: {type: number, minimum: 0}
         recovery_capacity_elapsed_milliseconds: {type: number, minimum: 0}
         recovery_capacity_evidence_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}

@@ -102,3 +102,29 @@ The summary neither renews observations nor authorizes a release. This keeps lar
 quality histories out of configuration comparison payloads without raising the
 publisher's 128 MiB response limit. Full capture memory is unchanged; this is an
 export optimization and diagnostic improvement, not a claim of lower DNS RSS.
+
+## Code recovery observations
+
+`code_not_current` requires a successfully observed public Front and its exact
+running Worker/Caddy process to prove an older code generation. Transport failures
+and missing metadata report `code_observation_unavailable` with the failed stage;
+identity disagreement reports `code_identity_conflict`. An unfinished group journal
+reports `code_transition_in_progress`. Unknown observations cannot generate a code
+catch-up plan. A fresh failure clears any old plan from the inventory response.
+
+For proven old code, `recovery_code_plan` derives at most two stages from the
+committed current/previous authority. If a node and the current group use opposite
+slots, it can prepare the current slot. If both use the same slot, the retained
+previous slot must have a fence strictly between the node and current fences:
+prepare/prove/switch to that previous slot, then prepare/prove/switch to the current
+slot. Replanning after the first stage yields just the second stage. Missing
+history, conflicting same fences and ahead-of-authority states cannot fabricate an
+intermediate image or fence. The plan is advisory (`execution_authorized=false`);
+it never restarts a Pod, activates a Front or changes membership by itself.
+
+The eventual executor must confirm capacity before downloading code, keep the
+current serving process until a prepared inactive Worker proves current signed
+configuration, revalidate group/physical identities under bounded leases, drain
+old connections before replacing their Worker, and retain DNS/code isolation until
+all final capacity and publication gates pass. These execution steps are not
+implemented by the advisory planner.
