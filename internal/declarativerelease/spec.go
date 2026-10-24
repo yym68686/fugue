@@ -125,6 +125,7 @@ type Workload struct {
 	Replicas             int    `json:"replicas"`
 	PreservedUnavailable int    `json:"preservedUnavailable,omitempty"`
 	RolloutMode          string `json:"rolloutMode"`
+	HealthTimeoutSeconds int    `json:"healthTimeoutSeconds,omitempty"`
 }
 
 // Transition declares the one non-standard rollout primitive that cannot be
@@ -555,6 +556,9 @@ func (workload Workload) validate(componentID string) error {
 	}
 	if workload.PreservedUnavailable < 0 || (workload.Kind != "DaemonSet" && workload.PreservedUnavailable != 0) {
 		return fmt.Errorf("component %q preservedUnavailable is invalid", componentID)
+	}
+	if workload.HealthTimeoutSeconds != 0 && (workload.HealthTimeoutSeconds < 120 || workload.HealthTimeoutSeconds > 300) {
+		return fmt.Errorf("component %q healthTimeoutSeconds must be omitted or between 120 and 300", componentID)
 	}
 	return nil
 }

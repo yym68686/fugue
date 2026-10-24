@@ -2184,7 +2184,7 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 		return declarativerelease.Observation{}, errors.New("cannot wait healthy for an absent target")
 	}
 	soak := healthSoakDuration(release)
-	deadline := time.Now().Add(cluster.timeout + soak)
+	deadline := time.Now().Add(healthWaitTimeout(release, cluster.timeout) + soak)
 	var lastErr error
 	var lastFailure error
 	tracker := healthSoakTracker{required: soak}
@@ -2341,6 +2341,16 @@ func typedPrewritePredecessorHealth(ctx context.Context, release declarativerele
 		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
 	}
 	return nil
+}
+
+// The reviewed component plan may budget cold recovery separately from each
+// Kubernetes operation. The outer execution context, exact health predicates
+// and continuous soak remain mandatory; time alone never establishes health.
+func healthWaitTimeout(release declarativerelease.PlanRelease, fallback time.Duration) time.Duration {
+	if seconds := release.Workload.HealthTimeoutSeconds; seconds != 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return fallback
 }
 
 func healthSoakDuration(release declarativerelease.PlanRelease) time.Duration {
