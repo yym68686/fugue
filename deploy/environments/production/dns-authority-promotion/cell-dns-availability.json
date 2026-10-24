@@ -5,7 +5,7 @@
     "digest": "sha256:d7f69c6fe64beb026ea801de0c523e6f85cb34071543c4bfec93c202c0b90078",
     "id": "artifact_1792840059_ad3dcf48fbc8"
   },
-  "generation": 11,
+  "generation": 12,
   "namespace": "fugue-system",
   "observation": {
     "interval_seconds": 20,
@@ -22,10 +22,10 @@
         "release_id": "artifactrel_1792781953_f9bfc2000ce9"
       },
       "gray": {
-        "artifact_id": "artifact_1792840060_7560e6955647",
-        "content_hash": "sha256:82f5feb99e8423a9d3273b648e8650099d98575eac9fd1ae4f1b58cd2df24dcb",
-        "fencing_token": 2,
-        "release_id": "artifactrel_1792850949_05e4310a722b"
+        "artifact_id": "artifact_1792759736_3206ccabcd78",
+        "content_hash": "sha256:08ca4bf3d6b68d0109eda5719637bb8cba365f760bf0a589e48174ebd4dd0074",
+        "fencing_token": 1,
+        "release_id": "artifactrel_1792761921_4971b4465f8d"
       },
       "shadow": {
         "artifact_id": "artifact_1792840060_7560e6955647",
