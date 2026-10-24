@@ -135,7 +135,7 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		if err := tx.Commit(); err != nil {
 			t.Fatal(err)
 		}
-		for _, migrate := range []func(context.Context, string) error{schemamigrate.MigratePlatformState, schemamigrate.MigrateImageCacheManifestGraph, schemamigrate.MigrateEdgeInstanceFencing, schemamigrate.MigrateSourceUploadSessions} {
+		for _, migrate := range []func(context.Context, string) error{schemamigrate.MigratePlatformState, schemamigrate.MigratePlatformShadowConsumers, schemamigrate.MigrateImageCacheManifestGraph, schemamigrate.MigrateEdgeInstanceFencing, schemamigrate.MigrateSourceUploadSessions} {
 			if err := migrate(ctx, address); err != nil {
 				t.Fatal(err)
 			}
@@ -417,7 +417,7 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	if err != nil {
 		t.Fatal(err)
 	}
-	report(shadow, 7, fullCaps, false)
+	report(shadow, 17, fullCaps, false)
 	guarded := func(channel string) model.PlatformArtifactReleaseRequest {
 		t.Helper()
 		lkg, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
@@ -450,7 +450,7 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	if err != nil {
 		t.Fatal("guarded gray rejected despite valid capabilities", err)
 	}
-	report(gray, 8, fullCaps, true)
+	report(gray, 18, fullCaps, true)
 	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(gray.ID, completePlatformVerificationRequest(gray.FencingToken, false), testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
 		t.Fatal("successor gray replaced existing positive LKG", err)
 	}
@@ -462,7 +462,7 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	if err != nil || previousLKG == nil || previousLKG.ArtifactID == parent.ID {
 		t.Fatal("publishing full replaced LKG before successor verification", err)
 	}
-	report(full, 9, fullCaps, false)
+	report(full, 19, fullCaps, false)
 	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(full.ID, completePlatformVerificationRequest(full.FencingToken, false), testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
 		t.Fatal("negative full observations replaced positive LKG", err)
 	}
@@ -470,7 +470,7 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	if err != nil || stillRetained == nil || stillRetained.ID != previousLKG.ID {
 		t.Fatal("failed verification lost previous positive LKG", err)
 	}
-	report(full, 10, fullCaps, true)
+	report(full, 20, fullCaps, true)
 	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(full.ID, completePlatformVerificationRequest(full.FencingToken, false), testPlatformPrincipal()); err != nil {
 		t.Fatal("observed successor full LKG failed", err)
 	}

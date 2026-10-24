@@ -165,6 +165,7 @@ func testDNSPublicationSuccessorGuard(t *testing.T, s *Store, input platformconf
 		t.Fatal("current exact retry not idempotent", err)
 	}
 	preserve()
+	rejectSupersededShadow := testShadowObservationIsolation(t, s, next, successor)
 	base.DNSPublicationPrecondition.Lanes["shadow"] = ref(next, successor)
 	second, third := candidate("second"), candidate("third")
 	requests := []model.PlatformArtifactReleaseRequest{request(second), request(third)}
@@ -193,5 +194,6 @@ func testDNSPublicationSuccessorGuard(t *testing.T, s *Store, input platformconf
 	if _, _, _, _, err := s.ReleasePlatformArtifact(next.ID, req, testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
 		t.Fatal("superseded retry accepted", err)
 	}
+	rejectSupersededShadow()
 	preserve()
 }

@@ -386,6 +386,33 @@ func testPrivateDNSHeartbeatPersistence(t *testing.T, transport *Server, claims 
 		t.Fatal(err)
 	}
 	state := model.State{PlatformArtifacts: []model.PlatformArtifact{c.ReleaseArtifact, c.DNSArtifact}, PlatformArtifactReleases: []model.PlatformArtifactRelease{r}, ExpectedConsumerSets: []model.PlatformExpectedConsumerSet{set}, PlatformReleaseLanes: []model.PlatformReleaseLane{{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, FencingToken: r.FencingToken, ActiveReleaseID: r.ID}}}
+	shadowRequest := req
+	shadowRequest.Intent.Generation += "-successor"
+	shadowRequest.Policy.Generation += "-successor"
+	shadowRequest.RuntimeSnapshot.IntentGeneration = ""
+	shadowRequest.RuntimeSnapshot.PolicyGeneration = ""
+	shadowCompiled, err := platformconfig.Compile(shadowRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shadowCompiled.DNSArtifact = celldns.Sign(t, shadowCompiled.DNSArtifact, "dns-child-successor", 2)
+	shadowCompiled.ReleaseArtifact = celldns.Sign(t, platformconfig.BuildReleaseSetArtifact(shadowCompiled.ReleaseSet, []string{shadowCompiled.DNSArtifact.ID}, shadowRequest.CreatedAt), "dns-parent-successor", 2)
+	shadowRelease := r
+	shadowRelease.ID = "dns-shadow"
+	shadowRelease.ArtifactID = shadowCompiled.ReleaseArtifact.ID
+	shadowRelease.Generation = shadowCompiled.ReleaseArtifact.Generation
+	shadowRelease.ReleaseChannel = "shadow"
+	shadowRelease.CanaryRuleRef = ""
+	shadowRelease.FencingToken = 2
+	shadowRelease.LaneKey = platformsafety.ReleaseLaneKey(r.ArtifactKind, r.ScopeKey, "shadow")
+	shadowSet, e := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: shadowCompiled.ReleaseArtifact.ID, ArtifactReleaseID: shadowRelease.ID, ArtifactKind: shadowCompiled.DNSArtifact.ArtifactKind, Generation: shadowCompiled.DNSArtifact.Generation, Scope: shadowCompiled.ReleaseArtifact.Scope, ScopeKey: shadowCompiled.ReleaseArtifact.ScopeKey, Revision: 1, PreparedAt: now, Topology: topology})
+	if e != nil {
+		t.Fatal(e)
+	}
+	state.PlatformArtifacts = append(state.PlatformArtifacts, shadowCompiled.ReleaseArtifact, shadowCompiled.DNSArtifact)
+	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, shadowRelease)
+	state.ExpectedConsumerSets = append(state.ExpectedConsumerSets, shadowSet)
+	state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: shadowRelease.LaneKey, ArtifactKind: shadowRelease.ArtifactKind, ScopeKey: shadowRelease.ScopeKey, ReleaseChannel: "shadow", FencingToken: 2, ActiveReleaseID: shadowRelease.ID})
 	path := t.TempDir() + "/state.json"
 	raw, _ := json.Marshal(state)
 	if err := os.WriteFile(path, raw, 0600); err != nil {
@@ -430,6 +457,40 @@ func testPrivateDNSHeartbeatPersistence(t *testing.T, transport *Server, claims 
 	if result := s.inspectDNSBackend(context.Background(), claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil); result == http.StatusOK {
 		t.Fatal("private receipt claimed public transport")
 	}
+	shadowHeartbeat := heartbeat(1)
+	shadowHeartbeat.ExpectedConsumerSetID = shadowSet.ID
+	shadowHeartbeat.ReleaseSetID = shadowSet.ReleaseSetID
+	shadowHeartbeat.DesiredGeneration = shadowSet.ExpectedGeneration
+	shadowHeartbeat.CandidateGeneration = shadowSet.ExpectedGeneration
+	shadowHeartbeat.GenerationSequence = shadowCompiled.DNSArtifact.GenerationSequence
+	shadowHeartbeat.FencingToken = 2
+	shadowHeartbeat.ApplyStatus = "staged"
+	shadowHeartbeat.ProbeStatus = "shadow_validated"
+	shadowHeartbeat.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(shadowHeartbeat)
+	response = performJSONRequest(t, s, http.MethodPost, "/v1/platform-state/consumers/shadow-heartbeat", token, shadowHeartbeat)
+	if response.Code != http.StatusOK {
+		t.Fatalf("isolated shadow rejected: %d %s", response.Code, response.Body.String())
+	}
+	shadowFacts, e := st.ListPlatformShadowConsumers(set.ArtifactKind, set.ScopeKey)
+	if e != nil || len(shadowFacts) != 1 || shadowFacts[0].ExpectedConsumerSetID != shadowSet.ID {
+		t.Fatal("shadow observation missing", e)
+	}
+	current, e := st.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
+	if e != nil || !reflect.DeepEqual(before, current) {
+		t.Fatal("shadow overwrote serving observation", e)
+	}
+	observed, e := s.platformConsumersForConvergence(shadowSet)
+	if e != nil || len(observed) != 1 || observed[0].ExpectedConsumerSetID != shadowSet.ID {
+		t.Fatal("shadow convergence did not select isolated observation", e)
+	}
+	observed, e = s.platformConsumersForConvergence(set)
+	if e != nil || !reflect.DeepEqual(before, observed) {
+		t.Fatal("serving convergence selected shadow", e)
+	}
+	response = performJSONRequest(t, s, http.MethodPost, "/v1/platform-state/consumers/shadow-heartbeat", token, heartbeat(2))
+	if response.Code == http.StatusOK {
+		t.Fatal("serving receipt accepted on shadow endpoint")
+	}
 	auditBefore, err := st.ListAuditEvents("", true, 100)
 	if err != nil {
 		t.Fatal(err)
@@ -438,6 +499,18 @@ func testPrivateDNSHeartbeatPersistence(t *testing.T, transport *Server, claims 
 	response = performJSONRequest(t, s, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", token, heartbeat(2))
 	if response.Code != http.StatusConflict {
 		t.Fatalf("changed validation transport accepted: %d %s", response.Code, response.Body.String())
+	}
+	shadowHeartbeat.Sequence++
+	shadowHeartbeat.IssuedAt = time.Now().UTC()
+	shadowHeartbeat.Nonce = model.NewID("nonce")
+	shadowHeartbeat.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(shadowHeartbeat)
+	response = performJSONRequest(t, s, http.MethodPost, "/v1/platform-state/consumers/shadow-heartbeat", token, shadowHeartbeat)
+	if response.Code != http.StatusConflict {
+		t.Fatal("changed private transport accepted isolated shadow", response.Code)
+	}
+	afterShadow, e := st.ListPlatformShadowConsumers(set.ArtifactKind, set.ScopeKey)
+	if e != nil || !reflect.DeepEqual(shadowFacts, afterShadow) {
+		t.Fatal("rejected shadow changed isolated observation", e)
 	}
 	after, err := st.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
 	if err != nil {

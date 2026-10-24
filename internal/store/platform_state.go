@@ -2066,12 +2066,16 @@ func buildPlatformConsumerHeartbeatAuditEvent(
 		"last_error_present":       fmt.Sprintf("%t", strings.TrimSpace(consumer.LastError) != ""),
 		"evidence_hash":            strings.TrimSpace(strings.ToLower(consumer.EvidenceHash)),
 	}
+	action, targetType := "platform_consumer.heartbeat_accepted", "platform_consumer"
+	if strings.HasPrefix(consumer.ID, "shadow_") {
+		action, targetType = "platform_consumer.shadow_observed", "platform_shadow_consumer"
+	}
 	return platformsafety.SignTamperEvidentAuditEvent(model.AuditEvent{
 		ID:            model.NewID("audit"),
 		ActorType:     "platform_component",
 		ActorID:       strings.TrimSpace(consumer.CredentialID),
-		Action:        "platform_consumer.heartbeat_accepted",
-		TargetType:    "platform_consumer",
+		Action:        action,
+		TargetType:    targetType,
 		TargetID:      strings.TrimSpace(consumer.ID),
 		Metadata:      metadata,
 		ChainID:       chainID,

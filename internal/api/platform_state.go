@@ -927,7 +927,7 @@ func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r 
 			return
 		}
 		set = platformcontrol.ProjectExpectedConsumerSetToTopology(set, topology)
-		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
+		consumers, consumerErr := s.platformConsumersForConvergence(set)
 		if consumerErr != nil {
 			s.writeStoreError(w, consumerErr)
 			return
@@ -1143,6 +1143,14 @@ func (s *Server) handlePlatformConsumerHeartbeat(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r *http.Request) {
+	s.handleVerifiedPlatformConsumerHeartbeat(w, r, false)
+}
+
+func (s *Server) handlePlatformShadowConsumerHeartbeat(w http.ResponseWriter, r *http.Request) {
+	s.handleVerifiedPlatformConsumerHeartbeat(w, r, true)
+}
+
+func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, r *http.Request, shadow bool) {
 	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
 	if !ok {
 		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
@@ -1184,14 +1192,12 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 		httpx.WriteError(w, status, "DNS heartbeat declared backend identity could not be verified")
 		return
 	}
-	consumer, err := s.store.AcceptTrustedPlatformConsumerHeartbeatWithAudit(
-		claims,
-		heartbeat.ExpectedConsumerSetID,
-		heartbeat,
-		time.Now().UTC(),
-		platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
-		s.heartbeatAuditKeyring,
-	)
+	var consumer model.PlatformConsumerInstance
+	if shadow {
+		consumer, err = s.store.AcceptPlatformShadowConsumerHeartbeat(claims, heartbeat, time.Now().UTC(), s.heartbeatAuditKeyring)
+	} else {
+		consumer, err = s.store.AcceptTrustedPlatformConsumerHeartbeatWithAudit(claims, heartbeat.ExpectedConsumerSetID, heartbeat, time.Now().UTC(), platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}, s.heartbeatAuditKeyring)
+	}
 	if err != nil {
 		writeTrustedPlatformConsumerHeartbeatError(w, err)
 		return

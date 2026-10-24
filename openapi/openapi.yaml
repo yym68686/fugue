@@ -4238,6 +4238,56 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/platform-state/consumers/shadow-heartbeat:
+    post:
+      operationId: shadowPlatformConsumerHeartbeat
+      summary: Report Isolated DNS Shadow Observation
+      description: >-
+        Validates an explicitly assigned cell-dns shadow with the same live Pod,
+        declared backend, signed artifact, exact expectation, fence, freshness,
+        replay and capability checks as trusted heartbeats. Only staged and
+        shadow_validated observations are accepted. Stores one bounded latest
+        shadow observation and an independent monotonic cursor per consumer,
+        artifact kind and authority scope. It never changes serving observations,
+        serving cursors, configuration or positive LKG. Release selection and
+        latest expectation are rechecked under the publication lock before commit.
+        The normal convergence endpoint selects these observations only for their
+        exact shadow release; serving convergence never reads them. Candidate
+        capability admission can use only the exact currently selected shadow.
+        Existing clients keep their original heartbeat contract.
+      tags: [Admin]
+      x-fugue-handler: handlePlatformShadowConsumerHeartbeat
+      security:
+        - PlatformComponentBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustedPlatformConsumerHeartbeatRequest"
+      responses:
+        '200':
+          description: Heartbeat accepted after identity, topology, freshness, and monotonicity verification.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConsumerHeartbeatResponse"
+        '400':
+          $ref: "#/components/responses/ErrorResponse"
+        '401':
+          $ref: "#/components/responses/ErrorResponse"
+        '403':
+          $ref: "#/components/responses/ErrorResponse"
+        '404':
+          $ref: "#/components/responses/ErrorResponse"
+        '409':
+          $ref: "#/components/responses/ErrorResponse"
+        '422':
+          $ref: "#/components/responses/ErrorResponse"
+        '503':
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/platform-state/consumers/identity:
     post:
       operationId: exchangePlatformConsumerIdentity

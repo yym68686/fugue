@@ -146,7 +146,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				continue
 			}
 			found := false
-			for _, fact := range state.PlatformConsumerInstances {
+			for _, fact := range trafficCapabilityObservations(state, parent, child, *latest, now) {
 				if fact.ConsumerID != expected.ConsumerID || fact.ArtifactKind != child.ArtifactKind || fact.ScopeKey != parent.ScopeKey {
 					continue
 				}

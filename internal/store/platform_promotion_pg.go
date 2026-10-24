@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -119,6 +120,30 @@ func (s *Store) pgFullReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent
 		return nil, err
 	}
 	rows.Close()
+	if dnsOnlyPublication(parent) {
+		rows, err = tx.QueryContext(ctx, `SELECT body FROM fugue_platform_shadow_consumers WHERE artifact_kind=$1 AND scope_key=$2 ORDER BY consumer_id FOR SHARE`, model.PlatformArtifactKindDNSAnswerBundle, parent.ScopeKey)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var raw []byte
+			var v model.PlatformConsumerInstance
+			if err = rows.Scan(&raw); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if len(raw) > 65536 || json.Unmarshal(raw, &v) != nil {
+				rows.Close()
+				return nil, ErrConflict
+			}
+			state.PlatformShadowConsumers = append(state.PlatformShadowConsumers, v)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
 		return nil, err
 	}

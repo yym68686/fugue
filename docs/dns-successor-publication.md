@@ -49,3 +49,25 @@ foreign publication roles, idempotency, unchanged full/LKG, and refusal to promo
 without capability or convergence. This facility does not yet constitute a
 periodic independent DNS producer; activating a successor and verifying public
 migration remain separate rollout steps.
+
+Established readers also need independent observation state. The
+`/v1/platform-state/consumers/shadow-heartbeat` operation accepts only an exact
+current, signed `cell-dns` shadow with `staged/shadow_validated` status. It uses
+an additive `fugue_platform_shadow_consumers` table (one bounded latest JSON
+record per consumer/kind/scope), its own monotonic cursor and its own signed
+audit chain. It validates the signed parent/child lineage, selected shadow lane,
+expected set and generation in the transaction. Kubernetes backend identity
+checks are shared with the original receipt endpoint.
+
+Only an explicit shadow convergence read can select these records. Exact current
+shadow capability can be projected into publication admission, but that projection
+never modifies serving facts. Full convergence and LKG verification continue to
+read only the original serving table. Shadow audit events have a separate action
+and target type and cannot appear as accepted serving heartbeats. Legacy initial
+enrollment remains compatible.
+
+Deploy the additive schema before enabling the new API. A failure in either
+release leaves current serving observations and artifacts intact. Readers must
+subsequently use separate local proof state and the isolated endpoint before an
+established authority can validate a successor; the storage/API release alone does
+not activate that reader behavior or promote gray/full.
