@@ -149,6 +149,7 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 			for _, hint := range hints {
 				answers, err := executeDNSQueryRecord(record, hint, now)
 				if err != nil {
+					s.retainDNSQueryFailure(c, a, view, record, payload.Plan, payload.Policy.DNSReadiness, readiness.Facts, now, hint, err)
 					return nil, err
 				}
 				receipt.Status.Questions++

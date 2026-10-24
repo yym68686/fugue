@@ -81,3 +81,13 @@ is copied into `/healthz`; serving errors, checkpoints, readiness and LKG remain
 owned by serving refresh. Cancellation stops both loops. Regression tests hold
 the serving lock while the production loop validates a real signed successor,
 then reject a receipt, restart validation and check unchanged retained files.
+
+A query-validation failure retains one bounded local witness at
+`<cache>.query-failure.json` (mode 0600, at most 2 MiB). It contains only the
+failing record's original view, projected candidates, selected readiness plan,
+exact facts/recovery history, evaluation time, representative client hint and
+artifact/assignment identity. `ReplayDNSQueryFailure` checks its content digest
+and replays materialization and selector validation at that original time. The
+witness is diagnostic evidence, not signed serving authorization; artifact and
+source signature verification remain separate. It never renews proof timestamps,
+modifies validation gates or writes a serving checkpoint.
