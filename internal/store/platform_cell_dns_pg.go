@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -17,6 +18,7 @@ func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent 
 		return nil
 	}
 	var dependencies []platformconfig.DNSRouteDependency
+	var dynamicChildren []model.PlatformArtifact
 	var producerArtifacts, producerReleases []string
 	for _, child := range state.PlatformArtifacts {
 		if child.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || child.ScopeKey != parent.ScopeKey {
@@ -35,6 +37,7 @@ func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent 
 			producerArtifacts = append(producerArtifacts, source.PolicyArtifactID)
 		}
 		if len(sources) > 0 {
+			dynamicChildren = append(dynamicChildren, child)
 			cells, err := platformconfig.DecodeCellRoutePublications(child)
 			if err != nil {
 				return err
@@ -109,7 +112,7 @@ func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent 
 		}
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	}
-	// A dynamic source can renew the same verified immutable full artifact.
+	// Dynamic sources retain their exact historical baseline publication.
 	// Preserve its exact original publication row for the historical identity
 	// check; active lane reads alone would lose that superseded authority.
 	if len(producerArtifacts) > 0 {
@@ -155,5 +158,45 @@ func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent 
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, view.PlatformArtifactReleases...)
 		state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, view.PlatformReleaseLanes...)
 	}
+	// Load only the bounded current source read set, under the same scope locks.
+	// This includes rejected/unapproved selections so the shared in-memory
+	// validator sees exactly the same ledger; no historical scan is needed.
+	for _, child := range dynamicChildren {
+		read := pgDNSRouteSourceReader(ctx, tx)
+		capture := dnsRouteSourceReader{
+			artifact: func(id string) (model.PlatformArtifact, error) {
+				a, err := read.artifact(id)
+				if err == nil && platformArtifactIndex(state.PlatformArtifacts, id) < 0 {
+					state.PlatformArtifacts = append(state.PlatformArtifacts, a)
+				}
+				return a, err
+			},
+			release: func(id string) (model.PlatformArtifactRelease, error) {
+				r, err := read.release(id)
+				if err == nil && platformArtifactReleaseIndex(state.PlatformArtifactReleases, id) < 0 {
+					state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
+				}
+				return r, err
+			},
+			lane: func(id string) (model.PlatformReleaseLane, error) {
+				lane, err := read.lane(id)
+				if _, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, id); err == nil && !ok {
+					state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, lane)
+				}
+				return lane, err
+			},
+			lkg: func(scope string) (*model.PlatformLKGSnapshot, error) {
+				lkg, err := read.lkg(scope)
+				if err == nil && lkg != nil && platformLKGSnapshotForScope(state.PlatformLKGSnapshots, model.PlatformArtifactKindReleaseSet, scope) == nil {
+					state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, *lkg)
+				}
+				return lkg, err
+			},
+		}
+		if _, err := observeDNSRouteSources(ctx, child, capture, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+			return platformReleaseRejected("routing_source_selection", fmt.Errorf("%w: current approved routing source unavailable", ErrConflict))
+		}
+	}
+
 	return nil
 }

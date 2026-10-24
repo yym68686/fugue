@@ -33,6 +33,7 @@ func TestCellDNSPublicationAndLKGPostgres(t *testing.T) {
 	t.Run("authorized transition", func(t *testing.T) { testCellDNSPublication(t, address, true, true) })
 	t.Run("retained routing only", func(t *testing.T) { testCellDNSPublication(t, address, true, true, true) })
 	t.Run("verified source renewal", func(t *testing.T) { testCellDNSPublication(t, address, true, true, true, true) })
+	t.Run("advancing source", func(t *testing.T) { testCellDNSPublication(t, address, true, true, true, true, true) })
 }
 
 func seedCellDNSRoutePublications(t *testing.T, s *Store, req *platformconfig.CompileRequest) {
@@ -97,6 +98,7 @@ func TestCellDNSPublicationWithSourceAuthorization(t *testing.T) {
 	t.Run("transition", func(t *testing.T) { testCellDNSPublication(t, "", true, true) })
 	t.Run("retained routing only", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true) })
 	t.Run("verified source renewal", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true, true) })
+	t.Run("advancing source", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true, true, true) })
 }
 
 func testCellDNSPublication(t *testing.T, address string, transition bool, sources ...bool) {
@@ -314,6 +316,15 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		renewed.ReleasedAt = renewed.ReleasedAt.Add(time.Minute)
 		renewed.VerificationState = model.PlatformArtifactVerificationStateServingUnverified
 		renewed.VerifiedLKGGeneration = ""
+		if len(sources) > 3 && sources[3] {
+			artifacts, advanced := advancedDNSRouteSource(t, *req.PreviousTrafficPublication)
+			for _, a := range artifacts {
+				if _, _, err := s.EnsurePlatformArtifact(a); err != nil {
+					t.Fatal(err)
+				}
+			}
+			renewed = advanced
+		}
 		if s.db != nil {
 			if _, err := s.db.Exec("UPDATE fugue_platform_artifact_releases SET status=$1 WHERE id=$2", model.PlatformArtifactReleaseStatusSuperseded, originalID); err != nil {
 				t.Fatal(err)
@@ -338,6 +349,29 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 			}
 		}
 	}
+	if s.db != nil && len(sources) > 3 && sources[3] {
+		if err := s.ValidateDNSPublicationReferences(child); err != nil {
+			t.Fatal("current source read set was not loaded", err)
+		}
+		originalID := req.PreviousTrafficPublication.Reference.ReleaseID
+		for _, id := range []string{originalID, originalID + "-next"} {
+			restore := model.PlatformArtifactVerificationStateVerified
+			if id != originalID {
+				restore = model.PlatformArtifactVerificationStateServingUnverified
+			}
+			if _, err := s.db.Exec("UPDATE fugue_platform_artifact_releases SET verification_state=$1 WHERE id=$2", model.PlatformArtifactVerificationStateFailed, id); err != nil {
+				t.Fatal(err)
+			}
+			rejected := s.ValidateDNSPublicationReferences(child)
+			if _, err := s.db.Exec("UPDATE fugue_platform_artifact_releases SET verification_state=$1 WHERE id=$2", restore, id); err != nil {
+				t.Fatal(err)
+			}
+			if !errors.Is(rejected, ErrConflict) {
+				t.Fatal("PostgreSQL accepted failed historical or current authority", id, rejected)
+			}
+		}
+	}
+
 	if len(sources) > 2 && sources[2] {
 		report(gray, 4, fullCaps, false)
 		if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(gray.ID, completePlatformVerificationRequest(gray.FencingToken, true), testPlatformPrincipal()); !errors.Is(err, ErrConflict) {

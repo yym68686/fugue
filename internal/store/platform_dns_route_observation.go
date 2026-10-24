@@ -40,34 +40,8 @@ func (s *Store) ObserveDNSRouteSources(ctx context.Context, child model.Platform
 	var result model.PlatformDNSRouteSourceSnapshot
 	if s.db == nil {
 		err := s.withLockedState(false, func(state *model.State) error {
-			read := dnsRouteSourceReader{
-				artifact: func(id string) (model.PlatformArtifact, error) {
-					i := platformArtifactIndex(state.PlatformArtifacts, id)
-					if i < 0 {
-						return model.PlatformArtifact{}, ErrNotFound
-					}
-					return state.PlatformArtifacts[i], nil
-				},
-				release: func(id string) (model.PlatformArtifactRelease, error) {
-					i := platformArtifactReleaseIndex(state.PlatformArtifactReleases, id)
-					if i < 0 {
-						return model.PlatformArtifactRelease{}, ErrNotFound
-					}
-					return state.PlatformArtifactReleases[i], nil
-				},
-				lane: func(id string) (model.PlatformReleaseLane, error) {
-					v, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, id)
-					if !ok {
-						return v, ErrNotFound
-					}
-					return v, nil
-				},
-				lkg: func(scope string) (*model.PlatformLKGSnapshot, error) {
-					return platformLKGSnapshotForScope(state.PlatformLKGSnapshots, model.PlatformArtifactKindReleaseSet, scope), nil
-				},
-			}
 			var err error
-			result, err = observeDNSRouteSources(ctx, child, read, keys, time.Now().UTC())
+			result, err = observeDNSRouteSources(ctx, child, stateDNSRouteSourceReader(state), keys, time.Now().UTC())
 			return err
 		})
 		return result, err
@@ -270,6 +244,35 @@ func pgDNSRouteSourceReader(ctx context.Context, tx *sql.Tx) dnsRouteSourceReade
 				return nil, err
 			}
 			return &v, nil
+		},
+	}
+}
+
+func stateDNSRouteSourceReader(state *model.State) dnsRouteSourceReader {
+	return dnsRouteSourceReader{
+		artifact: func(id string) (model.PlatformArtifact, error) {
+			i := platformArtifactIndex(state.PlatformArtifacts, id)
+			if i < 0 {
+				return model.PlatformArtifact{}, ErrNotFound
+			}
+			return state.PlatformArtifacts[i], nil
+		},
+		release: func(id string) (model.PlatformArtifactRelease, error) {
+			i := platformArtifactReleaseIndex(state.PlatformArtifactReleases, id)
+			if i < 0 {
+				return model.PlatformArtifactRelease{}, ErrNotFound
+			}
+			return state.PlatformArtifactReleases[i], nil
+		},
+		lane: func(id string) (model.PlatformReleaseLane, error) {
+			v, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, id)
+			if !ok {
+				return v, ErrNotFound
+			}
+			return v, nil
+		},
+		lkg: func(scope string) (*model.PlatformLKGSnapshot, error) {
+			return platformLKGSnapshotForScope(state.PlatformLKGSnapshots, model.PlatformArtifactKindReleaseSet, scope), nil
 		},
 	}
 }

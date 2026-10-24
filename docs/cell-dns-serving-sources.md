@@ -19,6 +19,23 @@ The baseline embedded route publications remain sufficient for offline
 verification of the original compiled artifact. Existing artifacts without this
 authorization retain their exact-reference semantics.
 
+Publication admission separates historical provenance from live selection. The
+embedded baseline must match its original release identity, channel, canary and
+fence; active or superseded history is accepted, while failed/rolled-back
+history is rejected. A previous-authority baseline must retain its verified
+status. Its artifacts remain validated and signed. The current selected routing
+artifacts may differ when they belong to an explicitly approved producer.
+
+Under the same authority locks, admission reads and authenticates the bounded
+current gray/full/LKG source snapshot using the runtime's source verifier. A
+frozen lane, missing approved source, invalid signature or expired-only LKG
+rejects admission. A failed current candidate may retain an independently valid
+positive LKG. PostgreSQL takes nonblocking shared source locks and captures the
+same bounded read set for the shared validator; it never scans source history.
+Fresh DNS proofs, consumer capability/convergence gates and separate full LKG
+verification remain mandatory. This avoids coupling every DNS publication to
+the routing artifact that happened to be selected at compile time.
+
 A DNS consumer can read current route/TLS publications through a private,
 assignment-bound API only for sources authorized by its selected signed DNS
 artifact. The response must bind the DNS assignment, source scope, producer
