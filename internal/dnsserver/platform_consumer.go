@@ -77,6 +77,7 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 
 func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	servingErr := s.SyncPlatformDNSServingOnce(ctx)
+	s.recordDNSSnapshotFailure(servingErr)
 	if servingErr != nil && ctx.Err() == nil && s.Config.CachePath != "" {
 		message := servingErr.Error()
 		for _, secret := range []string{s.Config.EdgeToken, s.Config.BundleSigningKey, s.Config.BundleSigningPreviousKey} {
@@ -111,7 +112,7 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 		s.platformServingReported = time.Time{}
 		s.mu.Unlock()
 		if previous != servingErr.Error() {
-			s.Logger.Printf("DNS standby backend; public receipt not selected")
+			s.Logger.Printf("DNS standby backend; serving observation: %v", servingErr)
 		}
 	} else if servingErr != nil && ctx.Err() == nil {
 		s.mu.Lock()
@@ -129,6 +130,7 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 	// Keep the authority lock: shadow evidence never becomes serving state.
 	if !s.platformServingBound.Load() || initialShadow {
 		if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
+			s.recordDNSSnapshotFailure(err)
 			s.mu.Lock()
 			s.platformCandidate.State = "failed"
 			if errors.Is(err, platformconsumer.ErrAssignmentChanged) || errors.Is(err, platformconsumer.ErrNoShadowAssignment) {
@@ -142,6 +144,18 @@ func (s *Service) syncPlatformConsumersOnce(ctx context.Context) {
 				s.Logger.Printf("dns platform candidate failed: %v", err)
 			}
 		}
+	}
+}
+
+// Snapshot failures use the existing bounded, asynchronous failure journal.
+// They are explicitly local executions, never public queries or successful ACKs.
+func (s *Service) recordDNSSnapshotFailure(err error) {
+	var failure *dnsSnapshotProbeFailure
+	if !errors.As(err, &failure) {
+		return
+	}
+	if journal := s.decisionAudit.Load(); journal != nil {
+		journal.enqueue(failure.request, failure.response, failure.capture, failure.publication, "snapshot", failure.observedAt, false)
 	}
 }
 

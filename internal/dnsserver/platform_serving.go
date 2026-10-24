@@ -560,15 +560,36 @@ func collectRetainedDNSReadinessFacts(ctx context.Context, old *dnsServingState,
 	return facts
 }
 
+// Keep the exact failed execution, including its clocks and selection entropy.
+// Re-running a failed query for diagnostics could explain a different decision.
+type dnsSnapshotProbeFailure struct {
+	request     *dns.Msg
+	response    *dns.Msg
+	capture     *dnsDecisionCapture
+	publication DNSDecisionPublicationState
+	observedAt  time.Time
+}
+
+func (failure *dnsSnapshotProbeFailure) Error() string {
+	question := failure.request.Question[0]
+	nameDigest := sha256.Sum256([]byte(normalizeName(question.Name)))
+	return fmt.Sprintf("DNS artifact wire probe failed: name_digest=%x type=%d rcode=%d", nameDigest, question.Qtype, failure.response.Rcode)
+}
+
 func probeDNSServingSnapshot(st *dnsServingState) error {
 	for _, zone := range st.zoneOrder {
 		for name, rows := range st.zones[zone].records {
 			for _, entry := range rows {
 				req := new(dns.Msg)
 				req.SetQuestion(dns.Fqdn(name), dns.StringToType[entry.record.Type])
-				response := st.answer(req, "", time.Now().UTC())
+				now := time.Now().UTC()
+				capture := &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}, records: []DNSDecisionRecord{}}
+				response := st.answerObserved(req, "", now, capture)
 				if response.Rcode != dns.RcodeSuccess {
-					return errors.New("DNS artifact wire probe failed")
+					// This detached candidate was never applied or checkpointed.
+					candidate := dnsPublication(st.record)
+					publication := DNSDecisionPublicationState{ObservedAt: now, DesiredKnown: true, Desired: &candidate, Outcome: "snapshot_probe_failed"}
+					return &dnsSnapshotProbeFailure{request: req, response: response, capture: capture, publication: publication, observedAt: now}
 				}
 				raw, err := response.Pack()
 				if err != nil {

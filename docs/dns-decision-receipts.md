@@ -1,5 +1,15 @@
 # Actual DNS decision receipts
 
+Candidate snapshot failures also enter the bounded failure journal with
+`transport: snapshot`, `write_succeeded: false`, and publication outcome
+`snapshot_probe_failed`. These are detached local executions, not public DNS
+requests, loaded generations, positive checkpoints, or accepted heartbeats.
+Their receipt retains the original query, clock, proofs, recovery history and
+selection entropy; replay does not run a second live query. A rejected standby
+heartbeat cannot hide an earlier snapshot failure joined with that error.
+Successful snapshot checks do not enter the journal. The same queue, byte and
+retention limits apply, so diagnostics cannot block DNS serving.
+
 Phase 1 is observation only. It does not change candidate eligibility, scores,
 selection, exploration buckets, cooldown policy, DNS TTLs, releases or positive
 checkpoints. A receipt is captured from the authoritative platform-serving
