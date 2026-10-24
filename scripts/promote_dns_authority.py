@@ -296,7 +296,7 @@ def observe_shadow(c, api, release):
     raise ValueError(error)
 
 
-def observe_reader(c, reader, release):
+def observe_reader(c, reader, release, deadline=None):
     pod = read_json("get", "pod", reader["pod"], "-n", c["namespace"], "-o", "json")
     meta, spec = pod["metadata"], pod["spec"]
     if meta.get("uid") != reader["uid"] or not meta.get("resourceVersion") or spec.get("nodeName") != reader["node_id"] or spec.get("serviceAccountName") != reader["service_account"] or not ready_pod(pod) or any(spec.get(k) for k in ["hostNetwork", "hostPID", "hostIPC"]) or any(p.get("hostPort", 0) for container in spec.get("containers", []) + spec.get("initContainers", []) for p in container.get("ports", [])):
@@ -343,28 +343,70 @@ def observe_reader(c, reader, release):
     if not PurePosixPath(cache).is_absolute() or ".." in PurePosixPath(cache).parts or str(PurePosixPath(cache)) != cache:
         raise ValueError("canonical DNS checkpoint path required")
     command = ["exec", "-n", c["namespace"], reader["pod"], "-c", reader["container"], "--"]
-    checkpoint = read_json(*command, "cat", cache + ".platform-serving.json")
     # Fetch stable verification material before the short-lived runtime facts.
     # Secret reads must not consume the proof's remaining validity window.
     verification = {"signing_key": secret("FUGUE_BUNDLE_SIGNING_KEY"), "signing_key_id": literal("FUGUE_BUNDLE_SIGNING_KEY_ID"), "previous_key": secret("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY"), "previous_key_id": literal("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID"), "revoked_key_ids": [v.strip() for v in literal("FUGUE_BUNDLE_REVOKED_KEY_IDS").split(",") if v.strip()]}
-    # Loopback reads the claimed process even when the private network policy
-    # intentionally rejects direct connections from the release runner.
-    snapshot = read_json(*command, "wget", "-qO-", "http://127.0.0.1:" + str(reader["port"]) + "/runtime-facts")
-    assignment = snapshot.get("assignment", {})
-    if snapshot.get("node_id") != reader["node_id"] or snapshot.get("parent_digest") != c["release_set"]["digest"] or assignment.get("artifact_id") != c["dns_artifact"]["id"] or assignment.get("content_hash") != c["dns_artifact"]["digest"] or assignment.get("release_set_id") != c["release_set"]["id"] or assignment.get("artifact_release_id") != release["id"] or assignment.get("fencing_token") != release["fencing_token"] or assignment.get("release_channel") != release["release_channel"] or assignment.get("scope_key") != scope(c):
-        raise ValueError("private DNS snapshot publication differs")
-    request = {"node_id": reader["node_id"], "group_id": c["authority_cell_id"], "scope": scope(c), "zone": literal("FUGUE_DNS_ZONE"), "checkpoint": checkpoint, "snapshot": snapshot,
-               **verification}
     verifier = os.environ.get("FUGUE_DNS_OBSERVATION_VERIFIER", "")
     if not os.path.isabs(verifier):
         raise ValueError("pinned DNS observation verifier unavailable")
-    result = subprocess.run([verifier], input=json.dumps(request), text=True, capture_output=True, timeout=30)
-    if result.returncode or result.stdout.strip() != '{"verified":true}':
-        raise ValueError("private DNS checkpoint or fresh answer verification failed")
+    def capture():
+        # Capture both values anew after a concurrent refresh. Neither a failed
+        # read nor a mismatched pair can become a positive observation.
+        checkpoint = read_json(*command, "cat", cache + ".platform-serving.json")
+        snapshot = read_json(*command, "wget", "-qO-", "http://127.0.0.1:" + str(reader["port"]) + "/runtime-facts")
+        return checkpoint, snapshot
+    def verify(checkpoint, snapshot):
+        assignment = snapshot.get("assignment", {})
+        if snapshot.get("node_id") != reader["node_id"] or snapshot.get("parent_digest") != c["release_set"]["digest"] or assignment.get("artifact_id") != c["dns_artifact"]["id"] or assignment.get("content_hash") != c["dns_artifact"]["digest"] or assignment.get("release_set_id") != c["release_set"]["id"] or assignment.get("artifact_release_id") != release["id"] or assignment.get("fencing_token") != release["fencing_token"] or assignment.get("release_channel") != release["release_channel"] or assignment.get("scope_key") != scope(c):
+            raise ValueError("private DNS snapshot publication differs")
+        request = {"node_id": reader["node_id"], "group_id": c["authority_cell_id"], "scope": scope(c), "zone": literal("FUGUE_DNS_ZONE"), "checkpoint": checkpoint, "snapshot": snapshot, **verification}
+        timeout = 30 if deadline is None else min(30, deadline - time.monotonic())
+        if timeout <= 0:
+            raise ValueError("private DNS observation deadline exceeded")
+        result = subprocess.run([verifier], input=json.dumps(request), text=True, capture_output=True, timeout=timeout)
+        if result.returncode or result.stdout.strip() != '{"verified":true}':
+            raise ValueError("private DNS checkpoint or fresh answer verification failed")
+    snapshot = coherent_reader_observation(capture, verify, deadline)
     current = read_json("get", "pod", reader["pod"], "-n", c["namespace"], "-o", "json")
     if current["metadata"].get("uid") != meta["uid"] or current["metadata"].get("resourceVersion") != meta["resourceVersion"]:
         raise ValueError("private DNS reader changed during observation")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise ValueError("private DNS observation deadline exceeded")
     return {"node_id": reader["node_id"], "uid": reader["uid"], "observed_at": snapshot["observed_at"], "evaluated_at": snapshot["evaluated_at"], "snapshot_digest": digest(snapshot)}
+
+
+def coherent_reader_observation(capture, verify, deadline=None):
+    """Retry reads only; every returned sample passes the original verifier."""
+    for attempt in range(3):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ValueError("private DNS observation deadline exceeded")
+        try:
+            checkpoint, snapshot = capture()
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            # A 503 can mean state_replaced during serialization. A fresh pair
+            # must still pass all identity, crypto, proof and freshness gates.
+            if attempt == 2:
+                raise ValueError("private DNS snapshot read unavailable after bounded attempts") from exc
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ValueError("private DNS observation deadline exceeded")
+        assignment = checkpoint.get("candidate", {}).get("assignment")
+        if assignment != snapshot.get("assignment"):
+            raise ValueError("private DNS checkpoint assignment changed")
+        if snapshot.get("ready") is not True:
+            raise ValueError("private DNS snapshot is not ready")
+        expiry = timestamp(checkpoint["applied_at"]) + datetime.timedelta(seconds=checkpoint["candidate"]["artifact"]["content"]["policy"]["max_stale_seconds"])
+        if expiry <= now() or timestamp(snapshot["checkpoint_valid_until"]) <= now():
+            raise ValueError("private DNS checkpoint expired")
+        if checkpoint.get("route_sources") != snapshot.get("route_sources") or expiry != timestamp(snapshot["checkpoint_valid_until"]):
+            if attempt == 2:
+                raise ValueError("private DNS checkpoint changed during bounded observation")
+            continue
+        verify(checkpoint, snapshot)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ValueError("private DNS observation deadline exceeded")
+        return snapshot
+    raise AssertionError("bounded DNS capture returned no observation")
 
 
 def observe(c, api, release):
@@ -376,7 +418,7 @@ def observe(c, api, release):
         try:
             convergence(c, api, release)
             with ThreadPoolExecutor(max_workers=len(c["readers"])) as pool:
-                readers = list(pool.map(lambda reader: observe_reader(c, reader, release), c["readers"]))
+                readers = list(pool.map(lambda reader: observe_reader(c, reader, release, deadline), c["readers"]))
             samples.append({"at": now().isoformat(), "readers": readers})
         except (ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             samples, error = [], str(exc)

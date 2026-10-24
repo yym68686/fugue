@@ -163,3 +163,15 @@ materializing a record/probe cross-product in memory.
 When an authenticated source plan removes eligibility, its inactive history is
 retired; re-admission must collect recovery again. A probe skipped by the bounded
 scheduler remains authorized in that plan and does not retire its history.
+
+Private promotion captures the disk checkpoint and loopback runtime facts as one
+verified observation. Normal serving refreshes can replace the in-memory pointer
+while the runtime-facts endpoint serializes a response (503 state_replaced), or
+between the two reads. The promotion reader fetches trust material first and
+retries a fresh pair at most three times within the original watch deadline.
+It accepts only matching assignments, source contexts and checkpoint deadlines;
+negative readiness, expired authority, identity changes or cryptographic/proof
+verification failure reject the sample. Read errors and mixed snapshots never
+count as successful samples or extend the observation window. Three successful
+samples with genuinely advancing probes and all existing convergence/identity
+checks remain required.

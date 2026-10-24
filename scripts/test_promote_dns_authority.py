@@ -290,6 +290,9 @@ class PrivateDNSPromotionTests(unittest.TestCase):
         pod = {"metadata": {"name": reader["pod"], "uid": reader["uid"], "resourceVersion": "12", "annotations": {"fugue.pro/authority-transition-role": "isolated-candidate", "fugue.pro/consumer-identity": json.dumps({"version": "v1", "component": "dns-server", "scope_key": p.scope(c), "authority_id": c["authority_cell_id"], "artifact_kinds": ["dns_answer_bundle"]})}},
                "spec": {"nodeName": reader["node_id"], "serviceAccountName": reader["service_account"], "containers": [{"name": "dns", "image": reader["image"], "env": env, "readinessProbe": {"httpGet": {"port": reader["port"]}}}]}, "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}}
         snapshot = {"node_id": reader["node_id"], "parent_digest": c["release_set"]["digest"], "assignment": {"artifact_id": "dns", "content_hash": c["dns_artifact"]["digest"], "release_set_id": "parent", "artifact_release_id": r["id"], "fencing_token": r["fencing_token"], "release_channel": "gray", "scope_key": p.scope(c)}, "observed_at": p.now().isoformat(), "evaluated_at": p.now().isoformat()}
+        snapshot.update(ready=True, checkpoint_valid_until=(p.now()+datetime.timedelta(hours=1)).isoformat())
+        checkpoint = {"candidate":{"assignment":copy.deepcopy(snapshot["assignment"]),"artifact":{"content":{"policy":{"max_stale_seconds":3600}}}},"applied_at":(p.timestamp(snapshot["checkpoint_valid_until"])-datetime.timedelta(hours=1)).isoformat()}
+
         for scenario in ["valid", "replaced", "wrong image", "wrong authority", "host network", "wrong port", "stale fence", "crypto rejection", "required key empty"]:
             local, facts, calls = copy.deepcopy(pod), copy.deepcopy(snapshot), []
             if scenario == "wrong image":
@@ -314,7 +317,7 @@ class PrivateDNSPromotionTests(unittest.TestCase):
                 self.assertEqual("exec", args[0])
                 self.assertEqual(reader["pod"], args[3])
                 if args[-2:] == ("cat", "/state/cache.platform-serving.json"):
-                    return {"signed": "fixture"}
+                    return copy.deepcopy(checkpoint)
                 self.assertEqual(("wget", "-qO-", "http://127.0.0.1:8080/runtime-facts"), args[-3:])
                 return facts
             result = subprocess.CompletedProcess(["/verified/reader"], 1 if scenario == "crypto rejection" else 0, '{"verified":true}', "")
@@ -329,6 +332,40 @@ class PrivateDNSPromotionTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError, msg=scenario):
                         p.observe_reader(c, reader, r)
+
+    def test_coherent_capture_retries_only_reads_and_never_renews_authority(self):
+        at = p.now()
+        checkpoint = {"candidate": {"assignment": {"fence": 7}, "artifact": {"content": {"policy": {"max_stale_seconds": 3600}}}}, "applied_at": at.isoformat(), "route_sources": {"release": "current"}}
+        facts = {"assignment": {"fence": 7}, "ready": True, "checkpoint_valid_until": (at + datetime.timedelta(hours=1)).isoformat(), "route_sources": {"release": "current"}, "observed_at": at.isoformat()}
+        mixed = dict(facts, route_sources={"release": "new"})
+        with patch.object(p.time, "monotonic", return_value=1):
+            capture = MagicMock(side_effect=[RuntimeError("503 state_replaced"), (checkpoint, mixed), (checkpoint, facts)])
+            verify = MagicMock()
+            result = p.coherent_reader_observation(capture, verify, deadline=10)
+            self.assertIs(result, facts)
+            self.assertEqual(3, capture.call_count)
+            verify.assert_called_once_with(checkpoint, facts)
+            for scenario in ["assignment", "negative", "expired", "crypto", "exhausted", "deadline"]:
+                with self.subTest(scenario=scenario):
+                    value = copy.deepcopy(facts)
+                    if scenario == "assignment": value["assignment"]["fence"] += 1
+                    if scenario == "negative": value["ready"] = False
+                    if scenario == "expired": value["checkpoint_valid_until"] = (at - datetime.timedelta(seconds=1)).isoformat()
+                    capture = MagicMock(return_value=(checkpoint, value))
+                    if scenario == "exhausted": capture.side_effect = RuntimeError("503")
+                    verify = MagicMock(side_effect=ValueError("signature rejected") if scenario == "crypto" else None)
+                    with self.assertRaises(ValueError):
+                        p.coherent_reader_observation(capture, verify, deadline=0 if scenario == "deadline" else 10)
+                    self.assertEqual(3 if scenario == "exhausted" else 0 if scenario == "deadline" else 1, capture.call_count)
+                    self.assertEqual(1 if scenario == "crypto" else 0, verify.call_count)
+
+    def test_capture_cannot_finish_outside_original_watch_deadline(self):
+        checkpoint = {"candidate": {"assignment": {}}, "applied_at": p.now().isoformat()}
+        with patch.object(p.time, "monotonic", side_effect=[9, 11]):
+            verify = MagicMock()
+            with self.assertRaisesRegex(ValueError, "deadline"):
+                p.coherent_reader_observation(lambda: (checkpoint, {"assignment": {}, "ready": True}), verify, deadline=10)
+            verify.assert_not_called()
 
     def test_full_waits_for_gray_lkg_and_a_separate_observation_window(self):
         c, events, published, verified = config(), [], {"shadow"}, []
