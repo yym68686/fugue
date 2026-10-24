@@ -52,6 +52,10 @@ env:
         if quarantine.exists() or quarantine.is_symlink():
             raise SystemExit('checkout quarantine path already exists')
         os.rename(workspace, quarantine)
+        workspace.mkdir(mode=0o700)
+        fresh = workspace.stat()
+        if fresh.st_uid != uid or fresh.st_dev != owner.st_dev:
+            raise SystemExit('fresh checkout ownership or device is unexpected')
         print('Preserved stale checkout:', quarantine.name, 'root-owned entries:', len(pending))
     else:
         print('Observed root-owned generated entries: 0')
