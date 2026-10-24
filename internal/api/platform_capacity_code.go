@@ -80,7 +80,7 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 		health.Status != "ok" || health.Authority != edgegroupfront.ActivationAuthority || health.Slot != current.Slot || health.Fence != current.Fence || health.Bundle != current.Bundle || health.Source != current.Source || health.Image != current.Image {
 		return fail()
 	}
-	worker, err := capacityTargetWorker(*front, pods.Items, edge, health)
+	worker, err := capacityTargetWorker(*front, pods.Items, edge, node, health)
 	if err != nil {
 		return fail()
 	}
@@ -97,11 +97,15 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	return result, nil
 }
 
-func capacityTargetWorker(front corev1.Pod, pods []corev1.Pod, edge model.EdgeNode, health capacityFrontState) (*corev1.Pod, error) {
+func capacityTargetWorker(front corev1.Pod, pods []corev1.Pod, edge model.EdgeNode, node corev1.Node, health capacityFrontState) (*corev1.Pod, error) {
 	host, portText, err := net.SplitHostPort(health.Target)
 	port, portErr := strconv.Atoi(portText)
 	if err != nil || portErr != nil || port < 1 || port > 65535 || net.ParseIP(host) == nil {
 		return nil, errors.New("literal Front target required")
+	}
+	nodeAddress := false
+	for _, a := range node.Status.Addresses {
+		nodeAddress = nodeAddress || (a.Type == corev1.NodeInternalIP || a.Type == corev1.NodeExternalIP) && a.Address == host
 	}
 	var selected *corev1.Pod
 	for i := range pods {
@@ -111,9 +115,6 @@ func capacityTargetWorker(front corev1.Pod, pods []corev1.Pod, edge model.EdgeNo
 		}
 		addressMatches := pod.Status.PodIP == host
 		addressMatches = addressMatches || net.ParseIP(host).IsLoopback() && front.Spec.HostNetwork && pod.Spec.HostNetwork
-		if !addressMatches {
-			continue
-		}
 		// Caddy, not the Edge control process, owns the Worker HTTPS socket.
 		targetMatches := false
 		for _, c := range pod.Spec.Containers {
@@ -121,7 +122,8 @@ func capacityTargetWorker(front corev1.Pod, pods []corev1.Pod, edge model.EdgeNo
 				continue
 			}
 			for _, p := range c.Ports {
-				targetMatches = targetMatches || p.Name == "https-slot" && p.ContainerPort == int32(port) && p.Protocol == corev1.ProtocolTCP
+				hostPortMatches := nodeAddress && p.HostPort == int32(port) && (p.HostIP == "" || p.HostIP == host || p.HostIP == "0.0.0.0" && net.ParseIP(host).To4() != nil || p.HostIP == "::" && net.ParseIP(host).To4() == nil)
+				targetMatches = targetMatches || p.Name == "https-slot" && p.Protocol == corev1.ProtocolTCP && (addressMatches && p.ContainerPort == int32(port) || hostPortMatches)
 			}
 		}
 		if !targetMatches {

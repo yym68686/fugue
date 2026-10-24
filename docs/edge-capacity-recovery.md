@@ -29,7 +29,8 @@ publication to other authorized members. Preview and inventory calls do not prob
 - The exact hostname/path must be authorized by the signed static platform intent.
   These platform routes use the `streaming` traffic class.
 - Read the selected public Service, its ready Front and EndpointSlices, and the
-  exact Worker that the Front forwards HTTPS to. Check node/pod/service UIDs,
+  exact Worker that the Front forwards HTTPS to, either by Pod IP or by a
+  declared hostPort on an address of the exact Kubernetes node. Check node/pod/service UIDs,
   running Edge and Caddy image digests, source commit, active slot and current group authority.
   Any unfinished group transition, ambiguity, missing observation or old code
   prevents admission. Legacy Front names and arbitrary same-node Workers are not

@@ -20,7 +20,7 @@ func testCapacityCode() platformproducer.CapacityCodeIdentity {
 }
 
 func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.T) {
-	for _, scenario := range []string{"valid", "old_worker_image", "wrong_source", "wrong_group", "foreign_target", "duplicate_target", "wrong_slot", "false_runtime_image", "unready_worker", "unready_front", "deleting_node", "no_authority_owner", "bad_authority_digest", "transition_in_progress", "front_old_authority", "front_target_loopback", "missing_endpoints", "truncated_inventory", "false_caddy_image", "wrong_caddy_port"} {
+	for _, scenario := range []string{"valid", "old_worker_image", "wrong_source", "wrong_group", "foreign_target", "duplicate_target", "wrong_slot", "false_runtime_image", "unready_worker", "unready_front", "deleting_node", "no_authority_owner", "bad_authority_digest", "transition_in_progress", "front_old_authority", "front_target_loopback", "missing_endpoints", "truncated_inventory", "false_caddy_image", "wrong_caddy_port", "node_hostport", "foreign_node_hostport", "wrong_hostport", "bound_other_host"} {
 		t.Run(scenario, func(t *testing.T) {
 			node, service, front, endpoints := publicNetworkFixture()
 			code := testCapacityCode()
@@ -33,6 +33,19 @@ func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.
 			current := edgeEnrollmentAuthority{GroupID: node.EdgeGroupID, Record: code.AuthorityRecordDigest, Slot: code.Slot, Fence: code.Fence, Bundle: code.Bundle, Source: code.WorkerSourceSHA, Image: code.WorkerImageDigest}
 			kubeNode := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node.ID, UID: "node-uid"}}
 			switch scenario {
+			case "node_hostport", "foreign_node_hostport", "wrong_hostport", "bound_other_host":
+				state.Target = node.PublicIPv4 + ":18443"
+				kubeNode.Status.Addresses = []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: node.PublicIPv4}}
+				worker.Spec.Containers[1].Ports[0].HostPort = 18443
+				if scenario == "foreign_node_hostport" {
+					kubeNode.Status.Addresses[0].Address = "203.0.113.11"
+				}
+				if scenario == "wrong_hostport" {
+					worker.Spec.Containers[1].Ports[0].HostPort = 28443
+				}
+				if scenario == "bound_other_host" {
+					worker.Spec.Containers[1].Ports[0].HostIP = "203.0.113.11"
+				}
 			case "false_caddy_image":
 				worker.Status.ContainerStatuses[1].ImageID = "unverified"
 			case "wrong_caddy_port":
@@ -98,6 +111,7 @@ func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.
 					oldWorker.Name = "legacy-worker"
 					oldWorker.UID = "legacy-worker-uid"
 					oldWorker.Status.PodIP = "10.0.0.8"
+					oldWorker.Spec.Containers[1].Ports[0].HostPort = 0
 					pods := corev1.PodList{Items: []corev1.Pod{legacy, oldWorker, front, worker}}
 					if scenario == "duplicate_target" {
 						pods.Items = append(pods.Items, worker)
@@ -122,7 +136,7 @@ func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.
 				return &clusterNodeClient{client: kube.Client(), baseURL: kube.URL, bearerToken: "metadata-reader"}, nil
 			}}
 			got, err := s.readCapacityCode(context.Background(), node)
-			if (err == nil) != (scenario == "valid") {
+			if (err == nil) != (scenario == "valid" || scenario == "node_hostport") {
 				t.Fatal(scenario, got, err)
 			}
 			if err == nil && got != code {
