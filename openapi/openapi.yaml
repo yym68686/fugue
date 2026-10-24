@@ -3419,7 +3419,13 @@ paths:
         continue to require complete verified runtime evidence independently of this
         endpoint. Missing or duplicate policy references and invalid/duplicate view
         values return 400. The retired static-only selector returns 410.
-        Both views retain business snapshot revision/time and configuration issues,
+        view=runtime_summary performs the same strict runtime capture, then omits only
+        runtime_snapshot.dns_selections[].physical_evidence from the HTTP response.
+        runtime_summary reports the complete snapshot digest and exact omitted counts
+        and byte sizes; omitted_runtime_fields explicitly records the omission.
+        This summary is not a replay input or publication authorization. Full runtime
+        capture, compiler verification and serving artifacts are unchanged.
+        All views retain business snapshot revision/time and configuration issues,
         preserve static non-address DNS and signed constraints, and write no serving
         state. Full runtime capture retains its bounded placement collectors.
       tags: [Admin]
@@ -3441,10 +3447,10 @@ paths:
             type: string
         - in: query
           name: view
-          description: Configuration-only preview by default; runtime explicitly opts into live capture and complete replay evidence.
+          description: Configuration-only preview by default; runtime includes complete live replay evidence; runtime_summary performs the same capture and omits raw DNS physical evidence from the response only.
           schema:
             type: string
-            enum: [configuration, runtime]
+            enum: [configuration, runtime, runtime_summary]
             default: configuration
       responses:
         '200':
@@ -36625,8 +36631,10 @@ components:
       properties:
         preview_mode:
           type: string
-          enum: [configuration, runtime]
-          description: Configuration mode contains no runtime evidence and cannot authorize serving. Runtime mode explicitly includes full live observations.
+          enum: [configuration, runtime, runtime_summary]
+          description: Configuration mode contains no runtime evidence and cannot authorize serving. Runtime mode includes full live observations. Runtime summary mode preserves live observations except the explicitly reported raw DNS physical evidence; it is not a replay snapshot.
+        runtime_summary:
+          $ref: '#/components/schemas/PlatformRuntimePreviewSummary'
         dns_exclusions:
           type: array
           description: Captured source rows excluded from the draft, with identities and reasons. Deleted or suspended zones never re-enter serving intent.
@@ -36668,7 +36676,7 @@ components:
         policy:
           $ref: "#/components/schemas/PlatformConfigPolicySnapshot"
         runtime_snapshot:
-          description: Generation bindings only in configuration mode. Full replay observations in explicit runtime mode; may be large.
+          description: Generation bindings only in configuration mode. Full replay observations in runtime mode; may be large. In runtime_summary mode only dns_selections[].physical_evidence is omitted; all timestamps, candidates, selections, readiness and recovery facts are preserved.
           $ref: "#/components/schemas/PlatformRuntimeSnapshot"
         source_generation:
           type: string
@@ -36682,6 +36690,16 @@ components:
           type: array
           items:
             type: string
+    PlatformRuntimePreviewSummary:
+      type: object
+      additionalProperties: false
+      required: [schema, full_snapshot_digest, omitted_physical_evidence_count, omitted_physical_evidence_bytes]
+      description: Present only for runtime_summary. Describes the exact live snapshot before response projection. The digest uses the same canonical runtime snapshot encoding as compiler lineage. Sizes count original JSON bytes of raw physical_evidence fields, excluding surrounding field names and separators. Neither a digest nor a summary replaces full replay verification.
+      properties:
+        schema: {type: string, enum: [fugue.runtime-preview-summary/v1]}
+        full_snapshot_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        omitted_physical_evidence_count: {type: integer, minimum: 0}
+        omitted_physical_evidence_bytes: {type: integer, format: int64, minimum: 0}
     PlatformPreviousTrafficPublicationReference:
       type: object
       additionalProperties: false

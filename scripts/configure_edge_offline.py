@@ -144,6 +144,20 @@ def recovery_declaration_digest(hold):
     return 'sha256:' + hashlib.sha256(raw.encode()).hexdigest()
 
 
+def validate_runtime_summary(view):
+    summary = view.get('runtime_summary', {})
+    omitted_path = 'runtime_snapshot.dns_selections[].physical_evidence'
+    if not isinstance(summary, dict) or not isinstance(view.get('omitted_runtime_fields'), list) or view.get('preview_mode') != 'runtime_summary' or summary.get('schema') != 'fugue.runtime-preview-summary/v1' or not isinstance(summary.get('full_snapshot_digest'), str) or not DIGEST.fullmatch(summary['full_snapshot_digest']) or omitted_path not in view.get('omitted_runtime_fields', []):
+        raise ValueError('explicit complete-capture runtime summary required')
+    count, size = summary.get('omitted_physical_evidence_count'), summary.get('omitted_physical_evidence_bytes')
+    selections = view.get('runtime_snapshot', {}).get('dns_selections', [])
+    if not isinstance(selections, list) or type(count) is not int or type(size) is not int or not 0 <= count <= len(selections) or size < 0 or (count == 0) != (size == 0) or any('physical_evidence' in fact for fact in selections):
+        raise ValueError('runtime summary omission accounting invalid')
+    if any(path not in ['selected_edge_group', 'decision_id', 'exclusion_evidence', omitted_path] for path in view.get('omitted_runtime_fields', [])):
+        raise ValueError('runtime summary omits unexpected evidence')
+    return summary
+
+
 def validate_preview(previous, current, policy):
     if not previous.get('business_snapshot_revision') or not current.get('business_snapshot_revision') or not previous.get('intent') or previous['intent'] != current.get('intent'):
         raise ValueError('offline preview changed business intent or unrelated compiled policy')
@@ -230,10 +244,12 @@ def publish(config, api, save):
     evidence = {'schema': config['schema'], 'declaration_digest': declaration, 'resolved_precondition': precondition, 'artifact_id': artifact['id'], 'changed_edge': changed,
                 'offline_edges': holds(config['projection_policy']), 'producer_activated': False, 'routing_acceptance_complete': False, 'automatic_readmission': any(hold.get('recovery') for hold in holds(config['projection_policy'])), 'phase': 'reading_previews'}
     save(evidence)
-    before = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + old['id'] + "&view=runtime")
-    preview = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + artifact['id'] + "&view=runtime")
-    evidence.update(phase='validating_previews', preview=preview_evidence(before, preview))
+    before = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + old['id'] + "&view=runtime_summary")
+    preview = api('GET', '/v1/admin/platform-config/routes/project?producer_policy_artifact_id=' + artifact['id'] + "&view=runtime_summary")
+    evidence.update(phase='validating_previews', preview=preview_evidence(before, preview), runtime_summaries={'before': before.get('runtime_summary'), 'after': preview.get('runtime_summary')})
     save(evidence)
+    validate_runtime_summary(before)
+    validate_runtime_summary(preview)
     candidates = validate_preview(before, preview, config['projection_policy'])
     config = wait_verified_baseline(config, api)
     precondition = config['precondition']

@@ -29,6 +29,7 @@ type platformProjectionIssue struct {
 }
 
 type platformIntentProjectionResponse struct {
+	RuntimeSummary           *platformRuntimePreviewSummary `json:"runtime_summary,omitempty"`
 	PreviewMode              string                         `json:"preview_mode"`
 	DNSExclusions            []platformDNSExclusion         `json:"dns_exclusions"`
 	Intent                   platformconfig.PlatformIntent  `json:"intent"`
@@ -86,8 +87,8 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 	}
 	view := "configuration"
 	if values, exists := r.URL.Query()["view"]; exists {
-		if len(values) != 1 || (values[0] != "configuration" && values[0] != "runtime") {
-			httpx.WriteError(w, http.StatusBadRequest, "one view value required: configuration or runtime")
+		if len(values) != 1 || (values[0] != "configuration" && values[0] != "runtime" && values[0] != "runtime_summary") {
+			httpx.WriteError(w, http.StatusBadRequest, "one view value required: configuration, runtime or runtime_summary")
 			return
 		}
 		view = values[0]
@@ -101,7 +102,7 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		var policy platformproducer.Policy
 		policy, err = platformproducer.Decode(a)
 		if err == nil {
-			projection, err = s.projectPlatformIntentForProducer(r.Context(), mustPrincipal(r), policy, view == "runtime")
+			projection, err = s.projectPlatformIntentForProducer(r.Context(), mustPrincipal(r), policy, view != "configuration")
 		}
 	}
 	if err != nil {
@@ -111,6 +112,11 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 	projection.PreviewMode = view
 	if view == "configuration" {
 		configurationPreview(&projection)
+	} else if view == "runtime_summary" {
+		if err := summarizeRuntimePreview(&projection); err != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "complete runtime preview digest unavailable")
+			return
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, projection)

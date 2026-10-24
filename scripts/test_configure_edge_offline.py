@@ -15,6 +15,28 @@ class OfflineConfigurationTests(unittest.TestCase):
         self.assertNotEqual(evidence['before_intent_digest'], evidence['after_intent_digest'])
         self.assertNotIn('private-', str(evidence))
 
+    def test_runtime_summary_is_explicit_and_preserves_all_admission_fields(self):
+        valid = {'preview_mode':'runtime_summary','runtime_summary':{'schema':'fugue.runtime-preview-summary/v1','full_snapshot_digest':'sha256:'+'a'*64,'omitted_physical_evidence_count':1,'omitted_physical_evidence_bytes':1024},'omitted_runtime_fields':['selected_edge_group','decision_id','exclusion_evidence','runtime_snapshot.dns_selections[].physical_evidence'],'runtime_snapshot':{'dns_selections':[{'hostname':'app.example.test','candidates':[{'edge_id':'edge-b'}]}],'facts':{'offline_edge_recovery':{'observations':[{'edge_id':'edge-a','admitted':False}]}},'dns_edge_endpoints':[{'edge_id':'edge-b'}]}}
+        original = copy.deepcopy(valid)
+        self.assertEqual(offline.validate_runtime_summary(valid),valid['runtime_summary'])
+        self.assertEqual(valid, original)
+        for scenario in ['old-runtime','missing-summary','null-summary','bad-digest','omitted-facts','missing-omission','negative-bytes','too-many','bool-count','remaining-raw','empty-size']:
+            changed = copy.deepcopy(valid)
+            if scenario == 'old-runtime': changed['preview_mode']='runtime'
+            elif scenario == 'missing-summary': changed.pop('runtime_summary')
+            elif scenario == 'null-summary': changed['runtime_summary']=None
+            elif scenario == 'bad-digest': changed['runtime_summary']['full_snapshot_digest']='unverified'
+            elif scenario == 'omitted-facts': changed['omitted_runtime_fields'].append('runtime_snapshot.facts')
+            elif scenario == 'missing-omission': changed['omitted_runtime_fields']=[]
+            elif scenario == 'negative-bytes': changed['runtime_summary']['omitted_physical_evidence_bytes']=-1
+            elif scenario == 'too-many': changed['runtime_summary']['omitted_physical_evidence_count']=2
+            elif scenario == 'bool-count': changed['runtime_summary']['omitted_physical_evidence_count']=True
+            elif scenario == 'remaining-raw': changed['runtime_snapshot']['dns_selections'][0]['physical_evidence']={}
+            elif scenario == 'empty-size': changed['runtime_summary']['omitted_physical_evidence_bytes']=0
+            with self.subTest(scenario=scenario), self.assertRaises(ValueError):offline.validate_runtime_summary(changed)
+        empty=copy.deepcopy(valid);empty['runtime_summary'].update(omitted_physical_evidence_count=0,omitted_physical_evidence_bytes=0)
+        offline.validate_runtime_summary(empty)
+
     def fixture(self):
         config, _, source = physical_fixture()
         config.pop('hostname')

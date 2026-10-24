@@ -117,9 +117,11 @@ func TestConfigurationPreviewSurvivesUnavailableRuntimeWithoutAuthorizingPublica
 		}
 	}
 	// Full diagnostics and the producer keep the fail-closed path.
-	full := performJSONRequest(t, s, http.MethodGet, path+"&view=runtime", admin, nil)
-	if full.Code != 503 {
-		t.Fatal("runtime view silently accepted unavailable evidence", full.Code)
+	for _, view := range []string{"runtime", "runtime_summary"} {
+		full := performJSONRequest(t, s, http.MethodGet, path+"&view="+view, admin, nil)
+		if full.Code != 503 {
+			t.Fatal("runtime view silently accepted unavailable evidence", view, full.Code)
+		}
 	}
 	if _, err := s.capturePlatformIntentForProducer(context.Background(), platformProducerPrincipal(), control); err == nil {
 		t.Fatal("producer bypassed missing runtime")
@@ -147,7 +149,7 @@ func TestConfigurationPreviewRejectsInvalidViewsAndUntrustedSources(t *testing.T
 		}
 	}
 	s.bundleRevokedKeyIDs = append(s.bundleRevokedKeyIDs, policy.Provenance.KeyID)
-	for _, view := range []string{"configuration", "runtime"} {
+	for _, view := range []string{"configuration", "runtime", "runtime_summary"} {
 		r := performJSONRequest(t, s, http.MethodGet, path+"&view="+view, admin, nil)
 		if r.Code != 503 {
 			t.Fatal("revoked source accepted", view, r.Code)

@@ -84,3 +84,21 @@ Enabling capacity policy is a separate configuration rollout. Automatic detectio
 of a newly degraded member, isolated code catch-up and automatic removal of a code
 release hold require their own authorized recovery workflow; the capacity gate
 alone does not implement those transitions.
+
+## Bounded configuration previews
+
+The offline configuration publisher explicitly requests `view=runtime_summary`.
+This performs the same strict live capture as `view=runtime`, then removes only
+`runtime_snapshot.dns_selections[].physical_evidence` from the HTTP response.
+Intent, policy, candidate identities, physical selections, recovery observations,
+readiness facts and their original timestamps remain present. The response reports
+the canonical digest of the full capture, omitted record count and raw JSON byte
+count, and explicitly lists the omitted field. The publisher rejects unexpected
+omissions or a response from a server that does not support this contract. It
+retains the summaries with configuration preview evidence before validation.
+
+The full runtime preview and automatic compiler still use complete replay evidence.
+The summary neither renews observations nor authorizes a release. This keeps large
+quality histories out of configuration comparison payloads without raising the
+publisher's 128 MiB response limit. Full capture memory is unchanged; this is an
+export optimization and diagnostic improvement, not a claim of lower DNS RSS.
