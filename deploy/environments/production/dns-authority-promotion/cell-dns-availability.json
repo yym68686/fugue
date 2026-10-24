@@ -5,7 +5,7 @@
     "digest": "sha256:d7f69c6fe64beb026ea801de0c523e6f85cb34071543c4bfec93c202c0b90078",
     "id": "artifact_1792840059_ad3dcf48fbc8"
   },
-  "generation": 9,
+  "generation": 10,
   "namespace": "fugue-system",
   "observation": {
     "interval_seconds": 20,
