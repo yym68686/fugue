@@ -59,7 +59,7 @@ type dnsRecordTransition struct {
 // probe. Re-evaluate only those newly collected observations against the exact
 // successor plan and publication. Never renew timestamps or copy old readiness
 // decisions; cached observations from before the candidate scan are excluded.
-func dnsSupplementTransitionFacts(successor, retained *dnsServingState, now time.Time) ([]dnsReadinessFact, bool) {
+func dnsSupplementTransitionFacts(successor, retained *dnsServingState, now time.Time, scheduler *dnsReadinessScheduler) ([]dnsReadinessFact, bool) {
 	if successor == nil || retained == nil || successor.payload.Plan == nil || retained.payload.Plan == nil {
 		return nil, false
 	}
@@ -117,6 +117,15 @@ func dnsSupplementTransitionFacts(successor, retained *dnsServingState, now time
 			continue
 		}
 		fact.ObservationID = observation.ObservationID
+		// This is a new, exact successor observation. Record it under the
+		// successor's immutable requirement only after publication validation.
+		// Re-evaluation creates a fresh fact; without this step it discards
+		// recovery continuity established by earlier successor probes.
+		if scheduler != nil {
+			scheduler.mu.Lock()
+			scheduler.observeProbeHistory(&fact, successor.payload.Policy.DNSReadiness, now)
+			scheduler.mu.Unlock()
+		}
 		if !changed {
 			result = slices.Clone(result)
 			changed = true

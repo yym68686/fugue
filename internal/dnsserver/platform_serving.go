@@ -385,7 +385,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			if err := client.CheckServingAssignment(ctx, id, a); err != nil {
 				return err
 			}
-			if supplemented, changed := dnsSupplementTransitionFacts(st, retained, time.Now().UTC()); changed {
+			if supplemented, changed := dnsSupplementTransitionFacts(st, retained, time.Now().UTC(), s.servingDNSProbes.shareHistory(&s.dnsProbeHistories)); changed {
 				if err := s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
 					return err
 				}

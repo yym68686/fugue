@@ -78,7 +78,7 @@ func TestDNSLateSuccessorFactsRequireExactFreshObservation(t *testing.T) {
 				next.payload.Plan.Probes = append(next.payload.Plan.Probes, next.payload.Plan.Probes...)
 			}
 			before, after := mustDNSJSON(t, old.facts), mustDNSJSON(t, next.facts)
-			result, changed := dnsSupplementTransitionFacts(next, old, now.Add(2*time.Millisecond))
+			result, changed := dnsSupplementTransitionFacts(next, old, now.Add(2*time.Millisecond), nil)
 			if changed != (scenario == "valid") {
 				t.Fatal("late observation changed authority", changed)
 			}
@@ -92,6 +92,109 @@ func TestDNSLateSuccessorFactsRequireExactFreshObservation(t *testing.T) {
 			}
 			if string(before) != string(mustDNSJSON(t, old.facts)) || string(after) != string(mustDNSJSON(t, next.facts)) {
 				t.Fatal("supplement changed either original observation set")
+			}
+		})
+	}
+}
+
+func TestDNSLateTransitionMustNotEraseEstablishedSuccessorRecovery(t *testing.T) {
+	old, bridge, nextFacts, now := initialCanaryDNSFixture(t)
+	parent := model.PlatformArtifact{ID: "next-parent", ContentHash: "sha256:next-parent"}
+	bridge.candidate.Assignment.ScopeKey = "global"
+	bridge.candidate.Release.ReleaseChannel = "gray"
+	bridge.candidate.Release.FencingToken = 2
+	history := &dnsProbeHistoryStore{}
+	scheduler := (&dnsReadinessScheduler{}).shareHistory(history)
+	policy := &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}
+	for i := range nextFacts {
+		nextFacts[i].Proof.TrafficRelease = &model.TrafficReleaseBinding{ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, RouteArtifactID: "next-route", ReleaseID: bridge.candidate.Release.ID, ReleaseChannel: "gray", FencingToken: 2, ScopeKey: "global"}
+		nextFacts[i].Ready = true
+		nextFacts[i].Reason = ""
+		for _, offset := range []time.Duration{-61 * time.Second, -31 * time.Second, -time.Second} {
+			nextFacts[i].Proof.CheckedAt = now.Add(offset)
+			scheduler.observeProbeHistory(&nextFacts[i], bridge.payload.Policy.DNSReadiness, now.Add(offset))
+		}
+	}
+	view := bridge.payload.Queries[0]
+	next, err := buildDNSServingState(dnsServingCheckpoint{Parent: parent, Candidate: bridge.candidate}, bridge.payload, "next-route", view.NodeID, view.EdgeGroupID, nextFacts, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.facts = nil
+	for i, requirement := range old.payload.Plan.Probes {
+		fact := nextFacts[i]
+		fact.ProbeID = requirement.ID
+		fact.Reason = "route_digest_mismatch"
+		fact.Ready = false
+		fact.ProbeHistory = nil
+		fact.Proof.CheckedAt = now.Add(time.Millisecond)
+		old.facts = append(old.facts, fact)
+	}
+	result, changed := dnsSupplementTransitionFacts(next, old, now.Add(2*time.Millisecond), scheduler)
+	if !changed {
+		t.Fatal("late successor proof not accepted")
+	}
+	for _, fact := range result {
+		if !dnsAvailabilityRecovered(policy, fact, time.Duration(bridge.payload.Policy.DNSReadiness.FactFreshnessSeconds)*time.Second, now.Add(2*time.Millisecond)) {
+			t.Fatal("late valid successor proof erased established recovery history", fact.ProbeHistory)
+		}
+	}
+}
+
+func TestDNSLateTransitionCannotBorrowOldHistoryOrCrossFailureBarrier(t *testing.T) {
+	for _, scenario := range []string{"old-history-only", "failed-successor", "expired-successor-history"} {
+		t.Run(scenario, func(t *testing.T) {
+			old, bridge, nextFacts, now := initialCanaryDNSFixture(t)
+			parent := model.PlatformArtifact{ID: "next-parent", ContentHash: "sha256:next-parent"}
+			bridge.candidate.Assignment.ScopeKey = "global"
+			bridge.candidate.Release.ReleaseChannel = "gray"
+			bridge.candidate.Release.FencingToken = 2
+			scheduler := (&dnsReadinessScheduler{}).shareHistory(&dnsProbeHistoryStore{})
+			for i := range nextFacts {
+				nextFacts[i].Ready = false
+			}
+			view := bridge.payload.Queries[0]
+			next, err := buildDNSServingState(dnsServingCheckpoint{Parent: parent, Candidate: bridge.candidate}, bridge.payload, "next-route", view.NodeID, view.EdgeGroupID, nextFacts, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old.facts = nil
+			for i, requirement := range old.payload.Plan.Probes {
+				fact := nextFacts[i]
+				fact.Ready = true
+				fact.Reason = ""
+				fact.Proof.TrafficRelease = &model.TrafficReleaseBinding{ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, RouteArtifactID: "next-route", ReleaseID: bridge.candidate.Release.ID, ReleaseChannel: "gray", FencingToken: 2, ScopeKey: "global"}
+				if scenario == "old-history-only" {
+					fact.ProbeID = requirement.ID
+				}
+				shift := time.Duration(0)
+				if scenario == "expired-successor-history" {
+					shift = -time.Hour
+				}
+				for _, offset := range []time.Duration{-61 * time.Second, -31 * time.Second, -time.Second} {
+					fact.Proof.CheckedAt = now.Add(shift + offset)
+					scheduler.observeProbeHistory(&fact, bridge.payload.Policy.DNSReadiness, now.Add(shift+offset))
+				}
+				if scenario == "failed-successor" {
+					fact.Ready = false
+					scheduler.observeProbeHistory(&fact, bridge.payload.Policy.DNSReadiness, now)
+					fact.Ready = true
+				}
+				fact.ProbeID = requirement.ID
+				fact.Reason = "route_digest_mismatch"
+				fact.Ready = false
+				fact.Proof.CheckedAt = now.Add(time.Millisecond)
+				old.facts = append(old.facts, fact)
+			}
+			result, changed := dnsSupplementTransitionFacts(next, old, now.Add(2*time.Millisecond), scheduler)
+			if !changed {
+				t.Fatal("exact late proof missing")
+			}
+			policy := &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}
+			for _, fact := range result {
+				if len(fact.ProbeHistory) != 1 || dnsAvailabilityRecovered(policy, fact, time.Duration(bridge.payload.Policy.DNSReadiness.FactFreshnessSeconds)*time.Second, now.Add(2*time.Millisecond)) {
+					t.Fatal("late proof inherited unqualified recovery", fact.ProbeHistory)
+				}
 			}
 		})
 	}

@@ -252,3 +252,10 @@ This prevents a redundant old DNS consumer from blocking recovery of an
 independent DNS authority that already proves the same unchanged route behavior.
 Both memory-store and PostgreSQL regressions explicitly reject negative current
 DNS observations even when the historical source was verified.
+
+A late successor proof captured during retained-LKG refresh is revalidated against
+the exact successor route and publication before it updates that successor's
+recovery history. Replacing a fact must not discard the already observed success
+sequence. Histories from the old requirement are never borrowed; a failure barrier
+or stale sequence still requires fresh recovery. This prevents a valid late proof
+from turning an already recovered successor into `availability_recovering`.
