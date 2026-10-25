@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ import (
 // no ready source observation yet, while the independently authorized global
 // producer has advanced. The positive old DNS must retain its own authority.
 func TestPendingDNSSuccessorDoesNotStrandRetainedSource(t *testing.T) {
-	for _, scenario := range []string{"authorized", "revoked grant", "corrupt grant", "expired grant", "changed grant", "unapproved producer", "negative proof"} {
+	for _, scenario := range []string{"authorized", "delayed candidate", "revoked grant", "corrupt grant", "expired grant", "changed grant", "unapproved producer", "negative proof"} {
 		t.Run(scenario, func(t *testing.T) { testPendingDNSSuccessorRetainedSource(t, scenario) })
 	}
 }
@@ -54,6 +55,9 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 	}
 	consumerID, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-dns")
 	pending, retainedReads := false, 0
+	blockedCandidate, releaseCandidate := make(chan struct{}), make(chan struct{})
+	var signalOnce, unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(releaseCandidate) }) }
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/platform-state/consumers/identity":
@@ -77,7 +81,7 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 				responseGrant.ExpiresAt = now.Add(-time.Minute)
 				responseGrant, _ = platformsafety.SignPlatformLKGSnapshot(responseGrant, keys)
 			}
-			if scenario == "changed grant" && retainedReads > 1 {
+			if scenario == "changed grant" && retainedReads%2 == 0 {
 				responseGrant.ID = "replacement-lkg"
 				responseGrant, _ = platformsafety.SignPlatformLKGSnapshot(responseGrant, keys)
 			}
@@ -101,6 +105,10 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		case r.URL.Path == "/v1/platform-state/consumers/artifacts/"+candidate.Artifact.ID:
 			json.NewEncoder(w).Encode(candidate)
 		case r.URL.Path == "/v1/platform-state/consumers/artifacts/"+parent.ID:
+			if pending && scenario == "delayed candidate" {
+				signalOnce.Do(func() { close(blockedCandidate) })
+				<-releaseCandidate
+			}
 			json.NewEncoder(w).Encode(map[string]any{"artifact": parent, "assignment": candidate.Assignment, "release": candidate.Release})
 		case r.URL.Path == "/v1/platform-state/consumers/trusted-heartbeat":
 			var h platformcontrol.PlatformConsumerHeartbeatEnvelope
@@ -115,6 +123,7 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		}
 	}))
 	defer server.Close()
+	defer unblock()
 	dir := t.TempDir()
 	s := NewService(config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: "cell-dns", PlatformScopeKey: assignment.ScopeKey, Zone: "example.test", CachePath: filepath.Join(dir, "dns"), BundleSigningKey: keys.PrimaryKey, BundleSigningKeyID: keys.PrimaryKeyID}, nil)
 	s.PlatformTokenFile = filepath.Join(dir, "token")
@@ -131,7 +140,8 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 				if p.PreviousAuthority != nil {
 					group, digest = p.PreviousAuthority.EdgeGroupID, p.PreviousAuthority.RouteDigest
 				}
-				return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: digest, Version: "observed", State: state, TrafficRelease: plans.Bindings[p.CellPublicationDigest], CheckedAt: time.Now(), ValidUntil: time.Now().Add(30 * time.Second)}, nil
+				until := time.Now().Add(30 * time.Second)
+				return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: digest, Version: "observed", State: state, TrafficRelease: plans.Bindings[p.CellPublicationDigest], CheckedAt: time.Now(), ValidUntil: until}, nil
 			}
 		}
 		return routeprobe.Proof{}, errors.New("unexpected probe")
@@ -181,11 +191,46 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		t.Fatal(err)
 	}
 	pending = true
-	if err := s.syncPlatformDNSServingOnce(context.Background(), probe, probeDNSServingSnapshot); err == nil {
+	if scenario == "delayed candidate" {
+		expires := time.Now().Add(2 * time.Second)
+		agingFacts := append([]dnsReadinessFact(nil), old.facts...)
+		for i := range agingFacts {
+			agingFacts[i].Proof.ValidUntil = expires
+		}
+		old, err = buildDNSServingState(old.record, old.payload, old.routeID, "dns-a", "cell-dns", agingFacts, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.platformServing.Store(old)
+		if answer := old.answer(question, "", time.Now()); answer.Rcode != dns.RcodeSuccess {
+			t.Fatal("aging baseline is not serving", answer)
+		}
+		done := make(chan error, 1)
+		go func() { done <- s.syncPlatformDNSServingOnce(context.Background(), probe, probeDNSServingSnapshot) }()
+		select {
+		case <-blockedCandidate:
+		case <-time.After(5 * time.Second):
+			t.Fatal("candidate did not reach blocked read")
+		}
+		// Query during the ongoing candidate read after the original proofs expire.
+		// No candidate failure has returned, so deferred fallback cannot help.
+		if wait := time.Until(expires.Add(20 * time.Millisecond)); wait > 0 {
+			time.Sleep(wait)
+		}
+		answer := s.platformServing.Load().answer(question, "", time.Now())
+		unblock()
+		err := <-done
+		if answer.Rcode != dns.RcodeSuccess || len(answer.Answer) == 0 {
+			t.Fatal("candidate processing starved retained proof refresh before fallback", answer)
+		}
+		if err == nil {
+			t.Fatal("delayed pending successor unexpectedly applied")
+		}
+	} else if err := s.syncPlatformDNSServingOnce(context.Background(), probe, probeDNSServingSnapshot); err == nil {
 		t.Fatal("pending successor unexpectedly applied")
 	}
 	retained := s.platformServing.Load()
-	if scenario != "authorized" {
+	if scenario != "authorized" && scenario != "delayed candidate" {
 		if a := retained.answer(question, "", time.Now()); a.Rcode != dns.RcodeServerFailure {
 			t.Fatal("invalid retained source authorization granted DNS", a)
 		}

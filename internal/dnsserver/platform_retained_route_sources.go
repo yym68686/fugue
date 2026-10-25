@@ -78,6 +78,11 @@ func (s *Service) refreshRetainedDNSRouteSources(ctx context.Context, old *dnsSe
 	if next.SelectionDigest != payload.routeSources.Snapshot.SelectionDigest {
 		return nil, platformconsumer.ErrAssignmentChanged
 	}
+	// Fresh proof observations do not require rewriting an unchanged source
+	// context or displacing the previous positive checkpoint.
+	if dnsSameSourceContext(old.record.RouteSources, record.RouteSources) {
+		return st, nil
+	}
 	path := strings.TrimSpace(s.Config.CachePath) + ".platform-serving.json"
 	if strings.TrimSpace(s.Config.CachePath) == "" {
 		return nil, errors.New("DNS serving cache path unavailable")

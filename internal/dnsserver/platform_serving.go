@@ -264,6 +264,15 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	candidate := dnsPlatformCandidate{Artifact: artifact, Assignment: a, Release: release}
 	desired := dnsPublication(dnsServingCheckpoint{Candidate: candidate})
 	publicationObservation.Desired, publicationObservation.DesiredKnown = &desired, true
+	// A candidate download/validation/probe can consume the retained proof's
+	// remaining lifetime. Refresh the independently authorized serving LKG first,
+	// rather than waiting until the candidate finally returns an error.
+	if old != nil && old.record.Positive && old.record.RouteSources != nil && retainedReader != nil && !reflect.DeepEqual(old.record.Candidate.Assignment, a) {
+		if refreshed, refreshErr := s.refreshRetainedDNSRouteSources(ctx, old, probe, "candidate_pending", *retainedReader); refreshErr == nil {
+			s.platformServing.Store(refreshed)
+			old = refreshed
+		}
+	}
 	parent, err := client.ReleaseSet(ctx, id, a, release)
 	if err != nil {
 		return err
