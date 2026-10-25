@@ -406,10 +406,24 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatal("shared API client code must not replay an initial Agent shadow configuration")
 	}
 	renewal := yamlMappingValue(t, jobs, "producer_publication_renewal")
-	for _, key := range yamlMappingKeys(t, renewal) {
-		if key == "needs" {
-			t.Fatal("producer recovery must remain independent of code builds")
+	if yamlMappingValue(t, renewal, "needs").Value != "cell_producer_plan" || !strings.Contains(yamlMappingValue(t, renewal, "if").Value, "needs.cell_producer_plan.outputs.renewal == 'true'") {
+		t.Fatal("producer renewal must select changed configuration before entering the shared queue")
+	}
+	renewalSelectionPlan := yamlMappingValue(t, jobs, "cell_producer_plan")
+	for _, key := range yamlMappingKeys(t, renewalSelectionPlan) {
+		if key == "needs" || key == "environment" || key == "concurrency" {
+			t.Fatal("producer configuration selection cannot depend on builds or acquire production locks")
 		}
+	}
+	if yamlMappingValue(t, renewalSelectionPlan, "runs-on").Value != "ubuntu-latest" || yamlMappingValue(t, yamlMappingValue(t, renewalSelectionPlan, "permissions"), "contents").Value != "read" {
+		t.Fatal("producer configuration selection requires only a disposable read-only runner")
+	}
+	producerSelectionRaw, err := yaml.Marshal(renewalSelectionPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(producerSelectionRaw), "secrets.") || !strings.Contains(string(producerSelectionRaw), "producer-renewal/renewal.json") || !strings.Contains(string(producerSelectionRaw), "renewal=true") {
+		t.Fatal("producer renewal selection lost its read-only declaration boundary")
 	}
 	renewalRaw, err := yaml.Marshal(renewal)
 	if err != nil {

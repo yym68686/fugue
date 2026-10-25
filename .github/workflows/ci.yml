@@ -1119,7 +1119,8 @@ jobs:
           python3 scripts/reconcile_cell_trust.py "${args[@]}" --check
 
   producer_publication_renewal:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: cell_producer_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.cell_producer_plan.outputs.renewal == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
@@ -1168,6 +1169,7 @@ jobs:
     timeout-minutes: 5
     permissions: {contents: read}
     outputs:
+      renewal: ${{ steps.plan.outputs.renewal }}
       shadow: ${{ steps.plan.outputs.shadow }}
       reconfiguration: ${{ steps.plan.outputs.reconfiguration }}
     steps:
@@ -1183,13 +1185,14 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producers deploy/environments/production/cell-producer-reconfiguration deploy/environments/production/cell-membership-expansion)
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producers deploy/environments/production/cell-producer-reconfiguration deploy/environments/production/cell-membership-expansion deploy/environments/production/producer-renewal/renewal.json)
           if (( ${#declarations[@]} > 1 )); then
             echo 'one Cell producer declaration per configuration atom is required' >&2
             exit 1
           fi
           if (( ${#declarations[@]} == 1 )); then
             case "${declarations[0]}" in
+              deploy/environments/production/producer-renewal/renewal.json) echo 'renewal=true' >> "$GITHUB_OUTPUT" ;;
               deploy/environments/production/cell-producers/*) echo 'shadow=true' >> "$GITHUB_OUTPUT" ;;
               *) echo 'reconfiguration=true' >> "$GITHUB_OUTPUT" ;;
             esac
