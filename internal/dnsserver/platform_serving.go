@@ -271,6 +271,10 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		if refreshed, refreshErr := s.refreshRetainedDNSRouteSources(ctx, old, probe, "candidate_pending", *retainedReader); refreshErr == nil {
 			s.platformServing.Store(refreshed)
 			old = refreshed
+		} else if errors.Is(refreshErr, platformconsumer.ErrAssignmentChanged) {
+			// A racing source grants no new proof. Retry current serving authority
+			// before spending another candidate scan while its old proof expires.
+			return refreshErr
 		}
 	}
 	parent, err := client.ReleaseSet(ctx, id, a, release)

@@ -29,7 +29,7 @@ import (
 // no ready source observation yet, while the independently authorized global
 // producer has advanced. The positive old DNS must retain its own authority.
 func TestPendingDNSSuccessorDoesNotStrandRetainedSource(t *testing.T) {
-	for _, scenario := range []string{"authorized", "delayed candidate", "revoked grant", "corrupt grant", "expired grant", "changed grant", "unapproved producer", "negative proof"} {
+	for _, scenario := range []string{"authorized", "delayed candidate", "raced source before candidate", "revoked grant", "corrupt grant", "expired grant", "changed grant", "unapproved producer", "negative proof"} {
 		t.Run(scenario, func(t *testing.T) { testPendingDNSSuccessorRetainedSource(t, scenario) })
 	}
 }
@@ -54,6 +54,7 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		t.Fatal(err)
 	}
 	consumerID, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-dns")
+	delayed := scenario == "delayed candidate" || scenario == "raced source before candidate"
 	pending, retainedReads := false, 0
 	blockedCandidate, releaseCandidate := make(chan struct{}), make(chan struct{})
 	var signalOnce, unblockOnce sync.Once
@@ -86,6 +87,9 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 				responseGrant, _ = platformsafety.SignPlatformLKGSnapshot(responseGrant, keys)
 			}
 			responseSnapshot := snapshot
+			if scenario == "raced source before candidate" && retainedReads == 2 {
+				responseSnapshot.SelectionDigest = "sha256:" + strings.Repeat("f", 64)
+			}
 			if scenario == "unapproved producer" {
 				raw, _ := json.Marshal(snapshot)
 				json.Unmarshal(raw, &responseSnapshot)
@@ -105,7 +109,7 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		case r.URL.Path == "/v1/platform-state/consumers/artifacts/"+candidate.Artifact.ID:
 			json.NewEncoder(w).Encode(candidate)
 		case r.URL.Path == "/v1/platform-state/consumers/artifacts/"+parent.ID:
-			if pending && scenario == "delayed candidate" {
+			if pending && delayed {
 				signalOnce.Do(func() { close(blockedCandidate) })
 				<-releaseCandidate
 			}
@@ -191,7 +195,7 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		t.Fatal(err)
 	}
 	pending = true
-	if scenario == "delayed candidate" {
+	if delayed {
 		expires := time.Now().Add(2 * time.Second)
 		agingFacts := append([]dnsReadinessFact(nil), old.facts...)
 		for i := range agingFacts {
@@ -206,7 +210,7 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 			t.Fatal("aging baseline is not serving", answer)
 		}
 		done := make(chan error, 1)
-		go func() { done <- s.syncPlatformDNSServingOnce(context.Background(), probe, probeDNSServingSnapshot) }()
+		go func() { done <- s.syncPlatformDNSServing(context.Background(), probe, probeDNSServingSnapshot) }()
 		select {
 		case <-blockedCandidate:
 		case <-time.After(5 * time.Second):
@@ -230,8 +234,17 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		t.Fatal("pending successor unexpectedly applied")
 	}
 	retained := s.platformServing.Load()
-	if scenario != "authorized" && scenario != "delayed candidate" {
-		if a := retained.answer(question, "", time.Now()); a.Rcode != dns.RcodeServerFailure {
+	if scenario != "authorized" && !delayed {
+		if scenario == "changed grant" {
+			// A control-plane observation race is not a negative physical proof.
+			// Original authorized proofs may serve only to their unchanged deadline.
+			if retained.record.RouteSources.Snapshot.SelectionDigest != old.record.RouteSources.Snapshot.SelectionDigest || !retained.record.AppliedAt.Equal(old.record.AppliedAt) {
+				t.Fatal("raced grant changed retained authority")
+			}
+			if a := retained.answer(question, "", time.Now().Add(31*time.Second)); a.Rcode != dns.RcodeServerFailure {
+				t.Fatal("raced grant extended original proof deadline", a)
+			}
+		} else if a := retained.answer(question, "", time.Now()); a.Rcode != dns.RcodeServerFailure {
 			t.Fatal("invalid retained source authorization granted DNS", a)
 		}
 		checkpointAfter, _ := os.ReadFile(s.Config.CachePath + ".platform-serving.json")
