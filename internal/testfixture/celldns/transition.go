@@ -20,7 +20,18 @@ func AvailabilityRequest(t testing.TB) platformconfig.CompileRequest {
 	return transitionRequest(t, true, 1)
 }
 
+// TransitionRequestWithSource retains the exact normalized global compiler inputs.
+func TransitionRequestWithSource(t testing.TB) (platformconfig.CompileRequest, platformconfig.CompileRequest) {
+	var source platformconfig.CompileRequest
+	req := transitionRequestSource(t, false, &source)
+	return req, source
+}
+
 func transitionRequest(t testing.TB, activeQuality bool, minimum ...int) platformconfig.CompileRequest {
+	return transitionRequestSource(t, activeQuality, nil, minimum...)
+}
+
+func transitionRequestSource(t testing.TB, activeQuality bool, original *platformconfig.CompileRequest, minimum ...int) platformconfig.CompileRequest {
 	t.Helper()
 	req := Request(t)
 	if activeQuality {
@@ -94,6 +105,9 @@ func transitionRequest(t testing.TB, activeQuality bool, minimum ...int) platfor
 			candidate := &snapshot.DNSSelections[i].Candidates[j]
 			candidate.EdgeGroupID = aliases[candidate.EdgeGroupID]
 		}
+	}
+	if original != nil {
+		*original = platformconfig.CompileRequest{Intent: platformconfig.NormalizePlatformIntent(intent), Policy: platformconfig.NormalizePolicySnapshot(policy), RuntimeSnapshot: snapshot, CreatedAt: req.CreatedAt}
 	}
 	c, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: policy, RuntimeSnapshot: snapshot, CreatedAt: req.CreatedAt})
 	if err != nil {

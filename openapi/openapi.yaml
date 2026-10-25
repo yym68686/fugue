@@ -260,14 +260,22 @@ x-fugue-platform-producer:
     declares authority_cell_id, and targets authority-cell:<cell-id>. Its pinned
     static intent and projection policy must use that same target scope and
     authority; the policy pins the complete declared consumer topology digest.
-    Cell producers require explicit application domains, complete route defaults,
-    DNS query policy and consumer_readiness placement even in shadow mode.
+    Complete-traffic cell producers require explicit application domains, complete
+    route defaults, DNS query policy and consumer_readiness placement even in shadow
+    mode. The explicit cell-dns/verified-global-dns mode instead pins an exact
+    continuously serving global producer publication, physical topology and DNS
+    membership. It projects the complete DNS behavior from that producer's current
+    verified full and authenticated unexpired LKG, using original signed inputs and
+    timestamps. It emits only a DNS child, independently schedules publication, and
+    preserves source policy constraints. It does not change public transport or
+    delegate global DNS convergence. See PlatformDNSProducerSource.
     Physical endpoint addresses are observed independently from Kubernetes node
     metadata; old inventory ownership and serving health are never rebound.
     Cell authority does not authorize publication in global or another cell.
     The legacy business-migration producer source is retired and rejected, including
-    for shadow mode. Historical artifacts remain readable. Every producer pins
-    a signed intent by exact ID and digest. Modes are paused, shadow and serving; serving additionally requires bounded
+    for shadow mode. Historical artifacts remain readable. Business-static-intent
+    producers pin a signed intent by exact ID and digest; verified-global-dns pins
+    its source producer authority instead. Modes are paused, shadow and serving; serving additionally requires bounded
     explicit promotion settings and complete pinned configuration inputs. business-static-intent pins a validated signed
     PlatformIntent by exact ID and content digest for static platform routes and
     DNS records; missing, invalid or revoked input never falls back to environment.
@@ -37202,26 +37210,51 @@ components:
     PlatformProducerPolicy:
       type: object
       additionalProperties: false
-      required: [schema_version, generation, mode, input_source, static_intent_artifact_id, static_intent_digest, target_scope, interval_seconds, refresh_seconds]
+      required: [schema_version, generation, mode, input_source, target_scope, interval_seconds, refresh_seconds]
       description: Signed operational policy stored as policy_snapshot in platform-config-producer for global, or platform-config-producer:<cell-id> for an independent cell. Activate or pause through the existing artifact shadow release API; a draft has no effect. A cell producer explicitly declares authority_cell_id and pins static intent and projection policy in its exact target scope.
       oneOf:
-        - not:
+        - required: [static_intent_artifact_id, static_intent_digest]
+          properties:
+            input_source: {type: string, enum: [business-static-intent]}
+          not:
             anyOf:
               - required: [publication_role]
               - required: [route_placement_transition]
-        - required: [publication_role, authority_cell_id, dns_policy_artifact_id, dns_policy_digest]
+              - required: [dns_source]
+        - required: [publication_role, authority_cell_id, static_intent_artifact_id, static_intent_digest, dns_policy_artifact_id, dns_policy_digest]
           properties:
+            publication_role: {type: string, enum: [cell-routes]}
+            input_source: {type: string, enum: [business-static-intent]}
             require_dns_query_policy: {type: boolean, enum: [false]}
             require_application_domains: {type: boolean, enum: [true]}
             require_route_defaults: {type: boolean, enum: [true]}
             hosted_zone_templates: {type: array, maxItems: 0, items: {}}
+          not:
+            required: [dns_source]
+        - required: [publication_role, authority_cell_id, dns_source]
+          properties:
+            publication_role: {type: string, enum: [cell-dns]}
+            input_source: {type: string, enum: [verified-global-dns]}
+            require_dns_query_policy: {type: boolean, enum: [false]}
+            require_application_domains: {type: boolean, enum: [false]}
+            require_route_defaults: {type: boolean, enum: [false]}
+            hosted_zone_templates: {type: array, maxItems: 0, items: {}}
+          not:
+            anyOf:
+              - required: [static_intent_artifact_id]
+              - required: [static_intent_digest]
+              - required: [dns_policy_artifact_id]
+              - required: [dns_policy_digest]
+              - required: [route_placement_transition]
       properties:
+        dns_source:
+          $ref: "#/components/schemas/PlatformDNSProducerSource"
         route_placement_transition:
           $ref: "#/components/schemas/PlatformRoutePlacementTransition"
         publication_role:
           type: string
-          enum: [cell-routes]
-          description: Explicit route/TLS-only authority for one neutral cell. Must match intent, policy, producer and consumer topology. It contains exactly edge_route_bundle and caddy_route_config; DNS input, membership and publication are forbidden. Omission retains the complete route/DNS/TLS publication contract. No existing serving authority is converted implicitly.
+          enum: [cell-routes, cell-dns]
+          description: Explicit publication role for one neutral cell. Must match intent, policy, producer and consumer topology. cell-routes contains exactly edge_route_bundle and caddy_route_config and forbids DNS publication. cell-dns requires verified-global-dns and dns_source; it projects only the complete DNS behavior of a current verified global full/LKG from the exact declared producer, retaining signed route/TLS references without publishing or modifying them. Omission retains the complete route/DNS/TLS publication contract. No existing serving authority is converted implicitly.
         authority_cell_id:
           type: string
           pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'
@@ -37252,7 +37285,7 @@ components:
             rollout_timeout_seconds: {type: integer, minimum: 30, maximum: 3600}
         input_source:
           type: string
-          enum: [business-static-intent]
+          enum: [business-static-intent, verified-global-dns]
         static_intent_artifact_id:
           type: string
           minLength: 1
@@ -37355,6 +37388,23 @@ components:
         content_hash: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
         release_id: {type: string, minLength: 1, maxLength: 256}
         fencing_token: {type: integer, minimum: 1, format: int64}
+    PlatformDNSProducerSource:
+      type: object
+      additionalProperties: false
+      required: [producer_policy, previous_topology, dns_node_ids]
+      description: Explicit transitional DNS source authority. The exact global producer publication must remain selected, signed and continuously serving. Capture requires its current verified full and matching positive unexpired LKG; original input timestamps and all DNS behavior are retained. The DNS worker has its own election and schedule. This mode does not delegate global DNS convergence or select public transport, and cannot make new records available before the source global publication verifies. Failed capture or publication preserves the previous positive DNS LKG. No ambient producer or topology discovery is allowed.
+      properties:
+        producer_policy:
+          $ref: "#/components/schemas/PlatformPublicationPrecondition"
+        previous_topology:
+          $ref: "#/components/schemas/PlatformEdgeTopology"
+        dns_node_ids:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 256}
+
     PlatformProducerReconfiguration:
       type: object
       additionalProperties: false

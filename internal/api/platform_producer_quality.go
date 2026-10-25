@@ -29,6 +29,9 @@ type producerQualityPlan struct {
 }
 
 func (s *Server) rememberProducerQualityPlan(policy platformproducer.Policy, projection platformIntentProjectionResponse) {
+	if policy.InputSource == platformproducer.DNSProducerInputSource {
+		return
+	}
 	query := projection.Policy.DNSQueryPolicy
 	if projection.Intent.Scope != policy.TargetScope || projection.Policy.Scope != policy.TargetScope || query == nil || query.DynamicQuality == nil || projection.RuntimeSnapshot.CapturedAt == nil {
 		return
@@ -125,6 +128,9 @@ func (s *Server) pendingProducerQualityPlan(policy platformproducer.Policy, now 
 // prior producer capture and is bounded by the signed evidence freshness limit.
 // New configuration, missing/revoked artifacts and expired plans cannot reuse it.
 func (s *Server) refreshPendingProducerQuality(ctx context.Context, policy platformproducer.Policy) error {
+	if policy.InputSource == platformproducer.DNSProducerInputSource {
+		return nil
+	}
 	if policy.DNSPolicyArtifactID == "" || policy.Serving == nil || policy.Serving.SinglePublication {
 		return nil
 	}

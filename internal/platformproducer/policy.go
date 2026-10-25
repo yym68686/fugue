@@ -26,6 +26,7 @@ const (
 )
 
 type Policy struct {
+	DNSSource                 *DNSProducerSource        `json:"dns_source,omitempty"`
 	RoutePlacementTransition  *RoutePlacementTransition `json:"route_placement_transition,omitempty"`
 	PublicationRole           string                    `json:"publication_role,omitempty"`
 	AuthorityCellID           string                    `json:"authority_cell_id,omitempty"`
@@ -94,6 +95,9 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 	policyScope, scopeErr := PolicyScopeForTarget(p.TargetScope)
 	if scopeErr != nil || artifact.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || artifact.ScopeKey != policyScope || p.SchemaVersion != Schema || strings.TrimSpace(p.Generation) == "" || p.Generation != artifact.Generation {
 		return p, fmt.Errorf("producer policy identity or scope invalid")
+	}
+	if p.InputSource == DNSProducerInputSource || p.DNSSource != nil {
+		return p, validateDNSProducerPolicy(p)
 	}
 	if p.TargetScope == "global" && p.AuthorityCellID != "" || p.TargetScope != "global" && (p.AuthorityCellID == "" || p.TargetScope != platformconfig.AuthorityCellScope(p.AuthorityCellID) || p.DNSPolicyArtifactID == "") {
 		return p, fmt.Errorf("producer cell authority or pinned policy missing")

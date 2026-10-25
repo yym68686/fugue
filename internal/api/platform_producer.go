@@ -200,8 +200,12 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	var projection platformIntentProjectionResponse
+	var dnsRequest platformconfig.CompileRequest
 	advance("capture_inputs")
-	if capture != nil {
+	if policy.InputSource == platformproducer.DNSProducerInputSource {
+		dnsRequest, err = s.captureDNSProducer(runCtx, policy)
+		projection.Intent, projection.Policy, projection.RuntimeSnapshot = dnsRequest.Intent, dnsRequest.Policy, dnsRequest.RuntimeSnapshot
+	} else if capture != nil {
 		projection, err = capture(runCtx, principal)
 	} else {
 		projection, err = s.capturePlatformIntentForProducer(runCtx, principal, policy)
@@ -211,7 +215,15 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	}
 	s.rememberProducerQualityPlan(policy, projection)
 	advance("source_digest")
-	sourceDigest, err := platformProducerSourceDigest(projection, authority.ID)
+	var sourceDigest string
+	if policy.InputSource == platformproducer.DNSProducerInputSource {
+		sourceDigest, err = platformconfig.Digest(struct {
+			Authority string
+			Request   platformconfig.CompileRequest
+		}{authority.ID, dnsRequest})
+	} else {
+		sourceDigest, err = platformProducerSourceDigest(projection, authority.ID)
+	}
 	if err != nil {
 		return interval, err
 	}
@@ -251,7 +263,10 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		}
 	}
 	advance("compile")
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot})
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot, PreviousTrafficPublication: dnsRequest.PreviousTrafficPublication})
+	if err == nil && policy.InputSource == platformproducer.DNSProducerInputSource {
+		err = platformproducer.ValidateDNSProducerOutput(policy, compiled.DNSArtifact)
+	}
 	if err != nil {
 		return interval, err
 	}

@@ -18,6 +18,10 @@ func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal
 }
 
 func (s *Server) projectPlatformIntentForProducer(ctx context.Context, principal model.Principal, policy platformproducer.Policy, collectRuntime bool) (platformIntentProjectionResponse, error) {
+	if policy.InputSource == platformproducer.DNSProducerInputSource {
+		req, err := s.captureDNSProducer(ctx, policy)
+		return platformIntentProjectionResponse{Intent: req.Intent, Policy: req.Policy, RuntimeSnapshot: req.RuntimeSnapshot}, err
+	}
 	if policy.InputSource != "business-static-intent" {
 		return platformIntentProjectionResponse{}, fmt.Errorf("producer requires pinned static intent")
 	}

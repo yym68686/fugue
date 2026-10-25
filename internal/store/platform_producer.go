@@ -90,6 +90,11 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 	// Recovery authorizes only the separately verified baseline. A broken
 	// candidate or revoked source cannot block undoing its publication.
 	if !producerRecoveryPhase(guard) {
+		if policy.InputSource == platformproducer.DNSProducerInputSource {
+			if err := validateDNSProducerPolicySelection(stateDNSRouteSourceReader(state), policy.DNSSource.ProducerPolicy, keys); err != nil {
+				return err
+			}
+		}
 		if policy.InputSource == "business-static-intent" {
 			index := platformArtifactIndex(state.PlatformArtifacts, policy.StaticIntentArtifactID)
 			if index < 0 {
@@ -167,6 +172,11 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 			}
 			for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
 				if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
+					return ErrConflict
+				}
+			}
+			if policy.InputSource == platformproducer.DNSProducerInputSource {
+				if child.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || platformproducer.ValidateDNSProducerOutput(policy, child) != nil {
 					return ErrConflict
 				}
 			}
@@ -313,6 +323,21 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 			return err
 		}
 		state.PlatformArtifacts = append(state.PlatformArtifacts, child)
+	}
+	if policy.InputSource == platformproducer.DNSProducerInputSource {
+		if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
+			return err
+		}
+		// Dynamic readers can retain historical source activations. A producer
+		// has narrower authority: its exact approved activation must be current.
+		// pgLoadCellDNSReferences already holds the nonblocking shared source
+		// policy lock; load this extra lane without taking a row write lock.
+		key := platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow")
+		lane, err := pgDNSRouteSourceReader(ctx, tx).lane(key)
+		if err != nil {
+			return err
+		}
+		state.PlatformReleaseLanes = upsertPlatformReleaseLane(state.PlatformReleaseLanes, lane)
 	}
 	return validateProducerReleaseGuard(state, parent, req, principal, s.platformArtifactSigningKeyring(), guard)
 }
