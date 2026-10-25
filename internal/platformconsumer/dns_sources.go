@@ -21,6 +21,19 @@ func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.Platfo
 		if errors.As(err, &status) && status.Code == http.StatusConflict {
 			return result.Snapshot, ErrAssignmentChanged
 		}
+		if status != nil && status.Code == http.StatusNotFound {
+			// A rollback can deselect gray between the two source reads. The
+			// endpoint then returns 404, not a source snapshot conflict. Confirm
+			// current selection before classifying it as a bounded retry; absent
+			// source data, failed rechecks and authorization errors remain errors.
+			check := c.CheckServingAssignment
+			if a.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
+				check = c.CheckAssignment
+			}
+			if changed := check(ctx, id, a); errors.Is(changed, ErrAssignmentChanged) {
+				return result.Snapshot, ErrAssignmentChanged
+			}
+		}
 		return result.Snapshot, err
 	}
 	if !reflect.DeepEqual(result.Assignment, a) || !reflect.DeepEqual(result.Release, r) {
