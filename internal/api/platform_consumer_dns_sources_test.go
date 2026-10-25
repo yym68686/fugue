@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	neturl "net/url"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +139,83 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 	raw, _ = json.Marshal(state)
 	os.WriteFile(path, raw, 0600)
 	read(token, url, http.StatusNotFound)
+
+	// A positive full DNS LKG remains an independent source-read authority after
+	// that release is superseded by a pending gray successor.
+	state.PlatformArtifactReleases[len(state.PlatformArtifactReleases)-1].VerificationState = model.PlatformArtifactVerificationStateVerified
+	state.PlatformArtifactReleases[len(state.PlatformArtifactReleases)-1].VerifiedLKGGeneration = compiled.ReleaseArtifact.Generation
+	verifiedAt := time.Now().UTC()
+	state.PlatformArtifactReleases[len(state.PlatformArtifactReleases)-1].VerifiedAt = &verifiedAt
+	lkg, err := platformsafety.SignPlatformLKGSnapshot(model.PlatformLKGSnapshot{ID: "dns-retained-lkg", ArtifactID: compiled.ReleaseArtifact.ID, ArtifactKind: compiled.ReleaseArtifact.ArtifactKind, Scope: compiled.ReleaseArtifact.Scope, ScopeKey: compiled.ReleaseArtifact.ScopeKey, SchemaVersion: compiled.ReleaseArtifact.SchemaVersion, Generation: compiled.ReleaseArtifact.Generation, GenerationSequence: compiled.ReleaseArtifact.GenerationSequence, ContentHash: compiled.ReleaseArtifact.ContentHash, ArtifactProvenance: compiled.ReleaseArtifact.Provenance, VerifiedByReleaseID: state.PlatformArtifactReleases[len(state.PlatformArtifactReleases)-1].ID, VerificationEvidenceHash: "sha256:" + strings.Repeat("b", 64), ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, lkg)
+	raw, _ = json.Marshal(state)
+	os.WriteFile(path, raw, 0600)
+	retainedURL := "/v1/platform-state/consumers/artifacts/" + compiled.DNSArtifact.ID + "/retained-route-sources?expected_consumer_set_id=" + neturl.QueryEscape(state.ExpectedConsumerSets[len(state.ExpectedConsumerSets)-1].ID)
+	retainedResponse := performJSONRequest(t, s, http.MethodGet, retainedURL, token, nil)
+	if retainedResponse.Code != http.StatusOK {
+		t.Fatalf("retained positive DNS LKG source read denied: %d %s", retainedResponse.Code, retainedResponse.Body.String())
+	}
+	var retained model.PlatformConsumerRetainedDNSRouteSourcesResponse
+	mustDecodeJSON(t, retainedResponse, &retained)
+	if retained.RetainedLKG.ID != lkg.ID || retained.Release.ID != lkg.VerifiedByReleaseID || retained.Assignment.ReleaseChannel != "full" {
+		t.Fatal("retained response lost positive full LKG binding")
+	}
+	baseline, _ := json.Marshal(state)
+	for _, scenario := range []string{"valid", "corrupt LKG", "expired LKG", "missing LKG", "foreign parent", "rolled back", "unverified", "wrong set", "foreign node", "foreign authority", "non DNS"} {
+		t.Run("retained/"+scenario, func(t *testing.T) {
+			var next model.State
+			if err := json.Unmarshal(baseline, &next); err != nil {
+				t.Fatal(err)
+			}
+			requestURL, requestToken := retainedURL, token
+			code := http.StatusNotFound
+			switch scenario {
+			case "valid":
+				code = http.StatusOK
+			case "corrupt LKG":
+				next.PlatformLKGSnapshots[0].SnapshotProvenance.Signature = "invalid"
+			case "expired LKG":
+				next.PlatformLKGSnapshots[0].ExpiresAt = time.Now().Add(-time.Minute)
+				next.PlatformLKGSnapshots[0], err = platformsafety.SignPlatformLKGSnapshot(next.PlatformLKGSnapshots[0], keys)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "missing LKG":
+				next.PlatformLKGSnapshots = nil
+			case "foreign parent":
+				next.PlatformLKGSnapshots[0].ArtifactID = "other-parent"
+			case "rolled back":
+				next.PlatformArtifactReleases[len(next.PlatformArtifactReleases)-1].Status = model.PlatformArtifactReleaseStatusRolledBack
+			case "unverified":
+				next.PlatformArtifactReleases[len(next.PlatformArtifactReleases)-1].VerificationState = "pending"
+			case "wrong set":
+				requestURL = strings.Replace(requestURL, next.ExpectedConsumerSets[len(next.ExpectedConsumerSets)-1].ID, "foreign", 1)
+			case "foreign node":
+				requestToken = issue(model.PlatformConsumerComponentDNSServer, "foreign-node", "cell-dns", model.PlatformArtifactKindDNSAnswerBundle)
+			case "foreign authority":
+				requestToken = issue(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-other", model.PlatformArtifactKindDNSAnswerBundle)
+			case "non DNS":
+				requestToken = issue(model.PlatformConsumerComponentEdgeWorker, "edge-a", "cell-dns", model.PlatformArtifactKindEdgeRouteBundle)
+				code = http.StatusForbidden
+			}
+			encoded, _ := json.Marshal(next)
+			if err := os.WriteFile(path, encoded, 0600); err != nil {
+				t.Fatal(err)
+			}
+			response := performJSONRequest(t, s, http.MethodGet, requestURL, requestToken, nil)
+			if response.Code != code {
+				t.Fatalf("retained authorization: %d want %d %s", response.Code, code, response.Body.String())
+			}
+			after, _ := os.ReadFile(path)
+			if !reflect.DeepEqual(encoded, after) {
+				t.Fatal("retained read modified production configuration or runtime state")
+			}
+		})
+	}
+
 }
 
 func TestDNSRouteSourceReadRechecksAssignmentAfterObservation(t *testing.T) {

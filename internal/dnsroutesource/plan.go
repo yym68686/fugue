@@ -17,8 +17,9 @@ import (
 // Context is retained inside the authenticated DNS checkpoint. It contains no
 // positive readiness. Selections choose one complete publication per target.
 type Context struct {
-	Snapshot   model.PlatformDNSRouteSourceSnapshot `json:"snapshot"`
-	Selections map[string]string                    `json:"selections"`
+	RetainedDNSLKG *model.PlatformLKGSnapshot           `json:"retained_dns_lkg,omitempty"`
+	Snapshot       model.PlatformDNSRouteSourceSnapshot `json:"snapshot"`
+	Selections     map[string]string                    `json:"selections"`
 }
 type variant struct {
 	source string
@@ -261,12 +262,16 @@ func (c *Context) ProofDeadline(binding *model.TrafficReleaseBinding) time.Time 
 	if c == nil || binding == nil {
 		return time.Time{}
 	}
+	var until time.Time
+	if c.RetainedDNSLKG != nil {
+		until = c.RetainedDNSLKG.ExpiresAt
+	}
 	for _, scope := range c.Snapshot.Scopes {
 		for _, p := range scope.Publications {
-			if p.Release.ID == binding.ReleaseID && p.Parent.ScopeKey == binding.ScopeKey && len(p.Selections) == 1 && p.Selections[0] == "lkg" && p.LKG != nil {
-				return p.LKG.ExpiresAt
+			if p.Release.ID == binding.ReleaseID && p.Parent.ScopeKey == binding.ScopeKey && len(p.Selections) == 1 && p.Selections[0] == "lkg" && p.LKG != nil && (until.IsZero() || p.LKG.ExpiresAt.Before(until)) {
+				until = p.LKG.ExpiresAt
 			}
 		}
 	}
-	return time.Time{}
+	return until
 }

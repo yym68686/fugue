@@ -4445,6 +4445,37 @@ paths:
         '409': {$ref: "#/components/responses/ErrorResponse"}
         '503': {$ref: "#/components/responses/ErrorResponse"}
         default: {$ref: "#/components/responses/ErrorResponse"}
+  /v1/platform-state/consumers/artifacts/{artifact_id}/retained-route-sources:
+    get:
+      operationId: getPlatformConsumerRetainedDNSRouteSources
+      summary: Read approved routing sources for the current positive DNS LKG
+      description: Read-only private observation for the exact signed current positive LKG of a DNS authority, independently of a pending successor assignment. Requires the verified scoped DNS identity to remain in the latest declared expected set of the full release that verified the LKG. The full release may be active or superseded, but never rolled back or unverified. The LKG signature, expiry, parent, child and original source policy are validated, and ownership and the current LKG are rechecked after observing sources. No arbitrary historical artifact, successor source policy, configuration mutation, readiness grant, public transport selection or checkpoint renewal is permitted. Readers must independently verify the returned LKG and recheck both its identity and source selection digest after probing. Existing checkpoint and proof deadlines remain in force and source observations are additionally bounded by the returned LKG expiry. Response encoding is bounded to 16 MiB.
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformConsumerRetainedDNSRouteSources
+      security:
+        - PlatformComponentBearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema: {type: string, minLength: 1}
+        - in: query
+          name: expected_consumer_set_id
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Current LKG-bound source observation; no checkpoint renewal or serving grant.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PlatformConsumerRetainedDNSRouteSourcesResponse"}
+        '400': {$ref: "#/components/responses/ErrorResponse"}
+        '401': {$ref: "#/components/responses/ErrorResponse"}
+        '403': {$ref: "#/components/responses/ErrorResponse"}
+        '404': {$ref: "#/components/responses/ErrorResponse"}
+        '409': {$ref: "#/components/responses/ErrorResponse"}
+        '503': {$ref: "#/components/responses/ErrorResponse"}
+        default: {$ref: "#/components/responses/ErrorResponse"}
   /v1/platform-state/consumers/artifacts/{artifact_id}/tls/{hostname}:
     get:
       operationId: getPlatformConsumerTLSCertificate
@@ -38030,6 +38061,15 @@ components:
         assignment: {$ref: "#/components/schemas/PlatformConsumerAssignment"}
         release: {$ref: "#/components/schemas/PlatformArtifactRelease"}
         snapshot: {$ref: "#/components/schemas/PlatformDNSRouteSourceSnapshot"}
+    PlatformConsumerRetainedDNSRouteSourcesResponse:
+      type: object
+      additionalProperties: false
+      required: [assignment, release, snapshot, retained_lkg]
+      properties:
+        assignment: {$ref: "#/components/schemas/PlatformConsumerAssignment"}
+        release: {$ref: "#/components/schemas/PlatformArtifactRelease"}
+        snapshot: {$ref: "#/components/schemas/PlatformDNSRouteSourceSnapshot"}
+        retained_lkg: {$ref: "#/components/schemas/PlatformLKGSnapshot"}
     PlatformDNSRouteSourceSnapshot:
       type: object
       additionalProperties: false

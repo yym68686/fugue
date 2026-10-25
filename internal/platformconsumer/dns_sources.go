@@ -28,3 +28,19 @@ func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.Platfo
 	}
 	return result.Snapshot, nil
 }
+
+// RetainedDNSRouteSources reads only the authority's current positive LKG.
+// Verification metadata may advance after the cached release was applied; its
+// immutable publication binding and exact expected membership must not change.
+func (c Client) RetainedDNSRouteSources(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease) (model.PlatformConsumerRetainedDNSRouteSourcesResponse, error) {
+	var result model.PlatformConsumerRetainedDNSRouteSourcesResponse
+	endpoint := strings.TrimRight(c.BaseURL, "/") + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(a.ArtifactID) + "/retained-route-sources?expected_consumer_set_id=" + url.QueryEscape(a.ExpectedConsumerSetID)
+	if err := c.jsonLimit(ctx, endpoint, id.Token, http.MethodGet, nil, &result, 16<<20); err != nil {
+		return result, err
+	}
+	got := result.Release
+	if !reflect.DeepEqual(result.Assignment, a) || got.ID != r.ID || got.ArtifactID != r.ArtifactID || got.ArtifactKind != r.ArtifactKind || got.ScopeKey != r.ScopeKey || got.Generation != r.Generation || got.ReleaseChannel != r.ReleaseChannel || got.FencingToken != r.FencingToken || !got.ReleasedAt.Equal(r.ReleasedAt) || got.CanaryRuleRef != r.CanaryRuleRef || got.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || (got.Status != model.PlatformArtifactReleaseStatusActive && got.Status != model.PlatformArtifactReleaseStatusSuperseded) || got.VerificationState != model.PlatformArtifactVerificationStateVerified || got.VerifiedLKGGeneration != r.Generation || got.VerifiedAt == nil || result.RetainedLKG.VerifiedByReleaseID != r.ID {
+		return result, ErrAssignmentChanged
+	}
+	return result, nil
+}

@@ -40,6 +40,11 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 			value = platformconsumer.Identity{Token: "scoped", ExpiresAt: now.Add(time.Hour), Component: "dns-server", NodeID: "dns-a", AuthorityID: "cell-dns", ConsumerID: consumer, ScopeKey: compiled.DNSArtifact.ScopeKey, ArtifactKinds: []string{compiled.DNSArtifact.ArtifactKind}}
 		case strings.HasSuffix(incoming.URL.Path, "/assignment"):
 			value = model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{assignment}}
+		case strings.HasSuffix(incoming.URL.Path, "/retained-route-sources"):
+			// This fixture has no remotely verified positive LKG. A failed current
+			// source scan must still preserve the listener without inventing quorum.
+			writer.WriteHeader(http.StatusNotFound)
+			return
 		case strings.HasSuffix(incoming.URL.Path, "/route-sources"):
 			value = model.PlatformConsumerDNSRouteSourcesResponse{Assignment: assignment, Release: release, Snapshot: snapshot}
 		case strings.HasSuffix(incoming.URL.Path, "/trusted-heartbeat"):

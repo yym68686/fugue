@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"fugue/internal/dnsroutesource"
+	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
+	"fugue/internal/platformsafety"
 	"fugue/internal/routeprobe"
 )
 
@@ -37,11 +39,19 @@ func (s *Service) replayDNSRouteContext(p dnsServingPayload, c dnsPlatformCandid
 }
 
 func (s *Service) observeDNSRouteSources(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, c dnsPlatformCandidate, p dnsServingPayload, previous *dnsroutesource.Context, probe dnsReadinessProbeFunc) (dnsServingPayload, []dnsReadinessFact, error) {
+	return s.observeDNSRouteSourcesWithReader(ctx, c, p, previous, probe, func(ctx context.Context) (model.PlatformDNSRouteSourceSnapshot, error) {
+		return client.DNSRouteSources(ctx, id, c.Assignment, c.Release)
+	})
+}
+
+// Both selected and retained DNS use the same authenticated source compilation,
+// recovery history and physical proof checks, but separate read authority.
+func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPlatformCandidate, p dnsServingPayload, previous *dnsroutesource.Context, probe dnsReadinessProbeFunc, read func(context.Context) (model.PlatformDNSRouteSourceSnapshot, error)) (dnsServingPayload, []dnsReadinessFact, error) {
 	approvals, err := platformconfig.DNSRouteSourceAuthorizations(c.Artifact)
 	if err != nil || len(approvals) == 0 {
 		return p, nil, err
 	}
-	snapshot, err := client.DNSRouteSources(ctx, id, c.Assignment, c.Release)
+	snapshot, err := read(ctx)
 	if err != nil {
 		return p, nil, err
 	}
@@ -106,8 +116,12 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 	for _, requirement := range p.Plan.Probes {
 		selected = append(selected, byID[requirement.ID])
 	}
-	if err = s.checkDNSRouteSources(ctx, client, id, c, selection); err != nil {
+	next, err := read(ctx)
+	if err != nil {
 		return p, selected, err
+	}
+	if next.SelectionDigest != selection.Snapshot.SelectionDigest {
+		return p, selected, platformconsumer.ErrAssignmentChanged
 	}
 	if err = s.advanceDNSRouteCursor(snapshot); err != nil {
 		return p, selected, err
@@ -178,12 +192,18 @@ func dnsSameSourceContext(a, b *dnsroutesource.Context) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	return a.Snapshot.SelectionDigest == b.Snapshot.SelectionDigest && reflect.DeepEqual(a.Selections, b.Selections)
+	return a.Snapshot.SelectionDigest == b.Snapshot.SelectionDigest && reflect.DeepEqual(a.Selections, b.Selections) && reflect.DeepEqual(a.RetainedDNSLKG, b.RetainedDNSLKG)
 }
 
 // The API, checkpoint and live state all replay the same signed requirements.
 func (s *Service) verifiedDNSCheckpointPayload(c dnsServingCheckpoint) (dnsServingPayload, string, error) {
 	p, routeID, err := s.verifyDNSServingRelease(c.Parent, c.Candidate)
+	if err == nil && c.RouteSources != nil && c.RouteSources.RetainedDNSLKG != nil {
+		grant := c.RouteSources.RetainedDNSLKG
+		if grant.VerifiedByReleaseID != c.Candidate.Release.ID || !platformsafety.EvaluatePlatformLKGSnapshot(*grant, c.Parent, s.platformDNSKeys(), c.RouteSources.Snapshot.ObservedAt).Pass {
+			return p, routeID, errors.New("retained DNS checkpoint source authorization invalid")
+		}
+	}
 	if err == nil {
 		p, err = s.replayDNSRouteContext(p, c.Candidate, c.RouteSources, time.Now().UTC())
 	}

@@ -8,6 +8,11 @@ type PlatformConsumerDNSRouteSourcesResponse struct {
 	Snapshot   PlatformDNSRouteSourceSnapshot `json:"snapshot"`
 }
 
+type PlatformConsumerRetainedDNSRouteSourcesResponse struct {
+	PlatformConsumerDNSRouteSourcesResponse
+	RetainedLKG PlatformLKGSnapshot `json:"retained_lkg"`
+}
+
 type PlatformDNSRouteSourceSnapshot struct {
 	DNSArtifactID     string                        `json:"dns_artifact_id"`
 	DNSArtifactDigest string                        `json:"dns_artifact_digest"`

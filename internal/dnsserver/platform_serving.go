@@ -206,12 +206,19 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	fallbackReason := "candidate_rejected"
 	var bridge *dnsReleaseBridge
 	var observations []dnsReadinessFact
+	var retainedReader *dnsRetainedRouteSourceReader
 	defer func() {
 		// A superseded assignment cannot authorize a bridge or a new checkpoint.
 		// Its scan may nevertheless contain fresh physical proofs of the exact
 		// retained release. Keep those independent runtime observations so that
 		// bounded retries do not starve serving proofs during publication churn.
 		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) {
+			if ctx.Err() == nil && old != nil && old.record.Positive && old.record.RouteSources != nil && retainedReader != nil && s.platformServing.Load() == old {
+				if refreshed, err := s.refreshRetainedDNSRouteSources(ctx, old, probe, fallbackReason, *retainedReader); err == nil {
+					s.platformServing.Store(refreshed)
+					return
+				}
+			}
 			if ctx.Err() == nil && old != nil && bridge != nil && s.platformServing.Load() == old {
 				if refreshed := s.refreshRetainedDNSFactsFromObservations(old, bridge.payload.Plan, observations, time.Now().UTC()); refreshed != nil {
 					s.platformServing.Store(refreshed)
@@ -226,13 +233,16 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// An applied candidate or an explicit negative readiness observation
 		// already replaced the runtime view and must not be overwritten here.
 		if syncErr != nil && ctx.Err() == nil && old != nil && s.platformServing.Load() == old {
-			if refreshed, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations); err == nil {
+			if refreshed, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations, retainedReader); err == nil {
 				s.platformServing.Store(refreshed)
 			}
 		}
 	}()
 	client := s.platformConsumerClient()
 	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindDNSAnswerBundle)
+	if id.Token != "" {
+		retainedReader = &dnsRetainedRouteSourceReader{client: client, identity: id}
+	}
 	wasBound := s.platformServingBound.Load()
 	if err != nil {
 		fallbackReason = "control_plane_unavailable"
@@ -358,7 +368,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			if old.record.Positive && dnsSameSourceContext(old.record.RouteSources, p.routeSources) {
 				st.record = old.record
 			} else if old.record.Positive {
-				st, err = s.refreshedDNSServingFacts(ctx, old, probe, "readiness_incomplete", nil, nil)
+				st, err = s.refreshedDNSServingFacts(ctx, old, probe, "readiness_incomplete", nil, nil, retainedReader)
 				if err != nil {
 					return err
 				}
@@ -376,7 +386,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			s.platformServing.Store(st)
 			_ = s.reportDNSServingState(ctx, client, id, st, false)
 		} else if hosts := dnsTransitionRecords(old, bridge); len(hosts) > 0 {
-			retained, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations)
+			retained, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations, retainedReader)
 			if err != nil {
 				return err
 			}
@@ -473,7 +483,12 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	status := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, st.facts, "", st.checkedAt, now)
 	return status.ReadyRecords == status.Records
 }
-func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact) (*dnsServingState, error) {
+func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact, readers ...*dnsRetainedRouteSourceReader) (*dnsServingState, error) {
+	if len(readers) > 0 && readers[0] != nil && old.record.Positive && old.record.RouteSources != nil {
+		if refreshed, err := s.refreshRetainedDNSRouteSources(ctx, old, probe, reason, *readers[0]); err == nil {
+			return refreshed, nil
+		}
+	}
 	if reason == "control_plane_unavailable" && bridge == nil && old.record.Positive &&
 		old.record.AppliedAt.Add(time.Duration(old.payload.Policy.MaxStaleSeconds)*time.Second).After(time.Now()) {
 		ctx = routeprobe.WithRetainedLKG(ctx)

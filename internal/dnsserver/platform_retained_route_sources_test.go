@@ -1,0 +1,252 @@
+package dnsserver
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"fugue/internal/config"
+	"fugue/internal/dnsroutesource"
+	"fugue/internal/model"
+	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
+	"fugue/internal/platformsafety"
+	"fugue/internal/routeprobe"
+	"fugue/internal/testfixture/celldns"
+	"github.com/miekg/dns"
+)
+
+// Exercise the actual sync/rejection/fallback path: a valid DNS successor has
+// no ready source observation yet, while the independently authorized global
+// producer has advanced. The positive old DNS must retain its own authority.
+func TestPendingDNSSuccessorDoesNotStrandRetainedSource(t *testing.T) {
+	for _, scenario := range []string{"authorized", "revoked grant", "corrupt grant", "expired grant", "changed grant", "unapproved producer", "negative proof"} {
+		t.Run(scenario, func(t *testing.T) { testPendingDNSSuccessorRetainedSource(t, scenario) })
+	}
+}
+
+func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
+	req, policies, activations := celldns.SourceAuthorizedRequest(t, true)
+	celldns.RetainGlobalOnly(&req)
+	compiled := celldns.Compile(t, req)
+	now := time.Now().UTC()
+	keys := celldns.Keys()
+	release := model.PlatformArtifactRelease{ID: "dns-full", ArtifactID: compiled.ReleaseArtifact.ID, ArtifactKind: compiled.ReleaseArtifact.ArtifactKind, ScopeKey: compiled.ReleaseArtifact.ScopeKey, Generation: compiled.ReleaseArtifact.Generation, ReleaseChannel: "full", FencingToken: 1, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now.Add(-time.Minute)}
+	assignment := model.PlatformConsumerAssignment{ArtifactID: compiled.DNSArtifact.ID, ArtifactKind: compiled.DNSArtifact.ArtifactKind, ArtifactReleaseID: release.ID, ReleaseSetID: compiled.ReleaseArtifact.ID, ExpectedConsumerSetID: "dns-expected", Revision: 1, ScopeKey: compiled.DNSArtifact.ScopeKey, ExpectedGeneration: compiled.DNSArtifact.Generation, GenerationSequence: compiled.DNSArtifact.GenerationSequence, ContentHash: compiled.DNSArtifact.ContentHash, FencingToken: 1, ReleaseChannel: "full"}
+	oldCandidate := dnsPlatformCandidate{Artifact: compiled.DNSArtifact, Assignment: assignment, Release: release}
+	parent, candidate := compiled.ReleaseArtifact, oldCandidate
+	snapshot := celldns.SourceSnapshot(t, req, compiled.DNSArtifact, policies, activations, now)
+	plans, err := dnsroutesource.Build(compiled.DNSArtifact, snapshot, keys, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lkg, err := platformsafety.SignPlatformLKGSnapshot(model.PlatformLKGSnapshot{ID: "dns-lkg", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, Scope: parent.Scope, ScopeKey: parent.ScopeKey, SchemaVersion: parent.SchemaVersion, Generation: parent.Generation, GenerationSequence: parent.GenerationSequence, ContentHash: parent.ContentHash, ArtifactProvenance: parent.Provenance, VerifiedByReleaseID: release.ID, VerificationEvidenceHash: "sha256:" + strings.Repeat("a", 64), ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now}, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerID, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-dns")
+	pending, retainedReads := false, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/platform-state/consumers/identity":
+			json.NewEncoder(w).Encode(map[string]any{"token": "test", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "dns-a", "authority_id": "cell-dns", "consumer_id": consumerID, "scope_key": assignment.ScopeKey, "artifact_kinds": []string{assignment.ArtifactKind}})
+		case r.URL.Path == "/v1/platform-state/consumers/assignment":
+			json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{candidate.Assignment}})
+		case strings.HasSuffix(r.URL.Path, "/retained-route-sources"):
+			retainedReads++
+			if !pending || !strings.Contains(r.URL.Path, "/"+oldCandidate.Artifact.ID+"/") || r.URL.Query().Get("expected_consumer_set_id") != assignment.ExpectedConsumerSetID {
+				t.Error("retained observation borrowed successor identity")
+			}
+			if scenario == "revoked grant" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			responseGrant := lkg
+			if scenario == "corrupt grant" {
+				responseGrant.SnapshotProvenance.Signature = "invalid"
+			}
+			if scenario == "expired grant" {
+				responseGrant.ExpiresAt = now.Add(-time.Minute)
+				responseGrant, _ = platformsafety.SignPlatformLKGSnapshot(responseGrant, keys)
+			}
+			if scenario == "changed grant" && retainedReads > 1 {
+				responseGrant.ID = "replacement-lkg"
+				responseGrant, _ = platformsafety.SignPlatformLKGSnapshot(responseGrant, keys)
+			}
+			responseSnapshot := snapshot
+			if scenario == "unapproved producer" {
+				raw, _ := json.Marshal(snapshot)
+				json.Unmarshal(raw, &responseSnapshot)
+				responseSnapshot.Scopes[0].Publications[0].ProducerRelease.ID = "foreign-producer"
+				responseSnapshot.SelectionDigest, _ = dnsroutesource.SelectionDigest(responseSnapshot)
+			}
+			verified := release
+			verified.VerificationState, verified.VerifiedLKGGeneration = model.PlatformArtifactVerificationStateVerified, compiled.ReleaseArtifact.Generation
+			verified.VerifiedAt = &now
+			json.NewEncoder(w).Encode(map[string]any{"assignment": assignment, "release": verified, "snapshot": responseSnapshot, "retained_lkg": responseGrant})
+		case strings.HasSuffix(r.URL.Path, "/route-sources"):
+			if pending {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			json.NewEncoder(w).Encode(model.PlatformConsumerDNSRouteSourcesResponse{Assignment: assignment, Release: release, Snapshot: snapshot})
+		case r.URL.Path == "/v1/platform-state/consumers/artifacts/"+candidate.Artifact.ID:
+			json.NewEncoder(w).Encode(candidate)
+		case r.URL.Path == "/v1/platform-state/consumers/artifacts/"+parent.ID:
+			json.NewEncoder(w).Encode(map[string]any{"artifact": parent, "assignment": candidate.Assignment, "release": candidate.Release})
+		case r.URL.Path == "/v1/platform-state/consumers/trusted-heartbeat":
+			var h platformcontrol.PlatformConsumerHeartbeatEnvelope
+			json.NewDecoder(r.Body).Decode(&h)
+			if pending && h.ProbeStatus == "passed" {
+				t.Error("retained source refresh acknowledged rejected successor")
+			}
+			json.NewEncoder(w).Encode(model.PlatformConsumerHeartbeatResponse{Consumer: model.PlatformConsumerInstance{IdentityVerified: true, ConsumerID: h.ConsumerID, Sequence: h.Sequence, EvidenceHash: h.EvidenceHash, ExpectedConsumerSetID: h.ExpectedConsumerSetID}})
+		default:
+			t.Error("unexpected request", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	s := NewService(config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: "cell-dns", PlatformScopeKey: assignment.ScopeKey, Zone: "example.test", CachePath: filepath.Join(dir, "dns"), BundleSigningKey: keys.PrimaryKey, BundleSigningKeyID: keys.PrimaryKeyID}, nil)
+	s.PlatformTokenFile = filepath.Join(dir, "token")
+	if err := os.WriteFile(s.PlatformTokenFile, []byte("pod-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	probe := func(_ context.Context, host, path, address, state string, _ time.Duration) (routeprobe.Proof, error) {
+		if pending && scenario == "negative proof" {
+			return routeprobe.Proof{}, errors.New("authenticated negative proof")
+		}
+		for _, p := range plans.Probes {
+			if p.Hostname == host && p.Path == path && p.Address == address {
+				group, digest := p.EdgeGroupID, p.RouteDigest
+				if p.PreviousAuthority != nil {
+					group, digest = p.PreviousAuthority.EdgeGroupID, p.PreviousAuthority.RouteDigest
+				}
+				return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: digest, Version: "observed", State: state, TrafficRelease: plans.Bindings[p.CellPublicationDigest], CheckedAt: time.Now(), ValidUntil: time.Now().Add(30 * time.Second)}, nil
+			}
+		}
+		return routeprobe.Proof{}, errors.New("unexpected probe")
+	}
+	if err := s.syncPlatformDNSServingOnce(context.Background(), probe, probeDNSServingSnapshot); err != nil {
+		t.Fatal("baseline", err)
+	}
+	old := s.platformServing.Load()
+	question := new(dns.Msg)
+	question.SetQuestion("app.example.test.", dns.TypeA)
+	if a := old.answer(question, "", time.Now()); a.Rcode != dns.RcodeSuccess || len(a.Answer) == 0 {
+		t.Fatal("baseline not serving", a)
+	}
+	checkpointBefore, err := os.ReadFile(s.Config.CachePath + ".platform-serving.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A different signed DNS candidate is not yet ready. Its source endpoint
+	// cannot authorize old DNS, even when it happens to share the same policy.
+	req.Intent.Generation += "-successor"
+	next := celldns.Compile(t, req)
+	next.DNSArtifact = celldns.Sign(t, next.DNSArtifact, "dns-successor", 2)
+	parent = celldns.Sign(t, platformconfig.BuildReleaseSetArtifact(next.ReleaseSet, []string{next.DNSArtifact.ID}, req.CreatedAt), "dns-parent-successor", 2)
+	candidate = oldCandidate
+	candidate.Artifact = next.DNSArtifact
+	candidate.Release.ID, candidate.Release.ArtifactID, candidate.Release.Generation = "dns-gray", parent.ID, parent.Generation
+	candidate.Release.ReleaseChannel, candidate.Release.ReleasedAt = "gray", now
+	candidate.Release.CanaryRuleRef = "cohort=complete"
+	candidate.Assignment.ArtifactID, candidate.Assignment.ContentHash, candidate.Assignment.ExpectedGeneration = next.DNSArtifact.ID, next.DNSArtifact.ContentHash, next.DNSArtifact.Generation
+	candidate.Assignment.GenerationSequence = 2
+	candidate.Assignment.ArtifactReleaseID, candidate.Assignment.ReleaseSetID, candidate.Assignment.ExpectedConsumerSetID = "dns-gray", parent.ID, "successor-expected"
+	candidate.Assignment.ReleaseChannel = "gray"
+	raw, _ := json.Marshal(snapshot)
+	json.Unmarshal(raw, &snapshot)
+	for i := range snapshot.Scopes {
+		scope := &snapshot.Scopes[i]
+		pub := &scope.Publications[0]
+		pub.Release.ID += "-next"
+		pub.Release.FencingToken++
+		scope.Lanes[0].ActiveReleaseID, scope.Lanes[0].FencingToken = pub.Release.ID, pub.Release.FencingToken
+		scope.Lanes[0].Version++
+	}
+	snapshot.ObservedAt = time.Now().UTC()
+	snapshot.SelectionDigest, _ = dnsroutesource.SelectionDigest(snapshot)
+	plans, err = dnsroutesource.Build(compiled.DNSArtifact, snapshot, keys, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending = true
+	if err := s.syncPlatformDNSServingOnce(context.Background(), probe, probeDNSServingSnapshot); err == nil {
+		t.Fatal("pending successor unexpectedly applied")
+	}
+	retained := s.platformServing.Load()
+	if scenario != "authorized" {
+		if a := retained.answer(question, "", time.Now()); a.Rcode != dns.RcodeServerFailure {
+			t.Fatal("invalid retained source authorization granted DNS", a)
+		}
+		checkpointAfter, _ := os.ReadFile(s.Config.CachePath + ".platform-serving.json")
+		if string(checkpointBefore) != string(checkpointAfter) {
+			t.Fatal("rejected retained source replaced positive checkpoint")
+		}
+		return
+	}
+	if a := retained.answer(question, "", time.Now()); a.Rcode != dns.RcodeSuccess || len(a.Answer) == 0 {
+		t.Fatalf("pending successor stranded positive DNS on an authorized source advance: %s; facts=%+v", a, retained.facts)
+	}
+	if retainedReads < 2 {
+		t.Fatal("retained source ownership was not independently rechecked")
+	}
+	if !reflect.DeepEqual(retained.record.Candidate, oldCandidate) || !retained.record.AppliedAt.Equal(old.record.AppliedAt) {
+		t.Fatal("retained refresh changed DNS intent or extended checkpoint age")
+	}
+	if retained.record.RouteSources.Snapshot.SelectionDigest != snapshot.SelectionDigest {
+		t.Fatal("retained configuration did not acquire its own current source context")
+	}
+	checkpointAfter, _ := os.ReadFile(s.Config.CachePath + ".platform-serving.json")
+	var refreshedCheckpoint dnsServingCheckpoint
+	if err := json.Unmarshal(checkpointAfter, &refreshedCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.decodeDNSCheckpoint(checkpointAfter); err != nil {
+		t.Fatal("retained source checkpoint was not re-signed", err)
+	}
+	if !reflect.DeepEqual(refreshedCheckpoint.Candidate, oldCandidate) || !refreshedCheckpoint.AppliedAt.Equal(old.record.AppliedAt) || refreshedCheckpoint.RouteSources.Snapshot.SelectionDigest != snapshot.SelectionDigest {
+		t.Fatal("durable retained checkpoint lost DNS identity, age or refreshed source")
+	}
+	previousCheckpoint, err := os.ReadFile(s.Config.CachePath + ".platform-serving.json.previous")
+	if err != nil || string(previousCheckpoint) != string(checkpointBefore) {
+		t.Fatal("previous positive checkpoint was not retained")
+	}
+	restarted := NewService(s.Config, nil)
+	restarted.PlatformTokenFile = s.PlatformTokenFile
+	if loaded, err := restarted.loadDNSServingCache(); !loaded || err != nil {
+		t.Fatal("retained source checkpoint did not survive restart", err)
+	}
+	if a := restarted.platformServing.Load().answer(question, "", time.Now()); a.Rcode != dns.RcodeServerFailure {
+		t.Fatal("restart resurrected cached positive readiness")
+	}
+	if err := restarted.syncPlatformDNSServingOnce(context.Background(), probe, probeDNSServingSnapshot); err == nil {
+		t.Fatal("restart acknowledged pending successor")
+	}
+	if a := restarted.platformServing.Load().answer(question, "", time.Now()); a.Rcode != dns.RcodeSuccess || len(a.Answer) == 0 {
+		t.Fatal("retained DNS could not recover through its own source authority after restart", a)
+	}
+	if !restarted.platformServing.Load().record.AppliedAt.Equal(old.record.AppliedAt) {
+		t.Fatal("restart renewed old configuration age")
+	}
+}
+
+func TestRetainedDNSSourceProofDeadlineIncludesDNSLKG(t *testing.T) {
+	deadline := time.Now().UTC().Add(time.Minute)
+	context := &dnsroutesource.Context{RetainedDNSLKG: &model.PlatformLKGSnapshot{ExpiresAt: deadline}}
+	binding := &model.TrafficReleaseBinding{ReleaseID: "active-route", ScopeKey: "global"}
+	got := context.ProofDeadline(binding)
+	if !got.Equal(deadline) {
+		t.Fatal("retained DNS source proof is not bounded by its positive LKG", got)
+	}
+}
