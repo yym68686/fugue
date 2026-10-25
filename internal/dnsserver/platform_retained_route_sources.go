@@ -25,6 +25,8 @@ type dnsRetainedRouteSourceReader struct {
 // preserving the exact DNS identity, original checkpoint age and previous file.
 // This never acknowledges the pending candidate or renews its configuration.
 func (s *Service) refreshRetainedDNSRouteSources(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, reader dnsRetainedRouteSourceReader) (state *dnsServingState, refreshErr error) {
+	ctx, finish := observeDNSSyncPhase(ctx, "retained_sources")
+	defer func() { finish(refreshErr) }()
 	defer func() {
 		if refreshErr != nil && s.Logger != nil {
 			s.Logger.Printf("DNS retained source refresh rejected artifact_id=%s release_id=%s: %v", old.record.Candidate.Artifact.ID, old.record.Candidate.Release.ID, refreshErr)

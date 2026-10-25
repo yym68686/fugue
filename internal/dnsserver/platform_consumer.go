@@ -170,7 +170,9 @@ func (s *Service) recordDNSSnapshotFailure(err error) {
 
 // SyncPlatformShadowOnce validates a real assigned artifact and durably stages
 // it. The active DNS bundle and its cache are never written by this method.
-func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
+func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) {
+	ctx, finish := startDNSSyncTrace(ctx, s.Logger, "shadow")
+	defer func() { finish(resultErr) }()
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
 	client := s.platformConsumerClient()

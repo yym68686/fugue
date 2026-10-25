@@ -50,7 +50,15 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 
 // Both selected and retained DNS use the same authenticated source compilation,
 // recovery history and physical proof checks, but separate read authority.
-func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPlatformCandidate, p dnsServingPayload, previous *dnsroutesource.Context, probe dnsReadinessProbeFunc, read func(context.Context) (model.PlatformDNSRouteSourceSnapshot, error)) (dnsServingPayload, []dnsReadinessFact, error) {
+func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPlatformCandidate, p dnsServingPayload, previous *dnsroutesource.Context, probe dnsReadinessProbeFunc, read func(context.Context) (model.PlatformDNSRouteSourceSnapshot, error)) (resultPayload dnsServingPayload, resultFacts []dnsReadinessFact, resultErr error) {
+	ctx, finish := observeDNSSyncPhase(ctx, "route_sources")
+	defer func() { finish(resultErr) }()
+	originalRead := read
+	read = func(ctx context.Context) (snapshot model.PlatformDNSRouteSourceSnapshot, err error) {
+		ctx, finish := observeDNSSyncPhase(ctx, "source_authority_read")
+		defer func() { finish(err) }()
+		return originalRead(ctx)
+	}
 	approvals, err := platformconfig.DNSRouteSourceAuthorizations(c.Artifact)
 	if err != nil || len(approvals) == 0 {
 		return p, nil, err
@@ -67,7 +75,9 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 		return p, nil, errors.New("DNS routing ledger replay rejected")
 	}
 	reuseDNSRouteSourceContent(&snapshot, previous)
+	_, finishBuild := observeDNSSyncPhase(ctx, "source_plan_build")
 	plans, err := dnsroutesource.Build(c.Artifact, snapshot, s.platformDNSKeys(), now)
+	finishBuild(err)
 	if err != nil {
 		return p, nil, err
 	}
@@ -136,7 +146,9 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 	}
 	return p, selected, nil
 }
-func (s *Service) checkDNSRouteSources(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, c dnsPlatformCandidate, source *dnsroutesource.Context) error {
+func (s *Service) checkDNSRouteSources(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, c dnsPlatformCandidate, source *dnsroutesource.Context) (resultErr error) {
+	ctx, finish := observeDNSSyncPhase(ctx, "source_recheck")
+	defer func() { finish(resultErr) }()
 	if source == nil {
 		return nil
 	}

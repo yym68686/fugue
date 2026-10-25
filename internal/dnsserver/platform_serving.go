@@ -171,7 +171,11 @@ func (s *Service) syncPlatformDNSServing(ctx context.Context, probe dnsReadiness
 }
 
 func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadinessProbeFunc, wireProbe func(*dnsServingState) error) (syncErr error) {
+	ctx, finishSync := startDNSSyncTrace(ctx, s.Logger, "serving")
+	defer func() { finishSync(syncErr) }()
+	_, finishLock := observeDNSSyncPhase(ctx, "consumer_lock")
 	s.platformConsumerMu.Lock()
+	finishLock(nil)
 	defer s.platformConsumerMu.Unlock()
 	old := s.platformServing.Load()
 	publicationObservation := &DNSDecisionPublicationState{ObservedAt: time.Now().UTC(), Outcome: "publication_unavailable"}
@@ -239,7 +243,15 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 	}()
 	client := s.platformConsumerClient()
-	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindDNSAnswerBundle)
+	readCtx, finishRead := observeDNSSyncPhase(ctx, "serving_assignment_read")
+	id, a, artifact, release, err := client.SyncServing(readCtx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindDNSAnswerBundle)
+	finishRead(err)
+	checkAssignment := func() error {
+		readCtx, finish := observeDNSSyncPhase(ctx, "assignment_recheck")
+		err := client.CheckServingAssignment(readCtx, id, a)
+		finish(err)
+		return err
+	}
 	if id.Token != "" {
 		retainedReader = &dnsRetainedRouteSourceReader{client: client, identity: id}
 	}
@@ -277,7 +289,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			return refreshErr
 		}
 	}
-	parent, err := client.ReleaseSet(ctx, id, a, release)
+	readCtx, finishRead = observeDNSSyncPhase(ctx, "candidate_parent_read")
+	parent, err := client.ReleaseSet(readCtx, id, a, release)
+	finishRead(err)
 	if err != nil {
 		return err
 	}
@@ -285,7 +299,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		reuseDNSArtifactContent(&parent, old.record.Parent)
 	}
 	desired.ParentDigest = parent.ContentHash
+	_, finishVerify := observeDNSSyncPhase(ctx, "candidate_verify")
 	p, routeID, err := s.verifyDNSServingRelease(parent, candidate)
+	finishVerify(err)
 	if err != nil {
 		return err
 	}
@@ -364,7 +380,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	ready := dnsServingReady(st, now)
 	var snapshotErr error
 	if ready {
+		_, finishSnapshot := observeDNSSyncPhase(ctx, "candidate_snapshot")
 		snapshotErr = probeDNSServingSnapshot(st)
+		finishSnapshot(snapshotErr)
 	}
 	// A route quorum may consist only of endpoints excluded by a record's
 	// signed selector. Keep exact successor proofs for other records through
@@ -374,7 +392,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// Negative observations also belong to an exact assignment. A publisher
 		// may advance while probing, so check authority before replacing any
 		// previously positive facts or refreshing with this candidate's bridge.
-		if err = client.CheckServingAssignment(ctx, id, a); err != nil {
+		if err = checkAssignment(); err != nil {
 			return err
 		}
 		if same {
@@ -385,7 +403,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 				if err != nil {
 					return err
 				}
-				if err = client.CheckServingAssignment(ctx, id, a); err != nil {
+				if err = checkAssignment(); err != nil {
 					return err
 				}
 				if err = s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
@@ -405,7 +423,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			}
 			// Refresh may perform additional probes. Recheck authority after all
 			// observations and publish the retained and pending views atomically.
-			if err := client.CheckServingAssignment(ctx, id, a); err != nil {
+			if err := checkAssignment(); err != nil {
 				return err
 			}
 			if supplemented, changed := dnsSupplementTransitionFacts(st, retained, time.Now().UTC(), s.servingDNSProbes.shareHistory(&s.dnsProbeHistories)); changed {
@@ -432,7 +450,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		return fmt.Errorf("DNS candidate required readiness is incomplete: %s", summary)
 	}
-	if err = client.CheckServingAssignment(ctx, id, a); err != nil {
+	if err = checkAssignment(); err != nil {
 		return err
 	}
 	if err = s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
@@ -454,7 +472,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		return err
 	}
-	if err = client.CheckServingAssignment(ctx, id, a); err != nil {
+	if err = checkAssignment(); err != nil {
 		rollback()
 		return err
 	}
@@ -496,7 +514,9 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	status := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, st.facts, "", st.checkedAt, now)
 	return status.ReadyRecords == status.Records
 }
-func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact, readers ...*dnsRetainedRouteSourceReader) (*dnsServingState, error) {
+func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact, readers ...*dnsRetainedRouteSourceReader) (result *dnsServingState, resultErr error) {
+	ctx, finish := observeDNSSyncPhase(ctx, "retained_facts")
+	defer func() { finish(resultErr) }()
 	if len(readers) > 0 && readers[0] != nil && old.record.Positive && old.record.RouteSources != nil {
 		if refreshed, err := s.refreshRetainedDNSRouteSources(ctx, old, probe, reason, *readers[0]); err == nil {
 			return refreshed, nil
@@ -707,7 +727,9 @@ func (s *Service) reportDNSRejectedSuccessor(ctx context.Context, client platfor
 	return s.reportDNSAssignmentState(ctx, client, id, a, retained, h)
 }
 
-func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope) error {
+func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope) (resultErr error) {
+	ctx, finish := observeDNSSyncPhase(ctx, "report_assignment_state")
+	defer func() { finish(resultErr) }()
 	if s.platformServing.Load() != loaded {
 		return errors.New("DNS serving evidence changed")
 	}
