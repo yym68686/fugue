@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ import (
 // same DNS-authorized recovery history. A publication-specific raw probe ID
 // cannot replace its continuous history when the control-plane read fails.
 func TestRetainedLocalProbePreservesAuthorizedSourceHistory(t *testing.T) {
-	for _, scenario := range []string{"local-probe", "assignment-race", "foreign-alias", "negative", "foreign-proof", "restart"} {
+	for _, scenario := range []string{"local-probe", "assignment-race", "assignment-race-delayed-observation", "foreign-alias", "negative", "foreign-proof", "restart"} {
 		t.Run(scenario, func(t *testing.T) { testRetainedSourceHistory(t, scenario) })
 	}
 }
@@ -157,6 +158,51 @@ func testRetainedSourceHistory(t *testing.T, scenario string) {
 		if refreshed == nil {
 			t.Fatal("fresh exact retained proof was not incorporated")
 		}
+	} else if scenario == "assignment-race-delayed-observation" {
+		local := collectDNSReadinessFacts(context.Background(), old.payload.Plan, old.payload.Policy.DNSReadiness, activeProbe, service.retainedDNSProbes.shareHistory(&service.dnsProbeHistories))
+		refreshAt := time.Now().UTC()
+		barriers := make(map[string]time.Time, len(local))
+		service.dnsProbeHistories.mu.Lock()
+		for i := range local {
+			key := old.payload.sourceRecoveryKeys[local[i].ProbeID]
+			entry := service.dnsProbeHistories.values[key]
+			// Simulate an overlapping scheduler completing a later successful
+			// probe before the exact retained observation below is consumed.
+			newerAt := local[i].Proof.CheckedAt.Add(time.Millisecond)
+			entry.successes = append(slices.Clone(entry.successes), local[i].Proof.CheckedAt, newerAt)
+			barriers[key] = newerAt.Add(time.Millisecond)
+			if barriers[key].After(refreshAt) {
+				refreshAt = barriers[key].Add(time.Millisecond)
+			}
+			if newerAt.After(entry.observedAt) {
+				entry.observedAt = newerAt
+			}
+			service.dnsProbeHistories.values[key] = entry
+			if after := newerAt.Add(time.Second); after.After(refreshAt) {
+				refreshAt = after
+			}
+		}
+		service.dnsProbeHistories.mu.Unlock()
+		refreshed = service.refreshRetainedDNSFactsFromObservations(old, old.payload.Plan, local, refreshAt)
+		if refreshed == nil {
+			t.Fatal("fresh exact delayed retained proof was not incorporated")
+		}
+		query := new(dns.Msg)
+		query.SetQuestion("app.example.test.", dns.TypeA)
+		if answer := refreshed.answer(query, "", refreshAt); answer.Rcode != dns.RcodeSuccess || len(answer.Answer) == 0 {
+			t.Fatal("valid chronological history prefix did not keep DNS serving", answer)
+		}
+		for i := range local {
+			failed := local[i]
+			failed.Ready, failed.Reason = false, "probe_unavailable"
+			failed.Proof.CheckedAt = barriers[old.payload.sourceRecoveryKeys[failed.ProbeID]]
+			service.retainedDNSProbes.shareHistory(&service.dnsProbeHistories).observeProbeHistoryKey(old.payload.sourceRecoveryKeys[failed.ProbeID], &failed, old.payload.Policy.DNSReadiness, failed.Proof.CheckedAt)
+		}
+		afterFailure := service.refreshRetainedDNSFactsFromObservations(old, old.payload.Plan, local, refreshAt.Add(time.Second))
+		if afterFailure == nil || afterFailure.answer(query, "", refreshAt.Add(time.Second)).Rcode != dns.RcodeServerFailure {
+			t.Fatal("delayed retained success crossed an intervening negative observation")
+		}
+		return
 	} else {
 		refreshed, err = service.refreshedDNSServingFacts(context.Background(), old, activeProbe, "control_plane_unavailable", nil, nil)
 		if err != nil {

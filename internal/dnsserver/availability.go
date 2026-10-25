@@ -132,6 +132,19 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistoryKey(key string, fact 
 		last := history[len(history)-1]
 		// A delayed positive result may not roll shared history backwards.
 		if at.Before(last) {
+			// The result may be an exact observation already in the shared
+			// continuity window. Return only its chronological prefix to this
+			// fact without mutating the newer shared history. Callers must never
+			// attach successes newer than the proof they are evaluating.
+			for i, prior := range history {
+				if at.Equal(prior) {
+					fact.ProbeHistory = slices.Clone(history[:i+1])
+					return
+				}
+				if at.Before(prior) {
+					break
+				}
+			}
 			return
 		}
 		if at.Sub(last) > time.Duration(policy.FactFreshnessSeconds)*time.Second {

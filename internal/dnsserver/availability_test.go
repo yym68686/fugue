@@ -3,11 +3,14 @@ package dnsserver
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
+	"fugue/internal/routeprobe"
 	"github.com/miekg/dns"
 )
 
@@ -233,6 +236,49 @@ func TestAvailabilityControlPlaneLossPreservesProbeContinuityWithoutReusingSucce
 	restarted.observeProbeHistory(&fact, &policy, fact.Proof.CheckedAt)
 	if len(fact.ProbeHistory) != 1 || dnsAvailabilityRecovered(availabilityTestPolicy(), fact, time.Minute, now.Add(13*time.Second)) {
 		t.Fatal("restart manufactured continuity")
+	}
+}
+
+func TestAvailabilityDelayedDuplicateUsesOnlyItsExistingHistoryPrefix(t *testing.T) {
+	start := time.Now().UTC().Add(-time.Minute)
+	readiness := &platformconfig.DNSReadinessPolicy{FactFreshnessSeconds: 60}
+	availability := &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a"}, RecoverySuccesses: 2, RecoveryMinSeconds: 10}
+	store := &dnsProbeHistoryStore{}
+	scheduler := (&dnsReadinessScheduler{}).shareHistory(store)
+	observe := func(at time.Time, ready bool, observedAt time.Time) dnsReadinessFact {
+		fact := dnsReadinessFact{ProbeID: "publication-specific-probe", Ready: ready, Proof: routeprobe.Proof{CheckedAt: at, ValidUntil: at.Add(2 * time.Minute)}}
+		if !ready {
+			fact.Reason = "probe_unavailable"
+		}
+		scheduler.observeProbeHistoryKey("authenticated-semantic-history", &fact, readiness, observedAt)
+		return fact
+	}
+	first, second, third := start, start.Add(10*time.Second), start.Add(20*time.Second)
+	observe(first, true, first)
+	observe(second, true, second)
+	observe(third, true, third)
+
+	store.mu.Lock()
+	before := slices.Clone(store.values["authenticated-semantic-history"].successes)
+	store.mu.Unlock()
+	// A duplicate success can finish after another scheduler has already
+	// recorded a later proof. It gets the existing prefix through its own
+	// timestamp, while the shared history remains at its newest observation.
+	delayed := observe(second, true, third.Add(5*time.Second))
+	if !reflect.DeepEqual(delayed.ProbeHistory, []time.Time{first, second}) || !dnsAvailabilityRecovered(availability, delayed, time.Minute, third.Add(5*time.Second)) {
+		t.Fatal("delayed duplicate lost the history valid at its proof timestamp", delayed.ProbeHistory)
+	}
+	store.mu.Lock()
+	after := slices.Clone(store.values["authenticated-semantic-history"].successes)
+	store.mu.Unlock()
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("delayed duplicate rolled shared history backwards", before, after)
+	}
+
+	observe(third.Add(10*time.Second), false, third.Add(10*time.Second))
+	afterFailure := observe(second, true, third.Add(15*time.Second))
+	if len(afterFailure.ProbeHistory) != 0 || dnsAvailabilityRecovered(availability, afterFailure, time.Minute, third.Add(15*time.Second)) {
+		t.Fatal("delayed success crossed an intervening failure", afterFailure.ProbeHistory)
 	}
 }
 
