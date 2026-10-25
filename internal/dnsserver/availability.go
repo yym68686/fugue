@@ -40,6 +40,7 @@ type dnsProbeHistoryStore struct {
 }
 
 type dnsProbeHistory struct {
+	observation dnsProbeHistoryObservation
 	recoveryKey string // authenticated dynamic-source alias; never carries authority
 	successes   []time.Time
 	failedAt    time.Time
@@ -80,10 +81,22 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistoryKey(key string, fact 
 		store.values = map[string]dnsProbeHistory{}
 	}
 	fact.ProbeHistory = nil
+	fact.HistoryObservation = nil
 	if observedAt.IsZero() {
 		return
 	}
 	entry, exists := store.values[key]
+	if entry.observation.ResetReason == "" {
+		entry.observation = dnsHistoryObservation(key, "history_started", observedAt, nil, "")
+	}
+	// Copy diagnostic provenance only after the normal algorithm persists a
+	// history/barrier; malformed or delayed observations create no new evidence.
+	defer func() {
+		if saved, ok := store.values[key]; ok && saved.observation.ResetReason != "" {
+			copy := saved.observation
+			fact.HistoryObservation = &copy
+		}
+	}()
 	if !exists && len(store.values) >= 16384 {
 		// Keep failed observations as barriers too. Delayed success from
 		// another scheduler must never resurrect pre-failure continuity.
@@ -97,6 +110,9 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistoryKey(key string, fact 
 		}
 	}
 	if !fact.Ready {
+		if len(entry.successes) > 0 || entry.observation.ResetReason == "history_started" {
+			entry.observation = dnsHistoryObservation(key, "negative_observation", observedAt, entry.successes, fact.Reason)
+		}
 		if observedAt.After(entry.failedAt) {
 			entry.failedAt = observedAt
 		}
@@ -119,6 +135,7 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistoryKey(key string, fact 
 			return
 		}
 		if at.Sub(last) > time.Duration(policy.FactFreshnessSeconds)*time.Second {
+			entry.observation = dnsHistoryObservation(key, "observation_gap", observedAt, history, "")
 			history = nil
 		}
 	}

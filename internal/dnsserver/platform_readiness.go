@@ -30,12 +30,13 @@ type DNSReadinessStatus struct {
 }
 
 type dnsReadinessFact struct {
-	ProbeHistory  []time.Time      `json:"probe_history,omitempty"`
-	ObservationID string           `json:"observation_id,omitempty"`
-	ProbeID       string           `json:"probe_id"`
-	Ready         bool             `json:"ready"`
-	Reason        string           `json:"reason,omitempty"`
-	Proof         routeprobe.Proof `json:"proof"`
+	HistoryObservation *dnsProbeHistoryObservation `json:"history_observation,omitempty"`
+	ProbeHistory       []time.Time                 `json:"probe_history,omitempty"`
+	ObservationID      string                      `json:"observation_id,omitempty"`
+	ProbeID            string                      `json:"probe_id"`
+	Ready              bool                        `json:"ready"`
+	Reason             string                      `json:"reason,omitempty"`
+	Proof              routeprobe.Proof            `json:"proof"`
 }
 
 type dnsReadinessReceipt struct {
@@ -151,6 +152,7 @@ func retainValidDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy 
 			// itself keeps its deadline for historical policies only.
 			if retained[i].Reason == "probe_unavailable" {
 				fact.ProbeHistory = nil
+				fact.HistoryObservation = cloneDNSHistoryObservation(retained[i].HistoryObservation)
 			}
 			retained[i] = fact
 		}

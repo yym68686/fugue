@@ -74,6 +74,7 @@ func (s *Service) observeDNSRouteRecovery(dns model.PlatformArtifact, plans *dns
 			fact.Ready, fact.Reason = false, "traffic_release_mismatch"
 		}
 		fact.ProbeHistory = nil
+		fact.HistoryObservation = nil
 		if fact.Reason == "not_observed" {
 			continue
 		}
@@ -132,6 +133,7 @@ func (s *Service) observeDNSRouteRecovery(dns model.PlatformArtifact, plans *dns
 		history.mu.Unlock()
 
 		for _, i := range indices {
+			facts[i].HistoryObservation = cloneDNSHistoryObservation(observation.HistoryObservation)
 			if facts[i].Ready {
 				facts[i].ProbeHistory = slices.Clone(observation.ProbeHistory)
 			}

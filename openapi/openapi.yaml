@@ -37937,6 +37937,9 @@ components:
       description: Authenticated routing observation and one publication per physical DNS target. This context grants no readiness; readers replay constraints and validate fresh proofs and current selection independently.
       properties:
         snapshot: {$ref: "#/components/schemas/PlatformDNSRouteSourceSnapshot"}
+        retained_dns_lkg:
+          $ref: "#/components/schemas/PlatformLKGSnapshot"
+          description: Optional independently verified positive DNS LKG authorizing the retained artifact's source refresh. Its expiry additionally bounds proofs and never extends the local checkpoint age.
         selections:
           type: object
           maxProperties: 8192
@@ -37968,6 +37971,18 @@ components:
             additionalProperties: false
             required: [probe_id, ready, proof]
             properties:
+              history_observation:
+                type: object
+                additionalProperties: false
+                required: [key_digest, reset_reason, reset_at, previous_success_count]
+                description: Bounded diagnostic provenance for the current recovery history. It grants no readiness and is ignored by routing and replay decisions. A new history key does not identify whether it arose from startup or a changed authorization; those inputs must be compared separately. Negative resets preserve the first reason that cleared prior continuity; later failed observations still advance the independent failure barrier.
+                properties:
+                  key_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+                  reset_reason: {type: string, enum: [history_started, negative_observation, observation_gap]}
+                  reset_at: {type: string, format: date-time}
+                  previous_success_count: {type: integer, minimum: 0, maximum: 16}
+                  previous_success_at: {type: string, format: date-time}
+                  observation_reason: {type: string, maxLength: 64}
               probe_history:
                 type: array
                 maxItems: 16
