@@ -239,6 +239,11 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		if syncErr != nil && ctx.Err() == nil && old != nil && s.platformServing.Load() == old {
 			if refreshed, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations, retainedReader); err == nil {
 				s.platformServing.Store(refreshed)
+			} else if errors.Is(err, platformconsumer.ErrAssignmentChanged) {
+				// A rejected candidate can race during its retained refresh too.
+				// Preserve the race so the existing bounded outer loop rereads
+				// authority before probing against a now-obsolete source context.
+				syncErr = errors.Join(syncErr, err)
 			}
 		}
 	}()
@@ -520,6 +525,11 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 	if len(readers) > 0 && readers[0] != nil && old.record.Positive && old.record.RouteSources != nil {
 		if refreshed, err := s.refreshRetainedDNSRouteSources(ctx, old, probe, reason, *readers[0]); err == nil {
 			return refreshed, nil
+		} else if errors.Is(err, platformconsumer.ErrAssignmentChanged) {
+			// This is an authority observation race, not an endpoint failure.
+			// Keep the original proof deadlines and retry the retained grant;
+			// a local probe cannot repair an explicitly outdated source context.
+			return nil, err
 		}
 	}
 	if reason == "control_plane_unavailable" && bridge == nil && old.record.Positive &&

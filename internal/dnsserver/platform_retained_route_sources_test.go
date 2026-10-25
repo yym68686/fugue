@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ import (
 // no ready source observation yet, while the independently authorized global
 // producer has advanced. The positive old DNS must retain its own authority.
 func TestPendingDNSSuccessorDoesNotStrandRetainedSource(t *testing.T) {
-	for _, scenario := range []string{"authorized", "delayed candidate", "raced source before candidate", "revoked grant", "corrupt grant", "expired grant", "changed grant", "unapproved producer", "negative proof"} {
+	for _, scenario := range []string{"authorized", "delayed candidate", "raced source before candidate", "raced source during fallback", "revoked grant", "corrupt grant", "expired grant", "changed grant", "unapproved producer", "negative proof"} {
 		t.Run(scenario, func(t *testing.T) { testPendingDNSSuccessorRetainedSource(t, scenario) })
 	}
 }
@@ -55,6 +56,9 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 	}
 	consumerID, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-dns")
 	delayed := scenario == "delayed candidate" || scenario == "raced source before candidate"
+	fallbackRace := scenario == "raced source during fallback"
+	var sourceChanged atomic.Bool
+	var staleSourceProbes atomic.Int32
 	pending, retainedReads := false, 0
 	blockedCandidate, releaseCandidate := make(chan struct{}), make(chan struct{})
 	var signalOnce, unblockOnce sync.Once
@@ -67,6 +71,9 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 			json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{candidate.Assignment}})
 		case strings.HasSuffix(r.URL.Path, "/retained-route-sources"):
 			retainedReads++
+			if fallbackRace && retainedReads > 5 {
+				sourceChanged.Store(false)
+			}
 			if !pending || !strings.Contains(r.URL.Path, "/"+oldCandidate.Artifact.ID+"/") || r.URL.Query().Get("expected_consumer_set_id") != assignment.ExpectedConsumerSetID {
 				t.Error("retained observation borrowed successor identity")
 			}
@@ -89,6 +96,12 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 			responseSnapshot := snapshot
 			if scenario == "raced source before candidate" && retainedReads == 2 {
 				responseSnapshot.SelectionDigest = "sha256:" + strings.Repeat("f", 64)
+			}
+			if fallbackRace && retainedReads == 5 {
+				// The pre-candidate retained refresh had three stable reads.
+				// Its fallback's second read now detects a publication advance.
+				responseSnapshot.SelectionDigest = "sha256:" + strings.Repeat("f", 64)
+				sourceChanged.Store(true)
 			}
 			if scenario == "unapproved producer" {
 				raw, _ := json.Marshal(snapshot)
@@ -145,7 +158,14 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 					group, digest = p.PreviousAuthority.EdgeGroupID, p.PreviousAuthority.RouteDigest
 				}
 				until := time.Now().Add(30 * time.Second)
-				return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: digest, Version: "observed", State: state, TrafficRelease: plans.Bindings[p.CellPublicationDigest], CheckedAt: time.Now(), ValidUntil: until}, nil
+				proof := routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: digest, Version: "observed", State: state, TrafficRelease: plans.Bindings[p.CellPublicationDigest], CheckedAt: time.Now(), ValidUntil: until}
+				if fallbackRace && sourceChanged.Load() {
+					staleSourceProbes.Add(1)
+					binding := *proof.TrafficRelease
+					binding.ReleaseID = "source-after-observed-race"
+					proof.TrafficRelease = &binding
+				}
+				return proof, nil
 			}
 		}
 		return routeprobe.Proof{}, errors.New("unexpected probe")
@@ -195,7 +215,14 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		t.Fatal(err)
 	}
 	pending = true
-	if delayed {
+	if fallbackRace {
+		if err := s.syncPlatformDNSServing(context.Background(), probe, probeDNSServingSnapshot); err == nil {
+			t.Fatal("pending successor unexpectedly applied")
+		}
+		if staleSourceProbes.Load() != 0 || retainedReads <= 5 {
+			t.Fatal("known source race fell through to stale local probes instead of bounded authority retry", staleSourceProbes.Load(), retainedReads)
+		}
+	} else if delayed {
 		expires := time.Now().Add(2 * time.Second)
 		agingFacts := append([]dnsReadinessFact(nil), old.facts...)
 		for i := range agingFacts {
@@ -234,7 +261,7 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		t.Fatal("pending successor unexpectedly applied")
 	}
 	retained := s.platformServing.Load()
-	if scenario != "authorized" && !delayed {
+	if scenario != "authorized" && !delayed && !fallbackRace {
 		if scenario == "changed grant" {
 			// A control-plane observation race is not a negative physical proof.
 			// Original authorized proofs may serve only to their unchanged deadline.
