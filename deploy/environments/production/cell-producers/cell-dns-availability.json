@@ -32,7 +32,7 @@
     "verification_evidence_hash": "sha256:19caa44ef082104b4c7ac732b4e922a59c0b9a6f3bf0dc11670b98f1b004eb44"
   },
   "expected_previous_policy": null,
-  "generation": 1,
+  "generation": 2,
   "origin": "https://api.fugue.pro",
   "producer": {
     "authority_cell_id": "cell-dns-availability",
