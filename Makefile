@@ -24,7 +24,7 @@ test:
 	python3 -m unittest scripts.test_activate_agent_edge_policy
 	python3 -m unittest scripts.test_provision_runtime_agent_identity
 	python3 -m unittest scripts.test_publish_agent_edge_shadow
-	python3 -m unittest scripts.test_bootstrap_cell_producer
+	python3 -m unittest scripts.test_bootstrap_cell_producer scripts.test_bootstrap_dns_producer
 	python3 -m unittest scripts.test_reconfigure_cell_producer scripts.test_expand_cell_membership scripts.test_reconfigure_physical_dns scripts.test_retire_dns_selector scripts.test_audit_dns_selector_retirement
 	python3 -m unittest scripts.test_reconcile_agent_edge_trust
 	python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport scripts.test_retire_dns_hostport
@@ -51,7 +51,7 @@ test-scripts:
 	python3 -m unittest scripts.test_activate_agent_edge_policy
 	python3 -m unittest scripts.test_provision_runtime_agent_identity
 	python3 -m unittest scripts.test_publish_agent_edge_shadow
-	python3 -m unittest scripts.test_bootstrap_cell_producer
+	python3 -m unittest scripts.test_bootstrap_cell_producer scripts.test_bootstrap_dns_producer
 	python3 -m unittest scripts.test_reconfigure_cell_producer scripts.test_expand_cell_membership scripts.test_reconfigure_physical_dns scripts.test_retire_dns_selector scripts.test_audit_dns_selector_retirement
 	python3 -m unittest scripts.test_reconcile_agent_edge_trust
 	python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport scripts.test_retire_dns_hostport

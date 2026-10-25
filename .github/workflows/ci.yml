@@ -1228,8 +1228,8 @@ jobs:
             config="${declarations[0]}"
             [[ "$config" =~ ^deploy/environments/production/cell-producers/cell-[a-z0-9-]+\.json$ ]]
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/bootstrap_cell_producer.py scripts/test_bootstrap_cell_producer.py; then
-              python3 -m unittest scripts.test_bootstrap_cell_producer
+            if git diff --quiet HEAD origin/main -- "$config" scripts/bootstrap_cell_producer.py scripts/test_bootstrap_cell_producer.py scripts/bootstrap_dns_producer.py scripts/test_bootstrap_dns_producer.py scripts/dns_publication_precondition.py; then
+              python3 -m unittest scripts.test_bootstrap_cell_producer scripts.test_bootstrap_dns_producer
               python3 -m scripts.bootstrap_cell_producer --validate-only "$config"
               echo "config=$config" >> "$GITHUB_OUTPUT"
               echo 'selected=true' >> "$GITHUB_OUTPUT"

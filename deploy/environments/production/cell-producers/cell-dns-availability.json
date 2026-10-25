@@ -1,0 +1,155 @@
+{
+  "api_connect_address": "95.169.10.156",
+  "authority_cell_id": "cell-dns-availability",
+  "baseline": {
+    "lanes": {
+      "full": {
+        "artifact_id": "artifact_1792840060_7560e6955647",
+        "content_hash": "sha256:82f5feb99e8423a9d3273b648e8650099d98575eac9fd1ae4f1b58cd2df24dcb",
+        "fencing_token": 2,
+        "release_id": "artifactrel_1792883281_bd2eae4c3270"
+      },
+      "gray": {
+        "artifact_id": "artifact_1792840060_7560e6955647",
+        "content_hash": "sha256:82f5feb99e8423a9d3273b648e8650099d98575eac9fd1ae4f1b58cd2df24dcb",
+        "fencing_token": 2,
+        "release_id": "artifactrel_1792850949_05e4310a722b"
+      },
+      "shadow": {
+        "artifact_id": "artifact_1792840060_7560e6955647",
+        "content_hash": "sha256:82f5feb99e8423a9d3273b648e8650099d98575eac9fd1ae4f1b58cd2df24dcb",
+        "fencing_token": 4,
+        "release_id": "artifactrel_1792840062_b7f98ebbc242"
+      }
+    },
+    "lkg_id": "artifactlkg_1792883567_b77bc3c5835a",
+    "lkg_publication": {
+      "artifact_id": "artifact_1792840060_7560e6955647",
+      "content_hash": "sha256:82f5feb99e8423a9d3273b648e8650099d98575eac9fd1ae4f1b58cd2df24dcb",
+      "fencing_token": 2,
+      "release_id": "artifactrel_1792883281_bd2eae4c3270"
+    },
+    "verification_evidence_hash": "sha256:19caa44ef082104b4c7ac732b4e922a59c0b9a6f3bf0dc11670b98f1b004eb44"
+  },
+  "expected_previous_policy": null,
+  "generation": 1,
+  "origin": "https://api.fugue.pro",
+  "producer": {
+    "authority_cell_id": "cell-dns-availability",
+    "dns_source": {
+      "dns_node_ids": [
+        "vps-591f4447",
+        "vps-84c8f0a9"
+      ],
+      "previous_topology": {
+        "authority_cells": [
+          {
+            "id": "cell-public-a",
+            "legacy_group_id": "edge-group-country-de"
+          },
+          {
+            "id": "cell-public-b",
+            "legacy_group_id": "edge-group-country-us"
+          }
+        ],
+        "edges": [
+          {
+            "authority_cell_id": "cell-public-b",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "host-86eabf26-42a9-4f9d-998a-754115f8b829"
+            },
+            "id": "86eabf26-42a9-4f9d-998a-754115f8b829",
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-b",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "bwg"
+            },
+            "id": "bwg",
+            "labels": {
+              "country": "us",
+              "region": "us"
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-b",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "vps-591f4447"
+            },
+            "id": "vps-591f4447",
+            "labels": {
+              "country": "us",
+              "region": "us"
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-a",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "vps-84c8f0a9"
+            },
+            "id": "vps-84c8f0a9",
+            "labels": {
+              "country": "de",
+              "region": "de"
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          }
+        ],
+        "schema_version": "edge-topology/v1",
+        "serving_pools": [
+          {
+            "id": "pool-public"
+          }
+        ]
+      },
+      "producer_policy": {
+        "artifact_id": "artifact_1792824846_d4b28fccd41a",
+        "content_hash": "sha256:1e74d0e83a8cc60a324bb8648b0d04a37be2d4dbb8752ecfe384573ed60768b2",
+        "fencing_token": 46,
+        "release_id": "artifactrel_1792827451_4c72688e985a"
+      }
+    },
+    "generation": "dns-availability-successor-20261025-v1",
+    "input_source": "verified-global-dns",
+    "interval_seconds": 60,
+    "mode": "serving",
+    "publication_role": "cell-dns",
+    "refresh_seconds": 600,
+    "schema_version": "fugue.platform.producer/v1",
+    "serving": {
+      "canary_rule_ref": "cohort=complete",
+      "full_min_seconds": 120,
+      "gray_min_seconds": 120,
+      "rollout_timeout_seconds": 900
+    },
+    "target_scope": "authority-cell:cell-dns-availability"
+  },
+  "schema": "fugue.dns-producer-bootstrap/v1"
+}

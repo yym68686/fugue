@@ -29,6 +29,9 @@ def digest(value):
 
 
 def validate(config):
+    if config.get("schema") == "fugue.dns-producer-bootstrap/v1":
+        from scripts.bootstrap_dns_producer import validate as validate_dns
+        return validate_dns(config)
     if set(config) != {"schema", "generation", "origin", "authority_cell_id", "expected_previous_policy", "static_intent", "projection_policy", "producer"} or config["schema"] != "fugue.cell-producer-bootstrap/v1" or type(config["generation"]) is not int or config["generation"] < 1:
         raise ValueError("invalid cell producer declaration")
     cell = config["authority_cell_id"]
@@ -130,6 +133,9 @@ def reject_serving(api, target, owner):
 
 
 def publish(config, api):
+    if config.get("schema") == "fugue.dns-producer-bootstrap/v1":
+        from scripts.bootstrap_dns_producer import publish as publish_dns
+        return publish_dns(config, api)
     config = validate(config)
     target, owner = config["producer"]["target_scope"], "platform-config-producer:" + config["authority_cell_id"]
     reject_serving(api, target, owner)
@@ -176,8 +182,8 @@ def main():
     token = os.environ.pop("FUGUE_API_KEY", "")
     if not token or not args.evidence:
         raise ValueError("configuration credential and evidence path required")
-    result = publish(config, API(config["origin"], token))
-    evidence = {"schema": "fugue.cell-producer-bootstrap-result/v1", "declaration_digest": digest(config), "scope": config["producer"]["target_scope"], "mode": "shadow", "authority": authority_identity(result), "authorizes_traffic": False}
+    result = publish(config, API(config["origin"], token, response_limit=128 << 20, connect_address=config.get("api_connect_address")))
+    evidence = {"schema": "fugue.cell-producer-bootstrap-result/v1", "declaration_digest": digest(config), "scope": config["producer"]["target_scope"], "mode": config["producer"]["mode"], "authority": authority_identity(result), "authorizes_traffic": False, "public_transport_changed": False}
     Path(args.evidence).write_text(canonical(evidence)+"\n")
     print(canonical(evidence))
 
