@@ -3,6 +3,8 @@ package platformconfig
 import (
 	"crypto/sha256"
 	"fmt"
+	"fugue/internal/model"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -40,5 +42,29 @@ func TestDNSFingerprintDoesNotInvokeCustomMarshalers(t *testing.T) {
 	}
 	if _, _, ok := fingerprintPolicyTree(v, true); ok || calls != 1 {
 		t.Fatal("pooled hasher retained permissive mode")
+	}
+}
+
+func TestExportedDNSConfigurationFingerprintKeepsFullInputBoundary(t *testing.T) {
+	a := model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ID: "artifact", ContentHash: "claimed", Content: map[string]any{"padding": strings.Repeat("x", 20<<10)}}
+	first, ok := DNSConfigurationValidationFingerprint(a)
+	if !ok {
+		t.Fatal("native large input not fingerprinted")
+	}
+	a.Content["padding"] = strings.Repeat("y", 20<<10)
+	second, ok := DNSConfigurationValidationFingerprint(a)
+	if !ok || first == second {
+		t.Fatal("claimed digest hid actual content change")
+	}
+	a.Content["padding"] = strings.Repeat("x", 20<<10)
+	a.Metadata = map[string]string{"intent_digest": "changed"}
+	third, ok := DNSConfigurationValidationFingerprint(a)
+	if !ok || first == third {
+		t.Fatal("envelope omitted from input fingerprint")
+	}
+	calls := 0
+	a.Content["custom"] = countedDNSPlanJSON{raw: []byte(`{}`), calls: &calls}
+	if _, ok := DNSConfigurationValidationFingerprint(a); ok || calls != 0 {
+		t.Fatal("cache key invoked custom marshaler")
 	}
 }

@@ -88,3 +88,15 @@ func dnsPreviousValidationKey(p PreviousTrafficPublicationInput) ([32]byte, bool
 	h.Sum(key[:0])
 	return key, true
 }
+
+// DNSConfigurationValidationFingerprint identifies complete large DNS input for
+// deterministic configuration checks. It provides no trust or serving grant.
+// Non-native JSON trees (including custom marshalers) are deliberately excluded
+// without invoking their methods, so callers preserve the original decoder.
+func DNSConfigurationValidationFingerprint(a model.PlatformArtifact) ([32]byte, bool) {
+	if a.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
+		return [32]byte{}, false
+	}
+	key, size, ok := dnsValidationArtifactKey(a)
+	return key, ok && size >= 16<<10
+}

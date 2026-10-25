@@ -11,7 +11,7 @@ import (
 	"fugue/internal/testfixture/celldns"
 )
 
-func dnsProducerFixture(t *testing.T) (platformproducer.Policy, platformconfig.CompileRequest, platformconfig.CompileRequest) {
+func dnsProducerFixture(t testing.TB) (platformproducer.Policy, platformconfig.CompileRequest, platformconfig.CompileRequest) {
 	t.Helper()
 	req, _, _ := celldns.SourceAuthorizedRequest(t, true)
 	_, source := celldns.TransitionRequestWithSource(t)

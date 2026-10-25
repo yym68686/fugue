@@ -230,6 +230,20 @@ func ValidateDNSProducerOutput(p Policy, child model.PlatformArtifact) error {
 	if child.ScopeKey == "" {
 		child.ScopeKey = child.Scope.Key
 	}
+	key, cacheable := dnsOutputValidationKey(p, child)
+	if cacheable && dnsOutputValidations.contains(key) {
+		return nil
+	}
+	if err := validateDNSProducerOutputUncached(p, child); err != nil {
+		return err
+	}
+	if cacheable {
+		dnsOutputValidations.remember(key)
+	}
+	return nil
+}
+
+func validateDNSProducerOutputUncached(p Policy, child model.PlatformArtifact) error {
 	payload, err := platformconfig.DecodeDNSArtifact(child)
 	if err != nil {
 		return fmt.Errorf("DNS producer output: %w", err)
