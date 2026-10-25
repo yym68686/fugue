@@ -34,6 +34,10 @@ func (s *Service) replayDNSRouteContext(p dnsServingPayload, c dnsPlatformCandid
 		return p, err
 	}
 	p.routeSources, p.sourceBindings = source, plans.Bindings
+	p.sourceRecoveryKeys, err = dnsRouteRecoveryKeys(c.Artifact, plans)
+	if err != nil {
+		return p, err
+	}
 	p.indexSourceRequirements()
 	return p, nil
 }
@@ -111,6 +115,10 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 		return p, nil, err
 	}
 	p.routeSources, p.sourceBindings = selection, plans.Bindings
+	p.sourceRecoveryKeys, err = dnsRouteRecoveryKeys(c.Artifact, plans)
+	if err != nil {
+		return p, nil, err
+	}
 	p.indexSourceRequirements()
 	selected := make([]dnsReadinessFact, 0, len(p.Plan.Probes))
 	for _, requirement := range p.Plan.Probes {

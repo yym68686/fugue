@@ -507,6 +507,7 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 		ctx = routeprobe.WithRetainedLKG(ctx)
 	}
 	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.shareHistory(&s.dnsProbeHistories).bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(old.payload, s.Config.DNSNodeID)))
+	s.observeRetainedDNSRouteRecovery(old, facts, time.Now().UTC())
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe
 	// has a transient transport failure. Keep only proofs that are still valid;

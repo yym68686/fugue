@@ -45,7 +45,9 @@ func (s *Service) refreshRetainedDNSFactsFromObservations(old *dnsServingState, 
 		if known && observed && reflect.DeepEqual(requirement, observedRequirement) && fresh &&
 			fact.Proof.CheckedAt.After(previous.Proof.CheckedAt) &&
 			dnsFactMatchesRelease(fact, old.record.Parent, old.record.Candidate, old.routeID, old.payload) {
-			facts[i] = fact
+			observation := []dnsReadinessFact{fact}
+			s.observeRetainedDNSRouteRecovery(old, observation, now)
+			facts[i] = observation[0]
 			changed = true
 		}
 	}

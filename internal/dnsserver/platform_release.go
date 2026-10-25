@@ -19,6 +19,7 @@ type dnsServingPayload struct {
 	routeSources               *dnsroutesource.Context
 	sourceBindings             map[string]*model.TrafficReleaseBinding
 	sourceRequirements         map[string]platformconfig.DNSReadinessProbe
+	sourceRecoveryKeys         map[string]string
 	PreviousTrafficPublication *platformconfig.PreviousTrafficPublicationInput `json:"previous_traffic_publication,omitempty"`
 	previousBindings           map[string]*model.TrafficReleaseBinding
 	previousCells              map[string]string
