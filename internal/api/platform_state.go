@@ -1574,7 +1574,7 @@ func validatePlatformArtifactDraft(artifact model.PlatformArtifact) []model.Plat
 			Message:  "artifact must carry control-plane provenance",
 		},
 	}
-	secretPath := firstSecretLikeContentPath(artifact.Content, "")
+	secretPath := firstPlatformArtifactSecretPath(artifact)
 	results = append(results, model.PlatformArtifactValidationResult{
 		Name:     "secret_safe.content",
 		Pass:     secretPath == "",

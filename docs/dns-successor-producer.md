@@ -41,3 +41,11 @@ of source inputs and timestamps, complete per-node behavior, wrong/frozen source
 selection, forged or expired LKG, cancellation, repeated shadow reconciliation,
 and publication guard parity in an isolated PostgreSQL schema. No production
 configuration is part of the capability release.
+
+The draft validation endpoint treats the source policy's `fencing_token` as a
+publication sequence only after decoding the complete typed DNS producer policy
+in its exact reserved scope. It scans a detached copy with only that single field
+excluded from credential-name detection. String values, nonpositive or lossy
+numbers, unknown fields and secret-like siblings remain rejected. The signed
+artifact is never changed by this scan. HTTP tests exercise draft creation and
+validation, in addition to the compiler and publication guard tests.
