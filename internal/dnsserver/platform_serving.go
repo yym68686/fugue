@@ -216,6 +216,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// Its scan may nevertheless contain fresh physical proofs of the exact
 		// retained release. Keep those independent runtime observations so that
 		// bounded retries do not starve serving proofs during publication churn.
+		if s.freshDNSRenewalCovers(old) {
+			return
+		}
 		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) {
 			if ctx.Err() == nil && old != nil && old.record.Positive && old.record.RouteSources != nil && retainedReader != nil && s.platformServing.Load() == old {
 				if refreshed, err := s.refreshRetainedDNSRouteSources(ctx, old, probe, fallbackReason, *retainedReader); err == nil {
@@ -284,7 +287,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	// A candidate download/validation/probe can consume the retained proof's
 	// remaining lifetime. Refresh the independently authorized serving LKG first,
 	// rather than waiting until the candidate finally returns an error.
-	if old != nil && old.record.Positive && old.record.RouteSources != nil && retainedReader != nil && !reflect.DeepEqual(old.record.Candidate.Assignment, a) {
+	if old != nil && old.record.Positive && old.record.RouteSources != nil && retainedReader != nil && !reflect.DeepEqual(old.record.Candidate.Assignment, a) && !s.freshDNSRenewalCovers(old) {
 		if refreshed, refreshErr := s.refreshRetainedDNSRouteSources(ctx, old, probe, "candidate_pending", *retainedReader); refreshErr == nil {
 			s.platformServing.Store(refreshed)
 			old = refreshed
@@ -360,7 +363,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	}
 	facts := sourceFacts
 	if p.routeSources == nil {
-		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.shareHistory(&s.dnsProbeHistories).bind(a, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(p, s.Config.DNSNodeID)))
+		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(p, s.Config.DNSNodeID)))
 	}
 	// Keep the original observations for the retained release. Candidate
 	// assignment filtering below must not erase a valid old-release proof.
@@ -431,7 +434,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			if err := checkAssignment(); err != nil {
 				return err
 			}
-			if supplemented, changed := dnsSupplementTransitionFacts(st, retained, time.Now().UTC(), s.servingDNSProbes.shareHistory(&s.dnsProbeHistories)); changed {
+			if supplemented, changed := dnsSupplementTransitionFacts(st, retained, time.Now().UTC(), s.servingDNSProbes.shareHistory(s.probeHistoryStore())); changed {
 				if err := s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
 					return err
 				}
@@ -536,7 +539,7 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 		old.record.AppliedAt.Add(time.Duration(old.payload.Policy.MaxStaleSeconds)*time.Second).After(time.Now()) {
 		ctx = routeprobe.WithRetainedLKG(ctx)
 	}
-	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.shareHistory(&s.dnsProbeHistories).bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(old.payload, s.Config.DNSNodeID)))
+	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.shareHistory(s.probeHistoryStore()).bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(old.payload, s.Config.DNSNodeID)))
 	s.observeRetainedDNSRouteRecovery(old, facts, time.Now().UTC())
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe

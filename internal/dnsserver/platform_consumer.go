@@ -63,6 +63,12 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 	if s.PlatformTokenFile == "" {
 		return
 	}
+	if worker := s.newDNSRenewalWorker(); worker != nil {
+		ctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); s.runDNSRenewal(ctx, worker) }()
+		defer func() { cancel(); <-done }()
+	}
 	// A separate validator owns its probe budget, facts and durable cursors.
 	// Slow or rejected serving state cannot prevent a successor dry run.
 	if worker := s.newIsolatedDNSShadowValidator(); worker != nil {

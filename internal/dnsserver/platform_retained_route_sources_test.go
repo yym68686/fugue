@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"fugue/internal/config"
+	"fugue/internal/dnsfacts"
 	"fugue/internal/dnsroutesource"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 	"fugue/internal/routeprobe"
@@ -30,7 +32,7 @@ import (
 // no ready source observation yet, while the independently authorized global
 // producer has advanced. The positive old DNS must retain its own authority.
 func TestPendingDNSSuccessorDoesNotStrandRetainedSource(t *testing.T) {
-	for _, scenario := range []string{"authorized", "delayed candidate", "raced source before candidate", "raced source during fallback", "revoked grant", "corrupt grant", "expired grant", "changed grant", "unapproved producer", "negative proof"} {
+	for _, scenario := range []string{"authorized", "delayed candidate", "independent renewal", "selected renewal", "selected renewal race", "raced source before candidate", "raced source during fallback", "revoked grant", "corrupt grant", "expired grant", "changed grant", "unapproved producer", "negative proof"} {
 		t.Run(scenario, func(t *testing.T) { testPendingDNSSuccessorRetainedSource(t, scenario) })
 	}
 }
@@ -55,19 +57,33 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		t.Fatal(err)
 	}
 	consumerID, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-dns")
-	delayed := scenario == "delayed candidate" || scenario == "raced source before candidate"
+	independent := scenario == "independent renewal"
+	delayed := scenario == "delayed candidate" || scenario == "raced source before candidate" || independent
+	var longRenewalLease atomic.Bool
 	fallbackRace := scenario == "raced source during fallback"
 	var sourceChanged atomic.Bool
 	var staleSourceProbes atomic.Int32
+	var selectedRenewal atomic.Bool
+	var renewalObserving atomic.Bool
+	var renewalSourceReads atomic.Int32
 	pending, retainedReads := false, 0
 	blockedCandidate, releaseCandidate := make(chan struct{}), make(chan struct{})
 	var signalOnce, unblockOnce sync.Once
 	unblock := func() { unblockOnce.Do(func() { close(releaseCandidate) }) }
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if renewalObserving.Load() && strings.Contains(r.URL.Path, "/artifacts/") && !strings.HasSuffix(r.URL.Path, "/route-sources") && !strings.HasSuffix(r.URL.Path, "/retained-route-sources") {
+			t.Error("independent renewal downloaded a candidate artifact")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		switch {
 		case r.URL.Path == "/v1/platform-state/consumers/identity":
 			json.NewEncoder(w).Encode(map[string]any{"token": "test", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "dns-a", "authority_id": "cell-dns", "consumer_id": consumerID, "scope_key": assignment.ScopeKey, "artifact_kinds": []string{assignment.ArtifactKind}})
 		case r.URL.Path == "/v1/platform-state/consumers/assignment":
+			if scenario == "selected renewal race" && selectedRenewal.Load() && renewalSourceReads.Load() >= 2 {
+				json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{})
+				return
+			}
 			json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{candidate.Assignment}})
 		case strings.HasSuffix(r.URL.Path, "/retained-route-sources"):
 			retainedReads++
@@ -114,6 +130,9 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 			verified.VerifiedAt = &now
 			json.NewEncoder(w).Encode(map[string]any{"assignment": assignment, "release": verified, "snapshot": responseSnapshot, "retained_lkg": responseGrant})
 		case strings.HasSuffix(r.URL.Path, "/route-sources"):
+			if selectedRenewal.Load() {
+				renewalSourceReads.Add(1)
+			}
 			if pending {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
@@ -158,6 +177,9 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 					group, digest = p.PreviousAuthority.EdgeGroupID, p.PreviousAuthority.RouteDigest
 				}
 				until := time.Now().Add(30 * time.Second)
+				if independent && pending && !longRenewalLease.Load() {
+					until = time.Now().Add(2 * time.Second)
+				}
 				proof := routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: digest, Version: "observed", State: state, TrafficRelease: plans.Bindings[p.CellPublicationDigest], CheckedAt: time.Now(), ValidUntil: until}
 				if fallbackRace && sourceChanged.Load() {
 					staleSourceProbes.Add(1)
@@ -182,6 +204,27 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 	checkpointBefore, err := os.ReadFile(s.Config.CachePath + ".platform-serving.json")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if scenario == "selected renewal" || scenario == "selected renewal race" {
+		selectedRenewal.Store(true)
+		worker := s.newDNSRenewalWorker()
+		s.platformConsumerMu.Lock()
+		renewalObserving.Store(true)
+		err := s.observeDNSRenewal(context.Background(), worker, probe)
+		renewalObserving.Store(false)
+		s.platformConsumerMu.Unlock()
+		if scenario == "selected renewal race" {
+			if !errors.Is(err, platformconsumer.ErrAssignmentChanged) || s.currentDNSServingState() != old {
+				t.Fatal("deselected publication acquired new serving facts", err)
+			}
+		} else if err != nil || s.currentDNSServingState() == old || s.platformServing.Load() != old {
+			t.Fatal("selected authority did not independently renew", err)
+		}
+		after, err := os.ReadFile(s.Config.CachePath + ".platform-serving.json")
+		if err != nil || string(after) != string(checkpointBefore) {
+			t.Fatal("selected renewal changed publication checkpoint", err)
+		}
+		return
 	}
 	// A different signed DNS candidate is not yet ready. Its source endpoint
 	// cannot authorize old DNS, even when it happens to share the same policy.
@@ -242,6 +285,63 @@ func testPendingDNSSuccessorRetainedSource(t *testing.T, scenario string) {
 		case <-blockedCandidate:
 		case <-time.After(5 * time.Second):
 			t.Fatal("candidate did not reach blocked read")
+		}
+		if independent {
+			loaded := s.platformServing.Load()
+			saved, err := os.ReadFile(s.Config.CachePath + ".platform-serving.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker := s.newDNSRenewalWorker()
+			if worker == nil {
+				t.Fatal("independent renewer missing")
+			}
+			longRenewalLease.Store(true)
+			renewalObserving.Store(true)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := s.observeDNSRenewal(ctx, worker, probe); err != nil {
+				t.Fatal("candidate lock blocked independent renewal", err)
+			}
+			if s.platformServing.Load() != loaded || s.currentDNSServingState() == loaded {
+				t.Fatal("renewal installed a configuration or failed to expose new facts")
+			}
+			deadline := loaded.facts[0].Proof.ValidUntil
+			if wait := time.Until(deadline.Add(25 * time.Millisecond)); wait > 0 {
+				time.Sleep(wait)
+			}
+			if a := loaded.answer(question, "", time.Now()); a.Rcode != dns.RcodeServerFailure {
+				t.Fatal("blocked candidate fixture still has live original proofs")
+			}
+			if a := dnsQuery(t, s, "app.example.test", dns.TypeA); a.Rcode != dns.RcodeSuccess || len(a.Answer) == 0 {
+				t.Fatal("actual query lost independent renewal while candidate remained blocked", a)
+			}
+			response := httptest.NewRecorder()
+			s.handleRuntimeFacts(response, httptest.NewRequest(http.MethodGet, "/runtime-facts", nil))
+			var exported dnsfacts.Snapshot
+			if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &exported) != nil || !exported.Ready || !reflect.DeepEqual(exported.Assignment, loaded.record.Candidate.Assignment) ||
+				!exported.CheckpointValidUntil.Equal(loaded.record.AppliedAt.Add(time.Duration(loaded.payload.Policy.MaxStaleSeconds)*time.Second)) {
+				t.Fatal("runtime facts disagreed with renewed queries or changed configuration lease", response.Code)
+			}
+			after, err := os.ReadFile(s.Config.CachePath + ".platform-serving.json")
+			if err != nil || string(after) != string(saved) || !s.currentDNSServingState().record.AppliedAt.Equal(loaded.record.AppliedAt) {
+				t.Fatal("renewal changed publication checkpoint or its original lease", err)
+			}
+			negative := func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+				return routeprobe.Proof{}, errors.New("authenticated endpoint failure")
+			}
+			if err := s.observeDNSRenewal(context.Background(), worker, negative); err != nil {
+				t.Fatal("negative observation not processed", err)
+			}
+			if a := dnsQuery(t, s, "app.example.test", dns.TypeA); a.Rcode != dns.RcodeServerFailure {
+				t.Fatal("independent renewal masked real endpoint failure", a)
+			}
+			renewalObserving.Store(false)
+			unblock()
+			if err := <-done; err == nil {
+				t.Fatal("blocked pending candidate unexpectedly applied")
+			}
+			return
 		}
 		// Query during the ongoing candidate read after the original proofs expire.
 		// No candidate failure has returned, so deferred fallback cannot help.

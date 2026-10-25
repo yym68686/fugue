@@ -19,7 +19,7 @@ func (s *Service) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	case !listeners || s.listenerFailed.Load():
 		reason = "listeners_unavailable"
 	case artifactAuthority:
-		st := s.platformServing.Load()
+		st := s.currentDNSServingState()
 		now := time.Now().UTC()
 		if st == nil || !st.record.Positive || st.record.AppliedAt.IsZero() || st.record.AppliedAt.After(now) || len(st.zones) == 0 {
 			reason = "checkpoint_unavailable"

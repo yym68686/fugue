@@ -270,7 +270,7 @@ func (s *Service) handleDNSDecisions(writer http.ResponseWriter, request *http.R
 		return
 	}
 	result := journal.snapshot(hostname, decisionID, limit)
-	result.Publication = decisionPublicationState(s.platformServing.Load(), s.decisionPublication.Load())
+	result.Publication = decisionPublicationState(s.currentDNSServingState(), s.decisionPublication.Load())
 	writer.Header().Set("Cache-Control", "private, no-store")
 	httpx.WriteJSON(writer, http.StatusOK, result)
 }

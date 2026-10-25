@@ -80,29 +80,37 @@ func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string)
 func (c Client) SyncChannel(ctx context.Context, component, nodeID, scope, kind, channel string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
 	return c.syncChannel(ctx, component, nodeID, scope, kind, channel)
 }
-func (c Client) syncChannel(ctx context.Context, component, nodeID, scope, kind, channel string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
+
+// ObserveServingAssignment acquires scoped identity and current selection only.
+// It does not download, validate or apply the candidate artifact.
+func (c Client) ObserveServingAssignment(ctx context.Context, component, nodeID, scope, kind string) (Identity, model.PlatformConsumerAssignment, error) {
+	id, assignment, _, err := c.observeAssignment(ctx, component, nodeID, scope, kind, "serving")
+	return id, assignment, err
+}
+
+func (c Client) observeAssignment(ctx context.Context, component, nodeID, scope, kind, channel string) (Identity, model.PlatformConsumerAssignment, string, error) {
 	switch channel {
 	case "serving", model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull:
 	default:
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform release channel is invalid")
+		return Identity{}, model.PlatformConsumerAssignment{}, "", errors.New("platform release channel is invalid")
 	}
 	base, err := url.Parse(strings.TrimSpace(c.BaseURL))
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil {
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform API endpoint is invalid")
+		return Identity{}, model.PlatformConsumerAssignment{}, "", errors.New("platform API endpoint is invalid")
 	}
 	base.RawQuery, base.Fragment = "", ""
 	base.Path = strings.TrimRight(base.Path, "/")
 	raw, err := ReadFile(c.TokenFile, 32768)
 	if err != nil || len(raw) == 0 || len(raw) > 32768 {
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform Pod credential unavailable")
+		return Identity{}, model.PlatformConsumerAssignment{}, "", errors.New("platform Pod credential unavailable")
 	}
 	var id Identity
 	if err := c.json(ctx, base.String()+"/v1/platform-state/consumers/identity", strings.TrimSpace(string(raw)), http.MethodPost, nil, &id); err != nil {
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
+		return Identity{}, model.PlatformConsumerAssignment{}, "", err
 	}
 	wantedID, identityErr := platformcontrol.PlatformConsumerID(component, nodeID, c.AuthorityID)
 	if identityErr != nil || id.AuthorityID != c.AuthorityID || (id.ConsumerID != "" && id.ConsumerID != wantedID) || (c.AuthorityID != "" && id.ConsumerID != wantedID) || id.Token == "" || id.Component != component || id.NodeID != nodeID || id.ScopeKey != scope || !slices.Contains(id.ArtifactKinds, kind) || !id.ExpiresAt.After(time.Now().Add(10*time.Second)) {
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform credential identity mismatch")
+		return Identity{}, model.PlatformConsumerAssignment{}, "", errors.New("platform credential identity mismatch")
 	}
 	var assignments model.PlatformConsumerAssignmentResponse
 	query := ""
@@ -112,38 +120,47 @@ func (c Client) syncChannel(ctx context.Context, component, nodeID, scope, kind,
 	if err := c.json(ctx, base.String()+"/v1/platform-state/consumers/assignment"+query, id.Token, http.MethodGet, nil, &assignments); err != nil {
 		var status *responseStatusError
 		if channel == "serving" && errors.As(err, &status) && status.Code == http.StatusNotFound {
-			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoServingAssignment
+			return id, model.PlatformConsumerAssignment{}, "", ErrNoServingAssignment
 		}
 		if channel == model.PlatformArtifactReleaseChannelShadow && errors.As(err, &status) && status.Code == http.StatusNotFound {
-			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoShadowAssignment
+			return id, model.PlatformConsumerAssignment{}, "", ErrNoShadowAssignment
 		}
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
+		return Identity{}, model.PlatformConsumerAssignment{}, "", err
 	}
 	var chosen *model.PlatformConsumerAssignment
 	for i := range assignments.Assignments {
 		a := &assignments.Assignments[i]
 		if a.ScopeKey == scope && a.ArtifactKind == kind && (a.ReleaseChannel == channel || (channel == "serving" && (a.ReleaseChannel == "gray" || a.ReleaseChannel == "full"))) {
 			if chosen != nil {
-				return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("ambiguous platform release assignment")
+				return Identity{}, model.PlatformConsumerAssignment{}, "", errors.New("ambiguous platform release assignment")
 			}
 			chosen = a
 		}
 	}
 	if chosen == nil {
 		if channel == "serving" {
-			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoServingAssignment
+			return id, model.PlatformConsumerAssignment{}, "", ErrNoServingAssignment
 		}
 		if channel == model.PlatformArtifactReleaseChannelShadow {
-			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoShadowAssignment
+			return id, model.PlatformConsumerAssignment{}, "", ErrNoShadowAssignment
 		}
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform release assignment unavailable")
+		return Identity{}, model.PlatformConsumerAssignment{}, "", errors.New("platform release assignment unavailable")
 	}
+	return id, *chosen, base.String(), nil
+}
+
+func (c Client) syncChannel(ctx context.Context, component, nodeID, scope, kind, channel string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
+	id, assignment, base, err := c.observeAssignment(ctx, component, nodeID, scope, kind, channel)
+	if err != nil {
+		return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
+	}
+	chosen := &assignment
 	var envelope struct {
 		Artifact   model.PlatformArtifact           `json:"artifact"`
 		Assignment model.PlatformConsumerAssignment `json:"assignment"`
 		Release    model.PlatformArtifactRelease    `json:"release"`
 	}
-	endpoint := base.String() + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(chosen.ArtifactID) + "?expected_consumer_set_id=" + url.QueryEscape(chosen.ExpectedConsumerSetID)
+	endpoint := base + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(chosen.ArtifactID) + "?expected_consumer_set_id=" + url.QueryEscape(chosen.ExpectedConsumerSetID)
 	if err := c.json(ctx, endpoint, id.Token, http.MethodGet, nil, &envelope); err != nil {
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, c.classifyAssignmentReadError(ctx, id, *chosen, err)
 	}

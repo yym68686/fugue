@@ -69,6 +69,7 @@ type Service struct {
 	udpListening                  atomic.Bool
 	tcpListening                  atomic.Bool
 	platformServing               atomic.Pointer[dnsServingState]
+	platformRenewal               atomic.Pointer[dnsServingRenewal]
 	platformServingBound          atomic.Bool
 	platformServingReported       time.Time
 	platformServingError          string
@@ -80,6 +81,7 @@ type Service struct {
 	isolatedShadowStarted         atomic.Bool
 	shadowValidationParent        *Service
 	dnsProbeHistories             dnsProbeHistoryStore
+	sharedProbeHistories          *dnsProbeHistoryStore
 	servingDNSProbes              dnsReadinessScheduler
 	candidateDNSProbes            dnsReadinessScheduler
 	retainedDNSProbes             dnsReadinessScheduler
@@ -876,7 +878,7 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 	if s.platformServingRequired() {
-		st := s.platformServing.Load()
+		st := s.currentDNSServingState()
 		if st == nil {
 			reply := new(miekgdns.Msg)
 			reply.SetRcode(r, miekgdns.RcodeServerFailure)
@@ -1121,7 +1123,7 @@ func (s *Service) statusLocked() Status {
 		status.PlatformCandidate = &candidate
 	}
 	if s.platformServingRequired() {
-		st := s.platformServing.Load()
+		st := s.currentDNSServingState()
 		status.Healthy = false
 		status.Status = "degraded"
 		status.StaleCache = true

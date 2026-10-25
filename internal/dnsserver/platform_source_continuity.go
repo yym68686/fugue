@@ -84,7 +84,7 @@ func (s *Service) observeDNSRouteRecovery(dns model.PlatformArtifact, plans *dns
 		}
 		groups[key] = append(groups[key], i)
 	}
-	scheduler := s.servingDNSProbes.shareHistory(&s.dnsProbeHistories)
+	scheduler := s.servingDNSProbes.shareHistory(s.probeHistoryStore())
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
 	// Explicitly removed eligibility cannot retain readmission progress.

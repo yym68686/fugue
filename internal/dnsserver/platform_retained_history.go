@@ -13,7 +13,7 @@ func (s *Service) observeRetainedDNSRouteRecovery(old *dnsServingState, facts []
 	if old == nil || old.payload.routeSources == nil || len(old.payload.sourceRecoveryKeys) == 0 {
 		return
 	}
-	scheduler := s.retainedDNSProbes.shareHistory(&s.dnsProbeHistories)
+	scheduler := s.retainedDNSProbes.shareHistory(s.probeHistoryStore())
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
 	for i := range facts {
