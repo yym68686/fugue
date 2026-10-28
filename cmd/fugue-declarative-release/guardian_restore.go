@@ -167,28 +167,52 @@ func runRestoreMonitorContext(parent context.Context, args []string, output io.W
 	if err != nil {
 		return err
 	}
+	rollback := currentBundle
+	if !monitorRestore {
+		rollback = monitorBundle{Plan: candidateBundle.Plan, Artifact: candidateBundle.Artifact, Prepared: candidateBundle.Prepared, Forward: candidateBundle.Forward, LKG: candidateBundle.LKG}
+	}
+	return restoreMonitorWithLease(ctx, output, store, cluster, lease, release, monitorRestoreBinding{current, rollback, lkgName, lkgBundle})
+}
+
+type monitorRestoreBinding struct {
+	current   monitorSnapshot
+	rollback  monitorBundle
+	lkgName   string
+	lkgBundle monitorBundle
+}
+
+func restoreMonitorWithLease(ctx context.Context, output io.Writer, store *monitorStore, cluster declarativerelease.Cluster, lease *componentLeaseCoordinator, release declarativerelease.PlanRelease, binding monitorRestoreBinding) error {
+	current, rollback, lkgBundle := binding.current, binding.rollback, binding.lkgBundle
+	if current.Bundle.Record != lkgBundle.Record {
+		// A committed candidate has its own verified monitor pointer. It may
+		// roll back only when that record is bound to these exact release files;
+		// accepting an arbitrary unchanged third release would be unsafe.
+		record, err := declarativerelease.NewMonitorRecord(rollback.Plan, rollback.Artifact, rollback.Prepared, current.Bundle.Terminal, rollback.Forward, rollback.LKG)
+		if err != nil || record != current.Bundle.Record {
+			return errors.New("live monitor pointer is not bound to the rollback source or its exact LKG")
+		}
+	}
 	held, err := lease.acquire(ctx, release, current.Bundle.Record.ConfigSHA)
 	if err != nil {
 		return fmt.Errorf("acquire component mutation lease: %w", err)
 	}
 	fresh, freshErr := store.load(ctx, release.Workload.Namespace, release.ComponentID)
-	if freshErr != nil || fresh.Bundle.Record != lkgBundle.Record {
+	// Fence the pointer observed before acquiring the Lease, not the rollback
+	// destination: a committed forward record legitimately differs from LKG.
+	if freshErr != nil || fresh.Bundle.Record != current.Bundle.Record || fresh.RecordName != current.RecordName || fresh.StateUID != current.StateUID || fresh.StateRV != current.StateRV {
 		releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
 		_ = lease.release(releaseCtx, held)
 		releaseCancel()
 		return errors.New("monitor pointer changed after component Lease acquisition")
 	}
-	plan := currentBundle.Plan
-	prepared, forward, lkg := currentBundle.Prepared, currentBundle.Forward, currentBundle.LKG
-	if !monitorRestore {
-		plan, prepared, forward, lkg = candidateBundle.Plan, candidateBundle.Prepared, candidateBundle.Forward, candidateBundle.LKG
-	}
-	result := declarativerelease.RestoreMonitoredLKG(ctx, cluster, plan, prepared, forward, lkg, release)
+	result := declarativerelease.RestoreMonitoredLKG(ctx, cluster, rollback.Plan, rollback.Prepared, rollback.Forward, rollback.LKG, release)
 	finalizeCtx, finalizeCancel := componentLeaseFinalizationContext(ctx)
 	defer finalizeCancel()
 	var activateErr error
-	if monitorRestore && result.Status == "compensated" {
-		_, activateErr = store.activateExistingRecord(finalizeCtx, fresh, lkgName, lkgBundle)
+	if result.Status == "compensated" {
+		// Candidate restores must finalize the same monitor CAS as legacy
+		// monitor restores before Guardian may acknowledge DesiredRelease.
+		_, activateErr = store.activateExistingRecord(finalizeCtx, fresh, binding.lkgName, lkgBundle)
 	}
 	releaseErr := lease.release(finalizeCtx, held)
 	raw, encodeErr := declarativerelease.CanonicalJSON(result)

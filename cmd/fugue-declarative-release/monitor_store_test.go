@@ -144,10 +144,11 @@ func TestMonitorStoreRejectsTamperedVerifiedFiles(t *testing.T) {
 
 func monitorBundleFixture(t *testing.T) (map[string][]byte, declarativerelease.ExecutionResult, declarativerelease.PlanRelease) {
 	t.Helper()
-	sha1 := strings.Repeat("a", 40)
-	sha2 := strings.Repeat("b", 40)
-	digest1 := "sha256:" + strings.Repeat("1", 64)
-	digest2 := "sha256:" + strings.Repeat("2", 64)
+	return monitorBundleFixtureBetween(t, strings.Repeat("a", 40), strings.Repeat("b", 40), "sha256:"+strings.Repeat("1", 64), "sha256:"+strings.Repeat("2", 64))
+}
+
+func monitorBundleFixtureBetween(t *testing.T, sha1, sha2, digest1, digest2 string, previous ...[]byte) (map[string][]byte, declarativerelease.ExecutionResult, declarativerelease.PlanRelease) {
+	t.Helper()
 	release := declarativerelease.PlanRelease{
 		ComponentID: "api", ChangedPaths: []string{"cmd/fugue-api/main.go", "deploy/releases/api/intent.json"},
 		IntentPath: "deploy/releases/api/intent.json", IntentDigest: "sha256:" + strings.Repeat("3", 64), IntentGeneration: 2,
@@ -157,6 +158,9 @@ func monitorBundleFixture(t *testing.T) (map[string][]byte, declarativerelease.E
 		Artifact:     declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-api", Dockerfile: "Dockerfile.api", Context: ".", BuildPackage: "./cmd/fugue-api"},
 		Workload:     declarativerelease.Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", Container: "api", FieldManager: "fugue-api-declarative", Replicas: 2, RolloutMode: "rolling"},
 		Health:       []declarativerelease.HealthProbe{{Type: "deployment", Name: "fugue-fugue-api"}}, Concurrency: "fugue-production-api",
+	}
+	if len(previous) > 0 {
+		release.Delivery = &declarativerelease.Delivery{Writer: "guardian", Group: "global", DependencyService: "api"}
 	}
 	plan := declarativerelease.Plan{APIVersion: declarativerelease.IntentAPIVersion, Kind: "ProductionReleasePlan", BaseSHA: sha1, HeadSHA: sha2, Releases: []declarativerelease.PlanRelease{release}}
 	planRaw, err := declarativerelease.CanonicalJSON(plan)
@@ -175,9 +179,19 @@ func monitorBundleFixture(t *testing.T) (map[string][]byte, declarativerelease.E
 		t.Fatal(err)
 	}
 	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"replicas":2,"strategy":{"type":"RollingUpdate"},"template":{"metadata":{},"spec":{"containers":[{"image":"ghcr.io/example/fugue-api:old","name":"api"}]}}}}],"kind":"ComponentResourceSet"}`)
-	rendered, err := declarativerelease.RenderManifests(plan, "api", artifact, bytes.NewReader(manifest), bytes.NewReader(manifest))
+	previousManifest := manifest
+	if len(previous) > 0 {
+		previousManifest = previous[0]
+	}
+	rendered, err := declarativerelease.RenderManifests(plan, "api", artifact, bytes.NewReader(manifest), bytes.NewReader(previousManifest))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(previous) > 0 {
+		rendered, err = declarativerelease.BindGuardianLKG(plan, "api", rendered, previous[0])
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	lkg := monitorObservation(sha1, "ghcr.io/example/fugue-api@"+digest1, "10")
 	forward := monitorObservation(sha2, artifact.ImmutableRef, "11")
