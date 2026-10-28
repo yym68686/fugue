@@ -97,3 +97,13 @@ Private/staged Services, management-port translations, foreign ownership and
 concurrent Service changes reject the update. NetworkPolicy updates use their
 own generation and UID/resource-version CAS; neither Pods, public Services,
 traffic artifacts nor code images are changed.
+
+Route-probe transports have a bounded absolute reuse age, not only an idle
+timeout: an L4 Front binds a connection to one Worker slot. Rejected probes also
+end that connection gracefully, allowing legacy observers to reconnect to the
+current slot. The Worker and its Caddy TLS terminator preserve the rejection
+status and never turn candidate, expired or otherwise invalid state into a
+positive proof. HTTP/2 uses GOAWAY and permits existing streams to finish;
+successful probes retain pooling, and ordinary application errors are copied
+unchanged. This is not permission to force a DNS Service handoff: the complete
+normal or explicitly authorized recovery witness is still required.

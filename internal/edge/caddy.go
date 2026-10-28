@@ -22,6 +22,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/proxyproto"
+	"fugue/internal/routeproof"
 	"fugue/internal/tlscertificate"
 )
 
@@ -274,6 +275,7 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 					"upstreams": []any{
 						map[string]string{"dial": proxyDial},
 					},
+					"handle_response": rejectedRouteProofResponseHandlers(),
 					"headers": map[string]any{
 						"request": map[string]any{
 							"set": map[string][]string{
@@ -437,6 +439,27 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 		return nil, 0, fmt.Errorf("marshal caddy config: %w", err)
 	}
 	return data, len(hosts), nil
+}
+
+// Connection is hop-by-hop: the worker's rejection cannot itself drain the
+// observer's TLS connection through Caddy. Preserve the rejection status and
+// make only rejected route-probe responses close gracefully at the TLS edge.
+// Ordinary application errors are copied unchanged by the fallback route.
+func rejectedRouteProofResponseHandlers() []any {
+	return []any{map[string]any{
+		"match": map[string]any{"status_code": []int{400, 404, 503}},
+		"routes": []any{
+			map[string]any{
+				"match": []any{map[string]any{"header": map[string][]string{routeproof.RequestHeader: {"1"}}}},
+				"handle": []any{map[string]any{
+					"handler": "static_response", "status_code": "{http.reverse_proxy.status_code}",
+					"headers": map[string][]string{"Cache-Control": {"no-store"}}, "close": true,
+				}},
+				"terminal": true,
+			},
+			map[string]any{"handle": []any{map[string]any{"handler": "copy_response"}}},
+		},
+	}}
 }
 
 func caddySecretRedactionEncoder() map[string]any {

@@ -16,6 +16,13 @@ import (
 // explicit mode and cannot become candidate/application rollout evidence.
 func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	// A Front binds each TCP connection to one Worker slot. An observer may
+	// still reuse that connection after the slot becomes an isolated candidate.
+	// Reject the proof as before, but let even older pooled clients reconnect
+	// to the current Front target. net/http turns this into a graceful GOAWAY
+	// for HTTP/2; existing streams are allowed to finish. Successful probes
+	// retain connection reuse and all proof/nonce/lease checks below.
+	w.Header().Set("Connection", "close")
 	mode, hasMode := r.Header[http.CanonicalHeaderKey(routeproof.ModeHeader)]
 	if hasMode && (len(mode) != 1 || mode[0] != routeproof.RetainedLKGMode) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -99,6 +106,7 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	if expectedState != "" {
 		w.Header().Set(routeproof.StateHeader, expectedState)
 	}
+	w.Header().Del("Connection")
 	w.WriteHeader(http.StatusNoContent)
 }
 
