@@ -134,6 +134,11 @@ func TestAvailabilityCommandTransactionAndRetry(t *testing.T) {
 					if req.ReleaseChannel != "shadow" || req.ProducerReconfiguration == nil || req.ProducerReconfiguration.Operation != "dns_availability_recovery" || req.SoftOverride || req.ForcePublish || req.KernelBreakGlass != nil || !strings.HasPrefix(req.IdempotencyKey, "producer-reconfiguration/sha256:") {
 						t.Error("unsafe or incomplete transaction", req)
 					}
+					previousRef, _ := availabilityPublication(current)
+					fullRef, _ := availabilityPublication(full)
+					if req.ProducerReconfiguration == nil || req.ProducerReconfiguration.PreviousPolicy != previousRef || req.ProducerReconfiguration.ServingFull != fullRef || req.ProducerReconfiguration.VerificationEvidenceHash != lkg.VerificationEvidenceHash {
+						t.Error("transaction lost exact producer/full/LKG fences")
+					}
 					id := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/admin/artifacts/"), "/release")
 					artifact := artifacts[id]
 					releases++

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -28,6 +29,9 @@ func TestReleaseReadinessDiagnosticIsBoundedAndPreservesFailure(t *testing.T) {
 		proofs = append(proofs, releaseRuntimeReadiness{ReleaseID: fmt.Sprintf("release-%d", i), Reason: "release service ownership differs"})
 	}
 	err := releaseReadinessDiagnostic(cause, proofs)
+	if !errors.Is(err, cause) {
+		t.Fatal("diagnostic lost the original readiness failure")
+	}
 	if !strings.Contains(err.Error(), cause.Error()) || !strings.Contains(err.Error(), "release_id=release-0 reason=release service ownership differs") || strings.Contains(err.Error(), "healthy") || strings.Contains(err.Error(), "release-8") {
 		t.Fatal(err)
 	}

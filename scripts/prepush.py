@@ -610,13 +610,14 @@ def main() -> int:
 
     warm_affected = warm_affected_tests_before_compile(test_commands)
     if warm_affected:
-        warm_commands = [command for command in test_commands if command[2] in SERIAL_WARM_TEST_PACKAGES]
-        test_commands = [command for command in test_commands if command[2] not in SERIAL_WARM_TEST_PACKAGES]
+        # Serialize only cold test compilation, not the entire API suite. The
+        # full, unchanged test commands still run below alongside compilation.
+        # Otherwise idle/runtime test time consumes the shared deadline before
+        # the compiler and vet even start. Warming is never a test substitute.
+        warm_commands = [["go", "test", command[2], "-run", "^$"] for command in test_commands if command[2] in SERIAL_WARM_TEST_PACKAGES]
         before = time.monotonic()
         status, output = run_test_commands(warm_commands, deadline, go_slots)
         warm_test_result = (status, output, before)
-        if not test_commands:
-            record("affected-tests", before, 0, "")
 
     phase_one_workers = 1 + len(non_go_tasks) + (1 if test_commands else 0)
     with concurrent.futures.ThreadPoolExecutor(max_workers=phase_one_workers) as phase_one:

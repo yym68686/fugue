@@ -205,7 +205,7 @@ class CanonicalReceiptTest(unittest.TestCase):
         compile_observed = []
 
         def fake_run(command, _timeout):
-            if command[:3] == ["go", "test", "./internal/api"]:
+            if command == ["go", "test", "./internal/api", "-run", "^$"]:
                 test_finished.set()
                 return 0, ""
             if command == ["go", "build", "-p", "4", "./..."]:
@@ -220,6 +220,30 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(compile_observed, [True])
         self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
+
+    def test_api_compile_warmup_does_not_serialize_full_test_execution(self):
+        warmed = threading.Event()
+        compiling = threading.Event()
+        testing = threading.Event()
+        full_runs = []
+
+        def fake_run(command, _timeout):
+            if command == ["go", "test", "./internal/api", "-run", "^$"]:
+                warmed.set()
+            elif command == ["go", "test", "./internal/api"]:
+                full_runs.append(command)
+                testing.set()
+                self.assertTrue(compiling.wait(timeout=0.2), "full API tests serialized ahead of compile/vet budget")
+            elif command == ["go", "build", "-p", "4", "./..."]:
+                self.assertTrue(warmed.is_set(), "cold API compilation contends with whole-module compilation")
+                compiling.set()
+                self.assertTrue(testing.wait(timeout=0.2))
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(fake_run, paths=["internal/api/observer.go"])
+        self.assertEqual(result, 0)
+        self.assertEqual(len(full_runs), 1, "compile-only warming cannot replace actual API tests")
+        self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
 
     def test_other_go_tasks_start_only_after_compile_success(self) -> None:
         compile_finished = threading.Event()
@@ -248,7 +272,7 @@ class CanonicalReceiptTest(unittest.TestCase):
 
         def fake_run(command, _timeout):
             executed.append(command)
-            if command == ["go", "test", "./internal/api"]:
+            if command == ["go", "test", "./internal/api", "-run", "^$"]:
                 api_finished.set()
             elif command in (["go", "build", "-p", "4", "./..."], ["go", "test", "./internal/model"]):
                 self.assertTrue(api_finished.is_set())
@@ -258,12 +282,13 @@ class CanonicalReceiptTest(unittest.TestCase):
         result, receipt = self.run_main_with_fake(fake_run, paths=["internal/api/ssh_ack.go", "internal/model/ssh_ack.go"])
         self.assertEqual(result, 0)
         self.assertEqual(executed.count(["go", "test", "./internal/api"]), 1)
+        self.assertEqual(executed.count(["go", "test", "./internal/api", "-run", "^$"]), 1)
         self.assertEqual(executed.count(["go", "test", "./internal/model"]), 1)
         self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
 
     def test_api_warm_failure_is_not_overwritten_by_later_success(self):
         def fake_run(command, _timeout):
-            if command == ["go", "test", "./internal/api"]:
+            if command == ["go", "test", "./internal/api", "-run", "^$"]:
                 return 1, "synthetic API failure"
             return 0, ""
 
