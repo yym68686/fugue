@@ -4046,6 +4046,12 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 	if !ok || !strings.Contains(string(entry.Body), "shell 2") {
 		t.Fatalf("expected background revalidation to refresh cached shell, ok=%t body=%q", ok, string(entry.Body))
 	}
+	// The rename makes the refreshed entry readable before the writer finishes
+	// disk accounting and releases its lock. Wait for that writer: subsequent
+	// cache misses deliberately skip storage rather than block on a busy disk.
+	disk := service.httpCacheDisk()
+	disk.mu.Lock()
+	disk.mu.Unlock()
 	refreshed := httptest.NewRecorder()
 	refreshedReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
 	service.ProxyHandler().ServeHTTP(refreshed, refreshedReq)
