@@ -14,6 +14,12 @@ x-fugue-dns-availability:
     verified release, current producer/full fences and unchanged source bindings.
     This authorizes configuration recovery, never fabricated serving verification,
     consumer ACKs, traffic promotion or LKG replacement.
+    A successor operator producer policy may capture and stage a new candidate
+    while the exact historical LKG rollback remains serving_unverified. The old
+    rollback need not become reachable first and is not marked verified by this
+    transition. The successor still requires normal signed gray/full admission,
+    fresh consumer convergence and positive LKG verification. The same producer
+    authority continues waiting for its recovery evidence without retrying a failed source.
     dns-availability-v1 is an explicit independently signed per-host availability
     policy. Its physical fallback pool is separate from quality experiment membership
     and sticky quality stops. Only existing authorized dynamic candidates with current
@@ -3423,7 +3429,10 @@ paths:
         potentially large replay snapshot; transient backend/evidence failures can
         return 503. This opt-in is required for diagnostics and scripts that inspect
         runtime observations or replay a compilation. Runtime timestamps and leases
-        are never renewed by the preview. Automatic producers and publication gates
+        are never renewed by the preview. A release-readiness rejection includes
+        bounded independently observed unready release IDs and reasons (at most
+        eight) in the admin error message, not workload environment or secrets.
+        Automatic producers and publication gates
         continue to require complete verified runtime evidence independently of this
         endpoint. Missing or duplicate policy references and invalid/duplicate view
         values return 400. The retired static-only selector returns 410.

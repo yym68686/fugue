@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -124,7 +125,30 @@ func (s *Server) captureReleaseRuntimeReadiness(ctx context.Context, projection 
 	projection.RuntimeSnapshot.Facts["release_readiness"] = value
 	projection.CapturedAt = time.Now().UTC()
 	projection.RuntimeSnapshot.CapturedAt = &projection.CapturedAt
-	return projectReadyReleaseOrigins(projection, proofs)
+	if err := projectReadyReleaseOrigins(projection, proofs); err != nil {
+		return releaseReadinessDiagnostic(err, proofs)
+	}
+	return nil
+}
+
+// A failed strict capture cannot return its runtime snapshot. Preserve the
+// failure and expose bounded factual resource diagnostics instead of making an
+// operator guess which independently observed release was unavailable.
+func releaseReadinessDiagnostic(cause error, proofs []releaseRuntimeReadiness) error {
+	items := make([]string, 0, 8)
+	for _, proof := range proofs {
+		if proof.Ready {
+			continue
+		}
+		items = append(items, fmt.Sprintf("release_id=%s reason=%s", proof.ReleaseID, proof.Reason))
+		if len(items) == 8 {
+			break
+		}
+	}
+	if len(items) == 0 {
+		return cause
+	}
+	return fmt.Errorf("%w; unready runtime observations: %s", cause, strings.Join(items, "; "))
 }
 
 func (s *Server) observeReleaseRuntimeReadiness(app model.App, release model.AppRelease, stable bool, snapshot managedAppKubeSnapshot, observedAt time.Time) (platformconfig.ReleaseObservation, releaseRuntimeReadiness) {

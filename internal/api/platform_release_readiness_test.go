@@ -21,6 +21,21 @@ import (
 	"fugue/internal/store"
 )
 
+func TestReleaseReadinessDiagnosticIsBoundedAndPreservesFailure(t *testing.T) {
+	cause := fmt.Errorf("stable release is not ready for traffic")
+	proofs := []releaseRuntimeReadiness{{ReleaseID: "healthy", Ready: true}}
+	for i := range 12 {
+		proofs = append(proofs, releaseRuntimeReadiness{ReleaseID: fmt.Sprintf("release-%d", i), Reason: "release service ownership differs"})
+	}
+	err := releaseReadinessDiagnostic(cause, proofs)
+	if !strings.Contains(err.Error(), cause.Error()) || !strings.Contains(err.Error(), "release_id=release-0 reason=release service ownership differs") || strings.Contains(err.Error(), "healthy") || strings.Contains(err.Error(), "release-8") {
+		t.Fatal(err)
+	}
+	if releaseReadinessDiagnostic(cause, nil) != cause {
+		t.Fatal("lost original failure")
+	}
+}
+
 func releaseReadinessFixture(t *testing.T, candidate bool, independentStable ...bool) (model.App, model.AppRelease, managedAppKubeSnapshot) {
 	t.Helper()
 	app := model.App{ID: "app-a", TenantID: "tenant-a", Name: "sample", Spec: model.AppSpec{Image: "registry.example/app@sha256:" + strings.Repeat("a", 64), Replicas: 2, RuntimeID: model.DefaultManagedRuntimeID, Ports: []int{8080}}}

@@ -22,12 +22,16 @@ import (
 func TestServingProducerProgressesRecoversAndDoesNotRetryFailedSource(t *testing.T) {
 	for _, dynamic := range []bool{false, true} {
 		t.Run(fmt.Sprintf("dynamic_quality_%t", dynamic), func(t *testing.T) {
-			testServingProducerProgressesRecovers(t, dynamic)
+			for _, supersede := range []bool{false, true} {
+				t.Run(fmt.Sprintf("supersede_recovery_%t", supersede), func(t *testing.T) {
+					testServingProducerProgressesRecovers(t, dynamic, supersede)
+				})
+			}
 		})
 	}
 }
 
-func testServingProducerProgressesRecovers(t *testing.T, dynamic bool) {
+func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede bool) {
 	path := t.TempDir() + "/state.json"
 	state := store.New(path)
 	if err := state.Init(); err != nil {
@@ -316,6 +320,35 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic bool) {
 		t.Fatal("historical baseline facts verified a new recovery fence")
 	}
 	age(recovered.ID, 61)
+	if supersede {
+		// A new operator authority must be able to repair an unavailable
+		// historical baseline without inventing evidence for its recovery fence.
+		p.Generation = "producer-repair"
+		repairAuthority := activate()
+		server = NewServer(state, auth.New(state, ""), nil, config)
+		seedInventory()
+		reconcile()
+		repair, fresh := active("gray")
+		if fresh.ID == badGray.ID || repair.Metadata[platformproducer.PolicyReleaseMetadata] != repairAuthority.ID {
+			t.Fatal("new authority remained blocked on unavailable recovery")
+		}
+		_, repairShadow := active("shadow")
+		age(repairShadow.ID, 5)
+		age(fresh.ID, 2)
+		reconcile()
+		_, pending := active("full")
+		unchangedLKG, err := state.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
+		if err != nil || pending.ID != recovered.ID || pending.VerificationState != model.PlatformArtifactVerificationStateServingUnverified || unchangedLKG.VerifiedByReleaseID == recovered.ID {
+			t.Fatal("repair fabricated recovery evidence or promoted without fresh gray ACK", err)
+		}
+		report(repair, fresh)
+		reconcile()
+		_, repairedFull := active("full")
+		if repairedFull.ArtifactID != repair.ID || repairedFull.ID == recovered.ID {
+			t.Fatal("fresh gray evidence did not advance repair")
+		}
+		return
+	}
 	report(candidate, recovered)
 	// The durable publication cursor survives restart and can finish after the
 	// failed candidate's rollout deadline, but only with the recovery's facts.

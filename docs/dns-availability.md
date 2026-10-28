@@ -26,6 +26,25 @@ region, route state, all-path quorum and exact current route/TLS proofs. An
 entry cannot add an endpoint, revive an administrative hold, bypass a pinned
 placement or extend a proof/checkpoint deadline. Static records are unchanged.
 
+The native CLI can configure one owned dynamic hostname and wait for production:
+
+```sh
+fugue admin dns availability set app.example.test \
+  --edge edge-a --edge edge-b --recovery-successes 3 --recovery-min-seconds 60
+```
+
+The command preserves every unrelated policy, producer control and offline hold.
+It checks configuration intent equality and a strict live `runtime_summary`
+preview, then uses the API's exact producer/full/LKG transaction. Deterministic
+draft generations and an already-selected-policy check make the same command
+safe to retry. A changed baseline conflicts rather than silently rebasing a write.
+`--dry-run` is strictly read-only and checks only the declaration and baseline,
+not a successor runtime. `--wait=false` reports configuration acceptance only.
+The default wait succeeds only with a matching full publication, fresh actual
+consumer convergence and its positive LKG; timeout is an error, never success.
+`--api-connect-address <IP>` can bypass broken local DNS while retaining the API
+origin, SNI and certificate verification; it does not use a proxy or redirects.
+
 Quality selection first operates on recovered candidates. If it produces no
 endpoint, the explicit availability order supplies the first eligible backup,
 including an authorized endpoint outside the experiment or with a historical
@@ -88,6 +107,14 @@ Configuration previews compare frozen intent without requiring a
 successful failed DNS answer; the successor still needs live preview, normal
 consumer capability checks and gray/full evidence. It changes neither serving
 publication nor positive LKG and never fabricates an ACK.
+
+An authorized successor producer may capture a fresh candidate while the old
+exact positive-LKG rollback remains `serving_unverified`. Requiring that broken
+baseline to become reachable first would deadlock a configuration repair. This
+does not verify the old recovery fence or replace LKG: the fresh candidate must
+still pass signed gray/full admission and obtain its own current-fence ACKs.
+Without a successor authority, the failed source remains frozen and recovery
+continues waiting for real evidence, including after restart.
 
 In a complete traffic publication, consumers of the shared route, DNS and TLS
 policy must advertise authenticated `dns_availability_v1` capability. This legacy
