@@ -30,6 +30,11 @@ x-fugue-dns-availability:
     order supplies the fallback. Administrative, tenant, region, route and TLS exclusions
     remain mandatory. Missing or incompatible policy never enables fallback. If a quality refresh is unavailable, an opted-in hostname may publish its independently declared availability order without manufacturing a successful quality receipt or resetting the historical allocation. Old policies
     and historical decision replay retain their exact semantics.
+    This independent availability publication also applies to all_dynamic hosts
+    when any required DNS-node quality receipt is missing or fails publication
+    revalidation; partial quality evidence never authorizes a mixed-node quality
+    publication. Hosts without an explicit availability policy retain their
+    verified-order learning behavior.
     dns-availability-redundant-v2 explicitly returns up to max_answers distinct
     recovered physical edges in each address RRset, including authorized ready
     backups absent from the quality order. This lets caching clients retry a

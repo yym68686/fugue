@@ -350,22 +350,11 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 			}
 			selections[job.Key] = entry.Compiled
 		}
-		if len(selections) != len(hostJobs) {
-			continue
-		}
-		individual := policy
-		individual.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{hostJobs[0].Route}
-		if err := applyPhysicalDNSSelections(projection, individual, selections, time.Now().UTC()); err != nil {
-			states[hostname] = "learning_publication_validation_failed"
+		state, err := applyDynamicQualityHost(projection, policy, hostJobs, selections, time.Now().UTC())
+		states[hostname] = state
+		if err != nil {
 			if s.log != nil {
 				s.log.Printf("dynamic quality publication validation failed; hostname=%s error=%v", hostname, err)
-			}
-			continue
-		}
-		states[hostname] = "measured"
-		for _, compiled := range selections {
-			if compiled.Selection.QualityState == "learning" {
-				states[hostname] = "learning_current_ready_primary"
 			}
 		}
 	}
@@ -374,6 +363,42 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 	}
 	projection.RuntimeSnapshot.Facts["dynamic_quality_coverage"] = map[string]any{"mode": policy.DynamicQuality.Mode, "query_count": len(jobs), "scheduled_queries": len(work), "refreshed_queries": completed, "capture_budget_exhausted": exhausted, "hostnames": states}
 	return nil
+}
+
+// A hostname is published as one unit across its DNS nodes. A cached selection
+// is still untrusted until applyPhysicalDNSSelections revalidates its receipt.
+func applyDynamicQualityHost(projection *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy, jobs []dynamicQualityJob, selections map[string]compiledPhysicalDNSSelection, now time.Time) (string, error) {
+	state := "learning_evidence_unavailable"
+	if len(jobs) == 0 {
+		return state, fmt.Errorf("dynamic quality hostname has no DNS jobs")
+	}
+	var qualityErr error
+	if len(selections) == len(jobs) {
+		individual := policy
+		individual.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{jobs[0].Route}
+		qualityErr = applyPhysicalDNSSelections(projection, individual, selections, now)
+		if qualityErr == nil {
+			state = "measured"
+			for _, compiled := range selections {
+				if compiled.Selection.QualityState == "learning" {
+					state = "learning_current_ready_primary"
+				}
+			}
+			return state, nil
+		}
+		state = "learning_publication_validation_failed"
+	}
+	availability := platformconfig.DNSAvailabilityForHost(&policy, jobs[0].Route.Hostname)
+	if availability == nil {
+		return state, qualityErr
+	}
+	// Do not retain a quality-only order when its evidence cannot be refreshed.
+	// The independent signed host policy authorizes this order, not the failed
+	// receipt. The compiler and DNS executor still enforce topology and recovery.
+	if err := applyDNSAvailabilityBaseline(projection, jobs[0].Route.Hostname, availability); err != nil {
+		return state, err
+	}
+	return "availability_only_quality_unavailable", nil
 }
 
 // Observation refresh is independent of compiling or publishing the enclosing
