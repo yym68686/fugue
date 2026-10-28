@@ -77,13 +77,20 @@ func (s *Service) signDNSCheckpoint(c *dnsServingCheckpoint) error {
 	return nil
 }
 func (s *Service) decodeDNSCheckpoint(raw []byte) (dnsServingCheckpoint, error) {
+	c, _, _, err := s.decodeDNSCheckpointPayload(raw)
+	return c, err
+}
+
+// Recovery consumes the verified payload from this decode rather than decoding
+// the embedded publication graphs a second time. This is not a trust cache.
+func (s *Service) decodeDNSCheckpointPayload(raw []byte) (dnsServingCheckpoint, dnsServingPayload, string, error) {
 	var c dnsServingCheckpoint
 	if len(raw) > 32<<20 || json.Unmarshal(raw, &c) != nil || c.Schema != "fugue.dns.positive-checkpoint/v1" || !c.Positive || c.NodeID != s.Config.DNSNodeID || c.GroupID != s.Config.EdgeGroupID || c.AppliedAt.IsZero() || c.AppliedAt.After(time.Now().Add(time.Second)) {
-		return c, errors.New("DNS positive checkpoint invalid")
+		return c, dnsServingPayload{}, "", errors.New("DNS positive checkpoint invalid")
 	}
 	k := s.platformDNSKeys()
 	if _, revoked := k.RevokedKeyIDs[strings.ToLower(c.KeyID)]; revoked {
-		return c, errors.New("DNS checkpoint key revoked")
+		return c, dnsServingPayload{}, "", errors.New("DNS checkpoint key revoked")
 	}
 	key := ""
 	if c.KeyID == k.PrimaryKeyID {
@@ -92,13 +99,14 @@ func (s *Service) decodeDNSCheckpoint(raw []byte) (dnsServingCheckpoint, error) 
 		key = k.PreviousKey
 	}
 	if key == "" || !hmac.Equal([]byte(c.Signature), []byte(checkpointMAC(c, key))) {
-		return c, errors.New("DNS checkpoint signature invalid")
+		return c, dnsServingPayload{}, "", errors.New("DNS checkpoint signature invalid")
 	}
-	if _, _, err := s.verifiedDNSCheckpointPayload(c); err != nil {
-		return c, err
+	p, routeID, err := s.verifiedDNSCheckpointPayload(c)
+	if err != nil {
+		return c, dnsServingPayload{}, "", err
 	}
 	compactDNSArtifactContent(&c.Candidate.Artifact)
-	return c, nil
+	return c, p, routeID, nil
 }
 
 var errDNSCheckpointMissing = errors.New("DNS positive serving checkpoint missing")
@@ -129,12 +137,7 @@ func (s *Service) loadDNSServingCache() (loaded bool, resultErr error) {
 		return true, errDNSCheckpointMissing
 	}
 	for _, item := range candidates {
-		c, e := s.decodeDNSCheckpoint(item.Data)
-		if e != nil {
-			err = e
-			continue
-		}
-		p, routeID, e := s.verifiedDNSCheckpointPayload(c)
+		c, p, routeID, e := s.decodeDNSCheckpointPayload(item.Data)
 		if e != nil {
 			err = e
 			continue

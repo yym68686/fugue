@@ -51,16 +51,20 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 		Plan   *platformconfig.DNSReadinessPlan `json:"readiness_plan"`
 		Policy platformconfig.PolicySnapshot    `json:"policy"`
 	}
-	raw, err := json.Marshal(c.Artifact.Content)
-	if err != nil {
-		return nil, err
-	}
-	if err = json.Unmarshal(raw, &payload); err != nil {
-		return nil, err
-	}
 	if readiness != nil && readiness.payload != nil {
+		// This transient receipt carries the strict candidate decode from the
+		// same shadow execution, including its source-adjusted plan and policy.
+		payload.Views = readiness.payload.Queries
 		payload.Plan = readiness.payload.Plan
 		payload.Policy = readiness.payload.Policy
+	} else {
+		raw, err := json.Marshal(c.Artifact.Content)
+		if err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(raw, &payload); err != nil {
+			return nil, err
+		}
 	}
 	if len(payload.Views) == 0 {
 		return nil, nil

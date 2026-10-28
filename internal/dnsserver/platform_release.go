@@ -42,16 +42,23 @@ func (s *Service) verifyDNSServingRelease(parent model.PlatformArtifact, c dnsPl
 }
 
 func (s *Service) verifyDNSRelease(parent model.PlatformArtifact, c dnsPlatformCandidate, serving bool) (dnsServingPayload, string, error) {
+	_, p, err := s.decodePlatformDNSCandidate(c, c.Assignment)
+	if err != nil {
+		return dnsServingPayload{}, "", err
+	}
+	return s.verifyDecodedDNSRelease(parent, c, serving, p)
+}
+
+// Only for the payload returned by decodePlatformDNSCandidate in this call.
+// No payload or trust verdict is cached across observations; serving/renewal
+// workers remain independent and every parent is verified against current keys.
+func (s *Service) verifyDecodedDNSRelease(parent model.PlatformArtifact, c dnsPlatformCandidate, serving bool, p dnsServingPayload) (dnsServingPayload, string, error) {
 	fail := func() (dnsServingPayload, string, error) {
 		return dnsServingPayload{}, "", errors.New("DNS serving ReleaseSet binding invalid")
 	}
 	a, child, r := c.Assignment, c.Artifact, c.Release
 	if a.ReleaseChannel != "gray" && a.ReleaseChannel != "full" && (serving || a.ReleaseChannel != "shadow") {
 		return fail()
-	}
-	_, p, err := s.decodePlatformDNSCandidate(c, a)
-	if err != nil {
-		return dnsServingPayload{}, "", err
 	}
 	keys := s.platformDNSKeys()
 	if parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || parent.ID != a.ReleaseSetID || parent.Status != model.PlatformArtifactStatusValidated || parent.ScopeKey != a.ScopeKey || parent.ScopeKey != r.ScopeKey || parent.Generation != r.Generation || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass {

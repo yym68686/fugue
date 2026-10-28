@@ -54,10 +54,7 @@ type dnsReadinessReceipt struct {
 type dnsReadinessProbeFunc func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
 
 func (s *Service) observePlatformDNSReadiness(ctx context.Context, c dnsPlatformCandidate, a model.PlatformConsumerAssignment) (*dnsReadinessReceipt, error) {
-	var payload struct {
-		Plan   *platformconfig.DNSReadinessPlan `json:"readiness_plan"`
-		Policy platformconfig.PolicySnapshot    `json:"policy"`
-	}
+	var payload dnsServingPayload
 	raw, err := json.Marshal(c.Artifact.Content)
 	if err != nil {
 		return nil, err
@@ -65,17 +62,21 @@ func (s *Service) observePlatformDNSReadiness(ctx context.Context, c dnsPlatform
 	if err = json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
 	}
+	return s.observeDecodedPlatformDNSReadiness(ctx, c, a, payload)
+}
+
+func (s *Service) observeDecodedPlatformDNSReadiness(ctx context.Context, c dnsPlatformCandidate, a model.PlatformConsumerAssignment, payload dnsServingPayload) (*dnsReadinessReceipt, error) {
 	if payload.Plan == nil {
 		return nil, nil
 	}
-	if err = platformconfig.ValidateDNSReadinessPlan(payload.Plan, payload.Policy.DNSReadiness); err != nil {
+	if err := platformconfig.ValidateDNSReadinessPlan(payload.Plan, payload.Policy.DNSReadiness); err != nil {
 		return nil, err
 	}
 	planDigest, err := platformconfig.Digest(payload.Plan)
 	if err != nil {
 		return nil, err
 	}
-	receipt := &dnsReadinessReceipt{ArtifactID: c.Artifact.ID, ArtifactDigest: c.Artifact.ContentHash, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, NodeID: s.Config.DNSNodeID}
+	receipt := &dnsReadinessReceipt{payload: &payload, ArtifactID: c.Artifact.ID, ArtifactDigest: c.Artifact.ContentHash, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, NodeID: s.Config.DNSNodeID}
 	cachePath := s.Config.CachePath + ".platform-dns-readiness.json"
 	if raw, err := platformconsumer.ReadFile(cachePath, 8<<20); err == nil {
 		var previous dnsReadinessReceipt
@@ -86,6 +87,7 @@ func (s *Service) observePlatformDNSReadiness(ctx context.Context, c dnsPlatform
 			// Recompute readiness using the original proof deadlines even on a cache
 			// hit. Re-reading a receipt never renews facts.
 			previous.Status = summarizeDNSReadiness(payload.Plan, payload.Policy.DNSReadiness, previous.Facts, planDigest, previous.Status.CheckedAt, time.Now().UTC())
+			previous.payload = &payload
 			return &previous, nil
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

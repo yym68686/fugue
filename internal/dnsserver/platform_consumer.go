@@ -188,7 +188,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 	}
 	chosen := &assignment
 	candidate := dnsPlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release}
-	counts, err := s.verifyPlatformDNSCandidate(candidate, *chosen)
+	counts, payload, err := s.decodePlatformDNSCandidate(candidate, *chosen)
 	if err != nil {
 		return err
 	}
@@ -198,7 +198,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 		if err != nil {
 			return err
 		}
-		p, _, err := s.verifyDNSRelease(parent, candidate, false)
+		p, _, err := s.verifyDecodedDNSRelease(parent, candidate, false, payload)
 		if err != nil {
 			return err
 		}
@@ -217,7 +217,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 		digest, _ := platformconfig.Digest(p.Plan)
 		readiness = &dnsReadinessReceipt{ArtifactID: artifact.ID, ArtifactDigest: artifact.ContentHash, ReleaseSetID: chosen.ReleaseSetID, ExpectedConsumerSetID: chosen.ExpectedConsumerSetID, FencingToken: chosen.FencingToken, NodeID: s.Config.DNSNodeID, Facts: facts, payload: &p, Status: summarizeDNSReadiness(p.Plan, p.Policy.DNSReadiness, facts, digest, now, now)}
 	} else {
-		readiness, err = s.observePlatformDNSReadiness(ctx, candidate, *chosen)
+		readiness, err = s.observeDecodedPlatformDNSReadiness(ctx, candidate, *chosen, payload)
 		if err != nil {
 			return err
 		}
@@ -358,7 +358,7 @@ func (s *Service) decodePlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	if !platformsafety.EvaluateArtifactIntegrity(c.Artifact, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)).Pass {
 		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate signature or digest rejected")
 	}
-	if _, err := cellpublication.VerifyDNSArtifact(artifact, s.platformDNSKeys()); err != nil {
+	if err := platformconfig.ValidateDNSCellPlan(artifact); err != nil {
 		return dnsCandidateCounts{}, dnsServingPayload{}, err
 	}
 	var payload dnsServingPayload
@@ -370,6 +370,21 @@ func (s *Service) decodePlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	dec.DisallowUnknownFields()
 	if dec.Decode(&payload) != nil || payload.Schema != platformconfig.SchemaVersion || payload.Generation != c.Artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
 		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate schema invalid")
+	}
+	// The strict decoder above already materialized these exact signed inputs.
+	// Recheck their current trust without separately marshaling and decoding the
+	// entire DNS artifact for each embedded publication. Pure plan validation
+	// still checks their declaration, ordering, lineage and transition binding.
+	keys := s.platformDNSKeys()
+	for _, publication := range payload.CellRoutePublications {
+		if err := cellpublication.VerifyInput(publication, keys); err != nil {
+			return dnsCandidateCounts{}, dnsServingPayload{}, err
+		}
+	}
+	if payload.PreviousTrafficPublication != nil {
+		if err := cellpublication.VerifyPreviousInput(*payload.PreviousTrafficPublication, keys); err != nil {
+			return dnsCandidateCounts{}, dnsServingPayload{}, err
+		}
 	}
 	owners := map[string]bool{}
 	consumers := []platformconfig.DNSConsumerIntent{}
