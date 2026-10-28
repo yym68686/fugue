@@ -59,6 +59,40 @@ Live post-release RSS, CPU, restart and OOM observations are required separately
 No tenfold memory claim can be inferred from these allocation numbers.
 
 Regression tests cover strict nested fields, changed predecessor and Cell
-signatures, revocation after warm pure validation, omitted declarations, field
-aliases, parent trust, exact checkpoint payloads, query behavior and receipt
+signatures, revocation after warm pure validation, omitted declarations,
+parent trust, exact checkpoint payloads, query behavior and receipt
 fencing. Relevant DNS/configuration tests and race tests must pass before push.
+
+## First production window and second bounded optimization
+
+Revision `f4eaf95d` was deployed by CI 40765214458 to the European independent
+reader at 2026-10-28 20:44:34 UTC. The limit remained 256 MiB and GOMEMLIMIT
+remained 48 MiB. A 61-sample, 60-second direct process window changed peak RSS
+from 196.27 MiB to 78.09 MiB and CPU consumption from 69.49 to 22.49 core-seconds.
+The new PID/start ticks and Pod/image identity were established independently.
+This is a short window, not proof of a tenfold improvement or 24-hour stability.
+Readiness is not established by the Pod's livez-based Ready condition.
+
+Complete Live Diagnostics raw profiles at 20:50:33.216 UTC and 20:51:10.922 UTC
+showed 280.59 MiB of sampled allocations over 37.71 seconds. The remaining
+`reuseDNSArtifactContent` deep comparison accounted for 33.79 MiB (12.04%).
+It compared full native JSON trees using reflect's general cycle index and
+boxed map values. A bounded typed traversal now preserves full value/type,
+nil/empty and identity semantics, with reflect fallback for non-JSON values
+and depth over 128. It still compares actual fresh content, not claimed hashes,
+and does not cache any trust decision. Complexity remains O(N); native-tree
+comparison scratch storage changes from O(N) to O(depth).
+
+The 4096-row neutral comparison benchmark changed from 5.27–5.28 MB and about
+37,075 allocations per operation (5.34–7.67 ms) to zero allocations (0.44 ms).
+Differential tests against reflect.DeepEqual include native scalars/containers,
+nil/empty distinctions, uncommon types, deep trees and cyclic fallback; fuzzing
+also compares both implementations. These numbers are not an additional RSS
+claim. Production post-release measurements remain necessary.
+
+Both old and new reader logs return 404 from current and retained route-source
+reads. A scoped identity reproduction confirmed assignment discovery succeeds
+while route-source reads fail. No missing source authority is fabricated and no
+proof deadline is extended to hide the error. This pre-existing condition is
+tracked separately from allocation reduction and prevents a claim that all
+independent DNS behavior is healthy.
