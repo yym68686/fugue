@@ -9,6 +9,33 @@ ability to coordinate a rejoin.
 
 ## Components
 
+### Coordination ingress and caching clients
+
+The signed recovery directory is independent of the Headscale control
+connection. A normal control-connection failure must not cause logout/reset or
+an unrequested mesh generation change. DNS TTL alone is not a bound on client
+reconnection: Tailscale's control resolver caches addresses for ten minutes
+independently of the authoritative TTL.
+
+For coordination ingress requiring client-side retry across physical edges,
+explicitly configure `dns-availability-redundant-v2` with `max_answers` (2–8).
+For example:
+
+```sh
+fugue admin dns availability set mesh.example.test \
+  --edge edge-a --edge edge-b --max-answers 2
+```
+
+Each answer still needs the normal signed membership, fresh exact route/TLS
+proof and consecutive recovery observations. Resolvers may reorder the RRset;
+this mode cannot enforce a traffic allocation or strict preferred-address order.
+Existing v1 policies remain single-answer. Deploy support and observe its
+authenticated capability before publishing configuration through the normal
+declarative release lane. Validate actual authoritative A/AAAA answers and
+end-to-end coordination health; HTTP health alone does not prove stream recovery.
+
+### Recovery services
+
 - `fugue-mesh-recovery` runs on edge or DNS nodes. It accepts node heartbeats,
   persists a last-known peer directory, signs `/mesh/directory` and
   `/mesh/generation`, and can expose a rejoin auth key during an explicit reset

@@ -107,3 +107,27 @@ func TestAvailabilityCannotAuthorizeLegacyOrUnboundedRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestRedundantAvailabilityCompilationBindsExactAnswerCount(t *testing.T) {
+	input := availabilityCompileFixture()
+	policy := &input.Policy.DNSQueryPolicy.AvailabilityRoutes[0].Policy
+	policy.Version, policy.MaxAnswers = model.DNSAvailabilityRedundantVersion, 2
+	rebindPlacement(&input)
+	compiled, err := Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := compiledQueryViews(t, compiled)[0].Records[0]
+	if !reflect.DeepEqual(record.AnswerPolicy.Availability, policy) {
+		t.Fatal("compiler lost explicit redundant authority")
+	}
+	record.AnswerPolicy.Availability.MaxAnswers = 3
+	if validateDNSAvailabilityIntent(record, input.Policy) == nil {
+		t.Fatal("unsigned answer fanout accepted")
+	}
+	for _, candidate := range record.Candidates {
+		if candidate.Healthy || candidate.TLSReady || candidate.RouteReady {
+			t.Fatal("answer count invented readiness")
+		}
+	}
+}

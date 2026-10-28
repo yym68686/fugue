@@ -170,19 +170,35 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistoryKey(key string, fact 
 // membership and the exact same positive per-record proof gates as normal use.
 func availabilityFallback(record model.EdgeDNSRecord, ordered []model.EdgeDNSAnswerCandidate, decision edgeDNSCandidateOrderDecision) ([]model.EdgeDNSAnswerCandidate, edgeDNSCandidateOrderDecision) {
 	policy := record.AnswerPolicy.Availability
-	if policy == nil || len(ordered) > 0 {
+	if policy == nil {
 		return ordered, decision
 	}
 	if model.ValidateDNSAvailabilityPolicy(policy) != nil {
+		return nil, decision
+	}
+	redundant := policy.Version == model.DNSAvailabilityRedundantVersion
+	if redundant && (record.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindPhysicalOrder && record.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindPhysicalQuality || record.AnswerPolicy.ECSEnabled || record.AnswerPolicy.ExplorationPercent != 0 || len(record.ScopedCandidates) != 0) {
+		return nil, decision
+	}
+	if len(ordered) > 0 && !redundant {
+		return ordered, decision
+	}
+	// A multi-address RRset cannot preserve a per-answer business allocation:
+	// clients/resolvers may reorder it. Never silently bypass that constraint.
+	if redundant && record.AnswerPolicy.PhysicalSelection != nil && record.AnswerPolicy.PhysicalSelection.BusinessAllocation != nil {
 		return nil, decision
 	}
 	positions := make(map[string]int, len(policy.OrderedEdgeIDs))
 	for i, id := range policy.OrderedEdgeIDs {
 		positions[id] = i
 	}
+	readyCandidate := func(c model.EdgeDNSAnswerCandidate) bool {
+		_, exists := positions[c.EdgeID]
+		return exists && (len(record.AnswerPolicy.AllowedEdgeGroups) == 0 || slices.Contains(record.AnswerPolicy.AllowedEdgeGroups, c.EdgeGroupID)) && edgeDNSCandidateEligible(c, record.AnswerPolicy, false)
+	}
 	fallback := []model.EdgeDNSAnswerCandidate{}
 	for _, c := range record.Candidates {
-		if _, exists := positions[c.EdgeID]; exists && (len(record.AnswerPolicy.AllowedEdgeGroups) == 0 || slices.Contains(record.AnswerPolicy.AllowedEdgeGroups, c.EdgeGroupID)) && edgeDNSCandidateEligible(c, record.AnswerPolicy, false) {
+		if readyCandidate(c) {
 			fallback = append(fallback, c)
 		}
 	}
@@ -192,6 +208,23 @@ func availabilityFallback(record model.EdgeDNSRecord, ordered []model.EdgeDNSAns
 		}
 		return fallback[i].IP < fallback[j].IP
 	})
+	if redundant && len(ordered) > 0 {
+		// Preserve the quality order, then include independently authorized ready
+		// backups even when a quality receipt omitted them. Materialization has
+		// already enforced fresh exact proofs and the complete recovery window.
+		result := make([]model.EdgeDNSAnswerCandidate, 0, len(ordered)+len(fallback))
+		seen := map[string]bool{}
+		for _, candidates := range [][]model.EdgeDNSAnswerCandidate{ordered, fallback} {
+			for _, candidate := range candidates {
+				if !readyCandidate(candidate) || seen[edgeDNSCandidateDecisionKey(candidate)] {
+					continue
+				}
+				seen[edgeDNSCandidateDecisionKey(candidate)] = true
+				result = append(result, candidate)
+			}
+		}
+		return result, decision
+	}
 	if len(fallback) > 0 {
 		decision.AvailabilityFallback = true
 		decision.Ranking = nil

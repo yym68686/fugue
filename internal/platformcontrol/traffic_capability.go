@@ -39,3 +39,7 @@ const BusinessUnifiedCapabilityV2 = "business_edge_unified_v2"
 
 // DNSAvailabilityCapabilityV1 understands independently signed availability pools and bounded recovery evidence.
 const DNSAvailabilityCapabilityV1 = "dns_availability_v1"
+
+// DNSAvailabilityRedundantCapabilityV2 understands the explicitly versioned
+// multi-address policy. It is not an assertion of endpoint readiness.
+const DNSAvailabilityRedundantCapabilityV2 = "dns_availability_redundant_v2"

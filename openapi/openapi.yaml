@@ -29,7 +29,15 @@ x-fugue-dns-availability:
     among recovered candidates; when it yields no endpoint the declared availability
     order supplies the fallback. Administrative, tenant, region, route and TLS exclusions
     remain mandatory. Missing or incompatible policy never enables fallback. If a quality refresh is unavailable, an opted-in hostname may publish its independently declared availability order without manufacturing a successful quality receipt or resetting the historical allocation. Old policies
-    and historical decision replay retain their exact semantics. Capability admission,
+    and historical decision replay retain their exact semantics.
+    dns-availability-redundant-v2 explicitly returns up to max_answers distinct
+    recovered physical edges in each address RRset, including authorized ready
+    backups absent from the quality order. This lets caching clients retry a
+    different endpoint without waiting for DNS refresh. Resolvers may reorder
+    answers; it therefore cannot be combined with business traffic allocation.
+    V1 forbids max_answers and remains single-answer. Required consumers must
+    report dns_availability_redundant_v2 before the new policy can serve.
+    Capability admission,
     signed configuration publication and positive LKG remain independent of code release.
 x-fugue-business-exploration:
   semantics: >-
@@ -21641,9 +21649,18 @@ components:
       type: object
       additionalProperties: false
       required: [version, ordered_edge_ids, recovery_successes, recovery_min_seconds]
+      oneOf:
+        - properties:
+            version: {enum: [dns-availability-v1]}
+          not: {required: [max_answers]}
+        - required: [max_answers]
+          properties:
+            version: {enum: [dns-availability-redundant-v2]}
+            ordered_edge_ids: {minItems: 2}
       description: 'Explicit availability authorization, not measured quality. The pool intersects the current signed endpoint/route/TLS constraints. Independent fresh observations gate initial admission and readmission. For explicitly approved dynamic routing sources, recovery continuity is scoped to the same DNS artifact, immutable producer authorization, source scope, relevant record/target availability constraints, physical endpoint and route behavior; advancing a routing publication or changing unrelated records or quality ranking alone does not reset it. The complete current signed source policy still constrains eligibility and quorum. Each success still requires a fresh proof matching the exact currently approved publication. Changed configuration, producer, relevant availability constraints, endpoint or route behavior starts a separate history. Explicit eligibility removal retires its history; later readmission requires fresh recovery. A failed observation resets recovery; unobserved or cached facts cannot count as successes. Recovery history is volatile and is not restored as positive readiness after restart. Every original proof deadline remains enforced. Quality primary resumes only after passing the same recovery gate.'
       properties:
-        version: {type: string, enum: [dns-availability-v1]}
+        version: {type: string, enum: [dns-availability-v1, dns-availability-redundant-v2]}
+        max_answers: {type: integer, minimum: 2, maximum: 8, description: 'Required only for dns-availability-redundant-v2; must not exceed the signed pool size. Returns up to this many distinct ready physical edges in one address RRset so caching clients can retry another address without a DNS refresh. The signed pool, fresh route/TLS proofs and recovery gates still apply. DNS does not guarantee address preference order. Incompatible with business traffic allocation. V1 remains single-answer and forbids this field.'}
         ordered_edge_ids: {type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
         recovery_successes: {type: integer, minimum: 2, maximum: 5}
         recovery_min_seconds: {type: integer, minimum: 10, maximum: 300, description: Must not exceed fifteen declared DNS probe intervals.}

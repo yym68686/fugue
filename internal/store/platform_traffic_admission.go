@@ -168,6 +168,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if required.availability && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAvailabilityCapabilityV1) {
 					return fail("required consumer lacks DNS availability v1 capability")
 				}
+				if required.redundantAvailability && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAvailabilityRedundantCapabilityV2) {
+					return fail("required consumer lacks redundant DNS availability v2 capability")
+				}
 				if required.retainedRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSRetainedRoutesCapabilityV1) {
 					return fail("retained route DNS capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
@@ -206,7 +209,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	return nil
 }
 
-type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability, retainedRoutes bool }
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability, redundantAvailability, retainedRoutes bool }
 
 func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
 	var out physicalCapabilities
@@ -233,6 +236,9 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 	out.retainedRoutes = payload.Source.Intent.Transition != nil && payload.Source.Intent.Transition.ReferenceMode == platformconfig.DNSRetainedGlobalReferenceV1
 	if query := payload.Policy.Query; query != nil {
 		out.availability = len(query.AvailabilityRoutes) > 0
+		for _, route := range query.AvailabilityRoutes {
+			out.redundantAvailability = out.redundantAvailability || route.Policy.Version == model.DNSAvailabilityRedundantVersion
+		}
 		out.projection = query.OrderedProjection != nil
 		if query.DynamicQuality != nil {
 			out.network = true

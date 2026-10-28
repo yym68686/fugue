@@ -23,6 +23,17 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_redundant_availability_requires_exact_versioned_bounds(self):
+        policy = {"version": "dns-availability-redundant-v2", "max_answers": 2, "ordered_edge_ids": ["edge-a", "edge-b"], "recovery_successes": 3, "recovery_min_seconds": 60}
+        quality.validate_availability_routes([{"hostname": "mesh.example.test", "policy": policy}])
+        for value in [None, True, 0, 1, 3, 9, 2.5]:
+            changed = dict(policy, max_answers=value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                quality.validate_availability_routes([{"hostname": "mesh.example.test", "policy": changed}])
+        for changed in [dict(policy, version="dns-availability-v1"), {k:v for k,v in policy.items() if k != "max_answers"}]:
+            with self.assertRaises(ValueError):
+                quality.validate_availability_routes([{"hostname": "mesh.example.test", "policy": changed}])
+
     def test_explicit_api_address_preserves_identity_and_bounded_client(self):
         from scripts.stage_dns_authority_transition import ExplicitAddressHTTPSHandler
         import urllib.request

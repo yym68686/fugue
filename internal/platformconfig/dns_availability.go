@@ -47,6 +47,9 @@ func validateDNSAvailabilityIntent(record model.EdgeDNSRecord, policy PolicySnap
 		return fmt.Errorf("DNS availability differs from explicit signed host policy")
 	}
 	if want != nil {
+		if want.Version == model.DNSAvailabilityRedundantVersion && record.AnswerPolicy.PhysicalSelection != nil && record.AnswerPolicy.PhysicalSelection.BusinessAllocation != nil {
+			return fmt.Errorf("redundant DNS answers cannot preserve business traffic allocation")
+		}
 		if policy.DNSReadiness == nil || want.RecoveryMinSeconds > 15*policy.DNSReadiness.ProbeIntervalSeconds {
 			return fmt.Errorf("availability recovery exceeds bounded probe history")
 		}

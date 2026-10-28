@@ -70,11 +70,37 @@ func TestAvailabilitySourcePreservesConstraintsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestRedundantAvailabilityCLIIsExplicitAndValidatedBeforeNetwork(t *testing.T) {
+	args := []string{"admin", "dns", "availability", "set", "mesh.example.test", "--edge", "edge-a", "--edge", "edge-b"}
+	for _, value := range []string{"0", "-1", "9", "3"} {
+		var stdout, stderr bytes.Buffer
+		err := runWithStreams(append(slicesClone(args), "--max-answers", value), &stdout, &stderr)
+		if err == nil || !strings.Contains(err.Error(), "redundant availability requires") {
+			t.Fatal("invalid answer count was not rejected before network access", value, err)
+		}
+	}
+	policy := model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityRedundantVersion, MaxAnswers: 2, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}
+	content := map[string]any{"generation": "source", "dns_query_policy": map[string]any{"ranking_mode": "active"}}
+	next, changed, err := availabilitySource(content, "mesh.example.test", policy)
+	if err != nil || !changed {
+		t.Fatal(err)
+	}
+	normalized, _ := cloneAvailabilityContent(next)
+	_, changed, err = availabilitySource(normalized, "mesh.example.test", policy)
+	if err != nil || changed {
+		t.Fatal("redundant retry changed its signed source", err)
+	}
+}
+
 // Exercise the actual command, signed-input API transaction shape and retry
 // path. Configuration acceptance must never be mislabeled serving success.
 func TestAvailabilityCommandTransactionAndRetry(t *testing.T) {
-	for _, mismatch := range []bool{false, true} {
-		t.Run(fmt.Sprintf("preview_changed_%t", mismatch), func(t *testing.T) {
+	for _, scenario := range []struct {
+		mismatch bool
+		answers  int
+	}{{false, 1}, {true, 1}, {false, 2}, {true, 2}} {
+		mismatch := scenario.mismatch
+		t.Run(fmt.Sprintf("preview_changed_%t_answers_%d", mismatch, scenario.answers), func(t *testing.T) {
 			full, authority, lkg := availabilityTestBaseline()
 			digest := "sha256:" + strings.Repeat("a", 64)
 			p := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "producer-one", Mode: "serving", InputSource: "business-static-intent", TargetScope: "global", IntervalSeconds: 30, RefreshSeconds: 300, StaticIntentArtifactID: "static", StaticIntentDigest: digest, DNSPolicyArtifactID: "source", DNSPolicyDigest: digest, RequireApplicationDomains: true, RequireRouteDefaults: true, RequireDNSQueryPolicy: true, Serving: &platformproducer.ServingPolicy{CanaryRuleRef: "cohort=complete", GrayMinSeconds: 1, FullMinSeconds: 1, RolloutTimeoutSeconds: 60}}
@@ -153,6 +179,7 @@ func TestAvailabilityCommandTransactionAndRetry(t *testing.T) {
 			}))
 			defer server.Close()
 			args := []string{"--base-url", server.URL, "--token", "synthetic-key", "-o", "json", "admin", "dns", "availability", "set", "app.example.test", "--edge", "edge-a", "--edge", "edge-b", "--wait=false"}
+			args = append(args, "--max-answers", fmt.Sprint(scenario.answers))
 			var stdout, stderr bytes.Buffer
 			if err := runWithStreams(append(slicesClone(args), "--dry-run"), &stdout, &stderr); err != nil {
 				t.Fatal(err)
@@ -177,6 +204,9 @@ func TestAvailabilityCommandTransactionAndRetry(t *testing.T) {
 			}
 			if !result.ProducerActivated || result.RoutingAcceptanceComplete || creates != 2 || releases != 1 {
 				t.Fatal("configuration was mislabeled or duplicated", result, creates, releases)
+			}
+			if scenario.answers == 2 && (result.Policy.Version != model.DNSAvailabilityRedundantVersion || result.Policy.MaxAnswers != 2) {
+				t.Fatal("transaction lost explicit redundant policy", result.Policy)
 			}
 			stdout.Reset()
 			if err := runWithStreams(args, &stdout, &stderr); err != nil {

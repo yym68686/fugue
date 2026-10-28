@@ -64,13 +64,19 @@ def validate_availability_routes(values):
         if set(route) != {"hostname", "policy"} or not isinstance(route["hostname"], str) or not 1 <= len(route["hostname"]) <= 253 or route["hostname"] in result:
             raise ValueError("explicit unique availability hostname required")
         policy = route["policy"]
-        if set(policy) != {"version", "ordered_edge_ids", "recovery_successes", "recovery_min_seconds"} or policy["version"] != "dns-availability-v1":
+        fields = {"version", "ordered_edge_ids", "recovery_successes", "recovery_min_seconds"}
+        redundant = policy.get("version") == "dns-availability-redundant-v2"
+        if redundant:
+            fields.add("max_answers")
+        if set(policy) != fields or policy["version"] not in ["dns-availability-v1", "dns-availability-redundant-v2"]:
             raise ValueError("complete versioned availability policy required")
         ids = policy["ordered_edge_ids"]
         if not isinstance(ids, list) or not 1 <= len(ids) <= 256 or any(not isinstance(value,str) or not re.fullmatch(r"[^\s\x00]{1,128}", value) for value in ids) or len(set(ids)) != len(ids):
             raise ValueError("explicit availability membership required")
         if type(policy["recovery_successes"]) is not int or not 2 <= policy["recovery_successes"] <= 5 or type(policy["recovery_min_seconds"]) is not int or not 10 <= policy["recovery_min_seconds"] <= 300:
             raise ValueError("bounded independent recovery observations required")
+        if redundant and (type(policy["max_answers"]) is not int or not 2 <= policy["max_answers"] <= min(8, len(ids))):
+            raise ValueError("redundant availability requires bounded distinct edges")
         result[route["hostname"]] = route
     return result
 

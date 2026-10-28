@@ -47,3 +47,41 @@ func TestDNSAvailabilityPolicyRequiresExplicitBoundedAuthority(t *testing.T) {
 		})
 	}
 }
+
+func TestDNSRedundantAvailabilityIsExplicitAndVersioned(t *testing.T) {
+	raw := []byte(`{"version":"dns-availability-redundant-v2","max_answers":2,"ordered_edge_ids":["edge-a","edge-b"],"recovery_successes":3,"recovery_min_seconds":60}`)
+	var policy DNSAvailabilityPolicy
+	if err := json.Unmarshal(raw, &policy); err != nil || policy.MaxAnswers != 2 {
+		t.Fatal("explicit redundant policy rejected", err)
+	}
+	for _, name := range []string{"missing", "null", "zero", "single", "oversized", "fractional", "legacy", "legacy_zero", "unknown"} {
+		t.Run(name, func(t *testing.T) {
+			var fields map[string]any
+			_ = json.Unmarshal(raw, &fields)
+			switch name {
+			case "missing":
+				delete(fields, "max_answers")
+			case "null":
+				fields["max_answers"] = nil
+			case "zero":
+				fields["max_answers"] = 0
+			case "single":
+				fields["max_answers"] = 1
+			case "oversized":
+				fields["max_answers"] = 9
+			case "fractional":
+				fields["max_answers"] = 2.5
+			case "legacy":
+				fields["version"] = DNSAvailabilityVersion
+			case "legacy_zero":
+				fields["version"], fields["max_answers"] = DNSAvailabilityVersion, 0
+			case "unknown":
+				fields["skip_tls"] = true
+			}
+			changed, _ := json.Marshal(fields)
+			if json.Unmarshal(changed, new(DNSAvailabilityPolicy)) == nil {
+				t.Fatal("accepted ambiguous redundant authority", string(changed))
+			}
+		})
+	}
+}

@@ -3014,6 +3014,21 @@ func filterOrderedDNSCandidates(record model.EdgeDNSRecord, ordered []model.Edge
 	if len(ordered) == 0 {
 		return nil, filteredCandidates, decision
 	}
+	if policy := record.AnswerPolicy.Availability; policy != nil && policy.Version == model.DNSAvailabilityRedundantVersion {
+		// Redundancy is between physical edges, not multiple addresses on one
+		// failed machine. Apply this after health filtering so a rejected address
+		// cannot hide another valid address on the same edge.
+		unique := ordered[:0]
+		seenEdges, seenIPs := map[string]bool{}, map[string]bool{}
+		for _, candidate := range ordered {
+			if seenEdges[candidate.EdgeID] || seenIPs[candidate.IP] {
+				continue
+			}
+			seenEdges[candidate.EdgeID], seenIPs[candidate.IP] = true, true
+			unique = append(unique, candidate)
+		}
+		ordered = unique
+	}
 	if limit := edgeDNSAnswerCandidateLimit(record.AnswerPolicy, ordered); limit > 0 && len(ordered) > limit {
 		ordered = ordered[:limit]
 	}
@@ -3109,6 +3124,9 @@ func edgeDNSSelectionResult(decision edgeDNSCandidateOrderDecision, answered []m
 }
 
 func edgeDNSAnswerCandidateLimit(policy model.DNSAnswerPolicy, ordered []model.EdgeDNSAnswerCandidate) int {
+	if availability := policy.Availability; availability != nil && availability.Version == model.DNSAvailabilityRedundantVersion && model.ValidateDNSAvailabilityPolicy(availability) == nil {
+		return availability.MaxAnswers
+	}
 	if len(ordered) <= 1 {
 		return len(ordered)
 	}

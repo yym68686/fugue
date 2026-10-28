@@ -252,6 +252,9 @@ func ValidateDNSQueryPolicy(p *DNSQueryPolicy) error {
 			return fmt.Errorf("invalid or duplicate physical route strategy")
 		}
 		if exploration := route.BusinessExploration; exploration != nil {
+			if availability := DNSAvailabilityForHost(p, route.Hostname); availability != nil && availability.Version == model.DNSAvailabilityRedundantVersion {
+				return fmt.Errorf("redundant DNS answers cannot preserve business traffic allocation")
+			}
 			if model.ValidateBusinessEdgeExplorationPolicy(*exploration) != nil || route.PathPrefix == "" || route.PathPrefix[0] != '/' || len(route.PathPrefix) > 2048 ||
 				(route.TrafficClass != "dynamic_api" && route.TrafficClass != "streaming") || !model.IsDeliveryPhysicalNetworkPolicy(route.Policy.Version) ||
 				route.Policy.WindowSeconds < exploration.BucketSeconds*(exploration.RequiredBuckets+1) ||

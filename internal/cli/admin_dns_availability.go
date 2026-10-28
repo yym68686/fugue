@@ -23,6 +23,7 @@ import (
 type dnsAvailabilityOptions struct {
 	Edges                 []string
 	Successes, MinSeconds int
+	MaxAnswers            int
 	Wait, DryRun          bool
 	Timeout               time.Duration
 	ConnectAddress        string
@@ -50,6 +51,9 @@ func (c *CLI) newAdminDNSAvailabilityCommand() *cobra.Command {
 			return fmt.Errorf("an exact non-wildcard DNS hostname is required")
 		}
 		policy := model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: opts.Edges, RecoverySuccesses: opts.Successes, RecoveryMinSeconds: opts.MinSeconds}
+		if opts.MaxAnswers != 1 {
+			policy.Version, policy.MaxAnswers = model.DNSAvailabilityRedundantVersion, opts.MaxAnswers
+		}
 		if err := model.ValidateDNSAvailabilityPolicy(&policy); err != nil {
 			return err
 		}
@@ -75,6 +79,7 @@ func (c *CLI) newAdminDNSAvailabilityCommand() *cobra.Command {
 	set.Flags().StringArrayVar(&opts.Edges, "edge", nil, "Authorized edge ID, repeat in preferred fallback order (required)")
 	set.Flags().IntVar(&opts.Successes, "recovery-successes", 3, "Distinct successful observations required (2-5)")
 	set.Flags().IntVar(&opts.MinSeconds, "recovery-min-seconds", 60, "Minimum observation span (10-300 seconds)")
+	set.Flags().IntVar(&opts.MaxAnswers, "max-answers", 1, "Maximum distinct ready edges per address RRset (1 preserves the original policy; 2-8 explicitly enables cached-client redundancy)")
 	set.Flags().BoolVar(&opts.Wait, "wait", true, "Wait for actual full consumer convergence and positive LKG; configuration success alone is not serving success")
 	set.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Read-only baseline/declaration check; does not create drafts or validate a successor runtime")
 	set.Flags().DurationVar(&opts.Timeout, "timeout", 30*time.Minute, "Total configuration and serving verification deadline")
