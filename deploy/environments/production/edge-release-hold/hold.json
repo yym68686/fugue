@@ -1,26 +1,26 @@
 {
   "schema": "fugue.edge-release-hold-declaration/v1",
-  "generation": 1,
+  "generation": 2,
   "namespace": "fugue-system",
   "component": "edge-worker-us",
   "group": "edge-group-country-us",
-  "node": "86eabf26-42a9-4f9d-998a-754115f8b829",
-  "node_uid": "71021b79-e4a8-4f59-8003-e1fe21f336df",
+  "node": "bwg",
+  "node_uid": "275836a4-5739-4cf7-a051-4b9be9bce79f",
   "reason": "quota_exhausted",
   "readers": [
     {
       "role": "guardian",
       "deployment": "fugue-release-guardian",
       "uid": "ce4dc125-b27f-4e08-b42f-9d12bd4c1e0f",
-      "image": "ghcr.io/yym68686/fugue-release-guardian@sha256:09cd0f31486a72775555bcc6c4c3b42722ebb8a6f4be09640235641001e850f8",
-      "revision": "4085ef7b85cf9bea3f3ff238f2d38f03fd0abd6c"
+      "image": "ghcr.io/yym68686/fugue-release-guardian@sha256:1cda8d975a3e2ca7db2844b5e48e25406c09c57215974baac7db1b5518fc16b9",
+      "revision": "48b1d341f3a5726b1f0aa178d30ed1d6af44d4c6"
     },
     {
       "role": "canary-prober",
       "deployment": "fugue-release-canary-prober",
       "uid": "c5fe057b-504f-4146-ae2c-5afe1da15d04",
-      "image": "ghcr.io/yym68686/fugue-release-guardian@sha256:09cd0f31486a72775555bcc6c4c3b42722ebb8a6f4be09640235641001e850f8",
-      "revision": "4085ef7b85cf9bea3f3ff238f2d38f03fd0abd6c"
+      "image": "ghcr.io/yym68686/fugue-release-guardian@sha256:1cda8d975a3e2ca7db2844b5e48e25406c09c57215974baac7db1b5518fc16b9",
+      "revision": "48b1d341f3a5726b1f0aa178d30ed1d6af44d4c6"
     }
   ]
 }
