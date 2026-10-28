@@ -22,7 +22,7 @@ func (s *Service) replayDNSRouteContext(p dnsServingPayload, c dnsPlatformCandid
 	// The checkpoint authenticates the original observation. Retained-only LKG
 	// proof deadlines are enforced independently; an unused expired LKG entry
 	// cannot invalidate an active source during bounded offline recovery.
-	plans, err := dnsroutesource.Build(c.Artifact, source.Snapshot, s.platformDNSKeys(), source.Snapshot.ObservedAt)
+	plans, err := s.routeSourceCompiler.Build(c.Artifact, source.Snapshot, s.platformDNSKeys(), source.Snapshot.ObservedAt)
 	if err != nil {
 		return p, err
 	}
@@ -76,7 +76,7 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 	}
 	reuseDNSRouteSourceContent(&snapshot, previous)
 	_, finishBuild := observeDNSSyncPhase(ctx, "source_plan_build")
-	plans, err := dnsroutesource.Build(c.Artifact, snapshot, s.platformDNSKeys(), now)
+	plans, err := s.routeSourceCompiler.Build(c.Artifact, snapshot, s.platformDNSKeys(), now)
 	finishBuild(err)
 	if err != nil {
 		return p, nil, err

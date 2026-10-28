@@ -44,6 +44,10 @@ func Build(dns model.PlatformArtifact, snapshot model.PlatformDNSRouteSourceSnap
 	if err := VerifySnapshot(snapshot, dns, keys, now); err != nil {
 		return nil, err
 	}
+	return buildVerified(dns, snapshot)
+}
+
+func buildVerified(dns model.PlatformArtifact, snapshot model.PlatformDNSRouteSourceSnapshot) (*Plans, error) {
 	var p struct {
 		Source *platformconfig.CellDNSPlanSource `json:"cell_dns_source"`
 		Policy platformconfig.PolicySnapshot     `json:"policy"`

@@ -155,6 +155,13 @@ func TestSourceLKGRequiresVerifiedUnexpiredFullAndCoherentTarget(t *testing.T) {
 	if _, err := dnsroutesource.Build(compiled.DNSArtifact, snapshot, celldns.Keys(), now.Add(2*time.Minute)); err == nil {
 		t.Fatal("expired LKG revived")
 	}
+	var compiler dnsroutesource.Compiler
+	if _, err := compiler.Build(compiled.DNSArtifact, snapshot, celldns.Keys(), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compiler.Build(compiled.DNSArtifact, snapshot, celldns.Keys(), now.Add(2*time.Minute)); err == nil {
+		t.Fatal("warm pure projection bypassed LKG expiry")
+	}
 	bad := clone(snapshot)
 	bad.Scopes[0].Publications[1].Release.VerificationState = model.PlatformArtifactVerificationStateFailed
 	bad.SelectionDigest, _ = dnsroutesource.SelectionDigest(bad)

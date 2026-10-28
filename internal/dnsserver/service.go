@@ -27,6 +27,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/config"
+	"fugue/internal/dnsroutesource"
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
@@ -87,6 +88,7 @@ type Service struct {
 	retainedDNSProbes             dnsReadinessScheduler
 	platformCandidate             PlatformCandidateStatus
 	platformDNSRouteFacts         []dnsReadinessFact // guarded by platformConsumerMu; never persisted
+	routeSourceCompiler           dnsroutesource.Compiler
 	Config                        config.DNSConfig
 	HTTPClient                    *http.Client
 	Logger                        *log.Logger

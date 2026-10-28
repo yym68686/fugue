@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -83,6 +82,10 @@ func classifyTransportError(err error) error {
 }
 
 func Probe(ctx context.Context, host, path, address, expectedState string, timeout time.Duration) (Proof, error) {
+	return probeWithPool(ctx, host, path, address, expectedState, timeout, &probeTransports)
+}
+
+func probeWithPool(ctx context.Context, host, path, address, expectedState string, timeout time.Duration, pool *probeTransportPool) (Proof, error) {
 	if timeout < time.Second || timeout > 10*time.Second {
 		return Proof{}, errors.New("invalid route probe timeout")
 	}
@@ -100,16 +103,7 @@ func Probe(ctx context.Context, host, path, address, expectedState string, timeo
 	nonce := hex.EncodeToString(nonceBytes)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	dialer := &net.Dialer{Timeout: timeout}
-	transport := &http.Transport{Proxy: nil, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}, MaxResponseHeaderBytes: 16 << 10, ForceAttemptHTTP2: true,
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			connection, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), "443"))
-			if err != nil {
-				return nil, connectionError{err: classifyTransportError(err)}
-			}
-			return connection, nil
-		}}
-	defer transport.CloseIdleConnections()
+	transport := pool.get(host, ip.String())
 	client := &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	target := url.URL{Scheme: "https", Host: host, Path: path}
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, target.String(), nil)
@@ -143,6 +137,10 @@ func Probe(ctx context.Context, host, path, address, expectedState string, timeo
 		return Proof{}, errors.New("placement TLS identity not verified")
 	}
 	for _, certificate := range response.TLS.VerifiedChains[0] {
+		// A pooled connection may outlive its original TLS verification time.
+		if checkedAt.Before(certificate.NotBefore) || !checkedAt.Before(certificate.NotAfter) {
+			return Proof{}, errors.New("placement TLS identity expired or not yet valid")
+		}
 		if certificate.NotAfter.Before(proof.ValidUntil) {
 			proof.ValidUntil = certificate.NotAfter
 		}
