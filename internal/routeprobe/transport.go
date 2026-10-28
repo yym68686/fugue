@@ -23,7 +23,10 @@ type probeTransportPool struct {
 type probeTransportEntry struct {
 	key       string
 	transport *http.Transport
+	createdAt time.Time
 }
+
+const probeTransportMaxAge = time.Minute
 
 var probeTransports = probeTransportPool{limit: 512}
 
@@ -32,8 +35,17 @@ func (p *probeTransportPool) get(host, address string) *http.Transport {
 	defer p.mu.Unlock()
 	key := host + "\x00" + address
 	if entry := p.entries[key]; entry != nil {
-		p.lru.MoveToFront(entry)
-		return entry.Value.(probeTransportEntry).transport
+		current := entry.Value.(probeTransportEntry)
+		if time.Since(current.createdAt) < probeTransportMaxAge {
+			p.lru.MoveToFront(entry)
+			return current.transport
+		}
+		// IdleConnTimeout alone does not bound affinity when probes arrive
+		// more frequently than that timeout. Retire aged idle connections while
+		// allowing in-flight requests to finish on their existing transport.
+		current.transport.CloseIdleConnections()
+		p.lru.Remove(entry)
+		delete(p.entries, key)
 	}
 	transport := &http.Transport{
 		Proxy: nil, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host},
@@ -53,7 +65,7 @@ func (p *probeTransportPool) get(host, address string) *http.Transport {
 	if p.entries == nil {
 		p.entries = make(map[string]*list.Element)
 	}
-	p.entries[key] = p.lru.PushFront(probeTransportEntry{key, transport})
+	p.entries[key] = p.lru.PushFront(probeTransportEntry{key: key, transport: transport, createdAt: time.Now()})
 	if p.lru.Len() > max(1, p.limit) {
 		old := p.lru.Back()
 		entry := old.Value.(probeTransportEntry)
