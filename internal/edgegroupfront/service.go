@@ -56,15 +56,16 @@ type Config struct {
 }
 
 type Service struct {
-	Config         Config
-	Logger         *log.Logger
-	activationMu   sync.Mutex
-	lastActivation *ActivationState
-	mu             sync.Mutex
-	active         map[string]edgeFrontActiveTCPConnection
-	metrics        edgeFrontMetrics
-	sequence       uint64
-	networkLast    time.Time
+	Config          Config
+	Logger          *log.Logger
+	activationMu    sync.Mutex
+	lastActivation  *ActivationState
+	mu              sync.Mutex
+	active          map[string]edgeFrontActiveTCPConnection
+	connectionIndex map[connectionObservationKey]map[string]struct{}
+	metrics         edgeFrontMetrics
+	sequence        uint64
+	networkLast     time.Time
 }
 
 type tcpCopyResult = tcpproxy.CopyResult
@@ -460,6 +461,7 @@ func (s *Service) startTCPConnection(protocol, slot, target string, downstream, 
 		s.active = make(map[string]edgeFrontActiveTCPConnection)
 	}
 	s.active[id] = entry
+	s.indexTCPConnection(entry)
 	return id
 }
 
@@ -470,7 +472,10 @@ func (s *Service) finishTCPConnection(id string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.active, id)
+	if connection, found := s.active[id]; found {
+		s.unindexTCPConnection(connection)
+		delete(s.active, id)
+	}
 }
 
 func (s *Service) recordTCPConnection(protocol, slot, firstCompleted string, proxyProtocol bool, duration time.Duration, clientToWorker, workerToClient tcpCopyResult, clientTCPInfo tcpdiag.Snapshot) {
@@ -577,6 +582,10 @@ type edgeFrontTCPConnectionDebug struct {
 }
 
 func (s *Service) handleTCPConnections(w http.ResponseWriter, r *http.Request) {
+	if r.URL.RawQuery != "" {
+		s.handleIndexedTCPConnection(w, r, tcpdiag.SnapshotFromConn)
+		return
+	}
 	now := time.Now().UTC()
 	connections := s.activeTCPConnections()
 	active := make([]edgeFrontTCPConnectionDebug, 0, len(connections))

@@ -356,6 +356,25 @@ never the raw client endpoint. An unavailable or changed transport yields no
 sample and does not block the business request or DNS. This diagnostic fallback
 does not restart, replace or reconfigure the serving Front.
 
+The private Front health listener also supports an indexed mode of
+`GET /edge/tcp-connections?request=<JSON>`; its contract is
+`openapi/openapi.yaml` (`x-fugue-front-network-observation`). The connection lifecycle
+maintains an exact public-peer/slot index. This path reads at most one kernel
+socket and returns at most 4 KiB without copying, sorting or sampling unrelated
+connections. Missing indexes, duplicate peers, non-HTTPS/non-PROXY connections,
+closed/replaced sockets and identity mismatches fail closed. The existing
+100ms process sampling budget and legacy 1024-entry inventory consumer limit
+are unchanged. Index maintenance is O(1) expected per connection open/close;
+lookup is O(1) expected rather than the full inventory's O(N log N) sort and
+O(N) allocation/kernel reads, with O(N) extra index storage for eligible peers.
+The index is live state, not a cache or a source of historical authority.
+
+Roll out this private reader to the actual transport-selected Fronts before
+publishing an API caller that requires it. An old Front ignores query parameters
+and returns a full debug inventory; that is not a compatible indexed response
+and must not be accepted, truncated or silently used as fallback. Merely
+publishing the reader does not mean existing API sampling has switched to it.
+
 The pure evaluator in `internal/edgequality` consumes a captured snapshot:
 
 - Explicit versioned policy, capture clock, hostname, traffic class, client scope.

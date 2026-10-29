@@ -145,6 +145,32 @@ x-fugue-authority-identity-labels:
     grant candidate eligibility or migrate existing authority. Invalid authority
     labels retain the existing absent-label behavior. Traffic publication,
     authenticated inventory, original leases and verified LKG remain independent.
+x-fugue-front-network-observation:
+  endpoint: GET /edge/tcp-connections on the private Front health listener
+  request_schema: '#/components/schemas/EdgePublicNetworkObservationRequest'
+  response_schema: '#/components/schemas/EdgePublicNetworkObservationResponse'
+  query:
+    name: request
+    description: The only query parameter, exactly once, containing JSON with at most 2048 decoded bytes; the encoded query is at most 8192 bytes.
+  semantics: >-
+    This node HTTP endpoint is not a control-plane or public serving route.
+    The control plane reaches it through its authenticated Kubernetes pod proxy
+    and independently selects and rechecks Service, Pod and EndpointSlice identity.
+    A query returns one fresh nonce/node/group/slot-bound sample, no raw peer
+    endpoint, at most 4096 bytes and Cache-Control no-store. The live connection
+    lifecycle maintains a public-peer/slot index; observing one connection never
+    scans, sorts or samples unrelated sockets. Missing, duplicate or inconsistent
+    index entries, non-HTTPS/non-PROXY connections, closed or replaced sockets,
+    and identity mismatches fail closed. TCP_INFO, when available, must report
+    an established connection. The existing 100ms process sampling budget is
+    retained. Invalid queries return 400, absent or changed exact connections
+    404, rate exhaustion 429, and busy locks or invalid live state 503.
+    With no query, the existing full debug inventory is unchanged; it is not an
+    indexed response. Its legacy consumer's 1024-entry limit is not increased.
+    A reader cannot accept or truncate an old Front's full inventory as an indexed
+    response. No read probes applications, changes routing, persists peer data,
+    renews evidence or authorizes serving. Publish the private reader to the actual
+    selected Fronts through verified executor replacement before enabling its caller.
 x-fugue-dns-readiness:
   endpoint: GET /readyz on the DNS node HTTP listener
   response_schema: '#/components/schemas/DNSListenerReadiness'
