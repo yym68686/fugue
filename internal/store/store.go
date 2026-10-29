@@ -2606,7 +2606,7 @@ func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.App
 			return ErrNotFound
 		}
 		hydrateAppBackingServices(state, &app)
-		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) {
+		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) || activeAppCPUResize(state.Operations, app.ID) {
 			return ErrConflict
 		}
 
@@ -2614,6 +2614,7 @@ func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.App
 		if spec == nil {
 			return ErrInvalidInput
 		}
+		model.PreserveVerifiedAppCPURequest(spec, app.Spec)
 		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 			return err
 		}
@@ -2656,7 +2657,7 @@ func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppS
 			return ErrNotFound
 		}
 		hydrateAppBackingServices(state, &app)
-		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) {
+		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) || activeAppCPUResize(state.Operations, app.ID) {
 			return ErrConflict
 		}
 
@@ -2664,6 +2665,7 @@ func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppS
 		if spec == nil {
 			return ErrInvalidInput
 		}
+		model.PreserveVerifiedAppCPURequest(spec, app.Spec)
 		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 			return err
 		}

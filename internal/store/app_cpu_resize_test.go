@@ -132,3 +132,47 @@ func TestAppCPUResizeConfigurationRebaseFoldsVerifiedTarget(t *testing.T) {
 		t.Fatal("release lost independently verified CPU target")
 	}
 }
+
+func TestAppCPUResizeSurvivesStaleObservedBaseline(t *testing.T) {
+	for _, observedPostgres := range []bool{false, true} {
+		t.Run(map[bool]string{false: "app baseline", true: "postgres observation"}[observedPostgres], func(t *testing.T) {
+			s, app := cpuResizeStoreFixture(t)
+			desired := *cloneAppSpec(&app.Spec)
+			desired.Resources.CPUMilliCores = 75
+			op, err := s.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// An observation read before the resize cannot write through its
+			// mutation interlock, including before the first Kubernetes PATCH.
+			sync := func() (model.App, error) {
+				if observedPostgres {
+					return s.SyncObservedManagedPostgresSpec(app.ID, app.Spec)
+				}
+				return s.SyncObservedManagedAppBaseline(app.ID, app.Spec, nil)
+			}
+			if _, err := sync(); !errors.Is(err, ErrConflict) {
+				t.Fatalf("active resize accepted observed baseline: %v", err)
+			}
+			op, claimed, err := s.TryClaimPendingOperation(op.ID)
+			if err != nil || !claimed {
+				t.Fatal(err)
+			}
+			if _, err := s.CompleteManagedOperationGuarded(op, &app, "", "verified", nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			// A source-less app continually recovers its deployment baseline.
+			// That runtime snapshot owns neither the verified CPU target nor the
+			// server-owned immutable CPU template marker.
+			for i := 0; i < 2; i++ {
+				current, err := sync()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if current.Spec.Resources.CPUMilliCores != 75 || current.Spec.CPURequestTemplateMilliCores == nil || *current.Spec.CPURequestTemplateMilliCores != 100 {
+					t.Fatal("observed snapshot overwrote verified CPU target")
+				}
+			}
+		})
+	}
+}

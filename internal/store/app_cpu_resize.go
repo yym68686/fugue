@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"strings"
 	"time"
 
@@ -58,6 +60,12 @@ func activeAppCPUResize(ops []model.Operation, appID string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Store) pgHasActiveAppCPUResizeTx(ctx context.Context, tx *sql.Tx, appID string) (bool, error) {
+	var active bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type=$2 AND status IN ('pending','running','waiting-agent'))`, appID, model.OperationTypeAppCPUResize).Scan(&active)
+	return active, err
 }
 
 // Only normal deployments fold a verified runtime request into a new template.

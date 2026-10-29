@@ -900,12 +900,14 @@ func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOper
 	}
 	if managedAppBaselineNeedsRecovery(stored) {
 		app := managedSnapshot
+		model.PreserveVerifiedAppCPURequest(&app.Spec, stored.Spec)
 		backfillManagedAppSource(&app, stored)
 		backfillManagedAppBackingServices(&app, stored)
 		return app, false
 	}
 	if managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored) {
 		app := managedSnapshot
+		model.PreserveVerifiedAppCPURequest(&app.Spec, stored.Spec)
 		backfillManagedAppSource(&app, stored)
 		backfillManagedAppBackingServices(&app, stored)
 		return app, false

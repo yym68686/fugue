@@ -2277,6 +2277,32 @@ func TestManagedAppBaselineUsesNormalizedBuildSource(t *testing.T) {
 	}
 }
 
+func TestManagedAppBaselineRecoveryPreservesVerifiedCPU(t *testing.T) {
+	t.Parallel()
+	for _, rollout := range []bool{false, true} {
+		stored := model.App{Spec: model.AppSpec{Image: "registry.example/service:one", Resources: &model.ResourceSpec{CPUMilliCores: 75, MemoryMebibytes: 128}}}
+		template := int64(100)
+		stored.Spec.CPURequestTemplateMilliCores = &template
+		snapshot := model.App{Spec: model.AppSpec{Image: stored.Spec.Image, Resources: &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 128}}}
+		if rollout {
+			snapshot.Spec.RolloutIntent = model.AppRolloutIntentOnlineResourceUpdate
+		}
+		chosen, _ := selectManagedAppDesiredApp(snapshot, stored, false)
+		if chosen.Spec.Resources.CPUMilliCores != 75 || chosen.Spec.CPURequestTemplateMilliCores == nil || *chosen.Spec.CPURequestTemplateMilliCores != 100 {
+			t.Fatal("baseline recovery lost verified CPU request")
+		}
+		chosen.Spec.Resources.CPUMilliCores = 50
+		*chosen.Spec.CPURequestTemplateMilliCores = 90
+		if stored.Spec.Resources.CPUMilliCores != 75 || template != 100 || snapshot.Spec.Resources.CPUMilliCores != 100 {
+			t.Fatal("baseline recovery aliased another snapshot")
+		}
+		active, _ := selectManagedAppDesiredApp(snapshot, stored, true)
+		if active.Spec.Resources.CPUMilliCores != 100 || active.Spec.CPURequestTemplateMilliCores != nil {
+			t.Fatal("active operation snapshot was rewritten")
+		}
+	}
+}
+
 func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshot(t *testing.T) {
 	t.Parallel()
 

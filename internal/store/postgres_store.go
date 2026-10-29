@@ -2855,11 +2855,19 @@ func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.A
 	if activeDatabaseMutation {
 		return model.App{}, ErrConflict
 	}
+	activeCPUResize, err := s.pgHasActiveAppCPUResizeTx(ctx, tx, app.ID)
+	if err != nil {
+		return model.App{}, err
+	}
+	if activeCPUResize {
+		return model.App{}, ErrConflict
+	}
 
 	spec := cloneAppSpec(&desiredSpec)
 	if spec == nil {
 		return model.App{}, ErrInvalidInput
 	}
+	model.PreserveVerifiedAppCPURequest(spec, app.Spec)
 	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 		return model.App{}, err
 	}
@@ -2911,11 +2919,19 @@ func (s *Store) pgSyncObservedManagedAppBaseline(id string, desiredSpec model.Ap
 	if activeDatabaseMutation {
 		return model.App{}, ErrConflict
 	}
+	activeCPUResize, err := s.pgHasActiveAppCPUResizeTx(ctx, tx, app.ID)
+	if err != nil {
+		return model.App{}, err
+	}
+	if activeCPUResize {
+		return model.App{}, ErrConflict
+	}
 
 	spec := cloneAppSpec(&desiredSpec)
 	if spec == nil {
 		return model.App{}, ErrInvalidInput
 	}
+	model.PreserveVerifiedAppCPURequest(spec, app.Spec)
 	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 		return model.App{}, err
 	}
@@ -3919,8 +3935,8 @@ WHERE app_id = $1
 	}
 	// Still under the app row lock: reject a new mutation before persistence,
 	// without replacing the existing actionable database validation errors.
-	var activeCPUResize bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type=$2 AND status IN ('pending','running','waiting-agent'))`, app.ID, model.OperationTypeAppCPUResize).Scan(&activeCPUResize); err != nil {
+	activeCPUResize, err := s.pgHasActiveAppCPUResizeTx(ctx, tx, app.ID)
+	if err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	if activeCPUResize {
