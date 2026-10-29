@@ -251,6 +251,7 @@ type kubePod struct {
 	ObservedUID             string                  `json:"-"`
 	ObservedOwnerReferences []kubePodOwnerReference `json:"-"`
 	ObservedStartTime       time.Time               `json:"-"`
+	ObservedResizeState     *kubeResizePod          `json:"-"`
 }
 
 type kubePodOwnerReference struct {
@@ -279,10 +280,15 @@ func (p *kubePod) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &observed); err != nil {
 		return err
 	}
+	var resizeState kubeResizePod
+	if err := json.Unmarshal(data, &resizeState); err != nil {
+		return err
+	}
 	*p = kubePod(decoded)
 	p.ObservedUID = strings.TrimSpace(observed.Metadata.UID)
 	p.ObservedOwnerReferences = observed.Metadata.OwnerReferences
 	p.ObservedStartTime = observed.Status.StartTime
+	p.ObservedResizeState = &resizeState
 	return nil
 }
 

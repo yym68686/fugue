@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1361,7 +1362,7 @@ func deploymentReadyPodsMatchTemplate(ctx context.Context, client *kubeClient, n
 
 	matchingReady := 0
 	for _, pod := range pods {
-		if podMatchesDeploymentTemplate(pod, deployment) {
+		if podMatchesManagedAppDeploymentTemplate(pod, deployment, app) {
 			matchingReady++
 		}
 	}
@@ -1374,6 +1375,43 @@ func deploymentReadyPodsMatchTemplate(ctx context.Context, client *kubeClient, n
 		name = runtime.RuntimeAppResourceName(app)
 	}
 	return false, fmt.Sprintf("waiting for deployment %s ready pods to match applied template (%d/%d)", name, matchingReady, desiredReplicas), nil
+}
+
+// An in-place CPU resize deliberately leaves the release template unchanged.
+// Restore readiness must check the durable CPU target, while still requiring
+// the same release identity and every other template resource. The marker is
+// consumed by normal releases, which keep the strict ordinary template check.
+func podMatchesManagedAppDeploymentTemplate(pod kubePod, deployment kubeDeployment, app model.App) bool {
+	marker := app.Spec.CPURequestTemplateMilliCores
+	if marker == nil {
+		return podMatchesDeploymentTemplate(pod, deployment)
+	}
+	if *marker <= 0 || app.Spec.Resources == nil || app.Spec.Resources.CPUMilliCores <= 0 || pod.ObservedResizeState == nil {
+		return false
+	}
+	containerName := runtime.RuntimeResourceName(app.Name)
+	containers := append([]kubeContainerSpec(nil), deployment.Spec.Template.Spec.Containers...)
+	found := false
+	for i := range containers {
+		if containers[i].Name != containerName {
+			continue
+		}
+		if !resizeQuantitiesEqual(containers[i].Resources.Requests["cpu"], strconv.FormatInt(*marker, 10)+"m") {
+			return false
+		}
+		containers[i].Resources = cloneKubeResourceRequirements(containers[i].Resources)
+		containers[i].Resources.Requests["cpu"] = strconv.FormatInt(app.Spec.Resources.CPUMilliCores, 10) + "m"
+		found = true
+	}
+	if !found {
+		return false
+	}
+	deployment.Spec.Template.Spec.Containers = containers
+	if !podMatchesDeploymentTemplate(pod, deployment) {
+		return false
+	}
+	observation, err := observeAppCPUResizePod(*pod.ObservedResizeState, containerName)
+	return err == nil && observation.PodResources == nil && appCPURequestResizeConverged(observation, app.Spec.Resources.CPUMilliCores)
 }
 
 func deploymentTemplatePodFailureMessage(pods []kubePod, deployment kubeDeployment) string {

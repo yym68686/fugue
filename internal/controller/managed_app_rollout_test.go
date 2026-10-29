@@ -1125,6 +1125,101 @@ func TestWaitForManagedAppRolloutRequiresReadyPodFromAppliedTemplate(t *testing.
 	}
 }
 
+func TestDeploymentReadyPodsMatchTemplateAfterCPURequestResize(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"converged", "unresized", "actual-old", "allocated-old", "resize-pending", "generation-pending", "memory-drift", "image-drift", "sidecar-drift", "label-drift", "deleting", "not-ready", "missing-marker", "wrong-marker", "missing-actual"} {
+		t.Run(scenario, func(t *testing.T) {
+			marker := int64(400)
+			app := model.App{ID: "app_service", TenantID: "tenant_service", Name: "service", Spec: model.AppSpec{Resources: &model.ResourceSpec{CPUMilliCores: 100}, CPURequestTemplateMilliCores: &marker}}
+			deployment := kubeDeployment{}
+			deployment.Metadata.Name = "service"
+			deployment.Spec.Template.Metadata.Labels = map[string]string{"release": "stable"}
+			deployment.Spec.Template.Spec.Containers = []kubeContainerSpec{
+				{Name: "service", Image: "registry.example/service:stable", Resources: kubeResourceRequirements{Requests: map[string]string{"cpu": "400m", "memory": "128Mi", "ephemeral-storage": "1Gi"}, Limits: map[string]string{"memory": "256Mi"}}},
+				{Name: "workspace", Image: "registry.example/workspace:stable", Resources: kubeResourceRequirements{Requests: map[string]string{"cpu": "25m"}}},
+			}
+			resizePod := appResizeTestPod(t)
+			encoded, err := json.Marshal(resizePod)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(encoded, &raw); err != nil {
+				t.Fatal(err)
+			}
+			meta := raw["metadata"].(map[string]any)
+			meta["labels"] = map[string]string{"release": "stable"}
+			spec := raw["spec"].(map[string]any)
+			containers := spec["containers"].([]any)
+			primary := containers[0].(map[string]any)
+			primary["image"] = "registry.example/service:stable"
+			containers = append(containers, map[string]any{"name": "workspace", "image": "registry.example/workspace:stable", "resources": map[string]any{"requests": map[string]string{"cpu": "25m"}}})
+			spec["containers"] = containers
+			status := raw["status"].(map[string]any)
+			actual := status["containerStatuses"].([]any)[0].(map[string]any)
+			switch scenario {
+			case "unresized":
+				primary["resources"].(map[string]any)["requests"].(map[string]any)["cpu"] = "400m"
+			case "actual-old":
+				actual["resources"].(map[string]any)["requests"].(map[string]any)["cpu"] = "400m"
+			case "allocated-old":
+				actual["allocatedResources"].(map[string]any)["cpu"] = "400m"
+			case "resize-pending":
+				status["conditions"] = append(status["conditions"].([]any), map[string]string{"type": "PodResizePending", "status": "True"})
+			case "generation-pending":
+				status["observedGeneration"] = 0
+			case "memory-drift":
+				primary["resources"].(map[string]any)["requests"].(map[string]any)["memory"] = "256Mi"
+			case "image-drift":
+				primary["image"] = "registry.example/service:other"
+			case "sidecar-drift":
+				containers[1].(map[string]any)["resources"] = map[string]any{"requests": map[string]string{"cpu": "30m"}}
+			case "label-drift":
+				meta["labels"] = map[string]string{"release": "other"}
+			case "deleting":
+				meta["deletionTimestamp"] = "2026-01-01T00:01:00Z"
+			case "not-ready":
+				status["conditions"] = []map[string]string{{"type": "Ready", "status": "False"}}
+			case "missing-marker":
+				app.Spec.CPURequestTemplateMilliCores = nil
+			case "wrong-marker":
+				marker = 300
+			case "missing-actual":
+				delete(actual, "resources")
+			}
+			encoded, err = json.Marshal(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pod kubePod
+			if err := json.Unmarshal(encoded, &pod); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/pods") {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"items":[%s]}`, encoded)
+			}))
+			defer server.Close()
+			client := &kubeClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}
+			ready, _, err := deploymentReadyPodsMatchTemplate(context.Background(), client, "namespace", app, deployment, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ready != (scenario == "converged") {
+				t.Fatalf("ready=%t for %s", ready, scenario)
+			}
+			if deployment.Spec.Template.Spec.Containers[0].Resources.Requests["cpu"] != "400m" {
+				t.Fatal("readiness check mutated immutable template")
+			}
+		})
+	}
+}
+
 func TestManagedAppRuntimeSchedulingReadyRequiresTargetRuntimeScheduling(t *testing.T) {
 	t.Parallel()
 
