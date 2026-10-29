@@ -16,6 +16,12 @@ func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp
 	// unplanned restart.
 	currentApp.Spec = normalizeBuildpacksLaunchOverrideSpec(currentApp, currentApp.Spec)
 	desiredApp.Spec = normalizeBuildpacksLaunchOverrideSpec(desiredApp, desiredApp.Spec)
+	// A regular deployment folds the verified effective CPU request into its
+	// new template, consuming this controller-owned immutable-template marker.
+	// Ignore only that bookkeeping in classification; Resources still describes
+	// the actual requested CPU/memory change and participates in the plan.
+	currentApp.Spec.CPURequestTemplateMilliCores = nil
+	desiredApp.Spec.CPURequestTemplateMilliCores = nil
 	if !appSupportsOnlineRolloutIntent(desiredApp) {
 		return ""
 	}

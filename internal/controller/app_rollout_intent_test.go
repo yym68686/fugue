@@ -1,11 +1,65 @@
 package controller
 
 import (
+	"reflect"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 )
+
+func TestRolloutIntentForManagedOperationAfterCPURequestResize(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*model.AppSpec)
+		want   string
+	}{
+		{"image", func(spec *model.AppSpec) { spec.Image = "ghcr.io/example/demo:v2" }, model.AppRolloutIntentOnlineImageUpdate},
+		{"config", func(spec *model.AppSpec) { spec.Files = []model.AppFile{{Path: "/etc/config.yaml", Content: "new"}} }, model.AppRolloutIntentOnlineConfigUpdate},
+		{"restart", func(spec *model.AppSpec) { spec.RestartToken = "new" }, model.AppRolloutIntentOnlineRestart},
+		{"environment", func(spec *model.AppSpec) { spec.Env = map[string]string{"MODE": "new"} }, model.AppRolloutIntentOnlineEnvironmentUpdate},
+		{"resources", func(spec *model.AppSpec) { spec.Resources = &model.ResourceSpec{CPUMilliCores: 200} }, model.AppRolloutIntentOnlineResourceUpdate},
+		{"lifecycle", func(spec *model.AppSpec) { spec.TerminationGracePeriodSeconds = 60 }, model.AppRolloutIntentOnlineLifecycleUpdate},
+		{"mixed", func(spec *model.AppSpec) {
+			spec.Image = "ghcr.io/example/demo:v2"
+			spec.Env = map[string]string{"MODE": "new"}
+		}, model.AppRolloutIntentOnlineRestart},
+		{"topology", func(spec *model.AppSpec) { spec.Ports = []int{9090} }, ""},
+		{"bookkeeping only", func(spec *model.AppSpec) {}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueLocalRWO)
+			templateCPU := int64(400)
+			current.Spec.CPURequestTemplateMilliCores = &templateCPU
+			current.Spec.Resources = &model.ResourceSpec{CPUMilliCores: 100}
+			current.Spec.Files = []model.AppFile{{Path: "/etc/config.yaml", Content: "old"}}
+			desired := current
+			// A regular deployment consumes the immutable template marker while
+			// retaining the effective CPU request verified by the in-place resize.
+			desired.Spec.CPURequestTemplateMilliCores = nil
+			tc.change(&desired.Spec)
+			currentBefore, desiredBefore := current.Spec, desired.Spec
+			op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+			if got := rolloutIntentForManagedOperation(op, current, desired); got != tc.want {
+				t.Fatalf("expected %q after CPU resize, got %q", tc.want, got)
+			}
+			if !reflect.DeepEqual(current.Spec, currentBefore) || !reflect.DeepEqual(desired.Spec, desiredBefore) || templateCPU != 400 {
+				t.Fatal("intent classification must preserve serving and desired snapshots")
+			}
+			if tc.want == "" {
+				return
+			}
+			desired.Spec.RolloutIntent = tc.want
+			decision := (&Service{Renderer: runtime.Renderer{}}).zeroDowntimeRolloutGuardDecision(
+				op, current, desired,
+				runtime.SchedulingConstraints{NodeSelector: map[string]string{kubeHostnameLabelKey: "node-a"}},
+			)
+			if decision.Refused || !decision.PodTemplateChanged || decision.Strategy != "RollingUpdate" {
+				t.Fatalf("expected validated rolling deployment after CPU resize: %+v", decision)
+			}
+		})
+	}
+}
 
 func TestRolloutIntentForManagedOperationDetectsRestartOnlyDeploy(t *testing.T) {
 	current := model.App{
