@@ -991,6 +991,11 @@ func isFugueManagedImmutableTag(image string) bool {
 }
 
 func runtimeAppResourceRequirements(spec model.AppSpec) map[string]any {
+	if spec.CPURequestTemplateMilliCores != nil && spec.Resources != nil {
+		resources := *spec.Resources
+		resources.CPUMilliCores = *spec.CPURequestTemplateMilliCores
+		return runtimeResourceRequirementsForClass(&resources, model.EffectiveWorkloadClass(spec))
+	}
 	return runtimeResourceRequirementsForClass(spec.Resources, model.EffectiveWorkloadClass(spec))
 }
 

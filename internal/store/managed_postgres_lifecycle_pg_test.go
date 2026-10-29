@@ -175,6 +175,7 @@ func TestPGCreateManagedPostgresSuspendLocksExactLifecycleTarget(t *testing.T) {
 	expectPGNoActiveAppDatabaseBackup(mock, appID, "demo-postgres", "demo-postgres")
 	expectPGNoActiveAppDatabaseImport(mock, appID)
 	expectPGLifecycleBillingAccrual(mock, now, tenantID, projectID, appID, serviceID)
+	expectPGNoActiveAppCPUResize(mock, appID)
 	mock.ExpectExec(`(?s)INSERT INTO fugue_operations`).
 		WithArgs(
 			sqlmock.AnyArg(), tenantID, model.OperationTypeDatabaseSuspend, model.OperationStatusPending,
@@ -219,6 +220,10 @@ func TestPGCreateManagedPostgresSuspendLocksExactLifecycleTarget(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("sqlmock expectations: %v", err)
 	}
+}
+
+func expectPGNoActiveAppCPUResize(mock sqlmock.Sqlmock, appID string) {
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type=$2 AND status IN ('pending','running','waiting-agent'))`)).WithArgs(appID, model.OperationTypeAppCPUResize).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 }
 
 func TestPGCreateManagedPostgresLifecycleRetryRequiresExactUniqueActiveOperation(t *testing.T) {

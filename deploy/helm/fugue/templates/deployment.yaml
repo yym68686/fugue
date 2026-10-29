@@ -65,6 +65,8 @@ spec:
               protocol: TCP
             {{- end }}
           env:
+            - name: FUGUE_APP_CPU_REQUEST_RESIZE_ENABLED
+              value: {{ .Values.api.appCPURequestResizeEnabled | quote }}
             - name: FUGUE_BIND_ADDR
               value: ":8080"
             {{- if .Values.api.metrics.enabled }}

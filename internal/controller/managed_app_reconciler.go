@@ -217,6 +217,15 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		case hasActiveOp:
 			return nil
 		default:
+			if storedApp.Spec.CPURequestTemplateMilliCores != nil && s.Config.AppCPURequestResizeEnabled {
+				queued, err := s.reconcileAppCPUResizeTarget(ctx, client, storedApp)
+				if err != nil {
+					return err
+				}
+				if queued {
+					return nil
+				}
+			}
 			// A pending canonical replacement may itself need the capacity held
 			// by drained revisions. Run their independent, fully guarded cleanup
 			// before executable readiness can stop this reconciliation pass.

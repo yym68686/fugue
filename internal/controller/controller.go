@@ -908,6 +908,10 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 	switch op.ExecutionMode {
 	case model.ExecutionModeManaged:
 		if err := s.executeManagedOperation(ctx, op); err != nil {
+			if errors.Is(err, errAppCPUResizeUnsettled) {
+				s.Logger.Printf("operation %s retained active pending app CPU resize verification: %v", op.ID, err)
+				return nil
+			}
 			if errors.Is(err, context.Canceled) {
 				if _, requeueErr := s.Store.RequeueManagedOperationGuarded(op, "operation requeued after controller interruption"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
 					s.Logger.Printf("operation %s requeue after interruption failed: %v", op.ID, requeueErr)
@@ -989,6 +993,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	s.markReleaseAttemptOperationRunning(op, app)
 
 	switch op.Type {
+	case model.OperationTypeAppCPUResize:
+		return s.executeAppCPUResize(ctx, op, app)
 	case model.OperationTypeImport:
 		return s.executeManagedImportOperation(ctx, op, app)
 	case model.OperationTypeFailover:

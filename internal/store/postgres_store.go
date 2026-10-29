@@ -3248,6 +3248,9 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if err := rebaseImportDeployConfiguration(&op, app, policy.ImportConfigBase); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
+	if err := reconcileAppCPUResizeSnapshot(&op, app); err != nil {
+		return model.Operation{}, operationCreateOutcome{}, err
+	}
 	if op.Type == model.OperationTypeImport || op.Type == model.OperationTypeDeploy {
 		op.ConfigBaseSpec = cloneAppSpec(&app.Spec)
 	}
@@ -3266,7 +3269,7 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 			return model.Operation{}, operationCreateOutcome{}, ErrConflict
 		}
 	}
-	if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize {
+	if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize && op.Type != model.OperationTypeAppCPUResize {
 		if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
@@ -3296,7 +3299,6 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if err := validateManagedPostgresActiveForOperation(app, op); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
-
 	switch op.Type {
 	case model.OperationTypeImport:
 		if op.DesiredSpec == nil || op.DesiredSource == nil {
@@ -3821,6 +3823,24 @@ WHERE app_id = $1
 				return model.Operation{}, operationCreateOutcome{}, ErrManagedPostgresImportInProgressConflict
 			}
 		}
+	case model.OperationTypeAppCPUResize:
+		var active bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND status IN ('pending','running','waiting-agent'))`, app.ID).Scan(&active); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if active {
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
+		}
+		rt, err := s.pgGetRuntimeTx(ctx, tx, app.Spec.RuntimeID, false)
+		if err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if rt.Type != model.RuntimeTypeManagedShared && rt.Type != model.RuntimeTypeManagedOwned {
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
+		}
+		if err := prepareAppCPUResizeOperation(app, &op); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
 	case model.OperationTypeDatabaseResize:
 		if _, err := s.pgValidateManagedPostgresResizeTargetTx(ctx, tx, &app, op.ServiceID); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
@@ -3896,6 +3916,15 @@ WHERE app_id = $1
 		nextPublicHourlyRateMicroCents,
 	); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
+	}
+	// Still under the app row lock: reject a new mutation before persistence,
+	// without replacing the existing actionable database validation errors.
+	var activeCPUResize bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type=$2 AND status IN ('pending','running','waiting-agent'))`, app.ID, model.OperationTypeAppCPUResize).Scan(&activeCPUResize); err != nil {
+		return model.Operation{}, operationCreateOutcome{}, err
+	}
+	if activeCPUResize {
+		return model.Operation{}, operationCreateOutcome{}, ErrConflict
 	}
 	op.ID = model.NewID("op")
 	op.Status = model.OperationStatusPending
@@ -4660,7 +4689,7 @@ func (s *Store) pgCompleteOperationGuarded(id, runtimeID, manifestPath, message 
 		}
 	}
 	immutableDesiredOperation := isManagedPostgresLifecycleOperationType(op.Type) ||
-		op.Type == model.OperationTypeDatabaseResize
+		op.Type == model.OperationTypeDatabaseResize || op.Type == model.OperationTypeAppCPUResize
 	if desiredSpec != nil && !immutableDesiredOperation {
 		op.DesiredSpec = cloneAppSpec(desiredSpec)
 	}
@@ -6426,6 +6455,8 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		// The exact runtime target is applied to the backing service in the same
 		// transaction. Do not change AppSpec, status, or timestamps.
 		return nil
+	case model.OperationTypeAppCPUResize:
+		return applyAppCPUResize(app, op)
 	default:
 		return ErrInvalidInput
 	}
@@ -6442,7 +6473,7 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 	if operationOnlyChangesRolloutConstraints(*app, *op) {
 		return nil
 	}
-	if isManagedPostgresServiceOperation(op.Type) {
+	if isManagedPostgresServiceOperation(op.Type) || op.Type == model.OperationTypeAppCPUResize {
 		return nil
 	}
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
@@ -6462,7 +6493,7 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 }
 
 func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
-	if isManagedPostgresServiceOperation(op.Type) {
+	if isManagedPostgresServiceOperation(op.Type) || op.Type == model.OperationTypeAppCPUResize {
 		return
 	}
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
@@ -6480,7 +6511,7 @@ func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 }
 
 func applyCanceledOperationToAppModel(app *model.App, op *model.Operation) {
-	if app == nil || isManagedPostgresServiceOperation(op.Type) || isDeletedApp(*app) {
+	if app == nil || isManagedPostgresServiceOperation(op.Type) || op.Type == model.OperationTypeAppCPUResize || isDeletedApp(*app) {
 		return
 	}
 	if !operationOnlyChangesRolloutConstraints(*app, *op) {

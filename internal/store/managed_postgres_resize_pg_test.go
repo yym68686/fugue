@@ -52,6 +52,7 @@ func TestPGCreateManagedPostgresResizePersistsNarrowIntent(t *testing.T) {
 	expectPGNoActiveAppDatabaseRestore(mock, appID)
 	expectPGRuntimeReservationAvailable(mock, "runtime_us")
 	expectPGLifecycleBillingAccrual(mock, now, tenantID, projectID, appID, serviceID)
+	expectPGNoActiveAppCPUResize(mock, appID)
 	mock.ExpectExec(`(?s)INSERT INTO fugue_operations`).
 		WithArgs(
 			sqlmock.AnyArg(), tenantID, model.OperationTypeDatabaseResize, model.OperationStatusPending,

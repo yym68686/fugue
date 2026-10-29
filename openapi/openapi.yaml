@@ -9102,7 +9102,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/AppResourceRecommendationApplyResponse"
         '202':
-          description: Deploy operation queued with recommended resources
+          description: Resource operation queued. Eligible CPU request changes use app-cpu-resize without replacing Pods; other changes use a deploy operation.
           content:
             application/json:
               schema:
@@ -23300,6 +23300,12 @@ components:
           format: int32
         resources:
           $ref: "#/components/schemas/ResourceSpec"
+        cpu_request_template_millicores:
+          type: integer
+          format: int64
+          minimum: 1
+          readOnly: true
+          description: Server-owned CPU request in the current immutable deployment template. When present, resources.cpu_millicores is the verified in-place runtime target. The next normal deployment uses that target and clears this snapshot.
         right_sizing:
           $ref: "#/components/schemas/AppRightSizingSpec"
         runtime_id:

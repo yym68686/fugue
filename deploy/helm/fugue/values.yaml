@@ -185,6 +185,7 @@ observability:
     extraEnv: []
 
 api:
+  appCPURequestResizeEnabled: false
   replicaCount: 2
   controlPlaneBackupCoordination:
     durationSeconds: 120
@@ -264,6 +265,7 @@ api:
       value: 1GiB
 
 controller:
+  appCPURequestResizeEnabled: false
   ownership: helm
   replicaCount: 2
   # Keep source builds reproducible and independently reversible from the

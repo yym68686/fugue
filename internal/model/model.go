@@ -167,6 +167,7 @@ const (
 
 	OperationTypeImport                   = "import"
 	OperationTypeDeploy                   = "deploy"
+	OperationTypeAppCPUResize             = "app-cpu-resize"
 	OperationTypeScale                    = "scale"
 	OperationTypeMigrate                  = "migrate"
 	OperationTypeFailover                 = "failover"
@@ -1772,32 +1773,35 @@ type EdgeTLSCertificate struct {
 }
 
 type AppSpec struct {
-	Image                         string                         `json:"image"`
-	Command                       []string                       `json:"command,omitempty"`
-	Args                          []string                       `json:"args,omitempty"`
-	Env                           map[string]string              `json:"env,omitempty"`
-	GeneratedEnv                  map[string]AppGeneratedEnvSpec `json:"generated_env,omitempty"`
-	SSH                           *AppSSHSpec                    `json:"ssh,omitempty"`
-	NetworkMode                   string                         `json:"network_mode,omitempty"`
-	NetworkPolicy                 *AppNetworkPolicySpec          `json:"network_policy,omitempty"`
-	WorkloadClass                 string                         `json:"workload_class,omitempty"`
-	Ports                         []int                          `json:"ports,omitempty"`
-	Replicas                      int                            `json:"replicas"`
-	Resources                     *ResourceSpec                  `json:"resources,omitempty"`
-	RightSizing                   *AppRightSizingSpec            `json:"right_sizing,omitempty"`
-	RuntimeID                     string                         `json:"runtime_id"`
-	Files                         []AppFile                      `json:"files,omitempty"`
-	Workspace                     *AppWorkspaceSpec              `json:"workspace,omitempty"`
-	Data                          *AppDataMaterializationSpec    `json:"data,omitempty"`
-	PersistentStorage             *AppPersistentStorageSpec      `json:"persistent_storage,omitempty"`
-	VolumeReplication             *AppVolumeReplicationSpec      `json:"volume_replication,omitempty"`
-	Postgres                      *AppPostgresSpec               `json:"postgres,omitempty"`
-	Failover                      *AppFailoverSpec               `json:"failover,omitempty"`
-	Continuity                    *AppContinuityPolicy           `json:"continuity,omitempty"`
-	ImageMirrorLimit              int                            `json:"image_mirror_limit,omitempty"`
-	TerminationGracePeriodSeconds int64                          `json:"termination_grace_period_seconds,omitempty"`
-	RestartToken                  string                         `json:"restart_token,omitempty"`
-	RolloutIntent                 string                         `json:"-"`
+	Image         string                         `json:"image"`
+	Command       []string                       `json:"command,omitempty"`
+	Args          []string                       `json:"args,omitempty"`
+	Env           map[string]string              `json:"env,omitempty"`
+	GeneratedEnv  map[string]AppGeneratedEnvSpec `json:"generated_env,omitempty"`
+	SSH           *AppSSHSpec                    `json:"ssh,omitempty"`
+	NetworkMode   string                         `json:"network_mode,omitempty"`
+	NetworkPolicy *AppNetworkPolicySpec          `json:"network_policy,omitempty"`
+	WorkloadClass string                         `json:"workload_class,omitempty"`
+	Ports         []int                          `json:"ports,omitempty"`
+	Replicas      int                            `json:"replicas"`
+	Resources     *ResourceSpec                  `json:"resources,omitempty"`
+	// CPURequestTemplateMilliCores preserves the serving template while Resources
+	// records the verified runtime target. Only the resize operation writes it.
+	CPURequestTemplateMilliCores  *int64                      `json:"cpu_request_template_millicores,omitempty"`
+	RightSizing                   *AppRightSizingSpec         `json:"right_sizing,omitempty"`
+	RuntimeID                     string                      `json:"runtime_id"`
+	Files                         []AppFile                   `json:"files,omitempty"`
+	Workspace                     *AppWorkspaceSpec           `json:"workspace,omitempty"`
+	Data                          *AppDataMaterializationSpec `json:"data,omitempty"`
+	PersistentStorage             *AppPersistentStorageSpec   `json:"persistent_storage,omitempty"`
+	VolumeReplication             *AppVolumeReplicationSpec   `json:"volume_replication,omitempty"`
+	Postgres                      *AppPostgresSpec            `json:"postgres,omitempty"`
+	Failover                      *AppFailoverSpec            `json:"failover,omitempty"`
+	Continuity                    *AppContinuityPolicy        `json:"continuity,omitempty"`
+	ImageMirrorLimit              int                         `json:"image_mirror_limit,omitempty"`
+	TerminationGracePeriodSeconds int64                       `json:"termination_grace_period_seconds,omitempty"`
+	RestartToken                  string                      `json:"restart_token,omitempty"`
+	RolloutIntent                 string                      `json:"-"`
 }
 
 type AppNetworkPolicySpec struct {

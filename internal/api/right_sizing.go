@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -159,6 +160,10 @@ func (s *Server) applyAppRightSizingRecommendation(
 	if err != nil {
 		return recommendation, nil, false, err
 	}
+	if recommendation.App.Ready && appCPURequestOnlyChange(app.Spec.Resources, recommendation.App.RequestTarget) && s.appCPUResizeEnabled(app) && !backingServiceRightSizingChange(app, recommendation) {
+		op, err := s.queueAppCPUResize(app, recommendation.App.RequestTarget.CPUMilliCores, actorType, actorID)
+		return recommendation, op, op == nil && err == nil, err
+	}
 	spec, source, err := s.recoverAppDeployBaseline(app)
 	if err != nil {
 		return recommendation, nil, false, err
@@ -221,9 +226,24 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	if err != nil {
 		return recommendation, nil, false, err
 	}
+	// Stage independent CPU request changes first. Memory/limit/backing-service
+	// suggestions remain recommendations and are evaluated on subsequent scans;
+	// they are never folded into an in-place mutation or silently marked applied.
+	cpuDecision := autoAppCPURequestChange(app.Spec.Resources, recommendation.App.RequestTarget)
+	if recommendation.App.Ready && cpuDecision.allowed && s.appCPUResizeEnabled(app) {
+		op, err := s.queueAppCPUResize(app, cpuDecision.resources.CPUMilliCores, model.ActorTypeSystem, cpuDecision.requestedByID)
+		if errors.Is(err, store.ErrConflict) {
+			s.logRightSizingDecision(app, "active_operation_exists", "in-place CPU resize deferred while another app operation is active", nil)
+			return recommendation, nil, true, nil
+		}
+		return recommendation, op, op == nil && err == nil, err
+	}
 	spec, source, err := s.recoverAppDeployBaseline(app)
 	if err != nil {
 		return recommendation, nil, false, err
+	}
+	if s.appCPUResizeEnabled(app) {
+		spec.Resources = model.CloneResourceSpec(app.Spec.Resources)
 	}
 	decision := autoRightSizingAppResourceChange(spec.Resources, recommendation.App.RequestTarget)
 	if !recommendation.App.Ready || !decision.allowed {
@@ -396,6 +416,7 @@ func (s *Server) autoRightSizingAdmission(app model.App, desired model.AppSpec, 
 	}
 	targetRuntimeID := strings.TrimSpace(desired.RuntimeID)
 	targetNodeName := ""
+	var nodeSelector map[string]string
 	if targetRuntimeID != "" && s.store != nil {
 		runtimeObj, runtimeErr := s.store.GetRuntime(targetRuntimeID)
 		if runtimeErr != nil {
@@ -404,6 +425,7 @@ func (s *Server) autoRightSizingAdmission(app model.App, desired model.AppSpec, 
 			}
 		} else {
 			targetNodeName = strings.TrimSpace(runtimeObj.ClusterNodeName)
+			nodeSelector = runtimepkg.SchedulingForRuntime(runtimeObj).NodeSelector
 		}
 	}
 	requiredCPUCapacity := maxInt64(0, resources.CPUMilliCores)
@@ -414,7 +436,14 @@ func (s *Server) autoRightSizingAdmission(app model.App, desired model.AppSpec, 
 	foundReadyNode := false
 	foundCPUHeadroom := false
 	for _, snapshot := range snapshots {
-		if !rightSizingCapacitySnapshotMatchesRuntime(snapshot, targetRuntimeID, targetNodeName) {
+		matches := rightSizingCapacitySnapshotMatchesRuntime(snapshot, targetRuntimeID, targetNodeName)
+		if len(nodeSelector) > 0 {
+			matches = rightSizingSnapshotMatchesSelector(snapshot, nodeSelector)
+			if targetNodeName != "" {
+				matches = matches && strings.EqualFold(snapshot.node.Name, targetNodeName)
+			}
+		}
+		if !matches {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(snapshot.node.Status), "ready") || snapshot.node.CPU == nil || snapshot.node.Memory == nil {
@@ -436,6 +465,9 @@ func (s *Server) autoRightSizingAdmission(app model.App, desired model.AppSpec, 
 	if foundReadyNode && !foundCPUHeadroom {
 		return "", fmt.Errorf("no ready cluster node preserves %.0f%% actual CPU headroom for the right-sizing surge capacity (%dm)", rightSizingRolloutCPUHeadroomRatio*100, requiredCPUCapacity)
 	}
+	if !foundReadyNode {
+		return "", fmt.Errorf("no ready cluster node matches the target runtime placement constraints")
+	}
 	return "", fmt.Errorf("no ready cluster node has %dMi schedulable memory for the right-sizing surge pod", requiredMemory/(1024*1024))
 }
 
@@ -456,7 +488,7 @@ func (s *Server) appHasRecentAutoRightSizingFailure(app model.App, desired model
 		return false, err
 	}
 	for _, op := range ops {
-		if op.Type != model.OperationTypeDeploy || op.Status != model.OperationStatusFailed ||
+		if (op.Type != model.OperationTypeDeploy && op.Type != model.OperationTypeAppCPUResize) || op.Status != model.OperationStatusFailed ||
 			op.RequestedByType != model.ActorTypeSystem ||
 			(op.RequestedByID != model.OperationRequestedByRightSizing && op.RequestedByID != model.OperationRequestedByRightSizingDownscale) {
 			continue

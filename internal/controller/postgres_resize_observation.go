@@ -66,11 +66,12 @@ type kubeResizePod struct {
 		Phase              string             `json:"phase,omitempty"`
 		Conditions         []kubePodCondition `json:"conditions,omitempty"`
 		ContainerStatuses  []struct {
-			Name         string                    `json:"name"`
-			Ready        bool                      `json:"ready,omitempty"`
-			RestartCount int                       `json:"restartCount,omitempty"`
-			Resources    *kubeResourceRequirements `json:"resources,omitempty"`
-			State        struct {
+			Name               string                    `json:"name"`
+			Ready              bool                      `json:"ready,omitempty"`
+			RestartCount       int                       `json:"restartCount,omitempty"`
+			Resources          *kubeResourceRequirements `json:"resources,omitempty"`
+			AllocatedResources map[string]string         `json:"allocatedResources,omitempty"`
+			State              struct {
 				Running *struct {
 					StartedAt string `json:"startedAt,omitempty"`
 				} `json:"running,omitempty"`
@@ -107,6 +108,7 @@ type managedPostgresResizeObservation struct {
 	ContainerStartedAt string
 	DesiredResources   kubeResourceRequirements
 	ActualResources    *kubeResourceRequirements
+	AllocatedResources map[string]string
 	ResizePolicy       []kubeResizePolicy
 	Containers         []kubeResizeContainerSpec
 	InitContainers     []kubeResizeContainerSpec
@@ -178,6 +180,7 @@ func observeManagedPostgresResize(pod kubeResizePod, containerName string) (mana
 		foundStatus = true
 		out.ContainerReady = status.Ready
 		out.RestartCount = status.RestartCount
+		out.AllocatedResources = cloneKubeResourceStringMap(status.AllocatedResources)
 		if status.State.Running != nil {
 			out.ContainerStartedAt = strings.TrimSpace(status.State.Running.StartedAt)
 		}
