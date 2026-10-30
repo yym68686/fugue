@@ -15,6 +15,8 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 func appResizeTestPod(t *testing.T) kubeResizePod {
@@ -81,9 +83,9 @@ func TestAppCPUResizeSafetyAndConvergence(t *testing.T) {
 }
 
 func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(t *testing.T) {
-	for _, scenario := range []string{"normal", "lost-response", "restart-compensation", "deadline-compensation"} {
+	for _, scenario := range []string{"normal", "legacy", "lost-response", "legacy-lost-response", "restart-compensation", "deadline-compensation"} {
 		t.Run(scenario, func(t *testing.T) {
-			lostResponse := scenario != "normal"
+			lostResponse := strings.Contains(scenario, "lost-response") || strings.HasSuffix(scenario, "compensation")
 			s := store.New(t.TempDir() + "/state.json")
 			if err := s.Init(); err != nil {
 				t.Fatal(err)
@@ -121,6 +123,9 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 			workload := runtime.RuntimeAppResourceName(app)
 			pod := appResizeTestPod(t)
 			pod.Metadata.Labels = map[string]string{runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue, runtime.FugueLabelTenantID: tenant.ID, runtime.FugueLabelAppID: app.ID, runtime.FugueLabelAppWorkload: workload}
+			if strings.HasPrefix(scenario, "legacy") {
+				delete(pod.Metadata.Labels, runtime.FugueLabelAppWorkload)
+			}
 			controller := true
 			pod.Metadata.OwnerReferences = []kubeResizeOwnerReference{{Kind: "ReplicaSet", Name: "service-rs", UID: "rs-one", Controller: &controller}}
 			patches := 0
@@ -141,7 +146,15 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/replicasets/"):
 					json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"uid": "rs-one", "ownerReferences": []map[string]any{{"kind": "Deployment", "name": workload, "uid": "deployment-one", "controller": true}}}})
 				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pods"):
-					json.NewEncoder(w).Encode(map[string]any{"items": []kubeResizePod{pod}})
+					selector, err := labels.Parse(r.URL.Query().Get("labelSelector"))
+					if err != nil {
+						t.Error(err)
+					}
+					items := []kubeResizePod{}
+					if selector.Matches(labels.Set(pod.Metadata.Labels)) {
+						items = append(items, pod)
+					}
+					json.NewEncoder(w).Encode(map[string]any{"items": items})
 				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pods/"+pod.Metadata.Name):
 					json.NewEncoder(w).Encode(pod)
 				case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/resize"):
@@ -239,6 +252,104 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 			actual, _ := s.GetApp(app.ID)
 			if actual.Spec.Resources.CPUMilliCores != 75 || !reflect.DeepEqual(actual.Status, app.Status) {
 				t.Fatal("resize lost serving state")
+			}
+		})
+	}
+}
+
+func TestAppCPUResizeLegacyPodsRequireVerifiedDeploymentOwnership(t *testing.T) {
+	for _, scenario := range []string{"mixed-revisions", "wrong-tenant", "wrong-app", "foreign-manager", "replaced-replicaset", "replaced-deployment", "replicaset-read-failed", "missing-deployment"} {
+		t.Run(scenario, func(t *testing.T) {
+			app := model.App{ID: "app_service", TenantID: "tenant_service", Name: "service"}
+			workload := runtime.RuntimeAppResourceName(app)
+			controller := true
+			makePod := func(name, rs, workloadLabel string) kubeResizePod {
+				pod := appResizeTestPod(t)
+				pod.Metadata.Name = name
+				pod.Metadata.Labels = map[string]string{runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue, runtime.FugueLabelTenantID: app.TenantID, runtime.FugueLabelAppID: app.ID}
+				if workloadLabel != "" {
+					pod.Metadata.Labels[runtime.FugueLabelAppWorkload] = workloadLabel
+				}
+				if rs != "" {
+					pod.Metadata.OwnerReferences = []kubeResizeOwnerReference{{Kind: "ReplicaSet", Name: rs, UID: rs + "-uid", Controller: &controller}}
+				}
+				return pod
+			}
+			modern := makePod("modern-z", "serving-rs", workload)
+			legacy := makePod("legacy-a", "serving-rs", "")
+			switch scenario {
+			case "wrong-tenant":
+				legacy.Metadata.Labels[runtime.FugueLabelTenantID] = "tenant_other"
+			case "wrong-app":
+				legacy.Metadata.Labels[runtime.FugueLabelAppID] = "app_other"
+			case "foreign-manager":
+				delete(legacy.Metadata.Labels, runtime.FugueLabelManagedBy)
+			}
+			// A candidate may also predate the workload label. Sharing app labels
+			// cannot authorize resizing it, nor can a missing owner reference.
+			candidate := makePod("legacy-candidate", "candidate-rs", "")
+			pods := []kubeResizePod{modern, legacy, candidate, makePod("candidate", "candidate-rs", workload+"-candidate"), makePod("orphan", "", "")}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("pod discovery mutated Kubernetes: %s %s", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/pods"):
+					json.NewEncoder(w).Encode(map[string]any{"items": pods})
+				case strings.Contains(r.URL.Path, "/deployments/"):
+					if scenario == "missing-deployment" {
+						http.NotFound(w, r)
+						return
+					}
+					uid := "deployment-one"
+					if scenario == "replaced-deployment" {
+						uid = "deployment-two"
+					}
+					json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": workload, "uid": uid}})
+				case strings.Contains(r.URL.Path, "/replicasets/"):
+					if scenario == "replicaset-read-failed" {
+						http.Error(w, "unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					rs := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+					uid, ownerName := rs+"-uid", workload
+					if scenario == "replaced-replicaset" {
+						uid = "replaced-rs-uid"
+					}
+					if rs == "candidate-rs" {
+						ownerName += "-candidate"
+					}
+					json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"uid": uid, "ownerReferences": []kubeResizeOwnerReference{{Kind: "Deployment", Name: ownerName, UID: "deployment-one", Controller: &controller}}}})
+				default:
+					t.Errorf("unexpected Kubernetes read %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			client := &kubeClient{baseURL: server.URL, client: server.Client()}
+			selected, err := listAppCPUResizePods(t.Context(), client, app, workload)
+			switch scenario {
+			case "mixed-revisions":
+				if err != nil || len(selected) != 2 || selected[0].Metadata.Name != "legacy-a" || selected[1].Metadata.Name != "modern-z" {
+					t.Fatalf("serving cohort was not isolated: pods=%+v err=%v", selected, err)
+				}
+				for _, pod := range selected {
+					if err := verifyAppCPUResizeOwner(t.Context(), client, app, pod, workload, "deployment-one"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := verifyAppCPUResizeOwner(t.Context(), client, app, candidate, workload, "deployment-one"); err == nil {
+					t.Fatal("unlabeled candidate passed serving ownership verification")
+				}
+			case "replaced-deployment":
+				if err != nil || len(selected) != 0 {
+					t.Fatalf("previous Deployment UID accepted: pods=%+v err=%v", selected, err)
+				}
+			default:
+				if err == nil {
+					t.Fatal("unverified ownership accepted", scenario)
+				}
 			}
 		})
 	}

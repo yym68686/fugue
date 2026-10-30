@@ -449,7 +449,10 @@ func appCPUResizeWorkload(ctx context.Context, c *kubeClient, app model.App) (st
 }
 
 func listAppCPUResizePods(ctx context.Context, c *kubeClient, app model.App, workload string) ([]kubeResizePod, error) {
-	query := url.Values{"labelSelector": {runtime.FugueLabelAppID + "=" + app.ID + "," + runtime.FugueLabelAppWorkload + "=" + workload}}
+	// Older serving Pods predate the workload label. Select by app identity,
+	// then prove the exact Deployment owner instead of rewriting their template
+	// or admitting other revisions of the same app into the resize cohort.
+	query := url.Values{"labelSelector": {runtime.FugueLabelAppID + "=" + app.ID}}
 	var list struct {
 		Items []kubeResizePod `json:"items"`
 	}
@@ -457,35 +460,77 @@ func listAppCPUResizePods(ctx context.Context, c *kubeClient, app model.App, wor
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Metadata.Name < list.Items[j].Metadata.Name })
-	return list.Items, nil
+	deployment, found, err := c.getDeployment(ctx, runtime.NamespaceForTenant(app.TenantID), workload)
+	if err != nil {
+		return nil, err
+	}
+	if !found || deployment.Metadata.UID == "" {
+		return nil, fmt.Errorf("app CPU resize requires an identified serving deployment")
+	}
+	pods := make([]kubeResizePod, 0, len(list.Items))
+	for _, pod := range list.Items {
+		if label := pod.Metadata.Labels[runtime.FugueLabelAppWorkload]; label != "" && label != workload {
+			continue
+		}
+		if !appCPUResizePodLabelsMatch(app, pod, workload) {
+			return nil, fmt.Errorf("Pod ownership labels mismatch")
+		}
+		owned, err := appCPUResizePodOwnedByDeployment(ctx, c, app, pod, workload, deployment.Metadata.UID)
+		if err != nil {
+			return nil, err
+		}
+		if owned {
+			pods = append(pods, pod)
+		}
+	}
+	sort.Slice(pods, func(i, j int) bool { return pods[i].Metadata.Name < pods[j].Metadata.Name })
+	return pods, nil
 }
 
-func verifyAppCPUResizeOwner(ctx context.Context, c *kubeClient, app model.App, pod kubeResizePod, workload, uid string) error {
-	if pod.Metadata.Labels[runtime.FugueLabelAppID] != app.ID || pod.Metadata.Labels[runtime.FugueLabelTenantID] != app.TenantID || pod.Metadata.Labels[runtime.FugueLabelManagedBy] != runtime.FugueLabelManagedByValue || pod.Metadata.Labels[runtime.FugueLabelAppWorkload] != workload {
-		return fmt.Errorf("Pod ownership labels mismatch")
-	}
+func appCPUResizePodLabelsMatch(app model.App, pod kubeResizePod, workload string) bool {
+	label := pod.Metadata.Labels[runtime.FugueLabelAppWorkload]
+	return pod.Metadata.Labels[runtime.FugueLabelAppID] == app.ID &&
+		pod.Metadata.Labels[runtime.FugueLabelTenantID] == app.TenantID &&
+		pod.Metadata.Labels[runtime.FugueLabelManagedBy] == runtime.FugueLabelManagedByValue &&
+		(label == "" || label == workload)
+}
+
+func appCPUResizePodOwnedByDeployment(ctx context.Context, c *kubeClient, app model.App, pod kubeResizePod, workload, uid string) (bool, error) {
 	for _, owner := range pod.Metadata.OwnerReferences {
 		if owner.Controller == nil || !*owner.Controller || owner.Kind != "ReplicaSet" || owner.UID == "" {
 			continue
 		}
 		rs, found, err := c.getRawObject(ctx, "/apis/apps/v1/namespaces/"+runtime.NamespaceForTenant(app.TenantID)+"/replicasets/"+url.PathEscape(owner.Name))
 		if err != nil {
-			return err
+			return false, err
 		}
 		if !found || objectStringField(objectMapField(rs, "metadata"), "uid") != owner.UID {
-			return fmt.Errorf("ReplicaSet ownership mismatch")
+			return false, fmt.Errorf("ReplicaSet ownership mismatch")
 		}
 		raw, _ := json.Marshal(nestedObjectValue(rs, "metadata", "ownerReferences"))
 		var refs []kubeResizeOwnerReference
 		if err := json.Unmarshal(raw, &refs); err != nil {
-			return err
+			return false, err
 		}
 		for _, ref := range refs {
 			if ref.Controller != nil && *ref.Controller && ref.Kind == "Deployment" && ref.Name == workload && ref.UID == uid {
-				return nil
+				return true, nil
 			}
 		}
+	}
+	return false, nil
+}
+
+func verifyAppCPUResizeOwner(ctx context.Context, c *kubeClient, app model.App, pod kubeResizePod, workload, uid string) error {
+	if !appCPUResizePodLabelsMatch(app, pod, workload) {
+		return fmt.Errorf("Pod ownership labels mismatch")
+	}
+	owned, err := appCPUResizePodOwnedByDeployment(ctx, c, app, pod, workload, uid)
+	if err != nil {
+		return err
+	}
+	if owned {
+		return nil
 	}
 	return fmt.Errorf("Pod is not controlled by the verified app deployment")
 }
