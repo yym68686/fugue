@@ -182,5 +182,8 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigrateEdgeInstanceFencing(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate edge-instance fencing schema: %w", err)
 	}
+	if err := schemamigrate.MigrateAppMail(ctx, databaseURL); err != nil {
+		return err
+	}
 	return nil
 }
