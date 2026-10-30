@@ -92,13 +92,16 @@ func TestMailRelayDNSIsSpecificToExactActiveApplication(t *testing.T) {
 	b := mailDNSFixture()
 	otherApp := b.Apps[0]
 	otherApp.ID = "other"
+	otherApp.TenantID, otherApp.ProjectID = "peer-tenant", "peer-project"
 	otherApp.Route = &model.AppRoute{Hostname: "other.apps.example.test"}
 	b.Apps = append(b.Apps, otherApp)
 	otherBinding := b.AppMailBindings[0]
 	otherBinding.AppID, otherBinding.Hostname = otherApp.ID, otherApp.Route.Hostname
+	otherBinding.TenantID, otherBinding.ProjectID = otherApp.TenantID, otherApp.ProjectID
 	b.AppMailBindings = append(b.AppMailBindings, otherBinding)
 	b.MailPlatformConfig.AppDNSRecords = map[string][]model.AppMailDNSRecord{
 		"app":     {{Name: "relay._domainkey", Type: "TXT", Values: []string{"v=DKIM1; p=domain-specific-public-key"}, TTL: 300}},
+		"other":   {{Name: "relay._domainkey", Type: "TXT", Values: []string{"v=DKIM1; p=other-domain-public-key"}, TTL: 300}},
 		"unbound": {{Name: "relay._domainkey", Type: "TXT", Values: []string{"v=DKIM1; p=unbound-public-key"}, TTL: 300}},
 	}
 	r := platformIntentProjectionResponse{}
@@ -109,18 +112,47 @@ func TestMailRelayDNSIsSpecificToExactActiveApplication(t *testing.T) {
 	for _, record := range r.Intent.DNS {
 		if strings.Contains(record.Hostname, "_domainkey") {
 			count++
-			if record.Hostname != "relay._domainkey.app.apps.example.test" || record.AppID != "app" {
+			validAppRecord := record.AppID == "app" && record.Hostname == "relay._domainkey.app.apps.example.test"
+			validPeerRecord := record.AppID == "other" && record.Hostname == "relay._domainkey.other.apps.example.test"
+			if !validAppRecord && !validPeerRecord {
 				t.Fatal("domain-specific relay key leaked to another app", record)
 			}
 		}
 	}
-	if count != 1 {
-		t.Fatal("missing app-specific DKIM", r.Intent.DNS)
+	if count != 2 {
+		t.Fatal("missing app-specific DKIM records", r.Intent.DNS)
 	}
-	b.AppMailBindings[0].State = "revoked"
-	r = platformIntentProjectionResponse{}
-	if err := projectAppMailDNS(&r, b, "apps.example.test"); err != nil || len(r.Intent.DNS) != 3 {
-		t.Fatal("revoked app retained relay DNS", r.Intent.DNS, err)
+	for _, lifecycle := range []string{"revoked", "deleted", "missing", "transferred"} {
+		t.Run(lifecycle, func(t *testing.T) {
+			changed := b
+			changed.Apps = slices.Clone(b.Apps)
+			changed.AppMailBindings = slices.Clone(b.AppMailBindings)
+			switch lifecycle {
+			case "revoked":
+				changed.AppMailBindings[0].State = "revoked"
+			case "deleted":
+				changed.Apps[0].Status.Phase = "deleted"
+			case "missing":
+				changed.Apps = changed.Apps[1:]
+			case "transferred":
+				changed.Apps[0].TenantID = "new-tenant"
+			}
+			r := platformIntentProjectionResponse{}
+			if err := projectAppMailDNS(&r, changed, "apps.example.test"); err != nil {
+				t.Fatal("project application DNS", err)
+			}
+			for _, record := range r.Intent.DNS {
+				if record.AppID != "other" || record.TenantID != "peer-tenant" {
+					t.Fatal("ineligible application retained mail DNS", record)
+				}
+			}
+			peerDKIM := slices.ContainsFunc(r.Intent.DNS, func(record platformconfig.DNSIntent) bool {
+				return record.Hostname == "relay._domainkey.other.apps.example.test" && slices.Equal(record.Values, []string{"v=DKIM1; p=other-domain-public-key"})
+			})
+			if len(r.Intent.DNS) != 4 || !peerDKIM {
+				t.Fatal("lifecycle cleanup changed another tenant's mail DNS", r.Intent.DNS)
+			}
+		})
 	}
 }
 
