@@ -62,6 +62,15 @@ func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.O
 		}
 		return resumed, err
 	}
+	scheduling := runtime.SchedulingConstraints{}
+	if len(schedulingValues) > 0 {
+		scheduling = schedulingValues[0]
+	}
+	if s.safeRolloutCandidateChangesPodTemplate(previous, candidate, scheduling) {
+		if err := s.checkSafeRolloutCandidateAdmission(ctx, candidate, ""); err != nil {
+			return nil, err
+		}
+	}
 	principal := model.Principal{
 		TenantID:  candidate.TenantID,
 		ActorType: model.ActorTypeSystem,
@@ -70,10 +79,6 @@ func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.O
 	stable, err := s.ensureSafeRolloutCanonicalStableBaseline(ctx, op, previous, principal)
 	if err != nil {
 		return nil, fmt.Errorf("ensure canonical stable release before safe rollout: %w", err)
-	}
-	scheduling := runtime.SchedulingConstraints{}
-	if len(schedulingValues) > 0 {
-		scheduling = schedulingValues[0]
 	}
 	if !s.safeRolloutCandidateChangesPodTemplate(previous, candidate, scheduling) {
 		s.recordSafeRolloutReleaseStep(op, candidate, "candidate_create", model.ReleaseStepStatusSkipped, "safe rollout skipped: candidate pod template unchanged", stable.ID, map[string]any{
@@ -1307,6 +1312,9 @@ func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op
 	objects = filterSafeRolloutCandidateRevisionObjects(objects, revision)
 	if state.Resumed && state.Candidate.RevisionWorkload != nil {
 		return s.verifyResumedSafeRolloutWorkload(ctx, client, op, state, objects)
+	}
+	if err := s.checkSafeRolloutCandidateAdmission(ctx, app, state.Candidate.ID); err != nil {
+		return err
 	}
 	// Persist the independent identity before creating Kubernetes objects so a
 	// concurrent ordinary reconciliation cannot mistake a starting revision for
