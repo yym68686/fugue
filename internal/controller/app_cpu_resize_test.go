@@ -141,6 +141,8 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 					json.NewEncoder(w).Encode(review)
 				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/services/"):
 					json.NewEncoder(w).Encode(map[string]any{"spec": map[string]any{"selector": pod.Metadata.Labels}})
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/deployments"):
+					json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
 				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/deployments/"):
 					json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": workload, "uid": "deployment-one", "generation": 1}, "spec": map[string]any{"replicas": 1}, "status": map[string]any{"observedGeneration": 1, "readyReplicas": 1}})
 				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/replicasets/"):

@@ -75,8 +75,26 @@ func TestAppCPUResizeAutoStagesCPUWithoutChangingMemoryOrLimits(t *testing.T) {
 	if !decision.allowed || decision.resources.CPUMilliCores != 25 || decision.resources.MemoryMebibytes != 256 || decision.resources.MemoryLimitMebibytes != 512 {
 		t.Fatal("CPU stage lost independent resource intent", decision)
 	}
-	target.CPUMilliCores = 90
+	target.CPUMilliCores = 96
 	if autoAppCPURequestChange(current, target).allowed {
 		t.Fatal("CPU stage bypassed the change threshold")
+	}
+}
+
+func TestAppCPUResizeAutoUsesFivePercentAndFiveMillicoreThresholds(t *testing.T) {
+	for _, test := range []struct {
+		current, target int64
+		allowed         bool
+	}{
+		{120, 100, true}, {100, 95, true}, {100, 105, true},
+		{100, 96, false}, {100, 104, false},
+		{200, 191, false}, {200, 209, false},
+		{200, 190, true}, {200, 210, true},
+		{10, 6, false}, {10, 5, true},
+	} {
+		decision := autoAppCPURequestChange(&model.ResourceSpec{CPUMilliCores: test.current}, &model.ResourceSpec{CPUMilliCores: test.target})
+		if decision.allowed != test.allowed {
+			t.Fatalf("%dm -> %dm allowed=%v, want %v", test.current, test.target, decision.allowed, test.allowed)
+		}
 	}
 }

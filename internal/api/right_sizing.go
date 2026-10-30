@@ -28,11 +28,11 @@ const (
 	rightSizingAutoDownscaleRequestedByID = model.OperationRequestedByRightSizingDownscale
 	rightSizingAutoApplyMinCPUIncrease    = int64(5)
 	rightSizingAutoApplyMinMemIncrease    = int64(128)
-	rightSizingAutoApplyMinCPUIncreaseR   = 0.20
+	rightSizingAutoApplyMinCPUIncreaseR   = 0.05
 	rightSizingAutoApplyMinMemIncreaseR   = 0.20
 	rightSizingAutoApplyMinCPUDecrease    = int64(5)
 	rightSizingAutoApplyMinMemDecrease    = int64(256)
-	rightSizingAutoApplyMinCPUDecreaseR   = 0.20
+	rightSizingAutoApplyMinCPUDecreaseR   = 0.05
 	rightSizingAutoApplyMinMemDecreaseR   = 0.20
 	rightSizingAutoDownscaleStepRatio     = 0.75
 	rightSizingAutoDownscaleOOMWindow     = 48 * time.Hour

@@ -50,6 +50,17 @@ func (s *Service) reconcileAppCPUResizeTarget(ctx context.Context, client *kubeC
 			return err == nil, err
 		}
 	}
+	additional, _, err := additionalAppCPUResizeBaselines(ctx, client, app, workload, app.Spec.Resources.CPUMilliCores)
+	if err != nil {
+		return false, err
+	}
+	if len(additional) > 0 {
+		_, err := s.Store.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, RequestedByType: model.ActorTypeSystem, RequestedByID: "app-cpu-resize-reconcile", DesiredSpec: &app.Spec}, app.Spec)
+		if errors.Is(err, store.ErrConflict) {
+			return true, nil
+		}
+		return err == nil, err
+	}
 	return false, nil
 }
 
@@ -66,6 +77,11 @@ type appCPUResizePodBaseline struct {
 	StartedAt string                   `json:"started_at"`
 	Resources kubeResourceRequirements `json:"resources"`
 	Pending   bool                     `json:"pending,omitempty"`
+	// Empty workload fields identify serving Pods in journals from older controllers.
+	Workload      string `json:"workload,omitempty"`
+	DeploymentUID string `json:"deployment_uid,omitempty"`
+	Generation    int64  `json:"generation,omitempty"`
+	NotReady      bool   `json:"not_ready,omitempty"`
 }
 
 type appCPUResizeJournal struct {
@@ -76,6 +92,7 @@ type appCPUResizeJournal struct {
 	Generation    int64                     `json:"generation"`
 	CPU           int64                     `json:"cpu_millicores"`
 	Pods          []appCPUResizePodBaseline `json:"pods"`
+	Deferred      []appCPUResizeDeferredPod `json:"deferred,omitempty"`
 }
 
 func (s *Service) executeAppCPUResize(ctx context.Context, op model.Operation, app model.App) (result error) {
@@ -145,12 +162,18 @@ func (s *Service) executeAppCPUResize(ctx context.Context, op model.Operation, a
 			}
 			journal.Pods = append(journal.Pods, appCPUResizePodBaseline{Name: ob.PodName, UID: ob.PodUID, Node: ob.NodeName, Restarts: ob.RestartCount, StartedAt: ob.ContainerStartedAt, Resources: ob.DesiredResources, Pending: pending})
 		}
+		additional, deferred, err := additionalAppCPUResizeBaselines(ctx, client, app, workload, journal.CPU)
+		if err != nil {
+			return err
+		}
+		journal.Pods = append(journal.Pods, additional...)
+		journal.Deferred = deferred
 		if err := s.recordAppCPUResizeEvidence(op, app, appCPUResizePreflight, "preflight verified", journal); err != nil {
 			return err
 		}
 		recorded = true
 	}
-	if journal.CPU != op.DesiredSpec.Resources.CPUMilliCores || len(journal.Pods) != app.Spec.Replicas || journal.Workload == "" {
+	if journal.CPU != op.DesiredSpec.Resources.CPUMilliCores || appCPUResizeServingPodCount(journal) != app.Spec.Replicas || journal.Workload == "" {
 		return fmt.Errorf("invalid persisted CPU resize journal")
 	}
 	// Abort is also journaled before mutation. A replacement or a persistently
@@ -177,7 +200,7 @@ func (s *Service) executeAppCPUResize(ctx context.Context, op model.Operation, a
 	if err := s.recordAppCPUResizeEvidence(op, app, "app_cpu_resize_verified", "CPU request applied without replacing or restarting Pods", journal); err != nil {
 		return fmt.Errorf("%w: %v", errAppCPUResizeUnsettled, err)
 	}
-	_, err = s.Store.CompleteManagedOperationGuarded(op, &app, "", "CPU request resized in place; Pod identities, startup times, readiness and allocated/actual resources verified", nil, nil, nil)
+	_, err = s.Store.CompleteManagedOperationGuarded(op, &app, "", fmt.Sprintf("CPU request target verified in place; %d serving/revision Pods journaled, %d revision Pods deferred; removed revisions excluded", len(journal.Pods), len(journal.Deferred)), nil, nil, nil)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errAppCPUResizeUnsettled, err)
 	}
@@ -186,15 +209,19 @@ func (s *Service) executeAppCPUResize(ctx context.Context, op model.Operation, a
 
 func (s *Service) convergeAppCPUResize(ctx context.Context, client *kubeClient, op model.Operation, app model.App, container string, journal appCPUResizeJournal) error {
 	ns := runtime.NamespaceForTenant(app.TenantID)
+	applyingRecorded := false
 	for _, baseline := range journal.Pods {
 		if err := s.ensureManagedPostgresLifecycleOperationOwned(op); err != nil {
 			return err
 		}
-		pod, found, err := client.getPodResizeState(ctx, ns, baseline.Name)
+		pod, found, err := appCPUResizeBaselinePod(ctx, client, app, journal, baseline)
 		if err != nil {
 			return err
 		}
 		if !found {
+			if baseline.Workload != "" {
+				continue // Independent retirement/replacement may remove a revision Pod.
+			}
 			return fmt.Errorf("%w: Pod %s disappeared", errAppCPUResizeDrift, baseline.Name)
 		}
 		ob, err := observeAppCPUResizePod(pod, container)
@@ -204,7 +231,8 @@ func (s *Service) convergeAppCPUResize(ctx context.Context, client *kubeClient, 
 		if err := validateAppCPUResizeIdentity(ob, baseline); err != nil {
 			return err
 		}
-		if err := verifyAppCPUResizeOwner(ctx, client, app, pod, journal.Workload, journal.DeploymentUID); err != nil {
+		workload, uid := appCPUResizeBaselineOwner(journal, baseline)
+		if err := verifyAppCPUResizeOwner(ctx, client, app, pod, workload, uid); err != nil {
 			return err
 		}
 		target := cloneKubeResourceRequirements(baseline.Resources)
@@ -213,11 +241,14 @@ func (s *Service) convergeAppCPUResize(ctx context.Context, client *kubeClient, 
 			return fmt.Errorf("Pod resources changed outside the CPU request operation")
 		}
 		if !resizeQuantitiesEqual(ob.DesiredResources.Requests["cpu"], target.Requests["cpu"]) {
-			if err := assessAppCPURequestResize(ob, journal.CPU, baseline.Pending); err != nil {
+			if err := assessAppCPUResizeBaseline(ob, journal.CPU, baseline); err != nil {
 				return err
 			}
-			if err := s.recordAppCPUResizeEvidence(op, app, "app_cpu_resize_applying", "applying CPU request through pods/resize", journal); err != nil {
-				return err
+			if !applyingRecorded {
+				if err := s.recordAppCPUResizeEvidence(op, app, "app_cpu_resize_applying", "applying CPU request through pods/resize", journal); err != nil {
+					return err
+				}
+				applyingRecorded = true
 			}
 			if err := s.ensureManagedPostgresLifecycleOperationOwned(op); err != nil {
 				return err
@@ -256,22 +287,32 @@ func (s *Service) convergeAppCPUResize(ctx context.Context, client *kubeClient, 
 		if err != nil {
 			return err
 		}
-		if len(pods) != len(journal.Pods) {
+		if len(pods) != appCPUResizeServingPodCount(journal) {
 			return fmt.Errorf("%w: replica set changed during CPU resize", errAppCPUResizeDrift)
 		}
 		converged := true
-		for i, pod := range pods {
+		for _, baseline := range journal.Pods {
+			pod, found, err := appCPUResizeBaselinePod(call, client, app, journal, baseline)
+			if err != nil {
+				return err
+			}
+			if !found && baseline.Workload != "" {
+				continue
+			}
+			if !found {
+				return fmt.Errorf("%w: serving Pod disappeared", errAppCPUResizeDrift)
+			}
 			ob, err := observeAppCPUResizePod(pod, container)
 			if err != nil {
 				return err
 			}
-			if err := validateAppCPUResizeIdentity(ob, journal.Pods[i]); err != nil {
+			if err := validateAppCPUResizeIdentity(ob, baseline); err != nil {
 				return err
 			}
-			if !appCPUResizeEnvelopeMatches(ob.DesiredResources, journal.Pods[i].Resources, journal.CPU) {
+			if !appCPUResizeEnvelopeMatches(ob.DesiredResources, baseline.Resources, journal.CPU) {
 				return fmt.Errorf("non-CPU resources changed during resize")
 			}
-			if !appCPURequestResizeConverged(ob, journal.CPU) {
+			if !appCPUResizeBaselineConverged(ob, baseline, journal.CPU) {
 				converged = false
 			}
 		}
@@ -619,7 +660,7 @@ func (s *Service) abortAppCPUResize(ctx context.Context, client *kubeClient, op 
 		if err != nil {
 			return err
 		}
-		if !appCPURequestResizeConverged(ob, cpu.MilliValue()) {
+		if !appCPUResizeBaselineConverged(ob, baseline, cpu.MilliValue()) {
 			return fmt.Errorf("waiting for compensation to converge")
 		}
 	}

@@ -30,12 +30,13 @@ type kubeObjectList struct {
 
 type kubeDeployment struct {
 	Metadata struct {
-		UID             string            `json:"uid,omitempty"`
-		Name            string            `json:"name"`
-		Namespace       string            `json:"namespace,omitempty"`
-		ResourceVersion string            `json:"resourceVersion,omitempty"`
-		Generation      int64             `json:"generation,omitempty"`
-		Annotations     map[string]string `json:"annotations,omitempty"`
+		UID               string            `json:"uid,omitempty"`
+		Name              string            `json:"name"`
+		Namespace         string            `json:"namespace,omitempty"`
+		ResourceVersion   string            `json:"resourceVersion,omitempty"`
+		Generation        int64             `json:"generation,omitempty"`
+		DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+		Annotations       map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		Replicas *int `json:"replicas,omitempty"`

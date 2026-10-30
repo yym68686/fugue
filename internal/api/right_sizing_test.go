@@ -980,11 +980,11 @@ func TestAutoRightSizingSmallCPURequestIncreaseUsesGuaranteeHysteresis(t *testin
 func TestAutoRightSizingLowCPUDownscaleKeepsRatioHysteresis(t *testing.T) {
 	t.Parallel()
 
-	current := &model.ResourceSpec{CPUMilliCores: 30, MemoryMebibytes: 128}
-	recommended := &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 128}
+	current := &model.ResourceSpec{CPUMilliCores: 200, MemoryMebibytes: 128}
+	recommended := &model.ResourceSpec{CPUMilliCores: 195, MemoryMebibytes: 128}
 	decision := autoRightSizingAppResourceChange(current, recommended)
 	if decision.allowed {
-		t.Fatalf("expected a CPU change below 20%% to remain blocked, got %+v", decision)
+		t.Fatalf("expected a CPU change below 5%% to remain blocked, got %+v", decision)
 	}
 }
 
@@ -1017,12 +1017,12 @@ func TestAutoRightSizingDownscaleDimensionsAreIndependent(t *testing.T) {
 		t.Parallel()
 
 		current := &model.ResourceSpec{
-			CPUMilliCores:        30,
+			CPUMilliCores:        100,
 			MemoryMebibytes:      1024,
 			MemoryLimitMebibytes: 2048,
 		}
 		recommended := &model.ResourceSpec{
-			CPUMilliCores:        25,
+			CPUMilliCores:        96,
 			MemoryMebibytes:      512,
 			MemoryLimitMebibytes: 1024,
 		}
@@ -1030,7 +1030,7 @@ func TestAutoRightSizingDownscaleDimensionsAreIndependent(t *testing.T) {
 		if !decision.allowed || decision.resources == nil {
 			t.Fatalf("expected memory downscale, got %+v", decision)
 		}
-		if got := decision.resources; got.CPUMilliCores != 30 || got.MemoryMebibytes != 768 || got.MemoryLimitMebibytes != 1536 {
+		if got := decision.resources; got.CPUMilliCores != 100 || got.MemoryMebibytes != 768 || got.MemoryLimitMebibytes != 1536 {
 			t.Fatalf("expected only memory to downscale, got %+v", got)
 		}
 	})

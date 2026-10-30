@@ -9114,6 +9114,11 @@ paths:
     get:
       operationId: getAppResourceRecommendation
       summary: Get App Resource Recommendation
+      description: >-
+        Returns historical capacity and request targets. Automatic application CPU
+        request changes require both a 5 millicore change and a 5 percent change;
+        memory thresholds are independent. In-place CPU adjustment includes verified
+        app-owned candidate and retained revision Pods as well as the serving workload.
       tags: [Apps]
       x-fugue-handler: handleGetAppResourceRecommendation
       security:
@@ -9145,6 +9150,11 @@ paths:
     post:
       operationId: applyAppResourceRecommendation
       summary: Apply App Resource Recommendation
+      description: >-
+        Eligible in-place CPU request operations include verified app-owned candidate
+        and retained revision Pods. Each Pod retains its identity, limits, memory,
+        and immutable Deployment template. Unsafe or unobservable revision Pods are
+        deferred with evidence; they do not prevent eligible Pods from adjusting.
       tags: [Apps]
       x-fugue-handler: handleApplyAppResourceRecommendation
       security:
