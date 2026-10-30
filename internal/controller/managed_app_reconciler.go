@@ -466,6 +466,11 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	if err != nil || active {
 		return err
 	}
+	position, finish, acquired := s.retirementScans.begin(app)
+	if !acquired {
+		return nil
+	}
+	defer func() { finish(position) }()
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	releases, err := s.Store.ListAppReleaseRetirementState(ctx, model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true, IncludeRetired: true})
@@ -489,10 +494,13 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	if stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing {
 		return nil
 	}
-	for _, previous := range releases {
+	for _, previous := range orderAppReleaseRetirementScan(releases, position) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// Even an unavailable observer or a cancelled cleanup consumes this
+		// turn. Resume after it next time, without treating it as drain proof.
+		position = appReleaseRetirementPositionOf(previous)
 		if previous.Status == model.AppReleaseStatusRetired && previous.RevisionWorkload != nil {
 			if err := s.retryRetiredAppReleaseCleanup(ctx, app, previous, stable); err != nil {
 				return fmt.Errorf("cleanup retired release %s: %w", previous.ID, err)
@@ -559,7 +567,7 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 		}
 		s.finalizeSafeZeroDowntimePreviousRetire(ctx, op, state)
 	}
-	return nil
+	return ctx.Err()
 }
 
 func (s *Service) retryRetiredAppReleaseCleanup(ctx context.Context, app model.App, retired, stable model.AppRelease) error {

@@ -56,6 +56,7 @@ type Service struct {
 	kubeClientMu                    sync.Mutex
 	kubeClients                     map[string]*kubeClient
 	managedRolloutCapacityLocks     sync.Map
+	retirementScans                 appReleaseRetirementScans
 	managedPostgresStorageNoticeMu  sync.Mutex
 	managedPostgresStorageNotices   map[string]struct{}
 	importImageInspectRetryDelay    time.Duration
