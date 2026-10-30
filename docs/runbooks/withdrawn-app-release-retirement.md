@@ -30,6 +30,12 @@ exact baseline proof without reactivating their release rows. Recovery only
 establishes a baseline; readiness, storage, capacity and
 canonical drain checks continue to apply.
 
+Older canonical Service selectors can include presentation and project labels.
+The handoff accepts them only when all stable app/tenant/workload isolation labels
+are present and every selector term matches the verified source template. The
+same UID/resourceVersion selector CAS, endpoint convergence and positive source
+drain observations apply before the canonical template can change.
+
 After a controller release, verify:
 
 - The running controller source commit and image match the Actions artifact.

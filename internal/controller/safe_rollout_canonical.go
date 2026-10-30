@@ -533,7 +533,8 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		for _, prior := range previousSelectors {
 			previousMatch = previousMatch || reflect.DeepEqual(existing, prior)
 		}
-		if !reflect.DeepEqual(existing, ownSelector) && !reflect.DeepEqual(existing, selector) && !previousMatch {
+		if !reflect.DeepEqual(existing, ownSelector) && !reflect.DeepEqual(existing, selector) && !previousMatch &&
+			!canonicalServiceSelectsSource(app, existing, deployment.Spec.Template.Metadata.Labels) {
 			return nil, fmt.Errorf("canonical handoff Service has an unexpected selector")
 		}
 		if !reflect.DeepEqual(existing, selector) {
@@ -628,6 +629,32 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		return nil, ctx.Err()
 	}
 	return objects, nil
+}
+
+// Older Services included mutable app/project labels in addition to workload
+// identity. Accept those selectors only when every term still matches the exact
+// captured canonical template and all isolation labels are present. Additional
+// matching terms narrow that cohort; a broad or unrelated selector cannot pass.
+func canonicalServiceSelectsSource(app model.App, selector, sourceLabels map[string]string) bool {
+	if _, revision := selector[runtime.FugueLabelAppReleaseID]; revision {
+		return false
+	}
+	for key, expected := range map[string]string{
+		runtime.FugueLabelManagedBy:   runtime.FugueLabelManagedByValue,
+		runtime.FugueLabelAppID:       strings.TrimSpace(app.ID),
+		runtime.FugueLabelTenantID:    strings.TrimSpace(app.TenantID),
+		runtime.FugueLabelAppWorkload: runtime.RuntimeAppResourceName(app),
+	} {
+		if expected == "" || selector[key] != expected {
+			return false
+		}
+	}
+	for key, value := range selector {
+		if value == "" || sourceLabels[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func safeCanonicalEndpoints(ctx context.Context, client *kubeClient, namespace, name string, pods []releaseDrainPod) error {

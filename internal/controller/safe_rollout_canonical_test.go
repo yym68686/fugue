@@ -94,7 +94,7 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 }
 
 func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
-	for _, scenario := range []string{"idle", "retired_source", "retired_logical_source", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_generation_lag_busy", "advance_interrupted_predecessor_busy", "advance_interrupted_wrong_service_uid", "advance_interrupted_wrong_lineage", "advance_generation_stuck", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector"} {
+	for _, scenario := range []string{"idle", "legacy_source_selector", "legacy_source_selector_busy", "legacy_source_selector_mismatch", "legacy_source_selector_broad", "retired_source", "retired_logical_source", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_generation_lag_busy", "advance_interrupted_predecessor_busy", "advance_interrupted_wrong_service_uid", "advance_interrupted_wrong_lineage", "advance_generation_stuck", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			s, app, candidate, f := newDrainWorkloadFixtureWithSnapshot(t, false, true)
@@ -164,6 +164,24 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			sm["name"], sm["uid"], sm["labels"] = serviceName, "canonical-service-uid", cLabels
 			objectMapField(canonicalService, "spec")["selector"] = cLabels
 			desiredService := cloneKubeMap(canonicalService)
+			if strings.HasPrefix(scenario, "legacy_source_selector") {
+				// The old Service retains the full template selector while the
+				// current renderer emits stable workload identity labels only.
+				legacy := clonePlacementStringMap(objectStringMapValue(cLabels))
+				legacy["app.kubernetes.io/name"] = "prior-name"
+				cLabels["app.kubernetes.io/name"] = "prior-name"
+				objectMapField(canonicalService, "spec")["selector"] = legacy
+				objectMapField(desiredService, "spec")["selector"] = map[string]string{
+					runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue, runtime.FugueLabelAppID: app.ID,
+					runtime.FugueLabelTenantID: app.TenantID, runtime.FugueLabelAppWorkload: name,
+				}
+				if scenario == "legacy_source_selector_mismatch" {
+					legacy["app.kubernetes.io/name"] = "unrelated-name"
+				}
+				if scenario == "legacy_source_selector_broad" {
+					delete(legacy, runtime.FugueLabelAppWorkload)
+				}
+			}
 			sourcePods := []map[string]any{}
 			for i, p := range f.pods {
 				objectMapField(p, "status")["podIP"] = fmt.Sprintf("10.0.0.%d", i+10)
@@ -284,7 +302,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			}
 			sourceReads, sourceProbes, servicePatches, templateWrites := 0, 0, 0, 0
 			busyObservation := make(chan struct{})
-			waitForBusyObservation := scenario == "busy" || (advancing && strings.HasSuffix(scenario, "_busy"))
+			waitForBusyObservation := scenario == "busy" || strings.HasSuffix(scenario, "_busy")
 			markerReads := 0
 			markerPatched := false
 			f.extra = func(w http.ResponseWriter, r *http.Request) bool {
@@ -409,7 +427,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				defer cancel()
 			}
 			got, err := s.prepareSafeCanonicalHandoff(ctx, client, app, []map[string]any{desired, desiredService})
-			success := scenario == "idle" || scenario == "retired_source" || scenario == "retired_logical_source" || scenario == "resume" || scenario == "restore_ready"
+			success := scenario == "idle" || scenario == "legacy_source_selector" || scenario == "retired_source" || scenario == "retired_logical_source" || scenario == "resume" || scenario == "restore_ready"
 			if success != (err == nil) {
 				t.Fatalf("expected success=%v got %v (reads=%d probes=%d)", success, err, sourceReads, sourceProbes)
 			}
@@ -443,6 +461,12 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			}
 			if scenario == "candidate_unhealthy" && servicePatches != 0 {
 				t.Fatal("unhealthy candidate received canonical service")
+			}
+			if (scenario == "legacy_source_selector_mismatch" || scenario == "legacy_source_selector_broad") && servicePatches != 0 {
+				t.Fatal("unverified legacy selector redirected traffic")
+			}
+			if scenario == "legacy_source_selector_busy" && servicePatches != 1 {
+				t.Fatal("verified legacy selector did not withdraw new source connections")
 			}
 			if advancing && strings.HasSuffix(scenario, "_busy") {
 				var checkpoint safeCanonicalHandoff
