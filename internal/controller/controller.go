@@ -1127,7 +1127,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return err
 	}
 	timer.Mark("zero_downtime_rollout_preflight")
-	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
+	// Starting a stopped workload (including after an offline volume move)
+	// needs the same asynchronous image prerequisite as deploy/migrate. Run it
+	// with the operation identity before the lower-level reconcile, which has
+	// no operation to requeue. ensureDeployableImage skips replicas <= 0, so a
+	// stop never depends on registry/cache availability.
+	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate || op.Type == model.OperationTypeScale {
 		if err := s.ensureDeployableImage(ctx, op, app, scheduling); err != nil {
 			return err
 		}
