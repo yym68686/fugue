@@ -57,15 +57,19 @@ type coldPostgresState struct {
 	SourceTolerations []runtimepkg.Toleration `json:"source_tolerations,omitempty"`
 	IntentHash        string                  `json:"intent_hash,omitempty"`
 	RetainedAttempts  []coldRetainedAttempt   `json:"retained_attempts,omitempty"`
+	DirectBootstrap   bool                    `json:"direct_bootstrap,omitempty"`
+	PrimaryPVCUID     string                  `json:"primary_pvc_uid,omitempty"`
+	PrimaryPrepared   bool                    `json:"primary_prepared,omitempty"`
 }
 
 type coldRetainedAttempt struct {
-	TargetName   string `json:"target_name"`
-	TargetUID    string `json:"target_uid"`
-	SeedName     string `json:"seed_name"`
-	SeedUID      string `json:"seed_uid"`
-	StorageClass string `json:"storage_class"`
-	IntentHash   string `json:"intent_hash"`
+	TargetName    string `json:"target_name"`
+	TargetUID     string `json:"target_uid"`
+	SeedName      string `json:"seed_name"`
+	SeedUID       string `json:"seed_uid"`
+	StorageClass  string `json:"storage_class"`
+	IntentHash    string `json:"intent_hash"`
+	PrimaryPVCUID string `json:"primary_pvc_uid,omitempty"`
 }
 
 func coldStateName(serviceID string) string {
@@ -203,6 +207,7 @@ func (s *Service) prepareColdState(ctx context.Context, c *kubeClient, op model.
 	suffix := hex.EncodeToString(h[:8])
 	st.SeedName = "pg-seed-" + suffix
 	st.TargetName = "pg-restored-" + suffix
+	st.DirectBootstrap = true
 	if offline {
 		if err := prepareColdOfflineReader(ctx, c, ns, source, pod, st); err != nil {
 			return nil, "", err

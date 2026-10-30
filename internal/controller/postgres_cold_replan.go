@@ -77,12 +77,13 @@ func (s *Service) replanColdStorage(ctx context.Context, c *kubeClient, ns strin
 
 func coldReplannedState(old *coldPostgresState, pg model.AppPostgresSpec) coldPostgresState {
 	next := *old
-	next.RetainedAttempts = append(append([]coldRetainedAttempt(nil), old.RetainedAttempts...), coldRetainedAttempt{TargetName: old.TargetName, TargetUID: old.TargetUID, SeedName: old.SeedName, SeedUID: old.SeedUID, StorageClass: old.TargetClass, IntentHash: old.IntentHash})
+	next.RetainedAttempts = append(append([]coldRetainedAttempt(nil), old.RetainedAttempts...), coldRetainedAttempt{TargetName: old.TargetName, TargetUID: old.TargetUID, SeedName: old.SeedName, SeedUID: old.SeedUID, StorageClass: old.TargetClass, IntentHash: old.IntentHash, PrimaryPVCUID: old.PrimaryPVCUID})
 	next.TargetClass, next.IntentHash = pg.StorageClassName, store.PostgresSpecFingerprint(pg)
 	h := sha256.Sum256([]byte(old.ServiceID + old.SourceUID + pg.RuntimeID + pg.StorageClassName))
 	suffix := hex.EncodeToString(h[:8])
 	next.SeedName, next.TargetName = "pg-seed-"+suffix, "pg-restored-"+suffix
 	next.SeedUID, next.TargetUID, next.StreamDigest, next.Phase = "", "", "", "planned"
+	next.DirectBootstrap, next.PrimaryPrepared, next.PrimaryPVCUID = true, false, ""
 	return next
 }
 

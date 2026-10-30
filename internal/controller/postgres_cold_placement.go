@@ -11,6 +11,27 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+// Preflight the actual destination size, including recovery headroom, while
+// preserving the requested spec used as the durable retry intent.
+func coldRecoveryPreflightSize(ctx context.Context, c *kubeClient, ns, serviceID string, source kubeCloudNativePGCluster, requested string) (string, error) {
+	st, _, err := loadColdState(ctx, c, ns, serviceID)
+	if err != nil {
+		return "", err
+	}
+	if st != nil {
+		return maximumRecoveryStorageSize(requested, st.TargetSize)
+	}
+	pvc, found, err := c.getPersistentVolumeClaim(ctx, ns, source.Status.CurrentPrimary)
+	if err != nil {
+		return "", err
+	}
+	q, parseErr := resource.ParseQuantity(pvc.Status.Capacity["storage"])
+	if !found || parseErr != nil || q.Sign() <= 0 {
+		return "", fmt.Errorf("source capacity unavailable for recovery preflight")
+	}
+	return maximumRecoveryStorageSize(requested, resource.NewQuantity(q.Value()+(2<<30), resource.BinarySI).String())
+}
+
 // Validate every HA failure domain before stopping a source, not just the
 // destination primary. CSI registration alone is insufficient for Longhorn.
 // Return exact, storage-compatible hosts so CNPG cannot choose an incompatible

@@ -24,7 +24,12 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 		return err
 	}
 	ns := runtimepkg.NamespaceForTenant(app.TenantID)
-	if _, err := s.coldRecoveryPlacements(ctx, c, app, pg, pg.PrimaryNodeName); err != nil {
+	preflight := pg
+	preflight.StorageSize, err = coldRecoveryPreflightSize(ctx, c, ns, op.ServiceID, source, pg.StorageSize)
+	if err != nil {
+		return err
+	}
+	if _, err := s.coldRecoveryPlacements(ctx, c, app, preflight, pg.PrimaryNodeName); err != nil {
 		return err
 	}
 	st, rv, err := s.prepareColdState(ctx, c, op, app, source, pg, targetRuntime)
@@ -178,6 +183,11 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 	if st.Phase == "copied" {
 		st.Phase = "restoring"
 		if err := saveColdState(ctx, c, ns, st, &rv); err != nil {
+			return err
+		}
+	}
+	if st.DirectBootstrap {
+		if err := s.prepareColdPrimaryVolume(ctx, c, ns, st, &rv, scheduling, op.ID); err != nil {
 			return err
 		}
 	}
@@ -509,6 +519,9 @@ func (s *Service) ensureColdTarget(ctx context.Context, c *kubeClient, ns string
 	if st.FileDigest == "" || st.SystemID == "" || st.SeedUID == "" {
 		return fmt.Errorf("recovery bootstrap requires durable copy evidence")
 	}
+	if st.DirectBootstrap && (!st.PrimaryPrepared || st.PrimaryPVCUID == "") {
+		return fmt.Errorf("direct bootstrap requires a verified destination primary volume")
+	}
 	current, found, err := c.getCloudNativePGCluster(ctx, ns, st.TargetName)
 	if err != nil {
 		return err
@@ -540,7 +553,15 @@ func (s *Service) ensureColdTarget(ctx context.Context, c *kubeClient, ns string
 		cred := runtimepkg.ManagedPostgresCredentialSecretName(st.ServiceID, app.ID, pg)
 		// Keep the core API group explicit. CNPG's defaulting round trip can
 		// serialize an omitted group as null, which its CRD rejects.
-		spec["bootstrap"] = map[string]any{"recovery": map[string]any{"database": pg.Database, "owner": pg.User, "secret": map[string]string{"name": cred}, "volumeSnapshots": map[string]any{"storage": map[string]string{"apiGroup": "", "kind": "PersistentVolumeClaim", "name": st.SeedName}}}}
+		if st.DirectBootstrap {
+			// CNPG's documented orphan-PVC restoration adopts the verified
+			// primary claim and restores serial/primary status before bootstrap.
+			// No CSI clone or snapshot capability is required. A fallback initdb
+			// also refuses a nonempty PGDATA rather than replacing its data.
+			spec["bootstrap"] = map[string]any{"initdb": map[string]any{"database": pg.Database, "owner": pg.User, "secret": map[string]string{"name": cred}}}
+		} else {
+			spec["bootstrap"] = map[string]any{"recovery": map[string]any{"database": pg.Database, "owner": pg.User, "secret": map[string]string{"name": cred}, "volumeSnapshots": map[string]any{"storage": map[string]string{"apiGroup": "", "kind": "PersistentVolumeClaim", "name": st.SeedName}}}}
+		}
 		spec["storage"] = map[string]any{"size": st.TargetSize, "storageClass": st.TargetClass, "resizeInUseVolumes": true}
 		obj["spec"] = spec
 		m := normalizeKubeMap(obj["metadata"])

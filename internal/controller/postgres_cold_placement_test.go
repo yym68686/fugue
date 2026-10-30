@@ -14,6 +14,37 @@ import (
 	"fugue/internal/store"
 )
 
+func TestColdRecoveryPreflightsActualVolumeAndPreservesRetryIntent(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Fatalf("preflight mutated %s", r.URL.Path)
+			}
+			if strings.Contains(r.URL.Path, "/configmaps/") {
+				if !retained {
+					http.NotFound(w, r)
+					return
+				}
+				raw, _ := json.Marshal(coldPostgresState{Version: 1, ServiceID: "service", TargetSize: "5Gi"})
+				json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]string{"resourceVersion": "1"}, "data": map[string]string{"state.json": string(raw)}})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"status": map[string]any{"capacity": map[string]string{"storage": "1Gi"}}})
+		}))
+		source := kubeCloudNativePGCluster{}
+		source.Status.CurrentPrimary = "primary"
+		size, err := coldRecoveryPreflightSize(context.Background(), &kubeClient{baseURL: srv.URL, client: srv.Client()}, "ns", "service", source, "1Gi")
+		srv.Close()
+		want := "3Gi"
+		if retained {
+			want = "5Gi"
+		}
+		if err != nil || size != want {
+			t.Fatal("preflight missed actual destination capacity", size, err)
+		}
+	}
+}
+
 func TestColdRecoveryPreflightsReplicaStorageBeforeAnyMutation(t *testing.T) {
 	for _, scenario := range []string{"ready", "csi-only-replica", "unready-replica", "same-node", "capacity", "local-storage"} {
 		t.Run(scenario, func(t *testing.T) {
