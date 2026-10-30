@@ -294,8 +294,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		// An older staged GitHub app may carry the historic provisional port 80.
 		// Prefer a concrete source-detected port in that case; explicit non-default
 		// ports remain authoritative.
-	} else if requestedPort := firstPositivePort(finalSpec.Ports); requestedPort > 0 && !(requestedPort == 80 && output.ImportResult.DetectedPort > 0 && output.ImportResult.DetectedPort != 80) {
-		finalSpec.Ports = []int{requestedPort}
+	} else if requestedPort := firstPositivePort(finalSpec.Ports); requestedPort > 0 && (len(finalSpec.Ports) > 1 || !(requestedPort == 80 && output.ImportResult.DetectedPort > 0 && output.ImportResult.DetectedPort != 80)) {
+		// Explicit multi-port configuration is authoritative. Detection describes
+		// the primary service, not a request to remove secondary listeners.
 	} else if shouldAutoBackgroundImportedApp(*op.DesiredSource, output.ImportResult) {
 		finalSpec.NetworkMode = model.AppNetworkModeBackground
 		finalSpec.Ports = nil

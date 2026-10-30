@@ -2369,7 +2369,7 @@ func TestExecuteManagedImportOperationSyncsBillingImageStorage(t *testing.T) {
 	}
 }
 
-func TestExecuteManagedImportOperationDoesNotConstrainBuildPlacementByRuntimeLocation(t *testing.T) {
+func TestExecuteManagedImportOperationPreservesExplicitPortsAndBuildPlacement(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -2394,7 +2394,7 @@ func TestExecuteManagedImportOperationDoesNotConstrainBuildPlacementByRuntimeLoc
 	}
 
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
-		Ports:     []int{8080},
+		Ports:     []int{80, 2525},
 		Replicas:  1,
 		RuntimeID: runtimeObj.ID,
 	}, model.AppSource{
@@ -2447,6 +2447,19 @@ func TestExecuteManagedImportOperationDoesNotConstrainBuildPlacementByRuntimeLoc
 	if len(selector) != 0 {
 		t.Fatalf("expected source build to use the builder pool without app runtime placement selector, got %v", selector)
 	}
+	ops, err := stateStore.ListOperations(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	for _, queued := range ops {
+		if queued.Type == model.OperationTypeDeploy && queued.AppID == app.ID {
+			if queued.DesiredSpec == nil || !reflect.DeepEqual(queued.DesiredSpec.Ports, []int{80, 2525}) {
+				t.Fatalf("explicit listeners lost after source rebuild: %+v", queued.DesiredSpec)
+			}
+			return
+		}
+	}
+	t.Fatal("expected queued deployment after import")
 }
 
 func TestImportBuilderMemoryCeilingUsesTenantManagedHeadroom(t *testing.T) {
