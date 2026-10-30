@@ -269,6 +269,67 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  postgres_bootstrap_cpu_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.selected.outputs.changed }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          changed=false
+          if ! git diff --quiet "$BASE_SHA" HEAD -- deploy/environments/production/managed-postgres/bootstrap-cpu.json scripts/configure_postgres_bootstrap.py scripts/test_configure_postgres_bootstrap.py; then changed=true; fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+  postgres_bootstrap_cpu:
+    needs: [prepush, postgres_bootstrap_cpu_plan]
+    if: ${{ needs.prepush.result == 'success' && needs.postgres_bootstrap_cpu_plan.outputs.changed == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-external-controller, cancel-in-progress: false, queue: max}
+    timeout-minutes: 20
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Test and prepare the explicitly enrolled database rollout
+        id: bootstrap_prepared
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/managed-postgres/bootstrap-cpu.json scripts/configure_postgres_bootstrap.py scripts/test_configure_postgres_bootstrap.py .github/workflows/ci.yml
+          python3 -m unittest scripts.test_configure_postgres_bootstrap
+          python3 -m scripts.configure_postgres_bootstrap deploy/environments/production/managed-postgres/bootstrap-cpu.json --evidence "$RUNNER_TEMP/postgres-bootstrap-prepared.json"
+          python3 -c 'import json; print("apply=" + str(json.load(open("deploy/environments/production/managed-postgres/bootstrap-cpu.json"))["apply"]).lower())' >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-postgres-bootstrap-prepared-${{ github.sha }}
+          path: ${{ runner.temp }}/postgres-bootstrap-prepared.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Replace one enrolled Pod at a time and verify SQL and storage identity
+        if: steps.bootstrap_prepared.outputs.apply == 'true'
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/managed-postgres/bootstrap-cpu.json scripts/configure_postgres_bootstrap.py scripts/test_configure_postgres_bootstrap.py .github/workflows/ci.yml
+          python3 -m scripts.configure_postgres_bootstrap deploy/environments/production/managed-postgres/bootstrap-cpu.json --prepared "$RUNNER_TEMP/postgres-bootstrap-prepared.json" --evidence "$RUNNER_TEMP/postgres-bootstrap-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: fugue-postgres-bootstrap-result-${{ github.sha }}
+          path: ${{ runner.temp }}/postgres-bootstrap-*.json
+          if-no-files-found: warn
+          retention-days: 30
+
   managed_postgres_cpu_policy_plan:
     # Select config-only work before acquiring the shared production lock.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

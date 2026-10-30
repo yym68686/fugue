@@ -1,0 +1,48 @@
+{
+  "schema": "fugue.postgres-bootstrap-cpu/v1",
+  "apply": true,
+  "operator": {
+    "namespace": "fugue-system",
+    "deployment": "fugue-cloudnative-pg",
+    "uid": "b2ad8bd3-64f9-4609-ac6a-be638e4f88d9",
+    "image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:350e517d95bbcbdbe55d9cd617c4f78c5086b1e0fc8cb73d73a5de486dc6b96d"
+  },
+  "targets": [
+    {
+      "namespace": "fg-tenant-1774495361-ceff207a44cc",
+      "cluster": "dataocean-postgres",
+      "clusterUID": "48fea768-c343-4265-b2fc-23a8f5f494a9",
+      "systemID": "7640066541724016660",
+      "pod": "dataocean-postgres-1",
+      "originalPodUID": "f6322d61-fbec-4528-ab42-78ce6514bf4c",
+      "node": "ns101351",
+      "cpuRequest": "1m",
+      "expectedMainResources": {
+        "requests": {"cpu": "100m", "memory": "256Mi"},
+        "limits": {"cpu": "100m", "memory": "384Mi"}
+      },
+      "expectedInitResources": {
+        "requests": {"cpu": "100m", "memory": "256Mi"},
+        "limits": {"cpu": "100m", "memory": "384Mi"}
+      }
+    },
+    {
+      "namespace": "fg-tenant-1774494657-53820de6a0cd",
+      "cluster": "shadowguard-db-postgres",
+      "clusterUID": "5f494e8a-6751-46a8-910a-37bc41cb69aa",
+      "systemID": "7678990889256734740",
+      "pod": "shadowguard-db-postgres-1",
+      "originalPodUID": "a11b18fc-6611-4bb3-95f8-898cc77adbb7",
+      "node": "ns101351",
+      "cpuRequest": "1m",
+      "expectedMainResources": {
+        "requests": {"cpu": "100m", "memory": "512Mi"},
+        "limits": {"cpu": "250m", "memory": "768Mi"}
+      },
+      "expectedInitResources": {
+        "requests": {"cpu": "100m", "memory": "512Mi"},
+        "limits": {"cpu": "250m", "memory": "768Mi"}
+      }
+    }
+  ]
+}
