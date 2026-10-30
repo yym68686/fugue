@@ -199,13 +199,31 @@ type safeRolloutEdgeWait struct {
 	trafficDigest string
 }
 
+func (o storeSafeRolloutEdgeBundleObserver) requiredNodesForObservation(ctx context.Context) ([]model.EdgeNode, error) {
+	releaseRead, err := acquireReleaseRetirementRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRead()
+	return o.requiredNodes()
+}
+
+func (o storeSafeRolloutEdgeBundleObserver) trafficDigestForObservation(ctx context.Context, app model.App, release model.AppRelease, weight int) (string, error) {
+	releaseRead, err := acquireReleaseRetirementRead(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer releaseRead()
+	return o.expectedAppTrafficDigest(app, release, weight)
+}
+
 func (o storeSafeRolloutEdgeBundleObserver) observe(ctx context.Context, app model.App, release model.AppRelease, weight int, since time.Time) (safeRolloutEdgeBundleObservation, error) {
 	return o.observeWait(ctx, app, release, weight, since, &safeRolloutEdgeWait{groups: map[string]string{}})
 }
 
 func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app model.App, release model.AppRelease, weight int, since time.Time, wait *safeRolloutEdgeWait) (safeRolloutEdgeBundleObservation, error) {
 	observation := safeRolloutEdgeBundleObservation{WaitingNodes: []string{}, Summary: map[string]any{"release_id": release.ID, "app_id": app.ID, "target_candidate_weight": weight}}
-	digest, err := o.expectedAppTrafficDigest(app, release, weight)
+	digest, err := o.trafficDigestForObservation(ctx, app, release, weight)
 	if err != nil {
 		return observation, err
 	}
@@ -216,7 +234,7 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 		return observation, fmt.Errorf("app traffic target changed during edge confirmation")
 	}
 	observation.Summary["expected_app_traffic_digest"] = digest
-	nodes, err := o.requiredNodes()
+	nodes, err := o.requiredNodesForObservation(ctx)
 	if errors.Is(err, store.ErrSafeRolloutServingPublicationPending) {
 		observation.RequiredNodes = len(wait.groups)
 		observation.WaitingNodes = append(observation.WaitingNodes, "serving-publication")
@@ -308,7 +326,7 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	}
 	// Recheck desired traffic after the network calls; no ACK may be reused after
 	// the policy or target upstream changed while evidence was being collected.
-	currentDigest, err := o.expectedAppTrafficDigest(app, release, weight)
+	currentDigest, err := o.trafficDigestForObservation(ctx, app, release, weight)
 	if err != nil {
 		return observation, err
 	}
@@ -317,7 +335,7 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	}
 	// Confirm that the inventory used for this batch still describes serving
 	// nodes. A topology change requires another complete observation batch.
-	after, err := o.requiredNodes()
+	after, err := o.requiredNodesForObservation(ctx)
 	if errors.Is(err, store.ErrSafeRolloutServingPublicationPending) {
 		observation.RequiredNodes = len(wait.groups)
 		observation.WaitingNodes = append(observation.WaitingNodes, "serving-publication")

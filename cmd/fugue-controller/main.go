@@ -8,7 +8,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
+	"time"
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/config"
@@ -40,12 +42,17 @@ func main() {
 	}
 
 	cfg := config.ControllerFromEnv()
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(512 << 20)
+	}
 	logger := log.Default()
 	store := store.New(cfg.StorePath, cfg.DatabaseURL)
 	store.ConfigurePlatformArtifactSigning(bundleauth.NewKeyring(cfg.BundleSigningKey, cfg.BundleSigningKeyID, cfg.BundleSigningPreviousKey, cfg.BundleSigningPreviousKeyID, cfg.BundleRevokedKeyIDs))
 	if err := store.Init(); err != nil {
 		logger.Fatalf("init store: %v", err)
 	}
+	store.ConfigureDatabaseConcurrency(16)
+	store.ConfigureDatabasePool(4, time.Minute)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

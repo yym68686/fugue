@@ -479,6 +479,7 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, backgroundReleaseRetirementKey{}, true)
+	ctx = withReleaseRetirementReadLimit(ctx)
 	releases, err := s.Store.ListAppReleaseRetirementState(ctx, model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true, IncludeRetired: true})
 	if err != nil {
 		return fmt.Errorf("list draining releases: %w", err)

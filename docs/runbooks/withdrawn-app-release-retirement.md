@@ -63,6 +63,14 @@ are present and every selector term matches the verified source template. The
 same UID/resourceVersion selector CAS, endpoint convergence and positive source
 drain observations apply before the canonical template can change.
 
+Retirement keeps 100 task slots while limiting heavy namespace/publication read
+phases to four at a time. Each read remains independent and fresh; this is
+backpressure, not shared deletion evidence. The controller database pool permits
+16 physical connections, with excess queries waiting under their own deadlines.
+Absent an explicit `GOMEMLIMIT`, the controller uses a 512 MiB Go memory target
+to trigger collection before its 768 MiB container limit. Observe connection
+errors, memory and restarts as well as the task concurrency count.
+
 After a controller release, verify:
 
 - The running controller source commit and image match the Actions artifact.

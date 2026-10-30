@@ -3,11 +3,49 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestDatabaseConcurrencyWaitsInsteadOfOpeningMoreConnections(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Store{db: db}
+	s.ConfigureDatabaseConcurrency(2)
+	s.ConfigureDatabasePool(2, time.Minute)
+	first, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := db.Conn(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("saturated pool should wait with caller deadline: %v", err)
+	}
+	if stats := db.Stats(); stats.OpenConnections != 2 || stats.WaitCount != 1 {
+		t.Fatalf("connection limit not enforced: %+v", stats)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	third, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	third.Close()
+}
 
 func TestDatabasePoolReusesConcurrentReadConnections(t *testing.T) {
 	db, _, err := sqlmock.New()

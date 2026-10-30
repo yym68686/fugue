@@ -222,6 +222,11 @@ func (s *Service) captureDrainWorkload(ctx context.Context, client *kubeClient, 
 }
 
 func (s *Service) captureDrainWorkloadState(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease, stopped, canonical, unstarted bool) (releaseDrainWorkload, error) {
+	releaseRead, err := acquireReleaseRetirementRead(ctx)
+	if err != nil {
+		return releaseDrainWorkload{}, err
+	}
+	defer releaseRead()
 	if canonical && (stopped || release.ID != "" || release.DeploymentName != runtime.RuntimeAppResourceName(app)) {
 		return releaseDrainWorkload{}, fmt.Errorf("invalid canonical drain observation")
 	}
