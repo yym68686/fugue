@@ -107,6 +107,18 @@ class ExternalControllerReleaseTests(unittest.TestCase):
                 release.execute(config, prepared)
             self.assertEqual(write.call_count, 1)
 
+    def test_stable_never_started_cluster_is_preserved_but_active_transition_rejected(self):
+        cluster = {'metadata': {'name': 'pending-db', 'namespace': 'sample', 'uid': 'cluster-id', 'generation': 1},
+                   'spec': {'instances': 1}, 'status': {'targetPrimary': 'pending-db-1', 'readyInstances': 0, 'phase': 'Setting up primary'}}
+        before = release.operand_snapshot({'items': [cluster]}, {'items': []})
+        release.assert_operands_preserved(before, release.operand_snapshot({'items': [cluster]}, {'items': []}))
+        cluster['status']['targetPrimary'] = 'pending-db-2'
+        with self.assertRaises(ValueError):
+            release.assert_operands_preserved(before, release.operand_snapshot({'items': [cluster]}, {'items': []}))
+        cluster['status']['currentPrimary'] = 'pending-db-1'
+        with self.assertRaises(ValueError):
+            release.operand_snapshot({'items': [cluster]}, {'items': []})
+
 
 if __name__ == "__main__":
     unittest.main()

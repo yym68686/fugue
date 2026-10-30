@@ -112,11 +112,17 @@ def operand_snapshot(clusters, pods):
     result = {"clusters": {}, "pods": {}}
     for item in clusters["items"]:
         m, status = item["metadata"], item.get("status", {})
-        if m.get("deletionTimestamp") or status.get("currentPrimary") != status.get("targetPrimary"):
+        # A never-started cluster can have a target but no current primary.
+        # It is not an active primary transition; the complete snapshot below
+        # still fences its target, spec, readiness and Pod identity throughout.
+        initial = (not status.get("currentPrimary") and status.get("readyInstances", 0) == 0
+                   and status.get("phase") == "Setting up primary")
+        if m.get("deletionTimestamp") or (status.get("currentPrimary") != status.get("targetPrimary") and not initial):
             raise ValueError("database deletion or primary transition is active")
         result["clusters"][m["uid"]] = {
             "namespace": m["namespace"], "name": m["name"], "generation": m["generation"],
             "spec": digest(item["spec"]), "primary": status.get("currentPrimary"),
+            "targetPrimary": status.get("targetPrimary"),
             "ready": status.get("readyInstances", 0), "manager": status.get("cloudNativePGOperatorHash"),
             "architectures": status.get("availableArchitectures", []),
         }
