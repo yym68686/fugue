@@ -3,9 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"fugue/internal/model"
 )
 
 func (s *Store) pgCaptureRouteBusinessSnapshot(parent context.Context) (RouteBusinessSnapshot, error) {
@@ -75,7 +78,37 @@ func readRouteBusinessSnapshotTx(ctx context.Context, tx *sql.Tx) (RouteBusiness
 	if err != nil {
 		return out, fmt.Errorf("capture ACME challenges: %w", err)
 	}
+	configs, err := readRouteBusinessRows(ctx, tx, `SELECT body FROM fugue_mail_platform_config WHERE id='platform'`, scanMailPlatformConfig)
+	if err != nil {
+		return out, fmt.Errorf("capture mail config: %w", err)
+	}
+	if len(configs) == 1 {
+		out.MailPlatformConfig = &configs[0]
+	}
+	out.AppMailBindings, err = readRouteBusinessRows(ctx, tx, `SELECT body FROM fugue_app_mail_bindings`, scanAppMailBinding)
+	if err != nil {
+		return out, fmt.Errorf("capture mail bindings: %w", err)
+	}
 	return out, nil
+}
+
+func scanMailPlatformConfig(row sqlScanner) (model.MailPlatformConfig, error) {
+	var raw []byte
+	var out model.MailPlatformConfig
+	if err := row.Scan(&raw); err != nil {
+		return out, err
+	}
+	err := json.Unmarshal(raw, &out)
+	return out, err
+}
+func scanAppMailBinding(row sqlScanner) (model.AppMailBinding, error) {
+	var raw []byte
+	var out model.AppMailBinding
+	if err := row.Scan(&raw); err != nil {
+		return out, err
+	}
+	err := json.Unmarshal(raw, &out)
+	return out, err
 }
 
 // Omit executable payloads before transfer. All rows and route-affecting fields

@@ -215,6 +215,9 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 	if err := projectCustomDomainDNSWithDomains(&projection, business.Domains, source.apps, domainsConfig); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("managed custom-domain DNS projection invalid")
 	}
+	if err := projectAppMailDNS(&projection,business,domainsConfig.AppBaseDomain); err != nil {
+		return platformIntentProjectionResponse{}, errors.New("application mail DNS policy invalid")
+	}
 	if err := projectACMEChallengeIntents(&projection, business.ACMEChallenges); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("ACME migration configuration invalid")
 	}

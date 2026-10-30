@@ -149,6 +149,7 @@ func main() {
 	go server.StartBackgroundBackupInventory(ctx)
 	go server.StartBackgroundMetrics(ctx)
 	go server.StartBackgroundAutomationShadowLoop(ctx)
+	go server.RunAppMailReconciler(ctx)
 
 	var metricsServer *http.Server
 	if cfg.MetricsBindAddr != "" {

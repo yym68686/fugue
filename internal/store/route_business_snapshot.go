@@ -14,18 +14,20 @@ import (
 // RouteBusinessSnapshot is a detached, consistent read of the business inputs
 // needed by route migration. Kubernetes observations are captured separately.
 type RouteBusinessSnapshot struct {
-	ACMEChallenges  []model.DNSACMEChallenge  `json:"acme_challenges"`
-	CapturedAt      time.Time                 `json:"captured_at"`
-	Revision        string                    `json:"revision"`
-	Apps            []model.App               `json:"apps"`
-	Domains         []model.AppDomain         `json:"domains"`
-	RouteTables     []model.ProjectRouteTable `json:"route_tables"`
-	Runtimes        []model.Runtime           `json:"runtimes"`
-	RoutePolicies   []model.EdgeRoutePolicy   `json:"route_policies"`
-	Releases        []model.AppRelease        `json:"releases"`
-	TrafficPolicies []model.AppTrafficPolicy  `json:"traffic_policies"`
-	HostedZones     []model.HostedZone        `json:"hosted_zones"`
-	DNSRecords      []model.DNSRecord         `json:"dns_records"`
+	MailPlatformConfig *model.MailPlatformConfig `json:"mail_platform_config,omitempty"`
+	AppMailBindings    []model.AppMailBinding    `json:"app_mail_bindings,omitempty"`
+	ACMEChallenges     []model.DNSACMEChallenge  `json:"acme_challenges"`
+	CapturedAt         time.Time                 `json:"captured_at"`
+	Revision           string                    `json:"revision"`
+	Apps               []model.App               `json:"apps"`
+	Domains            []model.AppDomain         `json:"domains"`
+	RouteTables        []model.ProjectRouteTable `json:"route_tables"`
+	Runtimes           []model.Runtime           `json:"runtimes"`
+	RoutePolicies      []model.EdgeRoutePolicy   `json:"route_policies"`
+	Releases           []model.AppRelease        `json:"releases"`
+	TrafficPolicies    []model.AppTrafficPolicy  `json:"traffic_policies"`
+	HostedZones        []model.HostedZone        `json:"hosted_zones"`
+	DNSRecords         []model.DNSRecord         `json:"dns_records"`
 }
 
 func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusinessSnapshot, error) {
@@ -38,6 +40,7 @@ func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusiness
 	var snapshot RouteBusinessSnapshot
 	err := s.withLockedState(false, func(state *model.State) error {
 		snapshot = RouteBusinessSnapshot{CapturedAt: time.Now().UTC(), Domains: state.AppDomains, RouteTables: state.ProjectRouteTables, Runtimes: state.Runtimes, RoutePolicies: state.EdgeRoutePolicies, Releases: state.AppReleases, TrafficPolicies: state.AppTrafficPolicies, HostedZones: state.HostedZones, DNSRecords: state.DNSRecords, ACMEChallenges: state.DNSACMEChallenges}
+		snapshot.MailPlatformConfig, snapshot.AppMailBindings = state.MailPlatformConfig, state.AppMailBindings
 		for _, app := range state.Apps {
 			snapshot.Apps = append(snapshot.Apps, routeBusinessAppProjection(app))
 		}
@@ -67,6 +70,7 @@ func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusiness
 }
 
 func (snapshot *RouteBusinessSnapshot) normalize() {
+	sort.Slice(snapshot.AppMailBindings, func(i, j int) bool { return snapshot.AppMailBindings[i].AppID < snapshot.AppMailBindings[j].AppID })
 	for i := range snapshot.ACMEChallenges {
 		normalizeDNSACMEChallengeForRead(&snapshot.ACMEChallenges[i])
 	}

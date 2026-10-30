@@ -40,6 +40,37 @@ func TestProjectDefaultAppDNSRejectsAmbiguousRootOwner(t *testing.T) {
 	}
 }
 
+func TestProjectDefaultAppDNSCoexistsWithMailRecords(t *testing.T) {
+	for _, recordType := range []string{"MX", "TXT", "CAA"} {
+		t.Run(recordType, func(t *testing.T) {
+			record := platformconfig.DNSIntent{Hostname: "app.example.test", Type: recordType, Values: []string{"mail-value"}, TTL: 300, AppID: "app", TenantID: "tenant"}
+			r := platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{DNS: []platformconfig.DNSIntent{record}, Routes: []platformconfig.RouteIntent{{Hostname: record.Hostname, AppID: "app", TenantID: "tenant", PathPrefix: "/", UpstreamURL: "http://application", Enabled: true}}}}
+			apps := map[string]model.App{"app": {ID: "app", TenantID: "tenant", Route: &model.AppRoute{Hostname: record.Hostname}}}
+			if err := projectDefaultAppDNS(&r, apps, "example.test", 60); err != nil {
+				t.Fatal(err)
+			}
+			if len(r.Intent.DNS) != 2 {
+				t.Fatalf("mail record suppressed Web DNS: %+v", r.Intent.DNS)
+			}
+			foundMail, foundWeb := false, false
+			for _, actual := range r.Intent.DNS {
+				if actual.Type == recordType && len(actual.Values) == 1 && actual.Values[0] == "mail-value" && actual.TTL == 300 {
+					foundMail = true
+				}
+				if actual.Type == "FUGUE_ROUTE" && actual.AppID == "app" && actual.TenantID == "tenant" {
+					foundWeb = true
+				}
+			}
+			if !foundMail || !foundWeb {
+				t.Fatal("record ownership or content changed", r.Intent.DNS)
+			}
+			if err := projectDefaultAppDNS(&r, apps, "example.test", 60); err != nil || len(r.Intent.DNS) != 2 {
+				t.Fatal("projection is not idempotent", err)
+			}
+		})
+	}
+}
+
 func TestProjectDefaultAppDNSRequiresFrozenDefaultHostnameAndOwner(t *testing.T) {
 	for _, scenario := range []string{"matching", "project_alias", "missing_app", "missing_route", "wrong_tenant", "wrong_app", "explicit_alias"} {
 		t.Run(scenario, func(t *testing.T) {

@@ -317,6 +317,8 @@ var postgresSchemaStatements = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`CREATE TABLE IF NOT EXISTS fugue_mail_platform_config (id TEXT PRIMARY KEY CHECK(id='platform'), body JSONB NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS fugue_app_mail_bindings (app_id TEXT PRIMARY KEY, generation BIGINT NOT NULL CHECK(generation>0), body JSONB NOT NULL)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_tenant_project_name_ci ON fugue_apps (tenant_id, project_id, lower(name))`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_apps_created_id_desc ON fugue_apps (created_at DESC, id DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_apps_updated_id_desc ON fugue_apps (updated_at DESC, id DESC)`,

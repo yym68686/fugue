@@ -7967,6 +7967,139 @@ paths:
                 $ref: "#/components/schemas/AppDeleteResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/mail:
+    get:
+      operationId: getMailPlatformConfig
+      summary: Read platform mail service configuration
+      tags: [Admin]
+      x-fugue-handler: handleGetMailPlatformConfig
+      security: [{BearerAuth: []}]
+      responses:
+        '200':
+          description: Public mail configuration; service credentials stay in the managed application
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MailPlatformConfig'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+    put:
+      operationId: putMailPlatformConfig
+      summary: Configure an explicitly selected Mailflare application
+      tags: [Admin]
+      x-fugue-handler: handlePutMailPlatformConfig
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MailPlatformConfig'}
+      responses:
+        '200':
+          description: Saved configuration
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MailPlatformConfig'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+  /v1/apps/{id}/mail:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string}}
+    get:
+      operationId: getAppMail
+      summary: Read an application mail binding and current provider status
+      tags: [Apps]
+      x-fugue-handler: handleGetAppMail
+      security: [{BearerAuth: []}]
+      responses:
+        '200':
+          description: Binding intent and provider observation; credentials are never returned
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AppMailResponse'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+    put:
+      operationId: putAppMail
+      summary: Enable, suspend or revoke application subdomain mail
+      tags: [Apps]
+      x-fugue-handler: handlePutAppMail
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [state, expected_generation]
+              properties:
+                state: {type: string, enum: [active, suspended, revoked]}
+                expected_generation: {type: integer, minimum: 0, maximum: 9007199254740990}
+                local_part: {type: string, pattern: '^[a-z0-9]+(?:[._+%-][a-z0-9]+)*$', maxLength: 64, default: support}
+      responses:
+        '200':
+          description: Durable desired state and current provider observation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AppMailResponse'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+  /v1/apps/{id}/mail/credentials:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string}}
+    post:
+      operationId: createAppMailCredential
+      summary: Create a mailbox-scoped API and JMAP credential
+      tags: [Apps]
+      x-fugue-handler: handleCreateAppMailCredential
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [generation, mailbox_id]
+              properties:
+                generation: {type: integer, minimum: 1}
+                mailbox_id: {type: string, minLength: 1, maxLength: 160}
+      responses:
+        '201':
+          description: Secret is shown exactly once
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, key, mailboxId]
+                properties:
+                  id: {type: string}
+                  key: {type: string, format: password}
+                  mailboxId: {type: string}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+    delete:
+      operationId: revokeAppMailCredential
+      summary: Revoke one credential belonging to this application
+      tags: [Apps]
+      x-fugue-handler: handleRevokeAppMailCredential
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [id]
+              properties:
+                id: {type: string, minLength: 1, maxLength: 160}
+      responses:
+        '200':
+          description: Credential revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: {type: boolean}
+        default: {$ref: '#/components/responses/ErrorResponse'}
   /v1/apps/{id}/source:
     patch:
       operationId: patchAppSource
@@ -23347,6 +23480,98 @@ components:
           type: string
         migration_ledger:
           $ref: "#/components/schemas/AppMigrationLedger"
+    MailPlatformConfig:
+      type: object
+      additionalProperties: false
+      required: [mailflare_app_id, enabled]
+      properties:
+        mailflare_app_id: {type: string, minLength: 1, maxLength: 160}
+        enabled: {type: boolean}
+        dns_records:
+          type: array
+          maxItems: 12
+          description: Public relay/MX policy, projected only beneath enabled applications; never the platform root.
+          items: {$ref: '#/components/schemas/AppMailDNSRecord'}
+    AppMailDNSRecord:
+      type: object
+      additionalProperties: false
+      required: [name, type, values, ttl]
+      properties:
+        name: {type: string, maxLength: 160, description: Relative owner beneath the application hostname; @ means the application hostname.}
+        type: {type: string, enum: [MX, TXT, CNAME]}
+        values:
+          type: array
+          minItems: 1
+          maxItems: 8
+          items: {type: string, minLength: 1, maxLength: 4096}
+        ttl: {type: integer, minimum: 60, maximum: 86400}
+    AppMailBinding:
+      type: object
+      required: [app_id, tenant_id, project_id, hostname, local_part, generation, state, created_at, updated_at]
+      properties:
+        app_id: {type: string}
+        tenant_id: {type: string}
+        project_id: {type: string}
+        hostname: {type: string}
+        local_part: {type: string}
+        generation: {type: integer, minimum: 1}
+        state: {type: string, enum: [active, suspended, revoked]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AppMailProviderStatus:
+      type: object
+      required: [bindingId, tenantId, projectId, appId, generation, state, hostname, sendingReady, receivingReady, mailboxes, usage]
+      properties:
+        bindingId: {type: string}
+        tenantId: {type: string}
+        projectId: {type: string}
+        appId: {type: string}
+        generation: {type: integer}
+        state: {type: string, enum: [active, suspended, revoked]}
+        hostname: {type: string}
+        sendingReady: {type: boolean}
+        receivingReady: {type: boolean}
+        mxHost: {type: string, nullable: true}
+        credentials:
+          type: array
+          items:
+            type: object
+            required: [id, prefix, createdAt]
+            properties:
+              id: {type: string}
+              prefix: {type: string}
+              createdAt: {type: string, format: date-time}
+              lastUsedAt: {type: string, format: date-time, nullable: true}
+        mailboxes:
+          type: array
+          items:
+            type: object
+            required: [id, address]
+            properties:
+              id: {type: string}
+              address: {type: string}
+        usage:
+          type: object
+          required: [messageCount, attachmentBytes, outbound]
+          properties:
+            messageCount: {type: integer}
+            attachmentBytes: {type: integer}
+            outbound:
+              type: array
+              items:
+                type: object
+                required: [status, count]
+                properties:
+                  status: {type: string}
+                  count: {type: integer}
+    AppMailResponse:
+      type: object
+      required: [binding, reconciled]
+      properties:
+        binding: {$ref: '#/components/schemas/AppMailBinding'}
+        reconciled: {type: boolean}
+        provider: {$ref: '#/components/schemas/AppMailProviderStatus'}
+        error: {type: string}
     AppSpec:
       type: object
       additionalProperties: false

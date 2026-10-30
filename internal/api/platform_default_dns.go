@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -24,7 +25,12 @@ func projectDefaultAppDNSWithTTL(result *platformIntentProjectionResponse, apps 
 	}
 	existing := map[string]bool{}
 	for _, record := range result.Intent.DNS {
-		existing[record.Hostname] = true
+		// MX/TXT (including SPF and DMARC) coexist with Web addresses at the
+		// same owner name. Only an explicit address/alias owns the Web answer.
+		switch strings.ToUpper(record.Type) {
+		case "A", "AAAA", "CNAME", "FUGUE_APP", "FUGUE_ROUTE":
+			existing[record.Hostname] = true
+		}
 	}
 	routes := map[string]platformconfig.RouteIntent{}
 	for _, route := range result.Intent.Routes {
