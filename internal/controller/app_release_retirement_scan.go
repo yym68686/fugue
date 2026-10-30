@@ -28,7 +28,10 @@ func runAppReleaseRetirementQueue(ctx context.Context, queue []prioritizedReleas
 				next++
 				positions[item.priority] = appReleaseRetirementPositionOf(item.release)
 				mu.Unlock()
-				itemCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+				// Heavy read backpressure is part of this deadline. Leave room
+				// for both independent traffic proofs and fresh post-drain reads
+				// under a full hundred-task queue, within the outer 60s sweep.
+				itemCtx, cancel := context.WithTimeout(ctx, 50*time.Second)
 				attempt(itemCtx, item)
 				cancel()
 			}

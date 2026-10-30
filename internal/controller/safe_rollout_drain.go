@@ -182,7 +182,10 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 		}
 	}
 	after, err := s.recaptureReleaseDrainWorkload(ctx, client, app, previous, before)
-	if err != nil || !reflect.DeepEqual(before, after) {
+	if err != nil {
+		return out, fmt.Errorf("recapture release workload after drain: %w", err)
+	}
+	if !reflect.DeepEqual(before, after) {
 		return out, fmt.Errorf("release workload changed during drain observation")
 	}
 	currentPolicy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)

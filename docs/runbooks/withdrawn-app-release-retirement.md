@@ -12,7 +12,7 @@ ticks coalesce during a sweep. Apps and the three resource classes retain fair
 resume positions. Scheduled workloads receive four queue entries per one pending
 cancellation and one retired-resource cleanup, so resource recovery has priority
 without starving cancellation or garbage collection. Each app has at most 100
-in-flight retirement attempts, a 25-second deadline per attempt and a 60-second
+in-flight retirement attempts, a 50-second deadline per attempt and a 60-second
 sweep budget. Shutdown cancels and joins all attempts before leadership handoff.
 Ordinary ManagedApp reconciliation does not synchronously wait for these sweeps.
 
