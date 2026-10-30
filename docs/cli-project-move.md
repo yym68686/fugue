@@ -22,6 +22,8 @@ CloudNativePG scale-down because it cannot attach under the destination node
 selector. Fugue retains that claim outside CloudNativePG discovery and removes
 only an unassigned, never-started replica Pod, after verifying the destination
 primary and resource identities. It never deletes the source PVC or PV.
+Legacy clusters that omit a storage class use the ready primary's actual claim
+as the destination-class evidence.
 
 With the default `--wait`, physical-node moves verify application placement,
 replica counts, and database convergence before returning success. Rerunning the

@@ -13,10 +13,13 @@ import (
 )
 
 func TestMigrationRetentionKeepsSourceVolumeAndOnlyRemovesUnstartedReplica(t *testing.T) {
-	for _, scenario := range []string{"retain", "resume-retained", "primary-unready", "same-class", "another-user", "pending-job", "foreign-claim", "claim-replaced", "cluster-changed", "pod-assigned", "conflict"} {
+	for _, scenario := range []string{"retain", "implicit-class", "resume-retained", "primary-unready", "same-class", "another-user", "pending-job", "foreign-claim", "claim-replaced", "cluster-changed", "pod-assigned", "conflict"} {
 		t.Run(scenario, func(t *testing.T) {
 			var cluster kubeCloudNativePGCluster
 			json.Unmarshal([]byte(`{"metadata":{"name":"db","uid":"cluster","generation":2,"labels":{"app.kubernetes.io/managed-by":"fugue","fugue.pro/tenant-id":"tenant","fugue.pro/project-id":"project","fugue.pro/backing-service-id":"service"}},"spec":{"instances":1,"storage":{"storageClass":"replicated"}},"status":{"instances":3,"readyInstances":2,"currentPrimary":"db-3","targetPrimary":"db-3"}}`), &cluster)
+			if scenario == "implicit-class" {
+				cluster.Spec.Storage.StorageClass = ""
+			}
 			var primary, old kubePod
 			json.Unmarshal([]byte(`{"metadata":{"name":"db-3","uid":"primary","ownerReferences":[{"apiVersion":"postgresql.cnpg.io/v1","kind":"Cluster","uid":"cluster"}]},"spec":{"nodeName":"destination"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}`), &primary)
 			oldJSON := `{"metadata":{"name":"db-1","uid":"old-pod","resourceVersion":"7","ownerReferences":[{"apiVersion":"postgresql.cnpg.io/v1","kind":"Cluster","uid":"cluster"}]},"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"db-1"}}]},"status":{"phase":"Pending"}}`
@@ -102,10 +105,10 @@ func TestMigrationRetentionKeepsSourceVolumeAndOnlyRemovesUnstartedReplica(t *te
 			}))
 			defer srv.Close()
 			app := model.App{ID: "app", TenantID: "tenant", ProjectID: "project"}
-			deployment := runtime.ManagedBackingServiceDeployment{ServiceID: "service", ResourceName: "db", DesiredInstances: 1, StorageClassName: "replicated"}
+			deployment := runtime.ManagedBackingServiceDeployment{ServiceID: "service", ResourceName: "db", DesiredInstances: 1, StorageClassName: cluster.Spec.Storage.StorageClass}
 			err := retainUnscheduledMigrationReplica(context.Background(), &kubeClient{baseURL: srv.URL, client: srv.Client()}, "tenant", app, deployment, cluster, []kubePod{primary, old})
 			want := 0
-			if scenario == "retain" {
+			if scenario == "retain" || scenario == "implicit-class" {
 				want = 1
 			}
 			wantDeletes := want

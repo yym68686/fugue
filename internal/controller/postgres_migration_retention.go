@@ -34,7 +34,7 @@ func retainUnscheduledMigrationReplica(ctx context.Context, client *kubeClient, 
 		return nil
 	}
 	primaryClaim, found, err := client.getPersistentVolumeClaim(ctx, namespace, primary.Metadata.Name)
-	if err != nil || !found || primaryClaim.Spec.StorageClassName != cluster.Spec.Storage.StorageClass {
+	if err != nil || !found || primaryClaim.Spec.StorageClassName == "" || (cluster.Spec.Storage.StorageClass != "" && primaryClaim.Spec.StorageClassName != cluster.Spec.Storage.StorageClass) {
 		return err
 	}
 	for _, pod := range pods {
@@ -46,7 +46,7 @@ func retainUnscheduledMigrationReplica(ctx context.Context, client *kubeClient, 
 			return err
 		}
 		retained := claim.Metadata.Annotations["fugue.pro/recovery-retained-cluster-uid"] == cluster.Metadata.UID && claim.Metadata.Annotations["fugue.pro/recovery-retained-reason"] == "superseded-local-replica"
-		if !found || claim.Metadata.UID == "" || claim.Metadata.ResourceVersion == "" || claim.Spec.VolumeName == "" || claim.Status.Phase != "Bound" || claim.Spec.StorageClassName == cluster.Spec.Storage.StorageClass || (!retained && (claim.Metadata.Labels["cnpg.io/cluster"] != cluster.Metadata.Name || claim.Metadata.Labels["cnpg.io/pvcRole"] != "PG_DATA")) {
+		if !found || claim.Metadata.UID == "" || claim.Metadata.ResourceVersion == "" || claim.Spec.VolumeName == "" || claim.Status.Phase != "Bound" || claim.Spec.StorageClassName == primaryClaim.Spec.StorageClassName || (!retained && (claim.Metadata.Labels["cnpg.io/cluster"] != cluster.Metadata.Name || claim.Metadata.Labels["cnpg.io/pvcRole"] != "PG_DATA")) {
 			continue
 		}
 		pv, exists, err := client.getPersistentVolume(ctx, claim.Spec.VolumeName)
@@ -168,7 +168,7 @@ func retainUnscheduledMigrationReplica(ctx context.Context, client *kubeClient, 
 }
 
 func migrationReplicaRetentionAllowed(app model.App, deployment runtime.ManagedBackingServiceDeployment, cluster kubeCloudNativePGCluster) bool {
-	if deployment.Suspended || deployment.DesiredInstances != 1 || cluster.Spec.Instances != 1 || cluster.Metadata.UID == "" || cluster.Metadata.DeletionTimestamp != "" || cluster.Spec.Storage.StorageClass == "" || cluster.Spec.Storage.StorageClass != deployment.StorageClassName || cluster.Status.ReadyInstances < 1 || cluster.Status.Instances <= cluster.Spec.Instances || cluster.Status.CurrentPrimary == "" || cluster.Status.CurrentPrimary != cluster.Status.TargetPrimary || cluster.Metadata.Name != deployment.ResourceName {
+	if deployment.Suspended || deployment.DesiredInstances != 1 || cluster.Spec.Instances != 1 || cluster.Metadata.UID == "" || cluster.Metadata.DeletionTimestamp != "" || cluster.Spec.Storage.StorageClass != deployment.StorageClassName || cluster.Status.ReadyInstances < 1 || cluster.Status.Instances <= cluster.Spec.Instances || cluster.Status.CurrentPrimary == "" || cluster.Status.CurrentPrimary != cluster.Status.TargetPrimary || cluster.Metadata.Name != deployment.ResourceName {
 		return false
 	}
 	if cluster.Metadata.Labels["app.kubernetes.io/managed-by"] != "fugue" || cluster.Metadata.Labels[runtime.FugueLabelTenantID] != app.TenantID || cluster.Metadata.Labels[runtime.FugueLabelProjectID] != app.ProjectID {
