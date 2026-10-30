@@ -1,0 +1,69 @@
+diff --git a/pkg/specs/containers.go b/pkg/specs/containers.go
+index 21e047b11..9c9593204 100644
+--- a/pkg/specs/containers.go
++++ b/pkg/specs/containers.go
+@@ -42,7 +42,7 @@ func createBootstrapContainer(cluster apiv1.Cluster, extensions []apiv1.Extensio
+ 			"/controller/manager",
+ 		},
+ 		VolumeMounts:    CreatePostgresVolumeMounts(cluster, extensions),
+-		Resources:       cluster.Spec.Resources,
++		Resources:       *cluster.Spec.Resources.DeepCopy(),
+ 		SecurityContext: GetSecurityContext(&cluster),
+ 	}
+ 
+diff --git a/pkg/specs/bootstrap_cpu_contract_test.go b/pkg/specs/bootstrap_cpu_contract_test.go
+new file mode 100644
+index 000000000..a89cfaab3
+--- /dev/null
++++ b/pkg/specs/bootstrap_cpu_contract_test.go
+@@ -0,0 +1,50 @@
++package specs
++
++import (
++	"context"
++	"encoding/json"
++	"testing"
++
++	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
++	corev1 "k8s.io/api/core/v1"
++	"k8s.io/apimachinery/pkg/api/equality"
++	"k8s.io/apimachinery/pkg/api/resource"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++func TestBootstrapCPURequestIsolation(t *testing.T) {
++	cluster := apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "sample", Namespace: "tenant"},
++		Spec: apiv1.ClusterSpec{ImageName: "postgres:18", Resources: corev1.ResourceRequirements{
++			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("256Mi")},
++			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("384Mi")}}}}
++	before, err := NewInstance(context.Background(), cluster, 1, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cluster.Annotations = map[string]string{utils.PodPatchAnnotationName: `[{"op":"test","path":"/spec/initContainers/0/name","value":"bootstrap-controller"},{"op":"replace","path":"/spec/initContainers/0/resources/requests/cpu","value":"1m"}]`}
++	after, err := NewInstance(context.Background(), cluster, 1, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := before.DeepCopy()
++	want.Spec.InitContainers[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("1m")
++	afterJSON, _ := json.Marshal(after.Spec)
++	wantJSON, _ := json.Marshal(want.Spec)
++	if string(afterJSON) != string(wantJSON) {
++		t.Fatal("pod patch changed fields outside init CPU request")
++	}
++	var stored corev1.PodSpec
++	if err := json.Unmarshal([]byte(after.Annotations[utils.PodSpecAnnotationName]), &stored); err != nil {
++		t.Fatal(err)
++	}
++	if !equality.Semantic.DeepEqual(stored, after.Spec) {
++		t.Fatal("stored PodSpec did not retain init CPU request")
++	}
++	if equal, diff := ComparePodSpecs(before.Spec, after.Spec); !equal {
++		t.Fatalf("annotation must not implicitly roll a database: %s", diff)
++	}
++	if cluster.Spec.Resources.Requests.Cpu().MilliValue() != 100 {
++		t.Fatal("cluster resources were mutated")
++	}
++}

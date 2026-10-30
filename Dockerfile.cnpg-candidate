@@ -10,11 +10,14 @@ COPY third_party/cloudnative-pg/semantic-status.patch /tmp/semantic-status.patch
 RUN git apply --check /tmp/semantic-status.patch && git apply /tmp/semantic-status.patch
 COPY third_party/cloudnative-pg/role-binding-cache.patch /tmp/role-binding-cache.patch
 RUN git apply --check /tmp/role-binding-cache.patch && git apply /tmp/role-binding-cache.patch
+COPY third_party/cloudnative-pg/bootstrap-cpu-isolation.patch /tmp/bootstrap-cpu-isolation.patch
+RUN git apply --check /tmp/bootstrap-cpu-isolation.patch && git apply /tmp/bootstrap-cpu-isolation.patch
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     go test -race ./internal/controller -run '^(TestNoopStatusRegression|TestRoleBindingRegression)' -count=1 \
+    && go test -race ./pkg/specs -run '^TestBootstrapCPURequestIsolation$' -count=1 \
     && CGO_ENABLED=0 go build -trimpath \
-       -ldflags '-X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildVersion=1.29.0-fugue-noop2 -X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildCommit=23eae00cd+fugue-noop2' \
+       -ldflags '-X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildVersion=1.29.0-fugue-bootstrap1 -X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildCommit=23eae00cd+fugue-bootstrap1' \
        -o /out/fugue-cnpg-controller ./cmd/manager
 
 # Retain the original instance-manager executables byte-for-byte. The candidate
@@ -23,5 +26,6 @@ FROM ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad4
 COPY --from=build --chown=65532:65532 --chmod=0755 /out/fugue-cnpg-controller /fugue-cnpg-controller
 COPY third_party/cloudnative-pg/semantic-status.patch /licenses/fugue-cnpg-semantic-status.patch
 COPY third_party/cloudnative-pg/role-binding-cache.patch /licenses/fugue-cnpg-role-binding-cache.patch
+COPY third_party/cloudnative-pg/bootstrap-cpu-isolation.patch /licenses/fugue-cnpg-bootstrap-cpu-isolation.patch
 USER 65532:65532
 ENTRYPOINT ["/fugue-cnpg-controller"]

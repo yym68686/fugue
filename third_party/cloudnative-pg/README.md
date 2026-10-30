@@ -1,4 +1,4 @@
-# CloudNativePG status write regression
+# CloudNativePG controller fixes
 
 This patch applies only to upstream commit
 `23eae00cd7aad82978397798dd27b600eb25ae3d` (CloudNativePG 1.29.0).
@@ -83,3 +83,18 @@ Production release prerequisites:
 
 The patch is derived from CloudNativePG, licensed under Apache-2.0. Its source
 files retain the upstream copyright and license headers.
+
+`bootstrap-cpu-isolation.patch` deep-copies the bootstrap init container's
+resource requirements. Upstream assigns the same resource maps to the init
+container and PostgreSQL. Applying `cnpg.io/podPatch` unmarshals into that Pod;
+the PostgreSQL resources overwrite the init CPU override through the shared
+map. The regression test reproduces a 1m init override remaining at 100m before
+the fix, then requires that only init CPU changes, the main resources and
+Cluster are retained, and the generated PodSpec annotation records 1m. It also
+verifies that this init-only change does not implicitly trigger a rollout.
+
+The fix introduces no default resource policy and does not enroll any database.
+Only Clusters explicitly configured with the existing `cnpg.io/podPatch` use
+an independent override. Operator activation retains all existing operand
+identities; separately declared canary maintenance is required to replace an
+old Pod and run bootstrap with its new request.
