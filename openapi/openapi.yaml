@@ -8942,6 +8942,12 @@ paths:
         source Pod finishes normal termination on healthy nodes. The source primary is never
         started to perform this copy. Existing HA instance and synchronous replica
         counts are preserved, and destination replicas must catch up before cutover.
+        Storage attachment compatibility is checked for the primary and distinct HA
+        replica nodes before the source is stopped. An explicit storage-class-only
+        retry may replace an unpublished verified offline destination: the old
+        destination is gracefully stopped, all data claims and attempt identities
+        are retained, and a new seed is copied from the still-stopped unchanged source.
+        Other intent changes, activated destinations and reused attempt classes are rejected.
         Source storage is never expanded. Durable phase records
         prevent recopying an activated destination. Dry run describes intent only;
         live preflight occurs before each mutation.

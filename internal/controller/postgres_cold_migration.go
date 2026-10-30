@@ -24,6 +24,9 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 		return err
 	}
 	ns := runtimepkg.NamespaceForTenant(app.TenantID)
+	if _, err := s.coldRecoveryPlacements(ctx, c, app, pg, pg.PrimaryNodeName); err != nil {
+		return err
+	}
 	st, rv, err := s.prepareColdState(ctx, c, op, app, source, pg, targetRuntime)
 	if err != nil {
 		return err

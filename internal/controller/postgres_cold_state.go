@@ -56,6 +56,16 @@ type coldPostgresState struct {
 	SourceNodes       []string                `json:"source_nodes,omitempty"`
 	SourceTolerations []runtimepkg.Toleration `json:"source_tolerations,omitempty"`
 	IntentHash        string                  `json:"intent_hash,omitempty"`
+	RetainedAttempts  []coldRetainedAttempt   `json:"retained_attempts,omitempty"`
+}
+
+type coldRetainedAttempt struct {
+	TargetName   string `json:"target_name"`
+	TargetUID    string `json:"target_uid"`
+	SeedName     string `json:"seed_name"`
+	SeedUID      string `json:"seed_uid"`
+	StorageClass string `json:"storage_class"`
+	IntentHash   string `json:"intent_hash"`
 }
 
 func coldStateName(serviceID string) string {
@@ -108,6 +118,9 @@ func (s *Service) prepareColdState(ctx context.Context, c *kubeClient, op model.
 		return nil, "", err
 	}
 	if existing != nil {
+		if existing.TargetClass != pg.StorageClassName {
+			return s.replanColdStorage(ctx, c, ns, op, app, existing, rv, pg)
+		}
 		if existing.AppID != app.ID || existing.TargetRuntime != pg.RuntimeID || existing.TargetClass != pg.StorageClassName || (existing.IntentHash != "" && existing.IntentHash != store.PostgresSpecFingerprint(pg)) {
 			return nil, "", fmt.Errorf("conflicting cold migration intent; retained state must be resolved first")
 		}

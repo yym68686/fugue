@@ -20,7 +20,7 @@ func (s *Service) restoreColdTargetHA(ctx context.Context, c *kubeClient, ns str
 	if pg.Instances <= 1 {
 		return nil
 	}
-	placements, err := s.managedPostgresServicePlacements(ctx, app, st.TargetName, app.Spec.RuntimeID, *pg)
+	placements, err := s.coldRecoveryPlacements(ctx, c, app, *pg, st.TargetNode)
 	if err != nil {
 		return err
 	}
