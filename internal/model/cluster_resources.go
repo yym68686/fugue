@@ -24,6 +24,10 @@ type ClusterServiceResources struct {
 	Namespace                string                             `json:"namespace"`
 	PodCount                 int                                `json:"pod_count"`
 	MeasuredPods             int                                `json:"measured_pods"`
+	ContainerCount           int                                `json:"container_count"`
+	CPUMeasuredContainers    int                                `json:"cpu_measured_containers"`
+	MemoryMeasuredContainers int                                `json:"memory_measured_containers"`
+	UsageStatus              string                             `json:"usage_status"`
 	CPURequestMilliCores     int64                              `json:"cpu_request_millicores"`
 	MemoryRequestBytes       int64                              `json:"memory_request_bytes"`
 	CPUUsageMilliCores       *float64                           `json:"cpu_usage_millicores"`

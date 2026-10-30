@@ -23,7 +23,7 @@ func (c *CLI) newAdminClusterResourcesCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "resources --node <node>",
 		Short:   "Rank node services by resource requests, live CPU/memory and recommended requests (admin)",
-		Long:    "Report all nonterminal pods on one node, grouped by managed app, database or Kubernetes controller. Includes candidate replicas, sidecars, init-container peaks and overhead. CPU-REC is the total recommended request; CPU-CAP is the separate capacity estimate. Unknown values are shown as '-'. This command does not change resources.",
+		Long:    "Report all nonterminal pods on one node, grouped by managed app, database or Kubernetes controller. Includes candidate replicas, sidecars, init-container peaks and overhead. CPU-REC is the total recommended request; CPU-CAP is the separate capacity estimate. Available usage is retained when metrics are incomplete: '*' marks a partial sum and USAGE shows partial. '-' means no observations for that dimension. This command does not change resources.",
 		Example: "  fugue admin cluster resources --node worker-a\n  fugue admin cluster resources --node worker-a --limit 0 --memory\n  fugue admin cluster resources --node worker-a --sort memory-usage --order desc --limit 50 --json",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -151,7 +151,7 @@ func writeClusterResourceTable(out io.Writer, report model.ClusterResourceReport
 	if memory {
 		header += "\tMEM-REQ(MiB)\tMEM-USED(MiB)\tMEM-REC(MiB)"
 	}
-	fmt.Fprintln(w, header+"\tMETRICS\tRECOMMENDATION")
+	fmt.Fprintln(w, header+"\tUSAGE\tMETRICS\tRECOMMENDATION")
 	integer := func(value *int64, divisor float64) string {
 		if value == nil {
 			return "-"
@@ -165,17 +165,34 @@ func writeClusterResourceTable(out io.Writer, report model.ClusterResourceReport
 		usage := "-"
 		if row.CPUUsageMilliCores != nil {
 			usage = fmt.Sprintf("%.2f", *row.CPUUsageMilliCores)
+			if row.CPUMeasuredContainers < row.ContainerCount || (row.ContainerCount == 0 && row.MeasuredPods < row.PodCount) {
+				usage += "*"
+			}
 		}
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s", i+1, row.Namespace, row.Kind, row.Name, row.PodCount, row.CPURequestMilliCores, usage, integer(row.CPURecommendedMilliCores, 1), integer(row.CPUCapacityMilliCores, 1))
 		if memory {
-			fmt.Fprintf(w, "\t%.1f\t%s\t%s", float64(row.MemoryRequestBytes)/1024/1024, integer(row.MemoryUsageBytes, 1024*1024), integer(row.MemoryRecommendedBytes, 1024*1024))
+			memoryUsage := integer(row.MemoryUsageBytes, 1024*1024)
+			if row.MemoryUsageBytes != nil && (row.MemoryMeasuredContainers < row.ContainerCount || (row.ContainerCount == 0 && row.MeasuredPods < row.PodCount)) {
+				memoryUsage += "*"
+			}
+			fmt.Fprintf(w, "\t%.1f\t%s\t%s", float64(row.MemoryRequestBytes)/1024/1024, memoryUsage, integer(row.MemoryRecommendedBytes, 1024*1024))
 		}
-		fmt.Fprintf(w, "\t%d/%d\t%s\n", row.MeasuredPods, row.PodCount, row.RecommendationReason)
+		status := row.UsageStatus
+		if status == "" {
+			status = "complete"
+			if row.CPUUsageMilliCores == nil && row.MemoryUsageBytes == nil {
+				status = "unavailable"
+			} else if row.MeasuredPods < row.PodCount {
+				status = "partial"
+			}
+		}
+		fmt.Fprintf(w, "\t%s\t%d/%d\t%s\n", status, row.MeasuredPods, row.PodCount, row.RecommendationReason)
 	}
 	if err := w.Flush(); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "CPU-REC = request target; CPU-CAP = capacity estimate. Totals include all node services; recommendations retain non-main-container reservations. History: %dh, minimum samples: %d.\n", report.WindowHours, report.MinSamples)
+	fmt.Fprintln(out, "* = partial observed sum, not the full service usage; missing observations are not treated as zero. METRICS = fully measured pods/total pods. RECOMMENDATION describes historical samples, not pod health.")
 	for _, warning := range report.Warnings {
 		if _, err := fmt.Fprintln(out, "Warning: "+warning); err != nil {
 			return err

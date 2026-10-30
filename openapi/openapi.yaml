@@ -6501,7 +6501,7 @@ paths:
     get:
       operationId: getClusterResourceReport
       summary: Report per-service resource requests, live usage and right-sizing on one node
-      description: Platform administrators only. Includes all nonterminal pods, grouped by managed workload or Kubernetes controller. Recommended totals retain sidecars, init-container peaks and pod overhead. Missing or incomplete metrics and unsupported recommendations are null.
+      description: Platform administrators only. Includes all nonterminal pods, grouped by managed workload or Kubernetes controller. Recommended totals retain sidecars, init-container peaks and pod overhead. Usage sums all available fresh container observations independently for CPU and memory; incomplete totals are marked partial with container coverage. A usage dimension is null only when it has no observations. Unsupported recommendations are null.
       tags: [Cluster]
       x-fugue-handler: handleGetClusterResourceReport
       security:
@@ -29648,18 +29648,34 @@ components:
     ClusterServiceResources:
       type: object
       additionalProperties: false
-      required: [kind, id, name, namespace, pod_count, measured_pods, cpu_request_millicores, memory_request_bytes, cpu_usage_millicores, memory_usage_bytes, cpu_recommended_millicores, cpu_capacity_millicores, memory_recommended_bytes, recommendation_reason]
+      required: [kind, id, name, namespace, pod_count, measured_pods, container_count, cpu_measured_containers, memory_measured_containers, usage_status, cpu_request_millicores, memory_request_bytes, cpu_usage_millicores, memory_usage_bytes, cpu_recommended_millicores, cpu_capacity_millicores, memory_recommended_bytes, recommendation_reason]
       properties:
         kind: {type: string}
         id: {type: string}
         name: {type: string}
         namespace: {type: string}
         pod_count: {type: integer}
-        measured_pods: {type: integer}
+        measured_pods:
+          type: integer
+          description: Pods with fresh CPU and memory observations for every expected regular container and restartable init sidecar. Other observed containers still contribute to usage sums.
+        container_count: {type: integer, minimum: 0}
+        cpu_measured_containers: {type: integer, minimum: 0}
+        memory_measured_containers: {type: integer, minimum: 0}
+        usage_status:
+          type: string
+          enum: [complete, partial, unavailable]
+          description: Complete means all expected containers have CPU and memory observations; partial retains the available observations; unavailable means neither dimension has any fresh observations.
         cpu_request_millicores: {type: integer, format: int64}
         memory_request_bytes: {type: integer, format: int64}
-        cpu_usage_millicores: {type: number, nullable: true}
-        memory_usage_bytes: {type: integer, format: int64, nullable: true}
+        cpu_usage_millicores:
+          type: number
+          nullable: true
+          description: Sum of available fresh CPU observations, including containers in partially measured pods. Partial sums are lower bounds; null means no CPU observations.
+        memory_usage_bytes:
+          type: integer
+          format: int64
+          nullable: true
+          description: Sum of available fresh memory working sets, including containers in partially measured pods. Partial sums are lower bounds; null means no memory observations.
         cpu_recommended_millicores:
           type: integer
           format: int64

@@ -86,3 +86,39 @@ func TestWriteClusterResourceTableIncludesActualAndRecommendationColumns(t *test
 		}
 	}
 }
+
+func TestClusterResourceTableMarksPartialDimensionsAndKeepsUsageSortable(t *testing.T) {
+	partialCPU, completeCPU, memory := 25.5, 10.0, int64(20*1024*1024)
+	rows := []model.ClusterServiceResources{
+		{Name: "complete", PodCount: 1, MeasuredPods: 1, ContainerCount: 1, CPUMeasuredContainers: 1, MemoryMeasuredContainers: 1, UsageStatus: "complete", CPUUsageMilliCores: &completeCPU, MemoryUsageBytes: &memory},
+		{Name: "partial", PodCount: 2, MeasuredPods: 1, ContainerCount: 4, CPUMeasuredContainers: 3, MemoryMeasuredContainers: 4, UsageStatus: "partial", CPUUsageMilliCores: &partialCPU, MemoryUsageBytes: &memory},
+		{Name: "missing", PodCount: 1, ContainerCount: 1, UsageStatus: "unavailable"},
+	}
+	if err := sortClusterServiceResources(rows, "cpu-usage", "desc"); err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].Name != "partial" || rows[2].Name != "missing" {
+		t.Fatalf("partial observations must participate in numeric sorting: %+v", rows)
+	}
+	var out bytes.Buffer
+	if err := writeClusterResourceTable(&out, model.ClusterResourceReport{Services: rows}, true); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{"25.50*", "partial", "1/2", "unavailable", "USAGE", "* = partial observed sum"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "20.0*") || strings.Contains(text, "10.00*") {
+		t.Fatalf("fully observed dimensions must not be marked partial: %s", text)
+	}
+	rows[0].MemoryMeasuredContainers = 3
+	out.Reset()
+	if err := writeClusterResourceTable(&out, model.ClusterResourceReport{Services: rows}, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "20.0*") {
+		t.Fatalf("partial memory must be marked: %s", out.String())
+	}
+}

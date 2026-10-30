@@ -65,7 +65,7 @@ func TestClusterResourceReportAdminAPIRecommendationsAndMetricsFailure(t *testin
 		t.Fatalf("unexpected services: %+v", report)
 	}
 	row := report.Services[0]
-	if row.CPURequestMilliCores != 125 || row.CPURecommendedMilliCores == nil || *row.CPURecommendedMilliCores != 45 || row.CPUCapacityMilliCores == nil || *row.CPUCapacityMilliCores != 55 || row.CPUUsageMilliCores != nil || len(report.Warnings) == 0 {
+	if row.CPURequestMilliCores != 125 || row.CPURecommendedMilliCores == nil || *row.CPURecommendedMilliCores != 45 || row.CPUCapacityMilliCores == nil || *row.CPUCapacityMilliCores != 55 || row.CPUUsageMilliCores != nil || row.UsageStatus != "unavailable" || row.ContainerCount != 2 || len(report.Warnings) == 0 {
 		t.Fatalf("live requests and request/capacity recommendations must remain distinct: %+v", row)
 	}
 	_, key, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"app.read"})
@@ -80,7 +80,7 @@ func TestClusterResourceReportAdminAPIRecommendationsAndMetricsFailure(t *testin
 	}
 }
 
-func TestBuildClusterResourceReportAggregatesNodeWorkloadsAndKeepsMissingUsageUnknown(t *testing.T) {
+func TestBuildClusterResourceReportRetainsObservedUsageWhenOtherPodsAreMissing(t *testing.T) {
 	now := time.Now().UTC()
 	pods := []corev1.Pod{
 		{ObjectMeta: metav1.ObjectMeta{Namespace: "app-a", Name: "web-1", Labels: map[string]string{runtimepkg.FugueLabelAppID: "app_a"}}, Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "web", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("64Mi")}}}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}},
@@ -97,8 +97,8 @@ func TestBuildClusterResourceReportAggregatesNodeWorkloadsAndKeepsMissingUsageUn
 		t.Fatalf("unexpected node totals: %+v", report)
 	}
 	row := report.Services[0]
-	if row.PodCount != 2 || row.MeasuredPods != 1 || row.CPUUsageMilliCores != nil || row.MemoryUsageBytes != nil {
-		t.Fatalf("incomplete service metrics must be unknown: %+v", row)
+	if row.PodCount != 2 || row.MeasuredPods != 1 || row.UsageStatus != "partial" || row.CPUUsageMilliCores == nil || *row.CPUUsageMilliCores != 25 || row.MemoryUsageBytes == nil || *row.MemoryUsageBytes != 20*1024*1024 || row.ContainerCount != 2 || row.CPUMeasuredContainers != 1 || row.MemoryMeasuredContainers != 1 {
+		t.Fatalf("available usage must survive missing pods with explicit coverage: %+v", row)
 	}
 }
 
@@ -126,7 +126,7 @@ func TestClusterPodResourceRequestsPreserveSidecarsAndInitPeakWhenReplacingMainC
 	}
 }
 
-func TestClusterResourceMetricsFallbackRejectsStaleOrIncompleteContainers(t *testing.T) {
+func TestClusterResourceMetricsFallbackRetainsPartialUsageAndRejectsStaleObservations(t *testing.T) {
 	now := time.Now().UTC()
 	nano, memory := uint64(12500000), uint64(16*1024*1024)
 	summary := &kubeNodeSummary{Pods: []kubeNodeSummaryPod{{PodRef: kubeNodeSummaryPodRef{Namespace: "app", Name: "web"}, Containers: []kubeNodeSummaryContainer{{Name: "main", CPU: kubeNodeSummaryCPU{Time: now.Format(time.RFC3339Nano), UsageNanoCores: &nano}, Memory: kubeNodeSummaryMem{Time: now.Format(time.RFC3339Nano), WorkingSetBytes: &memory}}}}}}
@@ -142,7 +142,59 @@ func TestClusterResourceMetricsFallbackRejectsStaleOrIncompleteContainers(t *tes
 	}
 	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "workspace"})
 	report, _ = buildClusterResourceReport("node-a", []corev1.Pod{pod}, metrics, nil, nil, now)
-	if report.Services[0].CPUUsageMilliCores != nil {
-		t.Fatal("missing sidecar metrics must be unknown")
+	row := report.Services[0]
+	if row.CPUUsageMilliCores == nil || *row.CPUUsageMilliCores != 12.5 || row.MemoryUsageBytes == nil || *row.MemoryUsageBytes != int64(memory) || row.UsageStatus != "partial" || row.MeasuredPods != 0 || row.ContainerCount != 2 || row.CPUMeasuredContainers != 1 {
+		t.Fatalf("missing sidecar must not hide the observed main container: %+v", row)
+	}
+	summary.Pods[0].Containers[0].CPU.UsageNanoCores = nil
+	metrics = clusterResourceMetricsFromSummary(summary)
+	report, _ = buildClusterResourceReport("node-a", []corev1.Pod{pod}, metrics, nil, nil, now)
+	row = report.Services[0]
+	if row.CPUUsageMilliCores != nil || row.MemoryUsageBytes == nil || *row.MemoryUsageBytes != int64(memory) || row.MemoryMeasuredContainers != 1 {
+		t.Fatalf("fallback must retain memory without CPU: %+v", row)
+	}
+	summary.Pods[0].Containers[0].CPU.UsageNanoCores = &nano
+	summary.Pods[0].Containers[0].CPU.Time = now.Add(-6 * time.Minute).Format(time.RFC3339Nano)
+	metrics = clusterResourceMetricsFromSummary(summary)
+	report, _ = buildClusterResourceReport("node-a", []corev1.Pod{pod}, metrics, nil, nil, now)
+	row = report.Services[0]
+	if row.CPUUsageMilliCores != nil || row.MemoryUsageBytes == nil || *row.MemoryUsageBytes != int64(memory) {
+		t.Fatalf("a stale CPU observation must not erase fresh fallback memory: %+v", row)
+	}
+}
+
+func TestClusterResourcePartialContainersAndIndependentDimensions(t *testing.T) {
+	now := time.Now().UTC()
+	float64Ptr := func(value float64) *float64 { return &value }
+	always := corev1.ContainerRestartPolicyAlways
+	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "web"}, Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main"}}, InitContainers: []corev1.Container{{Name: "drain", RestartPolicy: &always}}}}
+	for _, test := range []struct {
+		name                            string
+		usage                           map[string]corev1.ResourceList
+		cpu                             *float64
+		memory                          *int64
+		cpuCount, memoryCount, measured int
+		status                          string
+	}{
+		{name: "sidecar only", usage: map[string]corev1.ResourceList{"drain": {corev1.ResourceCPU: resource.MustParse("500u"), corev1.ResourceMemory: resource.MustParse("3Mi")}}, cpu: float64Ptr(0.5), memory: int64Ptr(3 * 1024 * 1024), cpuCount: 1, memoryCount: 1, status: "partial"},
+		{name: "CPU only including observed zero", usage: map[string]corev1.ResourceList{"main": {corev1.ResourceCPU: resource.MustParse("0")}, "drain": {corev1.ResourceCPU: resource.MustParse("0")}}, cpu: float64Ptr(0), cpuCount: 2, status: "partial"},
+		{name: "memory only including observed zero", usage: map[string]corev1.ResourceList{"main": {corev1.ResourceMemory: resource.MustParse("0")}, "drain": {corev1.ResourceMemory: resource.MustParse("0")}}, memory: int64Ptr(0), memoryCount: 2, status: "partial"},
+		{name: "all missing", status: "unavailable"},
+		{name: "complete", usage: map[string]corev1.ResourceList{"main": {corev1.ResourceCPU: resource.MustParse("20m"), corev1.ResourceMemory: resource.MustParse("16Mi")}, "drain": {corev1.ResourceCPU: resource.MustParse("1m"), corev1.ResourceMemory: resource.MustParse("4Mi")}}, cpu: float64Ptr(21), memory: int64Ptr(20 * 1024 * 1024), cpuCount: 2, memoryCount: 2, measured: 1, status: "complete"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			metric := clusterPodMetrics{Metadata: pod.ObjectMeta, Timestamp: metav1.NewTime(now)}
+			for name, values := range test.usage {
+				metric.Containers = append(metric.Containers, struct {
+					Name  string              `json:"name"`
+					Usage corev1.ResourceList `json:"usage"`
+				}{Name: name, Usage: values})
+			}
+			report, _ := buildClusterResourceReport("node-a", []corev1.Pod{pod}, []clusterPodMetrics{metric}, nil, nil, now)
+			row := report.Services[0]
+			if (row.CPUUsageMilliCores == nil) != (test.cpu == nil) || (test.cpu != nil && *row.CPUUsageMilliCores != *test.cpu) || (row.MemoryUsageBytes == nil) != (test.memory == nil) || (test.memory != nil && *row.MemoryUsageBytes != *test.memory) || row.UsageStatus != test.status || row.CPUMeasuredContainers != test.cpuCount || row.MemoryMeasuredContainers != test.memoryCount || row.ContainerCount != 2 || row.MeasuredPods != test.measured {
+				t.Fatalf("wrong observed usage or coverage: %+v", row)
+			}
+		})
 	}
 }

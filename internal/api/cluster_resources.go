@@ -137,17 +137,26 @@ func (s *Server) handleGetClusterResourceReport(w http.ResponseWriter, r *http.R
 
 func clusterResourceMetricsFromSummary(summary *kubeNodeSummary) []clusterPodMetrics {
 	out := make([]clusterPodMetrics, 0, len(summary.Pods))
+	now := time.Now().UTC()
 	for _, pod := range summary.Pods {
 		metric := clusterPodMetrics{Metadata: metav1.ObjectMeta{Namespace: pod.PodRef.Namespace, Name: pod.PodRef.Name}}
 		for _, container := range pod.Containers {
 			cpuTime, cpuErr := time.Parse(time.RFC3339Nano, container.CPU.Time)
 			memoryTime, memoryErr := time.Parse(time.RFC3339Nano, container.Memory.Time)
-			if cpuErr != nil || memoryErr != nil || container.CPU.UsageNanoCores == nil || container.Memory.WorkingSetBytes == nil {
-				continue
+			values := corev1.ResourceList{}
+			var observed time.Time
+			if cpuErr == nil && container.CPU.UsageNanoCores != nil && clusterResourceMetricFresh(cpuTime, now) {
+				values[corev1.ResourceCPU] = *resource.NewScaledQuantity(int64(*container.CPU.UsageNanoCores), resource.Nano)
+				observed = cpuTime
 			}
-			observed := cpuTime
-			if memoryTime.Before(observed) {
-				observed = memoryTime
+			if memoryErr == nil && container.Memory.WorkingSetBytes != nil && clusterResourceMetricFresh(memoryTime, now) {
+				values[corev1.ResourceMemory] = *resource.NewQuantity(int64(*container.Memory.WorkingSetBytes), resource.BinarySI)
+				if observed.IsZero() || memoryTime.Before(observed) {
+					observed = memoryTime
+				}
+			}
+			if len(values) == 0 {
+				continue
 			}
 			if metric.Timestamp.IsZero() || observed.Before(metric.Timestamp.Time) {
 				metric.Timestamp = metav1.NewTime(observed)
@@ -155,14 +164,16 @@ func clusterResourceMetricsFromSummary(summary *kubeNodeSummary) []clusterPodMet
 			metric.Containers = append(metric.Containers, struct {
 				Name  string              `json:"name"`
 				Usage corev1.ResourceList `json:"usage"`
-			}{Name: container.Name, Usage: corev1.ResourceList{
-				corev1.ResourceCPU:    *resource.NewScaledQuantity(int64(*container.CPU.UsageNanoCores), resource.Nano),
-				corev1.ResourceMemory: *resource.NewQuantity(int64(*container.Memory.WorkingSetBytes), resource.BinarySI),
-			}})
+			}{Name: container.Name, Usage: values})
 		}
 		out = append(out, metric)
 	}
 	return out
+}
+
+func clusterResourceMetricFresh(observed, now time.Time) bool {
+	age := now.Sub(observed)
+	return !observed.IsZero() && age >= -time.Minute && age <= 5*time.Minute
 }
 
 func buildClusterResourceReport(node string, pods []corev1.Pod, metrics []clusterPodMetrics, apps []model.App, services []model.BackingService, now time.Time) (model.ClusterResourceReport, map[string][]corev1.Pod) {
@@ -170,8 +181,7 @@ func buildClusterResourceReport(node string, pods []corev1.Pod, metrics []cluste
 	resolver := newClusterWorkloadResolver(apps, services)
 	measured := make(map[string]clusterPodMetrics, len(metrics))
 	for _, metric := range metrics {
-		age := now.Sub(metric.Timestamp.Time)
-		if !metric.Timestamp.IsZero() && age >= -time.Minute && age <= 5*time.Minute {
+		if clusterResourceMetricFresh(metric.Timestamp.Time, now) {
 			measured[clusterNamespacedResourceKey(metric.Metadata.Namespace, metric.Metadata.Name)] = metric
 		}
 	}
@@ -214,16 +224,21 @@ func buildClusterResourceReport(node string, pods []corev1.Pod, metrics []cluste
 		requests := clusterPodResourceRequests(pod, nil, false, false)
 		entry.CPURequestMilliCores += requests.cpuMilliCores
 		entry.MemoryRequestBytes += requests.memoryBytes
-		if metric, exists := measured[clusterNamespacedResourceKey(pod.Namespace, pod.Name)]; exists {
-			cpu, memory, complete := clusterPodMeasuredUsage(pod, metric)
-			if complete {
-				if entry.CPUUsageMilliCores == nil {
-					entry.CPUUsageMilliCores = new(float64)
-				}
-				*entry.CPUUsageMilliCores += cpu
-				addClusterResourceInt(&entry.MemoryUsageBytes, memory)
-				entry.MeasuredPods++
+		usage := clusterPodMeasuredUsage(pod, measured[clusterNamespacedResourceKey(pod.Namespace, pod.Name)])
+		entry.ContainerCount += usage.containers
+		entry.CPUMeasuredContainers += usage.cpuContainers
+		entry.MemoryMeasuredContainers += usage.memoryContainers
+		if usage.cpuMilliCores != nil {
+			if entry.CPUUsageMilliCores == nil {
+				entry.CPUUsageMilliCores = new(float64)
 			}
+			*entry.CPUUsageMilliCores += *usage.cpuMilliCores
+		}
+		if usage.memoryBytes != nil {
+			addClusterResourceInt(&entry.MemoryUsageBytes, *usage.memoryBytes)
+		}
+		if usage.containers > 0 && usage.cpuContainers == usage.containers && usage.memoryContainers == usage.containers {
+			entry.MeasuredPods++
 		}
 		report.TotalPods++
 		report.CPURequestMilliCores += requests.cpuMilliCores
@@ -231,9 +246,14 @@ func buildClusterResourceReport(node string, pods []corev1.Pod, metrics []cluste
 	}
 	missing := 0
 	for _, row := range rows {
-		if row.MeasuredPods != row.PodCount {
+		row.UsageStatus = "complete"
+		if row.CPUUsageMilliCores == nil && row.MemoryUsageBytes == nil {
+			row.UsageStatus = "unavailable"
+		} else if row.MeasuredPods != row.PodCount {
+			row.UsageStatus = "partial"
+		}
+		if row.UsageStatus != "complete" {
 			missing += row.PodCount - row.MeasuredPods
-			row.CPUUsageMilliCores, row.MemoryUsageBytes = nil, nil
 		}
 		report.Services = append(report.Services, *row)
 	}
@@ -242,7 +262,7 @@ func buildClusterResourceReport(node string, pods []corev1.Pod, metrics []cluste
 	})
 	report.TotalServices = len(report.Services)
 	if missing > 0 {
-		report.Warnings = append(report.Warnings, fmt.Sprintf("%d pods have missing, stale or incomplete metrics; affected service usage is unknown", missing))
+		report.Warnings = append(report.Warnings, fmt.Sprintf("%d pods have missing, stale or incomplete metrics; displayed usage retains available observations and may be partial", missing))
 	}
 	return report, groups
 }
@@ -306,34 +326,41 @@ func clusterPodResourceRequests(pod corev1.Pod, target *model.ResourceSpec, cpu,
 	return requests
 }
 
-func clusterPodMeasuredUsage(pod corev1.Pod, metric clusterPodMetrics) (float64, int64, bool) {
-	expected := map[string]bool{}
+type clusterPodUsage struct {
+	cpuMilliCores    *float64
+	memoryBytes      *int64
+	containers       int
+	cpuContainers    int
+	memoryContainers int
+}
+
+func clusterPodMeasuredUsage(pod corev1.Pod, metric clusterPodMetrics) clusterPodUsage {
+	expected := map[string]struct{}{}
 	for _, container := range pod.Spec.Containers {
-		expected[container.Name] = false
+		expected[container.Name] = struct{}{}
 	}
 	for _, container := range pod.Spec.InitContainers {
 		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
-			expected[container.Name] = false
+			expected[container.Name] = struct{}{}
 		}
 	}
-	var cpu float64
-	var memory int64
+	usage := clusterPodUsage{containers: len(expected)}
 	for _, container := range metric.Containers {
-		cpuValue, haveCPU := container.Usage[corev1.ResourceCPU]
-		memoryValue, haveMemory := container.Usage[corev1.ResourceMemory]
-		if !haveCPU || !haveMemory {
-			return 0, 0, false
+		if _, exists := expected[container.Name]; !exists {
+			continue
 		}
-		cpu += cpuValue.AsApproximateFloat64() * 1000
-		memory += memoryValue.Value()
-		if _, exists := expected[container.Name]; exists {
-			expected[container.Name] = true
+		delete(expected, container.Name)
+		if value, exists := container.Usage[corev1.ResourceCPU]; exists {
+			if usage.cpuMilliCores == nil {
+				usage.cpuMilliCores = new(float64)
+			}
+			*usage.cpuMilliCores += value.AsApproximateFloat64() * 1000
+			usage.cpuContainers++
+		}
+		if value, exists := container.Usage[corev1.ResourceMemory]; exists {
+			addClusterResourceInt(&usage.memoryBytes, value.Value())
+			usage.memoryContainers++
 		}
 	}
-	for _, found := range expected {
-		if !found {
-			return 0, 0, false
-		}
-	}
-	return cpu, memory, len(expected) > 0
+	return usage
 }
