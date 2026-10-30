@@ -23492,6 +23492,14 @@ components:
           maxItems: 12
           description: Public relay/MX policy, projected only beneath enabled applications; never the platform root.
           items: {$ref: '#/components/schemas/AppMailDNSRecord'}
+        app_dns_records:
+          type: object
+          maxProperties: 128
+          description: Administrator-owned public DNS additions keyed by exact application ID, for domain-specific relay DKIM and return-path records. Projected only under that application's active, ownership-matched binding; never copied to other applications. Combined with dns_records, each application is limited to 12 records.
+          additionalProperties:
+            type: array
+            maxItems: 12
+            items: {$ref: '#/components/schemas/AppMailDNSRecord'}
     AppMailDNSRecord:
       type: object
       additionalProperties: false

@@ -154,7 +154,7 @@ func (s *Server) handlePutMailPlatformConfig(w http.ResponseWriter, r *http.Requ
 	if !decodeMailInput(w, r, &cfg) {
 		return
 	}
-	if err := validateMailDNSPolicy(cfg.DNSRecords); err != nil {
+	if err := validateMailDNSConfig(cfg); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}

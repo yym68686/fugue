@@ -2,6 +2,7 @@ package api
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -84,5 +85,57 @@ func TestMailDNSPolicyCannotAliasWebOrEscapeApplicationNamespace(t *testing.T) {
 		if err := validateMailDNSPolicy([]model.AppMailDNSRecord{record}); err == nil {
 			t.Fatal("invalid mail policy accepted", record)
 		}
+	}
+}
+
+func TestMailRelayDNSIsSpecificToExactActiveApplication(t *testing.T) {
+	b := mailDNSFixture()
+	otherApp := b.Apps[0]
+	otherApp.ID = "other"
+	otherApp.Route = &model.AppRoute{Hostname: "other.apps.example.test"}
+	b.Apps = append(b.Apps, otherApp)
+	otherBinding := b.AppMailBindings[0]
+	otherBinding.AppID, otherBinding.Hostname = otherApp.ID, otherApp.Route.Hostname
+	b.AppMailBindings = append(b.AppMailBindings, otherBinding)
+	b.MailPlatformConfig.AppDNSRecords = map[string][]model.AppMailDNSRecord{
+		"app":     {{Name: "relay._domainkey", Type: "TXT", Values: []string{"v=DKIM1; p=domain-specific-public-key"}, TTL: 300}},
+		"unbound": {{Name: "relay._domainkey", Type: "TXT", Values: []string{"v=DKIM1; p=unbound-public-key"}, TTL: 300}},
+	}
+	r := platformIntentProjectionResponse{}
+	if err := projectAppMailDNS(&r, b, "apps.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, record := range r.Intent.DNS {
+		if strings.Contains(record.Hostname, "_domainkey") {
+			count++
+			if record.Hostname != "relay._domainkey.app.apps.example.test" || record.AppID != "app" {
+				t.Fatal("domain-specific relay key leaked to another app", record)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatal("missing app-specific DKIM", r.Intent.DNS)
+	}
+	b.AppMailBindings[0].State = "revoked"
+	r = platformIntentProjectionResponse{}
+	if err := projectAppMailDNS(&r, b, "apps.example.test"); err != nil || len(r.Intent.DNS) != 3 {
+		t.Fatal("revoked app retained relay DNS", r.Intent.DNS, err)
+	}
+}
+
+func TestMailDNSConfigRejectsUnboundedAndConflictingPerAppRules(t *testing.T) {
+	config := *mailDNSFixture().MailPlatformConfig
+	config.AppDNSRecords = map[string][]model.AppMailDNSRecord{"app": {{Name: "@", Type: "CNAME", Values: []string{"relay.example.test."}, TTL: 300}}}
+	if err := validateMailDNSConfig(config); err == nil {
+		t.Fatal("app-specific policy aliased the Web host")
+	}
+	config.AppDNSRecords = map[string][]model.AppMailDNSRecord{"bad/key": nil}
+	if err := validateMailDNSConfig(config); err == nil {
+		t.Fatal("invalid application identity accepted")
+	}
+	config.AppDNSRecords = map[string][]model.AppMailDNSRecord{"app": make([]model.AppMailDNSRecord, 12)}
+	if err := validateMailDNSConfig(config); err == nil {
+		t.Fatal("combined per-app record bound was bypassed")
 	}
 }

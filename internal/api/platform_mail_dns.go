@@ -41,6 +41,25 @@ func validateMailDNSPolicy(records []model.AppMailDNSRecord) error {
 	return nil
 }
 
+func validateMailDNSConfig(config model.MailPlatformConfig) error {
+	if len(config.AppDNSRecords) > 128 {
+		return store.ErrInvalidInput
+	}
+	if err := validateMailDNSPolicy(config.DNSRecords); err != nil {
+		return err
+	}
+	for appID, records := range config.AppDNSRecords {
+		if len(appID) < 1 || len(appID) > 160 || strings.ContainsAny(appID, " /\t\r\n") {
+			return store.ErrInvalidInput
+		}
+		combined := append(append([]model.AppMailDNSRecord(nil), config.DNSRecords...), records...)
+		if err := validateMailDNSPolicy(combined); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Consume only the frozen business snapshot. A provider request, runtime
 // observation or a second store read must not change the DNS artifact midway.
 func projectAppMailDNS(result *platformIntentProjectionResponse, business store.RouteBusinessSnapshot, base string) error {
@@ -48,7 +67,7 @@ func projectAppMailDNS(result *platformIntentProjectionResponse, business store.
 	if cfg == nil || !cfg.Enabled {
 		return nil
 	}
-	if err := validateMailDNSPolicy(cfg.DNSRecords); err != nil {
+	if err := validateMailDNSConfig(*cfg); err != nil {
 		return err
 	}
 	apps := map[string]model.App{}
@@ -61,7 +80,8 @@ func projectAppMailDNS(result *platformIntentProjectionResponse, business store.
 		if b.State != "active" || !exists || err != nil || host != b.Hostname || app.ID != b.AppID || app.TenantID != b.TenantID || app.ProjectID != b.ProjectID || app.Status.Phase == "deleted" || app.Status.Phase == "deleting" || app.Status.Phase == "disabled" {
 			continue
 		}
-		for _, rule := range cfg.DNSRecords {
+		rules := append(append([]model.AppMailDNSRecord(nil), cfg.DNSRecords...), cfg.AppDNSRecords[b.AppID]...)
+		for _, rule := range rules {
 			name := host
 			if rule.Name != "@" {
 				name = rule.Name + "." + host

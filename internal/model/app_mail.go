@@ -3,9 +3,10 @@ package model
 import "time"
 
 type MailPlatformConfig struct {
-	MailflareAppID string             `json:"mailflare_app_id"`
-	Enabled        bool               `json:"enabled"`
-	DNSRecords     []AppMailDNSRecord `json:"dns_records,omitempty"`
+	MailflareAppID string                        `json:"mailflare_app_id"`
+	Enabled        bool                          `json:"enabled"`
+	DNSRecords     []AppMailDNSRecord            `json:"dns_records,omitempty"`
+	AppDNSRecords  map[string][]AppMailDNSRecord `json:"app_dns_records,omitempty"`
 }
 
 // Public DNS only. Private relay/signing credentials stay in the managed
