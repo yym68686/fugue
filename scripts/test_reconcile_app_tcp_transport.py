@@ -40,7 +40,39 @@ class TCPTransportTests(unittest.TestCase):
         self.assertEqual(policy["spec"]["podSelector"]["matchLabels"], service["spec"]["selector"])
         self.assertEqual(policy["spec"]["ingress"][0]["ports"], [{"protocol": "TCP", "port": 25}])
         for target in [service, policy]:
+            self.assertNotIn(tcp.APP, target["metadata"]["labels"])
+            self.assertNotIn("fugue.pro/owner-app-id", target["metadata"]["labels"])
+            self.assertEqual(target["metadata"]["labels"][tcp.TRANSPORT_APP], "app_demo")
+            self.assertEqual(target["metadata"]["ownerReferences"], [self.owner()])
             self.assertEqual(tcp.mutation(self.current(target), target), (None, None))
+
+    def test_legacy_transport_labels_migrate_under_exact_owner_cas(self):
+        config = self.fixture()
+        for target in tcp.targets(config, config["listeners"][0], self.owner()):
+            current = self.current(target)
+            labels = current["metadata"]["labels"]
+            labels[tcp.APP] = labels.pop(tcp.TRANSPORT_APP)
+            labels["custom-label"] = "retained"
+            command, body = tcp.mutation(current, target)
+            self.assertEqual(command[0], "patch")
+            self.assertIn({"op": "test", "path": "/metadata/labels", "value": labels}, body)
+            migrated = next(p["value"] for p in body if p["path"] == "/metadata/labels" and p["op"] == "replace")
+            self.assertNotIn(tcp.APP, migrated)
+            self.assertEqual(migrated[tcp.TRANSPORT_APP], "app_demo")
+            self.assertEqual(migrated["custom-label"], "retained")
+            current["metadata"]["ownerReferences"][0]["uid"] = "foreign"
+            with self.assertRaises(ValueError):
+                tcp.mutation(current, target)
+
+    def test_settle_observation_rejects_pruned_or_replaced_resources(self):
+        config = self.fixture()
+        targets = tcp.targets(config, config["listeners"][0], self.owner())
+        before = [self.current(t) for t in targets]
+        for after in [None, dict(before[0], metadata=dict(before[0]["metadata"], uid="replacement"))]:
+            with patch.object(tcp, "observe", return_value=self.owner()), patch.object(tcp, "current_resource", side_effect=[*before, after]), patch.object(tcp.time, "sleep") as sleep:
+                with self.assertRaisesRegex(ValueError, "remain converged"):
+                    tcp.reconcile(config, apply=True, settle_seconds=30)
+                sleep.assert_called_once_with(30)
 
     def test_foreign_uid_drift_and_generation_replay_never_adopted(self):
         config = self.fixture()

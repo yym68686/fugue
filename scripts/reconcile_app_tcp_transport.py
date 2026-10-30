@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 
 try:
     from .observe_front_candidate import read
@@ -25,6 +26,7 @@ MANAGER = "fugue-app-tcp-transport"
 GENERATION = "transport.fugue.dev/generation"
 DIGEST = "transport.fugue.dev/digest"
 APP = "fugue.pro/app-id"
+TRANSPORT_APP = "transport.fugue.dev/app-id"
 TENANT = "fugue.pro/tenant-id"
 WORKLOAD = "fugue.pro/app-workload"
 
@@ -124,7 +126,10 @@ def targets(config, item, owner):
     policy_spec = {"podSelector": {"matchLabels": selector}, "policyTypes": ["Ingress"], "ingress": [{"from": [{"ipBlock": {"cidr": "0.0.0.0/0"}}], "ports": [{"protocol": "TCP", "port": item["targetPort"]}]}] if item["enabled"] else []}
     results = []
     for kind, spec in [("Service", service_spec), ("NetworkPolicy", policy_spec)]:
-        results.append({"apiVersion": "v1" if kind == "Service" else "networking.k8s.io/v1", "kind": kind, "metadata": {"name": item["name"], "namespace": item["namespace"], "labels": {"app.kubernetes.io/managed-by": MANAGER, APP: item["appId"]}, "annotations": {GENERATION: str(config["generation"]), DIGEST: digest({"owner": owner, "spec": spec})}, "ownerReferences": [owner]}, "spec": spec})
+        # APP belongs on the endpoint selector, not on this separately managed
+        # object's metadata: the app controller prunes objects carrying APP.
+        # The owner reference still gives transport resources the app lifecycle.
+        results.append({"apiVersion": "v1" if kind == "Service" else "networking.k8s.io/v1", "kind": kind, "metadata": {"name": item["name"], "namespace": item["namespace"], "labels": {"app.kubernetes.io/managed-by": MANAGER, TRANSPORT_APP: item["appId"]}, "annotations": {GENERATION: str(config["generation"]), DIGEST: digest({"owner": owner, "spec": spec})}, "ownerReferences": [owner]}, "spec": spec})
     return results
 
 
@@ -145,7 +150,10 @@ def mutation(current, target):
     if current is None:
         return ["create", "-f", "-", "--field-manager=" + MANAGER], target
     meta = current["metadata"]
-    if not meta.get("uid") or not meta.get("resourceVersion") or meta.get("deletionTimestamp") or meta.get("labels", {}).get("app.kubernetes.io/managed-by") != MANAGER or meta.get("labels", {}).get(APP) != target["metadata"]["labels"][APP] or meta.get("ownerReferences") != target["metadata"]["ownerReferences"]:
+    labels = meta.get("labels", {})
+    app_id = target["metadata"]["labels"][TRANSPORT_APP]
+    legacy = TRANSPORT_APP not in labels and labels.get(APP) == app_id
+    if not meta.get("uid") or not meta.get("resourceVersion") or meta.get("deletionTimestamp") or labels.get("app.kubernetes.io/managed-by") != MANAGER or not (labels.get(TRANSPORT_APP) == app_id or legacy) or labels.get(APP, app_id) != app_id or "fugue.pro/owner-app-id" in labels or meta.get("ownerReferences") != target["metadata"]["ownerReferences"]:
         raise ValueError("refusing foreign TCP resource")
     previous = controlled_spec(current, target)
     if digest({"owner": meta["ownerReferences"][0], "spec": previous}) != meta.get("annotations", {}).get(DIGEST):
@@ -154,7 +162,8 @@ def mutation(current, target):
     next_generation = int(target["metadata"]["annotations"][GENERATION])
     if next_generation < generation or next_generation == generation and meta["annotations"][DIGEST] != target["metadata"]["annotations"][DIGEST]:
         raise ValueError("TCP declaration generation replay")
-    if meta["annotations"][DIGEST] == target["metadata"]["annotations"][DIGEST] and next_generation == generation:
+    label_migration = legacy or APP in labels
+    if meta["annotations"][DIGEST] == target["metadata"]["annotations"][DIGEST] and next_generation == generation and not label_migration:
         return None, None
     patch = [{"op": "test", "path": "/metadata/" + key, "value": meta[key]} for key in ["uid", "resourceVersion", "ownerReferences", "annotations", "labels"]]
     patch.append({"op": "test", "path": "/spec", "value": current["spec"]})
@@ -163,6 +172,10 @@ def mutation(current, target):
         desired_spec.pop("externalTrafficPolicy", None)
     desired_spec.update(target["spec"])
     patch.append({"op": "replace", "path": "/spec", "value": desired_spec})
+    if label_migration:
+        next_labels = {k: v for k, v in labels.items() if k != APP}
+        next_labels.update(target["metadata"]["labels"])
+        patch.append({"op": "replace", "path": "/metadata/labels", "value": next_labels})
     for key, value in target["metadata"]["annotations"].items():
         patch.append({"op": "add", "path": "/metadata/annotations/" + key.replace("/", "~1"), "value": value})
     return ["patch", target["kind"], meta["name"], "-n", meta["namespace"], "--type=json", "--patch-file", "-", "--field-manager=" + MANAGER], patch
@@ -188,7 +201,7 @@ def current_resource(target):
     return result["items"][0] if result["items"] else None
 
 
-def reconcile(config, apply=False):
+def reconcile(config, apply=False, settle_seconds=0):
     pending, evidence = [], []
     # All declarations must pass observation and dry-run before any mutation.
     for item in config["listeners"]:
@@ -208,6 +221,12 @@ def reconcile(config, apply=False):
                 raise ValueError("TCP resource changed after preflight")
             current = write(command, body)
         evidence.append({"namespace": item["namespace"], "name": item["name"], "kind": target["kind"], "enabled": item["enabled"], "intentDigest": target["metadata"]["annotations"][DIGEST], "changed": bool(command), "applied": apply, "uid": (current or {}).get("metadata", {}).get("uid")})
+    if apply and settle_seconds:
+        time.sleep(settle_seconds)
+        for (_, _, _, target, _, _), receipt in zip(pending, evidence):
+            current = current_resource(target)
+            if current is None or current["metadata"].get("uid") != receipt["uid"] or mutation(current, target) != (None, None):
+                raise ValueError("TCP resource did not remain converged after publication")
     return {"schema": "fugue.app-tcp-transport-receipt/v1", "configDigest": digest(config), "resources": evidence}
 
 
@@ -218,7 +237,7 @@ def main():
     parser.add_argument("--evidence", required=True)
     args = parser.parse_args()
     config = validate(json.loads(Path(args.config).read_text()))
-    result = reconcile(config, args.apply)
+    result = reconcile(config, args.apply, settle_seconds=30)
     Path(args.evidence).write_text(canonical(result) + "\n")
 
 
