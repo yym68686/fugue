@@ -321,6 +321,9 @@ controller:
     enabled: true
     cpuRequestUpscaleEnabled: false
     cpuRequestDownscaleEnabled: false
+    # Exact service/Cluster UID/system ID enrollment enables automatic request
+    # downscale for these databases without opening the global direction gate.
+    autoCPURequestDownscaleTargets: []
     memoryRequestUpscaleEnabled: true
     memoryRequestDownscaleEnabled: true
     cpuLimitUpscaleEnabled: false

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql/driver"
 	"encoding/json"
 	"testing"
@@ -10,6 +11,39 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestPGResizeAllowsOnlyExclusivelyBoundStandaloneDatabase(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+		mock.ExpectBegin()
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectPGResizeBackingServiceForUpdate(mock, time.Now().UTC(), "tenant-db", "project-db", "", "service-db", model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 512}, nil)
+		rows := sqlmock.NewRows([]string{"tenant_id", "app_id"}).AddRow("tenant-db", "app-db")
+		if shared {
+			rows.AddRow("tenant-db", "other-app")
+		}
+		mock.ExpectQuery(`(?s)SELECT tenant_id, app_id.*FROM fugue_service_bindings.*WHERE service_id = \$1.*FOR UPDATE`).WithArgs("service-db").WillReturnRows(rows)
+		_, err = s.pgValidateManagedPostgresResizeTargetTx(context.Background(), tx, &model.App{ID: "app-db", TenantID: "tenant-db", ProjectID: "project-db"}, "service-db")
+		if (err == nil) == shared {
+			t.Fatalf("shared=%v err=%v", shared, err)
+		}
+		mock.ExpectRollback()
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+	}
+}
 
 func TestPGCreateManagedPostgresResizePersistsNarrowIntent(t *testing.T) {
 	t.Parallel()

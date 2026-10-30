@@ -313,6 +313,8 @@ spec:
               value: {{ .Values.controller.managedPostgresInPlaceResize.cpuRequestUpscaleEnabled | quote }}
             - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED
               value: {{ .Values.controller.managedPostgresInPlaceResize.cpuRequestDownscaleEnabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_AUTO_CPU_REQUEST_DOWNSCALE_TARGETS_JSON
+              value: {{ .Values.controller.managedPostgresInPlaceResize.autoCPURequestDownscaleTargets | default list | toJson | quote }}
             - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED
               value: {{ .Values.controller.managedPostgresInPlaceResize.memoryRequestUpscaleEnabled | quote }}
             - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED

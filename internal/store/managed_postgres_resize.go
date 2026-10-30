@@ -26,7 +26,7 @@ func normalizeManagedPostgresResizeTarget(target *model.ResourceSpec) (*model.Re
 }
 
 // prepareManagedPostgresResizeOperation narrows an untrusted operation request
-// to one app-owned managed PostgreSQL backing service and one complete runtime
+// to one owned or exclusively bound PostgreSQL service and one complete runtime
 // resource target. All caller-supplied AppSpec and source fields are discarded
 // so the operation cannot smuggle an app deploy or a CNPG bootstrap change.
 func prepareManagedPostgresResizeOperation(app model.App, op *model.Operation) error {
@@ -40,7 +40,7 @@ func prepareManagedPostgresResizeOperation(app model.App, op *model.Operation) e
 	}
 	target, err := ManagedPostgresOperationTargetForApp(app, op.ServiceID)
 	if err != nil || target == nil || target.Service == nil ||
-		strings.TrimSpace(target.ServiceID) == "" || !target.AppOwned {
+		strings.TrimSpace(target.ServiceID) == "" || (strings.TrimSpace(target.Service.OwnerAppID) != "" && !target.AppOwned) {
 		return ErrInvalidInput
 	}
 	if target.Postgres.Suspended {
@@ -99,7 +99,7 @@ func validateManagedPostgresResizeTargetState(state *model.State, app model.App,
 		!isManagedPostgresService(service) || service.Spec.Postgres == nil {
 		return ErrInvalidInput
 	}
-	if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(app.ID) {
+	if owner := strings.TrimSpace(service.OwnerAppID); owner != "" && owner != strings.TrimSpace(app.ID) {
 		return ErrConflict
 	}
 	if service.Spec.Postgres.Suspended {

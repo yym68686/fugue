@@ -102,16 +102,46 @@ type BackupCoordinationConfig struct {
 }
 
 type ManagedPostgresInPlaceResizeConfig struct {
-	Enabled                       bool
-	CPURequestUpscaleEnabled      bool
-	CPURequestDownscaleEnabled    bool
-	MemoryRequestUpscaleEnabled   bool
-	MemoryRequestDownscaleEnabled bool
-	CPULimitUpscaleEnabled        bool
-	CPULimitDownscaleEnabled      bool
-	MemoryLimitUpscaleEnabled     bool
-	MemoryLimitDownscaleEnabled   bool
-	RecoveryEnabled               bool
+	Enabled                        bool
+	CPURequestUpscaleEnabled       bool
+	CPURequestDownscaleEnabled     bool
+	MemoryRequestUpscaleEnabled    bool
+	MemoryRequestDownscaleEnabled  bool
+	CPULimitUpscaleEnabled         bool
+	CPULimitDownscaleEnabled       bool
+	MemoryLimitUpscaleEnabled      bool
+	MemoryLimitDownscaleEnabled    bool
+	RecoveryEnabled                bool
+	AutoCPURequestDownscaleTargets []ManagedPostgresCPURequestTarget
+}
+
+// Enrollment is explicit and bound to database identity, not a reusable name.
+type ManagedPostgresCPURequestTarget struct {
+	ServiceID  string `json:"service_id"`
+	Namespace  string `json:"namespace"`
+	Cluster    string `json:"cluster"`
+	ClusterUID string `json:"cluster_uid"`
+	SystemID   string `json:"system_id"`
+}
+
+func parseManagedPostgresCPURequestTargets(raw string) []ManagedPostgresCPURequestTarget {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var targets []ManagedPostgresCPURequestTarget
+	if err := json.Unmarshal([]byte(raw), &targets); err != nil {
+		log.Printf("invalid PostgreSQL automatic CPU request enrollment; automatic downscale disabled")
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, target := range targets {
+		if target.ServiceID == "" || target.Namespace == "" || target.Cluster == "" || target.ClusterUID == "" || target.SystemID == "" || seen[target.ServiceID] {
+			log.Printf("incomplete or duplicate PostgreSQL automatic CPU request enrollment; automatic downscale disabled")
+			return nil
+		}
+		seen[target.ServiceID] = true
+	}
+	return targets
 }
 
 type ControllerConfig struct {
@@ -588,16 +618,17 @@ func ControllerFromEnv() ControllerConfig {
 		ControlPlanePostgresClusterName:            getenv("FUGUE_CONTROL_PLANE_POSTGRES_CLUSTER_NAME", "fugue-fugue-control-plane-postgres"),
 		AppCPURequestResizeEnabled:                 getenvBool("FUGUE_APP_CPU_REQUEST_RESIZE_ENABLED", false),
 		ManagedPostgresInPlaceResize: ManagedPostgresInPlaceResizeConfig{
-			Enabled:                       getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", false),
-			CPURequestUpscaleEnabled:      getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", false),
-			CPURequestDownscaleEnabled:    getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED", false),
-			MemoryRequestUpscaleEnabled:   getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED", false),
-			MemoryRequestDownscaleEnabled: getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED", false),
-			CPULimitUpscaleEnabled:        getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_UPSCALE_ENABLED", false),
-			CPULimitDownscaleEnabled:      getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_DOWNSCALE_ENABLED", false),
-			MemoryLimitUpscaleEnabled:     getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_UPSCALE_ENABLED", false),
-			MemoryLimitDownscaleEnabled:   getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED", false),
-			RecoveryEnabled:               getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED", false),
+			Enabled:                        getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", false),
+			CPURequestUpscaleEnabled:       getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", false),
+			CPURequestDownscaleEnabled:     getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED", false),
+			MemoryRequestUpscaleEnabled:    getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED", false),
+			MemoryRequestDownscaleEnabled:  getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED", false),
+			CPULimitUpscaleEnabled:         getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_UPSCALE_ENABLED", false),
+			CPULimitDownscaleEnabled:       getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_DOWNSCALE_ENABLED", false),
+			MemoryLimitUpscaleEnabled:      getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_UPSCALE_ENABLED", false),
+			MemoryLimitDownscaleEnabled:    getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED", false),
+			RecoveryEnabled:                getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED", false),
+			AutoCPURequestDownscaleTargets: parseManagedPostgresCPURequestTargets(os.Getenv("FUGUE_MANAGED_POSTGRES_AUTO_CPU_REQUEST_DOWNSCALE_TARGETS_JSON")),
 		},
 	}
 	if cfg.RegistryPullBase == "" {

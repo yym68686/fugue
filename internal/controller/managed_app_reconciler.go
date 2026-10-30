@@ -223,6 +223,11 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		case hasActiveOp:
 			return nil
 		default:
+			if queued, err := s.reconcileManagedPostgresAutoCPURequest(ctx, client, storedApp); err != nil {
+				return err
+			} else if queued {
+				return nil
+			}
 			if storedApp.Spec.CPURequestTemplateMilliCores != nil && s.Config.AppCPURequestResizeEnabled {
 				queued, err := s.reconcileAppCPUResizeTarget(ctx, client, storedApp)
 				if err != nil {

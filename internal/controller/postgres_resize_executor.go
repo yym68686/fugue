@@ -72,8 +72,9 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	if err != nil {
 		return fmt.Errorf("resolve managed postgres resize target for app %s: %w", app.ID, err)
 	}
-	if target == nil || target.Service == nil || !target.AppOwned || strings.TrimSpace(target.ServiceID) == "" {
-		return s.blockManagedPostgresResizeOperation(op, app, "unowned_database", "managed postgres resize requires one app-owned backing service")
+	if target == nil || target.Service == nil || strings.TrimSpace(target.ServiceID) == "" ||
+		(target.Service.OwnerAppID != "" && !target.AppOwned) {
+		return s.blockManagedPostgresResizeOperation(op, app, "unowned_database", "managed postgres resize requires one owned or exclusively bound backing service")
 	}
 	if target.Postgres.Suspended {
 		return s.blockManagedPostgresResizeOperation(op, app, "database_suspended", "managed postgres resize requires an active database")
@@ -93,12 +94,29 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	if err != nil {
 		return fmt.Errorf("initialize kubernetes managed postgres resize client: %w", err)
 	}
+	gates := s.Config.ManagedPostgresInPlaceResize
+	enrollment := managedPostgresCPUEnrollment(gates, target.ServiceID, namespace, clusterName)
+	automaticCPU := strings.HasPrefix(op.RequestedByID, managedPostgresAutoCPUActor+"/")
+	if automaticCPU &&
+		(enrollment == nil || op.RequestedByID != managedPostgresCPUActor(*enrollment)) {
+		return s.blockManagedPostgresResizeOperation(op, app, "automatic_cpu_enrollment_changed", "automatic PostgreSQL CPU request enrollment no longer matches the queued database identity")
+	}
+	if enrollment != nil {
+		gates.CPURequestDownscaleEnabled = true
+	}
 	hooks := managedPostgresResizeExecutionHooks{
 		InspectCapability: func(callCtx context.Context) (managedPostgresResizeCapability, error) {
 			return client.inspectManagedPostgresResizeCapability(callCtx, namespace)
 		},
 		Observe: func(callCtx context.Context) (managedPostgresResizeSnapshot, error) {
-			return observeManagedPostgresResizeSnapshot(callCtx, client, namespace, clusterName)
+			snapshot, err := observeManagedPostgresResizeSnapshot(callCtx, client, namespace, clusterName)
+			if err == nil && enrollment != nil && !managedPostgresCPUEnrollmentMatches(*enrollment, snapshot) {
+				return managedPostgresResizeSnapshot{}, fmt.Errorf("PostgreSQL CPU request enrollment identity changed")
+			}
+			if err == nil && automaticCPU {
+				err = validateManagedPostgresAutomaticCPUTarget(snapshot.Observation.DesiredResources, targetResources)
+			}
+			return snapshot, err
 		},
 		Patch: func(
 			callCtx context.Context,
@@ -143,7 +161,7 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	finalSnapshot, err := executeManagedPostgresResizeStages(
 		ctx,
 		targetResources,
-		s.Config.ManagedPostgresInPlaceResize,
+		gates,
 		timeout,
 		interval,
 		hooks,

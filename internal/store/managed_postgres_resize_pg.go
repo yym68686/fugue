@@ -31,7 +31,7 @@ func (s *Store) pgValidateManagedPostgresResizeTargetTx(
 		!isManagedPostgresService(service) || service.Spec.Postgres == nil {
 		return model.BackingService{}, ErrInvalidInput
 	}
-	if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(app.ID) {
+	if owner := strings.TrimSpace(service.OwnerAppID); owner != "" && owner != strings.TrimSpace(app.ID) {
 		return model.BackingService{}, ErrConflict
 	}
 	if service.Spec.Postgres.Suspended {

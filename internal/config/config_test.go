@@ -296,6 +296,20 @@ func TestControllerFromEnvDefaultsManagedPostgresInPlaceResizeClosed(t *testing.
 	}
 }
 
+func TestManagedPostgresCPURequestEnrollmentFailsClosed(t *testing.T) {
+	valid := `[{"service_id":"service-db","namespace":"tenant-a","cluster":"database","cluster_uid":"cluster-uid","system_id":"123"}]`
+	t.Setenv("FUGUE_MANAGED_POSTGRES_AUTO_CPU_REQUEST_DOWNSCALE_TARGETS_JSON", valid)
+	cfg := ControllerFromEnv().ManagedPostgresInPlaceResize
+	if len(cfg.AutoCPURequestDownscaleTargets) != 1 || cfg.AutoCPURequestDownscaleTargets[0].SystemID != "123" {
+		t.Fatalf("missing enrollment %+v", cfg)
+	}
+	for _, raw := range []string{"", "bad-json", `[{"service_id":"service-db"}]`, valid[:len(valid)-1] + "," + valid[1:]} {
+		if targets := parseManagedPostgresCPURequestTargets(raw); len(targets) != 0 {
+			t.Fatalf("invalid enrollment accepted: %s", raw)
+		}
+	}
+}
+
 func TestControllerFromEnvReadsManagedPostgresInPlaceResizeGates(t *testing.T) {
 	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", "true")
 	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", "true")

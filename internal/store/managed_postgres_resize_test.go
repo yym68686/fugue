@@ -86,6 +86,36 @@ func managedPostgresResizeTarget() model.ResourceSpec {
 	}
 }
 
+func TestManagedPostgresResizeExclusivelyBoundStandaloneService(t *testing.T) {
+	f := newManagedPostgresResizeFixture(t)
+	mutateResizeFixtureState(t, f.store, func(state *model.State) {
+		state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = ""
+	})
+	target := managedPostgresResizeTarget()
+	op, _, err := f.store.CreateOperationWithResult(managedPostgresResizeOperation(f, target))
+	if err != nil {
+		t.Fatalf("queue standalone resize: %v", err)
+	}
+	if _, err := f.store.CompleteManagedOperation(op.ID, "", "verified in-place resize"); err != nil {
+		t.Fatal(err)
+	}
+	service, err := f.store.GetBackingService(f.service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.OwnerAppID != "" || service.Spec.Postgres.RuntimeResources == nil || *service.Spec.Postgres.RuntimeResources != target || *service.Spec.Postgres.Resources != f.bootstrap {
+		t.Fatalf("standalone resize changed ownership/bootstrap or lost runtime target: %+v", service.Spec.Postgres)
+	}
+	// An ownerless service bound to multiple applications must stay blocked.
+	mutateResizeFixtureState(t, f.store, func(state *model.State) {
+		state.ServiceBindings = append(state.ServiceBindings, model.ServiceBinding{ID: "other-binding", TenantID: f.tenant.ID, AppID: "other-app", ServiceID: f.service.ID})
+	})
+	target.CPUMilliCores = 300
+	if _, _, err := f.store.CreateOperationWithResult(managedPostgresResizeOperation(f, target)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("shared standalone target accepted: %v", err)
+	}
+}
+
 func managedPostgresResizeOperation(f managedPostgresResizeFixture, target model.ResourceSpec) model.Operation {
 	replicas := 99
 	return model.Operation{
@@ -294,10 +324,10 @@ func TestManagedPostgresResizeRejectsIncompleteOrUnsafeIntent(t *testing.T) {
 			want: ErrConflict,
 		},
 		{
-			name: "shared database",
+			name: "database owned by another app",
 			mutate: func(f *managedPostgresResizeFixture, _ *model.Operation) {
 				mutateResizeFixtureState(t, f.store, func(state *model.State) {
-					state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = ""
+					state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = "app-other"
 				})
 			},
 			want: ErrConflict,
