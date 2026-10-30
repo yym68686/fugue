@@ -85,7 +85,11 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 	if err != nil {
 		return err
 	}
-	if coldState != nil || (cluster.Status.ReadyInstances == 0 && (strings.EqualFold(strings.TrimSpace(cluster.Status.Phase), "Not enough disk space") || cluster.Metadata.Annotations["cnpg.io/fencedInstances"] == `["*"]`)) {
+	primary, primaryFound, err := client.getPod(ctx, namespace, cluster.Status.CurrentPrimary)
+	if err != nil {
+		return err
+	}
+	if coldState != nil || (primaryFound && coldPrimaryUnstarted(primary)) || pg.Instances > 1 || (cluster.Status.ReadyInstances == 0 && (strings.EqualFold(strings.TrimSpace(cluster.Status.Phase), "Not enough disk space") || cluster.Metadata.Annotations["cnpg.io/fencedInstances"] == `["*"]`)) {
 		// A disk-full source cannot be rescued by expanding its source LocalPV
 		// when the requested operation is an offline move. Copy the fenced source
 		// directly to the declared target storage class instead. The old source

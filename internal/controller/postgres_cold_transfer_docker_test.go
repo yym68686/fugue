@@ -36,7 +36,7 @@ func TestColdTransferNumericOwnershipAcrossImages(t *testing.T) {
 	}
 	run("run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "sh", "-v", source+":/data", pg, "-ec", `chown 26:26 /data; runuser -u postgres -- initdb -D /data/pgdata -A trust --no-locale >/dev/null; chown -R 26:26 /data/pgdata`)
 	probe := func(volume string) coldFileEvidence {
-		out := run("run", "--rm", "--network", "none", "--user", "26:26", "--entrypoint", "python3", "-v", volume+":/data:ro", pg, "-c", coldProbeProgram, "seed", "/data/pgdata")
+		out := run("run", "--rm", "--network", "none", "--read-only", "--user", "26:26", "--entrypoint", "python3", "-v", volume+":/data:ro", pg, "-c", coldProbeProgram, "offline", "/data/pgdata")
 		var ev coldFileEvidence
 		if err := json.Unmarshal(out, &ev); err != nil {
 			t.Fatalf("decode real probe: %v", err)

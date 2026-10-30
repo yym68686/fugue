@@ -3772,7 +3772,10 @@ WHERE app_id = $1
 			op.DesiredSpec.Postgres = model.CloneAppPostgresSpec(postgresSpec)
 		}
 		op.DesiredSpec.Postgres.RuntimeID = targetRuntimeID
-		if ManagedPostgresStorageGrowthInPlace(postgresSpec, op.DesiredSpec.Postgres, sourceRuntimeID, targetRuntimeID, op.DesiredSpec.Postgres.PrimaryNodeName) {
+		if op.Type == storagerecovery.OperationType {
+			op.DesiredSpec.Postgres.Instances = postgresSpec.Instances
+			op.DesiredSpec.Postgres.SynchronousReplicas = postgresSpec.SynchronousReplicas
+		} else if ManagedPostgresStorageGrowthInPlace(postgresSpec, op.DesiredSpec.Postgres, sourceRuntimeID, targetRuntimeID, op.DesiredSpec.Postgres.PrimaryNodeName) {
 			size := op.DesiredSpec.Postgres.StorageSize
 			op.DesiredSpec.Postgres = model.CloneAppPostgresSpec(postgresSpec)
 			op.DesiredSpec.Postgres.StorageSize = size

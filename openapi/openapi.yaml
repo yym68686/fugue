@@ -8934,10 +8934,15 @@ paths:
       description: |-
         Platform administrator only. An offline source is never copied without
         an observed primary and verified bound data claim. The controller checks
-        destination capacity before a disk-full source is fenced. Cold recovery
+        destination capacity before a disk-full or unscheduled source is fenced. Cold recovery
         streams from the stopped source directly into destination storage, verifies
         copied files and PostgreSQL system identity, and preserves the application
-        Service address. Source storage is never expanded. Durable phase records
+        Service address. An unstarted primary is copied through an isolated,
+        read-only volume reader after source reconciliation is paused and every
+        source Pod finishes normal termination on healthy nodes. The source primary is never
+        started to perform this copy. Existing HA instance and synchronous replica
+        counts are preserved, and destination replicas must catch up before cutover.
+        Source storage is never expanded. Durable phase records
         prevent recopying an activated destination. Dry run describes intent only;
         live preflight occurs before each mutation.
       tags: [Backing Services]

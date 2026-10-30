@@ -82,11 +82,28 @@ func coldExec(ctx context.Context, c *kubeClient, ns, pod, container string, com
 	return nil
 }
 func coldSourceEvidence(ctx context.Context, c *kubeClient, ns, pod string) (coldFileEvidence, error) {
+	return coldSourceEvidenceCommand(ctx, c, ns, pod, []string{"python3", "-c", coldProbeProgram, "source"})
+}
+
+func coldSourceEvidenceForState(ctx context.Context, c *kubeClient, ns string, st *coldPostgresState) (coldFileEvidence, error) {
+	if !st.OfflineSource {
+		return coldSourceEvidence(ctx, c, ns, st.SourcePVC)
+	}
+	if err := verifyColdOfflineQuiesced(ctx, c, ns, st); err != nil {
+		return coldFileEvidence{}, err
+	}
+	if err := verifyColdOfflineReader(ctx, c, ns, st); err != nil {
+		return coldFileEvidence{}, err
+	}
+	return coldSourceEvidenceCommand(ctx, c, ns, st.SourceReader, []string{"python3", "-c", coldProbeProgram, "offline", st.SourceDataPath})
+}
+
+func coldSourceEvidenceCommand(ctx context.Context, c *kubeClient, ns, pod string, command []string) (coldFileEvidence, error) {
 	var out bytes.Buffer
 	var ev coldFileEvidence
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	if err := coldExec(ctx, c, ns, pod, "postgres", []string{"python3", "-c", coldProbeProgram, "source"}, &out); err != nil {
+	if err := coldExec(ctx, c, ns, pod, "postgres", command, &out); err != nil {
 		return ev, err
 	}
 	if err := json.Unmarshal(out.Bytes(), &ev); err != nil {

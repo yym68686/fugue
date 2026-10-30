@@ -19,33 +19,43 @@ import (
 const coldMigrationAnnotation = "fugue.pro/cold-migration"
 
 type coldPostgresState struct {
-	Version        int    `json:"version"`
-	ServiceID      string `json:"service_id"`
-	AppID          string `json:"app_id"`
-	SourceName     string `json:"source_name"`
-	SourceUID      string `json:"source_uid"`
-	SourcePVC      string `json:"source_pvc"`
-	SourcePVCUID   string `json:"source_pvc_uid"`
-	SourcePV       string `json:"source_pv"`
-	SourcePodUID   string `json:"source_pod_uid"`
-	SourceNode     string `json:"source_node"`
-	SourceSpecHash string `json:"source_spec_hash"`
-	TargetRuntime  string `json:"target_runtime"`
-	TargetNode     string `json:"target_node"`
-	TargetClass    string `json:"target_class"`
-	TargetSize     string `json:"target_size"`
-	SeedName       string `json:"seed_name"`
-	SeedUID        string `json:"seed_uid"`
-	TargetName     string `json:"target_name"`
-	TargetUID      string `json:"target_uid"`
-	Endpoint       string `json:"endpoint"`
-	Image          string `json:"image"`
-	SourceImageID  string `json:"source_image_id"`
-	SystemID       string `json:"system_id"`
-	FileDigest     string `json:"file_digest"`
-	StreamDigest   string `json:"stream_digest"`
-	ControlDigest  string `json:"control_digest"`
-	Phase          string `json:"phase"`
+	Version           int                     `json:"version"`
+	ServiceID         string                  `json:"service_id"`
+	AppID             string                  `json:"app_id"`
+	SourceName        string                  `json:"source_name"`
+	SourceUID         string                  `json:"source_uid"`
+	SourcePVC         string                  `json:"source_pvc"`
+	SourcePVCUID      string                  `json:"source_pvc_uid"`
+	SourcePV          string                  `json:"source_pv"`
+	SourcePodUID      string                  `json:"source_pod_uid"`
+	SourceNode        string                  `json:"source_node"`
+	SourceSpecHash    string                  `json:"source_spec_hash"`
+	TargetRuntime     string                  `json:"target_runtime"`
+	TargetNode        string                  `json:"target_node"`
+	TargetClass       string                  `json:"target_class"`
+	TargetSize        string                  `json:"target_size"`
+	SeedName          string                  `json:"seed_name"`
+	SeedUID           string                  `json:"seed_uid"`
+	TargetName        string                  `json:"target_name"`
+	TargetUID         string                  `json:"target_uid"`
+	Endpoint          string                  `json:"endpoint"`
+	Image             string                  `json:"image"`
+	SourceImageID     string                  `json:"source_image_id"`
+	SystemID          string                  `json:"system_id"`
+	FileDigest        string                  `json:"file_digest"`
+	StreamDigest      string                  `json:"stream_digest"`
+	ControlDigest     string                  `json:"control_digest"`
+	Phase             string                  `json:"phase"`
+	OfflineSource     bool                    `json:"offline_source,omitempty"`
+	SourceReader      string                  `json:"source_reader,omitempty"`
+	SourceReaderUID   string                  `json:"source_reader_uid,omitempty"`
+	SourceDataPath    string                  `json:"source_data_path,omitempty"`
+	SourceMountPath   string                  `json:"source_mount_path,omitempty"`
+	SourceRunAsUser   int64                   `json:"source_run_as_user,omitempty"`
+	SourceRunAsGroup  int64                   `json:"source_run_as_group,omitempty"`
+	SourceNodes       []string                `json:"source_nodes,omitempty"`
+	SourceTolerations []runtimepkg.Toleration `json:"source_tolerations,omitempty"`
+	IntentHash        string                  `json:"intent_hash,omitempty"`
 }
 
 func coldStateName(serviceID string) string {
@@ -98,7 +108,7 @@ func (s *Service) prepareColdState(ctx context.Context, c *kubeClient, op model.
 		return nil, "", err
 	}
 	if existing != nil {
-		if existing.AppID != app.ID || existing.TargetRuntime != pg.RuntimeID || existing.TargetClass != pg.StorageClassName {
+		if existing.AppID != app.ID || existing.TargetRuntime != pg.RuntimeID || existing.TargetClass != pg.StorageClassName || (existing.IntentHash != "" && existing.IntentHash != store.PostgresSpecFingerprint(pg)) {
 			return nil, "", fmt.Errorf("conflicting cold migration intent; retained state must be resolved first")
 		}
 		return existing, rv, nil
@@ -126,11 +136,12 @@ func (s *Service) prepareColdState(ctx context.Context, c *kubeClient, op model.
 		return nil, "", fmt.Errorf("cold migration requires a single primary PGDATA volume without external WAL/tablespaces")
 	}
 	pod, found, err := c.getPod(ctx, ns, source.Status.CurrentPrimary)
-	if err != nil || !found || pod.ObservedUID == "" || pod.Spec.NodeName == "" {
+	if err != nil || !found || pod.ObservedUID == "" {
 		return nil, "", fmt.Errorf("source primary Pod identity unavailable")
 	}
 	sourceNode, found, err := managedPostgresPVCNode(ctx, c, ns, pvc.Metadata.Name)
-	if err != nil || !found || sourceNode != pod.Spec.NodeName {
+	offline := coldPrimaryUnstarted(pod)
+	if err != nil || !found || (sourceNode != pod.Spec.NodeName && !offline) {
 		return nil, "", fmt.Errorf("source Pod/PVC node identity mismatch")
 	}
 	node, err := recoveryStorageTargetNode(ctx, c, targetRuntime, pg.StorageClassName, pg.PrimaryNodeName)
@@ -153,6 +164,12 @@ func (s *Service) prepareColdState(ctx context.Context, c *kubeClient, op model.
 			imageID = cs.ImageID
 		}
 	}
+	if offline {
+		imageID, err = coldPeerImageID(ctx, c, ns, source, pod)
+		if err != nil {
+			return nil, "", err
+		}
+	}
 	imageID = strings.TrimPrefix(imageID, "docker-pullable://")
 	_, digest, ok := strings.Cut(imageID, "@sha256:")
 	if !ok || len(digest) != 64 {
@@ -168,11 +185,16 @@ func (s *Service) prepareColdState(ctx context.Context, c *kubeClient, op model.
 	if image == "" {
 		return nil, "", fmt.Errorf("source postgres image reference unavailable")
 	}
-	st := &coldPostgresState{Version: 1, ServiceID: op.ServiceID, AppID: app.ID, SourceName: source.Metadata.Name, SourceUID: source.Metadata.UID, SourcePVC: pvc.Metadata.Name, SourcePVCUID: pvc.Metadata.UID, SourcePV: pvc.Spec.VolumeName, SourcePodUID: pod.ObservedUID, SourceNode: sourceNode, SourceSpecHash: store.PostgresSpecFingerprint(target.Postgres), TargetRuntime: pg.RuntimeID, TargetNode: node, TargetClass: pg.StorageClassName, TargetSize: size, Endpoint: model.PostgresEndpointName(target.Postgres), Image: image, SourceImageID: imageID, Phase: "planned"}
+	st := &coldPostgresState{Version: 1, ServiceID: op.ServiceID, AppID: app.ID, SourceName: source.Metadata.Name, SourceUID: source.Metadata.UID, SourcePVC: pvc.Metadata.Name, SourcePVCUID: pvc.Metadata.UID, SourcePV: pvc.Spec.VolumeName, SourcePodUID: pod.ObservedUID, SourceNode: sourceNode, SourceSpecHash: store.PostgresSpecFingerprint(target.Postgres), TargetRuntime: pg.RuntimeID, TargetNode: node, TargetClass: pg.StorageClassName, TargetSize: size, Endpoint: model.PostgresEndpointName(target.Postgres), Image: image, SourceImageID: imageID, Phase: "planned", IntentHash: store.PostgresSpecFingerprint(pg)}
 	h := sha256.Sum256([]byte(op.ServiceID + source.Metadata.UID + pg.RuntimeID + pg.StorageClassName))
 	suffix := hex.EncodeToString(h[:8])
 	st.SeedName = "pg-seed-" + suffix
 	st.TargetName = "pg-restored-" + suffix
+	if offline {
+		if err := prepareColdOfflineReader(ctx, c, ns, source, pod, st); err != nil {
+			return nil, "", err
+		}
+	}
 	if err := saveColdState(ctx, c, ns, st, &rv); err != nil {
 		return nil, "", err
 	}

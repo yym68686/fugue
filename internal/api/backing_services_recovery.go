@@ -7,6 +7,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/storagerecovery"
+	"fugue/internal/store"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -73,12 +74,14 @@ func (s *Server) handleRecoverBackingService(w http.ResponseWriter, r *http.Requ
 	}
 	desired := app.Spec
 	pg := *cloneAppPostgresSpec(service.Spec.Postgres)
+	// Recovery changes the primary location, not the requested durability.
+	// The previous primary runtime becomes the replica location when moving HA.
+	if pg.Instances > 1 && pg.RuntimeID != runtimeID {
+		pg.FailoverTargetRuntimeID = pg.RuntimeID
+	}
 	pg.RuntimeID = runtimeID
-	pg.FailoverTargetRuntimeID = ""
 	pg.PrimaryNodeName = strings.TrimSpace(req.TargetNodeName)
 	pg.PrimaryPlacementPendingRebalance = false
-	pg.Instances = 1
-	pg.SynchronousReplicas = 0
 	pg.StorageClassName = storageClass
 	if size := strings.TrimSpace(req.StorageSize); size != "" {
 		pg.StorageSize = size
@@ -88,8 +91,10 @@ func (s *Server) handleRecoverBackingService(w http.ResponseWriter, r *http.Requ
 		"action": "database-storage-recovery", "service_id": service.ID,
 		"target_runtime_id": runtimeID, "target_node_name": pg.PrimaryNodeName,
 		"storage_class_name": storageClass, "storage_size": pg.StorageSize,
-		"live_preflight_pending": true,
-		"stages":                 []string{"verify source cluster and bound primary data claim", "preserve the largest observed storage size", "fence and verify stopped source without expanding it", "copy and verify physical files on target storage", "recover and verify matching system identity before stable endpoint cutover"},
+		"instances": pg.Instances, "synchronous_replicas": pg.SynchronousReplicas,
+		"failover_target_runtime_id": pg.FailoverTargetRuntimeID,
+		"live_preflight_pending":     true,
+		"stages":                     []string{"verify source cluster and bound primary data claim", "preserve the largest observed storage size", "fence and verify stopped source without starting or expanding it", "copy and verify physical files on target storage", "recover matching system identity and rebuild requested HA before stable endpoint cutover"},
 	}
 	ops, err := s.store.ListOperationsByApp(app.TenantID, true, app.ID)
 	if err != nil {
@@ -100,7 +105,7 @@ func (s *Server) handleRecoverBackingService(w http.ResponseWriter, r *http.Requ
 		if existing.Status != model.OperationStatusPending && existing.Status != model.OperationStatusRunning {
 			continue
 		}
-		if existing.Type != storagerecovery.OperationType || existing.ServiceID != service.ID || existing.TargetRuntimeID != runtimeID || existing.DesiredSpec == nil || existing.DesiredSpec.Postgres == nil || existing.DesiredSpec.Postgres.PrimaryNodeName != pg.PrimaryNodeName || existing.DesiredSpec.Postgres.StorageClassName != pg.StorageClassName || existing.DesiredSpec.Postgres.StorageSize != pg.StorageSize {
+		if existing.Type != storagerecovery.OperationType || existing.ServiceID != service.ID || existing.TargetRuntimeID != runtimeID || existing.DesiredSpec == nil || existing.DesiredSpec.Postgres == nil || store.PostgresSpecFingerprint(*existing.DesiredSpec.Postgres) != store.PostgresSpecFingerprint(pg) {
 			httpx.WriteError(w, http.StatusConflict, "a conflicting app operation is active")
 			return
 		}

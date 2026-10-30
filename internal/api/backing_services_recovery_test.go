@@ -38,7 +38,7 @@ func TestIndependentBackingServiceRecoveryRequiresAdminAndExactIntent(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := s.CreateBackingService(tenant.ID, project.ID, "database", "", model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{RuntimeID: source.ID, StorageSize: "2Gi", StorageClassName: "source-local", Database: "test", User: "test", Password: "secret", Instances: 1}})
+	service, err := s.CreateBackingService(tenant.ID, project.ID, "database", "", model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{RuntimeID: source.ID, StorageSize: "2Gi", StorageClassName: "source-local", Database: "test", User: "test", Password: "secret", Instances: 2, SynchronousReplicas: 1, FailoverTargetRuntimeID: target.ID}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,9 @@ func TestIndependentBackingServiceRecoveryRequiresAdminAndExactIntent(t *testing
 		}
 		if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil || op.DesiredSpec.Postgres.StorageClassName != "target-network" || op.DesiredSpec.Postgres.StorageSize != "10Gi" {
 			t.Fatalf("recovery destination lost: %+v", op.DesiredSpec)
+		}
+		if pg := op.DesiredSpec.Postgres; pg.Instances != 2 || pg.SynchronousReplicas != 1 || pg.FailoverTargetRuntimeID != source.ID {
+			t.Fatalf("recovery silently downgraded HA or retained the destination as its own replica: %+v", pg)
 		}
 		if i > 0 && op.ID != operationID {
 			t.Fatalf("repeat created another operation: %s != %s", op.ID, operationID)

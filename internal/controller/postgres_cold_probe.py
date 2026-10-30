@@ -1,13 +1,18 @@
 """Read-only physical recovery evidence. Never starts or repairs PostgreSQL."""
 import hashlib,json,os,re,stat,subprocess,sys,urllib.request
 mode=sys.argv[1]
+if mode not in ('source','seed','offline'):raise RuntimeError('unknown evidence mode')
 data=os.environ.get('PGDATA') if mode=='source' else sys.argv[2]
 if not data or os.path.realpath(data)!=data:raise RuntimeError('PGDATA must be a canonical directory')
 if mode=='source':
  metrics=urllib.request.urlopen('http://127.0.0.1:9187/metrics',timeout=10).read().decode()
  if not re.search(r'^cnpg_collector_fencing_on 1(?:\.0)?$',metrics,re.M):raise RuntimeError('instance manager has not acknowledged fencing')
+if mode in ('source','offline'):
  status=subprocess.run(['pg_ctl','-D',data,'status'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  if status.returncode!=3:raise RuntimeError('PostgreSQL is running or its stopped state is unknown')
+version=open(os.path.join(data,'PG_VERSION')).read().strip()
+binary=subprocess.check_output(['pg_controldata','--version'],text=True)
+if not re.search(r'\b'+re.escape(version)+r'(?:\.|\b)',binary):raise RuntimeError('PostgreSQL binary major differs from data directory')
 if os.path.islink(os.path.join(data,'pg_wal')):raise RuntimeError('external WAL is unsupported')
 if os.listdir(os.path.join(data,'pg_tblspc')):raise RuntimeError('external tablespaces are unsupported')
 for marker in ['backup_label','recovery.signal','standby.signal']:

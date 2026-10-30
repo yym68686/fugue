@@ -52,6 +52,11 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 	if err := patchColdSourceFence(ctx, c, ns, source, coldStateName(st.ServiceID)); err != nil {
 		return err
 	}
+	if st.OfflineSource && !alreadySelected {
+		if err := s.ensureColdOfflineReader(ctx, c, ns, st, &rv, op.ID); err != nil {
+			return err
+		}
+	}
 	scheduling := runtimepkg.SchedulingForRuntime(targetRuntime)
 	if scheduling.NodeSelector == nil {
 		scheduling.NodeSelector = map[string]string{}
@@ -66,15 +71,19 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 		return err
 	}
 	pg.Suspended = false
-	pg.Instances = 1
-	pg.SynchronousReplicas = 0
-	pg.FailoverTargetRuntimeID = ""
+	// Bootstrap only the chosen target primary first; restore the requested HA
+	// below before persisting the target or touching its stable Service.
 	if st.Phase == "planned" || st.Phase == "copying" {
 		if alreadySelected {
 			return fmt.Errorf("cold target selected before verified seed record")
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, "verifying fenced PostgreSQL process and physical source identity")
-		ev, err := waitColdSourceEvidence(ctx, c, ns, st.SourcePVC)
+		var ev coldFileEvidence
+		if st.OfflineSource {
+			ev, err = coldSourceEvidenceForState(ctx, c, ns, st)
+		} else {
+			ev, err = waitColdSourceEvidence(ctx, c, ns, st.SourcePVC)
+		}
 		if err != nil {
 			return err
 		}
@@ -125,7 +134,7 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 		if err := s.verifyColdSourceIdentity(ctx, c, ns, st); err != nil {
 			return err
 		}
-		after, err := coldSourceEvidence(ctx, c, ns, st.SourcePVC)
+		after, err := coldSourceEvidenceForState(ctx, c, ns, st)
 		if err != nil {
 			return err
 		}
@@ -203,10 +212,16 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
 	}
+	if err := s.restoreColdTargetHA(ctx, c, ns, st, app, &pg, scheduling, op.ID); err != nil {
+		return err
+	}
 	if !alreadySelected {
 		// A resumed bootstrap must not promote a copy if someone restarted or
 		// changed the retained source while this operation was interrupted.
-		evidence, err := coldSourceEvidence(ctx, c, ns, st.SourcePVC)
+		if err := s.verifyColdSourceIdentity(ctx, c, ns, st); err != nil {
+			return err
+		}
+		evidence, err := coldSourceEvidenceForState(ctx, c, ns, st)
 		if err != nil {
 			return err
 		}
@@ -252,6 +267,11 @@ func (s *Service) executeManagedDatabaseColdMigration(ctx context.Context, op mo
 	st.Phase = "complete"
 	if err := saveColdState(ctx, c, ns, st, &rv); err != nil {
 		return err
+	}
+	if st.OfflineSource {
+		if err := deleteColdPod(ctx, c, ns, st.SourceReader, coldStateName(st.ServiceID)); err != nil {
+			return err
+		}
 	}
 	_, err = s.Store.CompleteManagedOperationWithResult(op.ID, "", "verified cold database migration to "+st.TargetRuntime, &fresh.Spec, nil)
 	return err
@@ -315,7 +335,7 @@ func (s *Service) verifyColdSourceIdentity(ctx context.Context, c *kubeClient, n
 	if err != nil {
 		return err
 	}
-	if !found || cluster.Metadata.UID != st.SourceUID {
+	if !found || cluster.Metadata.UID != st.SourceUID || cluster.Status.CurrentPrimary != st.SourcePVC {
 		return fmt.Errorf("source cluster identity changed")
 	}
 	pvc, found, err := c.getPersistentVolumeClaim(ctx, ns, st.SourcePVC)
@@ -324,6 +344,16 @@ func (s *Service) verifyColdSourceIdentity(ctx context.Context, c *kubeClient, n
 	}
 	if !found || pvc.Metadata.UID != st.SourcePVCUID || pvc.Spec.VolumeName != st.SourcePV {
 		return fmt.Errorf("source PVC/PV identity changed")
+	}
+	if st.OfflineSource {
+		if cluster.Metadata.Annotations[coldReconciliationAnnotation] == coldReconciliationDisabled {
+			return nil // The stronger hibernation/reader gates run before every read.
+		}
+		pod, found, err := c.getPod(ctx, ns, st.SourcePVC)
+		if err != nil || !found || pod.ObservedUID != st.SourcePodUID || !coldPrimaryUnstarted(pod) || !coldClusterOwnsPod(cluster, pod) {
+			return fmt.Errorf("offline primary started or changed before hibernation")
+		}
+		return nil
 	}
 	if st.Phase == "planned" || st.Phase == "copying" {
 		pod, found, err := c.getPod(ctx, ns, st.SourcePVC)
@@ -387,7 +417,17 @@ func (s *Service) copyColdSeed(ctx context.Context, c *kubeClient, ns string, st
 	if err != nil || !found || ip == "" {
 		return "", fmt.Errorf("target receiver address unavailable")
 	}
-	digest, err := execColdPostgresTar(ctx, c, ns, st.SourcePVC, ev.DataPath, ip)
+	sourcePod := st.SourcePVC
+	if st.OfflineSource {
+		if err := verifyColdOfflineQuiesced(ctx, c, ns, st); err != nil {
+			return "", err
+		}
+		if err := verifyColdOfflineReader(ctx, c, ns, st); err != nil {
+			return "", err
+		}
+		sourcePod = st.SourceReader
+	}
+	digest, err := execColdPostgresTar(ctx, c, ns, sourcePod, ev.DataPath, ip)
 	if err != nil {
 		return "", err
 	}
@@ -482,6 +522,7 @@ func (s *Service) ensureColdTarget(ctx context.Context, c *kubeClient, ns string
 	if st.TargetUID != "" {
 		return fmt.Errorf("recorded target disappeared; refusing new bootstrap")
 	}
+	pg.Instances, pg.SynchronousReplicas, pg.FailoverTargetRuntimeID = 1, 0, ""
 	targetApp, err := appWithBackingServicePostgres(st.ServiceID, app, pg)
 	if err != nil {
 		return err
