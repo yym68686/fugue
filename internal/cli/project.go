@@ -88,6 +88,11 @@ func (c *CLI) newProjectMoveCommand() *cobra.Command {
 Move every migratable app and managed backing service in a project to a target
 runtime with one command.
 
+For a physical node, databases are localized to that node and all resources,
+including already-moved ones, must converge before a successful return.
+Movable volumes select a compatible platform-approved destination class when
+the original class has no capacity on the destination. Source data is retained.
+
 The command preflights all project apps and backing services before queueing
 operations. By default, any resource that cannot be safely migrated blocks the
 whole project move so the project is not left half-moved. Pass --skip-blocked
@@ -145,9 +150,32 @@ fugue project move argus --to v2202605354515455529 --dry-run
 			if opts.RecoverOffline {
 				return c.moveProjectWithOfflineRecovery(client, project, projectApps, projectServices, targetRuntimeID, opts)
 			}
+			runtimes, err := client.ListRuntimes()
+			if err != nil {
+				return err
+			}
+			targetNode := ""
+			for _, runtime := range runtimes {
+				if runtime.ID == targetRuntimeID {
+					targetNode = strings.TrimSpace(runtime.ClusterNodeName)
+					break
+				}
+			}
 
 			candidates, skipped := planProjectMove(projectApps, targetRuntimeID)
 			serviceCandidates, skippedServices := planProjectMoveServices(projectServices, targetRuntimeID)
+			if targetNode != "" {
+				remaining := skippedServices[:0]
+				for _, item := range skippedServices {
+					pg := item.Service.Spec.Postgres
+					if item.Reason == "already on target runtime" && pg != nil && (pg.Instances > 1 || pg.PrimaryNodeName != targetNode) {
+						serviceCandidates = append(serviceCandidates, item.Service)
+					} else {
+						remaining = append(remaining, item)
+					}
+				}
+				skippedServices = remaining
+			}
 			serviceCandidates, skippedServices = applyProjectMoveDependencies(
 				candidates,
 				skipped,
@@ -228,7 +256,7 @@ fugue project move argus --to v2202605354515455529 --dry-run
 				if ownerID == "" || !projectMoveAppNeedsDatabaseLocalization(ownerID, initialImpacts) {
 					continue
 				}
-				localized, err := client.LocalizeAppDatabase(ownerID, "", targetRuntimeID)
+				localized, err := client.LocalizeAppDatabase(ownerID, targetNode, targetRuntimeID)
 				if err != nil {
 					return fmt.Errorf("localize app-owned database %s: %w", formatDisplayName(service.Name, service.ID, c.showIDs()), err)
 				}
@@ -284,7 +312,7 @@ fugue project move argus --to v2202605354515455529 --dry-run
 					if _, alreadyLocalized := localizedApps[strings.TrimSpace(service.OwnerAppID)]; alreadyLocalized {
 						continue
 					}
-					localized, err := client.LocalizeAppDatabase(service.OwnerAppID, "", targetRuntimeID)
+					localized, err := client.LocalizeAppDatabase(service.OwnerAppID, targetNode, targetRuntimeID)
 					if err != nil {
 						return fmt.Errorf("localize app-owned database %s: %w", formatDisplayName(service.Name, service.ID, c.showIDs()), err)
 					}
@@ -301,7 +329,14 @@ fugue project move argus --to v2202605354515455529 --dry-run
 					}
 					continue
 				}
-				response, err := client.MigrateBackingService(service.ID, targetRuntimeID)
+				var response backingServiceMigrateResponse
+				if targetNode != "" {
+					// A physical-node project move includes every database instance.
+					// A normal switchover preserves HA replicas on the source nodes.
+					response, err = client.LocalizeBackingService(service.ID, targetRuntimeID, targetNode)
+				} else {
+					response, err = client.MigrateBackingService(service.ID, targetRuntimeID)
+				}
 				if err != nil {
 					return fmt.Errorf("move service %s: %w", formatDisplayName(service.Name, service.ID, c.showIDs()), err)
 				}
@@ -318,6 +353,11 @@ fugue project move argus --to v2202605354515455529 --dry-run
 				operations = append(operations, finalOps...)
 			} else {
 				operations = append(operations, serviceOperations...)
+			}
+			if opts.Wait && targetNode != "" {
+				if err := c.waitForProjectMoveConvergence(client, nil, serviceCandidates, targetRuntimeID); err != nil {
+					return err
+				}
 			}
 
 			appOperations := make([]model.Operation, 0, len(candidates))
@@ -342,6 +382,11 @@ fugue project move argus --to v2202605354515455529 --dry-run
 			result.SkippedServices = skippedServices
 			result.Operations = operations
 			result.Blocked = hasBlockedProjectMoveApps(result.Skipped) || hasBlockedProjectMoveServices(result.SkippedServices)
+			if opts.Wait && targetNode != "" && !result.Blocked {
+				if err := c.waitForProjectMoveConvergence(client, projectApps, projectServices, targetRuntimeID); err != nil {
+					return err
+				}
+			}
 			return c.renderProjectMoveResult(result)
 		},
 	}
@@ -363,7 +408,7 @@ func planProjectMove(apps []model.App, targetRuntimeID string) ([]model.App, []p
 		if strings.TrimSpace(app.ID) == "" {
 			continue
 		}
-		if strings.TrimSpace(appEffectiveRuntimeID(app)) == strings.TrimSpace(targetRuntimeID) {
+		if strings.TrimSpace(app.Spec.RuntimeID) == strings.TrimSpace(targetRuntimeID) && strings.TrimSpace(appEffectiveRuntimeID(app)) == strings.TrimSpace(targetRuntimeID) {
 			skipped = append(skipped, projectMoveSkippedApp{App: app, Reason: "already on target runtime"})
 			continue
 		}

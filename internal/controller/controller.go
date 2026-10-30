@@ -1104,6 +1104,16 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return fmt.Errorf("resolve managed postgres placements for app %s: %w", app.ID, err)
 	}
 	timer.Mark("postgres_placement")
+	if s.Config.KubectlApply && op.Type == model.OperationTypeMigrate {
+		prepared, changed, prepareErr := s.prepareMigrationStoragePlacement(ctx, op, currentApp, app)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		app = prepared
+		if changed {
+			completionDesiredSpec = cloneControllerAppSpec(&app.Spec)
+		}
+	}
 
 	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
 	if err != nil {

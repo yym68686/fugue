@@ -753,6 +753,9 @@ func (s *Service) syncManagedAppObservedStatus(
 					return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("list backing service cluster %s pods: %w", serviceDeployment.ResourceName, podsErr))
 				}
 				if !serviceDeployment.Suspended && serviceDeployment.DesiredInstances == clusterStatus.Spec.Instances {
+					if err := retainUnscheduledMigrationReplica(ctx, client, namespace, app, serviceDeployment, clusterStatus, pods); err != nil {
+						return fmt.Errorf("retain superseded database migration replica: %w", err)
+					}
 					if err := retainSurplusUnboundClaims(ctx, client, namespace, managed, clusterStatus, pods); err != nil {
 						return fmt.Errorf("retain surplus uninitialized database claims: %w", err)
 					}

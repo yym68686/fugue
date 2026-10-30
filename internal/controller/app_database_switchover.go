@@ -575,6 +575,9 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 			}
 		}
 	}
+	if err := s.selectDatabaseMigrationStorage(ctx, client, op, currentDatabase, desiredDatabase, sourceRuntimeID, targetRuntimeID); err != nil {
+		return err
+	}
 	storageMigrationRequired = managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
 	storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 
@@ -770,6 +773,9 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		if err != nil {
 			return err
 		}
+	}
+	if err := s.selectDatabaseMigrationStorage(ctx, client, op, currentDatabase, desiredDatabase, sourceRuntimeID, targetRuntimeID); err != nil {
+		return err
 	}
 	storageMigrationRequired = managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
 	storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
