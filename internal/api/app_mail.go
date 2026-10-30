@@ -313,6 +313,46 @@ func (s *Server) handleCreateAppMailCredential(w http.ResponseWriter, r *http.Re
 	httpx.WriteJSON(w, 201, raw)
 }
 
+func (s *Server) handleSetAppMailboxLogin(w http.ResponseWriter, r *http.Request) {
+	app, ok := s.appMailAuthorized(w, r, true)
+	if !ok {
+		return
+	}
+	var input struct {
+		Generation uint64 `json:"generation"`
+		MailboxID  string `json:"mailbox_id"`
+		Enabled    *bool  `json:"enabled"`
+	}
+	if !decodeMailInput(w, r, &input) {
+		return
+	}
+	if input.Enabled == nil || len(input.MailboxID) < 1 || len(input.MailboxID) > 160 || input.Generation == 0 || input.Generation > 9007199254740991 {
+		httpx.WriteError(w, 400, "invalid mailbox login request")
+		return
+	}
+	binding, err := s.store.GetAppMailBinding(app.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if binding.State != "active" || binding.Generation != input.Generation || binding.TenantID != app.TenantID || binding.ProjectID != app.ProjectID {
+		httpx.WriteError(w, 409, "mail binding changed or inactive")
+		return
+	}
+	if _, err = s.syncAppMail(r.Context(), binding); err != nil {
+		httpx.WriteError(w, 502, err.Error())
+		return
+	}
+	raw, err := s.mailProvider(r.Context(), http.MethodPost, url.PathEscape(app.ID)+"/login", map[string]any{"generation": input.Generation, "mailboxId": input.MailboxID, "enabled": *input.Enabled})
+	if err != nil {
+		httpx.WriteError(w, 502, err.Error())
+		return
+	}
+	s.appendAudit(mustPrincipal(r), "app.mail.login.update", "app", app.ID, app.TenantID, nil)
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(w, 200, raw)
+}
+
 func (s *Server) handleRevokeAppMailCredential(w http.ResponseWriter, r *http.Request) {
 	app, ok := s.appMailAuthorized(w, r, true)
 	if !ok {

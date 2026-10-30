@@ -1,1 +1,1 @@
-{"schema":"fugue.app-tcp-transport/v1","generation":1,"listeners":[]}
+{"schema":"fugue.app-tcp-transport/v1","generation":2,"listeners":[{"name":"mailflare-smtp","namespace":"fg-tenant-1774393589-e35b60a6fc11","appId":"app_1793376783_e4dfae16256e","tenantId":"tenant_1774393589_e35b60a6fc11","managedName":"app-1793376783-e4dfae16256e","managedUID":"309ab0e4-79af-4c0e-a9ec-9fa76a0dc5f0","deployment":"app-1793376783-e4dfae16256e","node":"ns101351","address":"147.135.6.173","port":25,"targetPort":25,"enabled":true}]}

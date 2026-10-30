@@ -8100,6 +8100,43 @@ paths:
                 properties:
                   ok: {type: boolean}
         default: {$ref: '#/components/responses/ErrorResponse'}
+  /v1/apps/{id}/mail/login:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string}}
+    post:
+      operationId: setAppMailboxLogin
+      summary: Rotate or disable an independent mailbox Web password
+      description: Requires app.write and exact active binding ownership/generation. Rotation returns a new password once; both actions invalidate mailbox sessions and device keys, independently of API/JMAP credentials. No platform account is created or entered.
+      tags: [Apps]
+      x-fugue-handler: handleSetAppMailboxLogin
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [generation, mailbox_id, enabled]
+              properties:
+                generation: {type: integer, minimum: 1, maximum: 9007199254740991}
+                mailbox_id: {type: string, minLength: 1, maxLength: 160}
+                enabled: {type: boolean}
+      responses:
+        '200':
+          description: Login updated; secret is returned only for an explicit rotation. Never cache or log this response.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [mailboxId, email, enabled]
+                properties:
+                  mailboxId: {type: string}
+                  email: {type: string, format: email}
+                  enabled: {type: boolean}
+                  password: {type: string, format: password}
+        default: {$ref: '#/components/responses/ErrorResponse'}
   /v1/apps/{id}/source:
     patch:
       operationId: patchAppSource
@@ -23558,6 +23595,7 @@ components:
             properties:
               id: {type: string}
               address: {type: string}
+              loginEnabled: {type: boolean, description: Independent mailbox password is enabled; inactive bindings always report false.}
         usage:
           type: object
           required: [messageCount, attachmentBytes, outbound]

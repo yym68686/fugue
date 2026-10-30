@@ -83,3 +83,36 @@ func TestAppMailProviderObservationMustMatchSavedGenerationAndOwner(t *testing.T
 		}
 	}
 }
+
+func TestMailboxLoginRequiresExplicitActionExactGenerationAndOwnership(t *testing.T) {
+	s, server, writer, _, app, _ := setupAppDomainTestServer(t)
+	if err := s.SaveMailPlatformConfig(model.MailPlatformConfig{MailflareAppID: app.ID, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	res := performJSONRequest(t, server, http.MethodPut, "/v1/apps/"+app.ID+"/mail", writer, map[string]any{"state": "active", "expected_generation": 0})
+	if res.Code != 200 {
+		t.Fatal(res.Code, res.Body.String())
+	}
+	path := "/v1/apps/" + app.ID + "/mail/login"
+	for _, input := range []any{map[string]any{"generation": 1, "mailbox_id": "mailbox"}, map[string]any{"generation": 0, "mailbox_id": "mailbox", "enabled": true}, map[string]any{"generation": 1, "mailbox_id": "", "enabled": false}, map[string]any{"generation": 1, "mailbox_id": "mailbox", "enabled": false, "extra": true}} {
+		if r := performJSONRequest(t, server, http.MethodPost, path, writer, input); r.Code != 400 {
+			t.Fatal(r.Code, r.Body.String())
+		}
+	}
+	input := map[string]any{"generation": 2, "mailbox_id": "mailbox", "enabled": true}
+	if r := performJSONRequest(t, server, http.MethodPost, path, writer, input); r.Code != 409 {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	other, _ := s.CreateTenant("Mailbox peer")
+	_, key, err := s.CreateAPIKey(other.ID, "peer", []string{"app.write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input["generation"] = 1
+	if r := performJSONRequest(t, server, http.MethodPost, path, key, input); r.Code != 403 && r.Code != 404 {
+		t.Fatal("cross-tenant mailbox login", r.Code)
+	}
+	if r := performJSONRequest(t, server, http.MethodPost, path, writer, input); r.Code != 502 {
+		t.Fatal("provider failure reported login success", r.Code)
+	}
+}
