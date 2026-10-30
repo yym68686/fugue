@@ -19,6 +19,10 @@ is rejected rather than replaced. Do not add production names to the executor.
 Push changes to `main`. The `postgres_bootstrap_cpu` lane in `ci.yml` runs
 the same unit tests and prepares server-side dry runs, SQL identity probes,
 bound-claim evidence and the other databases' Pod/configuration inventory.
+The node must have a full replacement's spare CPU and memory before any restart;
+the old Pod's eventual release is not counted. DELETE previews put `dryRun: [All]`
+in the request body alongside preconditions, since Kubernetes ignores query
+options when a DELETE request body is present.
 The prepared witness is uploaded before execution. The job checks that the
 declaration and executor still match current `main` before any write.
 

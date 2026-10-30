@@ -14,7 +14,7 @@
       "clusterUID": "48fea768-c343-4265-b2fc-23a8f5f494a9",
       "systemID": "7640066541724016660",
       "pod": "dataocean-postgres-1",
-      "originalPodUID": "f6322d61-fbec-4528-ab42-78ce6514bf4c",
+      "originalPodUID": "4eeeed12-afcd-4b0f-94d0-3522d6fe150d",
       "node": "ns101351",
       "cpuRequest": "1m",
       "expectedMainResources": {
@@ -32,7 +32,7 @@
       "clusterUID": "5f494e8a-6751-46a8-910a-37bc41cb69aa",
       "systemID": "7678990889256734740",
       "pod": "shadowguard-db-postgres-1",
-      "originalPodUID": "a11b18fc-6611-4bb3-95f8-898cc77adbb7",
+      "originalPodUID": "c7534f12-0355-4df4-bd21-bb0659597887",
       "node": "ns101351",
       "cpuRequest": "1m",
       "expectedMainResources": {

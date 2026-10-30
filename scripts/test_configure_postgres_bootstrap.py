@@ -115,9 +115,12 @@ class BootstrapPolicyTests(unittest.TestCase):
                 runner.replace(config['targets'][0], pod, preview=True)
                 args, kwargs = kube.call_args
                 self.assertEqual(args[:2], ('delete', '--raw'))
-                self.assertTrue(args[2].endswith('?dryRun=All'))
+                self.assertNotIn('?', args[2])
+                self.assertEqual(kwargs['body']['dryRun'], ['All'])
                 self.assertEqual(kwargs['body']['preconditions'], {'uid': pod['metadata']['uid'], 'resourceVersion': '30'})
                 self.assertNotIn('gracePeriodSeconds', kwargs['body'])
+                runner.replace(config['targets'][0], pod)
+                self.assertNotIn('dryRun', kube.call_args.kwargs['body'])
 
     def test_failed_first_canary_stops_before_touching_second(self):
         config, cluster, pod = fixture()
@@ -136,6 +139,24 @@ class BootstrapPolicyTests(unittest.TestCase):
                     runner.execute(prepared)
                 self.assertEqual(get_target.call_count, 1)
                 self.assertEqual(get_target.call_args.args[0]['cluster'], 'sample-db')
+
+    def test_restart_requires_spare_capacity_without_counting_original_pod_release(self):
+        config, _, pod = fixture()
+        target = config['targets'][0]
+        node = {'metadata': {'name': target['node']}, 'spec': {}, 'status': {
+            'allocatable': {'cpu': '200m', 'memory': '512Mi'}, 'conditions': [{'type': 'Ready', 'status': 'True'}]}}
+        pods = {'items': [pod]}
+        self.assertEqual(policy.capacity_witness(target, pod, node, pods)['cpu']['spare'], '0.100')
+        for resource, value in (('cpu', '199m'), ('memory', '511Mi')):
+            full = copy.deepcopy(node)
+            full['status']['allocatable'][resource] = value
+            with self.subTest(resource=resource), self.assertRaisesRegex(ValueError, 'Insufficient spare'):
+                policy.capacity_witness(target, pod, full, pods)
+        pod['status']['containerStatuses'][0]['allocatedResources'] = {'cpu': '150m'}
+        with self.assertRaisesRegex(ValueError, 'Insufficient spare cpu'):
+            policy.capacity_witness(target, pod, node, pods)
+        self.assertEqual(policy.quantity('0.5'), policy.quantity('500m'))
+        self.assertEqual(policy.quantity('1Gi'), policy.quantity('1024Mi'))
 
     def test_wait_tolerates_delayed_cluster_readiness_and_requires_one_stable_replacement(self):
         config, cluster, pod = fixture()

@@ -7,6 +7,7 @@ Run only through the declarative CI entrypoint for production.
 """
 import argparse
 import copy
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -33,6 +34,54 @@ def cpu_milli(value):
     if not match:
         raise ValueError('CPU request must use integer cores or millicores')
     return int(match[1]) * (1 if match[2] else 1000)
+
+
+def quantity(value):
+    if value is None:
+        return Decimal(0)
+    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)([KMGTPE]i|[numkKMGTPE]|[eE][+-]?[0-9]+)?', str(value))
+    if not match:
+        raise ValueError('Unsupported resource quantity')
+    number, suffix = Decimal(match[1]), match[2] or ''
+    if suffix.endswith('i'):
+        return number * (Decimal(1024) ** ('KMGTPE'.index(suffix[0]) + 1))
+    if suffix.startswith(('e', 'E')) and len(suffix) > 1:
+        return number * (Decimal(10) ** int(suffix[1:]))
+    return number * {'': Decimal(1), 'n': Decimal('1e-9'), 'u': Decimal('1e-6'), 'm': Decimal('1e-3'),
+                     **{s: Decimal(1000) ** (i + 1) for i, s in enumerate('kMGTPE')}, 'K': Decimal(1000)}[suffix]
+
+
+def pod_request(pod, resource):
+    # Conservatively include allocation still held by an in-progress resize.
+    # Summing all init containers also covers native sidecars without
+    # underestimating their overlap with later init containers.
+    statuses = {c['name']: c for c in pod.get('status', {}).get('containerStatuses', [])}
+    main = sum(max(quantity(c.get('resources', {}).get('requests', {}).get(resource)),
+                   quantity(statuses.get(c['name'], {}).get('allocatedResources', {}).get(resource)),
+                   quantity(statuses.get(c['name'], {}).get('resources', {}).get('requests', {}).get(resource)))
+               for c in pod['spec'].get('containers', []))
+    init = sum(quantity(c.get('resources', {}).get('requests', {}).get(resource)) for c in pod['spec'].get('initContainers', []))
+    return max(main + sum(quantity(c.get('resources', {}).get('requests', {}).get(resource))
+                          for c in pod['spec'].get('initContainers', []) if c.get('restartPolicy') == 'Always'), init,
+               quantity(pod['spec'].get('resources', {}).get('requests', {}).get(resource))) + quantity(pod['spec'].get('overhead', {}).get(resource))
+
+
+def capacity_witness(target, pod, node, pods):
+    if (node['metadata']['name'] != target['node'] or node['spec'].get('unschedulable')
+            or not any(c['type'] == 'Ready' and c['status'] == 'True' for c in node['status']['conditions'])):
+        raise ValueError('Database node is not schedulable and Ready')
+    witness = {}
+    for resource in ('cpu', 'memory'):
+        used = sum(pod_request(p, resource) for p in pods['items'] if p['spec'].get('nodeName') == target['node']
+                   and p.get('status', {}).get('phase') not in ('Succeeded', 'Failed'))
+        available = quantity(node['status']['allocatable'][resource]) - used
+        required = pod_request(pod, resource)
+        # Require a full replacement's spare capacity before removing the old
+        # Pod. Its released allocation is deliberately not counted as headroom.
+        if available < required:
+            raise ValueError(f'Insufficient spare {resource} for a controlled database restart')
+        witness[resource] = {'spare': str(available), 'required': str(required)}
+    return witness
 
 
 def validate_config(config):
@@ -190,6 +239,10 @@ class Runner:
         pvcs = self.get('pvc', None, target['namespace'], '-l', 'cnpg.io/cluster=' + target['cluster'])
         return {p['metadata']['uid']: {'name': p['metadata']['name'], 'spec': digest(p['spec']), 'phase': p.get('status', {}).get('phase')} for p in pvcs['items']}
 
+    def capacity(self, target, pod):
+        return capacity_witness(target, pod, self.get('node', target['node']),
+                                self.get('pods', None, None, '-A', '--field-selector=spec.nodeName=' + target['node']))
+
     def patch(self, target, patch, preview=False):
         if patch:
             return self.kube('-n', target['namespace'], 'patch', 'cluster.postgresql.cnpg.io', target['cluster'], '--type=json', '--patch-file=/dev/stdin', '-o', 'json', *(['--dry-run=server'] if preview else []), body=patch)
@@ -205,8 +258,9 @@ class Runner:
             if not claims or any(p['phase'] != 'Bound' for p in claims.values()):
                 raise ValueError('Database claims are not bound')
             self.patch(target, patch, True)
+            headroom = self.capacity(target, pod)
             self.evidence['targets'].append({'namespace': target['namespace'], 'cluster': target['cluster'], 'podUID': pod['metadata']['uid'],
-                                              'annotation': value, 'claims': claims, 'clusterSpec': digest(cluster['spec']), 'status': 'prepared'})
+                                              'annotation': value, 'claims': claims, 'headroom': headroom, 'clusterSpec': digest(cluster['spec']), 'status': 'prepared'})
         self.evidence['preparedAt'] = time.time()
         self.save()
 
@@ -217,7 +271,9 @@ class Runner:
             'uid': pod['metadata']['uid'], 'resourceVersion': pod['metadata']['resourceVersion']}}
         path = '/api/v1/namespaces/' + target['namespace'] + '/pods/' + target['pod']
         if preview:
-            path += '?dryRun=All'
+            # The DELETE handler decodes options from the body when present;
+            # URL query options are ignored in that case.
+            options['dryRun'] = ['All']
         self.kube('delete', '--raw', path, '-f', '-', body=options)
 
     def wait(self, target, receipt):
@@ -276,6 +332,7 @@ class Runner:
             self.sql_identity(target)
             self.patch(target, patch, True)
             if pod['metadata']['uid'] == target['originalPodUID']:
+                self.capacity(target, pod)
                 self.replace(target, pod, True)
             self.patch(target, patch)
             cluster, pod = self.target(target)
@@ -283,6 +340,7 @@ class Runner:
             if cluster['metadata'].get('annotations', {}).get(ANNOTATION) != receipt['annotation']:
                 raise ValueError('Bootstrap annotation did not persist')
             if pod['metadata']['uid'] == target['originalPodUID']:
+                self.capacity(target, pod)
                 receipt['status'] = 'replacing'
                 receipt['replacementRequestedAt'] = time.time()
                 self.save()
