@@ -94,7 +94,7 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 }
 
 func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
-	for _, scenario := range []string{"idle", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_generation_lag_busy", "advance_interrupted_predecessor_busy", "advance_interrupted_wrong_service_uid", "advance_interrupted_wrong_lineage", "advance_generation_stuck", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector"} {
+	for _, scenario := range []string{"idle", "retired_source", "retired_logical_source", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_generation_lag_busy", "advance_interrupted_predecessor_busy", "advance_interrupted_wrong_service_uid", "advance_interrupted_wrong_lineage", "advance_generation_stuck", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			s, app, candidate, f := newDrainWorkloadFixtureWithSnapshot(t, false, true)
@@ -120,6 +120,21 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				t.Fatal(err)
 			}
 			candidate.RollbackTargetID = "original-source"
+			if scenario == "retired_source" || scenario == "retired_logical_source" {
+				source, _ := s.Store.GetAppRelease(app.TenantID, true, "original-source")
+				archiveCanonicalTestRelease(&source)
+				if _, err := s.Store.UpdateAppRelease(source); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "retired_logical_source" {
+					logical := createCanonicalHandoffTestRevision(t, s, app, "logical-source", source.ID)
+					archiveCanonicalTestRelease(&logical)
+					if _, err := s.Store.UpdateAppRelease(logical); err != nil {
+						t.Fatal(err)
+					}
+					candidate.RollbackTargetID = logical.ID
+				}
+			}
 			if _, err := s.Store.UpdateAppRelease(candidate); err != nil {
 				t.Fatal(err)
 			}
@@ -394,7 +409,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				defer cancel()
 			}
 			got, err := s.prepareSafeCanonicalHandoff(ctx, client, app, []map[string]any{desired, desiredService})
-			success := scenario == "idle" || scenario == "resume" || scenario == "restore_ready"
+			success := scenario == "idle" || scenario == "retired_source" || scenario == "retired_logical_source" || scenario == "resume" || scenario == "restore_ready"
 			if success != (err == nil) {
 				t.Fatalf("expected success=%v got %v (reads=%d probes=%d)", success, err, sourceReads, sourceProbes)
 			}
@@ -477,19 +492,33 @@ func createCanonicalHandoffTestRevision(t *testing.T, s *Service, app model.App,
 }
 
 func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
-	for _, scenario := range []string{"legacy_successor", "retained_source", "completed_replacement", "unrelated_successor", "missing_source", "retired_predecessor", "multiple_successors", "logical_source_differs", "logical_source_wrong_snapshot"} {
+	for _, scenario := range []string{"legacy_successor", "retained_source", "completed_replacement", "unrelated_successor", "missing_source", "retired_predecessor", "multiple_successors", "logical_source_differs", "logical_source_wrong_snapshot", "retired_executable", "retired_logical_source", "retired_unpromoted_source"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			st, original, desired, _ := newSafeRolloutTestState(t)
 			s := &Service{Store: st, Renderer: runtime.Renderer{}}
+			archiveSource := scenario == "retired_executable" || scenario == "retired_logical_source" || scenario == "retired_unpromoted_source"
 			if _, err := st.CreateAppRelease(model.AppRelease{ID: "original", AppID: original.ID, TenantID: original.TenantID,
 				Role: model.AppReleaseRolePrevious, Status: model.AppReleaseStatusDraining, ResolvedImageRef: original.Spec.Image, SpecSnapshot: cloneControllerAppSpec(&original.Spec)}); err != nil {
 				t.Fatal(err)
+			}
+			if archiveSource {
+				source, _ := st.GetAppRelease(original.TenantID, true, "original")
+				archiveCanonicalTestRelease(&source)
+				if scenario == "retired_unpromoted_source" {
+					source.PromotedAt = nil
+				}
+				if _, err := st.UpdateAppRelease(source); err != nil {
+					t.Fatal(err)
+				}
 			}
 			previous := createCanonicalHandoffTestRevision(t, s, desired, "first-promoted", "original")
 			previous.Role, previous.Status = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
 			if scenario == "retired_predecessor" {
 				previous.Role, previous.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
+			}
+			if scenario == "retired_logical_source" {
+				archiveCanonicalTestRelease(&previous)
 			}
 			if _, err := st.UpdateAppRelease(previous); err != nil {
 				t.Fatal(err)
@@ -522,8 +551,11 @@ func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
 			live.Metadata.UID = "original-uid"
 			handoff := safeCanonicalHandoff{ReleaseID: previous.ID, DeploymentUID: live.Metadata.UID,
 				ReleaseKey: live.Metadata.Annotations[runtime.FugueAnnotationReleaseKey], Image: original.Spec.Image}
-			if scenario == "logical_source_differs" || scenario == "logical_source_wrong_snapshot" {
+			if scenario == "logical_source_differs" || scenario == "logical_source_wrong_snapshot" || archiveSource {
 				handoff.SourceReleaseID = previous.ID
+				if scenario == "retired_logical_source" {
+					handoff.ReleaseID = promoted.ID
+				}
 				if scenario == "logical_source_wrong_snapshot" {
 					bad, _ := st.GetAppRelease(original.TenantID, true, "original")
 					bad.SpecSnapshot = cloneControllerAppSpec(bad.SpecSnapshot)
@@ -551,12 +583,25 @@ func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
 			b, _ := json.Marshal(handoff)
 			live.Metadata.Annotations[safeCanonicalHandoffAnnotation] = string(b)
 			got, _, recovered, err := s.recoverSafeCanonicalHandoffSource(live, desired, desired)
-			want := scenario == "legacy_successor" || scenario == "retained_source" || scenario == "completed_replacement" || scenario == "multiple_successors" || scenario == "logical_source_differs"
+			want := scenario == "legacy_successor" || scenario == "retained_source" || scenario == "completed_replacement" || scenario == "multiple_successors" || scenario == "logical_source_differs" || scenario == "retired_executable" || scenario == "retired_logical_source"
 			if (err == nil && recovered) != want || (want && got.Spec.Image != expectedImage) {
 				t.Fatal("lost immutable original source across promotion", scenario, got.Spec.Image, recovered, err)
 			}
+			if archiveSource {
+				row, err := st.GetAppRelease(original.TenantID, true, "original")
+				if err != nil || row.Status != model.AppReleaseStatusRetired || row.Role != model.AppReleaseRoleRetired {
+					t.Fatal("canonical handoff reactivated historical release", err)
+				}
+			}
 		})
 	}
+}
+
+func archiveCanonicalTestRelease(release *model.AppRelease) {
+	release.Role, release.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
+	release.CreatedAt = time.Now().Add(-2 * time.Hour)
+	ready, retired := time.Now().Add(-time.Hour), time.Now().Add(-30*time.Minute)
+	release.ReadyAt, release.PromotedAt, release.RetiredAt = &ready, &ready, &retired
 }
 
 func TestPolicyUpdateCompletionRetainsExecutableChangesOnPendingHandoff(t *testing.T) {

@@ -94,14 +94,14 @@ func (s *Service) canonicalHandoffSourceReleaseID(app model.App, handoff safeCan
 func (s *Service) canonicalHandoffSourceSnapshot(app model.App, sourceID string, handoff safeCanonicalHandoff, scheduling runtime.SchedulingConstraints) (model.App, string, error) {
 	matches := func(release model.AppRelease) (model.App, bool) {
 		source := app
-		if release.SpecSnapshot == nil || release.AppID != app.ID || release.TenantID != app.TenantID {
+		if release.SpecSnapshot == nil || release.AppID != app.ID || release.TenantID != app.TenantID || !recordedCanonicalHistoryEligible(release) {
 			return source, false
 		}
 		source.Spec = *cloneControllerAppSpec(release.SpecSnapshot)
 		if normalized, changed := s.normalizeManagedAppRuntimeImageRefs(source); changed {
 			source = normalized
 		}
-		return source, strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(source), scheduling)) == handoff.ReleaseKey &&
+		return source, source.Spec.RuntimeID == app.Spec.RuntimeID && strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(source), scheduling)) == handoff.ReleaseKey &&
 			s.migrationImageRefsEquivalent(source, source.Spec.Image, handoff.Image)
 	}
 	declared, err := s.Store.GetAppRelease(app.TenantID, true, sourceID)
@@ -112,17 +112,17 @@ func (s *Service) canonicalHandoffSourceSnapshot(app model.App, sourceID string,
 		return source, declared.ID, nil
 	}
 	if declared.AppID != app.ID || declared.TenantID != app.TenantID || declared.RevisionWorkload == nil ||
-		declared.Role != model.AppReleaseRolePrevious || declared.Status != model.AppReleaseStatusDraining {
+		!recordedCanonicalHistoryEligible(declared) {
 		return app, "", fmt.Errorf("canonical handoff has no verified source snapshot")
 	}
 	// Load metadata first; only snapshots with the observed image are candidates.
-	history, err := s.Store.ListAppReleaseMetadata(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRolePrevious, ActiveOnly: true})
+	history, err := s.Store.ListAppReleaseMetadata(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, IncludeRetired: true})
 	if err != nil {
 		return app, "", err
 	}
 	reads := 0
 	for _, meta := range history {
-		if meta.ID == declared.ID || meta.Status != model.AppReleaseStatusDraining || meta.ResolvedImageRef == "" ||
+		if meta.ID == declared.ID || !recordedCanonicalHistoryEligible(meta) || meta.ResolvedImageRef == "" ||
 			!s.migrationImageRefsEquivalent(app, meta.ResolvedImageRef, handoff.Image) {
 			continue
 		}
