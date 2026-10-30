@@ -13,6 +13,9 @@ import (
 )
 
 func (s *Service) imageTrackingRetrySuppression(ctx context.Context, app model.App, tracking model.AppImageTracking, digest string) (string, error) {
+	if reason, err := s.candidateStartupRetrySuppression(ctx, app, digest); err != nil || reason != "" {
+		return reason, err
+	}
 	if strings.TrimSpace(digest) == strings.TrimSpace(tracking.LastQueuedDigest) {
 		ops, err := s.Store.ListOperationSummariesFiltered(app.TenantID, true, store.OperationListFilter{AppID: app.ID, Types: []string{model.OperationTypeDeploy}, Limit: 8})
 		if err != nil {

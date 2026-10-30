@@ -62,6 +62,9 @@ func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.O
 		}
 		return resumed, err
 	}
+	if err := s.checkCandidateStartupRetryBudget(ctx, candidate, op); err != nil {
+		return nil, err
+	}
 	scheduling := runtime.SchedulingConstraints{}
 	if len(schedulingValues) > 0 {
 		scheduling = schedulingValues[0]

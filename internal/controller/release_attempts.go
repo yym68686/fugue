@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -145,6 +146,14 @@ func (s *Service) markReleaseAttemptRolloutWaiting(op model.Operation, app model
 }
 
 func (s *Service) completeReleaseAttemptForOperation(op model.Operation, app model.App, summary string) {
+	if op.Type == model.OperationTypeDeploy {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := s.updateCandidateStartupFailures(ctx, app, op, true)
+		cancel()
+		if err != nil && s.Logger != nil {
+			s.Logger.Printf("reset successful candidate startup budget operation=%s: %v", op.ID, err)
+		}
+	}
 	attempt, found, err := s.Store.FindReleaseAttemptForOperation(op.ID)
 	if err != nil || !found {
 		return

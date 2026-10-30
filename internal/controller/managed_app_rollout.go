@@ -173,6 +173,7 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 	lastMessage := ""
 	schedulingBlock := rolloutSchedulingBlockTracker{}
 	volumeBlock := rolloutVolumeBlockTracker{}
+	startup := candidateStartupObservation{}
 	waitForNextSignal := func(targets []kubeWatchTarget) error {
 		if err := client.waitForAnyObjectEvent(waitCtx, targets, interval); err != nil {
 			if lastMessage != "" {
@@ -210,10 +211,15 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 			}
 			if err == nil {
 				watchTargets = append(watchTargets, managedAppRevisionPodRolloutWatchTargets(namespace, app, revision, podSnapshot.Metadata.ResourceVersion)...)
+				ready = ready && candidateStartupPodsReady(pods, deployment, app.Spec.Replicas)
 			}
 			if len(pods) > 0 {
 				volumePod, volumeMessage = deploymentVolumeBlockMessage(waitCtx, client, namespace, pods, deployment, s.rolloutObservationTime())
-				if failureMessage := deploymentTemplatePodFailureMessage(pods, deployment); failureMessage != "" {
+				failureMessage, err := s.candidateStartupFailureMessage(waitCtx, app, operationID, deployment, pods, &startup)
+				if err != nil {
+					return err
+				}
+				if failureMessage != "" {
 					primaryEvidenceID := s.captureDeploymentRolloutFailureEvidence(waitCtx, client, app, operationID, namespace, deployment, pods, failureMessage)
 					if strings.TrimSpace(primaryEvidenceID) != "" {
 						failureMessage = fmt.Sprintf("%s (primary_evidence_id=%s)", failureMessage, primaryEvidenceID)
