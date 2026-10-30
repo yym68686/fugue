@@ -331,6 +331,39 @@ func TestSchedulingForPodNodePinsToNFSNode(t *testing.T) {
 	}
 }
 
+func TestMovableRWOTargetSchedulingPinsLonghornTransferToEligibleNode(t *testing.T) {
+	f := newStoragePlacementFixture(t)
+	f.pvc.Spec.StorageClassName = &f.class.Name
+	f.pvc.Spec.VolumeName = ""
+	f.pvc.Status.Phase = "Pending"
+	f.ready = []string{"storage-ready"}
+
+	base := runtimepkg.SchedulingConstraints{NodeSelector: map[string]string{runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue}}
+	got, err := movableRWOTargetScheduling(context.Background(), f.client, "tenant", "data", f.class.Name, base)
+	if err != nil {
+		t.Fatalf("resolve Longhorn target scheduling: %v", err)
+	}
+	if got.NodeSelector[kubeHostnameLabelKey] != "storage-ready" {
+		t.Fatalf("expected transfer pod pinned to the Ready Longhorn node, got %#v", got.NodeSelector)
+	}
+	if got.NodeSelector[runtimepkg.SharedPoolLabelKey] != runtimepkg.SharedPoolLabelValue {
+		t.Fatalf("runtime selector was not preserved: %#v", got.NodeSelector)
+	}
+}
+
+func TestMovableRWOTargetSchedulingRejectsRuntimeSelectorWithoutLonghornNode(t *testing.T) {
+	f := newStoragePlacementFixture(t)
+	f.pvc.Spec.StorageClassName = &f.class.Name
+	f.pvc.Spec.VolumeName = ""
+	f.pvc.Status.Phase = "Pending"
+	f.ready = []string{"storage-ready"}
+
+	base := runtimepkg.SchedulingConstraints{NodeSelector: map[string]string{kubeHostnameLabelKey: "compute-only"}}
+	if _, err := movableRWOTargetScheduling(context.Background(), f.client, "tenant", "data", f.class.Name, base); err == nil || !strings.Contains(err.Error(), "no eligible Longhorn attachment node") {
+		t.Fatalf("expected a clear error for incompatible runtime selector, got %v", err)
+	}
+}
+
 func TestMovableRWONeedsFreshClaimWhenMigratingRuntime(t *testing.T) {
 	current := model.App{
 		ID: "app_demo",

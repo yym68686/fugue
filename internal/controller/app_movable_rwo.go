@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -348,6 +349,10 @@ func (s *Service) copyMovableRWOVolume(
 	if err := client.applyObject(ctx, targetPVC, nil); err != nil {
 		return fmt.Errorf("apply movable RWO target pvc %s/%s: %w", namespace, plan.targetClaimName, err)
 	}
+	targetScheduling, err = movableRWOTargetScheduling(ctx, client, namespace, plan.targetClaimName, desiredApp.Spec.PersistentStorage.StorageClassName, targetScheduling)
+	if err != nil {
+		return fmt.Errorf("resolve movable RWO target scheduling: %w", err)
+	}
 	if plan.sourceSharedProject {
 		if sourceScheduling, found, err := sharedWorkspaceNFSServerScheduling(ctx, client); err != nil {
 			return fmt.Errorf("resolve shared workspace NFS source node: %w", err)
@@ -376,6 +381,52 @@ func (s *Service) copyMovableRWOVolume(
 		sourceScheduling.NodeSelector[kubeHostnameLabelKey] = strings.TrimSpace(plan.sourceNodeName)
 	}
 	return s.copyMovableRWOVolumeViaTransferPods(ctx, client, namespace, names, plan, sourceScheduling, targetScheduling)
+}
+
+func movableRWOTargetScheduling(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	claimName string,
+	storageClassName string,
+	base runtimepkg.SchedulingConstraints,
+) (runtimepkg.SchedulingConstraints, error) {
+	placement, err := loadStoragePlacement(ctx, client, namespace, []storageClaimRequest{{Name: claimName, Class: storageClassName}})
+	if err != nil {
+		return runtimepkg.SchedulingConstraints{}, fmt.Errorf("observe target claim %s/%s placement: %w", namespace, claimName, err)
+	}
+	if placement == nil || len(placement.claims) == 0 || placement.claims[0].driver != longhornCSIDriver {
+		return base, nil
+	}
+
+	nodeNames, err := client.listNodeNames(ctx)
+	if err != nil {
+		return runtimepkg.SchedulingConstraints{}, fmt.Errorf("list nodes for Longhorn target claim %s: %w", claimName, err)
+	}
+	sort.Strings(nodeNames)
+	var rejected []string
+	for _, nodeName := range nodeNames {
+		if !placement.longhornNodes[nodeName] {
+			continue
+		}
+		node, found, err := client.getNode(ctx, nodeName)
+		if err != nil {
+			return runtimepkg.SchedulingConstraints{}, fmt.Errorf("read Longhorn attachment node %s: %w", nodeName, err)
+		}
+		if !found || !kubeNodeReady(node) || node.Spec.Unschedulable || !nodeLabelsMatchSelector(node.Metadata.Labels, base.NodeSelector) || !kubeTaintsTolerated(node.Spec.Taints, base.Tolerations) {
+			rejected = append(rejected, nodeName+": not Ready, schedulable, or compatible with runtime constraints")
+			continue
+		}
+		if reason := placement.rejection(node); reason != "" {
+			rejected = append(rejected, nodeName+": "+reason)
+			continue
+		}
+		return schedulingPinnedToNode(base, nodeName), nil
+	}
+	if len(rejected) == 0 {
+		return runtimepkg.SchedulingConstraints{}, fmt.Errorf("no Ready Longhorn attachment nodes are available for target claim %s", claimName)
+	}
+	return runtimepkg.SchedulingConstraints{}, fmt.Errorf("no eligible Longhorn attachment node for target claim %s: %s", claimName, strings.Join(rejected, "; "))
 }
 
 func (s *Service) copyMovableRWOVolumeViaTransferPods(
