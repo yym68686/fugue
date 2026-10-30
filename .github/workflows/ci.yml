@@ -2490,6 +2490,46 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  app_tcp_transport:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-app-tcp-transport, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Test and reconcile current declared application TCP transport
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/app-tcp-transport/listeners.json
+          python3 -m unittest scripts.test_reconcile_app_tcp_transport
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_app_tcp_transport.py; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_app_tcp_transport.py scripts/reconcile_front_probe_transport.py scripts/observe_front_candidate.py; then
+              python3 scripts/reconcile_app_tcp_transport.py "$config" --apply --evidence "$RUNNER_TEMP/app-tcp-transport.json"
+            fi
+          fi
+      - name: Retain application TCP transport receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-app-tcp-transport-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/app-tcp-transport.json
+          if-no-files-found: ignore
+          retention-days: 30
+
   front_serving_stage:
     needs: [front_probe_transport]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' }}
