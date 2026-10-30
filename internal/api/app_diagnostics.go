@@ -478,6 +478,8 @@ func managedPostgresQueryHostCandidates(app model.App, spec model.AppSpec) []str
 		}
 		appendCandidate(bound.Service.Spec.Postgres.ServiceName)
 		appendCandidate(model.PostgresRWServiceName(bound.Service.Spec.Postgres.ServiceName))
+		appendCandidate(model.PostgresEndpointName(*bound.Service.Spec.Postgres))
+		appendCandidate(model.PostgresRWServiceName(model.PostgresEndpointName(*bound.Service.Spec.Postgres)))
 	}
 	if len(candidates) == 0 && spec.Postgres != nil {
 		defaults := defaultAppManagedPostgresEnv(app.Name, *spec.Postgres)

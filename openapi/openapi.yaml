@@ -8986,6 +8986,10 @@ paths:
         New recovery attempts populate and physically verify a separate destination primary
         claim before handing it to CNPG's retained-volume restoration. This does not require
         CSI volume cloning. Prepared or activated primary claims are never recopied.
+        Effective managed database connection hosts, including the retained endpoint's
+        legacy -rw alias, follow the stable endpoint after replacement. URL credentials,
+        database, port and options are preserved; external and other-namespace hosts
+        are not rebound. Persisted application environment intent is not rewritten.
         Source storage is never expanded. Durable phase records
         prevent recopying an activated destination. Dry run describes intent only;
         live preflight occurs before each mutation.

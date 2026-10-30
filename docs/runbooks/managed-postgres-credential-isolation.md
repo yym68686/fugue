@@ -87,3 +87,12 @@ Older renderers derive credentials from display names and can reintroduce the
 collision. Use a compatible repair release, preserving current per-service
 intent, rather than restoring an old conflicting reference. The original
 database passwords and volumes remain the recovery baseline.
+
+Physical cold recovery retains `postgres.endpoint_service_name` independently
+of the replacement CNPG cluster name. Effective consumer environment and API
+database diagnostics rebind only known cluster/endpoint hosts and their `-rw`
+aliases to this stable endpoint, including same-namespace qualified hosts.
+They preserve URL credentials, database, explicit port and options, and leave
+external or other-namespace hosts and stored application environment unchanged.
+Verify a new connection through the stable endpoint before declaring the
+consumer healthy; a recovered database or HTTP landing page alone is insufficient.

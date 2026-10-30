@@ -1569,6 +1569,15 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 	for key, value := range app.Spec.Env {
 		merged[key] = value
 	}
+	for _, binding := range app.Bindings {
+		service, ok := servicesByID[binding.ServiceID]
+		if ok && strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) && service.Spec.Postgres != nil && (service.Provisioner == "" || service.Provisioner == model.BackingServiceProvisionerManaged) {
+			merged = model.RebindPostgresEndpointEnvironment(merged, *service.Spec.Postgres, NamespaceForTenant(app.TenantID))
+		}
+	}
+	if !hasManagedPostgresBinding && app.Spec.Postgres != nil {
+		merged = model.RebindPostgresEndpointEnvironment(merged, *app.Spec.Postgres, NamespaceForTenant(app.TenantID))
+	}
 
 	if ssh := model.NormalizeAppSSHSpec(app.Spec.SSH); ssh != nil {
 		merged["FUGUE_SSH_USER"] = ssh.User

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 )
 
 type appBoundService struct {
@@ -108,6 +109,14 @@ func mergedAppEnvDetails(app model.App, spec model.AppSpec) appEnvDetails {
 			Source:    "app",
 			SourceRef: "spec.env",
 		})
+	}
+	for _, bound := range appBoundServices(app) {
+		if strings.EqualFold(strings.TrimSpace(bound.Service.Type), model.BackingServiceTypePostgres) && isManagedBackingService(bound.Service) && bound.Service.Spec.Postgres != nil {
+			merged = model.RebindPostgresEndpointEnvironment(merged, *bound.Service.Spec.Postgres, runtime.NamespaceForTenant(app.TenantID))
+		}
+	}
+	if !hasManagedPostgresBinding && spec.Postgres != nil {
+		merged = model.RebindPostgresEndpointEnvironment(merged, *spec.Postgres, runtime.NamespaceForTenant(app.TenantID))
 	}
 	if len(merged) == 0 {
 		return appEnvDetails{}
@@ -215,7 +224,7 @@ func isManagedBackingService(service model.BackingService) bool {
 func defaultAPIBindingPostgresEnv(spec model.AppPostgresSpec) map[string]string {
 	return map[string]string{
 		"DB_TYPE":     "postgres",
-		"DB_HOST":     strings.TrimSpace(spec.ServiceName),
+		"DB_HOST":     model.PostgresEndpointName(spec),
 		"DB_PORT":     "5432",
 		"DB_USER":     spec.User,
 		"DB_PASSWORD": spec.Password,
