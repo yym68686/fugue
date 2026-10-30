@@ -90,6 +90,9 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("preparing managed postgres standby on runtime %s", targetRuntimeID))
 		stageSpec := databaseSwitchoverStageSpec(app.Spec, currentDatabase, sourceRuntimeID, targetRuntimeID)
+		if err := s.validateManagedPostgresSwitchoverStage(ctx, client, app, namespace, clusterName, *stageSpec.Postgres, *currentDatabase); err != nil {
+			return err
+		}
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
 			cause := fmt.Errorf("prepare managed postgres standby on %s: %w", targetRuntimeID, err)
 			return s.rollbackAppOwnedManagedPostgresStage(ctx, op, app, currentDatabase, cause)
@@ -240,6 +243,9 @@ func (s *Service) executeBoundManagedDatabaseSwitchoverOperation(
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("preparing managed postgres service %s standby on runtime %s", target.ServiceID, targetRuntimeID))
 		stagePostgres := databaseSwitchoverStagePostgresSpec(currentDatabase, sourceRuntimeID, targetRuntimeID)
+		if err := s.validateManagedPostgresSwitchoverStage(ctx, client, app, namespace, clusterName, stagePostgres, *currentDatabase); err != nil {
+			return err
+		}
 		stageApp, err := appWithBackingServicePostgres(target.ServiceID, app, stagePostgres)
 		if err != nil {
 			return fmt.Errorf("stage managed postgres service %s standby on %s: %w", target.ServiceID, targetRuntimeID, err)
@@ -405,7 +411,10 @@ func (s *Service) rollbackAppOwnedManagedPostgresStage(
 		stableSpec := app.Spec
 		stableSpec.Postgres = model.CloneAppPostgresSpec(stablePostgres)
 		_, err := s.applyManagedDesiredAppState(rollbackCtx, op.ID, app, stableSpec)
-		return err
+		if err != nil {
+			return err
+		}
+		return s.verifyManagedPostgresRollback(rollbackCtx, op, app, stablePostgres)
 	})
 }
 
@@ -425,7 +434,7 @@ func (s *Service) rollbackBoundManagedPostgresStage(
 		if _, err := s.applyManagedDesiredAppState(rollbackCtx, op.ID, stableApp, stableApp.Spec); err != nil {
 			return fmt.Errorf("apply restored managed postgres service %s state: %w", serviceID, err)
 		}
-		return nil
+		return s.verifyManagedPostgresRollback(rollbackCtx, op, app, stablePostgres)
 	})
 }
 
@@ -445,7 +454,7 @@ func (s *Service) rollbackBoundManagedPostgresEphemeralStage(
 		if _, err := s.applyManagedDesiredAppState(rollbackCtx, op.ID, stableApp, stableApp.Spec); err != nil {
 			return fmt.Errorf("apply restored managed postgres service %s state: %w", serviceID, err)
 		}
-		return nil
+		return s.verifyManagedPostgresRollback(rollbackCtx, op, app, stablePostgres)
 	})
 }
 
@@ -476,7 +485,7 @@ func (s *Service) rollbackManagedPostgresStage(
 	rollbackCtx = withForceExistingCloudNativePGWrites(rollbackCtx)
 	s.updateManagedPostgresTransitionProgress(op.ID, "managed postgres standby preparation failed; restoring the previous stable state")
 	if err := rollback(rollbackCtx); err != nil {
-		return fmt.Errorf("%w; automatic staged-state rollback failed: %v", cause, err)
+		return recoverableManagedPostgresTransitionError("rollback verification", fmt.Errorf("%w; automatic staged-state rollback failed or service recovery is unverified: %v", cause, err))
 	}
 	s.updateManagedPostgresTransitionProgress(op.ID, "managed postgres standby preparation failed; previous stable state restored")
 	return fmt.Errorf("%w; staged managed postgres state was rolled back", cause)
@@ -630,6 +639,9 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		stageSpec := databaseLocalizeStageSpec(app.Spec, desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
 		if storageMigrationRequired && stageSpec.Postgres != nil {
 			ensureDatabaseLocalizeStorageMigrationCapacity(stageSpec.Postgres, currentDatabase)
+		}
+		if err := s.validateManagedPostgresStage(ctx, client, app, namespace, clusterName, stageSpec.Postgres, *currentDatabase, true); err != nil {
+			return err
 		}
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
 			cause := fmt.Errorf("prepare localized managed postgres standby on runtime %s: %w", targetRuntimeID, err)
@@ -818,6 +830,9 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		stagePostgres := databaseLocalizeStagePostgresSpec(desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
 		if storageMigrationRequired {
 			ensureDatabaseLocalizeStorageMigrationCapacity(&stagePostgres, currentDatabase)
+		}
+		if err := s.validateManagedPostgresStage(ctx, client, app, namespace, clusterName, &stagePostgres, *currentDatabase, true); err != nil {
+			return err
 		}
 		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres, op)
 		if err != nil {
@@ -1069,7 +1084,10 @@ func databaseSwitchoverStagePostgresSpec(
 	postgresCopy := *model.CloneAppPostgresSpec(postgres)
 	postgresCopy.RuntimeID = strings.TrimSpace(primaryRuntimeID)
 	postgresCopy.FailoverTargetRuntimeID = strings.TrimSpace(failoverTargetRuntimeID)
-	postgresCopy.PrimaryPlacementPendingRebalance = false
+	// Changing Cluster affinity is a PodSpec change even when the existing
+	// primary still satisfies the new selector. CNPG must not restart it while
+	// a destination replica is being prepared.
+	postgresCopy.PrimaryPlacementPendingRebalance = true
 	if postgresCopy.Instances < 2 {
 		postgresCopy.Instances = 2
 	}
@@ -1085,6 +1103,7 @@ func databaseSwitchoverFinalPostgresSpec(
 ) model.AppPostgresSpec {
 	postgresCopy := databaseSwitchoverStagePostgresSpec(postgres, primaryRuntimeID, failoverTargetRuntimeID)
 	postgresCopy.PrimaryNodeName = strings.TrimSpace(primaryNodeName)
+	postgresCopy.PrimaryPlacementPendingRebalance = false
 	return postgresCopy
 }
 
@@ -1191,21 +1210,9 @@ func (s *Service) applyManagedDesiredAppState(
 		return bundle, nil
 	}
 
-	bundle, err = s.Renderer.RenderManagedAppBundle(app, scheduling)
-	if err != nil {
-		return runtime.Bundle{}, fmt.Errorf("render managed app manifest for app %s: %w", app.ID, err)
+	if err := s.applyManagedPostgresOperationObjects(ctx, operationID, app, postgresPlacements); err != nil {
+		return runtime.Bundle{}, err
 	}
-	applyCtx := withForceExistingCloudNativePGWrites(
-		withManagedAppApplySource(ctx, managedAppApplySourceOperation, operationID),
-	)
-	if err := s.applyManagedAppDesiredState(applyCtx, app, scheduling); err != nil {
-		return runtime.Bundle{}, fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
-	}
-	// Database-only operations mutate CloudNativePG placement and service state.
-	// The app Deployment may be observed during the apply, but app rollout is not
-	// the readiness gate for a database switchover/localize operation. Waiting on
-	// it here can deadlock when a transient app ReplicaSet is held behind the same
-	// database state this operation is preparing.
 	return bundle, nil
 }
 

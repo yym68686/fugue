@@ -8826,6 +8826,12 @@ paths:
     post:
       operationId: migrateBackingService
       summary: Migrate Backing Service
+      description: |-
+        An explicit platform-administrator migration takes precedence over tenant
+        placement and zero-downtime preferences for this operation only. Source
+        preservation, replication catch-up, writable-primary verification and
+        verified rollback remain mandatory; configured placement is not proof
+        of the currently serving primary.
       tags: [Backing Services]
       x-fugue-handler: handleMigrateBackingService
       security:
@@ -8892,6 +8898,10 @@ paths:
     post:
       operationId: localizeBackingService
       summary: Localize Backing Service
+      description: |-
+        Explicit platform-administrator placement takes precedence over tenant
+        placement and zero-downtime preferences without weakening data integrity,
+        source preservation or destination verification.
       tags: [Backing Services]
       x-fugue-handler: handleLocalizeBackingService
       security:
@@ -10860,6 +10870,12 @@ paths:
     post:
       operationId: migrateApp
       summary: Migrate App
+      description: |-
+        An explicit platform-administrator migration takes precedence over tenant
+        zero-downtime and source placement preferences for this operation only.
+        It does not change those preferences. Tenant isolation, destination
+        capacity, image integrity, single-writer storage and data verification
+        remain mandatory. Ordinary scoped migrations retain tenant policies.
       tags: [Apps]
       x-fugue-handler: handleMigrateApp
       security:
@@ -10989,6 +11005,10 @@ paths:
     post:
       operationId: localizeAppDatabase
       summary: Localize App Database
+      description: |-
+        Explicit platform-administrator placement takes precedence over tenant
+        placement and zero-downtime preferences without weakening data integrity,
+        source preservation or destination verification.
       tags: [Apps]
       x-fugue-handler: handleLocalizeAppDatabase
       security:

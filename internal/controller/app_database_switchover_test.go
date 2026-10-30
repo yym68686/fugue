@@ -586,6 +586,20 @@ func TestRollbackManagedPostgresStageRestoresThroughForcedApply(t *testing.T) {
 	if stored.Status != model.OperationStatusRunning || !strings.Contains(stored.ResultMessage, "previous stable state restored") {
 		t.Fatalf("expected running operation to record rollback phase, got %+v", stored)
 	}
+	err = svc.rollbackManagedPostgresStage(context.Background(), claimed, cause, func(context.Context) error {
+		return errors.New("configuration applied, but writable SQL endpoint is unavailable")
+	})
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "service recovery is unverified") ||
+		!strings.Contains(err.Error(), "recoverable from observed cluster state") {
+		t.Fatalf("unverified service recovery must stay actionable and preserve cause: %v", err)
+	}
+	stored, getErr = stateStore.GetOperation(op.ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if strings.Contains(stored.ResultMessage, "previous stable state restored") {
+		t.Fatalf("failed SQL recovery must not record restored service: %s", stored.ResultMessage)
+	}
 }
 
 func TestDatabaseSwitchoverStagePreservesNodeAndFinalUsesWitness(t *testing.T) {
@@ -613,6 +627,9 @@ func TestDatabaseSwitchoverStagePreservesNodeAndFinalUsesWitness(t *testing.T) {
 	}
 	if stage.Postgres.PrimaryNodeName != "node-source" {
 		t.Fatalf("stage changed durable source node pin: %+v", stage.Postgres)
+	}
+	if !stage.Postgres.PrimaryPlacementPendingRebalance {
+		t.Fatal("staging must hold CNPG PodSpec reconciliation before altering affinity")
 	}
 	final := databaseSwitchoverFinalPostgresSpec(postgres, "runtime_target", "runtime_source", "node-target")
 	if final.PrimaryNodeName != "node-target" || final.RuntimeID != "runtime_target" ||

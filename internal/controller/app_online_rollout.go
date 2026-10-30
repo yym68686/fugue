@@ -13,6 +13,12 @@ func (s *Service) onlineDurableRolloutScheduling(
 	currentApp, desiredApp model.App,
 	base runtimepkg.SchedulingConstraints,
 ) runtimepkg.SchedulingConstraints {
+	if op, ok := s.activeAdministratorMigration(ctx, desiredApp); ok &&
+		op.Type == model.OperationTypeMigrate && op.TargetRuntimeID == desiredApp.Spec.RuntimeID {
+		// The explicit destination outranks the user's same-node online rollout
+		// preference. Volume placement/single-writer checks still run separately.
+		return base
+	}
 	if !appUsesOnlineDurableRolloutIntent(desiredApp) {
 		return base
 	}

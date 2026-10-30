@@ -36,6 +36,7 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 // returned snapshot or they can wait forever on a spec hash that was never
 // applied.
 func (s *Service) applyManagedAppDesiredStateResult(ctx context.Context, app model.App, scheduling runtime.SchedulingConstraints) (model.App, error) {
+	ctx = s.withAdministratorMigrationApply(ctx, app)
 	client, err := s.kubeClient()
 	if err != nil {
 		return model.App{}, fmt.Errorf("initialize kubernetes managed app client: %w", err)
@@ -276,6 +277,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 }
 
 func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, recoverStoredBaseline bool, syncStoredManagedAppSnapshot bool, rolloutPrepared bool) error {
+	ctx = s.withAdministratorMigrationApply(ctx, app)
 	if err := client.resumeAppWorkloadMigration(ctx, namespace, runtime.RuntimeAppResourceName(app), app.ID, app.TenantID); err != nil {
 		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, err)
 	}

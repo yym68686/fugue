@@ -1606,9 +1606,21 @@ func buildAppServiceObjectWithOptions(namespace string, app model.App, labels ma
 			"labels":    labels,
 		},
 		"spec": map[string]any{
-			"selector": mergeStringMaps(labels, map[string]string{FugueLabelAppWorkload: RuntimeAppResourceNameWithOptions(app, options)}),
+			"selector": mergeStringMaps(appServiceWorkloadSelector(app, RuntimeAppResourceNameWithOptions(app, options)), appRevisionLabels(options)),
 			"ports":    servicePorts,
 		},
+	}
+}
+
+// A Service selects a stable app/workload identity, not mutable presentation or
+// project metadata. Old serving Pods may retain those labels until their next
+// executable rollout, including during an explicit maintenance stop or move.
+func appServiceWorkloadSelector(app model.App, workload string) map[string]string {
+	return map[string]string{
+		FugueLabelManagedBy:   FugueLabelManagedByValue,
+		FugueLabelTenantID:    strings.TrimSpace(app.TenantID),
+		FugueLabelAppID:       strings.TrimSpace(app.ID),
+		FugueLabelAppWorkload: workload,
 	}
 }
 
@@ -2122,7 +2134,7 @@ func buildComposeServiceAliasObject(namespace string, app model.App) map[string]
 			"labels":    composeServiceAliasLabels(app, composeService),
 		},
 		"spec": map[string]any{
-			"selector": mergeStringMaps(appLabels(app), map[string]string{FugueLabelAppWorkload: RuntimeAppResourceName(app)}),
+			"selector": appServiceWorkloadSelector(app, RuntimeAppResourceName(app)),
 			"ports":    servicePorts,
 		},
 	}
@@ -2157,7 +2169,7 @@ func buildLegacyComposeAppNameAliasObject(namespace string, app model.App) map[s
 			"labels":    legacyComposeAppNameAliasLabels(app),
 		},
 		"spec": map[string]any{
-			"selector": mergeStringMaps(appLabels(app), map[string]string{FugueLabelAppWorkload: RuntimeAppResourceName(app)}),
+			"selector": appServiceWorkloadSelector(app, RuntimeAppResourceName(app)),
 			"ports":    servicePorts,
 		},
 	}

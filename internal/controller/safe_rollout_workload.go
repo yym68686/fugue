@@ -117,13 +117,34 @@ func (s *Service) safeRolloutWorkloadIdentity(op model.Operation, app model.App,
 		}
 	}
 	selector := objectStringMapValue(nestedObjectValue(svc, "spec", "selector"))
-	if !reflect.DeepEqual(selector, objectStringMapValue(nestedObjectValue(expectedService, "spec", "selector"))) ||
+	if !revisionServiceSelectorMatches(selector, expectedService, expectedDeployment) ||
 		selector[runtime.FugueLabelAppReleaseID] != release.ID || selector[runtime.FugueLabelAppWorkload] != release.DeploymentName ||
 		!revisionAppliedFieldsMatch("spec.ports", normalizeKubeValue(nestedObjectValue(svc, "spec", "ports")), normalizeKubeValue(nestedObjectValue(expectedService, "spec", "ports"))) {
 		return out, fmt.Errorf("revision Service does not select the applied workload")
 	}
 	return model.AppReleaseWorkload{OperationID: op.ID, Namespace: ns, DeploymentName: release.DeploymentName, DeploymentUID: objectStringField(dm, "uid"), DeploymentGeneration: int64(generation),
 		ServiceName: release.ServiceName, ServiceUID: objectStringField(sm, "uid"), ReleaseKey: key, RuntimeID: release.RuntimeID, ImageRef: release.ResolvedImageRef}, nil
+}
+
+// Accept the two known renderer schemas, not an arbitrary subset of Pod
+// labels. Older revision Services included presentation/project labels; both
+// schemas must retain the exact tenant, workload and immutable release identity.
+func revisionServiceSelectorMatches(actual map[string]string, service, deployment map[string]any) bool {
+	expected := objectStringMapValue(nestedObjectValue(service, "spec", "selector"))
+	if reflect.DeepEqual(actual, expected) {
+		return true
+	}
+	legacy := make(map[string]string, len(expected)+3)
+	for key, value := range expected {
+		legacy[key] = value
+	}
+	labels := objectStringMapValue(nestedObjectValue(deployment, "spec", "template", "metadata", "labels"))
+	for _, key := range []string{runtime.FugueLabelName, runtime.FugueLabelProjectID, runtime.FugueLabelOwnerAppID} {
+		if value, ok := labels[key]; ok {
+			legacy[key] = value
+		}
+	}
+	return reflect.DeepEqual(actual, legacy)
 }
 
 // Kubernetes adds defaults inside list entries too. Compare all fields we

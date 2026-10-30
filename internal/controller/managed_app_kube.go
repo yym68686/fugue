@@ -323,7 +323,7 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 	if err := c.applyObjectAtPathWithRetry(ctx, apiPath, obj, out); err == nil {
 		return nil
 	} else if shouldRetryDeploymentAfterStaleAppFilesVolumeMounts(obj, err) {
-		if deploymentRequiresZeroDowntime(obj) {
+		if deploymentRequiresZeroDowntimeForApply(ctx, obj) {
 			return fmt.Errorf("refusing destructive deployment volume repair because zero downtime is required: %w", err)
 		}
 		name, namespace := objectNameAndNamespace(c.namespace, obj)
@@ -337,7 +337,7 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 	} else if !shouldRecreateDeploymentAfterImmutableSelector(obj, err) {
 		return err
 	} else {
-		if deploymentRequiresZeroDowntime(obj) {
+		if deploymentRequiresZeroDowntimeForApply(ctx, obj) {
 			return fmt.Errorf("refusing deployment delete/recreate after immutable selector failure because zero downtime is required: %w", err)
 		}
 		name, namespace := objectNameAndNamespace(c.namespace, obj)

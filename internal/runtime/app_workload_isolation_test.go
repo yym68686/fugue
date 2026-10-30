@@ -38,11 +38,18 @@ func TestAppServicesSelectOnlyTheirWorkload(t *testing.T) {
 			}
 			name := object["metadata"].(map[string]any)["name"].(string)
 			selector := object["spec"].(map[string]any)["selector"].(map[string]string)
+			if selector[FugueLabelName] != "" || selector[FugueLabelProjectID] != "" {
+				t.Fatalf("Service selector coupled to mutable metadata: %v", selector)
+			}
 			want := 0
 			if name == RuntimeAppServiceNameWithOptions(app, options[i]) {
 				want = i
 			}
 			for j, podLabels := range labels {
+				// A metadata-only rename/project move must not require restarting
+				// existing serving Pods before their Service can be reconciled.
+				podLabels[FugueLabelName] = "previous-name"
+				podLabels[FugueLabelProjectID] = "previous-project"
 				matches := true
 				for k, v := range selector {
 					matches = matches && podLabels[k] == v

@@ -24,6 +24,7 @@ type zeroDowntimeRolloutGuardDecision struct {
 	DesiredReleaseKey        string
 	PodTemplateChanged       bool
 	AuxiliaryTemplateChanged bool
+	AdministratorMigration   bool
 }
 
 func (s *Service) refuseNonZeroDowntimeRolloutIfNeeded(
@@ -592,6 +593,10 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		op.RequestedByType = recoveredOperation.RequestedByType
 		op.RequestedByID = recoveredOperation.RequestedByID
 	}
+	if administrative, ok := s.activeAdministratorMigration(ctx, desired); ok {
+		op = administrative
+		op.DesiredSpec = &desired.Spec
+	}
 
 	currentKey = strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(current), currentScheduling))
 	desiredKey = strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), desiredScheduling))
@@ -605,7 +610,8 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	}
 
 	desiredDeployment := s.zeroDowntimeManagedAppDeployment(desired, desiredScheduling)
-	zeroDowntimeRequired := zeroDowntimeRequirementSourceForOperation(current, desired) != ""
+	administratorMigration := s.administratorMigrationOperation(op)
+	zeroDowntimeRequired := !administratorMigration && zeroDowntimeRequirementSourceForOperation(current, desired) != ""
 	if zeroDowntimeRequired && desired.Spec.Replicas > 0 && model.AppHasClusterService(desired.Spec) && !zeroDowntimeDeploymentStrategyIsSafe(desiredDeployment) {
 		return model.App{}, fmt.Errorf("rendered serving workload is not an explicit safe RollingUpdate")
 	}
@@ -635,7 +641,7 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		desiredReplicas != liveReplicas
 	unavailableRecovery := false
 	readyDesiredCohortRecovery := false
-	if desiredReplicas > 0 && workloadChange {
+	if desiredReplicas > 0 && workloadChange && !administratorMigration {
 		readyEndpoint, err := liveManagedAppHasReadyEndpoint(ctx, client, namespace, current)
 		if err != nil {
 			return model.App{}, err
@@ -1186,13 +1192,19 @@ func (s *Service) zeroDowntimeRolloutGuardDecisionWithSchedulingAndTemplateEvide
 		RolloutIntent:            strings.TrimSpace(desiredApp.Spec.RolloutIntent),
 		AuxiliaryTemplateChanged: auxiliaryTemplateChanged,
 	}
-	if op.Type != model.OperationTypeDeploy && op.Type != model.OperationTypeMigrate && op.Type != model.OperationTypeScale {
+	administratorMigration := s.administratorMigrationOperation(op)
+	if !administratorMigration && op.Type != model.OperationTypeDeploy && op.Type != model.OperationTypeMigrate && op.Type != model.OperationTypeScale {
 		return decision
 	}
 	if desiredApp.Spec.Replicas > 1 && model.AppHasClusterService(desiredApp.Spec) && !controllerAppSupportsConcurrentStorage(desiredApp.Spec) {
 		decision.Refused = true
 		decision.RequirementSource = model.AppZeroDowntimeRequirementSourceServiceDefault
 		decision.Reason = zeroDowntimeUnsupportedTopologyReason(desiredApp.Spec)
+		return decision
+	}
+	if administratorMigration {
+		decision.AdministratorMigration = true
+		decision.RequirementSource = ""
 		return decision
 	}
 	if decision.RequirementSource == "" {

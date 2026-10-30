@@ -331,6 +331,13 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	}
 	metadata := objectMapField(live, "metadata")
 	marker := objectStringMapValue(metadata["annotations"])[safeCanonicalHandoffAnnotation]
+	// Explicit administrator maintenance does not create a zero-downtime
+	// handoff. A persisted handoff is still recovered, never abandoned.
+	if marker == "" {
+		if _, maintenance := s.activeAdministratorMigration(ctx, app); maintenance {
+			return objects, nil
+		}
+	}
 	// Once a handoff is persisted, an unavailable observation keeps the promoted
 	// desired state and both workloads. Do not turn a retryable observation error
 	// into a failed deploy that discards the desired replacement.
