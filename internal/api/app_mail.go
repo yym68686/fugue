@@ -210,6 +210,7 @@ func (s *Server) handleGetAppMail(w http.ResponseWriter, r *http.Request) {
 		err = validateMailObservation(provider, binding)
 	}
 	result := map[string]any{"binding": binding, "reconciled": err == nil}
+	s.addMailServiceURL(result)
 	if err != nil {
 		result["error"] = err.Error()
 	} else {
@@ -268,6 +269,7 @@ func (s *Server) handlePutAppMail(w http.ResponseWriter, r *http.Request) {
 	}
 	provider, syncErr := s.syncAppMail(r.Context(), binding)
 	result := map[string]any{"binding": binding, "reconciled": syncErr == nil}
+	s.addMailServiceURL(result)
 	if syncErr != nil {
 		result["error"] = syncErr.Error()
 	} else {
@@ -276,6 +278,31 @@ func (s *Server) handlePutAppMail(w http.ResponseWriter, r *http.Request) {
 	s.appendAudit(mustPrincipal(r), "app.mail."+input.State, "app", app.ID, app.TenantID, nil)
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, 200, result)
+}
+
+// Expose only a validated public origin, never the provider's environment or
+// path/query credentials. The configured route, not a hardcoded product URL,
+// is authoritative for API examples and independent mailbox Web login.
+func (s *Server) addMailServiceURL(result map[string]any) {
+	cfg, err := s.store.GetMailPlatformConfig()
+	if err != nil {
+		return
+	}
+	app, err := s.store.GetApp(cfg.MailflareAppID)
+	if err != nil || app.Route == nil {
+		return
+	}
+	if origin := appMailServiceOrigin(*app.Route); origin != "" {
+		result["service_url"] = origin
+	}
+}
+
+func appMailServiceOrigin(route model.AppRoute) string {
+	u, err := url.Parse(route.PublicURL)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Hostname() != route.Hostname || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return ""
+	}
+	return "https://" + u.Host
 }
 
 func (s *Server) handleCreateAppMailCredential(w http.ResponseWriter, r *http.Request) {

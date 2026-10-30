@@ -8040,6 +8040,23 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AppMailResponse'}
         default: {$ref: '#/components/responses/ErrorResponse'}
+  /v1/apps/{id}/mail/dns:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string}}
+    get:
+      operationId: getAppMailDNS
+      summary: Observe application mail DNS without changing serving configuration
+      description: Queries the system recursive resolver for the exact current application's configured public mail records. Results are bounded and time-limited, are not global propagation or delivery proofs, and never alter DNS artifacts, binding state or provider readiness. Inactive, transferred or mismatched bindings are not queried.
+      tags: [Apps]
+      x-fugue-handler: handleGetAppMailDNS
+      security: [{BearerAuth: []}]
+      responses:
+        '200':
+          description: Current recursive DNS observation for this application only
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AppMailDNSObservation'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
   /v1/apps/{id}/mail/credentials:
     parameters:
       - {in: path, name: id, required: true, schema: {type: string}}
@@ -23617,7 +23634,29 @@ components:
         binding: {$ref: '#/components/schemas/AppMailBinding'}
         reconciled: {type: boolean}
         provider: {$ref: '#/components/schemas/AppMailProviderStatus'}
+        service_url: {type: string, format: uri, description: Validated public HTTPS origin of the configured mail service. No credentials are included.}
         error: {type: string}
+    AppMailDNSObservation:
+      type: object
+      required: [app_id, generation, hostname, checked_at, status, records]
+      properties:
+        app_id: {type: string}
+        generation: {type: integer}
+        hostname: {type: string}
+        checked_at: {type: string, format: date-time}
+        status: {type: string, enum: [verified, pending, unconfigured, inactive]}
+        records:
+          type: array
+          maxItems: 12
+          items:
+            type: object
+            required: [hostname, type, expected, observed, status]
+            properties:
+              hostname: {type: string}
+              type: {type: string, enum: [MX, TXT, CNAME]}
+              expected: {type: array, maxItems: 8, items: {type: string, maxLength: 4096}}
+              observed: {type: array, maxItems: 32, items: {type: string, maxLength: 4096}}
+              status: {type: string, enum: [match, mismatch, unknown]}
     AppSpec:
       type: object
       additionalProperties: false

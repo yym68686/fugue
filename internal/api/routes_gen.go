@@ -201,6 +201,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /v1/apps/{id}/mail", s.auth.RequireAPI(http.HandlerFunc(s.handlePutAppMail)))
 	mux.Handle("POST /v1/apps/{id}/mail/credentials", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppMailCredential)))
 	mux.Handle("DELETE /v1/apps/{id}/mail/credentials", s.auth.RequireAPI(http.HandlerFunc(s.handleRevokeAppMailCredential)))
+	mux.Handle("GET /v1/apps/{id}/mail/dns", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppMailDNS)))
 	mux.Handle("POST /v1/apps/{id}/mail/login", s.auth.RequireAPI(http.HandlerFunc(s.handleSetAppMailboxLogin)))
 	mux.Handle("POST /v1/apps/{id}/migrate", s.auth.RequireAPI(http.HandlerFunc(s.handleMigrateApp)))
 	mux.Handle("POST /v1/apps/{id}/move-project", s.auth.RequireAPI(http.HandlerFunc(s.handleMoveAppProject)))

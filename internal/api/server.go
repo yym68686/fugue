@@ -156,6 +156,7 @@ type Server struct {
 	newBackupCoordinationLease             controlPlaneBackupCoordinationLeaseFactory
 	dialAppDatabaseTunnel                  func(context.Context, string, string) (net.Conn, error)
 	dnsResolver                            appDomainDNSResolver
+	mailDNSLookup                          func(context.Context, string, string) ([]string, error)
 	dnsDelegationProbe                     dnsDelegationProbeFunc
 	dnsParentNSLookup                      dnsParentNSLookupFunc
 	logStreamTuning                        logStreamTuning
