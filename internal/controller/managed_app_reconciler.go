@@ -565,7 +565,7 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 			Candidate:              stable,
 			StableAlignmentAllowed: true,
 		}
-		s.finalizeSafeZeroDowntimePreviousRetire(ctx, op, state)
+		s.retireWithdrawnSafeRolloutRelease(ctx, op, state)
 	}
 	return ctx.Err()
 }

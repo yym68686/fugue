@@ -156,7 +156,11 @@ func newDrainWorkloadFixtureWithSnapshot(t *testing.T, failed, snapshot bool, hi
 			if body.Preconditions["uid"] != uid {
 				t.Errorf("unsafe deletion: %+v", body)
 			}
-			if body.Preconditions["resourceVersion"] != "1" {
+			version := "1"
+			if strings.Contains(r.URL.Path, "/deployments/") {
+				version = objectStringField(objectMapField(f.deployment, "metadata"), "resourceVersion")
+			}
+			if body.Preconditions["resourceVersion"] != version {
 				t.Error("missing resource version")
 			}
 			if f.failDelete {

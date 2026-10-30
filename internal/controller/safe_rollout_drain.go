@@ -43,12 +43,15 @@ type releaseDrainPod struct {
 
 type releaseDrainWorkload struct {
 	RuntimeStopped    bool              `json:"runtime_stopped,omitempty"`
+	Unstarted         bool              `json:"unstarted,omitempty"`
+	Quiesced          bool              `json:"quiesced,omitempty"`
 	DeploymentUID     string            `json:"deployment_uid"`
 	DeploymentVersion string            `json:"deployment_version"`
 	ServiceVersion    string            `json:"service_version"`
 	Generation        int64             `json:"generation"`
 	Pods              []releaseDrainPod `json:"pods"`
 	ReplicaSets       []string          `json:"replica_set_uids"`
+	ReplicaVersions   []string          `json:"replica_set_versions,omitempty"`
 }
 
 func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.Context, app model.App, previous model.AppRelease, since time.Time) (safeRolloutDrainMetrics, error) {
@@ -99,11 +102,20 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 	if err != nil {
 		before, err = s.captureReleaseDrainWorkloadMode(ctx, client, app, previous, true)
 		if err != nil {
-			return out, err
+			before, err = s.captureUnstartedReleaseWorkload(ctx, client, app, previous)
+			if err != nil {
+				return out, err
+			}
+			if !before.Quiesced {
+				return out, s.quiesceUnstartedRelease(ctx, client, app, expected, policy, before)
+			}
 		}
 	}
 	out.Summary["workload"] = before
-	if before.RuntimeStopped {
+	if before.Quiesced {
+		out.Source = "kubernetes_zero_replicas"
+		out.Summary["source"] = out.Source
+	} else if before.RuntimeStopped {
 		receipts, err := s.observeStoppedReleaseRuntime(ctx, client, app, previous, before)
 		if err != nil {
 			return out, err
@@ -163,7 +175,7 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 			return out, drainCtx.Err()
 		}
 	}
-	after, err := s.captureReleaseDrainWorkloadMode(ctx, client, app, previous, before.RuntimeStopped)
+	after, err := s.recaptureReleaseDrainWorkload(ctx, client, app, previous, before)
 	if err != nil || !reflect.DeepEqual(before, after) {
 		return out, fmt.Errorf("release workload changed during drain observation")
 	}
@@ -200,10 +212,14 @@ func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *k
 // Canonical alignment observes the still-running original Deployment before
 // replacing it. This does not grant permission to retire a canonical release.
 func (s *Service) captureDrainWorkload(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease, stopped, canonical bool) (releaseDrainWorkload, error) {
+	return s.captureDrainWorkloadState(ctx, client, app, release, stopped, canonical, false)
+}
+
+func (s *Service) captureDrainWorkloadState(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease, stopped, canonical, unstarted bool) (releaseDrainWorkload, error) {
 	if canonical && (stopped || release.ID != "" || release.DeploymentName != runtime.RuntimeAppResourceName(app)) {
 		return releaseDrainWorkload{}, fmt.Errorf("invalid canonical drain observation")
 	}
-	out := releaseDrainWorkload{RuntimeStopped: stopped}
+	out := releaseDrainWorkload{RuntimeStopped: stopped, Unstarted: unstarted}
 	ns := runtime.NamespaceForTenant(app.TenantID)
 	deployment, found, err := client.getRawObject(ctx, deploymentAPIPath(ns, release.DeploymentName))
 	if err != nil || !found {
@@ -238,8 +254,17 @@ func (s *Service) captureDrainWorkload(ctx context.Context, client *kubeClient, 
 	}
 	var dep kubeDeployment
 	data, _ := json.Marshal(deployment)
-	if err := json.Unmarshal(data, &dep); err != nil || dep.Metadata.UID == "" || dep.Spec.Replicas == nil || *dep.Spec.Replicas < 1 || *dep.Spec.Replicas > 32 || (!stopped && !managedDeploymentStatusReady(dep, *dep.Spec.Replicas)) || !s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(dep), release.ResolvedImageRef) {
+	if err := json.Unmarshal(data, &dep); err != nil || dep.Metadata.UID == "" || dep.Spec.Replicas == nil || *dep.Spec.Replicas < 0 || (!unstarted && *dep.Spec.Replicas == 0) || *dep.Spec.Replicas > 32 || (!stopped && !unstarted && !managedDeploymentStatusReady(dep, *dep.Spec.Replicas)) || !s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(dep), release.ResolvedImageRef) {
 		return out, fmt.Errorf("release Deployment is not a complete current workload")
+	}
+	if unstarted && *dep.Spec.Replicas == 0 {
+		if dep.Status.ObservedGeneration < dep.Metadata.Generation || dep.Status.Replicas != 0 || dep.Status.ReadyReplicas != 0 || dep.Status.AvailableReplicas != 0 || dep.Status.UpdatedReplicas != 0 {
+			return out, fmt.Errorf("cancelled release Deployment has not converged to zero")
+		}
+		out.Quiesced = true
+	}
+	if unstarted && (dep.Status.ReadyReplicas > 0 || dep.Status.AvailableReplicas > 0) {
+		return out, fmt.Errorf("unstarted release still reports serving replicas")
 	}
 	if dep.Metadata.Generation < binding.DeploymentGeneration {
 		return out, fmt.Errorf("drain Deployment generation regressed")
@@ -260,11 +285,25 @@ func (s *Service) captureDrainWorkload(ctx context.Context, client *kubeClient, 
 				return out, fmt.Errorf("release ReplicaSet ownership or lifecycle differs")
 			}
 			uid := objectStringField(rm, "uid")
+			if unstarted {
+				version := objectStringField(rm, "resourceVersion")
+				if version == "" {
+					return out, fmt.Errorf("unstarted release ReplicaSet has no version")
+				}
+				out.ReplicaVersions = append(out.ReplicaVersions, uid+":"+version)
+				if out.Quiesced {
+					rs, found, err := client.getRawObject(ctx, "/apis/apps/v1/namespaces/"+url.PathEscape(ns)+"/replicasets/"+url.PathEscape(objectStringField(rm, "name")))
+					if err != nil || !found || !quiescedReleaseReplicaSet(rs, rm) {
+						return out, fmt.Errorf("cancelled release ReplicaSet has not converged to zero")
+					}
+				}
+			}
 			owned[objectStringField(rm, "name")] = uid
 			out.ReplicaSets = append(out.ReplicaSets, uid)
 		}
 	}
 	sort.Strings(out.ReplicaSets)
+	sort.Strings(out.ReplicaVersions)
 	if _, err := client.doJSON(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(ns)+"/pods", nil, &pods); err != nil {
 		return out, err
 	}
@@ -308,6 +347,17 @@ func (s *Service) captureDrainWorkload(ctx context.Context, client *kubeClient, 
 		}
 		if p.ReplicaUID == "" {
 			return out, fmt.Errorf("release Pod has no verified Deployment owner chain")
+		}
+		if unstarted {
+			if out.Quiesced || !releasePodNeverScheduled(pod) {
+				return out, fmt.Errorf("release still has a scheduled or terminating Pod")
+			}
+			p.Version = objectStringField(pm, "resourceVersion")
+			if p.Version == "" {
+				return out, fmt.Errorf("unstarted release Pod has no version")
+			}
+			out.Pods = append(out.Pods, p)
+			continue
 		}
 		if stopped {
 			p.Version = objectStringField(pm, "resourceVersion")
@@ -373,7 +423,7 @@ func (s *Service) captureDrainWorkload(ctx context.Context, client *kubeClient, 
 		sort.Strings(p.Containers)
 		out.Pods = append(out.Pods, p)
 	}
-	if len(out.Pods) != *dep.Spec.Replicas {
+	if !unstarted && len(out.Pods) != *dep.Spec.Replicas {
 		return out, fmt.Errorf("release Pod set does not match complete Deployment")
 	}
 	sort.Slice(out.Pods, func(i, j int) bool { return out.Pods[i].UID < out.Pods[j].UID })

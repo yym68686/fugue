@@ -542,6 +542,15 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 				}
 			}
 		}
+		if observedKey != liveKey {
+			historical, recovered, err := s.recoverRecordedCanonicalSnapshot(ctx, managed, deployment, current, observedScheduling)
+			if err != nil {
+				return model.App{}, err
+			}
+			if recovered {
+				current, observedKey = historical, liveKey
+			}
+		}
 		if observedKey == liveKey {
 			currentScheduling = observedScheduling
 			currentKey = observedKey

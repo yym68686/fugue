@@ -895,6 +895,17 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 	if !s.recheckSafeRolloutCandidateBeforeRetire(ctx, op, state, "pre_previous_retire_gate") {
 		return
 	}
+	s.retireWithdrawnSafeRolloutRelease(ctx, op, state)
+}
+
+// Background retirement does not promote or replace a serving workload. Once
+// retention expires, a business health regression must not retain withdrawn
+// revisions indefinitely. Traffic withdrawal, workload identity, drain and CAS
+// proofs below remain mandatory, independently of the foreground health gate.
+func (s *Service) retireWithdrawnSafeRolloutRelease(ctx context.Context, op model.Operation, state *safeRolloutState) {
+	if state == nil || !state.Enabled || !state.StableAlignmentAllowed {
+		return
+	}
 	policy, err := s.Store.GetAppTrafficPolicy(state.CandidateApp.TenantID, true, state.CandidateApp.ID)
 	if err != nil {
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: traffic policy unavailable", state.Candidate.ID, map[string]any{"error": err.Error()})
@@ -967,7 +978,7 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 		target := previous
 		target.DeploymentName = previous.RevisionWorkload.DeploymentName
 		target.ServiceName = previous.RevisionWorkload.ServiceName
-		fresh, err := s.captureReleaseDrainWorkloadMode(ctx, client, state.CandidateApp, target, metrics.Workload.RuntimeStopped)
+		fresh, err := s.recaptureReleaseDrainWorkload(ctx, client, state.CandidateApp, target, *metrics.Workload)
 		if err != nil || !reflect.DeepEqual(metrics.Workload, &fresh) {
 			return
 		}
@@ -1214,6 +1225,22 @@ func (s *Service) abortSafeZeroDowntimeRollout(ctx context.Context, op model.Ope
 
 func (s *Service) restoreSafeZeroDowntimePreviousSpec(ctx context.Context, op model.Operation, state *safeRolloutState, reason string) error {
 	if state == nil || !state.Enabled || !s.Config.KubectlApply {
+		return nil
+	}
+	if state.Candidate.RevisionWorkload != nil && !state.AlreadyPromoted && !state.PromotionPending && !state.StableAlignmentAllowed {
+		// Applying an independent candidate never writes the canonical desired
+		// state. Reapplying an older stored spec here can replace an unrelated
+		// retained canonical cohort, or fail on its legitimate older release key.
+		// Verify the durable abort and original source before leaving it intact.
+		failed, err := s.Store.GetAppRelease(state.CandidateApp.TenantID, true, state.Candidate.ID)
+		if err != nil || failed.AppID != op.AppID || failed.TenantID != op.TenantID || failed.Role != model.AppReleaseRoleCandidate || failed.Status != model.AppReleaseStatusFailed || failed.PromotedAt != nil || failed.RevisionWorkload == nil || failed.RevisionWorkload.OperationID != op.ID {
+			return fmt.Errorf("independent rollback has no matching failed revision")
+		}
+		policy, err := s.Store.GetAppTrafficPolicy(op.TenantID, true, op.AppID)
+		if err != nil || policy.Mode != model.AppTrafficModeSingle || policy.StableReleaseID != state.StableRelease.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+			return fmt.Errorf("independent rollback stable traffic is not restored")
+		}
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "restore_previous", model.ReleaseStepStatusCompleted, "independent candidate aborted; canonical desired state retained", failed.ID, map[string]any{"reason": reason})
 		return nil
 	}
 	previous := state.PreviousApp

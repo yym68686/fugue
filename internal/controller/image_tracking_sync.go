@@ -106,7 +106,16 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 			})
 			continue
 		}
-		if strings.TrimSpace(digest) == strings.TrimSpace(tracking.LastQueuedDigest) && !imageTrackingRetryReady(tracking, s.currentTime()) {
+		retryReason, err := s.imageTrackingRetrySuppression(ctx, app, tracking, digest)
+		if err != nil {
+			s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+				App: app, Tracking: tracking, ObservedDigest: digest,
+				Decision: model.AppImageTrackingDecisionRetrySuppressed, SkipReason: "retry state unavailable: " + err.Error(),
+				Event: "poll", StartedAt: startedAt,
+			})
+			continue
+		}
+		if retryReason != "" {
 			if updated, err := s.Store.RecordAppImageTrackingCheck(tracking.ID, digest, "", "poll", ""); err == nil {
 				tracking = updated
 			} else if s.Logger != nil {
@@ -117,7 +126,7 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 				Tracking:       tracking,
 				ObservedDigest: digest,
 				Decision:       model.AppImageTrackingDecisionRetrySuppressed,
-				SkipReason:     "digest already queued and retry delay has not elapsed",
+				SkipReason:     retryReason,
 				Event:          "poll",
 				StartedAt:      startedAt,
 			})
