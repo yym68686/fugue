@@ -451,7 +451,7 @@ func TestProductionTrafficEpochCompilerOwnersAreExplicit(t *testing.T) {
 		if !ok {
 			t.Fatalf("production component %s is absent", componentID)
 		}
-		for _, root := range []string{"internal/releaseflow", "internal/trafficepoch"} {
+		for _, root := range []string{"internal/releaseflow", "internal/trafficepoch", "internal/runtime"} {
 			if !containsString(component.SourceRoots, root) {
 				t.Fatalf("%s does not own compiled traffic dependency %s: %v", componentID, root, component.SourceRoots)
 			}

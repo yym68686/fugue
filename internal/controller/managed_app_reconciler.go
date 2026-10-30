@@ -208,6 +208,11 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		}
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app from store: %w", err))
 	} else {
+		// Lifecycle overrides belong only to this orphan episode. Adoption must
+		// not exempt a later deletion of the same ManagedApp from hibernation.
+		if managed.Metadata.Annotations[runtime.FugueAnnotationOrphanPostgresLifecycle] != "" {
+			return client.patchOrphanPostgresLifecycleIntent(ctx, namespace, managed, nil, "")
+		}
 		hasActiveOp, opErr := s.appHasActiveOperation(storedApp)
 		switch {
 		case opErr != nil:
@@ -1231,7 +1236,7 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 		managedAppOrphanWorkloadZeroVerified(managed.Status) {
 		stillZero, err := s.managedAppOrphanWorkloadAtZero(ctx, client, namespace, app)
 		if err == nil && stillZero {
-			backingServiceStatuses, reconcileErr := s.reconcileMissingStoreManagedPostgresLifecycle(ctx, client, namespace, managed, app)
+			backingServiceStatuses, reconcileErr := s.reconcileOrphanManagedPostgresLifecycle(ctx, client, namespace, managed, app)
 			if reconcileErr != nil {
 				return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile orphan managed postgres lifecycle: %w", reconcileErr))
 			}
@@ -1286,7 +1291,7 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 		return nil
 	}
 
-	backingServiceStatuses, err := s.reconcileMissingStoreManagedPostgresLifecycle(ctx, client, namespace, managed, app)
+	backingServiceStatuses, err := s.reconcileOrphanManagedPostgresLifecycle(ctx, client, namespace, managed, app)
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile orphan managed postgres lifecycle: %w", err))
 	}
@@ -1317,7 +1322,9 @@ func managedAppDisabledOrphanStatus(managed runtime.ManagedAppObject, app model.
 		if strings.EqualFold(strings.TrimSpace(previous.Type), managedAppOrphanWorkloadZeroConditionType) &&
 			strings.EqualFold(strings.TrimSpace(previous.Status), "True") &&
 			strings.EqualFold(strings.TrimSpace(previous.Reason), "Verified") {
-			condition.LastTransitionTime = strings.TrimSpace(previous.LastTransitionTime)
+			if _, err := time.Parse(time.RFC3339Nano, previous.LastTransitionTime); err == nil {
+				condition.LastTransitionTime = strings.TrimSpace(previous.LastTransitionTime)
+			}
 			break
 		}
 	}

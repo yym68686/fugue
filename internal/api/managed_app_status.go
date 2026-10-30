@@ -569,7 +569,13 @@ func managedAppAPIPath(namespace, name string) string {
 }
 
 func (c *managedAppStatusClient) patchManagedAppBackingServicesSuspended(ctx context.Context, managed runtime.ManagedAppObject, suspended bool) error {
-	ops := []map[string]any{{"op": "test", "path": "/metadata/resourceVersion", "value": strings.TrimSpace(managed.Metadata.ResourceVersion)}}
+	if strings.TrimSpace(managed.Metadata.UID) == "" || strings.TrimSpace(managed.Metadata.ResourceVersion) == "" {
+		return errors.New("managed PostgreSQL orphan lifecycle update requires exact UID and resource version")
+	}
+	ops := []map[string]any{
+		{"op": "test", "path": "/metadata/uid", "value": strings.TrimSpace(managed.Metadata.UID)},
+		{"op": "test", "path": "/metadata/resourceVersion", "value": strings.TrimSpace(managed.Metadata.ResourceVersion)},
+	}
 	for index := range managed.Spec.BackingServices {
 		postgres := managed.Spec.BackingServices[index].Spec.Postgres
 		if !strings.EqualFold(strings.TrimSpace(managed.Spec.BackingServices[index].Type), model.BackingServiceTypePostgres) ||
@@ -585,7 +591,15 @@ func (c *managedAppStatusClient) patchManagedAppBackingServicesSuspended(ctx con
 			"value": suspended,
 		})
 	}
-	if len(ops) == 1 {
+	if managed.Metadata.Annotations[runtime.FugueAnnotationOrphanPostgresLifecycle] != runtime.OrphanPostgresLifecycleExplicit {
+		annotations := make(map[string]string, len(managed.Metadata.Annotations)+1)
+		for key, value := range managed.Metadata.Annotations {
+			annotations[key] = value
+		}
+		annotations[runtime.FugueAnnotationOrphanPostgresLifecycle] = runtime.OrphanPostgresLifecycleExplicit
+		ops = append(ops, map[string]any{"op": "add", "path": "/metadata/annotations", "value": annotations})
+	}
+	if len(ops) == 2 {
 		return nil
 	}
 	return c.doRequest(ctx, http.MethodPatch, managedAppAPIPath(managed.Metadata.Namespace, managed.Metadata.Name), "application/json-patch+json", ops, nil)

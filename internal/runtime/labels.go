@@ -17,7 +17,10 @@ const (
 	FugueLabelOwnerAppID         = "fugue.pro/owner-app-id"
 	FugueLabelFenceEpoch         = "fugue.pro/fence-epoch"
 
-	FugueAnnotationReleaseKey           = "fugue.pro/release-key"
-	FugueAnnotationZeroDowntimeRequired = "fugue.pro/zero-downtime-required"
-	FugueAnnotationZeroDowntimeSource   = "fugue.pro/zero-downtime-source"
+	FugueAnnotationReleaseKey              = "fugue.pro/release-key"
+	FugueAnnotationZeroDowntimeRequired    = "fugue.pro/zero-downtime-required"
+	FugueAnnotationZeroDowntimeSource      = "fugue.pro/zero-downtime-source"
+	FugueAnnotationOrphanPostgresLifecycle = "fugue.pro/orphan-postgres-lifecycle"
+	OrphanPostgresLifecycleAutomatic       = "automatic"
+	OrphanPostgresLifecycleExplicit        = "explicit"
 )

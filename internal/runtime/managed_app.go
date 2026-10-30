@@ -50,6 +50,7 @@ type ManagedAppMeta struct {
 	Generation        int64             `json:"generation,omitempty"`
 	DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
+	Annotations       map[string]string `json:"annotations,omitempty"`
 }
 
 type ManagedAppSpec struct {

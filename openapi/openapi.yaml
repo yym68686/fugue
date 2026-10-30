@@ -7248,6 +7248,10 @@ paths:
         Platform-administrator inventory of retained managed PostgreSQL resources
         whose app record is missing. Only ManagedApps with a current controller
         proof that the app Deployment and all matching Pods are at zero are listed.
+        After five minutes of verified zero app workload, the controller defaults
+        retained app-owned databases to hibernation, preserving their PVCs. An
+        explicit administrator lifecycle request overrides that default for the
+        current orphan episode.
       tags: [Backing Services]
       x-fugue-handler: handleListManagedPostgresOrphans
       security:
@@ -7321,7 +7325,8 @@ paths:
         Platform-administrator lifecycle intent update for a retained orphan.
         The request is applied atomically to the ManagedApp spec and the
         controller performs the CNPG hibernation transition; no Fugue store
-        record is created.
+        record is created. Explicit lifecycle intent is retained for the current
+        orphan episode, including requests whose suspension state is already current.
       tags: [Backing Services]
       x-fugue-handler: handleSuspendManagedPostgresOrphan
       security:
@@ -7355,7 +7360,8 @@ paths:
         Platform-administrator lifecycle intent update for a retained orphan.
         The request is applied atomically to the ManagedApp spec and the
         controller performs the CNPG resume transition; no Fugue store record
-        is created.
+        is created. Explicit resume intent overrides automatic orphan hibernation
+        for the current orphan episode, including an already-resumed request.
       tags: [Backing Services]
       x-fugue-handler: handleResumeManagedPostgresOrphan
       security:

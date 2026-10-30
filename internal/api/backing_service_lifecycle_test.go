@@ -866,16 +866,24 @@ func TestManagedPostgresOrphanListAndAdoptAreAdminOnlyAndSecretSafe(t *testing.T
 	if alreadyResumed.Code != http.StatusOK {
 		t.Fatalf("expected already resumed status %d, got %d body=%s", http.StatusOK, alreadyResumed.Code, alreadyResumed.Body.String())
 	}
+	if len(lifecyclePatches) != 1 || len(lifecyclePatches[0]) != 3 || lifecyclePatches[0][0]["path"] != "/metadata/uid" || lifecyclePatches[0][0]["value"] != managed.Metadata.UID || lifecyclePatches[0][1]["value"] != managed.Metadata.ResourceVersion {
+		t.Fatalf("already-resumed request must persist explicit intent with UID/version fencing: %+v", lifecyclePatches)
+	}
+	annotations := lifecyclePatches[0][2]["value"].(map[string]any)
+	if annotations[runtime.FugueAnnotationOrphanPostgresLifecycle] != runtime.OrphanPostgresLifecycleExplicit {
+		t.Fatalf("already-resumed request must override automatic hibernation: %+v", annotations)
+	}
+	lifecyclePatches = nil
 	suspend := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/orphans/"+managed.Spec.AppID+"/suspend", bootstrapKey, nil)
 	if suspend.Code != http.StatusAccepted {
 		t.Fatalf("expected orphan suspend status %d, got %d body=%s", http.StatusAccepted, suspend.Code, suspend.Body.String())
 	}
 	assertResponseOmitsSecrets(t, suspend.Body.String(), databasePassword, databaseURL, repositoryToken)
-	if len(lifecyclePatches) != 1 || len(lifecyclePatches[0]) != 2 || lifecyclePatches[0][0]["op"] != "test" || lifecyclePatches[0][0]["value"] != managed.Metadata.ResourceVersion {
+	if len(lifecyclePatches) != 1 || len(lifecyclePatches[0]) != 4 || lifecyclePatches[0][0]["path"] != "/metadata/uid" || lifecyclePatches[0][0]["value"] != managed.Metadata.UID || lifecyclePatches[0][1]["value"] != managed.Metadata.ResourceVersion {
 		t.Fatalf("expected one resource-version-fenced lifecycle patch, got %+v", lifecyclePatches)
 	}
-	if lifecyclePatches[0][1]["path"] != "/spec/backingServices/0/spec/postgres/suspended" || lifecyclePatches[0][1]["value"] != true {
-		t.Fatalf("expected lifecycle patch to contain only suspended field, got %+v", lifecyclePatches[0][1])
+	if lifecyclePatches[0][2]["path"] != "/spec/backingServices/0/spec/postgres/suspended" || lifecyclePatches[0][2]["value"] != true || lifecyclePatches[0][3]["path"] != "/metadata/annotations" {
+		t.Fatalf("expected lifecycle patch to contain only suspended field and explicit intent annotation, got %+v", lifecyclePatches[0])
 	}
 	for _, test := range []struct {
 		mode       string
