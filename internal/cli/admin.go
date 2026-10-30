@@ -775,6 +775,7 @@ func (c *CLI) newAdminClusterCommand() *cobra.Command {
 		c.newAdminClusterServiceCommand(),
 		c.newAdminClusterStatusCommand(),
 		c.newAdminClusterPodsCommand(),
+		c.newAdminClusterResourcesCommand(),
 		c.newAdminClusterEventsCommand(),
 		c.newAdminClusterLogsCommand(),
 		c.newAdminClusterExecCommand(),

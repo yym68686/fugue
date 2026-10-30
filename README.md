@@ -123,6 +123,8 @@ Common workflows:
 - `fugue admin cluster status`
 - `fugue admin cluster top --once`
 - `fugue admin cluster pods --namespace kube-system`
+- `fugue admin cluster resources --node worker-a --limit 30 --sort cpu-request --memory`
+- `fugue admin cluster resources --node worker-a --limit 0 --sort memory-usage --json`
 - `fugue admin cluster events --namespace kube-system --limit 20`
 - `fugue admin cluster logs --namespace kube-system --pod coredns-abc --container coredns --tail 200`
 - `fugue admin cluster exec --namespace kube-system --pod coredns-abc -- cat /etc/resolv.conf`

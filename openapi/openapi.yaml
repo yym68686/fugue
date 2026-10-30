@@ -6497,6 +6497,35 @@ paths:
               schema: {$ref: "#/components/schemas/ErrorResponse"}
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/resources:
+    get:
+      operationId: getClusterResourceReport
+      summary: Report per-service resource requests, live usage and right-sizing on one node
+      description: Platform administrators only. Includes all nonterminal pods, grouped by managed workload or Kubernetes controller. Recommended totals retain sidecars, init-container peaks and pod overhead. Missing or incomplete metrics and unsupported recommendations are null.
+      tags: [Cluster]
+      x-fugue-handler: handleGetClusterResourceReport
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: node
+          required: true
+          schema: {type: string, minLength: 1}
+        - in: query
+          name: window_hours
+          schema: {type: integer, minimum: 1, maximum: 168, default: 168}
+        - in: query
+          name: min_samples
+          schema: {type: integer, minimum: 1, default: 12}
+      responses:
+        '200':
+          description: Node resource report; usage is CPU in millicores and memory working set in bytes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterResourceReport"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/cluster/pods:
     get:
       operationId: listClusterPods
@@ -29586,6 +29615,55 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ClusterPodContainer"
+    ClusterResourceReport:
+      type: object
+      additionalProperties: false
+      required: [node, observed_at, window_hours, min_samples, total_services, total_pods, cpu_request_millicores, memory_request_bytes, services]
+      properties:
+        node: {type: string}
+        observed_at: {type: string, format: date-time}
+        window_hours: {type: integer}
+        min_samples: {type: integer}
+        total_services: {type: integer}
+        total_pods: {type: integer}
+        cpu_request_millicores: {type: integer, format: int64}
+        memory_request_bytes: {type: integer, format: int64}
+        warnings:
+          type: array
+          items: {type: string}
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterServiceResources"
+    ClusterServiceResources:
+      type: object
+      additionalProperties: false
+      required: [kind, id, name, namespace, pod_count, measured_pods, cpu_request_millicores, memory_request_bytes, cpu_usage_millicores, memory_usage_bytes, cpu_recommended_millicores, cpu_capacity_millicores, memory_recommended_bytes, recommendation_reason]
+      properties:
+        kind: {type: string}
+        id: {type: string}
+        name: {type: string}
+        namespace: {type: string}
+        pod_count: {type: integer}
+        measured_pods: {type: integer}
+        cpu_request_millicores: {type: integer, format: int64}
+        memory_request_bytes: {type: integer, format: int64}
+        cpu_usage_millicores: {type: number, nullable: true}
+        memory_usage_bytes: {type: integer, format: int64, nullable: true}
+        cpu_recommended_millicores:
+          type: integer
+          format: int64
+          nullable: true
+          description: Total pod reservation if each managed main container uses the right-sizing request target; other reservations retained.
+        cpu_capacity_millicores:
+          type: integer
+          format: int64
+          nullable: true
+          description: Total with evidence-based CPU capacity in place of managed main-container requests; not a request target.
+        memory_recommended_bytes: {type: integer, format: int64, nullable: true}
+        recommendation_reason: {type: string}
+        recommendation:
+          $ref: "#/components/schemas/ResourceRightSizingRecommendation"
     ClusterPodListResponse:
       type: object
       additionalProperties: false

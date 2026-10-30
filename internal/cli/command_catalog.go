@@ -124,6 +124,9 @@ func commandEffect(cmd *cobra.Command) string {
 		return "group"
 	}
 	path := cmd.CommandPath()
+	if path == "fugue admin cluster resources" {
+		return "read"
+	}
 	for _, prefix := range []string{"fugue api request", "fugue workflow run", "fugue app db query", "fugue admin cluster exec", "fugue web diagnose", "fugue app request"} {
 		if strings.HasPrefix(path, prefix) {
 			return "caller_defined"
