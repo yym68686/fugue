@@ -25,7 +25,9 @@ Aborting an independent, unpromoted bound candidate restores traffic without
 reapplying a canonical spec the candidate never changed. When desired projections
 advanced past a retained canonical workload, recovery requires the controller's
 recorded ready key, the live template key and an exact same-runtime historical
-snapshot. Recovery only establishes a baseline; readiness, storage, capacity and
+snapshot. Previously ready and promoted retired snapshots remain usable for this
+exact baseline proof without reactivating their release rows. Recovery only
+establishes a baseline; readiness, storage, capacity and
 canonical drain checks continue to apply.
 
 After a controller release, verify:

@@ -23,13 +23,16 @@ func (s *Service) recoverRecordedCanonicalSnapshot(ctx context.Context, managed 
 		live.Metadata.Name != runtime.RuntimeAppResourceName(app) || live.Spec.Replicas == nil || !managedDeploymentStatusReady(live, *live.Spec.Replicas) {
 		return app, false, nil
 	}
-	history, err := s.Store.ListAppReleaseMetadataContext(ctx, model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRolePrevious, ActiveOnly: true, PlatformAdmin: true})
+	// Retirement removes an independent workload, not the historical spec. The
+	// canonical Deployment can still run that exact executable after the bound
+	// revision has drained. Recovering its baseline must not reactivate the row.
+	history, err := s.Store.ListAppReleaseMetadataContext(ctx, model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, IncludeRetired: true, PlatformAdmin: true})
 	if err != nil {
 		return app, false, fmt.Errorf("read recorded canonical history: %w", err)
 	}
 	reads := 0
 	for _, meta := range history {
-		if meta.ResolvedImageRef == "" || !s.migrationImageRefsEquivalent(app, meta.ResolvedImageRef, deploymentPrimaryContainerImage(live)) {
+		if !recordedCanonicalHistoryEligible(meta) || meta.ResolvedImageRef == "" || !s.migrationImageRefsEquivalent(app, meta.ResolvedImageRef, deploymentPrimaryContainerImage(live)) {
 			continue
 		}
 		reads++
@@ -40,8 +43,7 @@ func (s *Service) recoverRecordedCanonicalSnapshot(ctx context.Context, managed 
 		if err != nil {
 			return app, false, err
 		}
-		if release.AppID != app.ID || release.TenantID != app.TenantID || release.Role != model.AppReleaseRolePrevious ||
-			(release.Status != model.AppReleaseStatusServing && release.Status != model.AppReleaseStatusDraining) || release.SpecSnapshot == nil {
+		if release.AppID != app.ID || release.TenantID != app.TenantID || !recordedCanonicalHistoryEligible(release) || release.SpecSnapshot == nil {
 			continue
 		}
 		source := app
@@ -57,4 +59,16 @@ func (s *Service) recoverRecordedCanonicalSnapshot(ctx context.Context, managed 
 		return source, true, nil
 	}
 	return app, false, nil
+}
+
+func recordedCanonicalHistoryEligible(release model.AppRelease) bool {
+	if release.Role == model.AppReleaseRolePrevious {
+		return release.Status == model.AppReleaseStatusServing || release.Status == model.AppReleaseStatusDraining
+	}
+	// Failed candidates also become retired rows. Only a previously ready,
+	// promoted workload can supply this historical canonical baseline.
+	return release.Role == model.AppReleaseRoleRetired && release.Status == model.AppReleaseStatusRetired &&
+		release.ReadyAt != nil && release.PromotedAt != nil && release.RetiredAt != nil &&
+		!release.ReadyAt.Before(release.CreatedAt) && !release.PromotedAt.Before(*release.ReadyAt) &&
+		!release.RetiredAt.Before(*release.PromotedAt)
 }
