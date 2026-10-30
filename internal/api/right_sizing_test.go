@@ -104,8 +104,8 @@ func TestBuildRightSizingRecommendationPreservesUnobservedResourceDimensions(t *
 	if got := recommendation.Recommended.MemoryLimitMebibytes; got != 0 {
 		t.Fatalf("expected unobserved memory limit to remain unknown, got %dMi", got)
 	}
-	if recommendation.RequestTarget == nil || recommendation.RequestTarget.CPUMilliCores != 25 {
-		t.Fatalf("expected p50 CPU request target with 25m floor, got %+v", recommendation.RequestTarget)
+	if recommendation.RequestTarget == nil || recommendation.RequestTarget.CPUMilliCores != 20 {
+		t.Fatalf("expected p50 CPU request target 20m, got %+v", recommendation.RequestTarget)
 	}
 	if recommendation.RequestTarget.CPULimitMilliCores != 500 {
 		t.Fatalf("expected explicit CPU limit to be preserved, got %+v", recommendation.RequestTarget)
@@ -183,7 +183,44 @@ func TestBuildRightSizingRecommendationAddsPostgresMemoryLimitHeadroom(t *testin
 		t.Fatalf("expected postgres memory limit with headroom 784Mi, got %dMi", got)
 	}
 	if recommendation.RequestTarget == nil || recommendation.RequestTarget.CPUMilliCores != 100 {
-		t.Fatalf("expected postgres p75 CPU request target with 100m floor, got %+v", recommendation.RequestTarget)
+		t.Fatalf("expected postgres p75 CPU request target 100m, got %+v", recommendation.RequestTarget)
+	}
+}
+
+func TestBuildRightSizingRecommendationUsesOneMilliCPUFloor(t *testing.T) {
+	t.Parallel()
+
+	for _, workloadClass := range []string{"", model.WorkloadClassDemo, model.WorkloadClassService, model.WorkloadClassBatch, model.WorkloadClassCritical} {
+		for _, serviceType := range []string{"", model.BackingServiceTypePostgres} {
+			t.Run(workloadClass+"/"+serviceType, func(t *testing.T) {
+				t.Parallel()
+
+				for _, usage := range []struct {
+					cpuMilli int64
+					want     int64
+				}{
+					{cpuMilli: 0, want: 1},
+					{cpuMilli: 1, want: 5}, // Preserve the existing 5m rounding step.
+					{cpuMilli: 20, want: 20},
+				} {
+					recommendation := buildRightSizingRecommendation(
+						model.ClusterNodeWorkloadKindApp, "app_a", "demo", serviceType, workloadClass,
+						24, 3, &model.ResourceSpec{CPUMilliCores: 100},
+						rightSizingUsageSamples("tenant_a", model.ClusterNodeWorkloadKindApp, "app_a", []rightSizingUsageValue{
+							{cpuMilli: usage.cpuMilli, memoryMiB: 64},
+							{cpuMilli: usage.cpuMilli, memoryMiB: 64},
+							{cpuMilli: usage.cpuMilli, memoryMiB: 64},
+						}),
+					)
+					if !recommendation.Ready || recommendation.RequestTarget == nil {
+						t.Fatalf("expected ready recommendation, got %+v", recommendation)
+					}
+					if recommendation.Policy.CPUFloorMilli != 1 || recommendation.RequestTarget.CPUMilliCores != usage.want {
+						t.Fatalf("CPU usage %dm: expected floor 1m and request %dm, got policy %+v, target %+v", usage.cpuMilli, usage.want, recommendation.Policy, recommendation.RequestTarget)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -266,7 +303,7 @@ func TestApplyAppRightSizingRecommendationQueuesDeployForAppAndPostgres(t *testi
 		t.Fatalf("expected postgres desired resources, got %+v", op.DesiredSpec.Postgres)
 	}
 	postgresResources := op.DesiredSpec.Postgres.Resources
-	if postgresResources.CPUMilliCores != 100 || postgresResources.CPULimitMilliCores != 0 {
+	if postgresResources.CPUMilliCores != 60 || postgresResources.CPULimitMilliCores != 0 {
 		t.Fatalf("unexpected postgres CPU recommendation: %+v", postgresResources)
 	}
 	if postgresResources.MemoryMebibytes != 256 || postgresResources.MemoryLimitMebibytes != 384 {

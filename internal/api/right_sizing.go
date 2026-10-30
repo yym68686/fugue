@@ -808,25 +808,21 @@ func rightSizingPolicy(workloadClass, serviceType string, windowHours, minSample
 		CPUMultiplier:        1.5,
 		CPURequestPercentile: 0.50,
 		CPURequestMultiplier: 1.0,
-		CPUFloorMilli:        25,
+		CPUFloorMilli:        1,
 		MemoryPercentile:     0.99,
 		MemoryMultiplier:     1.2,
 		MemoryFloorMiB:       64,
 	}
 	switch workloadClass {
 	case model.WorkloadClassDemo:
-		policy.CPUFloorMilli = 10
 		policy.MemoryFloorMiB = 32
 	case model.WorkloadClassBatch:
-		policy.CPUFloorMilli = 25
 		policy.MemoryFloorMiB = 64
 	case model.WorkloadClassCritical:
-		policy.CPUFloorMilli = 100
 		policy.CPURequestPercentile = 0.75
 		policy.MemoryFloorMiB = 128
 	}
 	if serviceType == model.BackingServiceTypePostgres {
-		policy.CPUFloorMilli = 100
 		policy.CPURequestPercentile = 0.75
 		policy.MemoryFloorMiB = 256
 		policy.MemoryMultiplier = 1.5
