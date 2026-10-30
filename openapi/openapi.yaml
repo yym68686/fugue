@@ -8283,7 +8283,7 @@ paths:
     patch:
       operationId: patchAppTrafficPolicy
       summary: Patch App Traffic Policy
-      description: Retired releases cannot be referenced by a traffic policy, including at zero weight. A conflicting retirement returns 409 and leaves the policy unchanged.
+      description: Retired releases cannot be referenced by a traffic policy, including at zero weight. A conflicting retirement returns 409 and leaves the policy unchanged. Reapplying identical normalized routing intent is idempotent and preserves updated_at and the original updating actor, so reconciliation retries do not restart release retirement grace periods.
       tags: [Apps]
       x-fugue-handler: handlePatchAppTrafficPolicy
       security:
@@ -26809,6 +26809,7 @@ components:
           format: date-time
     AppTrafficPolicy:
       type: object
+      description: Routing intent and its last semantic change. Identical normalized intent preserves the existing update timestamp and actor.
       additionalProperties: false
       required:
         [id, tenant_id, app_id, mode, stable_weight, candidate_weight, created_at, updated_at]

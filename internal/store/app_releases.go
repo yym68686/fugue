@@ -218,12 +218,17 @@ func (s *Store) UpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.App
 		index := findAppTrafficPolicyByApp(state.AppTrafficPolicies, policy.AppID)
 		if index >= 0 {
 			current := state.AppTrafficPolicies[index]
-			if policy.ID == "" {
-				policy.ID = current.ID
+			// A reconcile/abort retry is not a new traffic withdrawal. Preserve
+			// its version and audit actor so it cannot renew retirement grace or
+			// invalidate a drain proof that observed identical routing intent.
+			if appTrafficPolicyIntentEqual(current, policy) {
+				out = current
+				return nil
 			}
-			if policy.CreatedAt.IsZero() {
-				policy.CreatedAt = current.CreatedAt
-			}
+			// Match PostgreSQL's app_id upsert: normalization may have generated
+			// a fresh ID/creation time, but this is still the same policy row.
+			policy.ID = current.ID
+			policy.CreatedAt = current.CreatedAt
 			state.AppTrafficPolicies[index] = policy
 		} else {
 			state.AppTrafficPolicies = append(state.AppTrafficPolicies, policy)
@@ -232,6 +237,13 @@ func (s *Store) UpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.App
 		return nil
 	})
 	return out, err
+}
+
+func appTrafficPolicyIntentEqual(a, b model.AppTrafficPolicy) bool {
+	return a.TenantID == b.TenantID && a.AppID == b.AppID && a.Mode == b.Mode &&
+		a.StableReleaseID == b.StableReleaseID && a.CandidateReleaseID == b.CandidateReleaseID &&
+		a.StableWeight == b.StableWeight && a.CandidateWeight == b.CandidateWeight &&
+		a.StickyHeader == b.StickyHeader && a.StickyCookie == b.StickyCookie
 }
 
 func AppReleaseIsRetired(release model.AppRelease) bool {

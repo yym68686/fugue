@@ -245,6 +245,17 @@ func (s *Store) pgUpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.A
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Compare under the ON CONFLICT row lock, rather than a read-before-write
+	// check that could overwrite a concurrent operator's routing change.
+	// Keep this predicate aligned with appTrafficPolicyIntentEqual.
+	const sameIntent = `ROW(fugue_app_traffic_policies.tenant_id, fugue_app_traffic_policies.app_id,
+		fugue_app_traffic_policies.mode, fugue_app_traffic_policies.stable_release_id,
+		fugue_app_traffic_policies.candidate_release_id, fugue_app_traffic_policies.stable_weight,
+		fugue_app_traffic_policies.candidate_weight, fugue_app_traffic_policies.sticky_header,
+		fugue_app_traffic_policies.sticky_cookie) IS NOT DISTINCT FROM
+		ROW(EXCLUDED.tenant_id, EXCLUDED.app_id, EXCLUDED.mode, EXCLUDED.stable_release_id,
+		EXCLUDED.candidate_release_id, EXCLUDED.stable_weight, EXCLUDED.candidate_weight,
+		EXCLUDED.sticky_header, EXCLUDED.sticky_cookie)`
 	out, err := scanAppTrafficPolicy(s.db.QueryRowContext(ctx, `
 INSERT INTO fugue_app_traffic_policies (
 	id, tenant_id, app_id, mode, stable_release_id, candidate_release_id,
@@ -264,9 +275,9 @@ ON CONFLICT (app_id) DO UPDATE SET
 	candidate_weight = EXCLUDED.candidate_weight,
 	sticky_header = EXCLUDED.sticky_header,
 	sticky_cookie = EXCLUDED.sticky_cookie,
-	updated_by_type = EXCLUDED.updated_by_type,
-	updated_by_id = EXCLUDED.updated_by_id,
-	updated_at = EXCLUDED.updated_at
+	updated_by_type = CASE WHEN `+sameIntent+` THEN fugue_app_traffic_policies.updated_by_type ELSE EXCLUDED.updated_by_type END,
+	updated_by_id = CASE WHEN `+sameIntent+` THEN fugue_app_traffic_policies.updated_by_id ELSE EXCLUDED.updated_by_id END,
+	updated_at = CASE WHEN `+sameIntent+` THEN fugue_app_traffic_policies.updated_at ELSE EXCLUDED.updated_at END
 RETURNING `+appTrafficPolicySelectColumns,
 		policy.ID, policy.TenantID, policy.AppID, policy.Mode, policy.StableReleaseID, policy.CandidateReleaseID,
 		policy.StableWeight, policy.CandidateWeight, policy.StickyHeader, policy.StickyCookie,

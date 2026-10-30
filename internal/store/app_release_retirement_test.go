@@ -127,7 +127,7 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 		}
 	}
 	for _, failed := range []bool{false, true} {
-		for _, change := range []string{"none", "previous", "stable", "policy", "retention", "canceled"} {
+		for _, change := range []string{"none", "same_policy", "previous", "stable", "policy", "retention", "canceled"} {
 			t.Run(fmt.Sprintf("cas_failed_%t_%s", failed, change), func(t *testing.T) {
 				role, status := model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
 				if failed {
@@ -159,7 +159,13 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 					}
 				case "policy":
 					copy := p
-					copy.StickyCookie = "changed"
+					copy.StickyCookie += "-changed"
+					if _, err = s.UpsertAppTrafficPolicy(copy); err != nil {
+						t.Fatal(err)
+					}
+				case "same_policy":
+					copy := p
+					copy.UpdatedByID = "reconcile-retry"
 					if _, err = s.UpsertAppTrafficPolicy(copy); err != nil {
 						t.Fatal(err)
 					}
@@ -174,7 +180,7 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 					cancel()
 				}
 				result, err := s.RetireDrainedAppRelease(ctx, r, stableNow, p)
-				if change == "none" {
+				if change == "none" || change == "same_policy" {
 					if err != nil || !AppReleaseIsRetired(result) {
 						t.Fatal("verified retirement failed", err)
 					}

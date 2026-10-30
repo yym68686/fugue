@@ -96,6 +96,34 @@ func TestAppReleaseTrafficAPI(t *testing.T) {
 	}
 }
 
+func TestAppTrafficPatchPreservesVersionForIdenticalIntent(t *testing.T) {
+	t.Parallel()
+	_, server, apiKey, _, _, app, _, _, _, _ := setupAppImagesTestServer(t)
+	response := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/traffic", apiKey, nil)
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Body.String())
+	}
+	var before appTrafficResponse
+	mustDecodeJSON(t, response, &before)
+	response = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/traffic", apiKey, appTrafficPatchRequest{})
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Body.String())
+	}
+	var after appTrafficResponse
+	mustDecodeJSON(t, response, &after)
+	if !reflect.DeepEqual(after.Traffic, before.Traffic) {
+		t.Fatal("identical traffic PATCH restarted retirement grace")
+	}
+	response = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/traffic", apiKey, appTrafficPatchRequest{StickyHeader: "X-Release"})
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Body.String())
+	}
+	mustDecodeJSON(t, response, &after)
+	if after.Traffic.StickyHeader != "X-Release" || !after.Traffic.UpdatedAt.After(before.Traffic.UpdatedAt) {
+		t.Fatal("real traffic PATCH did not advance routing version")
+	}
+}
+
 func TestAppReleaseGateMetricsUseReleaseID(t *testing.T) {
 	t.Parallel()
 
