@@ -7,6 +7,33 @@ business health gate: that gate still applies to foreground promotion and
 canonical replacement. A degraded stable must not indefinitely retain revisions
 that no longer receive traffic.
 
+The active leader runs an independent retirement worker every five seconds;
+ticks coalesce during a sweep. Apps and the three resource classes retain fair
+resume positions. Scheduled workloads receive four queue entries per one pending
+cancellation and one retired-resource cleanup, so resource recovery has priority
+without starving cancellation or garbage collection. Each app has at most 100
+in-flight retirement attempts, a 25-second deadline per attempt and a 60-second
+sweep budget. Shutdown cancels and joins all attempts before leadership handoff.
+Ordinary ManagedApp reconciliation does not synchronously wait for these sweeps.
+
+Discovery batches the initial unfiltered Pod/ReplicaSet ownership inventory and
+indexes owner UIDs. All observations after drain read fresh, unfiltered ownership
+metadata; only related Pods need their full executable state fetched, fenced by
+the metadata UID/resourceVersion. Incomplete or duplicate inventories are not
+drain evidence. Already absent retired workloads do not consume attempt slots.
+Background traffic checks inspect the complete current edge publication proof
+once and retry later when it is unavailable; foreground promotion still waits
+for publication convergence. No positive proof is inferred from a timeout.
+
+Application readiness is required for promotion and canonical traffic targets,
+not for draining an already withdrawn revision. An unhealthy withdrawn app can
+retire only when its complete replica/container identity remains unchanged and
+a Ready drain agent positively observes the full zero-connection quiet window.
+Missing container identity, agent failure, restarts, Pod replacement and ownership
+changes retain the workload. Failed running/stopped/unstarted observations retain
+their individual reasons in diagnostics rather than replacing the first error
+with the final fallback error.
+
 For a failed candidate whose Pods were never scheduled, the controller verifies
 the complete owned Pod set and immutable Deployment/Service identity twice, then
 sets only that Deployment's replica count to zero with UID/resourceVersion

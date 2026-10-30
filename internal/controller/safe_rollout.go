@@ -633,12 +633,11 @@ func (s *Service) waitSafeRolloutEdgeRouteBundleApplied(ctx context.Context, op 
 	if state == nil || !state.Enabled {
 		return true
 	}
-	observer := s.edgeBundleObserverForSafeRollout()
 	since := time.Now().UTC()
 	if state.Candidate.PromotedAt != nil {
 		since = state.Candidate.PromotedAt.UTC()
 	}
-	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, 0, since)
+	observation, err := s.observeSafeRolloutRetirementTraffic(ctx, state.CandidateApp, state.Candidate, since)
 	payload := map[string]any{
 		"observation": observation.Summary,
 	}

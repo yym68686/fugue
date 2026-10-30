@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fugue/internal/appimages"
@@ -57,6 +58,7 @@ type Service struct {
 	kubeClients                     map[string]*kubeClient
 	managedRolloutCapacityLocks     sync.Map
 	retirementScans                 appReleaseRetirementScans
+	retirementWorkerRunning         atomic.Bool
 	managedPostgresStorageNoticeMu  sync.Mutex
 	managedPostgresStorageNotices   map[string]struct{}
 	importImageInspectRetryDelay    time.Duration
@@ -311,6 +313,8 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 
 	stopOperationRecovery := s.startPeriodicReconcile(ctx, time.Minute, "operation finalization recovery", s.recoverCompletedManagedDeploys)
 	defer stopOperationRecovery()
+	stopRetirement := s.startAppReleaseRetirementWorker(ctx)
+	defer stopRetirement()
 	foregroundImports, stopForegroundImports := s.startPendingOperationWorkers(ctx, operationLaneForegroundImport, s.Config.ForegroundImportWorkers)
 	defer stopForegroundImports()
 	foregroundActivations, stopForegroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, s.Config.ForegroundActivateWorkers)

@@ -235,7 +235,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			// A pending canonical replacement may itself need the capacity held
 			// by drained revisions. Run their independent, fully guarded cleanup
 			// before executable readiness can stop this reconciliation pass.
-			if err := s.retryDrainingAppReleaseRetirement(ctx, storedApp); err != nil && s.Logger != nil {
+			if err := s.reconcileAppReleaseRetirementInline(ctx, storedApp); err != nil && s.Logger != nil {
 				s.Logger.Printf("background release retirement deferred for app %s: %v", storedApp.ID, err)
 			}
 			recoverStoredBaseline = managedAppBaselineNeedsRecovery(storedApp)
@@ -387,7 +387,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		// revisions indefinitely. Retirement still verifies traffic withdrawal,
 		// canonical Service references and every candidate's own positive drain.
 		if errors.Is(err, errSafeCanonicalHandoffPending) {
-			if retireErr := s.retryDrainingAppReleaseRetirement(ctx, app); retireErr != nil && s.Logger != nil {
+			if retireErr := s.reconcileAppReleaseRetirementInline(ctx, app); retireErr != nil && s.Logger != nil {
 				s.Logger.Printf("retire withdrawn revisions during canonical handoff app=%s: %v", app.ID, retireErr)
 			}
 		}
@@ -471,13 +471,14 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	if err != nil || active {
 		return err
 	}
-	position, finish, acquired := s.retirementScans.begin(app)
+	positions, finish, acquired := s.retirementScans.beginPrioritized(app)
 	if !acquired {
 		return nil
 	}
-	defer func() { finish(position) }()
+	defer func() { finish(positions) }()
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
+	ctx = context.WithValue(ctx, backgroundReleaseRetirementKey{}, true)
 	releases, err := s.Store.ListAppReleaseRetirementState(ctx, model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true, IncludeRetired: true})
 	if err != nil {
 		return fmt.Errorf("list draining releases: %w", err)
@@ -499,80 +500,104 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	if stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing {
 		return nil
 	}
-	for _, previous := range orderAppReleaseRetirementScan(releases, position) {
-		if err := ctx.Err(); err != nil {
+	var inventory *releaseDrainInventory
+	if s.Config.KubectlApply {
+		client, err := s.kubeClient()
+		if err != nil {
 			return err
 		}
-		// Even an unavailable observer or a cancelled cleanup consumes this
-		// turn. Resume after it next time, without treating it as drain proof.
-		position = appReleaseRetirementPositionOf(previous)
-		if previous.Status == model.AppReleaseStatusRetired && previous.RevisionWorkload != nil {
-			if err := s.retryRetiredAppReleaseCleanup(ctx, app, previous, stable); err != nil {
-				return fmt.Errorf("cleanup retired release %s: %w", previous.ID, err)
-			}
-			continue
-		}
-		if !store.AppReleaseAwaitingDrain(previous) {
-			continue
-		}
-		if previous.RevisionWorkload == nil {
-			bound, migrationErr := s.migrateSafeRolloutWorkload(ctx, app, previous)
-			if migrationErr != nil {
-				if !errors.Is(migrationErr, store.ErrNotFound) && s.Logger != nil {
-					s.Logger.Printf("retain unbound release %s: %v", previous.ID, migrationErr)
-				}
-				if !errors.Is(migrationErr, store.ErrNotFound) {
-					if err := s.retireUnboundStoppedRevision(ctx, app, previous, stable, policy); err != nil && s.Logger != nil {
-						s.Logger.Printf("retain unbound stopped revision %s: %v", previous.ID, err)
-					}
-				}
-				continue
-			}
-			previous = bound
-		}
-		if previous.RevisionWorkload == nil || previous.RevisionWorkload.OperationID == "" {
-			continue
-		}
-		op, err := s.Store.GetOperation(previous.RevisionWorkload.OperationID)
+		inventory, err = readReleaseDrainInventory(withInitialReleaseDrainInventory(ctx), client, runtime.NamespaceForTenant(app.TenantID))
 		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				continue
-			}
-			return fmt.Errorf("load retirement operation %s: %w", previous.RevisionWorkload.OperationID, err)
+			return err
 		}
-		if op.AppID != app.ID || op.TenantID != app.TenantID || op.Type != model.OperationTypeDeploy {
-			continue
-		}
-		if previous.Status == model.AppReleaseStatusFailed && op.Status != model.OperationStatusFailed {
-			continue
-		}
-		if previous.Status == model.AppReleaseStatusDraining && op.Status != model.OperationStatusCompleted {
-			// A release can serve successfully before its deploy operation fails
-			// during canonical alignment. Once superseded, that terminal outcome
-			// must not prevent the independent traffic, retention and drain proofs
-			// below from retiring its immutable workload. An unpromoted or active
-			// operation still cannot gain this retirement path.
-			promoted := previous.PromotedAt
-			if op.Status != model.OperationStatusFailed || promoted == nil || promoted.IsZero() ||
-				promoted.Before(previous.CreatedAt) || promoted.After(time.Now().UTC()) {
-				continue
-			}
-		}
-		previousApp := app
-		if previous.SpecSnapshot != nil {
-			previousApp.Spec = *cloneControllerAppSpec(previous.SpecSnapshot)
-		}
-		state := &safeRolloutState{
-			Enabled:                true,
-			PreviousApp:            previousApp,
-			CandidateApp:           app,
-			StableRelease:          previous,
-			Candidate:              stable,
-			StableAlignmentAllowed: true,
-		}
-		s.retireWithdrawnSafeRolloutRelease(ctx, op, state)
 	}
-	return ctx.Err()
+	if s.Config.KubectlApply {
+		client, err := s.kubeClient()
+		if err != nil {
+			return err
+		}
+		releases = filterAbsentRetiredReleaseResources(ctx, client, runtime.NamespaceForTenant(app.TenantID), releases)
+	}
+	queue := prioritizeAppReleaseRetirement(releases, positions, inventory)
+	ctx = context.WithValue(ctx, releaseRetirementDiscoveryKey{}, inventory)
+	startedAt := time.Now()
+	err = runAppReleaseRetirementQueue(ctx, queue, &positions, func(attempt context.Context, item prioritizedReleaseRetirement) {
+		s.retryOneAppReleaseRetirement(attempt, app, item.release, stable, policy)
+	})
+	if len(queue) > 0 && s.Logger != nil {
+		s.Logger.Printf("release retirement sweep app=%s queued=%d concurrency=%d duration_ms=%d error=%v", app.ID, len(queue), min(appReleaseRetirementConcurrency, len(queue)), time.Since(startedAt).Milliseconds(), err)
+	}
+	return err
+}
+
+func (s *Service) retryOneAppReleaseRetirement(ctx context.Context, app model.App, previous, stable model.AppRelease, policy model.AppTrafficPolicy) {
+	if previous.Status == model.AppReleaseStatusRetired && previous.RevisionWorkload != nil {
+		if err := s.retryRetiredAppReleaseCleanup(ctx, app, previous, stable); err != nil {
+			if s.Logger != nil {
+				s.Logger.Printf("cleanup retired release %s deferred: %v", previous.ID, err)
+			}
+		}
+		return
+	}
+	if !store.AppReleaseAwaitingDrain(previous) {
+		return
+	}
+	if previous.RevisionWorkload == nil {
+		bound, migrationErr := s.migrateSafeRolloutWorkload(ctx, app, previous)
+		if migrationErr != nil {
+			if !errors.Is(migrationErr, store.ErrNotFound) && s.Logger != nil {
+				s.Logger.Printf("retain unbound release %s: %v", previous.ID, migrationErr)
+			}
+			if !errors.Is(migrationErr, store.ErrNotFound) {
+				if err := s.retireUnboundStoppedRevision(ctx, app, previous, stable, policy); err != nil && s.Logger != nil {
+					s.Logger.Printf("retain unbound stopped revision %s: %v", previous.ID, err)
+				}
+			}
+			return
+		}
+		previous = bound
+	}
+	if previous.RevisionWorkload == nil || previous.RevisionWorkload.OperationID == "" {
+		return
+	}
+	op, err := s.Store.GetOperation(previous.RevisionWorkload.OperationID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) && s.Logger != nil {
+			s.Logger.Printf("load retirement operation %s: %v", previous.RevisionWorkload.OperationID, err)
+		}
+		return
+	}
+	if op.AppID != app.ID || op.TenantID != app.TenantID || op.Type != model.OperationTypeDeploy {
+		return
+	}
+	if previous.Status == model.AppReleaseStatusFailed && op.Status != model.OperationStatusFailed {
+		return
+	}
+	if previous.Status == model.AppReleaseStatusDraining && op.Status != model.OperationStatusCompleted {
+		// A release can serve successfully before its deploy operation fails
+		// during canonical alignment. Once superseded, that terminal outcome
+		// must not prevent the independent traffic, retention and drain proofs
+		// below from retiring its immutable workload. An unpromoted or active
+		// operation still cannot gain this retirement path.
+		promoted := previous.PromotedAt
+		if op.Status != model.OperationStatusFailed || promoted == nil || promoted.IsZero() ||
+			promoted.Before(previous.CreatedAt) || promoted.After(time.Now().UTC()) {
+			return
+		}
+	}
+	previousApp := app
+	if previous.SpecSnapshot != nil {
+		previousApp.Spec = *cloneControllerAppSpec(previous.SpecSnapshot)
+	}
+	state := &safeRolloutState{
+		Enabled:                true,
+		PreviousApp:            previousApp,
+		CandidateApp:           app,
+		StableRelease:          previous,
+		Candidate:              stable,
+		StableAlignmentAllowed: true,
+	}
+	s.retireWithdrawnSafeRolloutRelease(ctx, op, state)
 }
 
 func (s *Service) retryRetiredAppReleaseCleanup(ctx context.Context, app model.App, retired, stable model.AppRelease) error {

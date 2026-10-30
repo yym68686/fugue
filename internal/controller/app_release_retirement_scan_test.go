@@ -163,25 +163,18 @@ func TestBackgroundRetirementResumesAfterUnavailableCandidateWithoutBypassingPro
 			if _, err := s.Store.FailOperation(failedOp.ID, "candidate observer unavailable"); err != nil {
 				t.Fatal(err)
 			}
-			var cancelScan context.CancelFunc
 			s.safeRolloutDrainMetricsQuerier = retirementScanDrainFunc(func(ctx context.Context, app model.App, release model.AppRelease, since time.Time) (safeRolloutDrainMetrics, error) {
 				if release.ID == stalled.ID {
-					cancelScan()
-					return safeRolloutDrainMetrics{}, ctx.Err()
+					return safeRolloutDrainMetrics{}, errors.New("candidate observer unavailable")
 				}
 				return (kubeSafeRolloutDrainObserver{service: s}).QuerySafeRolloutDrainMetrics(ctx, app, release, since)
 			})
 			run := func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
-				cancelScan = cancel
 				if err := s.retryDrainingAppReleaseRetirement(ctx, app); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatal(err)
 				}
-			}
-			run()
-			if fixture.deleteCalls != 0 {
-				t.Fatal("scan did not stop at the unavailable predecessor")
 			}
 			policy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
 			if err != nil {

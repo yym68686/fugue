@@ -28,6 +28,22 @@ type safeRolloutEdgeBundleObserver interface {
 	WaitForSafeRolloutEdgeRouteBundle(ctx context.Context, app model.App, release model.AppRelease, targetCandidateWeight int, since time.Time) (safeRolloutEdgeBundleObservation, error)
 }
 
+type backgroundReleaseRetirementKey struct{}
+
+// Background cleanup observes the same complete proof once rather than
+// waiting for a publication to converge while other releases queue behind it.
+// Foreground promotions retain their existing bounded wait semantics.
+func (s *Service) observeSafeRolloutRetirementTraffic(ctx context.Context, app model.App, release model.AppRelease, since time.Time) (safeRolloutEdgeBundleObservation, error) {
+	observer := s.edgeBundleObserverForSafeRollout()
+	if background, _ := ctx.Value(backgroundReleaseRetirementKey{}).(bool); background {
+		if live, ok := observer.(storeSafeRolloutEdgeBundleObserver); ok {
+			wait := safeRolloutEdgeWait{groups: map[string]string{}}
+			return live.observeWait(ctx, app, release, 0, since, &wait)
+		}
+	}
+	return observer.WaitForSafeRolloutEdgeRouteBundle(ctx, app, release, 0, since)
+}
+
 type safeRolloutEdgeBundleObservation struct {
 	Ready           bool
 	RequiredNodes   int

@@ -505,6 +505,14 @@ func TestReleaseDrainRequiresCompleteStablePodSet(t *testing.T) {
 		{name: "extra_pod", mutate: func(_ *Service, _ model.App, _ *model.AppRelease, f *drainWorkloadFixture) {
 			f.pods = append(f.pods, f.pods[0])
 		}},
+		{name: "extra_pod_with_drifted_owner_kind", mutate: func(_ *Service, _ model.App, _ *model.AppRelease, f *drainWorkloadFixture) {
+			pod := cloneKubeMap(f.pods[0])
+			meta := objectMapField(pod, "metadata")
+			meta["name"], meta["uid"] = "drifted-child", "drifted-child-uid"
+			objectMapField(meta, "labels")[runtime.FugueLabelAppReleaseID] = "different-release"
+			mapSlice(meta["ownerReferences"])[0]["kind"] = "wrong-kind"
+			f.pods = append(f.pods, pod)
+		}},
 		{name: "replaced_deployment", mutate: func(_ *Service, _ model.App, _ *model.AppRelease, f *drainWorkloadFixture) {
 			objectMapField(f.deployment, "metadata")["uid"] = "replacement"
 		}},

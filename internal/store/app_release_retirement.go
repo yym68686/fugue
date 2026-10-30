@@ -10,6 +10,58 @@ import (
 	"fugue/internal/model"
 )
 
+type AppReleaseRetirementTarget struct{ TenantID, AppID string }
+
+// Scheduling discovery never needs executable snapshots or every historical
+// release row. Return each app once; the retirement transaction still reloads
+// its exact release, operation and traffic policy before making any mutation.
+func (s *Store) ListAppReleaseRetirementTargets(ctx context.Context) ([]AppReleaseRetirementTarget, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.usingDatabase() {
+		if err := s.ensureDatabaseReady(); err != nil {
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT tenant_id, app_id FROM fugue_app_releases WHERE (role='candidate' AND status='failed') OR (role='previous' AND status='draining') OR (status='retired' AND revision_workload_json IS NOT NULL) ORDER BY tenant_id, app_id`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var targets []AppReleaseRetirementTarget
+		for rows.Next() {
+			var target AppReleaseRetirementTarget
+			if err := rows.Scan(&target.TenantID, &target.AppID); err != nil {
+				return nil, err
+			}
+			targets = append(targets, target)
+		}
+		return targets, rows.Err()
+	}
+	var targets []AppReleaseRetirementTarget
+	err := s.withLockedState(false, func(state *model.State) error {
+		seen := map[AppReleaseRetirementTarget]bool{}
+		for _, r := range state.AppReleases {
+			if AppReleaseAwaitingDrain(r) || r.Status == model.AppReleaseStatusRetired && r.RevisionWorkload != nil {
+				seen[AppReleaseRetirementTarget{r.TenantID, r.AppID}] = true
+			}
+		}
+		for target := range seen {
+			targets = append(targets, target)
+		}
+		sort.Slice(targets, func(i, j int) bool {
+			if targets[i].TenantID != targets[j].TenantID {
+				return targets[i].TenantID < targets[j].TenantID
+			}
+			return targets[i].AppID < targets[j].AppID
+		})
+		return ctx.Err()
+	})
+	return targets, err
+}
+
 // AppReleaseAwaitingDrain identifies withdrawn lifecycle states. It does not
 // authorize retirement: traffic, retention and runtime proof must still pass.
 func AppReleaseAwaitingDrain(release model.AppRelease) bool {

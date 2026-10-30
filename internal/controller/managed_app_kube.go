@@ -22,7 +22,10 @@ import (
 )
 
 type kubeObjectList struct {
-	Items []map[string]any `json:"items"`
+	Items    []map[string]any `json:"items"`
+	Metadata struct {
+		Continue string `json:"continue"`
+	} `json:"metadata"`
 }
 
 type kubeDeployment struct {

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -87,7 +88,7 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 	if stable.DeploymentName == previous.DeploymentName || stable.ServiceName == previous.ServiceName {
 		return out, fmt.Errorf("stable traffic still uses the previous workload")
 	}
-	proof, err := s.edgeBundleObserverForSafeRollout().WaitForSafeRolloutEdgeRouteBundle(ctx, app, stable, 0, since)
+	proof, err := s.observeSafeRolloutRetirementTraffic(ctx, app, stable, since)
 	if err != nil {
 		return out, fmt.Errorf("current stable traffic is not confirmed before drain: %w (waiting=%v)", err, proof.WaitingNodes)
 	}
@@ -98,13 +99,18 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 	if err != nil {
 		return out, err
 	}
-	before, err := s.captureReleaseDrainWorkload(ctx, client, app, previous)
+	// Only discovery can reuse this attempt's initial inventory. Every
+	// post-observation capture below reads a new complete ownership snapshot.
+	initialCtx := withInitialReleaseDrainInventory(ctx)
+	before, err := s.captureReleaseDrainWorkload(initialCtx, client, app, previous)
 	if err != nil {
-		before, err = s.captureReleaseDrainWorkloadMode(ctx, client, app, previous, true)
+		runningErr := err
+		before, err = s.captureReleaseDrainWorkloadMode(initialCtx, client, app, previous, true)
 		if err != nil {
-			before, err = s.captureUnstartedReleaseWorkload(ctx, client, app, previous)
+			stoppedErr := err
+			before, err = s.captureUnstartedReleaseWorkload(initialCtx, client, app, previous)
 			if err != nil {
-				return out, err
+				return out, errors.Join(fmt.Errorf("running workload: %w", runningErr), fmt.Errorf("stopped workload: %w", stoppedErr), fmt.Errorf("unstarted workload: %w", err))
 			}
 			if !before.Quiesced {
 				return out, s.quiesceUnstartedRelease(ctx, client, app, expected, policy, before)
@@ -254,8 +260,16 @@ func (s *Service) captureDrainWorkloadState(ctx context.Context, client *kubeCli
 	}
 	var dep kubeDeployment
 	data, _ := json.Marshal(deployment)
-	if err := json.Unmarshal(data, &dep); err != nil || dep.Metadata.UID == "" || dep.Spec.Replicas == nil || *dep.Spec.Replicas < 0 || (!unstarted && *dep.Spec.Replicas == 0) || *dep.Spec.Replicas > 32 || (!stopped && !unstarted && !managedDeploymentStatusReady(dep, *dep.Spec.Replicas)) || !s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(dep), release.ResolvedImageRef) {
+	requireReady := canonical || !store.AppReleaseAwaitingDrain(release)
+	if err := json.Unmarshal(data, &dep); err != nil || dep.Metadata.UID == "" || dep.Spec.Replicas == nil || *dep.Spec.Replicas < 0 || (!unstarted && *dep.Spec.Replicas == 0) || *dep.Spec.Replicas > 32 || (requireReady && !stopped && !unstarted && !managedDeploymentStatusReady(dep, *dep.Spec.Replicas)) || !s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(dep), release.ResolvedImageRef) {
 		return out, fmt.Errorf("release Deployment is not a complete current workload")
+	}
+	// Promotion readiness is not drain evidence. A withdrawn workload may be
+	// unhealthy while its agent can still positively observe every connection.
+	// Require a fully observed executable replica set, then validate all Pod and
+	// container identities before and after the quiet window instead.
+	if !canonical && !stopped && !unstarted && (dep.Status.ObservedGeneration < dep.Metadata.Generation || dep.Status.UpdatedReplicas != *dep.Spec.Replicas || dep.Status.Replicas != *dep.Spec.Replicas) {
+		return out, fmt.Errorf("withdrawn Deployment replica identity has not converged")
 	}
 	if unstarted && *dep.Spec.Replicas == 0 {
 		if dep.Status.ObservedGeneration < dep.Metadata.Generation || dep.Status.Replicas != 0 || dep.Status.ReadyReplicas != 0 || dep.Status.AvailableReplicas != 0 || dep.Status.UpdatedReplicas != 0 {
@@ -271,14 +285,17 @@ func (s *Service) captureDrainWorkloadState(ctx context.Context, client *kubeCli
 	}
 	out.DeploymentUID, out.Generation = dep.Metadata.UID, dep.Metadata.Generation
 	out.DeploymentVersion, out.ServiceVersion = objectStringField(meta, "resourceVersion"), serviceVersion
-	var replicas, pods kubeObjectList
-	// Follow ownership even when a child's selector labels have changed. A
-	// label-only list could hide an old Pod that still owns active connections.
-	if _, err := client.doMetadataList(ctx, "/apis/apps/v1/namespaces/"+url.PathEscape(ns)+"/replicasets", &replicas); err != nil {
+	inventory, err := readReleaseDrainInventory(ctx, client, ns)
+	if err != nil {
 		return out, err
 	}
+	if inventory.err != nil {
+		return out, inventory.err
+	}
+	// Follow ownership even when a child's selector labels have changed. A
+	// label-only list could hide an old Pod that still owns active connections.
 	owned := map[string]string{}
-	for _, rs := range replicas.Items {
+	for _, rs := range inventory.replicasByDeployment[out.DeploymentUID] {
 		rm := objectMapField(rs, "metadata")
 		if appWorkloadControlledBy(rm, "Deployment", release.DeploymentName, out.DeploymentUID) {
 			if !owner(rm) || objectStringField(rm, "uid") == "" || objectStringField(rm, "deletionTimestamp") != "" {
@@ -304,10 +321,11 @@ func (s *Service) captureDrainWorkloadState(ctx context.Context, client *kubeCli
 	}
 	sort.Strings(out.ReplicaSets)
 	sort.Strings(out.ReplicaVersions)
-	if _, err := client.doJSON(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(ns)+"/pods", nil, &pods); err != nil {
-		return out, err
-	}
-	for _, pod := range pods.Items {
+	for _, pod := range inventory.podsForRelease(release.ID, release.DeploymentName, canonical, owned) {
+		pod, err = hydrateReleaseDrainPod(ctx, client, ns, pod)
+		if err != nil {
+			return out, err
+		}
 		pm := objectMapField(pod, "metadata")
 		belongs := !canonical && objectStringMapValue(pm["labels"])[runtime.FugueLabelAppReleaseID] == release.ID
 		if canonical && objectStringMapValue(pm["labels"])[runtime.FugueLabelAppWorkload] == release.DeploymentName {
@@ -401,9 +419,22 @@ func (s *Service) captureDrainWorkloadState(ctx context.Context, client *kubeCli
 				}
 			}
 		}
+		if len(mapSlice(nestedObjectValue(pod, "spec", "ephemeralContainers"))) > 0 || len(mapSlice(nestedObjectValue(pod, "status", "ephemeralContainerStatuses"))) > 0 {
+			return out, fmt.Errorf("release Pod has an unobserved ephemeral runtime")
+		}
+		if err := captureReleaseApplicationContainers(pod, requireReady, &p); err != nil {
+			return out, err
+		}
 		for _, field := range []string{"initContainerStatuses", "containerStatuses"} {
 			for _, c := range mapSlice(nestedObjectValue(pod, "status", field)) {
-				if nestedObjectValue(c, "state", "running") != nil {
+				if field == "initContainerStatuses" && c["name"] != "fugue-drain-agent" && nestedObjectValue(c, "state", "running") != nil {
+					id := objectStringField(c, "containerID")
+					if id == "" || canonical && c["ready"] != true {
+						return out, fmt.Errorf("release init container has no stable executable identity")
+					}
+					p.Containers = append(p.Containers, fmt.Sprintf("%s:%s:%v", objectStringField(c, "name"), id, c["restartCount"]))
+				}
+				if c["name"] == "fugue-drain-agent" && nestedObjectValue(c, "state", "running") != nil {
 					id := objectStringField(c, "containerID")
 					if id == "" || c["ready"] != true {
 						return out, fmt.Errorf("release container is not ready with a stable identity")
