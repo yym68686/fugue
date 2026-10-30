@@ -7,6 +7,8 @@ import (
 	"fugue/internal/model"
 )
 
+const ManagedPostgresAutoCPURequestActorPrefix = "fugue-controller/postgres-cpu-request-downscale"
+
 // normalizeManagedPostgresResizeTarget requires a complete resource envelope.
 // A zero CPU limit preserves an existing unlimited allowance. The live resize
 // preflight rejects removal of a configured limit; other fields stay positive.
@@ -42,6 +44,12 @@ func prepareManagedPostgresResizeOperation(app model.App, op *model.Operation) e
 	if err != nil || target == nil || target.Service == nil ||
 		strings.TrimSpace(target.ServiceID) == "" || (strings.TrimSpace(target.Service.OwnerAppID) != "" && !target.AppOwned) {
 		return ErrInvalidInput
+	}
+	// The public resize contract remains app-owned. Only the internal automatic
+	// CPU operation may enroll an exclusively bound standalone database.
+	if !target.AppOwned && (op.RequestedByType != model.ActorTypeSystem ||
+		!strings.HasPrefix(op.RequestedByID, ManagedPostgresAutoCPURequestActorPrefix+"/")) {
+		return ErrConflict
 	}
 	if target.Postgres.Suspended {
 		return ErrConflict

@@ -92,7 +92,13 @@ func TestManagedPostgresResizeExclusivelyBoundStandaloneService(t *testing.T) {
 		state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = ""
 	})
 	target := managedPostgresResizeTarget()
-	op, _, err := f.store.CreateOperationWithResult(managedPostgresResizeOperation(f, target))
+	request := managedPostgresResizeOperation(f, target)
+	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("public resize contract allowed standalone database: %v", err)
+	}
+	request.RequestedByType = model.ActorTypeSystem
+	request.RequestedByID = ManagedPostgresAutoCPURequestActorPrefix + "/cluster-uid/system-id"
+	op, _, err := f.store.CreateOperationWithResult(request)
 	if err != nil {
 		t.Fatalf("queue standalone resize: %v", err)
 	}
@@ -111,7 +117,8 @@ func TestManagedPostgresResizeExclusivelyBoundStandaloneService(t *testing.T) {
 		state.ServiceBindings = append(state.ServiceBindings, model.ServiceBinding{ID: "other-binding", TenantID: f.tenant.ID, AppID: "other-app", ServiceID: f.service.ID})
 	})
 	target.CPUMilliCores = 300
-	if _, _, err := f.store.CreateOperationWithResult(managedPostgresResizeOperation(f, target)); !errors.Is(err, ErrConflict) {
+	request.DesiredSpec.Postgres.RuntimeResources = &target
+	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
 		t.Fatalf("shared standalone target accepted: %v", err)
 	}
 }

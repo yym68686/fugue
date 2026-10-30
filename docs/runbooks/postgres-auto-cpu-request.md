@@ -25,6 +25,8 @@ to a replacement database. Non-CPU envelope drift blocks automatic operations.
 
 App-owned databases and standalone databases exclusively bound to one app are
 supported. Shared databases and databases owned by a different app are refused.
+Standalone enrollment is internal to automatic CPU operations; the public
+manual resize endpoint retains its app-owned service contract.
 Store lifecycle locking and backup/import/restore admission remain in force.
 Execution uses the existing `/resize` operation with SQL probes and Pod UID,
 container start time, restart, resource convergence, and init-floor checks.

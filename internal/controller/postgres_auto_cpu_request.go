@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-const managedPostgresAutoCPUActor = "fugue-controller/postgres-cpu-request-downscale"
+const managedPostgresAutoCPUActor = store.ManagedPostgresAutoCPURequestActorPrefix
 const managedPostgresCPUUsageSampleKind = "right_sizing_backing_service_per_replica_v1"
 
 func managedPostgresCPUEnrollment(cfg config.ManagedPostgresInPlaceResizeConfig, serviceID, namespace, cluster string) *config.ManagedPostgresCPURequestTarget {
