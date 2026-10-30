@@ -365,7 +365,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 			return fmt.Errorf("managed app %s/%s rollout failed: %w", namespace, managedAppName, err)
 		}
 		if app.Spec.Replicas > 0 && len(backingServices) > 0 {
-			backingServicesReady, backingServiceMessage, backingServiceWatchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
+			backingServicesReady, backingServiceMessage, backingServiceWatchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, app, backingServices)
 			if err != nil {
 				return err
 			}
@@ -510,7 +510,7 @@ func (s *Service) waitForManagedBackingServiceLifecycle(ctx context.Context, app
 				return err
 			}
 		}
-		ready, message, watchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, matching, true)
+		ready, message, watchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, app, matching, true)
 		if err != nil {
 			return err
 		}
@@ -614,6 +614,7 @@ func (s *Service) managedBackingServicesRolloutReady(
 	ctx context.Context,
 	client *kubeClient,
 	namespace string,
+	app model.App,
 	deployments []runtime.ManagedBackingServiceDeployment,
 	strictSuspensionPodObservation ...bool,
 ) (bool, string, []kubeWatchTarget, error) {
@@ -647,6 +648,13 @@ func (s *Service) managedBackingServicesRolloutReady(
 			}
 			if err == nil {
 				watchTargets = append(watchTargets, managedPostgresPodRolloutWatchTargets(namespace, deployment.ResourceName, podSnapshot.Metadata.ResourceVersion)...)
+			}
+			// Active operations skip background reconciliation. Resolve obsolete
+			// local replicas before readiness can wait on their own scale-down.
+			if found && podsListed {
+				if err := retainUnscheduledMigrationReplica(ctx, client, namespace, app, deployment, cluster, pods); err != nil {
+					return false, "", watchTargets, fmt.Errorf("converge migrated database replicas: %w", err)
+				}
 			}
 			if len(pods) > 0 {
 				if failureMessage := managedPostgresPodFailureMessage(pods); failureMessage != "" {

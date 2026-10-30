@@ -13,7 +13,7 @@ import (
 )
 
 func TestMigrationRetentionKeepsSourceVolumeAndOnlyRemovesUnstartedReplica(t *testing.T) {
-	for _, scenario := range []string{"retain", "implicit-class", "resume-retained", "primary-unready", "same-class", "another-user", "pending-job", "foreign-claim", "claim-replaced", "cluster-changed", "pod-assigned", "conflict"} {
+	for _, scenario := range []string{"retain", "active-rollout", "implicit-class", "resume-retained", "primary-unready", "same-class", "another-user", "pending-job", "foreign-claim", "claim-replaced", "cluster-changed", "pod-assigned", "conflict"} {
 		t.Run(scenario, func(t *testing.T) {
 			var cluster kubeCloudNativePGCluster
 			json.Unmarshal([]byte(`{"metadata":{"name":"db","uid":"cluster","generation":2,"labels":{"app.kubernetes.io/managed-by":"fugue","fugue.pro/tenant-id":"tenant","fugue.pro/project-id":"project","fugue.pro/backing-service-id":"service"}},"spec":{"instances":1,"storage":{"storageClass":"replicated"}},"status":{"instances":3,"readyInstances":2,"currentPrimary":"db-3","targetPrimary":"db-3"}}`), &cluster)
@@ -21,7 +21,8 @@ func TestMigrationRetentionKeepsSourceVolumeAndOnlyRemovesUnstartedReplica(t *te
 				cluster.Spec.Storage.StorageClass = ""
 			}
 			var primary, old kubePod
-			json.Unmarshal([]byte(`{"metadata":{"name":"db-3","uid":"primary","ownerReferences":[{"apiVersion":"postgresql.cnpg.io/v1","kind":"Cluster","uid":"cluster"}]},"spec":{"nodeName":"destination"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}`), &primary)
+			primaryJSON := `{"metadata":{"name":"db-3","uid":"primary","ownerReferences":[{"apiVersion":"postgresql.cnpg.io/v1","kind":"Cluster","uid":"cluster"}]},"spec":{"nodeName":"destination"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}`
+			json.Unmarshal([]byte(primaryJSON), &primary)
 			oldJSON := `{"metadata":{"name":"db-1","uid":"old-pod","resourceVersion":"7","ownerReferences":[{"apiVersion":"postgresql.cnpg.io/v1","kind":"Cluster","uid":"cluster"}]},"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"db-1"}}]},"status":{"phase":"Pending"}}`
 			json.Unmarshal([]byte(oldJSON), &old)
 			if scenario == "primary-unready" {
@@ -55,6 +56,9 @@ func TestMigrationRetentionKeepsSourceVolumeAndOnlyRemovesUnstartedReplica(t *te
 					w.Write([]byte(`{"spec":{"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["source"]}]}]}}}}`))
 				case strings.HasSuffix(r.URL.Path, "/pods"):
 					items := []any{}
+					if scenario == "active-rollout" && r.URL.Query().Get("labelSelector") != "" {
+						items = []any{json.RawMessage(primaryJSON), json.RawMessage(oldJSON)}
+					}
 					if scenario == "another-user" {
 						items = append(items, map[string]any{"metadata": map[string]string{"uid": "backup"}, "spec": old.Spec})
 					}
@@ -106,9 +110,19 @@ func TestMigrationRetentionKeepsSourceVolumeAndOnlyRemovesUnstartedReplica(t *te
 			defer srv.Close()
 			app := model.App{ID: "app", TenantID: "tenant", ProjectID: "project"}
 			deployment := runtime.ManagedBackingServiceDeployment{ServiceID: "service", ResourceName: "db", DesiredInstances: 1, StorageClassName: cluster.Spec.Storage.StorageClass}
-			err := retainUnscheduledMigrationReplica(context.Background(), &kubeClient{baseURL: srv.URL, client: srv.Client()}, "tenant", app, deployment, cluster, []kubePod{primary, old})
+			var err error
+			if scenario == "active-rollout" {
+				deployment.ResourceKind = runtime.CloudNativePGClusterKind
+				var ready bool
+				ready, _, _, err = (&Service{}).managedBackingServicesRolloutReady(context.Background(), &kubeClient{baseURL: srv.URL, client: srv.Client()}, "tenant", app, []runtime.ManagedBackingServiceDeployment{deployment})
+				if ready {
+					t.Fatal("rollout must still wait for observed scale-down")
+				}
+			} else {
+				err = retainUnscheduledMigrationReplica(context.Background(), &kubeClient{baseURL: srv.URL, client: srv.Client()}, "tenant", app, deployment, cluster, []kubePod{primary, old})
+			}
 			want := 0
-			if scenario == "retain" || scenario == "implicit-class" {
+			if scenario == "retain" || scenario == "implicit-class" || scenario == "active-rollout" {
 				want = 1
 			}
 			wantDeletes := want

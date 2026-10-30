@@ -2094,7 +2094,7 @@ func TestManagedBackingServicesRolloutRequiresZeroObservedPodsForSuspension(t *t
 		Suspended:        true,
 	}}
 
-	ready, message, _, err := service.managedBackingServicesRolloutReady(context.Background(), client, namespace, deployments)
+	ready, message, _, err := service.managedBackingServicesRolloutReady(context.Background(), client, namespace, model.App{}, deployments)
 	if err != nil {
 		t.Fatalf("check suspension rollout: %v", err)
 	}
@@ -2103,7 +2103,7 @@ func TestManagedBackingServicesRolloutRequiresZeroObservedPodsForSuspension(t *t
 	}
 
 	remainingPods.Store(0)
-	ready, message, _, err = service.managedBackingServicesRolloutReady(context.Background(), client, namespace, deployments)
+	ready, message, _, err = service.managedBackingServicesRolloutReady(context.Background(), client, namespace, model.App{}, deployments)
 	if err != nil {
 		t.Fatalf("check completed suspension rollout: %v", err)
 	}
@@ -2112,7 +2112,7 @@ func TestManagedBackingServicesRolloutRequiresZeroObservedPodsForSuspension(t *t
 	}
 
 	denyPodObservation.Store(true)
-	ready, _, _, err = service.managedBackingServicesRolloutReady(context.Background(), client, namespace, deployments, true)
+	ready, _, _, err = service.managedBackingServicesRolloutReady(context.Background(), client, namespace, model.App{}, deployments, true)
 	if err == nil || !strings.Contains(err.Error(), "cannot verify zero database pods") {
 		t.Fatalf("expected strict suspension verification to reject unavailable pod evidence, ready=%v err=%v", ready, err)
 	}

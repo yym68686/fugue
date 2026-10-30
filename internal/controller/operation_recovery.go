@@ -189,7 +189,7 @@ func (s *Service) observeRecoveredDeployment(ctx context.Context, app model.App,
 		}
 		backing := runtime.ManagedBackingServiceDeploymentsWithPlacements(app, scheduling, placements)
 		if len(backing) > 0 {
-			if ready, _, _, err = s.managedBackingServicesRolloutReady(ctx, client, namespace, backing); err != nil || !ready {
+			if ready, _, _, err = s.managedBackingServicesRolloutReady(ctx, client, namespace, app, backing); err != nil || !ready {
 				return false, err
 			}
 		}
