@@ -14,114 +14,128 @@ import (
 )
 
 func TestAppServiceWorkloadMigrationOrdersAndRecoversWrites(t *testing.T) {
-	for _, paused := range []bool{false, true} {
-		for _, failPodPatch := range []bool{false, true} {
-			t.Run(fmt.Sprintf("paused=%t/retry=%t", paused, failPodPatch), func(t *testing.T) {
-				labels := map[string]string{runtime.FugueLabelAppID: "app_test", runtime.FugueLabelTenantID: "tenant_test", runtime.FugueLabelManagedBy: "fugue"}
-				meta := func(name, uid string) map[string]any {
-					return map[string]any{"name": name, "uid": uid, "resourceVersion": "1", "generation": 1, "labels": labels}
-				}
-				owner := func(kind, name, uid string) []map[string]any {
-					return []map[string]any{{"apiVersion": "apps/v1", "kind": kind, "name": name, "uid": uid, "controller": true}}
-				}
-				deployment := map[string]any{"metadata": meta("workload", "deployment-uid"), "spec": map[string]any{"paused": paused, "replicas": 1, "selector": map[string]any{"matchLabels": labels}, "template": map[string]any{"metadata": map[string]any{"labels": labels}}}, "status": map[string]any{"observedGeneration": 1, "readyReplicas": 1}}
-				rs := map[string]any{"metadata": meta("revision", "rs-uid"), "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"labels": labels}}}}
-				objectMapField(rs, "metadata")["ownerReferences"] = owner("Deployment", "workload", "deployment-uid")
-				pod := map[string]any{"metadata": meta("pod", "pod-uid"), "status": map[string]any{"conditions": []map[string]any{{"type": "Ready", "status": "True"}}}}
-				objectMapField(pod, "metadata")["ownerReferences"] = owner("ReplicaSet", "revision", "rs-uid")
-				foreign := map[string]any{"metadata": meta("candidate-pod", "candidate-pod-uid")}
-				objectMapField(foreign, "metadata")["ownerReferences"] = owner("ReplicaSet", "revision", "replaced-rs-uid")
-				// JSON cloning prevents test maps from sharing label references.
-				deployment, rs, pod, foreign = cloneKubeMap(deployment), cloneKubeMap(rs), cloneKubeMap(pod), cloneKubeMap(foreign)
-				selectorBefore := cloneKubeMap(objectMapField(objectMapField(deployment, "spec"), "selector"))
-				serviceApplied, failed := false, false
-				writes := 0
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					var object map[string]any
-					switch {
-					case strings.HasSuffix(req.URL.Path, "/deployments/workload"):
-						object = deployment
-					case strings.HasSuffix(req.URL.Path, "/replicasets/revision"):
-						object = rs
-					case strings.HasSuffix(req.URL.Path, "/pods/pod"):
-						object = pod
-					case strings.HasSuffix(req.URL.Path, "/replicasets"):
-						_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{rs}})
-						return
-					case strings.HasSuffix(req.URL.Path, "/pods"):
-						_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{pod, foreign}})
-						return
-					case strings.HasSuffix(req.URL.Path, "/services/service"):
-						if req.Method == http.MethodGet {
+	for _, oldEpoch := range []string{"", "3"} {
+		for _, paused := range []bool{false, true} {
+			for _, failPodPatch := range []bool{false, true} {
+				t.Run(fmt.Sprintf("epoch=%s/paused=%t/retry=%t", oldEpoch, paused, failPodPatch), func(t *testing.T) {
+					labels := map[string]string{runtime.FugueLabelAppID: "app_test", runtime.FugueLabelTenantID: "tenant_test", runtime.FugueLabelManagedBy: "fugue", runtime.FugueLabelFenceEpoch: "3"}
+					if oldEpoch == "" {
+						delete(labels, runtime.FugueLabelFenceEpoch)
+					}
+					meta := func(name, uid string) map[string]any {
+						return map[string]any{"name": name, "uid": uid, "resourceVersion": "1", "generation": 1, "labels": labels}
+					}
+					owner := func(kind, name, uid string) []map[string]any {
+						return []map[string]any{{"apiVersion": "apps/v1", "kind": kind, "name": name, "uid": uid, "controller": true}}
+					}
+					deployment := map[string]any{"metadata": meta("workload", "deployment-uid"), "spec": map[string]any{"paused": paused, "replicas": 1, "selector": map[string]any{"matchLabels": labels}, "template": map[string]any{"metadata": map[string]any{"labels": labels}}}, "status": map[string]any{"observedGeneration": 1, "readyReplicas": 1}}
+					rs := map[string]any{"metadata": meta("revision", "rs-uid"), "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"labels": labels}}}}
+					objectMapField(rs, "metadata")["ownerReferences"] = owner("Deployment", "workload", "deployment-uid")
+					pod := map[string]any{"metadata": meta("pod", "pod-uid"), "status": map[string]any{"conditions": []map[string]any{{"type": "Ready", "status": "True"}}}}
+					objectMapField(pod, "metadata")["ownerReferences"] = owner("ReplicaSet", "revision", "rs-uid")
+					foreign := map[string]any{"metadata": meta("candidate-pod", "candidate-pod-uid")}
+					objectMapField(foreign, "metadata")["ownerReferences"] = owner("ReplicaSet", "revision", "replaced-rs-uid")
+					// JSON cloning prevents test maps from sharing label references.
+					deployment, rs, pod, foreign = cloneKubeMap(deployment), cloneKubeMap(rs), cloneKubeMap(pod), cloneKubeMap(foreign)
+					selectorBefore := cloneKubeMap(objectMapField(objectMapField(deployment, "spec"), "selector"))
+					serviceApplied, failed := false, false
+					writes := 0
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						var object map[string]any
+						switch {
+						case strings.HasSuffix(req.URL.Path, "/deployments/workload"):
+							object = deployment
+						case strings.HasSuffix(req.URL.Path, "/replicasets/revision"):
+							object = rs
+						case strings.HasSuffix(req.URL.Path, "/pods/pod"):
+							object = pod
+						case strings.HasSuffix(req.URL.Path, "/replicasets"):
+							_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{rs}})
+							return
+						case strings.HasSuffix(req.URL.Path, "/pods"):
+							_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{pod, foreign}})
+							return
+						case strings.HasSuffix(req.URL.Path, "/services/service"):
+							if req.Method == http.MethodGet {
+								http.NotFound(w, req)
+								return
+							}
+							if objectStringMapValue(objectMapField(pod, "metadata")["labels"])[runtime.FugueLabelAppWorkload] != "workload" {
+								t.Error("Service applied before existing Pod was labeled")
+							}
+							serviceApplied = true
+							_, _ = w.Write([]byte(`{}`))
+							return
+						default:
+							t.Errorf("unexpected request: %s %s", req.Method, req.URL)
 							http.NotFound(w, req)
 							return
 						}
-						if objectStringMapValue(objectMapField(pod, "metadata")["labels"])[runtime.FugueLabelAppWorkload] != "workload" {
-							t.Error("Service applied before existing Pod was labeled")
-						}
-						serviceApplied = true
-						_, _ = w.Write([]byte(`{}`))
-						return
-					default:
-						t.Errorf("unexpected request: %s %s", req.Method, req.URL)
-						http.NotFound(w, req)
-						return
-					}
-					if req.Method == http.MethodPatch {
-						var patch map[string]any
-						_ = json.NewDecoder(req.Body).Decode(&patch)
-						for _, key := range []string{"uid", "resourceVersion"} {
-							if objectMapField(patch, "metadata")[key] != objectMapField(object, "metadata")[key] {
-								t.Error("unguarded object patch", key)
+						if req.Method == http.MethodPatch {
+							var patch map[string]any
+							_ = json.NewDecoder(req.Body).Decode(&patch)
+							for _, key := range []string{"uid", "resourceVersion"} {
+								if objectMapField(patch, "metadata")[key] != objectMapField(object, "metadata")[key] {
+									t.Error("unguarded object patch", key)
+								}
+							}
+							if failPodPatch && !failed && strings.HasSuffix(req.URL.Path, "/pods/pod") {
+								failed = true
+								http.Error(w, "interrupted write", http.StatusServiceUnavailable)
+								return
+							}
+							mergeWorkloadTestPatch(object, patch)
+							writes++
+							objectMapField(object, "metadata")["resourceVersion"] = fmt.Sprint(writes + 1)
+							if strings.HasSuffix(req.URL.Path, "/deployments/workload") {
+								objectMapField(object, "metadata")["generation"] = float64(writes + 1)
+								objectMapField(object, "status")["observedGeneration"] = float64(writes + 1)
 							}
 						}
-						if failPodPatch && !failed && strings.HasSuffix(req.URL.Path, "/pods/pod") {
-							failed = true
-							http.Error(w, "interrupted write", http.StatusServiceUnavailable)
-							return
+						_ = json.NewEncoder(w).Encode(object)
+					}))
+					defer server.Close()
+					service := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": "service", "namespace": "tenant"}, "spec": map[string]any{"selector": map[string]string{runtime.FugueLabelAppID: "app_test", runtime.FugueLabelTenantID: "tenant_test", runtime.FugueLabelAppWorkload: "workload", runtime.FugueLabelFenceEpoch: "7"}}}
+					client := &kubeClient{client: server.Client(), baseURL: server.URL}
+					err := client.applyObjects(context.Background(), []map[string]any{service})
+					if failPodPatch {
+						if err == nil || serviceApplied || objectStringMapValue(objectMapField(deployment, "metadata")["annotations"])[appWorkloadMigrationAnnotation] == "" {
+							t.Fatal("failed migration did not retain resumable state", err)
 						}
-						mergeWorkloadTestPatch(object, patch)
-						writes++
-						objectMapField(object, "metadata")["resourceVersion"] = fmt.Sprint(writes + 1)
-						if strings.HasSuffix(req.URL.Path, "/deployments/workload") {
-							objectMapField(object, "metadata")["generation"] = float64(writes + 1)
-							objectMapField(object, "status")["observedGeneration"] = float64(writes + 1)
+						client = &kubeClient{client: server.Client(), baseURL: server.URL}
+						err = client.resumeAppWorkloadMigration(context.Background(), "tenant", "workload", "app_test", "tenant_test")
+						if err == nil {
+							err = client.applyObjects(context.Background(), []map[string]any{service})
 						}
 					}
-					_ = json.NewEncoder(w).Encode(object)
-				}))
-				defer server.Close()
-				service := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": "service", "namespace": "tenant"}, "spec": map[string]any{"selector": map[string]string{runtime.FugueLabelAppID: "app_test", runtime.FugueLabelTenantID: "tenant_test", runtime.FugueLabelAppWorkload: "workload"}}}
-				client := &kubeClient{client: server.Client(), baseURL: server.URL}
-				err := client.applyObjects(context.Background(), []map[string]any{service})
-				if failPodPatch {
-					if err == nil || serviceApplied || objectStringMapValue(objectMapField(deployment, "metadata")["annotations"])[appWorkloadMigrationAnnotation] == "" {
-						t.Fatal("failed migration did not retain resumable state", err)
+					if err != nil || !serviceApplied {
+						t.Fatal("migration did not complete", err)
 					}
-					client = &kubeClient{client: server.Client(), baseURL: server.URL}
-					err = client.resumeAppWorkloadMigration(context.Background(), "tenant", "workload", "app_test", "tenant_test")
-					if err == nil {
-						err = client.applyObjects(context.Background(), []map[string]any{service})
+					if !reflect.DeepEqual(selectorBefore, objectMapField(objectMapField(deployment, "spec"), "selector")) || objectMapField(deployment, "spec")["paused"] != paused {
+						t.Fatal("changed immutable selector or original pause state")
 					}
-				}
-				if err != nil || !serviceApplied {
-					t.Fatal("migration did not complete", err)
-				}
-				if !reflect.DeepEqual(selectorBefore, objectMapField(objectMapField(deployment, "spec"), "selector")) || objectMapField(deployment, "spec")["paused"] != paused {
-					t.Fatal("changed immutable selector or original pause state")
-				}
-				if objectStringMapValue(objectMapField(foreign, "metadata")["labels"])[runtime.FugueLabelAppWorkload] != "" {
-					t.Fatal("labeled a Pod owned by another ReplicaSet UID")
-				}
-				if objectStringMapValue(nestedObjectValue(rs, "spec", "template", "metadata", "labels"))[runtime.FugueLabelAppWorkload] != "workload" {
-					t.Fatal("ReplicaSet cannot produce correctly labeled replacements")
-				}
-				beforeWrites := writes
-				if err := client.prepareAppServiceWorkloads(context.Background(), []map[string]any{service}); err != nil || writes != beforeWrites {
-					t.Fatal("completed migration was not idempotent", err)
-				}
-			})
+					if objectStringMapValue(objectMapField(foreign, "metadata")["labels"])[runtime.FugueLabelAppWorkload] != "" {
+						t.Fatal("labeled a Pod owned by another ReplicaSet UID")
+					}
+					if objectStringMapValue(nestedObjectValue(rs, "spec", "template", "metadata", "labels"))[runtime.FugueLabelAppWorkload] != "workload" {
+						t.Fatal("ReplicaSet cannot produce correctly labeled replacements")
+					}
+					for _, old := range []map[string]any{deployment, rs} {
+						if objectStringMapValue(nestedObjectValue(old, "spec", "template", "metadata", "labels"))[runtime.FugueLabelFenceEpoch] != oldEpoch {
+							t.Fatal("identity migration reactivated a fenced workload template")
+						}
+					}
+					if objectStringMapValue(objectMapField(pod, "metadata")["labels"])[runtime.FugueLabelFenceEpoch] != oldEpoch ||
+						objectStringMapValue(nestedObjectValue(service, "spec", "selector"))[runtime.FugueLabelFenceEpoch] != "7" {
+						t.Fatal("identity migration weakened the Service fence")
+					}
+					beforeWrites := writes
+					if err := client.prepareAppServiceWorkloads(context.Background(), []map[string]any{service}); err != nil || writes != beforeWrites {
+						t.Fatal("completed migration was not idempotent", err)
+					}
+				})
+			}
 		}
 	}
 }

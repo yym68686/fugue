@@ -101,7 +101,11 @@ func (c *kubeClient) prepareAppServiceWorkload(ctx context.Context, namespace, n
 	}
 	templateLabels := objectStringMapValue(nestedObjectValue(deployment, "spec", "template", "metadata", "labels"))
 	for key, value := range selector {
-		if key != runtime.FugueLabelAppWorkload && templateLabels[key] != value {
+		// The fencing epoch is a rollout generation, not workload ownership.
+		// Validate/migrate only the stable identity here. Never copy a newer
+		// epoch onto an old Pod: the Service must keep excluding fenced Pods
+		// until the separately guarded Deployment transition creates its target.
+		if key != runtime.FugueLabelAppWorkload && key != runtime.FugueLabelFenceEpoch && templateLabels[key] != value {
 			return fmt.Errorf("Service selector differs from Deployment template for label %s", key)
 		}
 	}

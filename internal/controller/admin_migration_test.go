@@ -53,6 +53,19 @@ func TestAdministratorMigrationAuthorityAndSafetyBoundary(t *testing.T) {
 		})
 	}
 	op := model.Operation{Type: model.OperationTypeMigrate, RequestedByType: model.ActorTypeBootstrap, RequestedByID: "bootstrap-admin"}
+	for _, replicas := range []int{0, 1, 2} {
+		stop := model.Operation{Type: model.OperationTypeScale, RequestedByType: model.ActorTypeBootstrap, RequestedByID: "bootstrap-admin", DesiredReplicas: &replicas}
+		if got := svc.administratorMigrationOperation(stop); got != (replicas == 0) {
+			t.Fatalf("scale %d maintenance authority=%t", replicas, got)
+		}
+		stop.RequestedByID = "automatic-recovery"
+		if svc.administratorMigrationOperation(stop) {
+			t.Fatal("automated scale gained maintenance authority")
+		}
+	}
+	if svc.administratorMigrationOperation(model.Operation{Type: model.OperationTypeScale, RequestedByType: model.ActorTypeBootstrap, RequestedByID: "bootstrap-admin"}) {
+		t.Fatal("scale without a replica intent gained maintenance authority")
+	}
 	desired.Spec.Replicas = 2
 	if decision := svc.zeroDowntimeRolloutGuardDecision(op, current, desired, runtime.SchedulingConstraints{}); !decision.Refused {
 		t.Fatal("administrator migration bypassed single-writer data protection")
@@ -71,11 +84,11 @@ func TestAdministratorMigrationLowLevelScopeCannotEscapeAppIdentity(t *testing.T
 		"labels":      map[string]string{runtime.FugueLabelAppID: "sample", runtime.FugueLabelTenantID: "owner"},
 		"annotations": map[string]string{runtime.FugueAnnotationZeroDowntimeRequired: "true"},
 	}}
-	ctx := context.WithValue(context.Background(), adminMigrationApplyKey{}, adminMigrationApplyIdentity{"sample", "owner"})
+	ctx := context.WithValue(context.Background(), adminMigrationApplyKey{}, adminMigrationApplyIdentity{appID: "sample", tenantID: "owner"})
 	if deploymentRequiresZeroDowntimeForApply(ctx, object) {
 		t.Fatal("operation maintenance authority lost")
 	}
-	for _, identity := range []adminMigrationApplyIdentity{{"other", "owner"}, {"sample", "other"}, {}} {
+	for _, identity := range []adminMigrationApplyIdentity{{appID: "other", tenantID: "owner"}, {appID: "sample", tenantID: "other"}, {}} {
 		ctx := context.WithValue(context.Background(), adminMigrationApplyKey{}, identity)
 		if !deploymentRequiresZeroDowntimeForApply(ctx, object) {
 			t.Fatal("maintenance authority escaped app or tenant", identity)
@@ -83,6 +96,14 @@ func TestAdministratorMigrationLowLevelScopeCannotEscapeAppIdentity(t *testing.T
 	}
 	if !deploymentRequiresZeroDowntimeForApply(context.Background(), object) {
 		t.Fatal("ordinary reconciliation gained maintenance authority")
+	}
+	stop := context.WithValue(context.Background(), adminMigrationApplyKey{}, adminMigrationApplyIdentity{appID: "sample", tenantID: "owner", stopOnly: true})
+	for _, replicas := range []any{nil, 1, float64(1), "0", -1, 0, float64(0)} {
+		object["spec"] = map[string]any{"replicas": replicas}
+		allow := replicas == 0 || replicas == float64(0)
+		if got := !deploymentRequiresZeroDowntimeForApply(stop, object); got != allow {
+			t.Fatalf("stop authority escaped zero replicas: replicas=%#v allow=%t", replicas, got)
+		}
 	}
 }
 
@@ -172,5 +193,17 @@ func TestAdministratorMigrationResumptionRequiresStoredActiveAuthority(t *testin
 		if _, ok := svc.activeAdministratorMigration(ctx, app); ok {
 			t.Fatal("completed operation retained maintenance authority")
 		}
+	}
+	zero := 0
+	stop, err := st.CreateOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeScale, RequestedByType: model.ActorTypeBootstrap, RequestedByID: "bootstrap-admin", DesiredReplicas: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := svc.activeAdministratorMigration(context.Background(), app); ok {
+		t.Fatal("queued stop authorized applying a serving snapshot")
+	}
+	app.Spec.Replicas = 0
+	if found, ok := svc.activeAdministratorMigration(context.Background(), app); !ok || found.ID != stop.ID {
+		t.Fatal("explicit administrator stop lost maintenance authority")
 	}
 }

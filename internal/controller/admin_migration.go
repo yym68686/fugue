@@ -15,6 +15,13 @@ func (s *Service) administratorMigrationOperation(op model.Operation) bool {
 	switch op.Type {
 	case model.OperationTypeMigrate, model.OperationTypeDatabaseSwitchover,
 		model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
+	case model.OperationTypeScale:
+		// An explicit administrator stop is maintenance intent. It must not
+		// require a zero-downtime rollout merely to retire the old Deployment.
+		// Starting/scaling a serving workload does not inherit this exception.
+		if op.DesiredReplicas == nil || *op.DesiredReplicas != 0 {
+			return false
+		}
 	default:
 		return false
 	}
@@ -42,6 +49,7 @@ func (s *Service) activeAdministratorMigration(ctx context.Context, app model.Ap
 	}
 	valid := func(op model.Operation) bool {
 		return op.AppID == app.ID && op.TenantID == app.TenantID &&
+			(op.Type != model.OperationTypeScale || app.Spec.Replicas == 0) &&
 			(op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning || op.Status == model.OperationStatusWaitingAgent) &&
 			s.administratorMigrationOperation(op)
 	}
@@ -64,11 +72,16 @@ func (s *Service) activeAdministratorMigration(ctx context.Context, app model.Ap
 }
 
 type adminMigrationApplyKey struct{}
-type adminMigrationApplyIdentity struct{ appID, tenantID string }
+type adminMigrationApplyIdentity struct {
+	appID, tenantID string
+	stopOnly        bool
+}
 
 func (s *Service) withAdministratorMigrationApply(ctx context.Context, app model.App) context.Context {
-	if _, ok := s.activeAdministratorMigration(ctx, app); ok {
-		return context.WithValue(ctx, adminMigrationApplyKey{}, adminMigrationApplyIdentity{app.ID, app.TenantID})
+	if op, ok := s.activeAdministratorMigration(ctx, app); ok {
+		return context.WithValue(ctx, adminMigrationApplyKey{}, adminMigrationApplyIdentity{
+			appID: app.ID, tenantID: app.TenantID, stopOnly: op.Type == model.OperationTypeScale,
+		})
 	}
 	return ctx
 }
@@ -79,6 +92,14 @@ func deploymentRequiresZeroDowntimeForApply(ctx context.Context, object map[stri
 	if ok && identity.appID != "" && identity.tenantID != "" &&
 		strings.TrimSpace(labels[runtime.FugueLabelAppID]) == identity.appID &&
 		strings.TrimSpace(labels[runtime.FugueLabelTenantID]) == identity.tenantID {
+		if identity.stopOnly {
+			// Missing replicas defaults to one in Kubernetes. Only an explicit
+			// zero in this exact Deployment is authorized by a stop operation.
+			replicas := nestedObjectValue(object, "spec", "replicas")
+			if !normalizedKubeValueEqual(replicas, 0) {
+				return deploymentRequiresZeroDowntime(object)
+			}
+		}
 		return false
 	}
 	return deploymentRequiresZeroDowntime(object)
