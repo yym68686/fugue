@@ -7,6 +7,11 @@ import (
 )
 
 const (
+	// A legacy physical_deleted_at only proved that Fugue's manifest was removed.
+	// This version additionally proves completion through Longhorn's finalizer.
+	BackupLonghornCleanupVersionKey = "longhorn_cleanup_version"
+	BackupLonghornCleanupVersion    = "1"
+
 	BackupScopePlatform = "platform"
 	BackupScopeTenant   = "tenant"
 	BackupScopeProject  = "project"

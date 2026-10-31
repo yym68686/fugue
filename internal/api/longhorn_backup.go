@@ -222,6 +222,7 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 		Metadata: map[string]string{
 			"backup_engine": "longhorn-snapshot", "backup_source": "longhorn-volume", "volume_name": volumeName,
 			"snapshot_name": snapshotName, "longhorn_backup_name": backupName, "longhorn_backup_url": status.URL,
+			"longhorn_namespace": longhornNS,
 			"backup_target_name": targetName, "storage_class": longhornPVCStorageClass(pvc),
 			"backup_target_url": backupTargetURL,
 			"local_staging":     "false", "database_replica": "false", "pg_dump": "false", "wal_required": "true",

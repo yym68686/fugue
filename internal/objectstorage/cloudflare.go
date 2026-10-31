@@ -81,6 +81,44 @@ func (c *Client) Verify(ctx context.Context) error {
 	}
 	return c.call(ctx, "GET", "/tokens/permission_groups", nil, nil)
 }
+
+// ListBuckets does not enumerate application objects or incur an S3 full scan.
+func (c *Client) ListBuckets(ctx context.Context) ([]string, error) {
+	var result struct {
+		Buckets []struct {
+			Name string `json:"name"`
+		} `json:"buckets"`
+		Cursor string `json:"cursor"`
+	}
+	names := []string{}
+	cursor := ""
+	seen := map[string]bool{}
+	for page := 0; page < 20; page++ {
+		result.Cursor = ""
+		result.Buckets = nil
+		q := url.Values{"per_page": {"1000"}}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		if err := c.call(ctx, http.MethodGet, "/r2/buckets?"+q.Encode(), nil, &result); err != nil {
+			return nil, err
+		}
+		for _, b := range result.Buckets {
+			if b.Name != "" && !seen[b.Name] {
+				names = append(names, b.Name)
+				seen[b.Name] = true
+			}
+		}
+		if result.Cursor == "" {
+			return names, nil
+		}
+		if result.Cursor == cursor {
+			return nil, errors.New("provider repeated bucket cursor")
+		}
+		cursor = result.Cursor
+	}
+	return nil, errors.New("bucket inventory exceeded page bound")
+}
 func (c *Client) EnsureBucket(ctx context.Context, bucket string) error {
 	var b struct {
 		Name string `json:"name"`

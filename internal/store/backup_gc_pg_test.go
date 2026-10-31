@@ -35,7 +35,7 @@ func TestPGBackupArtifactPhysicalCleanupIsRestoreSafeAndDurable(t *testing.T) {
 	}
 
 	completedAt := cutoff.Add(time.Minute)
-	mock.ExpectExec(`UPDATE fugue_backup_artifacts SET physical_deleted_at = COALESCE\(physical_deleted_at, \$2\), physical_delete_attempted_at = \$2, physical_delete_error = '' WHERE id = \$1 AND status IN \('deleted', 'expired'\) AND protected = FALSE`).
+	mock.ExpectExec(`(?s)UPDATE fugue_backup_artifacts SET physical_deleted_at = \$2,.*longhorn_cleanup_version.*WHERE id = \$1 AND status IN \('deleted', 'expired'\) AND protected = FALSE`).
 		WithArgs("artifact-1", completedAt).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := stateStore.MarkBackupArtifactPhysicalDeleted("artifact-1", completedAt); err != nil {
@@ -43,7 +43,7 @@ func TestPGBackupArtifactPhysicalCleanupIsRestoreSafeAndDurable(t *testing.T) {
 	}
 
 	failureAt := completedAt.Add(time.Minute)
-	mock.ExpectExec(`UPDATE fugue_backup_artifacts SET physical_delete_attempted_at = \$2, physical_delete_error = \$3 WHERE id = \$1 AND physical_deleted_at IS NULL AND status IN \('deleted', 'expired'\) AND protected = FALSE`).
+	mock.ExpectExec(`(?s)UPDATE fugue_backup_artifacts SET physical_delete_attempted_at = \$2, physical_delete_error = \$3,.*longhorn_cleanup_version.*status IN \('deleted', 'expired'\) AND protected = FALSE`).
 		WithArgs("artifact-2", failureAt, "access denied").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := stateStore.RecordBackupArtifactPhysicalCleanupFailure("artifact-2", failureAt, "access denied"); err != nil {

@@ -110,6 +110,7 @@ type BackupArtifactFilter struct {
 type BackupArtifactCleanupFilter struct {
 	Before time.Time
 	Limit  int
+	Kind   string
 }
 
 // BackupRunObjectCleanupFilter describes terminal backup runs whose upload
@@ -1850,7 +1851,10 @@ func (s *Store) ListBackupArtifactCleanupCandidates(filter BackupArtifactCleanup
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, artifact := range state.BackupArtifacts {
 			artifact = model.NormalizeBackupArtifact(artifact)
-			if _, ok := cleaned[artifact.ID]; ok {
+			if _, ok := cleaned[artifact.ID]; ok && !backupArtifactNeedsEngineCleanup(artifact) {
+				continue
+			}
+			if filter.Kind != "" && artifact.Kind != filter.Kind {
 				continue
 			}
 			if artifact.Protected || artifact.DeletedAt == nil || artifact.DeletedAt.After(filter.Before) {
@@ -1909,6 +1913,22 @@ func (s *Store) MarkBackupArtifactPhysicalDeleted(id string, deletedAt time.Time
 	if artifact.Protected || (artifact.Status != model.BackupArtifactStatusDeleted && artifact.Status != model.BackupArtifactStatusExpired) {
 		return ErrConflict
 	}
+	if artifact.Kind == model.BackupArtifactKindLonghornSnapshot {
+		if err := s.withLockedState(true, func(state *model.State) error {
+			for i := range state.BackupArtifacts {
+				if state.BackupArtifacts[i].ID == id {
+					if state.BackupArtifacts[i].Manifest.Metadata == nil {
+						state.BackupArtifacts[i].Manifest.Metadata = map[string]string{}
+					}
+					state.BackupArtifacts[i].Manifest.Metadata[model.BackupLonghornCleanupVersionKey] = model.BackupLonghornCleanupVersion
+					return nil
+				}
+			}
+			return ErrNotFound
+		}); err != nil {
+			return err
+		}
+	}
 	s.backupArtifactPhysicalCleanupMu.Lock()
 	if s.backupArtifactPhysicalCleanup == nil {
 		s.backupArtifactPhysicalCleanup = map[string]time.Time{}
@@ -1951,8 +1971,15 @@ func (s *Store) RecordBackupArtifactPhysicalCleanupFailure(id string, attemptedA
 		s.backupArtifactPhysicalAttempts = map[string]time.Time{}
 	}
 	s.backupArtifactPhysicalAttempts[id] = attemptedAt
+	if backupArtifactNeedsEngineCleanup(artifact) {
+		delete(s.backupArtifactPhysicalCleanup, id)
+	}
 	s.backupArtifactPhysicalCleanupMu.Unlock()
 	return nil
+}
+
+func backupArtifactNeedsEngineCleanup(artifact model.BackupArtifact) bool {
+	return artifact.Kind == model.BackupArtifactKindLonghornSnapshot && artifact.Manifest.Metadata[model.BackupLonghornCleanupVersionKey] != model.BackupLonghornCleanupVersion
 }
 
 func backupArtifactHasInFlightRestore(state *model.State, artifactID string) bool {
@@ -4863,7 +4890,8 @@ WHERE id = $1
 func (s *Store) pgListBackupArtifactCleanupCandidates(filter BackupArtifactCleanupFilter) ([]model.BackupArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	query := backupArtifactSelectSQL() + ` WHERE status IN ('deleted', 'expired') AND protected = FALSE AND deleted_at IS NOT NULL AND deleted_at <= $1 AND physical_deleted_at IS NULL
+	query := backupArtifactSelectSQL() + ` WHERE status IN ('deleted', 'expired') AND protected = FALSE AND deleted_at IS NOT NULL AND deleted_at <= $1
+		AND (physical_deleted_at IS NULL OR (kind = 'longhorn-snapshot' AND COALESCE(manifest_json->'metadata'->>'longhorn_cleanup_version', '') <> '1'))
 		AND NOT EXISTS (
 			SELECT 1 FROM fugue_backup_restore_plans p
 			WHERE p.artifact_id = fugue_backup_artifacts.id
@@ -4876,6 +4904,10 @@ func (s *Store) pgListBackupArtifactCleanupCandidates(filter BackupArtifactClean
 		)
 		ORDER BY physical_delete_attempted_at ASC NULLS FIRST, deleted_at ASC, id ASC`
 	args := []any{filter.Before, filter.Limit}
+	if filter.Kind != "" {
+		query = strings.Replace(query, "ORDER BY physical_delete_attempted_at", "AND kind = $3 ORDER BY physical_delete_attempted_at", 1)
+		args = append(args, filter.Kind)
+	}
 	query += ` LIMIT $2`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -4896,7 +4928,9 @@ func (s *Store) pgListBackupArtifactCleanupCandidates(filter BackupArtifactClean
 func (s *Store) pgMarkBackupArtifactPhysicalDeleted(id string, deletedAt time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	result, err := s.db.ExecContext(ctx, `UPDATE fugue_backup_artifacts SET physical_deleted_at = COALESCE(physical_deleted_at, $2), physical_delete_attempted_at = $2, physical_delete_error = '' WHERE id = $1 AND status IN ('deleted', 'expired') AND protected = FALSE`, id, deletedAt)
+	result, err := s.db.ExecContext(ctx, `UPDATE fugue_backup_artifacts SET physical_deleted_at = $2, physical_delete_attempted_at = $2, physical_delete_error = '',
+		manifest_json = CASE WHEN kind = 'longhorn-snapshot' THEN jsonb_set(manifest_json::jsonb, '{metadata}', (CASE WHEN jsonb_typeof(manifest_json::jsonb->'metadata') = 'object' THEN manifest_json::jsonb->'metadata' ELSE '{}'::jsonb END) || '{"longhorn_cleanup_version":"1"}'::jsonb) ELSE manifest_json::jsonb END
+		WHERE id = $1 AND status IN ('deleted', 'expired') AND protected = FALSE`, id, deletedAt)
 	if err != nil {
 		return mapDBErr(err)
 	}
@@ -4913,7 +4947,9 @@ func (s *Store) pgMarkBackupArtifactPhysicalDeleted(id string, deletedAt time.Ti
 func (s *Store) pgRecordBackupArtifactPhysicalCleanupFailure(id string, attemptedAt time.Time, message string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	result, err := s.db.ExecContext(ctx, `UPDATE fugue_backup_artifacts SET physical_delete_attempted_at = $2, physical_delete_error = $3 WHERE id = $1 AND physical_deleted_at IS NULL AND status IN ('deleted', 'expired') AND protected = FALSE`, id, attemptedAt, message)
+	result, err := s.db.ExecContext(ctx, `UPDATE fugue_backup_artifacts SET physical_delete_attempted_at = $2, physical_delete_error = $3,
+		physical_deleted_at = CASE WHEN kind = 'longhorn-snapshot' THEN NULL ELSE physical_deleted_at END
+		WHERE id = $1 AND (physical_deleted_at IS NULL OR (kind = 'longhorn-snapshot' AND COALESCE(manifest_json->'metadata'->>'longhorn_cleanup_version', '') <> '1')) AND status IN ('deleted', 'expired') AND protected = FALSE`, id, attemptedAt, message)
 	if err != nil {
 		return mapDBErr(err)
 	}

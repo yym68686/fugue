@@ -70,6 +70,41 @@ limit or provider invoice. Multipart pending bytes, request charges, and billing
 reconciliation are not represented as measured zero. Measurements are explicit,
 so direct R2 traffic does not load the Fugue control plane.
 
+## Platform inventory and Longhorn reconciliation
+
+Platform administrators (not tenant `storage.admin` keys) can inspect account
+bucket names, configured project/data/backup namespaces, cached backup usage,
+CNPG destinations and Longhorn cleanup receipts:
+
+```
+fugue admin storage overview
+fugue admin storage ls --json
+fugue admin storage reconcile --json
+```
+
+All three commands are read-only and use `GET /v1/admin/storage`. `reconcile`
+reports the background collector's observations; it does not start deletion.
+The web console exposes the same view at `/admin/storage`. Inventory refresh
+does not scan bucket objects. Source failures and the bounded 500-artifact
+Longhorn inventory are explicit; unknown measurements and costs are not zero.
+The current endpoint does not import Cloudflare invoices or request metrics.
+Cached backup usage covers only configured backup namespaces, not the account
+total, CNPG, or unrelated project buckets.
+
+The collector treats Longhorn snapshots differently from ordinary objects.
+Only deleted/expired, unprotected artifacts outside the one-hour grace period
+and without live restore/shared-artifact references are eligible. It validates
+the repository and remote backup identity, then deletes the exact Backup CR
+with UID/resource-version preconditions. Longhorn's finalizer owns remote
+deletion and shared-block GC. A deletion request is pending, not success;
+Fugue records completion only on a subsequent absent-CR observation. No R2
+repository block is directly deleted. Do not remove Longhorn finalizers by hand.
+
+Old physical-deletion receipts without `longhorn_cleanup_version=1` are retried
+through this engine-aware flow. Failed steps keep the manifest and remain
+retryable. Untracked remote backups are displayed but never automatically
+deleted; reconcile ownership before planning any manual retirement.
+
 ## Verification
 
 Normal tests use an isolated fake provider and file-backed state. The opt-in

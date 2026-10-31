@@ -13835,6 +13835,24 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/storage:
+    get:
+      operationId: getAdminStorageOverview
+      summary: Inspect platform object storage
+      description: Platform administrators only. Read-only inventory of configured namespaces, provider buckets, cached usage and bounded Longhorn reconciliation. Never scans S3 objects or deletes data. Unknown metrics and billing remain unavailable, not zero. Provider or Kubernetes failures are explicit partial-result warnings.
+      tags: [Object Storage, Admin]
+      x-fugue-handler: handleGetAdminStorageOverview
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Inventory with per-source completeness and observation timestamps
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminStorageOverview'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
   /v1/admin/object-storage:
     get:
       operationId: getObjectStorageConfig
@@ -17289,6 +17307,60 @@ components:
       properties:
         enabled: {type: boolean}
         quota_bytes: {type: integer, format: int64, minimum: 0}
+    AdminStorageNamespace:
+      type: object
+      required: [kind, resource_id, name, bucket, prefix, tenant_id, project_id, status]
+      properties:
+        kind: {type: string}
+        resource_id: {type: string}
+        name: {type: string}
+        bucket: {type: string}
+        prefix: {type: string}
+        tenant_id: {type: string}
+        project_id: {type: string}
+        status: {type: string}
+        used_bytes: {type: integer, format: int64}
+        object_count: {type: integer, format: int64}
+        measured_at: {type: string, format: date-time}
+        stale: {type: boolean}
+    AdminStorageBucket:
+      type: object
+      required: [name, source]
+      properties:
+        name: {type: string}
+        source: {type: string, enum: [provider, configured]}
+    AdminStorageLonghornEntry:
+      type: object
+      required: [artifact_id, run_id, status, backup_name, volume_name, target_name, cleanup_state, protected]
+      properties:
+        artifact_id: {type: string}
+        run_id: {type: string}
+        status: {type: string}
+        backup_name: {type: string}
+        volume_name: {type: string}
+        target_name: {type: string}
+        cleanup_state: {type: string, enum: [active, protected, grace, blocked, pending, deleting, legacy_receipt, confirmed, missing, unavailable]}
+        remote_state: {type: string}
+        protected: {type: boolean}
+        physical_deleted_at: {type: string, format: date-time}
+        attempted_at: {type: string, format: date-time}
+        error: {type: string}
+    AdminStorageOverview:
+      type: object
+      required: [observed_at, configured, buckets_complete, longhorn_complete, metrics_status, billing_status, warnings, buckets, namespaces, longhorn]
+      properties:
+        observed_at: {type: string, format: date-time}
+        configured: {type: boolean}
+        account_id: {type: string}
+        buckets_complete: {type: boolean}
+        longhorn_complete: {type: boolean}
+        metrics_status: {type: string}
+        billing_status: {type: string}
+        warnings: {type: array, items: {type: string}}
+        buckets: {type: array, items: {$ref: '#/components/schemas/AdminStorageBucket'}}
+        namespaces: {type: array, items: {$ref: '#/components/schemas/AdminStorageNamespace'}}
+        longhorn: {type: array, items: {$ref: '#/components/schemas/AdminStorageLonghornEntry'}}
+        backup_usage: {$ref: '#/components/schemas/BackupUsage'}
     ObjectStore:
       type: object
       required: [id, tenant_id, project_id, name, provider, bucket, endpoint, region, status, quota_bytes, created_at, updated_at]

@@ -493,6 +493,27 @@ func (s *Server) deleteBackupArtifactObjects(ctx context.Context, artifact model
 	if artifact.Protected {
 		return fmt.Errorf("artifact is protected")
 	}
+	if artifact.Kind == model.BackupArtifactKindLonghornSnapshot {
+		referenced, err := s.store.LonghornBackupHasOtherReferences(artifact)
+		if err != nil {
+			return fmt.Errorf("verify Longhorn backup references: %w", err)
+		}
+		if referenced {
+			return fmt.Errorf("Longhorn backup still referenced by a live artifact or restore")
+		}
+		backend, err := s.store.GetBackupBackendForUse(artifact.BackendID, artifact.TenantID, artifact.TenantID == "")
+		if err != nil {
+			return fmt.Errorf("resolve Longhorn backend: %w", err)
+		}
+		client, err := newKubeLogsClient("")
+		if err != nil {
+			return err
+		}
+		defer client.closeIdleConnections()
+		if err := cleanupLonghornBackup(ctx, client, artifact, model.BackupBackendAsDataBackend(backend)); err != nil {
+			return err
+		}
+	}
 	logicalKeys, err := backupArtifactObjectKeysForDeletion(artifact)
 	if err != nil {
 		return err
