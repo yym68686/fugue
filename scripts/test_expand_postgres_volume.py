@@ -21,8 +21,11 @@ def fixture():
     volume = dict(metadata=dict(name='volume', uid='volume-uid'), spec=dict(numberOfReplicas=1), status=dict(state='attached', robustness='healthy'))
     replicas = [dict(spec=dict(volumeName='volume', active=True, nodeID='node-a', diskID='disk-a'), status=dict(currentState='running'))]
     nodes = [dict(metadata=dict(name='node-a'), spec=dict(disks=dict(data=dict(storageReserved=quantity('20Gi')))),
-                  status=dict(diskStatus=dict(data=dict(diskUUID='disk-a', storageAvailable=quantity('60Gi'), conditions=[dict(type='Ready', status='True')]))))]
-    return [config, cluster, pvc, pv, sc, volume, replicas, nodes]
+                  status=dict(diskStatus=dict(data=dict(diskUUID='disk-a', storageAvailable=quantity('60Gi'),
+                                                       storageMaximum=quantity('100Gi'), storageScheduled=quantity('40Gi'),
+                                                       conditions=[dict(type='Ready', status='True')]))))]
+    settings = {'storage-minimal-available-percentage': '20', 'storage-over-provisioning-percentage': '100'}
+    return [config, cluster, pvc, pv, sc, volume, replicas, nodes, settings]
 
 
 class ExpansionTests(unittest.TestCase):
@@ -67,6 +70,38 @@ class ExpansionTests(unittest.TestCase):
         self.assertEqual(plan(*args)[0], [])
         args[1]['spec']['storage']['size'] = '14Gi'
         self.assertEqual(plan(*args)[0], [])
+
+    def test_reserved_space_is_a_total_allocation_limit_not_an_unused_free_floor(self):
+        args = fixture()
+        args[7][0]['spec']['disks']['data']['storageReserved'] = quantity('65Gi')
+        args[7][0]['status']['diskStatus']['data']['storageScheduled'] = quantity('20Gi')
+        _, evidence = plan(*args)
+        self.assertEqual(evidence['replicaHeadroom'][0]['freeAfterReserveAndGrowthBytes'], quantity('36Gi'))
+        self.assertEqual(evidence['replicaHeadroom'][0]['scheduledHeadroomBytes'], quantity('11Gi'))
+
+    def test_rejects_physical_pressure_logical_overallocation_and_invalid_settings(self):
+        changes = [
+            lambda a: a[8].update({'storage-minimal-available-percentage': '41'}),
+            lambda a: a[8].clear(),
+            lambda a: a[8].update({'storage-minimal-available-percentage': '-1'}),
+            lambda a: a[8].update({'storage-over-provisioning-percentage': '0'}),
+            lambda a: a[7][0]['status']['diskStatus']['data'].update(storageScheduled=quantity('77Gi')),
+            lambda a: a[7][0]['status']['diskStatus']['data'].update(storageMaximum=0),
+        ]
+        for mutate in changes:
+            with self.subTest(mutate=mutate):
+                args = fixture()
+                mutate(args)
+                with self.assertRaises(ValueError):
+                    plan(*args)
+
+    def test_multiple_replicas_on_same_disk_reserve_the_combined_growth(self):
+        args = fixture()
+        args[5]['spec']['numberOfReplicas'] = 2
+        args[6].append(copy.deepcopy(args[6][0]))
+        args[7][0]['status']['diskStatus']['data']['storageAvailable'] = quantity('43Gi')
+        with self.assertRaisesRegex(ValueError, 'capacity after reserve'):
+            plan(*args)
 
 
 if __name__ == '__main__':

@@ -21,7 +21,7 @@ def quantity(value):
     return int(match[1]) * {'Gi': 2**30, 'Mi': 2**20, 'Ki': 2**10, None: 1}[match[2]]
 
 
-def plan(config, cluster, pvc, pv, storage_class, volume, replicas, nodes):
+def plan(config, cluster, pvc, pv, storage_class, volume, replicas, nodes, settings):
     required = {'schema', 'namespace', 'cluster', 'clusterUID', 'primary', 'pvcUID',
                 'pvUID', 'volumeUID', 'storageClass', 'previousSize', 'targetSize',
                 'minimumFreeAfterReserveGiB', 'longhornNamespace'}
@@ -56,7 +56,20 @@ def plan(config, cluster, pvc, pv, storage_class, volume, replicas, nodes):
     active = [r for r in replicas if r['spec'].get('volumeName') == volume['metadata']['name'] and r['spec'].get('active')]
     if len(active) != volume['spec']['numberOfReplicas'] or not active:
         raise ValueError('Replica inventory is incomplete')
+    try:
+        minimal = int(settings['storage-minimal-available-percentage'])
+        overprovision = int(settings['storage-over-provisioning-percentage'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('Longhorn capacity settings are missing or invalid') from exc
+    if not 0 <= minimal <= 100 or overprovision <= 0:
+        raise ValueError('Longhorn capacity settings are out of range')
     headroom = []
+    disk_growth = {}
+    for replica in active:
+        rs = replica['spec']
+        key = (rs['nodeID'], rs['diskID'])
+        disk_growth[key] = disk_growth.get(key, 0) + target - before
+    checked_disks = set()
     for replica in active:
         rs = replica['spec']
         if rs.get('failedAt') or replica['status'].get('currentState') != 'running':
@@ -68,12 +81,29 @@ def plan(config, cluster, pvc, pv, storage_class, volume, replicas, nodes):
         node, key, disk = matches[0]
         if not any(c['type'] == 'Ready' and c['status'] == 'True' for c in disk.get('conditions', [])):
             raise ValueError('Replica disk is not ready')
+        disk_key = (rs['nodeID'], rs['diskID'])
+        if disk_key in checked_disks:
+            continue
+        checked_disks.add(disk_key)
         # Reserve the full declared growth even on a retry: sparse volume usage
         # and an in-progress filesystem resize must not overstate headroom.
-        free = disk['storageAvailable'] - node['spec']['disks'][key]['storageReserved'] - (target - before)
+        # Longhorn's storageReserved reduces the TOTAL schedulable capacity;
+        # it is not additional unused space to subtract from storageAvailable.
+        # Independently preserve the physical minimum-free percentage plus the
+        # declaration's extra cushion, and enforce the logical allocation limit.
+        maximum = disk['storageMaximum']
+        reserved = node['spec']['disks'][key]['storageReserved']
+        if maximum <= 0 or not 0 <= reserved < maximum or not 0 <= disk['storageAvailable'] <= maximum or disk['storageScheduled'] < 0:
+            raise ValueError('Invalid replica disk capacity inventory')
+        growth = disk_growth[disk_key]
+        free = disk['storageAvailable'] - maximum * minimal // 100 - growth
+        scheduled_free = (maximum - reserved) * overprovision // 100 - disk['storageScheduled'] - growth
         if free < config['minimumFreeAfterReserveGiB'] * 2**30:
             raise ValueError('Insufficient replica disk capacity after reserve')
-        headroom.append({'node': rs['nodeID'], 'disk': rs['diskID'], 'freeAfterReserveAndGrowthBytes': free})
+        if scheduled_free < 0:
+            raise ValueError('Expansion exceeds Longhorn scheduled capacity')
+        headroom.append({'node': rs['nodeID'], 'disk': rs['diskID'], 'freeAfterReserveAndGrowthBytes': free,
+                         'scheduledHeadroomBytes': scheduled_free, 'minimumAvailablePercentage': minimal})
     patch = []
     if current != target:
         patch = [{'op': 'test', 'path': '/metadata/uid', 'value': pm['uid']},
@@ -103,7 +133,9 @@ def main():
     lh = config['longhornNamespace']
     patch, evidence = plan(config, cluster, pvc, pv, get('storageclass', config['storageClass']),
                            get('volumes.longhorn.io', pv['spec']['csi']['volumeHandle'], lh),
-                           get('replicas.longhorn.io', '', lh)['items'], get('nodes.longhorn.io', '', lh)['items'])
+                           get('replicas.longhorn.io', '', lh)['items'], get('nodes.longhorn.io', '', lh)['items'],
+                           {name: get('settings.longhorn.io', name, lh)['value'] for name in
+                            ('storage-minimal-available-percentage', 'storage-over-provisioning-percentage')})
     evidence.update(mode='apply' if args.apply else 'preview', patch=patch)
     def save():
         Path(args.evidence).write_text(json.dumps(evidence, indent=2) + '\n')
