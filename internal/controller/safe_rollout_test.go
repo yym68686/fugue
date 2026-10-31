@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -614,23 +615,23 @@ func TestSafeZeroDowntimeRolloutCanaryWaitsForEdgeBundleBeforeObservation(t *tes
 		t.Fatalf("prepare safe rollout: %v", err)
 	}
 	err = svc.completeSafeZeroDowntimeRollout(context.Background(), op, state)
-	if err == nil || !strings.Contains(err.Error(), "canary edge route bundle wait failed") {
-		t.Fatalf("expected canary edge bundle wait failure, got %v", err)
+	if !errors.Is(err, errSafeRolloutTrafficPending) {
+		t.Fatalf("expected nonterminal canary edge bundle wait, got %v", err)
 	}
 	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
 	if err != nil {
 		t.Fatalf("get traffic policy: %v", err)
 	}
-	if policy.Mode != model.AppTrafficModeSingle || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
-		t.Fatalf("expected stable-only traffic after canary edge bundle wait failure, got %+v", policy)
+	if policy.Mode != model.AppTrafficModeCanary || policy.CandidateReleaseID != state.Candidate.ID || policy.StableWeight != 50 || policy.CandidateWeight != 50 {
+		t.Fatalf("expected shifted intent preserved while confirmation waits, got %+v", policy)
 	}
 	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
 	if err != nil {
 		t.Fatalf("list release steps: %v", err)
 	}
-	if !releaseStepsContainPhase(steps, "canary_edge_bundle_wait", model.ReleaseStepStatusFailed) ||
-		!releaseStepsContainPhase(steps, "abort", model.ReleaseStepStatusCompleted) {
-		t.Fatalf("expected failed canary edge bundle wait and abort steps, got %+v", steps)
+	if !releaseStepsContainPhase(steps, "canary_edge_bundle_wait", model.ReleaseStepStatusRunning) ||
+		releaseStepsContainPhase(steps, "abort", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected pending confirmation without rollback, got %+v", steps)
 	}
 	for _, step := range steps {
 		if value, ok := step.Payload["phase"].(string); ok && value == "canary_gate" {
@@ -925,19 +926,19 @@ func TestSafeZeroDowntimeRolloutWaitsForEdgeBundleBeforeStableAlignment(t *testi
 		t.Fatalf("prepare safe rollout: %v", err)
 	}
 
-	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
-		t.Fatalf("complete safe rollout: %v", err)
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); !errors.Is(err, errSafeRolloutTrafficPending) {
+		t.Fatalf("expected pending traffic confirmation, got %v", err)
 	}
-	if state.StableAlignmentAllowed {
-		t.Fatal("expected stable alignment to stay paused until edge route bundle is confirmed")
+	if state.StableAlignmentAllowed || state.ServingVerified {
+		t.Fatal("unconfirmed traffic permitted stable alignment or claimed serving")
 	}
 	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
 	if err != nil {
 		t.Fatalf("list release steps: %v", err)
 	}
-	if !releaseStepsContainPhase(steps, "edge_bundle_wait", model.ReleaseStepStatusSkipped) ||
+	if !releaseStepsContainPhase(steps, "edge_bundle_wait", model.ReleaseStepStatusRunning) ||
 		releaseStepsContainPhase(steps, "stable_alignment", model.ReleaseStepStatusCompleted) {
-		t.Fatalf("expected skipped edge bundle wait and no completed alignment step, got %+v", steps)
+		t.Fatalf("expected pending edge bundle wait and no completed alignment step, got %+v", steps)
 	}
 }
 
@@ -969,8 +970,8 @@ func TestSafeZeroDowntimeRolloutPausesAlignmentWhenCandidateFailsRetireGate(t *t
 		t.Fatalf("prepare safe rollout: %v", err)
 	}
 
-	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
-		t.Fatalf("complete safe rollout should pause retire instead of aborting promoted release: %v", err)
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); !errors.Is(err, errSafeRolloutTrafficPending) {
+		t.Fatalf("complete safe rollout should remain pending instead of aborting promoted release: %v", err)
 	}
 	if state.StableAlignmentAllowed {
 		t.Fatal("expected stable alignment to stay paused after candidate retire gate failure")

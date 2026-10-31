@@ -35,7 +35,7 @@ type releaseRuntimeReadiness struct {
 	Reason               string                       `json:"reason,omitempty"`
 }
 
-func (s *Server) captureReleaseRuntimeReadiness(ctx context.Context, projection *platformIntentProjectionResponse, business store.RouteBusinessSnapshot) error {
+func (s *Server) captureReleaseRuntimeReadiness(ctx context.Context, projection *platformIntentProjectionResponse, business store.RouteBusinessSnapshot, retentionBudgets ...time.Duration) error {
 	if len(projection.RuntimeSnapshot.Releases) == 0 {
 		return nil
 	}
@@ -125,6 +125,7 @@ func (s *Server) captureReleaseRuntimeReadiness(ctx context.Context, projection 
 	projection.RuntimeSnapshot.Facts["release_readiness"] = value
 	projection.CapturedAt = time.Now().UTC()
 	projection.RuntimeSnapshot.CapturedAt = &projection.CapturedAt
+	s.captureRetainedTrafficPartitions(ctx, projection, retentionBudgets...)
 	if err := projectReadyReleaseOrigins(projection, proofs); err != nil {
 		return releaseReadinessDiagnostic(err, proofs)
 	}

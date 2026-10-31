@@ -230,6 +230,7 @@ type kubeTypedResourceList[T any] struct {
 type kubeMetadataEvidence struct {
 	Metadata struct {
 		UID               string                       `json:"uid"`
+		ResourceVersion   string                       `json:"resourceVersion"`
 		Name              string                       `json:"name"`
 		Namespace         string                       `json:"namespace"`
 		DeletionTimestamp string                       `json:"deletionTimestamp"`
@@ -262,6 +263,7 @@ type kubeEndpointSliceEvidence struct {
 type kubeDeploymentRuntimeEvidence struct {
 	Metadata struct {
 		UID               string            `json:"uid"`
+		ResourceVersion   string            `json:"resourceVersion"`
 		Name              string            `json:"name"`
 		Namespace         string            `json:"namespace"`
 		Generation        int64             `json:"generation"`

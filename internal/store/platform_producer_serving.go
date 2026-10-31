@@ -71,6 +71,11 @@ func validateProducerServingPhase(state *model.State, parent model.PlatformArtif
 	if baseline.ArtifactID != lkg.ArtifactID || baseline.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || baseline.VerificationState != model.PlatformArtifactVerificationStateVerified || baseline.VerifiedLKGGeneration != lkg.Generation {
 		return fail("initial full verified baseline required")
 	}
+	if !producerRecoveryPhase(guard) {
+		if err := validateRetainedTrafficBaseline(state, parent, baseline, *lkg, now, keys); err != nil {
+			return err
+		}
+	}
 	full, ok := producerActivePublication(state, parent.ScopeKey, model.PlatformArtifactReleaseChannelFull)
 	if !ok || full.ID != guard.PreviousFullReleaseID {
 		return fail("full authority changed")

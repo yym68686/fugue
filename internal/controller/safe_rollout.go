@@ -31,6 +31,18 @@ type safeRolloutState struct {
 	ResumeWeight           int
 	AlreadyPromoted        bool
 	PromotionPending       bool
+	ServingVerified        bool
+}
+
+var errSafeRolloutTrafficPending = errors.New(model.OperationResultTrafficConfirmationPending)
+
+// An observer owns a shorter budget than the operation. Its timeout must not
+// become a successful nil parent-context error, nor a failed executable.
+func safeRolloutTrafficPending(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errSafeRolloutTrafficPending
 }
 
 type safeRolloutPlan struct {
@@ -130,7 +142,7 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			return fmt.Errorf("resumed promoted release is not ready")
+			return safeRolloutTrafficPending(ctx)
 		}
 		if state.PromotionPending {
 			principal := model.Principal{TenantID: state.CandidateApp.TenantID, ActorType: model.ActorTypeSystem, ActorID: "safe-rollout-controller"}
@@ -143,10 +155,12 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 			}
 			state.Candidate = updated
 		}
-		if s.waitSafeRolloutEdgeRouteBundleApplied(ctx, op, state) {
-			state.StableAlignmentAllowed = true
+		if !s.waitSafeRolloutEdgeRouteBundleApplied(ctx, op, state) {
+			return safeRolloutTrafficPending(ctx)
 		}
-		return ctx.Err()
+		state.ServingVerified = true
+		state.StableAlignmentAllowed = true
+		return nil
 	}
 	service := s.appReleaseService()
 	now := time.Now().UTC()
@@ -237,12 +251,9 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 					observedCanaryTraffic = false
 					break
 				}
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				reason := fmt.Sprintf("candidate canary edge route bundle not applied at %d%%", weight)
-				_ = s.abortSafeZeroDowntimeRollout(ctx, op, state, reason)
-				return fmt.Errorf("safe zero downtime rollout canary edge route bundle wait failed at %d%%", weight)
+				// A publication wait is not evidence of a bad executable. Keep
+				// the exact shifted weight and resume before the observation gate.
+				return safeRolloutTrafficPending(ctx)
 			}
 			observedCanaryTraffic = true
 			if err := s.sleepSafeRolloutObservation(ctx, time.Duration(plan.Canary.MinObservationSeconds)*time.Second); err != nil {
@@ -346,11 +357,12 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 		"mode":         "safe_zero_downtime",
 	})
 	if !s.waitSafeRolloutEdgeRouteBundleApplied(ctx, op, state) {
-		return ctx.Err()
+		return safeRolloutTrafficPending(ctx)
 	}
 	if !s.recheckSafeRolloutCandidateBeforeRetire(ctx, op, state, "pre_alignment_retire_gate") {
-		return nil
+		return safeRolloutTrafficPending(ctx)
 	}
+	state.ServingVerified = true
 	state.StableAlignmentAllowed = true
 	return nil
 }
@@ -406,7 +418,7 @@ func (s *Service) alignSafeRolloutPromotedStableRelease(ctx context.Context, op 
 		"stable_release_id": updated.ID,
 	})
 	if !s.waitSafeRolloutStableReleaseEdgeRouteBundleApplied(ctx, op, state, since) {
-		return false, nil
+		return false, safeRolloutTrafficPending(ctx)
 	}
 	return true, nil
 }
@@ -608,7 +620,7 @@ func (s *Service) waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx context.Contex
 	}
 	if err != nil {
 		payload["error"] = err.Error()
-		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_edge_bundle_wait", model.ReleaseStepStatusFailed, fmt.Sprintf("candidate canary edge route bundle confirmation failed at %d%%", weight), state.Candidate.ID, payload)
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_edge_bundle_wait", model.ReleaseStepStatusRunning, fmt.Sprintf("traffic publication pending: canary edge confirmation observation did not complete at %d%%", weight), state.Candidate.ID, payload)
 		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.canary.blocked", state.Candidate.ID, map[string]string{
 			"operation_id":     op.ID,
 			"phase":            "canary_edge_bundle_wait",
@@ -621,8 +633,8 @@ func (s *Service) waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx context.Contex
 	status := model.ReleaseStepStatusCompleted
 	summary := fmt.Sprintf("edge route bundle applied for candidate canary at %d%%", weight)
 	if !observation.Ready {
-		status = model.ReleaseStepStatusFailed
-		summary = fmt.Sprintf("candidate canary edge route bundle not applied at %d%%", weight)
+		status = model.ReleaseStepStatusRunning
+		summary = fmt.Sprintf("traffic publication pending: canary edge route bundle not applied at %d%%", weight)
 	}
 	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_edge_bundle_wait", status, summary, state.Candidate.ID, payload)
 	if !observation.Ready {
@@ -651,7 +663,7 @@ func (s *Service) waitSafeRolloutEdgeRouteBundleApplied(ctx context.Context, op 
 	}
 	if err != nil {
 		payload["error"] = err.Error()
-		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "edge_bundle_wait", model.ReleaseStepStatusSkipped, "stable alignment paused: edge route bundle confirmation failed", state.Candidate.ID, payload)
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "edge_bundle_wait", model.ReleaseStepStatusRunning, "traffic publication pending: edge confirmation observation did not complete", state.Candidate.ID, payload)
 		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retire.paused", state.Candidate.ID, map[string]string{
 			"operation_id": op.ID,
 			"phase":        "edge_bundle_wait",
@@ -662,8 +674,8 @@ func (s *Service) waitSafeRolloutEdgeRouteBundleApplied(ctx context.Context, op 
 	status := model.ReleaseStepStatusCompleted
 	summary := "edge route bundle applied before previous retire"
 	if !observation.Ready {
-		status = model.ReleaseStepStatusSkipped
-		summary = "stable alignment paused: waiting for edge route bundle application"
+		status = model.ReleaseStepStatusRunning
+		summary = "traffic publication pending: waiting for edge route bundle application"
 	}
 	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "edge_bundle_wait", status, summary, state.Candidate.ID, payload)
 	if !observation.Ready {
@@ -688,7 +700,7 @@ func (s *Service) waitSafeRolloutStableReleaseEdgeRouteBundleApplied(ctx context
 	}
 	if err != nil {
 		payload["error"] = err.Error()
-		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "stable_release_edge_bundle_wait", model.ReleaseStepStatusSkipped, "stable release alignment paused: edge route bundle confirmation failed", state.Candidate.ID, payload)
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "stable_release_edge_bundle_wait", model.ReleaseStepStatusRunning, "traffic publication pending: canonical edge confirmation observation did not complete", state.Candidate.ID, payload)
 		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retire.paused", state.Candidate.ID, map[string]string{
 			"operation_id": op.ID,
 			"phase":        "stable_release_edge_bundle_wait",
@@ -699,8 +711,8 @@ func (s *Service) waitSafeRolloutStableReleaseEdgeRouteBundleApplied(ctx context
 	status := model.ReleaseStepStatusCompleted
 	summary := "edge route bundle applied for canonical stable release"
 	if !observation.Ready {
-		status = model.ReleaseStepStatusSkipped
-		summary = "stable release alignment paused: waiting for edge route bundle application"
+		status = model.ReleaseStepStatusRunning
+		summary = "traffic publication pending: waiting for canonical edge route bundle application"
 	}
 	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "stable_release_edge_bundle_wait", status, summary, state.Candidate.ID, payload)
 	if !observation.Ready {

@@ -37,6 +37,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		return fmt.Errorf("%w: leased traffic compatibility: %s", ErrConflict, reason)
 	}
 	if parent.ArtifactKind != model.PlatformArtifactKindReleaseSet {
+		if _, retained := parent.Metadata[platformconfig.RetainedTrafficPartitionsMetadata]; retained {
+			return fail("retained traffic requires a complete signed ReleaseSet")
+		}
 		if platformconfig.DNSArtifactRequiresTrafficRelease(parent) {
 			return fail("DNS value expiration requires a complete traffic ReleaseSet")
 		}
@@ -55,6 +58,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		index := platformArtifactIndex(state.PlatformArtifacts, value)
 		if index < 0 {
 			return fail("member unavailable")
+		}
+		if err := validateRetainedTrafficExpiry(state.PlatformArtifacts[index], now); err != nil {
+			return err
 		}
 		leased = leased || platformconfig.DNSArtifactRequiresTrafficRelease(state.PlatformArtifacts[index])
 	}

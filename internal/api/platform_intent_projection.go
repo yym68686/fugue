@@ -126,7 +126,7 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	return s.projectPlatformIntentWithInputs(ctx, principal, static, dnsPolicy, templates, true)
 }
 
-func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate, collectRuntime bool) (platformIntentProjectionResponse, error) {
+func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate, collectRuntime bool, producerPolicies ...platformproducer.Policy) (platformIntentProjectionResponse, error) {
 	domainsConfig, err := s.applicationDomainsForProjection(static.ApplicationDomains)
 	if err != nil {
 		return platformIntentProjectionResponse{}, err
@@ -182,16 +182,33 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 			return platformIntentProjectionResponse{}, err
 		}
 	}
+	// Freeze route/TLS authority before evaluating old partition reuse. DNS
+	// observations added later do not authorize changes to HTTP route bindings.
+	for _, policy := range producerPolicies {
+		if policy.RoutePlacementTransition != nil {
+			projection.Policy, err = platformproducer.ApplyRoutePlacementTransition(policy, projection.Policy)
+			if err != nil {
+				return platformIntentProjectionResponse{}, err
+			}
+			projection.RuntimeSnapshot.PolicyGeneration = projection.Policy.Generation
+		}
+	}
+	if err := projectDomainTLSLifecycle(&projection, snapshot.TLSAllowlist, business.Domains); err != nil {
+		return platformIntentProjectionResponse{}, errors.New("TLS domain lifecycle projection invalid")
+	}
 	if collectRuntime {
-		if err := s.captureReleaseRuntimeReadiness(ctx, &projection, business); err != nil {
+		var retentionBudget time.Duration
+		for _, policy := range producerPolicies {
+			if policy.Serving != nil {
+				retentionBudget = time.Duration(policy.Serving.GrayMinSeconds+policy.Serving.FullMinSeconds+3*policy.IntervalSeconds) * time.Second
+			}
+		}
+		if err := s.captureReleaseRuntimeReadiness(ctx, &projection, business, retentionBudget); err != nil {
 			return platformIntentProjectionResponse{}, err
 		}
 	}
 	projection.BusinessSnapshotRevision = business.Revision
 	projection.BusinessSnapshotAt = business.CapturedAt
-	if err := projectDomainTLSLifecycle(&projection, snapshot.TLSAllowlist, business.Domains); err != nil {
-		return platformIntentProjectionResponse{}, errors.New("TLS domain lifecycle projection invalid")
-	}
 	if static.PublicationRole == platformconfig.PublicationRoleCellRoutes {
 		// The signed role owns route/TLS only. DNS rows still participate in
 		// business hostname ownership, but are never projected as DNS authority.
@@ -563,6 +580,7 @@ func projectBusinessRouteDraftWithPolicy(snapshot model.EdgeRouteIntentSnapshot,
 	if defaults != nil {
 		base = *defaults
 	}
+	facts.IsolateTrafficAvailability = true
 	policy, err := platformconfig.ProjectPolicySnapshot(base, referencedRoutePolicies, referencedTrafficPolicies, "policy-draft")
 	if err != nil {
 		return result, err

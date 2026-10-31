@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,9 +29,15 @@ func TestReleaseEndpointReadinessValidatesPodOwnershipAndCoverage(t *testing.T) 
 				ep := slice.Endpoints[0]
 				pk := kubeNamespacedKey(ns, ep.TargetRef.Name)
 				pod := snapshot.releasePods[pk]
+				pod.Metadata.ResourceVersion = "pod-rv-17"
 				pod.Spec.Containers = slices.Clone(pod.Spec.Containers)
 				rk := kubeNamespacedKey(ns, pod.Metadata.OwnerReferences[0].Name)
 				rs := snapshot.releaseReplicaSets[rk]
+				rs.Metadata.ResourceVersion = "rs-rv-23"
+				dk := kubeNamespacedKey(ns, release.DeploymentName)
+				dep := snapshot.deployments[dk]
+				dep.Metadata.ResourceVersion = "deployment-rv-31"
+				snapshot.deployments[dk] = dep
 				yes, no := true, false
 				switch name {
 				case "dual stack", "one dual stack Pod":
@@ -141,6 +148,14 @@ func TestReleaseEndpointReadinessValidatesPodOwnershipAndCoverage(t *testing.T) 
 					if proof.Ready || fact.Status == model.EdgeRouteStatusActive || proof.Reason == "" {
 						t.Fatalf("unsafe endpoints accepted: %+v", proof)
 					}
+					field := map[string]string{"foreign Deployment": "deployment_uid", "old Pod release key": "pod_release_key", "old ReplicaSet release key": "replica_set_release_key"}[name]
+					if field != "" {
+						for _, expected := range []string{"field=" + field, "expected=", "observed=", "pod_rv=pod-rv-17", "replica_set_rv=rs-rv-23", "deployment_rv=deployment-rv-31"} {
+							if !strings.Contains(proof.Reason, expected) {
+								t.Fatalf("missing bounded identity diagnostic %q: %s", expected, proof.Reason)
+							}
+						}
+					}
 					return
 				}
 				if !proof.Ready || fact.Status != model.EdgeRouteStatusActive || proof.ReadyEndpoints != 2 || len(proof.EndpointPods) != 2 {
@@ -242,7 +257,7 @@ func TestStableReadinessRejectsCandidateEndpointsEvenWithForgedLabels(t *testing
 		snapshot.releaseReplicaSets[key] = rs
 	}
 	_, proof := (&Server{}).observeReleaseRuntimeReadiness(app, stable, true, snapshot, time.Now().UTC())
-	if proof.Ready || proof.Reason != "release endpoint belongs to another workload or executable revision" {
+	if proof.Ready || !strings.Contains(proof.Reason, "field=deployment_name") {
 		t.Fatalf("candidate origin accepted for stable: %+v", proof)
 	}
 }

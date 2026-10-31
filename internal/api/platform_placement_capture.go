@@ -352,6 +352,21 @@ func placementHostnameRoutesFromSnapshot(result platformIntentProjectionResponse
 		}
 	}
 	snapshot := result.RuntimeSnapshot
+	// A hostname projection resolves only a subset of the complete, already
+	// pinned partition. Do not feed another hostname/app's routes to that view.
+	snapshot.RetainedTrafficPartitions = nil
+	for _, part := range result.RuntimeSnapshot.RetainedTrafficPartitions {
+		allRoutes := part.Routes
+		part.Routes = nil
+		for _, route := range allRoutes {
+			if route.Hostname == host {
+				part.Routes = append(part.Routes, route)
+			}
+		}
+		if len(part.Routes) > 0 {
+			snapshot.RetainedTrafficPartitions = append(snapshot.RetainedTrafficPartitions, part)
+		}
+	}
 	snapshot.Origins = nil
 	snapshot.Releases = nil
 	for _, r := range result.RuntimeSnapshot.Origins {

@@ -12,7 +12,7 @@ import (
 const deployImageReplicationOperationRetryInterval = 30 * time.Second
 
 func pendingOperationRetryReady(op model.Operation, now time.Time) bool {
-	if !model.OperationWaitingForImageReplication(op) || op.UpdatedAt.IsZero() {
+	if (!model.OperationWaitingForImageReplication(op) && !model.OperationWaitingForTrafficConfirmation(op)) || op.UpdatedAt.IsZero() {
 		return true
 	}
 	return !now.Before(op.UpdatedAt.Add(deployImageReplicationOperationRetryInterval))

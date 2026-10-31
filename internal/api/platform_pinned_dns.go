@@ -64,16 +64,7 @@ func (s *Server) projectPlatformIntentForProducer(ctx context.Context, principal
 			return platformIntentProjectionResponse{}, fmt.Errorf("pinned route defaults required")
 		}
 	}
-	projection, err := s.projectPlatformIntentWithInputs(ctx, principal, static, dns, policy.HostedZoneTemplates, collectRuntime)
-	if err != nil || policy.RoutePlacementTransition == nil {
-		return projection, err
-	}
-	projection.Policy, err = platformproducer.ApplyRoutePlacementTransition(policy, projection.Policy)
-	if err != nil {
-		return platformIntentProjectionResponse{}, err
-	}
-	projection.RuntimeSnapshot.PolicyGeneration = projection.Policy.Generation
-	return projection, nil
+	return s.projectPlatformIntentWithInputs(ctx, principal, static, dns, policy.HostedZoneTemplates, collectRuntime, policy)
 }
 
 func projectPinnedDNSInputs(result *platformIntentProjectionResponse, declared []platformconfig.DNSConsumerIntent, p platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate, nodes []model.DNSNode, hosted []model.HostedZone, now time.Time) error {

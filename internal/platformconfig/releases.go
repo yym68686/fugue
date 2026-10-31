@@ -49,6 +49,29 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 	}
 	matched := make(map[string]bool, len(byApp))
 	out := append([]CompiledRoute(nil), routes...)
+	retained, err := retainedTrafficRoutes(routes, policy, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	isolate := func(route *CompiledRoute, cause error) error {
+		if !snapshot.IsolateTrafficAvailability {
+			return cause
+		}
+		// Retaining a release binding must never undo a current negative origin
+		// or explicit maintenance status. Those independent gates still win.
+		if route.Status != "" && route.Status != model.EdgeRouteStatusActive {
+			route.Upstreams = nil
+			return nil
+		}
+		if previous, ok := retained[trafficRouteKey(route.RouteIntent)]; ok {
+			*route = previous
+		} else {
+			route.Status = model.EdgeRouteStatusUnavailable
+			route.StatusReason = "application traffic partition pending: " + cause.Error()
+			route.Upstreams = nil
+		}
+		return nil
+	}
 	for i := range out {
 		route := &out[i]
 		rule, exists := byApp[route.AppID]
@@ -62,6 +85,10 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 			return nil, fmt.Errorf("route upstreams and traffic policy cannot both own release weights")
 		}
 		matched[rule.AppID] = true
+		if !route.Enabled || (route.RoutePolicy != "" && !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy)) {
+			route.Upstreams = nil
+			continue
+		}
 		stableWeight, candidateWeight := rule.StableWeight, rule.CandidateWeight
 		if rule.Mode == model.AppTrafficModeSingle || rule.Mode == model.AppTrafficModePaused {
 			stableWeight, candidateWeight = 100, 0
@@ -90,7 +117,10 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 			}
 			if candidate.Status != model.EdgeRouteStatusActive || candidate.UpstreamURL == "" {
 				if rule.UnavailableCandidate != "stable" {
-					return nil, fmt.Errorf("candidate unavailable and stable fallback is not authorized")
+					if err := isolate(route, fmt.Errorf("candidate unavailable and stable fallback is not authorized")); err != nil {
+						return nil, err
+					}
+					continue
 				}
 				stableWeight, candidateWeight = 100, 0
 			}
@@ -103,7 +133,10 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 				return nil, err
 			}
 			if stable.Status != model.EdgeRouteStatusActive || stable.UpstreamURL == "" {
-				return nil, fmt.Errorf("stable release is not ready for traffic")
+				if err := isolate(route, fmt.Errorf("stable release is not ready for traffic")); err != nil {
+					return nil, err
+				}
+				continue
 			}
 		}
 		// Intent disable and origin/policy failure always win over healthy releases.

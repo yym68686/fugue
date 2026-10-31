@@ -323,6 +323,22 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 			return err
 		}
 		state.PlatformArtifacts = append(state.PlatformArtifacts, child)
+		if guard.Phase != "" {
+			sources, err := retainedTrafficSourceRouteIDs(child)
+			if err != nil {
+				return err
+			}
+			for _, id := range sources {
+				if platformArtifactIndex(state.PlatformArtifacts, id) >= 0 {
+					continue
+				}
+				source, err := pgGetPlatformArtifactForUpdate(ctx, tx, id, true)
+				if err != nil {
+					return err
+				}
+				state.PlatformArtifacts = append(state.PlatformArtifacts, source)
+			}
+		}
 	}
 	if policy.InputSource == platformproducer.DNSProducerInputSource {
 		if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {

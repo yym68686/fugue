@@ -27,7 +27,7 @@ import (
 )
 
 func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
-	for _, scenario := range []string{"legacy", "query strategy", "compiled placement", "compiled placement and cache", "compiled domain TLS", "shadow Edge selection", "unassigned member", "serving unavailable"} {
+	for _, scenario := range []string{"legacy", "retained partition metadata", "query strategy", "compiled placement", "compiled placement and cache", "compiled domain TLS", "shadow Edge selection", "unassigned member", "serving unavailable"} {
 		t.Run(scenario, func(t *testing.T) {
 			testEdgePlatformShadowPreservesServingAndChecksBindings(t, scenario)
 		})
@@ -184,6 +184,28 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 			{EdgeID: "edge-a", EdgeGroupID: "edge-group-test", ServingGeneration: "serving", ObservedAt: captured, ValidUntil: captured.Add(time.Minute), Healthy: true, RouteReady: true, TLSReady: true, A: []string{"8.8.8.8"}},
 			{EdgeID: "edge-b", EdgeGroupID: "edge-group-test", ServingGeneration: "serving", ObservedAt: captured, ValidUntil: captured.Add(time.Minute), Healthy: true, RouteReady: true, TLSReady: true, A: []string{"8.8.4.4"}},
 		}}}
+	}
+	if scenario == "retained partition metadata" {
+		route := &request.Intent.Routes[0]
+		route.AppID, route.TenantID = "app-a", "tenant-a"
+		request.RuntimeSnapshot.IsolateTrafficAvailability = true
+		request.Policy.TrafficConstraints = []platformconfig.TrafficPolicyConstraint{{ID: "traffic-a", AppID: "app-a", TenantID: "tenant-a", Mode: "single", StableReleaseID: "release-a", StableWeight: 100}}
+		request.RuntimeSnapshot.Releases = []platformconfig.ReleaseObservation{{ID: "release-a", AppID: "app-a", TenantID: "tenant-a", ObservedAt: *request.RuntimeSnapshot.CapturedAt, Status: model.EdgeRouteStatusActive, UpstreamURL: route.UpstreamURL}}
+		old, err := platformconfig.Compile(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var previous []platformconfig.CompiledRoute
+		raw, _ := json.Marshal(old.RouteArtifact.Content["routes"])
+		if err := json.Unmarshal(raw, &previous); err != nil {
+			t.Fatal(err)
+		}
+		digest, err := platformconfig.TrafficPartitionInputDigest(request.Intent, request.Policy, route.TenantID, route.AppID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.RuntimeSnapshot.RetainedTrafficPartitions = []platformconfig.RetainedTrafficPartition{{AppID: route.AppID, TenantID: route.TenantID, InputDigest: digest, Source: model.PlatformPublicationPrecondition{ArtifactID: "parent-old", ContentHash: "sha256:" + strings.Repeat("a", 64), ReleaseID: "full-old", FencingToken: 1}, RouteArtifactID: "routes-old", RouteArtifactDigest: "sha256:" + strings.Repeat("b", 64), ObservedAt: *request.RuntimeSnapshot.CapturedAt, ExpiresAt: request.RuntimeSnapshot.CapturedAt.Add(time.Hour), Routes: previous}}
+		request.RuntimeSnapshot.Releases[0].Status = model.EdgeRouteStatusUnavailable
 	}
 	compiled, err := platformconfig.Compile(request)
 	if err != nil {

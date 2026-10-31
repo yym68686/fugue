@@ -51,6 +51,9 @@ func trafficLKGMembers(state *model.State, parent model.PlatformArtifact, releas
 			return fail()
 		}
 		child := state.PlatformArtifacts[index]
+		if err := validateRetainedTrafficExpiry(child, now); err != nil {
+			return nil, err
+		}
 		switch child.ArtifactKind {
 		case model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig:
 		default:

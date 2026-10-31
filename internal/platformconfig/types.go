@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -15,7 +16,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v33"
+	CompilerVersion = "platform-config-compiler/v34"
 	GlobalScopeKey  = "global"
 )
 
@@ -216,18 +217,20 @@ type CompileRequest struct {
 // RuntimeSnapshot is the immutable runtime fact view used by one compiler
 // invocation. It is input data, never serving configuration.
 type RuntimeSnapshot struct {
-	DNSSelections    []DNSSelectionObservation `json:"dns_selections,omitempty"`
-	DNSEdgeEndpoints []DNSEdgeEndpoint         `json:"dns_edge_endpoints,omitempty"`
-	DNSConsumers     []DNSConsumerObservation  `json:"dns_consumers,omitempty"`
-	TLSDomains       []TLSDomainObservation    `json:"tls_domains,omitempty"`
-	DNSPlacements    []DNSPlacementObservation `json:"dns_placements,omitempty"`
-	DNSFlatten       []DNSFlattenObservation   `json:"dns_flatten,omitempty"`
-	IntentGeneration string                    `json:"intent_generation"`
-	PolicyGeneration string                    `json:"policy_generation"`
-	Facts            map[string]any            `json:"facts,omitempty"`
-	CapturedAt       *time.Time                `json:"captured_at,omitempty"`
-	Origins          []OriginObservation       `json:"origins,omitempty"`
-	Releases         []ReleaseObservation      `json:"releases,omitempty"`
+	IsolateTrafficAvailability bool                       `json:"isolate_traffic_availability,omitempty"`
+	RetainedTrafficPartitions  []RetainedTrafficPartition `json:"retained_traffic_partitions,omitempty"`
+	DNSSelections              []DNSSelectionObservation  `json:"dns_selections,omitempty"`
+	DNSEdgeEndpoints           []DNSEdgeEndpoint          `json:"dns_edge_endpoints,omitempty"`
+	DNSConsumers               []DNSConsumerObservation   `json:"dns_consumers,omitempty"`
+	TLSDomains                 []TLSDomainObservation     `json:"tls_domains,omitempty"`
+	DNSPlacements              []DNSPlacementObservation  `json:"dns_placements,omitempty"`
+	DNSFlatten                 []DNSFlattenObservation    `json:"dns_flatten,omitempty"`
+	IntentGeneration           string                     `json:"intent_generation"`
+	PolicyGeneration           string                     `json:"policy_generation"`
+	Facts                      map[string]any             `json:"facts,omitempty"`
+	CapturedAt                 *time.Time                 `json:"captured_at,omitempty"`
+	Origins                    []OriginObservation        `json:"origins,omitempty"`
+	Releases                   []ReleaseObservation       `json:"releases,omitempty"`
 }
 
 // ReleaseObservation is a fixed runtime fact used to resolve a desired
@@ -294,6 +297,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
+	if err := ValidateTrafficPartitionInputs(intent, policy, runtimeSnapshot); err != nil {
+		return CompileResult{}, err
+	}
 	if req.PreviousTrafficPublication != nil && intent.RouteAuthorityTransition == nil {
 		return CompileResult{}, fmt.Errorf("previous publication requires explicit DNS transition")
 	}
@@ -488,7 +494,16 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	metadata["release_set_generation"] = releaseSetGeneration
 	intentArtifact := buildArtifact(model.PlatformArtifactKindPlatformIntent, intent.Scope, intent.Generation, intent, map[string]string{"intent_digest": intentDigest}, now)
 	policyArtifact := buildArtifact(model.PlatformArtifactKindPolicySnapshot, policy.Scope, policy.Generation, policy, map[string]string{"policy_digest": policyDigest}, now)
-	routeArtifact := buildArtifact(model.PlatformArtifactKindEdgeRouteBundle, intent.Scope, "route-"+configurationGeneration, routePayload, metadata, now)
+	routeArtifact := buildArtifact(model.PlatformArtifactKindEdgeRouteBundle, intent.Scope, "route-"+configurationGeneration, routePayload, maps.Clone(metadata), now)
+	if len(runtimeSnapshot.RetainedTrafficPartitions) > 0 {
+		// Metadata is covered by the artifact signature. Keep the established
+		// route/policy payload readable by existing strict consumer decoders.
+		parts, err := json.Marshal(runtimeSnapshot.RetainedTrafficPartitions)
+		if err != nil {
+			return CompileResult{}, err
+		}
+		routeArtifact.Metadata[RetainedTrafficPartitionsMetadata] = string(parts)
+	}
 	dnsArtifact := buildArtifact(model.PlatformArtifactKindDNSAnswerBundle, intent.Scope, "dns-"+configurationGeneration, dnsPayload, metadata, now)
 	tlsArtifact := buildArtifact(model.PlatformArtifactKindCaddyRouteConfig, intent.Scope, "tls-"+configurationGeneration, tlsPayload, metadata, now)
 

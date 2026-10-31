@@ -89,6 +89,8 @@ func WriteRuntimeSnapshot(w io.Writer, snapshot RuntimeSnapshot) error {
 		value any
 		omit  bool
 	}{
+		{"isolate_traffic_availability", snapshot.IsolateTrafficAvailability, !snapshot.IsolateTrafficAvailability},
+		{"retained_traffic_partitions", snapshot.RetainedTrafficPartitions, len(snapshot.RetainedTrafficPartitions) == 0},
 		{"dns_selections", snapshot.DNSSelections, len(snapshot.DNSSelections) == 0},
 		{"dns_edge_endpoints", snapshot.DNSEdgeEndpoints, len(snapshot.DNSEdgeEndpoints) == 0},
 		{"dns_consumers", snapshot.DNSConsumers, len(snapshot.DNSConsumers) == 0},

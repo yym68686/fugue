@@ -16,6 +16,8 @@ func TestRuntimeSnapshotStreamPreservesV1BytesAndDigest(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 123456789, time.FixedZone("offset", 3600))
 	for _, snapshot := range []RuntimeSnapshot{
 		{},
+		{IsolateTrafficAvailability: true},
+		{RetainedTrafficPartitions: []RetainedTrafficPartition{{AppID: "synthetic-app", InputDigest: "sha256:synthetic", ObservedAt: now, ExpiresAt: now.Add(time.Minute), Routes: []CompiledRoute{{RouteIntent: RouteIntent{Hostname: "example.test", AppID: "synthetic-app"}}}}}},
 		{IntentGeneration: "<&\u2028\x00", PolicyGeneration: "policy", CapturedAt: &now, Facts: map[string]any{"z": nil, "a": []any{1.25, "中文", map[string]any{"a": true}}, "invalid\xff": -0.001}},
 		{DNSSelections: []DNSSelectionObservation{{NodeID: "node-a", Hostname: "app.example.test", PhysicalEvidence: json.RawMessage(`{"snapshot":{"z":1,"a":{"b":2,"a":3}},"result":{"value":4}}`)}, {NodeID: "node-b"}}, Origins: []OriginObservation{{Ref: "origin-a", ObservedAt: now}}, Releases: []ReleaseObservation{{ID: "release-a", ObservedAt: now}}},
 	} {

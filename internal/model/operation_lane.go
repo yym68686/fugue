@@ -9,6 +9,7 @@ const (
 	OperationControllerLaneGitHubSyncActivate    = "github-sync-activate"
 	OperationControllerLaneUnknown               = "unknown"
 	OperationResultDeployImageReplicationPending = "deploy image replication is pending"
+	OperationResultTrafficConfirmationPending    = "traffic publication confirmation is pending"
 )
 
 // OperationWaitingForImageReplication reports the recoverable prerequisite
@@ -17,6 +18,10 @@ const (
 func OperationWaitingForImageReplication(op Operation) bool {
 	return strings.TrimSpace(op.Status) == OperationStatusPending &&
 		strings.HasPrefix(strings.TrimSpace(op.ResultMessage), OperationResultDeployImageReplicationPending)
+}
+
+func OperationWaitingForTrafficConfirmation(op Operation) bool {
+	return op.Status == OperationStatusPending && strings.HasPrefix(op.ResultMessage, OperationResultTrafficConfirmationPending)
 }
 
 func OperationControllerLaneName(op Operation) string {

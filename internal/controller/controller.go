@@ -913,6 +913,9 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 	switch op.ExecutionMode {
 	case model.ExecutionModeManaged:
 		if err := s.executeManagedOperation(ctx, op); err != nil {
+			if errors.Is(err, errSafeRolloutTrafficPending) {
+				return s.deferSafeRolloutTrafficConfirmation(ctx, op)
+			}
 			if errors.Is(err, errAppCPUResizeUnsettled) {
 				s.Logger.Printf("operation %s retained active pending app CPU resize verification: %v", op.ID, err)
 				return nil
@@ -1303,8 +1306,10 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				}
 				timer.Mark("postgres_storage_convergence")
 			}
-			if err := s.completeSafeZeroDowntimeRollout(ctx, op, safeRollout); err != nil {
-				return err
+			rolloutErr := s.completeSafeZeroDowntimeRollout(ctx, op, safeRollout)
+			timer.Mark("traffic_publication_wait")
+			if rolloutErr != nil {
+				return rolloutErr
 			}
 			if safeRollout != nil && safeRollout.StableAlignmentAllowed {
 				alignedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, app, scheduling)
@@ -1352,11 +1357,14 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusCompleted, "stable desired state aligned after edge route confirmation", safeRollout.Candidate.ID, nil)
 				s.finalizeSafeZeroDowntimePreviousRetire(ctx, op, safeRollout)
 			} else if safeRollout != nil {
-				s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "stable desired state alignment paused until edge route and retire gates pass", safeRollout.Candidate.ID, nil)
+				return safeRolloutTrafficPending(ctx)
 			}
 		}
 	}
 
+	if safeRollout != nil && s.Config.KubectlApply && !safeRollout.ServingVerified {
+		return safeRolloutTrafficPending(ctx)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

@@ -97,6 +97,9 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	if err := s.validateCellDNSCompilation(compiled); err != nil {
 		return platformConfigCompileResponse{}, err
 	}
+	if err := s.validateRetainedTrafficCompilation(ctx, compiled); err != nil {
+		return platformConfigCompileResponse{}, err
+	}
 	advance("compiler_input")
 	if err := s.store.EnsurePlatformCompilerInputContext(runtimeobservation.WithDatabaseOperation(ctx, "compiler-input-persist"), compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
 		return platformConfigCompileResponse{}, err

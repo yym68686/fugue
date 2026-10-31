@@ -25734,6 +25734,7 @@ components:
           additionalProperties: true
     ReleaseAttempt:
       type: object
+      description: Release lifecycle evidence. A rollout awaiting edge traffic confirmation remains rolling_out without finished_at; workload application or a local observation timeout alone never confirms a deployed digest.
       additionalProperties: false
       required: [id, tenant_id, project_id, app_id, trigger_type, trigger_actor_type, status, confidence, started_at, created_at, updated_at]
       properties:
@@ -37497,6 +37498,75 @@ components:
         parent: {$ref: "#/components/schemas/PlatformArtifact"}
         route: {$ref: "#/components/schemas/PlatformArtifact"}
         tls: {$ref: "#/components/schemas/PlatformArtifact"}
+    PlatformCompiledTrafficRoute:
+      type: object
+      description: Exact immutable compiled HTTP route, including desired route fields and fixed runtime placement. Not a mutable routing instruction.
+      additionalProperties: false
+      required: [hostname, upstream_url, enabled]
+      properties:
+        hostname: {type: string}
+        app_id: {type: string}
+        tenant_id: {type: string}
+        runtime_id: {type: string}
+        origin_ref: {type: string}
+        path_prefix: {type: string}
+        upstream_url: {type: string}
+        service_port: {type: integer, minimum: 0, maximum: 65535}
+        streaming: {type: boolean}
+        cache_policy_id: {type: string}
+        cache_namespace: {type: string}
+        deployment_generation: {type: string}
+        request_body_policies:
+          type: array
+          items: {$ref: "#/components/schemas/EdgeRequestBodyPolicy"}
+        upstreams:
+          type: array
+          maxItems: 16
+          items: {$ref: "#/components/schemas/PlatformConfigUpstreamIntent"}
+        enabled: {type: boolean}
+        edge_group_id: {type: string}
+        kind: {type: string}
+        upstream_kind: {type: string}
+        upstream_scope: {type: string}
+        tls_policy: {type: string}
+        route_policy: {type: string, enum: [route_a_only, edge_canary, edge_enabled]}
+        edge_group_mode: {type: string, enum: [all_healthy, region_aware, pinned]}
+        status: {type: string, enum: [active, disabled, unavailable]}
+        status_reason: {type: string}
+        ttl: {type: integer, format: int32}
+        runtime_type: {type: string}
+        runtime_edge_group_id: {type: string}
+        runtime_cluster_node: {type: string}
+        dns_placement_edge_group_id: {type: string}
+        excluded_edge_ids:
+          type: array
+          items: {type: string}
+        excluded_edge_group_ids:
+          type: array
+          items: {type: string}
+        exclusion_reason: {type: string}
+        exclusion_expires_at: {type: string, format: date-time}
+        exclusion_lifecycle: {type: string}
+        min_healthy_edge_nodes: {type: integer}
+    PlatformRetainedTrafficPartition:
+      type: object
+      additionalProperties: false
+      required: [app_id, tenant_id, input_digest, source, route_artifact_id, route_artifact_digest, observed_at, expires_at, routes]
+      properties:
+        app_id: {type: string, minLength: 1}
+        tenant_id: {type: string, minLength: 1}
+        input_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        source: {$ref: "#/components/schemas/PlatformPublicationPrecondition"}
+        route_artifact_id: {type: string, minLength: 1}
+        route_artifact_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        observed_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        routes:
+          type: array
+          minItems: 1
+          maxItems: 4096
+          description: Exact compiled routes from the pinned signed route artifact, including immutable desired fields, runtime placement, weighted targets and exclusion evidence. Admission compares the entire partition with the source artifact; callers cannot substitute route content.
+          items: {$ref: "#/components/schemas/PlatformCompiledTrafficRoute"}
     PlatformRuntimeSnapshot:
       type: object
       additionalProperties: false
@@ -37539,6 +37609,15 @@ components:
           maxItems: 10000
           items:
             $ref: "#/components/schemas/PlatformReleaseObservation"
+        retained_traffic_partitions:
+          type: array
+          maxItems: 4096
+          description: Fixed references to unchanged application partitions in a verified full publication. Capture and admission check the exact signed source, positive LKG, current consumer convergence, expiry, and unchanged application configuration. These facts never declare an unavailable new release ready. Invalid or stale references refuse compilation.
+          items:
+            $ref: "#/components/schemas/PlatformRetainedTrafficPartition"
+        isolate_traffic_availability:
+          type: boolean
+          description: Compiler capture capability for application availability isolation, not serving authorization. A matching trusted retained partition may preserve unchanged routes; otherwise only unavailable application routes close. Ownership, malformed or ambiguous evidence still rejects compilation. Omission preserves strict legacy compilation. This field is not emitted into consumer policy payloads.
         dns_flatten:
           type: array
           maxItems: 10000

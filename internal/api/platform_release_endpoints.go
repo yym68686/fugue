@@ -212,8 +212,19 @@ func (s *Server) observeReleaseEndpointPods(app model.App, release model.AppRele
 				return nil, fmt.Errorf("release endpoint ReplicaSet identity differs")
 			}
 			depRef, valid := singleKubeControllerOwner(rs.Metadata.OwnerReferences, "apps/v1", "Deployment")
-			if !valid || depRef.Name != deployment.Metadata.Name || depRef.UID != deployment.Metadata.UID || rs.Spec.Template.Metadata.Labels[runtime.FugueLabelAppWorkload] != deployment.Metadata.Name || pod.Metadata.Annotations.ReleaseKey != key || rs.Spec.Template.Metadata.Annotations.ReleaseKey != key {
-				return nil, fmt.Errorf("release endpoint belongs to another workload or executable revision")
+			if !valid {
+				return nil, fmt.Errorf("release endpoint ReplicaSet Deployment controller owner invalid: replica_set=%s", rs.Metadata.Name)
+			}
+			for _, check := range []struct{ field, expected, observed string }{
+				{"deployment_name", deployment.Metadata.Name, depRef.Name},
+				{"deployment_uid", deployment.Metadata.UID, depRef.UID},
+				{"replica_set_workload_label", deployment.Metadata.Name, rs.Spec.Template.Metadata.Labels[runtime.FugueLabelAppWorkload]},
+				{"pod_release_key", key, pod.Metadata.Annotations.ReleaseKey},
+				{"replica_set_release_key", key, rs.Spec.Template.Metadata.Annotations.ReleaseKey},
+			} {
+				if check.expected != check.observed {
+					return nil, fmt.Errorf("release endpoint identity differs: field=%s expected=%s observed=%s pod=%s pod_uid=%s pod_rv=%s replica_set=%s replica_set_uid=%s replica_set_rv=%s deployment=%s deployment_rv=%s", check.field, check.expected, check.observed, pod.Metadata.Name, pod.Metadata.UID, pod.Metadata.ResourceVersion, rs.Metadata.Name, rs.Metadata.UID, rs.Metadata.ResourceVersion, deployment.Metadata.Name, deployment.Metadata.ResourceVersion)
+				}
 			}
 			podIPs := map[netip.Addr]struct{}{}
 			if ip, err := netip.ParseAddr(pod.Status.PodIP); err == nil {
