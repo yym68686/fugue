@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fugue/internal/model"
 	"sort"
@@ -51,10 +52,12 @@ func (s *Store) ListLonghornReconciliationArtifacts(limit int) ([]BackupUsageArt
 	for rows.Next() {
 		var v BackupUsageArtifact
 		var raw []byte
+		var runID, backendID, tenantID sql.NullString
 		a := &v.Artifact
-		if err = rows.Scan(&a.ID, &a.RunID, &a.BackendID, &a.TenantID, &a.Status, &a.Protected, &a.DeletedAt, &v.PhysicalDeletedAt, &v.PhysicalDeleteAttemptedAt, &v.PhysicalDeleteError, &raw); err != nil {
+		if err = rows.Scan(&a.ID, &runID, &backendID, &tenantID, &a.Status, &a.Protected, &a.DeletedAt, &v.PhysicalDeletedAt, &v.PhysicalDeleteAttemptedAt, &v.PhysicalDeleteError, &raw); err != nil {
 			return nil, err
 		}
+		a.RunID, a.BackendID, a.TenantID = runID.String, backendID.String, tenantID.String
 		a.Kind = model.BackupArtifactKindLonghornSnapshot
 		if err = json.Unmarshal(raw, &a.Manifest.Metadata); err != nil {
 			return nil, err
