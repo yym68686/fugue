@@ -208,6 +208,28 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual(s.aborted, [])
         self.assertEqual(k.history_receipt()['state'], 'partial_or_unconfirmed')
 
+    def test_r2_head_httpdate_precision_keeps_etag_size_and_time_guards(self):
+        k, s = HistoryKube(), FakeS3()
+        for obj in s.objects.values():
+            obj['LastModified'] = s.old().replace(microsecond=435000)
+        original = s.head_object
+        def second_precision(**kwargs):
+            head = original(**kwargs)
+            head['LastModified'] = head['LastModified'].replace(microsecond=0)
+            return head
+        with patch.object(s, 'head_object', side_effect=second_precision):
+            plan = self.run_history(k, s)['plan_sha256']
+            result = self.run_history(k, s, True, plan)
+        self.assertEqual(result['state'], 'purged')
+        obj = dict(etag='same', size=10, modified='2026-01-02T00:00:00.435000+00:00')
+        head = dict(ETag='same', ContentLength=10, LastModified=s.old())
+        self.assertTrue(h.unchanged_head(obj, head))
+        self.assertTrue(h.unchanged_head(obj, dict(head, LastModified=s.old().replace(microsecond=435000))))
+        for field, value in [('ETag', 'new-etag'), ('ContentLength', 11),
+                             ('LastModified', s.old() + dt.timedelta(seconds=1)),
+                             ('LastModified', s.old().replace(microsecond=436000))]:
+            self.assertFalse(h.unchanged_head(obj, dict(head, **{field: value})))
+
     def test_unknown_tree_keep_and_foreign_database_fail_closed(self):
         for key, data in [('blocks/shared', b'block'), ('base/20260101T030000/annotations/keep', b'full'),
                           ('base/20260101T030000/backup.info', b'systemid=67890\n'),

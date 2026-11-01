@@ -218,6 +218,16 @@ def quiet(snapshot):
     r.require(all(dt.datetime.fromisoformat(value) <= cutoff for value in times), 'Archive was written within the last 15 minutes; wait and preview again')
 
 
+def unchanged_head(obj, head):
+    # HTTP Last-Modified (HEAD) has second precision; R2 LIST includes ms.
+    # Only tolerate the missing fraction, never changed ETag/size, another
+    # second, or conflicting fractional timestamps from a precise HEAD.
+    observed = stamp(head['LastModified'])
+    listed = dt.datetime.fromisoformat(obj['modified'])
+    same_time = observed == obj['modified'] or (head['LastModified'].microsecond == 0 and observed == stamp(listed.replace(microsecond=0)))
+    return head['ETag'] == obj['etag'] and head['ContentLength'] == obj['size'] and same_time
+
+
 def run(kube, s3, namespace, name, operation, job_uid, execute=False, expected=''):
     r.require(re.fullmatch(r'[a-f0-9]{32}', operation) and job_uid, 'Missing history Job identity')
     config = kube.request('GET', r.config_path(namespace, name))
@@ -288,7 +298,7 @@ def run(kube, s3, namespace, name, operation, job_uid, execute=False, expected='
             batch = snapshot['objects'][offset:offset + 100]
             for obj in batch:
                 head = s3.head_object(Bucket=bucket, Key=obj['key'], IfMatch=obj['etag'])
-                r.require(head['ETag'] == obj['etag'] and head['ContentLength'] == obj['size'] and stamp(head['LastModified']) == obj['modified'], 'Object changed; cleanup stopped, preview remaining data again')
+                r.require(unchanged_head(obj, head), 'Object changed; cleanup stopped, preview remaining data again')
             guard()
             evidence['deletion_attempted'] = True
             save()

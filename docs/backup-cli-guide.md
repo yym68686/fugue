@@ -264,6 +264,11 @@ verifies this complete identity before aborting with the latest returned handle.
 Multiple concurrent uploads for one key are ambiguous and block cleanup; content,
 timestamp, upload-count and object checks are not relaxed. Older preview hashes
 must be regenerated after an executor upgrade.
+HEAD's HTTP `Last-Modified` header has only second precision, unlike R2 LIST's
+fractional timestamps. The HEAD guard accepts an exact match or truncation to
+that same second, with unchanged ETag and byte count; conflicting fractional
+times or another second still block deletion. LIST snapshot hashes retain their
+full timestamp precision.
 
 The Lease does **not** fence external S3 writers, and R2 does not document atomic
 conditional DELETE in its [S3 compatibility table](https://developers.cloudflare.com/r2/api/s3/api/).
