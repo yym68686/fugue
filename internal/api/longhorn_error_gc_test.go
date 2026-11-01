@@ -47,7 +47,9 @@ func TestLonghornErrorGCPaginatesAndPreservesArtifactsAndActiveRuns(t *testing.T
 				return
 			}
 			items := []any{}
-			if !deleted { items = append(items, object) }
+			if !deleted {
+				items = append(items, object)
+			}
 			json.NewEncoder(w).Encode(map[string]any{"items": items})
 			return
 		}
