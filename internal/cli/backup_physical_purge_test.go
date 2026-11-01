@@ -122,7 +122,7 @@ func TestPhysicalHistoryRefusesOldExecutorIncompleteShutdownAndStalePreview(t *t
 	if _, err := startPhysicalHistory(context.Background(), f.kube, opts, options); err == nil || f.job != nil {
 		t.Fatalf("execution without preview launched: %v", err)
 	}
-	f.receipt = map[string]any{"state": "planned", "plan_sha256": options.planSHA, "observed_at": time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)}
+	f.receipt = map[string]any{"state": "planned", "can_execute": true, "plan_sha256": options.planSHA, "observed_at": time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)}
 	if _, err := startPhysicalHistory(context.Background(), f.kube, opts, options); err == nil || f.job != nil {
 		t.Fatalf("expired preview launched: %v", err)
 	}

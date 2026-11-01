@@ -68,9 +68,6 @@ func startPhysicalHistory(ctx context.Context, kube physicalKubeFunc, opts physi
 	if !shutdown.Completed || !physicalBackupHealthy(cluster) || physicalMap(physicalMap(cluster, "spec"), "backup")["retentionPolicy"] != nil {
 		return nil, fmt.Errorf("Barman shutdown must be complete and the database healthy before archive retirement; this command does not disable Barman")
 	}
-	if err := physicalCheckArchiveRecoveries(ctx, kube, policy); err != nil {
-		return nil, err
-	}
 	cron := shutdown.cron
 	if physicalString(physicalMap(physicalMap(cron, "metadata"), "annotations"), physicalHistoryCapability) != "v1" {
 		return nil, fmt.Errorf("installed executor does not support history retirement; upgrade it through the declarative release workflow")
@@ -113,8 +110,8 @@ func startPhysicalHistory(ctx context.Context, kube physicalKubeFunc, opts physi
 			return nil, err
 		}
 		observed, e := time.Parse(time.RFC3339Nano, physicalString(receipt, "observed_at"))
-		if physicalString(receipt, "state") != "planned" || physicalString(receipt, "plan_sha256") != options.planSHA || e != nil || time.Since(observed) < 0 || time.Since(observed) > time.Hour {
-			return nil, fmt.Errorf("a matching successful preview from the last hour is required; preview again")
+		if physicalString(receipt, "state") != "planned" || receipt["can_execute"] != true || physicalString(receipt, "plan_sha256") != options.planSHA || e != nil || time.Since(observed) < 0 || time.Since(observed) > time.Hour {
+			return nil, fmt.Errorf("a matching executable preview from the last hour is required; inspect execution_blockers or preview again")
 		}
 	}
 	random := make([]byte, 16)

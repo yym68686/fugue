@@ -229,8 +229,12 @@ restore drill before destroying the last Barman recovery points.
 
 Prerequisites are owned and completed native Barman shutdown, disabled count
 retention, suspended schedules/CronJob, a healthy stable primary, no pending or
-active backup, and no other CNPG cluster referencing the archive (even a healthy
-one). The independent executor is upgraded through the declarative release lane;
+active backup. Preview lists any referencing CNPG clusters in `archive_consumers`
+and `execution_blockers` alongside the inventory; `can_execute=false` means the
+preview is informational, not approval to delete. Execution additionally requires
+no other CNPG cluster referencing the archive (even a healthy one). It never
+removes these references or deletes recovery clusters automatically.
+The independent executor is upgraded through the declarative release lane;
 disabled installations preserve shutdown and reuse retained Secret **references**.
 Missing references or an old executor fail closed instead of enabling archiving.
 

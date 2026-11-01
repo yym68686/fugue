@@ -169,8 +169,7 @@ class HistoryTest(unittest.TestCase):
                      lambda k: k.resources[k.cron_path]['spec'].update(suspend=False),
                      lambda k: k.resources[k.schedules_path]['items'].append(dict(spec=dict(cluster=dict(name=k.policy['cluster']), suspend=False))),
                      lambda k: k.resources[f'/apis/postgresql.cnpg.io/v1/namespaces/{k.namespace}/backups?limit=500']['items'].append(dict(spec=dict(cluster=dict(name=k.policy['cluster'])), status=dict(phase='running'))),
-                     lambda k: k.resources['/apis/postgresql.cnpg.io/v1/clusters?limit=500']['metadata'].update(continue_='unused', **{'continue': 'truncated'}),
-                     lambda k: k.resources['/apis/postgresql.cnpg.io/v1/clusters?limit=500']['items'].append(dict(metadata=dict(uid='other', name='other-db'), spec=dict(externalClusters=[dict(name='source', barmanObjectStore=dict(destinationPath=k.policy['destination'] + '/', serverName=k.policy['server_name']))]), status=dict(phase='Cluster in healthy state')))]
+                     lambda k: k.resources['/apis/postgresql.cnpg.io/v1/clusters?limit=500']['metadata'].update(continue_='unused', **{'continue': 'truncated'})]
         for mutation in mutations:
             with self.subTest(mutation=mutation):
                 k, s = HistoryKube(), FakeS3()
@@ -178,6 +177,21 @@ class HistoryTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.run_history(k, s)
                 self.assertEqual(s.scan_count, 0)
+
+    def test_preview_reports_consumer_identity_and_size_but_execution_stays_blocked(self):
+        for reference in ('external', 'backup'):
+            k, s = HistoryKube(), FakeS3()
+            store = dict(destinationPath=k.policy['destination'] + '/', serverName=k.policy['server_name'])
+            spec = dict(externalClusters=[dict(name='source', barmanObjectStore=store)]) if reference == 'external' else dict(backup=dict(barmanObjectStore=store))
+            other = dict(metadata=dict(uid='other', name='restored-db', namespace='restore-test'), spec=spec, status=dict(phase='Cluster in healthy state'))
+            k.resources['/apis/postgresql.cnpg.io/v1/clusters?limit=500']['items'].append(other)
+            preview = self.run_history(k, s)
+            self.assertEqual(preview['inventory']['objects'], 3)
+            self.assertFalse(preview['can_execute'])
+            self.assertEqual(preview['archive_consumers'], ['restore-test/restored-db'])
+            with self.assertRaisesRegex(ValueError, 'restore-test/restored-db'):
+                self.run_history(k, s, True, preview['plan_sha256'])
+            self.assertEqual(s.deleted + s.aborted, [])
 
     def test_active_lease_is_not_stolen(self):
         k, s = HistoryKube(), FakeS3()

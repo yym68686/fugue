@@ -152,7 +152,7 @@ def collection(kube, path):
     return value['items']
 
 
-def check_live(kube, policy, name, uid, rv):
+def check_live(kube, policy, name, uid, rv, execute=True):
     cm = kube.request('GET', r.config_path(policy['namespace'], name))
     r.require(cm['metadata']['uid'] == uid and cm['metadata']['resourceVersion'] == rv, 'Policy changed during archive retirement')
     cluster = kube.request('GET', r.cluster_path(policy['namespace'], policy['cluster']))
@@ -175,6 +175,7 @@ def check_live(kube, policy, name, uid, rv):
     for backup in collection(kube, f'/apis/postgresql.cnpg.io/v1/namespaces/{ns}/backups'):
         if backup.get('spec', {}).get('cluster', {}).get('name') == policy['cluster']:
             r.require(backup.get('status', {}).get('phase') in ('completed', 'failed'), 'A database backup is pending or running')
+    consumers = []
     for other in collection(kube, '/apis/postgresql.cnpg.io/v1/clusters'):
         if other['metadata']['uid'] == policy['cluster_uid']:
             continue
@@ -185,8 +186,13 @@ def check_live(kube, policy, name, uid, rv):
                 continue
             other_policy = dict(policy, destination=store.get('destinationPath', ''), server_name=store.get('serverName', fallback) or '')
             # Compare physical bucket/key identity, not endpoint aliases or trailing slashes.
-            r.require(repository(other_policy) != repository(policy), 'Another cluster references this archive; history retirement is blocked')
-    return cluster
+            if repository(other_policy) == repository(policy):
+                target = other['metadata']['namespace'] + '/' + other['metadata']['name']
+                if target not in consumers:
+                    consumers.append(target)
+    consumers.sort()
+    r.require(not execute or not consumers, 'Another cluster references this archive; history retirement is blocked: ' + ', '.join(consumers))
+    return consumers
 
 
 def quiet(snapshot):
@@ -227,7 +233,7 @@ def run(kube, s3, namespace, name, operation, job_uid, execute=False, expected='
         r.require(time.monotonic() - started < 1000, 'History operation exceeded time bound; preview remaining data again')
         current_lock = kube.request('GET', path)
         r.require(current_lock.get('spec', {}).get('holderIdentity') == 'history/' + operation, 'History operation lost its Lease')
-        check_live(kube, policy, name, uid, rv)
+        return check_live(kube, policy, name, uid, rv, execute)
 
     try:
         guard()
@@ -239,14 +245,16 @@ def run(kube, s3, namespace, name, operation, job_uid, execute=False, expected='
         if execute:
             r.require(re.fullmatch(r'[a-f0-9]{64}', expected), 'Execution requires a preview SHA256')
             previous = json.loads(kube.request('GET', receipt_path)['data']['receipt.json'])
-            r.require(previous.get('state') == 'planned' and previous.get('plan_sha256') == expected, 'Matching successful preview is required')
+            r.require(previous.get('state') == 'planned' and previous.get('can_execute') is True and previous.get('plan_sha256') == expected, 'Matching executable preview is required')
             age = dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(previous['observed_at'])
             r.require(0 <= age.total_seconds() <= PLAN_SECONDS, 'Preview expired; create a fresh preview')
         snapshot = inventory(s3, policy)
         plan_hash = digest(policy, uid, rv, snapshot)
         evidence.update(inventory=summary(snapshot), plan_sha256=plan_hash,
                         warning='Permanent removal of ALL Barman restore points. Does not remove Backup CRs, Secrets, local WAL or Longhorn. External writers must be excluded; object-store DELETE is not atomically fenced.')
-        guard()
+        consumers = guard()
+        evidence.update(can_execute=not consumers, archive_consumers=consumers,
+                        execution_blockers=['Another cluster references this archive: ' + consumer for consumer in consumers])
         if not execute:
             evidence['state'] = 'planned'
             return evidence
