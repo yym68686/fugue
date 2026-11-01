@@ -391,7 +391,7 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 
 		attemptReq := req
 		attemptReq.Placement = placement
-		attemptReq.PodPolicy = attemptPolicy
+		attemptReq.PodPolicy = builderPodPolicyWithAllocatedDemand(attemptPolicy, req.WorkloadProfile, placement.AllocatedDemand)
 		logger.Printf("builder job preflight complete kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
 		logger.Printf(
 			"builder job start kind=dockerfile name=%s namespace=%s image=%s operation=%s app=%s placement=%s",

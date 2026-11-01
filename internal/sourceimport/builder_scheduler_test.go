@@ -70,7 +70,7 @@ func TestSelectBuilderCandidatesLightPrefersHigherOverallHeadroom(t *testing.T) 
 		t.Fatalf("expected 2 candidates, got %d", len(candidates))
 	}
 	if got := candidates[0].Node.Name; got != "higher-headroom" {
-		t.Fatalf("expected highest-headroom node to rank first for light build, got %q", got)
+		t.Fatalf("expected highest overall headroom node to rank first for light build, got %q", got)
 	}
 }
 
@@ -91,8 +91,8 @@ func TestSelectBuilderCandidatesHeavyPrefersHigherOverallHeadroom(t *testing.T) 
 	if len(candidates) != 2 {
 		t.Fatalf("expected 2 heavy candidates, got %d", len(candidates))
 	}
-	if got := candidates[0].Node.Name; got != "higher-headroom" {
-		t.Fatalf("expected highest-headroom node to rank first for heavy build, got %q", got)
+	if got := candidates[0].Node.Name; got != "lower-headroom" {
+		t.Fatalf("expected node with highest available memory to rank first for heavy build, got %q", got)
 	}
 }
 
@@ -122,8 +122,8 @@ func TestBuilderDemandForProfileUsesRequestedResourcesWhenPresent(t *testing.T) 
 	if heavyDemand.CPUMilli != parseBuilderCPUMilli("250m") {
 		t.Fatalf("expected heavy cpu demand 250m, got %dm", heavyDemand.CPUMilli)
 	}
-	if heavyDemand.MemoryBytes != parseBuilderBytes("512Mi") {
-		t.Fatalf("expected heavy memory demand 512Mi, got %d", heavyDemand.MemoryBytes)
+	if heavyDemand.MemoryBytes != parseBuilderBytes("6Gi") {
+		t.Fatalf("expected heavy placement demand to reserve the memory limit 6Gi, got %d", heavyDemand.MemoryBytes)
 	}
 	if heavyDemand.EphemeralBytes != parseBuilderBytes("3Gi") {
 		t.Fatalf("expected heavy ephemeral demand 3Gi, got %d", heavyDemand.EphemeralBytes)
@@ -140,6 +140,49 @@ func TestEscalatedBuilderDemandReservesOOMMemoryTier(t *testing.T) {
 	}
 	if demand.MemoryBytes != parseBuilderBytes("8Gi") {
 		t.Fatalf("expected escalated builder to reserve 8Gi, got %d bytes", demand.MemoryBytes)
+	}
+}
+
+func TestBuilderAllocatedDemandUsesAvailableMemoryUpToCeiling(t *testing.T) {
+	t.Parallel()
+
+	policy := builderPodPolicyWithMemoryCeiling(defaultBuilderPodPolicy(), parseBuilderBytes("12Gi"))
+	base := builderResourceDemand{
+		CPUMilli:       parseBuilderCPUMilli("250m"),
+		MemoryBytes:    parseBuilderBytes("6Gi"),
+		EphemeralBytes: parseBuilderBytes("8Gi"),
+	}
+	for _, test := range []struct {
+		name      string
+		available string
+		expected  string
+	}{
+		{name: "headroom below ceiling", available: "10Gi", expected: "10Gi"},
+		{name: "ceiling caps allocation", available: "20Gi", expected: "12Gi"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := builderCandidate{Available: builderResourceDemand{
+				CPUMilli:       base.CPUMilli,
+				MemoryBytes:    parseBuilderBytes(test.available),
+				EphemeralBytes: base.EphemeralBytes,
+			}}
+			got := builderAllocatedDemand(policy, builderWorkloadProfileHeavy, candidate)
+			if got.MemoryBytes != parseBuilderBytes(test.expected) {
+				t.Fatalf("expected allocated memory %s, got %d", test.expected, got.MemoryBytes)
+			}
+		})
+	}
+}
+
+func TestBuilderPodPolicyWithAllocatedDemandSetsMemoryRequestAndLimit(t *testing.T) {
+	t.Parallel()
+
+	policy := builderPodPolicyWithAllocatedDemand(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, builderResourceDemand{MemoryBytes: parseBuilderBytes("10Gi")})
+	if got := policy.Heavy.Resources.Requests["memory"]; got != "10240Mi" {
+		t.Fatalf("expected heavy memory request 10Gi, got %q", got)
+	}
+	if got := policy.Heavy.Resources.Limits["memory"]; got != "10240Mi" {
+		t.Fatalf("expected heavy memory limit 10Gi, got %q", got)
 	}
 }
 
@@ -294,8 +337,8 @@ func TestSelectBuilderCandidatesIncludesExplicitBuildPoolTenantScopedNodes(t *te
 		t.Fatalf("builder demand: %v", err)
 	}
 
-	shared := builderTestNode("shared-a", "shared-a", policy, "4000m", "4Gi", "24Gi", "250m", "1536Mi", "3Gi")
-	alicehk2 := builderTestNode("alicehk2", "fortedrape8", policy, "4000m", "4Gi", "30Gi", "250m", "768Mi", "2Gi")
+	shared := builderTestNode("shared-a", "shared-a", policy, "4000m", "16Gi", "24Gi", "250m", "1536Mi", "3Gi")
+	alicehk2 := builderTestNode("alicehk2", "fortedrape8", policy, "4000m", "16Gi", "30Gi", "250m", "768Mi", "2Gi")
 	alicehk2.Labels[runtime.NodeModeLabelKey] = model.RuntimeTypeManagedOwned
 	alicehk2.Labels[runtime.TenantIDLabelKey] = "tenant_demo"
 	alicehk2.Labels[runtime.RuntimeIDLabelKey] = "runtime_demo"
@@ -453,7 +496,7 @@ func TestSelectBuilderCandidatesUsesFilesystemAvailabilityForEphemeralHeadroom(t
 		t.Fatalf("expected low-disk node to stay in ranking instead of being filtered, got %d candidates", len(candidates))
 	}
 	if got := candidates[0].Node.Name; got != "gcp1" {
-		t.Fatalf("expected gcp1-like node to rank ahead once filesystem headroom is accounted for, got %q", got)
+		t.Fatalf("expected node with enough ephemeral headroom to rank first, got %q", got)
 	}
 }
 
@@ -525,12 +568,12 @@ func TestBuildBuilderPlacementPrefersSelectedNode(t *testing.T) {
 		{Node: builderNodeSnapshot{Name: "node-a", Hostname: "host-a"}},
 		{Node: builderNodeSnapshot{Name: "node-b", Hostname: "host-b"}},
 		{Node: builderNodeSnapshot{Name: "node-c", Hostname: "host-c"}},
-	}, "node-b", 2)
+	}, "node-b")
 
 	if placement.PreferredHostname != "host-b" {
 		t.Fatalf("expected preferred hostname host-b, got %q", placement.PreferredHostname)
 	}
-	expected := []string{"host-b", "host-a"}
+	expected := []string{"host-b"}
 	if !reflect.DeepEqual(placement.CandidateHostnames, expected) {
 		t.Fatalf("expected ordered hostnames %v, got %v", expected, placement.CandidateHostnames)
 	}
@@ -566,9 +609,9 @@ func TestSelectBuilderCandidatesHeavyAllowsSharedFourGiNodesWithModerateHeadroom
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{
-		builderTestNode("fortedrape8", "fortedrape8", policy, "2", "3977116Ki", "40010668616", "162m", "2042691584", "0"),
-		builderTestNode("gcp2", "instance-20260322-112431", policy, "2", "4018884Ki", "29888385001", "608m", "2291592704", "0"),
-		builderTestNode("gcp3", "instance-20260322-112657", policy, "2", "4018892Ki", "9814318482", "298m", "2316939264", "0"),
+		builderTestNode("fortedrape8", "fortedrape8", policy, "2", "16Gi", "40Gi", "162m", "2Gi", "0"),
+		builderTestNode("gcp2", "instance-20260322-112431", policy, "2", "12Gi", "30Gi", "608m", "2Gi", "0"),
+		builderTestNode("gcp3", "instance-20260322-112657", policy, "2", "10Gi", "20Gi", "298m", "2Gi", "0"),
 	}, nil, nil)
 
 	if len(candidates) < 2 {
@@ -605,8 +648,8 @@ func TestBuildBuildpacksJobObjectPlacementOverridesGenericAffinity(t *testing.T)
 	if got := requiredMatchExpressions[0]["key"]; got != builderHostnameLabelKey {
 		t.Fatalf("expected required hostname key %q, got %#v", builderHostnameLabelKey, got)
 	}
-	if got := requiredMatchExpressions[0]["values"].([]string); !reflect.DeepEqual(got, []string{"host-b", "host-a"}) {
-		t.Fatalf("expected required hostnames [host-b host-a], got %v", got)
+	if got := requiredMatchExpressions[0]["values"].([]string); !reflect.DeepEqual(got, []string{"host-b"}) {
+		t.Fatalf("expected hard-bound hostname [host-b], got %v", got)
 	}
 
 	preferred := nodeAffinity["preferredDuringSchedulingIgnoredDuringExecution"].([]map[string]any)
@@ -896,7 +939,7 @@ func TestUpsertReservationUpdateUsesMicrosecondPrecision(t *testing.T) {
 		reservationLeaseDuration: 2 * time.Minute,
 	}
 
-	if err := scheduler.upsertReservation(context.Background(), "reservation-a", "node-a"); err != nil {
+	if err := scheduler.upsertReservation(context.Background(), "reservation-a", "node-a", scheduler.demand); err != nil {
 		t.Fatalf("upsert reservation: %v", err)
 	}
 	assertMicrosecondKubeTimestamp(t, updated.Spec.AcquireTime)

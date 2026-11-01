@@ -14,9 +14,12 @@ const (
 	defaultBuilderCandidateCount          = 3
 	defaultBuilderSelectionTimeoutSec     = 600
 	defaultBuilderRetryIntervalSec        = 5
-	defaultBuilderReservationLeaseSec     = 120
-	defaultBuilderHeavyMemoryCeiling      = "16Gi"
-	defaultBuilderHeavyEphemeralCeiling   = "24Gi"
+	// Builder jobs may wait for image pulls and run for up to 30 minutes. Keep
+	// the reservation alive longer than that whole window so a live builder
+	// cannot lose its capacity reservation midway through execution.
+	defaultBuilderReservationLeaseSec   = 35 * 60
+	defaultBuilderHeavyMemoryCeiling    = "16Gi"
+	defaultBuilderHeavyEphemeralCeiling = "24Gi"
 )
 
 type builderWorkloadProfile string
@@ -120,7 +123,7 @@ func normalizeBuilderPodPolicy(policy BuilderPodPolicy) BuilderPodPolicy {
 	if policy.RetryIntervalSeconds <= 0 {
 		policy.RetryIntervalSeconds = defaults.RetryIntervalSeconds
 	}
-	if policy.ReservationLeaseDurationSecs <= 0 {
+	if policy.ReservationLeaseDurationSecs < defaults.ReservationLeaseDurationSecs {
 		policy.ReservationLeaseDurationSecs = defaults.ReservationLeaseDurationSecs
 	}
 	if strings.TrimSpace(policy.HeavyMemoryLimitCeiling) == "" {
@@ -164,6 +167,17 @@ func builderPodPolicyWithMemoryCeiling(policy BuilderPodPolicy, ceilingBytes int
 		ceilingBytes = maxBytes
 	}
 	policy.HeavyMemoryLimitCeiling = formatBuilderMemoryBytes(ceilingBytes)
+	return policy
+}
+
+func builderPodPolicyWithAllocatedDemand(policy BuilderPodPolicy, profile builderWorkloadProfile, demand builderResourceDemand) BuilderPodPolicy {
+	policy = normalizeBuilderPodPolicy(policy)
+	if profile != builderWorkloadProfileHeavy || demand.MemoryBytes <= 0 {
+		return policy
+	}
+	memory := formatBuilderMemoryBytes(demand.MemoryBytes)
+	policy.Heavy.Resources.Requests["memory"] = memory
+	policy.Heavy.Resources.Limits["memory"] = memory
 	return policy
 }
 
@@ -482,26 +496,17 @@ func applyBuilderTolerations(podSpec map[string]any, tolerations []BuilderTolera
 }
 
 func applyBuilderPlacement(podSpec map[string]any, placement builderJobPlacement) {
-	if len(placement.CandidateHostnames) == 0 {
+	preferredHostname := strings.TrimSpace(placement.PreferredHostname)
+	if preferredHostname == "" && len(placement.CandidateHostnames) > 0 {
+		preferredHostname = strings.TrimSpace(placement.CandidateHostnames[0])
+	}
+	if preferredHostname == "" {
 		return
 	}
 
-	requiredValues := make([]string, 0, len(placement.CandidateHostnames))
-	seen := make(map[string]struct{}, len(placement.CandidateHostnames))
-	for _, hostname := range placement.CandidateHostnames {
-		hostname = strings.TrimSpace(hostname)
-		if hostname == "" {
-			continue
-		}
-		if _, exists := seen[hostname]; exists {
-			continue
-		}
-		seen[hostname] = struct{}{}
-		requiredValues = append(requiredValues, hostname)
-	}
-	if len(requiredValues) == 0 {
-		return
-	}
+	// The scheduler already reserved this exact node. A fallback hostname here
+	// would allow Kubernetes to place the Pod on a different, unreserved node.
+	requiredValues := []string{preferredHostname}
 
 	affinity, _ := podSpec["affinity"].(map[string]any)
 	if affinity == nil {
@@ -524,10 +529,6 @@ func applyBuilderPlacement(podSpec map[string]any, placement builderJobPlacement
 		},
 	}
 
-	preferredHostname := strings.TrimSpace(placement.PreferredHostname)
-	if preferredHostname == "" {
-		preferredHostname = requiredValues[0]
-	}
 	nodeAffinity["preferredDuringSchedulingIgnoredDuringExecution"] = []map[string]any{
 		{
 			"weight": defaultBuilderPreferredHostnameWeight,

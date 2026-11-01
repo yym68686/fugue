@@ -10,12 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/kubeauth"
@@ -51,6 +53,7 @@ var errNoBuilderPlacement = errors.New("no eligible builder nodes")
 type builderJobPlacement struct {
 	CandidateHostnames []string
 	PreferredHostname  string
+	AllocatedDemand    builderResourceDemand
 }
 
 type builderResourceDemand struct {
@@ -230,11 +233,59 @@ func acquireBuilderPlacement(ctx context.Context, namespace, jobName string, pol
 	if err != nil {
 		return builderJobPlacement{}, nil, err
 	}
+	stopRenewal := scheduler.startReservationRenewal(reservationName)
+	var releaseOnce sync.Once
 	return placement, func() {
-		releaseCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = scheduler.releaseReservation(releaseCtx, reservationName)
+		releaseOnce.Do(func() {
+			stopRenewal()
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = scheduler.releaseReservation(releaseCtx, reservationName)
+		})
 	}, nil
+}
+
+func (s *builderScheduler) startReservationRenewal(reservationName string) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	interval := s.reservationLeaseDuration / 3
+	if interval <= 0 || interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				renewCtx, renewCancel := context.WithTimeout(ctx, 10*time.Second)
+				err := s.renewReservation(renewCtx, reservationName)
+				renewCancel()
+				if err != nil && ctx.Err() == nil {
+					log.Printf("builder reservation renewal failed reservation=%s err=%v", reservationName, err)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func (s *builderScheduler) renewReservation(ctx context.Context, reservationName string) error {
+	lease, found, err := s.client.getLease(ctx, reservationName)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("builder reservation %s disappeared", reservationName)
+	}
+	lease.Spec.RenewTime = formatKubeTimestamp(time.Now())
+	return s.client.updateLease(ctx, lease)
 }
 
 func newBuilderScheduler(namespace string, policy BuilderPodPolicy, profile builderWorkloadProfile, requiredNodeLabels map[string]string) (*builderScheduler, error) {
@@ -341,14 +392,22 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 			continue
 		}
 
+		selectedCandidate, found := builderCandidateByNodeName(refreshedCandidates, candidate.Node.Name)
+		if !found {
+			releaseLock()
+			continue
+		}
+		allocatedDemand := builderAllocatedDemand(s.policy, s.profile, selectedCandidate)
 		reservationName := builderReservationLeaseName(jobName)
-		if err := s.upsertReservation(ctx, reservationName, candidate.Node.Name); err != nil {
+		if err := s.upsertReservation(ctx, reservationName, candidate.Node.Name, allocatedDemand); err != nil {
 			releaseLock()
 			return builderJobPlacement{}, "", err
 		}
 		releaseLock()
 
-		return buildBuilderPlacement(refreshedCandidates, candidate.Node.Name, len(refreshedCandidates)), reservationName, nil
+		placement := buildBuilderPlacement(refreshedCandidates, candidate.Node.Name)
+		placement.AllocatedDemand = allocatedDemand
+		return placement, reservationName, nil
 	}
 
 	return builderJobPlacement{}, "", fmt.Errorf("%w after lock contention", errNoBuilderPlacement)
@@ -519,13 +578,13 @@ func (s *builderScheduler) releaseNodeLock(ctx context.Context, nodeName string)
 	return s.client.deleteLease(ctx, builderNodeLockLeaseName(nodeName))
 }
 
-func (s *builderScheduler) upsertReservation(ctx context.Context, reservationName, nodeName string) error {
+func (s *builderScheduler) upsertReservation(ctx context.Context, reservationName, nodeName string, demand builderResourceDemand) error {
 	now := time.Now()
 	annotations := map[string]string{
 		builderAnnotationNodeName:       nodeName,
-		builderAnnotationCPUMilli:       strconv.FormatInt(s.demand.CPUMilli, 10),
-		builderAnnotationMemoryBytes:    strconv.FormatInt(s.demand.MemoryBytes, 10),
-		builderAnnotationEphemeralBytes: strconv.FormatInt(s.demand.EphemeralBytes, 10),
+		builderAnnotationCPUMilli:       strconv.FormatInt(demand.CPUMilli, 10),
+		builderAnnotationMemoryBytes:    strconv.FormatInt(demand.MemoryBytes, 10),
+		builderAnnotationEphemeralBytes: strconv.FormatInt(demand.EphemeralBytes, 10),
 	}
 	lease, found, err := s.client.getLease(ctx, reservationName)
 	if err != nil {
@@ -597,6 +656,14 @@ func sortedBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
+		leftFits := builderDemandFits(candidates[i].Available, demand)
+		rightFits := builderDemandFits(candidates[j].Available, demand)
+		if leftFits != rightFits {
+			return leftFits
+		}
+		if profile == builderWorkloadProfileHeavy && candidates[i].Available.MemoryBytes != candidates[j].Available.MemoryBytes {
+			return candidates[i].Available.MemoryBytes > candidates[j].Available.MemoryBytes
+		}
 		return builderCandidateLess(demand, candidates[i], candidates[j])
 	})
 	return candidates
@@ -740,40 +807,17 @@ func compareBuilderInt64(left, right int64) int {
 	}
 }
 
-func buildBuilderPlacement(candidates []builderCandidate, selectedNodeName string, candidateCount int) builderJobPlacement {
-	if candidateCount <= 0 {
-		candidateCount = len(candidates)
-	}
-	ordered := make([]string, 0, candidateCount)
-	preferred := ""
-	appendHostname := func(hostname string) {
-		if hostname == "" {
-			return
-		}
-		for _, existing := range ordered {
-			if existing == hostname {
-				return
-			}
-		}
-		ordered = append(ordered, hostname)
-	}
+func buildBuilderPlacement(candidates []builderCandidate, selectedNodeName string) builderJobPlacement {
 	for _, candidate := range candidates {
 		if candidate.Node.Name == selectedNodeName {
-			preferred = candidate.Node.Hostname
-			appendHostname(candidate.Node.Hostname)
-			break
+			hostname := strings.TrimSpace(candidate.Node.Hostname)
+			return builderJobPlacement{
+				CandidateHostnames: []string{hostname},
+				PreferredHostname:  hostname,
+			}
 		}
 	}
-	for _, candidate := range candidates {
-		appendHostname(candidate.Node.Hostname)
-		if len(ordered) >= candidateCount {
-			break
-		}
-	}
-	return builderJobPlacement{
-		CandidateHostnames: ordered,
-		PreferredHostname:  preferred,
-	}
+	return builderJobPlacement{}
 }
 
 func builderNodeMatchesRequiredLabels(snapshot builderNodeSnapshot, requiredNodeLabels map[string]string) bool {
@@ -799,6 +843,15 @@ func builderCandidatesContainNode(candidates []builderCandidate, nodeName string
 	return false
 }
 
+func builderCandidateByNodeName(candidates []builderCandidate, nodeName string) (builderCandidate, bool) {
+	for _, candidate := range candidates {
+		if candidate.Node.Name == nodeName {
+			return candidate, true
+		}
+	}
+	return builderCandidate{}, false
+}
+
 func builderDemandForProfile(policy BuilderPodPolicy, profile builderWorkloadProfile) (builderResourceDemand, error) {
 	policy = normalizeBuilderPodPolicy(policy)
 	workload := policy.Light
@@ -810,7 +863,8 @@ func builderDemandForProfile(policy BuilderPodPolicy, profile builderWorkloadPro
 			parseBuilderCPUMilli(workload.Resources.Requests["cpu"]),
 			parseBuilderCPUMilli(workload.Resources.Limits["cpu"]),
 		),
-		MemoryBytes: builderSchedulingDemand(
+		MemoryBytes: builderMemorySchedulingDemand(
+			profile,
 			parseBuilderBytes(workload.Resources.Requests["memory"]),
 			parseBuilderBytes(workload.Resources.Limits["memory"]),
 		),
@@ -819,6 +873,33 @@ func builderDemandForProfile(policy BuilderPodPolicy, profile builderWorkloadPro
 			parseBuilderBytes(workload.Resources.Limits["ephemeral-storage"]),
 		),
 	}, nil
+}
+
+func builderMemorySchedulingDemand(profile builderWorkloadProfile, request, limit int64) int64 {
+	if profile == builderWorkloadProfileHeavy && limit > 0 {
+		return limit
+	}
+	return builderSchedulingDemand(request, limit)
+}
+
+func builderAllocatedDemand(policy BuilderPodPolicy, profile builderWorkloadProfile, candidate builderCandidate) builderResourceDemand {
+	demand, _ := builderDemandForProfile(policy, profile)
+	if profile != builderWorkloadProfileHeavy {
+		return demand
+	}
+	ceiling := parseBuilderBytes(normalizeBuilderPodPolicy(policy).HeavyMemoryLimitCeiling)
+	if ceiling <= 0 {
+		return demand
+	}
+	if candidate.Available.MemoryBytes < ceiling {
+		demand.MemoryBytes = candidate.Available.MemoryBytes
+	} else {
+		demand.MemoryBytes = ceiling
+	}
+	// Round down so the quantity applied to the Pod never exceeds the budget.
+	const mebibyte = int64(1024 * 1024)
+	demand.MemoryBytes = demand.MemoryBytes / mebibyte * mebibyte
+	return demand
 }
 
 func builderSchedulingDemand(request, limit int64) int64 {
