@@ -693,7 +693,11 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 					"-c",
 					postgresWaitCommand(postgres.spec.ServiceName),
 				},
-				"resources": runtimeHelperResourceRequirements(),
+				// This init container only waits for the database endpoint. Do not
+				// reserve CPU for it: its completed init stage would otherwise keep
+				// the Pod's effective CPU request above the app container's request
+				// and make CPU request downscales ineffective.
+				"resources": runtimeWaitPostgresResourceRequirements(),
 			})
 		}
 		initContainers = append(initContainers, postgresInitContainers...)
@@ -1092,6 +1096,18 @@ func runtimeHelperResourceRequirements() map[string]any {
 		},
 		map[string]string{
 			"cpu":    defaultHelperCPULimit,
+			"memory": defaultHelperMemoryLimit,
+		},
+	)
+}
+
+func runtimeWaitPostgresResourceRequirements() map[string]any {
+	return runtimeStaticResourceRequirements(
+		map[string]string{
+			"memory":            defaultHelperMemoryRequest,
+			"ephemeral-storage": defaultHelperEphemeralRequest,
+		},
+		map[string]string{
 			"memory": defaultHelperMemoryLimit,
 		},
 	)

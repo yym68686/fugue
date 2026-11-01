@@ -138,7 +138,7 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	if got := command[2]; got != expectedWaitCommand {
 		t.Fatalf("expected wait-postgres init container to prefer service ClusterIP env, got %q", got)
 	}
-	assertHelperResources(t, waitPostgres["resources"])
+	assertWaitPostgresResources(t, waitPostgres["resources"])
 	volumeMounts, ok := containers[0]["volumeMounts"].([]map[string]any)
 	if !ok {
 		t.Fatalf("expected declarative app files to be mounted into the app container")
@@ -3315,6 +3315,35 @@ func assertHelperResources(t *testing.T, value any) {
 	}
 	if got, ok := limits["ephemeral-storage"]; ok {
 		t.Fatalf("expected helper ephemeral limit to be unset, got %#v", got)
+	}
+}
+
+func assertWaitPostgresResources(t *testing.T, value any) {
+	t.Helper()
+
+	resources, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("expected wait-postgres resources object, got %#v", value)
+	}
+	requests := resourceStringValues(t, resources["requests"])
+	limits := resourceStringValues(t, resources["limits"])
+	if _, ok := requests["cpu"]; ok {
+		t.Fatalf("expected wait-postgres cpu request to be unset, got %#v", requests["cpu"])
+	}
+	if _, ok := limits["cpu"]; ok {
+		t.Fatalf("expected wait-postgres cpu limit to be unset, got %#v", limits["cpu"])
+	}
+	if got := requests["memory"]; got != defaultHelperMemoryRequest {
+		t.Fatalf("expected wait-postgres memory request %q, got %#v", defaultHelperMemoryRequest, got)
+	}
+	if got := requests["ephemeral-storage"]; got != defaultHelperEphemeralRequest {
+		t.Fatalf("expected wait-postgres ephemeral request %q, got %#v", defaultHelperEphemeralRequest, got)
+	}
+	if got := limits["memory"]; got != defaultHelperMemoryLimit {
+		t.Fatalf("expected wait-postgres memory limit %q, got %#v", defaultHelperMemoryLimit, got)
+	}
+	if _, ok := limits["ephemeral-storage"]; ok {
+		t.Fatalf("expected wait-postgres ephemeral limit to be unset, got %#v", limits["ephemeral-storage"])
 	}
 }
 
