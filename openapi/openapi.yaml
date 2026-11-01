@@ -37647,6 +37647,19 @@ components:
           additionalProperties: true
           description: Runtime diagnostics may include dynamic_quality_coverage. Its hostname states distinguish inactive_route_constraint (the current DNS route-state policy excludes the owner), learning_no_eligible_query (no projected query exists), learning_address_family_evidence_required (only unsupported address-family queries exist), and learning_queued (at least one supported query is actually scheduled for observation). These diagnostics do not authorize serving or override route policy; current usable evidence is separately classified during capture.
           properties:
+            managed_serving_handoffs:
+              type: array
+              maxItems: 4096
+              description: Bounded continuity observations for a managed in-place deployment. These facts never mark the desired origin or release ready. Admission independently rechecks the durable deploying operation, unchanged per-application HTTP authority (apart from the operation-derived deployment/cache epoch), exact signed positive LKG route, consumer convergence and original evidence expiry. Only the exact current_image_mismatch transition may retain that old route while independent DNS or peer configuration advances. Disabled routes, maintenance, other origin failures and explicit authority changes still win.
+              items:
+                type: object
+                additionalProperties: false
+                required: [tenant_id, app_id, release_id, operation_id]
+                properties:
+                  tenant_id: {type: string, minLength: 1}
+                  app_id: {type: string, minLength: 1}
+                  release_id: {type: string, minLength: 1}
+                  operation_id: {type: string, minLength: 1}
             release_readiness:
               type: object
               additionalProperties: false

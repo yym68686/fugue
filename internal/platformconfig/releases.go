@@ -57,9 +57,11 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 		if !snapshot.IsolateTrafficAvailability {
 			return cause
 		}
-		// Retaining a release binding must never undo a current negative origin
-		// or explicit maintenance status. Those independent gates still win.
-		if route.Status != "" && route.Status != model.EdgeRouteStatusActive {
+		// Independent negative origins and explicit maintenance still win.
+		// Only admitted managed-handoff provenance can retain an exact old
+		// path across the specific current-image transition, not declare the
+		// desired origin/release healthy or bypass another failure reason.
+		if route.Status != "" && route.Status != model.EdgeRouteStatusActive && !managedHandoffRetainsOrigin(*route, policy, snapshot) {
 			route.Upstreams = nil
 			return nil
 		}

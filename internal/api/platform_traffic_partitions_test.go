@@ -16,7 +16,7 @@ import (
 	"fugue/internal/store"
 )
 
-func retainedTrafficAPIFixture(t *testing.T) (*Server, platformconfig.CompileRequest, model.PlatformArtifact, string) {
+func retainedTrafficAPIFixture(t *testing.T, configure ...func(*platformconfig.CompileRequest)) (*Server, platformconfig.CompileRequest, model.PlatformArtifact, string) {
 	t.Helper()
 	path := t.TempDir() + "/state.json"
 	st := store.New(path)
@@ -50,6 +50,9 @@ func retainedTrafficAPIFixture(t *testing.T) (*Server, platformconfig.CompileReq
 	}
 	r.Intent.DNSConsumers = consumers
 	r.RuntimeSnapshot.DNSConsumers = []platformconfig.DNSConsumerObservation{{NodeID: "dns-a", EdgeGroupID: "edge-group-a", ObservedAt: now, A: []string{"8.8.8.8"}}}
+	for _, apply := range configure {
+		apply(&r)
+	}
 	compiled, err := platformconfig.Compile(r)
 	if err != nil {
 		t.Fatal(err)

@@ -154,6 +154,9 @@ func retainedTrafficRoutes(routes []CompiledRoute, policy PolicySnapshot, snapsh
 }
 
 func ValidateTrafficPartitionInputs(intent PlatformIntent, policy PolicySnapshot, snapshot RuntimeSnapshot) error {
+	if _, err := ManagedServingHandoffs(snapshot); err != nil {
+		return err
+	}
 	for _, part := range snapshot.RetainedTrafficPartitions {
 		digest, err := TrafficPartitionInputDigest(intent, policy, part.TenantID, part.AppID)
 		if err != nil || digest != part.InputDigest {

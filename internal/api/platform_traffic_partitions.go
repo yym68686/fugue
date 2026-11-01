@@ -213,11 +213,16 @@ func (s *Server) validateRetainedTrafficCompilation(ctx context.Context, compile
 	if err != nil {
 		return err
 	}
+	handoffs, err := s.validateManagedHandoffCompilation(ctx, compiled, source)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	for _, part := range parts {
 		pin := part.Source
 		digest, err := platformconfig.TrafficPartitionInputDigest(source.intent, source.policy, part.TenantID, part.AppID)
-		if err != nil || digest != part.InputDigest || pin.ArtifactID != source.parent.ID || pin.ContentHash != source.parent.ContentHash || pin.ReleaseID != source.release.ID || pin.FencingToken != source.release.FencingToken || part.RouteArtifactID != source.route.ID || part.RouteArtifactDigest != source.route.ContentHash || !part.ExpiresAt.After(now) || part.ExpiresAt.After(source.expiry(part.TenantID, part.AppID)) || !reflect.DeepEqual(platformconfig.NormalizeTrafficPartitionRoutes(source.routes[part.TenantID+"\x00"+part.AppID]), part.Routes) {
+		authorized := err == nil && (digest == part.InputDigest || handoffs[part.TenantID+"\x00"+part.AppID])
+		if !authorized || pin.ArtifactID != source.parent.ID || pin.ContentHash != source.parent.ContentHash || pin.ReleaseID != source.release.ID || pin.FencingToken != source.release.FencingToken || part.RouteArtifactID != source.route.ID || part.RouteArtifactDigest != source.route.ContentHash || !part.ExpiresAt.After(now) || part.ExpiresAt.After(source.expiry(part.TenantID, part.AppID)) || !reflect.DeepEqual(platformconfig.NormalizeTrafficPartitionRoutes(source.routes[part.TenantID+"\x00"+part.AppID]), part.Routes) {
 			return fmt.Errorf("retained traffic partition source, expiry or exact route content changed")
 		}
 	}

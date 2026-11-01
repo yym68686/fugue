@@ -110,6 +110,7 @@ func (s *Server) captureReleaseRuntimeReadiness(ctx context.Context, projection 
 	if err := s.guardPendingStableHandoffs(ctx, *projection, business); err != nil {
 		return err
 	}
+	s.captureManagedHandoffPartitions(ctx, projection, business, retentionBudgets...)
 	s.captureRetainedTrafficPartitions(ctx, projection, retentionBudgets...)
 	if err := projectReadyReleaseOrigins(projection, proofs); err != nil {
 		return releaseReadinessDiagnostic(err, proofs)

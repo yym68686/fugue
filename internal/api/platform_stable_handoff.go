@@ -11,7 +11,7 @@ import (
 	"fugue/internal/store"
 )
 
-const inPlaceDeployReadinessReason = "release deployment image or current generation is not ready"
+const inPlaceDeployReadinessReason = platformconfig.ManagedHandoffReleaseReason
 
 // An automatic code-release handoff is not an instruction to withdraw serving
 // configuration. If the new target has not passed the independent runtime gate,
