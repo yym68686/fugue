@@ -18,19 +18,21 @@ import (
 )
 
 const physicalBackupPolicyAnnotation = "fugue.pro/cnpg-count-policy"
+const physicalBarmanDisabledAnnotation = "fugue.pro/barman-disabled"
 
 type physicalBackupOptions struct{ namespace, policy, ssh, kubeconfig, kubeContext string }
 type physicalBackupPolicy struct {
-	Schema      string `json:"schema"`
-	Namespace   string `json:"namespace"`
-	Cluster     string `json:"cluster"`
-	ClusterUID  string `json:"cluster_uid"`
-	SystemID    string `json:"system_id"`
-	Destination string `json:"destination"`
-	Endpoint    string `json:"endpoint"`
-	ServerName  string `json:"server_name"`
-	Enabled     bool   `json:"enabled"`
-	RetainCount int    `json:"retain_count"`
+	Schema         string `json:"schema"`
+	Namespace      string `json:"namespace"`
+	Cluster        string `json:"cluster"`
+	ClusterUID     string `json:"cluster_uid"`
+	SystemID       string `json:"system_id"`
+	Destination    string `json:"destination"`
+	Endpoint       string `json:"endpoint"`
+	ServerName     string `json:"server_name"`
+	Enabled        bool   `json:"enabled"`
+	RetainCount    int    `json:"retain_count"`
+	BarmanDisabled bool   `json:"barman_disabled,omitempty"`
 }
 type physicalKubeFunc func(context.Context, any, ...string) (map[string]any, error)
 
@@ -129,7 +131,17 @@ func loadPhysicalBackup(ctx context.Context, kube physicalKubeFunc, opts physica
 	if server == "" {
 		server = physicalString(meta, "name")
 	}
-	if physicalString(meta, "name") != policy.Cluster || physicalString(meta, "namespace") != opts.namespace || physicalString(meta, "resourceVersion") == "" || physicalString(meta, "uid") != policy.ClusterUID || physicalString(status, "systemID") != policy.SystemID || physicalString(store, "destinationPath") != policy.Destination || physicalString(store, "endpointURL") != policy.Endpoint || server != policy.ServerName {
+	if physicalString(meta, "name") != policy.Cluster || physicalString(meta, "namespace") != opts.namespace || physicalString(meta, "resourceVersion") == "" || physicalString(meta, "uid") != policy.ClusterUID || physicalString(status, "systemID") != policy.SystemID {
+		return nil, nil, policy, fmt.Errorf("database or backup repository identity changed; refusing operation")
+	}
+	if policy.BarmanDisabled && policy.Enabled {
+		return nil, nil, policy, fmt.Errorf("Barman disable intent cannot enable retention")
+	}
+	if len(store) == 0 {
+		if !policy.BarmanDisabled || physicalString(physicalMap(meta, "annotations"), physicalBarmanDisabledAnnotation) != physicalString(physicalMap(cm, "metadata"), "uid") {
+			return nil, nil, policy, fmt.Errorf("backup repository missing without owned Barman disable intent")
+		}
+	} else if physicalString(store, "destinationPath") != policy.Destination || physicalString(store, "endpointURL") != policy.Endpoint || server != policy.ServerName {
 		return nil, nil, policy, fmt.Errorf("database or backup repository identity changed; refusing operation")
 	}
 	return cm, cluster, policy, nil
@@ -142,7 +154,7 @@ func physicalBackupHealthy(cluster map[string]any) bool {
 }
 
 func physicalBackupActivated(cm, cluster map[string]any) bool {
-	return physicalString(physicalMap(physicalMap(cluster, "metadata"), "annotations"), physicalBackupPolicyAnnotation) == physicalString(physicalMap(cm, "metadata"), "uid") && physicalMap(physicalMap(cluster, "spec"), "backup")["retentionPolicy"] == nil
+	return physicalString(physicalMap(physicalMap(cluster, "metadata"), "annotations"), physicalBarmanDisabledAnnotation) == "" && len(physicalMap(physicalMap(physicalMap(cluster, "spec"), "backup"), "barmanObjectStore")) > 0 && physicalString(physicalMap(physicalMap(cluster, "metadata"), "annotations"), physicalBackupPolicyAnnotation) == physicalString(physicalMap(cm, "metadata"), "uid") && physicalMap(physicalMap(cluster, "spec"), "backup")["retentionPolicy"] == nil
 }
 
 func physicalBackupLock(ctx context.Context, kube physicalKubeFunc, name string) (func(), error) {
@@ -185,6 +197,9 @@ func configurePhysicalBackup(ctx context.Context, kube physicalKubeFunc, opts ph
 	if err != nil {
 		return nil, err
 	}
+	if policy.BarmanDisabled || physicalString(physicalMap(physicalMap(cluster, "metadata"), "annotations"), physicalBarmanDisabledAnnotation) != "" {
+		return nil, fmt.Errorf("Barman disable intent is active; configure only changes retention and cannot re-enable backups")
+	}
 	meta := physicalMap(cluster, "metadata")
 	annotations := physicalMap(meta, "annotations")
 	if existing := physicalString(annotations, physicalBackupPolicyAnnotation); existing != "" && existing != physicalString(physicalMap(cm, "metadata"), "uid") {
@@ -221,7 +236,7 @@ func configurePhysicalBackup(ctx context.Context, kube physicalKubeFunc, opts ph
 
 func (c *CLI) newAdminPhysicalBackupCommand() *cobra.Command {
 	opts := physicalBackupOptions{namespace: "fugue-system", policy: "fugue-control-plane-backup-retention"}
-	cmd := &cobra.Command{Use: "physical", Short: "Manage independent CNPG physical backup count retention", Long: "Manage the installed CNPG physical-backup policy through Kubernetes credentials (or an explicitly selected SSH host). This operator path does not require the Fugue API or database. The executor must first be installed through the declarative release workflow. Logical dump policies are separate."}
+	cmd := &cobra.Command{Use: "physical", Short: "Manage CNPG physical backup retention and Barman shutdown", Long: "Manage the installed CNPG physical-backup policy through Kubernetes credentials (or an explicitly selected SSH host). This operator path does not require the Fugue API or database. The executor must first be installed through the declarative release workflow. Logical dump policies are separate."}
 	f := cmd.PersistentFlags()
 	f.StringVar(&opts.namespace, "namespace", opts.namespace, "Control-plane Kubernetes namespace")
 	f.StringVar(&opts.policy, "policy", opts.policy, "Installed count-retention policy ConfigMap")
@@ -243,7 +258,11 @@ func (c *CLI) newAdminPhysicalBackupCommand() *cobra.Command {
 		}
 		var observation any
 		_ = json.Unmarshal([]byte(physicalString(physicalMap(receipt, "data"), "receipt.json")), &observation)
-		return c.renderResourceResult(map[string]any{"policy": policy, "activated": physicalBackupActivated(cm, cluster), "database_healthy": physicalBackupHealthy(cluster), "database_phase": physicalString(physicalMap(cluster, "status"), "phase"), "native_recovery_window": physicalMap(physicalMap(cluster, "spec"), "backup")["retentionPolicy"], "last_receipt": observation})
+		shutdown, err := inspectPhysicalBarmanShutdown(cmd.Context(), kube, opts, cm, cluster, policy)
+		if err != nil {
+			return err
+		}
+		return c.renderResourceResult(map[string]any{"policy": policy, "activated": physicalBackupActivated(cm, cluster), "database_healthy": physicalBackupHealthy(cluster), "database_phase": physicalString(physicalMap(cluster, "status"), "phase"), "native_recovery_window": physicalMap(physicalMap(cluster, "spec"), "backup")["retentionPolicy"], "last_receipt": observation, "barman": shutdown})
 	}}
 	var count int
 	var ack bool
@@ -366,6 +385,6 @@ func (c *CLI) newAdminPhysicalBackupCommand() *cobra.Command {
 	}}
 	reconcile.Flags().BoolVar(&dryRun, "dry-run", false, "Ask Barman to preview without deleting backups or WAL")
 	reconcile.Flags().BoolVar(&wait, "wait", false, "Wait up to five minutes for the Job")
-	cmd.AddCommand(status, plan, configure, reconcile)
+	cmd.AddCommand(status, plan, configure, reconcile, c.newPhysicalBarmanDisableCommand(&opts))
 	return cmd
 }

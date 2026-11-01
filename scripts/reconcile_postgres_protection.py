@@ -10,6 +10,8 @@ import re
 
 def validate(config, live):
     spec = config['spec']
+    if live.get('metadata', {}).get('annotations', {}).get('fugue.pro/barman-disabled'):
+        raise ValueError('Barman was explicitly disabled; protection rollout cannot re-enable WAL archiving or backup schedules')
     if live.get('metadata', {}).get('annotations', {}).get('fugue.pro/cnpg-count-policy') and spec.get('backup', {}).get('retentionPolicy'):
         raise ValueError('Count retention is independently managed; cannot restore a recovery-window policy implicitly')
     if set(spec) - {'resources', 'backup', 'postgresql', 'primaryUpdateStrategy'}:

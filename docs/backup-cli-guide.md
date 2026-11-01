@@ -108,7 +108,9 @@ kubectl on an explicitly selected trusted SSH host. The latter uses existing
 SSH authentication and host-key verification; it does not copy executors or
 credentials to a node. Commands continue working if the Fugue API/database is
 unavailable. The operator needs access to the policy/receipt ConfigMaps, Lease,
-CNPG Cluster/Backups, and retention CronJob/Jobs in the selected namespace.
+CNPG Cluster/Backups/ScheduledBackups, and retention CronJob/Jobs in the selected
+namespace. Status/shutdown also inspect schedules and the retention CronJob;
+shutdown checks archive-dependent recoveries across namespaces (list Clusters).
 
 The executor is installed only through the declarative `ci.yml`
 `cnpg_backup_count_retention` lane, configured by
@@ -150,6 +152,52 @@ base backup (plus its required WAL). It is not a database recovery or disk clean
 operation: deleting R2 WAL cannot free local PostgreSQL `pg_wal`. Unhealthy
 databases may save configuration intent, but remote cleanup stays blocked until
 the database is healthy. Resolve local disk incidents separately.
+
+### Disable native Barman without deleting history
+
+```bash
+fugue admin backup physical disable --dry-run --ssh <operator-host-alias>
+fugue admin backup physical disable --ack-loss-of-pitr --wait --ssh <operator-host-alias>
+fugue admin backup physical status --ssh <operator-host-alias>
+```
+
+This is a separate, explicit lifecycle operation, **not** `--retain-count 0`.
+It stops future native Barman base backups **and** continuous WAL uploads. It
+does not alter PostgreSQL's local WAL, Longhorn policies, database volumes,
+replication, Secrets, historical Backup records, R2 objects or multipart uploads.
+Existing archive data continues to cost storage until separately retired.
+Confirm a recent successful alternative backup and perform an isolated restore
+drill before relying on Longhorn alone. Future PITR coverage is lost; restore
+points are limited to the alternative backups that actually succeed.
+
+`--dry-run` only reads Kubernetes state: no Lease, Job or intent is written.
+Execution acquires the retention Lease, persists `barman_disabled=true` and
+`enabled=false` in the policy, pins cluster ownership with
+`fugue.pro/barman-disabled=<policy UID>`, and suspends the retention CronJob and
+every native Barman ScheduledBackup targeting that cluster. Foreign clusters and
+volumeSnapshot/plugin schedules are untouched. Active backups (including unknown
+phases), unhealthy databases and active archive-dependent recoveries prevent
+archive removal. No backup process is cancelled. Do not start concurrent manual
+backups while shutting down.
+
+`disable_pending` is **not** completed shutdown: WAL archiving remains configured
+while a backup drains or the database is unhealthy. Rerun `disable` after those
+conditions clear. `--wait` retries for at most five minutes; an interrupted or
+timed-out command keeps its safe intent and never schedules automatic completion.
+UID/resourceVersion conflicts fail explicitly and can be retried. Only after
+revalidation does the command remove native `barmanObjectStore` and its retention
+window. `completed=true` proves configuration read-back, not PostgreSQL runtime
+reload, no future R2 writes, or successful Longhorn restoration; check database
+health, archiver logs/metrics and R2 activity separately.
+
+Subsequent retention installations preserve shutdown and leave their CronJob
+suspended, even after native credentials/configuration have been removed from
+the Cluster. The protection writer refuses to re-enable backups, and an online
+Helm upgrade refuses `backup.enabled=true` for an explicitly disabled Cluster
+(set `controlPlanePostgres.backup.enabled=false` for such an upgrade). Offline
+rendering cannot discover live intent; do not apply offline manifests over it.
+`configure` cannot re-enable Barman. Re-enabling is a separate, reviewed recovery
+configuration operation; do not simply remove the ownership annotation.
 
 ## Enable app backup explicitly
 

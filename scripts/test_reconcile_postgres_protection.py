@@ -14,6 +14,11 @@ class ProtectionSafetyTest(unittest.TestCase):
     def test_accepts_protected_existing_database(self):
         validate(self.config, self.live)
 
+    def test_explicit_shutdown_cannot_be_overwritten_by_protection_rollout(self):
+        self.live['metadata'] = {'annotations': {'fugue.pro/barman-disabled': 'policy-uid'}}
+        with self.assertRaisesRegex(ValueError, 'explicitly disabled'):
+            validate(self.config, self.live)
+
     def test_refuses_replacing_operator_owned_count_retention(self):
         self.live['metadata'] = {'annotations': {'fugue.pro/cnpg-count-policy': 'policy-uid'}}
         self.config['spec']['backup']['retentionPolicy'] = '7d'

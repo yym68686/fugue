@@ -184,6 +184,7 @@ class CountRetentionTest(unittest.TestCase):
                 return objects.get((args[1], args[2]))
             if args[0] == 'create':
                 objects[(body['kind'], body['metadata']['name'])] = copy.deepcopy(body)
+                objects[(body['kind'], body['metadata']['name'])]['metadata']['uid'] = 'policy-uid'
             if args[0] == 'apply':
                 applied.append(body)
         config = dict(namespace=policy['namespace'], name='sample-retention', cluster=policy['cluster'], clusterUID=policy['cluster_uid'], systemID=policy['system_id'], image='registry.example.test/db@sha256:' + 'a' * 64)
@@ -203,6 +204,54 @@ class CountRetentionTest(unittest.TestCase):
         self.assertNotIn('value', env['AWS_SECRET_ACCESS_KEY'])
         role = next(item for item in applied if item['kind'] == 'ClusterRole')
         self.assertEqual(role['rules'][0]['verbs'], ['get', 'list'])
+
+    @patch.object(r, 'barman')
+    def test_barman_shutdown_preserves_archive_after_native_config_is_removed(self, barman):
+        k = FakeKube()
+        k.policy.update(enabled=False, barman_disabled=True)
+        k.resources[r.config_path(k.namespace, k.name)]['data']['policy.json'] = json.dumps(k.policy)
+        k.cluster['metadata']['annotations'][r.DISABLED_ANNOTATION] = 'policy-uid'
+        del k.cluster['spec']['backup']['barmanObjectStore']
+        self.assertEqual(k.run()['state'], 'disabled')
+        barman.assert_not_called()
+        for owner in ('', 'foreign-uid'):
+            k.cluster['metadata']['annotations'][r.DISABLED_ANNOTATION] = owner
+            with self.assertRaisesRegex(ValueError, 'owned Barman disable intent'):
+                k.run()
+        for value in (True, 1, 'true'):
+            bad = {**k.policy, 'enabled': value}
+            with self.assertRaises(ValueError):
+                r.validate_policy(bad, k.cluster, 'policy-uid')
+
+    def test_install_preserves_shutdown_without_requiring_live_credentials(self):
+        policy, cluster = fixture()
+        policy.update(enabled=False, barman_disabled=True)
+        cluster['metadata']['annotations'][r.DISABLED_ANNOTATION] = 'policy-uid'
+        del cluster['spec']['backup']['barmanObjectStore']
+        saved = dict(metadata=dict(uid='policy-uid'), data={'policy.json': json.dumps(policy)})
+        cron = dict(metadata=dict(uid='cron-uid', resourceVersion='10'), spec=dict(suspend=False))
+        patches = []
+        def kube(*args, body=None):
+            if args[0] == 'get':
+                return {'clusters.postgresql.cnpg.io': cluster, 'ConfigMap': saved, 'CronJob': cron}[args[1]]
+            if args[0] == 'patch' and args[1] == 'CronJob':
+                patches.append(json.loads(args[-1]))
+                return {}
+            self.fail(f'Unexpected write during disabled installation: {args}')
+        config = dict(namespace=policy['namespace'], name='sample-retention', cluster=policy['cluster'], clusterUID=policy['cluster_uid'], systemID=policy['system_id'], image='registry.example.test/db@sha256:' + 'a' * 64)
+        with contextlib.redirect_stdout(io.StringIO()):
+            r.install(config, kube)
+        self.assertEqual(patches[0][-1], dict(op='add', path='/spec/suspend', value=True))
+        self.assertEqual(patches[0][0]['value'], 'cron-uid')
+        self.assertEqual(json.loads(saved['data']['policy.json']), policy)
+
+    @patch.object(r, 'barman')
+    def test_shutdown_marker_blocks_old_enabled_retention(self, barman):
+        k = FakeKube()
+        k.cluster['metadata']['annotations'][r.DISABLED_ANNOTATION] = 'policy-uid'
+        with self.assertRaisesRegex(ValueError, 'shutdown blocks retention'):
+            k.run()
+        barman.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 LABEL = 'fugue.pro/cnpg-count-retention'
 ANNOTATION = 'fugue.pro/cnpg-count-policy'
+DISABLED_ANNOTATION = 'fugue.pro/barman-disabled'
 SCHEMA = 'fugue.cnpg-count-retention/v1'
 NAME = re.compile(r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
 
@@ -24,12 +25,15 @@ def require(value, message):
         raise ValueError(message)
 
 
-def validate_policy(policy, cluster):
-    require(set(policy) == {'schema', 'namespace', 'cluster', 'cluster_uid', 'system_id', 'destination', 'endpoint', 'server_name', 'enabled', 'retain_count'}, 'Invalid policy fields')
+def validate_policy(policy, cluster, policy_uid=None):
+    required = {'schema', 'namespace', 'cluster', 'cluster_uid', 'system_id', 'destination', 'endpoint', 'server_name', 'enabled', 'retain_count'}
+    require(required <= set(policy) <= required | {'barman_disabled'}, 'Invalid policy fields')
     require(policy['schema'] == SCHEMA, 'Unsupported policy schema')
     for key in ('namespace', 'cluster', 'server_name'):
         require(isinstance(policy[key], str) and NAME.fullmatch(policy[key]) and len(policy[key]) <= 253, 'Invalid resource identity')
     require(type(policy['enabled']) is bool and type(policy['retain_count']) is int and 1 <= policy['retain_count'] <= 100, 'Invalid count policy')
+    require(type(policy.get('barman_disabled', False)) is bool, 'Invalid Barman disable intent')
+    require(not policy.get('barman_disabled') or not policy['enabled'], 'Barman disable intent cannot enable retention')
     require(isinstance(policy['cluster_uid'], str) and policy['cluster_uid'] and re.fullmatch(r'[0-9]+', policy['system_id']), 'Invalid database identity')
     endpoint = urlsplit(policy['endpoint'])
     require(endpoint.scheme == 'https' and endpoint.hostname and not endpoint.username and not endpoint.password and not endpoint.query and not endpoint.fragment, 'Invalid backup endpoint')
@@ -38,7 +42,10 @@ def validate_policy(policy, cluster):
     meta = cluster['metadata']
     require(meta['namespace'] == policy['namespace'] and meta['name'] == policy['cluster'] and meta['uid'] == policy['cluster_uid'], 'Cluster identity changed')
     require(str(cluster.get('status', {}).get('systemID', '')) == policy['system_id'], 'Database system ID changed')
-    store = cluster['spec']['backup']['barmanObjectStore']
+    store = cluster['spec'].get('backup', {}).get('barmanObjectStore')
+    if not store:
+        require(policy.get('barman_disabled') and policy_uid and meta.get('annotations', {}).get(DISABLED_ANNOTATION) == policy_uid, 'Backup repository missing without owned Barman disable intent')
+        return
     require(store['destinationPath'] == policy['destination'] and policy['destination'].startswith('s3://'), 'Backup destination changed')
     require(store.get('endpointURL') == policy['endpoint'], 'Backup endpoint changed')
     require(store.get('serverName', meta['name']) == policy['server_name'], 'Barman server identity changed')
@@ -119,7 +126,8 @@ def check_live(kube, policy, name, config_uid, resource_version):
     config = kube.request('GET', config_path(policy['namespace'], name))
     require(config['metadata']['uid'] == config_uid and config['metadata']['resourceVersion'] == resource_version, 'Policy changed during reconciliation')
     cluster = kube.request('GET', cluster_path(policy['namespace'], policy['cluster']))
-    validate_policy(policy, cluster)
+    validate_policy(policy, cluster, config_uid)
+    require(not policy.get('barman_disabled') and not cluster['metadata'].get('annotations', {}).get(DISABLED_ANNOTATION), 'Barman shutdown blocks retention')
     require(cluster['metadata'].get('annotations', {}).get(ANNOTATION) == config_uid, 'Count policy ownership has not been activated')
     require(not cluster['spec']['backup'].get('retentionPolicy'), 'Native recovery-window policy is still enabled')
     status = cluster.get('status', {})
@@ -147,7 +155,7 @@ def run_retention(kube, namespace, name, dry_run=False):
     policy = json.loads(config['data']['policy.json'])
     require(config['metadata']['namespace'] == namespace and config['metadata']['name'] == name and policy['namespace'] == namespace, 'Policy identity changed')
     cluster = kube.request('GET', cluster_path(namespace, policy['cluster']))
-    validate_policy(policy, cluster)
+    validate_policy(policy, cluster, config['metadata']['uid'])
     if not policy['enabled']:
         return {'state': 'disabled', 'deleted': False}
     path, lock = acquire(kube, namespace, name, 'retention/' + str(uuid.uuid4()))
@@ -199,6 +207,21 @@ def install(config, kube):
     require(cluster['metadata']['uid'] == config['clusterUID'] and str(cluster['status']['systemID']) == config['systemID'], 'Installation target identity mismatch')
     image = config['image']
     require(re.fullmatch(r'[^\s]+@sha256:[a-f0-9]{64}', image), 'Worker image must be digest pinned')
+    existing_policy = kube('get', 'ConfigMap', name, '-n', namespace, '--ignore-not-found', '-o', 'json')
+    if existing_policy:
+        saved = json.loads(existing_policy['data']['policy.json'])
+        validate_policy(saved, cluster, existing_policy['metadata']['uid'])
+        if saved.get('barman_disabled'):
+            require(cluster['metadata'].get('annotations', {}).get(DISABLED_ANNOTATION) == existing_policy['metadata']['uid'], 'Barman shutdown ownership is not activated; retry CLI disable')
+            cron = kube('get', 'CronJob', name, '-n', namespace, '--ignore-not-found', '-o', 'json')
+            if cron and not cron['spec'].get('suspend'):
+                patch = [{'op': 'test', 'path': '/metadata/uid', 'value': cron['metadata']['uid']},
+                         {'op': 'test', 'path': '/metadata/resourceVersion', 'value': cron['metadata']['resourceVersion']},
+                         {'op': 'add', 'path': '/spec/suspend', 'value': True}]
+                kube('patch', 'CronJob', name, '-n', namespace, '--type=json', '-p', json.dumps(patch))
+            print(json.dumps({'installed': False, 'barman_disabled': True, 'intent_preserved': True}))
+            return
+    require(not cluster['metadata'].get('annotations', {}).get(DISABLED_ANNOTATION), 'Barman shutdown intent must not be overwritten by an installation')
     store = cluster['spec']['backup']['barmanObjectStore']
     policy = {'schema': SCHEMA, 'namespace': namespace, 'cluster': config['cluster'], 'cluster_uid': config['clusterUID'], 'system_id': config['systemID'], 'destination': store['destinationPath'], 'endpoint': store['endpointURL'], 'server_name': store.get('serverName', config['cluster']), 'enabled': False, 'retain_count': 3}
     validate_policy(policy, cluster)
@@ -211,7 +234,7 @@ def install(config, kube):
         if not existing:
             kube('create', '-f', '-', body=resource)
         elif resource['metadata']['name'] == name and resource['kind'] == 'ConfigMap':
-            validate_policy(json.loads(existing['data']['policy.json']), cluster)
+            validate_policy(json.loads(existing['data']['policy.json']), cluster, existing['metadata']['uid'])
     code = Path(__file__).read_text()
     code_name = name + '-' + hashlib.sha256(code.encode()).hexdigest()[:12]
     resources = [dict(apiVersion='v1', kind='ConfigMap', metadata={**meta, 'name': code_name}, immutable=True, data={'worker.py': code}),

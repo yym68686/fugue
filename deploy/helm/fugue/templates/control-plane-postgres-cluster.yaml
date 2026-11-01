@@ -1,4 +1,9 @@
 {{- if .Values.controlPlanePostgres.enabled }}
+{{- $liveCluster := lookup "postgresql.cnpg.io/v1" "Cluster" .Release.Namespace (include "fugue.controlPlanePostgresName" .) | default dict }}
+{{- $liveAnnotations := dig "metadata" "annotations" (dict) $liveCluster }}
+{{- if and .Values.controlPlanePostgres.backup.enabled (get $liveAnnotations "fugue.pro/barman-disabled") }}
+  {{- fail "Barman was explicitly disabled by an operator; set controlPlanePostgres.backup.enabled=false. A chart upgrade must not re-enable WAL archiving." -}}
+{{- end }}
 {{- if lt (int .Values.controlPlanePostgres.instances) 1 }}
   {{- fail "controlPlanePostgres.instances must be at least 1 when controlPlanePostgres.enabled=true" -}}
 {{- end }}
