@@ -5,11 +5,36 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestAPIDeploymentHasGuardianRecoveryBudget(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	jobs := yamlMappingValue(t, document.Content[0], "jobs")
+	job := yamlMappingValue(t, jobs, "deploy_api")
+	minutes, err := strconv.Atoi(yamlMappingValue(t, job, "timeout-minutes").Value)
+	if err != nil || minutes < 35 {
+		t.Fatalf("API deployment must leave time for the bounded Guardian wait, committed-authority adoption, and receipt upload; got timeout=%d err=%v", minutes, err)
+	}
+	encoded, err := yaml.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "deploy-declarative-component") {
+		t.Fatal("API release bypasses the standard declarative component workflow")
+	}
+}
 
 func TestPhysicalBackupExecutorInstallsThroughIndependentDeclarativeLane(t *testing.T) {
 	raw, err := os.ReadFile("../../.github/workflows/ci.yml")

@@ -24,7 +24,7 @@ func TestAutomaticStableHandoffPreservesPositiveArtifactUntilIndependentReady(t 
 	business := store.RouteBusinessSnapshot{TrafficPolicies: []model.AppTrafficPolicy{{ID: "traffic-a", AppID: "app-a", TenantID: "tenant-a", Mode: "single", StableReleaseID: "release-a-next", StableWeight: 100, UpdatedByType: model.ActorTypeSystem, UpdatedByID: "stable-release-sync"}}}
 	before, _ := json.Marshal(projection)
 	err := s.guardPendingStableHandoffs(context.Background(), projection, business)
-	if err == nil || !strings.Contains(err.Error(), "automatic stable release handoff pending") || !strings.Contains(err.Error(), "endpoint Pods are not ready") {
+	if err == nil || !strings.Contains(err.Error(), "managed app serving handoff pending") || !strings.Contains(err.Error(), "endpoint Pods are not ready") {
 		t.Fatal("negative publication not blocked", err)
 	}
 	after, _ := json.Marshal(projection)
@@ -101,5 +101,78 @@ func TestAutomaticStableHandoffPreservesPositiveArtifactUntilIndependentReady(t 
 	}
 	if err := s.guardPendingStableHandoffs(context.Background(), projection, business); err != nil {
 		t.Fatal("revoked evidence blocked strict configuration recovery", err)
+	}
+}
+
+func TestInPlaceDeployPreservesPositiveArtifactBeforeStableSync(t *testing.T) {
+	s, request, parent, _ := retainedTrafficAPIFixture(t)
+	now := time.Now().UTC()
+	request.RuntimeSnapshot.CapturedAt = &now
+	request.RuntimeSnapshot.Releases[0].Status = model.EdgeRouteStatusUnavailable
+	request.RuntimeSnapshot.Releases[0].StatusReason = inPlaceDeployReadinessReason
+	projection := platformIntentProjectionResponse{Intent: request.Intent, Policy: request.Policy, RuntimeSnapshot: request.RuntimeSnapshot, CapturedAt: now}
+	business := store.RouteBusinessSnapshot{
+		Apps:            []model.App{{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID}, Status: model.AppStatus{Phase: "deploying", LastOperationID: "deploy-next"}}},
+		TrafficPolicies: []model.AppTrafficPolicy{{ID: "traffic-a", AppID: "app-a", TenantID: "tenant-a", Mode: "single", StableReleaseID: "release-a", StableWeight: 100, UpdatedByType: "user"}},
+	}
+	before, _ := json.Marshal(projection)
+	if err := s.guardPendingStableHandoffs(context.Background(), projection, business); err == nil || !strings.Contains(err.Error(), "managed app serving handoff pending") {
+		t.Fatal("in-place deploy withdrew the verified path before stable sync", err)
+	}
+	after, _ := json.Marshal(projection)
+	if string(before) != string(after) {
+		t.Fatal("guard changed authority or invented ready observations")
+	}
+	active, _, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", "full")
+	if err != nil || !found || active.ID != parent.ID || active.ContentHash != parent.ContentHash {
+		t.Fatal("current signed artifact changed", err)
+	}
+	for _, scenario := range []string{"no operation", "completed", "failed", "scaling", "importing", "unmanaged", "wrong tenant", "expired evidence", "disable", "route change", "peer recovery", "policy recovery", "explicit stable selection", "candidate", "ready", "other readiness failure", "no old binding"} {
+		t.Run(scenario, func(t *testing.T) {
+			var p platformIntentProjectionResponse
+			_ = json.Unmarshal(before, &p)
+			b := business
+			b.Apps = append([]model.App(nil), business.Apps...)
+			b.TrafficPolicies = append([]model.AppTrafficPolicy(nil), business.TrafficPolicies...)
+			switch scenario {
+			case "no operation":
+				b.Apps[0].Status.LastOperationID = ""
+			case "completed":
+				b.Apps[0].Status.Phase = "deployed"
+			case "failed":
+				b.Apps[0].Status.LastFailedOperation = &model.AppOperationFailure{ID: "deploy-next"}
+			case "scaling", "importing":
+				b.Apps[0].Status.Phase = scenario
+			case "unmanaged":
+				b.Apps[0].Spec.RuntimeID = "external-runtime"
+			case "wrong tenant":
+				b.Apps[0].TenantID = "another-tenant"
+			case "expired evidence":
+				p.CapturedAt = now.Add(time.Duration(p.Policy.MaxStaleSeconds+1) * time.Second)
+			case "disable":
+				p.Intent.Routes[0].Enabled = false
+			case "route change":
+				p.Intent.Routes[0].UpstreamURL = "http://different:8080"
+			case "peer recovery":
+				p.Intent.Routes[1].Enabled = false
+			case "policy recovery":
+				p.Policy.TrafficConstraints[0].StableWeight = 90
+			case "explicit stable selection":
+				p.Policy.TrafficConstraints[0].StableReleaseID = "selected"
+				p.RuntimeSnapshot.Releases[0].ID = "selected"
+				b.TrafficPolicies[0].StableReleaseID = "selected"
+			case "candidate":
+				b.TrafficPolicies[0].CandidateReleaseID = "candidate"
+			case "ready":
+				p.RuntimeSnapshot.Releases[0].Status = model.EdgeRouteStatusActive
+			case "other readiness failure":
+				p.RuntimeSnapshot.Releases[0].StatusReason = "release service ownership differs"
+			case "no old binding":
+				p.Intent.Scope = "another-scope"
+			}
+			if err := s.guardPendingStableHandoffs(context.Background(), p, b); err != nil {
+				t.Fatal("non-handoff drift or explicit recovery blocked", err)
+			}
+		})
 	}
 }

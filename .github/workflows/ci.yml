@@ -3829,7 +3829,9 @@ jobs:
   deploy_api:
     needs: [prepush, component-build, deploy_schema, deploy_release_guardian]
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && (needs.deploy_release_guardian.result == 'success' || needs.deploy_release_guardian.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'api') }}
-    timeout-minutes: 15
+    # Allow the bounded 15-minute Guardian wait, the existing 8-minute
+    # committed-authority reconciliation, setup and terminal receipt upload.
+    timeout-minutes: 35
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-api, cancel-in-progress: false, queue: max}
