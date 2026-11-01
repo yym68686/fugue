@@ -783,6 +783,39 @@ func TestBuilderNodePodRequestsAccountsForInitSidecarsOverheadAndTerminalPods(t 
 	}
 }
 
+func TestHeavyBuilderBudgetUsesPhysicalSafetyAndRequestHeadroomAsSeparateCeilings(t *testing.T) {
+	t.Parallel()
+
+	policy := builderPodPolicyWithMemoryCeiling(defaultBuilderPodPolicy(), parseBuilderBytes("16Gi"))
+	for _, test := range []struct {
+		name, used, requested, reservation, expected string
+		fits                                         bool
+	}{
+		{name: "requests constrain allocation without duplicate safety deduction", used: "14Gi", requested: "24Gi", reservation: "1Gi", expected: "7Gi", fits: true},
+		{name: "real pressure preserves physical safety buffer", used: "27Gi", requested: "8Gi", reservation: "0", expected: "0", fits: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			node := builderTestNode("worker", "worker", policy, "8000m", "32Gi", "100Gi", "1000m", test.used, "1Gi")
+			node.Requested.MemoryBytes = parseBuilderBytes(test.requested)
+			reserved := builderResourceDemand{MemoryBytes: parseBuilderBytes(test.reservation)}
+			available := builderAvailableResources(node, reserved, builderSafetyBuffer(node.Allocatable, builderWorkloadProfileHeavy))
+			demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := builderDemandFits(available, demand); got != test.fits {
+				t.Fatalf("expected fits=%t, got fits=%t for available=%+v", test.fits, got, available)
+			}
+			if test.fits && available.MemoryBytes != parseBuilderBytes(test.expected) {
+				t.Fatalf("expected %s available, got %d", test.expected, available.MemoryBytes)
+			}
+			if !test.fits && available.MemoryBytes >= parseBuilderBytes("1Gi") {
+				t.Fatalf("expected less than 1Gi after retaining safety buffer, got %d", available.MemoryBytes)
+			}
+		})
+	}
+}
+
 func TestLoadNodeSnapshotsFailsWhenAllEligibleSummariesAreUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -849,7 +882,9 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pods":
-			writeBuilderTestJSON(t, w, builderKubePodList{})
+			writeBuilderTestJSON(t, w, builderKubePodList{Items: []builderKubePod{
+				builderTestPod("node-a", "Running", "0", "4Gi", "0"),
+			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
 			writeBuilderTestJSON(t, w, builderKubeNodeList{
 				Items: []builderKubeNode{nodeA, nodeB, nodeC, nodeD},
@@ -914,6 +949,9 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 	}
 	if node := nodesByName["node-a"]; !node.Eligible || node.Rank != 1 {
 		t.Fatalf("expected node-a to be top eligible node, got %+v", node)
+	}
+	if got := nodesByName["node-a"].Available.MemoryBytes; got != parseBuilderBytes("3Gi") {
+		t.Fatalf("expected diagnostics to match request-aware scheduling headroom (8Gi - 4Gi Pod requests - 1Gi reservation), got %d", got)
 	}
 	if node := nodesByName["node-b"]; node.Eligible || !strings.Contains(strings.Join(node.Reasons, "\n"), runtime.TenantIDLabelKey) {
 		t.Fatalf("expected node-b to be excluded by tenant policy, got %+v", node)
