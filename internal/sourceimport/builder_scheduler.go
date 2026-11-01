@@ -78,6 +78,7 @@ type builderNodeSnapshot struct {
 	SummaryLoaded            bool
 	Allocatable              builderResourceDemand
 	Used                     builderResourceDemand
+	Requested                builderResourceDemand
 	FilesystemAvailableBytes int64
 }
 
@@ -119,6 +120,35 @@ type builderKubeClient struct {
 
 type builderKubeNodeList struct {
 	Items []builderKubeNode `json:"items"`
+}
+
+type builderKubePodList struct {
+	Items []builderKubePod `json:"items"`
+}
+
+type builderKubePod struct {
+	Spec struct {
+		NodeName       string                     `json:"nodeName,omitempty"`
+		Containers     []builderKubeContainer     `json:"containers,omitempty"`
+		InitContainers []builderKubeInitContainer `json:"initContainers,omitempty"`
+		Overhead       map[string]string          `json:"overhead,omitempty"`
+	} `json:"spec"`
+	Status struct {
+		Phase string `json:"phase,omitempty"`
+	} `json:"status"`
+}
+
+type builderKubeContainer struct {
+	Resources struct {
+		Requests map[string]string `json:"requests,omitempty"`
+	} `json:"resources,omitempty"`
+}
+
+type builderKubeInitContainer struct {
+	Resources struct {
+		Requests map[string]string `json:"requests,omitempty"`
+	} `json:"resources,omitempty"`
+	RestartPolicy string `json:"restartPolicy,omitempty"`
 }
 
 type builderKubeNode struct {
@@ -427,12 +457,18 @@ func (s *builderScheduler) loadNodeSnapshots(ctx context.Context) ([]builderNode
 			continue
 		}
 		eligibleCount++
+		pods, err := s.client.listNodePods(ctx, snapshot.Name)
+		if err != nil {
+			lastSummaryErr = fmt.Errorf("node %s pod requests: %w", snapshot.Name, err)
+			continue
+		}
 		summary, err := s.client.getNodeSummary(ctx, snapshot.Name)
 		if err != nil {
 			lastSummaryErr = fmt.Errorf("node %s: %w", snapshot.Name, err)
 			continue
 		}
 		snapshot.Used = builderUsedResources(summary, snapshot.Allocatable.MemoryBytes)
+		snapshot.Requested = builderNodePodRequests(pods)
 		snapshot.FilesystemAvailableBytes = builderNodeFilesystemAvailableBytes(summary)
 		snapshot.SummaryLoaded = true
 		snapshots = append(snapshots, snapshot)
@@ -1034,12 +1070,84 @@ func builderDemandFits(available, demand builderResourceDemand) bool {
 }
 
 func builderAvailableResources(snapshot builderNodeSnapshot, reserved, buffer builderResourceDemand) builderResourceDemand {
-	available := builderSubtractDemand(snapshot.Allocatable, snapshot.Used, reserved, buffer)
+	used := builderResourceDemand{
+		CPUMilli:       maxInt64(snapshot.Used.CPUMilli, snapshot.Requested.CPUMilli),
+		MemoryBytes:    maxInt64(snapshot.Used.MemoryBytes, snapshot.Requested.MemoryBytes),
+		EphemeralBytes: maxInt64(snapshot.Used.EphemeralBytes, snapshot.Requested.EphemeralBytes),
+	}
+	available := builderSubtractDemand(snapshot.Allocatable, used, reserved, buffer)
 	if snapshot.FilesystemAvailableBytes > 0 {
 		filesystemAvailable := snapshot.FilesystemAvailableBytes - reserved.EphemeralBytes - buffer.EphemeralBytes
 		available.EphemeralBytes = minInt64(available.EphemeralBytes, filesystemAvailable)
 	}
 	return available
+}
+
+func builderNodePodRequests(pods []builderKubePod) builderResourceDemand {
+	var total builderResourceDemand
+	for _, pod := range pods {
+		if strings.TrimSpace(pod.Spec.NodeName) == "" {
+			continue
+		}
+		if strings.EqualFold(pod.Status.Phase, "Succeeded") || strings.EqualFold(pod.Status.Phase, "Failed") {
+			continue
+		}
+		podDemand := builderPodRequestedResources(pod)
+		total.CPUMilli += podDemand.CPUMilli
+		total.MemoryBytes += podDemand.MemoryBytes
+		total.EphemeralBytes += podDemand.EphemeralBytes
+	}
+	return total
+}
+
+func builderPodRequestedResources(pod builderKubePod) builderResourceDemand {
+	var appContainers builderResourceDemand
+	for _, container := range pod.Spec.Containers {
+		appContainers = builderAddDemand(appContainers, builderContainerRequestedResources(container))
+	}
+
+	var restartableInit builderResourceDemand
+	var peakInit builderResourceDemand
+	for _, container := range pod.Spec.InitContainers {
+		requested := builderContainerRequestedResources(builderKubeContainer{Resources: container.Resources})
+		if strings.EqualFold(strings.TrimSpace(container.RestartPolicy), "Always") {
+			restartableInit = builderAddDemand(restartableInit, requested)
+			peakInit = builderMaxDemand(peakInit, restartableInit)
+			continue
+		}
+		peakInit = builderMaxDemand(peakInit, builderAddDemand(restartableInit, requested))
+	}
+	requested := builderMaxDemand(builderAddDemand(appContainers, restartableInit), peakInit)
+	requested = builderAddDemand(requested, builderResourceDemand{
+		CPUMilli:       parseBuilderCPUMilli(pod.Spec.Overhead["cpu"]),
+		MemoryBytes:    parseBuilderBytes(pod.Spec.Overhead["memory"]),
+		EphemeralBytes: parseBuilderBytes(pod.Spec.Overhead["ephemeral-storage"]),
+	})
+	return requested
+}
+
+func builderContainerRequestedResources(container builderKubeContainer) builderResourceDemand {
+	return builderResourceDemand{
+		CPUMilli:       parseBuilderCPUMilli(container.Resources.Requests["cpu"]),
+		MemoryBytes:    parseBuilderBytes(container.Resources.Requests["memory"]),
+		EphemeralBytes: parseBuilderBytes(container.Resources.Requests["ephemeral-storage"]),
+	}
+}
+
+func builderAddDemand(left, right builderResourceDemand) builderResourceDemand {
+	return builderResourceDemand{
+		CPUMilli:       left.CPUMilli + right.CPUMilli,
+		MemoryBytes:    left.MemoryBytes + right.MemoryBytes,
+		EphemeralBytes: left.EphemeralBytes + right.EphemeralBytes,
+	}
+}
+
+func builderMaxDemand(left, right builderResourceDemand) builderResourceDemand {
+	return builderResourceDemand{
+		CPUMilli:       maxInt64(left.CPUMilli, right.CPUMilli),
+		MemoryBytes:    maxInt64(left.MemoryBytes, right.MemoryBytes),
+		EphemeralBytes: maxInt64(left.EphemeralBytes, right.EphemeralBytes),
+	}
 }
 
 func builderSubtractDemand(parts ...builderResourceDemand) builderResourceDemand {
@@ -1241,6 +1349,17 @@ func (c *builderKubeClient) listNodes(ctx context.Context) ([]builderKubeNode, e
 		return nil, err
 	}
 	return nodeList.Items, nil
+}
+
+func (c *builderKubeClient) listNodePods(ctx context.Context, nodeName string) ([]builderKubePod, error) {
+	query := url.Values{}
+	query.Set("fieldSelector", "spec.nodeName="+strings.TrimSpace(nodeName))
+	var podList builderKubePodList
+	apiPath := "/api/v1/pods?" + query.Encode()
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &podList); err != nil {
+		return nil, err
+	}
+	return podList.Items, nil
 }
 
 func (c *builderKubeClient) getNodeSummary(ctx context.Context, nodeName string) (*builderKubeNodeSummary, error) {

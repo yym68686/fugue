@@ -669,6 +669,15 @@ func TestLoadNodeSnapshotsSkipsUnavailableNodeSummaries(t *testing.T) {
 	policy := defaultBuilderPodPolicy()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pods":
+			if got := r.URL.Query().Get("fieldSelector"); got != "spec.nodeName=node-a" && got != "spec.nodeName=node-b" {
+				t.Fatalf("expected node-scoped pod list, got fieldSelector=%q", got)
+			}
+			pods := builderKubePodList{}
+			if r.URL.Query().Get("fieldSelector") == "spec.nodeName=node-b" {
+				pods.Items = []builderKubePod{builderTestPod("node-b", "Running", "1500m", "4Gi", "2Gi")}
+			}
+			writeBuilderTestJSON(t, w, pods)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
 			writeBuilderTestJSON(t, w, builderKubeNodeList{
 				Items: []builderKubeNode{
@@ -705,6 +714,73 @@ func TestLoadNodeSnapshotsSkipsUnavailableNodeSummaries(t *testing.T) {
 	if got := snapshots[0].Name; got != "node-b" {
 		t.Fatalf("expected node-b snapshot to remain, got %q", got)
 	}
+	if got := snapshots[0].Requested; got != (builderResourceDemand{
+		CPUMilli:       parseBuilderCPUMilli("1500m"),
+		MemoryBytes:    parseBuilderBytes("4Gi"),
+		EphemeralBytes: parseBuilderBytes("2Gi"),
+	}) {
+		t.Fatalf("expected node pod requests to be included, got %+v", got)
+	}
+}
+
+func TestBuilderAvailableResourcesRespectsKubernetesRequestsAndMeasuredUsage(t *testing.T) {
+	t.Parallel()
+
+	snapshot := builderNodeSnapshot{
+		Allocatable: builderResourceDemand{
+			CPUMilli:       8_000,
+			MemoryBytes:    parseBuilderBytes("16Gi"),
+			EphemeralBytes: parseBuilderBytes("100Gi"),
+		},
+		Used: builderResourceDemand{
+			CPUMilli:       2_000,
+			MemoryBytes:    parseBuilderBytes("10Gi"),
+			EphemeralBytes: parseBuilderBytes("3Gi"),
+		},
+		Requested: builderResourceDemand{
+			CPUMilli:       3_000,
+			MemoryBytes:    parseBuilderBytes("12Gi"),
+			EphemeralBytes: parseBuilderBytes("5Gi"),
+		},
+	}
+
+	available := builderAvailableResources(snapshot, builderResourceDemand{}, builderResourceDemand{})
+	if available.CPUMilli != 5_000 || available.MemoryBytes != parseBuilderBytes("4Gi") || available.EphemeralBytes != parseBuilderBytes("95Gi") {
+		t.Fatalf("expected per-resource maximum of observed use and scheduler requests to be deducted, got %+v", available)
+	}
+}
+
+func TestBuilderNodePodRequestsAccountsForInitSidecarsOverheadAndTerminalPods(t *testing.T) {
+	t.Parallel()
+
+	var active builderKubePod
+	if err := json.Unmarshal([]byte(`{
+		"spec": {
+			"nodeName": "node-a",
+			"containers": [{"resources": {"requests": {"memory": "2Gi"}}}, {"resources": {"requests": {"memory": "1Gi"}}}],
+			"initContainers": [
+				{"restartPolicy": "Always", "resources": {"requests": {"memory": "1Gi"}}},
+				{"resources": {"requests": {"memory": "5Gi"}}}
+			],
+			"overhead": {"memory": "128Mi"}
+		},
+		"status": {"phase": "Running"}
+	}`), &active); err != nil {
+		t.Fatal(err)
+	}
+	requested := builderNodePodRequests([]builderKubePod{
+		active,
+		builderTestPod("node-a", "Succeeded", "0", "10Gi", "0"),
+		builderTestPod("node-a", "Failed", "0", "10Gi", "0"),
+		builderTestPod("", "Pending", "0", "10Gi", "0"),
+	})
+	if requested.MemoryBytes != parseBuilderBytes("6272Mi") {
+		t.Fatalf("expected peak init plus restartable sidecar and overhead (6Gi + 128Mi), got %+v", requested)
+	}
+	active.Spec.InitContainers = active.Spec.InitContainers[:1]
+	if got := builderPodRequestedResources(active).MemoryBytes; got != parseBuilderBytes("4224Mi") {
+		t.Fatalf("expected steady app plus sidecar and overhead (4Gi + 128Mi), got %d", got)
+	}
 }
 
 func TestLoadNodeSnapshotsFailsWhenAllEligibleSummariesAreUnavailable(t *testing.T) {
@@ -713,6 +789,8 @@ func TestLoadNodeSnapshotsFailsWhenAllEligibleSummariesAreUnavailable(t *testing
 	policy := defaultBuilderPodPolicy()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pods":
+			writeBuilderTestJSON(t, w, builderKubePodList{})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
 			writeBuilderTestJSON(t, w, builderKubeNodeList{
 				Items: []builderKubeNode{
@@ -770,6 +848,8 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pods":
+			writeBuilderTestJSON(t, w, builderKubePodList{})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
 			writeBuilderTestJSON(t, w, builderKubeNodeList{
 				Items: []builderKubeNode{nodeA, nodeB, nodeC, nodeD},
@@ -948,6 +1028,20 @@ func TestUpsertReservationUpdateUsesMicrosecondPrecision(t *testing.T) {
 
 func builderTestNode(name, hostname string, policy BuilderPodPolicy, cpu, memory, ephemeral, usedCPU, usedMemory, usedEphemeral string) builderNodeSnapshot {
 	return builderTestNodeWithFS(name, hostname, policy, cpu, memory, ephemeral, ephemeral, usedCPU, usedMemory, usedEphemeral)
+}
+
+func builderTestPod(nodeName, phase, cpu, memory, ephemeral string) builderKubePod {
+	var pod builderKubePod
+	pod.Spec.NodeName = nodeName
+	pod.Status.Phase = phase
+	container := builderKubeContainer{}
+	container.Resources.Requests = map[string]string{
+		"cpu":               cpu,
+		"memory":            memory,
+		"ephemeral-storage": ephemeral,
+	}
+	pod.Spec.Containers = []builderKubeContainer{container}
+	return pod
 }
 
 func builderTestKubeNode(name, hostname string, policy BuilderPodPolicy) builderKubeNode {

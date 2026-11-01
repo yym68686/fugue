@@ -2462,7 +2462,7 @@ func TestExecuteManagedImportOperationPreservesExplicitPortsAndBuildPlacement(t 
 	t.Fatal("expected queued deployment after import")
 }
 
-func TestImportBuilderMemoryCeilingUsesTenantManagedHeadroom(t *testing.T) {
+func TestImportBuilderMemoryCeilingUsesPoolCapInsteadOfTenantQuota(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -2485,9 +2485,12 @@ func TestImportBuilderMemoryCeilingUsesTenantManagedHeadroom(t *testing.T) {
 		Store:  stateStore,
 		Logger: log.New(io.Discard, "", 0),
 	}
-	want := sourceimport.DefaultBuilderHeavyMemoryLimitBytes() + 4*1024*1024*1024
+	want := sourceimport.MaxBuilderHeavyMemoryLimitBytes()
 	if got := svc.importBuilderMemoryCeilingBytes(tenant.ID); got != want {
 		t.Fatalf("expected builder ceiling %d bytes, got %d", want, got)
+	}
+	if got := (&Service{}).importBuilderMemoryCeilingBytes("missing-tenant"); got != want {
+		t.Fatalf("expected pool cap without tenant quota lookup, got %d", got)
 	}
 }
 
