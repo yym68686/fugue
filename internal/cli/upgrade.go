@@ -29,8 +29,11 @@ const (
 	cliUpdateCheckTTL           = 12 * time.Hour
 	cliUpdateNotifyTTL          = 24 * time.Hour
 	cliUpdateCheckTimeout       = 1200 * time.Millisecond
-	cliUpgradeFetchTimeout      = 30 * time.Second
-	cliChecksumsAssetName       = "fugue_checksums.txt"
+	// Release archives are platform binaries rather than small API responses.
+	// Keep the metadata request bounded, but allow a slow connection enough
+	// time to finish a verified archive download.
+	cliUpgradeFetchTimeout = 5 * time.Minute
+	cliChecksumsAssetName  = "fugue_checksums.txt"
 )
 
 var (
