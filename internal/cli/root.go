@@ -302,7 +302,9 @@ Environment variables:
 				}
 				return nil
 			}
-			isStaticEdgeDirect := strings.HasPrefix(commandPath, "fugue static-edge ") && commandPath != "fugue static-edge registry" && !strings.HasPrefix(commandPath, "fugue static-edge registry ")
+			isStaticEdgeDirect := strings.HasPrefix(commandPath, "fugue static-edge ") &&
+				commandPath != "fugue static-edge registry" && !strings.HasPrefix(commandPath, "fugue static-edge registry ") &&
+				commandPath != "fugue static-edge app" && !strings.HasPrefix(commandPath, "fugue static-edge app ")
 			if isStaticEdgeDirect {
 				if c.root.SaveToken {
 					return fmt.Errorf("--save-token is not supported for independent static-edge management")

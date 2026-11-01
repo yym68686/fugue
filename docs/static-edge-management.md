@@ -308,6 +308,48 @@ the local state revision, explicit target digest and request ID. A request ID
 reused with different content or actor is rejected. Up to 256 recent receipts
 are retained; older keys remain protected by monotonically increasing revisions.
 
+## Add a Fugue app route
+
+`fugue static-edge app add` reads the selected app's internal Service and route
+from the Fugue API, then edits complete local edge and origin bundle baselines.
+The baseline files must be the exact active generations reported by their
+independent managers; this avoids replacing newer or unrelated routes. The edge
+route is cloned from an existing hostname route so its public-to-origin hop
+configuration remains intact; matching TLS automation policies are extended
+when present. The origin receives an exact
+`X-Forwarded-Host`/path match and proxies to the app's stable Service hostname.
+
+```sh
+fugue static-edge app add my-app \
+  --edge-context static-entry --origin-context static-origin \
+  --edge-bundle ./current-edge.json --origin-bundle ./current-origin.json \
+  --edge-template-host existing.example.com \
+  --hostname app.example.com --path-prefix / \
+  --signing-key /secure/static-edge-signing.key \
+  --out-dir ./static-edge-routes/my-app
+
+# Review the generated edge.bundle.json and origin.bundle.json first.
+# Add --execute only when you want to apply them to both independent managers.
+```
+
+`--execute` requires the local signer to be trusted by both managers. The CLI
+reads current manager status, verifies the source bundle digest/generation and
+applies origin before edge with each manager's exact observed revision. If edge
+activation fails after origin succeeds, it reports the partial result and does
+not attempt an implicit rollback. Candidate bundles are written with mode `0600`
+to a new output directory; existing files are never overwritten.
+
+This command does not change Fugue app intent, deploys, app-domain records, DNS,
+or the independent failover policy. Attach/verify any custom domain through the
+normal app-domain workflow first when Fugue must also serve it as a fallback;
+ensure the static edge can obtain/serve a certificate for the hostname, then
+point DNS at the static edge or prepare `fugue traffic-pool` separately. The
+app Service must be reachable from the origin. For a Service outside the
+origin's cluster network, provide an origin-reachable `--upstream host:port`.
+Only HTTP apps with a stable Fugue internal Service are supported; non-HTTP
+protocols need a separate L4 design. App deploys do not synchronize routes to
+static edge: service identity or port changes require a new explicit command.
+
 Activation captures the original runtime, writes a durable pending journal,
 applies through Caddy's graceful configuration API, reads back the exact runtime,
 checks health, persists the verified startup config, then records active/LKG and
