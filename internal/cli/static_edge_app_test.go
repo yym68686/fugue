@@ -287,6 +287,44 @@ func TestStaticEdgeAppRouteClonesHostOnlyRouteSet(t *testing.T) {
 	}
 }
 
+func TestStaticEdgeAppExistingRoutesMustMatchRequestedAttachment(t *testing.T) {
+	edgeConfig, err := decodeStaticEdgeAppCaddyConfig([]byte(`{"apps":{"http":{"servers":{"public":{"routes":[{"match":[{"host":["template.example.test"]}],"handle":[{"handler":"headers"}]},{"match":[{"host":["template.example.test"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"127.0.0.1:18480"}]}]},{"match":[{"host":["new.example.test"]}],"handle":[{"handler":"headers"}]},{"match":[{"host":["new.example.test"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"127.0.0.1:18480"}]}]}]}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := staticEdgeAppHTTPServer(edgeConfig, "public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched, err := staticEdgeAppExistingEdgeRoutesMatch(server, "template.example.test", "new.example.test", "/")
+	if err != nil || !matched {
+		t.Fatalf("expected matching existing edge route, matched=%v err=%v", matched, err)
+	}
+	server["routes"].([]any)[3].(map[string]any)["handle"].([]any)[0].(map[string]any)["upstreams"].([]any)[0].(map[string]any)["dial"] = "wrong.example.test:8080"
+	matched, err = staticEdgeAppExistingEdgeRoutesMatch(server, "template.example.test", "new.example.test", "/")
+	if err != nil || matched {
+		t.Fatalf("expected mismatched existing edge route, matched=%v err=%v", matched, err)
+	}
+
+	originConfig, err := decodeStaticEdgeAppCaddyConfig([]byte(`{"apps":{"http":{"servers":{"origin":{"routes":[]}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, err := staticEdgeAppHTTPServer(originConfig, "origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := staticEdgeAppAddOriginRoute(origin, "new.example.test", "/", "app.ns.svc.cluster.local:3000"); err != nil {
+		t.Fatal(err)
+	}
+	if !staticEdgeAppExistingOriginRouteMatches(origin, "new.example.test", "/", "app.ns.svc.cluster.local:3000") {
+		t.Fatal("expected matching existing origin route")
+	}
+	if staticEdgeAppExistingOriginRouteMatches(origin, "new.example.test", "/", "other.ns.svc.cluster.local:3000") {
+		t.Fatal("accepted origin route with a different upstream")
+	}
+}
+
 func TestStaticEdgeAppHTTPServersSelectsAllPublicRouteServers(t *testing.T) {
 	config, err := decodeStaticEdgeAppCaddyConfig([]byte(`{"apps":{"http":{"servers":{"https":{"routes":[{"match":[{"host":["template.example.test"]}]}]},"redirect":{"routes":[{"match":[{"host":["template.example.test"]}]}]},"loopback":{"routes":[{"handle":[]}]}}}}}`))
 	if err != nil {

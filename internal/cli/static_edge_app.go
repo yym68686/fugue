@@ -200,6 +200,13 @@ func (cli *CLI) addStaticEdgeApp(ctx context.Context, app model.App, opts static
 	}
 	for _, edgeServer := range edgeServers {
 		if staticEdgeAppServerHasHostname(edgeServer, hostname) {
+			matches, matchErr := staticEdgeAppExistingEdgeRoutesMatch(edgeServer, opts.EdgeTemplateHost, hostname, pathPrefix)
+			if matchErr != nil {
+				return fmt.Errorf("existing edge route: %w", matchErr)
+			}
+			if !matches {
+				return fmt.Errorf("edge Caddy config already contains hostname %q with a different route; refusing to treat it as attached", hostname)
+			}
 			continue
 		}
 		if err = staticEdgeAppAddEdgeRoute(edgeConfig, edgeServer, opts.EdgeTemplateHost, hostname, pathPrefix); err != nil {
@@ -207,7 +214,11 @@ func (cli *CLI) addStaticEdgeApp(ctx context.Context, app model.App, opts static
 		}
 	}
 	staticEdgeAppAddTLSSubject(edgeConfig, opts.EdgeTemplateHost, hostname)
-	if !staticEdgeAppServerHasForwardedHost(originServer, hostname) {
+	if staticEdgeAppServerHasForwardedHost(originServer, hostname) {
+		if !staticEdgeAppExistingOriginRouteMatches(originServer, hostname, pathPrefix, upstream) {
+			return fmt.Errorf("origin Caddy config already contains forwarded hostname %q with a different route; refusing to treat it as attached", hostname)
+		}
+	} else {
 		if err = staticEdgeAppAddOriginRoute(originServer, hostname, pathPrefix, upstream); err != nil {
 			return fmt.Errorf("origin route: %w", err)
 		}
@@ -496,6 +507,88 @@ func staticEdgeAppServerHasForwardedHost(server map[string]any, hostname string)
 	return false
 }
 
+func staticEdgeAppExistingEdgeRoutesMatch(server map[string]any, templateHost, hostname, pathPrefix string) (bool, error) {
+	routes, ok := server["routes"].([]any)
+	if !ok {
+		return false, errors.New("edge HTTP server has no routes array")
+	}
+	expected := make([]string, 0)
+	actual := make([]string, 0)
+	for _, item := range routes {
+		if routeHasStaticEdgeAppHostname(item, templateHost) {
+			route, ok := item.(map[string]any)
+			if !ok {
+				return false, errors.New("edge template route is malformed")
+			}
+			matchers, ok := route["match"].([]any)
+			if !ok || len(matchers) != 1 {
+				return false, errors.New("edge template route has ambiguous matcher groups")
+			}
+			matcher, ok := matchers[0].(map[string]any)
+			if !ok {
+				return false, errors.New("edge template route matcher is malformed")
+			}
+			if _, hasPath := matcher["path"]; hasPath {
+				return false, fmt.Errorf("edge template hostname %q appears in a path-specific route", templateHost)
+			}
+			clone, err := cloneStaticEdgeAppJSONMap(route)
+			if err != nil {
+				return false, err
+			}
+			cloneMatcher := clone["match"].([]any)[0].(map[string]any)
+			cloneMatcher["host"] = []any{hostname}
+			if pathPrefix == "/" {
+				delete(cloneMatcher, "path")
+			} else {
+				cloneMatcher["path"] = staticEdgeAppPathPatterns(pathPrefix)
+			}
+			encoded, err := json.Marshal(clone)
+			if err != nil {
+				return false, err
+			}
+			expected = append(expected, string(encoded))
+		}
+		if routeHasStaticEdgeAppHostname(item, hostname) {
+			encoded, err := json.Marshal(item)
+			if err != nil {
+				return false, err
+			}
+			actual = append(actual, string(encoded))
+		}
+	}
+	if len(expected) == 0 || len(expected) != len(actual) {
+		return false, nil
+	}
+	for index := range expected {
+		if expected[index] != actual[index] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func staticEdgeAppExistingOriginRouteMatches(server map[string]any, hostname, pathPrefix, upstream string) bool {
+	routes, ok := server["routes"].([]any)
+	if !ok {
+		return false
+	}
+	expected := staticEdgeAppOriginRoute(hostname, pathPrefix, upstream)
+	expectedRaw, err := json.Marshal(expected)
+	if err != nil {
+		return false
+	}
+	for _, item := range routes {
+		if !routeHasStaticEdgeAppForwardedHost(item, hostname) {
+			continue
+		}
+		actualRaw, marshalErr := json.Marshal(item)
+		if marshalErr == nil && string(actualRaw) == string(expectedRaw) {
+			return true
+		}
+	}
+	return false
+}
+
 func staticEdgeAppAddEdgeRoute(config map[string]any, server map[string]any, templateHost, hostname, pathPrefix string) error {
 	templateHost = strings.ToLower(strings.TrimSpace(templateHost))
 	if !staticEdgeAppHostnamePattern.MatchString(templateHost) {
@@ -608,11 +701,17 @@ func staticEdgeAppAddOriginRoute(server map[string]any, hostname, pathPrefix, up
 			return fmt.Errorf("origin Caddy config already contains forwarded hostname %q; refusing to replace an existing route", hostname)
 		}
 	}
+	route := staticEdgeAppOriginRoute(hostname, pathPrefix, upstream)
+	server["routes"] = append([]any{route}, routes...)
+	return nil
+}
+
+func staticEdgeAppOriginRoute(hostname, pathPrefix, upstream string) map[string]any {
 	matcher := map[string]any{"header": map[string]any{"X-Forwarded-Host": []any{hostname}}}
 	if pathPrefix != "/" {
 		matcher["path"] = staticEdgeAppPathPatterns(pathPrefix)
 	}
-	route := map[string]any{
+	return map[string]any{
 		"match": []any{matcher},
 		"handle": []any{map[string]any{
 			"handler":   "reverse_proxy",
@@ -621,8 +720,6 @@ func staticEdgeAppAddOriginRoute(server map[string]any, hostname, pathPrefix, up
 		}},
 		"terminal": true,
 	}
-	server["routes"] = append([]any{route}, routes...)
-	return nil
 }
 
 func staticEdgeAppPathPatterns(pathPrefix string) []any {
