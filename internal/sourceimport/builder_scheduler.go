@@ -1070,12 +1070,17 @@ func builderDemandFits(available, demand builderResourceDemand) bool {
 }
 
 func builderAvailableResources(snapshot builderNodeSnapshot, reserved, buffer builderResourceDemand) builderResourceDemand {
-	used := builderResourceDemand{
-		CPUMilli:       maxInt64(snapshot.Used.CPUMilli, snapshot.Requested.CPUMilli),
-		MemoryBytes:    maxInt64(snapshot.Used.MemoryBytes, snapshot.Requested.MemoryBytes),
-		EphemeralBytes: maxInt64(snapshot.Used.EphemeralBytes, snapshot.Requested.EphemeralBytes),
+	// Physical safety headroom and Kubernetes admission are independent ceilings.
+	// Keep the safety buffer against measured use without deducting it a second
+	// time from capacity already held by existing Pod requests.
+	physical := builderSubtractDemand(snapshot.Allocatable, snapshot.Used, buffer)
+	schedulable := builderSubtractDemand(snapshot.Allocatable, snapshot.Requested)
+	available := builderResourceDemand{
+		CPUMilli:       minInt64(physical.CPUMilli, schedulable.CPUMilli),
+		MemoryBytes:    minInt64(physical.MemoryBytes, schedulable.MemoryBytes),
+		EphemeralBytes: minInt64(physical.EphemeralBytes, schedulable.EphemeralBytes),
 	}
-	available := builderSubtractDemand(snapshot.Allocatable, used, reserved, buffer)
+	available = builderSubtractDemand(available, reserved)
 	if snapshot.FilesystemAvailableBytes > 0 {
 		filesystemAvailable := snapshot.FilesystemAvailableBytes - reserved.EphemeralBytes - buffer.EphemeralBytes
 		available.EphemeralBytes = minInt64(available.EphemeralBytes, filesystemAvailable)
