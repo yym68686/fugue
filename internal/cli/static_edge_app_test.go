@@ -254,8 +254,36 @@ func TestStaticEdgeAppRouteRejectsDuplicateHostsAndMalformedConfig(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = staticEdgeAppAddEdgeRoute(ambiguous, ambiguousServer, "template.example.test", "new.example.test", "/"); err == nil || !strings.Contains(err.Error(), "multiple routes") {
-		t.Fatalf("expected ambiguous template route rejection, got %v", err)
+	if err = staticEdgeAppAddEdgeRoute(ambiguous, ambiguousServer, "template.example.test", "new.example.test", "/"); err == nil || !strings.Contains(err.Error(), "path-specific") {
+		t.Fatalf("expected path-specific template route rejection, got %v", err)
+	}
+}
+
+func TestStaticEdgeAppRouteClonesHostOnlyRouteSet(t *testing.T) {
+	config, err := decodeStaticEdgeAppCaddyConfig([]byte(`{"apps":{"http":{"servers":{"public":{"routes":[{"match":[{"host":["template.example.test"]}],"handle":[{"handler":"headers"}]},{"match":[{"host":["template.example.test"]}],"handle":[{"handler":"reverse_proxy"}]}]}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := staticEdgeAppHTTPServer(config, "public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = staticEdgeAppAddEdgeRoute(config, server, "template.example.test", "new.example.test", "/"); err != nil {
+		t.Fatal(err)
+	}
+	routes := server["routes"].([]any)
+	if len(routes) != 4 {
+		t.Fatalf("expected cloned route set, got %d routes", len(routes))
+	}
+	for i := 0; i < 2; i++ {
+		if !routeHasStaticEdgeAppHostname(routes[i], "new.example.test") {
+			t.Fatalf("route %d was not cloned for new host: %#v", i, routes[i])
+		}
+	}
+	for i := 2; i < 4; i++ {
+		if !routeHasStaticEdgeAppHostname(routes[i], "template.example.test") {
+			t.Fatalf("template route %d was not preserved: %#v", i, routes[i])
+		}
 	}
 }
 

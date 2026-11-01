@@ -441,7 +441,7 @@ func staticEdgeAppAddEdgeRoute(config map[string]any, server map[string]any, tem
 		}
 	}
 	templateIndex := -1
-	var templateRoute map[string]any
+	var templateRoutes []any
 	for index, item := range routes {
 		if !routeHasStaticEdgeAppHostname(item, templateHost) {
 			continue
@@ -463,8 +463,8 @@ func staticEdgeAppAddEdgeRoute(config map[string]any, server map[string]any, tem
 				return errors.New("edge template route includes non-host/path matchers; refusing to clone an ambiguous route")
 			}
 		}
-		if templateIndex >= 0 {
-			return fmt.Errorf("edge template hostname %q appears in multiple routes; choose a hostname with exactly one route", templateHost)
+		if _, hasPath := matcher["path"]; hasPath {
+			return fmt.Errorf("edge template hostname %q appears in a path-specific route; choose a host-only template", templateHost)
 		}
 		clone, err := cloneStaticEdgeAppJSONMap(route)
 		if err != nil {
@@ -477,12 +477,19 @@ func staticEdgeAppAddEdgeRoute(config map[string]any, server map[string]any, tem
 		} else {
 			cloneMatcher["path"] = staticEdgeAppPathPatterns(pathPrefix)
 		}
-		templateIndex, templateRoute = index, clone
+		if templateIndex < 0 {
+			templateIndex = index
+		}
+		templateRoutes = append(templateRoutes, clone)
 	}
 	if templateIndex < 0 {
 		return fmt.Errorf("no edge Caddy route matched --edge-template-host %q", templateHost)
 	}
-	server["routes"] = append(routes[:templateIndex], append([]any{templateRoute}, routes[templateIndex:]...)...)
+	// A public server can legitimately have several host-only routes for the
+	// same hostname (for example, response headers followed by the proxy hop).
+	// Clone the complete route set in order so the new host gets identical
+	// behavior without weakening the ambiguity checks above.
+	server["routes"] = append(routes[:templateIndex], append(templateRoutes, routes[templateIndex:]...)...)
 	return nil
 }
 
