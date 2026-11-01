@@ -44,6 +44,8 @@ type compilerDNSInput struct {
 	StoredSizes    []int
 	Ranges         []compilerDNSRange
 	Bytes          int
+	SharedRecipes  [][]byte
+	SharedClosure  [32]byte
 }
 type compilerDNSInputCache struct {
 	mu      sync.Mutex
@@ -132,6 +134,9 @@ func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func
 		}
 		if err == nil {
 			if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest.Format == m.Format && cached.Manifest.Size == m.Size && cached.Manifest.Count == m.Count && cached.Manifest.ChunkSize == m.ChunkSize {
+				if m.Format == inputFormatSharedV3 {
+					return readSharedDNSSelections(ctx, s.db, m, cached, needed)
+				}
 				return s.readCompilerDNSSelections(ctx, m, cached, needed)
 			}
 		}
@@ -237,6 +242,10 @@ func (s *Store) readCompilerDNSSelections(ctx context.Context, m inputManifest, 
 	if count != m.Count {
 		return CompilerInputDNSSelections{}, ErrConflict
 	}
+	return decodeCompilerDNSRanges(out, m, chunks, ranges)
+}
+
+func decodeCompilerDNSRanges(out CompilerInputDNSSelections, m inputManifest, chunks [][]byte, ranges []compilerDNSRange) (CompilerInputDNSSelections, error) {
 	// Decode only after *all* selected and unselected bytes have been verified.
 	for _, r := range ranges {
 		raw := make([]byte, 0, r.Length)

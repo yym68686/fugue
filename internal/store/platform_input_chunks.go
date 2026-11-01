@@ -48,6 +48,12 @@ func readInputManifest(ctx context.Context, db inputQueryer, digest string) (inp
 	if err != nil {
 		return m, err
 	}
+	if m.Format == inputFormatSharedV3 {
+		if !inputDigestPattern.MatchString(digest) || m.Size < 1 || m.Size > inputMaxBytes || m.ChunkSize != inputChunkBytes || m.Count != int((m.Size+inputChunkBytes-1)/inputChunkBytes) || m.Created.IsZero() {
+			return m, ErrConflict
+		}
+		return m, nil
+	}
 	if !inputDigestPattern.MatchString(digest) || (m.Format != inputFormatV1 && m.Format != inputFormatCodecV2) || m.Size <= 0 || m.Size > inputMaxBytes || m.ChunkSize < 1 || m.ChunkSize > inputChunkBytes || m.Count != int((m.Size+int64(m.ChunkSize)-1)/int64(m.ChunkSize)) || m.Created.IsZero() || m.Format == inputFormatCodecV2 && m.ChunkSize > inputChunkBytes-inputCodecHeaderBytes {
 		return m, fmt.Errorf("invalid compiler input manifest: %w", ErrConflict)
 	}
@@ -60,6 +66,7 @@ func absentInputManifest(err error) bool {
 }
 
 type inputChunkReader struct {
+	shared       *sharedInputReader
 	rows         *sql.Rows
 	manifest     inputManifest
 	ordinal      int
@@ -73,6 +80,13 @@ type inputChunkReader struct {
 }
 
 func openInputChunks(ctx context.Context, db inputQueryer, m inputManifest) (*inputChunkReader, error) {
+	if m.Format == inputFormatSharedV3 {
+		shared, err := openSharedInput(ctx, db, m)
+		if err != nil {
+			return nil, err
+		}
+		return &inputChunkReader{shared: shared}, nil
+	}
 	rows, err := db.QueryContext(ctx, `SELECT ordinal,chunk_hash,data FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal`, m.Digest)
 	if err != nil {
 		return nil, err
@@ -80,6 +94,11 @@ func openInputChunks(ctx context.Context, db inputQueryer, m inputManifest) (*in
 	return &inputChunkReader{rows: rows, manifest: m, hash: sha256.New()}, nil
 }
 func (r *inputChunkReader) Read(p []byte) (int, error) {
+	if r.shared != nil {
+		n, err := r.shared.Read(p)
+		r.done, r.err = r.shared.done, r.shared.err
+		return n, err
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -133,6 +152,13 @@ func (r *inputChunkReader) Read(p []byte) (int, error) {
 	n := copy(p, r.pending)
 	r.pending = r.pending[n:]
 	return n, nil
+}
+
+func (r *inputChunkReader) Close() error {
+	if r.rows != nil {
+		return r.rows.Close()
+	}
+	return nil
 }
 
 type inputChunkWriter struct {
@@ -268,6 +294,33 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	}
 	m, err := readInputManifest(ctx, tx, digest)
 	if err == nil {
+		if m.Format == inputFormatSharedV3 {
+			actual, err := platformconfig.RuntimeSnapshotDigest(snapshot)
+			if err != nil {
+				return err
+			}
+			if actual != digest {
+				return ErrConflict
+			}
+			if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest == m {
+				if _, err := readSharedDNSSelections(ctx, tx, m, cached, func(CompilerDNSSelectionSummary) bool { return false }); err != nil {
+					return err
+				}
+				return tx.Commit()
+			}
+			r, err := openSharedInput(ctx, tx, m)
+			if err != nil {
+				return err
+			}
+			if _, err = io.Copy(io.Discard, r); err != nil {
+				return err
+			}
+			if err = tx.Commit(); err != nil {
+				return err
+			}
+			s.rememberSharedDNSInput(snapshot, m, r)
+			return nil
+		}
 		// Older manifests may use unusually small chunks. Keep the witness
 		// vector bounded to the same maximum as a newly written input.
 		if m.Count > inputMaxBytes/inputChunkBytes || m.Format == inputFormatCodecV2 {
@@ -291,7 +344,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 				return err
 			}
 			_, err = io.Copy(io.Discard, r)
-			r.rows.Close()
+			r.Close()
 			if err != nil {
 				return err
 			}
@@ -365,6 +418,23 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			return ErrConflict
 		}
 		return tx.Commit()
+	}
+	if s.compilerInputSharedEnabled() {
+		if _, err = tx.ExecContext(ctx, `SAVEPOINT shared_input_budget`); err != nil {
+			return err
+		}
+		err = s.pgWriteSharedInput(ctx, tx, snapshot, digest)
+		if err == nil {
+			return tx.Commit()
+		}
+		if !errors.Is(err, errSharedInputBudget) {
+			return err
+		}
+		// Pathological inputs retain the established v1/v2 path. Undo partial
+		// shared writes atomically before fallback; never hide corrupt content.
+		if _, err = tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT shared_input_budget`); err != nil {
+			return err
+		}
 	}
 	format, chunkSize := inputFormatV1, inputChunkBytes
 	var codec *inputChunkEncoder
@@ -461,13 +531,16 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 			if err != nil {
 				return platformconfig.RuntimeSnapshot{}, err
 			}
-			defer r.rows.Close()
+			defer r.Close()
 			out, err := platformconfig.DecodeRuntimeSnapshotReader(r)
 			if err != nil {
 				return platformconfig.RuntimeSnapshot{}, fmt.Errorf("compiler input cannot be decoded or verified: %w", ErrConflict)
 			}
 			if !r.done || r.err != nil {
 				return platformconfig.RuntimeSnapshot{}, ErrConflict
+			}
+			if r.shared != nil {
+				s.rememberSharedDNSInput(out, m, r.shared)
 			}
 			if m.Format == inputFormatCodecV2 && len(r.storedHashes) == m.Count {
 				// Positions come from canonical JSON; physical witnesses come
@@ -511,7 +584,7 @@ func (s *Store) pgReadChunkedContent(ctx context.Context, digest string) (model.
 	if err != nil {
 		return model.PlatformArtifactContent{}, err
 	}
-	defer r.rows.Close()
+	defer r.Close()
 	var content map[string]any
 	d := json.NewDecoder(r)
 	if err = d.Decode(&content); err != nil {

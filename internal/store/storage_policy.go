@@ -23,13 +23,16 @@ type StoragePolicy struct {
 	DatabaseIdleSeconds int  `json:"database_idle_seconds"`
 }
 type storagePolicyState struct {
-	mu              sync.RWMutex
-	value           StoragePolicy
-	lastError       bool
-	loaded          time.Time
-	codec           compilerInputCodecPolicy
-	codecReadFailed bool
-	codecObservedAt time.Time
+	mu               sync.RWMutex
+	value            StoragePolicy
+	lastError        bool
+	loaded           time.Time
+	codec            compilerInputCodecPolicy
+	codecReadFailed  bool
+	codecObservedAt  time.Time
+	shared           compilerInputCodecPolicy
+	sharedReadFailed bool
+	sharedObservedAt time.Time
 }
 
 func (s *Store) StoragePolicy() StoragePolicy {
@@ -59,6 +62,7 @@ func (s *Store) RunStoragePolicy(ctx context.Context, path string) {
 	defer ticker.Stop()
 	for {
 		s.loadCompilerInputCodecPolicy(filepath.Join(filepath.Dir(path), "compiler-input-codec.json"))
+		s.loadCompilerInputSharedPolicy(filepath.Join(filepath.Dir(path), "compiler-input-shared.json"))
 		f, err := os.Open(path)
 		var p StoragePolicy
 		if err == nil {
@@ -95,12 +99,18 @@ func (s *Store) StorageObservation(ctx context.Context) (any, error) {
 	}
 	s.storagePolicy.mu.RLock()
 	codec, codecFailed, codecAt := s.storagePolicy.codec, s.storagePolicy.codecReadFailed, s.storagePolicy.codecObservedAt
+	shared, sharedFailed, sharedAt := s.storagePolicy.shared, s.storagePolicy.sharedReadFailed, s.storagePolicy.sharedObservedAt
 	p, loaded, failed := s.storagePolicy.value, s.storagePolicy.loaded, s.storagePolicy.lastError
 	s.storagePolicy.mu.RUnlock()
 	out := map[string]any{"schema": "fugue.storage.observation.v1", "observed_at": time.Now().UTC(), "policy": p, "policy_loaded_at": loaded, "policy_read_failed": failed, "compiler_input_chunk_bytes": inputChunkBytes, "compiler_input_database_writer_limit": 1}
 	out["compiler_input_codec"] = codec
 	out["compiler_input_codec_read_failed"] = codecFailed
 	out["compiler_input_codec_observed_at"] = codecAt
+	out["compiler_input_shared"] = shared
+	out["compiler_input_shared_read_failed"] = sharedFailed
+	out["compiler_input_shared_observed_at"] = sharedAt
+	out["compiler_input_shared_activity"] = sharedInputObservation()
+	out["compiler_input_read_formats"] = []string{inputFormatV1, inputFormatCodecV2, inputFormatSharedV3}
 	out["observation_retention"] = s.retentionObservation()
 	if s.db != nil {
 		out["database_pool"] = s.db.Stats()

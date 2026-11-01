@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def manifest(document):
-    if not {"namespace", "name", "policy"} <= set(document) or set(document) - {"namespace", "name", "policy", "observationRetention", "compilerInputCodec"}:
+    if not {"namespace", "name", "policy"} <= set(document) or set(document) - {"namespace", "name", "policy", "observationRetention", "compilerInputCodec", "compilerInputShared"}:
         raise ValueError("unexpected storage policy configuration")
     for field in ("namespace", "name"):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", document[field]):
@@ -24,11 +24,13 @@ def manifest(document):
     if p["database_max_open"] and (p["database_max_idle"] > p["database_max_open"] or not p["database_idle_seconds"]):
         raise ValueError("invalid connection/idle budget")
     data = {"policy.json": json.dumps(p, sort_keys=True, separators=(",", ":"))}
-    if "compilerInputCodec" in document:
-        codec = document["compilerInputCodec"]
+    for key, filename in (("compilerInputCodec", "compiler-input-codec.json"), ("compilerInputShared", "compiler-input-shared.json")):
+        if key not in document:
+            continue
+        codec = document[key]
         if set(codec) != {"version", "enabled"} or type(codec["version"]) is not int or codec["version"] != 1 or type(codec["enabled"]) is not bool:
             raise ValueError("invalid compiler input codec policy")
-        data["compiler-input-codec.json"] = json.dumps(codec, sort_keys=True, separators=(",", ":"))
+        data[filename] = json.dumps(codec, sort_keys=True, separators=(",", ":"))
     if "observationRetention" in document:
         r = document["observationRetention"]
         bounds = {"interval_seconds": (30, 3600), "batch_rows": (1, 1000), "heartbeat_days": (1, 90),

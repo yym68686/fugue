@@ -5,6 +5,20 @@ from scripts.publish_storage_policy import manifest
 
 
 class StoragePolicyTest(unittest.TestCase):
+    def test_shared_writer_has_independent_fail_closed_declaration(self):
+        base = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60}}
+        before = manifest(base)["data"]["policy.json"]
+        self.assertNotIn("compiler-input-shared.json", manifest(base)["data"])
+        for enabled in (False, True):
+            base["compilerInputShared"] = {"version": 1, "enabled": enabled}
+            got = manifest(base)["data"]
+            self.assertEqual(before, got["policy.json"])
+            self.assertEqual(enabled, json.loads(got["compiler-input-shared.json"])["enabled"])
+        for value in ({"version": 2, "enabled": True}, {"version": 1, "enabled": "true"}, {"version": 1, "enabled": True, "rewrite_history": True}):
+            base["compilerInputShared"] = value
+            with self.assertRaises(ValueError):
+                manifest(base)
+
     def test_codec_uses_independent_file_for_reader_only_rollback(self):
         base = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60}}
         before = manifest(base)["data"]["policy.json"]

@@ -61,6 +61,9 @@ func decodeInputChunk(format string, stored []byte, want int) ([]byte, error) {
 
 // Reuse one bounded compressor per input, not one large allocation per chunk.
 type inputChunkEncoder struct {
+	// Zero keeps the existing v2 BestSpeed output. Shared packs opt into a
+	// stronger standard zlib level to amortize their object index overhead.
+	level        int
 	buffer       bytes.Buffer
 	writer       *zlib.Writer
 	verifier     io.ReadCloser
@@ -75,7 +78,11 @@ func (e *inputChunkEncoder) encode(raw []byte) ([]byte, error) {
 	e.buffer.Write(make([]byte, inputCodecHeaderBytes))
 	if e.writer == nil {
 		var err error
-		e.writer, err = zlib.NewWriterLevel(&e.buffer, zlib.BestSpeed)
+		level := e.level
+		if level == 0 {
+			level = zlib.BestSpeed
+		}
+		e.writer, err = zlib.NewWriterLevel(&e.buffer, level)
 		if err != nil {
 			return nil, err
 		}
