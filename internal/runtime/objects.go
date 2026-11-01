@@ -1448,7 +1448,24 @@ func containerForRuntimeKey(container map[string]any) map[string]any {
 		}
 		out[key] = value
 	}
+	// wait-postgres is a platform-owned readiness helper. Its resource
+	// requests/limits are scheduling hints, not executable application state.
+	// Canonicalize them to the pre-change defaults so removing its CPU request
+	// does not manufacture a new release identity for an already-serving app.
+	if name, _ := container["name"].(string); isWaitPostgresContainer(name) {
+		// These values are the historical hash representation, independent of
+		// the current helper defaults. Never use them to render the live Pod.
+		out["resources"] = runtimeStaticResourceRequirements(
+			map[string]string{"cpu": "25m", "memory": "32Mi", "ephemeral-storage": "32Mi"},
+			map[string]string{"cpu": "100m", "memory": "128Mi"},
+		)
+	}
 	return out
+}
+
+func isWaitPostgresContainer(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == "wait-postgres" || strings.HasPrefix(name, "wait-postgres-")
 }
 
 func isStrictZeroDowntimeDrainLifecycle(value any) bool {

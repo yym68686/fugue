@@ -799,6 +799,46 @@ func TestBuildAppDeploymentAnnotatesReleaseKey(t *testing.T) {
 	}
 }
 
+func TestManagedAppReleaseKeyKeepsWaitPostgresResourceCompatibility(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Postgres:  &model.AppPostgresSpec{ServiceName: "demo-postgres"},
+		},
+	}
+
+	build := func() map[string]any {
+		return buildAppDeploymentObject(NamespaceForTenant(app.TenantID), app, appLabels(app), SchedulingConstraints{}, managedPostgresResources(NamespaceForTenant(app.TenantID), app, nil))
+	}
+	legacy := build()
+	modern := build()
+	for _, container := range legacy["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["initContainers"].([]map[string]any) {
+		if isWaitPostgresContainer(container["name"].(string)) {
+			container["resources"] = runtimeHelperResourceRequirements()
+		}
+	}
+	legacyKey := managedDeploymentRuntimeKey(legacy)
+	if got := managedDeploymentRuntimeKey(modern); got != legacyKey {
+		t.Fatalf("wait-postgres resource-only changes must preserve release identity: legacy=%q modern=%q", legacyKey, got)
+	}
+	initContainers := modern["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["initContainers"].([]map[string]any)
+	wait := initContainers[len(initContainers)-1]
+	assertWaitPostgresResources(t, wait["resources"])
+	wait["command"] = []string{"sh", "-c", "exit 1"}
+	if got := managedDeploymentRuntimeKey(modern); got == legacyKey {
+		t.Fatal("changing the database wait command must still change release identity")
+	}
+	app.Spec.Image = "ghcr.io/example/demo:v2"
+	if got := managedDeploymentRuntimeKey(build()); got == legacyKey {
+		t.Fatal("changing the application image must still change release identity")
+	}
+}
+
 func TestBuildAppRevisionObjectsKeepDefaultRenderCompatible(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo",
