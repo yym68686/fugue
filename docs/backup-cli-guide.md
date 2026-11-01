@@ -256,6 +256,15 @@ prefix has no complete objects or pending uploads afterward. `purged` with
 Job can have removed data; `partial_or_unconfirmed` and progress counters are not
 proof of a complete cleanup. Always preview the remainder before retrying.
 
+R2 may return a different opaque multipart `UploadId` on successive listings of
+the same unchanged upload. Plan schema `fugue.barman-history-plan/v2` binds the
+upload's key, initiated timestamp and every part number, byte count, ETag and
+modification timestamp, rather than that rotating handle. Execution re-lists and
+verifies this complete identity before aborting with the latest returned handle.
+Multiple concurrent uploads for one key are ambiguous and block cleanup; content,
+timestamp, upload-count and object checks are not relaxed. Older preview hashes
+must be regenerated after an executor upgrade.
+
 The Lease does **not** fence external S3 writers, and R2 does not document atomic
 conditional DELETE in its [S3 compatibility table](https://developers.cloudflare.com/r2/api/s3/api/).
 The operator must exclude external/manual writers throughout execution;

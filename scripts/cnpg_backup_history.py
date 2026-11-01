@@ -79,7 +79,7 @@ def pages(s3, method, **kwargs):
 def inventory(s3, policy):
     bucket, prefix = repository(policy)
     objects, uploads, parts_count = [], [], 0
-    seen, seen_uploads = set(), set()
+    seen, seen_uploads, upload_keys = set(), set(), set()
     for page in pages(s3, 'list_objects_v2', Bucket=bucket, Prefix=prefix):
         for obj in page.get('Contents', []):
             key = obj['Key']
@@ -94,7 +94,11 @@ def inventory(s3, policy):
             kind = object_kind(key, prefix)
             r.require(kind == 'base' and not key.endswith('/backup.info'), 'Unexpected multipart archive object')
             r.require(isinstance(upload_id, str) and upload_id and (key, upload_id) not in seen_uploads, 'Invalid or duplicate upload')
+            # Opaque handles cannot disambiguate concurrent uploads of one key
+            # across LIST calls. Never guess which one is the previewed upload.
+            r.require(key not in upload_keys, 'Multiple uploads for one archive key require separate review')
             seen_uploads.add((key, upload_id))
+            upload_keys.add(key)
             parts, numbers = [], set()
             for part_page in pages(s3, 'list_parts', Bucket=bucket, Key=key, UploadId=upload_id):
                 for part in part_page.get('Parts', []):
@@ -108,7 +112,10 @@ def inventory(s3, policy):
             uploads.append(dict(key=key, upload_id=upload_id, initiated=stamp(upload['Initiated']), parts=sorted(parts, key=lambda p: p['number'])))
             r.require(len(uploads) <= MAX_UPLOADS, 'Archive exceeds upload bound')
     objects.sort(key=lambda obj: obj['key'])
-    uploads.sort(key=lambda upload: (upload['key'], upload['upload_id']))
+    # R2 may rotate the opaque UploadId returned for an unchanged multipart
+    # upload between LIST calls. The id is required only for the final abort;
+    # it is deliberately excluded from the preview digest.
+    uploads.sort(key=lambda upload: upload['key'])
     # Validate every available catalogue identity before any destructive action.
     # Orphan/failed tar uploads without backup.info are allowed in a retired archive.
     for obj in objects:
@@ -141,8 +148,15 @@ def summary(snapshot):
     return result
 
 
+def upload_identity(uploads):
+    # Keep key, initiated timestamp and EVERY part's number/size/ETag/time. Only
+    # the provider's rotating operation handle is excluded from content identity.
+    return [{key: value for key, value in upload.items() if key != 'upload_id'} for upload in uploads]
+
+
 def digest(policy, uid, rv, snapshot):
-    document = dict(policy=policy, policy_uid=uid, policy_resource_version=rv, inventory=snapshot)
+    normalized = dict(snapshot, uploads=upload_identity(snapshot['uploads']))
+    document = dict(schema='fugue.barman-history-plan/v2', policy=policy, policy_uid=uid, policy_resource_version=rv, inventory=normalized)
     return hashlib.sha256(json.dumps(document, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
@@ -250,7 +264,7 @@ def run(kube, s3, namespace, name, operation, job_uid, execute=False, expected='
             r.require(0 <= age.total_seconds() <= PLAN_SECONDS, 'Preview expired; create a fresh preview')
         snapshot = inventory(s3, policy)
         plan_hash = digest(policy, uid, rv, snapshot)
-        evidence.update(inventory=summary(snapshot), plan_sha256=plan_hash,
+        evidence.update(inventory=summary(snapshot), plan_sha256=plan_hash, plan_schema='fugue.barman-history-plan/v2',
                         warning='Permanent removal of ALL Barman restore points. Does not remove Backup CRs, Secrets, local WAL or Longhorn. External writers must be excluded; object-store DELETE is not atomically fenced.')
         consumers = guard()
         evidence.update(can_execute=not consumers, archive_consumers=consumers,
@@ -260,7 +274,11 @@ def run(kube, s3, namespace, name, operation, job_uid, execute=False, expected='
             return evidence
         r.require(plan_hash == expected, 'Archive changed since preview; no deletion attempted')
         quiet(snapshot)
-        r.require(inventory(s3, policy) == snapshot, 'Archive changed during validation; no deletion attempted')
+        latest = inventory(s3, policy)
+        r.require(digest(policy, uid, rv, latest) == plan_hash, 'Archive changed during validation; no deletion attempted')
+        # Use the newest opaque UploadId, while retaining the preview's content
+        # and age checks. R2's UploadId is not a stable object identity.
+        snapshot['uploads'] = latest['uploads']
         guard()
         evidence['state'] = 'deleting'
         save()  # A killed Job never leaves a previous successful-preview receipt.
@@ -283,8 +301,8 @@ def run(kube, s3, namespace, name, operation, job_uid, execute=False, expected='
         # Re-list exact pending uploads, including part ETags/timestamps, before abort.
         guard()
         remaining = inventory(s3, policy)
-        r.require(not remaining['objects'] and remaining['uploads'] == snapshot['uploads'], 'Archive changed before multipart cleanup; preview remaining data again')
-        for upload in snapshot['uploads']:
+        r.require(not remaining['objects'] and upload_identity(remaining['uploads']) == upload_identity(snapshot['uploads']), 'Archive changed before multipart cleanup; preview remaining data again')
+        for upload in remaining['uploads']:
             guard()
             evidence['deletion_attempted'] = True
             save()

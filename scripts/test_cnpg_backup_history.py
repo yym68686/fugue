@@ -143,6 +143,71 @@ class HistoryTest(unittest.TestCase):
         self.assertTrue(all(key.startswith(s.prefix) for key in s.deleted))
         self.assertEqual(k.history_receipt()['state'], 'purged')
 
+    def test_r2_rotated_opaque_upload_id_does_not_change_preview(self):
+        k, s = HistoryKube(), FakeS3()
+        plan = self.run_history(k, s)['plan_sha256']
+        original = s.get_paginator
+        calls = {'uploads': 0}
+        def paginator(method):
+            p = original(method)
+            if method != 'list_multipart_uploads':
+                return p
+            owner = s
+            class Rotating:
+                def paginate(self, **kwargs):
+                    calls['uploads'] += 1
+                    # Old handles become unusable. Both ListParts and abort must
+                    # use the actual most recently listed handle, not a fallback.
+                    owner.uploads = {(key, 'rotated-' + str(calls['uploads'])): parts for (key, _), parts in owner.uploads.items()}
+                    yield from p.paginate(**kwargs)
+            return Rotating()
+        with patch.object(s, 'get_paginator', side_effect=paginator):
+            result = self.run_history(k, s, True, plan)
+        self.assertEqual(result['state'], 'purged')
+        self.assertEqual(s.aborted[0][1], 'rotated-3')
+
+    def test_rotating_handles_do_not_hide_part_changes_or_new_uploads(self):
+        k, s = HistoryKube(), FakeS3()
+        snapshot = h.inventory(s, k.policy)
+        plan = h.digest(k.policy, 'uid', '1', snapshot)
+        for field, value in [('key', s.prefix + 'base/20260103T030000/data.tar.gz'), ('initiated', '2026-01-03T00:00:00+00:00')]:
+            changed = copy.deepcopy(snapshot)
+            changed['uploads'][0]['upload_id'] = 'new-handle'
+            changed['uploads'][0][field] = value
+            self.assertNotEqual(h.digest(k.policy, 'uid', '1', changed), plan)
+        for field, value in [('number', 2), ('size', 13), ('etag', 'changed-same-size'), ('modified', '2026-01-03T00:00:00+00:00')]:
+            changed = copy.deepcopy(snapshot)
+            changed['uploads'][0]['upload_id'] = 'new-handle'
+            changed['uploads'][0]['parts'][0][field] = value
+            self.assertNotEqual(h.digest(k.policy, 'uid', '1', changed), plan)
+        changed = copy.deepcopy(snapshot)
+        changed['uploads'][0]['upload_id'] = 'new-handle'
+        self.assertEqual(h.digest(k.policy, 'uid', '1', changed), plan)
+        self.assertEqual(snapshot['uploads'][0]['upload_id'], 'upload-1')
+        changed['uploads'].append(copy.deepcopy(changed['uploads'][0]))
+        self.assertNotEqual(h.digest(k.policy, 'uid', '1', changed), plan)
+
+    def test_ambiguous_concurrent_uploads_of_same_key_fail_closed(self):
+        k, s = HistoryKube(), FakeS3()
+        key, _ = next(iter(s.uploads))
+        s.uploads[(key, 'another-upload')] = copy.deepcopy(next(iter(s.uploads.values())))
+        with self.assertRaisesRegex(ValueError, 'Multiple uploads'):
+            self.run_history(k, s)
+        self.assertEqual(s.deleted + s.aborted, [])
+
+    def test_part_drift_before_abort_stops_after_object_deletion(self):
+        k, s = HistoryKube(), FakeS3()
+        plan = self.run_history(k, s)['plan_sha256']
+        original = s.delete_objects
+        def changed(**kwargs):
+            response = original(**kwargs)
+            next(iter(s.uploads.values()))[0]['ETag'] = 'changed-part'
+            return response
+        with patch.object(s, 'delete_objects', side_effect=changed), self.assertRaisesRegex(ValueError, 'before multipart'):
+            self.run_history(k, s, True, plan)
+        self.assertEqual(s.aborted, [])
+        self.assertEqual(k.history_receipt()['state'], 'partial_or_unconfirmed')
+
     def test_unknown_tree_keep_and_foreign_database_fail_closed(self):
         for key, data in [('blocks/shared', b'block'), ('base/20260101T030000/annotations/keep', b'full'),
                           ('base/20260101T030000/backup.info', b'systemid=67890\n'),
