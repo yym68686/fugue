@@ -19,6 +19,7 @@ import (
 	"fugue/internal/appimages"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
+	"fugue/internal/releaseproof"
 	"fugue/internal/runtime"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
@@ -227,27 +228,8 @@ type kubeTypedResourceList[T any] struct {
 		Continue string `json:"continue"`
 	} `json:"metadata"`
 }
-type kubeMetadataEvidence struct {
-	Metadata struct {
-		UID               string                       `json:"uid"`
-		ResourceVersion   string                       `json:"resourceVersion"`
-		Name              string                       `json:"name"`
-		Namespace         string                       `json:"namespace"`
-		DeletionTimestamp string                       `json:"deletionTimestamp"`
-		Labels            map[string]string            `json:"labels"`
-		Annotations       kubeReleaseAnnotations       `json:"annotations"`
-		OwnerReferences   []kubeOwnerReferenceEvidence `json:"ownerReferences"`
-	} `json:"metadata"`
-}
-type kubeServiceRuntimeEvidence struct {
-	kubeMetadataEvidence
-	Spec struct {
-		Selector map[string]string `json:"selector"`
-		Ports    []struct {
-			Port int `json:"port"`
-		} `json:"ports"`
-	} `json:"spec"`
-}
+type kubeMetadataEvidence = releaseproof.MetadataEvidence
+type kubeServiceRuntimeEvidence = releaseproof.Service
 type kubeEndpointsEvidence struct {
 	kubeMetadataEvidence
 	Subsets []struct {
@@ -255,45 +237,8 @@ type kubeEndpointsEvidence struct {
 		NotReadyAddresses []json.RawMessage `json:"notReadyAddresses"`
 	} `json:"subsets"`
 }
-type kubeEndpointSliceEvidence struct {
-	kubeMetadataEvidence
-	Endpoints []kubeReleaseEndpointEvidence `json:"endpoints"`
-}
-
-type kubeDeploymentRuntimeEvidence struct {
-	Metadata struct {
-		UID               string            `json:"uid"`
-		ResourceVersion   string            `json:"resourceVersion"`
-		Name              string            `json:"name"`
-		Namespace         string            `json:"namespace"`
-		Generation        int64             `json:"generation"`
-		Labels            map[string]string `json:"labels"`
-		DeletionTimestamp string            `json:"deletionTimestamp"`
-	} `json:"metadata"`
-	Spec struct {
-		Replicas *int `json:"replicas"`
-		Template struct {
-			Metadata struct {
-				Labels      map[string]string      `json:"labels"`
-				Annotations kubeReleaseAnnotations `json:"annotations"`
-			} `json:"metadata"`
-			Spec struct {
-				Containers []struct {
-					Name  string `json:"name"`
-					Image string `json:"image"`
-				} `json:"containers"`
-			} `json:"spec"`
-		} `json:"template"`
-	} `json:"spec"`
-	Status struct {
-		Replicas           int   `json:"replicas"`
-		UpdatedReplicas    int   `json:"updatedReplicas"`
-		ReadyReplicas      int   `json:"readyReplicas"`
-		AvailableReplicas  int   `json:"availableReplicas"`
-		ObservedGeneration int64 `json:"observedGeneration"`
-	} `json:"status"`
-}
-
+type kubeEndpointSliceEvidence = releaseproof.EndpointSlice
+type kubeDeploymentRuntimeEvidence = releaseproof.Deployment
 type kubeEndpointRuntimeEvidence struct {
 	Present           bool
 	ReadyAddresses    int
@@ -1613,17 +1558,7 @@ func boolPointerTrue(value *bool) bool {
 }
 
 func deploymentCurrentCohortComplete(deployment kubeDeploymentRuntimeEvidence) bool {
-	if deployment.Metadata.Generation <= 0 ||
-		deployment.Status.ObservedGeneration < deployment.Metadata.Generation ||
-		deployment.Spec.Replicas == nil {
-		return false
-	}
-	desired := *deployment.Spec.Replicas
-	return desired > 0 &&
-		deployment.Status.Replicas <= desired &&
-		deployment.Status.UpdatedReplicas == desired &&
-		deployment.Status.ReadyReplicas >= desired &&
-		deployment.Status.AvailableReplicas >= desired
+	return releaseproof.DeploymentCurrentCohortComplete(deployment)
 }
 
 func minObservedReplicaCount(values ...int) int {

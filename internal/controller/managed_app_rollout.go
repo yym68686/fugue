@@ -397,6 +397,22 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 			}
 		}
 		if ready {
+			if app.Spec.Replicas > 0 && model.AppExposesPublicService(app.Spec) && !model.AppSafeZeroDowntimeRolloutEnabled(app.Spec) {
+				trafficReady, trafficMessage, trafficErr := s.managedAppTrafficReady(waitCtx, client, app)
+				if trafficErr != nil {
+					// Incomplete/temporarily unavailable evidence is pending, not
+					// a healthy target and not an immediate executable failure.
+					trafficReady = false
+					trafficMessage = "waiting for traffic readiness observation: " + trafficErr.Error()
+				}
+				if !trafficReady {
+					lastMessage = trafficMessage
+					if err := waitForNextSignal(watchTargets); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			if s.Store != nil {
 				if err := retryOperationStore(waitCtx, time.Second, s.operationPersistencePending(operationID, "ready_status"), func() error { return s.refreshManagedAppStatus(waitCtx, client, app) }); err != nil {
 					return fmt.Errorf("publish managed app ready status for %s/%s: %w", namespace, name, err)
