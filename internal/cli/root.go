@@ -278,6 +278,12 @@ Environment variables:
 			// Static-edge management must work with the Fugue API disconnected,
 			// invalid API credentials and a broken control-plane context.
 			commandPath := cmd.CommandPath()
+			if strings.HasPrefix(commandPath, "fugue admin backup physical ") {
+				if c.root.SaveToken {
+					return fmt.Errorf("--save-token is not supported for independent physical backup management")
+				}
+				return nil
+			}
 			if commandPath == "fugue admin edge quality-probe" {
 				if c.root.SaveToken {
 					return fmt.Errorf("--save-token is not supported for independent client network probes")

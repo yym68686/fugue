@@ -135,6 +135,7 @@ func (c *CLI) newAdminBackupCommand() *cobra.Command {
 		c.newAdminBackupRunCommand(),
 		c.newAdminBackupListCommand(),
 		c.newAdminBackupShowCommand(),
+		c.newAdminPhysicalBackupCommand(),
 	)
 	return cmd
 }

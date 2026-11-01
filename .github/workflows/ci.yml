@@ -3015,6 +3015,36 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
+  cnpg_backup_count_retention:
+    # Recovery policy and its executor must not depend on the Fugue database.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-cnpg-backup-retention, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Test and install the independently configured count-retention executor
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/control-plane-backup-retention/install.json
+          paths=("$config" scripts/cnpg_backup_retention.py scripts/test_cnpg_backup_retention.py .github/workflows/ci.yml)
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || "$BASE_SHA" == 0000000000000000000000000000000000000000 ]]; then
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          if git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then exit 0; fi
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "${paths[@]}" .github/workflows/ci.yml
+          python3 -m unittest scripts.test_cnpg_backup_retention
+          python3 scripts/cnpg_backup_retention.py --install "$config"
+
   postgres_protection:
     # Database recovery must remain possible when an application build fails.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -3039,14 +3069,23 @@ jobs:
             base="$(git rev-parse HEAD^)"
           fi
           changed=false
-          if ! git diff --quiet "${base}" HEAD -- deploy/environments/production/control-plane-postgres scripts/reconcile_postgres_protection.py; then
+          script_changed=false
+          if ! git diff --quiet "${base}" HEAD -- scripts/reconcile_postgres_protection.py scripts/test_reconcile_postgres_protection.py; then
+            script_changed=true
+          fi
+          if ! git diff --quiet "${base}" HEAD -- deploy/environments/production/control-plane-postgres; then
             changed=true
           fi
           echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
+          echo "script_changed=${script_changed}" >> "${GITHUB_OUTPUT}"
+      - name: Verify database protection writer safety
+        if: steps.changed.outputs.changed == 'true' || steps.changed.outputs.script_changed == 'true'
+        run: python3 -m unittest discover -s scripts -p test_reconcile_postgres_protection.py
       - name: Validate and reconcile durable database protection
         if: steps.changed.outputs.changed == 'true'
         run: |
-          python3 -m unittest discover -s scripts -p test_reconcile_postgres_protection.py
+          # Reapply protection only on explicit configuration intent changes.
+          # A guard-only code update must not restore an unrelated quorum policy.
           python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json
           python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json --apply
 

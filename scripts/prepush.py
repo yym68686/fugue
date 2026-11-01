@@ -474,6 +474,9 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if any(name in {"scripts/cnpg_backup_retention.py", "scripts/test_cnpg_backup_retention.py", "scripts/reconcile_postgres_protection.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/control-plane-backup-retention/") for name in paths):
+        non_go_tasks["cnpg-count-retention-tests"] = ["python3", "-m", "unittest", "scripts.test_cnpg_backup_retention"]
+        non_go_tasks["postgres-protection-writer-tests"] = ["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_reconcile_postgres_protection.py"]
     if any(name in {"scripts/configure_postgres_bootstrap.py", "scripts/test_configure_postgres_bootstrap.py", ".github/workflows/ci.yml", "deploy/environments/production/managed-postgres/bootstrap-cpu.json"} for name in paths):
         non_go_tasks["postgres-bootstrap-cpu-tests"] = ["python3", "-m", "unittest", "scripts.test_configure_postgres_bootstrap"]
     if any(name in {"scripts/observe_dns_failure_timeline.py", "scripts/test_observe_dns_failure_timeline.py"} for name in paths):

@@ -10,6 +10,8 @@ import re
 
 def validate(config, live):
     spec = config['spec']
+    if live.get('metadata', {}).get('annotations', {}).get('fugue.pro/cnpg-count-policy') and spec.get('backup', {}).get('retentionPolicy'):
+        raise ValueError('Count retention is independently managed; cannot restore a recovery-window policy implicitly')
     if set(spec) - {'resources', 'backup', 'postgresql', 'primaryUpdateStrategy'}:
         raise ValueError('Protection configuration cannot change identity, image or volumes')
     if str(live['status']['systemID']) != config['expectedSystemID']:

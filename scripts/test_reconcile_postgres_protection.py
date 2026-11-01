@@ -14,6 +14,12 @@ class ProtectionSafetyTest(unittest.TestCase):
     def test_accepts_protected_existing_database(self):
         validate(self.config, self.live)
 
+    def test_refuses_replacing_operator_owned_count_retention(self):
+        self.live['metadata'] = {'annotations': {'fugue.pro/cnpg-count-policy': 'policy-uid'}}
+        self.config['spec']['backup']['retentionPolicy'] = '7d'
+        with self.assertRaisesRegex(ValueError, 'independently managed'):
+            validate(self.config, self.live)
+
     def test_refuses_wrong_database_or_degraded_quorum(self):
         for field, value in [('systemID', '456'), ('readyInstances', 1), ('targetPrimary', 'db-2')]:
             live = copy.deepcopy(self.live)

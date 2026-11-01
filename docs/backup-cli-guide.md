@@ -1,9 +1,10 @@
 # Fugue backup CLI guide
 
-Fugue backup is opt-in for user workloads. The default platform policy only
-backs up the control-plane database, runs hourly, and retains three successful
-backup artifacts. App databases, persistent storage, and Data Workspaces stay
-disabled until a user enables a policy.
+Fugue backup is opt-in for user workloads. The default platform **logical dump**
+policy backs up the control-plane database hourly and retains three successful
+artifacts. This is independent of CNPG's full physical backups and continuous
+WAL archive. App databases, persistent storage, and Data Workspaces stay disabled
+until a user enables a policy.
 
 ## Check platform status
 
@@ -71,7 +72,7 @@ fugue backup backend create minio \
 Credential values are stored encrypted by the control plane and are redacted in
 normal list/show output.
 
-## Manage control-plane backup
+## Manage control-plane logical dumps
 
 ```bash
 fugue admin backup enable \
@@ -85,6 +86,70 @@ fugue backup artifact ls --target-type control-plane-db
 
 `--version` can attach an operator label such as `before-migration` or
 `release-2026-06`.
+
+## Manage control-plane physical backup retention
+
+`admin backup enable --retain-count` only changes logical dump artifacts. To
+manage CNPG full physical backups and their WAL archive, use the independent
+operator commands (Kubernetes authorization, not a Fugue API/bootstrap token):
+
+```bash
+fugue admin backup physical status
+fugue admin backup physical plan
+fugue admin backup physical configure --retain-count 3 --ack-reduced-recovery
+fugue admin backup physical reconcile --dry-run --wait
+fugue admin backup physical reconcile --wait
+fugue admin backup physical status
+```
+
+Use `--namespace`, `--policy`, `--kubeconfig` and `--kube-context` to select an
+installed policy. Alternatively, append `--ssh <operator-host-alias>` to run
+kubectl on an explicitly selected trusted SSH host. The latter uses existing
+SSH authentication and host-key verification; it does not copy executors or
+credentials to a node. Commands continue working if the Fugue API/database is
+unavailable. The operator needs access to the policy/receipt ConfigMaps, Lease,
+CNPG Cluster/Backups, and retention CronJob/Jobs in the selected namespace.
+
+The executor is installed only through the declarative `ci.yml`
+`cnpg_backup_count_retention` lane, configured by
+`deploy/environments/production/control-plane-backup-retention/install.json`.
+It starts **disabled**, uses a digest-pinned existing PostgreSQL/Barman image,
+and reads S3 credentials through existing Secret references. Subsequent code
+releases preserve the independently saved policy. The protection writer rejects
+an attempt to overwrite an owned count policy with a recovery window; changing
+writer code alone does not reapply unrelated protection configuration.
+
+`configure` persists and activates **successful-backup count**, not days:
+CNPG's native `7d` means a seven-day recovery window and may require more than
+seven base backups, whereas Barman `REDUNDANCY 3` retains the latest three
+successful full backups. Activation removes only the native window and sets a
+policy-ownership annotation with UID/resourceVersion fencing. It does not alter
+backup schedules, compression, database storage, replicas, or PostgreSQL settings.
+Increasing the count cannot recover already removed backups.
+
+The worker runs every 15 minutes. It acquires the policy Lease and revalidates
+the database UID/system ID, archive destination/endpoint/server identity,
+policy revision, cluster health, pending backups, and active archive-dependent
+recoveries before calling `barman-cloud-backup-delete --retention-policy
+"REDUNDANCY N" --minimum-redundancy N`. Only Barman removes backup files and
+unneeded WAL; Fugue never deletes archive keys by prefix. Incomplete/foreign
+catalogues and incremental backup chains fail closed. Archival `keep` flags
+remain honored, so the actual retained count may be higher than requested.
+
+`plan` reads Kubernetes records only and explicitly reports
+`remote_catalogue_verified=false`: old Backup CRs can outlive their remote data.
+`reconcile --dry-run` creates a Job but does not delete archive data. Check the
+last receipt for verified `remaining`, `removed`, `count_satisfied`,
+`remaining_above_count`, `dry_run`, and any blocking reason. A completed Job or
+saved configuration is not by itself proof of reduced R2 storage. Failed or
+unfinished multipart uploads are not counted as successful backups and are not
+aborted by this policy.
+
+Count retention permanently shortens the recovery horizon to the oldest retained
+base backup (plus its required WAL). It is not a database recovery or disk cleanup
+operation: deleting R2 WAL cannot free local PostgreSQL `pg_wal`. Unhealthy
+databases may save configuration intent, but remote cleanup stays blocked until
+the database is healthy. Resolve local disk incidents separately.
 
 ## Enable app backup explicitly
 
