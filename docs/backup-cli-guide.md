@@ -176,7 +176,7 @@ Execution acquires the retention Lease, persists `barman_disabled=true` and
 `fugue.pro/barman-disabled=<policy UID>`, and suspends the retention CronJob and
 every native Barman ScheduledBackup targeting that cluster. Foreign clusters and
 volumeSnapshot/plugin schedules are untouched. Active backups (including unknown
-phases), unhealthy databases and active archive-dependent recoveries prevent
+phases), unhealthy databases, archive-fed replica clusters and active archive-dependent recoveries prevent
 archive removal. No backup process is cancelled. Do not start concurrent manual
 backups while shutting down.
 

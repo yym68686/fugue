@@ -159,8 +159,13 @@ func physicalCheckArchiveRecoveries(ctx context.Context, kube physicalKubeFunc, 
 			if server == "" {
 				server = physicalString(external, "name")
 			}
-			if physicalString(store, "destinationPath") == policy.Destination && server == policy.ServerName && physicalString(physicalMap(other, "status"), "phase") != "Cluster in healthy state" {
-				return fmt.Errorf("an archive-dependent recovery is in progress; shutdown is blocked")
+			if physicalString(store, "destinationPath") == policy.Destination && server == policy.ServerName {
+				if physicalMap(physicalMap(other, "spec"), "replica")["enabled"] == true {
+					return fmt.Errorf("a replica cluster depends on this WAL archive; shutdown is blocked")
+				}
+				if physicalString(physicalMap(other, "status"), "phase") != "Cluster in healthy state" {
+					return fmt.Errorf("an archive-dependent recovery is in progress; shutdown is blocked")
+				}
 			}
 		}
 	}

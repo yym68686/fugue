@@ -189,7 +189,7 @@ func TestPhysicalBarmanDisableConflictIsResumableWithoutFalseSuccess(t *testing.
 }
 
 func TestPhysicalBarmanDisableRejectsUnsafeInventoriesOwnersPluginsAndRestores(t *testing.T) {
-	for _, mutation := range []string{"truncated", "owner", "plugin", "restore", "database-identity"} {
+	for _, mutation := range []string{"truncated", "owner", "plugin", "restore", "replica", "database-identity"} {
 		t.Run(mutation, func(t *testing.T) {
 			f, opts := physicalDisableFixture()
 			switch mutation {
@@ -201,8 +201,12 @@ func TestPhysicalBarmanDisableRejectsUnsafeInventoriesOwnersPluginsAndRestores(t
 				physicalMap(f.base.cluster, "spec")["plugins"] = []any{map[string]any{"isWALArchiver": true}}
 			case "database-identity":
 				physicalMap(f.base.cluster, "status")["systemID"] = "other"
-			case "restore":
+			case "restore", "replica":
 				f.others = []map[string]any{{"metadata": map[string]any{"uid": "restore-uid"}, "spec": map[string]any{"externalClusters": []any{map[string]any{"name": "sample-db", "barmanObjectStore": map[string]any{"destinationPath": "s3://sample/archive"}}}}, "status": map[string]any{"phase": "Setting up primary"}}}
+				if mutation == "replica" {
+					physicalMap(f.others[0], "status")["phase"] = "Cluster in healthy state"
+					physicalMap(f.others[0], "spec")["replica"] = map[string]any{"enabled": true}
+				}
 			}
 			if _, err := disablePhysicalBarman(context.Background(), f.kube, opts, false); err == nil || len(f.writes) != 0 {
 				t.Fatalf("unsafe mutation accepted: %v %v", err, f.writes)
