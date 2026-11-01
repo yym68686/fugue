@@ -52,9 +52,15 @@ func (s *builderScheduler) inspectPlacement(ctx context.Context, buildStrategy s
 	for _, node := range nodes {
 		snapshot := builderSnapshotFromKubeNode(node)
 		if s.nodeNeedsSummary(snapshot) {
+			pods, podErr := s.client.listNodePods(ctx, snapshot.Name)
+			if podErr != nil {
+				summaryErrors[snapshot.Name] = fmt.Sprintf("pod requests unavailable: %v", podErr)
+			} else {
+				snapshot.Requested = builderNodePodRequests(pods)
+			}
 			summary, summaryErr := s.client.getNodeSummary(ctx, snapshot.Name)
 			if summaryErr != nil {
-				summaryErrors[snapshot.Name] = fmt.Sprintf("stats summary unavailable: %v", summaryErr)
+				summaryErrors[snapshot.Name] = appendBuilderInspectionError(summaryErrors[snapshot.Name], fmt.Sprintf("stats summary unavailable: %v", summaryErr))
 			} else {
 				snapshot.Used = builderUsedResources(summary, snapshot.Allocatable.MemoryBytes)
 				snapshot.FilesystemAvailableBytes = builderNodeFilesystemAvailableBytes(summary)
@@ -128,6 +134,18 @@ func (s *builderScheduler) inspectPlacement(ctx context.Context, buildStrategy s
 	})
 
 	return report, nil
+}
+
+func appendBuilderInspectionError(existing, next string) string {
+	existing = strings.TrimSpace(existing)
+	next = strings.TrimSpace(next)
+	if existing == "" {
+		return next
+	}
+	if next == "" {
+		return existing
+	}
+	return existing + "; " + next
 }
 
 func builderInspectionSchedulingSnapshots(s *builderScheduler, snapshots []builderNodeSnapshot, summaryErrors map[string]string) []builderNodeSnapshot {
