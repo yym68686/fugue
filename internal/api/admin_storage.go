@@ -287,7 +287,7 @@ func (s *Server) adminStorageLonghorn(ctx context.Context, client *kubeLogsClien
 			metadata, _ := obj["metadata"].(map[string]any)
 			labels, _ := metadata["labels"].(map[string]any)
 			status, _ := obj["status"].(map[string]any)
-			out.Longhorn = append(out.Longhorn, adminStorageLonghornEntry{BackupName: name, RunID: longhornStringValue(labels["fugue.pro/backup-run"]), VolumeName: longhornStringValue(status["volumeName"]), TargetName: longhornStringValue(status["backupTargetName"]), RemoteState: longhornStringValue(status["state"]), Status: "untracked", CleanupState: "blocked", Error: "No matching artifact in bounded inventory; never automatically deleted."})
+			out.Longhorn = append(out.Longhorn, adminStorageLonghornEntry{BackupName: name, RunID: longhornStringValue(labels["fugue.pro/backup-run"]), VolumeName: longhornStringValue(status["volumeName"]), TargetName: longhornStringValue(status["backupTargetName"]), RemoteState: longhornStringValue(status["state"]), Status: "untracked", CleanupState: "blocked", Error: "No matching artifact in bounded inventory. Only verified empty lock-failure records are eligible for automatic metadata cleanup after 24 hours."})
 		}
 	}
 	if len(items) > 0 {

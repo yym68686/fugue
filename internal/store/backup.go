@@ -908,12 +908,26 @@ func (s *Store) ListDueBackupPolicies(now time.Time, limit int) ([]model.BackupP
 }
 
 func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
+	return s.createBackupRun(run, "")
+}
+
+// CreateBackupRetryRun fences retry creation against the policy's last run
+// under the same lock/transaction as the insert. A delayed worker or a second
+// scheduler cannot resurrect an old failure after a newer run has finished.
+func (s *Store) CreateBackupRetryRun(run model.BackupRun, failedRunID string) (model.BackupRun, error) {
+	if run.PolicyID == "" || failedRunID == "" || run.Trigger != model.BackupRunTriggerRetry || run.Status != model.BackupRunStatusPending || run.NextRetryAt == nil {
+		return model.BackupRun{}, ErrInvalidInput
+	}
+	return s.createBackupRun(run, failedRunID)
+}
+
+func (s *Store) createBackupRun(run model.BackupRun, retryOf string) (model.BackupRun, error) {
 	run = model.NormalizeBackupRun(run)
 	if run.Target.Type == "" {
 		return model.BackupRun{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgCreateBackupRun(run)
+		return s.pgCreateBackupRun(run, retryOf)
 	}
 	var created model.BackupRun
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -925,6 +939,9 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 				return ErrNotFound
 			}
 			policy := model.NormalizeBackupPolicy(state.BackupPolicies[index])
+			if retryOf != "" && policy.LastRunID != retryOf {
+				return ErrConflict
+			}
 			if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive {
 				return ErrConflict
 			}
@@ -4167,7 +4184,7 @@ func (s *Store) pgListDueBackupPolicies(now time.Time, limit int) ([]model.Backu
 	return policies, mapDBErr(rows.Err())
 }
 
-func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
+func (s *Store) pgCreateBackupRun(run model.BackupRun, retryOf string) (model.BackupRun, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	run = model.NormalizeBackupRun(run)
@@ -4183,6 +4200,9 @@ func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) 
 		policy, err := scanBackupPolicy(tx.QueryRowContext(ctx, backupPolicySelectSQL()+` WHERE id = $1 FOR UPDATE`, run.PolicyID))
 		if err != nil {
 			return model.BackupRun{}, err
+		}
+		if retryOf != "" && policy.LastRunID != retryOf {
+			return model.BackupRun{}, ErrConflict
 		}
 		if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive {
 			return model.BackupRun{}, ErrConflict

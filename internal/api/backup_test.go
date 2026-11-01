@@ -2686,6 +2686,57 @@ func TestScheduleBackupRetryCreatesPendingRetryRun(t *testing.T) {
 	}
 }
 
+func TestRecoverableLonghornLockFailureGetsDurableRetryAfterRollout(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name: "longhorn-r2", Provider: model.DataBackendProviderCloudflareR2,
+		Bucket: "longhorn-bucket", Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		Name: "control-plane", Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase, Engine: model.BackupEngineLonghornSnapshot},
+		BackendID: backend.ID, Enabled: true, Status: model.BackupPolicyStatusActive, Schedule: model.BackupDefaultSchedule,
+	})
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	finishedAt := time.Now().UTC().Add(-3 * time.Hour)
+	failed, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID: policy.ID, Target: policy.Target, BackendID: backend.ID,
+		Trigger: model.BackupRunTriggerRetry, Status: model.BackupRunStatusFailed,
+		Attempt: 4, RetryCount: 3, FinishedAt: &finishedAt,
+		ErrorCode: "backup_failed", ErrorMessage: "Longhorn backup failed: failed to acquire lock while performing backup create/restore",
+	})
+	if err != nil {
+		t.Fatalf("create exhausted legacy failure: %v", err)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	server.enqueueRecoverableLonghornLockRetries(context.Background())
+	server.enqueueRecoverableLonghornLockRetries(context.Background())
+
+	runs, err := stateStore.ListBackupRuns(store.BackupRunFilter{PolicyID: policy.ID, Status: model.BackupRunStatusPending, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list pending retries: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected exactly one durable recovery retry, got %+v", runs)
+	}
+	retry := runs[0]
+	if retry.Trigger != model.BackupRunTriggerRetry || retry.RetryCount != failed.RetryCount+1 || retry.NextRetryAt == nil {
+		t.Fatalf("unexpected recovery retry: %+v", retry)
+	}
+	if !retry.NextRetryAt.Equal(finishedAt.Add(backupRunLonghornLockRetryDelay)) || retry.NextRetryAt.After(time.Now()) {
+		t.Fatalf("overdue recovery retry must be due immediately, got %s", retry.NextRetryAt)
+	}
+}
+
 func TestScheduleBackupRetryRebindsManagedPostgresPolicyTarget(t *testing.T) {
 	t.Parallel()
 

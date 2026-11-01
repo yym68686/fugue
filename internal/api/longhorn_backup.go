@@ -27,6 +27,19 @@ const (
 
 var errLonghornBackupUnavailable = errors.New("longhorn snapshot backup is unavailable")
 
+// Longhorn returns this class of failure when a remote backup-store cleanup
+// holds the repository deletion lock.  It is safe to retry the Backup CR
+// creation after the cleanup finishes; it is not evidence that the database
+// or the remote backup target is corrupt.
+func isLonghornBackupLockConflictMessage(message string) bool {
+	value := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(value, "failed to acquire lock") && strings.Contains(value, "backup create/restore")
+}
+
+func backupRunHasLonghornLockConflict(run model.BackupRun) bool {
+	return model.NormalizeBackupTarget(run.Target).Engine == model.BackupEngineLonghornSnapshot && isLonghornBackupLockConflictMessage(run.ErrorMessage)
+}
+
 type longhornBackupStatus struct {
 	State            string `json:"state"`
 	Error            string `json:"error"`
@@ -353,6 +366,59 @@ func longhornCreate(ctx context.Context, client *kubeLogsClient, namespace, reso
 
 func longhornDelete(ctx context.Context, client *kubeLogsClient, namespace, resource, name string) error {
 	return client.doJSON(ctx, http.MethodDelete, "/apis/longhorn.io/v1beta2/namespaces/"+url.PathEscape(namespace)+"/"+resource+"/"+url.PathEscape(name), nil)
+}
+
+// deleteLonghornErrorBackup re-reads the object immediately before deletion
+// and sends Kubernetes UID/resourceVersion preconditions.  This prevents a
+// stale inventory item from deleting a replacement Backup CR with the same
+// name after a controller restart.
+func deleteLonghornErrorBackup(ctx context.Context, client *kubeLogsClient, namespace, name string, observed map[string]any, runID string, now time.Time, grace time.Duration) error {
+	if !longhornResourceName.MatchString(namespace) || !longhornResourceName.MatchString(name) {
+		return errors.New("invalid Longhorn Error backup identity")
+	}
+	path := "/apis/longhorn.io/v1beta2/namespaces/" + url.PathEscape(namespace) + "/backups/" + url.PathEscape(name)
+	current, err := longhornGet(ctx, client, namespace, "backups", name)
+	if isKubeNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !longhornErrorBackupEligible(current, now, grace) {
+		return errors.New("Longhorn Error backup changed or is no longer eligible")
+	}
+	observedMeta, _ := observed["metadata"].(map[string]any)
+	currentMeta, _ := current["metadata"].(map[string]any)
+	if longhornStringValue(observedMeta["uid"]) == "" || longhornStringValue(observedMeta["uid"]) != longhornStringValue(currentMeta["uid"]) {
+		return errors.New("Longhorn Error backup UID changed")
+	}
+	labels, _ := currentMeta["labels"].(map[string]any)
+	if longhornStringValue(labels["fugue.pro/backup-run"]) != runID {
+		return errors.New("Longhorn Error backup ownership changed")
+	}
+	uid, revision := longhornStringValue(currentMeta["uid"]), longhornStringValue(currentMeta["resourceVersion"])
+	if uid == "" || revision == "" {
+		return errors.New("Longhorn Error backup lacks deletion preconditions")
+	}
+	finalizers, _ := currentMeta["finalizers"].([]any)
+	engineOwned := false
+	for _, finalizer := range finalizers {
+		engineOwned = engineOwned || finalizer == "longhorn.io"
+	}
+	if !engineOwned {
+		return errors.New("Longhorn Error backup lacks engine finalizer")
+	}
+	spec, _ := current["spec"].(map[string]any)
+	snapshotName := longhornStringValue(spec["snapshotName"])
+	if !longhornResourceName.MatchString(snapshotName) {
+		return errors.New("Longhorn Error backup lacks snapshot identity")
+	}
+	if _, err := longhornGet(ctx, client, namespace, "snapshots", snapshotName); !isKubeNotFound(err) {
+		return fmt.Errorf("Longhorn Error backup snapshot absence is unconfirmed: %v", err)
+	}
+	return client.doJSONBody(ctx, http.MethodDelete, path, map[string]any{
+		"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": map[string]string{"uid": uid, "resourceVersion": revision},
+	}, nil)
 }
 
 func waitForLonghornSnapshot(ctx context.Context, client *kubeLogsClient, namespace, name string) error {

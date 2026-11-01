@@ -41,15 +41,25 @@ const (
 	backupRunHeartbeatPeriod = 30 * time.Second
 	backupBackendProbeTTL    = 30 * time.Second
 	backupRunMaxRetries      = 3
-	backupArtifactGCGrace    = time.Hour
-	backupArtifactGCLimit    = 20
-	backupArtifactGCLockName = "fugue-backup-artifact-physical-gc-v1"
-	backupArtifactGCTimeout  = 45 * time.Second
-	backupFailedRunGCGrace   = time.Hour
-	backupFailedRunGCLimit   = 100
-	backupFailedRunGCLock    = "fugue-backup-failed-run-object-gc-v1"
-	backupFailedRunGCTimeout = 45 * time.Second
-	backupUploadCleanupTTL   = 45 * time.Second
+	// Longhorn backup-store lock conflicts are transient when a remote cleanup
+	// operation is still holding the repository deletion lock.  Keep retrying
+	// for roughly a day so a slow/asynchronous Longhorn cleanup can finish
+	// without waiting for the next daily schedule.
+	backupRunLonghornLockMaxRetries = 24
+	backupRunLonghornLockRetryDelay = time.Hour
+	backupArtifactGCGrace           = time.Hour
+	backupArtifactGCLimit           = 20
+	backupArtifactGCLockName        = "fugue-backup-artifact-physical-gc-v1"
+	backupArtifactGCTimeout         = 45 * time.Second
+	backupFailedRunGCGrace          = time.Hour
+	backupFailedRunGCLimit          = 100
+	backupFailedRunGCLock           = "fugue-backup-failed-run-object-gc-v1"
+	backupFailedRunGCTimeout        = 45 * time.Second
+	backupUploadCleanupTTL          = 45 * time.Second
+	backupLonghornErrorGCGrace      = 24 * time.Hour
+	backupLonghornErrorGCLimit      = 50
+	backupLonghornErrorGCLock       = "fugue-backup-longhorn-error-gc-v1"
+	backupLonghornErrorGCTimeout    = 45 * time.Second
 
 	managedPostgresSuspendedBackupMessage = "managed_postgres_suspended: resume before backup"
 )
@@ -122,6 +132,7 @@ func (s *Server) StartBackgroundBackups(ctx context.Context) {
 	s.enqueueDueBackups(ctx)
 	go s.sweepDeletedBackupArtifacts(ctx)
 	go s.sweepFailedBackupRunObjects(ctx)
+	go s.sweepLonghornErrorBackups(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -130,6 +141,7 @@ func (s *Server) StartBackgroundBackups(ctx context.Context) {
 			s.enqueueDueBackups(ctx)
 			go s.sweepDeletedBackupArtifacts(ctx)
 			go s.sweepFailedBackupRunObjects(ctx)
+			go s.sweepLonghornErrorBackups(ctx)
 		}
 	}
 }
@@ -610,6 +622,7 @@ func backupArtifactDataObjectFilenameAllowed(kind, filename string) bool {
 
 func (s *Server) enqueueDueBackups(ctx context.Context) {
 	s.recoverStaleBackupRuns(ctx)
+	s.enqueueRecoverableLonghornLockRetries(ctx)
 	s.enqueueDueBackupRetries(ctx)
 	s.enqueuePendingControlPlaneBackupRuns(ctx)
 	policies, err := s.store.ListDueBackupPolicies(time.Now().UTC(), 25)
@@ -651,6 +664,37 @@ func (s *Server) enqueueDueBackups(ctx context.Context) {
 			continue
 		}
 		go s.executeBackupRun(contextWithoutCancel(ctx), run.ID)
+	}
+}
+
+// enqueueRecoverableLonghornLockRetries bridges deployments which happened
+// while the old three-attempt policy was active.  The newest failed run is
+// examined only when it has no newer pending/running/succeeded sibling, so a
+// retry is created once and then becomes visible to the normal due scanner.
+func (s *Server) enqueueRecoverableLonghornLockRetries(ctx context.Context) {
+	if s == nil || s.store == nil {
+		return
+	}
+	policies, err := s.store.ListBackupPolicies(store.BackupPolicyFilter{PlatformAdmin: true, Limit: 500})
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("backup scheduler list backup policies for Longhorn lock recovery failed: %v", err)
+		}
+		return
+	}
+	for _, policy := range policies {
+		if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive || policy.Engine != model.BackupEngineLonghornSnapshot || policy.LastRunID == "" {
+			continue
+		}
+		run, err := s.store.GetBackupRun(policy.LastRunID, "", true)
+		if err != nil {
+			continue
+		}
+		if run.Status != model.BackupRunStatusFailed || run.Trigger == model.BackupRunTriggerManual || run.FinishedAt == nil ||
+			!backupRunHasLonghornLockConflict(run) || run.RetryCount >= backupRunLonghornLockMaxRetries {
+			continue
+		}
+		s.scheduleBackupRetry(contextWithoutCancel(ctx), run)
 	}
 }
 
@@ -2640,11 +2684,14 @@ func (s *Server) scheduleBackupRetry(ctx context.Context, run model.BackupRun) {
 	// due-run scan is the sole executor after this record is created; do not
 	// create one timer goroutine per failed run.
 	_ = ctx
-	if run.PolicyID == "" || run.RetryCount >= backupRunMaxRetries || run.Trigger == model.BackupRunTriggerManual {
+	if run.PolicyID == "" || run.RetryCount >= backupRunRetryLimit(run) || run.Trigger == model.BackupRunTriggerManual {
 		return
 	}
-	delay := backupRetryDelay(run.RetryCount + 1)
+	delay := backupRetryDelayFor(run, run.RetryCount+1)
 	nextRetryAt := time.Now().UTC().Add(delay)
+	if run.FinishedAt != nil {
+		nextRetryAt = run.FinishedAt.UTC().Add(delay)
+	}
 	candidate := model.BackupRun{
 		PolicyID:        run.PolicyID,
 		TenantID:        run.TenantID,
@@ -2668,14 +2715,28 @@ func (s *Server) scheduleBackupRetry(ctx context.Context, run model.BackupRun) {
 		}
 		return
 	}
-	retryRun, err := s.store.CreateBackupRun(candidate)
+	retryRun, err := s.store.CreateBackupRetryRun(candidate, run.ID)
 	if err != nil {
-		if s.log != nil {
+		if s.log != nil && !errors.Is(err, store.ErrConflict) {
 			s.log.Printf("backup retry enqueue for run %s failed: %v", run.ID, err)
 		}
 		return
 	}
 	_ = retryRun
+}
+
+func backupRunRetryLimit(run model.BackupRun) int {
+	if backupRunHasLonghornLockConflict(run) {
+		return backupRunLonghornLockMaxRetries
+	}
+	return backupRunMaxRetries
+}
+
+func backupRetryDelayFor(run model.BackupRun, retryCount int) time.Duration {
+	if backupRunHasLonghornLockConflict(run) && retryCount > 3 {
+		return backupRunLonghornLockRetryDelay
+	}
+	return backupRetryDelay(retryCount)
 }
 
 func backupRetryDelay(retryCount int) time.Duration {
