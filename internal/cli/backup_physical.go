@@ -385,6 +385,6 @@ func (c *CLI) newAdminPhysicalBackupCommand() *cobra.Command {
 	}}
 	reconcile.Flags().BoolVar(&dryRun, "dry-run", false, "Ask Barman to preview without deleting backups or WAL")
 	reconcile.Flags().BoolVar(&wait, "wait", false, "Wait up to five minutes for the Job")
-	cmd.AddCommand(status, plan, configure, reconcile, c.newPhysicalBarmanDisableCommand(&opts))
+	cmd.AddCommand(status, plan, configure, reconcile, c.newPhysicalBarmanDisableCommand(&opts), c.newPhysicalBarmanPurgeCommand(&opts))
 	return cmd
 }

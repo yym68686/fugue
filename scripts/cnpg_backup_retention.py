@@ -208,50 +208,70 @@ def install(config, kube):
     image = config['image']
     require(re.fullmatch(r'[^\s]+@sha256:[a-f0-9]{64}', image), 'Worker image must be digest pinned')
     existing_policy = kube('get', 'ConfigMap', name, '-n', namespace, '--ignore-not-found', '-o', 'json')
+    cron = kube('get', 'CronJob', name, '-n', namespace, '--ignore-not-found', '-o', 'json')
+    disabled = False
     if existing_policy:
         saved = json.loads(existing_policy['data']['policy.json'])
         validate_policy(saved, cluster, existing_policy['metadata']['uid'])
         if saved.get('barman_disabled'):
+            disabled = True
             require(cluster['metadata'].get('annotations', {}).get(DISABLED_ANNOTATION) == existing_policy['metadata']['uid'], 'Barman shutdown ownership is not activated; retry CLI disable')
-            cron = kube('get', 'CronJob', name, '-n', namespace, '--ignore-not-found', '-o', 'json')
             if cron and not cron['spec'].get('suspend'):
                 patch = [{'op': 'test', 'path': '/metadata/uid', 'value': cron['metadata']['uid']},
                          {'op': 'test', 'path': '/metadata/resourceVersion', 'value': cron['metadata']['resourceVersion']},
                          {'op': 'add', 'path': '/spec/suspend', 'value': True}]
                 kube('patch', 'CronJob', name, '-n', namespace, '--type=json', '-p', json.dumps(patch))
-            print(json.dumps({'installed': False, 'barman_disabled': True, 'intent_preserved': True}))
-            return
-    require(not cluster['metadata'].get('annotations', {}).get(DISABLED_ANNOTATION), 'Barman shutdown intent must not be overwritten by an installation')
-    store = cluster['spec']['backup']['barmanObjectStore']
-    policy = {'schema': SCHEMA, 'namespace': namespace, 'cluster': config['cluster'], 'cluster_uid': config['clusterUID'], 'system_id': config['systemID'], 'destination': store['destinationPath'], 'endpoint': store['endpointURL'], 'server_name': store.get('serverName', config['cluster']), 'enabled': False, 'retain_count': 3}
-    validate_policy(policy, cluster)
+    require(disabled or not cluster['metadata'].get('annotations', {}).get(DISABLED_ANNOTATION), 'Barman shutdown intent must not be overwritten by an installation')
+    if disabled:
+        policy = saved
+        # After native shutdown the retained template is the only credential
+        # reference. Never guess a Secret name, read Secret values or restart WAL.
+        require(cron, 'Disabled executor is missing; cannot recover credential references')
+        containers = cron['spec'].get('jobTemplate', {}).get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+        require(len(containers) == 1, 'Invalid retained executor template')
+        credentials = {}
+        for variable, key in [('AWS_ACCESS_KEY_ID', 'accessKeyId'), ('AWS_SECRET_ACCESS_KEY', 'secretAccessKey')]:
+            matches = [v for v in containers[0].get('env', []) if v.get('name') == variable]
+            require(len(matches) == 1 and set(matches[0]) == {'name', 'valueFrom'}, 'Retained credentials must use Secret references')
+            require(set(matches[0]['valueFrom']) == {'secretKeyRef'}, 'Invalid retained credential reference')
+            credentials[key] = matches[0]['valueFrom']['secretKeyRef']
+    else:
+        store = cluster['spec']['backup']['barmanObjectStore']
+        policy = {'schema': SCHEMA, 'namespace': namespace, 'cluster': config['cluster'], 'cluster_uid': config['clusterUID'], 'system_id': config['systemID'], 'destination': store['destinationPath'], 'endpoint': store['endpointURL'], 'server_name': store.get('serverName', config['cluster']), 'enabled': False, 'retain_count': 3}
+        validate_policy(policy, cluster)
+        credentials = store['s3Credentials']
+    for ref in credentials.values():
+        require(isinstance(ref, dict) and NAME.fullmatch(ref.get('name', '')) and len(ref['name']) <= 253
+                and re.fullmatch(r'[-._a-zA-Z0-9]+', ref.get('key', '')) and ref.get('optional') is not True, 'Invalid or optional credential reference')
     meta = {'name': name, 'namespace': namespace, 'labels': {LABEL: name}}
     # Intent is operator-owned after initial creation. A code release never resets it.
     for resource in [dict(apiVersion='v1', kind='ConfigMap', metadata=meta, data={'policy.json': json.dumps(policy)}),
                      dict(apiVersion='v1', kind='ConfigMap', metadata={**meta, 'name': name + '-receipt'}, data={'receipt.json': '{}'}),
+                     dict(apiVersion='v1', kind='ConfigMap', metadata={**meta, 'name': name + '-history-receipt'}, data={'receipt.json': '{}'}),
                      dict(apiVersion='coordination.k8s.io/v1', kind='Lease', metadata=meta, spec={})]:
         existing = kube('get', resource['kind'], resource['metadata']['name'], '-n', namespace, '--ignore-not-found', '-o', 'json')
         if not existing:
             kube('create', '-f', '-', body=resource)
         elif resource['metadata']['name'] == name and resource['kind'] == 'ConfigMap':
             validate_policy(json.loads(existing['data']['policy.json']), cluster, existing['metadata']['uid'])
-    code = Path(__file__).read_text()
-    code_name = name + '-' + hashlib.sha256(code.encode()).hexdigest()[:12]
-    resources = [dict(apiVersion='v1', kind='ConfigMap', metadata={**meta, 'name': code_name}, immutable=True, data={'worker.py': code}),
+    code = {'worker.py': Path(__file__).read_text(), 'history.py': Path(__file__).with_name('cnpg_backup_history.py').read_text()}
+    code_name = name + '-' + hashlib.sha256(json.dumps(code, sort_keys=True).encode()).hexdigest()[:12]
+    resources = [dict(apiVersion='v1', kind='ConfigMap', metadata={**meta, 'name': code_name}, immutable=True, data=code),
                  dict(apiVersion='v1', kind='ServiceAccount', metadata=meta),
                  dict(apiVersion='rbac.authorization.k8s.io/v1', kind='Role', metadata=meta, rules=[
-                     {'apiGroups': [''], 'resources': ['configmaps'], 'resourceNames': [name, name + '-receipt'], 'verbs': ['get', 'update']},
+                     {'apiGroups': [''], 'resources': ['configmaps'], 'resourceNames': [name, name + '-receipt', name + '-history-receipt'], 'verbs': ['get', 'update']},
                      {'apiGroups': ['coordination.k8s.io'], 'resources': ['leases'], 'resourceNames': [name], 'verbs': ['get', 'update']},
-                     {'apiGroups': ['postgresql.cnpg.io'], 'resources': ['backups'], 'verbs': ['list']}]),
+                     {'apiGroups': ['postgresql.cnpg.io'], 'resources': ['backups', 'scheduledbackups'], 'verbs': ['list']},
+                     {'apiGroups': ['batch'], 'resources': ['cronjobs'], 'resourceNames': [name], 'verbs': ['get']}]),
                  dict(apiVersion='rbac.authorization.k8s.io/v1', kind='RoleBinding', metadata=meta, subjects=[{'kind': 'ServiceAccount', 'name': name, 'namespace': namespace}], roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': name}),
                  dict(apiVersion='rbac.authorization.k8s.io/v1', kind='ClusterRole', metadata={'name': namespace + '-' + name}, rules=[{'apiGroups': ['postgresql.cnpg.io'], 'resources': ['clusters'], 'verbs': ['get', 'list']}]),
                  dict(apiVersion='rbac.authorization.k8s.io/v1', kind='ClusterRoleBinding', metadata={'name': namespace + '-' + name}, subjects=[{'kind': 'ServiceAccount', 'name': name, 'namespace': namespace}], roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'ClusterRole', 'name': namespace + '-' + name})]
-    credentials = store['s3Credentials']
     env = [{'name': 'POLICY_NAMESPACE', 'value': namespace}, {'name': 'POLICY_NAME', 'value': name}, {'name': 'RETENTION_DRY_RUN', 'value': 'false'}]
     for variable, key in [('AWS_ACCESS_KEY_ID', 'accessKeyId'), ('AWS_SECRET_ACCESS_KEY', 'secretAccessKey')]:
         ref = credentials[key]
         env.append({'name': variable, 'valueFrom': {'secretKeyRef': {'name': ref['name'], 'key': ref['key']}}})
-    resources.append(dict(apiVersion='batch/v1', kind='CronJob', metadata=meta, spec={
+    resources.append(dict(apiVersion='batch/v1', kind='CronJob', metadata={**meta, 'annotations': {'fugue.pro/cnpg-history-purge': 'v1'}}, spec={
+        'suspend': disabled or bool(cron and cron['spec'].get('suspend')),
         'schedule': '*/15 * * * *', 'concurrencyPolicy': 'Forbid', 'successfulJobsHistoryLimit': 2, 'failedJobsHistoryLimit': 2,
         'jobTemplate': {'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 600, 'ttlSecondsAfterFinished': 86400,
             'template': {'metadata': {'labels': {LABEL: name}}, 'spec': {'serviceAccountName': name, 'restartPolicy': 'Never',
@@ -263,7 +283,7 @@ def install(config, kube):
                 'volumes': [{'name': 'code', 'configMap': {'name': code_name}}]}}}}}))
     for resource in resources:
         kube('apply', '--server-side', '--field-manager=fugue-cnpg-count-retention', '-f', '-', body=resource)
-    print(json.dumps({'installed': True, 'policy': name, 'intent_preserved': True, 'code_configmap': code_name}))
+    print(json.dumps({'installed': True, 'policy': name, 'intent_preserved': True, 'barman_disabled': disabled, 'code_configmap': code_name}))
 
 
 def main():

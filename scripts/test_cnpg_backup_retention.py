@@ -229,13 +229,25 @@ class CountRetentionTest(unittest.TestCase):
         cluster['metadata']['annotations'][r.DISABLED_ANNOTATION] = 'policy-uid'
         del cluster['spec']['backup']['barmanObjectStore']
         saved = dict(metadata=dict(uid='policy-uid'), data={'policy.json': json.dumps(policy)})
-        cron = dict(metadata=dict(uid='cron-uid', resourceVersion='10'), spec=dict(suspend=False))
+        env = [dict(name=variable, valueFrom=dict(secretKeyRef=dict(name='retained-secret', key=key))) for variable, key in [('AWS_ACCESS_KEY_ID', 'access'), ('AWS_SECRET_ACCESS_KEY', 'secret')]]
+        cron = dict(metadata=dict(uid='cron-uid', resourceVersion='10'), spec=dict(suspend=False, jobTemplate=dict(spec=dict(template=dict(spec=dict(containers=[dict(env=env)]))))))
         patches = []
+        applied = []
         def kube(*args, body=None):
             if args[0] == 'get':
-                return {'clusters.postgresql.cnpg.io': cluster, 'ConfigMap': saved, 'CronJob': cron}[args[1]]
+                if args[1] == 'ConfigMap':
+                    return saved if args[2] == config['name'] else None
+                if args[1] == 'Lease':
+                    return dict(metadata=dict(uid='lease-uid'))
+                return {'clusters.postgresql.cnpg.io': cluster, 'CronJob': cron}[args[1]]
             if args[0] == 'patch' and args[1] == 'CronJob':
                 patches.append(json.loads(args[-1]))
+                return {}
+            if args[0] == 'apply':
+                applied.append(body)
+                return {}
+            if args[0] == 'create':
+                self.assertIn('receipt', body['metadata']['name'])
                 return {}
             self.fail(f'Unexpected write during disabled installation: {args}')
         config = dict(namespace=policy['namespace'], name='sample-retention', cluster=policy['cluster'], clusterUID=policy['cluster_uid'], systemID=policy['system_id'], image='registry.example.test/db@sha256:' + 'a' * 64)
@@ -244,6 +256,17 @@ class CountRetentionTest(unittest.TestCase):
         self.assertEqual(patches[0][-1], dict(op='add', path='/spec/suspend', value=True))
         self.assertEqual(patches[0][0]['value'], 'cron-uid')
         self.assertEqual(json.loads(saved['data']['policy.json']), policy)
+        installed = next(obj for obj in applied if obj['kind'] == 'CronJob')
+        self.assertTrue(installed['spec']['suspend'])
+        self.assertEqual(installed['metadata']['annotations']['fugue.pro/cnpg-history-purge'], 'v1')
+        retained_env = installed['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['env']
+        self.assertEqual([e for e in retained_env if e['name'].startswith('AWS_')], env)
+        code = next(obj for obj in applied if obj['kind'] == 'ConfigMap')
+        self.assertTrue(code['immutable'])
+        self.assertIn('history.py', code['data'])
+        env[0] = dict(name='AWS_ACCESS_KEY_ID', value='plaintext-must-not-be-retained')
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, 'Secret references'):
+            r.install(config, kube)
 
     @patch.object(r, 'barman')
     def test_shutdown_marker_blocks_old_enabled_retention(self, barman):

@@ -199,6 +199,66 @@ rendering cannot discover live intent; do not apply offline manifests over it.
 `configure` cannot re-enable Barman. Re-enabling is a separate, reviewed recovery
 configuration operation; do not simply remove the ownership annotation.
 
+### Retire ALL disabled Barman history (including unfinished uploads)
+
+```bash
+# Default: R2 LIST/metadata reads only; creates a Kubernetes Job and receipt.
+fugue admin backup physical purge --ssh <operator-host-alias>
+fugue admin backup physical purge --status --ssh <operator-host-alias>
+
+# Irreversible; use the exact plan_sha256 returned by a preview within one hour.
+fugue admin backup physical purge --execute \
+  --plan-sha256 <preview-sha256> \
+  --ack-delete-all-history --ack-no-external-writers \
+  --ssh <operator-host-alias>
+```
+
+`purge` defaults to preview (`--dry-run` is an explicit equivalent), and waits
+for a receipt bound to the exact Job UID/operation ID. `--wait=false` returns the
+Job identity immediately; `--status` reads the latest history receipt without
+creating a Job. Interrupting/timing out the CLI does not cancel the Job. Do not
+start concurrent Jobs or interpret an old receipt as the current result.
+
+This is **archive retirement**, not retention: execution deletes **every** base
+backup, archived WAL and unfinished multipart upload in the installed policy's
+exact `destination/server_name/` prefix, including the most recent three backups.
+It never accepts an arbitrary bucket/prefix, changes retention count, disables
+Barman, or deletes Kubernetes Backup records, Secrets, local PostgreSQL WAL,
+PVCs or Longhorn objects/shared blocks. Check independent backups and complete a
+restore drill before destroying the last Barman recovery points.
+
+Prerequisites are owned and completed native Barman shutdown, disabled count
+retention, suspended schedules/CronJob, a healthy stable primary, no pending or
+active backup, and no other CNPG cluster referencing the archive (even a healthy
+one). The independent executor is upgraded through the declarative release lane;
+disabled installations preserve shutdown and reuse retained Secret **references**.
+Missing references or an old executor fail closed instead of enabling archiving.
+
+Inventory includes all paginated object/upload/part listings with explicit size
+and page bounds. It reports base/WAL bytes, pending-upload bytes and a snapshot
+SHA256 bound to policy UID/resourceVersion. Unknown layouts, keep/other retention
+annotations, foreign database metadata and incremental/snapshot catalogues block
+retirement. Full/orphan tar uploads are supported; a failed upload is not counted
+as a successful backup. Versioned-object history is not supported: this operator
+path requires a native Cloudflare R2 endpoint (including jurisdiction endpoints),
+not a custom endpoint or a general versioned-S3 bucket cleaner.
+
+Execution requires a matching fresh preview, no writes in the last 15 minutes,
+and a second unchanged inventory. It shares the retention Lease and rechecks
+Kubernetes gates before each batch, checks exact objects using HEAD/ETag, deletes
+only inventoried keys/upload IDs, rejects partial batch errors and verifies the
+prefix has no complete objects or pending uploads afterward. `purged` with
+`verified_empty=true` is the only successful execution state. A stopped/failed
+Job can have removed data; `partial_or_unconfirmed` and progress counters are not
+proof of a complete cleanup. Always preview the remainder before retrying.
+
+The Lease does **not** fence external S3 writers, and R2 does not document atomic
+conditional DELETE in its [S3 compatibility table](https://developers.cloudflare.com/r2/api/s3/api/).
+The operator must exclude external/manual writers throughout execution;
+`--ack-no-external-writers` explicitly acknowledges this requirement. HEAD plus
+DELETE cannot eliminate an external write race. This command never revokes
+shared credentials or silently falls back from failed conditional requests.
+
 ## Enable app backup explicitly
 
 ```bash
