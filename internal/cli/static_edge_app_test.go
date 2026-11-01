@@ -287,6 +287,20 @@ func TestStaticEdgeAppRouteClonesHostOnlyRouteSet(t *testing.T) {
 	}
 }
 
+func TestStaticEdgeAppHTTPServersSelectsAllPublicRouteServers(t *testing.T) {
+	config, err := decodeStaticEdgeAppCaddyConfig([]byte(`{"apps":{"http":{"servers":{"https":{"routes":[{"match":[{"host":["template.example.test"]}]}]},"redirect":{"routes":[{"match":[{"host":["template.example.test"]}]}]},"loopback":{"routes":[{"handle":[]}]}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, err := staticEdgeAppHTTPServers(config, "", "template.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("expected two public route servers, got %d", len(servers))
+	}
+}
+
 func TestStaticEdgeAppTargetAndUpstreamValidation(t *testing.T) {
 	app := model.App{Route: &model.AppRoute{Hostname: "primary.example.test", PathPrefix: "/v1"}}
 	for _, hostname := range []string{"https://example.test", "bad host", "*.example.test", "example.test:443", "localhost"} {

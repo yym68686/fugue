@@ -190,7 +190,7 @@ func (cli *CLI) addStaticEdgeApp(ctx context.Context, app model.App, opts static
 	if err != nil {
 		return fmt.Errorf("decode origin Caddy config: %w", err)
 	}
-	edgeServer, err := staticEdgeAppHTTPServer(edgeConfig, opts.EdgeServer)
+	edgeServers, err := staticEdgeAppHTTPServers(edgeConfig, opts.EdgeServer, opts.EdgeTemplateHost)
 	if err != nil {
 		return fmt.Errorf("edge server: %w", err)
 	}
@@ -198,8 +198,13 @@ func (cli *CLI) addStaticEdgeApp(ctx context.Context, app model.App, opts static
 	if err != nil {
 		return fmt.Errorf("origin server: %w", err)
 	}
-	if err = staticEdgeAppAddEdgeRoute(edgeConfig, edgeServer, opts.EdgeTemplateHost, hostname, pathPrefix); err != nil {
-		return fmt.Errorf("edge route: %w", err)
+	for _, edgeServer := range edgeServers {
+		if staticEdgeAppServerHasHostname(edgeServer, hostname) {
+			continue
+		}
+		if err = staticEdgeAppAddEdgeRoute(edgeConfig, edgeServer, opts.EdgeTemplateHost, hostname, pathPrefix); err != nil {
+			return fmt.Errorf("edge route: %w", err)
+		}
 	}
 	staticEdgeAppAddTLSSubject(edgeConfig, opts.EdgeTemplateHost, hostname)
 	if err = staticEdgeAppAddOriginRoute(originServer, hostname, pathPrefix, upstream); err != nil {
@@ -421,6 +426,59 @@ func staticEdgeAppHTTPServer(config map[string]any, selector string) (map[string
 		return server, nil
 	}
 	return nil, errors.New("Caddy HTTP server not found")
+}
+
+// staticEdgeAppHTTPServers selects every public HTTP server containing the
+// template host when no explicit server was supplied. An edge bundle normally
+// has separate TLS, HTTP redirect and HTTP/3 servers; attaching an app to only
+// one of them would make the hostname protocol-dependent.
+func staticEdgeAppHTTPServers(config map[string]any, selector, templateHost string) ([]map[string]any, error) {
+	if strings.TrimSpace(selector) != "" {
+		server, err := staticEdgeAppHTTPServer(config, selector)
+		if err != nil {
+			return nil, err
+		}
+		return []map[string]any{server}, nil
+	}
+	apps, ok := config["apps"].(map[string]any)
+	if !ok {
+		return nil, errors.New("Caddy config has no apps object")
+	}
+	httpApp, ok := apps["http"].(map[string]any)
+	if !ok {
+		return nil, errors.New("Caddy config has no HTTP app")
+	}
+	servers, ok := httpApp["servers"].(map[string]any)
+	if !ok || len(servers) == 0 {
+		return nil, errors.New("Caddy HTTP app has no servers")
+	}
+	var selected []map[string]any
+	for _, value := range servers {
+		server, ok := value.(map[string]any)
+		if !ok {
+			return nil, errors.New("Caddy HTTP server must be an object")
+		}
+		if staticEdgeAppServerHasHostname(server, templateHost) {
+			selected = append(selected, server)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no edge HTTP server matched --edge-template-host %q", templateHost)
+	}
+	return selected, nil
+}
+
+func staticEdgeAppServerHasHostname(server map[string]any, hostname string) bool {
+	routes, ok := server["routes"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range routes {
+		if routeHasStaticEdgeAppHostname(item, hostname) {
+			return true
+		}
+	}
+	return false
 }
 
 func staticEdgeAppAddEdgeRoute(config map[string]any, server map[string]any, templateHost, hostname, pathPrefix string) error {
