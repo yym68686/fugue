@@ -438,6 +438,9 @@ func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected D
 						if status.TargetRecordDigest == expected.RecordDigest && status.CurrentRecordDigest == expected.RecordDigest {
 							return status, nil
 						}
+						if store.restoredExpectedLKG(ctx, target, key, expected, status) {
+							return status, errors.New("Guardian release restored its LKG; the healthy LKG superseded the candidate")
+						}
 					case StateDegraded:
 						if degradedRouteTargetTerminal(status, expected) {
 							return status, nil
@@ -453,6 +456,9 @@ func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected D
 							return status, fmt.Errorf("Guardian release ended in %s: %s", status.State, status.Reason)
 						}
 					case StateLKGStable:
+						if store.restoredExpectedLKG(ctx, target, key, expected, status) {
+							return status, fmt.Errorf("Guardian release restored its LKG: %s", status.Reason)
+						}
 						if status.RolloutReceiptDigest != "" && status.TargetRecordDigest == status.CurrentRecordDigest && status.TargetRecordDigest != expected.RecordDigest {
 							current, getErr := store.client.CoreV1().ConfigMaps(target.Namespace).Get(ctx, desiredName(key), metav1.GetOptions{})
 							var desired DesiredRelease
@@ -473,6 +479,26 @@ func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected D
 		case <-ticker.C:
 		}
 	}
+}
+
+// Continuous reconciliation can replace the short-lived rollback receipt with
+// an ordinary healthy status before CI polls it. Prove rollback from the exact
+// immutable candidate's LKG and the consecutive DesiredRelease CAS instead.
+func (store *KubeStore) restoredExpectedLKG(ctx context.Context, target TargetConfig, key Key, expected DesiredRelease, status ReleaseStatus) bool {
+	if status.CurrentRecordDigest != status.TargetRecordDigest || status.CurrentRecordDigest == expected.RecordDigest {
+		return false
+	}
+	current, err := store.client.CoreV1().ConfigMaps(target.Namespace).Get(ctx, desiredName(key), metav1.GetOptions{})
+	var desired DesiredRelease
+	if err != nil || decodeStrict([]byte(current.Data["desired.json"]), &desired) != nil || desired.Validate() != nil || desired.Key() != key ||
+		desired.Generation != expected.Generation+1 || desired.RecordDigest != status.CurrentRecordDigest {
+		return false
+	}
+	candidate, err := store.client.CoreV1().ConfigMaps(target.Namespace).Get(ctx, releaseRecordName(key, expected.RecordDigest), metav1.GetOptions{})
+	var record ReleaseRecord
+	return err == nil && candidate.Immutable != nil && *candidate.Immutable &&
+		decodeStrict([]byte(candidate.Data["guardian-record.json"]), &record) == nil && record.Validate() == nil && record.Key() == key &&
+		record.RecordDigest == expected.RecordDigest && record.LKGRecordDigest == desired.RecordDigest
 }
 
 func degradedRouteTargetTerminal(status ReleaseStatus, expected DesiredRelease) bool {

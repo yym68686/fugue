@@ -77,3 +77,68 @@ func TestWaitForTerminalCommittedTargetRequiresFreshHealthyEvidence(t *testing.T
 		})
 	}
 }
+
+func TestWaitForTerminalRecognizesLKGAfterRollbackReceiptIsReplaced(t *testing.T) {
+	for _, scenario := range []string{"stable LKG", "rollback LKG", "later generation", "different LKG", "mutable candidate", "missing candidate"} {
+		t.Run(scenario, func(t *testing.T) {
+			now := time.Now().UTC()
+			key := Key{Component: "api", Group: "global"}
+			record, err := NewReleaseRecord(key, testSHA, testDigest, testDigest, otherDigest, testDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := DesiredRelease{APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: key.Component, Group: key.Group, RecordDigest: record.RecordDigest, Generation: 4}
+			desired := expected
+			desired.Generation, desired.RecordDigest = 5, otherDigest
+			status := ReleaseStatus{Component: key.Component, Group: key.Group, State: StateStable,
+				CurrentRecordDigest: otherDigest, TargetRecordDigest: otherDigest, LastSuccessfulLKG: otherDigest,
+				Health: testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now), Reason: "healthy LKG", ObservedAt: now.Format(time.RFC3339Nano)}
+			immutable := true
+			switch scenario {
+			case "rollback LKG":
+				status.State = StateLKGStable
+			case "later generation":
+				desired.Generation++
+			case "different LKG":
+				desired.RecordDigest, status.CurrentRecordDigest, status.TargetRecordDigest = testDigest, testDigest, testDigest
+			case "mutable candidate":
+				immutable = false
+			}
+			sealed, err := status.Seal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			statusRaw, _ := declarativerelease.CanonicalJSON(sealed)
+			desiredRaw, _ := declarativerelease.CanonicalJSON(desired)
+			recordRaw, _ := declarativerelease.CanonicalJSON(record)
+			objects := []runtime.Object{
+				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: statusName(key), Namespace: "system"}, Data: map[string]string{"status.json": string(statusRaw)}},
+				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: desiredName(key), Namespace: "system"}, Data: map[string]string{"desired.json": string(desiredRaw)}},
+			}
+			if scenario != "missing candidate" {
+				objects = append(objects, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: releaseRecordName(key, record.RecordDigest), Namespace: "system"}, Immutable: &immutable, Data: map[string]string{"guardian-record.json": string(recordRaw)}})
+			}
+			client := kubernetesfake.NewSimpleClientset(objects...)
+			store, err := NewKubeStore(client, []TargetConfig{{Key: key, Namespace: "system", MonitorComponent: key.Component, DependencyService: "dependency"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.now = func() time.Time { return now }
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			_, err = store.WaitForTerminal(ctx, key, expected, time.Second)
+			if scenario == "stable LKG" || scenario == "rollback LKG" {
+				if err == nil || !strings.Contains(err.Error(), "Guardian release restored its LKG") {
+					t.Fatalf("proven rollback was lost after status replacement: %v", err)
+				}
+			} else if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("unproven rollback was attributed to candidate: %v", err)
+			}
+			for _, action := range client.Actions() {
+				if action.GetVerb() != "get" {
+					t.Fatalf("terminal observation modified cluster: %v", action)
+				}
+			}
+		})
+	}
+}

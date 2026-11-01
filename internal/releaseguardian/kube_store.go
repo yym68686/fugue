@@ -15,6 +15,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -366,6 +367,7 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 	}
 	var selector labels.Selector
 	var daemonSet *appsv1.DaemonSet
+	var deployment *appsv1.Deployment
 	var desired, updated, ready, available int32
 	var generation, observed int64
 	switch release.Workload.Kind {
@@ -377,6 +379,7 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 		if err := workloadIdentityMatchesDeployment(workload, release, target); err != nil {
 			return degraded(err.Error())
 		}
+		deployment = workload
 		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)
 		if err != nil {
 			return degraded("Deployment Pod template labels are invalid")
@@ -420,6 +423,9 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 		return degraded("cannot read workload pod inventory")
 	}
 	activePods, retiredPods, err := store.workloadHealthPods(ctx, pods.Items, daemonSet)
+	if err == nil && deployment != nil {
+		activePods, retiredPods, err = store.deploymentHealthPods(ctx, activePods, deployment)
+	}
 	if err != nil {
 		return degraded("cannot classify workload pod inventory: " + err.Error())
 	}
@@ -610,6 +616,7 @@ func interfaceSlice(value any) []any {
 func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, probeType, name string) (workloadHealthEvidence, error) {
 	var selector labels.Selector
 	var daemonSet *appsv1.DaemonSet
+	var deployment *appsv1.Deployment
 	var desired, updated, ready, available int32
 	var generation, observed int64
 	var podNamespace string
@@ -623,6 +630,7 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 		if err := workloadReleaseIdentity(release, target, "Deployment", name, workload.Annotations, workload.Spec.Template.Annotations, workload.Spec.Template.Spec.Containers, workload.Spec.Template.Spec.InitContainers); err != nil {
 			return workloadHealthEvidence{}, err
 		}
+		deployment = workload
 		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)
 		if err != nil {
 			return workloadHealthEvidence{}, fmt.Errorf("health Deployment/%s Pod template labels are invalid", name)
@@ -656,6 +664,9 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 		return workloadHealthEvidence{}, fmt.Errorf("read health %s/%s Pod inventory: %w", probeType, name, err)
 	}
 	activePods, retiredPods, err := store.workloadHealthPods(ctx, pods.Items, daemonSet)
+	if err == nil && deployment != nil {
+		activePods, retiredPods, err = store.deploymentHealthPods(ctx, activePods, deployment)
+	}
 	if err != nil {
 		return workloadHealthEvidence{}, fmt.Errorf("health %s/%s Pod placement: %w", probeType, name, err)
 	}
@@ -685,9 +696,53 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 
 type retiredPodHealthEvidence struct {
 	PodUID              string            `json:"pod_uid"`
-	NodeUID             string            `json:"node_uid"`
-	NodeResourceVersion string            `json:"node_resource_version"`
-	NodeSelector        map[string]string `json:"node_selector"`
+	NodeUID             string            `json:"node_uid,omitempty"`
+	NodeResourceVersion string            `json:"node_resource_version,omitempty"`
+	NodeSelector        map[string]string `json:"node_selector,omitempty"`
+	ReplicaSetUID       string            `json:"replica_set_uid,omitempty"`
+	DeploymentUID       string            `json:"deployment_uid,omitempty"`
+}
+
+// A completed rolling update may retain draining Pods from a scaled-down
+// ReplicaSet. Attribute those Pods to the old revision without counting them
+// against the new Ready cohort. A deleting current revision, foreign owner,
+// active old ReplicaSet, or unprovable ownership must still fail health.
+func (store *KubeStore) deploymentHealthPods(ctx context.Context, pods []corev1.Pod, deployment *appsv1.Deployment) ([]corev1.Pod, []retiredPodHealthEvidence, error) {
+	if deployment.UID == "" {
+		return pods, nil, nil
+	}
+	sets := map[string]*appsv1.ReplicaSet{}
+	active := make([]corev1.Pod, 0, len(pods))
+	retired := []retiredPodHealthEvidence{}
+	for _, pod := range pods {
+		owner := metav1.GetControllerOf(&pod)
+		if pod.DeletionTimestamp == nil || pod.UID == "" || owner == nil || owner.APIVersion != "apps/v1" || owner.Kind != "ReplicaSet" || owner.UID == "" {
+			active = append(active, pod)
+			continue
+		}
+		set := sets[owner.Name]
+		if set == nil {
+			if len(sets) >= 32 {
+				return nil, nil, errors.New("draining Pod inventory exceeds bounded ReplicaSet reads")
+			}
+			var err error
+			set, err = store.client.AppsV1().ReplicaSets(deployment.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil, nil, fmt.Errorf("read draining Pod ReplicaSet: %w", err)
+			}
+			sets[owner.Name] = set
+		}
+		oldTemplate, currentTemplate := set.Spec.Template.DeepCopy(), deployment.Spec.Template.DeepCopy()
+		delete(oldTemplate.Labels, appsv1.DefaultDeploymentUniqueLabelKey)
+		delete(currentTemplate.Labels, appsv1.DefaultDeploymentUniqueLabelKey)
+		if set.UID != owner.UID || !metav1.IsControlledBy(set, deployment) || set.Spec.Replicas == nil || *set.Spec.Replicas != 0 || apiequality.Semantic.DeepEqual(oldTemplate, currentTemplate) {
+			active = append(active, pod)
+			continue
+		}
+		retired = append(retired, retiredPodHealthEvidence{PodUID: string(pod.UID), ReplicaSetUID: string(set.UID), DeploymentUID: string(deployment.UID)})
+	}
+	sort.Slice(retired, func(i, j int) bool { return retired[i].PodUID < retired[j].PodUID })
+	return active, retired, nil
 }
 
 func (store *KubeStore) workloadHealthPods(ctx context.Context, pods []corev1.Pod, daemonSet *appsv1.DaemonSet) ([]corev1.Pod, []retiredPodHealthEvidence, error) {
