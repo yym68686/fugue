@@ -18,6 +18,7 @@ const (
 	// the reservation alive longer than that whole window so a live builder
 	// cannot lose its capacity reservation midway through execution.
 	defaultBuilderReservationLeaseSec   = 35 * 60
+	defaultBuilderHeavyMemoryMinimum    = "512Mi"
 	defaultBuilderHeavyMemoryCeiling    = "16Gi"
 	defaultBuilderHeavyEphemeralCeiling = "24Gi"
 )
@@ -54,6 +55,7 @@ type BuilderPodPolicy struct {
 	SelectionTimeoutSeconds      int                   `json:"selectionTimeoutSeconds,omitempty"`
 	RetryIntervalSeconds         int                   `json:"retryIntervalSeconds,omitempty"`
 	ReservationLeaseDurationSecs int                   `json:"reservationLeaseDurationSeconds,omitempty"`
+	HeavyMemoryMinimum           string                `json:"heavyMemoryMinimum,omitempty"`
 	HeavyMemoryLimitCeiling      string                `json:"heavyMemoryLimitCeiling,omitempty"`
 	HeavyEphemeralLimitCeiling   string                `json:"heavyEphemeralLimitCeiling,omitempty"`
 	Tolerations                  []BuilderToleration   `json:"tolerations,omitempty"`
@@ -69,6 +71,7 @@ func defaultBuilderPodPolicy() BuilderPodPolicy {
 		SelectionTimeoutSeconds:      defaultBuilderSelectionTimeoutSec,
 		RetryIntervalSeconds:         defaultBuilderRetryIntervalSec,
 		ReservationLeaseDurationSecs: defaultBuilderReservationLeaseSec,
+		HeavyMemoryMinimum:           defaultBuilderHeavyMemoryMinimum,
 		HeavyMemoryLimitCeiling:      defaultBuilderHeavyMemoryCeiling,
 		HeavyEphemeralLimitCeiling:   defaultBuilderHeavyEphemeralCeiling,
 		Light: BuilderWorkloadPolicy{
@@ -129,6 +132,10 @@ func normalizeBuilderPodPolicy(policy BuilderPodPolicy) BuilderPodPolicy {
 	if strings.TrimSpace(policy.HeavyMemoryLimitCeiling) == "" {
 		policy.HeavyMemoryLimitCeiling = defaults.HeavyMemoryLimitCeiling
 	}
+	if parseBuilderBytes(policy.HeavyMemoryMinimum) < parseBuilderBytes(defaults.HeavyMemoryMinimum) {
+		policy.HeavyMemoryMinimum = defaults.HeavyMemoryMinimum
+	}
+	policy.HeavyMemoryMinimum = formatBuilderMemoryBytes(parseBuilderBytes(policy.HeavyMemoryMinimum))
 	if strings.TrimSpace(policy.HeavyEphemeralLimitCeiling) == "" {
 		policy.HeavyEphemeralLimitCeiling = defaults.HeavyEphemeralLimitCeiling
 	}
@@ -218,7 +225,12 @@ func builderPodPolicyForJobAttempt(policy BuilderPodPolicy, profile builderWorkl
 	if profile != builderWorkloadProfileHeavy {
 		return current, nil
 	}
-	if attempt.OOMRetryCount > 0 {
+	if attempt.MinimumMemoryBytes > 0 {
+		current.HeavyMemoryMinimum = formatBuilderMemoryBytes(maxInt64(parseBuilderBytes(current.HeavyMemoryMinimum), attempt.MinimumMemoryBytes))
+		if parseBuilderBytes(current.HeavyMemoryMinimum) > parseBuilderBytes(current.HeavyMemoryLimitCeiling) {
+			return BuilderPodPolicy{}, &BuilderResourceFailure{Resource: "memory", LimitBytes: parseBuilderBytes(current.HeavyMemoryLimitCeiling), Preflight: true}
+		}
+	} else if attempt.OOMRetryCount > 0 {
 		previous := builderPodPolicyForRetryCounts(policy, profile, attempt.OOMRetryCount-1, attempt.EphemeralRetryCount)
 		currentBytes := parseBuilderBytes(current.Heavy.Resources.Limits["memory"])
 		previousBytes := parseBuilderBytes(previous.Heavy.Resources.Limits["memory"])

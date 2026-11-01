@@ -43,6 +43,24 @@ type builderEffectivePolicy struct {
 	profile builderWorkloadProfile
 }
 
+// Preserve the actual dynamic allocation for OOM classification and retry
+// admission, rather than reconstructing it from the legacy default tier.
+type builderAttemptFailure struct {
+	policy  BuilderPodPolicy
+	profile builderWorkloadProfile
+	cause   error
+}
+
+func (e *builderAttemptFailure) Error() string { return e.cause.Error() }
+func (e *builderAttemptFailure) Unwrap() error { return e.cause }
+
+func withBuilderAttemptFailure(err error, policy BuilderPodPolicy, profile builderWorkloadProfile) error {
+	if err == nil {
+		return nil
+	}
+	return &builderAttemptFailure{policy: policy, profile: profile, cause: err}
+}
+
 func withBuilderEffectivePolicy(ctx context.Context, policy BuilderPodPolicy, profile builderWorkloadProfile) context.Context {
 	return context.WithValue(ctx, builderEffectivePolicyKey{}, builderEffectivePolicy{policy, profile})
 }
@@ -81,6 +99,11 @@ func classifyExhaustedBuilderPolicy(ctx context.Context, attempt builderJobAttem
 		return err
 	}
 	effective, ok := ctx.Value(builderEffectivePolicyKey{}).(builderEffectivePolicy)
+	var actual *builderAttemptFailure
+	if errors.As(err, &actual) {
+		effective, ok = builderEffectivePolicy{actual.policy, actual.profile}, true
+		attempt = builderJobAttempt{}
+	}
 	if !ok {
 		return err
 	}

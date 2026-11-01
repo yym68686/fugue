@@ -518,6 +518,8 @@ func diagnosisBuilderPlacementCategory(message string) string {
 		return "builder-lock-contention"
 	case strings.Contains(message, "load builder node stats summaries"):
 		return "builder-node-summary-unavailable"
+	case strings.Contains(message, "insufficient resources for profile"):
+		return "builder-insufficient-resources"
 	case strings.Contains(message, "no eligible builder nodes"):
 		return "builder-no-eligible-nodes"
 	default:
@@ -538,7 +540,9 @@ func diagnosisBuilderPlacementSummary(category, profile, buildStrategy, fallback
 	case "builder-node-summary-unavailable":
 		return fmt.Sprintf("builder node stats summaries could not be loaded for the eligible %s", target)
 	case "builder-no-eligible-nodes":
-		return fmt.Sprintf("no %s passed readiness, taint, disk-pressure, label, or stats checks", target)
+		return fmt.Sprintf("no %s could be reserved after node policy, statistics, and resource admission checks", target)
+	case "builder-insufficient-resources":
+		return fmt.Sprintf("eligible %s did not have enough unreserved CPU, memory, or temporary storage", target)
 	default:
 		return firstNonEmpty(strings.TrimSpace(fallback), "builder placement failed")
 	}
@@ -551,7 +555,9 @@ func diagnosisBuilderPlacementHint(category string) string {
 	case "builder-node-summary-unavailable":
 		return "Check kubelet summary availability and control-plane access to the node stats endpoints for the builder nodes."
 	case "builder-no-eligible-nodes":
-		return "Check builder node policy, shared-pool membership, taints, readiness, and disk pressure. The builder placement snapshot below shows why each node was excluded."
+		return "Check node build permission, readiness, taints, statistics, and resource headroom. The snapshot below is a current live inspection, not historical failure state."
+	case "builder-insufficient-resources":
+		return "Compare minimum demand with available resources after physical safety, Kubernetes Pod requests, and active reservations. Wait for capacity or add builder capacity. The snapshot below is current live state."
 	default:
 		return "Inspect the builder placement snapshot below for reservations, locks, and per-node exclusion reasons."
 	}

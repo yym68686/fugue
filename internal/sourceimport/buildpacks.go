@@ -221,7 +221,7 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 		logger.Printf("builder job applied kind=buildpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 		if err := waitForBuilderJob(attemptCtx, namespace, jobName, 30*time.Minute); err != nil {
 			logger.Printf("builder job failed kind=buildpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-			return fmt.Errorf("buildpacks job %s: %w", jobName, err)
+			return withBuilderAttemptFailure(fmt.Errorf("buildpacks job %s: %w", jobName, err), attemptReq.PodPolicy, req.WorkloadProfile)
 		}
 		logger.Printf("builder job completed kind=buildpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 		return nil

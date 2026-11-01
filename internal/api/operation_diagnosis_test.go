@@ -306,6 +306,12 @@ func TestGetOperationDiagnosisExplainsBuilderPlacementFailure(t *testing.T) {
 			t.Fatalf("expected evidence to contain %q, got %+v", want, response.Diagnosis.Evidence)
 		}
 	}
+	if category := diagnosisBuilderPlacementCategory("select builder placement: no eligible builder nodes: insufficient resources for profile heavy (minimum memory=536870912 bytes)"); category != "builder-insufficient-resources" {
+		t.Fatalf("capacity failure mislabeled as node eligibility: %s", category)
+	}
+	if summary := diagnosisBuilderPlacementSummary("builder-insufficient-resources", "heavy", "dockerfile", ""); !strings.Contains(summary, "unreserved") || strings.Contains(summary, "readiness") {
+		t.Fatalf("capacity failure got misleading diagnosis: %s", summary)
+	}
 }
 
 func TestOperationDiagnosisIncludesFailedBackupHint(t *testing.T) {

@@ -414,7 +414,7 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 		logger.Printf("builder job applied kind=dockerfile name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 		if err := waitForBuilderJob(attemptCtx, namespace, jobName, 25*time.Minute); err != nil {
 			logger.Printf("builder job failed kind=dockerfile name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-			return fmt.Errorf("kaniko job %s: %w", jobName, err)
+			return withBuilderAttemptFailure(fmt.Errorf("kaniko job %s: %w", jobName, err), attemptReq.PodPolicy, req.WorkloadProfile)
 		}
 		logger.Printf("builder job completed kind=dockerfile name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 		return nil

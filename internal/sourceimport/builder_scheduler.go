@@ -381,6 +381,9 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 	candidates = builderFittingCandidates(candidates, s.demand)
 	candidates = builderPlacementCandidates(candidates, s.profile, s.candidateCount)
 	if len(candidates) == 0 {
+		if len(snapshots) > 0 {
+			return builderJobPlacement{}, "", fmt.Errorf("%w: insufficient resources for profile %s (minimum cpu=%dm memory=%d bytes ephemeral=%d bytes)", errNoBuilderPlacement, s.profile, s.demand.CPUMilli, s.demand.MemoryBytes, s.demand.EphemeralBytes)
+		}
 		return builderJobPlacement{}, "", fmt.Errorf("%w for profile %s", errNoBuilderPlacement, s.profile)
 	}
 
@@ -428,6 +431,10 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 			continue
 		}
 		allocatedDemand := builderAllocatedDemand(s.policy, s.profile, selectedCandidate)
+		if !builderDemandFits(allocatedDemand, s.demand) || !builderDemandFits(selectedCandidate.Available, allocatedDemand) {
+			releaseLock()
+			continue
+		}
 		reservationName := builderReservationLeaseName(jobName)
 		if err := s.upsertReservation(ctx, reservationName, candidate.Node.Name, allocatedDemand); err != nil {
 			releaseLock()
@@ -893,6 +900,9 @@ func builderDemandForProfile(policy BuilderPodPolicy, profile builderWorkloadPro
 	workload := policy.Light
 	if profile == builderWorkloadProfileHeavy {
 		workload = policy.Heavy
+		if parseBuilderBytes(policy.HeavyMemoryMinimum) > parseBuilderBytes(policy.HeavyMemoryLimitCeiling) {
+			return builderResourceDemand{}, fmt.Errorf("heavy builder memory minimum exceeds policy ceiling")
+		}
 	}
 	return builderResourceDemand{
 		CPUMilli: builderSchedulingDemand(
@@ -900,7 +910,7 @@ func builderDemandForProfile(policy BuilderPodPolicy, profile builderWorkloadPro
 			parseBuilderCPUMilli(workload.Resources.Limits["cpu"]),
 		),
 		MemoryBytes: builderMemorySchedulingDemand(
-			profile,
+			policy, profile,
 			parseBuilderBytes(workload.Resources.Requests["memory"]),
 			parseBuilderBytes(workload.Resources.Limits["memory"]),
 		),
@@ -911,9 +921,9 @@ func builderDemandForProfile(policy BuilderPodPolicy, profile builderWorkloadPro
 	}, nil
 }
 
-func builderMemorySchedulingDemand(profile builderWorkloadProfile, request, limit int64) int64 {
-	if profile == builderWorkloadProfileHeavy && limit > 0 {
-		return limit
+func builderMemorySchedulingDemand(policy BuilderPodPolicy, profile builderWorkloadProfile, request, limit int64) int64 {
+	if profile == builderWorkloadProfileHeavy {
+		return parseBuilderBytes(policy.HeavyMemoryMinimum)
 	}
 	return builderSchedulingDemand(request, limit)
 }
@@ -964,10 +974,8 @@ func builderSafetyBuffer(allocatable builderResourceDemand, profile builderWorkl
 }
 
 func builderNodeEligibleForBuilders(policy BuilderPodPolicy, snapshot builderNodeSnapshot) bool {
-	for _, key := range []string{runtime.BuildNodeLabelKey, runtime.BuilderRoleLabelKey, policy.BuildNodeLabelKey} {
-		if strings.EqualFold(strings.TrimSpace(snapshot.Labels[key]), "false") {
-			return false
-		}
+	if len(builderDisabledLabelReasons(policy, snapshot)) > 0 {
+		return false
 	}
 	if !builderNodeTaintsTolerated(policy.Tolerations, snapshot.Taints) {
 		return false

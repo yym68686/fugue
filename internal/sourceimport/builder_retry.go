@@ -18,6 +18,7 @@ type builderJobAttempt struct {
 	Number              int
 	OOMRetryCount       int
 	EphemeralRetryCount int
+	MinimumMemoryBytes  int64
 }
 
 var retriableBuilderFailureSignals = []string{
@@ -60,6 +61,7 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 	var lastErr error
 	oomRetryCount := 0
 	ephemeralRetryCount := 0
+	minimumMemoryBytes := int64(0)
 	for attempt := 1; attempt <= oomBuilderJobMaxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			break
@@ -69,6 +71,7 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 			Number:              attempt,
 			OOMRetryCount:       oomRetryCount,
 			EphemeralRetryCount: ephemeralRetryCount,
+			MinimumMemoryBytes:  minimumMemoryBytes,
 		}
 		err := run(ctx, currentAttempt)
 		err = classifyExhaustedBuilderPolicy(ctx, currentAttempt, err)
@@ -104,6 +107,12 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 		}
 		if oomFailure {
 			oomRetryCount++
+			var actual *builderAttemptFailure
+			if errors.As(err, &actual) && actual.profile == builderWorkloadProfileHeavy {
+				previous := parseBuilderBytes(actual.policy.Heavy.Resources.Limits["memory"])
+				ceiling := parseBuilderBytes(actual.policy.HeavyMemoryLimitCeiling)
+				minimumMemoryBytes = minInt64(nextBuilderHeavyMemoryTier(previous), ceiling)
+			}
 		}
 		if ephemeralFailure {
 			ephemeralRetryCount++

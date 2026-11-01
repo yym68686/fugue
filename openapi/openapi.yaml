@@ -25471,6 +25471,7 @@ components:
           type: boolean
         eligible:
           type: boolean
+          description: Current node policy, statistics, and minimum resource admission checks all pass. Active locks are reported separately.
         rank:
           type: integer
         reasons:
@@ -25481,6 +25482,8 @@ components:
           $ref: "#/components/schemas/BuilderResourceSnapshot"
         used:
           $ref: "#/components/schemas/BuilderResourceSnapshot"
+        requested:
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
         reserved:
           $ref: "#/components/schemas/BuilderResourceSnapshot"
         safety_buffer:
@@ -25489,11 +25492,18 @@ components:
           $ref: "#/components/schemas/BuilderResourceSnapshot"
         remaining:
           $ref: "#/components/schemas/BuilderResourceSnapshot"
+        allocation:
+          description: Prospective per-build allocation for an eligible node, bounded by live headroom and policy. This inspection does not reserve capacity.
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
     BuilderPlacementInspection:
       type: object
       additionalProperties: false
       required: [demand]
       properties:
+        observed_at:
+          type: string
+          format: date-time
+          description: Time of this live inspection, not a reconstruction of the failed operation's historical node state.
         profile:
           type: string
         build_strategy:
@@ -25503,7 +25513,12 @@ components:
           additionalProperties:
             type: string
         demand:
+          description: Minimum resources required for admission. Heavy memory allocation is calculated separately from live node headroom.
           $ref: "#/components/schemas/BuilderResourceSnapshot"
+        memory_ceiling_bytes:
+          type: integer
+          format: int64
+          description: Maximum memory allocated to one heavy build.
         reservations:
           type: array
           items:

@@ -36,11 +36,16 @@ func normalizeBuilderInspectionProfile(profile, buildStrategy string, stateful b
 }
 
 func (s *builderScheduler) inspectPlacement(ctx context.Context, buildStrategy string) (model.BuilderPlacementInspection, error) {
+	observedAt := time.Now().UTC()
 	report := model.BuilderPlacementInspection{
+		ObservedAt:         &observedAt,
 		Profile:            string(s.profile),
 		BuildStrategy:      strings.TrimSpace(buildStrategy),
 		RequiredNodeLabels: cloneBuilderStringMap(s.requiredNodeLabels),
 		Demand:             builderResourceSnapshot(s.demand),
+	}
+	if s.profile == builderWorkloadProfileHeavy {
+		report.MemoryCeilingBytes = parseBuilderBytes(s.policy.HeavyMemoryLimitCeiling)
 	}
 
 	nodes, err := s.client.listNodes(ctx)
@@ -84,7 +89,7 @@ func (s *builderScheduler) inspectPlacement(ctx context.Context, buildStrategy s
 	report.Locks = builderLockInspections(locks)
 
 	schedulingSnapshots := builderInspectionSchedulingSnapshots(s, snapshots, summaryErrors)
-	rankedCandidates := sortedBuilderCandidates(s.policy, s.profile, s.demand, schedulingSnapshots, reservations, s.requiredNodeLabels)
+	rankedCandidates := builderFittingCandidates(sortedBuilderCandidates(s.policy, s.profile, s.demand, schedulingSnapshots, reservations, s.requiredNodeLabels), s.demand)
 	rankByNode := make(map[string]int, len(rankedCandidates))
 	for index, candidate := range rankedCandidates {
 		rankByNode[candidate.Node.Name] = index + 1
@@ -110,10 +115,18 @@ func (s *builderScheduler) inspectPlacement(ctx context.Context, buildStrategy s
 			buffer := builderSafetyBuffer(snapshot.Allocatable, s.profile)
 			available := builderAvailableResources(snapshot, reserved, buffer)
 			inspection.Used = builderResourceSnapshot(snapshot.Used)
+			inspection.Requested = builderResourceSnapshot(snapshot.Requested)
 			inspection.Reserved = builderResourceSnapshot(reserved)
 			inspection.SafetyBuffer = builderResourceSnapshot(buffer)
 			inspection.Available = builderResourceSnapshot(available)
 			inspection.Remaining = builderResourceSnapshot(builderSubtractDemand(available, s.demand))
+			if summaryErrors[snapshot.Name] == "" {
+				inspection.Reasons = append(inspection.Reasons, builderInsufficientResourceReasons(available, s.demand)...)
+			}
+			inspection.Eligible = len(inspection.Reasons) == 0
+			if inspection.Eligible {
+				inspection.Allocation = builderResourceSnapshot(builderAllocatedDemand(s.policy, s.profile, builderCandidate{Available: available}))
+			}
 		}
 		report.Nodes = append(report.Nodes, inspection)
 	}
@@ -224,6 +237,7 @@ func builderNodeInspectionReasons(policy BuilderPodPolicy, snapshot builderNodeS
 	}
 	reasons = append(reasons, builderUntoleratedTaintReasons(policy.Tolerations, snapshot.Taints)...)
 	reasons = append(reasons, builderRequiredLabelReasons(snapshot, requiredNodeLabels)...)
+	reasons = append(reasons, builderDisabledLabelReasons(policy, snapshot)...)
 	if !builderNodePoolEligible(policy, snapshot) {
 		reasons = append(reasons, builderPoolEligibilityReasons(policy, snapshot)...)
 	}
@@ -231,6 +245,33 @@ func builderNodeInspectionReasons(policy BuilderPodPolicy, snapshot builderNodeS
 		reasons = append(reasons, trimmed)
 	}
 	return appendUniqueBuilderReasons(reasons)
+}
+
+func builderDisabledLabelReasons(policy BuilderPodPolicy, snapshot builderNodeSnapshot) []string {
+	var reasons []string
+	for _, key := range []string{runtime.BuildNodeLabelKey, runtime.BuilderRoleLabelKey, policy.BuildNodeLabelKey} {
+		if key != "" && strings.EqualFold(strings.TrimSpace(snapshot.Labels[key]), "false") {
+			reasons = append(reasons, fmt.Sprintf("builds explicitly disabled by %s=false", key))
+		}
+	}
+	return appendUniqueBuilderReasons(reasons)
+}
+
+func builderInsufficientResourceReasons(available, demand builderResourceDemand) []string {
+	var reasons []string
+	for _, resource := range []struct {
+		name                string
+		available, required int64
+	}{
+		{"cpu_milli", available.CPUMilli, demand.CPUMilli},
+		{"memory_bytes", available.MemoryBytes, demand.MemoryBytes},
+		{"ephemeral_bytes", available.EphemeralBytes, demand.EphemeralBytes},
+	} {
+		if resource.available < resource.required {
+			reasons = append(reasons, fmt.Sprintf("insufficient %s: available=%d required=%d", resource.name, resource.available, resource.required))
+		}
+	}
+	return reasons
 }
 
 func builderUntoleratedTaintReasons(tolerations []BuilderToleration, taints []builderKubeNodeTaint) []string {

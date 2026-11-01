@@ -122,8 +122,8 @@ func TestBuilderDemandForProfileUsesRequestedResourcesWhenPresent(t *testing.T) 
 	if heavyDemand.CPUMilli != parseBuilderCPUMilli("250m") {
 		t.Fatalf("expected heavy cpu demand 250m, got %dm", heavyDemand.CPUMilli)
 	}
-	if heavyDemand.MemoryBytes != parseBuilderBytes("6Gi") {
-		t.Fatalf("expected heavy placement demand to reserve the memory limit 6Gi, got %d", heavyDemand.MemoryBytes)
+	if heavyDemand.MemoryBytes != parseBuilderBytes("512Mi") {
+		t.Fatalf("expected heavy placement demand to use the 512Mi minimum admission floor, got %d", heavyDemand.MemoryBytes)
 	}
 	if heavyDemand.EphemeralBytes != parseBuilderBytes("3Gi") {
 		t.Fatalf("expected heavy ephemeral demand 3Gi, got %d", heavyDemand.EphemeralBytes)
@@ -138,8 +138,8 @@ func TestEscalatedBuilderDemandReservesOOMMemoryTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("builder demand: %v", err)
 	}
-	if demand.MemoryBytes != parseBuilderBytes("8Gi") {
-		t.Fatalf("expected escalated builder to reserve 8Gi, got %d bytes", demand.MemoryBytes)
+	if demand.MemoryBytes != parseBuilderBytes("512Mi") {
+		t.Fatalf("expected OOM escalation to retain the dynamic 512Mi admission floor, got %d bytes", demand.MemoryBytes)
 	}
 }
 
@@ -203,6 +203,7 @@ func TestSelectBuilderCandidatesExcludesNodesBelowReservedDemand(t *testing.T) {
 	t.Parallel()
 
 	policy := builderPodPolicyForRetryCounts(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, 1, 0)
+	policy.HeavyMemoryMinimum = "8Gi"
 	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
 	if err != nil {
 		t.Fatalf("builder demand: %v", err)
@@ -875,6 +876,10 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 	nodeC := builderTestKubeNode("node-c", "", policy)
 	delete(nodeC.Metadata.Labels, builderHostnameLabelKey)
 	nodeD := builderTestKubeNode("node-d", "host-d", policy)
+	nodeE := builderTestKubeNode("node-e", "host-e", policy)
+	nodeE.Metadata.Labels[runtime.SharedPoolLabelKey] = runtime.SharedPoolLabelValue
+	nodeE.Metadata.Labels[runtime.BuildNodeLabelKey] = "false"
+	nodeF := builderTestKubeNode("node-f", "host-f", policy)
 	now := time.Now().UTC()
 	reservationRenewedAt := formatKubeTimestamp(now.Add(-30 * time.Second))
 	lockRenewedAt := formatKubeTimestamp(now.Add(-10 * time.Second))
@@ -882,12 +887,15 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pods":
-			writeBuilderTestJSON(t, w, builderKubePodList{Items: []builderKubePod{
-				builderTestPod("node-a", "Running", "0", "4Gi", "0"),
-			}})
+			name := strings.TrimPrefix(r.URL.Query().Get("fieldSelector"), "spec.nodeName=")
+			memory := "4Gi"
+			if name == "node-f" {
+				memory = "7936Mi"
+			}
+			writeBuilderTestJSON(t, w, builderKubePodList{Items: []builderKubePod{builderTestPod(name, "Running", "0", memory, "0")}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
 			writeBuilderTestJSON(t, w, builderKubeNodeList{
-				Items: []builderKubeNode{nodeA, nodeB, nodeC, nodeD},
+				Items: []builderKubeNode{nodeA, nodeB, nodeC, nodeD, nodeE, nodeF},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-a/proxy/stats/summary":
 			writeBuilderTestJSON(t, w, builderTestNodeSummary("18Gi"))
@@ -895,6 +903,8 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 			writeBuilderTestJSON(t, w, builderTestNodeSummary("12Gi"))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-d/proxy/stats/summary":
 			http.Error(w, `{"message":"stats unavailable"}`, http.StatusServiceUnavailable)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-f/proxy/stats/summary":
+			writeBuilderTestJSON(t, w, builderTestNodeSummary("18Gi"))
 		case r.Method == http.MethodGet && r.URL.Path == "/apis/coordination.k8s.io/v1/namespaces/fugue-system/leases" && r.URL.Query().Get("labelSelector") == builderReservationLabelSelector:
 			writeBuilderTestJSON(t, w, builderKubeLeaseList{
 				Items: []builderKubeLease{
@@ -936,6 +946,9 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 	if report.Profile != "heavy" {
 		t.Fatalf("expected heavy profile, got %+v", report)
 	}
+	if report.ObservedAt == nil || report.MemoryCeilingBytes != parseBuilderBytes("16Gi") {
+		t.Fatal("missing inspection policy/time", report)
+	}
 	if len(report.Reservations) != 1 {
 		t.Fatalf("expected 1 reservation, got %+v", report.Reservations)
 	}
@@ -953,6 +966,9 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 	if got := nodesByName["node-a"].Available.MemoryBytes; got != parseBuilderBytes("3Gi") {
 		t.Fatalf("expected diagnostics to match request-aware scheduling headroom (8Gi - 4Gi Pod requests - 1Gi reservation), got %d", got)
 	}
+	if node := nodesByName["node-a"]; node.Requested.MemoryBytes != parseBuilderBytes("4Gi") || node.Allocation.MemoryBytes != parseBuilderBytes("3Gi") {
+		t.Fatal("missing dynamic allocation or requests", node)
+	}
 	if node := nodesByName["node-b"]; node.Eligible || !strings.Contains(strings.Join(node.Reasons, "\n"), runtime.TenantIDLabelKey) {
 		t.Fatalf("expected node-b to be excluded by tenant policy, got %+v", node)
 	}
@@ -961,6 +977,12 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 	}
 	if node := nodesByName["node-d"]; node.Eligible || !strings.Contains(strings.Join(node.Reasons, "\n"), "stats summary unavailable") {
 		t.Fatalf("expected node-d to report summary failure, got %+v", node)
+	}
+	if node := nodesByName["node-e"]; node.Eligible || node.Rank != 0 || !strings.Contains(strings.Join(node.Reasons, " "), "builds explicitly disabled") {
+		t.Fatal("disabled node was misreported", node)
+	}
+	if node := nodesByName["node-f"]; node.Eligible || node.Rank != 0 || !strings.Contains(strings.Join(node.Reasons, " "), "insufficient memory_bytes") {
+		t.Fatal("capacity failure was not explained", node)
 	}
 }
 

@@ -70,10 +70,12 @@ type BuilderResourceSnapshot struct {
 }
 
 type BuilderPlacementInspection struct {
+	ObservedAt         *time.Time                              `json:"observed_at,omitempty"`
 	Profile            string                                  `json:"profile,omitempty"`
 	BuildStrategy      string                                  `json:"build_strategy,omitempty"`
 	RequiredNodeLabels map[string]string                       `json:"required_node_labels,omitempty"`
 	Demand             BuilderResourceSnapshot                 `json:"demand"`
+	MemoryCeilingBytes int64                                   `json:"memory_ceiling_bytes,omitempty"`
 	Reservations       []BuilderPlacementReservationInspection `json:"reservations,omitempty"`
 	Locks              []BuilderPlacementLockInspection        `json:"locks,omitempty"`
 	Nodes              []BuilderPlacementNodeInspection        `json:"nodes,omitempty"`
@@ -106,8 +108,10 @@ type BuilderPlacementNodeInspection struct {
 	Reasons      []string                `json:"reasons,omitempty"`
 	Allocatable  BuilderResourceSnapshot `json:"allocatable,omitempty"`
 	Used         BuilderResourceSnapshot `json:"used,omitempty"`
+	Requested    BuilderResourceSnapshot `json:"requested,omitempty"`
 	Reserved     BuilderResourceSnapshot `json:"reserved,omitempty"`
 	SafetyBuffer BuilderResourceSnapshot `json:"safety_buffer,omitempty"`
 	Available    BuilderResourceSnapshot `json:"available,omitempty"`
 	Remaining    BuilderResourceSnapshot `json:"remaining,omitempty"`
+	Allocation   BuilderResourceSnapshot `json:"allocation,omitempty"`
 }

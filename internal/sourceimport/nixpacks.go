@@ -376,7 +376,7 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 		logger.Printf("builder job applied kind=nixpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 		if err := waitForBuilderJob(attemptCtx, namespace, jobName, 30*time.Minute); err != nil {
 			logger.Printf("builder job failed kind=nixpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-			return fmt.Errorf("nixpacks job %s: %w", jobName, err)
+			return withBuilderAttemptFailure(fmt.Errorf("nixpacks job %s: %w", jobName, err), attemptReq.PodPolicy, req.WorkloadProfile)
 		}
 		logger.Printf("builder job completed kind=nixpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 		return nil
