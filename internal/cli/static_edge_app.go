@@ -207,8 +207,10 @@ func (cli *CLI) addStaticEdgeApp(ctx context.Context, app model.App, opts static
 		}
 	}
 	staticEdgeAppAddTLSSubject(edgeConfig, opts.EdgeTemplateHost, hostname)
-	if err = staticEdgeAppAddOriginRoute(originServer, hostname, pathPrefix, upstream); err != nil {
-		return fmt.Errorf("origin route: %w", err)
+	if !staticEdgeAppServerHasForwardedHost(originServer, hostname) {
+		if err = staticEdgeAppAddOriginRoute(originServer, hostname, pathPrefix, upstream); err != nil {
+			return fmt.Errorf("origin route: %w", err)
+		}
 	}
 	edgeBase.Generation = edgeObserved.ActiveGeneration + 1
 	originBase.Generation = originObserved.ActiveGeneration + 1
@@ -475,6 +477,19 @@ func staticEdgeAppServerHasHostname(server map[string]any, hostname string) bool
 	}
 	for _, item := range routes {
 		if routeHasStaticEdgeAppHostname(item, hostname) {
+			return true
+		}
+	}
+	return false
+}
+
+func staticEdgeAppServerHasForwardedHost(server map[string]any, hostname string) bool {
+	routes, ok := server["routes"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range routes {
+		if routeHasStaticEdgeAppForwardedHost(item, hostname) {
 			return true
 		}
 	}
