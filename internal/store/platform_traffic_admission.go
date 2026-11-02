@@ -244,7 +244,9 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 		return out, err
 	}
 	out.retainedRoutes = payload.Source.Intent.Transition != nil && payload.Source.Intent.Transition.ReferenceMode == platformconfig.DNSRetainedGlobalReferenceV1
-	out.staticEdge = len(payload.Policy.StaticEdgeRoutes) > 0
+	// Every traffic child carries the shared policy, but only DNS executes the
+	// independent endpoint proof. Route/TLS workers never consume this protocol.
+	out.staticEdge = artifact.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && len(payload.Policy.StaticEdgeRoutes) > 0
 	if query := payload.Policy.Query; query != nil {
 		out.availability = len(query.AvailabilityRoutes) > 0
 		for _, route := range query.AvailabilityRoutes {
