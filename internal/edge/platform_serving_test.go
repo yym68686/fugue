@@ -32,7 +32,7 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "valid-bundle-renewal", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-static-policy", "valid-bundle-renewal", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
@@ -42,6 +42,22 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			host := "app.example.test"
 			scope := "global"
 			request := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: host, UpstreamURL: "http://origin:8080", Enabled: true, TLSPolicy: model.EdgeRouteTLSPolicyPlatform}}, TLS: []platformconfig.TLSIntent{{Hostname: host, Policy: model.EdgeRouteTLSPolicyPlatform}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global", TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{group}}}, TLSReadiness: &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 10, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}}}
+			if mode == "valid-static-policy" {
+				request.Intent.Routes[0].AppID, request.Intent.Routes[0].TenantID = "app-a", "tenant-a"
+				availability := model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"static-a", "edge-a"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}
+				request.Policy.DNSPlacementMode = platformconfig.DNSPlacementConsumerReadiness
+				request.Policy.DNSReadiness = request.Policy.TLSReadiness
+				request.Policy.MinimumHealthyEdges = 1
+				request.Intent.DNSConsumers = []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: group, Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}}
+				request.RuntimeSnapshot = platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: "dns-a", EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}}
+				request.Policy.DNSClientPolicies = []platformconfig.DNSClientPolicy{{NodeID: "dns-a"}}
+				request.Policy.DNSAuthorities = []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}
+				request.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120, AvailabilityRoutes: []platformconfig.DNSAvailabilityRoute{{Hostname: host, Policy: availability}}}
+				request.Policy.StaticEdgeRoutes = []platformconfig.StaticEdgeDNSRoute{{AppID: "app-a", TenantID: "tenant-a", Hostname: host, Routing: model.AppStaticEdgeRouting{
+					Version: model.StaticEdgeDNSVersion, Availability: availability,
+					Candidates: []model.StaticEdgeDNSCandidate{{RegistrationID: "registration-a", EdgeID: "static-a", Addresses: []string{"1.1.1.1"}, ProbePath: "/health", RouteDigest: "sha256:" + strings.Repeat("c", 64), StatusCode: 200}},
+				}}}
+			}
 			if mode == "valid-cell-routes" {
 				scope = platformconfig.AuthorityCellScope(group)
 				request.Intent.Scope, request.Policy.Scope = scope, scope
@@ -142,7 +158,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&h); err != nil {
 						t.Fatal(err)
 					}
-					if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) || !slices.Contains(h.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) {
+					if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) || !slices.Contains(h.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) || !slices.Contains(h.CompatibilityCapabilities, platformcontrol.StaticEdgePolicyCapabilityV1) {
 						t.Error("executor capability missing")
 					}
 					reports = append(reports, h)
