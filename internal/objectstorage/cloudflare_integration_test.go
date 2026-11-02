@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/model"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -51,6 +52,13 @@ func TestR2ObjectStorageIntegration(t *testing.T) {
 	}
 	keyValue := token.Value
 	cli := s3.New(s3.Options{Region: "auto", BaseEndpoint: aws.String("https://" + c.AccountID + ".r2.cloudflarestorage.com"), UsePathStyle: true, Credentials: credentials.NewStaticCredentialsProvider(token.ID, SecretAccessKey(keyValue), "")})
+	backend := model.DataBackend{Bucket: bucket, Endpoint: "https://" + c.AccountID + ".r2.cloudflarestorage.com", Region: "auto", Credentials: model.DataBackendCredentials{AccessKeyID: token.ID, SecretAccessKey: SecretAccessKey(keyValue)}}
+	// Exercise cleanup immediately after token creation, before another call
+	// has accidentally warmed up authorization propagation.
+	initial, err := EmptyBucketBatch(ctx, backend)
+	if err != nil || !initial.Empty || initial.DeletedObjects != 0 {
+		t.Fatalf("fresh scoped credential cleanup failed: %+v, %v", initial, err)
+	}
 	var putErr error
 	for i := 0; i < 12; i++ {
 		_, putErr = cli.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String("probe"), Body: bytes.NewBufferString("object-storage-probe")})
@@ -74,9 +82,9 @@ func TestR2ObjectStorageIntegration(t *testing.T) {
 	if err != nil || string(raw) != "object-storage-probe" {
 		t.Fatal("round trip mismatch")
 	}
-	_, err = cli.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String("probe")})
-	if err != nil {
-		t.Fatal(err)
+	cleanup, err := EmptyBucketBatch(ctx, backend)
+	if err != nil || !cleanup.Empty || cleanup.DeletedObjects != 1 {
+		t.Fatalf("real R2 batch cleanup failed: %+v, %v", cleanup, err)
 	}
 	if err = c.Revoke(ctx, token.ID); err != nil {
 		t.Fatal(err)

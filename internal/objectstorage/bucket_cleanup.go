@@ -48,7 +48,7 @@ func EmptyBucketBatch(ctx context.Context, backend model.DataBackend) (CleanupBa
 		if pageNo == 0 {
 			for attempt := 0; err != nil && attempt < 24; attempt++ {
 				var apiErr smithy.APIError
-				if !errors.As(err, &apiErr) || (apiErr.ErrorCode() != "AccessDenied" && apiErr.ErrorCode() != "InvalidAccessKeyId") {
+				if !errors.As(err, &apiErr) || (apiErr.ErrorCode() != "Unauthorized" && apiErr.ErrorCode() != "AccessDenied" && apiErr.ErrorCode() != "InvalidAccessKeyId") {
 					break
 				}
 				select {

@@ -103,9 +103,10 @@ func TestEmptyBucketBatchWaitsForScopedCredentialPropagation(t *testing.T) {
 			return
 		}
 		listCalls++
-		if listCalls <= 2 {
+		if listCalls <= 3 {
 			w.WriteHeader(http.StatusForbidden)
-			fmt.Fprint(w, `<Error><Code>AccessDenied</Code></Error>`)
+			codes := []string{"Unauthorized", "AccessDenied", "InvalidAccessKeyId"}
+			fmt.Fprintf(w, `<Error><Code>%s</Code></Error>`, codes[listCalls-1])
 			return
 		}
 		fmt.Fprint(w, `<ListBucketResult/>`)
@@ -113,7 +114,7 @@ func TestEmptyBucketBatchWaitsForScopedCredentialPropagation(t *testing.T) {
 	defer fake.Close()
 	b := model.DataBackend{Bucket: "target", Endpoint: fake.URL, Credentials: model.DataBackendCredentials{AccessKeyID: "synthetic", SecretAccessKey: "synthetic"}}
 	out, err := EmptyBucketBatch(context.Background(), b)
-	if err != nil || !out.Empty || listCalls != 3 {
+	if err != nil || !out.Empty || listCalls != 4 {
 		t.Fatalf("credential propagation was not retried: calls=%d out=%+v err=%v", listCalls, out, err)
 	}
 }
