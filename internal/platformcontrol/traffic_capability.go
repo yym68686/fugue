@@ -2,6 +2,10 @@ package platformcontrol
 
 const DNSStaticEdgeCapabilityV1 = "dns_static_edge_v1"
 
+// StaticEdgePolicyCapabilityV1 can validate and project the shared signed policy
+// containing independent static endpoints. It does not execute DNS probes.
+const StaticEdgePolicyCapabilityV1 = "static_edge_policy_v1"
+
 // TrafficReleaseCapabilityV1 describes executable support for this fact's
 // artifact kind: signed parent authority, current assignment, explicit rollback
 // and durable recovery. DNS also enforces per-value and runtime proof expiry;

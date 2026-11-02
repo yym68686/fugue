@@ -177,6 +177,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if required.staticEdge && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSStaticEdgeCapabilityV1) {
 					return fail("required DNS consumer lacks independent static edge capability")
 				}
+				if required.staticEdgePolicy && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.StaticEdgePolicyCapabilityV1) {
+					return fail("required route/TLS consumer lacks independent static edge policy capability")
+				}
 				if required.redundantAvailability && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAvailabilityRedundantCapabilityV2) {
 					return fail("required consumer lacks redundant DNS availability v2 capability")
 				}
@@ -218,7 +221,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	return nil
 }
 
-type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability, redundantAvailability, retainedRoutes, staticEdge bool }
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability, redundantAvailability, retainedRoutes, staticEdge, staticEdgePolicy bool }
 
 func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
 	var out physicalCapabilities
@@ -247,6 +250,7 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 	// Every traffic child carries the shared policy, but only DNS executes the
 	// independent endpoint proof. Route/TLS workers never consume this protocol.
 	out.staticEdge = artifact.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && len(payload.Policy.StaticEdgeRoutes) > 0
+	out.staticEdgePolicy = (artifact.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle || artifact.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig) && len(payload.Policy.StaticEdgeRoutes) > 0
 	if query := payload.Policy.Query; query != nil {
 		out.availability = len(query.AvailabilityRoutes) > 0
 		for _, route := range query.AvailabilityRoutes {

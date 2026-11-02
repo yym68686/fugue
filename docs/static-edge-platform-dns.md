@@ -64,6 +64,9 @@ consumers; their managers, binaries, certificates and configurations remain unde
 the independent operator's lifecycle. This feature never calls a static manager
 or SSH to update them. Old DNS consumers must advertise `dns_static_edge_v1`
 before the normal serving admission can accept such a publication.
+Route/TLS consumers must separately advertise `static_edge_policy_v1`: they
+validate and project the shared signed policy but do not execute independent DNS
+probes. Both reader boundaries are checked before gray or full publication.
 
 After the producer publishes, use `fugue admin dns answer-check <hostname>` and
 query every authoritative node over UDP and TCP. Verify TLS and application

@@ -28,6 +28,9 @@ func TestStaticEdgeCapabilityDoesNotEnrollRouteAndTLSWorkers(t *testing.T) {
 			if required.staticEdge != (kind == model.PlatformArtifactKindDNSAnswerBundle) {
 				t.Fatalf("static endpoint protocol requirement crosses consumer boundary: kind=%s required=%t", kind, required.staticEdge)
 			}
+			if required.staticEdgePolicy != (kind != model.PlatformArtifactKindDNSAnswerBundle) {
+				t.Fatalf("shared static policy decoding is not required of route/TLS consumers: kind=%s required=%t", kind, required.staticEdgePolicy)
+			}
 			if !required.availability {
 				t.Fatal("independent static proof scoping removed the existing availability requirement")
 			}
@@ -35,7 +38,7 @@ func TestStaticEdgeCapabilityDoesNotEnrollRouteAndTLSWorkers(t *testing.T) {
 	}
 	policy.StaticEdgeRoutes = nil
 	required, err := physicalCapabilitiesRequired(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, Content: map[string]any{"policy": policy}})
-	if err != nil || required.staticEdge || !required.availability {
+	if err != nil || required.staticEdge || required.staticEdgePolicy || !required.availability {
 		t.Fatalf("ordinary managed availability requires an unrelated static protocol: %+v %v", required, err)
 	}
 }
