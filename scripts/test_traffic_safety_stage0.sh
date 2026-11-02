@@ -87,7 +87,9 @@ cp "${REPO_ROOT}/.github/workflows/ci.yml" "${tmpdir}/repo/.github/workflows/ci.
 git -C "${tmpdir}/repo" add .github/workflows/ci.yml
 git -C "${tmpdir}/repo" commit -qm base
 base_revision="$(git -C "${tmpdir}/repo" rev-parse HEAD)"
-sed -i.bak 's/PREPUSH_TIMEOUT_SECONDS: "240"/PREPUSH_TIMEOUT_SECONDS: "239"/' "${tmpdir}/repo/.github/workflows/ci.yml"
+budget_timeout="$(sed -nE 's/^[[:space:]]+PREPUSH_TIMEOUT_SECONDS: "([0-9]+)"$/\1/p' "${tmpdir}/repo/.github/workflows/ci.yml")"
+[[ "${budget_timeout}" =~ ^[0-9]+$ ]]
+sed -i.bak "s/PREPUSH_TIMEOUT_SECONDS: \"${budget_timeout}\"/PREPUSH_TIMEOUT_SECONDS: \"$((budget_timeout + 1))\"/" "${tmpdir}/repo/.github/workflows/ci.yml"
 rm "${tmpdir}/repo/.github/workflows/ci.yml.bak"
 git -C "${tmpdir}/repo" add .github/workflows/ci.yml
 git -C "${tmpdir}/repo" commit -qm budget-only
