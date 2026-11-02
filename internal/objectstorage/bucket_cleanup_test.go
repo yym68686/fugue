@@ -93,3 +93,27 @@ func TestEmptyBucketBatchRejectsPerObjectErrorsAndSanitizes(t *testing.T) {
 		t.Fatal("cancellation reported success")
 	}
 }
+
+func TestEmptyBucketBatchWaitsForScopedCredentialPropagation(t *testing.T) {
+	listCalls := 0
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Has("uploads") {
+			fmt.Fprint(w, `<ListMultipartUploadsResult/>`)
+			return
+		}
+		listCalls++
+		if listCalls <= 2 {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `<Error><Code>AccessDenied</Code></Error>`)
+			return
+		}
+		fmt.Fprint(w, `<ListBucketResult/>`)
+	}))
+	defer fake.Close()
+	b := model.DataBackend{Bucket: "target", Endpoint: fake.URL, Credentials: model.DataBackendCredentials{AccessKeyID: "synthetic", SecretAccessKey: "synthetic"}}
+	out, err := EmptyBucketBatch(context.Background(), b)
+	if err != nil || !out.Empty || listCalls != 3 {
+		t.Fatalf("credential propagation was not retried: calls=%d out=%+v err=%v", listCalls, out, err)
+	}
+}

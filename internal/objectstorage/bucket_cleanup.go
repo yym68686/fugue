@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
 type CleanupBatch struct {
@@ -41,6 +42,24 @@ func EmptyBucketBatch(ctx context.Context, backend model.DataBackend) (CleanupBa
 	started := time.Now()
 	for pageNo := 0; pageNo < 8; pageNo++ {
 		page, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(backend.Bucket), MaxKeys: aws.Int32(1000)})
+		// Newly created bucket-scoped credentials may not have propagated to
+		// S3 yet. Retry only the first read, only for authorization errors, and
+		// never retry an ambiguous delete operation here.
+		if pageNo == 0 {
+			for attempt := 0; err != nil && attempt < 24; attempt++ {
+				var apiErr smithy.APIError
+				if !errors.As(err, &apiErr) || (apiErr.ErrorCode() != "AccessDenied" && apiErr.ErrorCode() != "InvalidAccessKeyId") {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return out, errors.New("R2 object deletion listing cancelled; retry deletion to resume")
+				case <-time.After(500 * time.Millisecond):
+				}
+				page, err = client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(backend.Bucket), MaxKeys: aws.Int32(1000)})
+			}
+			started = time.Now()
+		}
 		if err != nil {
 			return out, errors.New("R2 object deletion listing failed; retry deletion to resume")
 		}
