@@ -18,13 +18,17 @@ import (
 )
 
 type objectDeleteFixture struct {
-	db                                             *store.Store
-	statePath                                      string
-	srv                                            *Server
-	v                                              model.ObjectStore
-	key, reader, attacker                          string
-	exists, failRevoke, failBucket                 bool
-	providerCalls, batches, revokes, bucketDeletes int
+	db                                                  *store.Store
+	statePath                                           string
+	srv                                                 *Server
+	v                                                   model.ObjectStore
+	key, reader, attacker                               string
+	exists, failRevoke, failTemporaryRevoke, failBucket bool
+	providerCalls, batches, revokes, bucketDeletes      int
+	temporaryCredentialRevokes                          int
+	temporaryCredentialPolicy                           map[string]any
+	temporaryCredentialID                               string
+	temporaryCredentialActive                           bool
 }
 
 func newObjectDeleteFixture(t *testing.T) *objectDeleteFixture {
@@ -68,6 +72,35 @@ func newObjectDeleteFixture(t *testing.T) *objectDeleteFixture {
 			if f.failRevoke {
 				status = 503
 			}
+		case path == "/tokens" && r.Method == http.MethodGet:
+			if f.temporaryCredentialActive {
+				result = []map[string]string{{"id": f.temporaryCredentialID, "name": objectStoreDeletionCredentialName(v.ID)}}
+			} else {
+				result = []any{}
+			}
+		case path == "/tokens" && r.Method == http.MethodPost:
+			var request struct {
+				Name     string           `json:"name"`
+				Policies []map[string]any `json:"policies"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode temporary credential request: %v", err)
+				status = 400
+			} else {
+				f.temporaryCredentialID = "temporary-bucket-token"
+				f.temporaryCredentialActive = true
+				if len(request.Policies) > 0 {
+					f.temporaryCredentialPolicy = request.Policies[0]
+				}
+				result = map[string]string{"id": f.temporaryCredentialID, "value": strings.Repeat("c", 40), "name": request.Name, "status": "active"}
+			}
+		case path == "/tokens/temporary-bucket-token" && r.Method == http.MethodDelete:
+			f.temporaryCredentialRevokes++
+			if f.failTemporaryRevoke {
+				status = 503
+			} else {
+				f.temporaryCredentialActive = false
+			}
 		case path == "/r2/buckets/"+v.Bucket && r.Method == http.MethodGet:
 			if f.exists {
 				result = map[string]string{"name": v.Bucket}
@@ -93,12 +126,16 @@ func newObjectDeleteFixture(t *testing.T) *objectDeleteFixture {
 	f.srv.newObjectStorageClient = func(a, b string) *objectstorage.Client { c := objectstorage.New(a, b); c.BaseURL = fake.URL; return c }
 	f.srv.cleanupObjectStoreBatch = func(ctx context.Context, b model.DataBackend) (objectstorage.CleanupBatch, error) {
 		f.batches++
-		if b.Bucket != v.Bucket || b.Credentials.Token != "" || b.Credentials.AccessKeyID != "management-id" {
+		if b.Bucket != v.Bucket || b.Credentials.Token != "" || b.Credentials.AccessKeyID != "temporary-bucket-token" || b.Credentials.SecretAccessKey != objectstorage.SecretAccessKey(strings.Repeat("c", 40)) {
 			t.Fatalf("unsafe cleanup connection: bucket=%s", b.Bucket)
 		}
 		records, _ := db.ListObjectStorageCredentials(v.ID)
 		if records[0].Credential.Status != "revoked" {
 			t.Fatal("objects deleted before credentials revoked")
+		}
+		resource := "com.cloudflare.edge.r2.bucket." + account + "_default_" + v.Bucket
+		if f.temporaryCredentialPolicy["effect"] != "allow" || f.temporaryCredentialPolicy["resources"].(map[string]any)[resource] != "*" {
+			t.Fatalf("temporary deletion credential is not scoped to its bucket: %#v", f.temporaryCredentialPolicy)
 		}
 		return objectstorage.CleanupBatch{DeletedObjects: 8, Empty: f.batches > 1}, nil
 	}
@@ -192,7 +229,7 @@ func TestObjectStoreDeleteAbsentBucketAndTargetGuard(t *testing.T) {
 	_, req := f.plan(t)
 	f.exists = false
 	f.request(t, "DELETE", "", f.key, req, 200)
-	if f.revokes != 1 || f.batches != 0 || f.bucketDeletes != 0 {
+	if f.revokes != 1 || f.batches != 0 || f.bucketDeletes != 0 || f.temporaryCredentialRevokes != 0 {
 		t.Fatal("absent-bucket recovery skipped revocation or contacted S3")
 	}
 	f = newObjectDeleteFixture(t)
@@ -203,5 +240,49 @@ func TestObjectStoreDeleteAbsentBucketAndTargetGuard(t *testing.T) {
 	f.request(t, "POST", "/deletion-plan", f.key, nil, 409)
 	if f.providerCalls != 0 {
 		t.Fatal("unsafe bucket contacted provider")
+	}
+}
+
+func TestObjectStoreDeleteReconcilesTemporaryCredentialAfterRevocationFailure(t *testing.T) {
+	f := newObjectDeleteFixture(t)
+	out, req := f.plan(t)
+	f.failTemporaryRevoke = true
+	f.request(t, "DELETE", "", f.key, req, 502)
+	if f.batches != 1 || f.bucketDeletes != 0 || !f.temporaryCredentialActive {
+		t.Fatal("failed temporary-token revocation was not fenced")
+	}
+	f.failTemporaryRevoke = false
+	mustDecodeJSON(t, f.request(t, "DELETE", "", f.key, req, 200), &out)
+	if f.temporaryCredentialActive || f.temporaryCredentialRevokes != 3 {
+		t.Fatal("retry did not revoke the prior token and the newly issued token")
+	}
+	if !out.Deleted || out.Store.Deletion.DeletedObjects != 16 {
+		t.Fatalf("retry progress not persisted: %+v", out)
+	}
+}
+
+func TestObjectStoreDeleteRevokesTemporaryCredentialAfterClientCancellation(t *testing.T) {
+	f := newObjectDeleteFixture(t)
+	_, body := f.plan(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cleanup := f.srv.cleanupObjectStoreBatch
+	f.srv.cleanupObjectStoreBatch = func(ctx context.Context, b model.DataBackend) (objectstorage.CleanupBatch, error) {
+		batch, _ := cleanup(ctx, b)
+		cancel()
+		return batch, ctx.Err()
+	}
+	payload, _ := json.Marshal(body)
+	r := httptest.NewRequest(http.MethodDelete, "/v1/object-stores/"+f.v.ID, strings.NewReader(string(payload))).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer "+f.key)
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(w, r)
+	if w.Code < 400 || f.temporaryCredentialRevokes != 1 || f.temporaryCredentialActive || f.bucketDeletes != 0 {
+		t.Fatalf("cancelled request leaked a temporary token or removed bucket: status=%d revokes=%d", w.Code, f.temporaryCredentialRevokes)
+	}
+	current, err := f.db.GetObjectStore(f.v.ID)
+	if err != nil || current.Status != "deleting" || current.Deletion.DeletedObjects != 8 {
+		t.Fatalf("cancellation lost durable progress: %+v, %v", current, err)
 	}
 }

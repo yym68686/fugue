@@ -22,8 +22,12 @@ command does not manage Longhorn, Barman, shared backup blocks or DataWorkspace
 blob storage.
 
 Execution persists `status=deleting` before revoking every Fugue-issued grant.
-It then removes at most eight pages of 1,000 objects and 16 unfinished uploads
-per request. The CLI continues requests until the provider confirms bucket
+For each batch, Fugue creates a temporary Cloudflare token scoped to that
+bucket only, uses it for S3 deletion, then revokes it even if the client
+disconnects. Retries reconcile a token left by an ambiguous response. Fugue
+never uses its account-wide management credential for object deletion. It then
+removes at most eight pages of 1,000 objects and 16 unfinished uploads per
+request. The CLI continues requests until the provider confirms bucket
 deletion. `--wait=false` executes one batch and returns `deleted=false` if more
 work remains. `s3 show` includes persisted progress; counters are lower bounds
 because a process can stop between provider deletion and receipt persistence.

@@ -344,6 +344,11 @@ func (s *Server) objectStoreDeletionPlan(v model.ObjectStore) (model.ObjectStore
 	return model.ObjectStoreDeleteInventory{ObjectCount: v.ObjectCount, Bytes: v.UsedBytes, Source: "cached", Complete: false, MeasuredAt: v.UsageMeasuredAt, PlanSHA256: hex.EncodeToString(sum[:])}, nil
 }
 
+func objectStoreDeletionCredentialName(storeID string) string {
+	sum := sha256.Sum256([]byte(storeID))
+	return "fugue-delete-" + hex.EncodeToString(sum[:])
+}
+
 func (s *Server) handleCreateObjectStoreDeletionPlan(w http.ResponseWriter, r *http.Request) {
 	v, ok := s.authorizedObjectStore(w, r, true)
 	if !ok {
@@ -425,12 +430,18 @@ func (s *Server) handleDeleteObjectStore(w http.ResponseWriter, r *http.Request)
 			return err
 		}
 		if exists {
-			secret, err := s.store.OpenObjectStorageSecret(cfg.Secret)
+			// Never use the account-wide management credential for S3 deletes.
+			// CreateCredential first reconciles any prior ambiguous grant with this
+			// durable name, and scopes the new token to this bucket only.
+			temporary, err := provider.CreateCredential(r.Context(), objectStoreDeletionCredentialName(v.ID), v.Bucket, "read-write")
 			if err != nil {
-				return err
+				// A lost create response may still have issued a token.
+				revokeCtx, revokeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				revokeErr := provider.RevokeNamed(revokeCtx, objectStoreDeletionCredentialName(v.ID))
+				revokeCancel()
+				return errors.Join(err, revokeErr)
 			}
-			secret.Token = ""
-			backend := model.DataBackend{Provider: v.Provider, Bucket: v.Bucket, Endpoint: v.Endpoint, Region: v.Region, Credentials: secret}
+			backend := model.DataBackend{Provider: v.Provider, Bucket: v.Bucket, Endpoint: v.Endpoint, Region: v.Region, Credentials: model.DataBackendCredentials{AccessKeyID: temporary.ID, SecretAccessKey: objectstorage.SecretAccessKey(temporary.Value)}}
 			cleanup := objectstorage.EmptyBucketBatch
 			if s.cleanupObjectStoreBatch != nil {
 				cleanup = s.cleanupObjectStoreBatch
@@ -439,7 +450,15 @@ func (s *Server) handleDeleteObjectStore(w http.ResponseWriter, r *http.Request)
 			v.Deletion.DeletedObjects += batch.DeletedObjects
 			v.Deletion.AbortedMultipartUploads += batch.AbortedMultipartUploads
 			if err = s.store.SaveObjectStore(v); err != nil {
-				return err
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
+			// Do not tie credential revocation to the request context: even a
+			// client disconnect should not leave a bucket-scoped writer active.
+			revokeCtx, revokeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			revokeErr := provider.Revoke(revokeCtx, temporary.ID)
+			revokeCancel()
+			if revokeErr != nil {
+				return errors.Join(cleanupErr, errors.New("temporary bucket-scoped deletion credential revocation failed; retry to reconcile"), revokeErr)
 			}
 			if cleanupErr != nil {
 				return cleanupErr
@@ -449,6 +468,12 @@ func (s *Server) handleDeleteObjectStore(w http.ResponseWriter, r *http.Request)
 				return nil
 			}
 			if err = provider.DeleteBucket(r.Context(), v.Bucket); err != nil {
+				return err
+			}
+		} else {
+			// An earlier request may have lost the token create/revoke response
+			// before the bucket disappeared. Reconcile it before dropping state.
+			if err = provider.RevokeNamed(r.Context(), objectStoreDeletionCredentialName(v.ID)); err != nil {
 				return err
 			}
 		}
