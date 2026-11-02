@@ -260,6 +260,17 @@ func (p dnsServingPayload) dnsSourceApprovals() []platformconfig.DNSRouteSourceA
 
 // Match the exact requirement, not another record's otherwise valid source.
 func dnsFactMatchesRelease(f dnsReadinessFact, parent model.PlatformArtifact, c dnsPlatformCandidate, routeID string, p dnsServingPayload) bool {
+	if f.Proof.Kind == routeprobe.StaticEdgeProofKind {
+		if p.Policy.PublicationRole != "" || p.Plan == nil {
+			return false
+		}
+		for _, r := range p.Plan.Probes {
+			if r.ID == f.ProbeID && r.StaticEdge != nil {
+				return dnsProofKindMatches(r, f.Proof) && platformconfig.DNSReadinessProofMatches(r, f.Proof.EdgeID, f.Proof.GroupID, f.Proof.Digest)
+			}
+		}
+		return false
+	}
 	if p.routeSources == nil {
 		return dnsProofMatchesRelease(f.Proof, parent, c, routeID, p)
 	}

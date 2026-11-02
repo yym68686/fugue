@@ -18,6 +18,7 @@ import (
 )
 
 type staticEdgeAppAddOptions struct {
+	HTTP3Port        int
 	EdgeContext      string
 	OriginContext    string
 	EdgeBundle       string
@@ -101,6 +102,7 @@ func (cli *CLI) newStaticEdgeAppCommand() *cobra.Command {
 		},
 	}
 	flags := add.Flags()
+	flags.IntVar(&opts.HTTP3Port, "http3-port", 0, "Explicit public HTTP/3 port when it differs from the template's advertised port (1-65535)")
 	flags.StringVar(&opts.EdgeContext, "edge-context", "", "Existing independent edge manager context")
 	flags.StringVar(&opts.OriginContext, "origin-context", "", "Existing independent origin manager context")
 	flags.StringVar(&opts.EdgeBundle, "edge-bundle", "", "Complete current edge bundle JSON/YAML baseline matching the manager's active digest")
@@ -121,11 +123,14 @@ func (cli *CLI) newStaticEdgeAppCommand() *cobra.Command {
 	for _, name := range []string{"edge-context", "origin-context", "edge-bundle", "origin-bundle", "edge-template-host", "out-dir"} {
 		_ = add.MarkFlagRequired(name)
 	}
-	cmd.AddCommand(add)
+	cmd.AddCommand(add, cli.newStaticEdgeAppDNSCommand())
 	return cmd
 }
 
 func (cli *CLI) addStaticEdgeApp(ctx context.Context, app model.App, opts staticEdgeAppAddOptions) error {
+	if opts.HTTP3Port < 0 || opts.HTTP3Port > 65535 {
+		return errors.New("--http3-port must be 1-65535 when supplied")
+	}
 	if app.InternalService == nil || strings.TrimSpace(app.InternalService.Host) == "" || app.InternalService.Port < 1 || app.InternalService.Port > 65535 {
 		return errors.New("app has no usable Fugue internal Service; only HTTP apps with a stable internal Service can be routed")
 	}
@@ -214,6 +219,11 @@ func (cli *CLI) addStaticEdgeApp(ctx context.Context, app model.App, opts static
 		}
 	}
 	staticEdgeAppAddTLSSubject(edgeConfig, opts.EdgeTemplateHost, hostname)
+	if opts.HTTP3Port > 0 {
+		for _, server := range edgeServers {
+			staticEdgeAppSetHTTP3Port(server, hostname, opts.HTTP3Port)
+		}
+	}
 	if staticEdgeAppServerHasForwardedHost(originServer, hostname) {
 		if !staticEdgeAppExistingOriginRouteMatches(originServer, hostname, pathPrefix, upstream) {
 			return fmt.Errorf("origin Caddy config already contains forwarded hostname %q with a different route; refusing to treat it as attached", hostname)

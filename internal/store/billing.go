@@ -1230,6 +1230,7 @@ func cloneAppForBilling(app model.App) model.App {
 	model.NormalizeAppSourceState(&out)
 	if app.Route != nil {
 		route := *app.Route
+		route.DNSRouting = model.CloneAppStaticEdgeRouting(app.Route.DNSRouting)
 		out.Route = &route
 	}
 	if cloned := cloneAppSpec(&app.Spec); cloned != nil {

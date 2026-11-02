@@ -115,6 +115,8 @@ func evaluateDNSReadinessFact(requirement platformconfig.DNSReadinessProbe, poli
 		fact.Reason = "probe_unavailable"
 	case err != nil:
 		fact.Reason = "probe_failed"
+	case !dnsProofKindMatches(requirement, proof):
+		fact.Reason = "proof_kind_mismatch"
 	case proof.Digest != requirement.RouteDigest && (requirement.PreviousAuthority == nil || proof.Digest != requirement.PreviousAuthority.RouteDigest):
 		fact.Reason = "route_digest_mismatch"
 	case !platformconfig.DNSReadinessProofMatches(requirement, proof.EdgeID, proof.GroupID, proof.Digest):
@@ -266,6 +268,9 @@ func validDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy *platf
 	}
 	for _, fact := range facts {
 		requirement, exists := requirements[fact.ProbeID]
+		if !dnsProofKindMatches(requirement, fact.Proof) {
+			continue
+		}
 		if !exists || duplicate[fact.ProbeID] || !platformconfig.DNSReadinessProofMatches(requirement, fact.Proof.EdgeID, fact.Proof.GroupID, fact.Proof.Digest) || fact.Proof.State != requirement.State || fact.Proof.Version == "" || fact.Proof.ValidUntil.After(fact.Proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy))*time.Second)) {
 			continue
 		}
@@ -276,4 +281,11 @@ func validDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy *platf
 	}
 
 	return valid
+}
+
+func dnsProofKindMatches(p platformconfig.DNSReadinessProbe, proof routeprobe.Proof) bool {
+	if p.StaticEdge != nil {
+		return proof.Kind == routeprobe.StaticEdgeProofKind && proof.Version == model.StaticEdgeDNSVersion && proof.TrafficRelease == nil
+	}
+	return proof.Kind == ""
 }

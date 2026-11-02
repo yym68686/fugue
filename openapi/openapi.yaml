@@ -8867,6 +8867,53 @@ paths:
                 $ref: "#/components/schemas/AppDomainCertificateMetadata"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/route/static-edge:
+    get:
+      operationId: getAppStaticEdgeRouting
+      summary: Inspect independent static edge DNS routing for the primary platform hostname
+      tags: [Apps]
+      x-fugue-handler: handleGetAppStaticEdgeRouting
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Desired routing and revision; configuration is not serving readiness
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AppStaticEdgeRoutingResponse"}
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: putAppStaticEdgeRouting
+      summary: Configure independent static edge DNS candidates and explicit fallback order
+      description: >-
+        Requires platform admin. Binds only the app's sole root route in the platform
+        namespace. Uses a compare-and-swap revision. Registered edges remain independently
+        operated; no manager credentials, processes or binaries are changed. The signed
+        DNS publication probes each static address directly with public TLS, a nonce and
+        exact route identity before answering. This operation changes desired configuration;
+        normal consumer admission and positive serving verification remain required.
+      tags: [Apps]
+      x-fugue-handler: handlePutAppStaticEdgeRouting
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PutAppStaticEdgeRoutingRequest"}
+      responses:
+        '200':
+          description: Desired routing accepted, pending normal signed DNS publication
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AppStaticEdgeRoutingResponse"}
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/domains/availability:
     get:
       operationId: getAppDomainAvailability
@@ -18629,6 +18676,8 @@ components:
       type: object
       additionalProperties: false
       properties:
+        dns_routing:
+          $ref: '#/components/schemas/AppStaticEdgeRouting'
         hostname:
           type: string
         path_prefix:
@@ -31569,6 +31618,52 @@ components:
           $ref: "#/components/schemas/App"
         operation:
           $ref: "#/components/schemas/Operation"
+    StaticEdgeDNSCandidate:
+      type: object
+      additionalProperties: false
+      required: [registration_id, edge_id, addresses, probe_path, route_digest, status_code]
+      properties:
+        registration_id: {type: string}
+        edge_id: {type: string, pattern: '^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$'}
+        addresses:
+          type: array
+          minItems: 1
+          maxItems: 8
+          uniqueItems: true
+          items: {type: string}
+        probe_path: {type: string}
+        route_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        status_code: {type: integer, minimum: 200, maximum: 399}
+    AppStaticEdgeRouting:
+      type: object
+      additionalProperties: false
+      required: [version, candidates, availability]
+      properties:
+        version: {type: string, enum: [static-edge-dns-v1]}
+        candidates:
+          type: array
+          minItems: 1
+          maxItems: 8
+          items: {$ref: '#/components/schemas/StaticEdgeDNSCandidate'}
+        availability: {$ref: '#/components/schemas/DNSAvailabilityPolicy'}
+    AppStaticEdgeRoutingResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, hostname, revision]
+      properties:
+        app_id: {type: string}
+        hostname: {type: string}
+        revision: {type: string}
+        routing: {$ref: '#/components/schemas/AppStaticEdgeRouting'}
+    PutAppStaticEdgeRoutingRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision]
+      properties:
+        expected_revision: {type: string}
+        routing:
+          description: Omit to restore the ordinary Fugue DNS strategy.
+          $ref: '#/components/schemas/AppStaticEdgeRouting'
     AppDomainResponse:
       type: object
       additionalProperties: false
@@ -36947,6 +37042,19 @@ components:
             traffic_constraints: {type: array, maxItems: 0, items: {}}
           not: {required: [tls_readiness]}
       properties:
+        static_edge_routes:
+          type: array
+          maxItems: 256
+          description: Explicit independent static endpoints for sole-owner app root hostnames. Requires consumer readiness; never grants platform lifecycle authority over these processes. Unsupported for Cell publications.
+          items:
+            type: object
+            additionalProperties: false
+            required: [app_id, tenant_id, hostname, routing]
+            properties:
+              app_id: {type: string, minLength: 1}
+              tenant_id: {type: string, minLength: 1}
+              hostname: {type: string, minLength: 1}
+              routing: {$ref: '#/components/schemas/AppStaticEdgeRouting'}
         offline_edges:
           type: array
           maxItems: 64

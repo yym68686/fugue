@@ -1462,13 +1462,14 @@ type AppTechnology struct {
 }
 
 type AppRoute struct {
-	Hostname       string `json:"hostname,omitempty"`
-	PathPrefix     string `json:"path_prefix,omitempty"`
-	BaseDomain     string `json:"base_domain,omitempty"`
-	PublicURL      string `json:"public_url,omitempty"`
-	ServicePort    int    `json:"service_port,omitempty"`
-	DomainName     string `json:"domain_name,omitempty"`
-	EntrypointName string `json:"entrypoint_name,omitempty"`
+	DNSRouting     *AppStaticEdgeRouting `json:"dns_routing,omitempty"`
+	Hostname       string                `json:"hostname,omitempty"`
+	PathPrefix     string                `json:"path_prefix,omitempty"`
+	BaseDomain     string                `json:"base_domain,omitempty"`
+	PublicURL      string                `json:"public_url,omitempty"`
+	ServicePort    int                   `json:"service_port,omitempty"`
+	DomainName     string                `json:"domain_name,omitempty"`
+	EntrypointName string                `json:"entrypoint_name,omitempty"`
 }
 
 type ProjectRouteDomain struct {

@@ -38,6 +38,10 @@ func readRouteBusinessSnapshotTx(ctx context.Context, tx *sql.Tx) (RouteBusiness
 	}
 	out.Revision = "postgres:" + out.Revision
 	var err error
+	out.StaticEdgeRegistrations, err = readRouteBusinessRows(ctx, tx, `SELECT `+staticEdgeRegistrationSelectColumns+` FROM fugue_static_edge_registrations`, func(row sqlScanner) (model.StaticEdgeRegistration, error) { return scanStaticEdgeRegistration(row) })
+	if err != nil {
+		return out, fmt.Errorf("capture static edge registrations: %w", err)
+	}
 	out.Apps, err = readRouteBusinessRows(ctx, tx, `SELECT `+routeBusinessAppSelectColumns+` FROM fugue_apps WHERE `+appVisiblePhasePredicate, scanApp)
 	if err != nil {
 		return out, fmt.Errorf("capture route apps: %w", err)

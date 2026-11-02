@@ -1,5 +1,7 @@
 package platformcontrol
 
+const DNSStaticEdgeCapabilityV1 = "dns_static_edge_v1"
+
 // TrafficReleaseCapabilityV1 describes executable support for this fact's
 // artifact kind: signed parent authority, current assignment, explicit rollback
 // and durable recovery. DNS also enforces per-value and runtime proof expiry;

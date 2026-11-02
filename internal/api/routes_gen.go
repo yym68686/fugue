@@ -235,6 +235,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/apps/{id}/rollout/timeline", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRolloutTimeline)))
 	mux.Handle("PATCH /v1/apps/{id}/route", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppRoute)))
 	mux.Handle("GET /v1/apps/{id}/route/availability", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRouteAvailability)))
+	mux.Handle("GET /v1/apps/{id}/route/static-edge", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppStaticEdgeRouting)))
+	mux.Handle("PUT /v1/apps/{id}/route/static-edge", s.auth.RequireAPI(http.HandlerFunc(s.handlePutAppStaticEdgeRouting)))
 	mux.Handle("GET /v1/apps/{id}/runtime-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRuntimeLogs)))
 	mux.Handle("GET /v1/apps/{id}/runtime-logs/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamAppRuntimeLogs)))
 	mux.Handle("GET /v1/apps/{id}/runtime-pods", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRuntimePods)))

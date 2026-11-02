@@ -44,6 +44,7 @@ type DNSPreviousAuthority struct {
 }
 
 type DNSReadinessProbe struct {
+	StaticEdge            *StaticEdgeDNSProbe   `json:"static_edge,omitempty"`
 	PreviousAuthority     *DNSPreviousAuthority `json:"previous_authority,omitempty"`
 	CellPublicationDigest string                `json:"cell_publication_digest,omitempty"`
 	FactMaxAgeSeconds     int                   `json:"fact_max_age_seconds,omitempty"`
@@ -240,6 +241,9 @@ func compileDNSReadinessProjection(intent PlatformIntent, routes []CompiledRoute
 				}
 			}
 		}
+		if err := appendStaticEdgeDNSTargets(&r, record, owners, policy, probes); err != nil {
+			return nil, err
+		}
 		sort.Slice(r.Targets, func(i, j int) bool {
 			return r.Targets[i].EdgeID+"\x00"+r.Targets[i].Address < r.Targets[j].EdgeID+"\x00"+r.Targets[j].Address
 		})
@@ -277,6 +281,9 @@ func ValidateDNSReadinessPlan(plan *DNSReadinessPlan, policy *DNSReadinessPolicy
 	probes := map[string]DNSReadinessProbe{}
 	owners := map[string]string{}
 	for _, p := range plan.Probes {
+		if p.StaticEdge != nil && (p.StaticEdge.StatusCode < 200 || p.StaticEdge.StatusCode > 399 || p.State != "" || p.PreviousAuthority != nil || p.CellPublicationDigest != "" || p.EdgeGroupID != StaticEdgeDNSGroup(p.EdgeID)) {
+			return fmt.Errorf("invalid independent static edge probe")
+		}
 		if previous := p.PreviousAuthority; previous != nil {
 			if p.CellPublicationDigest == "" || !trafficConsumerDigest.MatchString(previous.PublicationDigest) || !trafficConsumerDigest.MatchString(previous.RouteDigest) || !platformRouteArtifactGroupID.MatchString(previous.EdgeGroupID) {
 				return fmt.Errorf("invalid previous DNS authority alternative")

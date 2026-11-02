@@ -174,6 +174,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if required.availability && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAvailabilityCapabilityV1) {
 					return fail("required consumer lacks DNS availability v1 capability")
 				}
+				if required.staticEdge && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSStaticEdgeCapabilityV1) {
+					return fail("required DNS consumer lacks independent static edge capability")
+				}
 				if required.redundantAvailability && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.DNSAvailabilityRedundantCapabilityV2) {
 					return fail("required consumer lacks redundant DNS availability v2 capability")
 				}
@@ -215,7 +218,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	return nil
 }
 
-type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability, redundantAvailability, retainedRoutes bool }
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability, redundantAvailability, retainedRoutes, staticEdge bool }
 
 func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
 	var out physicalCapabilities
@@ -228,8 +231,9 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 			} `json:"intent"`
 		} `json:"cell_dns_source"`
 		Policy struct {
-			Query *platformconfig.DNSQueryPolicy `json:"dns_query_policy"`
-			Rules []platformconfig.DNSAnswerRule `json:"dns_answer_rules"`
+			StaticEdgeRoutes []platformconfig.StaticEdgeDNSRoute `json:"static_edge_routes"`
+			Query            *platformconfig.DNSQueryPolicy      `json:"dns_query_policy"`
+			Rules            []platformconfig.DNSAnswerRule      `json:"dns_answer_rules"`
 		} `json:"policy"`
 	}
 	raw, err := json.Marshal(artifact.Content)
@@ -240,6 +244,7 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 		return out, err
 	}
 	out.retainedRoutes = payload.Source.Intent.Transition != nil && payload.Source.Intent.Transition.ReferenceMode == platformconfig.DNSRetainedGlobalReferenceV1
+	out.staticEdge = len(payload.Policy.StaticEdgeRoutes) > 0
 	if query := payload.Policy.Query; query != nil {
 		out.availability = len(query.AvailabilityRoutes) > 0
 		for _, route := range query.AvailabilityRoutes {

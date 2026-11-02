@@ -16,7 +16,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v35"
+	CompilerVersion = "platform-config-compiler/v36"
 	GlobalScopeKey  = "global"
 )
 
@@ -135,6 +135,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	StaticEdgeRoutes         []StaticEdgeDNSRoute      `json:"static_edge_routes,omitempty"`
 	PublicationRole          string                    `json:"publication_role,omitempty"`
 	AuthorityCellID          string                    `json:"authority_cell_id,omitempty"`
 	ConsumerTopologyDigest   string                    `json:"consumer_topology_digest,omitempty"`
@@ -639,6 +640,11 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 
 func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out := in
+	out.StaticEdgeRoutes = append([]StaticEdgeDNSRoute(nil), in.StaticEdgeRoutes...)
+	for i := range out.StaticEdgeRoutes {
+		out.StaticEdgeRoutes[i].Routing = *model.CloneAppStaticEdgeRouting(&in.StaticEdgeRoutes[i].Routing)
+	}
+	sort.Slice(out.StaticEdgeRoutes, func(i, j int) bool { return out.StaticEdgeRoutes[i].Hostname < out.StaticEdgeRoutes[j].Hostname })
 	if in.DNSQueryPolicy != nil {
 		p := *in.DNSQueryPolicy
 		if p.DynamicQuality != nil {
@@ -820,6 +826,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := validateStaticEdgeDNSRoutes(in); err != nil {
+		return err
+	}
 	if err := validateConsumerTopologyPolicy(in); err != nil {
 		return err
 	}

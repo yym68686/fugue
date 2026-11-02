@@ -318,6 +318,9 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 		}
 	}
 	resolver := newHostedDNSFlattenResolver()
+	if err := projectAppStaticEdgeDNS(&projection, business, domainsConfig.AppBaseDomain); err != nil {
+		return platformIntentProjectionResponse{}, err
+	}
 	captureDNSFlattenFacts(ctx, &projection, resolver.resolve)
 	s.capturePlatformPlacements(ctx, &projection)
 	issues := projection.Issues[:0]

@@ -196,7 +196,13 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 			go func(index, target int) {
 				requirement := plan.Probes[index]
 				started := time.Now().UTC()
-				proof, err := probe(ctx, requirement.Hostname, requirement.Path, requirement.Address, requirement.State, time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
+				var proof routeprobe.Proof
+				var err error
+				if requirement.StaticEdge != nil {
+					proof, err = routeprobe.ProbeStatic(ctx, requirement, time.Duration(policy.ProbeTimeoutSeconds)*time.Second, time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy))*time.Second)
+				} else {
+					proof, err = probe(ctx, requirement.Hostname, requirement.Path, requirement.Address, requirement.State, time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
+				}
 				finished := time.Now().UTC()
 				results <- dnsProbeResult{index: index, target: target, fact: evaluateDNSReadinessFact(requirement, policy, proof, err, finished), connectionFailure: errors.Is(err, routeprobe.ErrConnectionUnavailable), started: started, finished: finished}
 			}(index, selected)

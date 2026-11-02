@@ -25,6 +25,7 @@ import (
 // Proof is a newly collected HTTPS observation. ValidUntil is bounded by
 // the original serving bundle and the certificate chain, never renewed here.
 type Proof struct {
+	Kind string `json:"kind,omitempty"`
 	// Nonzero only for an explicitly requested retained-LKG observation.
 	// ValidUntil then bounds offline observation, not a renewed bundle lease.
 	BundleValidUntil time.Time                    `json:"bundle_valid_until,omitzero"`

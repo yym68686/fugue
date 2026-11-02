@@ -2406,6 +2406,9 @@ func (s *Store) CreateImportedAppWithoutRoute(tenantID, projectID, name, descrip
 }
 
 func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, error) {
+	if route.DNSRouting != nil {
+		return model.App{}, ErrInvalidInput
+	}
 	id = strings.TrimSpace(id)
 	route = model.NormalizeAppRoute(route)
 	if id == "" || route.Hostname == "" {
@@ -2745,6 +2748,9 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 }
 
 func (s *Store) createApp(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource, route *model.AppRoute) (model.App, error) {
+	if route != nil && route.DNSRouting != nil {
+		return model.App{}, ErrInvalidInput
+	}
 	if spec.CPURequestTemplateMilliCores != nil {
 		return model.App{}, ErrInvalidInput
 	}
@@ -5186,6 +5192,7 @@ func cloneAppRoute(in *model.AppRoute) *model.AppRoute {
 		return nil
 	}
 	out := *in
+	out.DNSRouting = model.CloneAppStaticEdgeRouting(in.DNSRouting)
 	return &out
 }
 

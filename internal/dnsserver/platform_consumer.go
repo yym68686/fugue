@@ -56,6 +56,10 @@ func (s *Service) platformConsumerClient() platformconsumer.Client {
 }
 
 func dnsExecutionCapabilities() []string {
+	return append([]string{platformcontrol.DNSStaticEdgeCapabilityV1}, dnsPlatformExecutionCapabilities()...)
+}
+
+func dnsPlatformExecutionCapabilities() []string {
 	return []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.DNSAuthorityTransitionCapabilityV1, platformcontrol.DNSRouteSourcesCapabilityV1, platformcontrol.DNSRetainedRoutesCapabilityV1, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5, platformcontrol.PhysicalComparableDeliveryCapabilityV6, platformcontrol.PhysicalDynamicQualityCapabilityV1, platformcontrol.PhysicalOrderCapabilityV1, platformcontrol.PhysicalOrderProjectionCapabilityV1, platformcontrol.BusinessEdgeExplorationCapabilityV1, platformcontrol.BusinessDNSBaselineCapabilityV1, platformcontrol.BusinessUnifiedCapabilityV2, platformcontrol.DNSAvailabilityCapabilityV1, platformcontrol.DNSAvailabilityRedundantCapabilityV2}
 }
 
