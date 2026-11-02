@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -187,16 +188,23 @@ func (s *Server) readPublicFrontNetwork(ctx context.Context, node model.EdgeNode
 	if client.doJSON(ctx, http.MethodGet, slicePath, &endpoints) != nil || endpoints.Continue != "" || !dnsBackendEndpointsMatch(*service, *pod, endpoints.Items, true) {
 		return fail("serving_endpoints_identity")
 	}
-	var connections frontnetwork.LiveConnections
-	observed := time.Now().UTC()
-	path := base + "/pods/" + url.PathEscape(pod.Name+":"+strconv.Itoa(port)) + "/proxy/edge/tcp-connections"
-	if readDNSPodObservation(ctx, client, path, &connections, 2<<20) != nil {
+	queryJSON, err := json.Marshal(query)
+	if err != nil {
+		return fail("socket_query_invalid")
+	}
+	var observation frontnetwork.Response
+	path := base + "/pods/" + url.PathEscape(pod.Name+":"+strconv.Itoa(port)) + "/proxy/edge/tcp-connections?" + url.Values{"request": {string(queryJSON)}}.Encode()
+	if readDNSPodObservation(ctx, client, path, &observation, 4096) != nil {
 		return fail("socket_inventory_unavailable")
 	}
-	sample, err := frontnetwork.SampleFromLiveConnections(query, connections, observed)
-	if err != nil {
-		return fail(err.Error())
+	peer, err := frontnetwork.ParseRemote(query.RemoteAddr)
+	now := time.Now().UTC()
+	if err != nil || observation.Schema != frontnetwork.Schema || observation.Nonce != query.Nonce || observation.EdgeID != query.EdgeID || observation.GroupID != query.GroupID ||
+		observation.Sample.Slot != query.Slot || observation.Sample.Scope != frontnetwork.Scope(peer.Addr()) || observation.Sample.ObservedAt.After(now.Add(5*time.Second)) ||
+		now.Sub(observation.Sample.ObservedAt) > 5*time.Second || model.ValidateEdgeClientNetworkSample(&observation.Sample) != nil {
+		return fail("socket_observation_binding")
 	}
+	sample := observation.Sample
 	var currentServices corev1.ServiceList
 	var currentPod corev1.Pod
 	var currentEndpoints discoveryv1.EndpointSliceList

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -81,11 +83,16 @@ func TestPublicFrontObservationSelectsRuntimeTransportNotLegacyName(t *testing.T
 					}
 					response = value
 				case "/api/v1/namespaces/system/pods/front-a:7831/proxy/edge/tcp-connections":
-					remote := query.RemoteAddr
-					if scenario == "foreign_peer" {
-						remote = "198.51.100.2:40000"
+					values, err := url.ParseQuery(request.URL.RawQuery)
+					if err != nil || len(values) != 1 || len(values["request"]) != 1 || json.Unmarshal([]byte(values.Get("request")), &query) != nil {
+						t.Error("missing exact indexed Front observation request")
 					}
-					response = frontnetwork.LiveConnections{Count: 1, Active: []frontnetwork.LiveConnection{{ID: "connection-a", Protocol: "https", Slot: query.Slot, DownstreamRemote: remote, StartedAt: time.Now().Add(-time.Minute), ProxyProtocol: true, TCPInfo: map[string]json.RawMessage{"tcp_info_available": json.RawMessage("false")}}}}
+					scope := frontnetwork.Scope(mustObservationPeer(t, query.RemoteAddr))
+					if scenario == "foreign_peer" {
+						scope = "tcp_peer:203.0.113.0/24"
+					}
+					now := time.Now().UTC()
+					response = frontnetwork.Response{Schema: frontnetwork.Schema, Nonce: query.Nonce, EdgeID: query.EdgeID, GroupID: query.GroupID, Sample: model.EdgeClientNetworkSample{ConnectionID: "connection-a", Slot: query.Slot, Scope: scope, StartedAt: now.Add(-time.Minute), ObservedAt: now}}
 				default:
 					t.Error("unexpected read", request.URL.String())
 					http.NotFound(writer, request)
@@ -106,6 +113,15 @@ func TestPublicFrontObservationSelectsRuntimeTransportNotLegacyName(t *testing.T
 			}
 		})
 	}
+}
+
+func mustObservationPeer(t *testing.T, remote string) netip.Addr {
+	t.Helper()
+	peer, err := frontnetwork.ParseRemote(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return peer.Addr()
 }
 
 func TestPublicFrontObservationBudgetIsBounded(t *testing.T) {
