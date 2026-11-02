@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -135,6 +136,43 @@ func (c *Client) EnsureBucket(ctx context.Context, bucket string) error {
 		return err
 	}
 	return c.call(ctx, "POST", "/r2/buckets", map[string]string{"name": bucket}, nil)
+}
+
+func (c *Client) BucketExists(ctx context.Context, bucket string) (bool, error) {
+	bucket = strings.TrimSpace(bucket)
+	if bucket == "" {
+		return false, errors.New("object storage bucket name is required")
+	}
+	var b struct {
+		Name string `json:"name"`
+	}
+	err := c.call(ctx, http.MethodGet, "/r2/buckets/"+url.PathEscape(bucket), nil, &b)
+	var api *APIError
+	if errors.As(err, &api) && api.Status == http.StatusNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if b.Name != bucket {
+		return false, errors.New("object storage bucket identity mismatch")
+	}
+	return true, nil
+}
+
+// DeleteBucket removes an empty R2 bucket. Objects and unfinished multipart
+// uploads must be removed through the S3-compatible API before this call.
+func (c *Client) DeleteBucket(ctx context.Context, bucket string) error {
+	bucket = strings.TrimSpace(bucket)
+	if bucket == "" {
+		return errors.New("object storage bucket name is required")
+	}
+	err := c.call(ctx, http.MethodDelete, "/r2/buckets/"+url.PathEscape(bucket), nil, nil)
+	var api *APIError
+	if errors.As(err, &api) && api.Status == http.StatusNotFound {
+		return nil
+	}
+	return err
 }
 
 type Token struct {

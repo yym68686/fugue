@@ -39,6 +39,7 @@ type Server struct {
 	operations                             *runtimeobservation.Operations
 	certificateImportRoots                 *x509.CertPool
 	newObjectStorageClient                 func(string, string) *objectstorage.Client
+	cleanupObjectStoreBatch                func(context.Context, model.DataBackend) (objectstorage.CleanupBatch, error)
 	store                                  *store.Store
 	auth                                   *auth.Authenticator
 	log                                    *log.Logger

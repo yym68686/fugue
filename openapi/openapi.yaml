@@ -14046,6 +14046,67 @@ paths:
           $ref: "#/components/responses/ObjectStorageBusy"
         default:
           $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteObjectStore
+      summary: deleteObjectStore
+      description: Permanently deletes ALL objects and unfinished uploads in this managed bucket. Requires storage.admin or data.admin, a target digest from deletion-plan, exact bucket confirmation and acknowledgement that external writers have been stopped. Each request performs a bounded batch; repeat while deleted=false. Deleting stores cannot be enabled or issued credentials. All Fugue credentials are revoked first; metadata is removed only after provider bucket deletion succeeds. Interrupted requests can be resumed. Progress counters are lower bounds after interruptions.
+      tags: [Object Storage]
+      x-fugue-handler: handleDeleteObjectStore
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: store_id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObjectStoreDeleteRequest"
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStoreDeleteResponse"
+        "202":
+          description: Deletion is incomplete; repeat the same confirmed request to continue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStoreDeleteResponse"
+        "409":
+          $ref: "#/components/responses/ObjectStorageBusy"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/object-stores/{store_id}/deletion-plan:
+    post:
+      operationId: createObjectStoreDeletionPlan
+      summary: createObjectStoreDeletionPlan
+      description: Returns the immutable target digest and cached usage for a destructive deletion of ALL bucket contents. Usage is explicitly incomplete and may be stale; the digest pins bucket identity, not an object snapshot. Does not contact the provider or mutate state. Requires storage.admin or data.admin.
+      tags: [Object Storage]
+      x-fugue-handler: handleCreateObjectStoreDeletionPlan
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: store_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStoreDeleteResponse"
+        "409":
+          $ref: "#/components/responses/ObjectStorageBusy"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/object-stores/{store_id}/credentials:
     get:
       operationId: listObjectStoreCredentials
@@ -17354,6 +17415,37 @@ components:
       properties:
         enabled: {type: boolean}
         quota_bytes: {type: integer, format: int64, minimum: 0}
+    ObjectStoreDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [confirm_bucket, plan_sha256, ack_no_external_writers]
+      properties:
+        confirm_bucket: {type: string}
+        plan_sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        ack_no_external_writers: {type: boolean, enum: [true]}
+    ObjectStoreDeleteResponse:
+      type: object
+      required: [store, inventory, deleted]
+      properties:
+        deleted: {type: boolean}
+        store: {$ref: '#/components/schemas/ObjectStore'}
+        inventory:
+          type: object
+          required: [object_count, bytes, source, complete, plan_sha256]
+          properties:
+            object_count: {type: integer, format: int64}
+            bytes: {type: integer, format: int64}
+            source: {type: string, enum: [cached]}
+            complete: {type: boolean, enum: [false]}
+            measured_at: {type: string, format: date-time}
+            plan_sha256: {type: string}
+    ObjectStoreDeletionProgress:
+      type: object
+      required: [started_at, deleted_objects, aborted_multipart_uploads]
+      properties:
+        started_at: {type: string, format: date-time}
+        deleted_objects: {type: integer, format: int64, minimum: 0}
+        aborted_multipart_uploads: {type: integer, format: int64, minimum: 0}
     AdminStorageNamespace:
       type: object
       required: [kind, resource_id, name, bucket, prefix, tenant_id, project_id, status]
@@ -17420,7 +17512,8 @@ components:
         bucket: {type: string}
         endpoint: {type: string}
         region: {type: string}
-        status: {type: string, enum: [provisioning, active, disabling, disabled]}
+        status: {type: string, enum: [provisioning, active, disabling, disabled, deleting]}
+        deletion: {$ref: '#/components/schemas/ObjectStoreDeletionProgress'}
         quota_bytes: {type: integer, format: int64}
         used_bytes: {type: integer, format: int64}
         object_count: {type: integer, format: int64}

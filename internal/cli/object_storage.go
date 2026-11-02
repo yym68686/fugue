@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 	"github.com/spf13/cobra"
@@ -15,6 +17,7 @@ import (
 type objectStoreEnvelope struct {
 	Store model.ObjectStore `json:"store"`
 }
+type objectStoreDeleteResponse = model.ObjectStoreDeleteResponse
 type objectStorageConnection struct {
 	Credential      model.ObjectStorageCredential `json:"credential"`
 	Endpoint        string                        `json:"endpoint"`
@@ -116,6 +119,94 @@ func (c *CLI) newObjectStorageCommand() *cobra.Command {
 	}}
 	create.Flags().Int64Var(&quota, "quota-bytes", 0, "Soft storage budget in bytes; 0 disables the budget")
 	cmd.AddCommand(create)
+	plan := &cobra.Command{Use: "deletion-plan <store>", Short: "Show a read-only, cached deletion plan (no provider calls)", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := c.newClient()
+		if err != nil {
+			return err
+		}
+		v, err := c.findObjectStore(client, args[0])
+		if err != nil {
+			return err
+		}
+		var out objectStoreDeleteResponse
+		if err = client.doJSON(http.MethodPost, "/v1/object-stores/"+url.PathEscape(v.ID)+"/deletion-plan", nil, &out); err != nil {
+			return err
+		}
+		return c.writeJSON(out)
+	}}
+	cmd.AddCommand(plan)
+	var confirmBucket, planSHA256 string
+	var execute, ackExternal, wait bool
+	var maxBatches int
+	deleteCmd := &cobra.Command{Use: "delete <store>", Short: "Preview deletion; --execute permanently removes all objects and the bucket", Long: "Preview the exact managed bucket and cached usage. Execution deletes ALL objects and unfinished uploads, revokes Fugue grants, removes the provider bucket and finally removes Fugue metadata. Stop external writers first. The plan pins bucket identity, not an object snapshot. Interrupted deletion stays fenced and can be resumed with the same confirmation flags. --wait=false performs one batch; counters are lower bounds after interruptions.", Example: "fugue s3 delete events\nfugue s3 deletion-plan events", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if maxBatches <= 0 {
+			return fmt.Errorf("--max-batches must be positive")
+		}
+		if !execute && (confirmBucket != "" || planSHA256 != "" || ackExternal) {
+			return fmt.Errorf("confirmation flags require --execute")
+		}
+		digest, digestErr := hex.DecodeString(planSHA256)
+		if execute && (strings.TrimSpace(confirmBucket) == "" || digestErr != nil || len(digest) != 32) {
+			return fmt.Errorf("--confirm-bucket and --plan-sha256 from `s3 deletion-plan` are required")
+		}
+		if execute && !ackExternal {
+			return fmt.Errorf("refusing destructive operation: pass --ack-no-external-writers after stopping every external writer")
+		}
+		client, err := c.newClient()
+		if err != nil {
+			return err
+		}
+		v, err := c.findObjectStore(client, args[0])
+		if err != nil {
+			return err
+		}
+		if !execute {
+			var preview objectStoreDeleteResponse
+			if err = client.doJSON(http.MethodPost, "/v1/object-stores/"+url.PathEscape(v.ID)+"/deletion-plan", nil, &preview); err != nil {
+				return err
+			}
+			return c.writeJSON(preview)
+		}
+		if confirmBucket != v.Bucket {
+			return fmt.Errorf("--confirm-bucket does not match the selected store")
+		}
+		request := map[string]any{"confirm_bucket": confirmBucket, "plan_sha256": strings.ToLower(planSHA256), "ack_no_external_writers": true}
+		var out objectStoreDeleteResponse
+		for batch := 0; ; batch++ {
+			if err = cmd.Context().Err(); err != nil {
+				return err
+			}
+			if batch >= maxBatches {
+				return fmt.Errorf("deletion exceeded --max-batches=%d; rerun to resume", maxBatches)
+			}
+			out = objectStoreDeleteResponse{}
+			if err = client.doJSONWithTimeout(http.MethodDelete, "/v1/object-stores/"+url.PathEscape(v.ID), request, &out, 60*time.Second); err != nil {
+				return fmt.Errorf("deletion stopped; inspect `s3 show` and rerun the same confirmed command to resume: %w", err)
+			}
+			if out.Store.ID != v.ID || out.Store.Bucket != v.Bucket {
+				return fmt.Errorf("invalid deletion response target; refusing to continue")
+			}
+			if out.Deleted || !wait {
+				break
+			}
+			if !c.wantsJSON() && out.Store.Deletion != nil {
+				fmt.Fprintf(c.stderr, "Deletion in progress: at least %d objects and %d unfinished uploads removed.\n", out.Store.Deletion.DeletedObjects, out.Store.Deletion.AbortedMultipartUploads)
+			}
+			select {
+			case <-cmd.Context().Done():
+				return cmd.Context().Err()
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		return c.writeJSON(out)
+	}}
+	deleteCmd.Flags().StringVar(&confirmBucket, "confirm-bucket", "", "Exact bucket from the deletion plan")
+	deleteCmd.Flags().StringVar(&planSHA256, "plan-sha256", "", "Digest from the deletion plan")
+	deleteCmd.Flags().BoolVar(&ackExternal, "ack-no-external-writers", false, "Confirm all external writers have been stopped")
+	deleteCmd.Flags().BoolVar(&execute, "execute", false, "Required acknowledgement for permanent deletion")
+	deleteCmd.Flags().BoolVar(&wait, "wait", true, "Continue bounded deletion batches until the bucket is removed")
+	deleteCmd.Flags().IntVar(&maxBatches, "max-batches", 10000, "Maximum resumable deletion batches")
+	cmd.AddCommand(deleteCmd)
 	for _, action := range []string{"show", "enable", "disable", "usage"} {
 		action := action
 		cmd.AddCommand(&cobra.Command{Use: action + " <store>", Short: map[string]string{"show": "Show connection metadata without secrets", "enable": "Enable issuing new credentials", "disable": "Revoke all credentials and retain objects", "usage": "Measure bucket size and object count"}[action], Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {

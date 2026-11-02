@@ -2,9 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +26,7 @@ var objectStoreAccount = regexp.MustCompile(`^[a-f0-9]{32}$`)
 const objectStorageLock = "object-storage-management"
 
 const defaultObjectStorageUsageTimeout = 2 * time.Minute
+const defaultObjectStorageDeletionTimeout = 40 * time.Second
 
 func normalizeObjectStorageUsageTimeout(timeout time.Duration) time.Duration {
 	if timeout <= 0 {
@@ -240,6 +245,9 @@ func (s *Server) handleCreateObjectStore(w http.ResponseWriter, r *http.Request)
 				return err
 			}
 		}
+		if v.Status == "deleting" {
+			return store.ErrConflict
+		}
 		if v.Status == "provisioning" {
 			if err = provider.EnsureBucket(r.Context(), v.Bucket); err != nil {
 				return err
@@ -273,6 +281,9 @@ func (s *Server) handleUpdateObjectStore(w http.ResponseWriter, r *http.Request)
 		v, err = s.store.GetObjectStore(v.ID)
 		if err != nil {
 			return err
+		}
+		if v.Status == "deleting" {
+			return store.ErrConflict
 		}
 		if req.Enabled != nil {
 			if *req.Enabled {
@@ -314,6 +325,138 @@ func (s *Server) handleUpdateObjectStore(w http.ResponseWriter, r *http.Request)
 		}
 		s.appendAudit(mustPrincipal(r), "object-store.update", "object_store", v.ID, v.TenantID, map[string]string{"status": v.Status})
 		httpx.WriteJSON(w, 200, map[string]any{"store": v})
+		return nil
+	})
+}
+
+func (s *Server) objectStoreDeletionPlan(v model.ObjectStore) (model.ObjectStoreDeleteInventory, error) {
+	cfg, err := s.store.GetObjectStorageConfig()
+	if err != nil {
+		return model.ObjectStoreDeleteInventory{}, err
+	}
+	// Only explicitly provisioned application buckets are valid targets. Never
+	// accept a supplied endpoint or a backup/shared bucket as a deletion target.
+	if !objectStoreAccount.MatchString(cfg.AccountID) || v.Provider != model.DataBackendProviderCloudflareR2 || v.Bucket != "fugue-objects-"+strings.ReplaceAll(v.ID, "_", "-") || v.Endpoint != "https://"+cfg.AccountID+".r2.cloudflarestorage.com" || v.Region != "auto" {
+		return model.ObjectStoreDeleteInventory{}, store.ErrConflict
+	}
+	target, _ := json.Marshal([]string{"fugue-object-store-delete/v1", v.ID, v.TenantID, v.ProjectID, v.Name, cfg.AccountID, v.Bucket, v.Endpoint, v.CreatedAt.UTC().Format(time.RFC3339Nano)})
+	sum := sha256.Sum256(target)
+	return model.ObjectStoreDeleteInventory{ObjectCount: v.ObjectCount, Bytes: v.UsedBytes, Source: "cached", Complete: false, MeasuredAt: v.UsageMeasuredAt, PlanSHA256: hex.EncodeToString(sum[:])}, nil
+}
+
+func (s *Server) handleCreateObjectStoreDeletionPlan(w http.ResponseWriter, r *http.Request) {
+	v, ok := s.authorizedObjectStore(w, r, true)
+	if !ok {
+		return
+	}
+	s.objectStorageRun(w, r, func() error {
+		v, err := s.store.GetObjectStore(v.ID)
+		if err != nil {
+			return err
+		}
+		inventory, err := s.objectStoreDeletionPlan(v)
+		if err != nil {
+			return err
+		}
+		httpx.WriteJSON(w, http.StatusOK, model.ObjectStoreDeleteResponse{Store: v, Inventory: inventory})
+		return nil
+	})
+}
+
+func (s *Server) handleDeleteObjectStore(w http.ResponseWriter, r *http.Request) {
+	v, ok := s.authorizedObjectStore(w, r, true)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), defaultObjectStorageDeletionTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	var req struct {
+		ConfirmBucket        string `json:"confirm_bucket"`
+		PlanSHA256           string `json:"plan_sha256"`
+		AckNoExternalWriters bool   `json:"ack_no_external_writers"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil || req.ConfirmBucket == "" || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(req.PlanSHA256) || !req.AckNoExternalWriters {
+		httpx.WriteError(w, http.StatusBadRequest, "confirm_bucket, a valid plan_sha256 and ack_no_external_writers=true are required")
+		return
+	}
+	s.objectStorageRun(w, r, func() error {
+		v, err := s.store.GetObjectStore(v.ID)
+		if err != nil {
+			return err
+		}
+		if req.ConfirmBucket != v.Bucket {
+			return store.ErrConflict
+		}
+		cfg, err := s.store.GetObjectStorageConfig()
+		if err != nil {
+			return err
+		}
+		provider, err := s.objectStorageProvider(cfg)
+		if err != nil {
+			return err
+		}
+		inventory, err := s.objectStoreDeletionPlan(v)
+		if err != nil {
+			return err
+		}
+		if inventory.PlanSHA256 != req.PlanSHA256 {
+			return store.ErrConflict
+		}
+		records, err := s.store.ListObjectStorageCredentials(v.ID)
+		if err != nil {
+			return err
+		}
+		v.Status = "deleting"
+		if v.Deletion == nil {
+			v.Deletion = &model.ObjectStoreDeletionProgress{StartedAt: time.Now().UTC()}
+			s.appendAudit(mustPrincipal(r), "object-store.delete.start", "object_store", v.ID, v.TenantID, map[string]string{"bucket": v.Bucket})
+		}
+		if err = s.store.SaveObjectStore(v); err != nil {
+			return err
+		}
+		for _, rec := range records {
+			if err = s.revokeObjectStorageCredential(r.Context(), provider, v, rec); err != nil {
+				return err
+			}
+		}
+		exists, err := provider.BucketExists(r.Context(), v.Bucket)
+		if err != nil {
+			return err
+		}
+		if exists {
+			secret, err := s.store.OpenObjectStorageSecret(cfg.Secret)
+			if err != nil {
+				return err
+			}
+			secret.Token = ""
+			backend := model.DataBackend{Provider: v.Provider, Bucket: v.Bucket, Endpoint: v.Endpoint, Region: v.Region, Credentials: secret}
+			cleanup := objectstorage.EmptyBucketBatch
+			if s.cleanupObjectStoreBatch != nil {
+				cleanup = s.cleanupObjectStoreBatch
+			}
+			batch, cleanupErr := cleanup(r.Context(), backend)
+			v.Deletion.DeletedObjects += batch.DeletedObjects
+			v.Deletion.AbortedMultipartUploads += batch.AbortedMultipartUploads
+			if err = s.store.SaveObjectStore(v); err != nil {
+				return err
+			}
+			if cleanupErr != nil {
+				return cleanupErr
+			}
+			if !batch.Empty {
+				httpx.WriteJSON(w, http.StatusAccepted, model.ObjectStoreDeleteResponse{Store: v, Inventory: inventory})
+				return nil
+			}
+			if err = provider.DeleteBucket(r.Context(), v.Bucket); err != nil {
+				return err
+			}
+		}
+		if err = s.store.DeleteObjectStore(v.ID); err != nil {
+			return err
+		}
+		s.appendAudit(mustPrincipal(r), "object-store.delete", "object_store", v.ID, v.TenantID, map[string]string{"bucket": v.Bucket, "deleted_objects": strconv.FormatInt(v.Deletion.DeletedObjects, 10), "aborted_multipart_uploads": strconv.FormatInt(v.Deletion.AbortedMultipartUploads, 10)})
+		httpx.WriteJSON(w, http.StatusOK, model.ObjectStoreDeleteResponse{Store: v, Inventory: inventory, Deleted: true})
 		return nil
 	})
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"fugue/internal/model"
+	"strings"
 	"time"
 )
 
@@ -138,6 +139,102 @@ func (s *Store) SaveObjectStore(v model.ObjectStore) error {
 			}
 		}
 		st.ObjectStorage.Stores = append(st.ObjectStorage.Stores, v)
+		return nil
+	})
+}
+
+// DeleteObjectStore removes the durable metadata after the provider bucket
+// has already been emptied and deleted. Credentials are removed first so the
+// foreign-key relationship is safe in both PostgreSQL and file-backed state.
+func (s *Store) DeleteObjectStore(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return mapDBErr(err)
+		}
+		defer tx.Rollback()
+		var raw []byte
+		if err = tx.QueryRowContext(ctx, "SELECT body FROM fugue_object_stores WHERE id=$1 FOR UPDATE", id).Scan(&raw); err != nil {
+			return mapDBErr(err)
+		}
+		var v model.ObjectStore
+		if err = json.Unmarshal(raw, &v); err != nil {
+			return err
+		}
+		if v.Status != "deleting" {
+			return ErrConflict
+		}
+		rows, err := tx.QueryContext(ctx, "SELECT body FROM fugue_object_storage_credentials WHERE store_id=$1 FOR UPDATE", id)
+		if err != nil {
+			return mapDBErr(err)
+		}
+		for rows.Next() {
+			var rec model.ObjectStorageCredentialRecord
+			if err = rows.Scan(&raw); err == nil {
+				err = json.Unmarshal(raw, &rec)
+			}
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			if rec.Credential.Status != "revoked" {
+				rows.Close()
+				return ErrConflict
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, "DELETE FROM fugue_object_storage_credentials WHERE store_id=$1", id); err != nil {
+			return mapDBErr(err)
+		}
+		result, err := tx.ExecContext(ctx, "DELETE FROM fugue_object_stores WHERE id=$1", id)
+		if err != nil {
+			return mapDBErr(err)
+		}
+		if n, err := result.RowsAffected(); err != nil {
+			return mapDBErr(err)
+		} else if n == 0 {
+			return ErrNotFound
+		}
+		return mapDBErr(tx.Commit())
+	}
+	return s.withLockedState(true, func(st *model.State) error {
+		for _, rec := range st.ObjectStorage.Credentials {
+			if rec.Credential.StoreID == id && rec.Credential.Status != "revoked" {
+				return ErrConflict
+			}
+		}
+		found := false
+		for i := range st.ObjectStorage.Stores {
+			if st.ObjectStorage.Stores[i].ID != id {
+				continue
+			}
+			if st.ObjectStorage.Stores[i].Status != "deleting" {
+				return ErrConflict
+			}
+			found = true
+			st.ObjectStorage.Stores = append(st.ObjectStorage.Stores[:i], st.ObjectStorage.Stores[i+1:]...)
+			break
+		}
+		if !found {
+			return ErrNotFound
+		}
+		kept := st.ObjectStorage.Credentials[:0]
+		for _, rec := range st.ObjectStorage.Credentials {
+			if rec.Credential.StoreID != id {
+				kept = append(kept, rec)
+			}
+		}
+		st.ObjectStorage.Credentials = kept
 		return nil
 	})
 }

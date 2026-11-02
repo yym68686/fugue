@@ -80,4 +80,28 @@ func TestObjectStoragePostgresIntegration(t *testing.T) {
 	if _, err = s.DeleteTenant(tenant.ID); err == nil {
 		t.Fatal("deleted owner while object store exists")
 	}
+	if err = s.DeleteObjectStore(v.ID); !errors.Is(err, ErrConflict) {
+		t.Fatal("deleted active metadata", err)
+	}
+	v.Status = "deleting"
+	if err = s.SaveObjectStore(v); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DeleteObjectStore(v.ID); !errors.Is(err, ErrConflict) {
+		t.Fatal("deleted metadata with active grant", err)
+	}
+	rec.Credential.Status = "revoked"
+	rec.Secret = model.DataBackendSecret{}
+	if err = s.SaveObjectStorageCredential(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DeleteObjectStore(v.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.GetObjectStore(v.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("store metadata retained", err)
+	}
+	if grants, err = s.ListObjectStorageCredentials(v.ID); err != nil || len(grants) != 0 {
+		t.Fatal("grants retained", err)
+	}
 }

@@ -136,7 +136,7 @@ func commandEffect(cmd *cobra.Command) string {
 		return "may_change_state"
 	}
 	switch cmd.Name() {
-	case "ls", "list", "show", "get", "status", "overview", "history", "versions", "version", "timeline", "evidence", "usage", "meta", "tables", "schema", "requests", "traces", "metrics", "inventory", "result", "search", "logs", "export", "download", "help":
+	case "ls", "list", "show", "get", "status", "overview", "history", "versions", "version", "timeline", "evidence", "usage", "meta", "tables", "schema", "requests", "traces", "metrics", "inventory", "result", "search", "logs", "export", "download", "help", "deletion-plan":
 		return "read"
 	case "watch", "wait", "console", "cockpit", "top":
 		return "observe"
