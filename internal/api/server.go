@@ -154,6 +154,7 @@ type Server struct {
 	openAppDatabase                        func(driverName, dsn string) (*sql.DB, error)
 	appDatabaseImportRunner                func(context.Context, model.AppDatabaseImportJob) (string, error)
 	backupRunner                           func(context.Context, model.BackupRun) ([]model.BackupArtifact, error)
+	newBackupLonghornClient                func(string) (*kubeLogsClient, error)
 	newBackupCoordinationLease             controlPlaneBackupCoordinationLeaseFactory
 	dialAppDatabaseTunnel                  func(context.Context, string, string) (net.Conn, error)
 	dnsResolver                            appDomainDNSResolver
@@ -320,16 +321,17 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		newFilesystemPodLister: func(namespace string) (filesystemPodLister, error) {
 			return newKubeLogsClient(namespace)
 		},
-		filesystemExecRunner: kubeFilesystemExecRunner{},
-		appProxyTransport:    newDefaultAppProxyTransport(),
-		appRequestHTTPClient: newAppDiagnosticHTTPClient(),
-		openAppDatabase:      openAppDiagnosticDatabase,
-		backupRunner:         nil,
-		dnsResolver:          netAppDomainResolver{},
-		dnsDelegationProbe:   defaultDNSDelegationProbe,
-		dnsParentNSLookup:    defaultDNSParentNSLookup,
-		logStreamTuning:      defaultLogStreamTuning(),
-		oomRightSizingEvents: map[string]time.Time{},
+		filesystemExecRunner:    kubeFilesystemExecRunner{},
+		appProxyTransport:       newDefaultAppProxyTransport(),
+		appRequestHTTPClient:    newAppDiagnosticHTTPClient(),
+		openAppDatabase:         openAppDiagnosticDatabase,
+		backupRunner:            nil,
+		newBackupLonghornClient: newKubeLogsClient,
+		dnsResolver:             netAppDomainResolver{},
+		dnsDelegationProbe:      defaultDNSDelegationProbe,
+		dnsParentNSLookup:       defaultDNSParentNSLookup,
+		logStreamTuning:         defaultLogStreamTuning(),
+		oomRightSizingEvents:    map[string]time.Time{},
 	}
 	if server.registryPullBase == "" {
 		server.registryPullBase = server.registryPushBase

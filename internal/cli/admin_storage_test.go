@@ -34,6 +34,53 @@ func TestAdminStorageCommandsAreReadOnlyAndKeepUnknownSources(t *testing.T) {
 	}
 }
 
+func TestAdminOrphanManifestAdoptionUsesBothPreviewVersions(t *testing.T) {
+	for _, mode := range []string{"preview", "confirm", "blocked", "missing-version"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/storage/orphan-manifests/adopt" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL)
+				}
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				execute, _ := body["execute"].(bool)
+				if calls == 1 && execute {
+					t.Error("first request must preview")
+				}
+				if calls == 2 && (!execute || body["expected_etag"] != "manifest-version" || body["expected_config_etag"] != "config-version") {
+					t.Error("execution omitted preview identity")
+				}
+				version := "config-version"
+				if mode == "missing-version" {
+					version = ""
+				}
+				json.NewEncoder(w).Encode(map[string]any{"adoption": map[string]any{"can_adopt": mode != "blocked", "etag": "manifest-version", "config_etag": version, "executed": execute, "protected": true, "restore_verification": "not_run", "blockers": []string{}}})
+			}))
+			defer srv.Close()
+			args := []string{"--base-url", srv.URL, "--token", "test", "admin", "storage", "orphan-manifest", "adopt", "backup_run_fixture", "--object-key", "backup-root/control-plane/backup_run_fixture/manifest.json", "--json"}
+			if mode != "preview" {
+				args = append(args, "--confirm")
+			}
+			var stdout, stderr bytes.Buffer
+			err := runWithStreams(args, &stdout, &stderr)
+			if (err != nil) != (mode == "blocked" || mode == "missing-version") {
+				t.Fatalf("mode=%s error=%v", mode, err)
+			}
+			wantCalls := 1
+			if mode == "confirm" {
+				wantCalls = 2
+			}
+			if calls != wantCalls {
+				t.Fatalf("calls=%d want=%d", calls, wantCalls)
+			}
+		})
+	}
+}
+
 func TestAdminOrphanManifestCleanupPreviewsAndRechecksBeforeDelete(t *testing.T) {
 	for _, test := range []struct {
 		name             string

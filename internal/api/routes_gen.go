@@ -108,6 +108,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/admin/security/key-rotation", s.auth.RequireAPI(http.HandlerFunc(s.handlePreflightKeyRotation)))
 	mux.Handle("GET /v1/admin/ssh/front-acknowledgements/{edge_id}/{instance_uid}", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminGetSSHFrontAcknowledgement)))
 	mux.Handle("GET /v1/admin/storage", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAdminStorageOverview)))
+	mux.Handle("POST /v1/admin/storage/orphan-manifests/adopt", s.auth.RequireAPI(http.HandlerFunc(s.handleAdoptOrphanManifest)))
 	mux.Handle("POST /v1/admin/storage/orphan-manifests/cleanup", s.auth.RequireAPI(http.HandlerFunc(s.handleCleanupOrphanManifest)))
 	mux.Handle("GET /v1/admin/tls-issuance/policy", s.auth.RequireAPI(http.HandlerFunc(s.handleGetTLSIssuancePolicy)))
 	mux.Handle("PUT /v1/admin/tls-issuance/policy", s.auth.RequireAPI(http.HandlerFunc(s.handlePutTLSIssuancePolicy)))

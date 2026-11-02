@@ -124,6 +124,33 @@ observed ETag immediately before deleting the exact key. A still-present Longhor
 ambiguous inventory, missing manifest identity, or any other run object blocks
 cleanup. Fugue never deletes Longhorn repository blocks through this command.
 
+When a control-plane Longhorn backup completed remotely but its artifact could
+not be persisted, reconcile it without deleting remote data:
+
+```
+fugue admin storage orphan-manifest adopt <backup-run-id> \
+  --object-key <exact-physical-r2-key>
+fugue admin storage orphan-manifest adopt <backup-run-id> \
+  --object-key <exact-physical-r2-key> --confirm
+```
+
+This platform-admin operation verifies the failed/canceled run, lack of any
+artifact (including retired records), manifest ownership, matching Completed
+Longhorn resource, available target, and the remote repository config identity
+and block-map structure. Both source ETags are bound to the preview and rechecked
+before an atomic record insertion. It uses the same 24-hour grace period as
+cleanup. A changed run, active lease, source-version change, or duplicate remote
+reference fails closed. Remote objects are read-only throughout the operation.
+
+The recovered artifact is **protected** from automatic retention and deletion.
+Its creation time remains the original backup time; the failed run keeps its
+status and error while its artifact and byte counters are reconciled. Platform
+targets have no synthetic application foreign key. Provenance includes source
+ETags, repository config SHA-256, and `restore_verification=not_run`. Repository
+identity verification is not a complete block checksum audit or a PostgreSQL
+restore drill. The CLI does not yet release artifact protection; keep the
+record protected until a separate verified recovery/retirement workflow exists.
+
 ## Verification
 
 Normal tests use an isolated fake provider and file-backed state. The opt-in

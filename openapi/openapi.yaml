@@ -13932,6 +13932,38 @@ paths:
                   - $ref: '#/components/schemas/ErrorResponse'
         default:
           $ref: '#/components/responses/ErrorResponse'
+  /v1/admin/storage/orphan-manifests/adopt:
+    post:
+      operationId: adoptAdminOrphanManifest
+      summary: Reconcile a completed unregistered control-plane Longhorn backup
+      description: Platform administrators only. Preview by default. Execution requires the reviewed manifest and repository config ETags. Creates a protected artifact for a failed or canceled run with no artifacts, preserving the run failure and the remote objects. Repository identity is verified; this does not perform or certify a database restore. The artifact records restore_verification=not_run and is excluded from automatic retention.
+      tags: [Object Storage, Admin]
+      x-fugue-handler: handleAdoptOrphanManifest
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminOrphanManifestAdoptRequest'
+      responses:
+        '200':
+          description: Reconciliation preview or completed protected registration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminOrphanManifestAdoptResponse'
+        '409':
+          description: Reconciliation checks failed or another reconciliation is in progress
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/AdminOrphanManifestAdoptResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
   /v1/admin/object-storage:
     get:
       operationId: getObjectStorageConfig
@@ -17560,6 +17592,39 @@ components:
       required: [cleanup]
       properties:
         cleanup: {$ref: '#/components/schemas/AdminOrphanManifestCleanup'}
+    AdminOrphanManifestAdoptRequest:
+      type: object
+      additionalProperties: false
+      required: [run_id, object_key]
+      properties:
+        run_id: {type: string}
+        object_key: {type: string}
+        expected_etag: {type: string, description: Manifest ETag from preview; required for execution.}
+        expected_config_etag: {type: string, description: Longhorn repository config ETag from preview; required for execution.}
+        execute: {type: boolean, default: false}
+    AdminOrphanManifestAdopt:
+      type: object
+      required: [run_id, object_key, run_status, can_adopt, executed, blockers, protected, restore_verification]
+      properties:
+        run_id: {type: string}
+        object_key: {type: string}
+        run_status: {type: string}
+        etag: {type: string}
+        config_etag: {type: string}
+        remote_state: {type: string}
+        can_adopt: {type: boolean}
+        executed: {type: boolean}
+        artifact_id: {type: string}
+        protected: {type: boolean}
+        restore_verification: {type: string, enum: [not_run]}
+        block_mapping_count: {type: integer}
+        blockers: {type: array, items: {type: string}}
+        message: {type: string}
+    AdminOrphanManifestAdoptResponse:
+      type: object
+      required: [adoption]
+      properties:
+        adoption: {$ref: '#/components/schemas/AdminOrphanManifestAdopt'}
     ObjectStore:
       type: object
       required: [id, tenant_id, project_id, name, provider, bucket, endpoint, region, status, quota_bytes, created_at, updated_at]

@@ -48,7 +48,7 @@ func (c *CLI) newAdminStorageCommand() *cobra.Command {
 func (c *CLI) newAdminOrphanManifestCommand() *cobra.Command {
 	var objectKey string
 	var confirm bool
-	cmd := &cobra.Command{Use: "orphan-manifest", Short: "Preview and conditionally remove one reconciled orphan backup manifest"}
+	cmd := &cobra.Command{Use: "orphan-manifest", Short: "Reconcile, protect or safely remove one unregistered backup manifest"}
 	cleanup := &cobra.Command{
 		Use:   "cleanup RUN_ID",
 		Short: "Reconcile an orphan manifest, then remove it only if every safety check passes",
@@ -97,6 +97,63 @@ func (c *CLI) newAdminOrphanManifestCommand() *cobra.Command {
 	cleanup.Flags().StringVar(&objectKey, "object-key", "", "Exact physical R2 manifest key returned by reconciliation")
 	cleanup.Flags().BoolVar(&confirm, "confirm", false, "Delete only after the server-side reconciliation preview passes")
 	cmd.AddCommand(cleanup)
+	cmd.AddCommand(c.newAdminOrphanManifestAdoptCommand())
+	return cmd
+}
+
+func (c *CLI) newAdminOrphanManifestAdoptCommand() *cobra.Command {
+	var objectKey string
+	var confirm bool
+	cmd := &cobra.Command{
+		Use: "adopt RUN_ID", Short: "Register a completed control-plane Longhorn backup as protected; preview by default",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(objectKey) == "" {
+				return fmt.Errorf("--object-key is required")
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			request := map[string]any{"run_id": args[0], "object_key": objectKey, "execute": false}
+			var response map[string]any
+			if err := client.doJSON(http.MethodPost, "/v1/admin/storage/orphan-manifests/adopt", request, &response); err != nil {
+				return err
+			}
+			adoption, _ := response["adoption"].(map[string]any)
+			canAdopt, _ := adoption["can_adopt"].(bool)
+			if confirm && canAdopt {
+				if adoption["etag"] == nil || adoption["etag"] == "" || adoption["config_etag"] == nil || adoption["config_etag"] == "" {
+					return fmt.Errorf("server preview omitted required source ETags")
+				}
+				request["execute"], request["expected_etag"], request["expected_config_etag"] = true, adoption["etag"], adoption["config_etag"]
+				if err := client.doJSON(http.MethodPost, "/v1/admin/storage/orphan-manifests/adopt", request, &response); err != nil {
+					return err
+				}
+				adoption, _ = response["adoption"].(map[string]any)
+			}
+			if c.wantsJSON() {
+				if err := c.writeJSON(response); err != nil {
+					return err
+				}
+			} else {
+				fmt.Fprintf(c.stdout, "Run: %v\nRemote state: %v\nCan adopt: %v\nExecuted: %v\nProtected: %v\nRestore verification: %v\n", adoption["run_id"], adoption["remote_state"], adoption["can_adopt"], adoption["executed"], adoption["protected"], adoption["restore_verification"])
+				if id, _ := adoption["artifact_id"].(string); id != "" {
+					fmt.Fprintf(c.stdout, "Artifact: %s\n", id)
+				}
+				if blockers := stringList(adoption["blockers"]); len(blockers) > 0 {
+					fmt.Fprintf(c.stdout, "Blockers: %s\n", strings.Join(blockers, "; "))
+				}
+				fmt.Fprintf(c.stdout, "%v\n", adoption["message"])
+			}
+			if confirm && !canAdopt {
+				return fmt.Errorf("refusing orphan manifest adoption: %s", strings.Join(stringList(adoption["blockers"]), "; "))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&objectKey, "object-key", "", "Exact physical R2 manifest key")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "Register a protected artifact after rechecking both source ETags; does not certify recovery")
 	return cmd
 }
 

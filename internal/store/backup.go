@@ -1465,7 +1465,7 @@ func (s *Store) UpdateBackupRun(id string, update BackupRunUpdate) (model.Backup
 }
 
 func (s *Store) CreateBackupArtifact(artifact model.BackupArtifact) (model.BackupArtifact, error) {
-	return s.createBackupArtifact(artifact, "")
+	return s.createBackupArtifact(artifact, "", nil)
 }
 
 // CreateBackupArtifactForRun persists an artifact only while the creating
@@ -1476,20 +1476,74 @@ func (s *Store) CreateBackupArtifactForRun(artifact model.BackupArtifact, leaseO
 	if artifact.RunID == "" || leaseOwner == "" {
 		return model.BackupArtifact{}, ErrInvalidInput
 	}
-	return s.createBackupArtifact(artifact, leaseOwner)
+	return s.createBackupArtifact(artifact, leaseOwner, nil)
 }
 
-func (s *Store) createBackupArtifact(artifact model.BackupArtifact, leaseOwner string) (model.BackupArtifact, error) {
+// AdoptBackupArtifact registers a protected remote artifact without rewriting a
+// terminal run's failure. The observed run and absence of artifacts are checked
+// atomically with the insert; retries cannot duplicate or resurrect artifacts.
+func (s *Store) AdoptBackupArtifact(artifact model.BackupArtifact, observedRun model.BackupRun) (model.BackupArtifact, error) {
+	if artifact.RunID == "" || artifact.RunID != observedRun.ID || !artifact.Protected || artifact.Status != model.BackupArtifactStatusActive || artifact.BackendID != observedRun.BackendID || artifact.PolicyID != observedRun.PolicyID || artifact.Target.Type != model.BackupTargetControlPlaneDatabase || artifact.Kind != model.BackupArtifactKindLonghornSnapshot || artifact.AppID != "" || artifact.TenantID != "" || artifact.ProjectID != "" {
+		return model.BackupArtifact{}, ErrInvalidInput
+	}
+	return s.createBackupArtifact(artifact, "", &observedRun)
+}
+
+// Include retired artifacts: adoption must not resurrect a deliberately
+// deleted backup under a different run or manifest key.
+func (s *Store) BackupArtifactExistsForLonghornURL(backupURL string) (bool, error) {
+	if backupURL == "" {
+		return false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		var exists bool
+		err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_backup_artifacts WHERE kind = 'longhorn-snapshot' AND manifest_json->'metadata'->>'longhorn_backup_url' = $1)`, backupURL).Scan(&exists)
+		return exists, err
+	}
+	exists := false
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, artifact := range state.BackupArtifacts {
+			if artifact.Kind == model.BackupArtifactKindLonghornSnapshot && artifact.Manifest.Metadata["longhorn_backup_url"] == backupURL {
+				exists = true
+				break
+			}
+		}
+		return nil
+	})
+	return exists, err
+}
+
+func validateBackupAdoptionRun(run, observed model.BackupRun, now time.Time) error {
+	if run.ID != observed.ID || !run.UpdatedAt.Equal(observed.UpdatedAt) || run.Status != observed.Status || (run.Status != model.BackupRunStatusFailed && run.Status != model.BackupRunStatusCanceled) || run.BackendID != observed.BackendID || run.PolicyID != observed.PolicyID || run.ArtifactCount != 0 || run.BytesWritten != 0 || run.LogicalBytes != 0 || (run.LockedUntil != nil && run.LockedUntil.After(now)) {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (s *Store) createBackupArtifact(artifact model.BackupArtifact, leaseOwner string, observedRun *model.BackupRun) (model.BackupArtifact, error) {
 	artifact = model.NormalizeBackupArtifact(artifact)
 	if artifact.Kind == "" || artifact.Target.Type == "" {
 		return model.BackupArtifact{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgCreateBackupArtifact(artifact, leaseOwner)
+		return s.pgCreateBackupArtifact(artifact, leaseOwner, observedRun)
 	}
 	var created model.BackupArtifact
 	err := s.withLockedState(true, func(state *model.State) error {
 		now := time.Now().UTC()
+		if observedRun != nil {
+			runIndex := findBackupRun(state, artifact.RunID)
+			if runIndex < 0 || validateBackupAdoptionRun(state.BackupRuns[runIndex], *observedRun, now) != nil {
+				return ErrConflict
+			}
+			for _, existing := range state.BackupArtifacts {
+				if existing.RunID == artifact.RunID {
+					return ErrConflict
+				}
+			}
+		}
 		if leaseOwner != "" {
 			runIndex := findBackupRun(state, artifact.RunID)
 			if runIndex < 0 {
@@ -4607,7 +4661,7 @@ WHERE id = $1
 RETURNING `+backupRunReturningColumns(), current.ID, current.Status, current.LeaseOwner, current.LockedUntil, current.HeartbeatAt, current.BytesWritten, current.LogicalBytes, current.ArtifactCount, current.ErrorCode, current.ErrorMessage, current.NextRetryAt, current.UpdatedAt, current.StartedAt, current.FinishedAt))
 }
 
-func (s *Store) pgCreateBackupArtifact(artifact model.BackupArtifact, leaseOwner string) (model.BackupArtifact, error) {
+func (s *Store) pgCreateBackupArtifact(artifact model.BackupArtifact, leaseOwner string, observedRun *model.BackupRun) (model.BackupArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	artifact = model.NormalizeBackupArtifact(artifact)
@@ -4617,6 +4671,22 @@ func (s *Store) pgCreateBackupArtifact(artifact model.BackupArtifact, leaseOwner
 		return model.BackupArtifact{}, err
 	}
 	defer tx.Rollback()
+	if observedRun != nil {
+		run, err := scanBackupRun(tx.QueryRowContext(ctx, backupRunSelectSQL()+` WHERE id = $1 FOR UPDATE`, artifact.RunID))
+		if err != nil {
+			return model.BackupArtifact{}, err
+		}
+		if err := validateBackupAdoptionRun(run, *observedRun, now); err != nil {
+			return model.BackupArtifact{}, err
+		}
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_backup_artifacts WHERE run_id = $1)`, artifact.RunID).Scan(&exists); err != nil {
+			return model.BackupArtifact{}, err
+		}
+		if exists {
+			return model.BackupArtifact{}, ErrConflict
+		}
+	}
 	if leaseOwner != "" {
 		var runPolicyID sql.NullString
 		err := tx.QueryRowContext(ctx, `

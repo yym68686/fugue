@@ -14,6 +14,10 @@ type commandHelpDoc struct {
 }
 
 var commandHelpDocOverrides = map[string]commandHelpDoc{
+	"fugue admin storage orphan-manifest adopt": {
+		Long:    "Preview reconciliation for an unregistered completed control-plane Longhorn backup. With --confirm, verify both source ETags and register a protected artifact. The original failed run and remote data are preserved. Protection excludes this artifact from automatic retention and deletion. This is metadata reconciliation, not a database restore test; restore_verification remains not_run.",
+		Example: "fugue admin storage orphan-manifest adopt backup_run_123 --object-key backup-root/control-plane/backup_run_123/manifest.json\nfugue admin storage orphan-manifest adopt backup_run_123 --object-key backup-root/control-plane/backup_run_123/manifest.json --confirm",
+	},
 	"fugue admin storage orphan-manifest cleanup": {
 		Long:    "Preview reconciliation for one exact physical backup manifest key. Execution requires --confirm, rechecks the preview ETag, and refuses recoverable Longhorn backups or ambiguous ownership. This never deletes repository blocks. Stop external writers to this terminal backup key before confirming.",
 		Example: "fugue admin storage orphan-manifest cleanup backup_run_123 --object-key backup-root/control-plane/backup_run_123/manifest.json\nfugue admin storage orphan-manifest cleanup backup_run_123 --object-key backup-root/control-plane/backup_run_123/manifest.json --confirm",

@@ -42,6 +42,9 @@ type orphanManifestCleanupResult struct {
 	Executed    bool     `json:"executed"`
 	Blockers    []string `json:"blockers"`
 	Message     string   `json:"message,omitempty"`
+	manifest    model.BackupManifest
+	run         model.BackupRun
+	logicalKey  string
 }
 
 const orphanManifestCleanupGrace = 24 * time.Hour
@@ -113,6 +116,12 @@ func (s *Server) handleCleanupOrphanManifest(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) inspectOrphanManifest(ctx context.Context, req orphanManifestCleanupRequest) (orphanManifestCleanupResult, error) {
+	return s.inspectUnregisteredManifest(ctx, req, false)
+}
+
+// Adoption shares the ownership checks, but checks remote presence separately.
+// It must never reuse the cleanup eligibility result as deletion authority.
+func (s *Server) inspectUnregisteredManifest(ctx context.Context, req orphanManifestCleanupRequest, adoption bool) (orphanManifestCleanupResult, error) {
 	runID := strings.TrimSpace(req.RunID)
 	physicalKey := req.ObjectKey
 	result := orphanManifestCleanupResult{RunID: runID, ObjectKey: physicalKey, Blockers: []string{}}
@@ -121,6 +130,7 @@ func (s *Server) inspectOrphanManifest(ctx context.Context, req orphanManifestCl
 		return result, fmt.Errorf("load backup run: %w", err)
 	}
 	run = model.NormalizeBackupRun(run)
+	result.run = run
 	result.RunStatus = run.Status
 	result.BackendID = run.BackendID
 	if run.Status != model.BackupRunStatusFailed && run.Status != model.BackupRunStatusCanceled {
@@ -179,6 +189,7 @@ func (s *Server) inspectOrphanManifest(ctx context.Context, req orphanManifestCl
 			return result, fmt.Errorf("open backup backend: %w", e)
 		}
 		logicalKey, ok := objectBackend.logicalObjectKey(physicalKey)
+		result.logicalKey = logicalKey
 		if !ok {
 			result.Blockers = append(result.Blockers, "object is outside the configured backup namespace")
 		} else if !orphanManifestLogicalKeyAllowed(run, logicalKey) {
@@ -266,7 +277,8 @@ func (s *Server) inspectOrphanManifest(ctx context.Context, req orphanManifestCl
 			}
 		}
 	}
-	if model.NormalizeBackupTarget(run.Target).Engine == model.BackupEngineLonghornSnapshot {
+	result.manifest = manifest
+	if !adoption && model.NormalizeBackupTarget(run.Target).Engine == model.BackupEngineLonghornSnapshot {
 		remoteState, remoteExists, remoteErr := s.inspectOrphanLonghornRemote(ctx, runID, manifest)
 		result.RemoteState = remoteState
 		if remoteErr != nil {
@@ -279,7 +291,7 @@ func (s *Server) inspectOrphanManifest(ctx context.Context, req orphanManifestCl
 			result.Blockers = append(result.Blockers, err.Error())
 		}
 	}
-	result.CanDelete = len(result.Blockers) == 0
+	result.CanDelete = !adoption && len(result.Blockers) == 0
 	if result.CanDelete {
 		result.Message = "preview passed; execution would delete exactly one unreferenced manifest"
 	}
