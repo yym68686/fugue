@@ -2,8 +2,10 @@ package cli
 
 import (
 	"fmt"
-	"github.com/spf13/cobra"
 	"net/http"
+	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 func (c *CLI) newAdminStorageCommand() *cobra.Command {
@@ -39,5 +41,84 @@ func (c *CLI) newAdminStorageCommand() *cobra.Command {
 			return nil
 		}})
 	}
+	cmd.AddCommand(c.newAdminOrphanManifestCommand())
 	return cmd
+}
+
+func (c *CLI) newAdminOrphanManifestCommand() *cobra.Command {
+	var objectKey string
+	var confirm bool
+	cmd := &cobra.Command{Use: "orphan-manifest", Short: "Preview and conditionally remove one reconciled orphan backup manifest"}
+	cleanup := &cobra.Command{
+		Use:   "cleanup RUN_ID",
+		Short: "Reconcile an orphan manifest, then remove it only if every safety check passes",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(objectKey) == "" {
+				return fmt.Errorf("--object-key is required")
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			request := map[string]any{"run_id": args[0], "object_key": objectKey, "execute": false}
+			var preview map[string]any
+			if err := client.doJSON(http.MethodPost, "/v1/admin/storage/orphan-manifests/cleanup", request, &preview); err != nil {
+				return err
+			}
+			cleanup, _ := preview["cleanup"].(map[string]any)
+			canDelete, _ := cleanup["can_delete"].(bool)
+			if !confirm || !canDelete {
+				if c.wantsJSON() {
+					if err := c.writeJSON(preview); err != nil {
+						return err
+					}
+				} else {
+					c.printOrphanManifestCleanup(preview, confirm)
+				}
+				if confirm && !canDelete {
+					return fmt.Errorf("refusing orphan manifest cleanup: %s", strings.Join(stringList(cleanup["blockers"]), "; "))
+				}
+				return nil
+			}
+			request["execute"] = true
+			request["expected_etag"] = cleanup["etag"]
+			var executed map[string]any
+			if err := client.doJSON(http.MethodPost, "/v1/admin/storage/orphan-manifests/cleanup", request, &executed); err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return c.writeJSON(executed)
+			}
+			c.printOrphanManifestCleanup(executed, true)
+			return nil
+		},
+	}
+	cleanup.Flags().StringVar(&objectKey, "object-key", "", "Exact physical R2 manifest key returned by reconciliation")
+	cleanup.Flags().BoolVar(&confirm, "confirm", false, "Delete only after the server-side reconciliation preview passes")
+	cmd.AddCommand(cleanup)
+	return cmd
+}
+
+func stringList(value any) []string {
+	items, _ := value.([]any)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func (c *CLI) printOrphanManifestCleanup(response map[string]any, confirm bool) {
+	cleanup, _ := response["cleanup"].(map[string]any)
+	fmt.Fprintf(c.stdout, "Orphan manifest: %v\nObject: %v\nRun status: %v\nRemote state: %v\nCan delete: %v\nExecuted: %v\n", cleanup["run_id"], cleanup["object_key"], cleanup["run_status"], cleanup["remote_state"], cleanup["can_delete"], cleanup["executed"])
+	if blockers := stringList(cleanup["blockers"]); len(blockers) > 0 {
+		fmt.Fprintf(c.stdout, "Blockers: %s\n", strings.Join(blockers, "; "))
+	} else if confirm {
+		fmt.Fprintln(c.stdout, "Cleanup completed after the conditional recheck.")
+	} else {
+		fmt.Fprintln(c.stdout, "Preview passed; use --confirm to execute the conditional cleanup.")
+	}
 }

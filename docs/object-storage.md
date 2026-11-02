@@ -105,6 +105,25 @@ through this engine-aware flow. Failed steps keep the manifest and remain
 retryable. Untracked remote backups are displayed but never automatically
 deleted; reconcile ownership before planning any manual retirement.
 
+For an orphaned backup manifest, use the explicit one-object cleanup command:
+
+```
+fugue admin storage orphan-manifest cleanup <backup-run-id> \
+  --object-key <exact-physical-r2-key>
+fugue admin storage orphan-manifest cleanup <backup-run-id> \
+  --object-key <exact-physical-r2-key> --confirm
+```
+
+The first invocation is preview-only. The server requires a failed/canceled
+database run older than 24 hours, no registered artifact, zero persisted
+bytes/artifacts, and a valid matching manifest as the sole object under that run.
+For Longhorn snapshots, both the complete remote inventory and the exact
+repository backup configuration must confirm absence.
+Execution repeats all checks under a platform-wide lock and rechecks the
+observed ETag immediately before deleting the exact key. A still-present Longhorn Backup,
+ambiguous inventory, missing manifest identity, or any other run object blocks
+cleanup. Fugue never deletes Longhorn repository blocks through this command.
+
 ## Verification
 
 Normal tests use an isolated fake provider and file-backed state. The opt-in

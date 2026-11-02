@@ -47,6 +47,7 @@ type dataObjectInfo struct {
 	Key          string
 	Size         int64
 	LastModified time.Time
+	ETag         string
 }
 
 func newDataObjectBackend(backend model.DataBackend) (*dataObjectBackend, error) {
@@ -167,7 +168,7 @@ func (b *dataObjectBackend) headObject(ctx context.Context, objectKey string) (b
 func (b *dataObjectBackend) headObjectInfo(ctx context.Context, objectKey string) (dataObjectInfo, bool, error) {
 	resp, err := b.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(b.backend.Bucket), Key: aws.String(b.objectKey(objectKey))})
 	if err == nil {
-		return dataObjectInfo{Key: b.objectKey(objectKey), Size: aws.ToInt64(resp.ContentLength), LastModified: aws.ToTime(resp.LastModified)}, true, nil
+		return dataObjectInfo{Key: b.objectKey(objectKey), Size: aws.ToInt64(resp.ContentLength), LastModified: aws.ToTime(resp.LastModified), ETag: strings.Trim(aws.ToString(resp.ETag), `"`)}, true, nil
 	}
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
@@ -552,6 +553,27 @@ func (b *dataObjectBackend) deleteLogicalObjects(ctx context.Context, keys []str
 		physical = append(physical, b.objectKey(key))
 	}
 	return b.deleteObjects(ctx, physical)
+}
+
+// deleteObjectIfMatch rechecks the object identity immediately before issuing
+// the exact-key deletion. R2's S3 API does not document conditional DELETE,
+// so the platform-wide cleanup lock and the terminal, immutable backup-run key
+// are also required to keep Fugue writers from replacing the object here.
+func (b *dataObjectBackend) deleteObjectIfMatch(ctx context.Context, physicalKey, etag string) error {
+	etag = strings.Trim(strings.TrimSpace(etag), `"`)
+	logicalKey, ok := b.logicalObjectKey(physicalKey)
+	if !ok || etag == "" {
+		return errors.New("conditional object deletion requires a canonical object key in this backend and an ETag")
+	}
+	current, exists, err := b.headObjectInfo(ctx, logicalKey)
+	if err != nil {
+		return fmt.Errorf("recheck object before deletion: %w", err)
+	}
+	if !exists || current.ETag != etag {
+		return errors.New("object changed or disappeared after preview; refusing deletion")
+	}
+	_, err = b.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(b.backend.Bucket), Key: aws.String(physicalKey)})
+	return err
 }
 
 func (b *dataObjectBackend) deleteObjectBatch(ctx context.Context, batch []string) error {

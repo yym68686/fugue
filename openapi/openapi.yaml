@@ -13900,6 +13900,38 @@ paths:
                 $ref: '#/components/schemas/AdminStorageOverview'
         default:
           $ref: '#/components/responses/ErrorResponse'
+  /v1/admin/storage/orphan-manifests/cleanup:
+    post:
+      operationId: cleanupAdminOrphanManifest
+      summary: Preview or safely remove one orphan backup manifest
+      description: Platform administrators only. The server re-runs reconciliation and deletes at most the exact requested manifest, only when the failed run has no registered artifact, no persisted bytes, no remaining run objects, no recoverable Longhorn remote backup, and the object ETag still matches. Send execute=true only after reviewing the preview.
+      tags: [Object Storage, Admin]
+      x-fugue-handler: handleCleanupOrphanManifest
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminOrphanManifestCleanupRequest'
+      responses:
+        '200':
+          description: Preview or completed conditional deletion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminOrphanManifestCleanupResponse'
+        '409':
+          description: Safety checks failed or another cleanup is in progress
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/AdminOrphanManifestCleanupResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
   /v1/admin/object-storage:
     get:
       operationId: getObjectStorageConfig
@@ -17500,6 +17532,34 @@ components:
         namespaces: {type: array, items: {$ref: '#/components/schemas/AdminStorageNamespace'}}
         longhorn: {type: array, items: {$ref: '#/components/schemas/AdminStorageLonghornEntry'}}
         backup_usage: {$ref: '#/components/schemas/BackupUsage'}
+    AdminOrphanManifestCleanupRequest:
+      type: object
+      additionalProperties: false
+      required: [run_id, object_key]
+      properties:
+        run_id: {type: string}
+        object_key: {type: string}
+        expected_etag: {type: string, description: Required for execution; must match the reviewed preview.}
+        execute: {type: boolean, default: false}
+    AdminOrphanManifestCleanup:
+      type: object
+      required: [run_id, object_key, run_status, can_delete, executed, blockers]
+      properties:
+        run_id: {type: string}
+        object_key: {type: string}
+        size_bytes: {type: integer, format: int64}
+        etag: {type: string}
+        run_status: {type: string}
+        remote_state: {type: string}
+        can_delete: {type: boolean}
+        executed: {type: boolean}
+        blockers: {type: array, items: {type: string}}
+        message: {type: string}
+    AdminOrphanManifestCleanupResponse:
+      type: object
+      required: [cleanup]
+      properties:
+        cleanup: {$ref: '#/components/schemas/AdminOrphanManifestCleanup'}
     ObjectStore:
       type: object
       required: [id, tenant_id, project_id, name, provider, bucket, endpoint, region, status, quota_bytes, created_at, updated_at]

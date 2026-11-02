@@ -14,6 +14,10 @@ type commandHelpDoc struct {
 }
 
 var commandHelpDocOverrides = map[string]commandHelpDoc{
+	"fugue admin storage orphan-manifest cleanup": {
+		Long:    "Preview reconciliation for one exact physical backup manifest key. Execution requires --confirm, rechecks the preview ETag, and refuses recoverable Longhorn backups or ambiguous ownership. This never deletes repository blocks. Stop external writers to this terminal backup key before confirming.",
+		Example: "fugue admin storage orphan-manifest cleanup backup_run_123 --object-key backup-root/control-plane/backup_run_123/manifest.json\nfugue admin storage orphan-manifest cleanup backup_run_123 --object-key backup-root/control-plane/backup_run_123/manifest.json --confirm",
+	},
 	"fugue diagnostics": {
 		Long: strings.TrimSpace(`
 Run bounded live diagnostics with one target-oriented command tree.
