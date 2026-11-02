@@ -350,6 +350,8 @@ type dnsAuthoritativeAnswerSet struct {
 }
 
 type dnsAnswerCheckHostProbe struct {
+	StaticEdgeID  string `json:"static_edge_id,omitempty"`
+	RouteDigest   string `json:"route_digest,omitempty"`
 	Hostname      string `json:"hostname"`
 	IP            string `json:"ip"`
 	TLSReady      bool   `json:"tls_ready"`
@@ -384,13 +386,14 @@ func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQue
 	}
 	edgeGroupsByIP := edgeGroupsByIPFromEdgeNodes(edgeNodes.Nodes)
 	edgeNodesByIP := edgeNodesByIPFromEdgeNodes(edgeNodes.Nodes)
+	staticProbes, staticErr := dnsAnswerStaticEdgeProbes(client, hostname, explain, edgeGroupsByIP)
 	queryName := normalizeDNSHostname(explicitQueryName)
 	if queryName == "" {
 		queryName = dnsAnswerCheckQueryHostname(hostname, dnsNodes.Nodes)
 	}
 
 	nodes := make([]dnsAnswerCheckNode, 0, len(dnsNodes.Nodes))
-	pass := len(routeReady) > 0 || dnsTargetOnly
+	pass := len(routeReady) > 0 || dnsTargetOnly || len(staticProbes) > 0
 	routeGenerations := map[string]string{}
 	for _, edgeNode := range edgeNodes.Nodes {
 		groupID := strings.TrimSpace(edgeNode.EdgeGroupID)
@@ -430,6 +433,10 @@ func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQue
 		for _, answer := range answers {
 			groups := edgeGroupsByIP[strings.TrimSpace(answer)]
 			edgeNode, hasNode := edgeNodesByIP[strings.TrimSpace(answer)]
+			staticProbe, isStatic := staticProbes[strings.TrimSpace(answer)]
+			if isStatic {
+				groups = []string{staticProbe.EdgeGroupID}
+			}
 			for _, groupID := range groups {
 				if groupID != "" {
 					seenGroups[groupID] = struct{}{}
@@ -441,7 +448,7 @@ func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQue
 				nodeReport.Message = appendMessage(nodeReport.Message, fmt.Sprintf("answer %s is absent from current edge inventory", answer))
 				continue
 			}
-			edgeReady := dnsAnswerEdgeReady(groups, routeReady, dnsTargetOnly)
+			edgeReady := isStatic || dnsAnswerEdgeReady(groups, routeReady, dnsTargetOnly)
 			if !edgeReady {
 				nodePass = false
 				pass = false
@@ -486,12 +493,14 @@ func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQue
 	if !consistent {
 		pass = false
 	}
-	hostProbes := probeDNSAnswerHosts(hostname, nodes)
+	hostProbes := probeDNSAnswerHostsWithStatic(hostname, nodes, staticProbes, probeStaticDNSAnswerHost)
 	hostProbesByIP := make(map[string]dnsAnswerCheckHostProbe, len(hostProbes))
 	for _, probe := range hostProbes {
 		hostProbesByIP[probe.IP] = probe
 		if !probe.Pass {
 			pass = false
+		} else if requirement, ok := staticProbes[probe.IP]; ok {
+			routeReady[requirement.EdgeGroupID] = true
 		}
 	}
 	for index := range nodes {
@@ -508,6 +517,11 @@ func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQue
 			}
 		}
 		nodes[index].HostReady = hostReady
+		for _, answer := range nodes[index].Answers {
+			if _, isStatic := staticProbes[answer]; isStatic && !hostProbesByIP[answer].Pass {
+				nodes[index].RouteReady = false
+			}
+		}
 		nodes[index].Pass = nodes[index].Pass && hostReady
 		if !nodes[index].Pass {
 			pass = false
@@ -527,6 +541,10 @@ func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQue
 			failureReasons = append(failureReasons, fmt.Sprintf("DNS node %s (%s) failed: %s", node.DNSNodeID, firstNonEmpty(node.EdgeGroupID, "unknown-group"), firstNonEmpty(node.Message, "unknown error")))
 		}
 	}
+	explanationErrors := []string{}
+	if staticErr != nil {
+		explanationErrors = append(explanationErrors, "static edge configuration: "+staticErr.Error())
+	}
 	return dnsAnswerCheckReport{
 		Hostname:                hostname,
 		QueryName:               queryName,
@@ -541,6 +559,7 @@ func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQue
 		RouteReadyEdgeGroups:    sortedBoolSetKeys(routeReady),
 		RouteGenerations:        routeGenerations,
 		HostProbes:              hostProbes,
+		ExplanationErrors:       explanationErrors,
 		Nodes:                   nodes,
 	}, nil
 }
@@ -749,6 +768,10 @@ func summarizeAuthoritativeAnswerSets(nodes []dnsAnswerCheckNode) (bool, []dnsAu
 }
 
 func probeDNSAnswerHosts(hostname string, nodes []dnsAnswerCheckNode) []dnsAnswerCheckHostProbe {
+	return probeDNSAnswerHostsUsing(hostname, nodes, probeDNSAnswerHost)
+}
+
+func probeDNSAnswerHostsUsing(hostname string, nodes []dnsAnswerCheckNode, probeHost func(context.Context, string, string) dnsAnswerCheckHostProbe) []dnsAnswerCheckHostProbe {
 	hostname = normalizeDNSHostname(hostname)
 	answerSet := map[string]struct{}{}
 	for _, node := range nodes {
@@ -762,7 +785,7 @@ func probeDNSAnswerHosts(hostname string, nodes []dnsAnswerCheckNode) []dnsAnswe
 	probes := make([]dnsAnswerCheckHostProbe, 0, len(answers))
 	for _, answer := range answers {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		probe := probeDNSAnswerHost(ctx, hostname, answer)
+		probe := probeHost(ctx, hostname, answer)
 		cancel()
 		probes = append(probes, probe)
 	}

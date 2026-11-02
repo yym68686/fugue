@@ -71,3 +71,9 @@ responses directly at the static IP, then verify ordinary resolved access. For
 rollback, use `dns reset` with a current route revision and wait for a new
 verified platform publication; changing desired configuration alone is not a
 completed rollback.
+
+`answer-check` recognizes static IPs only from the exact app's explicit routing
+configuration and ready same-tenant registrations. Selected static answers must
+pass the same direct public TLS, nonce and edge/route identity probe as the DNS
+consumer. They do not need an entry in the managed edge inventory. Unknown IPs,
+revoked registrations and failed strict probes still fail the check.
