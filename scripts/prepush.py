@@ -19,8 +19,8 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIMEOUT_SECONDS = 55.0
 DEFAULT_MAX_ELAPSED_SECONDS = 60.0
-MAX_CONFIGURED_TIMEOUT_SECONDS = 240.0
-MAX_CONFIGURED_ELAPSED_SECONDS = 240.0
+MAX_CONFIGURED_TIMEOUT_SECONDS = 360.0
+MAX_CONFIGURED_ELAPSED_SECONDS = 360.0
 GO_TASK_CONCURRENCY = 2
 SERIAL_WARM_TEST_PACKAGES = {"./internal/api"}
 LOCALPV_BOOT_SOURCES = {
@@ -110,7 +110,7 @@ def elapsed_timeout_seconds(check_names: set[str]) -> float:
         raise SystemExit("PREPUSH_MAX_ELAPSED_SECONDS must be numeric") from exc
     if value <= 0 or value > MAX_CONFIGURED_ELAPSED_SECONDS:
         raise SystemExit(
-            "PREPUSH_MAX_ELAPSED_SECONDS must be greater than zero and at most 240"
+            "PREPUSH_MAX_ELAPSED_SECONDS must be greater than zero and at most 360"
         )
     return value
 
@@ -438,7 +438,7 @@ def main() -> int:
     timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
     if timeout_seconds <= 0 or timeout_seconds > MAX_CONFIGURED_TIMEOUT_SECONDS:
         raise SystemExit(
-            "PREPUSH_TIMEOUT_SECONDS must be greater than zero and at most 240"
+            "PREPUSH_TIMEOUT_SECONDS must be greater than zero and at most 360"
         )
     deadline = started + timeout_seconds
     base = resolve_base()
