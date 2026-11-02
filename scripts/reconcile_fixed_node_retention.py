@@ -64,6 +64,8 @@ def pod_patch(pod, node, selector):
         return None
     if spec.get('nodeName') != node or not all(metadata.get('labels', {}).get(key) == value for key, value in selector.items()):
         raise ValueError('fixed-node Pod identity changed')
+    if status.get('phase') in {'Succeeded', 'Failed'}:
+        return None
     if status.get('phase') != 'Pending' or status.get('containerStatuses') or status.get('initContainerStatuses'):
         raise ValueError('live fixed-node container requires separate session-preserving maintenance')
     previous = spec.get('tolerations', [])
@@ -75,6 +77,30 @@ def pod_patch(pod, node, selector):
             {'op': 'test', 'path': '/spec/nodeName', 'value': node},
             {'op': 'test', 'path': '/status', 'value': status},
             {'op': 'add', 'path': '/spec/tolerations', 'value': desired}]
+
+
+def deployment_patch(deployment, node, selector):
+    metadata = deployment['metadata']
+    spec = deployment['spec']['template']['spec']
+    if metadata.get('deletionTimestamp'):
+        return None
+    if metadata.get('labels', {}).get('app.kubernetes.io/managed-by') != selector.get('app.kubernetes.io/managed-by') or spec.get('nodeName') != node:
+        raise ValueError('fixed-node Deployment identity changed')
+    if not all(deployment['spec']['template'].get('metadata', {}).get('labels', {}).get(key) == value for key, value in selector.items()):
+        raise ValueError('fixed-node Deployment template labels changed')
+    previous = spec.get('tolerations', [])
+    desired = retain_tolerations(previous)
+    if previous == desired:
+        return None
+    patch = [{'op': 'test', 'path': '/metadata/uid', 'value': metadata['uid']},
+             {'op': 'test', 'path': '/metadata/resourceVersion', 'value': metadata['resourceVersion']},
+             {'op': 'test', 'path': '/spec/template/spec/nodeName', 'value': node}]
+    if 'tolerations' in spec:
+        patch.append({'op': 'test', 'path': '/spec/template/spec/tolerations', 'value': previous})
+        patch.append({'op': 'replace', 'path': '/spec/template/spec/tolerations', 'value': desired})
+    else:
+        patch.append({'op': 'add', 'path': '/spec/template/spec/tolerations', 'value': desired})
+    return patch
 
 
 def reconcile(config, evidence_path, apply=False, kube=kubectl):
@@ -104,7 +130,20 @@ def reconcile(config, evidence_path, apply=False, kube=kubectl):
         pods = read(['pods', '-n', namespace, '-l', query, '--field-selector', 'spec.nodeName=' + declared['id']])
         if pods.get('metadata', {}).get('continue') or len(pods['items']) > 4096:
             raise ValueError('retention inventory exceeds bound')
-        selected, retained = 0, 0
+        deployments = read(['deployments', '-n', namespace, '-l', query])
+        if deployments.get('metadata', {}).get('continue') or len(deployments['items']) > 1024:
+            raise ValueError('retention Deployment inventory exceeds bound')
+        matching_deployments = [item for item in deployments['items'] if item.get('spec', {}).get('template', {}).get('spec', {}).get('nodeName') == declared['id']]
+        deployment_operations = []
+        patched_deployments = 0
+        for deployment in matching_deployments:
+            operation = deployment_patch(deployment, declared['id'], config['pod_selector'])
+            if operation:
+                command = ['patch', 'deployment', deployment['metadata']['name'], '-n', namespace, '--type=json', '--field-manager=' + MANAGER, '--patch-file=/dev/stdin']
+                kube(command + ['--dry-run=server'], operation)
+                deployment_operations.append((command, operation))
+                patched_deployments += 1
+        selected, retained, terminal = 0, 0, 0
         for pod in pods['items']:
             operation = pod_patch(pod, declared['id'], config['pod_selector'])
             if pod['metadata'].get('deletionTimestamp'):
@@ -116,12 +155,18 @@ def reconcile(config, evidence_path, apply=False, kube=kubectl):
             replica = read(['replicaset', owners[0]['name'], '-n', namespace])
             if replica['metadata']['uid'] != owners[0]['uid'] or replica['spec']['template']['spec'].get('nodeName') != declared['id'] or replica['metadata'].get('labels', {}).get('app.kubernetes.io/managed-by') != config['owner_manager']:
                 raise ValueError('retention Pod owner is not fixed to the declared node')
+            if pod.get('status', {}).get('phase') in {'Succeeded', 'Failed'}:
+                terminal += 1
+                continue
             selected += 1
             if operation:
                 command = ['patch', 'pod', pod['metadata']['name'], '-n', namespace, '--type=json', '--field-manager=' + MANAGER, '--patch-file=/dev/stdin']
                 kube(command + ['--dry-run=server'], operation)
                 operations.append((command, operation))
-        observations.append({'node': declared['id'], 'node_uid': declared['uid'], 'pending_instances': selected, 'terminating_materials_retained': retained, 'expected_recovery_date': declared['expected_recovery_date'], 'automatic_readmission': False})
+        # Updating a template can start a rollout and change the existing Pods.
+        # Retain the validated Pending Pods before changing their controller.
+        operations.extend(deployment_operations)
+        observations.append({'node': declared['id'], 'node_uid': declared['uid'], 'deployment_templates': len(matching_deployments), 'patched_deployment_templates': patched_deployments, 'pending_instances': selected, 'terminal_instances': terminal, 'terminating_materials_retained': retained, 'expected_recovery_date': declared['expected_recovery_date'], 'automatic_readmission': False})
     report = {'schema': config['schema'], 'declaration_digest': digest(config), 'observations': observations,
               'patches': [{'command': command, 'patch': operation} for command, operation in operations], 'applied': []}
     evidence_path.parent.mkdir(parents=True, exist_ok=True)

@@ -363,6 +363,16 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 			t.Fatal("SSH front staging lost independent intent or artifact gates", required)
 		}
 	}
+	fixedNodeRetention := yamlMappingValue(t, jobs, "fixed_node_retention")
+	fixedNodeRetentionRaw, err := yaml.Marshal(fixedNodeRetention)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"scripts/reconcile_fixed_node_retention.py", "scripts.test_reconcile_fixed_node_retention", "deploy/environments/production/fixed-node-retention", "--apply"} {
+		if !strings.Contains(string(fixedNodeRetentionRaw), required) {
+			t.Fatal("fixed-node retention changes must rerun the production reconciler", required)
+		}
+	}
 	sshFrontArtifact := yamlMappingValue(t, jobs, "managed_ssh_front_artifact")
 	if yamlMappingValue(t, sshFrontArtifact, "needs").Value != "prepush" || yamlMappingValue(t, sshFrontArtifact, "runs-on").Value != "ubuntu-latest" {
 		t.Fatal("SSH front artifact must be verified away from production")

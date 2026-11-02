@@ -534,9 +534,15 @@ jobs:
           set -euo pipefail
           base="$BASE_SHA"
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          retention_scripts=(scripts/reconcile_fixed_node_retention.py scripts/test_reconcile_fixed_node_retention.py)
           mapfile -t configs < <(git diff --name-only "$base" HEAD -- deploy/environments/production/fixed-node-retention)
-          if (( ${#configs[@]} == 0 )); then exit 0; fi
-          (( ${#configs[@]} == 1 )) || { echo 'one retention declaration per release required' >&2; exit 1; }
+          scripts_changed=false
+          if ! git diff --quiet "$base" HEAD -- "${retention_scripts[@]}"; then scripts_changed=true; fi
+          if (( ${#configs[@]} == 0 )) && [[ "$scripts_changed" == false ]]; then exit 0; fi
+          if (( ${#configs[@]} == 0 )); then
+            mapfile -t configs < <(find deploy/environments/production/fixed-node-retention -maxdepth 1 -type f -name '*.json' -print | sort)
+          fi
+          (( ${#configs[@]} == 1 )) || { echo 'one retention declaration must be selected per release' >&2; exit 1; }
           config="${configs[0]}"
           [[ "$config" =~ ^deploy/environments/production/fixed-node-retention/[a-z0-9-]+\.json$ ]]
           git fetch origin main
