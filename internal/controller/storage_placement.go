@@ -32,6 +32,7 @@ type storagePlacement struct {
 type storagePlacementClaim struct {
 	name           string
 	requestedBytes int64
+	pvc            *corev1.PersistentVolumeClaim
 	driver         string
 	pv             *corev1.PersistentVolume
 	class          storagev1.StorageClass
@@ -140,7 +141,7 @@ func loadStoragePlacement(ctx context.Context, client *kubeClient, namespace str
 		if liveBytes := pvc.Spec.Resources.Requests.Storage().Value(); liveBytes > request.RequestedBytes {
 			request.RequestedBytes = liveBytes
 		}
-		claim := storagePlacementClaim{name: request.Name, requestedBytes: request.RequestedBytes, selectedNode: pvc.Annotations[pvcSelectedNodeAnnotation], singleNode: true, attachedNodes: map[string]bool{}}
+		claim := storagePlacementClaim{name: request.Name, requestedBytes: request.RequestedBytes, pvc: &pvc, selectedNode: pvc.Annotations[pvcSelectedNodeAnnotation], singleNode: true, attachedNodes: map[string]bool{}}
 		for _, mode := range pvc.Spec.AccessModes {
 			if mode == corev1.ReadWriteMany || mode == corev1.ReadOnlyMany {
 				claim.singleNode = false
@@ -492,6 +493,9 @@ func (s *Service) validateAppStoragePlacement(ctx context.Context, client *kubeC
 	}
 	if storage == nil {
 		return nil
+	}
+	if err := storage.validateSameNodeOnlineRollout(app, scheduling, !found); err != nil {
+		return err
 	}
 	names, err := client.listNodeNames(ctx)
 	if err != nil {

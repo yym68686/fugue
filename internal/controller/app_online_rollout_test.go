@@ -54,7 +54,15 @@ func TestOnlineDurableRolloutSchedulingSkipsWorkspaceRWOPersistentStorage(t *tes
 	}
 }
 
-func TestOnlineDurableRolloutSchedulingPinsLocalRWOPersistentStorage(t *testing.T) {
+func TestOnlineDurableRolloutSchedulingPinsSupportedRWOPersistentStorage(t *testing.T) {
+	for _, storageClass := range []string{model.AppStorageClassFugueLocalRWO, model.AppStorageClassFugueLonghornRWO} {
+		t.Run(storageClass, func(t *testing.T) {
+			testOnlineDurableRolloutSchedulingPinsRWO(t, storageClass)
+		})
+	}
+}
+
+func testOnlineDurableRolloutSchedulingPinsRWO(t *testing.T, storageClass string) {
 	current := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -66,7 +74,7 @@ func TestOnlineDurableRolloutSchedulingPinsLocalRWOPersistentStorage(t *testing.
 			RuntimeID: "runtime_demo",
 			PersistentStorage: &model.AppPersistentStorageSpec{
 				Mode:             model.AppPersistentStorageModeMovableRWO,
-				StorageClassName: model.AppStorageClassFugueLocalRWO,
+				StorageClassName: storageClass,
 				Mounts: []model.AppPersistentStorageMount{
 					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
 				},
@@ -114,7 +122,7 @@ func TestOnlineDurableRolloutSchedulingPinsLocalRWOPersistentStorage(t *testing.
 		t.Fatalf("expected runtime node selector to be preserved, got %#v", got.NodeSelector)
 	}
 	if got.NodeSelector[kubeHostnameLabelKey] != "node-a" {
-		t.Fatalf("expected local RWO online rollout to pin hostname node-a, got %#v", got.NodeSelector)
+		t.Fatalf("expected supported RWO online rollout to pin hostname node-a, got %#v", got.NodeSelector)
 	}
 }
 

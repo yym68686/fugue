@@ -13,6 +13,7 @@ const (
 
 	AppStorageClassFugueLocalRWO     = "fugue-local-rwo"
 	AppStorageClassFugueWorkspaceRWO = "fugue-workspace-rwo"
+	AppStorageClassFugueLonghornRWO  = "fugue-longhorn-rwo"
 )
 
 func NormalizeAppPersistentStorageMode(raw string) (string, error) {
@@ -47,7 +48,10 @@ func AppPersistentStorageSpecIsMigratable(spec *AppPersistentStorageSpec) bool {
 
 func AppRWOStorageClassSupportsSameNodeOnlineMount(storageClassName string) bool {
 	switch normalizeAppStorageClassName(storageClassName) {
-	case AppStorageClassFugueLocalRWO:
+	case AppStorageClassFugueLocalRWO, AppStorageClassFugueLonghornRWO:
+		// Longhorn filesystem RWO volumes support multiple pods on one node.
+		// The managed controller verifies the live CSI driver/PVC/PV before
+		// writing a replacement workload; an external agent still fails closed.
 		return true
 	default:
 		return false

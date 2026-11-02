@@ -29,6 +29,25 @@ func TestZeroDowntimeRolloutGuardAllowsValidatedLocalRWOEnvironmentRestart(t *te
 	}
 }
 
+func TestZeroDowntimeRolloutGuardLonghornImageUpdateRequiresNodePin(t *testing.T) {
+	current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueLonghornRWO)
+	desired := current
+	desired.Spec.Image = "ghcr.io/example/demo:next"
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+	desired.Spec.RolloutIntent = rolloutIntentForManagedOperation(op, current, desired)
+	for _, pin := range []string{"", "node-a"} {
+		t.Run("pin="+pin, func(t *testing.T) {
+			decision := (&Service{Renderer: runtime.Renderer{}}).zeroDowntimeRolloutGuardDecision(op, current, desired, runtime.SchedulingConstraints{NodeSelector: map[string]string{kubeHostnameLabelKey: pin}})
+			if decision.Refused != (pin == "") {
+				t.Fatalf("Longhorn rolling upgrade requires same-node proof: %+v", decision)
+			}
+			if pin != "" && (decision.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate || decision.Strategy != "RollingUpdate") {
+				t.Fatalf("expected an online image upgrade, got %+v", decision)
+			}
+		})
+	}
+}
+
 func TestZeroDowntimeRolloutGuardRefusesWorkspaceRWO(t *testing.T) {
 	current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueWorkspaceRWO)
 	desired := current

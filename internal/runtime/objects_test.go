@@ -2011,7 +2011,15 @@ func TestBuildAppObjectsFailsClosedForUnsupportedOnlinePersistentStorageImageUpd
 	}
 }
 
-func TestBuildAppObjectsUsesRollingUpdateForOnlineLocalRWOPersistentStorageImageUpdate(t *testing.T) {
+func TestBuildAppObjectsUsesRollingUpdateForOnlineRWOPersistentStorageImageUpdate(t *testing.T) {
+	for _, storageClass := range []string{model.AppStorageClassFugueLocalRWO, model.AppStorageClassFugueLonghornRWO} {
+		t.Run(storageClass, func(t *testing.T) {
+			testBuildAppObjectsOnlineRWOImageUpdate(t, storageClass)
+		})
+	}
+}
+
+func testBuildAppObjectsOnlineRWOImageUpdate(t *testing.T, storageClass string) {
 	app := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -2024,7 +2032,7 @@ func TestBuildAppObjectsUsesRollingUpdateForOnlineLocalRWOPersistentStorageImage
 			RolloutIntent: model.AppRolloutIntentOnlineImageUpdate,
 			PersistentStorage: &model.AppPersistentStorageSpec{
 				Mode:             model.AppPersistentStorageModeMovableRWO,
-				StorageClassName: model.AppStorageClassFugueLocalRWO,
+				StorageClassName: storageClass,
 				Mounts: []model.AppPersistentStorageMount{
 					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml"},
 					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},

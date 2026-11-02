@@ -8,6 +8,9 @@ func TestRWOStorageClassSameNodeOnlineMountCapability(t *testing.T) {
 	if !AppRWOStorageClassSupportsSameNodeOnlineMount(AppStorageClassFugueLocalRWO) {
 		t.Fatal("expected fugue-local-rwo to support same-node online mount")
 	}
+	if !AppRWOStorageClassSupportsSameNodeOnlineMount(AppStorageClassFugueLonghornRWO) {
+		t.Fatal("expected filesystem Longhorn RWO to support same-node online mount")
+	}
 	if AppRWOStorageClassSupportsSameNodeOnlineMount(AppStorageClassFugueWorkspaceRWO) {
 		t.Fatal("expected fugue-workspace-rwo not to support same-node online mount")
 	}
@@ -28,6 +31,11 @@ func TestPersistentStorageSpecSupportsSameNodeOnlineRollout(t *testing.T) {
 	}
 	if !AppPersistentStorageSpecSupportsSameNodeOnlineRollout(spec) {
 		t.Fatal("expected fugue-local-rwo movable RWO storage to support same-node online rollout")
+	}
+	longhorn := *spec
+	longhorn.StorageClassName = AppStorageClassFugueLonghornRWO
+	if !AppPersistentStorageSpecSupportsSameNodeOnlineRollout(&longhorn) {
+		t.Fatal("expected Longhorn RWO to request validated same-node online rollout")
 	}
 
 	unsupported := *spec

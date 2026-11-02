@@ -191,13 +191,17 @@ func TestAgentZeroDowntimeRolloutAllowsExplicitScaleToZero(t *testing.T) {
 	}
 }
 
-func TestAgentZeroDowntimeRolloutRefusesServingLocalRWOWithoutNodeProof(t *testing.T) {
-	current := agentZeroDowntimeTestApp(model.AppStorageClassFugueLocalRWO)
-	desired := current
-	desired.Spec.Env = map[string]string{"MODE": "new"}
+func TestAgentZeroDowntimeRolloutRefusesServingRWOWithoutNodeProof(t *testing.T) {
+	for _, storageClass := range []string{model.AppStorageClassFugueLocalRWO, model.AppStorageClassFugueLonghornRWO} {
+		t.Run(storageClass, func(t *testing.T) {
+			current := agentZeroDowntimeTestApp(storageClass)
+			desired := current
+			desired.Spec.Env = map[string]string{"MODE": "new"}
 
-	if _, err := agentZeroDowntimeRollout(model.OperationTypeDeploy, current, desired); err == nil {
-		t.Fatal("external agent must not claim a local-RWO rollout safe without same-node proof")
+			if _, err := agentZeroDowntimeRollout(model.OperationTypeDeploy, current, desired); err == nil {
+				t.Fatal("external agent must not claim an RWO rollout safe without same-node proof")
+			}
+		})
 	}
 }
 
