@@ -143,7 +143,7 @@ func (s *Server) inspectOrphanManifestAdoption(ctx context.Context, req orphanMa
 		return result, err
 	}
 	m, run := base.manifest, base.run
-	if run.Target.Type != model.BackupTargetControlPlaneDatabase || run.Target.Engine != model.BackupEngineLonghornSnapshot || m.Kind != model.BackupArtifactKindLonghornSnapshot || m.Format != "longhorn-remote-backup" || m.PolicyID != run.PolicyID || m.ObjectKey != "" || len(m.Files) != 0 || m.LogicalBytes <= 0 || m.SizeBytes <= 0 || m.CreatedAt.IsZero() {
+	if run.Target.Type != model.BackupTargetControlPlaneDatabase || run.Target.Engine != model.BackupEngineLonghornSnapshot || m.Kind != model.BackupArtifactKindLonghornSnapshot || m.Format != "longhorn-remote-backup" || (m.PolicyID != "" && m.PolicyID != run.PolicyID) || m.ObjectKey != "" || len(m.Files) != 0 || m.LogicalBytes <= 0 || m.SizeBytes <= 0 || m.CreatedAt.IsZero() {
 		result.Blockers = append(result.Blockers, "only completed unregistered control-plane Longhorn manifests are eligible")
 	}
 	if len(result.Blockers) != 0 {
@@ -204,6 +204,9 @@ func (s *Server) inspectOrphanManifestAdoption(ctx context.Context, req orphanMa
 	if m.Metadata == nil {
 		m.Metadata = map[string]string{}
 	}
+	// Historical manifests omitted policy and namespace. Ownership comes from
+	// the terminal run and its exact labeled remote snapshot, never user input.
+	m.Metadata["longhorn_namespace"] = adoptionLonghornNamespace(m)
 	sum := sha256.Sum256(data)
 	m.Metadata["reconciliation_source"] = "completed-longhorn-orphan-manifest"
 	m.Metadata["reconciled_at"] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -228,7 +231,7 @@ func (s *Server) inspectOrphanManifestAdoption(ctx context.Context, req orphanMa
 }
 
 func (s *Server) verifyAdoptionLonghornRemote(ctx context.Context, runID string, m model.BackupManifest) error {
-	ns, name, volume, targetName := m.Metadata["longhorn_namespace"], m.Metadata["longhorn_backup_name"], m.Metadata["volume_name"], m.Metadata["backup_target_name"]
+	ns, name, volume, targetName := adoptionLonghornNamespace(m), m.Metadata["longhorn_backup_name"], m.Metadata["volume_name"], m.Metadata["backup_target_name"]
 	for _, value := range []string{ns, name, volume, targetName} {
 		if !longhornResourceName.MatchString(value) {
 			return errors.New("manifest has invalid Longhorn identity")
@@ -260,6 +263,10 @@ func (s *Server) verifyAdoptionLonghornRemote(ctx context.Context, runID string,
 		return errors.New("Longhorn target identity or availability is unverified")
 	}
 	return nil
+}
+
+func adoptionLonghornNamespace(m model.BackupManifest) string {
+	return firstNonEmptyString(m.Metadata["longhorn_namespace"], getenv(longhornBackupNamespaceEnv), "longhorn-system")
 }
 
 func adoptionLonghornConfigKey(objects *dataObjectBackend, m model.BackupManifest) (string, error) {

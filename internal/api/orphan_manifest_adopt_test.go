@@ -17,7 +17,7 @@ import (
 )
 
 func TestOrphanManifestAdoptionProtectedReconciliation(t *testing.T) {
-	for _, mode := range []string{"safe", "manifest-changed", "config-changed", "changed-before-insert", "wrong-volume", "bad-block-map", "remote-error", "target-unavailable", "wrong-run-label", "existing-artifact"} {
+	for _, mode := range []string{"safe", "legacy", "wrong-policy", "manifest-changed", "config-changed", "changed-before-insert", "wrong-volume", "bad-block-map", "remote-error", "target-unavailable", "wrong-run-label", "existing-artifact"} {
 		t.Run(mode, func(t *testing.T) {
 			clearBackupUsageSeedEnv(t)
 			const runID = "backup_run_fixture"
@@ -29,6 +29,12 @@ func TestOrphanManifestAdoptionProtectedReconciliation(t *testing.T) {
 			manifest := model.BackupManifest{RunID: runID, Target: target, Kind: model.BackupArtifactKindLonghornSnapshot, Format: "longhorn-remote-backup", ManifestObjectKey: logicalKey, SizeBytes: 1000, LogicalBytes: 4194304, CreatedAt: created, Metadata: map[string]string{
 				"volume_name": "volume-test", "longhorn_backup_name": "backup-test", "snapshot_name": "snapshot-test", "longhorn_namespace": "longhorn-system", "backup_target_name": "default", "backup_target_url": "s3://bucket@auto/backup-root/longhorn", "longhorn_backup_url": backupURL,
 			}}
+			if mode == "legacy" {
+				delete(manifest.Metadata, "longhorn_namespace")
+			}
+			if mode == "wrong-policy" {
+				manifest.PolicyID = "backup_policy_other"
+			}
 			config := map[string]any{"Name": "backup-test", "VolumeName": "volume-test", "SnapshotName": "snapshot-test", "CreatedTime": created.Format(time.RFC3339), "SnapshotCreatedAt": created.Add(-time.Hour).Format(time.RFC3339), "Size": "2097152", "CompressionMethod": "lz4", "Parameters": map[string]string{"backup-block-size": "2097152"}, "Blocks": []map[string]any{{"Offset": 0, "BlockChecksum": strings.Repeat("a", 64)}}}
 			if mode == "wrong-volume" {
 				config["VolumeName"] = "another-volume"
@@ -105,7 +111,15 @@ func TestOrphanManifestAdoptionProtectedReconciliation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			run, err := db.CreateBackupRun(model.BackupRun{ID: runID, Target: target, BackendID: backend.ID, Status: model.BackupRunStatusFailed, ErrorCode: "backup_failed", ErrorMessage: "artifact persistence failed", FinishedAt: &created})
+			policyID := ""
+			if mode == "legacy" {
+				policy, err := db.UpsertBackupPolicy(model.BackupPolicy{Name: "legacy-policy", Target: target, BackendID: backend.ID, Enabled: true, Schedule: "@hourly", RetainCount: 3})
+				if err != nil {
+					t.Fatal(err)
+				}
+				policyID = policy.ID
+			}
+			run, err := db.CreateBackupRun(model.BackupRun{ID: runID, PolicyID: policyID, Target: target, BackendID: backend.ID, Status: model.BackupRunStatusFailed, ErrorCode: "backup_failed", ErrorMessage: "artifact persistence failed", FinishedAt: &created})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -124,7 +138,7 @@ func TestOrphanManifestAdoptionProtectedReconciliation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantEligible := mode == "safe" || strings.Contains(mode, "changed") || mode == "changed-before-insert"
+			wantEligible := mode == "safe" || mode == "legacy" || strings.Contains(mode, "changed") || mode == "changed-before-insert"
 			if preview.CanAdopt != wantEligible {
 				t.Fatalf("preview=%+v", preview)
 			}
@@ -140,7 +154,7 @@ func TestOrphanManifestAdoptionProtectedReconciliation(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer bootstrap-test")
 			rec := httptest.NewRecorder()
 			s.Handler().ServeHTTP(rec, req)
-			if mode == "safe" {
+			if mode == "safe" || mode == "legacy" {
 				if rec.Code != 200 {
 					t.Fatalf("status=%d %s", rec.Code, rec.Body)
 				}
@@ -153,6 +167,9 @@ func TestOrphanManifestAdoptionProtectedReconciliation(t *testing.T) {
 				artifact, err := db.GetBackupArtifact(response.Adoption.ArtifactID, "", true)
 				if err != nil || !artifact.Protected || artifact.AppID != "" || artifact.Manifest.Metadata["restore_verification"] != "not_run" {
 					t.Fatalf("artifact=%+v err=%v", artifact, err)
+				}
+				if artifact.PolicyID != run.PolicyID || artifact.Manifest.Metadata["longhorn_namespace"] != "longhorn-system" {
+					t.Fatalf("legacy ownership was not reconciled: %+v", artifact)
 				}
 				updated, _ := db.GetBackupRun(runID, "", true)
 				if updated.Status != run.Status || updated.ErrorMessage != run.ErrorMessage || updated.ArtifactCount != 1 {
