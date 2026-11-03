@@ -8,9 +8,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 )
+
+func (s *Store) pgRollbackReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, channel string, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) (*model.State, error) {
+	if verifiedTrafficRecovery(parent, channel, s.platformArtifactSigningKeyring(), now, lkg, guard) {
+		return s.pgReleaseSetSnapshot(ctx, tx, parent)
+	}
+	return s.pgFullReleaseSetSnapshot(ctx, tx, parent)
+}
 
 // This advisory lock is scoped to one configuration scope, not the database.
 // Ordinary evidence/expectation writers share it; full publication excludes
@@ -31,6 +39,20 @@ func pgLockPromotionScope(ctx context.Context, tx *sql.Tx, scope string, exclusi
 }
 
 func (s *Store) pgFullReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*model.State, error) {
+	state, err := s.pgReleaseSetSnapshot(ctx, tx, parent)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+// Recovery of an exact positive LKG needs its signed members and declared
+// consumers, independently of whether its former routing source is available.
+// Ordinary publication still loads and validates current sources above.
+func (s *Store) pgReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*model.State, error) {
 	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{parent}}
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	if !ok || len(ids) == 0 || len(ids) > 64 {
@@ -143,9 +165,6 @@ func (s *Store) pgFullReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent
 		if err != nil {
 			return nil, err
 		}
-	}
-	if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
-		return nil, err
 	}
 	return state, nil
 }

@@ -280,31 +280,33 @@ func TestCheckAssignmentRejectsChangedMissingAndDuplicateAuthority(t *testing.T)
 }
 
 func TestHeartbeatConflictsKeepStandbyAndAssignmentRacesDistinct(t *testing.T) {
-	for _, tc := range []struct {
-		code   string
-		status int
-		want   error
-	}{
-		{"dns_backend_not_selected", 409, ErrDNSBackendNotSelected},
-		{"platform_assignment_changed", 409, ErrAssignmentChanged},
-		{"conflict", 409, nil}, {"dns_backend_not_selected", 403, nil},
-	} {
-		t.Run(fmt.Sprintf("%s/%d", tc.code, tc.status), func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.status)
-				json.NewEncoder(w).Encode(map[string]string{"code": tc.code, "error": "untrusted server detail secret"})
-			}))
-			defer server.Close()
-			client := Client{BaseURL: server.URL}
-			var reply any
-			err := client.PostJSON(context.Background(), "/v1/platform-state/consumers/trusted-heartbeat", "identity", struct{}{}, &reply)
-			if err == nil || tc.want != nil && !errors.Is(err, tc.want) || tc.want == nil && (errors.Is(err, ErrDNSBackendNotSelected) || errors.Is(err, ErrAssignmentChanged)) || strings.Contains(err.Error(), "secret") {
-				t.Fatal("incorrect conflict classification", err)
-			}
-			err = client.GetJSON(context.Background(), "/v1/platform-state/consumers/assignment", "identity", &reply)
-			if errors.Is(err, ErrDNSBackendNotSelected) || errors.Is(err, ErrAssignmentChanged) {
-				t.Fatal("another endpoint granted heartbeat semantics", err)
-			}
-		})
+	for _, endpoint := range []string{"/v1/platform-state/consumers/trusted-heartbeat", "/v1/platform-state/consumers/shadow-heartbeat"} {
+		for _, tc := range []struct {
+			code   string
+			status int
+			want   error
+		}{
+			{"dns_backend_not_selected", 409, ErrDNSBackendNotSelected},
+			{"platform_assignment_changed", 409, ErrAssignmentChanged},
+			{"conflict", 409, nil}, {"dns_backend_not_selected", 403, nil},
+		} {
+			t.Run(fmt.Sprintf("%s/%s/%d", endpoint, tc.code, tc.status), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(tc.status)
+					json.NewEncoder(w).Encode(map[string]string{"code": tc.code, "error": "untrusted server detail secret"})
+				}))
+				defer server.Close()
+				client := Client{BaseURL: server.URL}
+				var reply any
+				err := client.PostJSON(context.Background(), endpoint, "identity", struct{}{}, &reply)
+				if err == nil || tc.want != nil && !errors.Is(err, tc.want) || tc.want == nil && (errors.Is(err, ErrDNSBackendNotSelected) || errors.Is(err, ErrAssignmentChanged)) || strings.Contains(err.Error(), "secret") {
+					t.Fatal("incorrect conflict classification", err)
+				}
+				err = client.GetJSON(context.Background(), "/v1/platform-state/consumers/assignment", "identity", &reply)
+				if errors.Is(err, ErrDNSBackendNotSelected) || errors.Is(err, ErrAssignmentChanged) {
+					t.Fatal("another endpoint granted heartbeat semantics", err)
+				}
+			})
+		}
 	}
 }

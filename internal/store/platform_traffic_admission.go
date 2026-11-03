@@ -21,12 +21,15 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 }
 
 func validateVerifiedTrafficRecoveryAdmission(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) error {
-	recovery := guard != nil && guard.Phase == "rollback" && guard.BaselineArtifactID == parent.ID &&
+	return validateLeasedTrafficAdmissionWithRecovery(state, parent, channel, canaryRef, keys, now, verifiedTrafficRecovery(parent, channel, keys, now, lkg, guard))
+}
+
+func verifiedTrafficRecovery(parent model.PlatformArtifact, channel string, keys bundleauth.Keyring, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) bool {
+	return guard != nil && guard.Phase == "rollback" && guard.BaselineArtifactID == parent.ID &&
 		channel == model.PlatformArtifactReleaseChannelFull && parent.ArtifactKind == model.PlatformArtifactKindReleaseSet && lkg != nil &&
 		lkg.ArtifactID == parent.ID && lkg.ContentHash == parent.ContentHash && lkg.Generation == parent.Generation &&
 		lkg.ScopeKey == parent.ScopeKey && lkg.ArtifactKind == parent.ArtifactKind && lkg.VerifiedByReleaseID != "" &&
-		lkg.VerificationEvidenceHash != "" && lkg.ExpiresAt.After(now)
-	return validateLeasedTrafficAdmissionWithRecovery(state, parent, channel, canaryRef, keys, now, recovery)
+		lkg.VerificationEvidenceHash != "" && platformsafety.EvaluatePlatformLKGSnapshot(*lkg, parent, keys, now).Pass
 }
 
 func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, verifiedRecovery bool) error {
@@ -90,8 +93,10 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		case model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig:
 		case model.PlatformArtifactKindDNSAnswerBundle:
 			component = model.PlatformConsumerComponentDNSServer
-			if err := validateCellDNSReferencesInState(state, child, keys); err != nil {
-				return err
+			if !verifiedRecovery {
+				if err := validateCellDNSReferencesInState(state, child, keys); err != nil {
+					return err
+				}
 			}
 		default:
 			return fail("unsupported member")

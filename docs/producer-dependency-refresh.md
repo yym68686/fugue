@@ -19,6 +19,14 @@ Both use the exact previous policy, selected full publication and authenticated
 unexpired positive LKG as transaction preconditions. A recovery full fence may
 reference its original verified LKG only when the server authenticates the exact
 rollback and original positive evidence. This does not verify that new fence.
+
+Automatic timeout recovery restores only the exact signed, unexpired positive
+LKG. Its former routing source may have been revoked; recovery therefore loads
+the baseline's immutable members and declared consumers without requiring a
+current route-source selection. Member integrity, lineage, membership and expiry
+checks still apply. Ordinary publication and subsequent LKG verification retain
+all current-source and fresh-convergence checks; a rollback fence is never a new
+positive checkpoint by itself.
 Newer in-flight gray traffic and competing successors conflict without writes.
 
 Use schema `fugue.producer-dependency-refresh/v1` in one declaration under

@@ -508,6 +508,9 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	if _, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(full.ID, completePlatformVerificationRequest(full.FencingToken, false), testPlatformPrincipal()); err != nil {
 		t.Fatal("observed successor full LKG failed", err)
 	}
+	if withSources && retained {
+		testDNSPositiveRecoveryAfterSourceRevocation(t, s, parent)
+	}
 }
 
 func TestCellDNSAdmissionRejectsChangedReferencedAuthority(t *testing.T) {

@@ -647,7 +647,7 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	var admissionSnapshot *model.State
 	if target.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel != model.PlatformArtifactReleaseChannelShadow {
 		trace.advance("recovery-snapshot")
-		admissionSnapshot, err = s.pgFullReleaseSetSnapshot(ctx, tx, target)
+		admissionSnapshot, err = s.pgRollbackReleaseSetSnapshot(ctx, tx, target, channel, now, lkg, guard)
 		if err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}

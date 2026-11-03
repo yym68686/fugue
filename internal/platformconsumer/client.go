@@ -264,7 +264,7 @@ func (c Client) jsonLimit(ctx context.Context, endpoint, token, method string, i
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		status := &responseStatusError{Code: resp.StatusCode}
-		if resp.StatusCode == http.StatusConflict && req.URL.Path == "/v1/platform-state/consumers/trusted-heartbeat" {
+		if resp.StatusCode == http.StatusConflict && (req.URL.Path == "/v1/platform-state/consumers/trusted-heartbeat" || req.URL.Path == "/v1/platform-state/consumers/shadow-heartbeat") {
 			var body struct {
 				Code string `json:"code"`
 			}
