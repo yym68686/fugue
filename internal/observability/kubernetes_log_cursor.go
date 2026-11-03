@@ -17,6 +17,8 @@ type kubernetesLogCursor struct {
 	Time               time.Time
 	Boundary           map[[32]byte]int
 	Visited            time.Time
+	FirstObserved      time.Time
+	LastRead           time.Time
 	DrainedThrough     time.Time
 	Complete           bool
 	NextAttempt        time.Time
@@ -27,7 +29,7 @@ type kubernetesLogCursor struct {
 }
 
 func logTargetFinishedAt(t kubernetesLogTarget) time.Time {
-	for _, s := range append(append(append([]corev1.ContainerStatus(nil), t.pod.Status.ContainerStatuses...), t.pod.Status.InitContainerStatuses...), t.pod.Status.EphemeralContainerStatuses...) {
+	for _, s := range kubernetesLogContainerStatuses(t.pod) {
 		if s.Name != t.container {
 			continue
 		}
@@ -44,7 +46,7 @@ func logTargetFinishedAt(t kubernetesLogTarget) time.Time {
 
 func logTargetKey(t kubernetesLogTarget) string {
 	identity := string(t.pod.UID)
-	for _, s := range append(append([]corev1.ContainerStatus(nil), t.pod.Status.ContainerStatuses...), t.pod.Status.InitContainerStatuses...) {
+	for _, s := range kubernetesLogContainerStatuses(t.pod) {
 		if s.Name != t.container {
 			continue
 		}
@@ -103,7 +105,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	cur, exists := c.cursors[key]
 	c.cursorsMu.Unlock()
 	if !exists {
-		cur = kubernetesLogCursor{Time: now.Add(-5 * time.Minute), Boundary: map[[32]byte]int{}}
+		cur = kubernetesLogCursor{Time: now.Add(-5 * time.Minute), Boundary: map[[32]byte]int{}, FirstObserved: now}
 	}
 	finished := logTargetFinishedAt(target)
 	if cur.Complete || now.Before(cur.NextAttempt) || (!finished.IsZero() && finished.Before(cur.Time)) {
@@ -141,6 +143,8 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		c.pipeline.observeLogSource(logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, CursorAfter: cur.Time, PendingAt: cur.PendingAt, DrainedThrough: cur.DrainedThrough, Outcome: "node_backoff", NextAttempt: retryAt})
 		return
 	}
+	cur.LastRead = now
+	c.cycleReads.Add(1)
 	original := cur.Time
 	observation := logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, Outcome: "drained", LineLimitBytes: c.pipeline.cfg.KubernetesLogMaxLineBytes}
 	defer func() {
@@ -163,12 +167,17 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		nodeResult = nil
 	}
 	if parent.Err() != nil {
-		nodeResult = parent.Err()
+		// The shared cycle deadline is a scheduling bound, not evidence of
+		// an unavailable node (DeadlineExceeded otherwise looks like net.Error).
+		nodeResult = context.Canceled
 	}
 	emitWarning := c.finishLogNodeRead(ticket, nodeResult, c.logNow())
 	if err != nil {
 		observation.Outcome = "open_error"
 		observation.ErrorClass = logReadErrorClass(err)
+		if parent.Err() != nil {
+			observation.Outcome = "canceled"
+		}
 		benign := isBenignKubernetesLogReadError(err)
 		if !benign && parent.Err() == nil {
 			c.pipeline.kubernetesLogErrors.Add(1)
@@ -179,7 +188,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		// Persist the newly initialized cursor even when the stream cannot be
 		// opened. Without this write, the next poll recreates a fresh five-minute
 		// cursor and can silently skip the interval covered by this failure.
-		if !benign && parent.Err() == nil && cur.PendingAt.IsZero() {
+		if (!benign || parent.Err() != nil) && cur.PendingAt.IsZero() {
 			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
 		}
 		// Failures retain their cursor and back off independently of successful
@@ -219,10 +228,15 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		if recoveryErr != nil {
 			observation.Outcome = "rotation_recovery_error"
 			observation.ErrorClass = logReadErrorClass(recoveryErr)
-			c.pipeline.kubernetesLogErrors.Add(1)
-			c.pipeline.recordError(fmt.Errorf("recover rotated Kubernetes logs source=%s: %w", key, recoveryErr))
+			if parent.Err() != nil {
+				observation.Outcome = "canceled"
+			}
+			if parent.Err() == nil {
+				c.pipeline.kubernetesLogErrors.Add(1)
+				c.pipeline.recordError(fmt.Errorf("recover rotated Kubernetes logs source=%s: %w", key, recoveryErr))
+				c.deferLogSource(&cur)
+			}
 			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
-			c.deferLogSource(&cur)
 			invalid = true
 			return
 		}
@@ -334,8 +348,11 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	}
 	if parent.Err() != nil {
 		observation.Outcome = "canceled"
+		if cur.PendingAt.IsZero() {
+			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
+		}
 	}
-	if err == nil && !invalid {
+	if err == nil && !invalid && parent.Err() == nil {
 		cur.Failures = 0
 		cur.NextAttempt = time.Time{}
 		if observation.Outcome == "queue_rejected" {
@@ -343,7 +360,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			cur.NextAttempt = c.logNow().Add(c.pipeline.cfg.KubernetesLogPollInterval)
 		}
 	}
-	if err == nil && !invalid && !truncated {
+	if err == nil && !invalid && !truncated && parent.Err() == nil {
 		if rotationAttempted && !rotationGap && logBoundaryMissing(boundary, seen) {
 			rotationGap = true
 			observation.Outcome = "rotation_gap"

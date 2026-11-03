@@ -33,6 +33,7 @@ func TestOfflineNodeBackoffBoundsAllSourcesAndPreservesRecoveryCursors(t *testin
 			node, name = "healthy", "healthy"
 		}
 		pods = append(pods, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"}, Spec: corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{Name: "app"}}}})
+		pods[len(pods)-1].Status = runningLogPod(name).Status
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/pods" {

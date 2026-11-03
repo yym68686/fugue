@@ -33,6 +33,9 @@ func main() {
 	cfg := config.TelemetryAgentFromEnv()
 	observabilityConfig := boundTelemetryAgentMemory(cfg.Observability)
 	logger := log.Default()
+	if requested := cfg.Observability.Normalize().KubernetesLogMaxPods; requested != observabilityConfig.KubernetesLogMaxPods {
+		logger.Printf("Kubernetes log per-cycle pod budget bounded configured=%d effective=%d; discovery remains complete and sources rotate across cycles", requested, observabilityConfig.KubernetesLogMaxPods)
+	}
 	agent := telemetryAgent{
 		cfg:      observabilityConfig,
 		logger:   logger,

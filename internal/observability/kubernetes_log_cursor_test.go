@@ -23,7 +23,7 @@ func TestCatchupUsesOnlyUnusedCycleBudgetAfterEverySourceGetsATurn(t *testing.T)
 		if r.URL.Path == "/api/v1/pods" {
 			pods := []corev1.Pod{}
 			for _, name := range []string{"busy", "quiet"} {
-				pods = append(pods, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}})
+				pods = append(pods, runningLogPod(name))
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(corev1.PodList{Items: pods})
@@ -66,7 +66,7 @@ func TestCollectionResumesAtFirstUnscheduledSourceAndReturnsUnusedBudget(t *test
 		if r.URL.Path == "/api/v1/pods" {
 			pods := []corev1.Pod{}
 			for _, name := range []string{"a", "b", "c"} {
-				pods = append(pods, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}})
+				pods = append(pods, runningLogPod(name))
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(corev1.PodList{Items: pods})
@@ -94,7 +94,7 @@ func TestCollectionReservesBudgetForSlowerInFlightSource(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/pods" {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"name":"slow","namespace":"ns"},"spec":{"containers":[{"name":"app"}]}},{"metadata":{"name":"fast","namespace":"ns"},"spec":{"containers":[{"name":"app"}]}}]}`)
+			json.NewEncoder(w).Encode(corev1.PodList{Items: []corev1.Pod{runningLogPod("slow"), runningLogPod("fast")}})
 			return
 		}
 		if strings.Contains(r.URL.Path, "/slow/") {
@@ -301,7 +301,7 @@ func TestCollectionBackpressureDefersReadsUntilQueueDrains(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/pods" {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"namespace":"ns","name":"pod"},"spec":{"containers":[{"name":"app"}]}}]}`)
+			json.NewEncoder(w).Encode(corev1.PodList{Items: []corev1.Pod{runningLogPod("pod")}})
 			return
 		}
 		logReads.Add(1)

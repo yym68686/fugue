@@ -35,15 +35,17 @@ const (
 )
 
 type kubernetesLogCollector struct {
-	pipeline     *Pipeline
-	client       kubernetes.Interface
-	deduper      *logLineDeduper
-	cursorsMu    sync.Mutex
-	cursors      map[string]kubernetesLogCursor
-	nodeRetries  map[string]kubernetesLogNodeRetry
-	clock        func() time.Time
-	targetOffset int
-	cycleVisited atomic.Int64
+	pipeline      *Pipeline
+	client        kubernetes.Interface
+	deduper       *logLineDeduper
+	cursorsMu     sync.Mutex
+	cursors       map[string]kubernetesLogCursor
+	nodeRetries   map[string]kubernetesLogNodeRetry
+	clock         func() time.Time
+	targetOffset  int
+	nextTargetKey string
+	cycleVisited  atomic.Int64
+	cycleReads    atomic.Int64
 }
 
 type kubernetesLogTarget struct {
@@ -117,26 +119,55 @@ func (c *kubernetesLogCollector) runCollectionLoop(collect func(context.Context)
 }
 
 func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
-	targets, podCount, ok := c.kubernetesLogTargets(ctx, c.pipeline.cfg.KubernetesLogLabelSelector, true)
+	started := time.Now()
+	ctx, cancel := context.WithDeadline(ctx, started.Add(c.pipeline.cfg.KubernetesLogPollInterval))
+	defer cancel()
+	targets, inventory, ok := c.kubernetesLogTargets(ctx, c.pipeline.cfg.KubernetesLogLabelSelector)
+	c.pipeline.kubernetesLogDiscoveryComplete.Store(0)
 	if !ok {
+		c.pipeline.kubernetesLogCycleMillis.Store(time.Since(started).Milliseconds())
 		return
 	}
+	c.pipeline.kubernetesLogDiscoveryComplete.Store(1)
 	unique := targets[:0]
 	seenTargets := map[string]bool{}
+	now := c.logNow()
+	c.cursorsMu.Lock()
+	if c.cursors == nil {
+		c.cursors = map[string]kubernetesLogCursor{}
+	}
 	for _, target := range targets {
 		key := logTargetKey(target)
 		if seenTargets[key] {
 			continue
 		}
 		seenTargets[key] = true
+		cur, exists := c.cursors[key]
+		if !exists {
+			// Initialize even deferred sources now: a rolling five-minute
+			// lookback at their eventual first turn would silently lose the wait.
+			cur = kubernetesLogCursor{Time: now.Add(-5 * time.Minute), Boundary: map[[32]byte]int{}, FirstObserved: now}
+		}
+		cur.Visited = now
+		if finished := logTargetFinishedAt(target); !finished.IsZero() && finished.Before(cur.Time) {
+			cur.Complete = true
+		}
+		c.cursors[key] = cur
+		if cur.Complete {
+			continue
+		}
 		unique = append(unique, target)
 	}
+	c.cursorsMu.Unlock()
 	targets = unique
-	if len(targets) == 0 {
-		return
+	// Resume by source identity rather than an array index, so insertion or
+	// removal of earlier pods cannot repeatedly move the next source away.
+	c.targetOffset = 0
+	if len(targets) > 0 && c.nextTargetKey != "" {
+		c.targetOffset = sort.Search(len(targets), func(i int) bool { return logTargetKey(targets[i]) >= c.nextTargetKey }) % len(targets)
 	}
-	started := time.Now()
 	c.cycleVisited.Store(0)
+	c.cycleReads.Store(0)
 	budget := int64(c.pipeline.cfg.KubernetesLogMaxLinesPerCycle)
 	// Pull only what can enter the ordinary queue. Keep one exporter batch
 	// of spare slots for concurrent OTLP traffic; critical capacity stays reserved.
@@ -157,7 +188,7 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	}
 	var remaining atomic.Int64
 	remaining.Store(budget)
-	workers := min(8, len(targets))
+	workers := max(1, min(8, len(targets)))
 	type indexedTarget struct {
 		target   kubernetesLogTarget
 		offset   int
@@ -198,7 +229,13 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	}
 	scheduled := 0
 	inFlight := 0
+	selectedPods := map[string]bool{}
 	for scheduled < len(targets) && ctx.Err() == nil {
+		target := targets[(scheduled+c.targetOffset)%len(targets)]
+		podKey := target.pod.Namespace + "/" + target.pod.Name + "/" + string(target.pod.UID)
+		if !selectedPods[podKey] && len(selectedPods) >= c.pipeline.cfg.KubernetesLogMaxPods {
+			break
+		}
 		grant := int64(0)
 		if inFlight < workers {
 			for left := remaining.Load(); left > 0; left = remaining.Load() {
@@ -210,9 +247,9 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 			}
 		}
 		if grant > 0 {
-			target := targets[(scheduled+c.targetOffset)%len(targets)]
 			select {
 			case jobs <- indexedTarget{target, scheduled, grant}:
+				selectedPods[podKey] = true
 				inFlight++
 				scheduled++
 			case <-ctx.Done():
@@ -247,20 +284,41 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	}
 	// A request may have been scheduled before another worker spent the budget.
 	// Resume at the first source that made no progress, including in-flight reads.
-	if resume := min(scheduled, int(firstBlocked.Load())); resume < len(targets) {
-		c.targetOffset = (c.targetOffset + resume) % len(targets)
-	} else {
-		c.targetOffset = (c.targetOffset + 1) % len(targets)
+	if len(targets) > 0 {
+		if resume := min(scheduled, int(firstBlocked.Load())); resume < len(targets) {
+			c.targetOffset = (c.targetOffset + resume) % len(targets)
+		} else {
+			c.targetOffset = (c.targetOffset + 1) % len(targets)
+		}
+		c.nextTargetKey = logTargetKey(targets[c.targetOffset])
 	}
 	c.cursorsMu.Lock()
-	var backlog int64
+	var backlog, maxWait, backoffTargets int64
+	effectivePods := map[string]bool{}
 	for _, target := range targets {
-		if cur, ok := c.cursors[logTargetKey(target)]; ok && !cur.PendingAt.IsZero() {
-			backlog = max(backlog, time.Since(cur.PendingAt).Milliseconds())
+		effectivePods[target.pod.Namespace+"/"+target.pod.Name] = true
+		cur := c.cursors[logTargetKey(target)]
+		if !cur.PendingAt.IsZero() {
+			backlog = max(backlog, c.logNow().Sub(cur.PendingAt).Milliseconds())
+		}
+		lastRead := maxLogTime(cur.FirstObserved, cur.LastRead)
+		if !lastRead.IsZero() {
+			maxWait = max(maxWait, c.logNow().Sub(lastRead).Milliseconds())
+		}
+		if retry := c.nodeRetries[target.pod.Spec.NodeName]; retry.Failures > 0 && (retry.Probe || c.logNow().Before(retry.NextAttempt)) {
+			backoffTargets++
 		}
 	}
 	c.pipeline.kubernetesLogBacklogMillis.Store(backlog)
 	c.pipeline.kubernetesLogDeferredTargets.Store(max(int64(0), int64(len(targets))-visited))
+	c.pipeline.kubernetesLogEligiblePods.Store(int64(len(effectivePods)))
+	c.pipeline.kubernetesLogEligibleTargets.Store(int64(len(targets)))
+	c.pipeline.kubernetesLogUnstartedPods.Store(int64(inventory.unstartedPods))
+	c.pipeline.kubernetesLogSelectedPods.Store(int64(len(selectedPods)))
+	c.pipeline.kubernetesLogSelectedTargets.Store(int64(scheduled))
+	c.pipeline.kubernetesLogReads.Store(c.cycleReads.Load())
+	c.pipeline.kubernetesLogBackoffTargets.Store(backoffTargets)
+	c.pipeline.kubernetesLogMaxWaitMillis.Store(maxWait)
 	for key, cur := range c.cursors {
 		if time.Since(cur.Visited) > time.Hour {
 			delete(c.cursors, key)
@@ -279,7 +337,7 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	c.pipeline.kubernetesLogBackoffNodes.Store(backingOff)
 	c.cursorsMu.Unlock()
 	c.pipeline.kubernetesPriorityTargets.Store(int64(priorityTargets))
-	c.pipeline.kubernetesLogPods.Store(int64(podCount))
+	c.pipeline.kubernetesLogPods.Store(int64(inventory.matchedPods))
 	c.pipeline.kubernetesLogCycleMillis.Store(time.Since(started).Milliseconds())
 	c.pipeline.sourceObservationMu.Lock()
 	c.pipeline.sourceObservationCycle = logCycleObservation{At: started, Targets: len(targets), Scheduled: scheduled, Visited: visited, CatchupReads: catchupReads, InitialBudget: budget, RemainingBudget: remaining.Load(), PollMillis: c.pipeline.cfg.KubernetesLogPollInterval.Milliseconds(), PerSourceLimit: c.pipeline.cfg.KubernetesLogTailLines, CycleLimit: c.pipeline.cfg.KubernetesLogMaxLinesPerCycle}
@@ -314,53 +372,60 @@ func (c *kubernetesLogCollector) catchupCursorTargets(ctx context.Context, targe
 	return reads
 }
 
-func (c *kubernetesLogCollector) kubernetesLogTargets(ctx context.Context, labelSelector string, enforcePodLimit bool) ([]kubernetesLogTarget, int, bool) {
+type kubernetesLogInventory struct {
+	matchedPods   int
+	unstartedPods int
+}
+
+func (c *kubernetesLogCollector) kubernetesLogTargets(ctx context.Context, labelSelector string) ([]kubernetesLogTarget, kubernetesLogInventory, bool) {
 	cfg := c.pipeline.cfg
-	listOptions := metav1.ListOptions{}
+	listOptions := metav1.ListOptions{Limit: 500}
 	if labelSelector = strings.TrimSpace(labelSelector); labelSelector != "" {
 		listOptions.LabelSelector = labelSelector
 	}
-	pods, err := c.client.CoreV1().Pods("").List(ctx, listOptions)
-	if err != nil {
-		c.pipeline.kubernetesLogErrors.Add(1)
-		c.pipeline.recordError(fmt.Errorf("list Kubernetes pods for log collection: %w", err))
-		return nil, 0, false
-	}
-	sort.Slice(pods.Items, func(i, j int) bool {
-		left := pods.Items[i].Namespace + "/" + pods.Items[i].Name
-		right := pods.Items[j].Namespace + "/" + pods.Items[j].Name
-		return left < right
-	})
-
 	c.deduper.Prune(time.Now().UTC().Add(-kubernetesLogDedupWindow))
-	podCount := 0
+	inventory := kubernetesLogInventory{}
 	targets := []kubernetesLogTarget{}
-	for i := range pods.Items {
-		pod := pods.Items[i]
-		if !kubernetesLogNamespaceAllowed(pod.Namespace, cfg.KubernetesLogNamespaces, cfg.KubernetesLogNamespacePrefixes) {
-			continue
-		}
-		podCount++
-		if enforcePodLimit && podCount > cfg.KubernetesLogMaxPods {
-			c.pipeline.kubernetesLogErrors.Add(1)
-			c.pipeline.recordError(fmt.Errorf("Kubernetes log collection reached pod limit %d", cfg.KubernetesLogMaxPods))
-			break
-		}
-		for _, container := range kubernetesLogContainerNames(pod) {
-			if kubernetesContainerHasLogs(pod, container) {
-				targets = append(targets, kubernetesLogTarget{pod: pod, container: container})
+	for {
+		pods, err := c.client.CoreV1().Pods("").List(ctx, listOptions)
+		if err != nil {
+			if ctx.Err() == nil {
+				c.pipeline.kubernetesLogErrors.Add(1)
+				c.pipeline.recordError(fmt.Errorf("list Kubernetes pods for log collection: %w", err))
 			}
-			// A replacement waiting to start can still have unread logs from
-			// its previous process, especially during CrashLoopBackOff.
-			for _, status := range append(append([]corev1.ContainerStatus(nil), pod.Status.ContainerStatuses...), pod.Status.InitContainerStatuses...) {
-				if status.Name == container && status.LastTerminationState.Terminated != nil {
-					targets = append(targets, kubernetesLogTarget{pod: pod, container: container, previous: true})
-					break
+			return nil, inventory, false
+		}
+		for i := range pods.Items {
+			pod := pods.Items[i]
+			if !kubernetesLogNamespaceAllowed(pod.Namespace, cfg.KubernetesLogNamespaces, cfg.KubernetesLogNamespacePrefixes) {
+				continue
+			}
+			inventory.matchedPods++
+			before := len(targets)
+			for _, container := range kubernetesLogContainerNames(pod) {
+				if kubernetesContainerHasLogs(pod, container) {
+					targets = append(targets, kubernetesLogTarget{pod: pod, container: container})
+				}
+				// A replacement waiting to start can still have unread logs from
+				// its previous process, especially during CrashLoopBackOff.
+				for _, status := range kubernetesLogContainerStatuses(pod) {
+					if status.Name == container && status.LastTerminationState.Terminated != nil {
+						targets = append(targets, kubernetesLogTarget{pod: pod, container: container, previous: true})
+						break
+					}
 				}
 			}
+			if len(targets) == before {
+				inventory.unstartedPods++
+			}
 		}
+		if pods.Continue == "" {
+			break
+		}
+		listOptions.Continue = pods.Continue
 	}
-	return targets, podCount, true
+	sort.Slice(targets, func(i, j int) bool { return logTargetKey(targets[i]) < logTargetKey(targets[j]) })
+	return targets, inventory, true
 }
 
 func (c *kubernetesLogCollector) kubernetesLogLinesPerContainer(targetCount int) int {
@@ -570,20 +635,20 @@ func kubernetesLogContainerNames(pod corev1.Pod) []string {
 }
 
 func kubernetesContainerHasLogs(pod corev1.Pod, container string) bool {
+	for _, status := range kubernetesLogContainerStatuses(pod) {
+		if status.Name == container {
+			return status.State.Running != nil || status.State.Terminated != nil
+		}
+	}
+	return false
+}
+
+func kubernetesLogContainerStatuses(pod corev1.Pod) []corev1.ContainerStatus {
 	statuses := make([]corev1.ContainerStatus, 0, len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses)+len(pod.Status.EphemeralContainerStatuses))
 	statuses = append(statuses, pod.Status.InitContainerStatuses...)
 	statuses = append(statuses, pod.Status.ContainerStatuses...)
 	statuses = append(statuses, pod.Status.EphemeralContainerStatuses...)
-	if len(statuses) == 0 {
-		return true
-	}
-	for _, status := range statuses {
-		if status.Name != container {
-			continue
-		}
-		return status.State.Running != nil || status.State.Terminated != nil
-	}
-	return false
+	return statuses
 }
 
 func isBenignKubernetesLogReadError(err error) bool {

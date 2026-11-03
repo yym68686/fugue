@@ -158,17 +158,40 @@ The first pipeline implementation is a guarded local pipeline:
   summaries to `request_facts`, span events to `request_spans`, and explicit
   platform/app events to `app_events`. Plain stdout/stderr is not copied into
   ClickHouse.
-- Kubernetes log collection has a separate bounded, concurrent priority pass
-  for pods explicitly labeled as the `public-data-plane` rollout subsystem.
-  That pass reads only structured request facts and edge diagnostic events on
-  every configured poll interval, so a slow cluster-wide log sweep cannot
-  create blind intervals for edge requests. The ordinary fair-share collector
-  continues to collect general logs independently.
-- The priority pass exposes its target count, ingested line count, and bounded
-  tail-window truncation count in telemetry-agent metrics. A non-zero
-  truncation count means the requested priority tail filled and the interval
-  must be treated as potentially incomplete rather than silently assumed
-  complete.
+- One shared cursor collector reads Kubernetes logs, including structured
+  request facts and edge diagnostic events. Priority metrics classify those
+  events and sources; they do not represent a separate collection pass or a
+  guarantee that every source is read every poll.
+- Discovery lists the full namespace/label-matched inventory in pages of 500.
+  Containers without a reported running or terminated process are rechecked
+  next poll without consuming the pod budget. Started init containers on Pending
+  pods and previous terminated processes during CrashLoopBackOff remain eligible.
+- `FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS` (default 500) bounds distinct
+  eligible pods scheduled per cycle, not the inventory. The standalone agent
+  caps this budget at 500 and logs any configuration clamp. Stable source
+  identities rotate across the full pool, including when pods are replaced.
+  Completed terminated processes stop consuming collection turns.
+- Discovery, reads and catch-up share one poll-interval deadline and at most
+  eight read workers. Existing queue byte/slot limits, line budgets and node
+  backoff remain in effect. Cycle expiration preserves cursors and does not
+  count as a failed node. A new source's five-minute initial lookback is fixed
+  when discovered, including when its first turn is deferred.
+- Coverage metrics use the `fugue_telemetry_pipeline_kubernetes_log_` prefix:
+  `pods` counts the complete matched inventory, `unstarted_pods` counts pods
+  without started sources, and `eligible_pods` / `eligible_targets` count sources
+  still requiring collection at cycle start. `selected_pods` / `selected_targets`
+  show scheduled first turns; `reads` counts actual stream-open attempts including
+  catch-up. `deferred_targets` exposes budget/deadline deferrals, while
+  `node_backoff_targets` and `backoff_skips_total` expose circuit skips.
+  `max_wait_seconds` measures the oldest eligible source's wait since discovery
+  or its last attempted read, including backoff; `pod_budget` reports the
+  effective budget. These gauges reset on empty inventory. If discovery fails,
+  `discovery_complete` becomes zero and inventory gauges retain the last complete
+  observation. `/readyz` remains a configuration check, not a coverage guarantee.
+- Priority truncations count reads deferred by source, cycle or queue limits.
+  Unread records retain their cursors; exporter failures and runtime retention
+  loss remain separate failure modes. This change restores future collection
+  and does not reconstruct historical intervals omitted before deployment.
 
 When observability is disabled, ingestion endpoints return accepted responses
 but do not export data. This keeps app-side telemetry exporters from turning

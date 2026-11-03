@@ -131,6 +131,15 @@ type Pipeline struct {
 	kubernetesLogBackoffSkips      atomic.Uint64
 	kubernetesLogBackoffNodes      atomic.Int64
 	kubernetesLogAdmissionDeferred atomic.Uint64
+	kubernetesLogDiscoveryComplete atomic.Int64
+	kubernetesLogEligiblePods      atomic.Int64
+	kubernetesLogEligibleTargets   atomic.Int64
+	kubernetesLogUnstartedPods     atomic.Int64
+	kubernetesLogSelectedPods      atomic.Int64
+	kubernetesLogSelectedTargets   atomic.Int64
+	kubernetesLogReads             atomic.Int64
+	kubernetesLogBackoffTargets    atomic.Int64
+	kubernetesLogMaxWaitMillis     atomic.Int64
 
 	cfg        Config
 	logger     *log.Logger
@@ -549,6 +558,8 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_lines_total counter")
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_cycle_seconds %f\n", float64(p.kubernetesLogCycleMillis.Load())/1000)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_backlog_max_seconds %f\n", float64(p.kubernetesLogBacklogMillis.Load())/1000)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_deferred_targets Eligible sources not visited in the last complete discovery cycle because of pod, line, queue or deadline budgets; excludes visited backoff skips.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_deferred_targets gauge")
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_deferred_targets %d\n", p.kubernetesLogDeferredTargets.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_backoff_skips_total", p.kubernetesLogBackoffSkips.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_admission_deferred_total", p.kubernetesLogAdmissionDeferred.Load())
@@ -556,16 +567,36 @@ func (p *Pipeline) PrometheusMetrics() string {
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_cursor_gaps_total", p.kubernetesLogCursorGaps.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_rotation_replays_total", p.kubernetesLogRotationReplays.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_lines_total", snap.KubernetesLogLines)
-	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_pods Last Kubernetes pod count considered by the log collector.")
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_pods All namespace/label-matched pods in the last complete discovery, including unstarted pods.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_pods gauge")
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_pods %d\n", snap.KubernetesLogPods)
-	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_priority_log_lines_total Priority structured data-plane log lines ingested by the dedicated collector.")
+	for _, metric := range []struct {
+		name  string
+		help  string
+		value int64
+	}{
+		{"discovery_complete", "Whether the last cycle enumerated the full pod inventory; coverage gauges retain the last complete inventory on failure.", p.kubernetesLogDiscoveryComplete.Load()},
+		{"eligible_pods", "Pods with started current or previous sources still requiring collection at cycle start.", p.kubernetesLogEligiblePods.Load()},
+		{"eligible_targets", "Started current or previous container sources still requiring collection at cycle start.", p.kubernetesLogEligibleTargets.Load()},
+		{"unstarted_pods", "Matched pods with no started current or previous container source.", p.kubernetesLogUnstartedPods.Load()},
+		{"selected_pods", "Distinct eligible pods scheduled in the last complete cycle.", p.kubernetesLogSelectedPods.Load()},
+		{"selected_targets", "Eligible container sources scheduled for a first turn in the last complete cycle.", p.kubernetesLogSelectedTargets.Load()},
+		{"reads", "Log stream open attempts in the last complete cycle, including bounded catch-up reads; excludes backoff skips.", p.kubernetesLogReads.Load()},
+		{"node_backoff_targets", "Eligible sources on nodes currently waiting for a retry or half-open probe.", p.kubernetesLogBackoffTargets.Load()},
+		{"pod_budget", "Effective maximum distinct eligible pods scheduled per cycle, not a discovery limit.", int64(p.cfg.KubernetesLogMaxPods)},
+	} {
+		_, _ = fmt.Fprintf(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_%s %s\n# TYPE fugue_telemetry_pipeline_kubernetes_log_%s gauge\nfugue_telemetry_pipeline_kubernetes_log_%s %d\n", metric.name, metric.help, metric.name, metric.name, metric.value)
+	}
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_max_wait_seconds Maximum wait since an eligible source was first discovered or last attempted, including backoff.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_max_wait_seconds gauge")
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_max_wait_seconds %f\n", float64(p.kubernetesLogMaxWaitMillis.Load())/1000)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_priority_log_lines_total Priority structured data-plane log lines ingested by the shared cursor collector.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_priority_log_lines_total counter")
 	writeMetric("fugue_telemetry_pipeline_kubernetes_priority_log_lines_total", snap.KubernetesPriorityLines)
-	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_priority_log_truncations_total Priority data-plane reads that filled their bounded Kubernetes tail window.")
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_priority_log_truncations_total Priority data-plane reads deferred by source, cycle or queue admission budgets; cursor is retained.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_priority_log_truncations_total counter")
 	writeMetric("fugue_telemetry_pipeline_kubernetes_priority_log_truncations_total", snap.KubernetesPriorityTruncations)
-	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_priority_log_targets Last priority data-plane target count considered by the dedicated collector.")
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_priority_log_targets All eligible priority data-plane sources considered by the shared cursor collector.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_priority_log_targets gauge")
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_priority_log_targets %d\n", snap.KubernetesPriorityTargets)
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_otlp_requests_total OTLP HTTP requests received by the telemetry pipeline.")
