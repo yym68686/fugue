@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "mode": "migrate",
+  "digest": "sha256:8ce1997fc10cdc791f9becbbf1b674a417758184d670de40786c11e19473a687",
+  "expectedFormat": "runtime-snapshot-json-v1",
+  "maxInputBytes": 2097152,
+  "apply": true,
+  "expectedExecutorRevision": "8e716521e46984c3dfd3664ef3ee9c043ef7ad20"
+}

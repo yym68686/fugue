@@ -22,5 +22,9 @@
   "compilerInputCodec": {
     "version": 1,
     "enabled": true
+  },
+  "compilerInputSeparated": {
+    "version": 1,
+    "enabled": true
   }
 }
