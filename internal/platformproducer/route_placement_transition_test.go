@@ -40,6 +40,36 @@ func placementFixture(t *testing.T) (Policy, platformconfig.PolicySnapshot, Stat
 	return p, policy, static
 }
 
+func TestPlacementMutationAdmissionPreservesPinnedSource(t *testing.T) {
+	p, policy, _ := placementFixture(t)
+	rule := policy.RouteConstraints[0]
+	if err := ValidateRouteConstraintMutation(p, rule.Hostname, &rule); err != nil {
+		t.Fatal("unchanged source rejected", err)
+	}
+	if err := ValidateRouteConstraintMutation(p, rule.Hostname, nil); err == nil {
+		t.Fatal("pinned deletion accepted")
+	}
+	changed := rule
+	changed.MinHealthyEdgeNodes++
+	if err := ValidateRouteConstraintMutation(p, rule.Hostname, &changed); err == nil {
+		t.Fatal("changed source accepted")
+	}
+	changed = rule
+	changed.Hostname = "new.example.test"
+	if err := ValidateRouteConstraintMutation(p, changed.Hostname, &changed); err == nil {
+		t.Fatal("unlisted legacy alias accepted")
+	}
+	changed.EdgeGroupID = "cell-b"
+	changed.ExcludedEdgeGroupIDs = nil
+	if err := ValidateRouteConstraintMutation(p, changed.Hostname, &changed); err != nil {
+		t.Fatal("unrelated neutral rule rejected", err)
+	}
+	p.Mode = "paused"
+	if err := ValidateRouteConstraintMutation(p, rule.Hostname, nil); err != nil {
+		t.Fatal("paused migration blocked repair", err)
+	}
+}
+
 func TestPlacementTransitionPreservesPhysicalEligibilityAndExpiredHold(t *testing.T) {
 	p, policy, static := placementFixture(t)
 	before, _ := json.Marshal(policy)

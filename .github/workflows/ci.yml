@@ -1357,8 +1357,8 @@ jobs:
               runner=scripts.expand_cell_membership
             fi
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/reconfigure_cell_producer.py scripts/test_reconfigure_cell_producer.py scripts/expand_cell_membership.py scripts/test_expand_cell_membership.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py; then
-              python3 -m unittest scripts.test_reconfigure_cell_producer scripts.test_expand_cell_membership
+            if git diff --quiet HEAD origin/main -- "$config" scripts/refresh_producer_dependencies.py scripts/test_refresh_producer_dependencies.py scripts/reconfigure_cell_producer.py scripts/test_reconfigure_cell_producer.py scripts/expand_cell_membership.py scripts/test_expand_cell_membership.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py; then
+              python3 -m unittest scripts.test_reconfigure_cell_producer scripts.test_expand_cell_membership scripts.test_refresh_producer_dependencies
               python3 -m "$runner" "$config" --validate-only
               echo "config=$config" >> "$GITHUB_OUTPUT"
               echo "runner=$runner" >> "$GITHUB_OUTPUT"

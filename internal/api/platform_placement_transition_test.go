@@ -100,14 +100,11 @@ func TestCellProducerPlacementTransitionCapturesAndGuardsExactSource(t *testing.
 		t.Fatal("publication trusted capture instead of validating transformed constraints")
 	}
 	legacy.MinHealthyEdgeNodes = 3
-	if _, err := st.PutEdgeRoutePolicy(legacy); err != nil {
-		t.Fatal(err)
+	if _, err := st.PutEdgeRoutePolicy(legacy); err == nil {
+		t.Fatal("business write bypassed the active source pin")
 	}
-	if _, err := s.reconcilePlatformConfigurationScope(ctx, scope, nil); err == nil {
-		t.Fatal("changed source policy was silently mapped")
-	}
-	if r := performJSONRequest(t, s, http.MethodGet, path, adminKey, nil); r.Code == http.StatusOK {
-		t.Fatal("preview accepted stale source pin")
+	if r := performJSONRequest(t, s, http.MethodGet, path, adminKey, nil); r.Code != http.StatusOK {
+		t.Fatal("rejected business mutation damaged producer preview", r.Body.String())
 	}
 	afterParent, afterRelease, found, err := st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, p.TargetScope, "shadow")
 	if err != nil || !found || afterParent.ID != parent.ID || afterRelease.ID != release.ID {

@@ -27,6 +27,9 @@ def validate_ref(ref):
 
 
 def validate(config):
+    if config.get("schema") == "fugue.producer-dependency-refresh/v1":
+        from scripts.refresh_producer_dependencies import validate as validate_dependencies
+        return validate_dependencies(config)
     if set(config) != {"schema", "generation", "origin", "authority_cell_id", "precondition", "policy"} or config["schema"] != "fugue.cell-producer-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1:
         raise ValueError("explicit producer reconfiguration declaration required")
     cell = config["authority_cell_id"]
@@ -123,6 +126,9 @@ def validate_output(config, policy):
 
 
 def publish(config, api, save):
+    if config.get("schema") == "fugue.producer-dependency-refresh/v1":
+        from scripts.refresh_producer_dependencies import publish as publish_dependencies
+        return publish_dependencies(config, api, save)
     validate(config)
     operation = config["precondition"].get("operation", "placement")
     scope = "platform-config-producer:" + config["authority_cell_id"]
@@ -198,7 +204,7 @@ def main():
         raise ValueError("configuration credential and retained evidence path required")
     def save(value):
         Path(args.evidence).write_text(canonical(value) + "\n")
-    print(canonical(publish(config, API(config["origin"], token), save)))
+    print(canonical(publish(config, API(config["origin"], token, response_limit=128 << 20), save)))
 
 
 if __name__ == "__main__":

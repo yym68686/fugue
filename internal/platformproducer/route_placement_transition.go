@@ -206,6 +206,37 @@ func ApplyRoutePlacementTransition(p Policy, policy platformconfig.PolicySnapsho
 	return result, err
 }
 
+// ValidateRouteConstraintMutation rejects a business write before it can stop an
+// active migration. It checks only the affected hostname, so an existing broken
+// constraint does not prevent unrelated repair work. Deletion is explicit nil.
+func ValidateRouteConstraintMutation(p Policy, hostname string, next *platformconfig.RoutePolicyConstraint) error {
+	if p.Mode == "paused" || p.RoutePlacementTransition == nil {
+		return nil
+	}
+	if err := validatePlacementTransitionPolicy(p); err != nil {
+		return err
+	}
+	for _, pin := range p.RoutePlacementTransition.Constraints {
+		if pin.Source.Hostname != hostname {
+			continue
+		}
+		if next != nil {
+			digest, err := RouteConstraintDigest(*next)
+			if err == nil && digest == pin.SourceDigest {
+				return nil
+			}
+		}
+		return fmt.Errorf("route constraint is pinned by an active placement migration; explicit producer reconfiguration required")
+	}
+	aliases, _ := p.RoutePlacementTransition.aliases()
+	if next != nil {
+		if _, affected := replaceConstraintAliases(*next, aliases); affected {
+			return fmt.Errorf("route constraint uses an unpinned migration alias; explicit producer reconfiguration required")
+		}
+	}
+	return nil
+}
+
 func ValidateRoutePlacementOutput(p Policy, policy platformconfig.PolicySnapshot) error {
 	if p.RoutePlacementTransition != nil {
 		if err := platformconfig.ValidatePolicySnapshot(policy); err != nil {

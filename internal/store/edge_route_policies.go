@@ -106,6 +106,9 @@ func (s *Store) PutEdgeRoutePolicy(policy model.EdgeRoutePolicy) (model.EdgeRout
 			}
 		}
 		policy.UpdatedAt = now
+		if err := s.validateRoutePolicyMigration(state, policy.Hostname, &policy); err != nil {
+			return err
+		}
 		if index >= 0 {
 			state.EdgeRoutePolicies[index] = policy
 		} else {
@@ -191,6 +194,9 @@ func (s *Store) PutEdgeRoutePolicyCAS(policy model.EdgeRoutePolicy, expectedGene
 			policy.ExclusionGeneration = expectedGeneration + 1
 			policy.ExclusionFence = model.NewID("edge_exclusion_fence")
 		}
+		if err := s.validateRoutePolicyMigration(state, policy.Hostname, &policy); err != nil {
+			return err
+		}
 		if index >= 0 {
 			state.EdgeRoutePolicies[index] = policy
 		} else {
@@ -218,6 +224,9 @@ func (s *Store) DeleteEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy, e
 			return ErrNotFound
 		}
 		removed = state.EdgeRoutePolicies[index]
+		if err := s.validateRoutePolicyMigration(state, hostname, nil); err != nil {
+			return err
+		}
 		if model.EdgeRoutePolicyHasExclusions(removed) {
 			return ErrConflict
 		}
@@ -244,6 +253,9 @@ func (s *Store) DeleteEdgeRoutePolicyCAS(hostname string, expectedGeneration uin
 			return ErrNotFound
 		}
 		removed = state.EdgeRoutePolicies[index]
+		if err := s.validateRoutePolicyMigration(state, hostname, nil); err != nil {
+			return err
+		}
 		if removed.ExclusionGeneration != expectedGeneration || strings.TrimSpace(removed.ExclusionFence) != expectedFence {
 			return ErrConflict
 		}

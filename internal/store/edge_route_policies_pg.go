@@ -56,7 +56,22 @@ func (s *Store) pgPutEdgeRoutePolicy(policy model.EdgeRoutePolicy) (model.EdgeRo
 		policy.CreatedAt = now
 	}
 	policy.UpdatedAt = now
-	return pgUpsertEdgeRoutePolicy(ctx, s.db, policy)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return model.EdgeRoutePolicy{}, err
+	}
+	defer tx.Rollback()
+	if err := s.pgGuardRoutePolicyMigration(ctx, tx, policy.Hostname, &policy); err != nil {
+		return model.EdgeRoutePolicy{}, err
+	}
+	stored, err := pgUpsertEdgeRoutePolicy(ctx, tx, policy)
+	if err != nil {
+		return model.EdgeRoutePolicy{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.EdgeRoutePolicy{}, mapDBErr(err)
+	}
+	return stored, nil
 }
 
 func (s *Store) pgPutEdgeRoutePolicyCAS(policy model.EdgeRoutePolicy, expectedGeneration uint64, expectedFence string) (model.EdgeRoutePolicy, error) {
@@ -109,6 +124,9 @@ func (s *Store) pgPutEdgeRoutePolicyCAS(policy model.EdgeRoutePolicy, expectedGe
 		clearEdgeRoutePolicyExclusionMetadata(&policy)
 		policy.ExclusionGeneration = expectedGeneration + 1
 		policy.ExclusionFence = model.NewID("edge_exclusion_fence")
+	}
+	if err := s.pgGuardRoutePolicyMigration(ctx, tx, policy.Hostname, &policy); err != nil {
+		return model.EdgeRoutePolicy{}, err
 	}
 	stored, err := pgUpsertEdgeRoutePolicy(ctx, tx, policy)
 	if err != nil {
@@ -181,6 +199,9 @@ func (s *Store) pgDeleteEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy,
 	if model.EdgeRoutePolicyHasExclusions(current) {
 		return model.EdgeRoutePolicy{}, ErrConflict
 	}
+	if err := s.pgGuardRoutePolicyMigration(ctx, tx, hostname, nil); err != nil {
+		return model.EdgeRoutePolicy{}, err
+	}
 	policy, err := scanEdgeRoutePolicy(tx.QueryRowContext(ctx, `DELETE FROM fugue_edge_route_policies WHERE lower(hostname) = lower($1) RETURNING `+edgeRoutePolicySelectColumns, hostname))
 	if err != nil {
 		return model.EdgeRoutePolicy{}, mapDBErr(err)
@@ -210,6 +231,9 @@ func (s *Store) pgDeleteEdgeRoutePolicyCAS(hostname string, expectedGeneration u
 		if err := s.pgValidateEdgeExclusionClearTx(ctx, tx, current.ExcludedEdgeIDs, current.ExcludedEdgeGroupIDs, true); err != nil {
 			return model.EdgeRoutePolicy{}, err
 		}
+	}
+	if err := s.pgGuardRoutePolicyMigration(ctx, tx, hostname, nil); err != nil {
+		return model.EdgeRoutePolicy{}, err
 	}
 	policy, err := scanEdgeRoutePolicy(tx.QueryRowContext(ctx, `DELETE FROM fugue_edge_route_policies WHERE lower(hostname) = lower($1) AND exclusion_generation = $2 AND exclusion_fence = $3 RETURNING `+edgeRoutePolicySelectColumns, hostname, expectedGeneration, expectedFence))
 	if errors.Is(err, sql.ErrNoRows) {

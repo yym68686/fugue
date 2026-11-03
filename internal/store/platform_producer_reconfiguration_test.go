@@ -142,7 +142,11 @@ func (f reconfigurationFixture) save(t *testing.T, p platformproducer.Policy) mo
 	if err = json.Unmarshal(raw, &content); err != nil {
 		t.Fatal(err)
 	}
-	a, err := f.s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: "platform-config-producer:cell-a"}, Generation: p.Generation, Content: content})
+	scope, err := platformproducer.PolicyScopeForTarget(p.TargetScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := f.s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: scope}, Generation: p.Generation, Content: content})
 	if err != nil {
 		t.Fatal(err)
 	}

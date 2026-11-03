@@ -44,7 +44,13 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		return p, ErrInvalidInput
 	}
 	r := req.ProducerReconfiguration
-	if globalDNSReconfiguration(r.Operation) {
+	if dependencyReconfiguration(r.Operation) {
+		if p.Mode != "serving" || p.Serving == nil || p.Serving.SinglePublication ||
+			r.Operation == "placement_constraints" && (p.PublicationRole != platformconfig.PublicationRoleCellRoutes || p.RoutePlacementTransition == nil) ||
+			r.Operation == "dns_source" && (p.PublicationRole != platformconfig.PublicationRoleCellDNS || p.DNSSource == nil) {
+			return p, ErrInvalidInput
+		}
+	} else if globalDNSReconfiguration(r.Operation) {
 		if p.PublicationRole != "" || p.TargetScope != "global" || p.RoutePlacementTransition != nil || !p.RequireDNSQueryPolicy {
 			return p, ErrInvalidInput
 		}
@@ -60,7 +66,7 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
-	case "continuous_serving", "physical_dns", "retire_dns_selector", "dynamic_quality", "edge_offline", "business_exploration", "dns_availability", "dns_availability_recovery":
+	case "placement_constraints", "dns_source", "continuous_serving", "physical_dns", "retire_dns_selector", "dynamic_quality", "edge_offline", "business_exploration", "dns_availability", "dns_availability_recovery":
 		if p.Mode != "serving" || p.Serving == nil || p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
@@ -112,6 +118,9 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	}
 	if a.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass {
 		return ErrConflict
+	}
+	if dependencyReconfiguration(req.ProducerReconfiguration.Operation) {
+		return validateDependencyReconfiguration(state, a, p, req, keys, now)
 	}
 	r := req.ProducerReconfiguration
 	laneKey := platformsafety.ReleaseLaneKey(a.ArtifactKind, a.ScopeKey, "shadow")
@@ -368,7 +377,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 	}
 	if lkg != nil {
 		state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, *lkg)
-		if r.Operation == "dns_availability_recovery" {
+		if r.Operation == "dns_availability_recovery" || dependencyReconfiguration(r.Operation) {
 			original, err := pgGetPlatformArtifactRelease(ctx, tx, lkg.VerifiedByReleaseID, false)
 			if err != nil {
 				return err
@@ -382,6 +391,11 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 			} else if err != ErrNotFound {
 				return err
 			}
+		}
+	}
+	if dependencyReconfiguration(r.Operation) {
+		if err := pgLoadDependencyReconfiguration(ctx, tx, state, p); err != nil {
+			return err
 		}
 	}
 	return validateProducerReconfiguration(state, a, req, s.platformArtifactSigningKeyring(), time.Now().UTC())
