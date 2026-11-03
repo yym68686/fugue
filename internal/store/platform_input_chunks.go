@@ -48,7 +48,7 @@ func readInputManifest(ctx context.Context, db inputQueryer, digest string) (inp
 	if err != nil {
 		return m, err
 	}
-	if m.Format == inputFormatSharedV3 {
+	if m.Format == inputFormatSharedV3 || m.Format == inputFormatSeparatedV4 {
 		if !inputDigestPattern.MatchString(digest) || m.Size < 1 || m.Size > inputMaxBytes || m.ChunkSize != inputChunkBytes || m.Count != int((m.Size+inputChunkBytes-1)/inputChunkBytes) || m.Created.IsZero() {
 			return m, ErrConflict
 		}
@@ -66,6 +66,7 @@ func absentInputManifest(err error) bool {
 }
 
 type inputChunkReader struct {
+	separated    *separatedInputReader
 	shared       *sharedInputReader
 	rows         *sql.Rows
 	manifest     inputManifest
@@ -80,6 +81,13 @@ type inputChunkReader struct {
 }
 
 func openInputChunks(ctx context.Context, db inputQueryer, m inputManifest) (*inputChunkReader, error) {
+	if m.Format == inputFormatSeparatedV4 {
+		r, err := openSeparatedInput(ctx, db, m)
+		if err != nil {
+			return nil, err
+		}
+		return &inputChunkReader{separated: r}, nil
+	}
 	if m.Format == inputFormatSharedV3 {
 		shared, err := openSharedInput(ctx, db, m)
 		if err != nil {
@@ -94,6 +102,11 @@ func openInputChunks(ctx context.Context, db inputQueryer, m inputManifest) (*in
 	return &inputChunkReader{rows: rows, manifest: m, hash: sha256.New()}, nil
 }
 func (r *inputChunkReader) Read(p []byte) (int, error) {
+	if r.separated != nil {
+		n, err := r.separated.Read(p)
+		r.done, r.err = r.separated.done, r.separated.err
+		return n, err
+	}
 	if r.shared != nil {
 		n, err := r.shared.Read(p)
 		r.done, r.err = r.shared.done, r.shared.err
@@ -294,6 +307,30 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	}
 	m, err := readInputManifest(ctx, tx, digest)
 	if err == nil {
+		if m.Format == inputFormatSeparatedV4 {
+			actual, e := platformconfig.RuntimeSnapshotDigest(snapshot)
+			if e != nil {
+				return e
+			}
+			if actual != digest {
+				return ErrConflict
+			}
+			if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest == m {
+				if _, e := readSeparatedDNSSelections(ctx, tx, m, cached, func(CompilerDNSSelectionSummary) bool { return false }); e == nil {
+					return tx.Commit()
+				}
+				// A completed migration can replace the closure while retaining
+				// the identity. Only a full verified read can establish it again.
+			}
+			r, e := openSeparatedInput(ctx, tx, m)
+			if e != nil {
+				return e
+			}
+			if _, e = io.Copy(io.Discard, r); e != nil {
+				return e
+			}
+			return tx.Commit()
+		}
 		if m.Format == inputFormatSharedV3 {
 			actual, err := platformconfig.RuntimeSnapshotDigest(snapshot)
 			if err != nil {
@@ -419,6 +456,22 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 		}
 		return tx.Commit()
 	}
+	if s.compilerInputSeparatedEnabled() {
+		if _, err = tx.ExecContext(ctx, `SAVEPOINT separated_input_budget`); err != nil {
+			return err
+		}
+		_, err = s.pgWriteSeparatedInput(ctx, tx, snapshot, digest, nil)
+		if err == nil {
+			return tx.Commit()
+		}
+		if !errors.Is(err, errSharedInputBudget) {
+			return err
+		}
+		separatedInputStats.fallback.Add(1)
+		if _, err = tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT separated_input_budget`); err != nil {
+			return err
+		}
+	}
 	if s.compilerInputSharedEnabled() {
 		if _, err = tx.ExecContext(ctx, `SAVEPOINT shared_input_budget`); err != nil {
 			return err
@@ -525,37 +578,22 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 	if s.usingDatabase() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		m, err := readInputManifest(ctx, s.db, digest)
+		// Keep the manifest and every streamed chunk in one MVCC snapshot.
+		// A concurrent GC may commit after the manifest read; this reader must
+		// still see the complete pre-collection representation.
+		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		if err != nil {
+			return platformconfig.RuntimeSnapshot{}, err
+		}
+		defer tx.Rollback()
+		m, err := readInputManifest(ctx, tx, digest)
 		if err == nil {
-			r, err := openInputChunks(ctx, s.db, m)
-			if err != nil {
-				return platformconfig.RuntimeSnapshot{}, err
-			}
-			defer r.Close()
-			out, err := platformconfig.DecodeRuntimeSnapshotReader(r)
-			if err != nil {
-				return platformconfig.RuntimeSnapshot{}, fmt.Errorf("compiler input cannot be decoded or verified: %w", ErrConflict)
-			}
-			if !r.done || r.err != nil {
-				return platformconfig.RuntimeSnapshot{}, ErrConflict
-			}
-			if r.shared != nil {
-				s.rememberSharedDNSInput(out, m, r.shared)
-			}
-			if m.Format == inputFormatCodecV2 && len(r.storedHashes) == m.Count {
-				// Positions come from canonical JSON; physical witnesses come
-				// from the verified stream, never recompression assumptions.
-				w := &inputChunkWriter{digest: digest, hash: sha256.New(), chunk: make([]byte, 0, m.ChunkSize)}
-				if platformconfig.WriteRuntimeSnapshot(w, out) == nil && w.flush() == nil {
-					w.expected, w.storedSizes = r.storedHashes, r.storedSizes
-					s.rememberCompilerDNSInput(out, m, w)
-				}
-			}
-			return out, nil
+			return s.readCompilerInputSnapshot(ctx, tx, m)
 		}
 		if !absentInputManifest(err) {
 			return platformconfig.RuntimeSnapshot{}, err
 		}
+		tx.Rollback() // Release the connection before the legacy fallback.
 	}
 	content, err := s.GetPlatformArtifactContent(digest)
 	if err != nil {
@@ -575,12 +613,48 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 	return snapshot, nil
 }
 
+func (s *Store) readCompilerInputSnapshot(ctx context.Context, db inputQueryer, m inputManifest) (platformconfig.RuntimeSnapshot, error) {
+	r, err := openInputChunks(ctx, db, m)
+	if err != nil {
+		return platformconfig.RuntimeSnapshot{}, err
+	}
+	defer r.Close()
+	out, err := platformconfig.DecodeRuntimeSnapshotReader(r)
+	if err != nil {
+		return platformconfig.RuntimeSnapshot{}, fmt.Errorf("compiler input cannot be decoded or verified: %w", ErrConflict)
+	}
+	if !r.done || r.err != nil {
+		return platformconfig.RuntimeSnapshot{}, ErrConflict
+	}
+	if r.shared != nil {
+		s.rememberSharedDNSInput(out, m, r.shared)
+	}
+	if r.separated != nil {
+		s.rememberSeparatedDNSInput(ctx, db, out, m, r.separated)
+	}
+	if m.Format == inputFormatCodecV2 && len(r.storedHashes) == m.Count {
+		// Positions come from canonical JSON; physical witnesses come from
+		// the verified stream, never recompression assumptions.
+		w := &inputChunkWriter{digest: m.Digest, hash: sha256.New(), chunk: make([]byte, 0, m.ChunkSize)}
+		if platformconfig.WriteRuntimeSnapshot(w, out) == nil && w.flush() == nil {
+			w.expected, w.storedSizes = r.storedHashes, r.storedSizes
+			s.rememberCompilerDNSInput(out, m, w)
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) pgReadChunkedContent(ctx context.Context, digest string) (model.PlatformArtifactContent, error) {
-	m, err := readInputManifest(ctx, s.db, digest)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return model.PlatformArtifactContent{}, err
 	}
-	r, err := openInputChunks(ctx, s.db, m)
+	defer tx.Rollback()
+	m, err := readInputManifest(ctx, tx, digest)
+	if err != nil {
+		return model.PlatformArtifactContent{}, err
+	}
+	r, err := openInputChunks(ctx, tx, m)
 	if err != nil {
 		return model.PlatformArtifactContent{}, err
 	}

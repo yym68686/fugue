@@ -38,7 +38,7 @@ func MigrateCompilerInputCodec(ctx context.Context, databaseURL string) error {
 	}
 	const legacy = "CHECK ((format = 'runtime-snapshot-json-v1'::text))"
 	const expanded = "CHECK (((format = 'runtime-snapshot-json-v1'::text) OR ((format = 'runtime-snapshot-json-chunk-codec-v2'::text) AND (chunk_size <= 262139))))"
-	if strings.TrimSuffix(definition, " NOT VALID") == expanded || strings.TrimSuffix(definition, " NOT VALID") == sharedInputFormatConstraint {
+	if strings.TrimSuffix(definition, " NOT VALID") == expanded || strings.TrimSuffix(definition, " NOT VALID") == sharedInputFormatConstraint || strings.TrimSuffix(definition, " NOT VALID") == separatedInputFormatConstraint {
 		if err = tx.Commit(); err != nil {
 			return err
 		}

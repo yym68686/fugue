@@ -5,6 +5,7 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -38,14 +39,15 @@ type compilerDNSRange struct {
 	Offset, Length int64
 }
 type compilerDNSInput struct {
-	Manifest       inputManifest
-	Intent, Policy string
-	Hashes         [][sha256.Size]byte
-	StoredSizes    []int
-	Ranges         []compilerDNSRange
-	Bytes          int
-	SharedRecipes  [][]byte
-	SharedClosure  [32]byte
+	Manifest         inputManifest
+	Intent, Policy   string
+	Hashes           [][sha256.Size]byte
+	StoredSizes      []int
+	Ranges           []compilerDNSRange
+	Bytes            int
+	SharedRecipes    [][]byte
+	SharedClosure    [32]byte
+	SeparatedWitness [32]byte
 }
 type compilerDNSInputCache struct {
 	mu      sync.Mutex
@@ -73,8 +75,10 @@ func (c *compilerDNSInputCache) put(v *compilerDNSInput) {
 		c.entries = map[string]*list.Element{}
 	}
 	if e := c.entries[v.Manifest.Digest]; e != nil {
-		c.lru.MoveToFront(e)
-		return
+		old := e.Value.(*compilerDNSInput)
+		c.bytes -= old.Bytes
+		c.lru.Remove(e)
+		delete(c.entries, v.Manifest.Digest)
 	}
 	for len(c.entries) >= compilerDNSCacheEntries || c.bytes+v.Bytes > compilerDNSCacheBytes {
 		e := c.lru.Back()
@@ -128,36 +132,56 @@ func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func
 	if s.usingDatabase() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		m, err := readInputManifest(ctx, s.db, digest)
+		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		if err != nil {
+			return CompilerInputDNSSelections{}, err
+		}
+		defer tx.Rollback()
+		m, err := readInputManifest(ctx, tx, digest)
 		if err != nil && !absentInputManifest(err) {
 			return CompilerInputDNSSelections{}, err
 		}
 		if err == nil {
 			if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest.Format == m.Format && cached.Manifest.Size == m.Size && cached.Manifest.Count == m.Count && cached.Manifest.ChunkSize == m.ChunkSize {
-				if m.Format == inputFormatSharedV3 {
-					return readSharedDNSSelections(ctx, s.db, m, cached, needed)
+				if m.Format == inputFormatSeparatedV4 {
+					out, e := readSeparatedDNSSelections(ctx, tx, m, cached, needed)
+					if e == nil {
+						return out, nil
+					}
+					// A representation may have been migrated away and back. A
+					// stale physical witness requires a full digest verification.
+				} else {
+					if m.Format == inputFormatSharedV3 {
+						return readSharedDNSSelections(ctx, tx, m, cached, needed)
+					}
+					return readCompilerDNSSelections(ctx, tx, m, cached, needed)
 				}
-				return s.readCompilerDNSSelections(ctx, m, cached, needed)
 			}
+			// Keep a cold read in the manifest's snapshot too. Ending this
+			// transaction and starting a second full read would reopen the
+			// collection race specifically on a cache miss.
+			snapshot, err := s.readCompilerInputSnapshot(ctx, tx, m)
+			if err != nil {
+				return CompilerInputDNSSelections{}, err
+			}
+			if m.Format == inputFormatV1 && m.Count <= inputMaxBytes/inputChunkBytes {
+				w := &inputChunkWriter{digest: digest, hash: sha256.New(), chunk: make([]byte, 0, m.ChunkSize)}
+				if platformconfig.WriteRuntimeSnapshot(w, snapshot) == nil && w.flush() == nil {
+					s.rememberCompilerDNSInput(snapshot, m, w)
+				}
+			}
+			return selectCompilerDNSObservations(snapshot, needed), nil
 		}
+		tx.Rollback() // Release the connection before the legacy fallback.
 	}
 	snapshot, err := s.GetPlatformCompilerInput(digest)
 	if err != nil {
 		return CompilerInputDNSSelections{}, err
 	}
-	// A cold reader builds an index only when canonical bytes reproduce the
-	// verified digest. Noncanonical legacy representations remain readable.
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		m, err := readInputManifest(ctx, s.db, digest)
-		cancel()
-		if err == nil && m.Format == inputFormatV1 && m.Count <= inputMaxBytes/inputChunkBytes {
-			w := &inputChunkWriter{digest: digest, hash: sha256.New(), chunk: make([]byte, 0, m.ChunkSize)}
-			if platformconfig.WriteRuntimeSnapshot(w, snapshot) == nil && w.flush() == nil {
-				s.rememberCompilerDNSInput(snapshot, m, w)
-			}
-		}
-	}
+	return selectCompilerDNSObservations(snapshot, needed), nil
+}
+
+func selectCompilerDNSObservations(snapshot platformconfig.RuntimeSnapshot, needed func(CompilerDNSSelectionSummary) bool) CompilerInputDNSSelections {
 	out := CompilerInputDNSSelections{IntentGeneration: snapshot.IntentGeneration, PolicyGeneration: snapshot.PolicyGeneration}
 	for _, f := range snapshot.DNSSelections {
 		summary := compilerDNSSelectionSummary(f)
@@ -167,12 +191,12 @@ func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func
 			out.Omitted = append(out.Omitted, summary)
 		}
 	}
-	return out, nil
+	return out
 }
 
 const compilerDNSSelectiveReadSQL = `SELECT ordinal,chunk_hash,octet_length(data),sha256(data),CASE WHEN ordinal = ANY($2::int[]) THEN data ELSE NULL END FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal`
 
-func (s *Store) readCompilerDNSSelections(ctx context.Context, m inputManifest, c *compilerDNSInput, needed func(CompilerDNSSelectionSummary) bool) (CompilerInputDNSSelections, error) {
+func readCompilerDNSSelections(ctx context.Context, db inputQueryer, m inputManifest, c *compilerDNSInput, needed func(CompilerDNSSelectionSummary) bool) (CompilerInputDNSSelections, error) {
 	if len(c.Hashes) != m.Count || m.Format == inputFormatCodecV2 && len(c.StoredSizes) != m.Count {
 		return CompilerInputDNSSelections{}, ErrConflict
 	}
@@ -196,7 +220,7 @@ func (s *Store) readCompilerDNSSelections(ctx context.Context, m inputManifest, 
 			}
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, compilerDNSSelectiveReadSQL, m.Digest, ordinals)
+	rows, err := db.QueryContext(ctx, compilerDNSSelectiveReadSQL, m.Digest, ordinals)
 	if err != nil {
 		return CompilerInputDNSSelections{}, err
 	}

@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def manifest(document):
-    if not {"namespace", "name", "policy"} <= set(document) or set(document) - {"namespace", "name", "policy", "observationRetention", "compilerInputCodec", "compilerInputShared"}:
+    if not {"namespace", "name", "policy"} <= set(document) or set(document) - {"namespace", "name", "policy", "observationRetention", "compilerInputCodec", "compilerInputShared", "compilerInputSeparated"}:
         raise ValueError("unexpected storage policy configuration")
     for field in ("namespace", "name"):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", document[field]):
@@ -24,7 +24,7 @@ def manifest(document):
     if p["database_max_open"] and (p["database_max_idle"] > p["database_max_open"] or not p["database_idle_seconds"]):
         raise ValueError("invalid connection/idle budget")
     data = {"policy.json": json.dumps(p, sort_keys=True, separators=(",", ":"))}
-    for key, filename in (("compilerInputCodec", "compiler-input-codec.json"), ("compilerInputShared", "compiler-input-shared.json")):
+    for key, filename in (("compilerInputCodec", "compiler-input-codec.json"), ("compilerInputShared", "compiler-input-shared.json"), ("compilerInputSeparated", "compiler-input-separated.json")):
         if key not in document:
             continue
         codec = document[key]
@@ -49,6 +49,10 @@ def main():
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     value = manifest(json.loads(Path(args.path).read_text()))
+    separated = json.loads(value['data'].get('compiler-input-separated.json', '{}'))
+    if separated.get('enabled'):
+        # New writes require BOTH current and automatic rollback readers.
+        subprocess.run(['python3', '-m', 'scripts.compiler_input_storage'], check=True, timeout=90)
     body = json.dumps(value)
     command = ["kubectl", "apply", "--server-side", "--field-manager=fugue-storage-policy", "-f", "-"]
     if not args.apply:

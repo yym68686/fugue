@@ -11,7 +11,8 @@ COPY internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-api ./cmd/fugue-api \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-diagnostic-agent ./cmd/fugue-api/diagnostic_agent \
-    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-pprof cmd/pprof
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-pprof cmd/pprof \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-input-storage ./cmd/fugue-input-storage
 
 FROM --platform=$TARGETPLATFORM golang:1.25-alpine
 RUN apk add --no-cache bash ca-certificates git kubectl perf postgresql-client
@@ -19,4 +20,5 @@ WORKDIR /app
 COPY --from=build /out/fugue-api /usr/local/bin/fugue-api
 COPY --from=build /out/fugue-diagnostic-agent /usr/local/bin/fugue-diagnostic-agent
 COPY --from=build /out/fugue-pprof /usr/local/bin/fugue-pprof
+COPY --from=build /out/fugue-input-storage /usr/local/bin/fugue-input-storage
 ENTRYPOINT ["/usr/local/bin/fugue-api"]

@@ -35,27 +35,40 @@ type sharedPackWitness struct {
 	Size, StoredSize int
 }
 type sharedInputReader struct {
-	ctx       context.Context
-	db        inputQueryer
-	m         inputManifest
-	recipes   [][]byte
-	locations map[int64]sharedLocation
-	packs     map[int64]sharedPackWitness
-	cache     map[int64][]byte
-	order     []int64
-	ordinal   int
-	pending   []byte
-	hash      hash.Hash
-	size      int64
-	done      bool
-	err       error
-	started   time.Time
-	recorded  bool
+	ctx        context.Context
+	db         inputQueryer
+	m          inputManifest
+	recipes    [][]byte
+	locations  map[int64]sharedLocation
+	packs      map[int64]sharedPackWitness
+	cache      map[int64][]byte
+	order      []int64
+	ordinal    int
+	pending    []byte
+	hash       hash.Hash
+	size       int64
+	done       bool
+	err        error
+	started    time.Time
+	recorded   bool
+	components bool
 }
 
 func openSharedInput(ctx context.Context, db inputQueryer, m inputManifest) (*sharedInputReader, error) {
-	r := &sharedInputReader{ctx: ctx, db: db, m: m, hash: sha256.New(), locations: map[int64]sharedLocation{}, packs: map[int64]sharedPackWitness{}, cache: map[int64][]byte{}, started: time.Now()}
-	rows, err := db.QueryContext(ctx, `SELECT ordinal,recipe_hash,recipe FROM fugue_platform_input_shared_recipes WHERE content_hash=$1 ORDER BY ordinal`, m.Digest)
+	return openSharedRepresentation(ctx, db, m, false)
+}
+
+func sharedRepresentationTables(components bool) (string, string) {
+	if components {
+		return "fugue_platform_input_component_recipes", "fugue_platform_input_component_refs"
+	}
+	return "fugue_platform_input_shared_recipes", "fugue_platform_input_shared_refs"
+}
+
+func openSharedRepresentation(ctx context.Context, db inputQueryer, m inputManifest, components bool) (*sharedInputReader, error) {
+	r := &sharedInputReader{ctx: ctx, db: db, m: m, components: components, hash: sha256.New(), locations: map[int64]sharedLocation{}, packs: map[int64]sharedPackWitness{}, cache: map[int64][]byte{}, started: time.Now()}
+	recipes, refs := sharedRepresentationTables(components)
+	rows, err := db.QueryContext(ctx, `SELECT ordinal,recipe_hash,recipe FROM `+recipes+` WHERE content_hash=$1 ORDER BY ordinal`, m.Digest)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +122,7 @@ func openSharedInput(ctx context.Context, db inputQueryer, m inputManifest) (*sh
 	if len(r.recipes) != m.Count {
 		return nil, ErrConflict
 	}
-	rows, err = db.QueryContext(ctx, `SELECT p.pack_id,p.pack_hash,p.size_bytes,p.stored_hash,octet_length(p.data) FROM fugue_platform_input_shared_refs r JOIN fugue_platform_input_shared_packs p USING(pack_id) WHERE content_hash=$1`, m.Digest)
+	rows, err = db.QueryContext(ctx, `SELECT p.pack_id,p.pack_hash,p.size_bytes,p.stored_hash,octet_length(p.data) FROM `+refs+` r JOIN fugue_platform_input_shared_packs p USING(pack_id) WHERE content_hash=$1`, m.Digest)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +289,7 @@ func (r *sharedInputReader) Read(p []byte) (n int, result error) {
 }
 
 type sharedInputWriter struct {
+	components                              bool
 	ctx                                     context.Context
 	tx                                      *sql.Tx
 	digest                                  string
@@ -453,11 +467,12 @@ func (w *sharedInputWriter) flush() error {
 	for _, id := range ids {
 		objectIDs = append(objectIDs, id)
 	}
-	if _, err = w.tx.ExecContext(w.ctx, `INSERT INTO fugue_platform_input_shared_refs(content_hash,pack_id) SELECT DISTINCT $1,pack_id FROM fugue_platform_input_shared_objects WHERE object_id=ANY($2::bigint[]) ON CONFLICT DO NOTHING`, w.digest, objectIDs); err != nil {
+	recipeTable, refTable := sharedRepresentationTables(w.components)
+	if _, err = w.tx.ExecContext(w.ctx, `INSERT INTO `+refTable+`(content_hash,pack_id) SELECT DISTINCT $1,pack_id FROM fugue_platform_input_shared_objects WHERE object_id=ANY($2::bigint[]) ON CONFLICT DO NOTHING`, w.digest, objectIDs); err != nil {
 		return err
 	}
 	var statement strings.Builder
-	statement.WriteString(`INSERT INTO fugue_platform_input_shared_recipes(content_hash,ordinal,recipe_hash,recipe) VALUES`)
+	statement.WriteString(`INSERT INTO ` + recipeTable + `(content_hash,ordinal,recipe_hash,recipe) VALUES`)
 	args := []any{w.digest}
 	for i, refs := range w.recipes {
 		physical := make([]sharedRecipeRef, len(refs))

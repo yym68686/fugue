@@ -75,6 +75,7 @@ func TestCompilerInputCodecReaderCompatibility(t *testing.T) {
 			case "unknown_format":
 				format = "runtime-snapshot-unknown"
 			}
+			mock.ExpectBegin()
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT format,size_bytes,chunk_size,chunk_count,created_at FROM fugue_platform_input_manifests WHERE content_hash=$1`)).WithArgs(requested).WillReturnRows(sqlmock.NewRows([]string{"format", "size", "chunk_size", "count", "created"}).AddRow(format, len(raw), len(raw), 1, time.Now()))
 			if mode != "unknown_format" {
 				h := sha256.Sum256(stored)
@@ -84,6 +85,7 @@ func TestCompilerInputCodecReaderCompatibility(t *testing.T) {
 				}
 				mock.ExpectQuery(regexp.QuoteMeta(`SELECT ordinal,chunk_hash,data FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal`)).WithArgs(requested).WillReturnRows(sqlmock.NewRows([]string{"ordinal", "hash", "data"}).AddRow(0, declared, stored))
 			}
+			mock.ExpectRollback()
 			got, err := state.GetPlatformCompilerInput(requested)
 			valid := mode == "v1" || mode == "v2_raw" || mode == "v2_zlib"
 			if (err == nil) != valid {

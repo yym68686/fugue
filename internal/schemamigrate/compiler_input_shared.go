@@ -69,7 +69,7 @@ func MigrateCompilerInputShared(ctx context.Context, databaseURL string) error {
 		return err
 	}
 	const v2 = "CHECK (((format = 'runtime-snapshot-json-v1'::text) OR ((format = 'runtime-snapshot-json-chunk-codec-v2'::text) AND (chunk_size <= 262139))))"
-	if strings.TrimSuffix(definition, " NOT VALID") != sharedInputFormatConstraint {
+	if strings.TrimSuffix(definition, " NOT VALID") != sharedInputFormatConstraint && strings.TrimSuffix(definition, " NOT VALID") != separatedInputFormatConstraint {
 		if definition != v2 {
 			return fmt.Errorf("unexpected compiler input format constraint")
 		}

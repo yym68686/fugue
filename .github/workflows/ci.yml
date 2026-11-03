@@ -3346,9 +3346,35 @@ jobs:
             echo "A newer storage policy supersedes this run."
             exit 0
           fi
-          python3 -m unittest scripts.test_publish_storage_policy
+          python3 -m unittest scripts.test_publish_storage_policy scripts.test_compiler_input_storage
           python3 scripts/publish_storage_policy.py deploy/environments/production/storage-policy/policy.json
           python3 scripts/publish_storage_policy.py deploy/environments/production/storage-policy/policy.json --apply
+
+  compiler_input_storage:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-storage-policy, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Check current maintenance implementation and reader barriers
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          operation=deploy/environments/production/storage-policy/operation.json
+          if [ ! -f "$operation" ]; then exit 0; fi
+          if git diff --quiet "$BASE_SHA" HEAD -- "$operation"; then exit 0; fi
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_storage.py deploy/releases deploy/environments/production/storage-policy .github/workflows/ci.yml
+          python3 -m unittest scripts.test_compiler_input_storage
+          python3 -m scripts.compiler_input_storage --operation "$operation"
 
   workload_memory_policy:
     # Admission configuration remains recoverable if a component build fails.

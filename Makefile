@@ -22,6 +22,7 @@ test:
 	python3 -m unittest scripts.test_observe_managed_ssh_front
 	python3 -m unittest scripts.test_select_managed_ssh_transport
 	python3 -m unittest scripts.test_publish_storage_policy
+	python3 -m unittest scripts.test_compiler_input_storage
 	python3 -m unittest scripts.test_verify_managed_ssh_image
 	python3 -m unittest scripts.test_reconcile_managed_ssh_keys
 	python3 -m unittest scripts.test_observe_worker_standby

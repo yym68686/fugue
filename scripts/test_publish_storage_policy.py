@@ -5,6 +5,16 @@ from scripts.publish_storage_policy import manifest
 
 
 class StoragePolicyTest(unittest.TestCase):
+    def test_separated_writer_is_independent(self):
+        base = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60}}
+        before = manifest(base)["data"]["policy.json"]
+        base["compilerInputSeparated"] = {"version": 1, "enabled": True}
+        got = manifest(base)["data"]
+        self.assertEqual(before, got["policy.json"])
+        self.assertTrue(json.loads(got["compiler-input-separated.json"])["enabled"])
+        base["compilerInputSeparated"]["delete_history"] = True
+        with self.assertRaises(ValueError):
+            manifest(base)
     def test_shared_writer_has_independent_fail_closed_declaration(self):
         base = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60}}
         before = manifest(base)["data"]["policy.json"]

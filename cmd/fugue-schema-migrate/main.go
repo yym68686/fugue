@@ -149,6 +149,9 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigrateCompilerInputShared(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate shared compiler input: %w", err)
 	}
+	if err := schemamigrate.MigrateCompilerInputSeparated(ctx, databaseURL); err != nil {
+		return fmt.Errorf("migrate separated compiler input: %w", err)
+	}
 	if err := schemamigrate.MigrateAppReleaseWorkload(ctx, databaseURL); err != nil {
 		return err
 	}
