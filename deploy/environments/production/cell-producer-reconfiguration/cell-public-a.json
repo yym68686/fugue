@@ -1,12 +1,12 @@
 {
   "authority_cell_id": "cell-public-a",
-  "generation": 6,
+  "generation": 7,
   "origin": "https://api.fugue.pro",
   "policy": {
     "authority_cell_id": "cell-public-a",
     "dns_policy_artifact_id": "artifact_1790687648_b177e2e8a771",
     "dns_policy_digest": "sha256:cbc23c231fe8854a69f5e1aeb4c0c7207d0ea2c81899281c0624a740b12614d7",
-    "generation": "cell-public-a-continuous-6",
+    "generation": "cell-public-a-dependencies-20261103-7",
     "hosted_zone_templates": [],
     "input_source": "business-static-intent",
     "interval_seconds": 60,
@@ -160,6 +160,20 @@
             "tenant_id": "tenant_1774393589_e35b60a6fc11"
           },
           "source_digest": "sha256:c2e0ee4d78b981bb354e95defa5e782a0cc356d5acaf9954951aff135f008450"
+        },
+        {
+          "source": {
+            "app_id": "app_1793275342_95c1b6377143",
+            "edge_group_id": "edge-group-country-de",
+            "enabled": true,
+            "hostname": "yym-edge-arb.fugue.pro",
+            "id": "edge_route_policy_1793275939_d9e97ea90152",
+            "match_scope": "tenant_hostname",
+            "min_healthy_edge_nodes": 1,
+            "route_policy": "edge_enabled",
+            "tenant_id": "tenant_1774393589_e35b60a6fc11"
+          },
+          "source_digest": "sha256:5b1574c0de203e242bcd917f52a562387d23e98cebc97a5843019cfb2e4f7b53"
         }
       ],
       "next_topology": {
@@ -322,20 +336,20 @@
     "target_scope": "authority-cell:cell-public-a"
   },
   "precondition": {
-    "operation": "continuous_serving",
+    "operation": "placement_constraints",
     "previous_policy": {
-      "artifact_id": "artifact_1790795413_a9dbac76a549",
-      "content_hash": "sha256:df622bcd508f9db6194c16025ae3c7dad0645009188b3b2582f46ffabddc4d61",
-      "fencing_token": 6,
-      "release_id": "artifactrel_1790795418_cc735615a7f4"
+      "artifact_id": "artifact_1790808001_252cf75fb198",
+      "content_hash": "sha256:3d0931956839d52fec7cbef872389f1001e04827ca68951494fefa5173ca3937",
+      "fencing_token": 7,
+      "release_id": "artifactrel_1790808021_1124aae0c5d3"
     },
     "serving_full": {
-      "artifact_id": "artifact_1790795457_53e1cdbb9b8d",
-      "content_hash": "sha256:f9124e93ed985dddab93ef92f071942663174796d05ccf6806b1404b623114aa",
-      "fencing_token": 4,
-      "release_id": "artifactrel_1790795588_df6c0d2e6209"
+      "artifact_id": "artifact_1793275215_f26e867fd525",
+      "content_hash": "sha256:a76bf2a1cd415d5a1d1bac7ff52a6f5a49984859c3d4d18b8f7a162f24293130",
+      "fencing_token": 5210,
+      "release_id": "artifactrel_1793275275_280142cbf3c9"
     },
-    "verification_evidence_hash": "sha256:60fbeec2d0c3287d4e4e46a1f5b7219bd54dd325f62de2e91132a06d80d3ba4b"
+    "verification_evidence_hash": "sha256:d266885513602fc5e4a44b5de2d4e602452906f40b52e727797a5caa0843722e"
   },
-  "schema": "fugue.cell-producer-reconfiguration/v1"
+  "schema": "fugue.producer-dependency-refresh/v1"
 }
