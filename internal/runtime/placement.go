@@ -51,10 +51,11 @@ const (
 )
 
 type Toleration struct {
-	Key      string `json:"key,omitempty"`
-	Operator string `json:"operator,omitempty"`
-	Value    string `json:"value,omitempty"`
-	Effect   string `json:"effect,omitempty"`
+	Key               string `json:"key,omitempty"`
+	Operator          string `json:"operator,omitempty"`
+	Value             string `json:"value,omitempty"`
+	Effect            string `json:"effect,omitempty"`
+	TolerationSeconds *int64 `json:"tolerationSeconds,omitempty"`
 }
 
 type SchedulingConstraints struct {

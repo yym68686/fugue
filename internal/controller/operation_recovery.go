@@ -173,7 +173,7 @@ func (s *Service) observeRecoveredDeployment(ctx context.Context, app model.App,
 	if err != nil || !ready {
 		return false, err
 	}
-	if ready, _ = deploymentSchedulingReadyForRollout(deployment, app.Spec.Replicas, scheduling); !ready {
+	if ready, _ = deploymentSchedulingReadyForRollout(deployment, app.Spec.Replicas, runtime.AppNodeLossScheduling(app.Spec.NodeLoss, scheduling)); !ready {
 		return false, nil
 	}
 	if ready, _ = deploymentRolloutPolicyReady(deployment, found, expected); !ready {

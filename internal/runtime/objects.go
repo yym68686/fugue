@@ -548,6 +548,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 }
 
 func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource, options RenderOptions) map[string]any {
+	scheduling = AppNodeLossScheduling(app.Spec.NodeLoss, scheduling)
 	options = normalizeRenderOptions(options)
 	resourceName := RuntimeAppResourceNameWithOptions(app, options)
 	container := map[string]any{
@@ -2555,12 +2556,16 @@ func applyScheduling(podSpec *map[string]any, scheduling SchedulingConstraints) 
 	if len(scheduling.Tolerations) > 0 {
 		tolerations := make([]map[string]any, 0, len(scheduling.Tolerations))
 		for _, toleration := range scheduling.Tolerations {
-			tolerations = append(tolerations, map[string]any{
+			item := map[string]any{
 				"key":      toleration.Key,
 				"operator": toleration.Operator,
 				"value":    toleration.Value,
 				"effect":   toleration.Effect,
-			})
+			}
+			if toleration.TolerationSeconds != nil {
+				item["tolerationSeconds"] = *toleration.TolerationSeconds
+			}
+			tolerations = append(tolerations, item)
 		}
 		(*podSpec)["tolerations"] = tolerations
 	}

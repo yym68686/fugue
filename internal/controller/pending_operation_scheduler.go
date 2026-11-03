@@ -19,6 +19,10 @@ func pendingOperationRetryReady(op model.Operation, now time.Time) bool {
 }
 
 func pendingOperationMatchesLane(op model.Operation, lane operationLane) bool {
+	restoring := op.Type == model.OperationTypeAppCPUResize && op.RequestedByType == model.ActorTypeSystem && op.RequestedByID == "app-cpu-resize-reconcile"
+	if restoring || lane == operationLaneCPURequestRestore {
+		return restoring && lane == operationLaneCPURequestRestore
+	}
 	requestedByBackgroundController := operationRequestedByBackgroundController(op.RequestedByID)
 	switch lane {
 	case operationLaneForegroundImport:

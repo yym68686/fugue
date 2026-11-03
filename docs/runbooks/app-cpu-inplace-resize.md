@@ -17,3 +17,18 @@ the preflight Pod identities with current Pod spec, allocated and reported CPU
 resources. A container downscale blocked by a higher effective init-container
 request remains expected. Automatic right-sizing retains its failure backoff;
 deploying a compatibility fix does not erase failed operation history.
+
+Restore reconciliation and execution share the same preflight. A terminating old
+Pod remains part of the cohort: a 2/1 cohort is a waiting condition, and creates
+no operation. Pending replacements can still restore a previously verified CPU
+request. The wait reason is exposed as `CPURequestRestoreWaiting` on ManagedApp.
+Unchanged waits are logged only on transition.
+
+An observation checkpoint reserves each automatic attempt before enqueue, across
+controller replicas/restarts. Fast failures retry after 5s, 10s, 20s, 40s, 80s,
+160s, then at most once every 5 minutes for unchanged intent and runtime facts.
+Resource versions and heartbeat timestamps do not reset this budget; a changed
+Pod identity, resource envelope, deployment generation or target can. Automatic
+restores use one dedicated worker rather than consuming user activation workers.
+Accepted PATCH journals still hold the app mutation interlock until verified
+convergence or compensation; retry state never grants mutation authority.

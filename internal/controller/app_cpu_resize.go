@@ -29,39 +29,31 @@ func (s *Service) reconcileAppCPUResizeTarget(ctx context.Context, client *kubeC
 	if app.Spec.Replicas <= 0 || app.Spec.Resources == nil {
 		return false, nil
 	}
-	workload, err := appCPUResizeWorkload(ctx, client, app)
+	_, fingerprint, needed, err := s.planAppCPUResize(ctx, client, app, app.Spec.Resources.CPUMilliCores)
 	if err != nil {
-		return false, err
-	}
-	pods, err := listAppCPUResizePods(ctx, client, app, workload)
-	if err != nil {
-		return false, err
-	}
-	for _, pod := range pods {
-		ob, err := observeAppCPUResizePod(pod, runtime.RuntimeResourceName(app.Name))
-		if err != nil {
-			return false, err
-		}
-		if !resizeQuantitiesEqual(ob.DesiredResources.Requests["cpu"], strconv.FormatInt(app.Spec.Resources.CPUMilliCores, 10)+"m") {
-			_, err := s.Store.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, RequestedByType: model.ActorTypeSystem, RequestedByID: "app-cpu-resize-reconcile", DesiredSpec: &app.Spec}, app.Spec)
-			if errors.Is(err, store.ErrConflict) {
-				return true, nil
+		var waiting *appCPUResizeWaiting
+		if errors.As(err, &waiting) {
+			if recordErr := s.recordAppCPUResizeWait(ctx, app, fingerprint, waiting.Error()); recordErr != nil {
+				return false, recordErr
 			}
-			return err == nil, err
 		}
+		return false, err
 	}
-	additional, _, err := additionalAppCPUResizeBaselines(ctx, client, app, workload, app.Spec.Resources.CPUMilliCores)
+	if !needed {
+		return false, nil
+	}
+	admitted, err := s.admitAppCPUResizeReconcile(ctx, app, fingerprint)
 	if err != nil {
 		return false, err
 	}
-	if len(additional) > 0 {
-		_, err := s.Store.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, RequestedByType: model.ActorTypeSystem, RequestedByID: "app-cpu-resize-reconcile", DesiredSpec: &app.Spec}, app.Spec)
-		if errors.Is(err, store.ErrConflict) {
-			return true, nil
-		}
-		return err == nil, err
+	if !admitted {
+		return false, &appCPUResizeWaiting{reason: "CPU request restore is waiting for its retry budget or a relevant state change"}
 	}
-	return false, nil
+	_, err = s.Store.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, RequestedByType: model.ActorTypeSystem, RequestedByID: "app-cpu-resize-reconcile", DesiredSpec: &app.Spec}, app.Spec)
+	if errors.Is(err, store.ErrConflict) {
+		return true, nil
+	}
+	return err == nil, err
 }
 
 const appCPUResizePreflight = "app_cpu_resize_preflight"
@@ -127,47 +119,10 @@ func (s *Service) executeAppCPUResize(ctx context.Context, op model.Operation, a
 		return fmt.Errorf("app CPU resize unavailable: %s", capability.Reason)
 	}
 	if !recorded {
-		workload, err := appCPUResizeWorkload(ctx, client, app)
+		journal, _, _, err = s.planAppCPUResize(ctx, client, app, op.DesiredSpec.Resources.CPUMilliCores)
 		if err != nil {
 			return err
 		}
-		deployment, found, err := client.getDeployment(ctx, ns, workload)
-		if err != nil {
-			return err
-		}
-		if !found || deployment.Metadata.UID == "" || deployment.Status.ObservedGeneration < deployment.Metadata.Generation ||
-			deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != app.Spec.Replicas {
-			return fmt.Errorf("app CPU resize requires a stable deployment")
-		}
-		pods, err := listAppCPUResizePods(ctx, client, app, workload)
-		if err != nil {
-			return err
-		}
-		if len(pods) != app.Spec.Replicas {
-			return fmt.Errorf("app CPU resize requires the complete replica set (%d/%d)", len(pods), app.Spec.Replicas)
-		}
-		journal = appCPUResizeJournal{CreatedAt: time.Now().UTC(), Workload: workload, DeploymentUID: deployment.Metadata.UID, Generation: deployment.Metadata.Generation, CPU: op.DesiredSpec.Resources.CPUMilliCores}
-		for _, pod := range pods {
-			ob, err := observeAppCPUResizePod(pod, container)
-			if err != nil {
-				return err
-			}
-			if err := verifyAppCPUResizeOwner(ctx, client, app, pod, workload, deployment.Metadata.UID); err != nil {
-				return err
-			}
-			restoring := app.Spec.CPURequestTemplateMilliCores != nil && app.Spec.Resources.CPUMilliCores == journal.CPU
-			pending := restoring && ob.Phase == "Pending"
-			if err := assessAppCPURequestResize(ob, journal.CPU, pending); err != nil {
-				return err
-			}
-			journal.Pods = append(journal.Pods, appCPUResizePodBaseline{Name: ob.PodName, UID: ob.PodUID, Node: ob.NodeName, Restarts: ob.RestartCount, StartedAt: ob.ContainerStartedAt, Resources: ob.DesiredResources, Pending: pending})
-		}
-		additional, deferred, err := additionalAppCPUResizeBaselines(ctx, client, app, workload, journal.CPU)
-		if err != nil {
-			return err
-		}
-		journal.Pods = append(journal.Pods, additional...)
-		journal.Deferred = deferred
 		if err := s.recordAppCPUResizeEvidence(op, app, appCPUResizePreflight, "preflight verified", journal); err != nil {
 			return err
 		}

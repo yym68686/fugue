@@ -91,6 +91,9 @@ spec:
                             type: string
                           effect:
                             type: string
+                          tolerationSeconds:
+                            type: integer
+                            format: int64
             status:
               type: object
               properties:

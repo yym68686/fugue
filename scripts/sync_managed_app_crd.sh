@@ -63,7 +63,7 @@ case "${transition}" in
         "${patch_target_transition}" >&2
       exit 1
     }
-    printf 'patching verified additive managed app CRD status schema: %s\n' "${transition#additive:}"
+    printf 'patching verified additive managed app CRD schema: %s\n' "${transition#additive:}"
     timeout --kill-after=2s 60s "${KUBECTL_BIN}" patch "crd/${CRD_NAME}" \
       --type=json --patch-file "${patch_json}"
     timeout --kill-after=2s 70s "${KUBECTL_BIN}" wait \

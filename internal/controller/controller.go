@@ -101,6 +101,7 @@ const (
 	operationLaneForegroundActivate
 	operationLaneGitHubSyncImport
 	operationLaneGitHubSyncActivate
+	operationLaneCPURequestRestore
 )
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
@@ -324,7 +325,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	defer stopBackgroundImports()
 	backgroundActivations, stopBackgroundActivations := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, s.Config.GitHubSyncActivateWorkers)
 	defer stopBackgroundActivations()
+	cpuRestores, stopCPURestores := s.startPendingOperationWorkers(ctx, operationLaneCPURequestRestore, 1)
+	defer stopCPURestores()
 	triggerBackgroundOps := func() {
+		triggerPendingOperationWorkers(cpuRestores...)
 		triggerPendingOperationWorkers(backgroundImports...)
 		triggerPendingOperationWorkers(backgroundActivations...)
 	}
@@ -718,6 +722,8 @@ func (lane operationLane) String() string {
 		return "github-sync-import"
 	case operationLaneGitHubSyncActivate:
 		return "github-sync-activate"
+	case operationLaneCPURequestRestore:
+		return "cpu-request-restore"
 	default:
 		return "unknown"
 	}

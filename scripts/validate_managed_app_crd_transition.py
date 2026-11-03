@@ -24,6 +24,20 @@ REQUIRED_BACKING_SERVICE_FIELDS = {
     "runtimeKey": "string",
     "serviceID": "string",
 }
+TOLERATION_SECONDS_ADDITION = "spec.scheduling.tolerations.tolerationSeconds"
+TOLERATION_PROPERTIES_PATH = (
+    "schema", "openAPIV3Schema", "properties", "spec", "properties",
+    "scheduling", "properties", "tolerations", "items", "properties",
+)
+
+
+def _toleration_properties(version):
+    value = version
+    for key in TOLERATION_PROPERTIES_PATH:
+        if not isinstance(value, dict) or key not in value:
+            return None
+        value = value[key]
+    return value if isinstance(value, dict) else None
 
 
 class TransitionError(ValueError):
@@ -119,6 +133,18 @@ def validate_transition(live, target):
         normalized_properties.update(copy.deepcopy(live_properties))
         _validate_required_status_schema(target_properties)
 
+        # This is the only permitted spec extension. Do not relax the guard for
+        # arbitrary spec changes or rewrite existing field definitions.
+        live_tolerations = _toleration_properties(live_version)
+        target_tolerations = _toleration_properties(target_version)
+        if (live_tolerations is not None and target_tolerations is not None
+                and "tolerationSeconds" not in live_tolerations
+                and "tolerationSeconds" in target_tolerations):
+            if target_tolerations["tolerationSeconds"] != {"type": "integer", "format": "int64"}:
+                raise TransitionError("invalid additive tolerationSeconds schema")
+            additions.append(f"{name}.{TOLERATION_SECONDS_ADDITION}")
+            del _toleration_properties(normalized_target_versions[name])["tolerationSeconds"]
+
     if normalized_target != live_spec:
         raise TransitionError(
             "target changes CRD spec outside additive status properties"
@@ -151,17 +177,24 @@ def build_json_patch(live, target):
     ]
     for addition in additions:
         version_name, field = addition.split(".", 1)
-        properties = _status_properties(
-            target_versions[version_name], f"target version {version_name}"
-        )
+        if field == TOLERATION_SECONDS_ADDITION:
+            value = _toleration_properties(target_versions[version_name])["tolerationSeconds"]
+            schema_path = "/".join(TOLERATION_PROPERTIES_PATH)
+            path = f"/spec/versions/{version_indexes[version_name]}/{schema_path}/tolerationSeconds"
+        else:
+            properties = _status_properties(
+                target_versions[version_name], f"target version {version_name}"
+            )
+            value = properties[field]
+            path = (
+                f"/spec/versions/{version_indexes[version_name]}/schema/"
+                f"openAPIV3Schema/properties/status/properties/{field}"
+            )
         patch.append(
             {
                 "op": "add",
-                "path": (
-                    f"/spec/versions/{version_indexes[version_name]}/schema/"
-                    f"openAPIV3Schema/properties/status/properties/{field}"
-                ),
-                "value": copy.deepcopy(properties[field]),
+                "path": path,
+                "value": copy.deepcopy(value),
             }
         )
     return patch

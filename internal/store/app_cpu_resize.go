@@ -71,6 +71,9 @@ func (s *Store) pgHasActiveAppCPUResizeTx(ctx context.Context, tx *sql.Tx, appID
 // Only normal deployments fold a verified runtime request into a new template.
 // Reject a fabricated server-owned snapshot on all other caller-provided specs.
 func reconcileAppCPUResizeSnapshot(op *model.Operation, app model.App) error {
+	if op.DesiredSpec != nil && op.DesiredSpec.NodeLoss == nil {
+		op.DesiredSpec.NodeLoss = model.CloneAppNodeLossPolicy(app.Spec.NodeLoss)
+	}
 	if op.DesiredSpec == nil || op.Type == model.OperationTypeAppCPUResize {
 		return nil
 	}

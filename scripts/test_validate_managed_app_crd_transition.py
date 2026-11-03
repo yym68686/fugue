@@ -88,7 +88,50 @@ def target_properties():
     return properties
 
 
+def with_tolerations(doc):
+    doc["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"] = {
+        "type": "object", "properties": {
+            "scheduling": {"type": "object", "properties": {
+                "tolerations": {"type": "array", "items": {
+                    "type": "object", "properties": {"key": scalar("string")}
+                }}
+            }}
+        }
+    }
+    return doc
+
+
 class ManagedAppCRDTransitionTest(unittest.TestCase):
+    def test_adds_exact_toleration_seconds_without_replacing_spec(self):
+        live = with_tolerations(document(target_properties()))
+        target = copy.deepcopy(live)
+        MODULE._toleration_properties(target["spec"]["versions"][0])["tolerationSeconds"] = {
+            "type": "integer", "format": "int64"
+        }
+        patch = MODULE.build_json_patch(live, target)
+        self.assertEqual(len(patch), 3)
+        self.assertEqual(patch[-1], {
+            "op": "add",
+            "path": "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/scheduling/properties/tolerations/items/properties/tolerationSeconds",
+            "value": {"type": "integer", "format": "int64"},
+        })
+        self.assertEqual(MODULE.validate_transition(target, copy.deepcopy(target)), [])
+        MODULE._toleration_properties(target["spec"]["versions"][0])["key"] = scalar("integer")
+        with self.assertRaisesRegex(MODULE.TransitionError, "outside additive"):
+            MODULE.validate_transition(live, target)
+
+    def test_rejects_invalid_or_changed_toleration_seconds(self):
+        live = with_tolerations(document(target_properties()))
+        target = copy.deepcopy(live)
+        MODULE._toleration_properties(target["spec"]["versions"][0])["tolerationSeconds"] = scalar("string")
+        with self.assertRaisesRegex(MODULE.TransitionError, "tolerationSeconds"):
+            MODULE.validate_transition(live, target)
+        MODULE._toleration_properties(live["spec"]["versions"][0])["tolerationSeconds"] = {
+            "type": "integer", "format": "int64"
+        }
+        with self.assertRaisesRegex(MODULE.TransitionError, "outside additive"):
+            MODULE.validate_transition(live, target)
+
     def test_accepts_only_additive_status_properties(self):
         additions = MODULE.validate_transition(
             document(current_properties()), document(target_properties())
@@ -271,6 +314,17 @@ exec "$@"
         self.assertFalse(applied)
         self.assertNotIn("wait --for=condition=Established", calls)
         self.assertNotIn("diff -f", calls)
+
+    def test_sync_script_upgrades_toleration_schema(self):
+        live = with_tolerations(document(target_properties()))
+        target = copy.deepcopy(live)
+        MODULE._toleration_properties(target["spec"]["versions"][0])["tolerationSeconds"] = {
+            "type": "integer", "format": "int64"
+        }
+        result, calls, applied = self.run_sync(live, target)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue(applied)
+        self.assertIn("--dry-run=server", calls)
 
 
 if __name__ == "__main__":

@@ -389,6 +389,12 @@ func cloneSchedulingConstraints(in SchedulingConstraints) SchedulingConstraints 
 	}
 	if len(in.Tolerations) > 0 {
 		out.Tolerations = append([]Toleration(nil), in.Tolerations...)
+		for i, item := range out.Tolerations {
+			if item.TolerationSeconds != nil {
+				seconds := *item.TolerationSeconds
+				out.Tolerations[i].TolerationSeconds = &seconds
+			}
+		}
 	}
 	return out
 }

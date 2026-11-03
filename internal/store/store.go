@@ -2618,6 +2618,7 @@ func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.App
 			return ErrInvalidInput
 		}
 		model.PreserveVerifiedAppCPURequest(spec, app.Spec)
+		model.PreserveAppNodeLossPolicy(spec, app.Spec)
 		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 			return err
 		}
@@ -2669,6 +2670,7 @@ func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppS
 			return ErrInvalidInput
 		}
 		model.PreserveVerifiedAppCPURequest(spec, app.Spec)
+		model.PreserveAppNodeLossPolicy(spec, app.Spec)
 		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 			return err
 		}
@@ -2748,6 +2750,9 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 }
 
 func (s *Store) createApp(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource, route *model.AppRoute) (model.App, error) {
+	if spec.NodeLoss == nil {
+		spec.NodeLoss = &model.AppNodeLossPolicy{Mode: model.AppNodeLossWait}
+	}
 	if route != nil && route.DNSRouting != nil {
 		return model.App{}, ErrInvalidInput
 	}
@@ -5110,6 +5115,7 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		failover := *in.Failover
 		out.Failover = &failover
 	}
+	out.NodeLoss = model.CloneAppNodeLossPolicy(in.NodeLoss)
 	out.Continuity = model.CloneAppContinuityPolicy(in.Continuity)
 	if in.Resources != nil {
 		resources := *in.Resources

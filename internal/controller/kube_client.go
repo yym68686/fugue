@@ -95,6 +95,7 @@ type kubeNodeList struct {
 type kubeNode struct {
 	Metadata struct {
 		Name   string            `json:"name"`
+		UID    string            `json:"uid,omitempty"`
 		Labels map[string]string `json:"labels,omitempty"`
 	} `json:"metadata"`
 	Spec struct {

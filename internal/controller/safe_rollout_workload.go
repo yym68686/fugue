@@ -160,6 +160,21 @@ func revisionAppliedFieldsMatch(path string, actual, desired any) bool {
 		if !ok {
 			return false
 		}
+		if strings.HasSuffix(path, ".tolerations") {
+			// An omitted timeout means infinity, not the Kubernetes 300s
+			// default. A finite injected timeout must never satisfy wait.
+			if !reflect.DeepEqual(got["tolerationSeconds"], want["tolerationSeconds"]) {
+				return false
+			}
+			if want["operator"] == "Exists" && want["value"] == "" && got["value"] == nil {
+				copy := make(map[string]any, len(got)+1)
+				for key, value := range got {
+					copy[key] = value
+				}
+				copy["value"] = ""
+				got = copy
+			}
+		}
 		// EnvVar.Value has an empty-string default and the Kubernetes API omits
 		// it on serialization. Accept only a named literal EnvVar with no source;
 		// an injected valueFrom must never masquerade as an empty literal.

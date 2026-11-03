@@ -319,6 +319,17 @@ func (s *Service) queueAutomaticFailovers(ctx context.Context) error {
 		if targetRuntimeID == currentRuntime.ID {
 			continue
 		}
+		// Automatic recovery cannot prove that a partitioned source stopped.
+		// Keep its configured failover intent without generating doomed attempts.
+		if s.Config.KubectlApply {
+			client, err := s.kubeClient()
+			if err != nil {
+				return err
+			}
+			if _, err := s.observeAppFailoverSource(ctx, client, app, currentRuntime.ID); err != nil {
+				continue
+			}
+		}
 		if _, err := s.Store.CreateOperation(model.Operation{
 			TenantID:        app.TenantID,
 			Type:            model.OperationTypeFailover,
@@ -347,6 +358,13 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 	if err != nil {
 		return fmt.Errorf("initialize kubernetes failover client: %w", err)
 	}
+	var sourceProof appFailoverSource
+	if s.Config.KubectlApply && app.Spec.Replicas > 0 {
+		sourceProof, err = s.appFailoverSourceJournal(ctx, client, op, app, sourceRuntimeID)
+		if err != nil {
+			return err
+		}
+	}
 	if _, err := s.acquireAppFenceLease(ctx, client, app, op.ID); err != nil {
 		return fmt.Errorf("acquire app fence lease: %w", err)
 	}
@@ -371,6 +389,9 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 			}
 			if err := s.waitForManagedAppRollout(ctx, appliedApp, ""); err != nil {
 				return fmt.Errorf("wait for fenced managed app rollout %s: %w", app.ID, err)
+			}
+			if err := verifyAppFailoverSourceStopped(ctx, client, app, sourceProof); err != nil {
+				return err
 			}
 		}
 	}

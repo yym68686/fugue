@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -27,14 +28,15 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		PersistentStorage             *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
 		VolumeReplication             *model.AppVolumeReplicationSpec `json:"volume_replication,omitempty"`
 		RightSizing                   *model.AppRightSizingSpec       `json:"right_sizing,omitempty"`
+		NodeLoss                      *model.AppNodeLossPolicy        `json:"node_loss,omitempty"`
 		TerminationGracePeriodSeconds *int64                          `json:"termination_grace_period_seconds,omitempty"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.ImageMirrorLimit == nil && req.StartupCommand == nil && req.PersistentStorage == nil && req.VolumeReplication == nil && req.RightSizing == nil && req.TerminationGracePeriodSeconds == nil {
-		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit, startup_command, persistent_storage, volume_replication, right_sizing, or termination_grace_period_seconds is required")
+	if req.NodeLoss == nil && req.ImageMirrorLimit == nil && req.StartupCommand == nil && req.PersistentStorage == nil && req.VolumeReplication == nil && req.RightSizing == nil && req.TerminationGracePeriodSeconds == nil {
+		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit, startup_command, persistent_storage, volume_replication, right_sizing, node_loss, or termination_grace_period_seconds is required")
 		return
 	}
 	if req.ImageMirrorLimit != nil && *req.ImageMirrorLimit < 0 {
@@ -48,6 +50,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			http.StatusBadRequest,
 			fmt.Sprintf("termination_grace_period_seconds must be between 0 and %d", model.MaxAppTerminationGracePeriodSeconds),
 		)
+		return
+	}
+	if err := model.ValidateAppNodeLossPolicy(req.NodeLoss); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -119,7 +125,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var operation *model.Operation
-	if req.StartupCommand != nil || req.PersistentStorage != nil || req.VolumeReplication != nil || req.TerminationGracePeriodSeconds != nil {
+	if req.NodeLoss != nil || req.StartupCommand != nil || req.PersistentStorage != nil || req.VolumeReplication != nil || req.TerminationGracePeriodSeconds != nil {
 		spec, source, err := s.recoverAppDeployBaseline(currentApp)
 		if err != nil {
 			s.writeStoreError(w, err)
@@ -133,6 +139,15 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		spec.ImageMirrorLimit = model.EffectiveAppImageMirrorLimit(currentApp.Spec.ImageMirrorLimit)
 
 		deployChanged := false
+		if req.NodeLoss != nil {
+			before, _ := json.Marshal(spec.NodeLoss)
+			after, _ := json.Marshal(req.NodeLoss)
+			if string(before) != string(after) {
+				spec.NodeLoss = model.CloneAppNodeLossPolicy(req.NodeLoss)
+				deployChanged = true
+				auditMetadata["node_loss"] = req.NodeLoss.Mode
+			}
+		}
 		if req.StartupCommand != nil {
 			applyStartupCommand(&spec, req.StartupCommand)
 			if !startupCommandsEqual(currentCommand, spec.Command) {

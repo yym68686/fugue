@@ -314,7 +314,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 			return err
 		}
 		if ready {
-			if schedulingReady, schedulingMessage := deploymentSchedulingReadyForRollout(deployment, app.Spec.Replicas, scheduling); !schedulingReady {
+			if schedulingReady, schedulingMessage := deploymentSchedulingReadyForRollout(deployment, app.Spec.Replicas, runtime.AppNodeLossScheduling(app.Spec.NodeLoss, scheduling)); !schedulingReady {
 				ready = false
 				message = schedulingMessage
 			}
@@ -1002,15 +1002,23 @@ func (s *Service) cleanupStrandedPodsBySelector(ctx context.Context, client *kub
 		if err != nil {
 			return err
 		}
-		if known && ready {
+		if !known || !ready {
 			continue
 		}
-		if err := client.forceDeletePod(ctx, namespace, pod.Metadata.Name); err != nil {
+		// An unreachable kubelet cannot acknowledge termination. Removing its
+		// API object is not fencing and must not authorize another writer.
+		if pod.Status.Phase != "Failed" && pod.Status.Phase != "Succeeded" {
+			continue
+		}
+		if strings.TrimSpace(pod.ObservedUID) == "" {
+			continue
+		}
+		if err := client.deletePodWithUID(ctx, namespace, pod.Metadata.Name, pod.ObservedUID); err != nil {
 			return err
 		}
 		if s.Logger != nil {
 			s.Logger.Printf(
-				"force deleted stranded %s pod %s/%s on unavailable node %s",
+				"deleted terminal %s pod %s/%s on recovered node %s",
 				strings.TrimSpace(resourceLabel),
 				namespace,
 				strings.TrimSpace(pod.Metadata.Name),
@@ -1618,13 +1626,21 @@ func tolerationSet(in []runtime.Toleration) map[string]struct{} {
 			strings.TrimSpace(item.Operator),
 			strings.TrimSpace(item.Value),
 			strings.TrimSpace(item.Effect),
+			tolerationSecondsKey(item.TolerationSeconds),
 		}, "\x00")
-		if key == "\x00\x00\x00" {
+		if item.Key == "" && item.Operator == "" && item.Value == "" && item.Effect == "" && item.TolerationSeconds == nil {
 			continue
 		}
 		out[key] = struct{}{}
 	}
 	return out
+}
+
+func tolerationSecondsKey(seconds *int64) string {
+	if seconds == nil {
+		return "infinite"
+	}
+	return strconv.FormatInt(*seconds, 10)
 }
 
 func deploymentPrimaryContainerImage(deployment kubeDeployment) string {

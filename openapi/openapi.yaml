@@ -23395,6 +23395,34 @@ components:
         schedule:
           type: string
           description: Cron schedule used when mode is scheduled. Defaults to every five minutes.
+    AppNodeLossPolicy:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      description: >-
+        Lifecycle of application Pods when their node becomes not-ready or unreachable.
+        New apps default to wait; omission on existing apps preserves their prior
+        Kubernetes eviction behavior. This policy does not purchase standby capacity,
+        change replicas or placement, or enable app/database failover. An explicit
+        policy change is applied through a normal user-requested deployment and may
+        replace Pods; it cannot undo a Pod deletion already in progress. Database
+        instances retain their independently configured lifecycle and failover policy.
+      properties:
+        mode:
+          type: string
+          enum: [wait, replace, legacy]
+          description: >-
+            wait retains Pods on a disconnected node until it recovers or the user
+            acts. replace permits native Kubernetes eviction after the configured
+            toleration; replacement still requires eligible authorized capacity and
+            does not guarantee availability or exclusive execution on a partitioned
+            node. legacy leaves Kubernetes tolerations unchanged.
+        toleration_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 86400
+          description: Only valid with replace. Defaults to 300; explicit 0 permits immediate eviction. No timeout is used with wait.
     AppFailoverSpec:
       type: object
       additionalProperties: false
@@ -24060,6 +24088,8 @@ components:
           $ref: "#/components/schemas/AppPostgresSpec"
         failover:
           $ref: "#/components/schemas/AppFailoverSpec"
+        node_loss:
+          $ref: "#/components/schemas/AppNodeLossPolicy"
         continuity:
           $ref: "#/components/schemas/AppContinuityPolicy"
         image_mirror_limit:
@@ -28132,6 +28162,8 @@ components:
       type: object
       additionalProperties: false
       properties:
+        node_loss:
+          $ref: "#/components/schemas/AppNodeLossPolicy"
         image_mirror_limit:
           type: integer
           format: int32

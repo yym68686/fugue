@@ -107,7 +107,11 @@ func businessCouplingSource(path string, body []byte) []byte {
 		return body
 	}
 	var declaration map[string]json.RawMessage
-	if json.Unmarshal(body, &declaration) != nil || string(declaration["schema"]) != `"fugue.cell-producer-reconfiguration/v1"` {
+	if json.Unmarshal(body, &declaration) != nil {
+		return body
+	}
+	schema := string(declaration["schema"])
+	if schema != `"fugue.cell-producer-reconfiguration/v1"` && schema != `"fugue.producer-dependency-refresh/v1"` {
 		return body
 	}
 	var policy, transition map[string]json.RawMessage
@@ -264,6 +268,11 @@ func TestBusinessCouplingConfigExceptionOnlyCoversHostnameData(t *testing.T) {
 	masked := string(businessCouplingSource(path, []byte(body)))
 	if !strings.Contains(masked, `"hostname":"configuration-hostname"`) || !strings.Contains(masked, `"command":"branch on tenant.example.test"`) {
 		t.Fatal("configuration exception hid executable field")
+	}
+	refresh := strings.Replace(body, "fugue.cell-producer-reconfiguration/v1", "fugue.producer-dependency-refresh/v1", 1)
+	maskedRefresh := string(businessCouplingSource(path, []byte(refresh)))
+	if !strings.Contains(maskedRefresh, `"hostname":"configuration-hostname"`) || !strings.Contains(maskedRefresh, `"command":"branch on tenant.example.test"`) {
+		t.Fatal("dependency refresh must mask only typed hostname configuration")
 	}
 	for _, other := range []string{"internal/api/routing.go", path + ".go", strings.Replace(path, "/cell-example", "/nested/cell-example", 1)} {
 		if string(businessCouplingSource(other, []byte(body))) != body {

@@ -103,6 +103,7 @@ in more than one visible project or tenant.
 		c.newAppBackupCommand(),
 		c.newAppRestoreCommand(),
 		c.newAppResourcesCommand(),
+		c.newAppNodeLossCommand(),
 		c.newAppDeployShortcutCommand(),
 		c.newAppRebuildShortcutCommand(),
 		c.newAppRollbackShortcutCommand(),

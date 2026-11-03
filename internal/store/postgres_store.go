@@ -2868,6 +2868,7 @@ func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.A
 		return model.App{}, ErrInvalidInput
 	}
 	model.PreserveVerifiedAppCPURequest(spec, app.Spec)
+	model.PreserveAppNodeLossPolicy(spec, app.Spec)
 	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 		return model.App{}, err
 	}
@@ -2932,6 +2933,7 @@ func (s *Store) pgSyncObservedManagedAppBaseline(id string, desiredSpec model.Ap
 		return model.App{}, ErrInvalidInput
 	}
 	model.PreserveVerifiedAppCPURequest(spec, app.Spec)
+	model.PreserveAppNodeLossPolicy(spec, app.Spec)
 	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 		return model.App{}, err
 	}

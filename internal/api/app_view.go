@@ -338,6 +338,7 @@ func cloneAppSource(source *model.AppSource) *model.AppSource {
 func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 	spec, _ = model.StripFugueInjectedAppEnvFromSpec(spec)
 	out := spec
+	out.NodeLoss = model.CloneAppNodeLossPolicy(spec.NodeLoss)
 	if len(spec.Command) > 0 {
 		out.Command = append([]string(nil), spec.Command...)
 	}

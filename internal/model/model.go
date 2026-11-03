@@ -1798,6 +1798,7 @@ type AppSpec struct {
 	VolumeReplication             *AppVolumeReplicationSpec   `json:"volume_replication,omitempty"`
 	Postgres                      *AppPostgresSpec            `json:"postgres,omitempty"`
 	Failover                      *AppFailoverSpec            `json:"failover,omitempty"`
+	NodeLoss                      *AppNodeLossPolicy          `json:"node_loss,omitempty"`
 	Continuity                    *AppContinuityPolicy        `json:"continuity,omitempty"`
 	ImageMirrorLimit              int                         `json:"image_mirror_limit,omitempty"`
 	TerminationGracePeriodSeconds int64                       `json:"termination_grace_period_seconds,omitempty"`

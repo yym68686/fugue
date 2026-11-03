@@ -212,6 +212,9 @@ func normalizeAppSpecResources(spec *model.AppSpec) error {
 	if spec == nil {
 		return ErrInvalidInput
 	}
+	if err := model.ValidateAppNodeLossPolicy(spec.NodeLoss); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidInput, err)
+	}
 	if spec.ImageMirrorLimit < 0 {
 		return ErrInvalidInput
 	}

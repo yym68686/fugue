@@ -228,9 +228,14 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			} else if queued {
 				return nil
 			}
-			if storedApp.Spec.CPURequestTemplateMilliCores != nil && s.Config.AppCPURequestResizeEnabled {
+			if managed.Metadata.DeletionTimestamp == "" && storedApp.Spec.CPURequestTemplateMilliCores != nil && s.Config.AppCPURequestResizeEnabled {
 				queued, err := s.reconcileAppCPUResizeTarget(ctx, client, storedApp)
 				if err != nil {
+					var waiting *appCPUResizeWaiting
+					if errors.As(err, &waiting) && managed.Metadata.DeletionTimestamp == "" {
+						return s.syncManagedAppObservedStatus(ctx, client, namespace, managed, storedApp, nil, managed.Status.CurrentReleaseKey, false,
+							runtime.ManagedAppCondition{Type: "CPURequestRestoreWaiting", Status: "True", Reason: "PreflightDeferred", Message: waiting.Error()})
+					}
 					return err
 				}
 				if queued {
@@ -755,6 +760,7 @@ func (s *Service) syncManagedAppObservedStatus(
 	postgresPlacements map[string][]runtime.SchedulingConstraints,
 	releaseKey string,
 	recoverStoredBaseline bool,
+	additionalConditions ...runtime.ManagedAppCondition,
 ) error {
 	deployment, found, err := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
 	if err != nil {
@@ -808,6 +814,15 @@ func (s *Service) syncManagedAppObservedStatus(
 	}
 
 	status := buildManagedAppStatus(managed, app, deployment, found, appPods, backingServiceStatuses, releaseKey)
+	for _, condition := range additionalConditions {
+		condition.LastTransitionTime = s.cpuResizeNow().Format(time.RFC3339)
+		for _, previous := range managed.Status.Conditions {
+			if previous.Type == condition.Type && previous.Status == condition.Status && previous.Reason == condition.Reason && previous.Message == condition.Message {
+				condition.LastTransitionTime = previous.LastTransitionTime
+			}
+		}
+		status.Conditions = append(status.Conditions, condition)
+	}
 	if !managedAppStatusEquivalent(managed.Status, status) {
 		if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
 			return fmt.Errorf("patch managed app status for %s/%s: %w", namespace, managed.Metadata.Name, err)
@@ -1191,6 +1206,12 @@ func cloneControllerSchedulingConstraints(in runtime.SchedulingConstraints) runt
 	}
 	if len(in.Tolerations) > 0 {
 		out.Tolerations = append([]runtime.Toleration(nil), in.Tolerations...)
+		for i, item := range out.Tolerations {
+			if item.TolerationSeconds != nil {
+				seconds := *item.TolerationSeconds
+				out.Tolerations[i].TolerationSeconds = &seconds
+			}
+		}
 	}
 	return out
 }
@@ -1825,6 +1846,20 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	}
 	podFailureMessage := ""
 	podSchedulingBlockMessage := ""
+	nodeExecutionUnknown := false
+	for _, pod := range pods {
+		if pod.Status.Phase == "Failed" || pod.Status.Phase == "Succeeded" {
+			continue
+		}
+		if pod.Status.Reason == "NodeLost" || pod.Status.Phase == "Unknown" {
+			nodeExecutionUnknown = true
+		}
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == "Unknown" {
+				nodeExecutionUnknown = true
+			}
+		}
+	}
 	if allowPodFailure {
 		podFailureMessage = managedAppPodFailureMessage(pods, podFailureCutoff)
 		podSchedulingBlockMessage = managedAppPodSchedulingBlockMessage(pods, podFailureCutoff)
@@ -1843,6 +1878,11 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	case !found:
 		status.Phase = runtime.ManagedAppPhasePending
 		status.Message = fmt.Sprintf("waiting for deployment %s", runtime.RuntimeAppResourceName(app))
+	case nodeExecutionUnknown:
+		status.Phase = runtime.ManagedAppPhaseProgressing
+		status.Message = "node execution state unknown; waiting for node recovery or authorized fenced recovery"
+		status.ReadyReplicas = 0
+		status.Conditions = append(status.Conditions, runtime.ManagedAppCondition{Type: "NodeExecutionUnknown", Status: "True", Reason: "NodeUnreachable", Message: status.Message})
 	case managedDeploymentStatusReady(deployment, app.Spec.Replicas):
 		status.Phase = runtime.ManagedAppPhaseReady
 		status.Message = fmt.Sprintf("deployment ready (%d/%d replicas)", status.ReadyReplicas, app.Spec.Replicas)

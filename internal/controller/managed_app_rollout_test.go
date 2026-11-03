@@ -2189,7 +2189,7 @@ func TestWaitForManagedBackingServiceLifecycleChecksSuspendedDatabaseWhenAppIsDi
 	}
 }
 
-func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUpStrandedPods(t *testing.T) {
+func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryWithoutDeletingUnknownWriter(t *testing.T) {
 	t.Parallel()
 
 	app := model.App{
@@ -2354,8 +2354,8 @@ func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUp
 	if err := svc.waitForManagedAppRollout(context.Background(), app, ""); err != nil {
 		t.Fatalf("expected rollout wait to succeed once the primary is ready, got %v", err)
 	}
-	if deletedPod.Load() == 0 {
-		t.Fatal("expected stranded managed postgres pod to be force deleted")
+	if deletedPod.Load() != 0 {
+		t.Fatal("an unavailable node is not proof that its old database writer stopped")
 	}
 }
 
