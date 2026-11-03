@@ -17,7 +17,7 @@ import (
 )
 
 func TestDataGCProtectsOtherTenantAliasAndPendingUpload(t *testing.T) {
-	old := time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
+	old := time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second).Add(741 * time.Millisecond)
 	digests := []string{testDataDigest("other-workspace"), testDataDigest("upload"), testDataDigest("orphan")}
 	deleted := ""
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,12 +25,13 @@ func TestDataGCProtectsOtherTenantAliasAndPendingUpload(t *testing.T) {
 		case r.Method == "GET":
 			fmt.Fprint(w, "<ListBucketResult><IsTruncated>false</IsTruncated>")
 			for _, d := range digests {
-				fmt.Fprintf(w, "<Contents><Key>shared/%s</Key><Size>1</Size><LastModified>%s</LastModified></Contents>", model.DataObjectKey(d), old.Format(time.RFC3339))
+				fmt.Fprintf(w, "<Contents><Key>shared/%s</Key><Size>1</Size><ETag>\"original\"</ETag><LastModified>%s</LastModified></Contents>", model.DataObjectKey(d), old.Format(time.RFC3339Nano))
 			}
 			fmt.Fprint(w, "</ListBucketResult>")
 		case r.Method == "HEAD":
 			w.Header().Set("Content-Length", "1")
 			w.Header().Set("Last-Modified", old.Format(http.TimeFormat))
+			w.Header().Set("ETag", `"original"`)
 		case r.Method == "POST":
 			body, _ := io.ReadAll(r.Body)
 			deleted += string(body)
@@ -90,11 +91,15 @@ func TestDataGCProtectsOtherTenantAliasAndPendingUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := NewServer(s, nil, nil, ServerConfig{})
+	preview, err := server.sweepDataNamespaceGC(context.Background(), w, 7, true)
+	if err != nil || len(preview.Candidates) != 1 || preview.Deleted != 0 || preview.DeletedBytes != 0 || deleted != "" {
+		t.Fatalf("preview reported physical reclamation: %+v %v %s", preview, err, deleted)
+	}
 	out, e := server.sweepDataNamespaceGC(context.Background(), w, 7, false)
 	if e != nil {
 		t.Fatal(e)
 	}
-	if out.Deleted != 1 || !strings.Contains(deleted, digests[2]) || strings.Contains(deleted, digests[0]) || strings.Contains(deleted, digests[1]) {
+	if out.Deleted != 1 || out.DeletedBytes != 1 || !strings.Contains(deleted, digests[2]) || strings.Contains(deleted, digests[0]) || strings.Contains(deleted, digests[1]) {
 		t.Fatalf("unsafe deletion: %+v %s", out, deleted)
 	}
 	// Names are tenant-scoped: an ambiguous legacy name cannot pick an
@@ -103,5 +108,31 @@ func TestDataGCProtectsOtherTenantAliasAndPendingUpload(t *testing.T) {
 	deleted = ""
 	if _, err := server.sweepDataNamespaceGC(context.Background(), w, 7, false); err == nil || deleted != "" {
 		t.Fatalf("ambiguous backend allowed collection: %v %s", err, deleted)
+	}
+}
+
+func TestDataGCIdentityRequiresUnchangedETagForTimestampPrecision(t *testing.T) {
+	stamp := time.Date(2026, 10, 18, 5, 55, 53, 741000000, time.UTC)
+	listed := dataObjectInfo{Size: 13, ETag: `"original"`, LastModified: stamp}
+	for _, tc := range []struct {
+		name    string
+		current dataObjectInfo
+		matches bool
+	}{
+		{"HTTP-date precision", dataObjectInfo{Size: 13, ETag: listed.ETag, LastModified: stamp.Truncate(time.Second)}, true},
+		{"replacement in same second", dataObjectInfo{Size: 13, ETag: `"replacement"`, LastModified: stamp.Truncate(time.Second)}, false},
+		{"missing ETag", dataObjectInfo{Size: 13, LastModified: stamp.Truncate(time.Second)}, false},
+		{"changed size", dataObjectInfo{Size: 14, ETag: listed.ETag, LastModified: stamp.Truncate(time.Second)}, false},
+		{"changed timestamp", dataObjectInfo{Size: 13, ETag: listed.ETag, LastModified: stamp.Add(time.Second).Truncate(time.Second)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dataGCObjectIdentityMatches(listed, tc.current); got != tc.matches {
+				t.Fatalf("identity matches=%v want %v", got, tc.matches)
+			}
+		})
+	}
+	listed.ETag = ""
+	if dataGCObjectIdentityMatches(listed, dataObjectInfo{Size: 13, LastModified: stamp.Truncate(time.Second)}) {
+		t.Fatal("relaxed timestamp precision without ETag")
 	}
 }

@@ -22,6 +22,21 @@ func dataPhysicalBucket(backend model.DataBackend) string {
 	return endpoint + "/" + backend.Bucket
 }
 
+// S3 LIST timestamps can include milliseconds while HEAD uses HTTP-date,
+// whose precision is one second. Only relax that precision check when an
+// unchanged ETag and size independently bind the object identity.
+func dataGCObjectIdentityMatches(listed, current dataObjectInfo) bool {
+	if listed.Size != current.Size || listed.LastModified.IsZero() || current.LastModified.IsZero() ||
+		(listed.ETag != "" && listed.ETag != current.ETag) {
+		return false
+	}
+	if listed.LastModified.Equal(current.LastModified) {
+		return true
+	}
+	return listed.ETag != "" && listed.ETag == current.ETag &&
+		listed.LastModified.Truncate(time.Second).Equal(current.LastModified.Truncate(time.Second))
+}
+
 // The backend id and provider label are not physical namespace identities.
 // Compare bucket locations and physical keys, including overlapping prefixes.
 func (s *Server) dataNamespaceReferences(ctx context.Context, backend model.DataBackend) (map[string]bool, error) {
@@ -181,7 +196,7 @@ func (s *Server) sweepDataNamespaceGC(ctx context.Context, workspace model.DataW
 							if e != nil {
 								return e
 							}
-							if !exists || !current.LastModified.Equal(v.LastModified) || current.Size != v.Size || (v.ETag != "" && v.ETag != current.ETag) {
+							if !exists || !dataGCObjectIdentityMatches(v, current) {
 								continue
 							}
 							if e = objects.deleteObjects(ctx, []string{v.Key}); e != nil {
@@ -191,9 +206,9 @@ func (s *Server) sweepDataNamespaceGC(ctx context.Context, workspace model.DataW
 							return e
 						}
 						result.Deleted++
+						result.DeletedBytes += v.Size
 					}
 					result.Candidates = append(result.Candidates, candidate)
-					result.DeletedBytes += v.Size
 				}
 				return nil
 			})
