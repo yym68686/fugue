@@ -26,6 +26,13 @@ type CompilerInputArchiveRouteOptions struct {
 	Unroute bool
 }
 
+type CompilerInputArchiveWriteFenceReport struct {
+	Action           string `json:"action"`
+	Applied          bool   `json:"applied"`
+	WritesFenced     bool   `json:"writes_fenced"`
+	TriggerInstalled bool   `json:"trigger_installed"`
+}
+
 type CompilerInputArchiveMigrationReport struct {
 	Action       string `json:"action"`
 	Digest       string `json:"digest"`
@@ -171,6 +178,105 @@ func RunCompilerInputArchiveRoute(ctx context.Context, databaseURL string, optio
 	return routeCompilerInputArchive(ctx, db, objects, backendHash, options.Digest)
 }
 
+// RunCompilerInputArchiveWriteFence installs or removes a database-level
+// trigger in the same transaction that changes the writer fence. It is an
+// explicit maintenance operation: merely deploying this code does not pause
+// legacy writes or add per-row overhead.
+func RunCompilerInputArchiveWriteFence(ctx context.Context, databaseURL string, apply, disarm bool) (CompilerInputArchiveWriteFenceReport, error) {
+	action := "archive-write-fence"
+	if disarm {
+		action = "archive-write-unfence"
+	}
+	report := CompilerInputArchiveWriteFenceReport{Action: action}
+	if !apply {
+		return report, ErrInvalidInput
+	}
+	db, err := openPostgresDatabase(databaseURL)
+	if err != nil {
+		return report, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return report, err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{`SET LOCAL lock_timeout='250ms'`, `SET LOCAL statement_timeout='5s'`, `SELECT pg_advisory_xact_lock(315609238744290)`} {
+		if _, err = tx.ExecContext(ctx, statement); err != nil {
+			return report, err
+		}
+	}
+	var fenced bool
+	var retiredAt sql.NullTime
+	if err = tx.QueryRowContext(ctx, `SELECT writes_fenced,retirement_started_at FROM fugue_platform_input_archive_control WHERE singleton FOR UPDATE`).Scan(&fenced, &retiredAt); err != nil {
+		return report, fmt.Errorf("compiler input archive control unavailable: %w", ErrConflict)
+	}
+	var hotTableInstalled bool
+	if err = tx.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_hot_chunks') IS NOT NULL`).Scan(&hotTableInstalled); err != nil || !hotTableInstalled {
+		return report, fmt.Errorf("compiler input hot chunk relation is unavailable: %w", ErrConflict)
+	}
+	var triggerInstalled bool
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='fugue_platform_input_chunks'::regclass AND tgname='fugue_platform_input_chunks_archive_write_fence' AND NOT tgisinternal)`).Scan(&triggerInstalled); err != nil {
+		return report, err
+	}
+	if retiredAt.Valid {
+		return report, fmt.Errorf("compiler input chunks relation has entered retirement and cannot be unfenced: %w", ErrConflict)
+	}
+	if disarm {
+		if fenced != triggerInstalled {
+			return report, fmt.Errorf("compiler input write fence state and database trigger disagree: %w", ErrConflict)
+		}
+		if !fenced {
+			if err = tx.Commit(); err != nil {
+				return report, err
+			}
+			return report, nil
+		}
+		if _, err = tx.ExecContext(ctx, `DROP TRIGGER fugue_platform_input_chunks_archive_write_fence ON fugue_platform_input_chunks`); err != nil {
+			return report, err
+		}
+		if _, err = tx.ExecContext(ctx, `DROP FUNCTION fugue_platform_input_chunks_archive_write_fence()`); err != nil {
+			return report, err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE fugue_platform_input_archive_control SET writes_fenced=false,updated_at=now() WHERE singleton`); err != nil {
+			return report, err
+		}
+		if err = tx.Commit(); err != nil {
+			return report, err
+		}
+		report.Applied = true
+		return report, nil
+	}
+	if fenced != triggerInstalled {
+		return report, fmt.Errorf("compiler input write fence state and database trigger disagree: %w", ErrConflict)
+	}
+	if fenced {
+		if err = tx.Commit(); err != nil {
+			return report, err
+		}
+		report.WritesFenced, report.TriggerInstalled = true, true
+		return report, nil
+	}
+	if _, err = tx.ExecContext(ctx, `CREATE FUNCTION fugue_platform_input_chunks_archive_write_fence() RETURNS trigger LANGUAGE plpgsql AS $fence$ BEGIN RAISE EXCEPTION 'compiler input chunks are read-only during archive retirement' USING ERRCODE='55000'; END $fence$`); err != nil {
+		return report, err
+	}
+	if _, err = tx.ExecContext(ctx, `CREATE TRIGGER fugue_platform_input_chunks_archive_write_fence BEFORE INSERT OR UPDATE OR DELETE ON fugue_platform_input_chunks FOR EACH STATEMENT EXECUTE FUNCTION fugue_platform_input_chunks_archive_write_fence()`); err != nil {
+		return report, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE fugue_platform_input_archive_control SET writes_fenced=true,updated_at=now() WHERE singleton AND writes_fenced=false AND retirement_started_at IS NULL`); err != nil {
+		return report, err
+	}
+	if err = tx.Commit(); err != nil {
+		return report, err
+	}
+	report.Applied, report.WritesFenced, report.TriggerInstalled = true, true, true
+	return report, nil
+}
+
 func routeCompilerInputArchive(ctx context.Context, db *sql.DB, objects inputarchive.Objects, backendHash, digest string) (CompilerInputArchiveMigrationReport, error) {
 	report := CompilerInputArchiveMigrationReport{Action: "archive-route", Digest: digest}
 	if !inputDigestPattern.MatchString(digest) || !inputDigestPattern.MatchString(backendHash) || objects == nil {
@@ -203,6 +309,13 @@ func routeCompilerInputArchive(ctx context.Context, db *sql.DB, objects inputarc
 		return report, err
 	}
 	defer tx.Rollback()
+	retiring, err := compilerInputArchiveRetirementStarted(ctx, tx)
+	if err != nil {
+		return report, err
+	}
+	if retiring {
+		return report, fmt.Errorf("compiler input chunks relation is retired: %w", ErrConflict)
+	}
 	currentEpoch, err := readInputArchiveEpoch(ctx, tx, epoch)
 	if err != nil {
 		return report, err
@@ -320,6 +433,13 @@ func unrouteCompilerInputArchive(ctx context.Context, db *sql.DB, digest string)
 		return report, err
 	}
 	defer tx.Rollback()
+	retiring, err := compilerInputArchiveRetirementStarted(ctx, tx)
+	if err != nil {
+		return report, err
+	}
+	if retiring {
+		return report, fmt.Errorf("compiler input chunks relation is retired: %w", ErrConflict)
+	}
 	currentEpoch, err := readInputArchiveEpoch(ctx, tx, epoch)
 	if err != nil {
 		return report, err
@@ -447,6 +567,39 @@ func readInputArchiveEpoch(ctx context.Context, tx *sql.Tx, epoch int64) (int64,
 	return current, nil
 }
 
+// compilerInputWritesFenced is checked only after taking the common writer
+// lock. Older databases without the additive archive ledger remain writable;
+// a present but malformed control row fails closed.
+func compilerInputWritesFenced(ctx context.Context, db inputQueryer) (bool, error) {
+	var installed bool
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_archive_control') IS NOT NULL`).Scan(&installed); err != nil {
+		return false, err
+	}
+	if !installed {
+		return false, nil
+	}
+	var fenced bool
+	if err := db.QueryRowContext(ctx, `SELECT writes_fenced FROM fugue_platform_input_archive_control WHERE singleton`).Scan(&fenced); err != nil {
+		return false, fmt.Errorf("compiler input write fence control unavailable: %w", ErrConflict)
+	}
+	return fenced, nil
+}
+
+func compilerInputArchiveRetirementStarted(ctx context.Context, db inputQueryer) (bool, error) {
+	var installed bool
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_archive_control') IS NOT NULL`).Scan(&installed); err != nil {
+		return false, err
+	}
+	if !installed {
+		return false, nil
+	}
+	var retired sql.NullTime
+	if err := db.QueryRowContext(ctx, `SELECT retirement_started_at FROM fugue_platform_input_archive_control WHERE singleton`).Scan(&retired); err != nil {
+		return false, fmt.Errorf("compiler input retirement state unavailable: %w", ErrConflict)
+	}
+	return retired.Valid, nil
+}
+
 func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash string, options CompilerInputArchiveMigrationOptions) (inputArchiveClaim, error) {
 	var claim inputArchiveClaim
 	owner, err := newArchiveWorkerID()
@@ -461,6 +614,13 @@ func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash stri
 	defer tx.Rollback()
 	if claim.epoch, err = readInputArchiveEpoch(ctx, tx, -1); err != nil {
 		return claim, err
+	}
+	retiring, err := compilerInputArchiveRetirementStarted(ctx, tx)
+	if err != nil {
+		return claim, err
+	}
+	if retiring {
+		return claim, fmt.Errorf("compiler input chunks relation is retired: %w", ErrConflict)
 	}
 	if claim.source, err = readInputManifest(ctx, tx, options.Digest); err != nil {
 		return claim, err

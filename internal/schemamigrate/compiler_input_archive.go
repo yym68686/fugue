@@ -10,6 +10,14 @@ import (
 // reroutes, or changes a reader. Archive writers and reader routing require a
 // later, separately gated rollout.
 const CompilerInputArchiveSQL = `
+ALTER TABLE fugue_platform_input_manifests ADD COLUMN IF NOT EXISTS storage_location TEXT NOT NULL DEFAULT 'legacy' CHECK (storage_location IN ('legacy','hot'));
+CREATE TABLE IF NOT EXISTS fugue_platform_input_hot_chunks (
+ content_hash TEXT NOT NULL REFERENCES fugue_platform_input_manifests(content_hash) DEFERRABLE INITIALLY DEFERRED,
+ ordinal INTEGER NOT NULL CHECK (ordinal>=0 AND ordinal<1048576),
+ chunk_hash TEXT NOT NULL CHECK (chunk_hash ~ '^sha256:[0-9a-f]{64}$'),
+ data BYTEA NOT NULL CHECK (octet_length(data)>0 AND octet_length(data)<=262144),
+ PRIMARY KEY(content_hash,ordinal)
+);
 CREATE TABLE IF NOT EXISTS fugue_platform_input_archives (
  content_hash TEXT PRIMARY KEY REFERENCES fugue_platform_input_manifests(content_hash) ON DELETE RESTRICT,
  archive_format TEXT NOT NULL CHECK (archive_format='compiler-input-archive-v1'),
@@ -60,8 +68,16 @@ CREATE TABLE IF NOT EXISTS fugue_platform_input_archive_control (
  epoch BIGINT NOT NULL CHECK (epoch>=0),
  writes_fenced BOOLEAN NOT NULL DEFAULT FALSE,
  retirement_started_at TIMESTAMPTZ NULL,
+ retirement_plan_sha256 TEXT NOT NULL DEFAULT '' CHECK (retirement_plan_sha256='' OR retirement_plan_sha256 ~ '^[0-9a-f]{64}$'),
+ retirement_reader_current TEXT NOT NULL DEFAULT '' CHECK (retirement_reader_current='' OR retirement_reader_current ~ '^[0-9a-f]{40}$'),
+ retirement_reader_rollback TEXT NOT NULL DEFAULT '' CHECK (retirement_reader_rollback='' OR retirement_reader_rollback ~ '^[0-9a-f]{40}$'),
+ retirement_archive_policy_sha256 TEXT NOT NULL DEFAULT '' CHECK (retirement_archive_policy_sha256='' OR retirement_archive_policy_sha256 ~ '^[0-9a-f]{64}$'),
  updated_at TIMESTAMPTZ NOT NULL
 );
+ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retirement_plan_sha256 TEXT NOT NULL DEFAULT '' CHECK (retirement_plan_sha256='' OR retirement_plan_sha256 ~ '^[0-9a-f]{64}$');
+ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retirement_reader_current TEXT NOT NULL DEFAULT '' CHECK (retirement_reader_current='' OR retirement_reader_current ~ '^[0-9a-f]{40}$');
+ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retirement_reader_rollback TEXT NOT NULL DEFAULT '' CHECK (retirement_reader_rollback='' OR retirement_reader_rollback ~ '^[0-9a-f]{40}$');
+ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retirement_archive_policy_sha256 TEXT NOT NULL DEFAULT '' CHECK (retirement_archive_policy_sha256='' OR retirement_archive_policy_sha256 ~ '^[0-9a-f]{64}$');
 INSERT INTO fugue_platform_input_archive_control(singleton,epoch,writes_fenced,updated_at)
  VALUES(TRUE,0,FALSE,now()) ON CONFLICT(singleton) DO NOTHING;
 `
@@ -93,10 +109,12 @@ func MigrateCompilerInputArchive(ctx context.Context, databaseURL string) error 
 		return fmt.Errorf("create compiler input archive ledger: %w", err)
 	}
 	for _, table := range []struct{ name, columns, casts string }{
+		{"fugue_platform_input_hot_chunks", "content_hash,ordinal,chunk_hash,data", "NULL::text,NULL::integer,NULL::text,NULL::bytea"},
+		{"fugue_platform_input_manifests", "storage_location", "NULL::text"},
 		{"fugue_platform_input_archives", "content_hash,archive_format,source_format,raw_bytes,segment_bytes,segment_count,object_prefix,backend_hash,state,source_epoch,verified_digest,fencing_token,created_at,verified_at,routed_at,updated_at", "NULL::text,NULL::text,NULL::text,NULL::bigint,NULL::integer,NULL::integer,NULL::text,NULL::text,NULL::text,NULL::bigint,NULL::text,NULL::bigint,NULL::timestamptz,NULL::timestamptz,NULL::timestamptz,NULL::timestamptz"},
 		{"fugue_platform_input_archive_segments", "content_hash,ordinal,object_key,raw_bytes,stored_bytes,segment_hash,stored_hash,object_etag,uploaded_at,verified_at", "NULL::text,NULL::integer,NULL::text,NULL::integer,NULL::integer,NULL::text,NULL::text,NULL::text,NULL::timestamptz,NULL::timestamptz"},
 		{"fugue_platform_input_archive_leases", "content_hash,owner,source_epoch,fencing_token,expires_at,updated_at", "NULL::text,NULL::text,NULL::bigint,NULL::bigint,NULL::timestamptz,NULL::timestamptz"},
-		{"fugue_platform_input_archive_control", "singleton,epoch,writes_fenced,retirement_started_at,updated_at", "NULL::boolean,NULL::bigint,NULL::boolean,NULL::timestamptz,NULL::timestamptz"},
+		{"fugue_platform_input_archive_control", "singleton,epoch,writes_fenced,retirement_started_at,retirement_plan_sha256,retirement_reader_current,retirement_reader_rollback,retirement_archive_policy_sha256,updated_at", "NULL::boolean,NULL::bigint,NULL::boolean,NULL::timestamptz,NULL::text,NULL::text,NULL::text,NULL::text,NULL::timestamptz"},
 	} {
 		rows, queryErr := tx.QueryContext(ctx, "SELECT "+table.columns+" FROM "+table.name+" WHERE false UNION ALL SELECT "+table.casts+" WHERE false")
 		if queryErr != nil {

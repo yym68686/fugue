@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -29,7 +30,33 @@ func archiveTestStore(t *testing.T) *Store {
 			t.Fatal(err)
 		}
 	}
+	resetCompilerInputArchiveTestLedger(t, s)
 	return s
+}
+
+func resetCompilerInputArchiveTestLedger(t *testing.T, s *Store) {
+	t.Helper()
+	// archiveTestStore has already verified this is a loopback fugue_test DB.
+	for _, table := range []string{"fugue_platform_input_archive_control", "fugue_platform_input_archives", "fugue_platform_input_archive_segments", "fugue_platform_input_archive_leases"} {
+		for _, level := range []string{"row", "truncate"} {
+			if _, err := s.db.ExecContext(t.Context(), "DROP TRIGGER IF EXISTS "+table+"_retired_"+level+"_guard ON "+table); err != nil {
+				t.Fatal("reset disposable archive guard", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(t.Context(), `DROP FUNCTION IF EXISTS fugue_platform_input_archive_retirement_guard()`); err != nil {
+		t.Fatal("reset disposable archive guard function", err)
+	}
+	for _, statement := range []string{
+		`DELETE FROM fugue_platform_input_archive_leases`,
+		`DELETE FROM fugue_platform_input_archive_segments`,
+		`DELETE FROM fugue_platform_input_archives`,
+		`UPDATE fugue_platform_input_archive_control SET epoch=0,writes_fenced=false,retirement_started_at=NULL,retirement_plan_sha256='',retirement_reader_current='',retirement_reader_rollback='',retirement_archive_policy_sha256='' WHERE singleton`,
+	} {
+		if _, err := s.db.ExecContext(t.Context(), statement); err != nil {
+			t.Fatal("reset disposable archive ledger", err)
+		}
+	}
 }
 
 func resetArchiveInputFixture(t *testing.T, s *Store, digest string) {
@@ -130,6 +157,397 @@ func TestCompilerInputArchiveCopyLeaseResumePinsAndReadback(t *testing.T) {
 	if err = checkpointCompilerInputArchive(t.Context(), s.db, old, inputarchive.Segment{}); !errors.Is(err, ErrConflict) {
 		t.Fatal("stale worker wrote a receipt", err)
 	}
+}
+
+func TestCompilerInputWriteFenceRoutesFallbackToHotAndBlocksMaintenanceRewrite(t *testing.T) {
+	s := archiveTestStore(t)
+	resetArchiveFenceFixture(t, s)
+	snapshot, digest := chunkedInputFixture(t)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	var original inputManifest
+	original, err := readInputManifest(t.Context(), s.db, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(t.Context(), `UPDATE fugue_platform_input_archive_control SET writes_fenced=true WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Existing identities remain usable while fallback writes move to the hot
+	// relation, leaving the old relation fixed for retirement verification.
+	if err = s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal("existing input was rejected by the write fence", err)
+	}
+	changed := snapshot
+	changed.IntentGeneration += "-new"
+	newDigest, err := platformconfig.RuntimeSnapshotDigest(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.EnsurePlatformCompilerInput(changed, newDigest); err != nil {
+		t.Fatal("fenced writer did not use the separate hot relation", err)
+	}
+	var location string
+	if err = s.db.QueryRowContext(t.Context(), `SELECT storage_location FROM fugue_platform_input_manifests WHERE content_hash=$1`, newDigest).Scan(&location); err != nil || location != "hot" {
+		t.Fatal("fenced write location was not recorded", location, err)
+	}
+	var legacyRows, hotRows int
+	if err = s.db.QueryRowContext(t.Context(), `SELECT (SELECT count(*) FROM fugue_platform_input_chunks WHERE content_hash=$1),(SELECT count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1)`, newDigest).Scan(&legacyRows, &hotRows); err != nil || legacyRows != 0 || hotRows == 0 {
+		t.Fatal("fenced fallback did not isolate bytes in the hot relation", legacyRows, hotRows, err)
+	}
+	for i := 0; i < 2; i++ {
+		got, readErr := s.GetPlatformCompilerInput(newDigest)
+		if readErr != nil {
+			t.Fatal("new hot input is unreadable", readErr)
+		}
+		if actual, digestErr := platformconfig.RuntimeSnapshotDigest(got); digestErr != nil || actual != newDigest {
+			t.Fatal("hot input changed its canonical digest", actual, digestErr)
+		}
+		if err = s.EnsurePlatformCompilerInput(changed, newDigest); err != nil {
+			t.Fatal("hot input did not support idempotent ensure", err)
+		}
+	}
+
+	if _, err = s.maintainCompilerInput(t.Context(), CompilerInputMaintenanceOptions{Action: "migrate", Digest: digest, ExpectedFormat: original.Format, MaxInputBytes: 1 << 30, Apply: true}); !errors.Is(err, ErrConflict) {
+		t.Fatal("maintenance rewrite passed the fence", err)
+	}
+	current, err := readInputManifest(t.Context(), s.db, digest)
+	if err != nil || current != original {
+		t.Fatal("fenced maintenance changed the input manifest", current, err)
+	}
+}
+
+func TestCompilerInputDatabaseWriteFenceBlocksOldWritersAndCanBeReversedBeforeRetirement(t *testing.T) {
+	s := archiveTestStore(t)
+	resetArchiveFenceFixture(t, s)
+	snapshot, digest := chunkedInputFixture(t)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+
+	armed, err := RunCompilerInputArchiveWriteFence(t.Context(), s.databaseURL, true, false)
+	if err != nil || !armed.Applied || !armed.WritesFenced || !armed.TriggerInstalled {
+		t.Fatal("database writer fence was not atomically armed", armed, err)
+	}
+	if _, err = s.db.ExecContext(t.Context(), `UPDATE fugue_platform_input_chunks SET data=data WHERE content_hash=$1 AND ordinal=0`, digest); err == nil {
+		t.Fatal("database trigger allowed a legacy binary to mutate chunks")
+	}
+	readBack, err := s.GetPlatformCompilerInput(digest)
+	if err != nil {
+		t.Fatal("write fencing blocked existing readers", err)
+	}
+	if got, e := platformconfig.RuntimeSnapshotDigest(readBack); e != nil || got != digest {
+		t.Fatal("fenced read changed input identity", got, e)
+	}
+
+	released, err := RunCompilerInputArchiveWriteFence(t.Context(), s.databaseURL, true, true)
+	if err != nil || !released.Applied || released.WritesFenced || released.TriggerInstalled {
+		t.Fatal("pre-retirement writer fence could not be reversed", released, err)
+	}
+	changed := snapshot
+	changed.IntentGeneration += "-after-unfence"
+	newDigest, err := platformconfig.RuntimeSnapshotDigest(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.EnsurePlatformCompilerInput(changed, newDigest); err != nil {
+		t.Fatal("writer did not resume after fence removal", err)
+	}
+	var location string
+	if err = s.db.QueryRowContext(t.Context(), `SELECT storage_location FROM fugue_platform_input_manifests WHERE content_hash=$1`, newDigest).Scan(&location); err != nil || location != "legacy" {
+		t.Fatal("unfenced writer did not return to the legacy relation", location, err)
+	}
+	if _, err = s.db.ExecContext(t.Context(), `UPDATE fugue_platform_input_archive_control SET writes_fenced=true,retirement_started_at=now() WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = RunCompilerInputArchiveWriteFence(t.Context(), s.databaseURL, true, true); !errors.Is(err, ErrConflict) {
+		t.Fatal("retired relation was allowed to reopen for writes", err)
+	}
+}
+
+func prepareRetirableCompilerInput(t *testing.T, s *Store) (platformconfig.RuntimeSnapshot, string, *archiveTestObjects, string) {
+	t.Helper()
+	for name, value := range map[string]string{
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ENDPOINT":          "https://archive.example.invalid",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_REGION":            "auto",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_BUCKET":            "compiler-input-test",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_PREFIX":            "compiler-archive-test",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ACCESS_KEY_ID":     "test-access",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_SECRET_ACCESS_KEY": "test-secret",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED":   "true",
+	} {
+		t.Setenv(name, value)
+	}
+	resetArchiveFenceFixture(t, s)
+	if _, err := s.db.ExecContext(t.Context(), `TRUNCATE TABLE fugue_platform_input_chunks RESTRICT`); err != nil {
+		t.Fatal("clear disposable legacy chunk fixtures", err)
+	}
+	snapshot, digest := chunkedInputFixture(t)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	objects := &archiveTestObjects{}
+	cfg, configured, err := inputarchive.ConfigFromEnv()
+	if err != nil || !configured {
+		t.Fatal("test archive config invalid", err)
+	}
+	backend, err := cfg.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := copyCompilerInputArchive(t.Context(), s.db, objects, backend, CompilerInputArchiveMigrationOptions{Digest: digest, Apply: true}); err != nil {
+		t.Fatal("archive source was not verified", err)
+	}
+	if _, err := routeCompilerInputArchive(t.Context(), s.db, objects, backend, digest); err != nil {
+		t.Fatal("archive read route was not committed", err)
+	}
+	if report, err := RunCompilerInputArchiveWriteFence(t.Context(), s.databaseURL, true, false); err != nil || !report.WritesFenced || !report.TriggerInstalled {
+		t.Fatal("database writer fence was not installed", report, err)
+	}
+	s.compilerInputArchiveObjects = objects
+	s.compilerInputArchiveReadLeaseEnabled = true
+	return snapshot, digest, objects, backend
+}
+
+func TestCompilerInputArchiveRetirementRequiresCompleteVerifiedRouteAndDrainsReaders(t *testing.T) {
+	s := archiveTestStore(t)
+	_, digest, objects, backend := prepareRetirableCompilerInput(t, s)
+	plan, err := compilerInputArchiveRetirementPlan(t.Context(), s.db, objects, backend, true)
+	if err != nil || !plan.CanRetire || plan.InputCount != 1 || plan.CoveredInputCount != 1 || plan.VerifiedArchiveInputs != 1 || plan.BlockedInputCount != 0 || plan.LegacyChunkRows == 0 || plan.ReclaimableRelationBytes == 0 || plan.Inputs[0].Digest != digest || !plan.Inputs[0].ReplacementVerified {
+		t.Fatal("complete archive route did not produce a retireable plan", plan, err)
+	}
+	if plan.Inputs[0].LogicalBytes <= 0 || plan.ReclaimableLogicalBytes != plan.Inputs[0].LogicalBytes {
+		t.Fatal("plan did not report logical bytes separately from relation bytes", plan.Inputs[0], plan.ReclaimableLogicalBytes)
+	}
+
+	readerConn, err := s.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var locked bool
+	if err = readerConn.QueryRowContext(t.Context(), `SELECT pg_try_advisory_lock_shared($1)`, compilerInputArchiveReadLeaseLockID).Scan(&locked); err != nil || !locked {
+		readerConn.Close()
+		t.Fatal("could not establish a live compiler-input reader lease", err)
+	}
+	policyHash := strings.Repeat("d", 64)
+	blocked, err := applyCompilerInputArchiveRetirement(t.Context(), s.db, backend, CompilerInputArchiveRetirementOptions{RoutingEnabled: true, ExpectedPlanSHA256: plan.PlanSHA256, CurrentReaderRelease: strings.Repeat("a", 40), RollbackReaderRelease: strings.Repeat("b", 40), ArchiveRetentionPolicySHA256: policyHash, ReaderDrainTimeout: 100 * time.Millisecond}, plan)
+	if err == nil || blocked.Applied {
+		t.Fatal("retirement did not stop when a reader lease remained active", blocked, err)
+	}
+	var rows int64
+	if err = s.db.QueryRowContext(t.Context(), `SELECT count(*) FROM fugue_platform_input_chunks WHERE content_hash=$1`, digest).Scan(&rows); err != nil || rows != plan.Inputs[0].LegacyChunkRows {
+		t.Fatal("reader drain timeout changed source rows", rows, err)
+	}
+	if _, err = readerConn.ExecContext(t.Context(), `SELECT pg_advisory_unlock_shared($1)`, compilerInputArchiveReadLeaseLockID); err != nil {
+		readerConn.Close()
+		t.Fatal(err)
+	}
+	if err = readerConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	options := CompilerInputArchiveRetirementOptions{RoutingEnabled: true, ExpectedPlanSHA256: plan.PlanSHA256, CurrentReaderRelease: strings.Repeat("a", 40), RollbackReaderRelease: strings.Repeat("b", 40), ArchiveRetentionPolicySHA256: policyHash, ReaderDrainTimeout: time.Second}
+	retired, err := applyCompilerInputArchiveRetirement(t.Context(), s.db, backend, options, plan)
+	if err != nil || !retired.Applied || retired.Action != "archive-retire" {
+		t.Fatal("complete verified relation did not retire", retired, err)
+	}
+	if err = s.db.QueryRowContext(t.Context(), `SELECT count(*) FROM fugue_platform_input_chunks WHERE content_hash=$1`, digest).Scan(&rows); err != nil || rows != 0 {
+		t.Fatal("retirement left legacy chunk rows", rows, err)
+	}
+	var retiredAt sql.NullTime
+	var storedPlan, currentReader, rollbackReader, storedPolicy string
+	if err = s.db.QueryRowContext(t.Context(), `SELECT retirement_started_at,retirement_plan_sha256,retirement_reader_current,retirement_reader_rollback,retirement_archive_policy_sha256 FROM fugue_platform_input_archive_control WHERE singleton`).Scan(&retiredAt, &storedPlan, &currentReader, &rollbackReader, &storedPolicy); err != nil || !retiredAt.Valid || storedPlan != plan.PlanSHA256 || currentReader != strings.Repeat("a", 40) || rollbackReader != strings.Repeat("b", 40) || storedPolicy != policyHash {
+		t.Fatal("retirement audit marker was not committed atomically", retiredAt, storedPlan, currentReader, rollbackReader, storedPolicy, err)
+	}
+	got, err := s.GetPlatformCompilerInput(digest)
+	if err != nil {
+		t.Fatal("reader could not load equivalent bytes after retirement", err)
+	}
+	if actual, digestErr := platformconfig.RuntimeSnapshotDigest(got); digestErr != nil || actual != digest {
+		t.Fatal("reader identity changed after relation retirement", actual, digestErr)
+	}
+	if _, err = RunCompilerInputArchiveWriteFence(t.Context(), s.databaseURL, true, true); !errors.Is(err, ErrConflict) {
+		t.Fatal("retired table was allowed to reopen for writes", err)
+	}
+	if _, err = unrouteCompilerInputArchive(t.Context(), s.db, digest); !errors.Is(err, ErrConflict) {
+		t.Fatal("retired source was allowed to re-enter the legacy route", err)
+	}
+	for _, statement := range []string{
+		`UPDATE fugue_platform_input_archive_control SET retirement_started_at=NULL WHERE singleton`,
+		`TRUNCATE TABLE fugue_platform_input_archive_control RESTRICT`,
+		`UPDATE fugue_platform_input_archives SET state='verified',routed_at=NULL`,
+		`DELETE FROM fugue_platform_input_archive_segments`,
+		`TRUNCATE TABLE fugue_platform_input_archive_segments RESTRICT`,
+		`INSERT INTO fugue_platform_input_archive_leases(content_hash,owner,source_epoch,fencing_token,expires_at,updated_at) VALUES('` + digest + `','retirement-test',0,0,now()+interval '1 minute',now())`,
+	} {
+		if _, err = s.db.ExecContext(t.Context(), statement); err == nil {
+			t.Fatal("retirement allowed archive recovery metadata to mutate", statement)
+		}
+	}
+	if err = schemamigrate.MigrateCompilerInputArchive(t.Context(), s.databaseURL); err != nil {
+		t.Fatal("idempotent archive schema migration failed after retirement", err)
+	}
+}
+
+func TestCompilerInputArchiveRetirementBlocksUnroutedInputs(t *testing.T) {
+	s := archiveTestStore(t)
+	resetArchiveFenceFixture(t, s)
+	if _, err := s.db.ExecContext(t.Context(), `TRUNCATE TABLE fugue_platform_input_chunks RESTRICT`); err != nil {
+		t.Fatal("clear disposable legacy chunk fixtures", err)
+	}
+	snapshot, digest := chunkedInputFixture(t)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	objects := &archiveTestObjects{}
+	if report, err := RunCompilerInputArchiveWriteFence(t.Context(), s.databaseURL, true, false); err != nil || !report.WritesFenced {
+		t.Fatal("writer fence was not installed", report, err)
+	}
+	plan, err := compilerInputArchiveRetirementPlan(t.Context(), s.db, objects, "sha256:"+strings.Repeat("c", 64), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.CanRetire || plan.BlockedInputCount != 1 || plan.ReclaimableRelationBytes != 0 || plan.Inputs[0].Blocker != "verified-archive-route-missing" {
+		t.Fatal("unrouted legacy source was treated as retireable", plan)
+	}
+}
+
+func TestCompilerInputArchiveRetirementBlocksActiveMigrationLease(t *testing.T) {
+	s := archiveTestStore(t)
+	_, digest, objects, backend := prepareRetirableCompilerInput(t, s)
+	if _, err := s.db.ExecContext(t.Context(), `INSERT INTO fugue_platform_input_archive_leases(content_hash,owner,source_epoch,fencing_token,expires_at,updated_at) SELECT content_hash,'active-test-migration',source_epoch,fencing_token+1,now()+interval '2 minutes',now() FROM fugue_platform_input_archives WHERE content_hash=$1 ON CONFLICT(content_hash) DO UPDATE SET owner=excluded.owner,source_epoch=excluded.source_epoch,fencing_token=excluded.fencing_token,expires_at=excluded.expires_at,updated_at=now()`, digest); err != nil {
+		t.Fatal("could not establish test migration lease", err)
+	}
+	plan, err := compilerInputArchiveRetirementPlan(t.Context(), s.db, objects, backend, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.CanRetire || plan.ActiveArchiveLeases != 1 || plan.ReclaimableRelationBytes != 0 {
+		t.Fatal("active archive migration was not treated as a retirement blocker", plan)
+	}
+}
+
+func TestCompilerInputArchiveRetirementPlanWorksWithoutArchiveBackend(t *testing.T) {
+	s := archiveTestStore(t)
+	resetArchiveFenceFixture(t, s)
+	if _, err := s.db.ExecContext(t.Context(), `TRUNCATE TABLE fugue_platform_input_chunks RESTRICT`); err != nil {
+		t.Fatal("clear disposable legacy chunk fixtures", err)
+	}
+	for _, name := range []string{
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ENDPOINT", "FUGUE_COMPILER_INPUT_ARCHIVE_REGION",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_BUCKET", "FUGUE_COMPILER_INPUT_ARCHIVE_PREFIX",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ACCESS_KEY_ID", "FUGUE_COMPILER_INPUT_ARCHIVE_SECRET_ACCESS_KEY",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED",
+	} {
+		t.Setenv(name, "")
+	}
+	snapshot, digest := chunkedInputFixture(t)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	var rowsBefore int64
+	if err := s.db.QueryRowContext(t.Context(), `SELECT count(*) FROM fugue_platform_input_chunks`).Scan(&rowsBefore); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := RunCompilerInputArchiveRetirement(t.Context(), s.databaseURL, CompilerInputArchiveRetirementOptions{})
+	if err != nil {
+		t.Fatal("read-only plan required an unprovisioned archive target", err)
+	}
+	var rowsAfter int64
+	if err = s.db.QueryRowContext(t.Context(), `SELECT count(*) FROM fugue_platform_input_chunks`).Scan(&rowsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if plan.Applied || plan.CanRetire || plan.RoutingEnabled || plan.BlockedInputCount != 1 || plan.ReclaimableRelationBytes != 0 || rowsAfter != rowsBefore || plan.Inputs[0].Digest != digest {
+		t.Fatal("archive-less plan changed data or overstated retirement coverage", plan, rowsBefore, rowsAfter)
+	}
+}
+
+func TestCompilerInputArchiveStartupRequiresMatchingBackendAfterRetirement(t *testing.T) {
+	s := archiveTestStore(t)
+	_, _, _, backend := prepareRetirableCompilerInput(t, s)
+	resetArchiveFenceFixture(t, s)
+	tx, err := s.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err = installCompilerInputArchiveRetirementGuards(t.Context(), tx); err != nil {
+		t.Fatal("install disposable retirement guards", err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(t.Context(), `UPDATE fugue_platform_input_archive_control SET retirement_started_at=now() WHERE singleton`); err != nil {
+		t.Fatal("mark disposable legacy relation retired", err)
+	}
+	if _, err := s.db.ExecContext(t.Context(), `TRUNCATE TABLE fugue_platform_input_chunks RESTRICT`); err != nil {
+		t.Fatal("retire disposable legacy relation", err)
+	}
+	for _, name := range []string{
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ENDPOINT", "FUGUE_COMPILER_INPUT_ARCHIVE_REGION",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_BUCKET", "FUGUE_COMPILER_INPUT_ARCHIVE_PREFIX",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ACCESS_KEY_ID", "FUGUE_COMPILER_INPUT_ARCHIVE_SECRET_ACCESS_KEY",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED",
+	} {
+		t.Setenv(name, "")
+	}
+	s.compilerInputArchiveObjects = nil
+	s.compilerInputArchiveReadLeaseEnabled = false
+	if err := s.ConfigureCompilerInputArchiveFromEnv(); !errors.Is(err, ErrConflict) {
+		t.Fatal("retired relation allowed startup without its archive backend", err)
+	}
+	for name, value := range map[string]string{
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ENDPOINT":          "https://archive.example.invalid",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_REGION":            "auto",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_BUCKET":            "compiler-input-test",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_PREFIX":            "compiler-archive-test",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ACCESS_KEY_ID":     "test-access",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_SECRET_ACCESS_KEY": "test-secret",
+		"FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED":   "true",
+	} {
+		t.Setenv(name, value)
+	}
+	if err := s.ConfigureCompilerInputArchiveFromEnv(); err != nil {
+		t.Fatal("retired relation rejected its matching archive backend", err)
+	}
+	if !s.compilerInputArchiveReadLeaseEnabled || s.compilerInputArchiveObjects == nil {
+		t.Fatal("matching archive backend did not enable routed reads and leases")
+	}
+	if backend == "" {
+		t.Fatal("test fixture backend fingerprint is empty")
+	}
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_BUCKET", "another-compiler-input-test")
+	if err := s.ConfigureCompilerInputArchiveFromEnv(); !errors.Is(err, ErrConflict) {
+		t.Fatal("retired relation accepted a different archive backend", err)
+	}
+}
+
+func resetArchiveFenceFixture(t *testing.T, s *Store) {
+	t.Helper()
+	// archiveTestStore permits only an explicitly configured disposable
+	// loopback fugue_test database. Never reset another database's control.
+	reset := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, table := range []string{"fugue_platform_input_archive_control", "fugue_platform_input_archives", "fugue_platform_input_archive_segments", "fugue_platform_input_archive_leases"} {
+			for _, level := range []string{"row", "truncate"} {
+				if _, err := s.db.ExecContext(ctx, "DROP TRIGGER IF EXISTS "+table+"_retired_"+level+"_guard ON "+table); err != nil {
+					t.Error("reset disposable archive guard", err)
+				}
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `DROP FUNCTION IF EXISTS fugue_platform_input_archive_retirement_guard()`); err != nil {
+			t.Error("reset disposable archive guard function", err)
+		}
+		_, err := s.db.ExecContext(ctx, `DROP TRIGGER IF EXISTS fugue_platform_input_chunks_archive_write_fence ON fugue_platform_input_chunks; DROP FUNCTION IF EXISTS fugue_platform_input_chunks_archive_write_fence(); UPDATE fugue_platform_input_archive_control SET epoch=0,writes_fenced=false,retirement_started_at=NULL,retirement_plan_sha256='',retirement_reader_current='',retirement_reader_rollback='',retirement_archive_policy_sha256='' WHERE singleton`)
+		if err != nil {
+			t.Error("reset disposable write-fence fixture", err)
+		}
+	}
+	reset()
+	t.Cleanup(reset)
 }
 
 func TestCompilerInputArchiveRoutedReadRequiresVerifiedBytes(t *testing.T) {

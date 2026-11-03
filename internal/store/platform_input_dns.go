@@ -200,7 +200,13 @@ func selectCompilerDNSObservations(snapshot platformconfig.RuntimeSnapshot, need
 	return out
 }
 
-const compilerDNSSelectiveReadSQL = `SELECT ordinal,chunk_hash,octet_length(data),sha256(data),CASE WHEN ordinal = ANY($2::int[]) THEN data ELSE NULL END FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal`
+func compilerDNSSelectiveReadSQL(location string) (string, error) {
+	table, err := compilerInputChunksTable(location)
+	if err != nil {
+		return "", err
+	}
+	return `SELECT ordinal,chunk_hash,octet_length(data),sha256(data),CASE WHEN ordinal = ANY($2::int[]) THEN data ELSE NULL END FROM ` + table + ` WHERE content_hash=$1 ORDER BY ordinal`, nil
+}
 
 func readCompilerDNSSelections(ctx context.Context, db inputQueryer, m inputManifest, c *compilerDNSInput, needed func(CompilerDNSSelectionSummary) bool) (CompilerInputDNSSelections, error) {
 	if len(c.Hashes) != m.Count || m.Format == inputFormatCodecV2 && len(c.StoredSizes) != m.Count {
@@ -226,7 +232,11 @@ func readCompilerDNSSelections(ctx context.Context, db inputQueryer, m inputMani
 			}
 		}
 	}
-	rows, err := db.QueryContext(ctx, compilerDNSSelectiveReadSQL, m.Digest, ordinals)
+	query, err := compilerDNSSelectiveReadSQL(m.Location)
+	if err != nil {
+		return CompilerInputDNSSelections{}, err
+	}
+	rows, err := db.QueryContext(ctx, query, m.Digest, ordinals)
 	if err != nil {
 		return CompilerInputDNSSelections{}, err
 	}

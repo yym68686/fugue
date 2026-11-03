@@ -58,17 +58,40 @@ read-only Repeatable Read transaction, which pins the old physical versions
 until an already-started reader finishes. Current, pinned, historical, and LKG
 references keep the same digest throughout migration.
 
+### External compiler-input archive
+
+`--mode archive` is a separate, one-digest v1/v2 export path. It streams the
+original canonical bytes through immutable gzip segments, with a 1 MiB default
+segment and a 1 GiB per-input maximum. Each uploaded segment is fetched back and
+checked before its durable receipt is recorded; the complete reconstructed
+input is checked against its original digest before the archive becomes
+`verified`. This supports inputs larger than 128 MiB without raising the
+in-database representation migrator's 128 MiB limit or buffering a whole input
+in memory.
+
+`verified` means an equivalent external copy exists; it does not change the
+read route or permit retirement. `--mode archive-route` revalidates the
+external copy and the source, then routes one exact digest with compare-and-
+swap. The old source rows remain available for explicit `archive-unroute` until
+the separate old-relation retirement gate is implemented and passed. The
+archive reader fails closed on missing or invalid receipts and verifies the
+complete byte stream on use. This path currently accepts only v1/v2 chunked
+inputs; v3/v4 inputs do not reside in the legacy chunks relation and are not
+part of its retirement coverage.
+
 `--mode collect` removes at most 16 unreferenced components and 16 unreferenced
 packs per transaction. It checks both v3 and component references, verifies FK
 barriers are present and enabled, and takes the common writer fence. It never
 deletes input manifests, artifacts, publications, pins or LKG roots. Retiring
 historical inputs is a separate complete dependency-graph GC problem.
 
-The hard per-input maintenance limit is 128 MiB; statement/lock/overall budgets
-are 5 seconds/250 ms/2 minutes. Errors abort the whole operation. Storage events
-record committed representation changes. CLI output contains only aggregate
-counts, digests and byte totals, never evidence or credentials. A lost commit
-acknowledgment requires inspection before retrying.
+The in-database representation migrator's hard per-input limit is 128 MiB;
+statement/lock/overall budgets are 5 seconds/250 ms/2 minutes. The separate
+external archive stream has a 1 GiB hard input limit and bounded segments.
+Errors abort the current operation. Storage events record committed
+representation changes. CLI output contains only aggregate counts, digests and
+byte totals, never evidence or credentials. A lost commit acknowledgment
+requires inspection before retrying.
 
 Maintenance uses the ordinary database role. It sets `work_mem=1MB` and disables
 parallel query workers, but does not set the superuser-only `temp_file_limit` or
@@ -109,16 +132,14 @@ relation files, and freed pages in the old chunk relation do not automatically
 become space for new component relations. No VACUUM FULL, global rewrite,
 historical deletion or claim of reducing tens of GiB to hundreds of MiB is part
 of this representation change. Production savings require actual measurement.
-# Compiler input external archive (staged)
+# Compiler input external archive
 
-Status as of 2026-11-04: code is staged in the isolated `compiler-input-retention`
-worktree; no production archive bucket is provisioned or validated, no archive
-migration has been run, no read route has been committed, and no production
-input rows have been deleted or truncated. The production chunk relation was
-68,116,963,328 bytes at 2026-11-03 17:29:45Z and 17:56:40Z. Database size rose
-from 155,488,016,063 to 155,510,519,487 bytes over that interval; this is a
-sampled database delta, not a sustained growth-rate estimate. At 17:51Z the
-volume had 1,499,280 KiB available (reported 100% used). Do not start bulk
+The single-input archive writer, reader, and `archive-route` / `archive-unroute`
+operations are in `main`. Production has no dedicated archive environment or
+validated archive bucket, no archive migration or route has been run, and no
+production input rows have been deleted or truncated. The separate hot-chunk
+write fence and archive-retirement maintenance commands are implemented in the
+isolated worktree but are not yet pushed or deployed. Do not start production
 copying until a dedicated target, measured transfer capacity, safe runway, and
 backpressure policy are confirmed.
 
@@ -156,10 +177,55 @@ only a routed row whose full digest and every segment receipt validate. A
 separate operator route operation can switch exactly one already-verified
 digest without deleting its original rows. Routing still requires cold/hot
 dependency proof and all serving/rollback readers to support the archive.
-Physical retirement additionally requires stopping old writers, proving the
-full old-relation copy set, draining readers with a release/rollback
-compatibility floor, and passing a separate bounded maintenance gate. Do not
-use existing backup prefixes or retention policy for compiler-input archives.
+Physical retirement has an explicit two-phase maintenance path. The
+read-only `archive-retirement-plan` inventories every digest with rows in the
+legacy relation, checks ordinal coverage and orphan rows, fully reads and
+hash-verifies each external routed object (or the verified hot copy), and
+reports the relation's exact heap/index/total bytes separately from each
+input's logical bytes. It does not mutate production data. Its full readback can
+be I/O intensive and should only be run after a dedicated archive target is
+available.
+
+`archive-retire --apply` requires the exact plan hash, current and rollback
+reader release IDs, a committed write fence and database trigger, no active
+archive leases, a matching database-side recheck, and a drained session-level
+reader barrier. It sets short lock/statement timeouts and executes only
+`TRUNCATE TABLE fugue_platform_input_chunks RESTRICT`; it never uses CASCADE or
+terminates application sessions. In the same transaction it installs enabled
+row and statement guards on the archive control, archive, segment, and lease
+tables; after the retirement marker commits those ledgers cannot be changed or
+truncated through ordinary SQL. API startup then requires the archive backend,
+matching routed backend fingerprints, complete segment receipts, and all
+retirement guards. It also requires a SHA-256 identifier for the
+independently reviewed archive retention policy and stores that value in the
+retirement audit row. This value is an operator attestation; Fugue cannot prove
+from an S3-compatible endpoint that external lifecycle rules will not delete
+the objects. Database guards cannot prevent an object-store administrator from
+deleting an archived object; reads still validate the complete original digest
+and fail closed if the object is missing. A reader-drain timeout, changed plan,
+FK, or table lock aborts the transaction without removing the source rows. Run
+the live preflight immediately before authorizing retirement:
+
+```sh
+python3 -m scripts.compiler_input_storage --mode check-archive-readers
+```
+
+It binds the active workloads, pods, immutable current/LKG records and their
+source revisions, and fails on an unstable rollout or unresolved release
+monitor state. Every API candidate is separately source-checked in the normal
+GitHub Actions deploy lane for the routed reader, session lease and startup
+guard. The release IDs passed to `archive-retire` are operator-supplied audit
+values; the binary does not independently query Kubernetes, so they are not
+proof that the live preflight was run. Do not execute retirement unless that
+preflight has just passed and the independent object-retention policy has been
+reviewed. Do not use existing backup prefixes or retention policy for
+compiler-input archives.
+
+The relation-byte figure is the exact PostgreSQL heap/index/TOAST relation
+size observed in the plan; PostgreSQL freeing it does not guarantee the same
+amount of Longhorn backing-disk reduction while snapshots retain blocks. Per
+input logical bytes must not be presented as an exact allocation of physical
+pages.
 
 After the per-input canary, operators may explicitly route one verified digest
 with `fugue-input-storage --mode archive-route --digest sha256:... --apply`.

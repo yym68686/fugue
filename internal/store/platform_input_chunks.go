@@ -31,9 +31,21 @@ const inputChunkBatchSize = 16
 
 var inputDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+func compilerInputChunksTable(location string) (string, error) {
+	switch location {
+	case "", "legacy":
+		return "fugue_platform_input_chunks", nil
+	case "hot":
+		return "fugue_platform_input_hot_chunks", nil
+	default:
+		return "", fmt.Errorf("invalid compiler input storage location: %w", ErrConflict)
+	}
+}
+
 type inputManifest struct {
 	Digest           string
 	Format           string
+	Location         string
 	Size             int64
 	ChunkSize, Count int
 	Created          time.Time
@@ -45,9 +57,12 @@ type inputQueryer interface {
 
 func readInputManifest(ctx context.Context, db inputQueryer, digest string) (inputManifest, error) {
 	m := inputManifest{Digest: digest}
-	err := db.QueryRowContext(ctx, `SELECT format,size_bytes,chunk_size,chunk_count,created_at FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest).Scan(&m.Format, &m.Size, &m.ChunkSize, &m.Count, &m.Created)
+	err := db.QueryRowContext(ctx, `SELECT format,size_bytes,chunk_size,chunk_count,created_at,COALESCE(to_jsonb(m)->>'storage_location','legacy') FROM fugue_platform_input_manifests m WHERE content_hash=$1`, digest).Scan(&m.Format, &m.Size, &m.ChunkSize, &m.Count, &m.Created, &m.Location)
 	if err != nil {
 		return m, err
+	}
+	if m.Location != "legacy" && m.Location != "hot" {
+		return m, fmt.Errorf("invalid compiler input storage location: %w", ErrConflict)
 	}
 	if m.Format == inputFormatSharedV3 || m.Format == inputFormatSeparatedV4 {
 		if !inputDigestPattern.MatchString(digest) || m.Size < 1 || m.Size > inputMaxBytes || m.ChunkSize != inputChunkBytes || m.Count != int((m.Size+inputChunkBytes-1)/inputChunkBytes) || m.Created.IsZero() {
@@ -97,7 +112,11 @@ func openInputChunks(ctx context.Context, db inputQueryer, m inputManifest) (*in
 		}
 		return &inputChunkReader{shared: shared}, nil
 	}
-	rows, err := db.QueryContext(ctx, `SELECT ordinal,chunk_hash,data FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal`, m.Digest)
+	table, err := compilerInputChunksTable(m.Location)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT ordinal,chunk_hash,data FROM `+table+` WHERE content_hash=$1 ORDER BY ordinal`, m.Digest)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +210,7 @@ type inputChunkWriter struct {
 	ctx               context.Context
 	tx                *sql.Tx
 	digest            string
+	location          string
 	hash              hash.Hash
 	chunk             []byte
 	count             int
@@ -276,8 +296,12 @@ func (w *inputChunkWriter) flushPending() error {
 	if len(w.pending) == 0 {
 		return nil
 	}
+	table, err := compilerInputChunksTable(w.location)
+	if err != nil {
+		return err
+	}
 	var statement strings.Builder
-	statement.WriteString(`INSERT INTO fugue_platform_input_chunks(content_hash,ordinal,chunk_hash,data) VALUES`)
+	statement.WriteString(`INSERT INTO ` + table + `(content_hash,ordinal,chunk_hash,data) VALUES`)
 	args := make([]any, 1, 2+4*len(w.pending))
 	args[0] = w.digest
 	// Send one binary buffer after the small parameters. Many separate bytea
@@ -402,7 +426,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			}
 			if m.Format == inputFormatCodecV2 {
 				if cached := s.compilerDNSInputs.get(digest); !archiveRouted && cached != nil && cached.Manifest.Format == m.Format && cached.Manifest.Size == m.Size && cached.Manifest.Count == m.Count && cached.Manifest.ChunkSize == m.ChunkSize {
-					if err := verifyInputChunkHashes(ctx, tx, m, cached.Hashes, cached.StoredSizes); err != nil {
+					if err := verifyInputChunkHashesInTable(ctx, tx, m, cached.Hashes, m.Location, cached.StoredSizes); err != nil {
 						return err
 					}
 					return tx.Commit()
@@ -443,7 +467,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			if w.size != m.Size || w.count != m.Count || "sha256:"+hex.EncodeToString(w.hash.Sum(nil)) != digest {
 				return ErrConflict
 			}
-			if err := verifyInputChunkHashes(ctx, tx, m, w.expected); err != nil {
+			if err := verifyInputChunkHashesInTable(ctx, tx, m, w.expected, m.Location); err != nil {
 				return err
 			}
 			if err := tx.Commit(); err != nil {
@@ -521,6 +545,14 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			return err
 		}
 	}
+	legacyWritesFenced, err := compilerInputWritesFenced(ctx, tx)
+	if err != nil {
+		return err
+	}
+	location := "legacy"
+	if legacyWritesFenced {
+		location = "hot"
+	}
 	format, chunkSize := inputFormatV1, inputChunkBytes
 	var codec *inputChunkEncoder
 	if s.compilerInputCodecEnabled() {
@@ -528,7 +560,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 		chunkSize -= inputCodecHeaderBytes
 		codec = &inputChunkEncoder{}
 	}
-	w := &inputChunkWriter{ctx: ctx, tx: tx, digest: digest, hash: sha256.New(), chunk: make([]byte, 0, chunkSize), codec: codec}
+	w := &inputChunkWriter{ctx: ctx, tx: tx, digest: digest, location: location, hash: sha256.New(), chunk: make([]byte, 0, chunkSize), codec: codec}
 	if err = platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
 		return err
 	}
@@ -538,14 +570,23 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	if "sha256:"+hex.EncodeToString(w.hash.Sum(nil)) != digest {
 		return ErrConflict
 	}
-	m = inputManifest{Digest: digest, Format: format, Size: w.size, Count: w.count, ChunkSize: chunkSize, Created: time.Now().UTC()}
+	m = inputManifest{Digest: digest, Format: format, Location: location, Size: w.size, Count: w.count, ChunkSize: chunkSize, Created: time.Now().UTC()}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_platform_input_manifests(content_hash,format,size_bytes,chunk_size,chunk_count,created_at) VALUES($1,$2,$3,$4,$5,$6)`, m.Digest, m.Format, m.Size, m.ChunkSize, m.Count, m.Created); err != nil {
 		return err
+	}
+	if location == "hot" {
+		result, updateErr := tx.ExecContext(ctx, `UPDATE fugue_platform_input_manifests SET storage_location='hot' WHERE content_hash=$1 AND storage_location='legacy'`, m.Digest)
+		if updateErr != nil {
+			return updateErr
+		}
+		if changed, updateErr := result.RowsAffected(); updateErr != nil || changed != 1 {
+			return fmt.Errorf("compiler input hot location was not recorded: %w", ErrConflict)
+		}
 	}
 	// Hash the actual stored bytes in PostgreSQL and compare with the hashes
 	// of the input just written. A claimed chunk_hash alone is not proof. This
 	// retains read-after-write verification without returning the entire body.
-	if err = verifyInputChunkHashes(ctx, tx, m, w.expected, w.storedSizes); err != nil {
+	if err = verifyInputChunkHashesInTable(ctx, tx, m, w.expected, location, w.storedSizes); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -559,8 +600,16 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 // chunk must match that stream's independent SHA-256, position and length, so
 // even changing both stored data and its declared chunk_hash cannot pass.
 func verifyInputChunkHashes(ctx context.Context, db inputQueryer, m inputManifest, expected [][sha256.Size]byte, storedSizes ...[]int) error {
+	return verifyInputChunkHashesInTable(ctx, db, m, expected, "legacy", storedSizes...)
+}
+
+func verifyInputChunkHashesInTable(ctx context.Context, db inputQueryer, m inputManifest, expected [][sha256.Size]byte, location string, storedSizes ...[]int) error {
 	if len(expected) != m.Count {
 		return ErrConflict
+	}
+	table, err := compilerInputChunksTable(location)
+	if err != nil {
+		return err
 	}
 	var physicalSizes []int
 	if m.Format == inputFormatCodecV2 {
@@ -569,7 +618,7 @@ func verifyInputChunkHashes(ctx context.Context, db inputQueryer, m inputManifes
 		}
 		physicalSizes = storedSizes[0]
 	}
-	rows, err := db.QueryContext(ctx, `SELECT ordinal,chunk_hash,octet_length(data),sha256(data) FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal`, m.Digest)
+	rows, err := db.QueryContext(ctx, `SELECT ordinal,chunk_hash,octet_length(data),sha256(data) FROM `+table+` WHERE content_hash=$1 ORDER BY ordinal`, m.Digest)
 	if err != nil {
 		return err
 	}

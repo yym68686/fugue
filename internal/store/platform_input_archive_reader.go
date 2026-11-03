@@ -20,15 +20,62 @@ func (s *Store) ConfigureCompilerInputArchiveFromEnv() error {
 	if err != nil {
 		return fmt.Errorf("compiler input archive configuration: %w", err)
 	}
-	if !configured {
-		return nil
+	backendHash := ""
+	var objects inputarchive.Objects
+	if configured {
+		objects, err = inputarchive.NewS3(cfg)
+		if err != nil {
+			return err
+		}
+		backendHash, err = cfg.Fingerprint()
+		if err != nil {
+			return err
+		}
 	}
-	objects, err := inputarchive.NewS3(cfg)
-	if err != nil {
-		return err
+	if s.db != nil {
+		if err = s.verifyCompilerInputArchiveStartupCompatibility(context.Background(), configured, backendHash); err != nil {
+			return err
+		}
 	}
 	s.compilerInputArchiveObjects = objects
-	s.compilerInputArchiveReadLeaseEnabled = true
+	s.compilerInputArchiveReadLeaseEnabled = configured
+	return nil
+}
+
+func (s *Store) verifyCompilerInputArchiveStartupCompatibility(ctx context.Context, configured bool, backendHash string) error {
+	retired, err := compilerInputArchiveRetirementStarted(ctx, s.db)
+	if err != nil {
+		return fmt.Errorf("compiler input archive retirement state unavailable: %w", err)
+	}
+	if !retired {
+		return nil
+	}
+	if !configured {
+		return fmt.Errorf("compiler input chunks relation is retired; archive backend is required: %w", ErrConflict)
+	}
+	guardsInstalled, err := compilerInputArchiveRetirementGuardsInstalled(ctx, s.db)
+	if err != nil || !guardsInstalled {
+		return fmt.Errorf("compiler input archive retirement guards are unavailable: %w", ErrConflict)
+	}
+	var mismatch bool
+	if err = s.db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM fugue_platform_input_archives a
+		JOIN fugue_platform_input_manifests m ON m.content_hash=a.content_hash
+		WHERE a.state='routed' AND (
+			a.backend_hash<>$1 OR a.verified_digest<>a.content_hash OR a.verified_at IS NULL OR a.routed_at IS NULL OR
+			a.source_format<>m.format OR a.raw_bytes<>m.size_bytes OR a.segment_count<>((a.raw_bytes+a.segment_bytes-1)/a.segment_bytes) OR
+			a.segment_count<>(SELECT count(*) FROM fugue_platform_input_archive_segments s WHERE s.content_hash=a.content_hash) OR
+			EXISTS(SELECT 1 FROM fugue_platform_input_archive_segments s WHERE s.content_hash=a.content_hash AND (s.uploaded_at IS NULL OR s.verified_at IS NULL)) OR
+			(SELECT min(ordinal) FROM fugue_platform_input_archive_segments s WHERE s.content_hash=a.content_hash)<>0 OR
+			(SELECT max(ordinal) FROM fugue_platform_input_archive_segments s WHERE s.content_hash=a.content_hash)<>a.segment_count-1 OR
+			(SELECT COALESCE(sum(raw_bytes),0) FROM fugue_platform_input_archive_segments s WHERE s.content_hash=a.content_hash)<>a.raw_bytes
+		)
+	)`, backendHash).Scan(&mismatch); err != nil {
+		return fmt.Errorf("compiler input archive backend binding unavailable after retirement: %w", ErrConflict)
+	}
+	if mismatch {
+		return fmt.Errorf("compiler input archive backend differs from routed data after retirement: %w", ErrConflict)
+	}
 	return nil
 }
 

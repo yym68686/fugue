@@ -138,13 +138,15 @@ func (s *Store) BackendKind() string {
 }
 
 func (s *Store) Init() error {
-	if err := s.ConfigureCompilerInputArchiveFromEnv(); err != nil {
-		return err
-	}
 	if s.usingDatabase() {
 		if err := s.ensureDatabaseReady(); err != nil {
 			return err
 		}
+	}
+	if err := s.ConfigureCompilerInputArchiveFromEnv(); err != nil {
+		return err
+	}
+	if s.usingDatabase() {
 		if err := s.SeedDefaultDataBackendFromEnv(); err != nil {
 			return err
 		}

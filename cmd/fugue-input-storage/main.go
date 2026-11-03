@@ -21,16 +21,24 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-route, archive-unroute, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-route, archive-unroute, archive-write-fence, archive-retirement-plan, archive-retire, observe")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
+	disarm := flag.Bool("disarm", false, "remove a pre-retirement archive write fence")
+	expectedPlanSHA256 := flag.String("expected-plan-sha256", "", "exact archive-retirement-plan hash to apply")
+	currentReaderRelease := flag.String("current-reader-release", "", "40-hex release commit with archive reader lease support")
+	rollbackReaderRelease := flag.String("rollback-reader-release", "", "40-hex rollback release commit with archive reader lease support")
+	archiveRetentionPolicySHA256 := flag.String("archive-retention-policy-sha256", "", "64-hex operator attestation of the independently reviewed archive retention policy")
+	readerDrainTimeout := flag.Duration("reader-drain-timeout", 30*time.Second, "maximum wait for session-level compiler-input readers")
 	rehearse := flag.Bool("rehearse", false, "encode/verify then roll back (consumes WAL and I/O)")
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
-	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive" && !*apply
+	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-retirement-plan" || *mode == "archive" && !*apply
 	routeMode := *mode == "archive-route" || *mode == "archive-unroute"
-	if flag.NArg() != 0 || *apply && *rehearse || (*mode == "archive" || routeMode) && *rehearse || routeMode && !*apply || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
+	writeFenceMode := *mode == "archive-write-fence"
+	retirementMode := *mode == "archive-retire"
+	if flag.NArg() != 0 || *apply && *rehearse || (*mode == "archive" || routeMode || writeFenceMode || retirementMode) && *rehearse || routeMode && !*apply || writeFenceMode && !*apply || retirementMode && !*apply || *disarm && !writeFenceMode || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
 		fmt.Fprintln(os.Stderr, "select a read-only mode, or explicitly choose apply/rehearse")
 		os.Exit(2)
 	}
@@ -68,6 +76,43 @@ func main() {
 		report, err := store.RunCompilerInputArchiveRoute(ctx, dsn, store.CompilerInputArchiveRouteOptions{Digest: *digest, Apply: *apply, Unroute: *mode == "archive-unroute"})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "compiler input archive route not confirmed; inspect the archive ledger before retrying")
+			os.Exit(1)
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if writeFenceMode {
+		dsn := os.Getenv("FUGUE_DATABASE_URL")
+		if dsn == "" {
+			fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
+			os.Exit(2)
+		}
+		report, err := store.RunCompilerInputArchiveWriteFence(ctx, dsn, *apply, *disarm)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "compiler input write fence state not confirmed; inspect control state and database trigger")
+			os.Exit(1)
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if *mode == "archive-retirement-plan" || retirementMode {
+		dsn := os.Getenv("FUGUE_DATABASE_URL")
+		if dsn == "" {
+			fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
+			os.Exit(2)
+		}
+		report, err := store.RunCompilerInputArchiveRetirement(ctx, dsn, store.CompilerInputArchiveRetirementOptions{
+			Apply: *apply, ExpectedPlanSHA256: *expectedPlanSHA256,
+			CurrentReaderRelease: *currentReaderRelease, RollbackReaderRelease: *rollbackReaderRelease,
+			ArchiveRetentionPolicySHA256: *archiveRetentionPolicySHA256,
+			ReaderDrainTimeout:           *readerDrainTimeout,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "compiler input retirement not confirmed; no success should be inferred; inspect control state and relation size")
 			os.Exit(1)
 		}
 		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {

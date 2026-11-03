@@ -30,7 +30,7 @@ func TestExistingCodecInputRechecksPhysicalBytesWithoutBody(t *testing.T) {
 			s.compilerDNSInputs.put(&compilerDNSInput{Manifest: m, Hashes: [][sha256.Size]byte{physical}, StoredSizes: []int{len(encoded)}, Bytes: 512})
 			mock.ExpectBegin()
 			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
-			mock.ExpectQuery(regexp.QuoteMeta(`SELECT format,size_bytes,chunk_size,chunk_count,created_at FROM fugue_platform_input_manifests WHERE content_hash=$1`)).WithArgs(digest).WillReturnRows(sqlmock.NewRows([]string{"format", "size", "chunk_size", "count", "created"}).AddRow(m.Format, m.Size, m.ChunkSize, m.Count, m.Created))
+			mock.ExpectQuery(regexp.QuoteMeta(`SELECT format,size_bytes,chunk_size,chunk_count,created_at,COALESCE(to_jsonb(m)->>'storage_location','legacy') FROM fugue_platform_input_manifests m WHERE content_hash=$1`)).WithArgs(digest).WillReturnRows(sqlmock.NewRows([]string{"format", "size", "chunk_size", "count", "created", "location"}).AddRow(m.Format, m.Size, m.ChunkSize, m.Count, m.Created, "legacy"))
 			if corrupt {
 				physical[0] ^= 255
 			}

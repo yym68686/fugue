@@ -76,7 +76,7 @@ func TestCompilerInputCodecReaderCompatibility(t *testing.T) {
 				format = "runtime-snapshot-unknown"
 			}
 			mock.ExpectBegin()
-			mock.ExpectQuery(regexp.QuoteMeta(`SELECT format,size_bytes,chunk_size,chunk_count,created_at FROM fugue_platform_input_manifests WHERE content_hash=$1`)).WithArgs(requested).WillReturnRows(sqlmock.NewRows([]string{"format", "size", "chunk_size", "count", "created"}).AddRow(format, len(raw), len(raw), 1, time.Now()))
+			mock.ExpectQuery(regexp.QuoteMeta(`SELECT format,size_bytes,chunk_size,chunk_count,created_at,COALESCE(to_jsonb(m)->>'storage_location','legacy') FROM fugue_platform_input_manifests m WHERE content_hash=$1`)).WithArgs(requested).WillReturnRows(sqlmock.NewRows([]string{"format", "size", "chunk_size", "count", "created", "location"}).AddRow(format, len(raw), len(raw), 1, time.Now(), "legacy"))
 			if mode != "unknown_format" {
 				h := sha256.Sum256(stored)
 				declared := "sha256:" + hex.EncodeToString(h[:])

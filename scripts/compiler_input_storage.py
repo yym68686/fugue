@@ -41,13 +41,23 @@ def get(namespace, kind, name):
     return json.loads(kube(namespace, 'get', kind, name, '-o', 'json'))
 
 
-def compatible_revision(revision):
+def compatible_revision(revision, archive_required=False):
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('reader source revision is missing')
     body = command(['git', 'show', revision+':internal/store/platform_input_separated.go'])
     chunks = command(['git', 'show', revision+':internal/store/platform_input_chunks.go'])
     if FORMAT not in body or 'sql.LevelRepeatableRead' not in chunks:
         raise ValueError('current or rollback reader does not support separated inputs')
+    if not archive_required:
+        return
+    archive_reader = command(['git', 'show', revision+':internal/store/platform_input_archive_reader.go'])
+    if ('func (s *Store) BeginCompilerInputReadLease' not in archive_reader or
+            'pg_try_advisory_lock_shared' not in archive_reader or
+            's.compilerInputArchiveReadLeaseEnabled = configured' not in archive_reader or
+            'compilerInputArchiveRouted(ctx' not in archive_reader or
+            'verifyCompilerInputArchiveStartupCompatibility' not in archive_reader or
+            'compiler input chunks relation is retired; archive backend is required' not in archive_reader):
+        raise ValueError('current or rollback reader lacks archive routing or reader barrier support')
 
 
 def primary(resources, workload):
@@ -75,11 +85,11 @@ def owned_pods(namespace, deployment):
         for r in x['metadata'].get('ownerReferences', []))]}
 
 
-def validate_reader(component, deployment, pods, record):
+def validate_reader(component, deployment, pods, record, archive_required=False):
     w = component['workload']
     template = deployment['spec']['template']
     revision = template['metadata']['annotations']['fugue.pro/source-commit']
-    compatible_revision(revision)
+    compatible_revision(revision, archive_required)
     count = deployment['spec'].get('replicas', 1)
     status = deployment['status']
     if count < 1 or status.get('observedGeneration', 0) < deployment['metadata']['generation'] or any(status.get(k, 0) != count for k in ('updatedReplicas', 'readyReplicas', 'replicas', 'availableReplicas')):
@@ -100,19 +110,22 @@ def validate_reader(component, deployment, pods, record):
     envelope = json.loads(record['data']['record.json'])
     if envelope['component'] != component['id'] or envelope['configSha'] != revision:
         raise ValueError('reader monitor does not bind the running revision')
+    rollback_revision = ''
     for key, digest_key in (('forward.json', 'forwardManifestDigest'), ('lkg.json', 'lkgManifestDigest')):
         body = record['data'][key].strip()
         if 'sha256:'+hashlib.sha256(body.encode()).hexdigest() != envelope[digest_key]:
             raise ValueError('reader release manifest digest differs')
         item = primary(json.loads(body), w)
         bound = item['spec']['template']['metadata']['annotations']['fugue.pro/source-commit']
-        compatible_revision(bound)
+        compatible_revision(bound, archive_required)
         if key == 'forward.json' and bound != revision:
             raise ValueError('reader forward source differs')
-    return {'component': component['id'], 'revision': revision, 'pod': active[0]['metadata']['name'], 'namespace': w['namespace'], 'container': w['container'], 'image': containers[0]['image']}
+        if key == 'lkg.json':
+            rollback_revision = bound
+    return {'component': component['id'], 'revision': revision, 'rollback_revision': rollback_revision, 'pod': active[0]['metadata']['name'], 'namespace': w['namespace'], 'container': w['container'], 'image': containers[0]['image']}
 
 
-def readers(registry):
+def readers(registry, archive_required=False):
     result = []
     for component in registry['components']:
         if not {'internal/store', 'internal/schemamigrate'}.intersection(component.get('sourceRoots', [])):
@@ -130,7 +143,7 @@ def readers(registry):
         name = pointer['data']['recordName']
         if not re.fullmatch('fugue-release-record-'+re.escape(component['id'])+'-[0-9a-f]{16}', name):
             raise ValueError('reader monitor record name is invalid')
-        result.append(validate_reader(component, deployment, pods, get(namespace, 'configmap', name)))
+        result.append(validate_reader(component, deployment, pods, get(namespace, 'configmap', name), archive_required))
     if not result:
         raise ValueError('store reader inventory is empty')
     return result
@@ -155,7 +168,8 @@ def free_bytes(database):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--operation', help='exact reviewed operation declaration from main')
-    parser.add_argument('--mode', choices=['check-readers', 'inspect', 'migrate', 'rollback', 'collect'], default='check-readers')
+    parser.add_argument('--mode', choices=['check-readers', 'check-archive-readers', 'check-api-candidate', 'inspect', 'migrate', 'rollback', 'collect'], default='check-readers')
+    parser.add_argument('--candidate-revision', default='')
     parser.add_argument('--digest', default='')
     parser.add_argument('--expected-format', default='')
     parser.add_argument('--max-input-bytes', type=int, default=128 << 20)
@@ -170,16 +184,27 @@ def main():
         args.mode, args.digest, args.expected_format = value['mode'], value['digest'], value['expectedFormat']
         args.max_input_bytes, args.apply = value['maxInputBytes'], value['apply']
         expected_revision = value['expectedExecutorRevision']
-    if not 0 < args.max_input_bytes <= 128 << 20 or args.mode not in ('check-readers', 'collect') and not re.fullmatch(r'sha256:[0-9a-f]{64}', args.digest):
+    read_modes = ('check-readers', 'check-archive-readers', 'check-api-candidate')
+    if not 0 < args.max_input_bytes <= 128 << 20 or args.mode not in (*read_modes, 'collect') and not re.fullmatch(r'sha256:[0-9a-f]{64}', args.digest):
         raise ValueError('invalid maintenance input bound or identity')
+    if args.mode == 'check-api-candidate':
+        if args.operation or args.apply:
+            raise ValueError('API candidate check is read-only and does not accept an operation')
+        compatible_revision(args.candidate_revision, archive_required=True)
+        print(json.dumps({'archive_reader_candidate': args.candidate_revision, 'startup_guard': 'present'}))
+        return
     if args.mode in ('migrate', 'rollback') and args.expected_format not in ('runtime-snapshot-json-v1', 'runtime-snapshot-json-chunk-codec-v2', 'runtime-snapshot-shared-v3', FORMAT):
         raise ValueError('exact expected format is required')
-    if args.mode in ('check-readers', 'inspect') and args.apply:
-        raise ValueError('read-only operation cannot apply')
+    if args.mode in read_modes or args.mode == 'inspect':
+        if args.apply:
+            raise ValueError('read-only operation cannot apply')
     registry = json.loads(Path('deploy/releases/components.json').read_text())
-    current = readers(registry)
+    current = readers(registry, archive_required=args.mode == 'check-archive-readers')
     if args.mode == 'check-readers':
         print(json.dumps({'compatible_readers_and_rollback': current}))
+        return
+    if args.mode == 'check-archive-readers':
+        print(json.dumps({'archive_compatible_readers_and_rollback': current}))
         return
     config = json.loads(Path('deploy/environments/production/storage-policy/maintenance.json').read_text())
     if set(config) != {'version', 'database'} or config['version'] != 1 or set(config['database']) != {'namespace', 'cluster', 'container', 'dataPath'}:

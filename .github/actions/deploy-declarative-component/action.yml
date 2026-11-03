@@ -28,6 +28,12 @@ runs:
       with:
         name: fugue-${{ inputs.component }}-artifact-${{ github.sha }}
         path: ${{ runner.temp }}/fugue-component-artifact
+    - name: Preserve compiler-input archive reader and startup guard
+      if: ${{ inputs.component == 'api' }}
+      shell: bash
+      env:
+        CANDIDATE_REVISION: ${{ github.sha }}
+      run: python3 -m scripts.compiler_input_storage --mode check-api-candidate --candidate-revision "${CANDIDATE_REVISION}"
     - name: Prepare the durable server-side apply plan
       shell: bash
       env:

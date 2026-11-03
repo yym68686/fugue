@@ -59,6 +59,15 @@ class CompilerInputStorageTest(unittest.TestCase):
         self.assertEqual([x.args[0] for x in compatible.call_args_list], ['a'*40, 'a'*40, 'd'*40])
 
     @patch('scripts.compiler_input_storage.compatible_revision')
+    def test_archive_retirement_preflight_checks_current_and_rollback_revisions(self, compatible):
+        component, deployment, pods, record = self.fixture()
+        validate_reader(component, deployment, pods, record, archive_required=True)
+        self.assertEqual(
+            [(call.args, call.kwargs) for call in compatible.call_args_list],
+            [((revision, True), {}) for revision in ('a'*40, 'a'*40, 'd'*40)],
+        )
+
+    @patch('scripts.compiler_input_storage.compatible_revision')
     def test_rejects_rollout_and_binding_changes(self, _compatible):
         for mutation in ('unready', 'old-pod', 'mutable-record', 'layout-hash', 'extra-pod', 'terminating'):
             with self.subTest(mutation=mutation):
@@ -76,8 +85,20 @@ class CompilerInputStorageTest(unittest.TestCase):
     def test_incompatible_reader_rejected(self, command):
         command.return_value = 'old format'
         with self.assertRaises(ValueError): compatible_revision('a'*40)
-        command.side_effect = [FORMAT for FORMAT in ('runtime-snapshot-separated-v4', 'sql.LevelRepeatableRead')]
+        archive_reader = '\n'.join((
+            'func (s *Store) BeginCompilerInputReadLease',
+            'pg_try_advisory_lock_shared',
+            's.compilerInputArchiveReadLeaseEnabled = configured',
+            'compilerInputArchiveRouted(ctx',
+            'verifyCompilerInputArchiveStartupCompatibility',
+            'compiler input chunks relation is retired; archive backend is required',
+        ))
+        command.side_effect = ['runtime-snapshot-separated-v4', 'sql.LevelRepeatableRead']
         compatible_revision('a'*40)
+        command.side_effect = ['runtime-snapshot-separated-v4', 'sql.LevelRepeatableRead', archive_reader]
+        compatible_revision('a'*40, archive_required=True)
+        command.side_effect = ['runtime-snapshot-separated-v4', 'sql.LevelRepeatableRead', 'archive route without startup guard']
+        with self.assertRaises(ValueError): compatible_revision('a'*40, archive_required=True)
         with self.assertRaises(ValueError): compatible_revision('tag')
 
     @patch('scripts.compiler_input_storage.kube')

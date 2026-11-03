@@ -36,6 +36,10 @@ func TestCompilerInputArchiveSchemaCompatibilityAndFences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var hotTable, locationColumn bool
+	if err = db.QueryRow(`SELECT to_regclass('fugue_platform_input_hot_chunks') IS NOT NULL,EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='fugue_platform_input_manifests' AND column_name='storage_location')`).Scan(&hotTable, &locationColumn); err != nil || !hotTable || !locationColumn {
+		t.Fatal("archive migration did not install the separate hot relation locator", hotTable, locationColumn, err)
+	}
 	digest := "sha256:" + strings.Repeat("a", 64)
 	defer func() {
 		_, _ = db.Exec(`DELETE FROM fugue_platform_input_archives WHERE content_hash=$1`, digest)

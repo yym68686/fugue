@@ -109,7 +109,11 @@ func (r *archiveInputStream) fetch() error {
 		}
 		return fmt.Errorf("compiler input archive source representation changed: %w", ErrConflict)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT ordinal,chunk_hash,data FROM fugue_platform_input_chunks WHERE content_hash=$1 AND ordinal >= $2 ORDER BY ordinal LIMIT 16`, r.m.Digest, r.next)
+	table, err := compilerInputChunksTable(r.m.Location)
+	if err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT ordinal,chunk_hash,data FROM `+table+` WHERE content_hash=$1 AND ordinal >= $2 ORDER BY ordinal LIMIT 16`, r.m.Digest, r.next)
 	if err != nil {
 		return err
 	}
@@ -218,7 +222,11 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 		report.OldFormat = m.Format
 		report.NewFormat = inputFormatSeparatedV4
 		report.LogicalBytes = m.Size
-		err = tx.QueryRowContext(ctx, `SELECT COALESCE(sum(octet_length(data)),0) FROM fugue_platform_input_chunks WHERE content_hash=$1`, o.Digest).Scan(&report.OldChunkPayloadBytes)
+		table, tableErr := compilerInputChunksTable(m.Location)
+		if tableErr != nil {
+			return report, tableErr
+		}
+		err = tx.QueryRowContext(ctx, `SELECT COALESCE(sum(octet_length(data)),0) FROM `+table+` WHERE content_hash=$1`, o.Digest).Scan(&report.OldChunkPayloadBytes)
 		if err == nil && m.Format == inputFormatSeparatedV4 {
 			var r *separatedInputReader
 			r, err = openSeparatedInput(ctx, tx, m)
@@ -261,10 +269,17 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 	if o.Action == "collect" {
 		err = collectInputComponents(ctx, tx, &report)
 	} else {
+		fenced, fenceErr := compilerInputWritesFenced(ctx, tx)
+		if fenceErr != nil {
+			return report, fenceErr
+		}
 		var m inputManifest
 		m, err = readInputManifest(ctx, tx, o.Digest)
 		if err != nil {
 			return report, err
+		}
+		if fenced && o.Action != "rollback" && m.Location != "hot" {
+			return report, fmt.Errorf("legacy compiler input writes are fenced: %w", ErrConflict)
 		}
 		archivePinned, pinErr := compilerInputArchivePinsSource(ctx, tx, m.Digest)
 		if pinErr != nil {
@@ -289,7 +304,11 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 		if o.Action == "rollback" && m.Format != inputFormatSeparatedV4 && m.Format != inputFormatSharedV3 {
 			return report, ErrConflict
 		}
-		if err = tx.QueryRowContext(ctx, `SELECT COALESCE(sum(octet_length(data)),0) FROM fugue_platform_input_chunks WHERE content_hash=$1`, m.Digest).Scan(&report.OldChunkPayloadBytes); err != nil {
+		table, tableErr := compilerInputChunksTable(m.Location)
+		if tableErr != nil {
+			return report, tableErr
+		}
+		if err = tx.QueryRowContext(ctx, `SELECT COALESCE(sum(octet_length(data)),0) FROM `+table+` WHERE content_hash=$1`, m.Digest).Scan(&report.OldChunkPayloadBytes); err != nil {
 			return report, err
 		}
 		var snapshot platformconfig.RuntimeSnapshot
@@ -323,7 +342,7 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 			return report, ErrConflict
 		}
 		if target == inputFormatSeparatedV4 {
-			_, err = tx.ExecContext(ctx, `DELETE FROM fugue_platform_input_chunks WHERE content_hash=$1`, m.Digest)
+			_, err = tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE content_hash=$1`, m.Digest)
 		} else {
 			_, err = tx.ExecContext(ctx, `DELETE FROM fugue_platform_input_separated_refs WHERE content_hash=$1`, m.Digest)
 			if err == nil {
@@ -370,7 +389,15 @@ func compilerInputArchivePinsSource(ctx context.Context, db inputQueryer, digest
 }
 
 func writeRollbackInput(ctx context.Context, tx *sql.Tx, snapshot platformconfig.RuntimeSnapshot, old inputManifest) error {
-	w := &inputChunkWriter{ctx: ctx, tx: tx, digest: old.Digest, hash: sha256.New(), chunk: make([]byte, 0, inputChunkBytes-inputCodecHeaderBytes), codec: &inputChunkEncoder{}}
+	location := old.Location
+	fenced, err := compilerInputWritesFenced(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if fenced {
+		location = "hot"
+	}
+	w := &inputChunkWriter{ctx: ctx, tx: tx, digest: old.Digest, location: location, hash: sha256.New(), chunk: make([]byte, 0, inputChunkBytes-inputCodecHeaderBytes), codec: &inputChunkEncoder{}}
 	if err := platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
 		return err
 	}
@@ -381,7 +408,7 @@ func writeRollbackInput(ctx context.Context, tx *sql.Tx, snapshot platformconfig
 		return ErrConflict
 	}
 	m := inputManifest{Digest: old.Digest, Format: inputFormatCodecV2, Size: w.size, Count: w.count, ChunkSize: cap(w.chunk), Created: old.Created}
-	if err := verifyInputChunkHashes(ctx, tx, m, w.expected, w.storedSizes); err != nil {
+	if err := verifyInputChunkHashesInTable(ctx, tx, m, w.expected, location, w.storedSizes); err != nil {
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE fugue_platform_input_manifests SET format=$2,chunk_size=$3,chunk_count=$4 WHERE content_hash=$1 AND format=$5 AND size_bytes=$6`, m.Digest, m.Format, m.ChunkSize, m.Count, old.Format, old.Size)
@@ -391,6 +418,9 @@ func writeRollbackInput(ctx context.Context, tx *sql.Tx, snapshot platformconfig
 	n, err := result.RowsAffected()
 	if err == nil && n != 1 {
 		err = ErrConflict
+	}
+	if err == nil && location == "hot" {
+		_, err = tx.ExecContext(ctx, `UPDATE fugue_platform_input_manifests SET storage_location='hot' WHERE content_hash=$1`, old.Digest)
 	}
 	return err
 }
