@@ -56,7 +56,7 @@ func TestOOMRecorderRequiresConfirmedCauseAndActualLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 		if message == "OOMKilled: exit_code=137" {
-			if len(observed) != 1 || observed[0].MemoryLimitBytes != 5<<30 || observed[0].Attempt != 2 {
+			if len(observed) != 1 || observed[0].MemoryLimitBytes != 5<<30 || observed[0].Attempt != 2 || observed[0].WorkloadProfile != "heavy" {
 				t.Fatal(observed)
 			}
 		} else if len(observed) != 0 {

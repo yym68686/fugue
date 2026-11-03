@@ -16,11 +16,12 @@ type BuilderOOMObservation struct {
 	Attempt          int       `json:"attempt"`
 	JobName          string    `json:"job_name"`
 	ObservedAt       time.Time `json:"observed_at"`
+	WorkloadProfile  string    `json:"workload_profile,omitempty"`
 }
 
 type builderOOMGuardKey struct{}
 type builderOOMGuard struct {
-	load   func(context.Context) (int64, error)
+	load   func(context.Context, string) (int64, error)
 	record func(context.Context, BuilderOOMObservation) error
 }
 
@@ -46,7 +47,7 @@ func builderPodHasConfirmedOOM(pod builderPod) bool {
 
 // WithBuilderOOMGuard binds durable admission facts to the resolved build input.
 // Unlike diagnostic evidence, a failed guard read/write must stop execution.
-func WithBuilderOOMGuard(ctx context.Context, load func(context.Context) (int64, error), record func(context.Context, BuilderOOMObservation) error) context.Context {
+func WithBuilderOOMGuard(ctx context.Context, load func(context.Context, string) (int64, error), record func(context.Context, BuilderOOMObservation) error) context.Context {
 	return context.WithValue(ctx, builderOOMGuardKey{}, builderOOMGuard{load, record})
 }
 
@@ -56,15 +57,18 @@ type BuilderMemoryAdmissionError struct {
 }
 
 func (e *BuilderMemoryAdmissionError) Error() string {
+	if e.AllocatedBytes <= 0 {
+		return fmt.Sprintf("builder_memory_not_increased: build rejected before starting a build Pod: no eligible memory allocation strictly exceeds previous confirmed OOM limit %d bytes", e.PreviousOOMBytes)
+	}
 	return fmt.Sprintf("builder_memory_not_increased: build rejected before starting a build Pod: allocated memory %d bytes must strictly exceed previous confirmed OOM limit %d bytes", e.AllocatedBytes, e.PreviousOOMBytes)
 }
 
-func loadBuilderOOMLimit(ctx context.Context) (int64, error) {
+func loadBuilderOOMLimit(ctx context.Context, profile builderWorkloadProfile) (int64, error) {
 	guard, _ := ctx.Value(builderOOMGuardKey{}).(builderOOMGuard)
 	if guard.load == nil {
 		return 0, nil
 	}
-	limit, err := guard.load(ctx)
+	limit, err := guard.load(ctx, string(profile))
 	if err != nil {
 		return 0, fmt.Errorf("read builder OOM admission history: %w", err)
 	}
@@ -95,7 +99,7 @@ func recordBuilderOOM(ctx context.Context, job string, attempt int, err error) e
 	}
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 	defer cancel()
-	if err := guard.record(writeCtx, BuilderOOMObservation{limit, attempt, job, time.Now().UTC()}); err != nil {
+	if err := guard.record(writeCtx, BuilderOOMObservation{limit, attempt, job, time.Now().UTC(), string(actual.profile)}); err != nil {
 		return fmt.Errorf("persist builder OOM admission history: %w", err)
 	}
 	return nil

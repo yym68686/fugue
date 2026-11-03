@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -35,7 +36,7 @@ func decodeBuildOOMHistory(raw []byte) (buildOOMHistory, error) {
 	if err := json.Unmarshal(raw, &history); err != nil {
 		return history, err
 	}
-	if history.Version != 1 || history.MemoryLimitBytes < 0 {
+	if history.Version != 1 || history.MemoryLimitBytes < 0 || history.WorkloadProfile != "" && history.WorkloadProfile != "light" && history.WorkloadProfile != "heavy" {
 		return history, errors.New("invalid builder OOM history")
 	}
 	return history, nil
@@ -115,7 +116,14 @@ func (s *Service) writeBuildOOMHistory(ctx context.Context, app model.App, finge
 				return nil, err
 			}
 			if len(raw) > 0 && previous.MemoryLimitBytes >= next.MemoryLimitBytes {
+				if previous.WorkloadProfile == "" && next.WorkloadProfile != "" {
+					previous.WorkloadProfile = next.WorkloadProfile
+					return json.Marshal(previous)
+				}
 				return nil, nil
+			}
+			if next.WorkloadProfile == "" {
+				next.WorkloadProfile = previous.WorkloadProfile
 			}
 			return json.Marshal(next)
 		})
@@ -131,6 +139,21 @@ func (s *Service) writeBuildOOMHistory(ctx context.Context, app model.App, finge
 		}
 	}
 	return errors.New("builder OOM history is concurrently updating")
+}
+
+func (s *Service) resolveBuildOOMProfile(ctx context.Context, app model.App, fingerprint, profile string) (buildOOMHistory, error) {
+	history, err := s.readBuildOOMHistory(ctx, app, fingerprint)
+	if err != nil || history.MemoryLimitBytes == 0 || history.WorkloadProfile != "" {
+		return history, err
+	}
+	if profile != "light" && profile != "heavy" {
+		return history, errors.New("invalid executed builder profile")
+	}
+	history.WorkloadProfile = profile
+	if err := s.writeBuildOOMHistory(ctx, app, fingerprint, history); err != nil {
+		return history, err
+	}
+	return history, nil
 }
 
 func (s *Service) recordBuildOOM(ctx context.Context, app model.App, opID, fingerprint string, fact sourceimport.BuilderOOMObservation) error {
@@ -149,6 +172,20 @@ func (s *Service) githubBuildOOMAdmission(ctx context.Context, app model.App, so
 	if history.MemoryLimitBytes == 0 {
 		return true, nil
 	}
+	strategy := source.BuildStrategy
+	switch history.WorkloadProfile {
+	case "heavy":
+		strategy = model.AppBuildStrategyDockerfile
+	case "light":
+		strategy = model.AppBuildStrategyStaticSite
+	default:
+		if strings.TrimSpace(strategy) == "" || strings.EqualFold(strings.TrimSpace(strategy), model.AppBuildStrategyAuto) {
+			// Legacy evidence lacks the resolved profile. Allow one operation
+			// to resolve it from source, then persist it before Pod admission.
+			// The execution guard still enforces the historical memory limit.
+			return true, nil
+		}
+	}
 	inspect := s.inspectBuilderOOMPlacement
 	if inspect == nil {
 		inspect = sourceimport.InspectBuilderPlacementAfterOOM
@@ -161,7 +198,7 @@ func (s *Service) githubBuildOOMAdmission(ctx context.Context, app model.App, so
 	if namespace == "" {
 		namespace = "fugue-system"
 	}
-	report, err := inspect(checkCtx, namespace, policy, source.BuildStrategy, stateful, labels, history.MemoryLimitBytes)
+	report, err := inspect(checkCtx, namespace, policy, strategy, stateful, labels, history.MemoryLimitBytes)
 	var blocked *sourceimport.BuilderMemoryAdmissionError
 	if err != nil && !errors.As(err, &blocked) {
 		return false, err

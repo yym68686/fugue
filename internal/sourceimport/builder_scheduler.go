@@ -255,7 +255,7 @@ func (e *builderKubeStatusError) Error() string {
 }
 
 func acquireBuilderPlacement(ctx context.Context, namespace, jobName string, policy BuilderPodPolicy, profile builderWorkloadProfile, requiredNodeLabels map[string]string) (builderJobPlacement, func(), error) {
-	limit, err := loadBuilderOOMLimit(ctx)
+	limit, err := loadBuilderOOMLimit(ctx, profile)
 	if err != nil {
 		return builderJobPlacement{}, nil, err
 	}
@@ -393,7 +393,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 	candidates = builderFittingCandidates(candidates, s.demand)
 	candidates = builderPlacementCandidates(candidates, s.profile, s.candidateCount)
 	if len(candidates) == 0 {
-		limit, historyErr := loadBuilderOOMLimit(ctx)
+		limit, historyErr := loadBuilderOOMLimit(ctx, s.profile)
 		if historyErr != nil {
 			return builderJobPlacement{}, "", historyErr
 		}
@@ -450,7 +450,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 			continue
 		}
 		allocatedDemand := builderAllocatedDemand(s.policy, s.profile, selectedCandidate)
-		previousOOM, guardErr := loadBuilderOOMLimit(ctx)
+		previousOOM, guardErr := loadBuilderOOMLimit(ctx, s.profile)
 		if guardErr != nil {
 			releaseLock()
 			return builderJobPlacement{}, "", guardErr

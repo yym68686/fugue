@@ -186,3 +186,51 @@ func TestGitHubOOMAdmissionStopsRepeatedOperationsAndResumes(t *testing.T) {
 		t.Fatal("capacity recovery did not queue exactly once", ops, err)
 	}
 }
+
+func TestAutoOOMAdmissionUsesResolvedProfile(t *testing.T) {
+	for _, profile := range []string{"heavy", "light"} {
+		t.Run(profile, func(t *testing.T) {
+			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			if err := state.Init(); err != nil {
+				t.Fatal(err)
+			}
+			svc := &Service{Store: state}
+			app := model.App{ID: "app-fixture", TenantID: "tenant-fixture"}
+			source := model.AppSource{CommitSHA: strings.Repeat("a", 40), BuildStrategy: model.AppBuildStrategyAuto}
+			spec := model.AppSpec{}
+			fp := buildOOMInputFingerprint(source, spec)
+			if err := svc.recordBuildOOM(context.Background(), app, "op-fixture", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 5 << 30}); err != nil {
+				t.Fatal(err)
+			}
+			// Old evidence may have no profile. Resolve it once without
+			// running a Pod; the scheduler still checks the same OOM limit.
+			admitted, err := svc.githubBuildOOMAdmission(context.Background(), app, source, spec, sourceimport.BuilderPodPolicy{})
+			if err != nil || !admitted {
+				t.Fatal(admitted, err)
+			}
+			history, err := svc.resolveBuildOOMProfile(context.Background(), app, fp, profile)
+			if err != nil || history.MemoryLimitBytes != 5<<30 || history.WorkloadProfile != profile {
+				t.Fatal(history, err)
+			}
+			// A smaller observation must not lower the memory fact when
+			// enriching its resolved profile.
+			if err := svc.recordBuildOOM(context.Background(), app, "op-smaller", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 4 << 30, WorkloadProfile: profile}); err != nil {
+				t.Fatal(err)
+			}
+			svc.inspectBuilderOOMPlacement = func(_ context.Context, _ string, _ sourceimport.BuilderPodPolicy, strategy string, _ bool, _ map[string]string, previous int64) (model.BuilderPlacementInspection, error) {
+				expected := model.AppBuildStrategyDockerfile
+				if profile == "light" {
+					expected = model.AppBuildStrategyStaticSite
+				}
+				if strategy != expected || previous != 5<<30 {
+					t.Fatal("incorrect auto profile admission", strategy, previous)
+				}
+				return model.BuilderPlacementInspection{Nodes: []model.BuilderPlacementNodeInspection{{Eligible: true, Allocation: model.BuilderResourceSnapshot{MemoryBytes: 5<<30 + 1<<20}}}}, nil
+			}
+			admitted, err = svc.githubBuildOOMAdmission(context.Background(), app, source, spec, sourceimport.BuilderPodPolicy{})
+			if err != nil || !admitted {
+				t.Fatal("resolved auto input did not recover", admitted, err)
+			}
+		})
+	}
+}

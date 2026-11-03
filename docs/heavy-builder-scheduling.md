@@ -53,6 +53,10 @@ use after upgrade, retained structured build-attempt evidence seeds the history.
 New OOM facts require the Kubernetes `OOMKilled` termination reason and the
 executed allocation; exit 137 or application log text alone is insufficient.
 History read/write failures stop the build instead of bypassing admission.
+The resolved light/heavy profile is saved with the OOM fact, so `auto` builds
+check the same resource envelope when capacity recovers. Legacy `auto` records
+without a profile may queue one operation to resolve it from source; the profile
+is persisted before admission and the historical memory guard still applies.
 
 Operation diagnosis distinguishes insufficient resources, lock contention,
 unavailable statistics, and node eligibility failures. Per-node reasons include

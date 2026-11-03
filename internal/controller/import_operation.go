@@ -68,8 +68,8 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	builderPolicy := s.effectiveImportBuilderPolicy(builderMemoryCeiling)
 	failureFingerprint := ""
 	oomFingerprint := buildOOMInputFingerprint(*op.DesiredSource, *op.DesiredSpec)
-	importCtx = sourceimport.WithBuilderOOMGuard(importCtx, func(readCtx context.Context) (int64, error) {
-		history, err := s.readBuildOOMHistory(readCtx, app, oomFingerprint)
+	importCtx = sourceimport.WithBuilderOOMGuard(importCtx, func(readCtx context.Context, profile string) (int64, error) {
+		history, err := s.resolveBuildOOMProfile(readCtx, app, oomFingerprint, profile)
 		return history.MemoryLimitBytes, err
 	}, func(writeCtx context.Context, fact sourceimport.BuilderOOMObservation) error {
 		return s.recordBuildOOM(writeCtx, app, op.ID, oomFingerprint, fact)

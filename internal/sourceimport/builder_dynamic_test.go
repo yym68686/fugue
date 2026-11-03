@@ -91,7 +91,7 @@ func TestHeavyPlacementReservesLiveHeadroomBelowLegacySixGiFloor(t *testing.T) {
 				if mode == "greater than OOM limit" {
 					limit = 4 << 30
 				}
-				ctx = WithBuilderOOMGuard(ctx, func(context.Context) (int64, error) { return limit, nil }, nil)
+				ctx = WithBuilderOOMGuard(ctx, func(context.Context, string) (int64, error) { return limit, nil }, nil)
 			}
 			placement, reservation, err := s.tryReservePlacement(ctx, "build-first")
 			if mode == "equal OOM limit" || mode == "lower than OOM limit" {
