@@ -36,6 +36,44 @@ func TestAPIDeploymentHasGuardianRecoveryBudget(t *testing.T) {
 	}
 }
 
+func TestControllerReleaseSynchronizesManagedAppSchemaBeforeRollout(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	job := yamlMappingValue(t, yamlMappingValue(t, document.Content[0], "jobs"), "deploy_controller")
+	steps := yamlMappingValue(t, job, "steps")
+	syncIndex, rolloutIndex := -1, -1
+	for index, step := range steps.Content {
+		encoded, err := yaml.Marshal(step)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := string(encoded)
+		if strings.Contains(source, "bash scripts/sync_managed_app_crd.sh") {
+			syncIndex = index
+			for _, required := range []string{"set -euo pipefail", "git diff --exit-code HEAD origin/main", "scripts/validate_managed_app_crd_transition.py", "python3 scripts/test_validate_managed_app_crd_transition.py"} {
+				if !strings.Contains(source, required) {
+					t.Fatalf("schema sync lost its fail-closed release gate: %s", required)
+				}
+			}
+			if strings.Contains(source, "continue-on-error") || strings.Contains(source, "|| true") {
+				t.Fatal("schema synchronization failure must block rollout")
+			}
+		}
+		if strings.Contains(source, "deploy-declarative-component") {
+			rolloutIndex = index
+		}
+	}
+	if syncIndex < 0 || rolloutIndex <= syncIndex {
+		t.Fatal("controller rollout must follow verified additive schema synchronization")
+	}
+}
+
 func TestPhysicalBackupExecutorInstallsThroughIndependentDeclarativeLane(t *testing.T) {
 	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
