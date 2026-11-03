@@ -1,0 +1,139 @@
+{
+  "authority_cell_id": "cell-dns-availability",
+  "generation": 1,
+  "origin": "https://api.fugue.pro",
+  "policy": {
+    "authority_cell_id": "cell-dns-availability",
+    "dns_source": {
+      "dns_node_ids": [
+        "vps-591f4447",
+        "vps-84c8f0a9"
+      ],
+      "previous_topology": {
+        "authority_cells": [
+          {
+            "id": "cell-public-a",
+            "legacy_group_id": "edge-group-country-de"
+          },
+          {
+            "id": "cell-public-b",
+            "legacy_group_id": "edge-group-country-us"
+          }
+        ],
+        "edges": [
+          {
+            "authority_cell_id": "cell-public-b",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "host-86eabf26-42a9-4f9d-998a-754115f8b829"
+            },
+            "id": "86eabf26-42a9-4f9d-998a-754115f8b829",
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-b",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "bwg"
+            },
+            "id": "bwg",
+            "labels": {
+              "country": "us",
+              "region": "us"
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-b",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "vps-591f4447"
+            },
+            "id": "vps-591f4447",
+            "labels": {
+              "country": "us",
+              "region": "us"
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          },
+          {
+            "authority_cell_id": "cell-public-a",
+            "capabilities": [
+              "http",
+              "tls"
+            ],
+            "failure_domains": {
+              "host": "vps-84c8f0a9"
+            },
+            "id": "vps-84c8f0a9",
+            "labels": {
+              "country": "de",
+              "region": "de"
+            },
+            "serving_pool_ids": [
+              "pool-public"
+            ]
+          }
+        ],
+        "schema_version": "edge-topology/v1",
+        "serving_pools": [
+          {
+            "id": "pool-public"
+          }
+        ]
+      },
+      "producer_policy": {
+        "artifact_id": "artifact_1793401282_efc3d0d078e5",
+        "content_hash": "sha256:7cd82adf408ee4b63c4082299bf6891d8c1d671eeba7e90bfab0d191d72581cd",
+        "fencing_token": 51,
+        "release_id": "artifactrel_1793401471_edbd4146b81b"
+      }
+    },
+    "generation": "cell-dns-availability-dependencies-20261103-1",
+    "input_source": "verified-global-dns",
+    "interval_seconds": 60,
+    "mode": "serving",
+    "publication_role": "cell-dns",
+    "refresh_seconds": 600,
+    "schema_version": "fugue.platform.producer/v1",
+    "serving": {
+      "canary_rule_ref": "cohort=complete",
+      "full_min_seconds": 120,
+      "gray_min_seconds": 120,
+      "rollout_timeout_seconds": 900
+    },
+    "target_scope": "authority-cell:cell-dns-availability"
+  },
+  "precondition": {
+    "operation": "dns_source",
+    "previous_policy": {
+      "artifact_id": "artifact_1792902104_4d05c2bf61f8",
+      "content_hash": "sha256:297694fc3268dcfe60976db5ccc7e711a7227a17b2c1a4343476aa76de8cfa14",
+      "fencing_token": 1,
+      "release_id": "artifactrel_1792903776_92e86bb6822b"
+    },
+    "serving_full": {
+      "artifact_id": "artifact_1793180185_be3732a0258b",
+      "content_hash": "sha256:68ae859440ef7d0129bd250c9f15430dbf36d23b6967abc9f0966cff76d94702",
+      "fencing_token": 254,
+      "release_id": "artifactrel_1793181982_2609ebf0190a"
+    },
+    "verification_evidence_hash": "sha256:4042e4d8ba9b2c31853bdc6c219aa2cdedb3b5155e2bac39ea644c6cd5105ca6"
+  },
+  "schema": "fugue.producer-dependency-refresh/v1"
+}
