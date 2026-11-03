@@ -140,7 +140,7 @@ func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent 
 		if stored.Content["publication_role"] != p.Parent.Content["publication_role"] || stored.ScopeKey != p.Parent.ScopeKey || stored.ContentHash != p.Parent.ContentHash {
 			return ErrConflict
 		}
-		view, err := s.pgFullReleaseSetSnapshot(ctx, tx, stored)
+		view, err := s.pgRoutingReleaseSetSnapshot(ctx, tx, stored)
 		if err != nil {
 			return err
 		}

@@ -29,6 +29,12 @@ all current-source and fresh-convergence checks; a rollback fence is never a new
 positive checkpoint by itself.
 Newer in-flight gray traffic and competing successors conflict without writes.
 
+PostgreSQL routing-dependency snapshots load exact signed members and locked
+publication lanes without reading the source's consumer expectations or heartbeat
+rows. Those unrelated consumers cannot authorize a DNS reference and must not
+delay its transaction. The target DNS publication still loads its own consumers
+and requires the same fresh capability and convergence checks.
+
 Use schema `fugue.producer-dependency-refresh/v1` in one declaration under
 `deploy/environments/production/cell-producer-reconfiguration/`. It has the same
 top-level fields as the cell reconfiguration declaration: schema, generation,

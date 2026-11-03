@@ -53,6 +53,18 @@ func (s *Store) pgFullReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent
 // consumers, independently of whether its former routing source is available.
 // Ordinary publication still loads and validates current sources above.
 func (s *Store) pgReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*model.State, error) {
+	state, err := s.pgRoutingReleaseSetSnapshot(ctx, tx, parent)
+	if err != nil {
+		return nil, err
+	}
+	return pgLoadReleaseSetConsumers(ctx, tx, parent, state)
+}
+
+// A routing dependency needs exact immutable members and selected lanes, but
+// never the source's consumer expectations or heartbeat rows. Loading those
+// rows under DNS publication locks couples unrelated heartbeat writers to the
+// DNS transaction and can exhaust its deadline before admission even starts.
+func (s *Store) pgRoutingReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*model.State, error) {
 	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{parent}}
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	if !ok || len(ids) == 0 || len(ids) > 64 {
@@ -98,7 +110,11 @@ func (s *Store) pgReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent mod
 		}
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
+	return state, nil
+}
+
+func pgLoadReleaseSetConsumers(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, state *model.State) (*model.State, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
  expected_generation, topology_revision, revision, requires_consumers,
  required_cardinality, optional_cardinality, heartbeat_deadline,
  convergence_deadline, consumers_json, created_at, updated_at

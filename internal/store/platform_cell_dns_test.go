@@ -180,6 +180,9 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	if err := s.ValidateDNSPublicationReferences(compiled.DNSArtifact); err != nil {
 		t.Fatal("coherent compilation reference snapshot rejected", err)
 	}
+	if s.db != nil && retained {
+		testDNSReferencesIndependentOfSourceHeartbeats(t, s, compiled.DNSArtifact)
+	}
 
 	save := func(a model.PlatformArtifact) model.PlatformArtifact {
 		t.Helper()
@@ -511,6 +514,41 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	if withSources && retained {
 		testDNSPositiveRecoveryAfterSourceRevocation(t, s, parent)
 	}
+}
+
+// Source consumer state does not authorize a DNS routing reference. Exercise
+// the real loader while those unrelated tables are locked by another writer;
+// the old full snapshot incorrectly waited on them until its deadline.
+func testDNSReferencesIndependentOfSourceHeartbeats(t *testing.T, s *Store, child model.PlatformArtifact) {
+	t.Helper()
+	blocker, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	if _, err := blocker.Exec(`LOCK TABLE fugue_platform_consumer_instances, fugue_platform_expected_consumer_sets IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{child}}
+	parent := model.PlatformArtifact{ScopeKey: child.ScopeKey, Content: map[string]any{"publication_role": platformconfig.PublicationRoleCellDNS}}
+	started := time.Now()
+	if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
+		t.Fatal("DNS reference read waited on unrelated source consumers", err)
+	}
+	if len(state.ExpectedConsumerSets) != 0 || len(state.PlatformConsumerInstances) != 0 || len(state.PlatformShadowConsumers) != 0 {
+		t.Fatal("DNS routing dependency loaded unrelated source consumer state")
+	}
+	if err := validateCellDNSReferencesInState(state, child, celldns.Keys()); err != nil {
+		t.Fatal("narrow routing snapshot lost source authorization", err)
+	}
+	t.Logf("DNS reference authorization completed with source consumer tables exclusively locked: %s", time.Since(started))
 }
 
 func TestCellDNSAdmissionRejectsChangedReferencedAuthority(t *testing.T) {
