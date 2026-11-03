@@ -477,7 +477,7 @@ func (s *Store) CreateDataWorkspace(workspace model.DataWorkspace) (model.DataWo
 	return workspace, err
 }
 
-func (s *Store) UpdateDataWorkspace(idOrName, tenantID string, platformAdmin bool, update DataWorkspaceUpdate) (model.DataWorkspace, error) {
+func (s *Store) updateDataWorkspace(idOrName, tenantID string, platformAdmin bool, update DataWorkspaceUpdate) (model.DataWorkspace, error) {
 	idOrName = strings.TrimSpace(idOrName)
 	if idOrName == "" {
 		return model.DataWorkspace{}, ErrInvalidInput
@@ -630,7 +630,7 @@ func (s *Store) LatestDataSnapshot(workspaceID string) (model.DataSnapshot, erro
 	return snapshots[0], nil
 }
 
-func (s *Store) CreateDataSnapshot(snapshot model.DataSnapshot) (model.DataSnapshot, error) {
+func (s *Store) createDataSnapshot(snapshot model.DataSnapshot) (model.DataSnapshot, error) {
 	snapshot.Manifest = model.NormalizeDataManifest(snapshot.Manifest)
 	snapshot.Version = strings.TrimSpace(snapshot.Version)
 	if snapshot.Version == "" {
@@ -708,7 +708,7 @@ func (s *Store) DeleteDataSnapshot(workspaceID, idOrVersion string) (model.DataS
 	return deleted, err
 }
 
-func (s *Store) CreateDataTransfer(transfer model.DataTransfer) (model.DataTransfer, error) {
+func (s *Store) createDataTransfer(transfer model.DataTransfer) (model.DataTransfer, error) {
 	transfer.WorkspaceID = strings.TrimSpace(transfer.WorkspaceID)
 	transfer.Direction = strings.TrimSpace(transfer.Direction)
 	transfer.Manifest = model.NormalizeDataManifest(transfer.Manifest)
@@ -754,7 +754,7 @@ func (s *Store) CreateDataTransfer(transfer model.DataTransfer) (model.DataTrans
 	return transfer, err
 }
 
-func (s *Store) UpdateDataTransfer(transfer model.DataTransfer) (model.DataTransfer, error) {
+func (s *Store) updateDataTransfer(transfer model.DataTransfer) (model.DataTransfer, error) {
 	if transfer.ID == "" {
 		return model.DataTransfer{}, ErrInvalidInput
 	}
@@ -768,10 +768,10 @@ func (s *Store) UpdateDataTransfer(transfer model.DataTransfer) (model.DataTrans
 			return ErrNotFound
 		}
 		current := state.DataTransfers[index]
-		if current.Direction == model.DataTransferDirectionPrewarm && !current.UpdatedAt.Equal(transfer.UpdatedAt) {
+		if !transfer.UpdatedAt.IsZero() && !current.UpdatedAt.Equal(transfer.UpdatedAt) {
 			return ErrConflict
 		}
-		if current.Direction == model.DataTransferDirectionPrewarm && (current.Status == model.DataTransferStatusCompleted || current.Status == model.DataTransferStatusFailed || current.Status == model.DataTransferStatusCanceled) && transfer.Status != "" && current.Status != transfer.Status {
+		if (current.Status == model.DataTransferStatusCompleted || current.Status == model.DataTransferStatusFailed || current.Status == model.DataTransferStatusCanceled) && transfer.Status != "" && current.Status != transfer.Status {
 			return ErrConflict
 		}
 		if transfer.Cache != nil {
@@ -2591,10 +2591,10 @@ func (s *Store) pgUpdateDataTransfer(transfer model.DataTransfer) (model.DataTra
 	updated, err := scanDataTransfer(s.db.QueryRowContext(ctx, `
 UPDATE fugue_data_transfers
 SET snapshot_id = $2, version = $3, message = $4, status = $5, manifest_json = $6, plan_blobs_json = $7, part_size = $8, expires_at = $9, bytes_total = $10, bytes_done = $11, files_total = $12, files_done = $13, error_code = $14, error_message = $15, updated_at = $16, started_at = $17, finished_at = $18, prewarm_cache_json=$19
-WHERE id = $1 AND (direction <> 'prewarm' OR updated_at=$20) AND (direction <> 'prewarm' OR status NOT IN ('completed','failed','canceled') OR status=$5)
+WHERE id = $1 AND ($20::timestamptz='0001-01-01T00:00:00Z' OR updated_at=$20) AND (status NOT IN ('completed','failed','canceled') OR status=$5)
 RETURNING id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at, prewarm_cache_json
 `, transfer.ID, transfer.SnapshotID, transfer.Version, transfer.Message, transfer.Status, manifestJSON, planBlobsJSON, transfer.PartSize, transfer.ExpiresAt, transfer.BytesTotal, transfer.BytesDone, transfer.FilesTotal, transfer.FilesDone, transfer.ErrorCode, transfer.ErrorMessage, transfer.UpdatedAt, transfer.StartedAt, transfer.FinishedAt, cacheJSON, expectedUpdatedAt))
-	if errors.Is(err, ErrNotFound) && transfer.Direction == model.DataTransferDirectionPrewarm {
+	if errors.Is(err, ErrNotFound) {
 		var exists bool
 		if checkErr := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_data_transfers WHERE id=$1)`, transfer.ID).Scan(&exists); checkErr != nil {
 			return model.DataTransfer{}, checkErr

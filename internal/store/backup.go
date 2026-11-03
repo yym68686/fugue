@@ -1489,6 +1489,24 @@ func (s *Store) AdoptBackupArtifact(artifact model.BackupArtifact, observedRun m
 	return s.createBackupArtifact(artifact, "", &observedRun)
 }
 
+// RecoverCompletedBackupArtifact is used only after engine/config/block
+// verification. The original terminal failure remains immutable audit history.
+func (s *Store) RecoverCompletedBackupArtifact(a model.BackupArtifact, run model.BackupRun) (model.BackupArtifact, error) {
+	if a.RunID != run.ID || a.BackendID != run.BackendID || a.PolicyID != run.PolicyID || a.Kind != model.BackupArtifactKindLonghornSnapshot || a.Status != model.BackupArtifactStatusActive || a.Manifest.Metadata["repository_verification"] != "referenced_objects_present" {
+		return model.BackupArtifact{}, ErrInvalidInput
+	}
+	if a.Target.Type != run.Target.Type || (a.Target.Type != model.BackupTargetControlPlaneDatabase && a.Target.Type != model.BackupTargetAppDatabase) {
+		return model.BackupArtifact{}, ErrInvalidInput
+	}
+	if a.Target.Type == model.BackupTargetAppDatabase && (a.AppID != run.AppID || a.TenantID != run.TenantID || a.ProjectID != run.ProjectID) {
+		return model.BackupArtifact{}, ErrInvalidInput
+	}
+	if a.Target.Type == model.BackupTargetControlPlaneDatabase && (a.AppID != "" || a.TenantID != "" || a.ProjectID != "") {
+		return model.BackupArtifact{}, ErrInvalidInput
+	}
+	return s.createBackupArtifact(a, "", &run)
+}
+
 // Include retired artifacts: adoption must not resurrect a deliberately
 // deleted backup under a different run or manifest key.
 func (s *Store) BackupArtifactExistsForLonghornURL(backupURL string) (bool, error) {
@@ -2403,7 +2421,7 @@ func applyBackupRetentionInState(state *model.State, policyID string) {
 	if retain <= 0 {
 		retain = policy.Retention.RetainCount
 	}
-	if retain <= 0 {
+	if retain <= 0 && policy.Retention.RetainDays <= 0 {
 		return
 	}
 	var candidates []int
@@ -2415,13 +2433,17 @@ func applyBackupRetentionInState(state *model.State, policyID string) {
 		candidates = append(candidates, idx)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		return state.BackupArtifacts[candidates[i]].CreatedAt.After(state.BackupArtifacts[candidates[j]].CreatedAt)
+		a, b := state.BackupArtifacts[candidates[i]], state.BackupArtifacts[candidates[j]]
+		if a.CreatedAt.Equal(b.CreatedAt) {
+			return a.ID > b.ID
+		}
+		return a.CreatedAt.After(b.CreatedAt)
 	})
-	if len(candidates) <= retain {
-		return
-	}
 	now := time.Now().UTC()
-	for _, idx := range candidates[retain:] {
+	for rank, idx := range candidates {
+		if !retentionExpired(policy, rank, state.BackupArtifacts[idx].CreatedAt, now) {
+			continue
+		}
 		state.BackupArtifacts[idx].Status = model.BackupArtifactStatusExpired
 		state.BackupArtifacts[idx].DeletedAt = &now
 	}
@@ -4539,9 +4561,7 @@ RETURNING `+backupRunReturningColumns(), id, leaseOwner, finish.Status, finish.F
 	if err := tx.Commit(); err != nil {
 		return model.BackupRun{}, err
 	}
-	if finished.Status == model.BackupRunStatusSucceeded && finished.PolicyID != "" {
-		_ = s.pgApplyBackupRetention(finished.PolicyID)
-	}
+	// Retention is reconciled independently with persisted failure/retry state.
 	return finished, nil
 }
 
@@ -5058,34 +5078,7 @@ func (s *Store) pgApplyBackupRetention(policyID string) error {
 	if err != nil {
 		return err
 	}
-	retain := policy.RetainCount
-	if retain <= 0 {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM fugue_backup_artifacts WHERE policy_id = $1 AND status = 'active' AND protected = FALSE ORDER BY created_at DESC OFFSET $2`, policyID, retain)
-	if err != nil {
-		return mapDBErr(err)
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return mapDBErr(err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return mapDBErr(err)
-	}
-	for _, id := range ids {
-		if _, err := s.pgMarkBackupArtifactDeleted(id, "", true); err != nil && !errors.Is(err, ErrConflict) {
-			return err
-		}
-	}
-	return nil
+	return s.pgReconcileRetentionCandidates(policy)
 }
 
 func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.BackupRestorePlan, error) {

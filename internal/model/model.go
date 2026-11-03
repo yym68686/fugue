@@ -3471,6 +3471,7 @@ func MachinePolicyDedicatedMode(policy MachinePolicy) string {
 }
 
 type State struct {
+	StorageMaintenanceJobs     []StorageMaintenanceJob        `json:"storage_maintenance_jobs,omitempty"`
 	MailPlatformConfig         *MailPlatformConfig            `json:"mail_platform_config,omitempty"`
 	AppMailBindings            []AppMailBinding               `json:"app_mail_bindings,omitempty"`
 	ImageOrphanPolicy          *ImageOrphanPolicy             `json:"image_orphan_policy,omitempty"`

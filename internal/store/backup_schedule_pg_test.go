@@ -907,11 +907,7 @@ func TestPGFinishBackupRunAdvancesPolicyAfterFencedSuccess(t *testing.T) {
 		WithArgs(run.PolicyID, run.ID, finishedAt).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	policy := backupScheduleTestPolicy(run.PolicyID)
-	policy.Target = run.Target
-	policy.RetainCount = 0
-	policy.Retention = model.BackupRetentionPolicy{}
-	expectGetBackupSchedulePolicy(mock, policy)
+	// Retention now has its own durable periodic retry job.
 
 	finished, err := s.FinishBackupRun(run.ID, run.LeaseOwner, finish)
 	if err != nil {

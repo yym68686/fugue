@@ -137,6 +137,9 @@ func serveHealthOnListener(ctx context.Context, listener net.Listener, address s
 }
 
 func migrateSchema(ctx context.Context, databaseURL string) error {
+	if err := schemamigrate.MigrateStorageMaintenance(ctx, databaseURL); err != nil {
+		return err
+	}
 	if err := schemamigrate.MigrateBoundedContent(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate bounded content stores: %w", err)
 	}

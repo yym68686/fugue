@@ -92,6 +92,10 @@ func TestSweepDataWorkspaceGCCleansOldMigrationBackendObjects(t *testing.T) {
 	var deletedOldBackend bool
 	sourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodHead:
+			w.Header().Set("Content-Length", "6")
+			stamp, _ := time.Parse(time.RFC3339, old)
+			w.Header().Set("Last-Modified", stamp.Format(http.TimeFormat))
 		case r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2":
 			w.Header().Set("Content-Type", "application/xml")
 			_, _ = w.Write([]byte(`<ListBucketResult><IsTruncated>false</IsTruncated>` +

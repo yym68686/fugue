@@ -61,6 +61,58 @@ env:
         print('Observed root-owned generated entries: 0')
 
 jobs:
+  longhorn_gc_build:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions: {contents: read, packages: write}
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {fetch-depth: 0}
+      - id: select
+        env: {BASE_SHA: '${{ github.event.before }}'}
+        run: |
+          if ! git diff --quiet "$BASE_SHA" HEAD -- Dockerfile.longhorn-gc third_party/longhorn-engine scripts/install_longhorn_gc.py scripts/test_install_longhorn_gc.py deploy/environments/production/longhorn-gc; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.select.outputs.selected == 'true'
+        run: python3 -m unittest scripts.test_install_longhorn_gc
+      - if: steps.select.outputs.selected == 'true'
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - if: steps.select.outputs.selected == 'true'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        with: {registry: ghcr.io, username: '${{ github.actor }}', password: '${{ secrets.GITHUB_TOKEN }}'}
+      - id: build
+        if: steps.select.outputs.selected == 'true'
+        run: |
+          set -euo pipefail
+          image=$(python3 -c 'import json; print(json.load(open("deploy/environments/production/longhorn-gc/engine.json"))["repository"])')
+          docker buildx build --platform linux/amd64 --file Dockerfile.longhorn-gc --tag "$image:gc-${{ github.sha }}" --metadata-file "$RUNNER_TEMP/longhorn-gc-build.json" --push .
+          digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/longhorn-gc-build.json")
+          echo "image=$image@$digest" >> "$GITHUB_OUTPUT"
+  longhorn_gc_install:
+    needs: [longhorn_gc_build, prepush]
+    if: ${{ needs.longhorn_gc_build.outputs.image != '' && needs.prepush.result == 'success' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-longhorn-gc, cancel-in-progress: false, queue: max}
+    timeout-minutes: 12
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Check current declaration and install a ready, digest-addressed backup utility
+        env: {ENGINE_IMAGE: '${{ needs.longhorn_gc_build.outputs.image }}'}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- Dockerfile.longhorn-gc third_party/longhorn-engine scripts/install_longhorn_gc.py deploy/environments/production/longhorn-gc
+          python3 scripts/install_longhorn_gc.py deploy/environments/production/longhorn-gc/engine.json --image "$ENGINE_IMAGE"
+          python3 scripts/install_longhorn_gc.py deploy/environments/production/longhorn-gc/engine.json --image "$ENGINE_IMAGE" --apply
   edge_release_hold_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest

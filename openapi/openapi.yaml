@@ -13902,6 +13902,66 @@ paths:
                 $ref: '#/components/schemas/AdminStorageOverview'
         default:
           $ref: '#/components/responses/ErrorResponse'
+  /v1/admin/storage/jobs:
+    get:
+      operationId: listStorageMaintenanceJobs
+      summary: List durable storage maintenance jobs
+      tags: [Object Storage, Admin]
+      x-fugue-handler: handleListStorageMaintenanceJobs
+      security: [{BearerAuth: []}]
+      responses:
+        '200':
+          description: Recent history and all actionable jobs; platform administrators only
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobs]
+                properties:
+                  jobs: {type: array, items: {$ref: '#/components/schemas/StorageMaintenanceJob'}}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+    post:
+      operationId: createStorageMaintenanceJob
+      summary: Queue storage reconciliation or cleanup
+      description: Platform administrators only. Preview by default. Execution rechecks current references; it never directly removes Longhorn shared blocks. Global retention checks enabled policies only; an explicit policy scope also permits disabled-policy retention. Data GC covers the physical namespace shared by all workspaces, with a seven-day object grace period. Idle transfer retirement uses a thirty-day inactivity window in addition to expired authorization.
+      tags: [Object Storage, Admin]
+      x-fugue-handler: handleCreateStorageMaintenanceJob
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kind]
+              properties:
+                kind: {type: string, enum: [retention, longhorn-reconcile, backup-cleanup, data-gc, transfer-expiry]}
+                scope_id: {type: string, description: Policy ID for retention; workspace ID for data-gc}
+                execute: {type: boolean, default: false}
+      responses:
+        '202':
+          description: Persisted job; poll its resource for completion
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StorageMaintenanceJob'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+  /v1/admin/storage/jobs/{job_id}:
+    get:
+      operationId: getStorageMaintenanceJob
+      summary: Inspect a storage maintenance job
+      tags: [Object Storage, Admin]
+      x-fugue-handler: handleGetStorageMaintenanceJob
+      security: [{BearerAuth: []}]
+      parameters:
+        - {name: job_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Persisted progress, errors and retry time
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StorageMaintenanceJob'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
   /v1/admin/storage/orphan-manifests/cleanup:
     post:
       operationId: cleanupAdminOrphanManifest
@@ -14877,6 +14937,7 @@ paths:
     post:
       operationId: sweepDataWorkspaceGC
       summary: Sweep Data Workspace GC
+      description: Platform administrators only. Scans a shared physical storage namespace and preserves references across every tenant, workspace and active transfer. Preview by default; seven-day object grace by default.
       tags: [Data Workspaces]
       x-fugue-handler: handleSweepDataWorkspaceGC
       security:
@@ -17512,6 +17573,21 @@ components:
         started_at: {type: string, format: date-time}
         deleted_objects: {type: integer, format: int64, minimum: 0}
         aborted_multipart_uploads: {type: integer, format: int64, minimum: 0}
+    StorageMaintenanceJob:
+      type: object
+      required: [id, kind, execute, status, attempts, created_at, updated_at]
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [retention, longhorn-reconcile, backup-cleanup, data-gc, transfer-expiry]}
+        scope_id: {type: string}
+        execute: {type: boolean}
+        status: {type: string, enum: [queued, running, retrying, succeeded, failed]}
+        attempts: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        retry_at: {type: string, format: date-time}
+        error: {type: string}
+        result: {type: object, additionalProperties: true}
     AdminStorageNamespace:
       type: object
       required: [kind, resource_id, name, bucket, prefix, tenant_id, project_id, status]

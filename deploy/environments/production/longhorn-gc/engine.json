@@ -1,0 +1,6 @@
+{
+  "namespace": "longhorn-system",
+  "expectedPreviousImage": "docker.io/longhornio/longhorn-engine:v1.12.1",
+  "repository": "ghcr.io/yym68686/fugue-longhorn-engine",
+  "upstreamCommit": "1fa902f0061b84b92af445c38392bfeb99faffb2"
+}

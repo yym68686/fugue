@@ -465,12 +465,21 @@ func (b *dataObjectBackend) abortMultipartUpload(ctx context.Context, objectKey,
 		Key:      aws.String(b.objectKey(objectKey)),
 		UploadId: aws.String(uploadID),
 	})
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchUpload" {
+		return nil
+	}
 	return err
 }
 
 func (b *dataObjectBackend) listObjects(ctx context.Context, prefix string) ([]dataObjectInfo, error) {
+	directory := strings.HasSuffix(prefix, "/")
 	prefix = b.objectKey(prefix)
+	if directory && prefix != "" {
+		prefix += "/"
+	}
 	var token *string
+	seen := map[string]bool{}
 	var out []dataObjectInfo
 	for {
 		resp, err := b.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(b.backend.Bucket), Prefix: aws.String(prefix), ContinuationToken: token})
@@ -478,12 +487,16 @@ func (b *dataObjectBackend) listObjects(ctx context.Context, prefix string) ([]d
 			return nil, err
 		}
 		for _, obj := range resp.Contents {
-			out = append(out, dataObjectInfo{Key: aws.ToString(obj.Key), Size: aws.ToInt64(obj.Size), LastModified: aws.ToTime(obj.LastModified)})
+			out = append(out, dataObjectInfo{Key: aws.ToString(obj.Key), Size: aws.ToInt64(obj.Size), LastModified: aws.ToTime(obj.LastModified), ETag: strings.Trim(aws.ToString(obj.ETag), `"`)})
 		}
 		if !aws.ToBool(resp.IsTruncated) {
 			break
 		}
 		token = resp.NextContinuationToken
+		if aws.ToString(token) == "" || seen[aws.ToString(token)] {
+			return nil, errors.New("incomplete object inventory: missing or repeated continuation token")
+		}
+		seen[aws.ToString(token)] = true
 	}
 	return out, nil
 }

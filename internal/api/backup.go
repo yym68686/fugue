@@ -130,6 +130,7 @@ func (s *Server) StartBackgroundBackups(ctx context.Context) {
 	ticker := time.NewTicker(backupSchedulerInterval)
 	defer ticker.Stop()
 	s.enqueueDueBackups(ctx)
+	go s.sweepStorageMaintenance(ctx)
 	go s.sweepDeletedBackupArtifacts(ctx)
 	go s.sweepFailedBackupRunObjects(ctx)
 	go s.sweepLonghornErrorBackups(ctx)
@@ -138,6 +139,7 @@ func (s *Server) StartBackgroundBackups(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			go s.sweepStorageMaintenance(ctx)
 			s.enqueueDueBackups(ctx)
 			go s.sweepDeletedBackupArtifacts(ctx)
 			go s.sweepFailedBackupRunObjects(ctx)

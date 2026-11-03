@@ -1,0 +1,223 @@
+diff --git a/vendor/github.com/longhorn/backupstore/deltablock.go b/vendor/github.com/longhorn/backupstore/deltablock.go
+index 2f3df04..3cfe029 100644
+--- a/vendor/github.com/longhorn/backupstore/deltablock.go
++++ b/vendor/github.com/longhorn/backupstore/deltablock.go
+@@ -1458,10 +1458,16 @@ func DeleteDeltaBlockBackup(backupURL string) (err error) {
+ 
+ func cleanupBlocks(driver BackupStoreDriver, blockMap map[string]*BlockInfo, volume string) error {
+ 	var deletionFailures []string
++	batch, useBatch := driver.(interface{ RemoveBlocks([]string) error })
++	var paths []string
+ 	activeBlockCount := int64(0)
+ 	deletedBlockCount := int64(0)
+ 	for _, blk := range blockMap {
+ 		if isBlockSafeToDelete(blk) {
++			if useBatch {
++				paths = append(paths, blk.path)
++				continue
++			}
+ 			if err := driver.Remove(blk.path); err != nil {
+ 				deletionFailures = append(deletionFailures, blk.checksum)
+ 				continue
+@@ -1472,6 +1478,12 @@ func cleanupBlocks(driver BackupStoreDriver, blockMap map[string]*BlockInfo, vol
+ 			activeBlockCount++
+ 		}
+ 	}
++	if useBatch && len(paths) > 0 {
++		if err := batch.RemoveBlocks(paths); err != nil {
++			return err
++		}
++		deletedBlockCount = int64(len(paths))
++	}
+ 
+ 	if len(deletionFailures) > 0 {
+ 		return fmt.Errorf("failed to delete backup blocks: %v", deletionFailures)
+@@ -1492,6 +1504,11 @@ func cleanupBlocks(driver BackupStoreDriver, blockMap map[string]*BlockInfo, vol
+ }
+ 
+ func getBlockNamesForVolume(driver BackupStoreDriver, volumeName string) ([]string, error) {
++	if flat, ok := driver.(interface {
++		ListBlockNames(string) ([]string, error)
++	}); ok {
++		return flat.ListBlockNames(getBlockPath(volumeName))
++	}
+ 	names := []string{}
+ 	blockPathBase := getBlockPath(volumeName)
+ 	lv1Dirs, err := driver.List(blockPathBase)
+diff --git a/vendor/github.com/longhorn/backupstore/s3/flat_gc.go b/vendor/github.com/longhorn/backupstore/s3/flat_gc.go
+new file mode 100644
+index 0000000..d127490
+--- /dev/null
++++ b/vendor/github.com/longhorn/backupstore/s3/flat_gc.go
+@@ -0,0 +1,94 @@
++package s3
++
++import (
++	"context"
++	"fmt"
++	"github.com/aws/aws-sdk-go-v2/aws"
++	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
++	"github.com/aws/aws-sdk-go-v2/service/s3/types"
++	"path"
++	"regexp"
++	"strings"
++	"time"
++)
++
++var blockNamePattern = regexp.MustCompile(`^[0-9a-f]{64}\.blk$`)
++
++// Flat, paged enumeration avoids one request per hash directory. The caller
++// retains the deletion lock and rechecks the complete backup reference set.
++func (s *BackupStoreDriver) ListBlockNames(blockPath string) ([]string, error) {
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
++	defer cancel()
++	prefix := strings.TrimSuffix(s.updatePath(blockPath), "/") + "/"
++	svc, err := s.service.newInstance(ctx, false)
++	if err != nil {
++		return nil, err
++	}
++	pages := awss3.NewListObjectsV2Paginator(svc, &awss3.ListObjectsV2Input{Bucket: aws.String(s.service.Bucket), Prefix: aws.String(prefix), MaxKeys: aws.Int32(1000)})
++	names := []string{}
++	seen := map[string]bool{}
++	seenTokens := map[string]bool{}
++	for pages.HasMorePages() {
++		page, err := pages.NextPage(ctx)
++		if err != nil {
++			return nil, err
++		}
++		for _, v := range page.Contents {
++			key := aws.ToString(v.Key)
++			relative := strings.TrimPrefix(key, prefix)
++			name := path.Base(relative)
++			if !strings.HasPrefix(key, prefix) || !blockNamePattern.MatchString(name) || relative != path.Join(name[:2], name[2:4], name) {
++				return nil, fmt.Errorf("unexpected object in Longhorn block namespace: %s", key)
++			}
++			if seen[name] {
++				return nil, fmt.Errorf("duplicate block in paged inventory: %s", name)
++			}
++			seen[name] = true
++			names = append(names, strings.TrimSuffix(name, ".blk"))
++		}
++		if aws.ToBool(page.IsTruncated) {
++			token := aws.ToString(page.NextContinuationToken)
++			if token == "" || seenTokens[token] {
++				return nil, fmt.Errorf("truncated block listing with missing or repeated continuation token")
++			}
++			seenTokens[token] = true
++		}
++	}
++	return names, nil
++}
++
++// Only already-validated exact block keys are accepted. Prefix Remove retains
++// its existing semantics for directories and metadata. Per-object failures are
++// propagated so a partial batch can never become a successful GC receipt.
++func (s *BackupStoreDriver) RemoveBlocks(paths []string) error {
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
++	defer cancel()
++	svc, err := s.service.newInstance(ctx, true)
++	if err != nil {
++		return err
++	}
++	keys := make([]types.ObjectIdentifier, 0, len(paths))
++	for _, p := range paths {
++		name := path.Base(p)
++		parent := path.Dir(p)
++		if !blockNamePattern.MatchString(name) || path.Base(parent) != name[2:4] || path.Base(path.Dir(parent)) != name[:2] || path.Base(path.Dir(path.Dir(parent))) != "blocks" || path.Clean(p) != p {
++			return fmt.Errorf("refusing noncanonical block deletion: %s", p)
++		}
++		keys = append(keys, types.ObjectIdentifier{Key: aws.String(s.updatePath(p))})
++	}
++	for start := 0; start < len(keys); start += 1000 {
++		end := start + 1000
++		if end > len(keys) {
++			end = len(keys)
++		}
++		result, err := svc.DeleteObjects(ctx, &awss3.DeleteObjectsInput{Bucket: aws.String(s.service.Bucket), Delete: &types.Delete{Objects: keys[start:end], Quiet: aws.Bool(true)}})
++		if err != nil {
++			return err
++		}
++		if len(result.Errors) > 0 {
++			return fmt.Errorf("Longhorn block batch deletion failed: %s %s", aws.ToString(result.Errors[0].Code), aws.ToString(result.Errors[0].Message))
++		}
++		log.Infof("GC progress: removed %d/%d unreferenced blocks", end, len(keys))
++	}
++	return nil
++}
+diff --git a/vendor/github.com/longhorn/backupstore/s3/flat_gc_test.go b/vendor/github.com/longhorn/backupstore/s3/flat_gc_test.go
+new file mode 100644
+index 0000000..598eb76
+--- /dev/null
++++ b/vendor/github.com/longhorn/backupstore/s3/flat_gc_test.go
+@@ -0,0 +1,71 @@
++package s3
++
++import (
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++func TestFlatGCEnumeratesPagesAndBatchesExactKeys(t *testing.T) {
++	checksum := strings.Repeat("a", 64)
++	calls, deletes := 0, 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/xml")
++		if r.Method == "POST" {
++			deletes++
++			fmt.Fprint(w, "<DeleteResult/>")
++			return
++		}
++		calls++
++		if r.URL.Query().Get("delimiter") != "" {
++			t.Error("flat listing sent delimiter")
++		}
++		prefix := r.URL.Query().Get("prefix")
++		if !strings.HasSuffix(prefix, "/blocks/") {
++			t.Errorf("unsafe prefix %s", prefix)
++		}
++		if r.URL.Query().Get("continuation-token") == "" {
++			fmt.Fprintf(w, "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>second</NextContinuationToken><Contents><Key>%saa/aa/%s.blk</Key></Contents></ListBucketResult>", prefix, checksum)
++		} else {
++			fmt.Fprint(w, "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>")
++		}
++	}))
++	defer server.Close()
++	t.Setenv("AWS_ENDPOINTS", server.URL)
++	t.Setenv("AWS_ACCESS_KEY_ID", "key")
++	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
++	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
++	driver := &BackupStoreDriver{path: "repo", service: &service{Bucket: "bucket", Region: "us-east-1"}}
++	names, err := driver.ListBlockNames("backupstore/volumes/aa/bb/volume/blocks")
++	if err != nil || len(names) != 1 || names[0] != checksum || calls != 2 {
++		t.Fatalf("names=%v calls=%d err=%v", names, calls, err)
++	}
++	paths := []string{}
++	for i := 0; i < 1001; i++ {
++		paths = append(paths, "backupstore/volumes/aa/bb/volume/blocks/aa/aa/"+checksum+".blk")
++	}
++	if err := driver.RemoveBlocks(paths); err != nil || deletes != 2 {
++		t.Fatalf("deletes=%d err=%v", deletes, err)
++	}
++	if err := driver.RemoveBlocks([]string{"backupstore/volume.cfg"}); err == nil {
++		t.Fatal("metadata accepted as block")
++	}
++}
++
++func TestFlatGCRejectsPartialDelete(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/xml")
++		fmt.Fprint(w, "<DeleteResult><Error><Key>block</Key><Code>AccessDenied</Code><Message>denied</Message></Error></DeleteResult>")
++	}))
++	defer server.Close()
++	t.Setenv("AWS_ENDPOINTS", server.URL)
++	t.Setenv("AWS_ACCESS_KEY_ID", "key")
++	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
++	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
++	driver := &BackupStoreDriver{path: "repo", service: &service{Bucket: "bucket", Region: "us-east-1"}}
++	if err := driver.RemoveBlocks([]string{"backupstore/volumes/aa/bb/volume/blocks/aa/aa/" + strings.Repeat("a", 64) + ".blk"}); err == nil {
++		t.Fatal("partial batch reported success")
++	}
++}

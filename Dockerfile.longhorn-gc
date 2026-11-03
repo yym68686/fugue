@@ -1,0 +1,14 @@
+FROM golang:1.26.0-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends git libqcow-dev libbfio-dev zlib1g-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git init && git remote add origin https://github.com/longhorn/longhorn-engine.git && git fetch --depth 1 origin 1fa902f0061b84b92af445c38392bfeb99faffb2 && git checkout --detach FETCH_HEAD
+COPY third_party/longhorn-engine/flat-s3-gc.patch /tmp/flat-s3-gc.patch
+RUN git apply --check /tmp/flat-s3-gc.patch && git apply /tmp/flat-s3-gc.patch
+RUN go test -mod=vendor ./vendor/github.com/longhorn/backupstore/s3 -run TestFlatGC -count=1 -v
+RUN CGO_ENABLED=1 CGO_LDFLAGS="-lbfio -lz -lpthread" go build -mod=vendor -tags netgo -ldflags '-X main.Version=v1.12.1 -X main.GitCommit=1fa902f0061b84b92af445c38392bfeb99faffb2-fugue-gc1 -linkmode external -extldflags "-static"' -o /out/longhorn .
+RUN /out/longhorn version --client-only
+
+# Keep the official userspace, entrypoint and engine protocol. The sole binary
+# change is the pinned backupstore GC patch; existing volume engines stay put.
+FROM longhornio/longhorn-engine:v1.12.1
+COPY --from=build /out/longhorn /usr/local/bin/longhorn
