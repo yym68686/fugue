@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,7 +156,7 @@ func TestCycleDeadlineBoundsSweepWithoutNodeFaultOrCursorLoss(t *testing.T) {
 	for i := range pods {
 		pods[i] = runningLogPod(fmt.Sprintf("pod-%02d", i))
 	}
-	c, p := coverageCollector(t, Config{Enabled: true, KubernetesLogPollInterval: 100 * time.Millisecond}, func(w http.ResponseWriter, r *http.Request) {
+	c, p := coverageCollector(t, Config{Enabled: true, KubernetesLogPollInterval: time.Second}, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/pods" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(corev1.PodList{Items: pods})
@@ -164,7 +165,9 @@ func TestCycleDeadlineBoundsSweepWithoutNodeFaultOrCursorLoss(t *testing.T) {
 		<-r.Context().Done()
 	})
 	start := time.Now()
-	c.collectOnce(t.Context())
+	deadlineCtx, stop := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer stop()
+	c.collectOnce(deadlineCtx)
 	if time.Since(start) > time.Second {
 		t.Fatal("cycle deadline did not bound the whole sweep")
 	}
@@ -220,8 +223,10 @@ func TestSlowSourcesCannotKeepHealthySuccessorFromItsNextTurn(t *testing.T) {
 	pods := make([]corev1.Pod, 8)
 	for i := range pods {
 		pods[i] = runningLogPod(fmt.Sprintf("a-slow-%02d", i))
+		pods[i].Spec.NodeName = "slow-node"
 	}
 	pods = append(pods, runningLogPod("z-healthy"))
+	var slowReads atomic.Int64
 	c, p := coverageCollector(t, Config{Enabled: true, KubernetesLogPollInterval: 100 * time.Millisecond}, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/pods" {
 			w.Header().Set("Content-Type", "application/json")
@@ -232,11 +237,16 @@ func TestSlowSourcesCannotKeepHealthySuccessorFromItsNextTurn(t *testing.T) {
 			fmt.Fprintf(w, "%s healthy\n", time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano))
 			return
 		}
+		slowReads.Add(1)
 		<-r.Context().Done()
 	})
 	c.collectOnce(t.Context())
+	first := slowReads.Load()
+	if p.kubernetesLogLines.Load() != 1 || first < 1 || first > 8 {
+		t.Fatal("hung node blocked the healthy source's first turn or multiplied requests")
+	}
 	c.collectOnce(t.Context())
-	if p.kubernetesLogLines.Load() != 1 || p.kubernetesLogErrors.Load() != 0 {
-		t.Fatal("slow sources starved the healthy successor or manufactured a node fault")
+	if p.kubernetesLogLines.Load() != 2 || p.kubernetesLogBackoffNodes.Load() != 1 || p.kubernetesLogErrors.Load() == 0 || slowReads.Load() != first {
+		t.Fatal("slow node did not back off independently of the healthy successor")
 	}
 }

@@ -157,7 +157,11 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	}()
 	boundary := cur.Boundary
 	seen := map[[32]byte]int{}
-	ctx, cancel := context.WithTimeout(parent, c.pipeline.cfg.KubernetesLogPollInterval)
+	// An independent I/O timeout must expire before the shared cycle deadline.
+	// Otherwise a hung kubelet is canceled as a scheduling deferral on every
+	// poll and never opens its node circuit. Keep room to visit healthy nodes.
+	readTimeout := min(5*time.Second, c.pipeline.cfg.KubernetesLogPollInterval/3)
+	ctx, cancel := context.WithTimeout(parent, readTimeout)
 	defer cancel()
 	since := metav1.NewTime(cur.Time)
 	stream, err := c.client.CoreV1().Pods(target.pod.Namespace).GetLogs(target.pod.Name, &corev1.PodLogOptions{Container: target.container, Timestamps: true, SinceTime: &since, Previous: target.previous}).Stream(ctx)

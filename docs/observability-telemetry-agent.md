@@ -172,7 +172,10 @@ The first pipeline implementation is a guarded local pipeline:
   identities rotate across the full pool, including when pods are replaced.
   Completed terminated processes stop consuming collection turns.
 - Discovery, reads and catch-up share one poll-interval deadline and at most
-  eight read workers. Existing queue byte/slot limits, line budgets and node
+  eight read workers. Each read also has an independent I/O timeout of at most
+  five seconds (one third of the poll interval when shorter), so an unresponsive
+  kubelet opens its existing node circuit before the whole cycle expires.
+  Existing queue byte/slot limits, line budgets and node
   backoff remain in effect. Cycle expiration preserves cursors and does not
   count as a failed node. A new source's five-minute initial lookback is fixed
   when discovered, including when its first turn is deferred.
