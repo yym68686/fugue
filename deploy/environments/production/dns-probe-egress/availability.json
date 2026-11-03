@@ -1,6 +1,6 @@
 {
   "schema": "fugue.dns-probe-egress/v1",
-  "generation": 1,
+  "generation": 2,
   "namespace": "fugue-system",
   "policy_name": "fugue-dns-availability-public-probes",
   "authority_cell_id": "cell-dns-availability",
@@ -8,14 +8,14 @@
     {
       "name": "fugue-front-serving-public-a",
       "uid": "935d3d0b-7a46-434e-9054-185fa8f3a017",
-      "generation": 3,
-      "digest": "sha256:73f03933740b117ce530475f6898a824484aed227200c8ada44299f90cda8bad"
+      "generation": 4,
+      "digest": "sha256:44ec8ad5bc502301e5b5e40096437705ff55eda43133b5ff382870109637beac"
     },
     {
       "name": "fugue-front-serving-public-b-primary",
       "uid": "50247fef-fbe9-43db-b5c4-5cf6f09e146f",
-      "generation": 3,
-      "digest": "sha256:49cf1ccf6384b029a110b34c4deb5ee535cfee79eb23c4db0466cef8e4be043a"
+      "generation": 4,
+      "digest": "sha256:2906faa6bc59581d63ee7f1486c9e96f62078dda14997d51eb95736716d87a83"
     },
     {
       "name": "fugue-front-serving-public-b-secondary",
