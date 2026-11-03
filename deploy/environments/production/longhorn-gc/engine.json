@@ -1,6 +1,8 @@
 {
-  "generation": 1,
+  "generation": 2,
   "namespace": "longhorn-system",
+  "managerDaemonSet": "longhorn-manager",
+  "managerContainer": "longhorn-manager",
   "expectedPreviousImage": "docker.io/longhornio/longhorn-engine:v1.12.1",
   "repository": "ghcr.io/yym68686/fugue-api",
   "upstreamCommit": "1fa902f0061b84b92af445c38392bfeb99faffb2"

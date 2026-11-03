@@ -13,7 +13,9 @@ from pathlib import Path
 
 def kubectl(*args, body=None):
     p = subprocess.run(['kubectl', *args], input=json.dumps(body) if body is not None else None,
-                       text=True, check=True, capture_output=True)
+                       text=True, capture_output=True, timeout=45)
+    if p.returncode:
+        raise RuntimeError('kubectl failed: ' + p.stderr[-4000:])
     return json.loads(p.stdout) if p.stdout.strip() else None
 
 
@@ -32,6 +34,29 @@ def quiescent(ns):
     return True
 
 
+def manager_engine_patch(manager, container_name, previous_image, image):
+    for index, container in enumerate(manager['spec']['template']['spec']['containers']):
+        if container['name'] != container_name:
+            continue
+        command = container.get('command', [])
+        if command.count('--engine-image') != 1:
+            raise ValueError('manager must declare exactly one --engine-image flag')
+        position = command.index('--engine-image') + 1
+        if position >= len(command) or command[position] not in (previous_image, image):
+            raise ValueError('manager engine image differs from the reviewed predecessor')
+        if command[position] == image:
+            return []
+        root = f'/spec/template/spec/containers/{index}'
+        return [
+            {'op': 'test', 'path': '/metadata/uid', 'value': manager['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': manager['metadata']['resourceVersion']},
+            {'op': 'test', 'path': root + '/name', 'value': container_name},
+            {'op': 'test', 'path': root + '/command', 'value': command},
+            {'op': 'replace', 'path': root + f'/command/{position}', 'value': image},
+        ]
+    raise ValueError('configured manager container is absent')
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('config')
@@ -45,6 +70,12 @@ def main():
     setting = kubectl('-n', ns, 'get', 'settings.longhorn.io', 'default-engine-image', '-o', 'json')
     if setting['value'] not in (config['expectedPreviousImage'], args.image):
         raise SystemExit('default engine changed; review the declaration before retrying')
+    upgrades = kubectl('-n', ns, 'get', 'settings.longhorn.io',
+                       'concurrent-automatic-engine-upgrade-per-node-limit', '-o', 'json')
+    if upgrades['value'] != '0':
+        raise SystemExit('automatic volume engine upgrades must already be disabled')
+    manager = kubectl('-n', ns, 'get', 'daemonset', config['managerDaemonSet'], '-o', 'json')
+    manager_engine_patch(manager, config['managerContainer'], config['expectedPreviousImage'], args.image)
     original = volumes(ns)
     previous_name = 'ei-' + hashlib.sha512(setting['value'].strip().encode()).hexdigest()[:8]
     previous = kubectl('-n', ns, 'get', 'engineimages.longhorn.io', previous_name, '-o', 'json')
@@ -76,13 +107,29 @@ def main():
     setting = kubectl('-n', ns, 'get', 'settings.longhorn.io', 'default-engine-image', '-o', 'json')
     if setting['value'] not in (config['expectedPreviousImage'], args.image):
         raise SystemExit('default engine changed while waiting')
-    if setting['value'] != args.image:
-        kubectl('-n', ns, 'patch', 'settings.longhorn.io', 'default-engine-image', '--type=json',
-                '-p', json.dumps([
-                    {'op': 'test', 'path': '/metadata/resourceVersion', 'value': setting['metadata']['resourceVersion']},
-                    {'op': 'test', 'path': '/value', 'value': config['expectedPreviousImage']},
-                    {'op': 'replace', 'path': '/value', 'value': args.image},
-                ]), '-o', 'json')
+    # This setting is read-only. The manager's supported startup flag owns it;
+    # changing the utility must survive manager restarts without spoofing an
+    # internal Longhorn annotation or changing existing volume engines.
+    manager = kubectl('-n', ns, 'get', 'daemonset', config['managerDaemonSet'], '-o', 'json')
+    patches = manager_engine_patch(manager, config['managerContainer'], config['expectedPreviousImage'], args.image)
+    if patches:
+        manager = kubectl('-n', ns, 'patch', 'daemonset', config['managerDaemonSet'],
+                          '--type=json', '-p', json.dumps(patches), '-o', 'json')
+    deadline = time.monotonic() + 480
+    while time.monotonic() < deadline:
+        live = kubectl('-n', ns, 'get', 'daemonset', config['managerDaemonSet'], '-o', 'json')
+        status = live.get('status', {})
+        desired = status.get('desiredNumberScheduled', 0)
+        if (status.get('observedGeneration', 0) >= live['metadata']['generation']
+                and desired > 0 and status.get('updatedNumberScheduled', 0) == desired
+                and status.get('numberReady', 0) == desired
+                and status.get('numberUnavailable', 0) == 0):
+            setting = kubectl('-n', ns, 'get', 'settings.longhorn.io', 'default-engine-image', '-o', 'json')
+            if setting['value'] == args.image:
+                break
+        time.sleep(10)
+    else:
+        raise SystemExit('manager rollout or default engine did not converge')
     if volumes(ns) != original:
         raise SystemExit('volume engine identities changed during installation; investigate')
     print(json.dumps({'installed': args.image, 'existing_volume_engines_unchanged': True}))

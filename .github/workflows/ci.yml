@@ -97,7 +97,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-longhorn-gc, cancel-in-progress: false, queue: max}
-    timeout-minutes: 12
+    timeout-minutes: 20
     permissions: {contents: read}
     steps:
       - name: Inspect generated metadata before checkout
