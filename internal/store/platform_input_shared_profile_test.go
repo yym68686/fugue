@@ -21,13 +21,21 @@ import (
 
 type inputProfileTracer struct {
 	postgresReadTracer
-	queries  atomic.Uint64
-	metadata atomic.Uint64
-	delay    time.Duration
+	queries            atomic.Uint64
+	metadata           atomic.Uint64
+	componentManifests atomic.Uint64
+	packBodies         atomic.Uint64
+	delay              time.Duration
 }
 
 func (t *inputProfileTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	t.queries.Add(1)
+	if strings.Contains(data.SQL, "size_bytes,stored_hash,data FROM fugue_platform_input_shared_packs") {
+		t.packBodies.Add(1)
+	}
+	if strings.Contains(data.SQL, "fugue_platform_input_components") {
+		t.componentManifests.Add(1)
+	}
 	if strings.Contains(data.SQL, "fugue_platform_input_component_recipes") || strings.Contains(data.SQL, "fugue_platform_input_component_refs") {
 		t.metadata.Add(1)
 	}

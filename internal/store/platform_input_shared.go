@@ -1,7 +1,6 @@
 package store
 
 import (
-	"bytes"
 	"compress/zlib"
 	"context"
 	"crypto/sha256"
@@ -219,18 +218,16 @@ func (r *sharedInputReader) pack(id int64) ([]byte, error) {
 	} else if data, ok := r.cache[id]; ok {
 		return data, nil
 	}
-	var data, h, sh []byte
-	var n int
-	if err := r.db.QueryRowContext(r.ctx, `SELECT pack_hash,size_bytes,stored_hash,data FROM fugue_platform_input_shared_packs WHERE pack_id=$1`, id).Scan(&h, &n, &sh, &data); err != nil {
+	if err := r.prefetchPacks(id); err != nil {
 		return nil, err
 	}
-	if n != w.Size || len(data) != w.StoredSize || !bytes.Equal(h, w.Hash[:]) || !bytes.Equal(sh, w.StoredHash[:]) || sha256.Sum256(data) != w.StoredHash {
-		return nil, ErrConflict
+	if r.packCache != nil {
+		return r.packCache.entries[id].data, nil
 	}
-	raw, err := decodeInputChunk(inputFormatCodecV2, data, n)
-	if err != nil || sha256.Sum256(raw) != w.Hash {
-		return nil, ErrConflict
-	}
+	return r.cache[id], nil
+}
+
+func (r *sharedInputReader) cachePack(id int64, w sharedPackWitness, raw []byte) {
 	if c := r.packCache; c != nil {
 		if _, ok := c.entries[id]; !ok {
 			if len(c.order) == 16 {
@@ -240,7 +237,7 @@ func (r *sharedInputReader) pack(id int64) ([]byte, error) {
 			c.order = append(c.order, id)
 		}
 		c.entries[id] = sharedReadPack{witness: w, data: raw}
-		return raw, nil
+		return
 	}
 	// Decoded cache is per read, bounded to four MiB, never a verification
 	// result reused across calls. It avoids decompressing a repeated pack.
@@ -250,7 +247,6 @@ func (r *sharedInputReader) pack(id int64) ([]byte, error) {
 	}
 	r.order = append(r.order, id)
 	r.cache[id] = raw
-	return raw, nil
 }
 func (r *sharedInputReader) Read(p []byte) (n int, result error) {
 	defer func() {
@@ -276,7 +272,7 @@ func (r *sharedInputReader) Read(p []byte) (n int, result error) {
 		if r.ordinal == r.m.Count {
 			r.done = true
 			if r.size != r.m.Size || sharedHashBytes(r.hash.Sum(nil)) != r.m.Digest {
-				r.err = ErrConflict
+				r.err = fmt.Errorf("shared component digest: %w", ErrConflict)
 				return 0, r.err
 			}
 			return 0, io.EOF
@@ -301,7 +297,7 @@ func (r *sharedInputReader) Read(p []byte) (n int, result error) {
 			}
 			raw := pack[l.Offset : l.Offset+l.Size]
 			if sha256.Sum256(raw) != l.Hash {
-				r.err = ErrConflict
+				r.err = fmt.Errorf("shared fact hash: %w", ErrConflict)
 				return 0, r.err
 			}
 			r.pending = append(r.pending, raw...)
@@ -430,6 +426,9 @@ func (w *sharedInputWriter) flush() error {
 	var pack []byte
 	var hashes [][]byte
 	var sizes, offsets []int32
+	var packHashes, storedHashes, bodies [][]byte
+	var packSizes []int32
+	var objectPacks []int
 	flushPack := func() error {
 		if len(pack) == 0 {
 			return nil
@@ -440,41 +439,13 @@ func (w *sharedInputWriter) flush() error {
 		}
 		h, sh := sha256.Sum256(pack), sha256.Sum256(encoded)
 		w.newPackBytes += uint64(len(encoded))
-		w.newObjects += uint64(len(hashes))
-		var packID int64
-		if _, e = w.tx.ExecContext(w.ctx, `INSERT INTO fugue_platform_input_shared_packs(pack_hash,size_bytes,stored_hash,data,created_at) VALUES($1,$2,$3,$4,now()) ON CONFLICT DO NOTHING`, h[:], len(pack), sh[:], encoded); e != nil {
-			return e
-		}
-		if e = w.tx.QueryRowContext(w.ctx, `SELECT pack_id FROM fugue_platform_input_shared_packs WHERE pack_hash=$1`, h[:]).Scan(&packID); e != nil {
-			return e
-		}
-		inserted, e := w.tx.QueryContext(w.ctx, `INSERT INTO fugue_platform_input_shared_objects(object_hash,size_bytes,pack_id,pack_offset) SELECT h,n,$3,o FROM unnest($1::bytea[],$2::int[],$4::int[]) AS v(h,n,o) RETURNING object_hash,object_id`, hashes, sizes, packID, offsets)
-		if e != nil {
-			return e
-		}
-		for inserted.Next() {
-			var raw []byte
-			var id int64
-			if e = inserted.Scan(&raw, &id); e != nil {
-				break
-			}
-			if len(raw) != 32 || id < 1 {
-				e = ErrConflict
-				break
-			}
-			var key [32]byte
-			copy(key[:], raw)
-			ids[key] = id
-		}
-		if e == nil {
-			e = inserted.Err()
-		}
-		inserted.Close()
+		packHashes = append(packHashes, h[:])
+		storedHashes = append(storedHashes, sh[:])
+		packSizes = append(packSizes, int32(len(pack)))
+		// The reusable encoder owns encoded until its next call.
+		bodies = append(bodies, append([]byte(nil), encoded...))
 		pack = nil
-		hashes = nil
-		sizes = nil
-		offsets = nil
-		return e
+		return nil
 	}
 	for _, h := range w.order {
 		if ids[h] != 0 {
@@ -487,12 +458,87 @@ func (w *sharedInputWriter) flush() error {
 			}
 		}
 		hashes = append(hashes, h[:])
+		w.newObjects++
 		sizes = append(sizes, int32(obj.Ref.Size))
 		offsets = append(offsets, int32(len(pack)))
+		objectPacks = append(objectPacks, len(packHashes))
 		pack = append(pack, obj.Data...)
 	}
 	if err = flushPack(); err != nil {
 		return err
+	}
+	// A flush holds at most sixteen 256KiB recipes. Persist their new packs
+	// and object placements in three bounded queries, rather than three per
+	// pack. Original pack boundaries, hashes and final readback are unchanged.
+	if len(packHashes) > 0 {
+		if _, err = w.tx.ExecContext(w.ctx, `INSERT INTO fugue_platform_input_shared_packs(pack_hash,size_bytes,stored_hash,data,created_at) SELECT h,n,s,d,now() FROM unnest($1::bytea[],$2::int[],$3::bytea[],$4::bytea[]) AS v(h,n,s,d) ON CONFLICT DO NOTHING`, packHashes, packSizes, storedHashes, bodies); err != nil {
+			return err
+		}
+		rows, err = w.tx.QueryContext(w.ctx, `SELECT pack_hash,pack_id FROM fugue_platform_input_shared_packs WHERE pack_hash=ANY($1::bytea[])`, packHashes)
+		if err != nil {
+			return err
+		}
+		packIDs := map[[32]byte]int64{}
+		for rows.Next() {
+			var h []byte
+			var id int64
+			if err = rows.Scan(&h, &id); err != nil {
+				break
+			}
+			if len(h) != 32 || id < 1 {
+				err = ErrConflict
+				break
+			}
+			var key [32]byte
+			copy(key[:], h)
+			packIDs[key] = id
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		placements := make([]int64, len(objectPacks))
+		for i, ordinal := range objectPacks {
+			var key [32]byte
+			copy(key[:], packHashes[ordinal])
+			placements[i] = packIDs[key]
+			if placements[i] < 1 {
+				return ErrConflict
+			}
+		}
+		rows, err = w.tx.QueryContext(w.ctx, `INSERT INTO fugue_platform_input_shared_objects(object_hash,size_bytes,pack_id,pack_offset) SELECT h,n,p,o FROM unnest($1::bytea[],$2::int[],$3::bigint[],$4::int[]) AS v(h,n,p,o) RETURNING object_hash,object_id`, hashes, sizes, placements, offsets)
+		if err != nil {
+			return err
+		}
+		inserted := 0
+		for rows.Next() {
+			var h []byte
+			var id int64
+			if err = rows.Scan(&h, &id); err != nil {
+				break
+			}
+			if len(h) != 32 || id < 1 {
+				err = ErrConflict
+				break
+			}
+			var key [32]byte
+			copy(key[:], h)
+			ids[key] = id
+			inserted++
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if inserted != len(hashes) {
+			return ErrConflict
+		}
 	}
 	objectIDs := []int64{}
 	owners := []string{}

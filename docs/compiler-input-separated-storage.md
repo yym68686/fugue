@@ -25,6 +25,9 @@ read. No cached result grants serving permission.
 
 The writer stages up to sixteen chunk recipes (at most four MiB of fact data)
 across component boundaries before querying/inserting shared objects and packs.
+Evidence manifests are looked up/inserted in batches of at most sixteen bodies
+or four MiB; an oversized body occupies its own bounded-input batch. New pack
+payloads and object placements are also persisted in bounded bulk queries.
 Its one final full read verifies both new and reused components before commit;
 it does not separately read every body twice. Readers prefetch metadata for at
 most sixteen components / four MiB of logical input and share a four MiB decoded
@@ -32,6 +35,12 @@ pack cache only inside the same read transaction. Pack reuse requires identical
 hashes and sizes. Every component occurrence and the complete original input
 are still hashed; cache state never crosses transactions. The private storage
 observation reports bounded phase timings and sanitized failure categories.
+Physical pack reads fetch at most sixteen packs / four MiB per query, with a
+lookahead capped at sixteen recipes. Both physical hashes are checked before
+any fetched pack enters the transaction cache. The most recent failed write's
+phase and timings survive subsequent successful writes, so a small successful
+input cannot erase a large input's deadline evidence. The original write
+deadline is unchanged.
 
 ## Migration and collection
 

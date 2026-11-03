@@ -18,12 +18,15 @@ var separatedInputStats struct {
 	lastFailureCategory                               string
 	lastFailureAt                                     time.Time
 	lastWriteTimings                                  map[string]int64
+	lastFailureTimings                                map[string]int64
+	lastFailurePhase                                  string
 }
 
 func separatedInputObservation() any {
 	separatedInputStats.mu.Lock()
 	category, at := separatedInputStats.lastFailureCategory, separatedInputStats.lastFailureAt
 	timings := separatedInputStats.lastWriteTimings
+	failureTimings, failurePhase := separatedInputStats.lastFailureTimings, separatedInputStats.lastFailurePhase
 	separatedInputStats.mu.Unlock()
 	return map[string]any{
 		"verified_write_attempts": separatedInputStats.writes.Load(),
@@ -34,6 +37,8 @@ func separatedInputObservation() any {
 		"last_failure_category":   category,
 		"last_failure_at":         at,
 		"last_write_timings_ms":   timings,
+		"last_failure_timings_ms": failureTimings,
+		"last_failure_phase":      failurePhase,
 	}
 }
 

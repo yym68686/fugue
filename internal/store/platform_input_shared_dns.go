@@ -143,6 +143,7 @@ func readSharedDNSSelections(ctx context.Context, db inputQueryer, m inputManife
 		if !selected[ordinal] {
 			continue
 		}
+		r.ordinal = ordinal
 		refs, e := decodeSharedRecipe(recipe, int(binaryRecipeSize(recipe)))
 		if e != nil {
 			return CompilerInputDNSSelections{}, e

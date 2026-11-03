@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,46 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 )
+
+func TestSharedInputReaderBatchesPackBodies(t *testing.T) {
+	s := sharedInputTestStore(t)
+	snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: fmt.Sprintf("pack-batch-%d", time.Now().UnixNano()), PolicyGeneration: "policy"}
+	var payload strings.Builder
+	for i := 0; i < 60000; i++ {
+		fmt.Fprintf(&payload, "%x", sha256.Sum256([]byte(fmt.Sprintf("independent-fact-%d", i))))
+	}
+	snapshot.Facts = map[string]any{"bounded_payload": payload.String()}
+	digest, err := platformconfig.RuntimeSnapshotDigest(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	var packs int
+	if err := s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_shared_refs WHERE content_hash=$1`, digest).Scan(&packs); err != nil || packs < 8 {
+		t.Fatal("fixture did not exercise multiple packs", packs, err)
+	}
+	config, err := pgx.ParseConfig(s.databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracer := &inputProfileTracer{}
+	config.Tracer = tracer
+	s.db.Close()
+	s.db = stdlib.OpenDB(*config)
+	t.Cleanup(func() { s.db.Close() })
+	got, err := s.GetPlatformCompilerInput(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual, err := platformconfig.RuntimeSnapshotDigest(got); err != nil || actual != digest {
+		t.Fatal("batched read changed bytes", err)
+	}
+	if n := tracer.packBodies.Load(); n > uint64((packs+15)/16+1) {
+		t.Fatalf("per-pack round trips returned: packs=%d queries=%d", packs, n)
+	}
+}
 
 func separatedTestStore(t testing.TB) *Store {
 	s := sharedInputTestStore(t)
@@ -580,4 +621,64 @@ func TestSeparatedFinalReadbackRejectsForgedNewComponentRecipe(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest).Scan(&n); err != nil || n != 0 {
 		t.Fatal("failed input leaked", n, err)
 	}
+}
+
+func TestSeparatedWriterBatchesDistinctComponentManifests(t *testing.T) {
+	s := separatedTestStore(t)
+	snapshot := separatedFixture(t)
+	base := snapshot.DNSSelections[0]
+	snapshot.DNSSelections = nil
+	for i := 0; i < 80; i++ {
+		v := base
+		v.PhysicalEvidence = json.RawMessage(fmt.Sprintf(`{"capture":"capture-%d","shared":%s}`, i, base.PhysicalEvidence))
+		snapshot.DNSSelections = append(snapshot.DNSSelections, v)
+	}
+	config, err := pgx.ParseConfig(s.databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracer := &inputProfileTracer{}
+	config.Tracer = tracer
+	s.db.Close()
+	s.db = stdlib.OpenDB(*config)
+	t.Cleanup(func() { s.db.Close() })
+	digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	if n := tracer.componentManifests.Load(); n > 18 {
+		t.Fatalf("per-component manifest round trips returned: %d", n)
+	}
+	assertSeparatedEquivalent(t, s, snapshot, digest)
+}
+
+func TestSeparatedFailureObservationSurvivesSuccessfulWrite(t *testing.T) {
+	s := separatedTestStore(t)
+	snapshot := separatedFixture(t)
+	digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
+	tx, err := s.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := s.pgWriteSeparatedInput(ctx, tx, snapshot, digest, nil); !errors.Is(err, context.Canceled) {
+		t.Fatal("canceled write not rejected", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	before := separatedInputObservation().(map[string]any)
+	if before["last_failure_phase"] != "encode_components" || before["last_failure_category"] != "canceled" {
+		t.Fatal("failure phase/category unavailable", before)
+	}
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	after := separatedInputObservation().(map[string]any)
+	if fmt.Sprint(before["last_failure_timings_ms"]) != fmt.Sprint(after["last_failure_timings_ms"]) || before["last_failure_at"] != after["last_failure_at"] || before["last_failure_phase"] != after["last_failure_phase"] {
+		t.Fatal("successful write erased failure evidence")
+	}
+	assertSeparatedEquivalent(t, s, snapshot, digest)
 }
