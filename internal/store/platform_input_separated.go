@@ -149,6 +149,11 @@ type separatedInputWriter struct {
 	size      int64
 	packBytes uint64
 	verified  map[string]bool
+	depth     int
+	quoted    bool
+	escaped   bool
+	dnsHeader uint8
+	dnsArray  bool
 }
 
 func (w *separatedInputWriter) Write(p []byte) (int, error) {
@@ -156,7 +161,7 @@ func (w *separatedInputWriter) Write(p []byte) (int, error) {
 	// Detach its first physical_evidence field without changing the encoder,
 	// its field order, or a single signed byte. Unknown shapes stay literal.
 	prefix := []byte(`{"physical_evidence":`)
-	if len(p) > len(prefix) && bytes.HasPrefix(p, prefix) {
+	if w.dnsArray && w.depth == 2 && len(p) > len(prefix) && bytes.HasPrefix(p, prefix) {
 		d := json.NewDecoder(bytes.NewReader(p[len(prefix):]))
 		var evidence json.RawMessage
 		if err := d.Decode(&evidence); err != nil {
@@ -180,6 +185,7 @@ func (w *separatedInputWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	w.observeJSONShape(p)
 	offset := uint32(len(w.frame))
 	w.frame = append(w.frame, p...)
 	if n := len(w.parts); n > 0 && !w.parts[n-1].Evidence && w.parts[n-1].Offset+w.parts[n-1].Size == offset {
@@ -193,6 +199,54 @@ func (w *separatedInputWriter) Write(p []byte) (int, error) {
 	w.size += int64(len(p))
 	w.hash.Write(p)
 	return len(p), nil
+}
+
+// Only the canonical top-level dns_selections array contains typed selection
+// evidence. A configuration value with the same field name remains in frame.
+// Follow the encoder's token boundaries, then track JSON depth across writes.
+func (w *separatedInputWriter) observeJSONShape(p []byte) {
+	switch w.dnsHeader {
+	case 1:
+		w.dnsHeader = 0
+		if bytes.Equal(p, []byte(":")) {
+			w.dnsHeader = 2
+		}
+	case 2:
+		w.dnsHeader = 0
+		if w.depth == 1 && bytes.Equal(p, []byte("[")) {
+			w.dnsArray = true
+		}
+	default:
+		if w.depth == 1 && !w.quoted && bytes.Equal(p, []byte(`"dns_selections"`)) {
+			w.dnsHeader = 1
+		}
+	}
+	for _, b := range p {
+		if w.escaped {
+			w.escaped = false
+			continue
+		}
+		if w.quoted && b == '\\' {
+			w.escaped = true
+			continue
+		}
+		if b == '"' {
+			w.quoted = !w.quoted
+			continue
+		}
+		if w.quoted {
+			continue
+		}
+		switch b {
+		case '{', '[':
+			w.depth++
+		case '}', ']':
+			if w.dnsArray && w.depth == 2 && b == ']' {
+				w.dnsArray = false
+			}
+			w.depth--
+		}
+	}
 }
 
 func (w *separatedInputWriter) WriteRuntimeSnapshotEvidence(raw []byte) (int, error) {

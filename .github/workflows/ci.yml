@@ -3325,7 +3325,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-storage-policy, cancel-in-progress: false}
+    concurrency: {group: fugue-storage-policy, cancel-in-progress: false, queue: max}
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
@@ -3354,7 +3354,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-storage-policy, cancel-in-progress: false}
+    concurrency: {group: fugue-compiler-input-storage, cancel-in-progress: false, queue: max}
     timeout-minutes: 5
     permissions: {contents: read}
     steps:

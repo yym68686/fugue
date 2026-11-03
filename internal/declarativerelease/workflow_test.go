@@ -285,6 +285,16 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatalf("CI triggers are not push/PR/audit only: %v", triggerKeys)
 	}
 	jobs := yamlMappingValue(t, root, "jobs")
+	policyQueue := yamlMappingValue(t, yamlMappingValue(t, jobs, "storage_policy"), "concurrency")
+	maintenanceQueue := yamlMappingValue(t, yamlMappingValue(t, jobs, "compiler_input_storage"), "concurrency")
+	if yamlMappingValue(t, policyQueue, "group").Value == yamlMappingValue(t, maintenanceQueue, "group").Value {
+		t.Fatal("empty maintenance jobs must not cancel pending storage policy publication")
+	}
+	for _, queue := range []*yaml.Node{policyQueue, maintenanceQueue} {
+		if yamlMappingValue(t, queue, "queue").Value != "max" || yamlMappingValue(t, queue, "cancel-in-progress").Value != "false" {
+			t.Fatal("reviewed storage maintenance and policy operations must queue without cancellation")
+		}
+	}
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "app_tcp_transport", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_backup_count_retention", "cnpg_candidate_artifact", "compiler_input_storage", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_image_gc", "deploy_edge_worker",

@@ -457,3 +457,15 @@ func TestSeparatedWriterPolicyFailsClosed(t *testing.T) {
 		t.Fatal("missing declaration enabled writer")
 	}
 }
+
+func TestSeparatedFrameDoesNotClassifyConfigurationByFieldName(t *testing.T) {
+	snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: "dns_selections", PolicyGeneration: "policy", Facts: map[string]any{"looks_like_evidence": map[string]any{"physical_evidence": map[string]any{"configuration": "retained"}}, "array": []any{map[string]any{"physical_evidence": true}}}}
+	w := &separatedInputWriter{hash: sha256.New(), verified: map[string]bool{}}
+	if err := platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := platformconfig.EncodeRuntimeSnapshot(snapshot)
+	if err != nil || !bytes.Equal(raw, w.frame) || len(w.verified) != 0 || w.depth != 0 || w.quoted || w.dnsArray {
+		t.Fatal("configuration field was reclassified", err)
+	}
+}

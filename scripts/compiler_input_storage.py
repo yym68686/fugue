@@ -46,6 +46,24 @@ def primary(resources, workload):
     return items[0]
 
 
+def owned_pods(namespace, deployment):
+    # Legacy Deployment selectors can also match unrelated workloads. Bind the
+    # population by controller UID through ReplicaSets, never by labels alone.
+    uid = deployment['metadata'].get('uid')
+    selector = deployment['spec']['selector']
+    if not uid or set(selector) != {'matchLabels'} or not selector['matchLabels']:
+        raise ValueError('reader ownership or selector is not exact')
+    labels = ','.join(k+'='+v for k, v in sorted(selector['matchLabels'].items()))
+    sets = json.loads(kube(namespace, 'get', 'replicasets', '-l', labels, '-o', 'json'))
+    owners = {x['metadata']['uid'] for x in sets['items'] if any(
+        r.get('controller') is True and r.get('kind') == 'Deployment' and r.get('uid') == uid
+        for r in x['metadata'].get('ownerReferences', []))}
+    pods = json.loads(kube(namespace, 'get', 'pods', '-l', labels, '-o', 'json'))
+    return {'items': [x for x in pods['items'] if any(
+        r.get('controller') is True and r.get('kind') == 'ReplicaSet' and r.get('uid') in owners
+        for r in x['metadata'].get('ownerReferences', []))]}
+
+
 def validate_reader(component, deployment, pods, record):
     w = component['workload']
     template = deployment['spec']['template']
@@ -93,11 +111,7 @@ def readers(registry):
             raise ValueError('unsupported store reader workload; explicit review required')
         namespace = w['namespace']
         deployment = get(namespace, 'deployment', w['name'])
-        selector = deployment['spec']['selector']
-        if set(selector) != {'matchLabels'} or not selector['matchLabels']:
-            raise ValueError('reader selector is not exact')
-        labels = ','.join(k+'='+v for k, v in sorted(selector['matchLabels'].items()))
-        pods = json.loads(kube(namespace, 'get', 'pods', '-l', labels, '-o', 'json'))
+        pods = owned_pods(namespace, deployment)
         pointer = get(namespace, 'configmap', 'fugue-release-monitor-'+component['id'])
         state = json.loads(pointer['data']['state.json'])
         if state.get('consecutiveFailures') or state.get('rollbackStatus'):

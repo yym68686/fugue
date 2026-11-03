@@ -4,10 +4,25 @@ import json
 import unittest
 from unittest.mock import patch
 
-from scripts.compiler_input_storage import compatible_revision, validate_reader, free_bytes
+from scripts.compiler_input_storage import compatible_revision, validate_reader, free_bytes, owned_pods
 
 
 class CompilerInputStorageTest(unittest.TestCase):
+    @patch('scripts.compiler_input_storage.kube')
+    def test_reader_population_uses_controller_uid_despite_shared_labels(self, kube):
+        deployment = {'metadata': {'uid': 'deployment-id'}, 'spec': {'selector': {'matchLabels': {'app': 'shared'}}}}
+        def owned(name, kind, uid, **extra):
+            return {'metadata': {'name': name, 'uid': name+'-id', 'ownerReferences': [{'kind': kind, 'uid': uid, 'controller': True}], **extra}}
+        sets = [owned('current', 'Deployment', 'deployment-id'), owned('old', 'Deployment', 'deployment-id'), owned('unrelated', 'Deployment', 'another-id')]
+        current = owned('current-pod', 'ReplicaSet', 'current-id')
+        terminating = owned('old-pod', 'ReplicaSet', 'old-id', deletionTimestamp='2026-01-01T00:00:00Z')
+        unrelated = owned('unrelated-pod', 'ReplicaSet', 'unrelated-id')
+        forged = owned('same-name-new-uid', 'ReplicaSet', 'current-other-id')
+        kube.side_effect = [json.dumps({'items': sets}), json.dumps({'items': [unrelated, current, terminating, forged]})]
+        self.assertEqual(owned_pods('system', deployment)['items'], [current, terminating])
+        self.assertIn('replicasets', kube.call_args_list[0].args)
+        with self.assertRaises(ValueError): owned_pods('system', {'metadata': {}, 'spec': deployment['spec']})
+
     def fixture(self):
         revision = 'a'*40
         image = 'registry.example.test/control@sha256:'+'b'*64
