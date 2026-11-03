@@ -57,6 +57,7 @@ func (s *Server) reconcileCompletedLonghornBackups(ctx context.Context, execute 
 	blocked := result["blocked"].(map[string]string)
 	candidates := []string{}
 	adopted := 0
+	var retryErrors []error
 	inventories := map[string]map[string]dataObjectInfo{}
 	for _, remote := range remotes {
 		meta, _ := remote["metadata"].(map[string]any)
@@ -188,7 +189,7 @@ func (s *Server) reconcileCompletedLonghornBackups(ctx context.Context, execute 
 		}
 		// Serialize registration with manual adoption and failed-run manifest GC.
 		acquired, err := s.store.WithAdvisoryLock(ctx, orphanManifestCleanupLock, func() error {
-			locked, e := s.store.WithAdvisoryLock(ctx, backupFailedRunGCLock, func() error {
+			locked, e := waitLonghornRegistrationLock(ctx, s.store, func() error {
 				latest, present, e := objects.headObjectInfo(ctx, configKey)
 				if e != nil {
 					return e
@@ -265,11 +266,33 @@ func (s *Server) reconcileCompletedLonghornBackups(ctx context.Context, execute 
 				err = store.ErrConflict
 			}
 			blocked[id] = err.Error()
+			retryErrors = append(retryErrors, fmt.Errorf("backup %s registration deferred: %w", id, err))
 			continue
 		}
 		adopted++
 	}
 	result["adopted"] = adopted
 	result["candidates"] = candidates
-	return result, nil
+	return result, errors.Join(retryErrors...)
+}
+
+// Inventory takes time. A periodic manifest sweep may acquire its lock during
+// that scan; wait for its bounded pass instead of repeatedly colliding at the
+// same scheduler phase and re-listing the whole repository on every retry.
+func waitLonghornRegistrationLock(ctx context.Context, db *store.Store, fn func() error) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 50*time.Second)
+	defer cancel()
+	for {
+		acquired, err := db.WithAdvisoryLock(ctx, backupFailedRunGCLock, fn)
+		if err != nil || acquired {
+			return acquired, err
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }

@@ -39,9 +39,25 @@ func (s *Server) dataNamespaceReferences(ctx context.Context, backend model.Data
 	}
 	out := map[string]bool{}
 	for _, ref := range refs {
-		b, ok := byID[ref.BackendID]
+		backendID := ref.BackendID
+		if backendID == "" {
+			backendID = s.store.DefaultDataBackendID()
+		}
+		b, ok := byID[backendID]
 		if !ok {
-			return nil, errors.New("reference backend is unavailable; refusing data GC")
+			// Older workspace rows can retain a backend name/slug. Resolve the
+			// public identity only when the global inventory is unambiguous.
+			matches := 0
+			for _, candidate := range backends {
+				if candidate.Name == backendID || candidate.Slug == model.Slugify(backendID) {
+					b = candidate
+					matches++
+				}
+			}
+			if matches != 1 {
+				return nil, errors.New("reference backend is unavailable; refusing data GC")
+			}
+			byID[backendID] = b
 		}
 		digest := strings.ToLower(strings.TrimSpace(ref.SHA256))
 		if !dataBackendSupportsDirectObjectStorage(backend) {

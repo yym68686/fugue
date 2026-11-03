@@ -2,12 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"fugue/internal/model"
 	"fugue/internal/store"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,7 +40,8 @@ func TestDataGCProtectsOtherTenantAliasAndPendingUpload(t *testing.T) {
 		}
 	}))
 	defer remote.Close()
-	s := store.New(filepath.Join(t.TempDir(), "state.json"))
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	s := store.New(statePath)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +68,27 @@ func TestDataGCProtectsOtherTenantAliasAndPendingUpload(t *testing.T) {
 	if _, e := s.CreateDataTransfer(model.DataTransfer{WorkspaceID: other.ID, Direction: "upload", Status: "running", Manifest: manifest(digests[1]), ExpiresAt: &expires}); e != nil {
 		t.Fatal(e)
 	}
+	// Simulate a retained legacy row; current workspace writes require an ID.
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state model.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	for i := range state.DataWorkspaces {
+		if state.DataWorkspaces[i].ID == other.ID {
+			state.DataWorkspaces[i].StorageBackendID = alias.Name
+		}
+	}
+	raw, err = json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
 	server := NewServer(s, nil, nil, ServerConfig{})
 	out, e := server.sweepDataNamespaceGC(context.Background(), w, 7, false)
 	if e != nil {
@@ -72,5 +96,12 @@ func TestDataGCProtectsOtherTenantAliasAndPendingUpload(t *testing.T) {
 	}
 	if out.Deleted != 1 || !strings.Contains(deleted, digests[2]) || strings.Contains(deleted, digests[0]) || strings.Contains(deleted, digests[1]) {
 		t.Fatalf("unsafe deletion: %+v %s", out, deleted)
+	}
+	// Names are tenant-scoped: an ambiguous legacy name cannot pick an
+	// arbitrary backend while a platform-wide collector is marking references.
+	create(a.ID, alias.Name)
+	deleted = ""
+	if _, err := server.sweepDataNamespaceGC(context.Background(), w, 7, false); err == nil || deleted != "" {
+		t.Fatalf("ambiguous backend allowed collection: %v %s", err, deleted)
 	}
 }

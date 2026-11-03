@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"fugue/internal/model"
 	"fugue/internal/store"
@@ -85,6 +86,20 @@ func TestCompletedLonghornReconcileVerifiesBlocksBeforeAdoption(t *testing.T) {
 			}
 			if exists, _ := db.BackupArtifactExistsForRun(id); exists {
 				t.Fatal("preview wrote artifact")
+			}
+			if !missing {
+				_, lockErr := db.WithAdvisoryLock(context.Background(), backupFailedRunGCLock, func() error {
+					ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+					defer cancel()
+					_, err := server.reconcileCompletedLonghornBackups(ctx, true)
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("busy registration must remain retryable: %v", err)
+					}
+					return nil
+				})
+				if lockErr != nil {
+					t.Fatal(lockErr)
+				}
 			}
 			result, e = server.reconcileCompletedLonghornBackups(context.Background(), true)
 			if e != nil {
