@@ -4,10 +4,20 @@ import json
 import unittest
 from unittest.mock import patch
 
-from scripts.compiler_input_storage import compatible_revision, validate_reader, free_bytes, owned_pods
+from scripts.compiler_input_storage import compatible_revision, validate_reader, free_bytes, owned_pods, command
 
 
 class CompilerInputStorageTest(unittest.TestCase):
+    @patch('scripts.compiler_input_storage.subprocess.run')
+    def test_failed_command_reports_only_static_stage_and_executor_category(self, run):
+        import subprocess
+        run.return_value = subprocess.CompletedProcess([], 1, 'private body', 'postgres://private-secret\ncompiler input maintenance completion not confirmed; inspect state before retrying; category=23503\n')
+        with self.assertRaisesRegex(ValueError, '^storage command failed stage=maintenance-executor category=23503$'):
+            command(['kubectl', 'exec', 'pod', '--', '/usr/local/bin/fugue-input-storage'])
+        run.return_value.stderr = 'unrecognized sensitive failure'
+        with self.assertRaisesRegex(ValueError, '^storage command failed stage=source-compatibility$'):
+            command(['git', 'show', 'revision:path'])
+
     @patch('scripts.compiler_input_storage.kube')
     def test_reader_population_uses_controller_uid_despite_shared_labels(self, kube):
         deployment = {'metadata': {'uid': 'deployment-id'}, 'spec': {'selector': {'matchLabels': {'app': 'shared'}}}}

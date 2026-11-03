@@ -18,7 +18,18 @@ FORMAT = 'runtime-snapshot-separated-v4'
 def command(args, timeout=30):
     result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
-        raise ValueError('storage preflight command failed')
+        stage = 'cluster-read'
+        if args[0] == 'git':
+            stage = 'source-compatibility'
+        elif '/usr/local/bin/fugue-input-storage' in args:
+            stage = 'maintenance-executor'
+        elif 'df' in args:
+            stage = 'database-space-observation'
+        # Extract only the executor's bounded category, never SQL, connection
+        # strings, kubectl stderr, evidence, or arbitrary subprocess output.
+        category = re.search(r'^compiler input maintenance completion not confirmed; inspect state before retrying; category=([a-z0-9-]{1,32})$', result.stderr, re.MULTILINE)
+        suffix = ' category='+category[1] if category else ''
+        raise ValueError('storage command failed stage='+stage+suffix)
     return result.stdout
 
 

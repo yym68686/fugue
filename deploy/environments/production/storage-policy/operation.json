@@ -5,5 +5,5 @@
   "expectedFormat": "runtime-snapshot-json-v1",
   "maxInputBytes": 2097152,
   "apply": true,
-  "expectedExecutorRevision": "8e716521e46984c3dfd3664ef3ee9c043ef7ad20"
+  "expectedExecutorRevision": "2e10d82547bf704b1d086997b7cf449682fe1fa4"
 }
