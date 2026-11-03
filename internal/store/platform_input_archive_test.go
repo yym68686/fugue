@@ -156,25 +156,83 @@ func TestCompilerInputArchiveRoutedReadRequiresVerifiedBytes(t *testing.T) {
 	if _, err = copyCompilerInputArchive(t.Context(), s.db, objects, backend, CompilerInputArchiveMigrationOptions{Digest: digest, Apply: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.db.Exec(`UPDATE fugue_platform_input_archives SET state='routed',routed_at=now() WHERE content_hash=$1 AND state='verified'`, digest); err != nil {
-		t.Fatal(err)
-	}
 	s.compilerInputArchiveObjects = objects
 	s.compilerInputArchiveReadLeaseEnabled = true
+	originalObjects := make(map[string][]byte, len(objects.objects))
+	for key, value := range objects.objects {
+		originalObjects[key] = bytes.Clone(value)
+	}
+	for key := range objects.objects {
+		objects.objects[key][0] ^= 0xff
+		break
+	}
+	if _, err = routeCompilerInputArchive(t.Context(), s.db, objects, backend, digest); err == nil {
+		t.Fatal("corrupt archive was routed")
+	}
+	var state string
+	if err = s.db.QueryRow(`SELECT state FROM fugue_platform_input_archives WHERE content_hash=$1`, digest).Scan(&state); err != nil || state != "verified" {
+		t.Fatal("failed route changed the archive state", state, err)
+	}
 	got, err := s.GetPlatformCompilerInput(digest)
 	if err != nil {
-		t.Fatal("verified archive route was unreadable", err)
+		t.Fatal("unrouted input did not retain its legacy reader", err)
 	}
 	gotDigest, err := platformconfig.RuntimeSnapshotDigest(got)
 	if err != nil || gotDigest != digest {
+		t.Fatal("legacy reader changed input identity", err)
+	}
+	for key, value := range originalObjects {
+		objects.objects[key] = value
+	}
+	route, err := routeCompilerInputArchive(t.Context(), s.db, objects, backend, digest)
+	if err != nil || !route.Applied || route.State != "routed" {
+		t.Fatal("verified archive was not routed", route, err)
+	}
+	got, err = s.GetPlatformCompilerInput(digest)
+	if err != nil {
+		t.Fatal("verified archive route was unreadable", err)
+	}
+	gotDigest, err = platformconfig.RuntimeSnapshotDigest(got)
+	if err != nil || gotDigest != digest {
 		t.Fatal("archive route changed input identity", err)
+	}
+	if _, err = routeCompilerInputArchive(t.Context(), s.db, objects, backend, digest); err != nil {
+		t.Fatal("repeated route was not idempotent", err)
+	}
+	var firstChunk []byte
+	if err = s.db.QueryRow(`SELECT data FROM fugue_platform_input_chunks WHERE content_hash=$1 ORDER BY ordinal LIMIT 1`, digest).Scan(&firstChunk); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_chunks SET data=overlay(data placing decode('00','hex') from 1 for 1) WHERE content_hash=$1 AND ordinal=0`, digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = unrouteCompilerInputArchive(t.Context(), s.db, digest); err == nil {
+		t.Fatal("corrupt legacy source was accepted for unroute")
+	}
+	if err = s.db.QueryRow(`SELECT state FROM fugue_platform_input_archives WHERE content_hash=$1`, digest).Scan(&state); err != nil || state != "routed" {
+		t.Fatal("failed unroute changed the archive state", state, err)
+	}
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_chunks SET data=$2 WHERE content_hash=$1 AND ordinal=0`, digest, firstChunk); err != nil {
+		t.Fatal(err)
 	}
 	for key := range objects.objects {
 		objects.objects[key][0] ^= 0xff
 		break
 	}
 	if _, err = s.GetPlatformCompilerInput(digest); err == nil {
-		t.Fatal("corrupt archived bytes accepted")
+		t.Fatal("corrupt routed archive was accepted")
+	}
+	rolledBack, err := unrouteCompilerInputArchive(t.Context(), s.db, digest)
+	if err != nil || !rolledBack.Applied || rolledBack.State != "verified" {
+		t.Fatal("verified legacy source was not restored", rolledBack, err)
+	}
+	got, err = s.GetPlatformCompilerInput(digest)
+	if err != nil {
+		t.Fatal("legacy fallback failed after unroute", err)
+	}
+	gotDigest, err = platformconfig.RuntimeSnapshotDigest(got)
+	if err != nil || gotDigest != digest {
+		t.Fatal("legacy fallback changed input identity", err)
 	}
 }
 

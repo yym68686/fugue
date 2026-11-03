@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -19,7 +20,14 @@ type CompilerInputArchiveMigrationOptions struct {
 	Apply  bool
 }
 
+type CompilerInputArchiveRouteOptions struct {
+	Digest  string
+	Apply   bool
+	Unroute bool
+}
+
 type CompilerInputArchiveMigrationReport struct {
+	Action       string `json:"action"`
 	Digest       string `json:"digest"`
 	Applied      bool   `json:"applied"`
 	SourceFormat string `json:"source_format"`
@@ -51,7 +59,7 @@ func newArchiveWorkerID() (string, error) {
 // deletes source rows or publishes a reader route. A verified result alone is
 // insufficient authority to retire the old relation.
 func RunCompilerInputArchiveMigration(ctx context.Context, databaseURL string, options CompilerInputArchiveMigrationOptions) (CompilerInputArchiveMigrationReport, error) {
-	report := CompilerInputArchiveMigrationReport{Digest: options.Digest}
+	report := CompilerInputArchiveMigrationReport{Action: "archive", Digest: options.Digest}
 	if !inputDigestPattern.MatchString(options.Digest) {
 		return report, ErrInvalidInput
 	}
@@ -86,7 +94,7 @@ func RunCompilerInputArchiveMigration(ctx context.Context, databaseURL string, o
 }
 
 func copyCompilerInputArchive(ctx context.Context, db *sql.DB, objects inputarchive.Objects, backendHash string, options CompilerInputArchiveMigrationOptions) (CompilerInputArchiveMigrationReport, error) {
-	report := CompilerInputArchiveMigrationReport{Digest: options.Digest}
+	report := CompilerInputArchiveMigrationReport{Action: "archive", Digest: options.Digest}
 	if !inputDigestPattern.MatchString(options.Digest) || options.Apply && (!inputDigestPattern.MatchString(backendHash) || objects == nil) {
 		return report, ErrInvalidInput
 	}
@@ -115,6 +123,285 @@ func copyCompilerInputArchive(ctx context.Context, db *sql.DB, objects inputarch
 	}
 	report.Applied, report.State, report.Segments, report.FencingToken = true, "verified", len(got.Segments), claim.token
 	return report, nil
+}
+
+// RunCompilerInputArchiveRoute changes one verified input's read location.
+// The legacy chunks remain intact so an explicit unroute can restore them.
+func RunCompilerInputArchiveRoute(ctx context.Context, databaseURL string, options CompilerInputArchiveRouteOptions) (CompilerInputArchiveMigrationReport, error) {
+	action := "archive-route"
+	if options.Unroute {
+		action = "archive-unroute"
+	}
+	report := CompilerInputArchiveMigrationReport{Action: action, Digest: options.Digest}
+	if !inputDigestPattern.MatchString(options.Digest) || !options.Apply {
+		return report, ErrInvalidInput
+	}
+	enabled, err := inputarchive.RoutingEnabledFromEnv()
+	if err != nil || !enabled {
+		return report, fmt.Errorf("compiler input archive routing opt-in is required: %w", ErrConflict)
+	}
+	db, err := openPostgresDatabase(databaseURL)
+	if err != nil {
+		return report, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	if options.Unroute {
+		report, err = unrouteCompilerInputArchive(ctx, db, options.Digest)
+		if err == nil {
+			report.Action = action
+		}
+		return report, err
+	}
+	cfg, configured, err := inputarchive.ConfigFromEnv()
+	if err != nil || !configured {
+		return report, fmt.Errorf("dedicated compiler input archive backend is required: %w", ErrConflict)
+	}
+	objects, err := inputarchive.NewS3(cfg)
+	if err != nil {
+		return report, err
+	}
+	backendHash, err := cfg.Fingerprint()
+	if err != nil {
+		return report, err
+	}
+	return routeCompilerInputArchive(ctx, db, objects, backendHash, options.Digest)
+}
+
+func routeCompilerInputArchive(ctx context.Context, db *sql.DB, objects inputarchive.Objects, backendHash, digest string) (CompilerInputArchiveMigrationReport, error) {
+	report := CompilerInputArchiveMigrationReport{Action: "archive-route", Digest: digest}
+	if !inputDigestPattern.MatchString(digest) || !inputDigestPattern.MatchString(backendHash) || objects == nil {
+		return report, ErrInvalidInput
+	}
+	source, epoch, err := verifiedArchiveSource(ctx, db, digest)
+	if err != nil {
+		return report, err
+	}
+	var state string
+	if err = db.QueryRowContext(ctx, `SELECT state FROM fugue_platform_input_archives WHERE content_hash=$1`, digest).Scan(&state); err != nil {
+		return report, err
+	}
+	if state != "verified" && state != "routed" {
+		return report, fmt.Errorf("compiler input archive is not verified: %w", ErrConflict)
+	}
+	expectedState := state
+	archive, err := compilerInputArchiveManifest(ctx, db, source, backendHash, expectedState)
+	if err != nil {
+		return report, err
+	}
+	if err = inputarchive.Verify(ctx, objects, archive); err != nil {
+		return report, err
+	}
+	if err = verifyCompilerInputArchiveSource(ctx, db, source, epoch); err != nil {
+		return report, err
+	}
+	tx, err := beginInputArchiveTx(ctx, db)
+	if err != nil {
+		return report, err
+	}
+	defer tx.Rollback()
+	currentEpoch, err := readInputArchiveEpoch(ctx, tx, epoch)
+	if err != nil {
+		return report, err
+	}
+	currentSource, err := readInputManifest(ctx, tx, digest)
+	if err != nil || currentSource != source {
+		if err != nil {
+			return report, err
+		}
+		return report, fmt.Errorf("compiler input archive source changed before route: %w", ErrConflict)
+	}
+	var currentState string
+	if err = tx.QueryRowContext(ctx, `SELECT state FROM fugue_platform_input_archives WHERE content_hash=$1`, digest).Scan(&currentState); err != nil {
+		return report, err
+	}
+	if currentState == "routed" {
+		currentArchive, routeErr := compilerInputArchiveManifest(ctx, tx, currentSource, backendHash, "routed")
+		if routeErr != nil || !sameCompilerInputArchiveManifest(archive, currentArchive) {
+			if routeErr != nil {
+				return report, routeErr
+			}
+			return report, fmt.Errorf("compiler input archive route changed during retry: %w", ErrConflict)
+		}
+		return compilerInputArchiveRouteReport(report, source, currentArchive, epoch, false), nil
+	}
+	if currentState != "verified" {
+		return report, fmt.Errorf("compiler input archive state changed before route: %w", ErrConflict)
+	}
+	if expectedState == "routed" {
+		return report, fmt.Errorf("compiler input archive was unrouted during verification: %w", ErrConflict)
+	}
+	currentArchive, err := compilerInputArchiveManifest(ctx, tx, currentSource, backendHash, "verified")
+	if err != nil || !sameCompilerInputArchiveManifest(archive, currentArchive) {
+		if err != nil {
+			return report, err
+		}
+		return report, fmt.Errorf("compiler input archive receipt changed before route: %w", ErrConflict)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE fugue_platform_input_archives SET state='routed',routed_at=now(),updated_at=now() WHERE content_hash=$1 AND archive_format=$2 AND source_format=$3 AND raw_bytes=$4 AND backend_hash=$5 AND state='verified' AND verified_digest=content_hash AND source_epoch=$6 AND EXISTS (SELECT 1 FROM fugue_platform_input_archive_segments WHERE content_hash=$1 AND uploaded_at IS NOT NULL AND verified_at IS NOT NULL)`, digest, inputarchive.Format, source.Format, source.Size, backendHash, currentEpoch)
+	if err != nil {
+		return report, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return report, err
+	}
+	if changed == 0 {
+		if err = tx.QueryRowContext(ctx, `SELECT state FROM fugue_platform_input_archives WHERE content_hash=$1`, digest).Scan(&state); err != nil {
+			return report, err
+		}
+		if state != "routed" {
+			return report, fmt.Errorf("compiler input archive route compare-and-swap failed: %w", ErrConflict)
+		}
+		currentArchive, err = compilerInputArchiveManifest(ctx, tx, currentSource, backendHash, "routed")
+		if err != nil || !sameCompilerInputArchiveManifest(archive, currentArchive) {
+			if err != nil {
+				return report, err
+			}
+			return report, fmt.Errorf("compiler input archive route changed during retry: %w", ErrConflict)
+		}
+	} else if err = tx.Commit(); err != nil {
+		return report, err
+	}
+	return compilerInputArchiveRouteReport(report, source, archive, epoch, changed == 1), nil
+}
+
+func compilerInputArchiveRouteReport(report CompilerInputArchiveMigrationReport, source inputManifest, archive inputarchive.Manifest, epoch int64, applied bool) CompilerInputArchiveMigrationReport {
+	report.Applied = applied
+	report.SourceFormat, report.RawBytes, report.SourceChunks = source.Format, source.Size, source.Count
+	report.Segments, report.State, report.SourceEpoch = len(archive.Segments), "routed", epoch
+	return report
+}
+
+func sameCompilerInputArchiveManifest(a, b inputarchive.Manifest) bool {
+	if a.Format != b.Format || a.Digest != b.Digest || a.RawBytes != b.RawBytes || a.SegmentBytes != b.SegmentBytes || a.Prefix != b.Prefix || len(a.Segments) != len(b.Segments) {
+		return false
+	}
+	for i := range a.Segments {
+		if a.Segments[i] != b.Segments[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func unrouteCompilerInputArchive(ctx context.Context, db *sql.DB, digest string) (CompilerInputArchiveMigrationReport, error) {
+	report := CompilerInputArchiveMigrationReport{Action: "archive-unroute", Digest: digest}
+	var backendHash, state string
+	if !inputDigestPattern.MatchString(digest) {
+		return report, ErrInvalidInput
+	}
+	if err := db.QueryRowContext(ctx, `SELECT backend_hash,state FROM fugue_platform_input_archives WHERE content_hash=$1 AND state IN ('verified','routed')`, digest).Scan(&backendHash, &state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return report, fmt.Errorf("compiler input archive is not routed: %w", ErrConflict)
+		}
+		return report, err
+	}
+	var epoch int64
+	if err := db.QueryRowContext(ctx, `SELECT epoch FROM fugue_platform_input_archive_control WHERE singleton`).Scan(&epoch); err != nil {
+		return report, err
+	}
+	source, err := readInputManifest(ctx, db, digest)
+	if err != nil {
+		return report, err
+	}
+	archive, err := compilerInputArchiveManifest(ctx, db, source, backendHash, state)
+	if err != nil {
+		return report, err
+	}
+	if err = verifyCompilerInputArchiveSource(ctx, db, source, epoch); err != nil {
+		return report, fmt.Errorf("compiler input archive legacy fallback is not verified: %w", err)
+	}
+	tx, err := beginInputArchiveTx(ctx, db)
+	if err != nil {
+		return report, err
+	}
+	defer tx.Rollback()
+	currentEpoch, err := readInputArchiveEpoch(ctx, tx, epoch)
+	if err != nil {
+		return report, err
+	}
+	currentSource, err := readInputManifest(ctx, tx, digest)
+	if err != nil || currentSource != source {
+		if err != nil {
+			return report, err
+		}
+		return report, fmt.Errorf("compiler input archive source changed before unroute: %w", ErrConflict)
+	}
+	var currentState string
+	if err = tx.QueryRowContext(ctx, `SELECT state FROM fugue_platform_input_archives WHERE content_hash=$1`, digest).Scan(&currentState); err != nil {
+		return report, err
+	}
+	if currentState != "verified" && currentState != "routed" {
+		return report, fmt.Errorf("compiler input archive state changed before unroute: %w", ErrConflict)
+	}
+	currentArchive, err := compilerInputArchiveManifest(ctx, tx, currentSource, backendHash, currentState)
+	if err != nil || !sameCompilerInputArchiveManifest(archive, currentArchive) {
+		if err != nil {
+			return report, err
+		}
+		return report, fmt.Errorf("compiler input archive receipt changed before unroute: %w", ErrConflict)
+	}
+	if currentState == "verified" {
+		report.SourceFormat, report.RawBytes, report.SourceChunks = source.Format, source.Size, source.Count
+		report.Segments, report.State, report.SourceEpoch = len(archive.Segments), "verified", epoch
+		return report, nil
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE fugue_platform_input_archives SET state='verified',routed_at=NULL,updated_at=now() WHERE content_hash=$1 AND backend_hash=$2 AND state='routed' AND verified_digest=content_hash AND source_epoch=$3`, digest, backendHash, currentEpoch)
+	if err != nil {
+		return report, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return report, err
+	}
+	if changed != 1 {
+		return report, fmt.Errorf("compiler input archive unroute compare-and-swap failed: %w", ErrConflict)
+	}
+	if err = tx.Commit(); err != nil {
+		return report, err
+	}
+	report.Applied, report.SourceFormat, report.RawBytes, report.SourceChunks = true, source.Format, source.Size, source.Count
+	report.Segments, report.State, report.SourceEpoch = len(archive.Segments), "verified", epoch
+	return report, nil
+}
+
+func verifiedArchiveSource(ctx context.Context, db *sql.DB, digest string) (inputManifest, int64, error) {
+	var zero inputManifest
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return zero, 0, err
+	}
+	defer tx.Rollback()
+	epoch, err := readInputArchiveEpoch(ctx, tx, -1)
+	if err != nil {
+		return zero, 0, err
+	}
+	source, err := readInputManifest(ctx, tx, digest)
+	if err != nil {
+		return zero, 0, err
+	}
+	if source.Format != inputFormatV1 && source.Format != inputFormatCodecV2 {
+		return zero, 0, fmt.Errorf("compiler input archive source is not v1/v2: %w", ErrConflict)
+	}
+	if err = tx.Commit(); err != nil {
+		return zero, 0, err
+	}
+	return source, epoch, nil
+}
+
+func verifyCompilerInputArchiveSource(ctx context.Context, db *sql.DB, source inputManifest, epoch int64) error {
+	stream := &archiveInputStream{ctx: ctx, db: db, m: source, hash: sha256.New(), sourceEpoch: epoch}
+	if _, err := io.Copy(io.Discard, stream); err != nil {
+		return err
+	}
+	if stream.err != nil || !stream.done || stream.count != source.Count || stream.size != source.Size || "sha256:"+hex.EncodeToString(stream.hash.Sum(nil)) != source.Digest {
+		return fmt.Errorf("compiler input archive source verification differs: %w", ErrConflict)
+	}
+	return nil
 }
 
 func beginInputArchiveTx(ctx context.Context, db *sql.DB) (*sql.Tx, error) {

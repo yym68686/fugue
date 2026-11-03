@@ -151,3 +151,18 @@ func TestCopyRejectsWrongDigestAndInvalidRoutingMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestRoutingRequiresExplicitOptIn(t *testing.T) {
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED", "")
+	if enabled, err := RoutingEnabledFromEnv(); err != nil || enabled {
+		t.Fatalf("routing must default off: enabled=%v err=%v", enabled, err)
+	}
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED", "true")
+	if enabled, err := RoutingEnabledFromEnv(); err != nil || !enabled {
+		t.Fatalf("explicit opt-in not honored: enabled=%v err=%v", enabled, err)
+	}
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED", "yes")
+	if _, err := RoutingEnabledFromEnv(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid opt-in accepted: %v", err)
+	}
+}

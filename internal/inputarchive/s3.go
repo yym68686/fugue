@@ -93,7 +93,15 @@ func ConfigFromEnv() (S3Config, bool, error) {
 // installs compatible readers and reader leases; it never migrates or changes
 // retention behavior by itself.
 func MigrationEnabledFromEnv() (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED"))) {
+	return explicitFeatureFlag("FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED")
+}
+
+func RoutingEnabledFromEnv() (bool, error) {
+	return explicitFeatureFlag("FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED")
+}
+
+func explicitFeatureFlag(name string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
 	case "", "false":
 		return false, nil
 	case "true":

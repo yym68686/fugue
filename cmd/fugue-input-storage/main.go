@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-route, archive-unroute, observe")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
@@ -29,7 +29,8 @@ func main() {
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
 	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive" && !*apply
-	if flag.NArg() != 0 || *apply && *rehearse || *mode == "archive" && *rehearse || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
+	routeMode := *mode == "archive-route" || *mode == "archive-unroute"
+	if flag.NArg() != 0 || *apply && *rehearse || (*mode == "archive" || routeMode) && *rehearse || routeMode && !*apply || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
 		fmt.Fprintln(os.Stderr, "select a read-only mode, or explicitly choose apply/rehearse")
 		os.Exit(2)
 	}
@@ -51,6 +52,22 @@ func main() {
 		report, err := store.RunCompilerInputArchiveMigration(ctx, dsn, store.CompilerInputArchiveMigrationOptions{Digest: *digest, Apply: *apply})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "compiler input archive not confirmed; inspect archive ledger before retrying")
+			os.Exit(1)
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if *mode == "archive-route" || *mode == "archive-unroute" {
+		dsn := os.Getenv("FUGUE_DATABASE_URL")
+		if dsn == "" {
+			fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
+			os.Exit(2)
+		}
+		report, err := store.RunCompilerInputArchiveRoute(ctx, dsn, store.CompilerInputArchiveRouteOptions{Digest: *digest, Apply: *apply, Unroute: *mode == "archive-unroute"})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "compiler input archive route not confirmed; inspect the archive ledger before retrying")
 			os.Exit(1)
 		}
 		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {

@@ -151,12 +151,24 @@ FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED=true \
 FUGUE_DATABASE_URL=... fugue-input-storage --mode archive --digest sha256:... --apply
 ```
 
-This stage deliberately has no production `route`, bulk-scan, delete, or
-`TRUNCATE` mode. The reader implementation accepts only a previously routed
-row whose full digest and every segment receipt validate, but no production
-operation can currently create that route. Routing requires cold/hot dependency
-proof and all serving/rollback readers to support the archive. Physical
-retirement additionally requires stopping old writers, proving the full
-old-relation copy set, draining readers with a release/rollback compatibility
-floor, and passing a separate bounded maintenance gate. Do not use existing
-backup prefixes or retention policy for compiler-input archives.
+This stage has no bulk-scan, delete, or `TRUNCATE` mode. The reader accepts
+only a routed row whose full digest and every segment receipt validate. A
+separate operator route operation can switch exactly one already-verified
+digest without deleting its original rows. Routing still requires cold/hot
+dependency proof and all serving/rollback readers to support the archive.
+Physical retirement additionally requires stopping old writers, proving the
+full old-relation copy set, draining readers with a release/rollback
+compatibility floor, and passing a separate bounded maintenance gate. Do not
+use existing backup prefixes or retention policy for compiler-input archives.
+
+After the per-input canary, operators may explicitly route one verified digest
+with `fugue-input-storage --mode archive-route --digest sha256:... --apply`.
+This requires `FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED=true` and the same
+dedicated archive configuration. The operation re-verifies the full external
+object and retained legacy chunks before a short compare-and-swap; it does not
+remove the old chunks. To restore the legacy reader for one digest, use
+`--mode archive-unroute --digest sha256:... --apply` with the routing opt-in;
+unroute verifies the retained old bytes first and does not require object-store
+availability. Both operations affect exactly one digest, and failed validation
+leaves the current route unchanged. Neither command authorizes bulk retirement
+or `TRUNCATE`.
