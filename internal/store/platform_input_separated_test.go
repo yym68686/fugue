@@ -17,6 +17,8 @@ import (
 
 	"fugue/internal/platformconfig"
 	"fugue/internal/schemamigrate"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 func separatedTestStore(t testing.TB) *Store {
@@ -512,4 +514,62 @@ func TestSeparatedMaintenanceUsesOrdinaryDatabaseRole(t *testing.T) {
 		}
 	}
 	assertSeparatedEquivalent(t, s, snapshot, digest)
+}
+
+func TestSeparatedReaderBatchesDistinctComponentMetadata(t *testing.T) {
+	s := separatedTestStore(t)
+	snapshot := separatedFixture(t)
+	base := snapshot.DNSSelections[0]
+	snapshot.DNSSelections = nil
+	for i := 0; i < 80; i++ {
+		v := base
+		v.PhysicalEvidence = json.RawMessage(fmt.Sprintf(`{"capture":"capture-%d","shared":%s}`, i, base.PhysicalEvidence))
+		snapshot.DNSSelections = append(snapshot.DNSSelections, v)
+	}
+	digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	config, err := pgx.ParseConfig(s.databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracer := &inputProfileTracer{}
+	config.Tracer = tracer
+	db := stdlib.OpenDB(*config)
+	defer db.Close()
+	reader := &Store{db: db, databaseURL: s.databaseURL, dbReady: true}
+	got, err := reader.GetPlatformCompilerInput(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual, e := platformconfig.RuntimeSnapshotDigest(got); e != nil || actual != digest {
+		t.Fatal("bytes changed", e)
+	}
+	if queries := tracer.metadata.Load(); queries >= 32 {
+		t.Fatalf("per-component round trips returned: %d", queries)
+	}
+}
+
+func TestSeparatedFinalReadbackRejectsForgedNewComponentRecipe(t *testing.T) {
+	s := separatedTestStore(t)
+	if _, err := s.db.Exec(`CREATE FUNCTION fugue_test_alter_component_recipe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.recipe=set_byte(NEW.recipe,0,0); NEW.recipe_hash='sha256:'||encode(sha256(NEW.recipe),'hex'); RETURN NEW; END $$; CREATE TRIGGER fugue_test_alter_component_recipe BEFORE INSERT ON fugue_platform_input_component_recipes FOR EACH ROW EXECUTE FUNCTION fugue_test_alter_component_recipe()`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, err := s.db.Exec(`DROP TRIGGER fugue_test_alter_component_recipe ON fugue_platform_input_component_recipes; DROP FUNCTION fugue_test_alter_component_recipe()`)
+		if err != nil {
+			t.Error(err)
+		}
+	})
+	snapshot := separatedFixture(t)
+	snapshot.DNSSelections[0].PhysicalEvidence = json.RawMessage(fmt.Sprintf(`{"unique":"new-%d"}`, time.Now().UnixNano()))
+	digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err == nil {
+		t.Fatal("forged stored recipe committed")
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest).Scan(&n); err != nil || n != 0 {
+		t.Fatal("failed input leaked", n, err)
+	}
 }

@@ -92,19 +92,16 @@ func readComponentManifest(ctx context.Context, db inputQueryer, digest string) 
 	return m, err
 }
 
-func ensureInputComponent(ctx context.Context, tx *sql.Tx, raw []byte) (string, uint64, error) {
+func ensureInputComponent(ctx context.Context, tx *sql.Tx, raw []byte, batch *sharedInputWriter) (string, uint64, error) {
 	digest := sharedHash(sha256.Sum256(raw))
 	m, err := readComponentManifest(ctx, tx, digest)
 	if err == nil {
 		if m.Size != int64(len(raw)) {
 			return "", 0, ErrConflict
 		}
-		r, e := openSharedRepresentation(ctx, tx, m, true)
-		if e != nil {
-			return "", 0, e
-		}
-		_, e = io.Copy(io.Discard, r)
-		return digest, 0, e
+		// The complete reconstructed input is read and verified below before
+		// commit, including reused components. Do not read every body twice.
+		return digest, 0, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return "", 0, err
@@ -112,11 +109,16 @@ func ensureInputComponent(ctx context.Context, tx *sql.Tx, raw []byte) (string, 
 	if len(raw) == 0 || len(raw) > inputMaxBytes {
 		return "", 0, ErrInvalidInput
 	}
-	w := &sharedInputWriter{components: true, ctx: ctx, tx: tx, digest: digest, hash: sha256.New(), encoder: inputChunkEncoder{level: zlib.DefaultCompression}, objects: map[[32]byte]sharedObject{}, seen: map[[32]byte]bool{}}
+	w := batch
+	if w == nil {
+		w = &sharedInputWriter{components: true, ctx: ctx, tx: tx, encoder: inputChunkEncoder{level: zlib.DefaultCompression}, objects: map[[32]byte]sharedObject{}, seen: map[[32]byte]bool{}}
+	}
+	w.digest, w.hash, w.size, w.ordinal, w.splitter = digest, sha256.New(), 0, 0, sharedSplitter{}
+	before := w.newPackBytes
 	if _, err = w.Write(raw); err == nil {
 		err = w.stage()
 	}
-	if err == nil {
+	if err == nil && batch == nil {
 		err = w.flush()
 	}
 	if err != nil {
@@ -128,16 +130,7 @@ func ensureInputComponent(ctx context.Context, tx *sql.Tx, raw []byte) (string, 
 	if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_platform_input_components(content_hash,size_bytes,chunk_count,created_at) VALUES($1,$2,$3,now())`, digest, w.size, w.ordinal); err != nil {
 		return "", 0, err
 	}
-	m, err = readComponentManifest(ctx, tx, digest)
-	if err != nil {
-		return "", 0, err
-	}
-	r, err := openSharedRepresentation(ctx, tx, m, true)
-	if err != nil {
-		return "", 0, err
-	}
-	_, err = io.Copy(io.Discard, r)
-	return digest, w.newPackBytes, err
+	return digest, w.newPackBytes - before, nil
 }
 
 type separatedInputWriter struct {
@@ -149,6 +142,7 @@ type separatedInputWriter struct {
 	size      int64
 	packBytes uint64
 	verified  map[string]bool
+	batch     *sharedInputWriter
 	depth     int
 	quoted    bool
 	escaped   bool
@@ -255,7 +249,7 @@ func (w *separatedInputWriter) WriteRuntimeSnapshotEvidence(raw []byte) (int, er
 	}
 	digest := sharedHash(sha256.Sum256(raw))
 	if !w.verified[digest] {
-		_, n, err := ensureInputComponent(w.ctx, w.tx, raw)
+		_, n, err := ensureInputComponent(w.ctx, w.tx, raw, w.batch)
 		if err != nil {
 			return 0, err
 		}
@@ -271,7 +265,16 @@ func (w *separatedInputWriter) WriteRuntimeSnapshotEvidence(raw []byte) (int, er
 
 func (s *Store) pgWriteSeparatedInput(ctx context.Context, tx *sql.Tx, snapshot platformconfig.RuntimeSnapshot, digest string, previous *inputManifest) (packResult uint64, resultErr error) {
 	w := &separatedInputWriter{ctx: ctx, tx: tx, hash: sha256.New(), verified: map[string]bool{}}
+	w.batch = &sharedInputWriter{components: true, ctx: ctx, tx: tx, encoder: inputChunkEncoder{level: zlib.DefaultCompression}, objects: map[[32]byte]sharedObject{}, seen: map[[32]byte]bool{}}
+	started := time.Now()
+	phase := started
+	timings := map[string]int64{}
+	advance := func(name string) { now := time.Now(); timings[name] = now.Sub(phase).Milliseconds(); phase = now }
 	defer func() {
+		timings["total"] = time.Since(started).Milliseconds()
+		separatedInputStats.mu.Lock()
+		separatedInputStats.lastWriteTimings = timings
+		separatedInputStats.mu.Unlock()
 		if resultErr != nil {
 			observeSeparatedFailure(resultErr)
 			return
@@ -283,14 +286,21 @@ func (s *Store) pgWriteSeparatedInput(ctx context.Context, tx *sql.Tx, snapshot 
 	if err := platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
 		return 0, err
 	}
+	advance("encode_components")
+	before := w.batch.newPackBytes
+	if err := w.batch.flush(); err != nil {
+		return 0, err
+	}
+	w.packBytes += w.batch.newPackBytes - before
 	if sharedHashBytes(w.hash.Sum(nil)) != digest {
 		return 0, ErrConflict
 	}
-	frame, packBytes, err := ensureInputComponent(ctx, tx, w.frame)
+	frame, packBytes, err := ensureInputComponent(ctx, tx, w.frame, nil)
 	if err != nil {
 		return 0, err
 	}
 	w.packBytes += packBytes
+	advance("frame")
 	layout, err := encodeSeparatedLayout(w.parts)
 	if err != nil {
 		return 0, err
@@ -326,11 +336,13 @@ func (s *Store) pgWriteSeparatedInput(ctx context.Context, tx *sql.Tx, snapshot 
 	if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_platform_input_separated_refs(content_hash,component_hash) SELECT $1,unnest($2::text[])`, digest, components); err != nil {
 		return 0, err
 	}
+	advance("manifest")
 	r, err := openSeparatedInput(ctx, tx, m)
 	if err != nil {
 		return 0, err
 	}
 	_, err = io.Copy(io.Discard, r)
+	advance("full_verify")
 	return w.packBytes, err
 }
 
@@ -343,6 +355,8 @@ type separatedInputReader struct {
 	components map[string]inputManifest
 	ordinal    int
 	current    *sharedInputReader
+	readers    map[string]*sharedInputReader
+	packCache  *sharedReadPackCache
 	pending    []byte
 	hash       hash.Hash
 	size       int64
@@ -351,7 +365,7 @@ type separatedInputReader struct {
 }
 
 func openSeparatedInput(ctx context.Context, db inputQueryer, m inputManifest) (*separatedInputReader, error) {
-	r := &separatedInputReader{ctx: ctx, db: db, m: m, hash: sha256.New(), components: map[string]inputManifest{}}
+	r := &separatedInputReader{ctx: ctx, db: db, m: m, hash: sha256.New(), components: map[string]inputManifest{}, readers: map[string]*sharedInputReader{}, packCache: &sharedReadPackCache{entries: map[int64]sharedReadPack{}}}
 	var frame string
 	var declared, layout []byte
 	if err := db.QueryRowContext(ctx, `SELECT frame_hash,layout_hash,layout FROM fugue_platform_input_separated_roots WHERE content_hash=$1`, m.Digest).Scan(&frame, &declared, &layout); err != nil {
@@ -406,6 +420,7 @@ func openSeparatedInput(ctx context.Context, db inputQueryer, m inputManifest) (
 	if err != nil {
 		return nil, err
 	}
+	fr.packCache = r.packCache
 	r.frame, err = io.ReadAll(io.LimitReader(fr, separatedFrameLimit+1))
 	if err != nil || !fr.done || len(r.frame) > separatedFrameLimit {
 		return nil, ErrConflict
@@ -464,7 +479,7 @@ func (r *separatedInputReader) Read(p []byte) (int, error) {
 		r.ordinal++
 		if part.Evidence {
 			var err error
-			r.current, err = openSharedRepresentation(r.ctx, r.db, r.components[part.Digest], true)
+			r.current, err = r.evidenceReader(part.Digest)
 			if err != nil {
 				r.err = err
 				return 0, err

@@ -2,17 +2,45 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"fugue/internal/platformconfig"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
+
+type inputProfileTracer struct {
+	postgresReadTracer
+	queries  atomic.Uint64
+	metadata atomic.Uint64
+	delay    time.Duration
+}
+
+func (t *inputProfileTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	t.queries.Add(1)
+	if strings.Contains(data.SQL, "fugue_platform_input_component_recipes") || strings.Contains(data.SQL, "fugue_platform_input_component_refs") {
+		t.metadata.Add(1)
+	}
+	if t.delay > 0 {
+		timer := time.NewTimer(t.delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+		}
+	}
+	return t.postgresReadTracer.TraceQueryStart(ctx, conn, data)
+}
 
 // Explicit offline benchmark. Source bytes are consumed from a private pipe;
 // only aggregates are logged. Use only a guarded disposable PostgreSQL.
@@ -20,7 +48,28 @@ func TestSharedInputProfileStream(t *testing.T) {
 	if os.Getenv("FUGUE_INPUT_PROFILE_STREAM") != "1" && os.Getenv("FUGUE_PROFILE_SOURCE_DATABASE_URL") == "" {
 		t.Skip("offline profile disabled")
 	}
-	s := sharedInputTestStore(t)
+	var s *Store
+	if os.Getenv("FUGUE_INPUT_PROFILE_FORMAT") == "v4" {
+		s = separatedTestStore(t)
+	} else {
+		s = sharedInputTestStore(t)
+	}
+	tracer := &inputProfileTracer{}
+	if d := os.Getenv("FUGUE_INPUT_PROFILE_QUERY_DELAY"); d != "" {
+		var err error
+		tracer.delay, err = time.ParseDuration(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	config, err := pgx.ParseConfig(s.databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Tracer = tracer
+	s.db.Close()
+	s.db = stdlib.OpenDB(*config)
+	t.Cleanup(func() { s.db.Close() })
 	if os.Getenv("FUGUE_INPUT_PROFILE_FORMAT") == "v2" {
 		s.storagePolicy.shared.Enabled = false
 		s.storagePolicy.codec = compilerInputCodecPolicy{Version: 1, Enabled: true}
@@ -39,7 +88,11 @@ func TestSharedInputProfileStream(t *testing.T) {
 		source = &Store{db: db, databaseURL: dsn, dbReady: true}
 	}
 	var encoder inputChunkEncoder
-	for sample := 0; sample < 2; sample++ {
+	samples := 2
+	if os.Getenv("FUGUE_INPUT_PROFILE_FORMAT") == "v4" {
+		samples = 1
+	}
+	for sample := 0; sample < samples; sample++ {
 		var n uint32
 		var raw []byte
 		if source != nil {
@@ -76,7 +129,20 @@ func TestSharedInputProfileStream(t *testing.T) {
 		if actual, err := platformconfig.RuntimeSnapshotDigest(snapshot); err != nil || actual != digest {
 			t.Fatal("noncanonical sample")
 		}
+		if os.Getenv("FUGUE_INPUT_PROFILE_FRESH") == "1" {
+			snapshot.IntentGeneration = fmt.Sprintf("offline-profile-%d", time.Now().UnixNano())
+			raw, err = platformconfig.EncodeRuntimeSnapshot(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest = sharedHash(sha256.Sum256(raw))
+		}
 		start := time.Now()
+		unique := map[[32]byte]bool{}
+		for _, v := range snapshot.DNSSelections {
+			unique[sha256.Sum256(v.PhysicalEvidence)] = true
+		}
+		t.Logf("format=%s logical=%d selections=%d unique_evidence=%d", os.Getenv("FUGUE_INPUT_PROFILE_FORMAT"), n, len(snapshot.DNSSelections), len(unique))
 		v2 := 0
 		for offset := 0; offset < len(raw); offset += inputChunkBytes - inputCodecHeaderBytes {
 			b, err := encoder.encode(raw[offset:min(offset+inputChunkBytes-inputCodecHeaderBytes, len(raw))])
@@ -87,10 +153,12 @@ func TestSharedInputProfileStream(t *testing.T) {
 		}
 		v2Time := time.Since(start)
 		start = time.Now()
+		tracer.queries.Store(0)
 		if err = s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
-			t.Fatal(err)
+			t.Fatalf("write failed after %s queries=%d: %v", time.Since(start), tracer.queries.Load(), err)
 		}
 		writeTime := time.Since(start)
+		t.Logf("write_queries=%d simulated_query_delay=%s", tracer.queries.Load(), tracer.delay)
 		start = time.Now()
 		got, err := s.GetPlatformCompilerInput(digest)
 		if err != nil {

@@ -23,6 +23,16 @@ layout, all referenced recipes/placements and actual hashes of every distinct
 physical pack, including omitted evidence. A changed witness requires a full
 read. No cached result grants serving permission.
 
+The writer stages up to sixteen chunk recipes (at most four MiB of fact data)
+across component boundaries before querying/inserting shared objects and packs.
+Its one final full read verifies both new and reused components before commit;
+it does not separately read every body twice. Readers prefetch metadata for at
+most sixteen components / four MiB of logical input and share a four MiB decoded
+pack cache only inside the same read transaction. Pack reuse requires identical
+hashes and sizes. Every component occurrence and the complete original input
+are still hashed; cache state never crosses transactions. The private storage
+observation reports bounded phase timings and sanitized failure categories.
+
 ## Migration and collection
 
 `fugue-input-storage` defaults to read-only inspection of one exact digest.

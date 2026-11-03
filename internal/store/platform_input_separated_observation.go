@@ -17,11 +17,13 @@ var separatedInputStats struct {
 	mu                                                sync.Mutex
 	lastFailureCategory                               string
 	lastFailureAt                                     time.Time
+	lastWriteTimings                                  map[string]int64
 }
 
 func separatedInputObservation() any {
 	separatedInputStats.mu.Lock()
 	category, at := separatedInputStats.lastFailureCategory, separatedInputStats.lastFailureAt
+	timings := separatedInputStats.lastWriteTimings
 	separatedInputStats.mu.Unlock()
 	return map[string]any{
 		"verified_write_attempts": separatedInputStats.writes.Load(),
@@ -31,6 +33,7 @@ func separatedInputObservation() any {
 		"new_pack_bytes":          separatedInputStats.newPackBytes.Load(),
 		"last_failure_category":   category,
 		"last_failure_at":         at,
+		"last_write_timings_ms":   timings,
 	}
 }
 

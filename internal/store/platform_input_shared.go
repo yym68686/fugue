@@ -34,6 +34,17 @@ type sharedPackWitness struct {
 	Hash, StoredHash [32]byte
 	Size, StoredSize int
 }
+
+// A single read transaction may reuse a physical pack across components.
+// Identity includes both hashes and lengths; this is never a process cache.
+type sharedReadPack struct {
+	witness sharedPackWitness
+	data    []byte
+}
+type sharedReadPackCache struct {
+	entries map[int64]sharedReadPack
+	order   []int64
+}
 type sharedInputReader struct {
 	ctx        context.Context
 	db         inputQueryer
@@ -52,6 +63,7 @@ type sharedInputReader struct {
 	started    time.Time
 	recorded   bool
 	components bool
+	packCache  *sharedReadPackCache
 }
 
 func openSharedInput(ctx context.Context, db inputQueryer, m inputManifest) (*sharedInputReader, error) {
@@ -196,12 +208,16 @@ func openSharedRepresentation(ctx context.Context, db inputQueryer, m inputManif
 }
 
 func (r *sharedInputReader) pack(id int64) ([]byte, error) {
-	if data, ok := r.cache[id]; ok {
-		return data, nil
-	}
 	w, ok := r.packs[id]
 	if !ok {
 		return nil, ErrConflict
+	}
+	if r.packCache != nil {
+		if cached, ok := r.packCache.entries[id]; ok && cached.witness == w {
+			return cached.data, nil
+		}
+	} else if data, ok := r.cache[id]; ok {
+		return data, nil
 	}
 	var data, h, sh []byte
 	var n int
@@ -214,6 +230,17 @@ func (r *sharedInputReader) pack(id int64) ([]byte, error) {
 	raw, err := decodeInputChunk(inputFormatCodecV2, data, n)
 	if err != nil || sha256.Sum256(raw) != w.Hash {
 		return nil, ErrConflict
+	}
+	if c := r.packCache; c != nil {
+		if _, ok := c.entries[id]; !ok {
+			if len(c.order) == 16 {
+				delete(c.entries, c.order[0])
+				c.order = c.order[1:]
+			}
+			c.order = append(c.order, id)
+		}
+		c.entries[id] = sharedReadPack{witness: w, data: raw}
+		return raw, nil
 	}
 	// Decoded cache is per read, bounded to four MiB, never a verification
 	// result reused across calls. It avoids decompressing a repeated pack.
@@ -302,6 +329,8 @@ type sharedInputWriter struct {
 	objects                                 map[[32]byte]sharedObject
 	order                                   [][32]byte
 	recipes                                 [][]sharedRef
+	recipeOwners                            []string
+	recipeOrdinals                          []int
 	lengths                                 []int
 	seen                                    map[[32]byte]bool
 	recipeBytes                             int
@@ -353,6 +382,8 @@ func (w *sharedInputWriter) stage() error {
 		return errSharedInputBudget
 	}
 	w.recipes = append(w.recipes, refs)
+	w.recipeOwners = append(w.recipeOwners, w.digest)
+	w.recipeOrdinals = append(w.recipeOrdinals, w.ordinal)
 	w.lengths = append(w.lengths, len(w.chunk))
 	w.ordinal++
 	w.chunk = w.chunk[:0]
@@ -463,17 +494,21 @@ func (w *sharedInputWriter) flush() error {
 	if err = flushPack(); err != nil {
 		return err
 	}
-	objectIDs := make([]int64, 0, len(ids))
-	for _, id := range ids {
-		objectIDs = append(objectIDs, id)
+	objectIDs := []int64{}
+	owners := []string{}
+	for i, refs := range w.recipes {
+		for _, ref := range refs {
+			owners = append(owners, w.recipeOwners[i])
+			objectIDs = append(objectIDs, ids[ref.Hash])
+		}
 	}
 	recipeTable, refTable := sharedRepresentationTables(w.components)
-	if _, err = w.tx.ExecContext(w.ctx, `INSERT INTO `+refTable+`(content_hash,pack_id) SELECT DISTINCT $1,pack_id FROM fugue_platform_input_shared_objects WHERE object_id=ANY($2::bigint[]) ON CONFLICT DO NOTHING`, w.digest, objectIDs); err != nil {
+	if _, err = w.tx.ExecContext(w.ctx, `INSERT INTO `+refTable+`(content_hash,pack_id) SELECT DISTINCT v.content_hash,o.pack_id FROM unnest($1::text[],$2::bigint[]) AS v(content_hash,object_id) JOIN fugue_platform_input_shared_objects o USING(object_id) ON CONFLICT DO NOTHING`, owners, objectIDs); err != nil {
 		return err
 	}
 	var statement strings.Builder
 	statement.WriteString(`INSERT INTO ` + recipeTable + `(content_hash,ordinal,recipe_hash,recipe) VALUES`)
-	args := []any{w.digest}
+	args := []any{}
 	for i, refs := range w.recipes {
 		physical := make([]sharedRecipeRef, len(refs))
 		for j, ref := range refs {
@@ -486,8 +521,8 @@ func (w *sharedInputWriter) flush() error {
 		if i > 0 {
 			statement.WriteByte(',')
 		}
-		fmt.Fprintf(&statement, "($1,$%d,$%d,$%d)", 2+3*i, 3+3*i, 4+3*i)
-		args = append(args, w.ordinal-len(w.recipes)+i, sharedHash(sha256.Sum256(recipe)), recipe)
+		fmt.Fprintf(&statement, "($%d,$%d,$%d,$%d)", 1+4*i, 2+4*i, 3+4*i, 4+4*i)
+		args = append(args, w.recipeOwners[i], w.recipeOrdinals[i], sharedHash(sha256.Sum256(recipe)), recipe)
 	}
 	if _, err = w.tx.ExecContext(w.ctx, statement.String(), args...); err != nil {
 		return err
@@ -495,6 +530,8 @@ func (w *sharedInputWriter) flush() error {
 	w.objects = map[[32]byte]sharedObject{}
 	w.order = nil
 	w.recipes = nil
+	w.recipeOwners = nil
+	w.recipeOrdinals = nil
 	w.lengths = nil
 	return nil
 }
