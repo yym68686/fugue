@@ -103,8 +103,11 @@ func waitForBuilderJob(ctx context.Context, namespace, jobName string, timeout t
 			return nil
 		}
 		if builderJobFailed(job.Status) {
-			summary, summaryErr := summarizeBuilderJobFailure(waitCtx, namespace, jobName)
+			summary, confirmedOOM, summaryErr := summarizeBuilderJobFailureDetails(waitCtx, namespace, jobName)
 			if summaryErr == nil && strings.TrimSpace(summary) != "" {
+				if confirmedOOM {
+					return &builderConfirmedOOM{cause: fmt.Errorf("%s", summary)}
+				}
 				return fmt.Errorf("%s", summary)
 			}
 			return fmt.Errorf("builder job %s failed", jobName)
@@ -170,18 +173,25 @@ func listBuilderPods(ctx context.Context, namespace, jobName string) ([]builderP
 }
 
 func summarizeBuilderJobFailure(ctx context.Context, namespace, jobName string) (string, error) {
+	summary, _, err := summarizeBuilderJobFailureDetails(ctx, namespace, jobName)
+	return summary, err
+}
+
+func summarizeBuilderJobFailureDetails(ctx context.Context, namespace, jobName string) (string, bool, error) {
 	job, err := getBuilderJob(ctx, namespace, jobName)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	pods, err := listBuilderPods(ctx, namespace, jobName)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	lines := make([]string, 0, len(pods)+1)
+	confirmedOOM := false
 	for _, pod := range pods {
+		confirmedOOM = confirmedOOM || builderPodHasConfirmedOOM(pod)
 		if summary := summarizeBuilderPodFailure(pod); summary != "" {
 			lines = append(lines, summary)
 			if logTail, containerName := summarizeBuilderPodFailureLogTail(ctx, namespace, pod); logTail != "" {
@@ -190,14 +200,14 @@ func summarizeBuilderJobFailure(ctx context.Context, namespace, jobName string) 
 		}
 	}
 	if len(lines) > 0 {
-		return strings.Join(lines, "\n"), nil
+		return strings.Join(lines, "\n"), confirmedOOM, nil
 	}
 	for _, condition := range job.Status.Conditions {
 		if strings.EqualFold(strings.TrimSpace(condition.Type), "Failed") && strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
-			return formatFailureLine("job "+jobName, strings.TrimSpace(condition.Reason), strings.TrimSpace(condition.Message)), nil
+			return formatFailureLine("job "+jobName, strings.TrimSpace(condition.Reason), strings.TrimSpace(condition.Message)), confirmedOOM, nil
 		}
 	}
-	return fmt.Sprintf("builder job %s failed", jobName), nil
+	return fmt.Sprintf("builder job %s failed", jobName), confirmedOOM, nil
 }
 
 func summarizeBuilderPodFailure(pod builderPod) string {

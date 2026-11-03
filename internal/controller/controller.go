@@ -53,6 +53,7 @@ type Service struct {
 	serviceURLForApp                func(context.Context, model.App) string
 	syncBillingImageStorage         bool
 	latestGitHubCommit              func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
+	inspectBuilderOOMPlacement      func(context.Context, string, sourceimport.BuilderPodPolicy, string, bool, map[string]string, int64) (model.BuilderPlacementInspection, error)
 	newKubeClient                   func(namespace string) (*kubeClient, error)
 	kubeClientMu                    sync.Mutex
 	kubeClients                     map[string]*kubeClient

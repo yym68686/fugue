@@ -125,7 +125,7 @@ func (s *Service) recordGitHubSourceSyncSuccess(ctx context.Context, app model.A
 		}
 		return false
 	}
-	if recorded && app.Status.SourceSync != nil && app.Status.SourceSync.Phase != model.AppSourceSyncPhaseOK && s.Logger != nil {
+	if recorded && app.Status.SourceSync != nil && app.Status.SourceSync.Phase != model.AppSourceSyncPhaseOK && app.Status.SourceSync.LastErrorCode != "builder_memory_not_increased" && s.Logger != nil {
 		s.Logger.Printf("github sync source recovered for app=%s", app.ID)
 	}
 	return recorded

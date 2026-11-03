@@ -32,6 +32,28 @@ and temporary storage retain their existing budgets. A confirmed OOM retries
 with a minimum above the previous actual allocation; an OOM at the policy ceiling
 is terminal. An admission failure never claims a build Pod ran.
 
+Confirmed OOM limits are persisted per tenant, app and complete build input
+fingerprint, across operations and controller restarts. The fingerprint includes
+the resolved commit or archive hash, build settings, environment and injected
+files; credentials, output image metadata and resource policy are excluded.
+Changing the policy alone cannot erase a previous OOM.
+
+Let `M` be the highest confirmed OOM container limit for those inputs and `A` the
+final reserved Pod limit after MiB rounding. Admission requires `A > M`; equal or
+smaller allocations are rejected with `builder_memory_not_increased`. The next
+minimum is the first whole MiB above `M`, without fixed 8/12/16 GiB retry tiers.
+The scheduler rechecks the durable limit while holding the node reservation
+lock, and continues to enforce the existing tenant memory ceiling.
+
+GitHub sync checks this rule before creating another import operation. It reports
+the blocked source-sync status, periodically rechecks capacity, and can resume
+when capacity strictly increases. Manual rebuilds use the same execution guard.
+A new commit, archive or other build input receives a separate history. On first
+use after upgrade, retained structured build-attempt evidence seeds the history.
+New OOM facts require the Kubernetes `OOMKilled` termination reason and the
+executed allocation; exit 137 or application log text alone is insufficient.
+History read/write failures stop the build instead of bypassing admission.
+
 Operation diagnosis distinguishes insufficient resources, lock contention,
 unavailable statistics, and node eligibility failures. Per-node reasons include
 explicit build-disable labels, and inspection exposes existing Pod requests,

@@ -26,6 +26,8 @@ type BuilderAttemptEvidence struct {
 // echoed: diagnostic output can contain arbitrary credentials and topology.
 func PublicDeploymentCause(code string) string {
 	switch code {
+	case "builder_memory_not_increased":
+		return "The build is blocked until its allocated memory strictly exceeds its previous confirmed OOM limit."
 	case "builder_memory_policy_exhausted":
 		return "The build cannot fit within the current memory policy. Change the build configuration or increase the available memory envelope."
 	case "builder_storage_policy_exhausted":
@@ -77,6 +79,9 @@ func DeploymentCauseCodes(message string) []string {
 	text := strings.ToLower(message)
 	out := []string{}
 	add := func(code string) { out = append(out, code) }
+	if strings.Contains(text, "builder_memory_not_increased") {
+		add("builder_memory_not_increased")
+	}
 	if strings.Contains(text, "ephemeral local storage usage exceeds") || strings.Contains(text, "ephemeral-storage") && strings.Contains(text, "exceeds") {
 		add("ephemeral_storage_limit_exceeded")
 	}

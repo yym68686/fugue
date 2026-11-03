@@ -255,6 +255,14 @@ func (e *builderKubeStatusError) Error() string {
 }
 
 func acquireBuilderPlacement(ctx context.Context, namespace, jobName string, policy BuilderPodPolicy, profile builderWorkloadProfile, requiredNodeLabels map[string]string) (builderJobPlacement, func(), error) {
+	limit, err := loadBuilderOOMLimit(ctx)
+	if err != nil {
+		return builderJobPlacement{}, nil, err
+	}
+	policy, err = builderPolicyAfterOOM(policy, profile, limit)
+	if err != nil {
+		return builderJobPlacement{}, nil, err
+	}
 	scheduler, err := newBuilderScheduler(namespace, policy, profile, requiredNodeLabels)
 	if err != nil {
 		return builderJobPlacement{}, nil, err
@@ -351,6 +359,10 @@ func (s *builderScheduler) reservePlacement(ctx context.Context, jobName string)
 			return placement, reservationName, nil
 		}
 		lastErr = err
+		var admission *BuilderMemoryAdmissionError
+		if errors.As(err, &admission) {
+			return builderJobPlacement{}, "", err
+		}
 		if ctx.Err() != nil {
 			return builderJobPlacement{}, "", ctx.Err()
 		}
@@ -381,6 +393,13 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 	candidates = builderFittingCandidates(candidates, s.demand)
 	candidates = builderPlacementCandidates(candidates, s.profile, s.candidateCount)
 	if len(candidates) == 0 {
+		limit, historyErr := loadBuilderOOMLimit(ctx)
+		if historyErr != nil {
+			return builderJobPlacement{}, "", historyErr
+		}
+		if limit > 0 {
+			return builderJobPlacement{}, "", &BuilderMemoryAdmissionError{PreviousOOMBytes: limit}
+		}
 		if len(snapshots) > 0 {
 			return builderJobPlacement{}, "", fmt.Errorf("%w: insufficient resources for profile %s (minimum cpu=%dm memory=%d bytes ephemeral=%d bytes)", errNoBuilderPlacement, s.profile, s.demand.CPUMilli, s.demand.MemoryBytes, s.demand.EphemeralBytes)
 		}
@@ -431,6 +450,19 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 			continue
 		}
 		allocatedDemand := builderAllocatedDemand(s.policy, s.profile, selectedCandidate)
+		previousOOM, guardErr := loadBuilderOOMLimit(ctx)
+		if guardErr != nil {
+			releaseLock()
+			return builderJobPlacement{}, "", guardErr
+		}
+		actualLimit := allocatedDemand.MemoryBytes
+		if s.profile != builderWorkloadProfileHeavy {
+			actualLimit = parseBuilderBytes(s.policy.Light.Resources.Limits["memory"])
+		}
+		if previousOOM > 0 && actualLimit <= previousOOM {
+			releaseLock()
+			return builderJobPlacement{}, "", &BuilderMemoryAdmissionError{previousOOM, actualLimit}
+		}
 		if !builderDemandFits(allocatedDemand, s.demand) || !builderDemandFits(selectedCandidate.Available, allocatedDemand) {
 			releaseLock()
 			continue

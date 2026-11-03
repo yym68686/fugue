@@ -74,6 +74,10 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 			MinimumMemoryBytes:  minimumMemoryBytes,
 		}
 		err := run(ctx, currentAttempt)
+		if persistErr := recordBuilderOOM(ctx, jobName, attempt, err); persistErr != nil {
+			recordBuilderAttempt(ctx, jobName, currentAttempt, started, err)
+			return errors.Join(err, persistErr)
+		}
 		err = classifyExhaustedBuilderPolicy(ctx, currentAttempt, err)
 		recordBuilderAttempt(ctx, jobName, currentAttempt, started, err)
 		if err == nil {
@@ -110,8 +114,11 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 			var actual *builderAttemptFailure
 			if errors.As(err, &actual) && actual.profile == builderWorkloadProfileHeavy {
 				previous := parseBuilderBytes(actual.policy.Heavy.Resources.Limits["memory"])
-				ceiling := parseBuilderBytes(actual.policy.HeavyMemoryLimitCeiling)
-				minimumMemoryBytes = minInt64(nextBuilderHeavyMemoryTier(previous), ceiling)
+				var floorErr error
+				minimumMemoryBytes, floorErr = builderMemoryAfterOOM(previous)
+				if floorErr != nil {
+					return errors.Join(err, floorErr)
+				}
 			}
 		}
 		if ephemeralFailure {
@@ -166,6 +173,10 @@ func shouldRetryBuilderJobFailure(err error) (bool, string) {
 		return false, ""
 	}
 	var exhausted *BuilderResourceFailure
+	var admission *BuilderMemoryAdmissionError
+	if errors.As(err, &admission) {
+		return false, "builder_memory_not_increased"
+	}
 	if errors.As(err, &exhausted) {
 		return false, exhausted.Code()
 	}

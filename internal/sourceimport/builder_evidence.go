@@ -30,6 +30,16 @@ func recordBuilderAttempt(ctx context.Context, jobName string, attempt builderJo
 	if runErr != nil {
 		fact.Outcome = "failed"
 	}
+	var admission *BuilderMemoryAdmissionError
+	if errors.As(runErr, &admission) {
+		fact.Outcome = "rejected"
+		fact.Causes = []string{"builder_memory_not_increased"}
+		fact.MemoryLimitBytes = admission.AllocatedBytes
+		diagnostics["execution_started"] = false
+		diagnostics["previous_oom_memory_bytes"] = admission.PreviousOOMBytes
+		record(fact, diagnostics)
+		return
+	}
 	var exhausted *BuilderResourceFailure
 	if errors.As(runErr, &exhausted) {
 		addBuilderCauses(&fact, exhausted.Code())

@@ -25,27 +25,21 @@ func TestDefaultBuilderPodPolicyWaitsForQueuedCapacity(t *testing.T) {
 	}
 }
 
-func TestBuilderPodPolicyEscalatesHeavyMemoryAfterOOM(t *testing.T) {
+func TestBuilderPodPolicyUsesStrictActualOOMFloor(t *testing.T) {
 	t.Parallel()
 
 	policy := defaultBuilderPodPolicy()
 	for _, tc := range []struct {
-		oomRetries int
-		want       string
+		failed string
+		want   string
 	}{
-		{oomRetries: 0, want: "6Gi"},
-		{oomRetries: 1, want: "8192Mi"},
-		{oomRetries: 2, want: "12288Mi"},
-		{oomRetries: 3, want: "16384Mi"},
+		{failed: "5Gi", want: "5121Mi"},
+		{failed: "7800Mi", want: "7801Mi"},
+		{failed: "12Gi", want: "12289Mi"},
 	} {
-		got := builderPodPolicyForRetryCounts(policy, builderWorkloadProfileHeavy, tc.oomRetries, 0)
-		if limit := got.Heavy.Resources.Limits["memory"]; limit != tc.want {
-			t.Fatalf("OOM retries=%d: expected memory limit %s, got %s", tc.oomRetries, tc.want, limit)
-		}
-		if tc.oomRetries > 0 {
-			if request := got.Heavy.Resources.Requests["memory"]; request != tc.want {
-				t.Fatalf("OOM retries=%d: expected memory request %s, got %s", tc.oomRetries, tc.want, request)
-			}
+		got, err := builderPolicyAfterOOM(policy, builderWorkloadProfileHeavy, parseBuilderBytes(tc.failed))
+		if err != nil || got.HeavyMemoryMinimum != tc.want {
+			t.Fatalf("failed=%s: minimum=%s err=%v", tc.failed, got.HeavyMemoryMinimum, err)
 		}
 	}
 }
@@ -81,16 +75,12 @@ func TestBuilderPodPolicyEscalatesHeavyEphemeralAfterEviction(t *testing.T) {
 	}
 }
 
-func TestBuilderPodPolicyCapsOOMGrowthAtTenantCeiling(t *testing.T) {
+func TestBuilderPodPolicyRejectsOOMFloorAtCeiling(t *testing.T) {
 	t.Parallel()
 
 	policy := builderPodPolicyWithMemoryCeiling(defaultBuilderPodPolicy(), 10*1024*1024*1024)
-	got := builderPodPolicyForRetryCounts(policy, builderWorkloadProfileHeavy, 2, 0)
-	if limit := got.Heavy.Resources.Limits["memory"]; limit != "10240Mi" {
-		t.Fatalf("expected OOM memory growth capped at 10Gi, got %s", limit)
-	}
-	if request := got.Heavy.Resources.Requests["memory"]; request != "10240Mi" {
-		t.Fatalf("expected capped memory to be reserved, got %s", request)
+	if _, err := builderPolicyAfterOOM(policy, builderWorkloadProfileHeavy, 10<<30); err == nil {
+		t.Fatal("unchanged ceiling admitted")
 	}
 }
 
@@ -112,7 +102,7 @@ func TestBuilderPodPolicyStopsWhenTenantCeilingCannotGrow(t *testing.T) {
 	t.Parallel()
 
 	policy := builderPodPolicyWithMemoryCeiling(defaultBuilderPodPolicy(), DefaultBuilderHeavyMemoryLimitBytes())
-	if _, err := builderPodPolicyForJobAttempt(policy, builderWorkloadProfileHeavy, builderJobAttempt{Number: 2, OOMRetryCount: 1}); err == nil {
+	if _, err := builderPodPolicyForJobAttempt(policy, builderWorkloadProfileHeavy, builderJobAttempt{Number: 2, OOMRetryCount: 1, MinimumMemoryBytes: DefaultBuilderHeavyMemoryLimitBytes() + 1<<20}); err == nil {
 		t.Fatal("expected builder OOM retry to stop when the tenant ceiling cannot grow")
 	}
 }

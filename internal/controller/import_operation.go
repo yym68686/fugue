@@ -67,10 +67,18 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	builderMemoryCeiling := s.importBuilderMemoryCeilingBytes(app.TenantID)
 	builderPolicy := s.effectiveImportBuilderPolicy(builderMemoryCeiling)
 	failureFingerprint := ""
+	oomFingerprint := buildOOMInputFingerprint(*op.DesiredSource, *op.DesiredSpec)
+	importCtx = sourceimport.WithBuilderOOMGuard(importCtx, func(readCtx context.Context) (int64, error) {
+		history, err := s.readBuildOOMHistory(readCtx, app, oomFingerprint)
+		return history.MemoryLimitBytes, err
+	}, func(writeCtx context.Context, fact sourceimport.BuilderOOMObservation) error {
+		return s.recordBuildOOM(writeCtx, app, op.ID, oomFingerprint, fact)
+	})
 	guardRejected := false
 	importCtx = sourceimport.WithBuildInputGuard(importCtx, func(actualCommit string) error {
 		source := *op.DesiredSource
 		source.CommitSHA = actualCommit
+		oomFingerprint = buildOOMInputFingerprint(source, *op.DesiredSpec)
 		failureFingerprint = buildInputFingerprint(source, *op.DesiredSpec, builderPolicy)
 		ledger, loadErr := s.readBuildFailureLedger(importCtx, app)
 		if loadErr != nil {
@@ -189,6 +197,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		if upload.TenantID != app.TenantID {
 			return fmt.Errorf("source upload %s is not visible to tenant %s", upload.ID, app.TenantID)
 		}
+		resolvedSource := *op.DesiredSource
+		resolvedSource.ArchiveSHA256 = upload.SHA256
+		oomFingerprint = buildOOMInputFingerprint(resolvedSource, *op.DesiredSpec)
 		archiveURL, archiveURLErr := sourceUploadDownloadURL(s.Config.SourceUploadBaseURL, upload.ID, upload.DownloadToken)
 		if archiveURLErr != nil {
 			return archiveURLErr

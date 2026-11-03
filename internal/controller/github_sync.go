@@ -23,6 +23,7 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			return err
 		}
 		currentTime := s.gitHubSyncNow()
+		wasOOMBlocked := app.Status.SourceSync != nil && app.Status.SourceSync.LastErrorCode == "builder_memory_not_increased"
 		originSource := model.AppOriginSource(app)
 		if !shouldAutoSyncGitHubApp(app) {
 			continue
@@ -81,7 +82,11 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			}
 		}
 		buildSpec, buildSource := gitHubRetryInputs(app, retryBaseOperation)
-		buildSource.CommitSHA = latestCommit
+		buildSource, err = queueableGitHubSource(buildSource, resolvedBranch, latestCommit)
+		if err != nil {
+			s.Logger.Printf("github sync invalid build source app=%s: %v", app.ID, err)
+			continue
+		}
 		fingerprint := buildInputFingerprint(buildSource, buildSpec, s.effectiveImportBuilderPolicy(s.importBuilderMemoryCeilingBytes(app.TenantID)))
 		ledger, historyErr := s.readBuildFailureLedger(ctx, app)
 		if historyErr != nil {
@@ -91,7 +96,15 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		if cachedBuildRejection(ledger, fingerprint) != nil {
 			continue
 		}
-		if found && !buildPolicyChangedSinceFailure(ledger, state.lastAutomaticFailure, fingerprint) &&
+		admitted, admissionErr := s.githubBuildOOMAdmission(ctx, app, buildSource, buildSpec, s.effectiveImportBuilderPolicy(s.importBuilderMemoryCeilingBytes(app.TenantID)))
+		if admissionErr != nil {
+			s.Logger.Printf("github sync OOM admission check failed app=%s: %v", app.ID, admissionErr)
+			continue
+		}
+		if !admitted {
+			continue
+		}
+		if found && !wasOOMBlocked && !buildPolicyChangedSinceFailure(ledger, state.lastAutomaticFailure, fingerprint) &&
 			!gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
 			continue
 		}

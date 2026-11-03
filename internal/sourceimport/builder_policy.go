@@ -193,30 +193,10 @@ func builderPodPolicyForRetryCounts(policy BuilderPodPolicy, profile builderWork
 	if profile != builderWorkloadProfileHeavy {
 		return policy
 	}
-	if oomRetryCount > 0 {
-		policy = builderPodPolicyWithHeavyMemoryRetry(policy, oomRetryCount)
-	}
+	// OOM admission uses the actual failed limit, never a fixed memory tier.
 	if ephemeralRetryCount > 0 {
 		policy = builderPodPolicyWithHeavyEphemeralRetry(policy, ephemeralRetryCount)
 	}
-	return policy
-}
-
-func builderPodPolicyWithHeavyMemoryRetry(policy BuilderPodPolicy, oomRetryCount int) BuilderPodPolicy {
-	currentBytes := parseBuilderBytes(policy.Heavy.Resources.Limits["memory"])
-	ceilingBytes := parseBuilderBytes(policy.HeavyMemoryLimitCeiling)
-	if ceilingBytes < currentBytes {
-		ceilingBytes = currentBytes
-	}
-	for retry := 0; retry < oomRetryCount && currentBytes < ceilingBytes; retry++ {
-		currentBytes = nextBuilderHeavyMemoryTier(currentBytes)
-		if currentBytes > ceilingBytes {
-			currentBytes = ceilingBytes
-		}
-	}
-	memory := formatBuilderMemoryBytes(currentBytes)
-	policy.Heavy.Resources.Requests["memory"] = memory
-	policy.Heavy.Resources.Limits["memory"] = memory
 	return policy
 }
 
@@ -230,13 +210,6 @@ func builderPodPolicyForJobAttempt(policy BuilderPodPolicy, profile builderWorkl
 		if parseBuilderBytes(current.HeavyMemoryMinimum) > parseBuilderBytes(current.HeavyMemoryLimitCeiling) {
 			return BuilderPodPolicy{}, &BuilderResourceFailure{Resource: "memory", LimitBytes: parseBuilderBytes(current.HeavyMemoryLimitCeiling), Preflight: true}
 		}
-	} else if attempt.OOMRetryCount > 0 {
-		previous := builderPodPolicyForRetryCounts(policy, profile, attempt.OOMRetryCount-1, attempt.EphemeralRetryCount)
-		currentBytes := parseBuilderBytes(current.Heavy.Resources.Limits["memory"])
-		previousBytes := parseBuilderBytes(previous.Heavy.Resources.Limits["memory"])
-		if currentBytes <= previousBytes {
-			return BuilderPodPolicy{}, &BuilderResourceFailure{Resource: "memory", LimitBytes: currentBytes, Preflight: true}
-		}
 	}
 	if attempt.EphemeralRetryCount > 0 {
 		previous := builderPodPolicyForRetryCounts(policy, profile, attempt.OOMRetryCount, attempt.EphemeralRetryCount-1)
@@ -247,19 +220,6 @@ func builderPodPolicyForJobAttempt(policy BuilderPodPolicy, profile builderWorkl
 		}
 	}
 	return current, nil
-}
-
-func nextBuilderHeavyMemoryTier(currentBytes int64) int64 {
-	for _, tier := range []int64{
-		8 * 1024 * 1024 * 1024,
-		12 * 1024 * 1024 * 1024,
-		16 * 1024 * 1024 * 1024,
-	} {
-		if currentBytes < tier {
-			return tier
-		}
-	}
-	return currentBytes
 }
 
 func builderPodPolicyWithHeavyEphemeralRetry(policy BuilderPodPolicy, ephemeralRetryCount int) BuilderPodPolicy {

@@ -14,7 +14,7 @@ import (
 )
 
 func TestHeavyPlacementReservesLiveHeadroomBelowLegacySixGiFloor(t *testing.T) {
-	for _, mode := range []string{"normal", "capacity changes under lock", "lock contention"} {
+	for _, mode := range []string{"normal", "capacity changes under lock", "lock contention", "equal OOM limit", "lower than OOM limit", "greater than OOM limit"} {
 		t.Run(mode, func(t *testing.T) {
 			policy := defaultBuilderPodPolicy()
 			demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
@@ -82,12 +82,35 @@ func TestHeavyPlacementReservesLiveHeadroomBelowLegacySixGiFloor(t *testing.T) {
 			defer server.Close()
 			s := &builderScheduler{client: &builderKubeClient{client: server.Client(), baseURL: server.URL, namespace: "fugue-system"},
 				policy: policy, profile: builderWorkloadProfileHeavy, demand: demand, candidateCount: 3, reservationLeaseDuration: 35 * time.Minute}
-			placement, reservation, err := s.tryReservePlacement(context.Background(), "build-first")
+			ctx := context.Background()
+			if strings.Contains(mode, "OOM limit") {
+				limit := int64(5 << 30)
+				if mode == "lower than OOM limit" {
+					limit = 6 << 30
+				}
+				if mode == "greater than OOM limit" {
+					limit = 4 << 30
+				}
+				ctx = WithBuilderOOMGuard(ctx, func(context.Context) (int64, error) { return limit, nil }, nil)
+			}
+			placement, reservation, err := s.tryReservePlacement(ctx, "build-first")
+			if mode == "equal OOM limit" || mode == "lower than OOM limit" {
+				var blocked *BuilderMemoryAdmissionError
+				if !errors.As(err, &blocked) || reservation != "" {
+					t.Fatalf("unsafe reservation: %+v %s %v", placement, reservation, err)
+				}
+				for _, lease := range leases {
+					if lease.Metadata.Labels["app.kubernetes.io/component"] == builderReservationComponentValue {
+						t.Fatal("blocked build reserved capacity")
+					}
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			wantNode, wantMemory := "worker-a", "5Gi"
-			if mode != "normal" {
+			if mode == "capacity changes under lock" || mode == "lock contention" {
 				wantNode, wantMemory = "worker-b", "4Gi"
 			}
 			if placement.PreferredHostname != wantNode || placement.AllocatedDemand.MemoryBytes != parseBuilderBytes(wantMemory) {
@@ -172,7 +195,7 @@ func TestDynamicOOMRetryUsesActualAllocationAndStopsAtCeiling(t *testing.T) {
 				t.Fatal(err)
 			}
 			demand, _ := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
-			if demand.MemoryBytes != parseBuilderBytes("16Gi") {
+			if demand.MemoryBytes != parseBuilderBytes("12289Mi") {
 				t.Fatal("retry regressed below previous 12Gi allocation", demand)
 			}
 			return nil
