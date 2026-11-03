@@ -35,6 +35,12 @@ rows. Those unrelated consumers cannot authorize a DNS reference and must not
 delay its transaction. The target DNS publication still loads its own consumers
 and requires the same fresh capability and convergence checks.
 
+Publication, rollback and LKG verification have a bounded 30-second PostgreSQL
+transaction budget, separate from ten-second point reads. Signed member graphs
+need CPU validation as well as SQL; successful checks must not inevitably expire
+at commit. Freshness and admission are still rechecked before commit, and no
+proof, heartbeat or LKG lease is extended by the transaction budget.
+
 Use schema `fugue.producer-dependency-refresh/v1` in one declaration under
 `deploy/environments/production/cell-producer-reconfiguration/`. It has the same
 top-level fields as the cell reconfiguration declaration: schema, generation,

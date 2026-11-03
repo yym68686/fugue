@@ -20,6 +20,13 @@ type platformStateDB interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
+// Publication verifies bounded signed member graphs and then rechecks fresh
+// convergence/admission before commit. Its budget must cover that CPU work as
+// well as SQL; the ordinary ten-second point-query budget can expire between
+// successful validation and commit on a busy control plane. Scope locks remain
+// bounded, and this does not extend any proof, heartbeat or LKG validity.
+const platformPublicationTransactionTimeout = 30 * time.Second
+
 func (s *Store) pgCreatePlatformArtifact(artifact model.PlatformArtifact) (model.PlatformArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -332,7 +339,7 @@ RETURNING id, artifact_kind, scope_key, scope_json, schema_version, generation, 
 }
 
 func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactReleaseRequest, principal model.Principal, guard *platformProducerReleaseGuard) (resultArtifact model.PlatformArtifact, resultRelease model.PlatformArtifactRelease, resultMessage model.PlatformReleaseMessage, resultLKG *model.PlatformLKGSnapshot, resultErr error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), platformPublicationTransactionTimeout)
 	defer cancel()
 	ctx, trace := startPlatformMutationTrace(ctx, "platform-release")
 	defer func() { resultErr = trace.finish(resultErr) }()
@@ -567,7 +574,7 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 }
 
 func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifactRollbackRequest, principal model.Principal, guard *platformProducerReleaseGuard) (resultArtifact model.PlatformArtifact, resultRelease model.PlatformArtifactRelease, resultMessage model.PlatformReleaseMessage, resultLKG *model.PlatformLKGSnapshot, resultErr error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), platformPublicationTransactionTimeout)
 	defer cancel()
 	ctx, trace := startPlatformMutationTrace(ctx, "platform-rollback")
 	defer func() { resultErr = trace.finish(resultErr) }()
@@ -776,7 +783,7 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 
 func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal, guard *platformProducerReleaseGuard) (resultArtifact model.PlatformArtifact, resultRelease model.PlatformArtifactRelease, resultMessage model.PlatformReleaseMessage, resultLKG *model.PlatformLKGSnapshot, resultErr error) {
 	_ = principal
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), platformPublicationTransactionTimeout)
 	defer cancel()
 	ctx, trace := startPlatformMutationTrace(ctx, "platform-lkg-verify")
 	defer func() { resultErr = trace.finish(resultErr) }()

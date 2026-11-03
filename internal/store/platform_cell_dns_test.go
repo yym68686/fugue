@@ -512,8 +512,64 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		t.Fatal("observed successor full LKG failed", err)
 	}
 	if withSources && retained {
+		if s.db != nil && len(sources) == 2 {
+			testDNSPublicationBudgetBeyondPointQueryTimeout(t, s, parent)
+		}
 		testDNSPositiveRecoveryAfterSourceRevocation(t, s, parent)
 	}
+}
+
+func testDNSPublicationBudgetBeyondPointQueryTimeout(t *testing.T, s *Store, parent model.PlatformArtifact) {
+	t.Helper()
+	before, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
+	if err != nil || before == nil {
+		t.Fatal("verified baseline missing", err)
+	}
+	// Use a neutral policy in the same scope so the delay cannot alter the DNS
+	// publication or borrow its existing LKG as a new positive checkpoint.
+	successor, err := s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy, Scope: parent.Scope, Generation: "bounded-budget-successor", Content: map[string]any{"weights": map[string]any{"latency": 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err = s.ValidatePlatformArtifact(successor.ID, []model.PlatformArtifactValidationResult{{Name: "compiler", Pass: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	if err := pgLockPromotionScope(context.Background(), blocker, parent.ScopeKey, true); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		_, _, _, _, err := s.ReleasePlatformArtifact(successor.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "bounded-publication-delay"}, testPlatformPrincipal())
+		done <- err
+	}()
+	// A transaction delayed beyond the point-query budget must still perform
+	// all publication checks and commit within its independent bounded budget.
+	timer := time.NewTimer(11 * time.Second)
+	defer timer.Stop()
+	<-timer.C
+	if err := blocker.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal("valid publication exhausted the point-query budget", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("publication did not complete after contention cleared")
+	}
+	after, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
+	if err != nil || after == nil || after.ID != before.ID || after.VerifiedByReleaseID != before.VerifiedByReleaseID || !after.ExpiresAt.Equal(before.ExpiresAt) {
+		t.Fatal("publication wait renewed or replaced verified LKG", err)
+	}
+	t.Logf("publication completed after a bounded delay exceeding the point-query timeout: %s", time.Since(started))
 }
 
 // Source consumer state does not authorize a DNS routing reference. Exercise
