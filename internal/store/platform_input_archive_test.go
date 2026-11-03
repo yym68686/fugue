@@ -32,6 +32,27 @@ func archiveTestStore(t *testing.T) *Store {
 	return s
 }
 
+func resetArchiveInputFixture(t *testing.T, s *Store, digest string) {
+	t.Helper()
+	clear := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM fugue_platform_input_chunks WHERE content_hash=$1`, digest); err != nil {
+			return err
+		}
+		_, err := s.db.ExecContext(ctx, `DELETE FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest)
+		return err
+	}
+	if err := clear(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := clear(); err != nil {
+			t.Errorf("clean archive fixture %s: %v", digest, err)
+		}
+	})
+}
+
 func (s *archiveTestObjects) Put(_ context.Context, key string, raw []byte) error {
 	if s.failSecond && strings.Contains(key, "/00001-") {
 		return errors.New("simulated upload failure")
@@ -165,6 +186,7 @@ func TestCompilerInputArchiveSourceStreamsMultipleBoundedPages(t *testing.T) {
 	raw := bytes.Repeat([]byte("stable-source-data-"), 17)
 	h := sha256.Sum256(raw)
 	digest := "sha256:" + hex.EncodeToString(h[:])
+	resetArchiveInputFixture(t, s, digest)
 	const chunkSize = 19
 	count := (len(raw) + chunkSize - 1) / chunkSize
 	if _, err := s.db.Exec(`INSERT INTO fugue_platform_input_manifests(content_hash,format,size_bytes,chunk_size,chunk_count,created_at) VALUES($1,$2,$3,$4,$5,$6)`, digest, inputFormatV1, len(raw), chunkSize, count, time.Now().UTC()); err != nil {
@@ -221,6 +243,7 @@ func TestCompilerInputArchiveMigrationStreamsBeyondLegacyLimit(t *testing.T) {
 		left -= int64(n)
 	}
 	digest := "sha256:" + hex.EncodeToString(h.Sum(nil))
+	resetArchiveInputFixture(t, s, digest)
 	count := int((size + chunkSize - 1) / chunkSize)
 	if _, err := s.db.Exec(`INSERT INTO fugue_platform_input_manifests(content_hash,format,size_bytes,chunk_size,chunk_count,created_at) VALUES($1,$2,$3,$4,$5,now())`, digest, inputFormatV1, size, chunkSize, count); err != nil {
 		t.Fatal(err)
@@ -281,6 +304,7 @@ func TestCompilerInputArchiveSourceRejectsChangedChunkBytes(t *testing.T) {
 	raw := []byte("a canonical compiler input")
 	h := sha256.Sum256(raw)
 	digest := "sha256:" + hex.EncodeToString(h[:])
+	resetArchiveInputFixture(t, s, digest)
 	chunkHash := sha256.Sum256([]byte("different canonical compiler input"))
 	if _, err := s.db.Exec(`INSERT INTO fugue_platform_input_manifests(content_hash,format,size_bytes,chunk_size,chunk_count,created_at) VALUES($1,$2,$3,$4,1,$5)`, digest, inputFormatV1, len(raw), len(raw), time.Now().UTC()); err != nil {
 		t.Fatal(err)
@@ -312,5 +336,84 @@ func TestCompilerInputArchiveReaderFallsBackBeforeLedgerMigration(t *testing.T) 
 	actual, err := platformconfig.RuntimeSnapshotDigest(got)
 	if err != nil || actual != digest {
 		t.Fatal("legacy input changed before archive DDL", err)
+	}
+}
+
+func TestCompilerInputInspectWaitsBehindArchiveReaderFence(t *testing.T) {
+	s := archiveTestStore(t)
+	snapshot, digest := chunkedInputFixture(t)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_ENDPOINT", "https://archive.example.invalid")
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_REGION", "auto")
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_BUCKET", "compiler-input-test")
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_PREFIX", "compiler-archive-test")
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_ACCESS_KEY_ID", "test-access")
+	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_SECRET_ACCESS_KEY", "test-secret")
+
+	conn, err := s.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var acquired bool
+	if err = conn.QueryRowContext(t.Context(), `SELECT pg_try_advisory_lock($1)`, compilerInputArchiveReadLeaseLockID).Scan(&acquired); err != nil || !acquired {
+		t.Fatal("could not establish the retirement reader fence", err)
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
+		defer cleanupCancel()
+		_, _ = conn.ExecContext(cleanupCtx, `SELECT pg_advisory_unlock_all()`)
+	}()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, inspectErr := RunCompilerInputMaintenance(ctx, s.databaseURL, CompilerInputMaintenanceOptions{Action: "inspect", Digest: digest})
+		done <- inspectErr
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		// The reader deliberately polls pg_try_advisory_lock_shared rather
+		// than queueing an unbounded server-side lock wait. Observe its
+		// actual backend query before asserting that it cannot finish.
+		var attempts int
+		if err = s.db.QueryRowContext(t.Context(), `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND query=$1`, `SELECT pg_try_advisory_lock_shared($1)`).Scan(&attempts); err != nil {
+			t.Fatal(err)
+		}
+		if attempts > 0 {
+			select {
+			case err = <-done:
+				t.Fatalf("maintenance inspect completed while the reader fence was held: %v", err)
+			default:
+			}
+			break
+		}
+		select {
+		case err = <-done:
+			t.Fatalf("maintenance inspect bypassed the archive reader fence: %v", err)
+		case <-ctx.Done():
+			t.Fatal("maintenance inspect did not enter the reader fence", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("maintenance inspect did not wait for the reader fence")
+		}
+	}
+
+	var unlocked bool
+	if err = conn.QueryRowContext(t.Context(), `SELECT pg_advisory_unlock($1)`, compilerInputArchiveReadLeaseLockID).Scan(&unlocked); err != nil || !unlocked {
+		t.Fatal("could not release the retirement reader fence", err)
+	}
+	select {
+	case err = <-done:
+		if err != nil {
+			t.Fatal("maintenance inspect did not resume after the reader fence", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("maintenance inspect remained blocked after the reader fence", ctx.Err())
 	}
 }

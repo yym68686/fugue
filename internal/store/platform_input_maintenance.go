@@ -195,6 +195,9 @@ func RunCompilerInputMaintenance(ctx context.Context, databaseURL string, option
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	s := &Store{db: db, databaseURL: databaseURL, dbReady: true}
+	if err = s.ConfigureCompilerInputArchiveFromEnv(); err != nil {
+		return CompilerInputMaintenanceReport{}, err
+	}
 	return s.maintainCompilerInput(ctx, options)
 }
 
@@ -203,11 +206,11 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if o.Action == "inspect" {
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+		tx, finish, err := s.BeginCompilerInputReadLease(ctx)
 		if err != nil {
 			return report, err
 		}
-		defer tx.Rollback()
+		defer finish()
 		m, err := readInputManifest(ctx, tx, o.Digest)
 		if err != nil {
 			return report, err
