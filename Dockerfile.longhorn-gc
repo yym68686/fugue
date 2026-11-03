@@ -5,7 +5,7 @@ RUN git init && git remote add origin https://github.com/longhorn/longhorn-engin
 COPY third_party/longhorn-engine/flat-s3-gc.patch /tmp/flat-s3-gc.patch
 RUN git apply --check /tmp/flat-s3-gc.patch && git apply /tmp/flat-s3-gc.patch
 RUN go test -mod=vendor ./vendor/github.com/longhorn/backupstore/s3 -run TestFlatGC -count=1 -v
-RUN CGO_ENABLED=1 CGO_LDFLAGS="-lbfio -lz -lpthread" go build -mod=vendor -tags netgo -ldflags '-X main.Version=v1.12.1 -X main.GitCommit=1fa902f0061b84b92af445c38392bfeb99faffb2-fugue-gc1 -linkmode external -extldflags "-static"' -o /out/longhorn .
+RUN CGO_ENABLED=1 CGO_LDFLAGS="-Wl,--start-group -lqcow -lbfio -lz -lpthread -Wl,--end-group" go build -mod=vendor -tags netgo -ldflags '-X main.Version=v1.12.1 -X main.GitCommit=1fa902f0061b84b92af445c38392bfeb99faffb2-fugue-gc1 -linkmode external -extldflags "-static"' -o /out/longhorn .
 RUN /out/longhorn version --client-only
 
 # Keep the official userspace, entrypoint and engine protocol. The sole binary

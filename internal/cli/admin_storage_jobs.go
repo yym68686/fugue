@@ -11,7 +11,7 @@ import (
 
 func (c *CLI) newAdminStorageJobsCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "jobs", Short: "Queue and inspect durable storage maintenance; preview by default"}
-	cmd.AddCommand(&cobra.Command{Use: "ls", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	cmd.AddCommand(&cobra.Command{Use: "ls", Short: "List recent storage maintenance jobs and all pending work", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := c.newClient()
 		if err != nil {
 			return err
@@ -51,7 +51,7 @@ func (c *CLI) newAdminStorageJobsCommand() *cobra.Command {
 	cmd.AddCommand(run)
 	var getWait bool
 	var getTimeout time.Duration
-	get := &cobra.Command{Use: "get JOB_ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	get := &cobra.Command{Use: "get JOB_ID", Short: "Inspect a durable maintenance result or wait for completion", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if getWait {
 			return c.waitStorageJob(cmd, args[0], getTimeout)
 		}

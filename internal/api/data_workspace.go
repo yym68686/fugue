@@ -913,7 +913,7 @@ func (s *Server) handleCompleteDataTransfer(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleListDataTransfers(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	transfers, err := s.store.ListDataTransfers(principal.TenantID, r.URL.Query().Get("workspace_id"), principal.IsPlatformAdmin())
+	transfers, err := s.store.ListDataTransferSummaries(principal.TenantID, r.URL.Query().Get("workspace_id"), principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

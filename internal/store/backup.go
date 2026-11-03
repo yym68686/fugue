@@ -5078,7 +5078,7 @@ func (s *Store) pgApplyBackupRetention(policyID string) error {
 	if err != nil {
 		return err
 	}
-	return s.pgReconcileRetentionCandidates(policy)
+	return s.pgReconcileRetentionCandidates(policy, false)
 }
 
 func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.BackupRestorePlan, error) {

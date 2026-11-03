@@ -88,7 +88,7 @@ jobs:
         run: |
           set -euo pipefail
           image=$(python3 -c 'import json; print(json.load(open("deploy/environments/production/longhorn-gc/engine.json"))["repository"])')
-          docker buildx build --platform linux/amd64 --file Dockerfile.longhorn-gc --tag "$image:gc-${{ github.sha }}" --metadata-file "$RUNNER_TEMP/longhorn-gc-build.json" --push .
+          docker buildx build --platform linux/amd64 --file Dockerfile.longhorn-gc --tag "$image:longhorn-gc-${{ github.sha }}" --metadata-file "$RUNNER_TEMP/longhorn-gc-build.json" --push .
           digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/longhorn-gc-build.json")
           echo "image=$image@$digest" >> "$GITHUB_OUTPUT"
   longhorn_gc_install:

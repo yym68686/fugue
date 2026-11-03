@@ -5,6 +5,7 @@ No volume engine upgrades, process kills, lock breaking or finalizer changes.
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -39,12 +40,14 @@ def main():
     args = p.parse_args()
     config = json.loads(Path(args.config).read_text())
     ns = config['namespace']
-    if not args.image.startswith(config['repository'] + '@sha256:') or len(args.image.rsplit(':', 1)[1]) != 64:
+    if not args.image.startswith(config['repository'] + '@sha256:') or not re.fullmatch('[0-9a-f]{64}', args.image.rsplit(':', 1)[1]):
         raise SystemExit('requires digest-addressed image from the configured repository')
     setting = kubectl('-n', ns, 'get', 'settings.longhorn.io', 'default-engine-image', '-o', 'json')
     if setting['value'] not in (config['expectedPreviousImage'], args.image):
         raise SystemExit('default engine changed; review the declaration before retrying')
     original = volumes(ns)
+    previous_name = 'ei-' + hashlib.sha512(setting['value'].strip().encode()).hexdigest()[:8]
+    previous = kubectl('-n', ns, 'get', 'engineimages.longhorn.io', previous_name, '-o', 'json')
     print(json.dumps({'previous': setting['value'], 'candidate': args.image, 'volumes': original, 'apply': args.apply}))
     if not args.apply:
         return
@@ -59,8 +62,14 @@ def main():
     deadline = time.monotonic() + 480
     while time.monotonic() < deadline:
         live = kubectl('-n', ns, 'get', 'engineimages.longhorn.io', candidate['metadata']['name'], '-o', 'json')
-        if live.get('status', {}).get('state') == 'deployed' and quiescent(ns):
-            break
+        if live.get('status', {}).get('state') == 'deployed':
+            version_fields = ('cliAPIVersion', 'cliAPIMinVersion', 'controllerAPIVersion',
+                              'controllerAPIMinVersion', 'dataFormatVersion', 'dataFormatMinVersion')
+            if any(field not in previous.get('status', {}) or live.get('status', {}).get(field) != previous['status'][field]
+                   for field in version_fields):
+                raise SystemExit('candidate engine protocol or data format changed; no default change')
+            if quiescent(ns):
+                break
         time.sleep(10)
     else:
         raise SystemExit('candidate not ready or backup activity still running; no default change')

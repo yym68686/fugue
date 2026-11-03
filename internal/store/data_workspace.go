@@ -2616,9 +2616,25 @@ FROM fugue_data_transfers WHERE id = $1
 }
 
 func (s *Store) pgListDataTransfers(tenantID, workspaceID string, platformAdmin bool) ([]model.DataTransfer, error) {
+	return s.pgListDataTransferRows(tenantID, workspaceID, platformAdmin, true)
+}
+
+// ListDataTransferSummaries excludes historical manifests and signed plans;
+// those can be enormous and belong to the paged detail endpoints.
+func (s *Store) ListDataTransferSummaries(tenantID, workspaceID string, platformAdmin bool) ([]model.DataTransfer, error) {
+	if s.usingDatabase() {
+		return s.pgListDataTransferRows(tenantID, workspaceID, platformAdmin, false)
+	}
+	return s.ListDataTransfers(tenantID, workspaceID, platformAdmin)
+}
+
+func (s *Store) pgListDataTransferRows(tenantID, workspaceID string, platformAdmin, includePlan bool) ([]model.DataTransfer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	query := `SELECT id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at, prewarm_cache_json FROM fugue_data_transfers`
+	if !includePlan {
+		query = strings.Replace(query, "manifest_json, plan_blobs_json", "'{}'::jsonb, '[]'::jsonb", 1)
+	}
 	args := []any{}
 	conds := []string{}
 	if !platformAdmin {

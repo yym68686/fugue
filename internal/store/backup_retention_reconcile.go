@@ -12,12 +12,24 @@ import (
 // backups. Disabled policies keep their history unless an administrator
 // explicitly reconciles that policy. Manual backups have no implicit expiry.
 func (s *Store) ReconcileBackupRetention(policyID string) error {
+	return s.reconcileBackupRetention(policyID, false)
+}
+
+func (s *Store) reconcileBackupRetention(policyID string, enabledOnly bool) error {
 	if s.usingDatabase() {
-		return s.pgApplyBackupRetention(policyID)
+		p, err := s.pgGetBackupPolicy(policyID, "", true)
+		if err != nil {
+			return err
+		}
+		return s.pgReconcileRetentionCandidates(p, enabledOnly)
 	}
 	return s.withLockedState(true, func(state *model.State) error {
-		if findBackupPolicy(state, policyID) < 0 {
+		i := findBackupPolicy(state, policyID)
+		if i < 0 {
 			return ErrNotFound
+		}
+		if enabledOnly && (!state.BackupPolicies[i].Enabled || state.BackupPolicies[i].Status == model.BackupPolicyStatusDisabled) {
+			return nil
 		}
 		applyBackupRetentionInState(state, policyID)
 		return nil
@@ -34,7 +46,7 @@ func (s *Store) ReconcileEnabledBackupRetention() error {
 	}
 	var failures []error
 	for _, p := range policies {
-		if err := s.ReconcileBackupRetention(p.ID); err != nil {
+		if err := s.reconcileBackupRetention(p.ID, true); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -113,7 +125,7 @@ func (s *Store) PreviewBackupRetention(policyID string) ([]string, error) {
 	return ids, err
 }
 
-func (s *Store) pgReconcileRetentionCandidates(policy model.BackupPolicy) error {
+func (s *Store) pgReconcileRetentionCandidates(policy model.BackupPolicy, enabledOnly bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -126,6 +138,9 @@ func (s *Store) pgReconcileRetentionCandidates(policy model.BackupPolicy) error 
 	policy, err = scanBackupPolicy(tx.QueryRowContext(ctx, backupPolicySelectSQL()+` WHERE id=$1 FOR SHARE`, policy.ID))
 	if err != nil {
 		return mapDBErr(err)
+	}
+	if enabledOnly && (!policy.Enabled || policy.Status == model.BackupPolicyStatusDisabled) {
+		return nil
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT id,created_at FROM fugue_backup_artifacts WHERE policy_id=$1 AND `+retentionEligibleSQL+` ORDER BY created_at DESC,id DESC`, policy.ID)
 	if err != nil {

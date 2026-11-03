@@ -14,6 +14,22 @@ type commandHelpDoc struct {
 }
 
 var commandHelpDocOverrides = map[string]commandHelpDoc{
+	"fugue admin storage": {
+		Long:    "Inspect account storage and queue maintenance previews or confirmed executions. Inventory observations do not authorize deletion.",
+		Example: "fugue admin storage overview\nfugue admin storage jobs run longhorn-reconcile --wait",
+	},
+	"fugue admin storage jobs": {
+		Long:    "Inspect durable maintenance jobs. Run creates a preview unless --confirm is explicitly supplied; execution repeats current reference and engine checks.",
+		Example: "fugue admin storage jobs ls\nfugue admin storage jobs run retention --scope policy-example --wait",
+	},
+	"fugue admin storage jobs run": {
+		Long:    "Queue retention, longhorn-reconcile, backup-cleanup, data-gc or transfer-expiry. Jobs survive server restarts and retain retry and failure evidence. Retention without a scope applies only to enabled policies; data-gc requires a workspace scope.",
+		Example: "fugue admin storage jobs run longhorn-reconcile --wait\nfugue admin storage jobs run retention --scope policy-example --confirm --wait",
+	},
+	"fugue admin storage jobs get": {
+		Long:    "Fetch a stored job result. With --wait, poll until success or failure; timeout leaves the server job running.",
+		Example: "fugue admin storage jobs get storage_job_example --wait",
+	},
 	"fugue admin storage orphan-manifest adopt": {
 		Long:    "Preview reconciliation for an unregistered completed control-plane Longhorn backup. With --confirm, verify both source ETags and register a protected artifact. The original failed run and remote data are preserved. Protection excludes this artifact from automatic retention and deletion. This is metadata reconciliation, not a database restore test; restore_verification remains not_run.",
 		Example: "fugue admin storage orphan-manifest adopt backup_run_123 --object-key backup-root/control-plane/backup_run_123/manifest.json\nfugue admin storage orphan-manifest adopt backup_run_123 --object-key backup-root/control-plane/backup_run_123/manifest.json --confirm",

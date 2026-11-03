@@ -15,7 +15,9 @@ func (s *Store) ListStorageMaintenanceJobs() ([]model.StorageMaintenanceJob, err
 		defer cancel()
 		// Include every actionable job even when newer history fills the display.
 		rows, err := s.db.QueryContext(ctx, `SELECT body FROM fugue_storage_maintenance_jobs
-   WHERE status IN ('queued','running','retrying') OR id IN (SELECT id FROM fugue_storage_maintenance_jobs ORDER BY updated_at DESC,id DESC LIMIT 50)
+   WHERE status IN ('queued','running','retrying')
+      OR id IN (SELECT id FROM fugue_storage_maintenance_jobs ORDER BY updated_at DESC,id DESC LIMIT 50)
+      OR id IN (SELECT DISTINCT ON (kind,scope_id,(body->>'execute')) id FROM fugue_storage_maintenance_jobs ORDER BY kind,scope_id,(body->>'execute'),updated_at DESC,id DESC)
    ORDER BY updated_at DESC,id DESC`)
 		if err != nil {
 			return nil, mapDBErr(err)

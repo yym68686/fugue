@@ -50,7 +50,10 @@ func (s *Server) dataNamespaceReferences(ctx context.Context, backend model.Data
 			}
 			continue
 		}
-		if !dataBackendSupportsDirectObjectStorage(b) || dataPhysicalBucket(b) != dataPhysicalBucket(backend) {
+		// Different endpoint aliases can expose the same S3/R2 bucket. A
+		// same-named bucket on an unrelated provider can only over-protect here;
+		// treating an alias as unrelated could destroy a live reference.
+		if !dataBackendSupportsDirectObjectStorage(b) || b.Bucket != backend.Bucket {
 			continue
 		}
 		key := ref.ObjectKey

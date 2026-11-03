@@ -13,7 +13,7 @@ import (
 )
 
 func TestLonghornCleanupWaitsForEngineAndRejectsForeignBackups(t *testing.T) {
-	for _, scenario := range []string{"completed", "deleting", "absent", "foreign", "protected", "wrong-repository", "missing-finalizer", "provider-error"} {
+	for _, scenario := range []string{"completed", "deleting", "queued-volume", "absent", "foreign", "protected", "wrong-repository", "missing-finalizer", "provider-error"} {
 		t.Run(scenario, func(t *testing.T) {
 			targetURL := "s3://test-bucket@auto/backups/engine"
 			backupURL := targetURL + "?backup=backup-one&volume=volume-one"
@@ -28,6 +28,14 @@ func TestLonghornCleanupWaitsForEngineAndRejectsForeignBackups(t *testing.T) {
 			}
 			deletes := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/backups") {
+					items := []any{}
+					if scenario == "queued-volume" {
+						items = append(items, map[string]any{"metadata": map[string]string{"name": "other-backup", "deletionTimestamp": "2026-01-01T00:00:00Z"}, "status": map[string]string{"volumeName": "volume-one", "backupTargetName": "target-one"}})
+					}
+					json.NewEncoder(w).Encode(map[string]any{"items": items})
+					return
+				}
 				if strings.Contains(r.URL.Path, "backuptargets") {
 					json.NewEncoder(w).Encode(map[string]any{"spec": map[string]string{"backupTargetURL": targetURL}})
 					return
@@ -75,7 +83,7 @@ func TestLonghornCleanupWaitsForEngineAndRejectsForeignBackups(t *testing.T) {
 			if err == nil {
 				t.Fatal("cleanup completed before engine confirmation")
 			}
-			if scenario == "completed" || scenario == "deleting" {
+			if scenario == "completed" || scenario == "deleting" || scenario == "queued-volume" {
 				if !errors.Is(err, errLonghornCleanupPending) {
 					t.Fatal(err)
 				}

@@ -85,6 +85,38 @@ func cleanupLonghornBackup(ctx context.Context, client *kubeLogsClient, artifact
 	if !strings.EqualFold(longhornStringValue(status["state"]), "Completed") {
 		return errors.New("Longhorn backup is not completed; cleanup deferred")
 	}
+	// One deletion per repository volume. A second finalizer would otherwise
+	// start another expensive GC which only contends for the same engine lock.
+	query = url.Values{"limit": {"500"}}
+	seen := map[string]bool{}
+	for {
+		var list struct {
+			Items []struct {
+				Metadata struct {
+					Name              string
+					DeletionTimestamp *string
+				}
+				Status struct{ VolumeName, BackupTargetName string }
+			}
+			Metadata struct{ Continue string }
+		}
+		if err := client.doJSON(ctx, http.MethodGet, "/apis/longhorn.io/v1beta2/namespaces/"+url.PathEscape(namespace)+"/backups?"+query.Encode(), &list); err != nil {
+			return fmt.Errorf("inspect volume cleanup queue: %w", err)
+		}
+		for _, other := range list.Items {
+			if other.Metadata.Name != name && other.Metadata.DeletionTimestamp != nil && other.Status.VolumeName == volume && other.Status.BackupTargetName == target {
+				return errLonghornCleanupPending
+			}
+		}
+		if list.Metadata.Continue == "" {
+			break
+		}
+		if seen[list.Metadata.Continue] {
+			return errors.New("cleanup queue inventory repeated continuation token")
+		}
+		seen[list.Metadata.Continue] = true
+		query.Set("continue", list.Metadata.Continue)
+	}
 	apiPath := "/apis/longhorn.io/v1beta2/namespaces/" + url.PathEscape(namespace) + "/backups/" + url.PathEscape(name)
 	err = client.doJSONBody(ctx, http.MethodDelete, apiPath, map[string]any{
 		"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": map[string]string{"uid": uid, "resourceVersion": revision},
