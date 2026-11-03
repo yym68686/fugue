@@ -1048,7 +1048,12 @@ func TestReplayableAdmissionPreservesCapacityAndDoesNotReportLoss(t *testing.T) 
 			if p.ingest(t.Context(), event, true) || p.queuedBytes.Load() != beforeBytes || p.ordinaryQueuedSlots.Load() != beforeSlots {
 				t.Fatal("deferral leaked reservations")
 			}
-			if p.Ingest(t.Context(), event) || p.dropped.Load() != 1 {
+			if !p.Ingest(t.Context(), event) || p.dropped.Load() != 0 {
+				t.Fatal("cursor catch-up consumed the live-input headroom")
+			}
+			for i := 0; i < 1000 && p.Ingest(t.Context(), event); i++ {
+			}
+			if p.dropped.Load() != 1 {
 				t.Fatal("live admission no longer reports actual loss")
 			}
 			for len(p.queue) > 0 {

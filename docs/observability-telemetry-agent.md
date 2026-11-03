@@ -299,7 +299,10 @@ and backlog age together. Skipped sources do not count as attempted reads in
 source diagnostics; `next_attempt` and `node_backoff` expose the wait explicitly.
 
 Cursor collection also reserves queue bytes as well as slots before opening
-sources. If concurrent ingestion fills the queue, the unread record retains its
+sources. Each ordinary cursor admission leaves one eighth of ordinary byte and
+slot capacity for live inputs, in addition to the existing critical-event reserve.
+This headroom is enforced during open streams, not only at cycle start.
+If concurrent ingestion fills the cursor budget, the unread record retains its
 inclusive cursor and is deferred until the next poll, including during catch-up.
 `fugue_telemetry_pipeline_kubernetes_log_admission_deferred_total` records these
 replayable capacity deferrals; they do not emit per-record loss warnings or

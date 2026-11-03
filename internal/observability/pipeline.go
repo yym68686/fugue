@@ -47,6 +47,7 @@ type queuedEvent struct {
 }
 
 const telemetryCriticalQueueReserveDivisor int64 = 10
+const telemetryReplayQueueReserveDivisor int64 = 8
 
 type PipelineSnapshot struct {
 	Enabled                       bool   `json:"enabled"`
@@ -369,6 +370,11 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 		if ordinaryLimit >= telemetryCriticalQueueReserveDivisor {
 			ordinaryLimit -= ordinaryLimit / telemetryCriticalQueueReserveDivisor
 		}
+		if replayable {
+			// Cursor inputs can retry. Enforce live-input headroom on every
+			// admission, including streams already open when a cycle fills up.
+			ordinaryLimit -= ordinaryLimit / telemetryReplayQueueReserveDivisor
+		}
 		if p.ordinaryQueuedSlots.Add(1) > ordinaryLimit {
 			p.ordinaryQueuedSlots.Add(-1)
 			if replayable {
@@ -387,6 +393,9 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 		admissionLimit := p.cfg.MemoryLimitBytes
 		if !criticalDecisionEvidence {
 			admissionLimit -= p.cfg.MemoryLimitBytes / telemetryCriticalQueueReserveDivisor
+			if replayable {
+				admissionLimit -= admissionLimit / telemetryReplayQueueReserveDivisor
+			}
 		}
 		if nextSize > admissionLimit {
 			p.queuedBytes.Add(-size)
