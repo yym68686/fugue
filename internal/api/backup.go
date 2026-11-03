@@ -568,6 +568,12 @@ func backupArtifactObjectKeysForDeletion(artifact model.BackupArtifact) ([]strin
 		keys = append(keys, artifact.ManifestObjectKey)
 	}
 	if len(keys) == 0 {
+		// Reconciled Longhorn manifests can live only in the database. Their
+		// shared blocks are owned by the engine, whose cleanup is confirmed
+		// separately before deleting an artifact's directly owned objects.
+		if artifact.Kind == model.BackupArtifactKindLonghornSnapshot {
+			return keys, nil
+		}
 		return nil, fmt.Errorf("artifact has no deletable object keys")
 	}
 	seen := map[string]struct{}{}

@@ -61,6 +61,17 @@ func TestBackupArtifactObjectKeysForDeletion(t *testing.T) {
 	if _, err := backupArtifactObjectKeysForDeletion(missingKeys); err == nil {
 		t.Fatal("artifact without object keys was treated as successfully deletable")
 	}
+
+	databaseManifest := missingKeys
+	databaseManifest.Kind = model.BackupArtifactKindLonghornSnapshot
+	keys, err = backupArtifactObjectKeysForDeletion(databaseManifest)
+	if err != nil || len(keys) != 0 {
+		t.Fatalf("Longhorn artifact with a database-only manifest rejected: %v %#v", err, keys)
+	}
+	databaseManifest.ManifestObjectKey = "apps/other-run/manifest.json"
+	if _, err := backupArtifactObjectKeysForDeletion(databaseManifest); err == nil {
+		t.Fatal("Longhorn manifest outside its run was accepted")
+	}
 }
 
 func TestBackupArtifactCleanupCandidatesHonorRestoreInterlocksAndMarker(t *testing.T) {

@@ -103,6 +103,12 @@ func TestInventorySeparatesDeclaredRepositoryBlocksFromArtifactObjects(t *testin
 		Status:   model.BackupArtifactStatusActive,
 		Manifest: model.BackupManifest{Metadata: map[string]string{"backup_target_url": "s3://bucket@auto/backup-root/shared-repository"}},
 	})
+	createBackupUsageArtifact(t, state, model.BackupArtifact{
+		ID: "snapshot_database_manifest", RunID: "run_database_manifest", BackendID: backend.ID,
+		Kind: model.BackupArtifactKindLonghornSnapshot, SizeBytes: 1000000,
+		Status:   model.BackupArtifactStatusActive,
+		Manifest: model.BackupManifest{Metadata: map[string]string{"backup_target_url": "s3://bucket@auto/backup-root/shared-repository"}},
+	})
 	old := time.Now().Add(-48 * time.Hour)
 	fake.put("backup-root/"+artifact.ManifestObjectKey, 123, old)
 	fake.put("backup-root/shared-repository/blocks/chunk", 456, old)
@@ -122,7 +128,7 @@ func TestInventorySeparatesDeclaredRepositoryBlocksFromArtifactObjects(t *testin
 		t.Fatal(err)
 	}
 	r := usage.Reconciliation
-	if usage.PhysicalBytes == nil || *usage.PhysicalBytes != 586 || r.RepositoryManagedBytes != 456 || r.RepositoryManagedObjectCount != 1 || r.OrphanedObjectCount != 1 || r.OrphanedBytes != 7 || r.SizeMismatchCount != 0 {
+	if usage.PhysicalBytes == nil || *usage.PhysicalBytes != 586 || r.RepositoryManagedBytes != 456 || r.RepositoryManagedObjectCount != 1 || r.OrphanedObjectCount != 1 || r.OrphanedBytes != 7 || r.SizeMismatchCount != 0 || r.InvalidReferenceCount != 0 {
 		t.Fatalf("repository blocks or snapshot upload size misclassified: %+v", usage)
 	}
 	for _, raw := range []string{"s3://foreign@auto/backup-root/shared", "s3://bucket@auto/other", "s3://bucket@auto/backup-root", "s3://bucket@auto/backup-root/a/../b"} {
