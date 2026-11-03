@@ -21,16 +21,16 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, observe")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
 	rehearse := flag.Bool("rehearse", false, "encode/verify then roll back (consumes WAL and I/O)")
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
-	readOnly := *mode == "inspect" || *mode == "observe"
-	if flag.NArg() != 0 || *apply && *rehearse || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
-		fmt.Fprintln(os.Stderr, "select read-only inspect, or explicitly choose apply/rehearse")
+	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive" && !*apply
+	if flag.NArg() != 0 || *apply && *rehearse || *mode == "archive" && *rehearse || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
+		fmt.Fprintln(os.Stderr, "select a read-only mode, or explicitly choose apply/rehearse")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -38,6 +38,22 @@ func main() {
 	if *mode == "observe" {
 		if err := observeStorage(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "runtime storage observation unavailable")
+			os.Exit(1)
+		}
+		return
+	}
+	if *mode == "archive" {
+		dsn := os.Getenv("FUGUE_DATABASE_URL")
+		if dsn == "" {
+			fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
+			os.Exit(2)
+		}
+		report, err := store.RunCompilerInputArchiveMigration(ctx, dsn, store.CompilerInputArchiveMigrationOptions{Digest: *digest, Apply: *apply})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "compiler input archive not confirmed; inspect archive ledger before retrying")
+			os.Exit(1)
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
 			os.Exit(1)
 		}
 		return

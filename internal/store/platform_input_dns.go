@@ -5,7 +5,6 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -132,29 +131,35 @@ func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func
 	if s.usingDatabase() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		tx, finish, err := s.BeginCompilerInputReadLease(ctx)
 		if err != nil {
 			return CompilerInputDNSSelections{}, err
 		}
-		defer tx.Rollback()
+		defer finish()
 		m, err := readInputManifest(ctx, tx, digest)
 		if err != nil && !absentInputManifest(err) {
 			return CompilerInputDNSSelections{}, err
 		}
 		if err == nil {
-			if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest.Format == m.Format && cached.Manifest.Size == m.Size && cached.Manifest.Count == m.Count && cached.Manifest.ChunkSize == m.ChunkSize {
-				if m.Format == inputFormatSeparatedV4 {
-					out, e := readSeparatedDNSSelections(ctx, tx, m, cached, needed)
-					if e == nil {
-						return out, nil
+			archiveRouted, routeErr := s.compilerInputArchiveRouted(ctx, tx, m)
+			if routeErr != nil {
+				return CompilerInputDNSSelections{}, routeErr
+			}
+			if !archiveRouted {
+				if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest.Format == m.Format && cached.Manifest.Size == m.Size && cached.Manifest.Count == m.Count && cached.Manifest.ChunkSize == m.ChunkSize {
+					if m.Format == inputFormatSeparatedV4 {
+						out, e := readSeparatedDNSSelections(ctx, tx, m, cached, needed)
+						if e == nil {
+							return out, nil
+						}
+						// A representation may have been migrated away and back. A
+						// stale physical witness requires a full digest verification.
+					} else {
+						if m.Format == inputFormatSharedV3 {
+							return readSharedDNSSelections(ctx, tx, m, cached, needed)
+						}
+						return readCompilerDNSSelections(ctx, tx, m, cached, needed)
 					}
-					// A representation may have been migrated away and back. A
-					// stale physical witness requires a full digest verification.
-				} else {
-					if m.Format == inputFormatSharedV3 {
-						return readSharedDNSSelections(ctx, tx, m, cached, needed)
-					}
-					return readCompilerDNSSelections(ctx, tx, m, cached, needed)
 				}
 			}
 			// Keep a cold read in the manifest's snapshot too. Ending this
@@ -172,7 +177,8 @@ func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func
 			}
 			return selectCompilerDNSObservations(snapshot, needed), nil
 		}
-		tx.Rollback() // Release the connection before the legacy fallback.
+		tx.Rollback()
+		finish() // Release the session lease before obtaining another reader.
 	}
 	snapshot, err := s.GetPlatformCompilerInput(digest)
 	if err != nil {

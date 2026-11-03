@@ -109,3 +109,54 @@ relation files, and freed pages in the old chunk relation do not automatically
 become space for new component relations. No VACUUM FULL, global rewrite,
 historical deletion or claim of reducing tens of GiB to hundreds of MiB is part
 of this representation change. Production savings require actual measurement.
+# Compiler input external archive (staged)
+
+Status as of 2026-11-04: code is staged in the isolated `compiler-input-retention`
+worktree; no production archive bucket is provisioned or validated, no archive
+migration has been run, no read route has been committed, and no production
+input rows have been deleted or truncated. The production chunk relation was
+68,116,963,328 bytes at 2026-11-03 17:29:45Z and 17:56:40Z. Database size rose
+from 155,488,016,063 to 155,510,519,487 bytes over that interval; this is a
+sampled database delta, not a sustained growth-rate estimate. At 17:51Z the
+volume had 1,499,280 KiB available (reported 100% used). Do not start bulk
+copying until a dedicated target, measured transfer capacity, safe runway, and
+backpressure policy are confirmed.
+
+The archive migration mode is an opt-in copy/verification tool, not a retention
+or deletion tool. It copies one existing v1/v2 chunked input into immutable,
+compressed object segments, reads them back, and records `verified` only after
+reconstructing the original SHA-256. `verified` does not change the reader
+route and does not reclaim PostgreSQL space.
+
+The object bucket must be separately provisioned and isolated from CNPG backups
+and tenant buckets. Configuration uses `FUGUE_COMPILER_INPUT_ARCHIVE_*`; the
+read route is installed only when that backend is configured. Migrations also
+require the explicit `FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED=true`
+opt-in. No archive bucket is inferred or borrowed from backup configuration.
+
+Inspect one source manifest without copying. This metadata-only dry-run checks
+the registered format, length, and chunk count; it does not read or hash the
+source chunk bodies and therefore is not evidence that the whole input is
+intact:
+
+```sh
+FUGUE_DATABASE_URL=... fugue-input-storage --mode archive --digest sha256:...
+```
+
+After explicitly enabling the dedicated archive backend and running a verified
+canary, apply one exact input:
+
+```sh
+FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED=true \
+FUGUE_DATABASE_URL=... fugue-input-storage --mode archive --digest sha256:... --apply
+```
+
+This stage deliberately has no production `route`, bulk-scan, delete, or
+`TRUNCATE` mode. The reader implementation accepts only a previously routed
+row whose full digest and every segment receipt validate, but no production
+operation can currently create that route. Routing requires cold/hot dependency
+proof and all serving/rollback readers to support the archive. Physical
+retirement additionally requires stopping old writers, proving the full
+old-relation copy set, draining readers with a release/rollback compatibility
+floor, and passing a separate bounded maintenance gate. Do not use existing
+backup prefixes or retention policy for compiler-input archives.

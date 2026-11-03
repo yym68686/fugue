@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash"
+	"io"
 	"time"
 
 	"fugue/internal/platformconfig"
@@ -22,6 +24,141 @@ type CompilerInputMaintenanceOptions struct {
 	MaxInputBytes  int64
 	Apply          bool
 }
+
+// archiveInputStream is a bounded, keyset-paged reader over the old v1/v2
+// chunks. It never holds a multi-hour database transaction. The archive ledger
+// pins this source representation; every page also rechecks its manifest,
+// maintenance epoch and per-chunk hash under the common writer barrier.
+type archiveInputStream struct {
+	ctx         context.Context
+	db          *sql.DB
+	m           inputManifest
+	next        int
+	rows        [][]byte
+	row         int
+	count       int
+	size        int64
+	hash        hash.Hash
+	sourceEpoch int64
+	done        bool
+	err         error
+}
+
+func (r *archiveInputStream) Read(p []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for len(r.rows) == 0 || r.row >= len(r.rows) {
+		if r.done {
+			return 0, io.EOF
+		}
+		if err := r.fetch(); err != nil {
+			r.err = err
+			return 0, err
+		}
+		if len(r.rows) == 0 && r.done {
+			if r.count != r.m.Count || r.size != r.m.Size || sharedHashBytes(r.hash.Sum(nil)) != r.m.Digest {
+				r.err = fmt.Errorf("compiler input archive source changed: %w", ErrConflict)
+				return 0, r.err
+			}
+			return 0, io.EOF
+		}
+	}
+	chunk := r.rows[r.row]
+	n := copy(p, chunk)
+	if n != len(chunk) {
+		// Fetches are deliberately one decoded chunk at a time. Keep a small
+		// pending buffer instead of allowing a caller to lose a suffix.
+		r.rows[r.row] = chunk[n:]
+		return n, nil
+	}
+	r.row++
+	return n, nil
+}
+
+func (r *archiveInputStream) fetch() error {
+	ctx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
+	defer cancel()
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{`SET LOCAL lock_timeout='250ms'`, `SET LOCAL statement_timeout='5s'`} {
+		if _, err = tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(315609238744290)`); err != nil {
+		return err
+	}
+	var epoch int64
+	if err = tx.QueryRowContext(ctx, `SELECT epoch FROM fugue_platform_input_archive_control WHERE singleton`).Scan(&epoch); err != nil {
+		return err
+	}
+	if epoch != r.sourceEpoch {
+		return fmt.Errorf("compiler input archive maintenance epoch changed: %w", ErrConflict)
+	}
+	current, err := readInputManifest(ctx, tx, r.m.Digest)
+	if err != nil || current != r.m {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("compiler input archive source representation changed: %w", ErrConflict)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT ordinal,chunk_hash,data FROM fugue_platform_input_chunks WHERE content_hash=$1 AND ordinal >= $2 ORDER BY ordinal LIMIT 16`, r.m.Digest, r.next)
+	if err != nil {
+		return err
+	}
+	r.rows = nil
+	r.row = 0
+	for rows.Next() {
+		var ordinal int
+		var declared string
+		var stored []byte
+		if err = rows.Scan(&ordinal, &declared, &stored); err != nil {
+			return err
+		}
+		if ordinal != r.next || ordinal >= r.m.Count {
+			return fmt.Errorf("compiler input archive source ordinal differs: %w", ErrConflict)
+		}
+		h := sha256.Sum256(stored)
+		if declared != "sha256:"+fmt.Sprintf("%x", h[:]) {
+			return fmt.Errorf("compiler input archive source stored hash differs: %w", ErrConflict)
+		}
+		want := r.m.ChunkSize
+		if ordinal == r.m.Count-1 {
+			want = int(r.m.Size - int64(ordinal)*int64(r.m.ChunkSize))
+		}
+		decoded, decodeErr := decodeInputChunk(r.m.Format, stored, want)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if _, err = r.hash.Write(decoded); err != nil {
+			return err
+		}
+		r.size += int64(len(decoded))
+		r.count++
+		r.next++
+		r.rows = append(r.rows, decoded)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if len(r.rows) == 0 {
+		r.done = true
+	}
+	return tx.Commit()
+}
+
+func (s *archiveInputStream) Close() error { return nil }
 
 type CompilerInputMaintenanceReport struct {
 	Action               string `json:"action"`
@@ -126,6 +263,13 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 		if err != nil {
 			return report, err
 		}
+		archivePinned, pinErr := compilerInputArchivePinsSource(ctx, tx, m.Digest)
+		if pinErr != nil {
+			return report, pinErr
+		}
+		if archivePinned {
+			return report, fmt.Errorf("compiler input representation is pinned by an external archive: %w", ErrConflict)
+		}
 		report.OldFormat = m.Format
 		report.LogicalBytes = m.Size
 		if m.Size > o.MaxInputBytes || o.ExpectedFormat != "" && o.ExpectedFormat != m.Format {
@@ -210,6 +354,16 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 	}
 	report.Applied = true
 	return report, nil
+}
+
+func compilerInputArchivePinsSource(ctx context.Context, db inputQueryer, digest string) (bool, error) {
+	var installed bool
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_archives') IS NOT NULL`).Scan(&installed); err != nil || !installed {
+		return false, err
+	}
+	var pinned bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_platform_input_archives WHERE content_hash=$1)`, digest).Scan(&pinned)
+	return pinned, err
 }
 
 func writeRollbackInput(ctx context.Context, tx *sql.Tx, snapshot platformconfig.RuntimeSnapshot, old inputManifest) error {

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/inputarchive"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/runtimeobservation"
@@ -68,6 +69,7 @@ func absentInputManifest(err error) bool {
 type inputChunkReader struct {
 	separated    *separatedInputReader
 	shared       *sharedInputReader
+	archive      *inputarchive.Reader
 	rows         *sql.Rows
 	manifest     inputManifest
 	ordinal      int
@@ -102,6 +104,14 @@ func openInputChunks(ctx context.Context, db inputQueryer, m inputManifest) (*in
 	return &inputChunkReader{rows: rows, manifest: m, hash: sha256.New()}, nil
 }
 func (r *inputChunkReader) Read(p []byte) (int, error) {
+	if r.archive != nil {
+		n, err := r.archive.Read(p)
+		r.done = r.archive.Verified()
+		if err != nil && !errors.Is(err, io.EOF) {
+			r.err = err
+		}
+		return n, err
+	}
 	if r.separated != nil {
 		n, err := r.separated.Read(p)
 		r.done, r.err = r.separated.done, r.separated.err
@@ -168,6 +178,9 @@ func (r *inputChunkReader) Read(p []byte) (int, error) {
 }
 
 func (r *inputChunkReader) Close() error {
+	if r.archive != nil {
+		return r.archive.Close()
+	}
 	if r.rows != nil {
 		return r.rows.Close()
 	}
@@ -307,6 +320,25 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	}
 	m, err := readInputManifest(ctx, tx, digest)
 	if err == nil {
+		archiveRouted, routeErr := s.compilerInputArchiveRouted(ctx, tx, m)
+		if routeErr != nil {
+			return routeErr
+		}
+		if archiveRouted {
+			actual, e := platformconfig.RuntimeSnapshotDigest(snapshot)
+			if e != nil || actual != digest {
+				return ErrConflict
+			}
+			r, e := s.openArchiveInput(ctx, tx, m)
+			if e != nil {
+				return e
+			}
+			defer r.Close()
+			if e = verifyArchiveReader(r, m.Digest, m.Size); e != nil {
+				return e
+			}
+			return tx.Commit()
+		}
 		if m.Format == inputFormatSeparatedV4 {
 			actual, e := platformconfig.RuntimeSnapshotDigest(snapshot)
 			if e != nil {
@@ -315,7 +347,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			if actual != digest {
 				return ErrConflict
 			}
-			if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest == m {
+			if cached := s.compilerDNSInputs.get(digest); !archiveRouted && cached != nil && cached.Manifest == m {
 				if _, e := readSeparatedDNSSelections(ctx, tx, m, cached, func(CompilerDNSSelectionSummary) bool { return false }); e == nil {
 					return tx.Commit()
 				}
@@ -339,7 +371,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			if actual != digest {
 				return ErrConflict
 			}
-			if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest == m {
+			if cached := s.compilerDNSInputs.get(digest); !archiveRouted && cached != nil && cached.Manifest == m {
 				if _, err := readSharedDNSSelections(ctx, tx, m, cached, func(CompilerDNSSelectionSummary) bool { return false }); err != nil {
 					return err
 				}
@@ -369,14 +401,14 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 				return ErrConflict
 			}
 			if m.Format == inputFormatCodecV2 {
-				if cached := s.compilerDNSInputs.get(digest); cached != nil && cached.Manifest.Format == m.Format && cached.Manifest.Size == m.Size && cached.Manifest.Count == m.Count && cached.Manifest.ChunkSize == m.ChunkSize {
+				if cached := s.compilerDNSInputs.get(digest); !archiveRouted && cached != nil && cached.Manifest.Format == m.Format && cached.Manifest.Size == m.Size && cached.Manifest.Count == m.Count && cached.Manifest.ChunkSize == m.ChunkSize {
 					if err := verifyInputChunkHashes(ctx, tx, m, cached.Hashes, cached.StoredSizes); err != nil {
 						return err
 					}
 					return tx.Commit()
 				}
 			}
-			r, err := openInputChunks(ctx, tx, m)
+			r, err := s.openInputChunks(ctx, tx, m)
 			if err != nil {
 				return err
 			}
@@ -581,11 +613,11 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 		// Keep the manifest and every streamed chunk in one MVCC snapshot.
 		// A concurrent GC may commit after the manifest read; this reader must
 		// still see the complete pre-collection representation.
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		tx, finish, err := s.BeginCompilerInputReadLease(ctx)
 		if err != nil {
 			return platformconfig.RuntimeSnapshot{}, err
 		}
-		defer tx.Rollback()
+		defer finish()
 		m, err := readInputManifest(ctx, tx, digest)
 		if err == nil {
 			return s.readCompilerInputSnapshot(ctx, tx, m)
@@ -593,7 +625,7 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 		if !absentInputManifest(err) {
 			return platformconfig.RuntimeSnapshot{}, err
 		}
-		tx.Rollback() // Release the connection before the legacy fallback.
+		finish() // Release the connection and session lease before the legacy fallback.
 	}
 	content, err := s.GetPlatformArtifactContent(digest)
 	if err != nil {
@@ -614,7 +646,7 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 }
 
 func (s *Store) readCompilerInputSnapshot(ctx context.Context, db inputQueryer, m inputManifest) (platformconfig.RuntimeSnapshot, error) {
-	r, err := openInputChunks(ctx, db, m)
+	r, err := s.openInputChunks(ctx, db, m)
 	if err != nil {
 		return platformconfig.RuntimeSnapshot{}, err
 	}
@@ -645,16 +677,16 @@ func (s *Store) readCompilerInputSnapshot(ctx context.Context, db inputQueryer, 
 }
 
 func (s *Store) pgReadChunkedContent(ctx context.Context, digest string) (model.PlatformArtifactContent, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	tx, finish, err := s.BeginCompilerInputReadLease(ctx)
 	if err != nil {
 		return model.PlatformArtifactContent{}, err
 	}
-	defer tx.Rollback()
+	defer finish()
 	m, err := readInputManifest(ctx, tx, digest)
 	if err != nil {
 		return model.PlatformArtifactContent{}, err
 	}
-	r, err := openInputChunks(ctx, tx, m)
+	r, err := s.openInputChunks(ctx, tx, m)
 	if err != nil {
 		return model.PlatformArtifactContent{}, err
 	}

@@ -17,6 +17,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/edgetopology"
+	"fugue/internal/inputarchive"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/sshidentity"
@@ -38,13 +39,15 @@ type Store struct {
 	platformContentHintMu sync.Mutex
 	platformContentHints  map[string][32]byte
 
-	path          string
-	databaseURL   string
-	db            *sql.DB
-	dbInitMu      sync.Mutex
-	dbReady       bool
-	storagePolicy storagePolicyState
-	retention     observationRetentionState
+	path                                 string
+	databaseURL                          string
+	db                                   *sql.DB
+	dbInitMu                             sync.Mutex
+	dbReady                              bool
+	storagePolicy                        storagePolicyState
+	retention                            observationRetentionState
+	compilerInputArchiveObjects          inputarchive.Objects
+	compilerInputArchiveReadLeaseEnabled bool
 
 	advisoryLockMu sync.Mutex
 	advisoryLocks  map[string]bool
@@ -135,6 +138,9 @@ func (s *Store) BackendKind() string {
 }
 
 func (s *Store) Init() error {
+	if err := s.ConfigureCompilerInputArchiveFromEnv(); err != nil {
+		return err
+	}
 	if s.usingDatabase() {
 		if err := s.ensureDatabaseReady(); err != nil {
 			return err

@@ -152,6 +152,9 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigrateCompilerInputSeparated(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate separated compiler input: %w", err)
 	}
+	if err := schemamigrate.MigrateCompilerInputArchive(ctx, databaseURL); err != nil {
+		return fmt.Errorf("migrate compiler input archive ledger: %w", err)
+	}
 	if err := schemamigrate.MigrateAppReleaseWorkload(ctx, databaseURL); err != nil {
 		return err
 	}
