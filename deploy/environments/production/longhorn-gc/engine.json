@@ -1,4 +1,5 @@
 {
+  "generation": 1,
   "namespace": "longhorn-system",
   "expectedPreviousImage": "docker.io/longhornio/longhorn-engine:v1.12.1",
   "repository": "ghcr.io/yym68686/fugue-api",
