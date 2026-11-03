@@ -51,6 +51,11 @@ record committed representation changes. CLI output contains only aggregate
 counts, digests and byte totals, never evidence or credentials. A lost commit
 acknowledgment requires inspection before retrying.
 
+Maintenance uses the ordinary database role. It sets `work_mem=1MB` and disables
+parallel query workers, but does not set the superuser-only `temp_file_limit` or
+grant additional privileges. This is not a hard zero-temporary-file guarantee;
+bounded inputs/batches and the filesystem reserve below remain mandatory.
+
 ## Production sequence
 
 1. Ship the additive schema and compatible readers via main → the existing CI

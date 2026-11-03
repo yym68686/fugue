@@ -273,7 +273,7 @@ func (s *Store) pgWriteSeparatedInput(ctx context.Context, tx *sql.Tx, snapshot 
 	w := &separatedInputWriter{ctx: ctx, tx: tx, hash: sha256.New(), verified: map[string]bool{}}
 	defer func() {
 		if resultErr != nil {
-			separatedInputStats.failures.Add(1)
+			observeSeparatedFailure(resultErr)
 			return
 		}
 		separatedInputStats.writes.Add(1)

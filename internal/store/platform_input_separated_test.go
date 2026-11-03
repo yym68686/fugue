@@ -469,3 +469,47 @@ func TestSeparatedFrameDoesNotClassifyConfigurationByFieldName(t *testing.T) {
 		t.Fatal("configuration field was reclassified", err)
 	}
 }
+
+func TestSeparatedMaintenanceUsesOrdinaryDatabaseRole(t *testing.T) {
+	s := separatedTestStore(t)
+	var super bool
+	if err := s.db.QueryRow(`SELECT rolsuper FROM pg_roles WHERE rolname=current_user`).Scan(&super); err != nil {
+		t.Fatal(err)
+	}
+	if !super {
+		t.Skip("fixture role creation requires a disposable database administrator")
+	}
+	// SET ROLE, not the fixture's superuser identity, executes every statement
+	// in the maintenance transaction. No login, credential, or production role.
+	const role = "fugue_test_input_maintenance"
+	if _, err := s.db.Exec(`CREATE ROLE ` + role + ` NOLOGIN NOSUPERUSER`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		s.db.Exec(`RESET ROLE`)
+		s.db.Exec(`DROP OWNED BY ` + role)
+		if _, err := s.db.Exec(`DROP ROLE ` + role); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := s.db.Exec(`GRANT USAGE ON SCHEMA public TO ` + role + `; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO ` + role + `; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO ` + role); err != nil {
+		t.Fatal(err)
+	}
+	s.storagePolicy.separated.Enabled = false
+	snapshot := separatedFixture(t)
+	digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	s.db.SetMaxOpenConns(1)
+	s.db.SetMaxIdleConns(1)
+	if _, err := s.db.Exec(`SET ROLE ` + role); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"migrate", "rollback", "collect"} {
+		if _, err := s.maintainCompilerInput(t.Context(), CompilerInputMaintenanceOptions{Action: action, Digest: digest, MaxInputBytes: 128 << 20, Apply: true}); err != nil {
+			t.Fatal(action, err)
+		}
+	}
+	assertSeparatedEquivalent(t, s, snapshot, digest)
+}

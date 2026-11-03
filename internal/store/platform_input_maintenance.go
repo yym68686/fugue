@@ -106,7 +106,11 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 	defer tx.Rollback()
 	// Same writer fence as all v1/v2/v3/v4 creation; consistent lock order with
 	// the optional historical collector. Short lock budgets yield to production.
-	for _, q := range []string{`SET LOCAL lock_timeout='250ms'`, `SET LOCAL statement_timeout='5s'`, `SET LOCAL work_mem='1MB'`, `SET LOCAL temp_file_limit=0`, `SET LOCAL max_parallel_workers_per_gather=0`, `SELECT pg_advisory_xact_lock_shared(hashtextextended('fugue.compiler-input-gc.v1',0))`, `SELECT pg_advisory_xact_lock(315609238744290)`} {
+	// temp_file_limit is a superuser-only GUC. The ordinary application role
+	// cannot SET it, and maintenance must not acquire broader database rights.
+	// Bounded inputs/batches, short statements and the CI disk reserve bound
+	// this operation; work_mem limits memory, not total temporary disk usage.
+	for _, q := range []string{`SET LOCAL lock_timeout='250ms'`, `SET LOCAL statement_timeout='5s'`, `SET LOCAL work_mem='1MB'`, `SET LOCAL max_parallel_workers_per_gather=0`, `SELECT pg_advisory_xact_lock_shared(hashtextextended('fugue.compiler-input-gc.v1',0))`, `SELECT pg_advisory_xact_lock(315609238744290)`} {
 		if _, err = tx.ExecContext(ctx, q); err != nil {
 			return report, err
 		}
