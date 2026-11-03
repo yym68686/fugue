@@ -112,10 +112,13 @@ def reconcile(c, apply, save, kube=kubectl):
         fresh = read_sources()
         if desired(c, fresh) != target or any((a["metadata"]["uid"], a["metadata"]["resourceVersion"]) != (b["metadata"]["uid"], b["metadata"]["resourceVersion"]) for a, b in zip(sources, fresh)):
             raise ValueError("public Service changed during DNS egress planning")
-        args = ["create", "--field-manager=" + MANAGER, "-f", "-", "-o", "json"] if action == "create" else ["patch", "networkpolicy", c["policy_name"], "-n", c["namespace"], "--field-manager=" + MANAGER, "--type=json", "--patch-file", "-", "-o", "json"]
-        kube(*args, "--dry-run=server", body=canonical(body))
+        # kubectl create supports stdin via -f -, but patch-file treats '-' as
+        # a literal filename. Pass the bounded JSON patch as its own argument.
+        args = ["create", "--field-manager=" + MANAGER, "-f", "-", "-o", "json"] if action == "create" else ["patch", "networkpolicy", c["policy_name"], "-n", c["namespace"], "--field-manager=" + MANAGER, "--type=json", "--patch", canonical(body), "-o", "json"]
+        stdin = canonical(body) if action == "create" else None
+        kube(*args, "--dry-run=server", body=stdin)
         if apply:
-            kube(*args, body=canonical(body))
+            kube(*args, body=stdin)
     if apply:
         fresh = read_sources()
         if desired(c, fresh) != target or any((a["metadata"]["uid"], a["metadata"]["resourceVersion"]) != (b["metadata"]["uid"], b["metadata"]["resourceVersion"]) for a, b in zip(sources, fresh)):

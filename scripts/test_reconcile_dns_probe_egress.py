@@ -98,6 +98,43 @@ class ProbeEgressTests(unittest.TestCase):
             change(c)
             with self.assertRaises(ValueError): p.validate(c)
 
+    def test_existing_policy_update_passes_json_patch_argument_and_keeps_cas(self):
+        import json
+        c, service = fixture()
+        current = copy.deepcopy(p.desired(c, [service]))
+        current["metadata"].update(uid="policy-one", resourceVersion="20")
+        c["generation"] = 2
+        service["spec"]["selector"]["role"] = "successor-front"
+        service["metadata"]["annotations"]["transport.fugue.dev/generation"] = "3"
+        logical = {k: service["spec"].get(k) for k in ["type", "selector", "ports", "externalIPs", "externalTrafficPolicy", "publishNotReadyAddresses"]}
+        service["metadata"]["annotations"]["transport.fugue.dev/digest"] = p.digest(logical)
+        c["services"][0].update(generation=3, digest=p.digest(logical))
+        writes = []
+        def kube(*args, body=None):
+            nonlocal current
+            if args[:2] == ("get", "service"): return copy.deepcopy(service)
+            if args[:2] == ("get", "networkpolicy"): return copy.deepcopy(current)
+            self.assertEqual("patch", args[0])
+            self.assertIsNone(body)
+            self.assertNotIn("--patch-file", args)
+            patch = json.loads(args[args.index("--patch") + 1])
+            tests = {entry["path"]: entry["value"] for entry in patch if entry["op"] == "test"}
+            self.assertEqual("policy-one", tests["/metadata/uid"])
+            self.assertEqual("20", tests["/metadata/resourceVersion"])
+            self.assertEqual(current["spec"], tests["/spec"])
+            writes.append(args)
+            if "--dry-run=server" not in args:
+                current = p.desired(c, [service])
+                current["metadata"].update(uid="policy-one", resourceVersion="21")
+            return copy.deepcopy(current)
+        result = p.reconcile(c, True, lambda _: None, kube)
+        self.assertTrue(result["applied"])
+        self.assertEqual(2, len(writes))
+        self.assertIn("--dry-run=server", writes[0])
+        self.assertNotIn("--dry-run=server", writes[1])
+        p.reconcile(c, True, lambda _: None, kube)
+        self.assertEqual(2, len(writes))
+
 
 if __name__ == "__main__":
     unittest.main()

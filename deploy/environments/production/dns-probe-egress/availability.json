@@ -1,6 +1,6 @@
 {
   "schema": "fugue.dns-probe-egress/v1",
-  "generation": 2,
+  "generation": 3,
   "namespace": "fugue-system",
   "policy_name": "fugue-dns-availability-public-probes",
   "authority_cell_id": "cell-dns-availability",
