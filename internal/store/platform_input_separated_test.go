@@ -549,6 +549,14 @@ func TestSeparatedReaderBatchesDistinctComponentMetadata(t *testing.T) {
 	if queries := tracer.metadata.Load(); queries >= 32 {
 		t.Fatalf("per-component round trips returned: %d", queries)
 	}
+	tracer.metadata.Store(0)
+	selections, err := reader.GetPlatformCompilerInputDNSSelections(digest, nil)
+	if err != nil || len(selections.DNSSelections) != len(snapshot.DNSSelections) {
+		t.Fatal("selective full-body read differs", err)
+	}
+	if queries := tracer.metadata.Load(); queries >= 32 {
+		t.Fatalf("selective path repeated metadata queries: %d", queries)
+	}
 }
 
 func TestSeparatedFinalReadbackRejectsForgedNewComponentRecipe(t *testing.T) {

@@ -250,7 +250,8 @@ func readSeparatedDNSSelections(ctx context.Context, db inputQueryer, m inputMan
 				start := max(int64(0), v.Offset-offset)
 				stop := min(int64(part.Size), v.Offset+v.Length-offset)
 				if part.Evidence {
-					component, e := openSharedRepresentation(ctx, db, r.components[part.Digest], true)
+					r.ordinal = i + 1
+					component, e := r.evidenceReader(part.Digest)
 					if e != nil {
 						return CompilerInputDNSSelections{}, e
 					}
