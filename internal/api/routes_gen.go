@@ -108,6 +108,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/admin/security/key-rotation", s.auth.RequireAPI(http.HandlerFunc(s.handlePreflightKeyRotation)))
 	mux.Handle("GET /v1/admin/ssh/front-acknowledgements/{edge_id}/{instance_uid}", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminGetSSHFrontAcknowledgement)))
 	mux.Handle("GET /v1/admin/storage", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAdminStorageOverview)))
+	mux.Handle("GET /v1/admin/storage/compiler-input-archive", s.auth.RequireAPI(http.HandlerFunc(s.handleGetCompilerInputArchiveBackend)))
+	mux.Handle("POST /v1/admin/storage/compiler-input-archive", s.auth.RequireAPI(http.HandlerFunc(s.handleEnableCompilerInputArchiveBackend)))
 	mux.Handle("GET /v1/admin/storage/jobs", s.auth.RequireAPI(http.HandlerFunc(s.handleListStorageMaintenanceJobs)))
 	mux.Handle("POST /v1/admin/storage/jobs", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateStorageMaintenanceJob)))
 	mux.Handle("GET /v1/admin/storage/jobs/{job_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetStorageMaintenanceJob)))

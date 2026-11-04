@@ -3355,7 +3355,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-compiler-input-storage, cancel-in-progress: false, queue: max}
-    timeout-minutes: 5
+    timeout-minutes: 120
     permissions: {contents: read}
     steps:
       - name: Inspect generated metadata before checkout
@@ -3368,6 +3368,13 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
+          archive=deploy/environments/production/storage-policy/archive-operation.json
+          if [ -f "$archive" ] && ! git diff --quiet "$BASE_SHA" HEAD -- "$archive"; then
+            git fetch origin main
+            git diff --exit-code HEAD origin/main -- scripts/compiler_input_archive.py scripts/compiler_input_storage.py deploy/releases deploy/environments/production/storage-policy .github/workflows/ci.yml
+            python3 -m unittest scripts.test_compiler_input_archive scripts.test_compiler_input_storage
+            python3 -m scripts.compiler_input_archive --operation "$archive"
+          fi
           operation=deploy/environments/production/storage-policy/operation.json
           if [ ! -f "$operation" ]; then exit 0; fi
           if git diff --quiet "$BASE_SHA" HEAD -- "$operation"; then exit 0; fi

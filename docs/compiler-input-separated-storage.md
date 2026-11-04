@@ -134,6 +134,24 @@ historical deletion or claim of reducing tens of GiB to hundreds of MiB is part
 of this representation change. Production savings require actual measurement.
 # Compiler input external archive
 
+Platform administrators can provision a dedicated control-plane R2 backend with
+`fugue admin storage archive enable --execute` and inspect it with
+`fugue admin storage archive status`. Without `--execute`, enable is a read-only
+preview. Provisioning reuses platform R2 management, never an application's
+bucket, and returns no S3 secrets. Credentials are encrypted in the existing
+platform object storage configuration: a bucket-scoped reader and a separate
+writer. Upgraded readers discover activation from the shared configuration;
+no live Deployment patch or plaintext environment injection is needed.
+
+The bucket has an independently verified indefinite object lock and no object
+expiration or storage-class lifecycle rules (R2's incomplete multipart abort
+rule is harmless and preserved). The management API has no archive disable/delete operation.
+Enabling is not migration or payment/backup success: verify real S3 uploads and
+full digest readbacks separately. All current AND rollback reader releases must
+support managed configuration before publishing routes or retiring old chunks.
+Explicit archive environment configuration remains supported for standalone
+operators; when present, it takes precedence and must bind the same backend.
+
 The single-input archive writer, reader, and `archive-route` / `archive-unroute`
 operations are in `main`. Production has no dedicated archive environment or
 validated archive bucket, no archive migration or route has been run, and no

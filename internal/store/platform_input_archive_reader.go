@@ -17,6 +17,9 @@ import (
 
 func (s *Store) ConfigureCompilerInputArchiveFromEnv() error {
 	cfg, configured, err := inputarchive.ConfigFromEnv()
+	if err == nil && !configured && s.db != nil {
+		cfg, configured, err = resolveCompilerInputArchiveConfig(context.Background(), s.db, false)
+	}
 	if err != nil {
 		return fmt.Errorf("compiler input archive configuration: %w", err)
 	}
@@ -38,7 +41,9 @@ func (s *Store) ConfigureCompilerInputArchiveFromEnv() error {
 		}
 	}
 	s.compilerInputArchiveObjects = objects
-	s.compilerInputArchiveReadLeaseEnabled = configured
+	// Managed activation is shared by all replicas without changing environment
+	// variables. Every upgraded database reader participates before activation.
+	s.compilerInputArchiveReadLeaseEnabled = configured || s.db != nil
 	return nil
 }
 
@@ -82,10 +87,7 @@ func (s *Store) verifyCompilerInputArchiveStartupCompatibility(ctx context.Conte
 // openArchiveInput refuses fallback when a committed external route is absent,
 // mismatched, or not fully receipt-validated.
 func (s *Store) openArchiveInput(ctx context.Context, db inputQueryer, m inputManifest) (*inputarchive.Reader, error) {
-	if s.compilerInputArchiveObjects == nil {
-		return nil, fmt.Errorf("compiler input archive backend unavailable: %w", ErrConflict)
-	}
-	cfg, configured, err := inputarchive.ConfigFromEnv()
+	cfg, configured, err := resolveCompilerInputArchiveConfig(ctx, db, false)
 	if err != nil || !configured {
 		return nil, fmt.Errorf("compiler input archive backend unavailable: %w", ErrConflict)
 	}
@@ -97,7 +99,14 @@ func (s *Store) openArchiveInput(ctx context.Context, db inputQueryer, m inputMa
 	if err != nil {
 		return nil, err
 	}
-	return inputarchive.Open(ctx, s.compilerInputArchiveObjects, manifest)
+	objects := s.compilerInputArchiveObjects
+	if objects == nil {
+		objects, err = inputarchive.NewS3(cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return inputarchive.Open(ctx, objects, manifest)
 }
 
 func compilerInputArchiveManifest(ctx context.Context, db inputQueryer, m inputManifest, fingerprint, expectedState string) (inputarchive.Manifest, error) {

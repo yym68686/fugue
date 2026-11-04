@@ -110,6 +110,10 @@ func (s *Server) handleGetAdminStorageOverview(w http.ResponseWriter, r *http.Re
 	if err == nil && cfg.AccountID != "" {
 		out.Configured = true
 		out.AccountID = cfg.AccountID
+		if archive := cfg.CompilerInputArchive; archive != nil {
+			buckets[archive.Bucket] = "configured"
+			out.Namespaces = append(out.Namespaces, adminStorageNamespace{Kind: "control-plane-archive", ResourceID: archive.ID, Name: "compiler-inputs", Bucket: archive.Bucket, Prefix: archive.Prefix, Status: archive.State, Stale: true})
+		}
 		provider, e := s.objectStorageProvider(cfg)
 		if e == nil {
 			var names []string

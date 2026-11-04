@@ -13902,6 +13902,43 @@ paths:
                 $ref: '#/components/schemas/AdminStorageOverview'
         default:
           $ref: '#/components/responses/ErrorResponse'
+  /v1/admin/storage/compiler-input-archive:
+    get:
+      operationId: getCompilerInputArchiveBackend
+      summary: Inspect the control plane archive backend without secrets
+      tags: [Object Storage, Admin]
+      x-fugue-handler: handleGetCompilerInputArchiveBackend
+      security: [{BearerAuth: []}]
+      responses:
+        '200':
+          description: Platform administrators only; configuration is not a migration receipt
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CompilerInputArchiveBackendStatus'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+    post:
+      operationId: enableCompilerInputArchiveBackend
+      summary: Provision an isolated control plane R2 archive
+      description: Platform administrators only. Preview unless execute is true. Uses existing platform R2 management to create a private dedicated bucket, indefinite object lock and separate encrypted bucket-scoped reader and writer credentials. Resumable; does not migrate or route any input. Existing identities cannot be replaced or disabled through this endpoint.
+      tags: [Object Storage, Admin]
+      x-fugue-handler: handleEnableCompilerInputArchiveBackend
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                execute: {type: boolean, default: false}
+      responses:
+        '200':
+          description: Preview or persisted provisioning result; credentials are never returned
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CompilerInputArchiveBackendStatus'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
   /v1/admin/storage/jobs:
     get:
       operationId: listStorageMaintenanceJobs
@@ -17513,6 +17550,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DataTransferPart"
+    CompilerInputArchiveBackendStatus:
+      type: object
+      additionalProperties: false
+      required: [configured, executed, state]
+      properties:
+        configured: {type: boolean}
+        executed: {type: boolean}
+        state: {type: string, enum: [unconfigured, provisioning, active]}
+        bucket: {type: string}
+        endpoint: {type: string}
+        prefix: {type: string}
+        reader_configured: {type: boolean}
+        writer_configured: {type: boolean}
+        retention_policy_sha256: {type: string}
+        protection_verified_at: {type: string, format: date-time}
     ObjectStorageConfigRequest:
       type: object
       additionalProperties: false

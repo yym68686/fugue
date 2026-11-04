@@ -42,9 +42,26 @@ type ObjectStorageCredentialRecord struct {
 	Secret     DataBackendSecret       `json:"secret"`
 }
 type ObjectStorageConfig struct {
-	AccountID string            `json:"account_id"`
-	Secret    DataBackendSecret `json:"secret"`
-	UpdatedAt time.Time         `json:"updated_at"`
+	AccountID            string                       `json:"account_id"`
+	Secret               DataBackendSecret            `json:"secret"`
+	UpdatedAt            time.Time                    `json:"updated_at"`
+	CompilerInputArchive *CompilerInputArchiveBackend `json:"compiler_input_archive,omitempty"`
+}
+
+// CompilerInputArchiveBackend is platform-owned and never exposed with its
+// encrypted credentials. Identity and granted credentials survive retries.
+type CompilerInputArchiveBackend struct {
+	ID                    string            `json:"id"`
+	AccountID             string            `json:"account_id"`
+	Bucket                string            `json:"bucket"`
+	Prefix                string            `json:"prefix"`
+	State                 string            `json:"state"`
+	Reader                DataBackendSecret `json:"reader"`
+	Writer                DataBackendSecret `json:"writer"`
+	ReaderConfigured      bool              `json:"reader_configured"`
+	WriterConfigured      bool              `json:"writer_configured"`
+	RetentionPolicySHA256 string            `json:"retention_policy_sha256"`
+	ProtectionVerifiedAt  *time.Time        `json:"protection_verified_at,omitempty"`
 }
 type ObjectStorageState struct {
 	Config      *ObjectStorageConfig            `json:"config,omitempty"`

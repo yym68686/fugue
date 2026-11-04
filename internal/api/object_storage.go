@@ -133,6 +133,9 @@ func (s *Server) handleConfigureObjectStorage(w http.ResponseWriter, r *http.Req
 			return err
 		}
 		if old.AccountID != "" && old.AccountID != req.AccountID {
+			if old.CompilerInputArchive != nil {
+				return store.ErrConflict
+			}
 			items, err := s.store.ListObjectStores("", "")
 			if err != nil {
 				return err
@@ -145,7 +148,7 @@ func (s *Server) handleConfigureObjectStorage(w http.ResponseWriter, r *http.Req
 		if err != nil {
 			return err
 		}
-		cfg := model.ObjectStorageConfig{AccountID: req.AccountID, Secret: secret, UpdatedAt: time.Now().UTC()}
+		cfg := model.ObjectStorageConfig{AccountID: req.AccountID, Secret: secret, UpdatedAt: time.Now().UTC(), CompilerInputArchive: old.CompilerInputArchive}
 		provider, err := s.objectStorageProvider(cfg)
 		if err != nil {
 			return err

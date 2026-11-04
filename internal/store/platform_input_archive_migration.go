@@ -16,8 +16,9 @@ import (
 )
 
 type CompilerInputArchiveMigrationOptions struct {
-	Digest string
-	Apply  bool
+	Digest       string
+	Apply        bool
+	SegmentBytes int
 }
 
 type CompilerInputArchiveRouteOptions struct {
@@ -70,10 +71,15 @@ func RunCompilerInputArchiveMigration(ctx context.Context, databaseURL string, o
 	if !inputDigestPattern.MatchString(options.Digest) {
 		return report, ErrInvalidInput
 	}
+	db, err := openPostgresDatabase(databaseURL)
+	if err != nil {
+		return report, err
+	}
+	defer db.Close()
 	var objects inputarchive.Objects
 	var backendHash string
 	if options.Apply {
-		cfg, configured, err := inputarchive.ConfigFromEnv()
+		cfg, configured, err := resolveCompilerInputArchiveConfig(ctx, db, true)
 		if err != nil || !configured {
 			return report, fmt.Errorf("dedicated compiler input archive backend is required: %w", ErrConflict)
 		}
@@ -90,11 +96,6 @@ func RunCompilerInputArchiveMigration(ctx context.Context, databaseURL string, o
 			return report, err
 		}
 	}
-	db, err := openPostgresDatabase(databaseURL)
-	if err != nil {
-		return report, err
-	}
-	defer db.Close()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	return copyCompilerInputArchive(ctx, db, objects, backendHash, options)
@@ -102,7 +103,7 @@ func RunCompilerInputArchiveMigration(ctx context.Context, databaseURL string, o
 
 func copyCompilerInputArchive(ctx context.Context, db *sql.DB, objects inputarchive.Objects, backendHash string, options CompilerInputArchiveMigrationOptions) (CompilerInputArchiveMigrationReport, error) {
 	report := CompilerInputArchiveMigrationReport{Action: "archive", Digest: options.Digest}
-	if !inputDigestPattern.MatchString(options.Digest) || options.Apply && (!inputDigestPattern.MatchString(backendHash) || objects == nil) {
+	if !inputDigestPattern.MatchString(options.Digest) || options.SegmentBytes < 0 || options.SegmentBytes > inputarchive.MaxSegmentBytes || options.SegmentBytes > 0 && options.SegmentBytes < 65536 || options.Apply && (!inputDigestPattern.MatchString(backendHash) || objects == nil) {
 		return report, ErrInvalidInput
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
@@ -163,7 +164,7 @@ func RunCompilerInputArchiveRoute(ctx context.Context, databaseURL string, optio
 		}
 		return report, err
 	}
-	cfg, configured, err := inputarchive.ConfigFromEnv()
+	cfg, configured, err := resolveCompilerInputArchiveConfig(ctx, db, false)
 	if err != nil || !configured {
 		return report, fmt.Errorf("dedicated compiler input archive backend is required: %w", ErrConflict)
 	}
@@ -636,6 +637,9 @@ func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash stri
 	err = tx.QueryRowContext(ctx, `SELECT archive_format,source_format,raw_bytes,segment_bytes,segment_count,object_prefix,backend_hash,state,source_epoch,fencing_token FROM fugue_platform_input_archives WHERE content_hash=$1 FOR UPDATE`, options.Digest).Scan(&archiveFormat, &sourceFormat, &rawBytes, &segmentBytes, &segmentCount, &prefix, &backend, &state, &sourceEpoch, &claim.token)
 	if errors.Is(err, sql.ErrNoRows) {
 		archiveFormat, sourceFormat, rawBytes, segmentBytes = inputarchive.Format, claim.source.Format, claim.source.Size, inputarchive.DefaultSegmentBytes
+		if options.SegmentBytes > 0 {
+			segmentBytes = int64(options.SegmentBytes)
+		}
 		prefix, sourceEpoch, backend = "input/"+strings.TrimPrefix(options.Digest, "sha256:")+"/"+owner, claim.epoch, backendHash
 		segmentCount = (rawBytes + segmentBytes - 1) / segmentBytes
 		_, err = tx.ExecContext(ctx, `INSERT INTO fugue_platform_input_archives(content_hash,archive_format,source_format,raw_bytes,segment_bytes,segment_count,object_prefix,backend_hash,state,source_epoch,verified_digest,fencing_token,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'planned',$9,'',0,now(),now())`, options.Digest, archiveFormat, sourceFormat, rawBytes, segmentBytes, segmentCount, prefix, backendHash, sourceEpoch)

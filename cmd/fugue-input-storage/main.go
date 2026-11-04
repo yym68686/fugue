@@ -31,10 +31,12 @@ func main() {
 	rollbackReaderRelease := flag.String("rollback-reader-release", "", "40-hex rollback release commit with archive reader lease support")
 	archiveRetentionPolicySHA256 := flag.String("archive-retention-policy-sha256", "", "64-hex operator attestation of the independently reviewed archive retention policy")
 	readerDrainTimeout := flag.Duration("reader-drain-timeout", 30*time.Second, "maximum wait for session-level compiler-input readers")
+	archiveLimit := flag.Int("archive-limit", 1, "maximum archive batch inputs, 1 through 1000")
+	archiveSegmentBytes := flag.Int("archive-segment-bytes", 16<<20, "bounded archive segment bytes; applies only to new receipts")
 	rehearse := flag.Bool("rehearse", false, "encode/verify then roll back (consumes WAL and I/O)")
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
-	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-retirement-plan" || *mode == "archive" && !*apply
+	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch") && !*apply
 	routeMode := *mode == "archive-route" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
@@ -51,13 +53,27 @@ func main() {
 		}
 		return
 	}
+	if *mode == "archive-batch" {
+		dsn := os.Getenv("FUGUE_DATABASE_URL")
+		if dsn == "" || *rehearse {
+			fmt.Fprintln(os.Stderr, "archive batch requires a database and explicit copy intent")
+			os.Exit(2)
+		}
+		encoder := json.NewEncoder(os.Stdout)
+		err := store.RunCompilerInputArchiveBatch(ctx, dsn, *archiveLimit, *apply, func(report store.CompilerInputArchiveMigrationReport) error { return encoder.Encode(report) })
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "compiler input archive batch not complete; verified receipts remain resumable")
+			os.Exit(1)
+		}
+		return
+	}
 	if *mode == "archive" {
 		dsn := os.Getenv("FUGUE_DATABASE_URL")
 		if dsn == "" {
 			fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
 			os.Exit(2)
 		}
-		report, err := store.RunCompilerInputArchiveMigration(ctx, dsn, store.CompilerInputArchiveMigrationOptions{Digest: *digest, Apply: *apply})
+		report, err := store.RunCompilerInputArchiveMigration(ctx, dsn, store.CompilerInputArchiveMigrationOptions{Digest: *digest, Apply: *apply, SegmentBytes: *archiveSegmentBytes})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "compiler input archive not confirmed; inspect archive ledger before retrying")
 			os.Exit(1)

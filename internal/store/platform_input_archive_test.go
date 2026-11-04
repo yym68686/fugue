@@ -742,7 +742,7 @@ func TestCompilerInputArchiveMigrationStreamsBeyondLegacyLimit(t *testing.T) {
 	}
 	stream := &archiveInputStream{ctx: t.Context(), db: s.db, m: m, hash: sha256.New()}
 	objects := &archiveTestObjects{}
-	plan := inputarchive.Manifest{Format: inputarchive.Format, Digest: digest, RawBytes: size, SegmentBytes: inputarchive.DefaultSegmentBytes, Prefix: "archive/streaming-over-limit"}
+	plan := inputarchive.Manifest{Format: inputarchive.Format, Digest: digest, RawBytes: size, SegmentBytes: 16 << 20, Prefix: "archive/streaming-over-limit"}
 	archived, err := inputarchive.Copy(t.Context(), objects, stream, plan, func(inputarchive.Segment) error { return nil })
 	if err != nil {
 		t.Fatal(err)

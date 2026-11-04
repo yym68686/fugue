@@ -116,7 +116,12 @@ func RunCompilerInputArchiveRetirement(ctx context.Context, databaseURL string, 
 			return CompilerInputArchiveRetirementReport{}, ErrInvalidInput
 		}
 	}
-	cfg, configured, err := inputarchive.ConfigFromEnv()
+	db, err := openPostgresDatabase(databaseURL)
+	if err != nil {
+		return CompilerInputArchiveRetirementReport{}, err
+	}
+	defer db.Close()
+	cfg, configured, err := resolveCompilerInputArchiveConfig(ctx, db, false)
 	if err != nil {
 		return CompilerInputArchiveRetirementReport{}, fmt.Errorf("compiler input archive configuration is invalid: %w", ErrConflict)
 	}
@@ -140,11 +145,6 @@ func RunCompilerInputArchiveRetirement(ctx context.Context, databaseURL string, 
 		return CompilerInputArchiveRetirementReport{}, fmt.Errorf("dedicated archive backend and reader routing opt-in are required for retirement: %w", ErrConflict)
 	}
 	options.RoutingEnabled = routingEnabled
-	db, err := openPostgresDatabase(databaseURL)
-	if err != nil {
-		return CompilerInputArchiveRetirementReport{}, err
-	}
-	defer db.Close()
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Hour)
