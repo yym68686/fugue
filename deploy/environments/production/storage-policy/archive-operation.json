@@ -1,1 +1,1 @@
-{"version":1,"mode":"archive-batch","digest":"","limit":1000,"apply":true,"expectedExecutorRevision":"3aa40bc28b3b4c861fd5781f1304d18994b7d58d","minimumFreeBytes":536870912}
+{"version":1,"mode":"archive-route-batch","digest":"","limit":10,"apply":true,"expectedExecutorRevision":"3aa40bc28b3b4c861fd5781f1304d18994b7d58d","minimumFreeBytes":536870912}
