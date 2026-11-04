@@ -9,32 +9,30 @@ from scripts.compiler_input_archive import validate_operation, managed_reader, c
 
 
 class ArchiveOperationTest(unittest.TestCase):
-    @patch('scripts.compiler_input_archive.time.sleep')
     @patch('scripts.compiler_input_archive.time.monotonic', return_value=1)
     @patch('scripts.compiler_input_archive.free_bytes', return_value=1024 << 20)
     @patch('scripts.compiler_input_archive.command')
-    def test_only_confirmed_lock_timeout_retries_with_fresh_space_checks(self, command, space, clock, sleep):
-        timeout = ValueError('storage command failed stage=maintenance-executor category=55P03')
-        command.side_effect = [timeout, timeout, 'receipt']
+    def test_command_is_not_replayed_after_a_possible_partial_copy(self, command, space, clock):
+        command.return_value = 'receipt'
         self.assertEqual(execute_item(['synthetic'], {}, 512 << 20, 100), 'receipt')
-        self.assertEqual(space.call_count, 3)
-        self.assertEqual([x.args[0] for x in sleep.call_args_list], [1, 2])
-        space.reset_mock()
-        space.side_effect = [1024 << 20, 511 << 20]
-        command.side_effect = [timeout]
-        with self.assertRaisesRegex(ValueError, 'free-space reserve'):
-            execute_item(['synthetic'], {}, 512 << 20, 100)
-        self.assertEqual(command.call_count, 4)
-        space.side_effect = None
-        for category in ('conflict', 'deadline', 'unclassified'):
+        space.assert_called_once()
+        # Any of these failures can follow an already committed lease or
+        # receipt. In particular, 55P03 must survive as the original failure;
+        # replaying now would usually replace it with active-owner conflict.
+        for category in ('55P03', 'conflict', 'deadline', 'unclassified'):
             command.reset_mock()
-            command.side_effect = [ValueError('storage command failed stage=maintenance-executor category='+category)]
-            with self.assertRaises(ValueError): execute_item(['synthetic'], {}, 512 << 20, 100)
+            failure = ValueError('storage command failed stage=maintenance-executor category='+category)
+            command.side_effect = [failure, ValueError('storage command failed stage=maintenance-executor category=conflict')]
+            with self.assertRaises(ValueError) as raised:
+                execute_item(['synthetic'], {}, 512 << 20, 100)
+            self.assertIs(raised.exception, failure)
             command.assert_called_once()
         command.reset_mock()
-        command.side_effect = [timeout]*4
-        with self.assertRaises(ValueError): execute_item(['synthetic'], {}, 512 << 20, 100)
-        self.assertEqual(command.call_count, 4)
+        space.return_value = 511 << 20
+        with self.assertRaisesRegex(ValueError, 'free-space reserve'):
+            execute_item(['synthetic'], {}, 512 << 20, 100)
+        command.assert_not_called()
+        space.return_value = 1024 << 20
         command.reset_mock()
         clock.return_value = 100
         with self.assertRaisesRegex(ValueError, 'time budget'):

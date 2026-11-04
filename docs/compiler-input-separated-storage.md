@@ -93,6 +93,15 @@ representation changes. CLI output contains only aggregate counts, digests and
 byte totals, never evidence or credentials. A lost commit acknowledgment
 requires inspection before retrying.
 
+The CI archive runner never replays a failed whole-input command based only on
+SQLSTATE `55P03`. That error can occur after an earlier transaction committed
+the input's owner lease or a segment receipt. Only the executor's individual
+lock acquisition can retry, after its transaction has confirmed rollback and
+within its bounded acquisition budget. A stopped command retains resumable
+receipts; inspect them and wait for any owner lease to expire naturally before
+declaring a new bounded operation. A later active-owner conflict is not evidence
+that the original operation made no progress.
+
 Maintenance uses the ordinary database role. It sets `work_mem=1MB` and disables
 parallel query workers, but does not set the superuser-only `temp_file_limit` or
 grant additional privileges. This is not a hard zero-temporary-file guarantee;

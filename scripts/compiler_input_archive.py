@@ -119,21 +119,18 @@ def shared_reader_keys(registry, current):
 
 
 def execute_item(argv, database, minimum_free_bytes, deadline):
-    # Yield outside a transaction on a confirmed PostgreSQL lock timeout.
-    # Never retry an unknown failure/commit outcome or steal an active lease.
-    # If a prior phase acquired a lease, its normal conflict check still wins.
-    for attempt in range(4):
-        if time.monotonic() >= deadline:
-            raise ValueError('archive paused at time budget; prior receipts retained')
-        if free_bytes(database) < minimum_free_bytes:
-            raise ValueError('archive paused at free-space reserve; prior receipts retained')
-        try:
-            return command(argv, timeout=1850)
-        except ValueError as exc:
-            if str(exc) != 'storage command failed stage=maintenance-executor category=55P03' or attempt == 3:
-                raise
-            print(json.dumps({'retry': 'maintenance-lock-timeout', 'attempt': attempt+1}), flush=True)
-            time.sleep(2**attempt)
+    # A SQLSTATE describes the failing transaction, not earlier transactions
+    # in this command. A copy may already own a durable lease or segment even
+    # when a later source-page/checkpoint lock fails. The executor alone can
+    # retry a rolled-back acquisition before proceeding; never replay the
+    # whole command on 55P03 or conceal it behind a subsequent lease conflict.
+    # Resume needs inspection of receipts and natural lease expiry, then a new
+    # reviewed operation. Unknown commit outcomes are not automatic retries.
+    if time.monotonic() >= deadline:
+        raise ValueError('archive paused at time budget; prior receipts retained')
+    if free_bytes(database) < minimum_free_bytes:
+        raise ValueError('archive paused at free-space reserve; prior receipts retained')
+    return command(argv, timeout=1850)
 
 
 def main():
