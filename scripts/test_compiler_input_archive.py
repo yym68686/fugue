@@ -11,6 +11,30 @@ from scripts.compiler_input_archive import validate_operation, managed_reader, h
 class ArchiveOperationTest(unittest.TestCase):
     @patch('scripts.compiler_input_archive.time.monotonic', return_value=1)
     @patch('scripts.compiler_input_archive.free_bytes', return_value=1024 << 20)
+    @patch('scripts.compiler_input_archive.command', return_value='receipt')
+    def test_reviewed_duration_cancels_remote_executor_without_kill_or_replay(self, command, space, clock):
+        argv = ['kubectl', 'exec', 'synthetic', '--', 'env', 'FEATURE=true',
+                '/usr/local/bin/fugue-input-storage', '--mode', 'archive']
+        self.assertEqual(execute_item(argv, {}, 512 << 20, 600, 540), 'receipt')
+        command.assert_called_once_with(argv[:6]+['timeout', '-s', 'TERM', '540']+argv[6:], timeout=570)
+        failure = ValueError('storage command failed stage=maintenance-executor category=deadline')
+        command.reset_mock()
+        command.side_effect = failure
+        with self.assertRaises(ValueError) as raised:
+            execute_item(argv, {}, 512 << 20, 600, 540)
+        self.assertIs(raised.exception, failure)
+        command.assert_called_once()
+
+    def test_duration_is_explicit_and_bounded(self):
+        for seconds in (True, 0, 59, 1801, '540'):
+            item = self.fixture(); item['maxDurationSeconds'] = seconds
+            with self.subTest(seconds=seconds), self.assertRaises(ValueError):
+                validate_operation(item)
+        item = self.fixture(); item['maxDurationSeconds'] = 540
+        validate_operation(item)
+
+    @patch('scripts.compiler_input_archive.time.monotonic', return_value=1)
+    @patch('scripts.compiler_input_archive.free_bytes', return_value=1024 << 20)
     @patch('scripts.compiler_input_archive.command')
     def test_command_is_not_replayed_after_a_possible_partial_copy(self, command, space, clock):
         command.return_value = 'receipt'

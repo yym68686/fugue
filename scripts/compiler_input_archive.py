@@ -15,6 +15,10 @@ from scripts.compiler_input_storage import command, readers, free_bytes, get, pr
 
 def validate_operation(value):
     required = {'version', 'mode', 'digest', 'limit', 'apply', 'expectedExecutorRevision', 'minimumFreeBytes'}
+    if 'maxDurationSeconds' in value:
+        required.add('maxDurationSeconds')
+        if type(value['maxDurationSeconds']) is not int or not 60 <= value['maxDurationSeconds'] <= 1800:
+            raise ValueError('archive duration must be between 60 and 1800 seconds')
     if value.get('mode') == 'archive-hot-copy':
         required.add('maxStoredBytes')
     if set(value) != required or value['version'] != 1 or type(value['version']) is not int:
@@ -139,7 +143,7 @@ def shared_reader_keys(registry, current):
             raise ValueError('archive credential encryption key differs for '+component+' '+label)
 
 
-def execute_item(argv, database, minimum_free_bytes, deadline):
+def execute_item(argv, database, minimum_free_bytes, deadline, max_duration_seconds=None):
     # A SQLSTATE describes the failing transaction, not earlier transactions
     # in this command. A copy may already own a durable lease or segment even
     # when a later source-page/checkpoint lock fails. The executor alone can
@@ -151,6 +155,13 @@ def execute_item(argv, database, minimum_free_bytes, deadline):
         raise ValueError('archive paused at time budget; prior receipts retained')
     if free_bytes(database) < minimum_free_bytes:
         raise ValueError('archive paused at free-space reserve; prior receipts retained')
+    if max_duration_seconds is not None:
+        # The timer lives beside the executor, not on kubectl: disconnecting
+        # exec alone could leave a remote copy running. TERM cancels the Go
+        # signal context and preserves resumable receipts; never send KILL.
+        marker = argv.index('/usr/local/bin/fugue-input-storage')
+        argv = argv[:marker]+['timeout', '-s', 'TERM', str(max_duration_seconds)]+argv[marker:]
+        return command(argv, timeout=max_duration_seconds+30)
     return command(argv, timeout=1850)
 
 
@@ -183,7 +194,8 @@ def main():
     # Small segments and receipts replace re-encoding: old whole-input WAL
     # budgets do not apply. The reserve is checked before every copy below.
     count = value['limit'] if value['mode'] in ('archive-batch', 'archive-route-batch') else 1
-    deadline = time.monotonic()+80*60
+    max_duration = value.get('maxDurationSeconds')
+    deadline = time.monotonic()+(max_duration or 80*60)
     for _ in range(count):
         if time.monotonic() >= deadline:
             print(json.dumps({'batch_paused_time_budget': True}), flush=True)
@@ -200,7 +212,10 @@ def main():
             argv += ['--hot-copy-max-stored-bytes', str(value['maxStoredBytes'])]
         if value['apply']:
             argv += ['--apply']
-        result = execute_item(argv, database, value['minimumFreeBytes'], deadline)
+        remaining = min(max_duration, int(deadline-time.monotonic())) if max_duration is not None else None
+        if remaining is not None and remaining <= 0:
+            raise ValueError('archive paused at time budget; prior receipts retained')
+        result = execute_item(argv, database, value['minimumFreeBytes'], deadline, remaining)
         if len(result) > 16384:
             raise ValueError('archive receipt exceeds bound')
         if not result.strip():
