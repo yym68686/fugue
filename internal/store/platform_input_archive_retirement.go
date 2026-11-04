@@ -69,6 +69,7 @@ type CompilerInputArchiveRetirementReport struct {
 	CurrentReaderRelease         string                                `json:"current_reader_release,omitempty"`
 	RollbackReaderRelease        string                                `json:"rollback_reader_release,omitempty"`
 	ArchiveRetentionPolicySHA256 string                                `json:"archive_retention_policy_sha256,omitempty"`
+	TransactionDrain             *CompilerInputArchiveTransactionDrain `json:"transaction_drain,omitempty"`
 	Inputs                       []CompilerInputArchiveRetirementInput `json:"inputs"`
 }
 
@@ -453,6 +454,11 @@ func applyCompilerInputArchiveRetirement(ctx context.Context, db *sql.DB, backen
 	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM fugue_platform_input_archive_leases WHERE expires_at>now()`).Scan(&activeLeases); err != nil || activeLeases != 0 {
 		return verified, fmt.Errorf("compiler input archive leases became active before retirement: %w", ErrConflict)
 	}
+	drain, err := compilerInputArchiveTransactionDrain(ctx, tx)
+	verified.TransactionDrain = &drain
+	if err != nil {
+		return verified, err
+	}
 	if err = installCompilerInputArchiveRetirementGuards(ctx, tx); err != nil {
 		return verified, fmt.Errorf("compiler input archive retirement guards could not be installed: %w", ErrConflict)
 	}
@@ -463,6 +469,11 @@ func applyCompilerInputArchiveRetirement(ctx context.Context, db *sql.DB, backen
 	}
 	if current.PlanSHA256 != verified.PlanSHA256 || !current.CanRetire {
 		return verified, fmt.Errorf("compiler input retirement plan changed after archive ledgers were fenced: %w", ErrConflict)
+	}
+	drain, err = compilerInputArchiveTransactionDrain(ctx, tx)
+	verified.TransactionDrain = &drain
+	if err != nil {
+		return verified, err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE fugue_platform_input_archive_control SET epoch=epoch+1,retirement_plan_sha256=$1,retirement_reader_current=$2,retirement_reader_rollback=$3,retirement_archive_policy_sha256=$4,retirement_started_at=now(),updated_at=now() WHERE singleton AND writes_fenced=true AND retirement_started_at IS NULL`, verified.PlanSHA256, options.CurrentReaderRelease, options.RollbackReaderRelease, options.ArchiveRetentionPolicySHA256); err != nil {
 		return verified, err

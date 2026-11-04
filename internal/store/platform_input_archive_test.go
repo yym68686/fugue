@@ -507,6 +507,29 @@ func TestCompilerInputArchiveRetirementRequiresCompleteVerifiedRouteAndDrainsRea
 	if plan.Inputs[0].LogicalBytes <= 0 || plan.ReclaimableLogicalBytes != plan.Inputs[0].LogicalBytes {
 		t.Fatal("plan did not report logical bytes separately from relation bytes", plan.Inputs[0], plan.ReclaimableLogicalBytes)
 	}
+	// An old snapshot that has not touched the legacy relation takes neither
+	// its relation lock nor our input read lease. TRUNCATE is not MVCC-safe;
+	// waiting only for the reader lease would incorrectly permit retirement.
+	oldSnapshot, err := s.db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oldSnapshot.Rollback()
+	var snapshot string
+	if err = oldSnapshot.QueryRow(`SELECT pg_current_snapshot()::text`).Scan(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	blockedBySnapshot, err := applyCompilerInputArchiveRetirement(t.Context(), s.db, backend, CompilerInputArchiveRetirementOptions{RoutingEnabled: true, ExpectedPlanSHA256: plan.PlanSHA256, CurrentReaderRelease: strings.Repeat("a", 40), RollbackReaderRelease: strings.Repeat("b", 40), ArchiveRetentionPolicySHA256: strings.Repeat("d", 64), ReaderDrainTimeout: time.Second}, plan)
+	if !errors.Is(err, ErrConflict) || blockedBySnapshot.Applied || blockedBySnapshot.TransactionDrain == nil || blockedBySnapshot.TransactionDrain.OldTransactions < 1 {
+		t.Fatal("retirement accepted a pre-existing snapshot without a read lease", blockedBySnapshot, err)
+	}
+	var remaining int64
+	if err = s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_chunks WHERE content_hash=$1`, digest).Scan(&remaining); err != nil || remaining != plan.Inputs[0].LegacyChunkRows {
+		t.Fatal("transaction drain rejection changed legacy rows", remaining, err)
+	}
+	if err = oldSnapshot.Rollback(); err != nil {
+		t.Fatal(err)
+	}
 
 	readerConn, err := s.db.Conn(t.Context())
 	if err != nil {

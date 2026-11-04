@@ -250,7 +250,15 @@ available.
 `archive-retire --apply` requires the exact plan hash, current and rollback
 reader release IDs, a committed write fence and database trigger, no active
 archive leases, a matching database-side recheck, and a drained session-level
-reader barrier. It sets short lock/statement timeouts and executes only
+reader barrier. It also checks all database transactions twice with refreshed
+PostgreSQL statistics: pre-existing transactions, any session retaining a
+snapshot, and prepared transactions block retirement. Full transaction
+visibility (superuser or `pg_read_all_stats`) is required. A blocked maintenance
+attempt exits without cancelling sessions; operators must let the transactions
+finish before retrying. This protects old snapshots that never took the input
+reader lease. The reader barrier still prevents new supported input readers
+from taking a snapshot before the cutover commits. The executor sets short
+lock/statement timeouts and executes only
 `TRUNCATE TABLE fugue_platform_input_chunks RESTRICT`; it never uses CASCADE or
 terminates application sessions. In the same transaction it installs enabled
 row and statement guards on the archive control, archive, segment, and lease
