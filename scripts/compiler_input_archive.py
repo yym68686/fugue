@@ -36,6 +36,26 @@ def managed_reader(revision):
     config = command(['git', 'show', revision+':internal/store/platform_input_archive_config.go'])
     if 'resolveCompilerInputArchiveConfig(ctx, db, false)' not in body or 'configured || s.db != nil' not in body or 'decryptDataBackendSecret(sealed)' not in config:
         raise ValueError('reader lacks managed archive configuration or activation barrier')
+    for path in ('deploy/releases/api/deployment.json', 'deploy/releases/controller/resources.json', 'deploy/releases/ssh-control/resources.json'):
+        resources = json.loads(command(['git', 'show', 'HEAD:'+path]))
+        env = {item.get('name'): item.get('valueFrom', {}).get('secretKeyRef', {}) for item in _walk(resources)
+               if item.get('name') in ('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'FUGUE_BUNDLE_SIGNING_KEY')}
+        data_key = env.get('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', {})
+        bundle_key = env.get('FUGUE_BUNDLE_SIGNING_KEY', {})
+        archive_alias_is_shared = data_key.get('name') == 'fugue-fugue-config' and data_key.get('key') == 'FUGUE_BUNDLE_SIGNING_KEY' and not data_key.get('optional', False)
+        fallback_is_shared = bundle_key.get('name') == 'fugue-fugue-config' and bundle_key.get('key') == 'FUGUE_BUNDLE_SIGNING_KEY' and not bundle_key.get('optional', False)
+        if not (archive_alias_is_shared or fallback_is_shared):
+            raise ValueError('managed archive credential encryption key is not shared across readers')
+
+
+def _walk(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk(child)
 
 
 def main():

@@ -1,4 +1,5 @@
 import copy
+import json
 import unittest
 from unittest.mock import patch
 
@@ -29,11 +30,21 @@ class ArchiveOperationTest(unittest.TestCase):
 
     @patch('scripts.compiler_input_archive.command')
     def test_managed_reader_requires_shared_configuration_and_activation_barrier(self, command):
-        command.side_effect = ['resolveCompilerInputArchiveConfig(ctx, db, false)\nconfigured || s.db != nil', 'decryptDataBackendSecret(sealed)']
+        def source(data_key='FUGUE_BUNDLE_SIGNING_KEY', data_optional=False, bundle=True):
+            env = [{'name': 'FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'valueFrom': {'secretKeyRef': {
+                'name': 'fugue-fugue-config', 'key': data_key, 'optional': data_optional}}}]
+            if bundle:
+                env.append({'name': 'FUGUE_BUNDLE_SIGNING_KEY', 'valueFrom': {'secretKeyRef': {
+                    'name': 'fugue-fugue-config', 'key': 'FUGUE_BUNDLE_SIGNING_KEY'}}})
+            return json.dumps({'items': [{'kind': 'Deployment', 'spec': {'template': {'spec': {'containers': [
+                {'env': env}
+            ]}}}}]})
+        good = source()
+        command.side_effect = ['resolveCompilerInputArchiveConfig(ctx, db, false)\nconfigured || s.db != nil', 'decryptDataBackendSecret(sealed)', good, good, good]
         managed_reader('a'*40)
-        for reader, config in [('environment-only-reader', 'decryptDataBackendSecret(sealed)'),
-                               ('resolveCompilerInputArchiveConfig(ctx, db, false)', 'decryptDataBackendSecret(sealed)')]:
-            command.side_effect = [reader, config]
+        for reader, config, refs in [('environment-only-reader', 'decryptDataBackendSecret(sealed)', [good, good, good]),
+                                     ('resolveCompilerInputArchiveConfig(ctx, db, false)', 'decryptDataBackendSecret(sealed)', [good, source('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', True, False), good])]:
+            command.side_effect = [reader, config, *refs]
             with self.assertRaises(ValueError): managed_reader('a'*40)
 
 
