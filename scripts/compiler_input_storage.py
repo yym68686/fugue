@@ -45,12 +45,11 @@ def compatible_revision(revision, archive_required=False):
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('reader source revision is missing')
     body = command(['git', 'show', revision+':internal/store/platform_input_separated.go'])
-    chunks = command(['git', 'show', revision+':internal/store/platform_input_chunks.go'])
-    if FORMAT not in body or 'sql.LevelRepeatableRead' not in chunks:
-        raise ValueError('current or rollback reader does not support separated inputs')
+    archive_reader = command(['git', 'show', revision+':internal/store/platform_input_archive_reader.go'])
+    if FORMAT not in body or 'sql.LevelRepeatableRead' not in archive_reader:
+        raise ValueError('reader source does not support separated inputs or Repeatable Read snapshots')
     if not archive_required:
         return
-    archive_reader = command(['git', 'show', revision+':internal/store/platform_input_archive_reader.go'])
     if ('func (s *Store) BeginCompilerInputReadLease' not in archive_reader or
             'pg_try_advisory_lock_shared' not in archive_reader or
             's.compilerInputArchiveReadLeaseEnabled = configured' not in archive_reader or

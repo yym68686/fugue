@@ -2,7 +2,7 @@ import copy
 import hashlib
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from scripts.compiler_input_storage import compatible_revision, validate_reader, free_bytes, owned_pods, command
 
@@ -83,9 +83,12 @@ class CompilerInputStorageTest(unittest.TestCase):
 
     @patch('scripts.compiler_input_storage.command')
     def test_incompatible_reader_rejected(self, command):
-        command.return_value = 'old format'
+        command.side_effect = ['old format', 'sql.LevelRepeatableRead']
+        with self.assertRaises(ValueError): compatible_revision('a'*40)
+        command.side_effect = ['runtime-snapshot-separated-v4', 'reader without snapshot isolation']
         with self.assertRaises(ValueError): compatible_revision('a'*40)
         archive_reader = '\n'.join((
+            'sql.LevelRepeatableRead',
             'func (s *Store) BeginCompilerInputReadLease',
             'pg_try_advisory_lock_shared',
             's.compilerInputArchiveReadLeaseEnabled = configured',
@@ -93,11 +96,18 @@ class CompilerInputStorageTest(unittest.TestCase):
             'verifyCompilerInputArchiveStartupCompatibility',
             'compiler input chunks relation is retired; archive backend is required',
         ))
-        command.side_effect = ['runtime-snapshot-separated-v4', 'sql.LevelRepeatableRead']
+        command.side_effect = ['runtime-snapshot-separated-v4', archive_reader]
         compatible_revision('a'*40)
-        command.side_effect = ['runtime-snapshot-separated-v4', 'sql.LevelRepeatableRead', archive_reader]
+        command.side_effect = ['runtime-snapshot-separated-v4', archive_reader]
         compatible_revision('a'*40, archive_required=True)
-        command.side_effect = ['runtime-snapshot-separated-v4', 'sql.LevelRepeatableRead', 'archive route without startup guard']
+        self.assertEqual(
+            [call.args[0] for call in command.call_args_list[-2:]],
+            [
+                ['git', 'show', 'a'*40+':internal/store/platform_input_separated.go'],
+                ['git', 'show', 'a'*40+':internal/store/platform_input_archive_reader.go'],
+            ],
+        )
+        command.side_effect = ['runtime-snapshot-separated-v4', 'sql.LevelRepeatableRead\narchive route without startup guard']
         with self.assertRaises(ValueError): compatible_revision('a'*40, archive_required=True)
         with self.assertRaises(ValueError): compatible_revision('tag')
 
