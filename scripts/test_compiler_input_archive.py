@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from scripts.compiler_input_archive import validate_operation, managed_reader, credential_key, shared_reader_keys, execute_item
+from scripts.compiler_input_archive import validate_operation, managed_reader, hot_reader, credential_key, shared_reader_keys, execute_item
 
 
 class ArchiveOperationTest(unittest.TestCase):
@@ -63,6 +63,29 @@ class ArchiveOperationTest(unittest.TestCase):
         with self.assertRaises(ValueError): validate_operation(batch)
         batch['apply'] = True
         validate_operation(batch)
+
+    @patch('scripts.compiler_input_archive.command')
+    def test_hot_reader_rejects_previous_r2_first_reader(self, command):
+        command.side_effect = [
+            'func (s *Store) compilerInputArchiveRouted(ctx context.Context) {\nif m.Location == "hot" {\nreturn false, nil\n}\n}',
+            'func compilerInputChunksTable(location string) {\ncase "hot": return "fugue_platform_input_hot_chunks"\n}',
+        ]
+        hot_reader('a'*40)
+        for body in ('func (s *Store) compilerInputArchiveRouted(ctx context.Context) {\nreturn state == "routed", nil\n}',
+                     'func (s *Store) compilerInputArchiveRouted(ctx context.Context) {\nif m.Location == "hot" {\nreturn true, nil\n}\n}'):
+            command.side_effect = [body]
+            with self.assertRaises(ValueError): hot_reader('a'*40)
+
+    def test_hot_copy_reserves_both_extra_copy_and_wal(self):
+        item = self.fixture()
+        item.update(mode='archive-hot-copy', maxStoredBytes=16 << 20, minimumFreeBytes=576 << 20)
+        validate_operation(item)
+        for key, value in [('maxStoredBytes', True), ('maxStoredBytes', 0), ('maxStoredBytes', (2 << 30)+1),
+                           ('minimumFreeBytes', (576 << 20)-1), ('limit', 2), ('digest', '')]:
+            invalid = copy.deepcopy(item); invalid[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError): validate_operation(invalid)
+        del item['maxStoredBytes']
+        with self.assertRaises(ValueError): validate_operation(item)
 
     @patch('scripts.compiler_input_archive.command')
     def test_managed_reader_requires_shared_configuration_and_activation_barrier(self, command):

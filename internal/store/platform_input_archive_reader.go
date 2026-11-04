@@ -160,6 +160,11 @@ func compilerInputArchiveManifest(ctx context.Context, db inputQueryer, m inputM
 }
 
 func (s *Store) compilerInputArchiveRouted(ctx context.Context, db inputQueryer, m inputManifest) (bool, error) {
+	// A verified local hot copy is authoritative even if the independently
+	// retained archive receipt remains routed. Hot inputs must not require R2.
+	if m.Location == "hot" {
+		return false, nil
+	}
 	if !s.compilerInputArchiveReadLeaseEnabled {
 		return false, nil
 	}

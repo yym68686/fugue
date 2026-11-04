@@ -20,6 +20,7 @@ import (
 type archiveTestObjects struct {
 	objects    map[string][]byte
 	failSecond bool
+	failGet    bool
 }
 
 func archiveTestStore(t *testing.T) *Store {
@@ -64,6 +65,11 @@ func resetArchiveInputFixture(t *testing.T, s *Store, digest string) {
 	clear := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		for _, table := range []string{"fugue_platform_input_archive_leases", "fugue_platform_input_archive_segments", "fugue_platform_input_archives", "fugue_platform_input_hot_chunks"} {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE content_hash=$1`, digest); err != nil {
+				return err
+			}
+		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM fugue_platform_input_chunks WHERE content_hash=$1`, digest); err != nil {
 			return err
 		}
@@ -94,11 +100,191 @@ func (s *archiveTestObjects) Put(_ context.Context, key string, raw []byte) erro
 	return nil
 }
 func (s *archiveTestObjects) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	if s.failGet {
+		return nil, errors.New("simulated read failure")
+	}
 	raw, ok := s.objects[key]
 	if !ok {
 		return nil, errors.New("not found")
 	}
 	return io.NopCloser(bytes.NewReader(raw)), nil
+}
+
+func prepareVerifiedRoutedArchive(t *testing.T, s *Store) (string, *archiveTestObjects, string) {
+	t.Helper()
+	snapshot, _ := chunkedInputFixture(t)
+	snapshot.Origins = append(snapshot.Origins, snapshot.Origins...)
+	digest, err := platformconfig.RuntimeSnapshotDigest(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	objects := &archiveTestObjects{}
+	backend := "sha256:" + strings.Repeat("b", 64)
+	if _, err := copyCompilerInputArchive(t.Context(), s.db, objects, backend, CompilerInputArchiveMigrationOptions{Digest: digest, Apply: true}); err != nil {
+		t.Fatal("archive copy failed", err)
+	}
+	if _, err := routeCompilerInputArchive(t.Context(), s.db, objects, backend, digest); err != nil {
+		t.Fatal("archive route failed", err)
+	}
+	s.compilerInputArchiveObjects = objects
+	s.compilerInputArchiveReadLeaseEnabled = true
+	return digest, objects, backend
+}
+
+const hotCopyTestBudget = 16 << 20
+
+func TestCompilerInputArchiveHotCopyVerifiesThenPrefersLocalBytes(t *testing.T) {
+	for _, codec := range []bool{false, true} {
+		t.Run(map[bool]string{false: "v1", true: "v2"}[codec], func(t *testing.T) {
+			testCompilerInputArchiveHotCopyVerifiesThenPrefersLocalBytes(t, codec)
+		})
+	}
+}
+
+func testCompilerInputArchiveHotCopyVerifiesThenPrefersLocalBytes(t *testing.T, codec bool) {
+	s := archiveTestStore(t)
+	if codec {
+		s.storagePolicy.codec = compilerInputCodecPolicy{Version: 1, Enabled: true}
+	}
+	digest, objects, backend := prepareVerifiedRoutedArchive(t, s)
+	options := CompilerInputArchiveHotOptions{Digest: digest, MaxStoredBytes: hotCopyTestBudget}
+	preview, err := copyCompilerInputArchiveHot(t.Context(), s.db, nil, "", options)
+	if err != nil || preview.Applied || preview.State != "source-metadata-observed" || preview.StoredBytes <= 0 {
+		t.Fatal("hot-copy preview changed state or omitted its byte estimate", preview, err)
+	}
+	objects.failGet = true
+	if _, err = copyCompilerInputArchiveHot(t.Context(), s.db, objects, backend, CompilerInputArchiveHotOptions{Digest: digest, Apply: true, MaxStoredBytes: hotCopyTestBudget}); err == nil {
+		t.Fatal("promotion accepted an unreadable external archive")
+	}
+	var hotRows int
+	if err = s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, digest).Scan(&hotRows); err != nil || hotRows != 0 {
+		t.Fatal("failed archive verification staged hot rows", hotRows, err)
+	}
+	objects.failGet = false
+	if _, err = copyCompilerInputArchiveHot(t.Context(), s.db, objects, backend, CompilerInputArchiveHotOptions{Digest: digest, Apply: true, MaxStoredBytes: preview.StoredBytes - 1}); !errors.Is(err, ErrConflict) {
+		t.Fatal("hot-copy byte budget was not enforced", err)
+	}
+	report, err := copyCompilerInputArchiveHot(t.Context(), s.db, objects, backend, CompilerInputArchiveHotOptions{Digest: digest, Apply: true, MaxStoredBytes: hotCopyTestBudget})
+	if err != nil || !report.Applied || report.State != "hot-verified" || report.Chunks < 1 || report.StoredBytes != preview.StoredBytes {
+		t.Fatal("verified hot copy did not complete", report, err)
+	}
+	var location, archiveState string
+	var oldRows int
+	if err = s.db.QueryRow(`SELECT storage_location FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest).Scan(&location); err != nil || location != "hot" {
+		t.Fatal("hot copy was not atomically published", location, err)
+	}
+	if err = s.db.QueryRow(`SELECT (SELECT count(*) FROM fugue_platform_input_chunks WHERE content_hash=$1),(SELECT state FROM fugue_platform_input_archives WHERE content_hash=$1)`, digest).Scan(&oldRows, &archiveState); err != nil || oldRows != report.Chunks || archiveState != "routed" {
+		t.Fatal("promotion removed source rows or changed its archive pin", oldRows, archiveState, err)
+	}
+	if err = s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, digest).Scan(&hotRows); err != nil || hotRows != report.Chunks {
+		t.Fatal("hot chunk coverage differs", hotRows, err)
+	}
+	// A broken R2 reader proves this hot input is read from local PostgreSQL,
+	// not the old external route. The source relation remains as rollback.
+	s.compilerInputArchiveObjects = &archiveTestObjects{failGet: true}
+	got, err := s.GetPlatformCompilerInput(digest)
+	if err != nil {
+		t.Fatal("hot input depended on unavailable R2", err)
+	}
+	if actual, hashErr := platformconfig.RuntimeSnapshotDigest(got); hashErr != nil || actual != digest {
+		t.Fatal("hot reader changed the canonical input", actual, hashErr)
+	}
+	if _, err = s.GetPlatformArtifactContent(digest); err != nil {
+		t.Fatal("public artifact content path depended on R2 for a hot input", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err = s.GetPlatformCompilerInputDNSSelections(digest, nil); err != nil {
+			t.Fatal("cold/warm selective input path depended on R2 for a hot input", err)
+		}
+	}
+	if err = s.EnsurePlatformCompilerInput(got, digest); err != nil {
+		t.Fatal("existing hot writer verification depended on R2", err)
+	}
+	objects.failGet = true
+	if _, err = copyCompilerInputArchiveHot(t.Context(), s.db, objects, backend, CompilerInputArchiveHotOptions{Digest: digest, Apply: true, MaxStoredBytes: hotCopyTestBudget}); err != nil {
+		t.Fatal("repeated promotion of verified hot input required the archive", err)
+	}
+}
+
+func TestCompilerInputArchiveHotCopyRejectsCorruptHotBytes(t *testing.T) {
+	s := archiveTestStore(t)
+	digest, _, backend := prepareVerifiedRoutedArchive(t, s)
+	report, err := copyCompilerInputArchiveHot(t.Context(), s.db, s.compilerInputArchiveObjects, backend, CompilerInputArchiveHotOptions{Digest: digest, Apply: true, MaxStoredBytes: hotCopyTestBudget})
+	if err != nil || !report.Applied {
+		t.Fatal("hot copy fixture did not complete", report, err)
+	}
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_hot_chunks SET data=$2 WHERE content_hash=$1 AND ordinal=0`, digest, []byte("corrupt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.GetPlatformCompilerInput(digest); err == nil {
+		t.Fatal("corrupt hot input silently fell back to R2")
+	}
+}
+
+func TestCompilerInputArchiveHotCopyPartialPageFailureAndResume(t *testing.T) {
+	s := archiveTestStore(t)
+	digest, objects, backend := prepareVerifiedRoutedArchive(t, s)
+	m, epoch, err := verifiedArchiveSource(t.Context(), s.db, digest)
+	if err != nil || m.Count <= inputChunkBatchSize {
+		t.Fatal("fixture must span multiple bounded pages", m, err)
+	}
+	if _, err = copyCompilerInputHotPage(t.Context(), s.db, m, epoch+1, 0, inputChunkBatchSize, 8<<20); !errors.Is(err, ErrConflict) {
+		t.Fatal("stale maintenance epoch was allowed to stage bytes", err)
+	}
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_archive_leases SET expires_at=now()+interval '1 minute' WHERE content_hash=$1`, digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = copyCompilerInputHotPage(t.Context(), s.db, m, epoch, 0, inputChunkBatchSize, 8<<20); !errors.Is(err, ErrConflict) {
+		t.Fatal("active archive owner was not respected", err)
+	}
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_archive_leases SET expires_at=now()-interval '1 second' WHERE content_hash=$1`, digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`INSERT INTO fugue_platform_input_hot_chunks(content_hash,ordinal,chunk_hash,data) VALUES($1,$2,'sha256:'||encode(sha256($3::bytea),'hex'),$3)`, digest, inputChunkBatchSize, []byte("synthetic-conflict")); err != nil {
+		t.Fatal(err)
+	}
+	options := CompilerInputArchiveHotOptions{Digest: digest, Apply: true, MaxStoredBytes: hotCopyTestBudget}
+	if report, err := copyCompilerInputArchiveHot(t.Context(), s.db, objects, backend, options); !errors.Is(err, ErrConflict) || report.Applied {
+		t.Fatal("conflicting second page was accepted", report, err)
+	}
+	var location string
+	var count int
+	if err = s.db.QueryRow(`SELECT storage_location FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest).Scan(&location); err != nil || location != "legacy" {
+		t.Fatal("incomplete hot copy was published", location, err)
+	}
+	if err = s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, digest).Scan(&count); err != nil || count != inputChunkBatchSize+1 {
+		t.Fatal("failed page did not roll back while retaining prior checkpoints", count, err)
+	}
+	// Remove only this deliberately injected test conflict. Production never
+	// deletes or overwrites unexpected staging bytes to force a retry through.
+	if _, err = s.db.Exec(`DELETE FROM fugue_platform_input_hot_chunks WHERE content_hash=$1 AND ordinal=$2`, digest, inputChunkBatchSize); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := copyCompilerInputArchiveHot(t.Context(), s.db, objects, backend, options); err != nil || !report.Applied {
+		t.Fatal("exact retry did not preserve/reuse the completed page", report, err)
+	}
+}
+
+func TestCompilerInputArchiveHotCopyRejectsSelfConsistentSourceCorruption(t *testing.T) {
+	s := archiveTestStore(t)
+	digest, objects, backend := prepareVerifiedRoutedArchive(t, s)
+	if _, err := s.db.Exec(`UPDATE fugue_platform_input_chunks SET data=set_byte(data,0,33),chunk_hash='sha256:'||encode(sha256(set_byte(data,0,33)),'hex') WHERE content_hash=$1 AND ordinal=0`, digest); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := copyCompilerInputArchiveHot(t.Context(), s.db, objects, backend, CompilerInputArchiveHotOptions{Digest: digest, Apply: true, MaxStoredBytes: hotCopyTestBudget}); !errors.Is(err, ErrConflict) || report.Applied {
+		t.Fatal("full original digest did not reject self-consistent corrupted chunks", report, err)
+	}
+	var location string
+	if err := s.db.QueryRow(`SELECT storage_location FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest).Scan(&location); err != nil || location != "legacy" {
+		t.Fatal("corrupt hot copy changed the canonical location", location, err)
+	}
+	var hotRows, expected int
+	if err := s.db.QueryRow(`SELECT (SELECT count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1),(SELECT chunk_count FROM fugue_platform_input_manifests WHERE content_hash=$1)`, digest).Scan(&hotRows, &expected); err != nil || hotRows != expected {
+		t.Fatal("test did not reach full target digest validation", hotRows, expected, err)
+	}
 }
 
 func TestCompilerInputArchiveCopyLeaseResumePinsAndReadback(t *testing.T) {
@@ -740,15 +926,15 @@ func TestCompilerInputArchiveMigrationStreamsBeyondLegacyLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream := &archiveInputStream{ctx: t.Context(), db: s.db, m: m, hash: sha256.New()}
 	objects := &archiveTestObjects{}
-	plan := inputarchive.Manifest{Format: inputarchive.Format, Digest: digest, RawBytes: size, SegmentBytes: 16 << 20, Prefix: "archive/streaming-over-limit"}
-	archived, err := inputarchive.Copy(t.Context(), objects, stream, plan, func(inputarchive.Segment) error { return nil })
-	if err != nil {
-		t.Fatal(err)
+	backend := "sha256:" + strings.Repeat("e", 64)
+	archived, err := copyCompilerInputArchive(t.Context(), s.db, objects, backend, CompilerInputArchiveMigrationOptions{Digest: digest, Apply: true, SegmentBytes: 16 << 20})
+	if err != nil || int64(archived.Segments) != (size+(16<<20)-1)/(16<<20) || archived.SourceChunks != count || archived.RawBytes != size {
+		t.Fatal("streamed archive dimensions differ", archived, err)
 	}
-	if int64(len(archived.Segments)) != (size+int64(plan.SegmentBytes)-1)/int64(plan.SegmentBytes) || stream.count != count || stream.size != size {
-		t.Fatalf("streamed archive dimensions differ: segments=%d source_chunks=%d source_bytes=%d", len(archived.Segments), stream.count, stream.size)
+	hot, err := copyCompilerInputArchiveHot(t.Context(), s.db, objects, backend, CompilerInputArchiveHotOptions{Digest: digest, Apply: true, MaxStoredBytes: size})
+	if err != nil || !hot.Applied || hot.Chunks != m.Count || hot.RawBytes != size || hot.StoredBytes != size {
+		t.Fatal("hot promotion did not support inputs larger than 128MiB", hot, err)
 	}
 }
 

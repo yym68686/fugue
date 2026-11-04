@@ -214,10 +214,30 @@ budget. The floor is a stop condition, not a guarantee of sufficient runway.
 Route preflight checks the actual current and immutable LKG manifests and their
 effective credential encryption keys against the API executor, including empty
 environment fallback; a safe HEAD template does not establish rollback safety.
-Confirmed maintenance SQLSTATE `55P03` retries at most three times after 1, 2,
-and 4 seconds outside transactions, rechecking space and health each time. The
-250ms lock timeout is unchanged. Unknown failures and active-lease conflicts
-stop immediately; a retry never steals a lease or assumes an unconfirmed commit.
+Only a maintenance barrier acquisition that fails with SQLSTATE `55P03` and
+whose transaction rollback has been confirmed is retried outside transactions,
+with 100ms backoff for at most five seconds. Each acquisition retains the
+250ms lock timeout. The CI runner never retries the whole command: earlier
+page/receipt transactions may have committed before a later failure. Unknown
+failures, unconfirmed rollbacks and active-lease conflicts stop immediately;
+exact retries require inspecting prior receipts and natural lease expiry.
+
+`archive-hot-copy` is a separately declared, exact-digest promotion for a
+critical v1/v2 input that already has a complete verified R2 receipt. It first
+re-verifies the entire immutable R2 object, then copies source chunks into the
+hot relation in 16-row transactions. The legacy source and archive receipt
+remain intact. Existing readers continue to use the old source until every hot
+chunk has been read back, checked against its stored hash, decoded, and checked
+against the original full-input digest; only then does a manifest CAS select
+the hot location. A partial copy is never visible to readers and can be resumed
+idempotently; conflicting existing hot bytes fail closed. Current and immutable
+rollback readers must explicitly prefer `storage_location=hot` and support the
+hot relation before an operation is accepted. The runner requires a declared
+stored-byte bound and a free-space reserve of at least 512 MiB plus four times
+that bound. This is a conservative admission floor, not proof of actual WAL or
+Longhorn amplification; begin with a small canary and measure PostgreSQL/WAL
+and filesystem deltas before selecting a larger bound. Hot promotion duplicates
+bytes while source rows remain and therefore is not a space-reclamation step.
 Physical retirement has an explicit two-phase maintenance path. The
 read-only `archive-retirement-plan` inventories every digest with rows in the
 legacy relation, checks ordinal coverage and orphan rows, fully reads and
@@ -279,3 +299,18 @@ unroute verifies the retained old bytes first and does not require object-store
 availability. Both operations affect exactly one digest, and failed validation
 leaves the current route unchanged. Neither command authorizes bulk retirement
 or `TRUNCATE`.
+
+## Capacity guardrails and bounded automatic diagnostics
+
+Automatic image-cache orphan pruning now keeps only a bounded plan receipt in
+the control-plane history: counts, policy summaries, plan hash, limits, and
+status. The controller still holds the complete classification in memory while
+it evaluates every safety gate, and a scheduled task retains its bounded target
+payload plus the original plan hash. Automatic summaries use a stable identity
+derived from node/runtime/mode and the full plan hash, so repeated scheduler
+passes for the same observation update one row instead of appending per tick.
+Explicit administrator previews continue
+to support full detail when requested. This prevents repeated scheduler passes
+that cannot run (cooldown, active task, missing capability, or global limit)
+from appending large per-image JSON arrays indefinitely; it does not authorize
+deletion, change image-cache retention, or claim physical space recovery.

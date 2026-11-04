@@ -15,9 +15,11 @@ from scripts.compiler_input_storage import command, readers, free_bytes, get, pr
 
 def validate_operation(value):
     required = {'version', 'mode', 'digest', 'limit', 'apply', 'expectedExecutorRevision', 'minimumFreeBytes'}
+    if value.get('mode') == 'archive-hot-copy':
+        required.add('maxStoredBytes')
     if set(value) != required or value['version'] != 1 or type(value['version']) is not int:
         raise ValueError('invalid archive operation declaration')
-    if value['mode'] not in ('archive', 'archive-batch', 'archive-route', 'archive-route-batch', 'archive-unroute'):
+    if value['mode'] not in ('archive', 'archive-batch', 'archive-route', 'archive-route-batch', 'archive-unroute', 'archive-hot-copy'):
         raise ValueError('unsupported archive operation')
     if type(value['apply']) is not bool or type(value['limit']) is not int or not 1 <= value['limit'] <= 1000:
         raise ValueError('invalid archive batch bound')
@@ -31,6 +33,14 @@ def validate_operation(value):
         raise ValueError('archive executor revision is not pinned')
     if type(value['minimumFreeBytes']) is not int or value['minimumFreeBytes'] < 512 << 20:
         raise ValueError('archive must preserve at least 512MiB free space')
+    if value['mode'] == 'archive-hot-copy':
+        budget = value['maxStoredBytes']
+        if type(budget) is not int or not 0 < budget <= 2 << 30:
+            raise ValueError('hot copy requires an explicit stored-byte bound')
+        # Source rows remain during promotion. Reserve for the extra hot copy
+        # and WAL, in addition to the ordinary migration stop line.
+        if value['minimumFreeBytes'] < (512 << 20)+4*budget:
+            raise ValueError('hot copy reserve must include conservative copy and WAL headroom')
     return value
 
 
@@ -39,6 +49,17 @@ def managed_reader(revision):
     config = command(['git', 'show', revision+':internal/store/platform_input_archive_config.go'])
     if 'resolveCompilerInputArchiveConfig(ctx, db, false)' not in body or 'configured || s.db != nil' not in body or 'decryptDataBackendSecret(sealed)' not in config:
         raise ValueError('reader lacks managed archive configuration or activation barrier')
+
+
+def hot_reader(revision):
+    body = command(['git', 'show', revision+':internal/store/platform_input_archive_reader.go'])
+    function = body.split('func (s *Store) compilerInputArchiveRouted(', 1)[-1].split('\nfunc ', 1)[0]
+    if not re.search(r'if m\.Location == "hot"\s*\{\s*return false, nil\s*\}', function):
+        raise ValueError('reader does not prioritize the verified local hot copy')
+    chunks = command(['git', 'show', revision+':internal/store/platform_input_chunks.go'])
+    table = chunks.split('func compilerInputChunksTable(', 1)[-1].split('\n}', 1)[0]
+    if 'case "hot":' not in table or 'fugue_platform_input_hot_chunks' not in table:
+        raise ValueError('reader release does not support hot chunk locations')
 
 
 def credential_key(namespace, container, secrets):
@@ -139,7 +160,8 @@ def main():
     args = parser.parse_args()
     value = validate_operation(json.loads(Path(args.operation).read_text()))
     registry = json.loads(Path('deploy/releases/components.json').read_text())
-    route_mode = value['mode'] in ('archive-route', 'archive-route-batch', 'archive-unroute')
+    hot_mode = value['mode'] == 'archive-hot-copy'
+    route_mode = value['mode'] in ('archive-route', 'archive-route-batch', 'archive-unroute') or hot_mode
     current = readers(registry, archive_required=route_mode)
     executor = next(x for x in current if x['component'] == 'api')
     if executor['revision'] != value['expectedExecutorRevision']:
@@ -150,6 +172,10 @@ def main():
             managed_reader(item['revision'])
             managed_reader(item['rollback_revision'])
         shared_reader_keys(registry, current)
+    if hot_mode:
+        for item in current:
+            hot_reader(item['revision'])
+            hot_reader(item['rollback_revision'])
     database = json.loads(Path('deploy/environments/production/storage-policy/maintenance.json').read_text())['database']
     before = free_bytes(database)
     if before < value['minimumFreeBytes']:
@@ -170,6 +196,8 @@ def main():
             argv += ['--archive-limit', '1']
         else:
             argv += ['--digest', value['digest']]
+        if hot_mode:
+            argv += ['--hot-copy-max-stored-bytes', str(value['maxStoredBytes'])]
         if value['apply']:
             argv += ['--apply']
         result = execute_item(argv, database, value['minimumFreeBytes'], deadline)

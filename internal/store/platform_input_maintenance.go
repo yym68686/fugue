@@ -30,18 +30,19 @@ type CompilerInputMaintenanceOptions struct {
 // pins this source representation; every page also rechecks its manifest,
 // maintenance epoch and per-chunk hash under the common writer barrier.
 type archiveInputStream struct {
-	ctx         context.Context
-	db          *sql.DB
-	m           inputManifest
-	next        int
-	rows        [][]byte
-	row         int
-	count       int
-	size        int64
-	hash        hash.Hash
-	sourceEpoch int64
-	done        bool
-	err         error
+	ctx          context.Context
+	db           *sql.DB
+	m            inputManifest
+	next         int
+	rows         [][]byte
+	row          int
+	count        int
+	size         int64
+	hash         hash.Hash
+	sourceEpoch  int64
+	readLocation string // optional staging location; m still fences the canonical manifest
+	done         bool
+	err          error
 }
 
 func (r *archiveInputStream) Read(p []byte) (int, error) {
@@ -101,7 +102,11 @@ func (r *archiveInputStream) fetch() error {
 		}
 		return fmt.Errorf("compiler input archive source representation changed: %w", ErrConflict)
 	}
-	table, err := compilerInputChunksTable(r.m.Location)
+	location := r.m.Location
+	if r.readLocation != "" {
+		location = r.readLocation
+	}
+	table, err := compilerInputChunksTable(location)
 	if err != nil {
 		return err
 	}
