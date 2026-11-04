@@ -232,5 +232,115 @@ class RecoveryTests(unittest.TestCase):
             self.assertTrue(obj['metadata']['name'].endswith('-probe'))
 
 
+class NativeFinalizerRecoveryTests(unittest.TestCase):
+    """An accepted native delete can finish without replay or forced finalizers."""
+    setUp = RecoveryTests.setUp
+
+    def pending(self):
+        self.kube.fail_delete = True
+        with patch('scripts.recover_longhorn_snapshot.observe', return_value=review()):
+            with self.assertRaises(TimeoutError):
+                self.r.run()
+        self.kube.fail_delete = False
+        self.kube.snapshot = dict(apiVersion='longhorn.io/v1beta2', kind='Snapshot',
+            metadata=dict(name='old-point', uid='snapshot-uid', resourceVersion='13',
+                          deletionTimestamp='2026-01-01T00:00:00Z', finalizers=['longhorn.io']),
+            spec=dict(volume='pvc-data', createSnapshot=True))
+        identities = []
+        for obj in barrier_objects(self.c, review(), self.r.operation, legacy_snapshot_spec=True):
+            obj['metadata'].update(uid=obj['metadata']['name'], resourceVersion='1')
+            identities.append(dict(kind=obj['kind'], name=obj['metadata']['name'], uid=obj['metadata']['uid']))
+            self.kube.objects[obj['metadata']['name'] + obj['kind']] = obj
+        self.r.record['data']['barriers'] = canonical(identities)
+        self.kube.replace(self.r.record)
+        original_get, original_replace = self.kube.get, self.kube.replace
+        self.updates, self.dry_runs, self.checks = [], [], []
+        def get(kind, name, ns=None):
+            kinds = dict(validatingadmissionpolicies='ValidatingAdmissionPolicy',
+                         validatingadmissionpolicybindings='ValidatingAdmissionPolicyBinding')
+            if kind in kinds:
+                return copy.deepcopy(self.kube.objects[name + kinds[kind]])
+            if kind == 'snapshots.longhorn.io' and name == 'kept':
+                return dict(apiVersion='longhorn.io/v1beta2', kind='Snapshot',
+                    metadata=dict(name='kept', uid='kept-uid', finalizers=['longhorn.io']),
+                    spec=dict(volume='pvc-data', createSnapshot=True))
+            return original_get(kind, name, ns)
+        def replace(obj):
+            if obj['kind'] in ('ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'):
+                self.updates.append(copy.deepcopy(obj))
+                self.kube.objects[obj['metadata']['name'] + obj['kind']] = copy.deepcopy(obj)
+                return copy.deepcopy(obj)
+            if obj['kind'] == 'Snapshot':
+                self.updates.append(copy.deepcopy(obj))
+                # Native controller handles the metadata update, not our code.
+                self.kube.snapshot = None
+                return copy.deepcopy(obj)
+            return original_replace(obj)
+        self.kube.get, self.kube.replace = get, replace
+        self.kube.command = lambda args, body: self.dry_runs.append((args, json.loads(body))) or '{}'
+        self.r.check_barriers = lambda: self.checks.append(True)
+        self.denied_updates = []
+        self.r.denied_probe = lambda args, body: self.denied_updates.append((args, copy.deepcopy(body)))
+        self.r.native_state = lambda _: (copy.deepcopy(self.kube.snapshot), self.kube.snapshot is None, True)
+
+    def test_pending_native_delete_repairs_guard_and_requeues_without_new_delete(self):
+        self.pending()
+        original = copy.deepcopy(self.kube.snapshot)
+        self.r.run()
+        self.assertEqual(self.kube.deletes, 1)
+        self.assertEqual(self.r.state['phase'], 'completed')
+        self.assertEqual([x['kind'] for x in self.updates], ['ValidatingAdmissionPolicy', 'Snapshot'])
+        kick = self.updates[-1]
+        self.assertEqual(kick['metadata']['finalizers'], original['metadata']['finalizers'])
+        self.assertEqual(kick['spec'], original['spec'])
+        self.assertEqual(kick['metadata']['uid'], original['metadata']['uid'])
+        self.assertEqual(kick['metadata']['resourceVersion'], original['metadata']['resourceVersion'])
+        self.assertEqual(kick['metadata']['annotations']['fugue.pro/snapshot-recovery-reconcile'], self.r.operation)
+        self.assertEqual(len(self.checks), 1)
+        self.assertEqual(len(self.dry_runs), 1)
+        args, probe = self.dry_runs[0]
+        self.assertIn('--dry-run=server', args)
+        self.assertEqual(probe['metadata']['finalizers'], ['longhorn.io'])
+        self.assertIsNone(probe['spec']['labels'])
+        self.assertEqual(len(self.denied_updates), 2)
+
+    def test_changed_guard_spec_keeps_all_protection(self):
+        self.pending()
+        name = self.r.operation + '-backupsValidatingAdmissionPolicy'
+        self.kube.objects[name]['spec']['failurePolicy'] = 'Ignore'
+        with self.assertRaisesRegex(ValueError, 'identity or spec'):
+            self.r.run()
+        self.assertEqual(self.kube.deletes, 1)
+        self.assertEqual(self.updates, [])
+        self.assertEqual(self.kube.lease['spec']['holderIdentity'], self.r.holder)
+
+    def test_purge_still_running_cannot_repair_or_unlock(self):
+        self.pending()
+        self.r.native_state = lambda _: (self.kube.snapshot, False, False)
+        with self.assertRaisesRegex(ValueError, 'not terminal enough'):
+            self.r.run()
+        self.assertEqual(self.updates, [])
+        self.assertEqual(self.kube.deletes, 1)
+        self.assertEqual(self.kube.lease['spec']['holderIdentity'], self.r.holder)
+
+    def test_unknown_policy_update_can_resume_by_exact_spec_without_redelete(self):
+        self.pending()
+        original = self.kube.replace
+        def lost_response(obj):
+            result = original(obj)
+            if obj['kind'] == 'ValidatingAdmissionPolicy':
+                raise TimeoutError('accepted compatibility update, response lost')
+            return result
+        self.kube.replace = lost_response
+        with self.assertRaises(TimeoutError):
+            self.r.run()
+        self.assertEqual(self.kube.lease['spec']['holderIdentity'], self.r.holder)
+        self.kube.replace = original
+        self.r.run()
+        self.assertEqual(self.kube.deletes, 1)
+        self.assertEqual(self.r.state['phase'], 'completed')
+        self.assertEqual(sum(x['kind'] == 'ValidatingAdmissionPolicy' for x in self.updates), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

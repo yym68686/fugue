@@ -60,8 +60,16 @@ Only the approved Snapshot gets a UID+resourceVersion DELETE. Longhorn performs
 the fold/purge. The executor never sends an engine purge or removes a finalizer
 or file. Any possible DELETE commit is journaled *before* the request. Unknown
 outcomes, native errors, health loss and timeout retain the durable fences.
-Another invocation only observes a committed operation: it cannot issue another
-DELETE or release protection while the original target remains intact. A known
+Another invocation cannot issue another DELETE or release protection while the
+original target remains intact. If the exact UID is deleting, its native layer
+is already gone, purge is idle and every retained point remains, it can repair
+the known nullable SnapshotSpec compatibility rule under the same Lease. The
+complete old/new admission specs and all durable UIDs must match; unknown edits
+stop recovery. Absent and null `labels` are equivalent, while all other spec
+keys and non-null labels remain immutable. A retained-child server dry-run must
+accept typed normalization and deny real spec changes. A metadata annotation
+can requeue Longhorn's native finalizer reconciliation; the executor never
+changes a finalizer or sends another delete/engine operation. A known
 pre-delete abort can be retried after its guards have been removed and all gates
 are re-evaluated. A completed operation is inert on replay.
 

@@ -55,7 +55,7 @@ class Cluster(ReadOnlyCluster):
                                preconditions={k: obj['metadata'][k] for k in ('uid', 'resourceVersion')}))
 
 
-def barrier_objects(config, review, operation):
+def barrier_objects(config, review, operation, *, legacy_snapshot_spec=False):
     """Deny NEW reference writers; native finalizers/status remain operational.
 
     The shared Lease covers Fugue backups/releases, not CSI or Longhorn native
@@ -68,10 +68,19 @@ def barrier_objects(config, review, operation):
     chain = canonical(sorted(review['snapshot_chain']))
     # Removed head-parent system snapshots may be reconciled by native cleanup.
     same_spec = "request.operation == 'UPDATE' && object.spec == oldObject.spec"
+    # Longhorn's typed SnapshotSpec always serializes nullable labels, even
+    # when the stored JSON omitted it. Finalizer Update therefore adds null.
+    # Compare every other key bidirectionally; only absent/null labels are
+    # equivalent. A new key or changed label value still fails closed.
+    snapshot_same_spec = same_spec if legacy_snapshot_spec else (
+        "request.operation == 'UPDATE' && "
+        "object.spec.all(k, k == 'labels' || (k in oldObject.spec && object.spec[k] == oldObject.spec[k])) && "
+        "oldObject.spec.all(k, k == 'labels' || (k in object.spec && object.spec[k] == oldObject.spec[k])) && "
+        "(has(object.spec.labels) ? object.spec.labels : null) == (has(oldObject.spec.labels) ? oldObject.spec.labels : null)")
     rules = [
         ('snapshots', 'longhorn.io', 'v1beta2', ['snapshots'],
          f'o.spec.volume == {volume}',
-         f"({same_spec}) || (request.operation == 'DELETE' && oldObject.metadata.uid in {snapshot_uids})"),
+         f"({snapshot_same_spec}) || (request.operation == 'DELETE' && oldObject.metadata.uid in {snapshot_uids})"),
         ('backups', 'longhorn.io', 'v1beta2', ['backups'],
          f"(has(o.spec.snapshotName) && o.spec.snapshotName in {chain}) || (has(o.metadata.labels) && 'backup-volume' in o.metadata.labels && o.metadata.labels['backup-volume'] == {volume})",
          same_spec),
@@ -93,8 +102,9 @@ def barrier_objects(config, review, operation):
         involved = f"[object, oldObject].exists(o, o != null && ({reference}))"
         policy = dict(apiVersion='admissionregistration.k8s.io/v1', kind='ValidatingAdmissionPolicy',
                       metadata=dict(name=name, labels={OPERATION: operation}),
-                      spec=dict(failurePolicy='Fail', matchConstraints=dict(resourceRules=[dict(
-                          apiGroups=[group], apiVersions=[version], operations=['CREATE', 'UPDATE', 'DELETE'], resources=resources)]),
+                      spec=dict(failurePolicy='Fail', matchConstraints=dict(
+                          matchPolicy='Equivalent', namespaceSelector={}, objectSelector={}, resourceRules=[dict(
+                          apiGroups=[group], apiVersions=[version], operations=['CREATE', 'UPDATE', 'DELETE'], resources=resources, scope='*')]),
                           validations=[dict(expression=f'!({involved}) || ({permitted})',
                                             message='snapshot-maintenance-fence/' + operation)]))
         binding = dict(apiVersion='admissionregistration.k8s.io/v1', kind='ValidatingAdmissionPolicyBinding',
@@ -191,24 +201,100 @@ class Recovery:
             identities.append(dict(kind=obj['kind'], name=created['metadata']['name'], uid=created['metadata']['uid']))
             self.record['data']['barriers'] = canonical(identities)
             self.save('installing-barriers')
+        self.check_barriers()
+        self.check_snapshot_updates(review)
+
+    def denied_probe(self, args, body):
+        deadline = time.monotonic() + 30
+        while True:
+            self.own_lease()
+            result = subprocess.run(self.kube.kubectl + args,
+                                    input=canonical(body), text=True, capture_output=True, timeout=20)
+            if result.returncode and ('snapshot-maintenance-fence/' + self.operation) in result.stderr:
+                return
+            require(time.monotonic() < deadline, 'admission fence was not observed; no deletion permitted')
+            time.sleep(1)
+
+    def check_barriers(self):
         # Admission is cached. A bounded, server-side dry-run MUST observe the
         # denial marker before any destructive request is eligible.
         for probe in admission_probes(self.config, self.operation):
-            deadline = time.monotonic() + 30
-            while True:
-                self.own_lease()
-                result = subprocess.run(self.kube.kubectl + ['create', '--dry-run=server', '-f', '-', '-o', 'json'],
-                                        input=canonical(probe), text=True, capture_output=True, timeout=20)
-                if result.returncode and ('snapshot-maintenance-fence/' + self.operation) in result.stderr:
-                    break
-                require(time.monotonic() < deadline, 'admission fence was not observed; no deletion permitted')
-                time.sleep(1)
+            self.denied_probe(['create', '--dry-run=server', '-f', '-', '-o', 'json'], probe)
         for obj in json.loads(self.record['data']['barriers']):
             if obj['kind'] != 'ValidatingAdmissionPolicy':
                 continue
             live = self.kube.get('validatingadmissionpolicies', obj['name'])
             require(live.get('status', {}).get('observedGeneration') == live['metadata']['generation'] and
                     'typeChecking' in live['status'] and not live['status']['typeChecking'].get('expressionWarnings'), 'admission policy type check incomplete')
+
+    def resume_native_finalizer(self, review):
+        """Repair only the known nullable-field fence, never DELETE/finalizers.
+
+        The old native layer must already be gone and purge idle. Every durable
+        guard UID and its complete old/new spec must still match before CAS.
+        An annotation merely requeues Longhorn's own finalizer reconciliation;
+        it neither removes a finalizer nor invokes an engine operation.
+        """
+        self.own_lease()
+        snapshot, _, engine_quiescent = self.native_state(review)
+        require(snapshot and snapshot['metadata'].get('deletionTimestamp') and engine_quiescent,
+                'native deletion is not terminal enough for finalizer compatibility recovery')
+        self.health()
+        expected = barrier_objects(self.config, review, self.operation)
+        legacy = barrier_objects(self.config, review, self.operation, legacy_snapshot_spec=True)
+        identities = json.loads(self.record['data']['barriers'])
+        require(len(identities) == len(expected) and
+                {(x['kind'], x['name']) for x in identities} == {(x['kind'], x['metadata']['name']) for x in expected},
+                'durable admission barrier set changed')
+        repair = None
+        for wanted, old in zip(expected, legacy):
+            self.own_lease()
+            kind, name = wanted['kind'], wanted['metadata']['name']
+            resource = 'validatingadmissionpolicies' if kind == 'ValidatingAdmissionPolicy' else 'validatingadmissionpolicybindings'
+            live = self.kube.get(resource, name)
+            identity = next(x for x in identities if x['kind'] == kind and x['name'] == name)
+            require(live['metadata']['uid'] == identity['uid'] and
+                    live['metadata'].get('labels', {}).get(OPERATION) == self.operation and
+                    live['spec'] in (wanted['spec'], old['spec']), 'admission barrier identity or spec changed')
+            if live['spec'] != wanted['spec']:
+                require(kind == 'ValidatingAdmissionPolicy' and name.endswith('-snapshots'), 'unexpected barrier repair')
+                repair = (live, wanted['spec'])
+        self.save('repairing-native-finalizer-compatibility', barrier_revision='snapshot-null-labels-v1')
+        if repair:
+            live, spec = repair
+            self.own_lease()
+            live['spec'] = spec
+            self.kube.replace(live)
+        self.check_barriers()
+        self.check_snapshot_updates(review)
+        self.own_lease()
+        snapshot, _, engine_quiescent = self.native_state(review)
+        if snapshot is None:
+            return
+        require(snapshot['metadata'].get('deletionTimestamp') and engine_quiescent, 'native state changed before reconciliation')
+        annotations = snapshot['metadata'].setdefault('annotations', {})
+        key = 'fugue.pro/snapshot-recovery-reconcile'
+        require(annotations.get(key) in (None, self.operation), 'another recovery requested reconciliation')
+        if annotations.get(key) != self.operation:
+            annotations[key] = self.operation
+            self.save('native-reconcile-requested')
+            self.kube.replace(snapshot)
+
+    def check_snapshot_updates(self, review):
+        # Test a real, retained immutable child's typed normalization without
+        # persisting any change or touching its finalizers. Deny probes above
+        # independently prove that new reference writers remain fenced.
+        child = next(n for n, present in review['snapshot_chain'][self.config['snapshot']]['children'].items() if present)
+        probe = self.kube.get('snapshots.longhorn.io', child, self.config['longhornNamespace'])
+        require(probe['spec']['volume'] == self.config['volume'] and probe['spec'].get('labels') is None,
+                'a nullable SnapshotSpec normalization probe is unavailable')
+        probe['spec']['labels'] = None
+        self.kube.command(['replace', '--dry-run=server', '-f', '-', '-o', 'json'], canonical(probe))
+        for key, value in [('createSnapshot', not probe['spec'].get('createSnapshot', False)),
+                           ('labels', {'maintenance-probe': 'changed'})]:
+            changed = json.loads(canonical(probe))
+            changed['spec'][key] = value
+            self.denied_probe(['replace', '--dry-run=server', '-f', '-', '-o', 'json'], changed)
 
     def health(self):
         c = self.config
@@ -237,33 +323,36 @@ class Recovery:
         return json.loads(self.kube.command(['-n', self.config['longhornNamespace'], 'exec', '-i', review['instance_manager_name'],
                                             '-c', 'instance-manager', '--', 'python3', '-c', source], review['replica_directory']))
 
-    def wait_native(self, review):
+    def native_state(self, review):
         c = self.config
+        volume = self.kube.get('volumes.longhorn.io', c['volume'], c['longhornNamespace'])
+        same(volume, c['volume'], c['volumeUID'])
+        require(volume['status'].get('robustness') == 'healthy' and volume['status'].get('state') == 'attached', 'volume health changed during native deletion')
+        engine = self.kube.get('engines.longhorn.io', review['engine_name'], c['longhornNamespace'])
+        same(engine, review['engine_name'], review['engine_uid'])
+        es = engine['status']
+        require(es.get('currentState') == 'running' and list(es.get('replicaModeMap', {}).values()) == ['RW'], 'native engine health changed')
+        require(es.get('currentImage', '').endswith(':v1.12.1') and es.get('currentImage') == engine['spec'].get('image'), 'native engine implementation changed')
+        replica = self.kube.get('replicas.longhorn.io', review['replica_name'], c['longhornNamespace'])
+        same(replica, review['replica_name'], review['replica_uid'])
+        require(replica['spec'].get('active') is True and not replica['spec'].get('failedAt') and
+                replica['status'].get('currentState') == 'running', 'native replica health changed')
+        chain, purge = es.get('snapshots', {}), es.get('purgeStatus', {})
+        require(purge and all(not x.get('error') for x in purge.values()), 'native purge reported an error or unknown state')
+        kept = set(review['snapshot_chain']) - {c['snapshot']} - set(review['collateral_head_parent_prunes'])
+        require(kept <= set(chain), 'another recovery point disappeared')
+        snapshot = self.kube.maybe('snapshots.longhorn.io', c['snapshot'], c['longhornNamespace'])
+        if snapshot:
+            require(snapshot['metadata']['uid'] == c['snapshotUID'], 'snapshot name was reused')
+        engine_quiescent = c['snapshot'] not in chain and all(not x.get('isPurging') for x in purge.values())
+        return snapshot, not snapshot and engine_quiescent, engine_quiescent
+
+    def wait_native(self, review):
         deadline = time.monotonic() + self.approval['maxWaitSeconds']
         stable = 0
         while True:
             self.own_lease()
-            volume = self.kube.get('volumes.longhorn.io', c['volume'], c['longhornNamespace'])
-            same(volume, c['volume'], c['volumeUID'])
-            require(volume['status'].get('robustness') == 'healthy' and volume['status'].get('state') == 'attached', 'volume health changed during native deletion')
-            engine = self.kube.get('engines.longhorn.io', review['engine_name'], c['longhornNamespace'])
-            same(engine, review['engine_name'], review['engine_uid'])
-            es = engine['status']
-            require(es.get('currentState') == 'running' and list(es.get('replicaModeMap', {}).values()) == ['RW'], 'native engine health changed')
-            require(es.get('currentImage', '').endswith(':v1.12.1') and es.get('currentImage') == engine['spec'].get('image'), 'native engine implementation changed')
-            replica = self.kube.get('replicas.longhorn.io', review['replica_name'], c['longhornNamespace'])
-            same(replica, review['replica_name'], review['replica_uid'])
-            require(replica['spec'].get('active') is True and not replica['spec'].get('failedAt') and
-                    replica['status'].get('currentState') == 'running', 'native replica health changed')
-            chain, purge = es.get('snapshots', {}), es.get('purgeStatus', {})
-            require(purge and all(not x.get('error') for x in purge.values()), 'native purge reported an error or unknown state')
-            kept = set(review['snapshot_chain']) - {c['snapshot']} - set(review['collateral_head_parent_prunes'])
-            require(kept <= set(chain), 'another recovery point disappeared')
-            # Native Snapshot GC may remove a pruned head-parent CR itself.
-            snapshot = self.kube.maybe('snapshots.longhorn.io', c['snapshot'], c['longhornNamespace'])
-            if snapshot:
-                require(snapshot['metadata']['uid'] == c['snapshotUID'], 'snapshot name was reused')
-            completed = not snapshot and c['snapshot'] not in chain and all(not x.get('isPurging') for x in purge.values())
+            _, completed, _ = self.native_state(review)
             stable = stable + 1 if completed else 0
             self.save('awaiting-native-quiescence', native_quiescent=completed)
             if stable >= 2:
@@ -301,12 +390,13 @@ class Recovery:
                     require(self.kube.maybe(resource, obj['name']) is None, 'an aborted operation still has an admission fence')
             else:
                 require(self.state.get('deletion_attempted') is True, 'previous pre-delete attempt needs explicit recovery review')
-                # Observer-only recovery: the old exact-UID delete must already
-                # have taken effect; don't release around an intact target.
-                require(self.kube.maybe('snapshots.longhorn.io', c['snapshot'], c['longhornNamespace']) is None,
-                        'delete outcome is not terminal; keep existing fences')
                 self.own_lease()
                 review = json.loads(existing['data']['review.json'])
+                snapshot = self.kube.maybe('snapshots.longhorn.io', c['snapshot'], c['longhornNamespace'])
+                if snapshot is not None:
+                    require(snapshot['metadata']['uid'] == c['snapshotUID'] and snapshot['metadata'].get('deletionTimestamp'),
+                            'delete outcome is not terminal; keep existing fences')
+                    self.resume_native_finalizer(review)
         if not existing or retry_aborted:
             review = observe(self.kube, c)
             require(review['ready_for_review'], 'working-space gate failed; no deletion permitted')
