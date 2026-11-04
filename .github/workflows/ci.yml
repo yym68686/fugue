@@ -276,6 +276,26 @@ jobs:
           path: ${{ runner.temp }}/postgres-volume-*.json
           if-no-files-found: error
           retention-days: 30
+      - name: Review the declared obsolete local snapshot without changing it
+        id: snapshot_review
+        env: {BASE_SHA: '${{ github.event.before }}'}
+        run: |
+          set -euo pipefail
+          paths=(deploy/environments/production/local-snapshot-review scripts/longhorn_snapshot_map.py scripts/plan_longhorn_snapshot_recovery.py scripts/test_longhorn_snapshot_map.py scripts/test_plan_longhorn_snapshot_recovery.py)
+          if git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then exit 0; fi
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "${paths[@]}" .github/workflows/ci.yml
+          echo 'selected=true' >> "$GITHUB_OUTPUT"
+          python3 -m unittest scripts.test_longhorn_snapshot_map scripts.test_plan_longhorn_snapshot_recovery
+          # Read-only: no apply mode, Lease acquisition, CR DELETE or SQL write.
+          python3 -m scripts.plan_longhorn_snapshot_recovery deploy/environments/production/local-snapshot-review/review.json --evidence "$RUNNER_TEMP/local-snapshot-review.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.snapshot_review.outputs.selected == 'true'
+        with:
+          name: fugue-local-snapshot-review-${{ github.sha }}
+          path: ${{ runner.temp }}/local-snapshot-review.json
+          if-no-files-found: error
+          retention-days: 30
 
   k3s_transport_integration:
     # Dependency verification runs on a disposable runner without production access.

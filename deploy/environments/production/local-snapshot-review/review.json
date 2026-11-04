@@ -1,0 +1,20 @@
+{
+  "schema": "fugue.local-snapshot-review/v1",
+  "namespace": "fugue-system",
+  "cluster": "fugue-fugue-control-plane-postgres",
+  "clusterUID": "603cac0e-43a9-4480-bd25-d1364e6aecc2",
+  "primary": "fugue-fugue-control-plane-postgres-8",
+  "primaryUID": "60643c24-5aec-46db-bdc9-0ed56894a75d",
+  "pvcUID": "4f18ef1d-1060-45fb-9159-910ca4c70ce9",
+  "volume": "pvc-4f18ef1d-1060-45fb-9159-910ca4c70ce9",
+  "volumeUID": "40d3c445-5830-4a74-8e70-86854507a5ea",
+  "longhornNamespace": "longhorn-system",
+  "snapshot": "fugue-backup-run-1791511221-47f550a84446-gh9r7",
+  "snapshotUID": "13f0555a-44ab-446a-bdbf-9b88cde68a81",
+  "artifact": "backup_artifact_1791513124_3301fd21820c",
+  "run": "backup_run_1791511221_47f550a84446",
+  "coordinationLease": "fugue-fugue-control-plane-db-backup",
+  "minimumExtraFreeBytes": 17179869184,
+  "workingReserveBytes": 201326592,
+  "maxFoldWriteBytes": 6442450944
+}
