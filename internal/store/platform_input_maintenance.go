@@ -82,19 +82,11 @@ func (r *archiveInputStream) Read(p []byte) (int, error) {
 func (r *archiveInputStream) fetch() error {
 	ctx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
 	defer cancel()
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := beginInputArchiveLockedTx(ctx, r.db, false, true, false)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{`SET LOCAL lock_timeout='250ms'`, `SET LOCAL statement_timeout='5s'`} {
-		if _, err = tx.ExecContext(ctx, statement); err != nil {
-			return err
-		}
-	}
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(315609238744290)`); err != nil {
-		return err
-	}
 	var epoch int64
 	if err = tx.QueryRowContext(ctx, `SELECT epoch FROM fugue_platform_input_archive_control WHERE singleton`).Scan(&epoch); err != nil {
 		return err

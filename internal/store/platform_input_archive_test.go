@@ -815,6 +815,57 @@ func TestCompilerInputArchiveReaderFallsBackBeforeLedgerMigration(t *testing.T) 
 	}
 }
 
+func TestCompilerInputArchiveWriterBarrierRetriesOnlyAfterRollback(t *testing.T) {
+	s := boundedContentTestStore(t)
+	holder, err := s.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback()
+	if _, err = holder.ExecContext(t.Context(), `SELECT pg_advisory_xact_lock(315609238744290)`); err != nil {
+		t.Fatal("could not establish disposable writer contention", err)
+	}
+
+	released := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(400 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			_ = holder.Rollback()
+		case <-t.Context().Done():
+			_ = holder.Rollback()
+		}
+		close(released)
+	}()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	started := time.Now()
+	tx, err := beginInputArchiveTx(ctx, s.db)
+	if err != nil {
+		t.Fatal("bounded barrier retry did not resume after the writer released", err)
+	}
+	if elapsed := time.Since(started); elapsed < 350*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("barrier retry did not respect bounded wait: %s", elapsed)
+	}
+	if _, err = tx.ExecContext(ctx, `SELECT 1`); err != nil {
+		t.Fatal("barrier retry returned an invalid transaction", err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal("barrier retry transaction did not commit", err)
+	}
+	select {
+	case <-released:
+	case <-ctx.Done():
+		t.Fatal("disposable lock holder did not release")
+	}
+	var held int
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND classid=(315609238744290::bigint>>32)::oid AND objid=(315609238744290::bigint&4294967295)::oid AND granted`).Scan(&held); err != nil || held != 0 {
+		t.Fatal("completed archive barrier leaked a lock", held, err)
+	}
+}
+
 func TestCompilerInputInspectWaitsBehindArchiveReaderFence(t *testing.T) {
 	s := archiveTestStore(t)
 	snapshot, digest := chunkedInputFixture(t)

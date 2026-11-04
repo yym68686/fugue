@@ -526,35 +526,58 @@ func verifyCompilerInputArchiveSource(ctx context.Context, db *sql.DB, source in
 }
 
 func beginInputArchiveTx(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	for _, q := range []string{`SET LOCAL lock_timeout='250ms'`, `SET LOCAL statement_timeout='5s'`, `SET LOCAL work_mem='1MB'`, `SELECT pg_advisory_xact_lock(315609238744290)`} {
-		if _, err = tx.ExecContext(ctx, q); err != nil {
-			tx.Rollback()
-			return nil, err
-		}
-	}
-	return tx, nil
+	return beginInputArchiveLockedTx(ctx, db, false, false, true)
 }
 
 func beginInputArchiveClaimTx(ctx context.Context, db *sql.DB, apply bool) (*sql.Tx, error) {
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: !apply})
-	if err != nil {
-		return nil, err
-	}
+	return beginInputArchiveLockedTx(ctx, db, !apply, !apply, false)
+}
+
+// Only acquisition of the unchanged writer barrier may be retried. An
+// unsuccessful attempt is rolled back before yielding, so no transaction,
+// row lock, or partial mutation survives the wait. Never retry a statement
+// after acquisition, a commit, a lease conflict, or an unknown database error.
+// This bounds contention without increasing the 250ms database lock timeout
+// or changing fencing, pin, epoch, and compare-and-swap checks.
+func beginInputArchiveLockedTx(ctx context.Context, db *sql.DB, readOnly, shared, workMem bool) (*sql.Tx, error) {
 	lock := `SELECT pg_advisory_xact_lock_shared(315609238744290)`
-	if apply {
+	if !shared {
 		lock = `SELECT pg_advisory_xact_lock(315609238744290)`
 	}
-	for _, q := range []string{`SET LOCAL lock_timeout='250ms'`, `SET LOCAL statement_timeout='5s'`, lock} {
-		if _, err = tx.ExecContext(ctx, q); err != nil {
-			tx.Rollback()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: readOnly})
+		if err != nil {
 			return nil, err
 		}
+		settings := []string{`SET LOCAL lock_timeout='250ms'`, `SET LOCAL statement_timeout='5s'`}
+		if workMem {
+			settings = append(settings, `SET LOCAL work_mem='1MB'`)
+		}
+		for _, q := range settings {
+			if _, err = tx.ExecContext(ctx, q); err != nil {
+				_ = tx.Rollback()
+				return nil, err
+			}
+		}
+		if _, err = tx.ExecContext(ctx, lock); err == nil {
+			return tx, nil
+		}
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			return nil, err // rollback not confirmed; do not retry
+		}
+		var state interface{ SQLState() string }
+		if !errors.As(err, &state) || state.SQLState() != "55P03" || !time.Now().Before(deadline) {
+			return nil, err
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return tx, nil
 }
 
 func readInputArchiveEpoch(ctx context.Context, tx *sql.Tx, epoch int64) (int64, error) {
