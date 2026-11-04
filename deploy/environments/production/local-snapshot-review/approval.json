@@ -1,7 +1,7 @@
 {
   "schema": "fugue.local-snapshot-recovery/v1",
-  "declarationSHA256": "39ebb0ce636d5d27e054542b2a36c309469b8d0ca88654479cde50bd7dd0331b",
-  "snapshotUID": "4ee9478b-cddf-4943-b22d-702296db74bb",
+  "declarationSHA256": "85fe209ef1ed07899c51f7278e08592cc540712f682888319cb7e4739b0654cd",
+  "snapshotUID": "dd7cfbc4-f968-4ab2-8bcc-ec610435152e",
   "authorized": true,
   "maxWaitSeconds": 600,
   "readyURL": "https://api.fugue.pro/readyz"
