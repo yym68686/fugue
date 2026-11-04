@@ -65,8 +65,11 @@ original target remains intact. If the exact UID is deleting, its native layer
 is already gone, purge is idle and every retained point remains, it can repair
 the known nullable SnapshotSpec compatibility rule under the same Lease. The
 complete old/new admission specs and all durable UIDs must match; unknown edits
-stop recovery. Absent and null `labels` are equivalent, while all other spec
-keys and non-null labels remain immutable. A retained-child server dry-run must
+stop recovery. The complete structural SnapshotSpec schema is pinned before
+explicit typed field comparisons; new fields or unknown-field preservation stop
+execution. Absent and null `labels` are equivalent, and an absent boolean uses
+the native false default; actual field values and non-null labels remain
+immutable. A retained-child server dry-run must
 accept typed normalization and deny real spec changes. A metadata annotation
 can requeue Longhorn's native finalizer reconciliation; the executor never
 changes a finalizer or sends another delete/engine operation. A known

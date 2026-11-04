@@ -279,6 +279,7 @@ class NativeFinalizerRecoveryTests(unittest.TestCase):
         self.kube.get, self.kube.replace = get, replace
         self.kube.command = lambda args, body: self.dry_runs.append((args, json.loads(body))) or '{}'
         self.r.check_barriers = lambda: self.checks.append(True)
+        self.r.check_snapshot_schema = lambda: None
         self.denied_updates = []
         self.r.denied_probe = lambda args, body: self.denied_updates.append((args, copy.deepcopy(body)))
         self.r.native_state = lambda _: (copy.deepcopy(self.kube.snapshot), self.kube.snapshot is None, True)
@@ -340,6 +341,39 @@ class NativeFinalizerRecoveryTests(unittest.TestCase):
         self.assertEqual(self.kube.deletes, 1)
         self.assertEqual(self.r.state['phase'], 'completed')
         self.assertEqual(sum(x['kind'] == 'ValidatingAdmissionPolicy' for x in self.updates), 1)
+
+    def test_known_failed_map_rule_can_be_replaced_without_unlock_or_redelete(self):
+        self.pending()
+        name = self.r.operation + '-snapshotsValidatingAdmissionPolicy'
+        self.kube.objects[name]['spec'] = barrier_objects(self.c, review(), self.r.operation, map_snapshot_spec=True)[0]['spec']
+        self.r.run()
+        self.assertEqual(self.kube.deletes, 1)
+        self.assertEqual(self.r.state['phase'], 'completed')
+
+
+class SnapshotSchemaTests(unittest.TestCase):
+    def test_typed_comparison_requires_the_complete_exact_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            c = config()
+            r = Recovery(FakeCluster(), c, approval(c), Path(directory) / 'receipt.json')
+            spec = dict(type='object', properties=dict(volume=dict(type='string'),
+                createSnapshot=dict(type='boolean'), labels=dict(type='object', nullable=True,
+                    additionalProperties=dict(type='string'))))
+            def crd(value):
+                return dict(spec=dict(versions=[dict(name='v1beta2', served=True,
+                    schema=dict(openAPIV3Schema=dict(properties=dict(spec=value))))]))
+            r.kube.get = lambda *args: crd(spec)
+            r.check_snapshot_schema()
+            for mutate in [lambda s:s['properties'].__setitem__('newControl', dict(type='string')),
+                           lambda s:s.__setitem__('additionalProperties', True),
+                           lambda s:s.__setitem__('x-kubernetes-preserve-unknown-fields', True),
+                           lambda s:s['properties']['labels'].__setitem__('nullable', False),
+                           lambda s:s['properties']['createSnapshot'].__setitem__('type', 'string')]:
+                changed = copy.deepcopy(spec)
+                mutate(changed)
+                r.kube.get = lambda *args: crd(changed)
+                with self.assertRaisesRegex(ValueError, 'unsupported SnapshotSpec'):
+                    r.check_snapshot_schema()
 
 
 if __name__ == '__main__':

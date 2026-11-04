@@ -55,7 +55,7 @@ class Cluster(ReadOnlyCluster):
                                preconditions={k: obj['metadata'][k] for k in ('uid', 'resourceVersion')}))
 
 
-def barrier_objects(config, review, operation, *, legacy_snapshot_spec=False):
+def barrier_objects(config, review, operation, *, legacy_snapshot_spec=False, map_snapshot_spec=False):
     """Deny NEW reference writers; native finalizers/status remain operational.
 
     The shared Lease covers Fugue backups/releases, not CSI or Longhorn native
@@ -70,13 +70,21 @@ def barrier_objects(config, review, operation, *, legacy_snapshot_spec=False):
     same_spec = "request.operation == 'UPDATE' && object.spec == oldObject.spec"
     # Longhorn's typed SnapshotSpec always serializes nullable labels, even
     # when the stored JSON omitted it. Finalizer Update therefore adds null.
-    # Compare every other key bidirectionally; only absent/null labels are
-    # equivalent. A new key or changed label value still fails closed.
-    snapshot_same_spec = same_spec if legacy_snapshot_spec else (
+    # Kubernetes exposes the structural spec as a typed object, not a map.
+    # Pin its complete schema before using the explicit field comparison.
+    # Preserve the old map expression solely for exact durable-state recovery.
+    map_same_spec = (
         "request.operation == 'UPDATE' && "
         "object.spec.all(k, k == 'labels' || (k in oldObject.spec && object.spec[k] == oldObject.spec[k])) && "
         "oldObject.spec.all(k, k == 'labels' || (k in object.spec && object.spec[k] == oldObject.spec[k])) && "
         "(has(object.spec.labels) ? object.spec.labels : null) == (has(oldObject.spec.labels) ? oldObject.spec.labels : null)")
+    typed_same_spec = (
+        "request.operation == 'UPDATE' && object.spec.volume == oldObject.spec.volume && "
+        "(has(object.spec.createSnapshot) ? object.spec.createSnapshot : false) == "
+        "(has(oldObject.spec.createSnapshot) ? oldObject.spec.createSnapshot : false) && "
+        "((!has(object.spec.labels) && !has(oldObject.spec.labels)) || "
+        "(has(object.spec.labels) && has(oldObject.spec.labels) && object.spec.labels == oldObject.spec.labels))")
+    snapshot_same_spec = same_spec if legacy_snapshot_spec else map_same_spec if map_snapshot_spec else typed_same_spec
     rules = [
         ('snapshots', 'longhorn.io', 'v1beta2', ['snapshots'],
          f'o.spec.volume == {volume}',
@@ -193,6 +201,7 @@ class Recovery:
             self.kube.delete('/apis/admissionregistration.k8s.io/v1/' + resource + '/' + obj['name'], current)
 
     def install_barriers(self, review):
+        self.check_snapshot_schema()
         self.record['data']['barriers'] = '[]'
         for obj in barrier_objects(self.config, review, self.operation):
             self.own_lease()
@@ -227,6 +236,19 @@ class Recovery:
             require(live.get('status', {}).get('observedGeneration') == live['metadata']['generation'] and
                     'typeChecking' in live['status'] and not live['status']['typeChecking'].get('expressionWarnings'), 'admission policy type check incomplete')
 
+    def check_snapshot_schema(self):
+        crd = self.kube.get('customresourcedefinitions', 'snapshots.longhorn.io')
+        versions = [v for v in crd['spec']['versions'] if v['name'] == 'v1beta2' and v.get('served')]
+        require(len(versions) == 1, 'Snapshot API schema unavailable')
+        spec = versions[0]['schema']['openAPIV3Schema']['properties']['spec']
+        properties = spec.get('properties', {})
+        require(spec.get('type') == 'object' and set(properties) == {'volume', 'createSnapshot', 'labels'} and
+                not spec.get('additionalProperties') and not spec.get('x-kubernetes-preserve-unknown-fields') and
+                properties['volume'].get('type') == 'string' and
+                properties['createSnapshot'].get('type') == 'boolean' and
+                properties['labels'].get('type') == 'object' and properties['labels'].get('nullable') is True and
+                properties['labels'].get('additionalProperties') == {'type': 'string'}, 'unsupported SnapshotSpec schema')
+
     def resume_native_finalizer(self, review):
         """Repair only the known nullable-field fence, never DELETE/finalizers.
 
@@ -240,14 +262,16 @@ class Recovery:
         require(snapshot and snapshot['metadata'].get('deletionTimestamp') and engine_quiescent,
                 'native deletion is not terminal enough for finalizer compatibility recovery')
         self.health()
+        self.check_snapshot_schema()
         expected = barrier_objects(self.config, review, self.operation)
         legacy = barrier_objects(self.config, review, self.operation, legacy_snapshot_spec=True)
+        map_legacy = barrier_objects(self.config, review, self.operation, map_snapshot_spec=True)
         identities = json.loads(self.record['data']['barriers'])
         require(len(identities) == len(expected) and
                 {(x['kind'], x['name']) for x in identities} == {(x['kind'], x['metadata']['name']) for x in expected},
                 'durable admission barrier set changed')
         repair = None
-        for wanted, old in zip(expected, legacy):
+        for wanted, old, previous in zip(expected, legacy, map_legacy):
             self.own_lease()
             kind, name = wanted['kind'], wanted['metadata']['name']
             resource = 'validatingadmissionpolicies' if kind == 'ValidatingAdmissionPolicy' else 'validatingadmissionpolicybindings'
@@ -255,11 +279,11 @@ class Recovery:
             identity = next(x for x in identities if x['kind'] == kind and x['name'] == name)
             require(live['metadata']['uid'] == identity['uid'] and
                     live['metadata'].get('labels', {}).get(OPERATION) == self.operation and
-                    live['spec'] in (wanted['spec'], old['spec']), 'admission barrier identity or spec changed')
+                    live['spec'] in (wanted['spec'], old['spec'], previous['spec']), 'admission barrier identity or spec changed')
             if live['spec'] != wanted['spec']:
                 require(kind == 'ValidatingAdmissionPolicy' and name.endswith('-snapshots'), 'unexpected barrier repair')
                 repair = (live, wanted['spec'])
-        self.save('repairing-native-finalizer-compatibility', barrier_revision='snapshot-null-labels-v1')
+        self.save('repairing-native-finalizer-compatibility', barrier_revision='snapshot-typed-null-labels-v2')
         if repair:
             live, spec = repair
             self.own_lease()
