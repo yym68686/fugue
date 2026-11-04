@@ -14,6 +14,11 @@ import subprocess
 import time
 
 
+# Space for the bounded maintenance operation itself, in addition to the
+# physical free percentage and the declaration's extra capacity cushion.
+WORKING_RESERVE_BYTES = 192 << 20
+
+
 def quantity(value):
     match = re.fullmatch(r'([1-9][0-9]*)(Gi|Mi|Ki)?', str(value))
     if not match:
@@ -25,8 +30,13 @@ def plan(config, cluster, pvc, pv, storage_class, volume, replicas, nodes, setti
     required = {'schema', 'namespace', 'cluster', 'clusterUID', 'primary', 'pvcUID',
                 'pvUID', 'volumeUID', 'storageClass', 'previousSize', 'targetSize',
                 'minimumFreeAfterReserveGiB', 'longhornNamespace'}
+    if 'minimumAvailablePercentage' in config:
+        required.add('minimumAvailablePercentage')
     if set(config) != required or config['schema'] != 'fugue.postgres-volume-expansion/v1':
         raise ValueError('Unsupported expansion declaration')
+    declared_minimal = config.get('minimumAvailablePercentage', 0)
+    if type(declared_minimal) is not int or not 0 <= declared_minimal <= 100:
+        raise ValueError('Invalid declared physical reserve percentage')
     before, target = quantity(config['previousSize']), quantity(config['targetSize'])
     if target <= before or target > 2 * before or type(config['minimumFreeAfterReserveGiB']) is not int or config['minimumFreeAfterReserveGiB'] < 16:
         raise ValueError('Expansion must be bounded and preserve disk headroom')
@@ -63,6 +73,8 @@ def plan(config, cluster, pvc, pv, storage_class, volume, replicas, nodes, setti
         raise ValueError('Longhorn capacity settings are missing or invalid') from exc
     if not 0 <= minimal <= 100 or overprovision <= 0:
         raise ValueError('Longhorn capacity settings are out of range')
+    if minimal < declared_minimal:
+        raise ValueError('Longhorn physical reserve is below the declared minimum')
     headroom = []
     disk_growth = {}
     for replica in active:
@@ -98,12 +110,16 @@ def plan(config, cluster, pvc, pv, storage_class, volume, replicas, nodes, setti
         growth = disk_growth[disk_key]
         free = disk['storageAvailable'] - maximum * minimal // 100 - growth
         scheduled_free = (maximum - reserved) * overprovision // 100 - disk['storageScheduled'] - growth
-        if free < config['minimumFreeAfterReserveGiB'] * 2**30:
+        extra_free = config['minimumFreeAfterReserveGiB'] * 2**30
+        unallocated = free - extra_free - WORKING_RESERVE_BYTES
+        if unallocated < 0:
             raise ValueError('Insufficient replica disk capacity after reserve')
         if scheduled_free < 0:
             raise ValueError('Expansion exceeds Longhorn scheduled capacity')
         headroom.append({'node': rs['nodeID'], 'disk': rs['diskID'], 'freeAfterReserveAndGrowthBytes': free,
-                         'scheduledHeadroomBytes': scheduled_free, 'minimumAvailablePercentage': minimal})
+                         'scheduledHeadroomBytes': scheduled_free, 'minimumAvailablePercentage': minimal,
+                         'minimumExtraFreeBytes': extra_free, 'workingReserveBytes': WORKING_RESERVE_BYTES,
+                         'unallocatedAfterAllReservesBytes': unallocated})
     patch = []
     if current != target:
         patch = [{'op': 'test', 'path': '/metadata/uid', 'value': pm['uid']},

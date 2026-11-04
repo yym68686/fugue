@@ -8,8 +8,9 @@
   "pvUID": "483891a6-d9d8-4a7c-ac8e-7539744cb0a0",
   "volumeUID": "40d3c445-5830-4a74-8e70-86854507a5ea",
   "storageClass": "fugue-longhorn-rwo",
-  "previousSize": "150Gi",
-  "targetSize": "151Gi",
+  "previousSize": "151Gi",
+  "targetSize": "161Gi",
   "minimumFreeAfterReserveGiB": 16,
+  "minimumAvailablePercentage": 25,
   "longhornNamespace": "longhorn-system"
 }

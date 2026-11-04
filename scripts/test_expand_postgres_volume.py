@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from scripts.expand_postgres_volume import plan, quantity
+from scripts.expand_postgres_volume import WORKING_RESERVE_BYTES, plan, quantity
 
 
 def fixture():
@@ -100,6 +100,43 @@ class ExpansionTests(unittest.TestCase):
         args[5]['spec']['numberOfReplicas'] = 2
         args[6].append(copy.deepcopy(args[6][0]))
         args[7][0]['status']['diskStatus']['data']['storageAvailable'] = quantity('43Gi')
+        with self.assertRaisesRegex(ValueError, 'capacity after reserve'):
+            plan(*args)
+
+    def test_reserves_maintenance_space_in_addition_to_percentage_and_cushion(self):
+        for remaining, accepted in [(0, False), (WORKING_RESERVE_BYTES-1, False), (WORKING_RESERVE_BYTES, True)]:
+            with self.subTest(remaining=remaining):
+                args = fixture()
+                # 20Gi physical reserve + 4Gi full growth + 16Gi cushion.
+                args[7][0]['status']['diskStatus']['data']['storageAvailable'] = quantity('40Gi')+remaining
+                if not accepted:
+                    with self.assertRaisesRegex(ValueError, 'capacity after reserve'):
+                        plan(*args)
+                else:
+                    _, evidence = plan(*args)
+                    disk = evidence['replicaHeadroom'][0]
+                    self.assertEqual(disk['workingReserveBytes'], 192 << 20)
+                    self.assertEqual(disk['minimumExtraFreeBytes'], quantity('16Gi'))
+                    self.assertEqual(disk['unallocatedAfterAllReservesBytes'], 0)
+
+    def test_rejects_lowered_declared_percentage_even_with_more_free_space(self):
+        args = fixture()
+        args[0]['minimumAvailablePercentage'] = 25
+        with self.assertRaisesRegex(ValueError, 'below the declared minimum'):
+            plan(*args)  # Actual setting is still 20, not the declared 25.
+        args[8]['storage-minimal-available-percentage'] = '25'
+        _, evidence = plan(*args)
+        self.assertEqual(evidence['replicaHeadroom'][0]['minimumAvailablePercentage'], 25)
+        for invalid in (True, '25', -1, 101):
+            with self.subTest(invalid=invalid):
+                args[0]['minimumAvailablePercentage'] = invalid
+                with self.assertRaisesRegex(ValueError, 'declared physical reserve'):
+                    plan(*args)
+
+    def test_retry_cannot_spend_the_maintenance_reserve(self):
+        args = fixture()
+        args[2]['spec']['resources']['requests']['storage'] = '14Gi'
+        args[7][0]['status']['diskStatus']['data']['storageAvailable'] = quantity('40Gi')
         with self.assertRaisesRegex(ValueError, 'capacity after reserve'):
             plan(*args)
 
