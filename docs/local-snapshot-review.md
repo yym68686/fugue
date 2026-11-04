@@ -27,7 +27,7 @@ deliberately unknown until native completion and actual filesystem measurement.
 The physical free counter uses `f_bfree`, matching the root-run storage engine;
 filesystem `df Available` can be smaller because of reserved root blocks.
 
-`ready_for_review` is **not authorization or permission to delete**. A future
+`ready_for_review` is **not authorization or permission to delete**. The separate
 executor still needs the shared backup/release coordination Lease held through
 native purge quiescence, fresh object/ledger/reference checks, UID and resource
 version deletion preconditions, failure recovery, and database/API latency and
@@ -35,3 +35,41 @@ physical-space acceptance. It must never delete replica files directly, remove
 finalizers, modify remote backups, unprotect restore points, or batch-delete
 snapshots based on size estimates. Already-retired remote artifacts alone do not
 prove that their local Longhorn snapshot layers were cleaned up.
+
+## Explicit single-snapshot execution
+
+`scripts.recover_longhorn_snapshot` is the separate execution entrypoint. It
+defaults to a read-only preview. Apply requires the main production Actions
+environment, an explicit approval binding the exact declaration SHA256 and
+Snapshot UID, and all fresh planner gates. The existing serialized
+`postgres_volume_recovery` job is the only release path. No SQL write is used.
+
+Before DELETE, a durable operation ConfigMap records the exact target, fencing
+token and review. The existing backup/release Lease uses a `release/` owner:
+ordinary backup workers cannot take it over merely because its time expires.
+Exact-volume admission policies independently fence new Longhorn snapshots,
+backup references, source-volume changes/clones and CSI/PVC clone references.
+Native status and finalizer reconciliation remain allowed. Every independent
+reference fence must actually deny a server-side dry-run; policy type checking
+must also finish without warnings. Existing pending references, incomplete
+inventories, another native operation, changed ancestry or insufficient working
+space stop execution. These guards do not claim to fence a privileged operator
+issuing out-of-band engine RPCs or deleting the guards themselves.
+
+Only the approved Snapshot gets a UID+resourceVersion DELETE. Longhorn performs
+the fold/purge. The executor never sends an engine purge or removes a finalizer
+or file. Any possible DELETE commit is journaled *before* the request. Unknown
+outcomes, native errors, health loss and timeout retain the durable fences.
+Another invocation only observes a committed operation: it cannot issue another
+DELETE or release protection while the original target remains intact. A known
+pre-delete abort can be retried after its guards have been removed and all gates
+are re-evaluated. A completed operation is inert on replay.
+
+Success requires the CR and engine layer to disappear, all other user recovery
+points to remain, purge quiescence on two polls, unchanged primary identity and
+restart count, public readiness and the original physical reserve. Only then are
+admission guards and the shared Lease released. The durable receipt contains
+actual bottom-disk free counters and PG filesystem available bytes. The free
+counter change includes concurrent business writes: it is not an exact causal
+reclaim measurement. Local snapshot cleanup does not itself enlarge PostgreSQL's
+filesystem. A separate expansion still needs its own current capacity gate.

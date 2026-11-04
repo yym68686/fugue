@@ -97,6 +97,7 @@ def inspect(request):
                 fold_write_bytes=records[1]['mapped_bytes'],
                 new_mapped_bytes=records[1]['mapped_bytes'] - overlap,
                 physical_free_bytes=fs.f_bfree * fs.f_frsize,
+                physical_available_bytes=fs.f_bavail * fs.f_frsize,
                 physical_total_bytes=fs.f_blocks * fs.f_frsize,
                 content_bytes_read=0, sync_requested=False)
 

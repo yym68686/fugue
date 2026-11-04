@@ -130,7 +130,7 @@ def collateral_purges(chain, selected):
     return collateral
 
 
-def observe(kube, config):
+def observe(kube, config, *, lease_holder=None):
     validate(config)
     ns, lh, volume_name = config['namespace'], config['longhornNamespace'], config['volume']
     cluster = kube.get('clusters.postgresql.cnpg.io', config['cluster'], ns)
@@ -173,16 +173,32 @@ def observe(kube, config):
     # Native purge also touches already removed/system-generated snapshots.
     # Include them explicitly; only a head-parent prune can be reviewed here.
     collateral = collateral_purges(chain, config['snapshot'])
+    snapshot_crs = kube.items(base + '/snapshots')
+    require(not any(x['spec'].get('volume') == volume_name and x['metadata'].get('deletionTimestamp') for x in snapshot_crs),
+            'another snapshot deletion is already pending')
+    collateral_uids = [x['metadata']['uid'] for x in snapshot_crs
+                       if x['metadata']['name'] in collateral and x['spec'].get('volume') == volume_name]
     ledger = kube.ledger(config)
     terminal_ledger(ledger, config['artifact'], config['run'])
     backups = kube.items(base + '/backups')
     require(not any(x.get('spec', {}).get('snapshotName') == config['snapshot'] for x in backups), 'remote Backup CR still refers to the candidate')
+    require(not any(x.get('metadata', {}).get('labels', {}).get('backup-volume') == volume_name and
+                    (x.get('status', {}).get('state') != 'Completed' or x['metadata'].get('deletionTimestamp')) for x in backups),
+            'another backup operation on the volume is pending')
     volumes = kube.items(base + '/volumes')
     require(not any(volume_name in str(x['spec'].get('dataSource', '')) or x.get('status', {}).get('cloneStatus', {}).get('sourceVolume') == volume_name for x in volumes), 'a clone refers to this volume')
     contents = kube.items('/apis/snapshot.storage.k8s.io/v1/volumesnapshotcontents')
     require(not any(volume_name in str(x.get('spec', {}).get('source', {})) or volume_name in str(x.get('status', {}).get('snapshotHandle', '')) for x in contents), 'CSI snapshot references this volume')
+    snapshots = kube.items('/apis/snapshot.storage.k8s.io/v1/volumesnapshots')
+    require(not any(x['metadata'].get('namespace') == ns and x.get('spec', {}).get('source', {}).get('persistentVolumeClaimName') == config['primary'] for x in snapshots), 'a pending CSI snapshot references this claim')
+    claims = kube.items('/api/v1/persistentvolumeclaims')
+    for claim in claims:
+        for field in ('dataSource', 'dataSourceRef'):
+            source = claim.get('spec', {}).get(field) or {}
+            require(not (source.get('kind') == 'PersistentVolumeClaim' and source.get('name') == config['primary'] and
+                         source.get('namespace', claim['metadata'].get('namespace')) == ns), 'a PVC clone references this claim')
     lease = kube.get('leases.coordination.k8s.io', config['coordinationLease'], ns)
-    require(not lease['spec'].get('holderIdentity'), 'backup or release coordination Lease is occupied')
+    require(lease['spec'].get('holderIdentity', '') == (lease_holder or ''), 'backup or release coordination Lease is occupied')
     manager = kube.get('pod', rs['instanceManagerName'], lh)
     require(manager['spec'].get('nodeName') == replica['spec']['nodeID'] == pod['spec']['nodeName'], 'replica observer is on another node')
     require(any(c['name'] == 'instance-manager' and c.get('ready') for c in manager['status'].get('containerStatuses', [])), 'instance manager is not Ready')
@@ -197,8 +213,12 @@ def observe(kube, config):
                     deletion_attempted=False, declaration=config,
                     snapshot_resource_version=snapshot['metadata']['resourceVersion'],
                     engine_uid=engine['metadata']['uid'], replica_uid=replica['metadata']['uid'],
+                    engine_name=engine['metadata']['name'], replica_name=replica['metadata']['name'],
+                    snapshot_chain=chain,
                     instance_manager_uid=manager['metadata']['uid'], child=child,
+                    instance_manager_name=manager['metadata']['name'], replica_directory=request['directory'],
                     lease_uid=lease['metadata']['uid'], collateral_head_parent_prunes=collateral,
+                    collateral_snapshot_uids=collateral_uids,
                     ledger=ledger, allocation=observation, budget=budget,
                     remaining_execution_gates=['shared backup/release Lease held until native purge quiesces',
                                               'fresh object UID/resourceVersion and full reference revalidation',

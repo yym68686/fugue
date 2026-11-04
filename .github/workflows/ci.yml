@@ -238,7 +238,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-postgres-protection, cancel-in-progress: false, queue: max}
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions: {contents: read}
     steps:
       - name: Inspect generated metadata before checkout
@@ -281,19 +281,26 @@ jobs:
         env: {BASE_SHA: '${{ github.event.before }}'}
         run: |
           set -euo pipefail
-          paths=(deploy/environments/production/local-snapshot-review scripts/longhorn_snapshot_map.py scripts/plan_longhorn_snapshot_recovery.py scripts/test_longhorn_snapshot_map.py scripts/test_plan_longhorn_snapshot_recovery.py)
+          paths=(deploy/environments/production/local-snapshot-review scripts/longhorn_snapshot_map.py scripts/plan_longhorn_snapshot_recovery.py scripts/recover_longhorn_snapshot.py scripts/test_longhorn_snapshot_map.py scripts/test_plan_longhorn_snapshot_recovery.py scripts/test_recover_longhorn_snapshot.py)
           if git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then exit 0; fi
           git fetch origin main
           git diff --exit-code HEAD origin/main -- "${paths[@]}" .github/workflows/ci.yml
           echo 'selected=true' >> "$GITHUB_OUTPUT"
-          python3 -m unittest scripts.test_longhorn_snapshot_map scripts.test_plan_longhorn_snapshot_recovery
-          # Read-only: no apply mode, Lease acquisition, CR DELETE or SQL write.
-          python3 -m scripts.plan_longhorn_snapshot_recovery deploy/environments/production/local-snapshot-review/review.json --evidence "$RUNNER_TEMP/local-snapshot-review.json"
+          python3 -m unittest scripts.test_longhorn_snapshot_map scripts.test_plan_longhorn_snapshot_recovery scripts.test_recover_longhorn_snapshot
+          # Read-only preview also recognizes a durable previous operation.
+          python3 -m scripts.recover_longhorn_snapshot deploy/environments/production/local-snapshot-review/review.json deploy/environments/production/local-snapshot-review/approval.json --evidence "$RUNNER_TEMP/local-snapshot-review.json"
+      - name: Recover only the explicitly approved local snapshot through native Longhorn
+        if: steps.snapshot_review.outputs.selected == 'true'
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/local-snapshot-review scripts/longhorn_snapshot_map.py scripts/plan_longhorn_snapshot_recovery.py scripts/recover_longhorn_snapshot.py scripts/test_recover_longhorn_snapshot.py .github/workflows/ci.yml
+          python3 -m scripts.recover_longhorn_snapshot deploy/environments/production/local-snapshot-review/review.json deploy/environments/production/local-snapshot-review/approval.json --apply --evidence "$RUNNER_TEMP/local-snapshot-result.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && steps.snapshot_review.outputs.selected == 'true'
         with:
           name: fugue-local-snapshot-review-${{ github.sha }}
-          path: ${{ runner.temp }}/local-snapshot-review.json
+          path: ${{ runner.temp }}/local-snapshot-*.json
           if-no-files-found: error
           retention-days: 30
 
