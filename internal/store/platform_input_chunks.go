@@ -61,19 +61,24 @@ func readInputManifest(ctx context.Context, db inputQueryer, digest string) (inp
 	if err != nil {
 		return m, err
 	}
+	return m, validateCompilerInputManifest(m)
+}
+
+func validateCompilerInputManifest(m inputManifest) error {
+	digest := m.Digest
 	if m.Location != "legacy" && m.Location != "hot" {
-		return m, fmt.Errorf("invalid compiler input storage location: %w", ErrConflict)
+		return fmt.Errorf("invalid compiler input storage location: %w", ErrConflict)
 	}
 	if m.Format == inputFormatSharedV3 || m.Format == inputFormatSeparatedV4 {
 		if !inputDigestPattern.MatchString(digest) || m.Size < 1 || m.Size > inputMaxBytes || m.ChunkSize != inputChunkBytes || m.Count != int((m.Size+inputChunkBytes-1)/inputChunkBytes) || m.Created.IsZero() {
-			return m, ErrConflict
+			return ErrConflict
 		}
-		return m, nil
+		return nil
 	}
 	if !inputDigestPattern.MatchString(digest) || (m.Format != inputFormatV1 && m.Format != inputFormatCodecV2) || m.Size <= 0 || m.Size > inputMaxBytes || m.ChunkSize < 1 || m.ChunkSize > inputChunkBytes || m.Count != int((m.Size+int64(m.ChunkSize)-1)/int64(m.ChunkSize)) || m.Created.IsZero() || m.Format == inputFormatCodecV2 && m.ChunkSize > inputChunkBytes-inputCodecHeaderBytes {
-		return m, fmt.Errorf("invalid compiler input manifest: %w", ErrConflict)
+		return fmt.Errorf("invalid compiler input manifest: %w", ErrConflict)
 	}
-	return m, nil
+	return nil
 }
 
 func absentInputManifest(err error) bool {

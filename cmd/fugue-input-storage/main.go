@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-write-fence, archive-retirement-plan, archive-retire, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-write-fence, archive-retirement-plan, archive-retire, observe")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
@@ -38,7 +38,7 @@ func main() {
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
 	hotMode := *mode == "archive-hot-copy" || *mode == "archive-hot-restore"
-	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode) && !*apply
+	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode) && !*apply
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
@@ -51,6 +51,27 @@ func main() {
 	if *mode == "observe" {
 		if err := observeStorage(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "runtime storage observation unavailable")
+			os.Exit(1)
+		}
+		return
+	}
+	if *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" {
+		dsn := os.Getenv("FUGUE_DATABASE_URL")
+		if dsn == "" {
+			fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
+			os.Exit(2)
+		}
+		run := store.RunCompilerInputHotInventory
+		if *mode == "archive-hot-roots" {
+			run = store.RunCompilerInputHotRootsInventory
+		}
+		report, err := run(ctx, dsn)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "hot inventory incomplete; stage="+store.HotInventoryFailureStage(err))
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
 			os.Exit(1)
 		}
 		return

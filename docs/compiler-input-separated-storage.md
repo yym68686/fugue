@@ -278,6 +278,53 @@ input's logical bytes. It does not mutate production data. Its full readback can
 be I/O intensive and should only be run after a dedicated archive target is
 available.
 
+`archive-hot-inventory` is a separate read-only metadata inventory. It collects
+database roots and follows declared artifact, release, expectation, scoped
+generation and input identities in one read-only Repeatable Read transaction.
+It includes active publication and rollback generations, current and unexpired
+LKG, at least three distinct verified historical generations per scope,
+consumer/shadow identities, active task references and archive owners. Repeated
+LKG verification events and legacy zero sequence values do not replace distinct
+rollback generations. Typed DNS dependencies retain the previous complete
+publication and its producer policies. An embedded artifact contributes an
+expected hash; it does not replace the immutable ledger row.
+
+The private operator report contains ledger identities and each input's retained
+roots, not payloads, database URLs, credentials or arbitrary driver errors.
+Shared descendants are resolved once and retain every incoming root. Declared
+hash conflicts and unresolved native execution generations remain blockers;
+generation labels are never parsed into input digests. Bounds are 16,384 roots,
+32,768 nodes, 262,144 edges and 524,288 root/node bindings, with a one-minute
+overall deadline, five-second statement budget and 250ms lock budget. Exceeding
+a bound refuses the inventory rather than returning a truncated proof. This
+uses an ordinary read-only database role and does not require setting the
+superuser-only temporary-file limit.
+
+`archive-hot-roots` uses the same coherent bounded root collector and returns
+every root plus counts per source, without traversing its dependencies. This
+separates sizing the actual retained-root inventory from verifying a graph.
+It leaves `traversal_performed`, dependency completeness, byte verification and
+retirement authority false and emits no reusable graph hash. In either mode,
+queries for separate root sources share the same transaction snapshot and each
+has the same five-second statement limit; no global sort over combined history
+is required. Active expectations use the existing release/revision index.
+Fixed failure-stage diagnostics contain no database or driver error text.
+Artifact and input metadata is fetched in batches of at most 32 unique
+identities; artifact text is capped at 8MiB per artifact and 32MiB per batch.
+Missing identities remain explicit blockers, while failed database statements
+abort the inventory instead of masquerading as missing dependencies. Batched
+and individual reads use the same typed dependency and manifest validation.
+
+This inventory deliberately does not grant retirement authority. Its
+`metadata_complete` field describes only the graph reachable from the collected
+database roots. The report separately lists uncovered sources and leaves
+`body_verification`, `reactivation_protected`, `retirement_authorized` and local
+byte verification false. Native external generation ledgers, a complete pin
+registry, artifact signatures, independent original-byte checks and persistent
+reactivation admission still require their own proofs. Its deterministic graph
+hash is not an approved retirement plan or a publication barrier. Deploying the
+command does not run it or change any production read/write route.
+
 `archive-retire --apply` requires the exact plan hash, current and rollback
 reader release IDs, a committed write fence and database trigger, no active
 archive leases, a matching database-side recheck, and a drained session-level
