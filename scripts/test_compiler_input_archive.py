@@ -5,10 +5,42 @@ import json
 import unittest
 from unittest.mock import patch
 
-from scripts.compiler_input_archive import validate_operation, managed_reader, credential_key, shared_reader_keys
+from scripts.compiler_input_archive import validate_operation, managed_reader, credential_key, shared_reader_keys, execute_item
 
 
 class ArchiveOperationTest(unittest.TestCase):
+    @patch('scripts.compiler_input_archive.time.sleep')
+    @patch('scripts.compiler_input_archive.time.monotonic', return_value=1)
+    @patch('scripts.compiler_input_archive.free_bytes', return_value=1024 << 20)
+    @patch('scripts.compiler_input_archive.command')
+    def test_only_confirmed_lock_timeout_retries_with_fresh_space_checks(self, command, space, clock, sleep):
+        timeout = ValueError('storage command failed stage=maintenance-executor category=55P03')
+        command.side_effect = [timeout, timeout, 'receipt']
+        self.assertEqual(execute_item(['synthetic'], {}, 512 << 20, 100), 'receipt')
+        self.assertEqual(space.call_count, 3)
+        self.assertEqual([x.args[0] for x in sleep.call_args_list], [1, 2])
+        space.reset_mock()
+        space.side_effect = [1024 << 20, 511 << 20]
+        command.side_effect = [timeout]
+        with self.assertRaisesRegex(ValueError, 'free-space reserve'):
+            execute_item(['synthetic'], {}, 512 << 20, 100)
+        self.assertEqual(command.call_count, 4)
+        space.side_effect = None
+        for category in ('conflict', 'deadline', 'unclassified'):
+            command.reset_mock()
+            command.side_effect = [ValueError('storage command failed stage=maintenance-executor category='+category)]
+            with self.assertRaises(ValueError): execute_item(['synthetic'], {}, 512 << 20, 100)
+            command.assert_called_once()
+        command.reset_mock()
+        command.side_effect = [timeout]*4
+        with self.assertRaises(ValueError): execute_item(['synthetic'], {}, 512 << 20, 100)
+        self.assertEqual(command.call_count, 4)
+        command.reset_mock()
+        clock.return_value = 100
+        with self.assertRaisesRegex(ValueError, 'time budget'):
+            execute_item(['synthetic'], {}, 512 << 20, 100)
+        command.assert_not_called()
+
     def fixture(self):
         return dict(version=1, mode='archive', digest='sha256:'+'a'*64, limit=1,
                     apply=False, expectedExecutorRevision='b'*40, minimumFreeBytes=512 << 20)

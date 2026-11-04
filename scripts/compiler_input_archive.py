@@ -118,6 +118,24 @@ def shared_reader_keys(registry, current):
             raise ValueError('archive credential encryption key differs for '+component+' '+label)
 
 
+def execute_item(argv, database, minimum_free_bytes, deadline):
+    # Yield outside a transaction on a confirmed PostgreSQL lock timeout.
+    # Never retry an unknown failure/commit outcome or steal an active lease.
+    # If a prior phase acquired a lease, its normal conflict check still wins.
+    for attempt in range(4):
+        if time.monotonic() >= deadline:
+            raise ValueError('archive paused at time budget; prior receipts retained')
+        if free_bytes(database) < minimum_free_bytes:
+            raise ValueError('archive paused at free-space reserve; prior receipts retained')
+        try:
+            return command(argv, timeout=1850)
+        except ValueError as exc:
+            if str(exc) != 'storage command failed stage=maintenance-executor category=55P03' or attempt == 3:
+                raise
+            print(json.dumps({'retry': 'maintenance-lock-timeout', 'attempt': attempt+1}), flush=True)
+            time.sleep(2**attempt)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--operation', required=True)
@@ -147,8 +165,6 @@ def main():
         if time.monotonic() >= deadline:
             print(json.dumps({'batch_paused_time_budget': True}), flush=True)
             break
-        if free_bytes(database) < value['minimumFreeBytes']:
-            raise ValueError('archive paused at free-space reserve; prior receipts retained')
         # One-item batches permit a primary/space check between inputs.
         argv = ['kubectl', '-n', executor['namespace'], 'exec', executor['pod'], '-c', executor['container'], '--', 'env',
                 'FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED=true', 'FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED=true',
@@ -159,7 +175,7 @@ def main():
             argv += ['--digest', value['digest']]
         if value['apply']:
             argv += ['--apply']
-        result = command(argv, timeout=1850)
+        result = execute_item(argv, database, value['minimumFreeBytes'], deadline)
         if len(result) > 16384:
             raise ValueError('archive receipt exceeds bound')
         if not result.strip():

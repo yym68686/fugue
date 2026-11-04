@@ -205,6 +205,10 @@ budget. The floor is a stop condition, not a guarantee of sufficient runway.
 Route preflight checks the actual current and immutable LKG manifests and their
 effective credential encryption keys against the API executor, including empty
 environment fallback; a safe HEAD template does not establish rollback safety.
+Confirmed maintenance SQLSTATE `55P03` retries at most three times after 1, 2,
+and 4 seconds outside transactions, rechecking space and health each time. The
+250ms lock timeout is unchanged. Unknown failures and active-lease conflicts
+stop immediately; a retry never steals a lease or assumes an unconfirmed commit.
 Physical retirement has an explicit two-phase maintenance path. The
 read-only `archive-retirement-plan` inventories every digest with rows in the
 legacy relation, checks ordinal coverage and orphan rows, fully reads and
