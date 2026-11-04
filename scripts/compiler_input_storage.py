@@ -27,7 +27,7 @@ def command(args, timeout=30):
             stage = 'database-space-observation'
         # Extract only the executor's bounded category, never SQL, connection
         # strings, kubectl stderr, evidence, or arbitrary subprocess output.
-        category = re.search(r'^compiler input maintenance completion not confirmed; inspect state before retrying; category=([a-z0-9-]{1,32})$', result.stderr, re.MULTILINE)
+        category = re.search(r'^compiler input maintenance completion not confirmed; inspect state before retrying; category=([A-Z0-9]{5}|[a-z0-9-]{1,32})$', result.stderr, re.MULTILINE)
         suffix = ' category='+category[1] if category else ''
         raise ValueError('storage command failed stage='+stage+suffix)
     return result.stdout

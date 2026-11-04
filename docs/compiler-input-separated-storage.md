@@ -152,14 +152,11 @@ support managed configuration before publishing routes or retiring old chunks.
 Explicit archive environment configuration remains supported for standalone
 operators; when present, it takes precedence and must bind the same backend.
 
-The single-input archive writer, reader, and `archive-route` / `archive-unroute`
-operations are in `main`. Production has no dedicated archive environment or
-validated archive bucket, no archive migration or route has been run, and no
-production input rows have been deleted or truncated. The separate hot-chunk
-write fence and archive-retirement maintenance commands are implemented in the
-isolated worktree but are not yet pushed or deployed. Do not start production
-copying until a dedicated target, measured transfer capacity, safe runway, and
-backpressure policy are confirmed.
+The archive writer, reader, hot-chunk write fence, and two-phase retirement
+commands are separate explicit operations. Deploying or enabling the backend
+does not run any of them. Before production copying, verify the dedicated
+target, transfer capacity, free-space reserve, and stop conditions. Record live
+migration receipts and health separately from code availability.
 
 The archive migration mode is an opt-in copy/verification tool, not a retention
 or deletion tool. It copies one existing v1/v2 chunked input into immutable,
@@ -190,11 +187,24 @@ FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED=true \
 FUGUE_DATABASE_URL=... fugue-input-storage --mode archive --digest sha256:... --apply
 ```
 
-This stage has no bulk-scan, delete, or `TRUNCATE` mode. The reader accepts
-only a routed row whose full digest and every segment receipt validate. A
-separate operator route operation can switch exactly one already-verified
+The reader accepts only a routed row whose full digest and every segment
+receipt validate. The single-input route operation can switch one verified
 digest without deleting its original rows. Routing still requires cold/hot
 dependency proof and all serving/rollback readers to support the archive.
+
+`archive-batch --archive-limit N --apply` copies up to N legacy inputs, and
+`archive-route-batch --archive-limit N --apply` switches up to N fully verified,
+unrouted receipts. N is bounded to 1–1000. Both use one worker and the same
+advisory lock; a failure stops the batch and committed receipts are skipped on
+resume. Every route re-verifies both the full external input and the retained
+source before compare-and-swap. Neither batch fences writers or deletes rows.
+Production operations are declared in `storage-policy/archive-operation.json`
+and run through the main-only CI lane, which checks the healthy primary and a
+minimum 512 MiB free-space floor between each input, with an 80-minute batch
+budget. The floor is a stop condition, not a guarantee of sufficient runway.
+Route preflight checks the actual current and immutable LKG manifests and their
+effective credential encryption keys against the API executor, including empty
+environment fallback; a safe HEAD template does not establish rollback safety.
 Physical retirement has an explicit two-phase maintenance path. The
 read-only `archive-retirement-plan` inventories every digest with rows in the
 legacy relation, checks ordinal coverage and orphan rows, fully reads and

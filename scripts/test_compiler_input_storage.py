@@ -14,6 +14,9 @@ class CompilerInputStorageTest(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 1, 'private body', 'postgres://private-secret\ncompiler input maintenance completion not confirmed; inspect state before retrying; category=23503\n')
         with self.assertRaisesRegex(ValueError, '^storage command failed stage=maintenance-executor category=23503$'):
             command(['kubectl', 'exec', 'pod', '--', '/usr/local/bin/fugue-input-storage'])
+        run.return_value.stderr = 'private diagnostic\ncompiler input maintenance completion not confirmed; inspect state before retrying; category=55P03\n'
+        with self.assertRaisesRegex(ValueError, '^storage command failed stage=maintenance-executor category=55P03$'):
+            command(['kubectl', 'exec', 'pod', '--', '/usr/local/bin/fugue-input-storage'])
         run.return_value.stderr = 'unrecognized sensitive failure'
         with self.assertRaisesRegex(ValueError, '^storage command failed stage=source-compatibility$'):
             command(['git', 'show', 'revision:path'])

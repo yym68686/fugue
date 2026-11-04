@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-route, archive-unroute, archive-write-fence, archive-retirement-plan, archive-retire, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-write-fence, archive-retirement-plan, archive-retire, observe")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
@@ -37,7 +37,7 @@ func main() {
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
 	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch") && !*apply
-	routeMode := *mode == "archive-route" || *mode == "archive-unroute"
+	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
 	if flag.NArg() != 0 || *apply && *rehearse || (*mode == "archive" || routeMode || writeFenceMode || retirementMode) && *rehearse || routeMode && !*apply || writeFenceMode && !*apply || retirementMode && !*apply || *disarm && !writeFenceMode || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
@@ -53,16 +53,22 @@ func main() {
 		}
 		return
 	}
-	if *mode == "archive-batch" {
+	if *mode == "archive-batch" || *mode == "archive-route-batch" {
 		dsn := os.Getenv("FUGUE_DATABASE_URL")
 		if dsn == "" || *rehearse {
 			fmt.Fprintln(os.Stderr, "archive batch requires a database and explicit copy intent")
 			os.Exit(2)
 		}
 		encoder := json.NewEncoder(os.Stdout)
-		err := store.RunCompilerInputArchiveBatch(ctx, dsn, *archiveLimit, *apply, func(report store.CompilerInputArchiveMigrationReport) error { return encoder.Encode(report) })
+		emit := func(report store.CompilerInputArchiveMigrationReport) error { return encoder.Encode(report) }
+		var err error
+		if *mode == "archive-route-batch" {
+			err = store.RunCompilerInputArchiveRouteBatch(ctx, dsn, *archiveLimit, emit)
+		} else {
+			err = store.RunCompilerInputArchiveBatch(ctx, dsn, *archiveLimit, *apply, emit)
+		}
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "compiler input archive batch not complete; verified receipts remain resumable")
+			reportMaintenanceError(err)
 			os.Exit(1)
 		}
 		return
@@ -75,7 +81,7 @@ func main() {
 		}
 		report, err := store.RunCompilerInputArchiveMigration(ctx, dsn, store.CompilerInputArchiveMigrationOptions{Digest: *digest, Apply: *apply, SegmentBytes: *archiveSegmentBytes})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "compiler input archive not confirmed; inspect archive ledger before retrying")
+			reportMaintenanceError(err)
 			os.Exit(1)
 		}
 		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
@@ -91,7 +97,7 @@ func main() {
 		}
 		report, err := store.RunCompilerInputArchiveRoute(ctx, dsn, store.CompilerInputArchiveRouteOptions{Digest: *digest, Apply: *apply, Unroute: *mode == "archive-unroute"})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "compiler input archive route not confirmed; inspect the archive ledger before retrying")
+			reportMaintenanceError(err)
 			os.Exit(1)
 		}
 		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
@@ -143,24 +149,44 @@ func main() {
 	}
 	report, err := store.RunCompilerInputMaintenance(ctx, dsn, store.CompilerInputMaintenanceOptions{Action: *mode, Digest: *digest, ExpectedFormat: *expected, MaxInputBytes: *maxBytes, Apply: *apply})
 	if err != nil {
-		code := "unclassified"
-		var pgError *pgconn.PgError
-		switch {
-		case errors.As(err, &pgError):
-			code = pgError.Code
-		case errors.Is(err, context.DeadlineExceeded):
-			code = "deadline"
-		case errors.Is(err, store.ErrConflict):
-			code = "conflict"
-		case errors.Is(err, store.ErrInvalidInput):
-			code = "invalid-input"
-		}
-		fmt.Fprintln(os.Stderr, "compiler input maintenance completion not confirmed; inspect state before retrying; category="+code)
+		reportMaintenanceError(err)
 		os.Exit(1)
 	}
 	if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
 		os.Exit(1)
 	}
+}
+
+func reportMaintenanceError(err error) {
+	fmt.Fprintln(os.Stderr, "compiler input maintenance completion not confirmed; inspect state before retrying; category="+maintenanceErrorCategory(err))
+}
+
+// Return only a bounded category, never driver messages, SQL, URLs or keys.
+func maintenanceErrorCategory(err error) string {
+	var pgError *pgconn.PgError
+	var networkError net.Error
+	switch {
+	case errors.As(err, &pgError):
+		if len(pgError.Code) == 5 {
+			for _, c := range pgError.Code {
+				if !(c >= '0' && c <= '9' || c >= 'A' && c <= 'Z') {
+					return "unclassified"
+				}
+			}
+			return pgError.Code
+		}
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, store.ErrConflict):
+		return "conflict"
+	case errors.Is(err, store.ErrInvalidInput):
+		return "invalid-input"
+	case errors.As(err, &networkError):
+		return "network"
+	}
+	return "unclassified"
 }
 
 func observeStorage(ctx context.Context) error {

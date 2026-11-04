@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
 """Reviewed main-only archive operations. Never prints credentials or bodies."""
 import argparse
+import base64
+import binascii
+import hashlib
 import json
 from pathlib import Path
 import re
 import time
 import subprocess
 
-from scripts.compiler_input_storage import command, readers, free_bytes
+from scripts.compiler_input_storage import command, readers, free_bytes, get, primary
 
 
 def validate_operation(value):
     required = {'version', 'mode', 'digest', 'limit', 'apply', 'expectedExecutorRevision', 'minimumFreeBytes'}
     if set(value) != required or value['version'] != 1 or type(value['version']) is not int:
         raise ValueError('invalid archive operation declaration')
-    if value['mode'] not in ('archive', 'archive-batch', 'archive-route', 'archive-unroute'):
+    if value['mode'] not in ('archive', 'archive-batch', 'archive-route', 'archive-route-batch', 'archive-unroute'):
         raise ValueError('unsupported archive operation')
     if type(value['apply']) is not bool or type(value['limit']) is not int or not 1 <= value['limit'] <= 1000:
         raise ValueError('invalid archive batch bound')
-    if value['mode'] != 'archive-batch' and (value['limit'] != 1 or not re.fullmatch(r'sha256:[0-9a-f]{64}', value['digest'])):
+    if value['mode'] not in ('archive-batch', 'archive-route-batch') and (value['limit'] != 1 or not re.fullmatch(r'sha256:[0-9a-f]{64}', value['digest'])):
         raise ValueError('archive requires exact input identity')
-    if value['mode'] == 'archive-batch' and value['digest'] != '':
+    if value['mode'] in ('archive-batch', 'archive-route-batch') and value['digest'] != '':
         raise ValueError('batch cannot accept a hidden identity selector')
-    if value['mode'] in ('archive-route', 'archive-unroute') and not value['apply']:
+    if value['mode'] in ('archive-route', 'archive-route-batch', 'archive-unroute') and not value['apply']:
         raise ValueError('route changes require explicit apply')
     if not re.fullmatch('[0-9a-f]{40}', value['expectedExecutorRevision']):
         raise ValueError('archive executor revision is not pinned')
@@ -36,26 +39,83 @@ def managed_reader(revision):
     config = command(['git', 'show', revision+':internal/store/platform_input_archive_config.go'])
     if 'resolveCompilerInputArchiveConfig(ctx, db, false)' not in body or 'configured || s.db != nil' not in body or 'decryptDataBackendSecret(sealed)' not in config:
         raise ValueError('reader lacks managed archive configuration or activation barrier')
-    for path in ('deploy/releases/api/deployment.json', 'deploy/releases/controller/resources.json', 'deploy/releases/ssh-control/resources.json'):
-        resources = json.loads(command(['git', 'show', 'HEAD:'+path]))
-        env = {item.get('name'): item.get('valueFrom', {}).get('secretKeyRef', {}) for item in _walk(resources)
-               if item.get('name') in ('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'FUGUE_BUNDLE_SIGNING_KEY')}
-        data_key = env.get('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', {})
-        bundle_key = env.get('FUGUE_BUNDLE_SIGNING_KEY', {})
-        archive_alias_is_shared = data_key.get('name') == 'fugue-fugue-config' and data_key.get('key') == 'FUGUE_BUNDLE_SIGNING_KEY' and not data_key.get('optional', False)
-        fallback_is_shared = bundle_key.get('name') == 'fugue-fugue-config' and bundle_key.get('key') == 'FUGUE_BUNDLE_SIGNING_KEY' and not bundle_key.get('optional', False)
-        if not (archive_alias_is_shared or fallback_is_shared):
-            raise ValueError('managed archive credential encryption key is not shared across readers')
 
 
-def _walk(value):
-    if isinstance(value, dict):
-        yield value
-        for child in value.values():
-            yield from _walk(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _walk(child)
+def credential_key(namespace, container, secrets):
+    """Match dataBackendSecretKey's precedence without printing key material.
+
+    Inspect the actual running/LKG manifest and existing Secret, rather than
+    assuming that a safe HEAD template proves an older rollback is safe.
+    """
+    names = ('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'FUGUE_BUNDLE_SIGNING_KEY', 'FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY')
+    if container.get('envFrom'):
+        raise ValueError('archive credential key has an unreviewed environment source')
+    env = {}
+    for item in container.get('env', []):
+        if item['name'] in names:
+            if item['name'] in env:
+                raise ValueError('archive credential key environment is ambiguous')
+            env[item['name']] = item
+    for name in names:
+        item = env.get(name, {})
+        value = item.get('value', '')
+        if 'valueFrom' in item:
+            ref = item['valueFrom'].get('secretKeyRef')
+            if not ref:
+                raise ValueError('archive credential key source is unsupported')
+            identity = namespace, ref['name']
+            if identity not in secrets:
+                secrets[identity] = get(namespace, 'secret', ref['name'])
+            encoded = secrets[identity].get('data', {}).get(ref['key'])
+            if encoded is None and not ref.get('optional', False):
+                raise ValueError('archive credential key Secret is incomplete')
+            try:
+                value = base64.b64decode(encoded or '', validate=True).decode()
+            except (binascii.Error, UnicodeError):
+                raise ValueError('archive credential key Secret encoding is invalid') from None
+        value = value.strip()
+        if not value:
+            continue
+        raw = value.encode()
+        try:
+            # Go's StdEncoding accepts CR/LF within a base64 string.
+            decoded = base64.b64decode(value.replace('\r', '').replace('\n', ''), validate=True)
+            if len(decoded) >= 32:
+                raw = decoded
+        except binascii.Error:
+            pass
+        return hashlib.sha256(raw).digest()
+    raise ValueError('archive reader lacks a configured credential encryption key')
+
+
+def shared_reader_keys(registry, current):
+    workloads = []
+    for item in current:
+        component = next(x for x in registry['components'] if x['id'] == item['component'])
+        if 'internal/store' not in component.get('sourceRoots', []):
+            continue  # schema-only jobs do not open archived compiler inputs
+        w = component['workload']
+        live = get(w['namespace'], 'deployment', w['name'])
+        pointer = get(w['namespace'], 'configmap', 'fugue-release-monitor-'+component['id'])
+        record = get(w['namespace'], 'configmap', pointer['data']['recordName'])
+        envelope = json.loads(record['data']['record.json'])
+        body = record['data']['lkg.json'].strip()
+        if record.get('immutable') is not True or envelope['component'] != component['id'] or envelope['configSha'] != item['revision'] or 'sha256:'+hashlib.sha256(body.encode()).hexdigest() != envelope['lkgManifestDigest']:
+            raise ValueError('archive reader release record changed during credential validation')
+        lkg = primary(json.loads(body), w)
+        for label, workload, revision in [('current', live, item['revision']), ('rollback', lkg, item['rollback_revision'])]:
+            if workload['spec']['template']['metadata']['annotations']['fugue.pro/source-commit'] != revision:
+                raise ValueError('archive reader changed during credential validation')
+            containers = [x for x in workload['spec']['template']['spec']['containers'] if x['name'] == w['container']]
+            if len(containers) != 1:
+                raise ValueError('archive reader container is ambiguous')
+            workloads.append((component['id'], label, w['namespace'], containers[0]))
+    secrets = {}
+    executor = next(x for x in workloads if x[0] == 'api' and x[1] == 'current')
+    expected = credential_key(executor[2], executor[3], secrets)
+    for component, label, namespace, container in workloads:
+        if credential_key(namespace, container, secrets) != expected:
+            raise ValueError('archive credential encryption key differs for '+component+' '+label)
 
 
 def main():
@@ -64,22 +124,24 @@ def main():
     args = parser.parse_args()
     value = validate_operation(json.loads(Path(args.operation).read_text()))
     registry = json.loads(Path('deploy/releases/components.json').read_text())
-    current = readers(registry, archive_required=value['mode'] in ('archive-route', 'archive-unroute'))
+    route_mode = value['mode'] in ('archive-route', 'archive-route-batch', 'archive-unroute')
+    current = readers(registry, archive_required=route_mode)
     executor = next(x for x in current if x['component'] == 'api')
     if executor['revision'] != value['expectedExecutorRevision']:
         raise ValueError('archive executor differs from reviewed revision')
     managed_reader(executor['revision'])
-    if value['mode'] in ('archive-route', 'archive-unroute'):
+    if route_mode:
         for item in current:
             managed_reader(item['revision'])
             managed_reader(item['rollback_revision'])
+        shared_reader_keys(registry, current)
     database = json.loads(Path('deploy/environments/production/storage-policy/maintenance.json').read_text())['database']
     before = free_bytes(database)
     if before < value['minimumFreeBytes']:
         raise ValueError('archive free-space reserve is insufficient')
     # Small segments and receipts replace re-encoding: old whole-input WAL
     # budgets do not apply. The reserve is checked before every copy below.
-    count = value['limit'] if value['mode'] == 'archive-batch' else 1
+    count = value['limit'] if value['mode'] in ('archive-batch', 'archive-route-batch') else 1
     deadline = time.monotonic()+80*60
     for _ in range(count):
         if time.monotonic() >= deadline:
@@ -91,7 +153,7 @@ def main():
         argv = ['kubectl', '-n', executor['namespace'], 'exec', executor['pod'], '-c', executor['container'], '--', 'env',
                 'FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED=true', 'FUGUE_COMPILER_INPUT_ARCHIVE_ROUTING_ENABLED=true',
                 '/usr/local/bin/fugue-input-storage', '--mode', value['mode']]
-        if value['mode'] == 'archive-batch':
+        if value['mode'] in ('archive-batch', 'archive-route-batch'):
             argv += ['--archive-limit', '1']
         else:
             argv += ['--digest', value['digest']]

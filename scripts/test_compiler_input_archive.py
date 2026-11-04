@@ -1,9 +1,11 @@
+import base64
 import copy
+import hashlib
 import json
 import unittest
 from unittest.mock import patch
 
-from scripts.compiler_input_archive import validate_operation, managed_reader
+from scripts.compiler_input_archive import validate_operation, managed_reader, credential_key, shared_reader_keys
 
 
 class ArchiveOperationTest(unittest.TestCase):
@@ -27,25 +29,67 @@ class ArchiveOperationTest(unittest.TestCase):
         validate_operation(batch)
         batch['digest'] = self.fixture()['digest']
         with self.assertRaises(ValueError): validate_operation(batch)
+        batch.update(mode='archive-route-batch', digest='', apply=False)
+        with self.assertRaises(ValueError): validate_operation(batch)
+        batch['apply'] = True
+        validate_operation(batch)
 
     @patch('scripts.compiler_input_archive.command')
     def test_managed_reader_requires_shared_configuration_and_activation_barrier(self, command):
-        def source(data_key='FUGUE_BUNDLE_SIGNING_KEY', data_optional=False, bundle=True):
-            env = [{'name': 'FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'valueFrom': {'secretKeyRef': {
-                'name': 'fugue-fugue-config', 'key': data_key, 'optional': data_optional}}}]
-            if bundle:
-                env.append({'name': 'FUGUE_BUNDLE_SIGNING_KEY', 'valueFrom': {'secretKeyRef': {
-                    'name': 'fugue-fugue-config', 'key': 'FUGUE_BUNDLE_SIGNING_KEY'}}})
-            return json.dumps({'items': [{'kind': 'Deployment', 'spec': {'template': {'spec': {'containers': [
-                {'env': env}
-            ]}}}}]})
-        good = source()
-        command.side_effect = ['resolveCompilerInputArchiveConfig(ctx, db, false)\nconfigured || s.db != nil', 'decryptDataBackendSecret(sealed)', good, good, good]
+        command.side_effect = ['resolveCompilerInputArchiveConfig(ctx, db, false)\nconfigured || s.db != nil', 'decryptDataBackendSecret(sealed)']
         managed_reader('a'*40)
-        for reader, config, refs in [('environment-only-reader', 'decryptDataBackendSecret(sealed)', [good, good, good]),
-                                     ('resolveCompilerInputArchiveConfig(ctx, db, false)', 'decryptDataBackendSecret(sealed)', [good, source('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', True, False), good])]:
-            command.side_effect = [reader, config, *refs]
+        for reader, config in [('environment-only-reader', 'decryptDataBackendSecret(sealed)'),
+                               ('resolveCompilerInputArchiveConfig(ctx, db, false)', 'decryptDataBackendSecret(sealed)')]:
+            command.side_effect = [reader, config]
             with self.assertRaises(ValueError): managed_reader('a'*40)
+
+    @patch('scripts.compiler_input_archive.get')
+    def test_actual_secret_precedence_empty_fallback_and_alias(self, get):
+        get.return_value = {'data': {'empty': '', 'bundle': base64.b64encode(b'synthetic-shared-value').decode()}}
+        def ref(name, key):
+            return {'name': name, 'valueFrom': {'secretKeyRef': {'name': 'synthetic-secret', 'key': key}}}
+        api = {'env': [ref('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'empty'), ref('FUGUE_BUNDLE_SIGNING_KEY', 'bundle')]}
+        ssh = {'env': [ref('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'bundle')]}
+        cache = {}
+        self.assertEqual(credential_key('synthetic', api, cache), credential_key('synthetic', ssh, cache))
+        get.assert_called_once()
+        ssh['env'][0] = ref('FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'empty')
+        with self.assertRaises(ValueError): credential_key('synthetic', ssh, cache)
+        key = b'k'*32
+        encoded = {'env': [{'name': 'FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'value': base64.b64encode(key).decode()}]}
+        literal = {'env': [{'name': 'FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'value': key.decode()}]}
+        self.assertEqual(credential_key('synthetic', encoded, {}), credential_key('synthetic', literal, {}))
+        encoded['env'][0]['value'] = encoded['env'][0]['value'][:12]+'\r\n'+encoded['env'][0]['value'][12:]
+        self.assertEqual(credential_key('synthetic', encoded, {}), credential_key('synthetic', literal, {}))
+        with self.assertRaises(ValueError): credential_key('synthetic', {'envFrom': [{}]}, {})
+
+    @patch('scripts.compiler_input_archive.get')
+    def test_actual_rollback_key_must_match_even_when_current_manifest_is_safe(self, get):
+        registry = {'components': [{'id': 'api', 'sourceRoots': ['internal/store'], 'workload': {
+            'kind': 'Deployment', 'name': 'synthetic-api', 'namespace': 'synthetic', 'container': 'api'}}]}
+        def workload(key, revision):
+            return {'kind': 'Deployment', 'metadata': {'name': 'synthetic-api', 'namespace': 'synthetic'},
+                    'spec': {'template': {'metadata': {'annotations': {'fugue.pro/source-commit': revision}},
+                                         'spec': {'containers': [{'name': 'api', 'env': [
+                                             {'name': 'FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY', 'value': key}]}]}}}}
+        current = [{'component': 'api', 'revision': 'a'*40, 'rollback_revision': 'b'*40}]
+        live = workload('synthetic-current-key', 'a'*40)
+        pointer = {'data': {'recordName': 'synthetic-record'}}
+        def record_for(key):
+            body = json.dumps({'items': [workload(key, 'b'*40)]})
+            return {'immutable': True, 'data': {'lkg.json': body, 'record.json': json.dumps({
+                'component': 'api', 'configSha': 'a'*40, 'lkgManifestDigest': 'sha256:'+hashlib.sha256(body.encode()).hexdigest()})}}
+        record = record_for('synthetic-other-key')
+        get.side_effect = [live, pointer, record]
+        with self.assertRaisesRegex(ValueError, 'differs for api rollback'):
+            shared_reader_keys(registry, current)
+        record = record_for('synthetic-current-key')
+        get.side_effect = [live, pointer, record]
+        shared_reader_keys(registry, current)
+        record['immutable'] = False
+        get.side_effect = [live, pointer, record]
+        with self.assertRaisesRegex(ValueError, 'release record changed'):
+            shared_reader_keys(registry, current)
 
 
 if __name__ == '__main__': unittest.main()
