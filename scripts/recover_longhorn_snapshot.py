@@ -55,7 +55,7 @@ class Cluster(ReadOnlyCluster):
                                preconditions={k: obj['metadata'][k] for k in ('uid', 'resourceVersion')}))
 
 
-def barrier_objects(config, review, operation, *, legacy_snapshot_spec=False, map_snapshot_spec=False):
+def barrier_objects(config, review, operation, *, legacy_snapshot_spec=False, map_snapshot_spec=False, typed_presence_snapshot_spec=False):
     """Deny NEW reference writers; native finalizers/status remain operational.
 
     The shared Lease covers Fugue backups/releases, not CSI or Longhorn native
@@ -84,7 +84,16 @@ def barrier_objects(config, review, operation, *, legacy_snapshot_spec=False, ma
         "(has(oldObject.spec.createSnapshot) ? oldObject.spec.createSnapshot : false) && "
         "((!has(object.spec.labels) && !has(oldObject.spec.labels)) || "
         "(has(object.spec.labels) && has(oldObject.spec.labels) && object.spec.labels == oldObject.spec.labels))")
-    snapshot_same_spec = same_spec if legacy_snapshot_spec else map_same_spec if map_snapshot_spec else typed_same_spec
+    # VAP evaluation uses dynamic objects: has(labels) is true for explicit
+    # null. Only this nullable field needs dyn to type-check map/null equality.
+    nullable_same_spec = (
+        "request.operation == 'UPDATE' && object.spec.volume == oldObject.spec.volume && "
+        "(has(object.spec.createSnapshot) ? object.spec.createSnapshot : false) == "
+        "(has(oldObject.spec.createSnapshot) ? oldObject.spec.createSnapshot : false) && "
+        "(has(object.spec.labels) ? dyn(object.spec.labels) : null) == "
+        "(has(oldObject.spec.labels) ? dyn(oldObject.spec.labels) : null)")
+    snapshot_same_spec = (same_spec if legacy_snapshot_spec else map_same_spec if map_snapshot_spec else
+                          typed_same_spec if typed_presence_snapshot_spec else nullable_same_spec)
     rules = [
         ('snapshots', 'longhorn.io', 'v1beta2', ['snapshots'],
          f'o.spec.volume == {volume}',
@@ -232,9 +241,22 @@ class Recovery:
         for obj in json.loads(self.record['data']['barriers']):
             if obj['kind'] != 'ValidatingAdmissionPolicy':
                 continue
-            live = self.kube.get('validatingadmissionpolicies', obj['name'])
-            require(live.get('status', {}).get('observedGeneration') == live['metadata']['generation'] and
-                    'typeChecking' in live['status'] and not live['status']['typeChecking'].get('expressionWarnings'), 'admission policy type check incomplete')
+            deadline = time.monotonic() + 60
+            while True:
+                self.own_lease()
+                live = self.kube.get('validatingadmissionpolicies', obj['name'])
+                require(live['metadata']['uid'] == obj['uid'] and not live['metadata'].get('deletionTimestamp'),
+                        'admission policy identity changed')
+                status = live.get('status', {})
+                if status.get('observedGeneration') == live['metadata']['generation']:
+                    # The status controller acknowledges the checked generation.
+                    # After clearing old warnings SSA can omit typeChecking;
+                    # requiring that optional empty object rejects a valid rule.
+                    require(not (status.get('typeChecking') or {}).get('expressionWarnings'),
+                            'admission policy has expression type warnings')
+                    break
+                require(time.monotonic() < deadline, 'admission policy type check incomplete')
+                time.sleep(1)
 
     def check_snapshot_schema(self):
         crd = self.kube.get('customresourcedefinitions', 'snapshots.longhorn.io')
@@ -266,12 +288,13 @@ class Recovery:
         expected = barrier_objects(self.config, review, self.operation)
         legacy = barrier_objects(self.config, review, self.operation, legacy_snapshot_spec=True)
         map_legacy = barrier_objects(self.config, review, self.operation, map_snapshot_spec=True)
+        presence_legacy = barrier_objects(self.config, review, self.operation, typed_presence_snapshot_spec=True)
         identities = json.loads(self.record['data']['barriers'])
         require(len(identities) == len(expected) and
                 {(x['kind'], x['name']) for x in identities} == {(x['kind'], x['metadata']['name']) for x in expected},
                 'durable admission barrier set changed')
         repair = None
-        for wanted, old, previous in zip(expected, legacy, map_legacy):
+        for wanted, old, previous, presence in zip(expected, legacy, map_legacy, presence_legacy):
             self.own_lease()
             kind, name = wanted['kind'], wanted['metadata']['name']
             resource = 'validatingadmissionpolicies' if kind == 'ValidatingAdmissionPolicy' else 'validatingadmissionpolicybindings'
@@ -279,11 +302,11 @@ class Recovery:
             identity = next(x for x in identities if x['kind'] == kind and x['name'] == name)
             require(live['metadata']['uid'] == identity['uid'] and
                     live['metadata'].get('labels', {}).get(OPERATION) == self.operation and
-                    live['spec'] in (wanted['spec'], old['spec'], previous['spec']), 'admission barrier identity or spec changed')
+                    live['spec'] in (wanted['spec'], old['spec'], previous['spec'], presence['spec']), 'admission barrier identity or spec changed')
             if live['spec'] != wanted['spec']:
                 require(kind == 'ValidatingAdmissionPolicy' and name.endswith('-snapshots'), 'unexpected barrier repair')
                 repair = (live, wanted['spec'])
-        self.save('repairing-native-finalizer-compatibility', barrier_revision='snapshot-typed-null-labels-v2')
+        self.save('repairing-native-finalizer-compatibility', barrier_revision='snapshot-null-dynamic-labels-v3')
         if repair:
             live, spec = repair
             self.own_lease()

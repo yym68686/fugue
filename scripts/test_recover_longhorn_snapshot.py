@@ -350,6 +350,51 @@ class NativeFinalizerRecoveryTests(unittest.TestCase):
         self.assertEqual(self.kube.deletes, 1)
         self.assertEqual(self.r.state['phase'], 'completed')
 
+    def test_known_typed_presence_rule_can_be_replaced_without_unlock_or_redelete(self):
+        self.pending()
+        name = self.r.operation + '-snapshotsValidatingAdmissionPolicy'
+        self.kube.objects[name]['spec'] = barrier_objects(self.c, review(), self.r.operation, typed_presence_snapshot_spec=True)[0]['spec']
+        self.r.run()
+        self.assertEqual(self.kube.deletes, 1)
+        self.assertEqual(self.r.state['phase'], 'completed')
+
+
+class AdmissionCheckTests(unittest.TestCase):
+    setUp = RecoveryTests.setUp
+
+    def check(self, statuses, uid='policy-uid'):
+        self.r.record = dict(data=dict(barriers=canonical([
+            dict(kind='ValidatingAdmissionPolicy', name='guard', uid='policy-uid')])))
+        self.r.own_lease = lambda: None
+        self.probes = []
+        self.r.denied_probe = lambda args, body: self.probes.append(body)
+        observations = iter(statuses)
+        self.kube.get = lambda *args: dict(metadata=dict(uid=uid, generation=3), status=next(observations))
+        self.r.check_barriers()
+
+    def test_acknowledged_generation_with_omitted_empty_typechecking_is_valid(self):
+        self.check([dict(observedGeneration=3)])
+        self.assertEqual(len(self.probes), 6)
+
+    def test_acknowledged_generation_with_warning_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'expression type warnings'):
+            self.check([dict(observedGeneration=3, typeChecking=dict(expressionWarnings=[dict(warning='invalid')]))])
+
+    def test_stale_warning_must_wait_for_current_generation(self):
+        with patch('scripts.recover_longhorn_snapshot.time.sleep') as sleep:
+            self.check([dict(observedGeneration=2, typeChecking=dict(expressionWarnings=[dict(warning='old')])),
+                        dict(observedGeneration=3)])
+        sleep.assert_called_once_with(1)
+
+    def test_missing_acknowledgement_times_out_without_accepting_no_warnings(self):
+        with patch('scripts.recover_longhorn_snapshot.time.monotonic', side_effect=[0, 61]):
+            with self.assertRaisesRegex(ValueError, 'type check incomplete'):
+                self.check([{}])
+
+    def test_replaced_policy_identity_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            self.check([dict(observedGeneration=3)], uid='other-policy')
+
 
 class SnapshotSchemaTests(unittest.TestCase):
     def test_typed_comparison_requires_the_complete_exact_schema(self):

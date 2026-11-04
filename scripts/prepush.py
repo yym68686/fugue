@@ -474,8 +474,9 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
-    if any(name in {"scripts/longhorn_snapshot_map.py", "scripts/plan_longhorn_snapshot_recovery.py", "scripts/recover_longhorn_snapshot.py", "scripts/test_longhorn_snapshot_map.py", "scripts/test_plan_longhorn_snapshot_recovery.py", "scripts/test_recover_longhorn_snapshot.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/local-snapshot-review/") for name in paths):
+    if any(name in {"scripts/longhorn_snapshot_map.py", "scripts/plan_longhorn_snapshot_recovery.py", "scripts/recover_longhorn_snapshot.py", "scripts/test_longhorn_snapshot_map.py", "scripts/test_plan_longhorn_snapshot_recovery.py", "scripts/test_recover_longhorn_snapshot.py", ".github/workflows/ci.yml"} or name.startswith(("deploy/environments/production/local-snapshot-review/", "tests/snapshot-admission-cel/")) for name in paths):
         non_go_tasks["local-snapshot-review-tests"] = ["python3", "-m", "unittest", "scripts.test_longhorn_snapshot_map", "scripts.test_plan_longhorn_snapshot_recovery", "scripts.test_recover_longhorn_snapshot"]
+        go_dependent_tasks["snapshot-admission-cel-tests"] = ["go", "-C", "tests/snapshot-admission-cel", "test", "-count=1", "./..."]
     if any(name in {"scripts/cnpg_backup_retention.py", "scripts/test_cnpg_backup_retention.py", "scripts/cnpg_backup_history.py", "scripts/test_cnpg_backup_history.py", "scripts/reconcile_postgres_protection.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/control-plane-backup-retention/") for name in paths):
         non_go_tasks["cnpg-count-retention-tests"] = ["python3", "-m", "unittest", "scripts.test_cnpg_backup_retention", "scripts.test_cnpg_backup_history"]
         non_go_tasks["postgres-protection-writer-tests"] = ["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_reconcile_postgres_protection.py"]

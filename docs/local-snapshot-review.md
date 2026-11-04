@@ -69,7 +69,14 @@ stop recovery. The complete structural SnapshotSpec schema is pinned before
 explicit typed field comparisons; new fields or unknown-field preservation stop
 execution. Absent and null `labels` are equivalent, and an absent boolean uses
 the native false default; actual field values and non-null labels remain
-immutable. A retained-child server dry-run must
+immutable. Type checking must acknowledge the current policy generation with no
+warnings (an omitted optional empty `typeChecking` object is valid); a bounded
+wait renews the Lease while the status controller catches up. The nullable labels
+value alone uses CEL `dyn` so missing and explicit null normalize under both
+structural type checking and dynamic admission evaluation. An isolated CEL test
+module exercises the generated rule with Kubernetes v1.35.4's libraries and
+reproduces the old presence bug; prepush always reruns it for these changes.
+A retained-child server dry-run must
 accept typed normalization and deny real spec changes. A metadata annotation
 can requeue Longhorn's native finalizer reconciliation; the executor never
 changes a finalizer or sends another delete/engine operation. A known
