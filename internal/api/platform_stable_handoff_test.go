@@ -112,7 +112,8 @@ func TestInPlaceDeployPreservesPositiveArtifactBeforeStableSync(t *testing.T) {
 	request.RuntimeSnapshot.Releases[0].StatusReason = inPlaceDeployReadinessReason
 	projection := platformIntentProjectionResponse{Intent: request.Intent, Policy: request.Policy, RuntimeSnapshot: request.RuntimeSnapshot, CapturedAt: now}
 	business := store.RouteBusinessSnapshot{
-		Apps:            []model.App{{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID}, Status: model.AppStatus{Phase: "deploying", LastOperationID: "deploy-next"}}},
+		Apps:            []model.App{{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID}, Status: model.AppStatus{Phase: "deployed", LastOperationID: "deploy-next"}}},
+		Operations:      []store.RouteBusinessOperation{{ID: "deploy-next", TenantID: "tenant-a", AppID: "app-a", Type: model.OperationTypeDeploy, Status: model.OperationStatusRunning}},
 		TrafficPolicies: []model.AppTrafficPolicy{{ID: "traffic-a", AppID: "app-a", TenantID: "tenant-a", Mode: "single", StableReleaseID: "release-a", StableWeight: 100, UpdatedByType: "user"}},
 	}
 	before, _ := json.Marshal(projection)
@@ -134,15 +135,20 @@ func TestInPlaceDeployPreservesPositiveArtifactBeforeStableSync(t *testing.T) {
 			b := business
 			b.Apps = append([]model.App(nil), business.Apps...)
 			b.TrafficPolicies = append([]model.AppTrafficPolicy(nil), business.TrafficPolicies...)
+			b.Operations = append([]store.RouteBusinessOperation(nil), business.Operations...)
 			switch scenario {
 			case "no operation":
 				b.Apps[0].Status.LastOperationID = ""
 			case "completed":
-				b.Apps[0].Status.Phase = "deployed"
+				b.Operations[0].Status = model.OperationStatusCompleted
 			case "failed":
 				b.Apps[0].Status.LastFailedOperation = &model.AppOperationFailure{ID: "deploy-next"}
 			case "scaling", "importing":
 				b.Apps[0].Status.Phase = scenario
+				b.Operations[0].Type = model.OperationTypeScale
+				if scenario == "importing" {
+					b.Operations[0].Type = model.OperationTypeImport
+				}
 			case "unmanaged":
 				b.Apps[0].Spec.RuntimeID = "external-runtime"
 			case "wrong tenant":

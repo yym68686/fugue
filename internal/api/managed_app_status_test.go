@@ -762,6 +762,7 @@ func TestManagedAppEvidenceChecksImageOnlyForCompleteCurrentCohort(t *testing.T)
 
 	t.Run("complete wrong cohort reports mismatch without image missing", func(t *testing.T) {
 		app, managed, evidence := buildEvidence(t, runtime.ManagedAppPhaseReady, oldImage, 3, 3, 3)
+		managed.Status.Message = "deployment ready (1/1 replicas)"
 		if !slices.Contains(evidence.invariantViolations, "current_image_mismatch") {
 			t.Fatalf("stable wrong cohort must fail closed: %+v", evidence)
 		}
@@ -776,6 +777,9 @@ func TestManagedAppEvidenceChecksImageOnlyForCompleteCurrentCohort(t *testing.T)
 		})
 		if !slices.Equal(status.InvariantViolations, []string{"current_image_mismatch"}) {
 			t.Fatalf("stable mismatch must not derive image_missing: %+v", status.InvariantViolations)
+		}
+		if !strings.Contains(status.Message, "current_image_mismatch") || strings.Contains(status.Message, "deployment ready") {
+			t.Fatalf("independent image invariant was hidden by the controller message: %q", status.Message)
 		}
 		app = runtime.ApplyAppObservedStatus(app, status)
 		if routeStatus, reason := edgeRouteStatus(app, model.DefaultManagedRuntimeID, true); routeStatus != model.EdgeRouteStatusUnavailable || !strings.Contains(reason, "current_image_mismatch") || strings.Contains(reason, "image_missing") {

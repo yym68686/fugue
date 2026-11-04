@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -12,7 +11,7 @@ import (
 	"fugue/internal/store"
 )
 
-// Only a durable, nonfailed managed deploying operation can explain the exact
+// Only a durable, nonfailed managed deployment operation can explain the exact
 // old-stable/current-image transition. Neither an arbitrary runtime failure nor
 // the presence of a caller-provided fact is permission to preserve a route.
 func managedHandoffOperation(b store.RouteBusinessSnapshot, h platformconfig.ManagedServingHandoff) (model.App, bool) {
@@ -29,7 +28,7 @@ func managedHandoffOperation(b store.RouteBusinessSnapshot, h platformconfig.Man
 			break
 		}
 	}
-	if !managed[app.Spec.RuntimeID] || !strings.EqualFold(strings.TrimSpace(app.Status.Phase), "deploying") || app.Status.LastOperationID != h.OperationID || h.OperationID == "" || model.AppHasCurrentFailedOperation(app.Status) {
+	if !managed[app.Spec.RuntimeID] || app.Status.LastOperationID != h.OperationID || !activeRouteDeployOperation(b, app) {
 		return app, false
 	}
 	for _, p := range b.TrafficPolicies {
@@ -38,6 +37,21 @@ func managedHandoffOperation(b store.RouteBusinessSnapshot, h platformconfig.Man
 		}
 	}
 	return app, false
+}
+
+// The observer may report deployed before the operation commits its new image
+// and stable release. Require the exact current operation's nonterminal state,
+// not the app's presentation phase, both at capture and publication admission.
+func activeRouteDeployOperation(b store.RouteBusinessSnapshot, app model.App) bool {
+	if app.Status.LastOperationID == "" || model.AppHasCurrentFailedOperation(app.Status) {
+		return false
+	}
+	for _, op := range b.Operations {
+		if op.ID == app.Status.LastOperationID && op.AppID == app.ID && op.TenantID == app.TenantID && op.ActiveDeploy() {
+			return true
+		}
+	}
+	return false
 }
 
 func handoffRouteKey(r platformconfig.RouteIntent) string {

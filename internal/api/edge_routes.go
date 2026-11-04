@@ -214,6 +214,12 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 	// over a desired replica count of zero. Otherwise Edge would relabel the
 	// shared calculator's unavailable result as merely disabled.
 	if observed := app.ObservedStatus; observed != nil && observed.Phase == "unavailable" {
+		// Independent failed invariants must not be hidden by a controller's
+		// Ready message. Exact handoff classification consumes this reason while
+		// the origin itself remains unavailable.
+		if len(observed.InvariantViolations) > 0 {
+			return model.EdgeRouteStatusUnavailable, "runtime invariant violation: " + strings.Join(observed.InvariantViolations, ", ")
+		}
 		return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, appRouteUnavailableMessage(app))
 	}
 	switch {

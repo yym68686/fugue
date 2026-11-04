@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,43 @@ import (
 	"fugue/internal/model"
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestRouteBusinessSnapshotCapturesCurrentDeployLifecycleOnly(t *testing.T) {
+	s := New(filepath.Join(t.TempDir(), "state.json"))
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent, model.OperationStatusCompleted, model.OperationStatusFailed, model.OperationStatusCanceled} {
+		t.Run(status, func(t *testing.T) {
+			if err := s.withLockedState(true, func(state *model.State) error {
+				state.Apps = []model.App{{ID: "app-a", TenantID: "tenant-a", Status: model.AppStatus{Phase: "deployed", LastOperationID: "current"}}, {ID: "deleted", TenantID: "tenant-a", Status: model.AppStatus{Phase: "deleted", LastOperationID: "deleted-op"}}}
+				state.Operations = []model.Operation{
+					{ID: "current", TenantID: "tenant-a", AppID: "app-a", Type: model.OperationTypeDeploy, Status: status, DesiredSpec: &model.AppSpec{Env: map[string]string{"PRIVATE": "executable-payload"}}},
+					{ID: "previous", TenantID: "tenant-a", AppID: "app-a", Type: model.OperationTypeDeploy, Status: model.OperationStatusRunning},
+					{ID: "current", TenantID: "other-tenant", AppID: "app-a", Type: model.OperationTypeDeploy, Status: model.OperationStatusRunning},
+					{ID: "current", TenantID: "tenant-a", AppID: "other-app", Type: model.OperationTypeDeploy, Status: model.OperationStatusRunning},
+					{ID: "current", TenantID: "tenant-a", AppID: "app-a", Type: model.OperationTypeScale, Status: model.OperationStatusRunning},
+					{ID: "deleted-op", TenantID: "tenant-a", AppID: "deleted", Type: model.OperationTypeDeploy, Status: model.OperationStatusRunning},
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := s.CaptureRouteBusinessSnapshot(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			active := status == model.OperationStatusPending || status == model.OperationStatusRunning || status == model.OperationStatusWaitingAgent
+			if active && (len(snapshot.Operations) != 1 || snapshot.Operations[0].ID != "current" || snapshot.Operations[0].Status != status) || !active && len(snapshot.Operations) != 0 {
+				t.Fatalf("snapshot lost lifecycle boundary: %+v", snapshot.Operations)
+			}
+			raw, _ := json.Marshal(snapshot)
+			if strings.Contains(string(raw), "executable-payload") || strings.Contains(string(raw), "desired_spec") {
+				t.Fatal("operation payload leaked into route input")
+			}
+		})
+	}
+}
 
 func TestRouteBusinessSnapshotFileIsDetachedAndConsistent(t *testing.T) {
 	s := New(filepath.Join(t.TempDir(), "state.json"))

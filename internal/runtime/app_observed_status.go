@@ -213,7 +213,7 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 	if len(status.InvariantViolations) > 0 && (status.Phase == "deployed" || (status.Phase == "disabled" && app.Spec.Replicas > 0)) {
 		status.Phase = "unavailable"
 		status.Reason = AppObservationReasonRuntimeObservationNotReady
-		status.Message = firstObservedStatusMessage(status.Message, strings.Join(status.InvariantViolations, "; "))
+		status.Message = "runtime invariant violation: " + strings.Join(status.InvariantViolations, ", ")
 	}
 	// A traffic-policy reference is not a serving claim until the same fresh
 	// observation proves the current cohort. Early returns deliberately omit it.

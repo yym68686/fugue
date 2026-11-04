@@ -29,12 +29,18 @@ func handoffPartitionFixture(t *testing.T) (*Server, platformIntentProjectionRes
 	r.Intent.Generation, r.Policy.Generation = "intent-new", "policy-new"
 	r.Intent.Routes[0].DeploymentGeneration, r.Intent.Routes[0].CacheNamespace = "deploy-next", "app-a_deploy-next"
 	r.RuntimeSnapshot.Releases[0].Status, r.RuntimeSnapshot.Releases[0].StatusReason = model.EdgeRouteStatusUnavailable, inPlaceDeployReadinessReason
-	r.RuntimeSnapshot.Origins[0].Status, r.RuntimeSnapshot.Origins[0].StatusReason = model.EdgeRouteStatusUnavailable, "runtime invariant violation: current_image_mismatch"
+	// The runtime observer can publish deployed/Ready presentation state before
+	// the operation commits its image/stable release. Route projection must keep
+	// the independent invariant instead of that reassuring controller message.
+	app := model.App{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID}, Status: model.AppStatus{Phase: "deployed", LastOperationID: "deploy-next"},
+		ObservedStatus: &model.AppObservedStatus{Phase: "unavailable", Message: "deployment ready (1/1 replicas)", InvariantViolations: []string{"current_image_mismatch"}}}
+	r.RuntimeSnapshot.Origins[0].Status, r.RuntimeSnapshot.Origins[0].StatusReason = edgeRouteStatus(app, model.DefaultManagedRuntimeID, true)
 	// A code handoff must not block independently authorized peer/DNS recovery.
 	r.Intent.Routes[1].Enabled = false
 	r.Intent.DNS = []platformconfig.DNSIntent{{Hostname: "recovery.example.test", Type: "A", Values: []string{"192.0.2.30"}, TTL: 60}}
 	b := store.RouteBusinessSnapshot{
-		Apps:            []model.App{{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID}, Status: model.AppStatus{Phase: "deploying", LastOperationID: "deploy-next"}}},
+		Apps:            []model.App{app},
+		Operations:      []store.RouteBusinessOperation{{ID: "deploy-next", TenantID: "tenant-a", AppID: "app-a", Type: model.OperationTypeDeploy, Status: model.OperationStatusRunning}},
 		TrafficPolicies: []model.AppTrafficPolicy{{ID: "traffic-a", AppID: "app-a", TenantID: "tenant-a", Mode: "single", StableReleaseID: "release-a", StableWeight: 100}},
 	}
 	persistHandoffBusiness(t, path, b)
@@ -53,6 +59,10 @@ func persistHandoffBusiness(t *testing.T, path string, b store.RouteBusinessSnap
 	}
 	state.Apps = b.Apps
 	state.AppTrafficPolicies = b.TrafficPolicies
+	state.Operations = nil
+	for _, op := range b.Operations {
+		state.Operations = append(state.Operations, model.Operation{ID: op.ID, TenantID: op.TenantID, AppID: op.AppID, Type: op.Type, Status: op.Status})
+	}
 	raw, err = json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
@@ -177,13 +187,14 @@ func TestManagedHandoffPartitionPreservesPathAcrossOperationCacheAndDNSChurn(t *
 func TestManagedHandoffPartitionAuthorityAndOriginBoundaries(t *testing.T) {
 	s, base, b, _ := handoffPartitionFixture(t)
 	raw, _ := json.Marshal(base)
-	for _, scenario := range []string{"disabled", "maintenance", "upstream", "cache policy", "custom cache namespace", "wrong operation epoch", "runtime", "tenant", "tls", "weights", "stable selection", "no operation", "finished", "failed", "unmanaged", "expired", "insufficient budget", "other origin failure", "other release failure", "ready"} {
+	for _, scenario := range []string{"disabled", "maintenance", "upstream", "cache policy", "custom cache namespace", "wrong operation epoch", "runtime", "tenant", "tls", "weights", "stable selection", "no operation", "missing lifecycle", "wrong operation app", "wrong operation tenant", "not deployment", "finished", "canceled", "operation failed", "failed", "unmanaged", "expired", "insufficient budget", "other origin failure", "other release failure", "ready"} {
 		t.Run(scenario, func(t *testing.T) {
 			var p platformIntentProjectionResponse
 			_ = json.Unmarshal(raw, &p)
 			business := b
 			business.Apps = append([]model.App(nil), b.Apps...)
 			business.TrafficPolicies = append([]model.AppTrafficPolicy(nil), b.TrafficPolicies...)
+			business.Operations = append([]store.RouteBusinessOperation(nil), b.Operations...)
 			budget := time.Duration(0)
 			switch scenario {
 			case "disabled":
@@ -211,7 +222,19 @@ func TestManagedHandoffPartitionAuthorityAndOriginBoundaries(t *testing.T) {
 			case "no operation":
 				business.Apps[0].Status.LastOperationID = ""
 			case "finished":
-				business.Apps[0].Status.Phase = "deployed"
+				business.Operations[0].Status = model.OperationStatusCompleted
+			case "canceled":
+				business.Operations[0].Status = model.OperationStatusCanceled
+			case "operation failed":
+				business.Operations[0].Status = model.OperationStatusFailed
+			case "missing lifecycle":
+				business.Operations = nil
+			case "wrong operation app":
+				business.Operations[0].AppID = "other-app"
+			case "wrong operation tenant":
+				business.Operations[0].TenantID = "other-tenant"
+			case "not deployment":
+				business.Operations[0].Type = model.OperationTypeScale
 			case "failed":
 				business.Apps[0].Status.LastFailedOperation = &model.AppOperationFailure{ID: "deploy-next"}
 			case "unmanaged":
@@ -266,9 +289,10 @@ func TestManagedHandoffAdmissionRechecksDurableOperationAndExactSource(t *testin
 			business := b
 			business.Apps = append([]model.App(nil), b.Apps...)
 			business.TrafficPolicies = append([]model.AppTrafficPolicy(nil), b.TrafficPolicies...)
+			business.Operations = append([]store.RouteBusinessOperation(nil), b.Operations...)
 			switch scenario {
 			case "finished":
-				business.Apps[0].Status.Phase = "deployed"
+				business.Operations[0].Status = model.OperationStatusCompleted
 			case "replaced operation":
 				business.Apps[0].Status.LastOperationID = "new-operation"
 			case "failed":

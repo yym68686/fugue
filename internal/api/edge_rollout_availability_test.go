@@ -1,11 +1,28 @@
 package api
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
+
+func TestUnavailableRoutePreservesIndependentInvariantOverReadyMessage(t *testing.T) {
+	for _, violations := range [][]string{{"current_image_mismatch"}, {"current_image_mismatch", "endpoint_unready"}, nil} {
+		app := model.App{Spec: model.AppSpec{Replicas: 1, RuntimeID: "runtime-a"}, ObservedStatus: &model.AppObservedStatus{
+			Phase: "unavailable", Message: "deployment ready (1/1 replicas)", InvariantViolations: violations,
+		}}
+		status, reason := edgeRouteStatus(app, app.Spec.RuntimeID, true)
+		want := app.ObservedStatus.Message
+		if len(violations) > 0 {
+			want = "runtime invariant violation: " + strings.Join(violations, ", ")
+		}
+		if status != model.EdgeRouteStatusUnavailable || reason != want {
+			t.Fatalf("unavailable reason lost independent evidence: status=%q reason=%q want=%q", status, reason, want)
+		}
+	}
+}
 
 func TestEdgeRetainsServingEndpointsWithoutDeclaringRolloutComplete(t *testing.T) {
 	now := time.Now().UTC()

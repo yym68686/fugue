@@ -21,6 +21,7 @@ type RouteBusinessSnapshot struct {
 	CapturedAt              time.Time                      `json:"captured_at"`
 	Revision                string                         `json:"revision"`
 	Apps                    []model.App                    `json:"apps"`
+	Operations              []RouteBusinessOperation       `json:"operations,omitempty"`
 	Domains                 []model.AppDomain              `json:"domains"`
 	RouteTables             []model.ProjectRouteTable      `json:"route_tables"`
 	Runtimes                []model.Runtime                `json:"runtimes"`
@@ -29,6 +30,21 @@ type RouteBusinessSnapshot struct {
 	TrafficPolicies         []model.AppTrafficPolicy       `json:"traffic_policies"`
 	HostedZones             []model.HostedZone             `json:"hosted_zones"`
 	DNSRecords              []model.DNSRecord              `json:"dns_records"`
+}
+
+// RouteBusinessOperation carries lifecycle identity only, never executable
+// payloads. App phase can be updated by runtime observation before the current
+// deploy commits, so serving handoffs need the operation in the same snapshot.
+type RouteBusinessOperation struct {
+	ID       string `json:"id"`
+	TenantID string `json:"tenant_id"`
+	AppID    string `json:"app_id"`
+	Type     string `json:"type"`
+	Status   string `json:"status"`
+}
+
+func (op RouteBusinessOperation) ActiveDeploy() bool {
+	return op.Type == model.OperationTypeDeploy && (op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning || op.Status == model.OperationStatusWaitingAgent)
 }
 
 func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusinessSnapshot, error) {
@@ -45,6 +61,9 @@ func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusiness
 		snapshot.StaticEdgeRegistrations = state.StaticEdgeRegistrations
 		for _, app := range state.Apps {
 			snapshot.Apps = append(snapshot.Apps, routeBusinessAppProjection(app))
+		}
+		for _, op := range state.Operations {
+			snapshot.Operations = append(snapshot.Operations, RouteBusinessOperation{ID: op.ID, TenantID: op.TenantID, AppID: op.AppID, Type: op.Type, Status: op.Status})
 		}
 		raw, err := json.Marshal(snapshot)
 		if err != nil {
@@ -91,6 +110,21 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 		apps = append(apps, routeBusinessAppProjection(app))
 	}
 	snapshot.Apps = apps
+	currentOperations := make(map[string]model.App, len(apps))
+	for _, app := range apps {
+		if app.Status.LastOperationID != "" {
+			currentOperations[app.Status.LastOperationID] = app
+		}
+	}
+	operations := make([]RouteBusinessOperation, 0)
+	for _, op := range snapshot.Operations {
+		app, ok := currentOperations[op.ID]
+		if ok && op.AppID == app.ID && op.TenantID == app.TenantID && op.ActiveDeploy() {
+			operations = append(operations, op)
+		}
+	}
+	snapshot.Operations = operations
+	sort.Slice(snapshot.Operations, func(i, j int) bool { return snapshot.Operations[i].ID < snapshot.Operations[j].ID })
 	domains := make([]model.AppDomain, 0, len(snapshot.Domains))
 	for _, domain := range snapshot.Domains {
 		if domain.Status == model.AppDomainStatusVerified {

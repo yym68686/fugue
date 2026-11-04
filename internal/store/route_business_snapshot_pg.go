@@ -46,6 +46,16 @@ func readRouteBusinessSnapshotTx(ctx context.Context, tx *sql.Tx) (RouteBusiness
 	if err != nil {
 		return out, fmt.Errorf("capture route apps: %w", err)
 	}
+	out.Operations, err = readRouteBusinessRows(ctx, tx, `SELECT o.id, o.tenant_id, o.app_id, o.type, o.status
+FROM fugue_operations o JOIN fugue_apps a ON a.id=o.app_id AND a.tenant_id=o.tenant_id AND a.status_json->>'last_operation_id'=o.id
+WHERE o.type='deploy' AND o.status IN ('pending','running','waiting-agent')`, func(row sqlScanner) (RouteBusinessOperation, error) {
+		var op RouteBusinessOperation
+		err := row.Scan(&op.ID, &op.TenantID, &op.AppID, &op.Type, &op.Status)
+		return op, err
+	})
+	if err != nil {
+		return out, fmt.Errorf("capture route deployment operations: %w", err)
+	}
 	out.Domains, err = readRouteBusinessRows(ctx, tx, `SELECT hostname, tenant_id, app_id, status, dns_mode, dns_zone_id, dns_record_id, dns_record_source, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at FROM fugue_app_domains WHERE status='verified'`, scanAppDomain)
 	if err != nil {
 		return out, fmt.Errorf("capture route domains: %w", err)

@@ -41,12 +41,11 @@ func (s *Server) guardPendingStableHandoffs(ctx context.Context, p platformInten
 		// The transactional business snapshot is frozen before the Kubernetes
 		// read. An in-place deployment may finish between those two reads: the
 		// new image is complete while the frozen stable release still names the
-		// old image. Durable phase is only permission to defer publication, never
+		// old image. The exact active operation only permits deferring publication;
+		// app phase may already say deployed. Neither is
 		// serving proof. The existing LKG and exact authority gates below remain
 		// mandatory and its original evidence expiry is not extended.
-		if strings.EqualFold(strings.TrimSpace(app.Status.Phase), "deploying") &&
-			strings.TrimSpace(app.Status.LastOperationID) != "" &&
-			!model.AppHasCurrentFailedOperation(app.Status) && managedRuntimes[strings.TrimSpace(app.Spec.RuntimeID)] {
+		if activeRouteDeployOperation(business, app) && managedRuntimes[strings.TrimSpace(app.Spec.RuntimeID)] {
 			inFlightManagedDeploy[key] = true
 		}
 	}
