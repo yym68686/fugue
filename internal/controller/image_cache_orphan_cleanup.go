@@ -127,13 +127,14 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		plan, err = s.Store.UpsertImageCachePrunePlan(plan)
-		if err != nil {
-			return err
-		}
 		plans = append(plans, nodeImageCachePrunePlan{node: node, plan: plan})
 	}
 	if mode == model.ImageCachePruneModeObserve {
+		for _, item := range plans {
+			if _, err := s.Store.UpsertImageCachePrunePlanSummary(item.plan); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	sortControllerImageCachePrunePlans(plans)
@@ -164,9 +165,6 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		}
 		node := item.node
 		plan := item.plan
-		if plan.CandidateManifestCount == 0 && plan.CandidateBlobCount == 0 {
-			continue
-		}
 		updater, ok := controllerImageCacheUpdaterForNode(updaters, node)
 		if !ok {
 			continue
@@ -217,6 +215,15 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 			}
 			continue
 		}
+		// Pending tasks can make every target protected. Check the task gates
+		// before persisting even an empty summary, so that this transient
+		// protection state does not append a receipt on every scheduler pass.
+		if plan.CandidateManifestCount == 0 && plan.CandidateBlobCount == 0 {
+			if _, err := s.Store.UpsertImageCachePrunePlanSummary(plan); err != nil {
+				return err
+			}
+			continue
+		}
 		candidates := plan.Candidates
 		if mode == model.ImageCachePruneModeDelete {
 			if reason := controllerImageCacheAutomaticDeleteUnsafeReason(plan); reason != "" && s.Logger != nil {
@@ -230,12 +237,23 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		}
 		targets := controllerImageCachePruneTargets(candidates, targetLimit)
 		if len(targets) == 0 && plan.CandidateBlobCount == 0 {
+			// Retain a compact explanation when candidates were classified but
+			// safety filters left nothing executable. Plans skipped by active-task,
+			// cooldown, capability, or global-concurrency gates remain ephemeral.
+			if _, err := s.Store.UpsertImageCachePrunePlanSummary(plan); err != nil {
+				return err
+			}
 			continue
 		}
 		targetsRaw, err := json.Marshal(targets)
 		if err != nil {
 			return err
 		}
+		persisted, err := s.Store.UpsertImageCachePrunePlanSummary(plan)
+		if err != nil {
+			return err
+		}
+		plan = persisted
 		dryRun := mode != model.ImageCachePruneModeDelete
 		allowDelete := mode == model.ImageCachePruneModeDelete
 		if _, err := s.Store.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{

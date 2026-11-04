@@ -628,6 +628,8 @@ var postgresSchemaStatements = []string{
 		cluster_node_name TEXT NOT NULL DEFAULT '',
 		runtime_id TEXT NOT NULL DEFAULT '',
 		mode TEXT NOT NULL,
+		policy_version TEXT NOT NULL DEFAULT '',
+		plan_hash TEXT NOT NULL DEFAULT '',
 		candidate_manifest_count INTEGER NOT NULL DEFAULT 0,
 		protected_manifest_count INTEGER NOT NULL DEFAULT 0,
 		candidate_blob_count INTEGER NOT NULL DEFAULT 0,
@@ -649,6 +651,8 @@ var postgresSchemaStatements = []string{
 		status TEXT NOT NULL,
 		error TEXT NOT NULL DEFAULT ''
 	)`,
+	`ALTER TABLE fugue_image_cache_prune_plans ADD COLUMN IF NOT EXISTS policy_version TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_image_cache_prune_plans ADD COLUMN IF NOT EXISTS plan_hash TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_image_cache_prune_plans ADD COLUMN IF NOT EXISTS candidate_blob_count INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE fugue_image_cache_prune_plans ADD COLUMN IF NOT EXISTS candidate_blob_bytes BIGINT NOT NULL DEFAULT 0`,
 	`ALTER TABLE fugue_image_cache_prune_plans ADD COLUMN IF NOT EXISTS protected_blob_count INTEGER NOT NULL DEFAULT 0`,

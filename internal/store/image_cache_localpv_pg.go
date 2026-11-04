@@ -22,7 +22,7 @@ func imageCacheManifestColumns() string {
 }
 
 func imageCachePrunePlanColumns() string {
-	return `id, node_id, cluster_node_name, runtime_id, mode, candidate_manifest_count, protected_manifest_count, candidate_blob_count, candidate_blob_bytes, protected_blob_count, planned_delete_bytes, max_delete_bytes, min_manifest_age, protection_summary_json, candidate_summary_json, candidates_json, protected_manifests_json, skipped_manifests_json, unreferenced_blobs_json, node_pressure, budget_exhausted, created_at, executed_at, status, error`
+	return `id, node_id, cluster_node_name, runtime_id, mode, policy_version, plan_hash, candidate_manifest_count, protected_manifest_count, candidate_blob_count, candidate_blob_bytes, protected_blob_count, planned_delete_bytes, max_delete_bytes, min_manifest_age, protection_summary_json, candidate_summary_json, candidates_json, protected_manifests_json, skipped_manifests_json, unreferenced_blobs_json, node_pressure, budget_exhausted, created_at, executed_at, status, error`
 }
 
 func localPVInventoryColumns() string {
@@ -368,7 +368,7 @@ func (s *Store) pgUpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (mod
 	}
 	out, err := scanImageCachePrunePlan(s.db.QueryRowContext(ctx, `
 INSERT INTO fugue_image_cache_prune_plans (
-	id, node_id, cluster_node_name, runtime_id, mode, candidate_manifest_count,
+	id, node_id, cluster_node_name, runtime_id, mode, policy_version, plan_hash, candidate_manifest_count,
 	protected_manifest_count, candidate_blob_count, candidate_blob_bytes,
 	protected_blob_count, planned_delete_bytes, max_delete_bytes,
 	min_manifest_age, protection_summary_json, candidate_summary_json,
@@ -376,19 +376,21 @@ INSERT INTO fugue_image_cache_prune_plans (
 	unreferenced_blobs_json, node_pressure, budget_exhausted, created_at,
 	executed_at, status, error
 ) VALUES (
-	$1, $2, $3, $4, $5, $6,
-	$7, $8, $9,
-	$10, $11, $12,
-	$13, $14, $15,
-	$16, $17, $18,
-	$19, $20, $21, $22,
-	$23, $24, $25
+	$1, $2, $3, $4, $5, $6, $7, $8,
+	$9, $10, $11,
+	$12, $13, $14,
+	$15, $16, $17,
+	$18, $19, $20,
+	$21, $22, $23,
+	$24, $25, $26, $27
 )
 ON CONFLICT (id) DO UPDATE SET
 	node_id = EXCLUDED.node_id,
 	cluster_node_name = EXCLUDED.cluster_node_name,
 	runtime_id = EXCLUDED.runtime_id,
 	mode = EXCLUDED.mode,
+	policy_version = EXCLUDED.policy_version,
+	plan_hash = EXCLUDED.plan_hash,
 	candidate_manifest_count = EXCLUDED.candidate_manifest_count,
 	protected_manifest_count = EXCLUDED.protected_manifest_count,
 	candidate_blob_count = EXCLUDED.candidate_blob_count,
@@ -408,7 +410,7 @@ ON CONFLICT (id) DO UPDATE SET
 	executed_at = EXCLUDED.executed_at,
 	status = EXCLUDED.status,
 	error = EXCLUDED.error
-RETURNING `+imageCachePrunePlanColumns(), plan.ID, plan.NodeID, plan.ClusterNodeName, plan.RuntimeID, plan.Mode, plan.CandidateManifestCount, plan.ProtectedManifestCount, plan.CandidateBlobCount, plan.CandidateBlobBytes, plan.ProtectedBlobCount, plan.PlannedDeleteBytes, plan.MaxDeleteBytes, plan.MinManifestAge, protectionJSON, candidateSummaryJSON, candidatesJSON, protectedManifestsJSON, skippedManifestsJSON, unreferencedBlobsJSON, plan.NodePressure, plan.BudgetExhausted, plan.CreatedAt, plan.ExecutedAt, plan.Status, plan.Error))
+	RETURNING `+imageCachePrunePlanColumns(), plan.ID, plan.NodeID, plan.ClusterNodeName, plan.RuntimeID, plan.Mode, plan.PolicyVersion, plan.PlanHash, plan.CandidateManifestCount, plan.ProtectedManifestCount, plan.CandidateBlobCount, plan.CandidateBlobBytes, plan.ProtectedBlobCount, plan.PlannedDeleteBytes, plan.MaxDeleteBytes, plan.MinManifestAge, protectionJSON, candidateSummaryJSON, candidatesJSON, protectedManifestsJSON, skippedManifestsJSON, unreferencedBlobsJSON, plan.NodePressure, plan.BudgetExhausted, plan.CreatedAt, plan.ExecutedAt, plan.Status, plan.Error))
 	if err != nil {
 		return model.ImageCachePrunePlan{}, mapDBErr(err)
 	}
@@ -687,6 +689,7 @@ func scanImageCacheManifest(scanner sqlScanner) (model.ImageCacheManifest, error
 func scanImageCachePrunePlan(scanner sqlScanner) (model.ImageCachePrunePlan, error) {
 	var out model.ImageCachePrunePlan
 	var protectionRaw, candidateSummaryRaw, candidatesRaw, protectedManifestsRaw, skippedManifestsRaw, unreferencedBlobsRaw []byte
+	var policyVersion, planHash sql.NullString
 	var executedAt sql.NullTime
 	if err := scanner.Scan(
 		&out.ID,
@@ -694,6 +697,8 @@ func scanImageCachePrunePlan(scanner sqlScanner) (model.ImageCachePrunePlan, err
 		&out.ClusterNodeName,
 		&out.RuntimeID,
 		&out.Mode,
+		&policyVersion,
+		&planHash,
 		&out.CandidateManifestCount,
 		&out.ProtectedManifestCount,
 		&out.CandidateBlobCount,
@@ -751,6 +756,12 @@ func scanImageCachePrunePlan(scanner sqlScanner) (model.ImageCachePrunePlan, err
 		out.ExecutedAt = &executedAt.Time
 	}
 	imagecachepolicy.Seal(&out)
+	if policyVersion.Valid && policyVersion.String != "" {
+		out.PolicyVersion = policyVersion.String
+	}
+	if planHash.Valid && planHash.String != "" {
+		out.PlanHash = planHash.String
+	}
 	return out, nil
 }
 

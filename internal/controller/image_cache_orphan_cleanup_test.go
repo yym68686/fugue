@@ -68,12 +68,18 @@ func TestScheduleOrphanImageCachePruneObservePersistsPlanOnly(t *testing.T) {
 	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
 		t.Fatalf("schedule orphan prune: %v", err)
 	}
+	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+		t.Fatalf("repeat unchanged observation: %v", err)
+	}
 	plans, err := stateStore.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Mode: model.ImageCachePruneModeObserve})
 	if err != nil {
 		t.Fatalf("list plans: %v", err)
 	}
 	if len(plans) != 1 || plans[0].CandidateManifestCount != 1 {
 		t.Fatalf("unexpected plans: %+v", plans)
+	}
+	if plans[0].PlanHash == "" || len(plans[0].Candidates) != 0 || len(plans[0].ProtectedManifests) != 0 || len(plans[0].SkippedManifests) != 0 || len(plans[0].UnreferencedBlobs) != 0 {
+		t.Fatalf("automatic observe plan persisted unbounded detail: %+v", plans[0])
 	}
 	tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
 	if err != nil {
@@ -115,6 +121,23 @@ func TestScheduleOrphanImageCachePruneDryRunCreatesNonDeletingTask(t *testing.T)
 	}
 	if tasks[0].Payload["dry_run"] != "true" || tasks[0].Payload["allow_delete"] != "false" || tasks[0].Payload["targets_json"] == "" {
 		t.Fatalf("unexpected prune payload: %+v", tasks[0].Payload)
+	}
+	plans, err := stateStore.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Mode: model.ImageCachePruneModeDryRun})
+	if err != nil {
+		t.Fatalf("list persisted dry-run plan: %v", err)
+	}
+	if len(plans) != 1 || plans[0].PlanHash == "" || len(plans[0].Candidates) != 0 || len(plans[0].ProtectedManifests) != 0 || len(plans[0].SkippedManifests) != 0 || len(plans[0].UnreferencedBlobs) != 0 {
+		t.Fatalf("automatic dry-run plan persisted unbounded detail: %+v", plans)
+	}
+	if tasks[0].Payload["prune_plan_id"] != plans[0].ID || tasks[0].Payload["plan_hash"] != plans[0].PlanHash {
+		t.Fatal("scheduled task lost its persisted full-plan binding")
+	}
+	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+		t.Fatalf("repeat active-task pass: %v", err)
+	}
+	again, err := stateStore.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Mode: model.ImageCachePruneModeDryRun})
+	if err != nil || len(again) != 1 {
+		t.Fatalf("active-task pass appended another plan: %d %v", len(again), err)
 	}
 }
 

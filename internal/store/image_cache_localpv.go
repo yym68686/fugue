@@ -1,6 +1,8 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"strings"
 	"time"
@@ -155,6 +157,47 @@ func (s *Store) UpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (model
 	if s.usingDatabase() {
 		return s.pgUpsertImageCachePrunePlan(plan)
 	}
+	return s.upsertImageCachePrunePlanState(plan)
+}
+
+// UpsertImageCachePrunePlanSummary persists the bounded diagnostic projection
+// of an automatically generated plan. The full plan hash is retained so a
+// scheduled task can still bind its exact target payload to the explanation;
+// the detailed per-image rows are not copied into long-lived control-plane
+// history. Explicit admin previews continue to use UpsertImageCachePrunePlan.
+func (s *Store) UpsertImageCachePrunePlanSummary(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
+	plan = normalizeImageCachePrunePlan(plan)
+	if plan.CreatedAt.IsZero() {
+		plan.CreatedAt = time.Now().UTC()
+	}
+	if plan.NodeID == "" && plan.ClusterNodeName == "" {
+		return model.ImageCachePrunePlan{}, ErrInvalidInput
+	}
+	if plan.Mode == "" || plan.Status == "" {
+		return model.ImageCachePrunePlan{}, ErrInvalidInput
+	}
+	// Automatic scheduler passes describe the same bounded observation until
+	// the underlying inventory/policy hash changes. Give that projection a
+	// stable identity so repeated blocked/cooldown passes update one receipt
+	// instead of appending another row on every controller tick.
+	plan.ID = imageCachePruneSummaryID(plan)
+	plan.Candidates = nil
+	plan.ProtectedManifests = nil
+	plan.SkippedManifests = nil
+	plan.UnreferencedBlobs = nil
+	if s.usingDatabase() {
+		return s.pgUpsertImageCachePrunePlan(plan)
+	}
+	return s.upsertImageCachePrunePlanState(plan)
+}
+
+func imageCachePruneSummaryID(plan model.ImageCachePrunePlan) string {
+	identity := plan.NodeID + "\x00" + plan.ClusterNodeName + "\x00" + plan.RuntimeID + "\x00" + plan.Mode + "\x00" + plan.PlanHash
+	sum := sha256.Sum256([]byte(identity))
+	return "imgcacheprune-summary-" + hex.EncodeToString(sum[:16])
+}
+
+func (s *Store) upsertImageCachePrunePlanState(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
 	var out model.ImageCachePrunePlan
 	err := s.withLockedState(true, func(state *model.State) error {
 		now := time.Now().UTC()

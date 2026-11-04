@@ -39,10 +39,22 @@ func metricsProjectionTestDB(tb testing.TB) *Store {
  task_type text,status text,payload_json jsonb default '{}',result_message text default '',error_message text default '',logs_json jsonb default '[]',requested_by_type text default '',requested_by_id text default '',
  created_at timestamptz,updated_at timestamptz,claimed_at timestamptz,completed_at timestamptz)`,
 		`CREATE TEMPORARY TABLE fugue_image_cache_prune_plans (
- id text,node_id text,cluster_node_name text,runtime_id text,mode text,candidate_manifest_count integer,protected_manifest_count integer,candidate_blob_count integer,candidate_blob_bytes bigint,protected_blob_count integer default 0,planned_delete_bytes bigint,max_delete_bytes bigint default 0,min_manifest_age text default '',protection_summary_json jsonb,candidate_summary_json jsonb default '{}',candidates_json jsonb default '[]',protected_manifests_json jsonb default '[]',skipped_manifests_json jsonb default '[]',unreferenced_blobs_json jsonb default '[]',node_pressure bool default false,budget_exhausted bool default false,created_at timestamptz,executed_at timestamptz,status text,error text default '')`,
+		 id text primary key,node_id text,cluster_node_name text,runtime_id text,mode text,candidate_manifest_count integer,protected_manifest_count integer,candidate_blob_count integer,candidate_blob_bytes bigint,protected_blob_count integer default 0,planned_delete_bytes bigint,max_delete_bytes bigint default 0,min_manifest_age text default '',protection_summary_json jsonb,candidate_summary_json jsonb default '{}',candidates_json jsonb default '[]',protected_manifests_json jsonb default '[]',skipped_manifests_json jsonb default '[]',unreferenced_blobs_json jsonb default '[]',node_pressure bool default false,budget_exhausted bool default false,created_at timestamptz,executed_at timestamptz,status text,error text default '')`,
 	} {
 		if _, err := db.Exec(ddl); err != nil {
 			tb.Fatal(err)
+		}
+	}
+	// Exercise the actual additive bootstrap against the predecessor's table
+	// shape, including an idempotent second pass. The temp table isolates this
+	// check from all other tests and from durable local database contents.
+	for pass := 0; pass < 2; pass++ {
+		for _, ddl := range postgresSchemaStatements {
+			if strings.HasPrefix(ddl, "ALTER TABLE fugue_image_cache_prune_plans ADD COLUMN IF NOT EXISTS policy_version ") || strings.HasPrefix(ddl, "ALTER TABLE fugue_image_cache_prune_plans ADD COLUMN IF NOT EXISTS plan_hash ") {
+				if _, err := db.Exec(ddl); err != nil {
+					tb.Fatal(err)
+				}
+			}
 		}
 	}
 	return &Store{db: db, databaseURL: address, dbReady: true}
@@ -117,6 +129,71 @@ func TestImageCacheMetricProjectionsMatchFullPostgresReads(t *testing.T) {
 	}
 	if _, err := s.ListImageCachePrunePlanMetrics(ctx, 200); err == nil {
 		t.Fatal("ignored canceled plan collection")
+	}
+}
+
+func TestImageCacheAutomaticPlanSummaryPreservesFullPlanHashInPostgres(t *testing.T) {
+	s := metricsProjectionTestDB(t)
+	plan, err := s.UpsertImageCachePrunePlan(model.ImageCachePrunePlan{
+		ID:                     "automatic-summary",
+		NodeID:                 "node",
+		ClusterNodeName:        "worker",
+		RuntimeID:              "runtime",
+		Mode:                   model.ImageCachePruneModeDryRun,
+		CandidateManifestCount: 1,
+		CandidateSummary:       map[string]int{"stale_replica": 1},
+		Candidates:             []model.ImageCachePruneCandidate{{Repo: "fugue-apps/demo", Target: "release", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Reason: "stale_replica"}},
+		CreatedAt:              time.Now().UTC(),
+		Status:                 model.ImageCachePrunePlanStatusPlanned,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullPlanHash := plan.PlanHash
+	if fullPlanHash == "" {
+		t.Fatal("full plan hash was not sealed")
+	}
+	// Older writers omit the additive fields. Their complete stored arrays
+	// must remain readable and retain the same derived policy/hash.
+	if _, err := s.db.Exec(`UPDATE fugue_image_cache_prune_plans SET plan_hash='',policy_version='' WHERE id=$1`, plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := s.UpsertImageCachePrunePlanSummary(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate := plan
+	duplicate.ID = "another-scheduler-tick"
+	duplicate.CreatedAt = duplicate.CreatedAt.Add(time.Minute)
+	repeated, err := s.UpsertImageCachePrunePlanSummary(duplicate)
+	if err != nil || repeated.ID != summary.ID {
+		t.Fatalf("unchanged automatic projection did not reuse identity: %s %s %v", summary.ID, repeated.ID, err)
+	}
+	got, err := s.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Mode: model.ImageCachePruneModeDryRun, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("manual preview plus deduplicated summary should be two rows, got %d", len(got))
+	}
+	var foundSummary, foundManual bool
+	for _, item := range got {
+		if item.ID == summary.ID {
+			foundSummary = item.PlanHash == fullPlanHash && item.CandidateManifestCount == 1 && item.CandidateSummary["stale_replica"] == 1 && len(item.Candidates) == 0
+		}
+		if item.ID == plan.ID {
+			foundManual = len(item.Candidates) == 1 && item.PlanHash == fullPlanHash
+		}
+	}
+	if !foundSummary || !foundManual {
+		t.Fatalf("summary identity/detail or independent manual preview changed: %+v", got)
+	}
+	var details []byte
+	if err = s.db.QueryRow(`SELECT candidates_json FROM fugue_image_cache_prune_plans WHERE id=$1`, summary.ID).Scan(&details); err != nil {
+		t.Fatal(err)
+	}
+	if string(details) != "null" {
+		t.Fatalf("automatic plan detail remained stored: %d bytes", len(details))
 	}
 }
 
