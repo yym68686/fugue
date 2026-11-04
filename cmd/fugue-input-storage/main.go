@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-write-fence, archive-retirement-plan, archive-retire, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-write-fence, archive-retirement-plan, archive-retire, observe")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
@@ -33,11 +33,11 @@ func main() {
 	readerDrainTimeout := flag.Duration("reader-drain-timeout", 30*time.Second, "maximum wait for session-level compiler-input readers")
 	archiveLimit := flag.Int("archive-limit", 1, "maximum archive batch inputs, 1 through 1000")
 	archiveSegmentBytes := flag.Int("archive-segment-bytes", 16<<20, "bounded archive segment bytes; applies only to new receipts")
-	hotMaxStoredBytes := flag.Int64("hot-copy-max-stored-bytes", 0, "explicit stored-byte budget for one archive-hot-copy apply; source remains intact")
+	hotMaxStoredBytes := flag.Int64("hot-copy-max-stored-bytes", 0, "explicit stored-byte budget for one archive hot copy or restore; source remains intact")
 	rehearse := flag.Bool("rehearse", false, "encode/verify then roll back (consumes WAL and I/O)")
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
-	hotMode := *mode == "archive-hot-copy"
+	hotMode := *mode == "archive-hot-copy" || *mode == "archive-hot-restore"
 	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode) && !*apply
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
@@ -97,7 +97,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
 			os.Exit(2)
 		}
-		report, err := store.RunCompilerInputArchiveHotCopy(ctx, dsn, store.CompilerInputArchiveHotOptions{Digest: *digest, Apply: *apply, MaxStoredBytes: *hotMaxStoredBytes})
+		options := store.CompilerInputArchiveHotOptions{Digest: *digest, Apply: *apply, MaxStoredBytes: *hotMaxStoredBytes}
+		run := store.RunCompilerInputArchiveHotCopy
+		if *mode == "archive-hot-restore" {
+			run = store.RunCompilerInputArchiveHotRestore
+		}
+		report, err := run(ctx, dsn, options)
 		if err != nil {
 			reportMaintenanceError(err)
 			os.Exit(1)

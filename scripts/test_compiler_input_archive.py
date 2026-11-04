@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from scripts.compiler_input_archive import validate_operation, managed_reader, hot_reader, credential_key, shared_reader_keys, execute_item
+from scripts.compiler_input_archive import validate_operation, managed_reader, hot_reader, hot_restore_executor, credential_key, shared_reader_keys, execute_item
 
 
 class ArchiveOperationTest(unittest.TestCase):
@@ -110,6 +110,30 @@ class ArchiveOperationTest(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError): validate_operation(invalid)
         del item['maxStoredBytes']
         with self.assertRaises(ValueError): validate_operation(item)
+
+    def test_hot_restore_requires_exact_digest_and_copy_wal_budget(self):
+        item = self.fixture()
+        item.update(mode='archive-hot-restore', maxStoredBytes=16 << 20,
+                    minimumFreeBytes=576 << 20, maxDurationSeconds=540)
+        validate_operation(item)
+        for key, value in [('maxStoredBytes', True), ('maxStoredBytes', 0),
+                           ('minimumFreeBytes', (576 << 20)-1), ('limit', 2),
+                           ('digest', ''), ('digest', '*')]:
+            invalid = copy.deepcopy(item); invalid[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate_operation(invalid)
+        del item['maxStoredBytes']
+        with self.assertRaises(ValueError):
+            validate_operation(item)
+
+    @patch('scripts.compiler_input_archive.command')
+    def test_hot_restore_requires_executor_support_before_remote_execution(self, command):
+        command.return_value = 'run = store.RunCompilerInputArchiveHotRestore'
+        hot_restore_executor('a'*40)
+        command.assert_called_once_with(['git', 'show', 'a'*40+':cmd/fugue-input-storage/main.go'])
+        command.return_value = 'store.RunCompilerInputArchiveHotCopy'
+        with self.assertRaises(ValueError):
+            hot_restore_executor('b'*40)
 
     @patch('scripts.compiler_input_archive.command')
     def test_managed_reader_requires_shared_configuration_and_activation_barrier(self, command):

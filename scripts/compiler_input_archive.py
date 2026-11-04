@@ -19,11 +19,11 @@ def validate_operation(value):
         required.add('maxDurationSeconds')
         if type(value['maxDurationSeconds']) is not int or not 60 <= value['maxDurationSeconds'] <= 1800:
             raise ValueError('archive duration must be between 60 and 1800 seconds')
-    if value.get('mode') == 'archive-hot-copy':
+    if value.get('mode') in ('archive-hot-copy', 'archive-hot-restore'):
         required.add('maxStoredBytes')
     if set(value) != required or value['version'] != 1 or type(value['version']) is not int:
         raise ValueError('invalid archive operation declaration')
-    if value['mode'] not in ('archive', 'archive-batch', 'archive-route', 'archive-route-batch', 'archive-unroute', 'archive-hot-copy'):
+    if value['mode'] not in ('archive', 'archive-batch', 'archive-route', 'archive-route-batch', 'archive-unroute', 'archive-hot-copy', 'archive-hot-restore'):
         raise ValueError('unsupported archive operation')
     if type(value['apply']) is not bool or type(value['limit']) is not int or not 1 <= value['limit'] <= 1000:
         raise ValueError('invalid archive batch bound')
@@ -37,7 +37,7 @@ def validate_operation(value):
         raise ValueError('archive executor revision is not pinned')
     if type(value['minimumFreeBytes']) is not int or value['minimumFreeBytes'] < 512 << 20:
         raise ValueError('archive must preserve at least 512MiB free space')
-    if value['mode'] == 'archive-hot-copy':
+    if value['mode'] in ('archive-hot-copy', 'archive-hot-restore'):
         budget = value['maxStoredBytes']
         if type(budget) is not int or not 0 < budget <= 2 << 30:
             raise ValueError('hot copy requires an explicit stored-byte bound')
@@ -64,6 +64,12 @@ def hot_reader(revision):
     table = chunks.split('func compilerInputChunksTable(', 1)[-1].split('\n}', 1)[0]
     if 'case "hot":' not in table or 'fugue_platform_input_hot_chunks' not in table:
         raise ValueError('reader release does not support hot chunk locations')
+
+
+def hot_restore_executor(revision):
+    source = command(['git', 'show', revision+':cmd/fugue-input-storage/main.go'])
+    if 'store.RunCompilerInputArchiveHotRestore' not in source:
+        raise ValueError('reviewed executor does not support archive hot restore')
 
 
 def credential_key(namespace, container, secrets):
@@ -171,13 +177,15 @@ def main():
     args = parser.parse_args()
     value = validate_operation(json.loads(Path(args.operation).read_text()))
     registry = json.loads(Path('deploy/releases/components.json').read_text())
-    hot_mode = value['mode'] == 'archive-hot-copy'
+    hot_mode = value['mode'] in ('archive-hot-copy', 'archive-hot-restore')
     route_mode = value['mode'] in ('archive-route', 'archive-route-batch', 'archive-unroute') or hot_mode
     current = readers(registry, archive_required=route_mode)
     executor = next(x for x in current if x['component'] == 'api')
     if executor['revision'] != value['expectedExecutorRevision']:
         raise ValueError('archive executor differs from reviewed revision')
     managed_reader(executor['revision'])
+    if value['mode'] == 'archive-hot-restore':
+        hot_restore_executor(executor['revision'])
     if route_mode:
         for item in current:
             managed_reader(item['revision'])

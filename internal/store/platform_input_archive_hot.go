@@ -27,6 +27,9 @@ type CompilerInputArchiveHotReport struct {
 	RawBytes    int64  `json:"raw_bytes"`
 	StoredBytes int64  `json:"stored_bytes"`
 	Chunks      int    `json:"chunks"`
+	// Archive restoration cannot know the recompressed local size in a
+	// metadata-only preview. Keep its format-derived ceiling separate.
+	WorstCaseStoredBytes int64 `json:"worst_case_stored_bytes,omitempty"`
 }
 
 // RunCompilerInputArchiveHotCopy promotes one archived v1/v2 input to an
@@ -37,6 +40,17 @@ type CompilerInputArchiveHotReport struct {
 // before apply. A failed copy may leave bounded staging rows for an exact retry;
 // it never publishes a partial hot copy or overwrites conflicting stored bytes.
 func RunCompilerInputArchiveHotCopy(ctx context.Context, databaseURL string, options CompilerInputArchiveHotOptions) (CompilerInputArchiveHotReport, error) {
+	return runCompilerInputArchiveHot(ctx, databaseURL, options, false)
+}
+
+// RunCompilerInputArchiveHotRestore rebuilds one local v1/v2 representation
+// from a routed archive, including after legacy-table retirement. It never
+// changes archive receipts or requires the retired relation's bytes.
+func RunCompilerInputArchiveHotRestore(ctx context.Context, databaseURL string, options CompilerInputArchiveHotOptions) (CompilerInputArchiveHotReport, error) {
+	return runCompilerInputArchiveHot(ctx, databaseURL, options, true)
+}
+
+func runCompilerInputArchiveHot(ctx context.Context, databaseURL string, options CompilerInputArchiveHotOptions, restore bool) (CompilerInputArchiveHotReport, error) {
 	if options.Apply {
 		enabled, err := inputarchive.MigrationEnabledFromEnv()
 		if err != nil || !enabled {
@@ -52,7 +66,7 @@ func RunCompilerInputArchiveHotCopy(ctx context.Context, databaseURL string, opt
 	db.SetMaxIdleConns(1)
 	var objects inputarchive.Objects
 	var backendHash string
-	if options.Apply {
+	if options.Apply || restore {
 		cfg, configured, err := resolveCompilerInputArchiveConfig(ctx, db, false)
 		if err != nil || !configured {
 			return CompilerInputArchiveHotReport{}, fmt.Errorf("dedicated compiler input archive backend is required: %w", ErrConflict)
@@ -65,6 +79,9 @@ func RunCompilerInputArchiveHotCopy(ctx context.Context, databaseURL string, opt
 		if err != nil {
 			return CompilerInputArchiveHotReport{}, err
 		}
+	}
+	if restore {
+		return restoreCompilerInputArchiveHot(ctx, db, objects, backendHash, options)
 	}
 	return copyCompilerInputArchiveHot(ctx, db, objects, backendHash, options)
 }

@@ -959,6 +959,25 @@ func TestCompilerInputArchiveMigrationStreamsBeyondLegacyLimit(t *testing.T) {
 	if err != nil || !hot.Applied || hot.Chunks != m.Count || hot.RawBytes != size || hot.StoredBytes != size {
 		t.Fatal("hot promotion did not support inputs larger than 128MiB", hot, err)
 	}
+	// Independently exercise the external restore path beyond 128MiB. Remove
+	// only this disposable fixture's local representations; production restores
+	// neither delete old rows nor depend on them being present.
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_manifests SET storage_location='legacy' WHERE content_hash=$1`, digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`DELETE FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`DELETE FROM fugue_platform_input_chunks WHERE content_hash=$1`, digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_archives SET state='routed',routed_at=now() WHERE content_hash=$1`, digest); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := restoreCompilerInputArchiveHot(t.Context(), s.db, objects, backend, CompilerInputArchiveHotOptions{Digest: digest, Apply: true, MaxStoredBytes: size})
+	if err != nil || !restored.Applied || restored.Chunks != count || restored.RawBytes != size || restored.StoredBytes != size {
+		t.Fatal("external hot restore did not stream beyond 128MiB", restored, err)
+	}
 }
 
 func TestCompilerInputArchiveDryRunIsReadOnlyAndNeedsNoObjectStore(t *testing.T) {

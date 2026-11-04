@@ -238,6 +238,37 @@ that bound. This is a conservative admission floor, not proof of actual WAL or
 Longhorn amplification; begin with a small canary and measure PostgreSQL/WAL
 and filesystem deltas before selecting a larger bound. Hot promotion duplicates
 bytes while source rows remain and therefore is not a space-reclamation step.
+
+The separate `archive-hot-restore` operation can rebuild one routed v1/v2 input
+directly from its R2 archive before or after retirement. Unlike
+`archive-hot-copy`, it does not read the legacy relation. Preview checks only
+metadata and reports `worst_case_stored_bytes` (raw bytes plus the v2 envelope
+ceiling), leaving measured `stored_bytes` at zero. Apply requires the migration
+opt-in, an exact digest, the same explicit stored-byte budget and free-space/WAL
+reserve as hot copy, and an executor revision that supports this operation.
+Current and rollback readers must support local hot locations.
+
+The restore reads bounded archive segments outside database transactions and
+stages at most 16 chunks per transaction. Each page rechecks the maintenance
+epoch, original manifest, routed receipt and complete segment set, and absence
+of an active archive owner. It never writes archive leases or receipts, which
+remain immutable after retirement. Full archive EOF validates the original
+digest; a separate complete local readback must then validate it again before
+the manifest CAS publishes the hot location. Format, original digest, logical
+length and creation time remain unchanged. Interrupted operations retain bounded
+staging progress. An exact retry accepts an existing differently compressed
+chunk only when its stored hash, decoding and original bytes all match; it
+never overwrites conflicting bytes. The budget accounts the bytes actually
+retained, including valid pre-existing compression. An already-hot input is
+verified locally and does not require a successful R2 GET.
+
+Restoration is an explicit maintenance action, not automatic publication
+admission or proof that every running and rollback dependency is local. A full
+hot dependency plan, missing-root resolution, reactivation/pin admission, and
+the independent cutover gates remain required before retiring the legacy
+relation. Shipping this command does not authorize a production restore or
+retirement.
+
 Physical retirement has an explicit two-phase maintenance path. The
 read-only `archive-retirement-plan` inventories every digest with rows in the
 legacy relation, checks ordinal coverage and orphan rows, fully reads and
