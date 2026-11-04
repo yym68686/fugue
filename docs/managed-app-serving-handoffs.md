@@ -11,8 +11,12 @@ configuration. It also does not declare either workload or release healthy.
 
 Admission requires all of the following:
 
-- A durable, nonfailed `deploying` operation on a managed runtime and an enabled
-  single stable100 policy naming the same old stable release.
+- The application's exact current deploy operation on a managed runtime must be
+  pending, running or waiting-agent and nonfailed, with an enabled single
+  stable100 policy naming the same old stable release. Its lifecycle identity is
+  captured with the application in the same business snapshot. The application's
+  presentation phase may already be `deployed` before the operation commits;
+  that phase is not evidence of completion.
 - The exact independent old-release/current-image readiness transition. Only
   the corresponding `current_image_mismatch` origin status may use this path;
   other negative origins and explicit route maintenance remain closed.
@@ -29,6 +33,8 @@ release provenance. API materialization rechecks the durable operation and
 compares both immutable input authorization and exact source routes. Store
 publication continues to enforce source baseline, signature, fence and expiry.
 The existing retained-partition envelope is unchanged for Edge consumers.
+Independent origin invariant failures take precedence over a controller's Ready
+message; preserving their reason does not declare the origin ready.
 
 Explicit route/policy edits, tenant/runtime changes, failed/finished/replaced
 operations, unavailable source evidence and expiry use normal strict admission.
