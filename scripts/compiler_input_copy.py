@@ -24,7 +24,7 @@ require = r.require
 
 
 def validate(c):
-    extra = {'copy', 'maxWalGrowthBytes', 'maxAvailableDropBytes', 'maxNewDeadlineFailures'}
+    extra = {'copy', 'storage', 'maxWalGrowthBytes', 'maxAvailableDropBytes', 'maxNewDeadlineFailures'}
     base = {k: v for k, v in c.items() if k not in extra}
     require(type(base.get('version')) is int and base['version'] == 1, 'invalid copy declaration')
     base.update(version=3, readCount=0)
@@ -45,6 +45,13 @@ def validate(c):
         require(type(x[key]) is int and low <= x[key] <= high, 'invalid copy payload bound')
     segments = (x['raw_bytes']+x['segment_bytes']-1)//x['segment_bytes']
     require(x['max_put_requests'] == segments and x['max_get_requests'] == 2*segments, 'copy request budget differs from two-pass verification')
+    s = c['storage']
+    names = {'longhorn_namespace', 'volume', 'replica', 'instance_manager', 'node'}
+    uids = {'volume_uid', 'pvc_uid', 'pv_uid', 'replica_uid', 'instance_manager_uid', 'disk_id'}
+    require(isinstance(s, dict) and set(s) == names | uids | {'disk_path'}, 'invalid copy backing-storage declaration')
+    require(all(isinstance(s[k], str) and re.fullmatch('[a-z0-9][a-z0-9.-]{0,127}', s[k]) for k in names)
+            and all(isinstance(s[k], str) and re.fullmatch('[a-f0-9-]{36}', s[k]) for k in uids)
+            and re.fullmatch('/[a-zA-Z0-9/_-]{1,200}', s['disk_path']), 'invalid copy backing-storage identity')
     return c
 
 
@@ -136,10 +143,54 @@ def node_gate(c, job_uid=''):
     summary = r.node_gate(c, job_uid)
     stats = json.loads(r.cluster_kube('get', '--raw', '/api/v1/nodes/'+c['node']+'/proxy/stats/summary'))
     fs = stats['node']['fs']
+    # The original 25% physical-data-disk floor is enforced on the exact
+    # Longhorn backing filesystem below, not on an unrelated worker root.
+    # This root stores at most the full 256MiB Job ephemeral limit; preserve
+    # an additional 16GiB plus 192MiB and the existing DiskPressure gate.
     require(type(fs['capacityBytes']) is int and type(fs['availableBytes']) is int
-            and fs['availableBytes'] >= fs['capacityBytes']//4+(16 << 30)+(192 << 20), 'copy worker filesystem reserve unavailable')
+            and fs['availableBytes'] >= (16 << 30)+(192 << 20)+(256 << 20), 'copy worker filesystem reserve unavailable')
     summary.update(filesystem_available_bytes=fs['availableBytes'], filesystem_capacity_bytes=fs['capacityBytes'])
     return summary
+
+
+def backing_gate(c, primary, starting=False):
+    # Existing Longhorn instance-manager, metadata/statvfs only. No helper Pod,
+    # snapshot traversal, file contents, trim, sync, or storage mutations.
+    s = c['storage']
+    pvc = get(c['namespace'], 'pvc', c['primary'])
+    pv = r.cluster_get('pv', pvc['spec']['volumeName'])
+    require(pvc['metadata']['uid'] == s['pvc_uid'] and pv['metadata']['uid'] == s['pv_uid']
+            and pv['spec']['claimRef']['uid'] == s['pvc_uid'] and pv['spec']['csi']['driver'] == 'driver.longhorn.io'
+            and pv['spec']['csi']['volumeHandle'] == s['volume'], 'copy backing-volume binding changed')
+    volume = get(s['longhorn_namespace'], 'volumes.longhorn.io', s['volume'])
+    require(volume['metadata']['uid'] == s['volume_uid'] and volume['spec'].get('dataEngine') == 'v1'
+            and volume['spec'].get('numberOfReplicas') == 1 and volume['status'].get('state') == 'attached'
+            and volume['status'].get('robustness') == 'healthy' and not volume['status'].get('expansionRequired')
+            and volume['status'].get('currentNodeID') == primary['spec']['nodeName'] == s['node'], 'copy backing-volume topology or health changed')
+    replicas = json.loads(kube(s['longhorn_namespace'], 'get', 'replicas.longhorn.io', '-l', 'longhornvolume='+s['volume'], '-o', 'json'))['items']
+    require(len(replicas) == 1, 'copy backing-replica inventory is ambiguous')
+    replica = replicas[0]
+    require(replica['metadata']['name'] == s['replica'] and replica['metadata']['uid'] == s['replica_uid']
+            and replica['spec']['volumeName'] == s['volume'] and replica['spec']['nodeID'] == s['node']
+            and replica['spec']['diskID'] == s['disk_id'] and replica['spec']['diskPath'] == s['disk_path']
+            and replica['spec'].get('active') is True and not replica['spec'].get('failedAt')
+            and replica['status'].get('currentState') == 'running' and replica['status']['instanceManagerName'] == s['instance_manager'], 'copy backing-replica identity changed')
+    manager = get(s['longhorn_namespace'], 'pod', s['instance_manager'])
+    require(manager['metadata']['uid'] == s['instance_manager_uid'] and manager['spec']['nodeName'] == s['node']
+            and not manager['metadata'].get('deletionTimestamp')
+            and any(x['name'] == 'instance-manager' and x['ready'] for x in manager['status']['containerStatuses']), 'copy backing observer changed')
+    program = 'import json,os,sys; s=os.statvfs(sys.argv[1]); print(json.dumps(dict(total_bytes=s.f_blocks*s.f_frsize,free_bytes=s.f_bfree*s.f_frsize,available_bytes=s.f_bavail*s.f_frsize)))'
+    fs = json.loads(kube(s['longhorn_namespace'], 'exec', s['instance_manager'], '-c', 'instance-manager', '--', 'python3', '-c', program, '/host'+s['disk_path']))
+    require(set(fs) == {'total_bytes', 'free_bytes', 'available_bytes'} and all(type(x) is int and x >= 0 for x in fs.values())
+            and 0 <= fs['available_bytes'] <= fs['free_bytes'] <= fs['total_bytes'] and fs['total_bytes'] > 0, 'copy backing-space observation malformed')
+    require(get(s['longhorn_namespace'], 'pod', s['instance_manager'])['metadata']['uid'] == s['instance_manager_uid'], 'copy backing observer changed during stat')
+    minimum = fs['total_bytes']//4+(16 << 30)+(192 << 20)
+    # Reserve the Job's full ephemeral-storage limit on the backing disk, plus
+    # the separately authorized maximum PG-volume drop for the initial gate.
+    required = minimum+(256 << 20)+ (c['maxAvailableDropBytes'] if starting else 0)
+    return {**fs, 'volume_uid': s['volume_uid'], 'replica_uid': s['replica_uid'], 'instance_manager_uid': s['instance_manager_uid'],
+            'protected_floor_bytes': minimum, 'required_bytes': required, 'remaining_budget_bytes': fs['free_bytes']-required,
+            'capacity_gate_passed': fs['free_bytes'] >= required}
 
 
 def api_activity(c, serving):
@@ -157,9 +208,32 @@ def api_activity(c, serving):
     return observed
 
 
+def api_log_signals(c, serving):
+    # Exact Deployment owner Pods only. Read a small recent tail, retain only
+    # aggregate categories, then recheck UID/image/container/restart identity.
+    result = {}
+    for name, uid in serving['api_pods'].items():
+        before = get(c['namespace'], 'pod', name)
+        container = next(x for x in before['status']['containerStatuses'] if x['name'] == 'api')
+        body = kube(c['namespace'], 'logs', name, '-c', 'api', '--since=1m', '--tail=200')
+        require(len(body) <= 1 << 20, 'copy bounded API log sample exceeded')
+        lines = body.splitlines()
+        counts = {'critical': sum(bool(re.search(r'panic|fatal', x, re.I)) for x in lines),
+                  'archive_error': sum(bool(re.search(r'archive', x, re.I) and re.search(r'error|fail', x, re.I)) for x in lines)}
+        after = get(c['namespace'], 'pod', name)
+        current = next(x for x in after['status']['containerStatuses'] if x['name'] == 'api')
+        require(before['metadata']['uid'] == after['metadata']['uid'] == uid
+                and all(current.get(k) == container.get(k) for k in ('containerID', 'imageID', 'restartCount')),
+                'copy API owner changed during bounded log sampling')
+        require(counts['critical'] == counts['archive_error'] == 0, 'copy API bounded log error appeared')
+        result[uid] = counts
+    return result
+
+
 def check_impact(c, initial, current):
     require(current['epoch'] == initial['epoch'] and current['manifest'] == initial['manifest'] and current['source_chunks'] == initial['source_chunks'], 'copy source or maintenance epoch changed')
     require(0 <= int(current['wal_bytes'])-int(initial['wal_bytes']) <= c['maxWalGrowthBytes'], 'copy WAL growth budget exceeded or counter reset')
+    require(current['other_leases'] == 0 and 0 <= current['all_leases'] <= 1, 'concurrent compiler-input archive worker appeared')
     require(current['active_clients'] <= initial['active_clients']+4 and current['worker_connections'] <= 1, 'copy database connection pressure increased')
 
 
@@ -206,6 +280,8 @@ def execute(c, evidence, apply=False):
                 and os.environ.get('GITHUB_SHA') == command(['git', 'rev-parse', 'HEAD']).strip(), 'copy requires exact main CI checkout')
         report['node_before'] = node_gate(c)
         cluster, primary, available = r.primary_gate(c)
+        report['backing_before'] = backing_gate(c, primary, starting=True); save()
+        require(report['backing_before']['capacity_gate_passed'], 'copy backing filesystem reserve unavailable')
         executor, deployment, serving = r.serving_gate(c, registry)
         code = command(['git', 'show', c['sourceCommit']+':cmd/fugue-input-storage/main.go'])
         require('store.RunCompilerInputArchiveCopy' in code, 'copy worker executable lacks bounded mode')
@@ -213,10 +289,14 @@ def execute(c, evidence, apply=False):
         require(initial['archive'] is None and initial['all_leases'] == 0 and initial['worker_connections'] == 0, 'copy source already attempted or worker active')
         data = copy_session(c, cluster, primary, deployment, executor, initial)
         initial.pop('platform')
-        report.update(before=initial, available_before=available, serving=serving, errors_before=api_activity(c, serving), impact_samples=[])
+        report.update(before=initial, available_before=available, serving=serving, errors_before=api_activity(c, serving),
+                      bounded_logs_before=api_log_signals(c, serving), impact_samples=[])
         primary_restarts = {x['name']: x['restartCount'] for x in primary['status']['containerStatuses']}
         def watch():
             _, pod, free = r.primary_gate(c)
+            backing = backing_gate(c, pod)
+            report['last_backing_observation'] = backing; save()
+            require(backing['capacity_gate_passed'], 'copy backing filesystem reserve exhausted')
             require({x['name']: x['restartCount'] for x in pod['status']['containerStatuses']} == primary_restarts, 'copy primary restarted')
             require(available-free <= c['maxAvailableDropBytes'], 'copy filesystem drop budget exceeded')
             _, _, now = r.serving_gate(c, registry)
@@ -224,11 +304,12 @@ def execute(c, evidence, apply=False):
             current = metadata(c)
             check_impact(c, initial, current)
             errors = api_activity(c, serving)
+            bounded_logs = api_log_signals(c, serving)
             for uid, item in errors.items():
                 baseline = report['errors_before'][uid]
                 require(item['budget_fallbacks'] == baseline['budget_fallbacks'] and 0 <= item['write_failures']-baseline['write_failures'] <= c['maxNewDeadlineFailures'], 'copy writer error impact budget exceeded')
             node = node_gate(c, job_uid or '')
-            sample = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'available_bytes': free, 'metadata': current, 'errors': errors, 'node': node}
+            sample = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'available_bytes': free, 'metadata': current, 'errors': errors, 'bounded_logs': bounded_logs, 'node': node, 'backing': backing}
             report['impact_samples'].append(sample)
             require(len(report['impact_samples']) <= 50, 'copy watchdog sample bound exhausted')
             save()

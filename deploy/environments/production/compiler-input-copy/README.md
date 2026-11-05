@@ -37,7 +37,10 @@ writer-error deltas against an explicit baseline. Existing deadline errors are
 reported separately from the declared incremental tolerance. A new category,
 fallback, exceeded bound or uncertain observation stops only this worker. The
 512MiB hard stop/1GiB warning remains; this lane requires at least 3GiB free and
-the node floor remains 25% plus 16GiB plus 192MiB.
+the exact Longhorn backing-disk floor remains 25% plus 16GiB plus 192MiB,
+with the full possible PG-volume drop and worker ephemeral limit reserved
+before starting. The separate worker root reserves 16GiB plus 192MiB beyond
+its complete 256MiB ephemeral limit; no DiskPressure is allowed.
 
 The result artifact contains exact execution identities, native payload counts,
 verified original bytes, elapsed time, durable ledger confirmation, source/route
