@@ -324,6 +324,8 @@ def worker_terminal(pod):
         return result
     terminated = state['terminated']
     reason = terminated.get('reason')
+    if type(reason) is not str or not reason.strip():
+        return result
     result['reason'] = reason if reason in ('Completed', 'Error', 'OOMKilled', 'ContainerCannotRun', 'StartError', 'DeadlineExceeded') else 'other'
     for source, target in (('exitCode', 'exit_code'), ('signal', 'signal')):
         value = terminated.get(source, 0 if source == 'signal' else None)

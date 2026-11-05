@@ -103,7 +103,8 @@ class CopyTest(unittest.TestCase):
                      startedAt='2026-01-02T03:04:05Z', finishedAt='2026-01-02T03:04:06Z')
         pod = {'status': {'phase': 'Succeeded', 'containerStatuses': [{'name': 'copy', 'state': {'terminated': state}}]}}
         self.assertTrue(c.worker_terminal(pod)['metadata_complete'])
-        for key, changed in [('exitCode', True), ('exitCode', -1), ('signal', '9'), ('signal', 1 << 31),
+        for key, changed in [('reason', None), ('reason', ''), ('reason', '  '), ('reason', 0),
+                             ('exitCode', True), ('exitCode', -1), ('signal', '9'), ('signal', 1 << 31),
                              ('startedAt', 'synthetic-private-time'), ('finishedAt', '2026-02-30T00:00:00Z'),
                              ('finishedAt', '2026-01-02T03:04:04Z'), ('finishedAt', '2026-01-02T03:04:06Z synthetic-private')]:
             invalid = copy.deepcopy(pod); invalid['status']['containerStatuses'][0]['state']['terminated'][key] = changed
@@ -111,6 +112,9 @@ class CopyTest(unittest.TestCase):
                 result = c.worker_terminal(invalid)
                 self.assertFalse(result['metadata_complete'])
                 self.assertNotIn('synthetic-private', json.dumps(result))
+        missing_reason = copy.deepcopy(pod)
+        del missing_reason['status']['containerStatuses'][0]['state']['terminated']['reason']
+        self.assertFalse(c.worker_terminal(missing_reason)['metadata_complete'])
         for statuses in (None, [], [{'name': 'other'}], [pod['status']['containerStatuses'][0]]*2,
                          [{'name': 'copy', 'state': {}}], [{'name': 'copy', 'state': {'running': {}}}],
                          [{'name': 'copy', 'state': {'terminated': state, 'running': {}}}]):
