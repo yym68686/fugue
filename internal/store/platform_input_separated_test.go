@@ -677,12 +677,26 @@ func TestSeparatedFailureObservationSurvivesSuccessfulWrite(t *testing.T) {
 	if before["last_failure_phase"] != "encode_components" || before["last_failure_category"] != "canceled" {
 		t.Fatal("failure phase/category unavailable", before)
 	}
+	failureProfile, ok := before["last_failure_profile"].(map[string]int64)
+	if !ok || failureProfile["snapshot_bytes"] == 0 || failureProfile["evidence_occurrences"] != int64(len(snapshot.DNSSelections)) || failureProfile["evidence_bytes"] == 0 {
+		t.Fatal("failure did not retain bounded snapshot/evidence progress", before["last_failure_profile"])
+	}
 	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 	after := separatedInputObservation().(map[string]any)
 	if fmt.Sprint(before["last_failure_timings_ms"]) != fmt.Sprint(after["last_failure_timings_ms"]) || before["last_failure_at"] != after["last_failure_at"] || before["last_failure_phase"] != after["last_failure_phase"] {
 		t.Fatal("successful write erased failure evidence")
+	}
+	if fmt.Sprint(before["last_failure_profile"]) != fmt.Sprint(after["last_failure_profile"]) {
+		t.Fatal("successful write erased failure progress")
+	}
+	writeProfile, ok := after["last_write_profile"].(map[string]int64)
+	if !ok || writeProfile["snapshot_bytes"] == 0 || writeProfile["snapshot_complete"] != 1 || writeProfile["unique_evidence_components_seen"] == 0 || writeProfile["pack_encode_ms"] < 0 || writeProfile["component_flush_ms"] < 0 {
+		t.Fatal("successful write did not retain bounded profile", after["last_write_profile"])
+	}
+	if strings.Contains(fmt.Sprint(writeProfile), "measurement-") || strings.Contains(fmt.Sprint(writeProfile), "service.example.test") {
+		t.Fatal("profile leaked snapshot content", writeProfile)
 	}
 	assertSeparatedEquivalent(t, s, snapshot, digest)
 }

@@ -35,6 +35,14 @@ pack cache only inside the same read transaction. Pack reuse requires identical
 hashes and sizes. Every component occurrence and the complete original input
 are still hashed; cache state never crosses transactions. The private storage
 observation reports bounded phase timings and sanitized failure categories.
+For separated-input writer deadlines it also retains a bounded per-attempt
+profile: snapshot/evidence/component/pack/frame durations plus byte and item
+counts. These nested timings overlap: `encode_components` includes snapshot
+serialization and may include PostgreSQL queries/writes while evidence
+components are staged; it is not a CPU-only measurement. `pack_encode_ms`
+isolates the pack encoder's wall time, while evidence and frame stage timings
+include their storage work. No snapshot bytes, identities, SQL text, or evidence
+content are exposed.
 Physical pack reads fetch at most sixteen packs / four MiB per query, with a
 lookahead capped at sixteen recipes. Both physical hashes are checked before
 any fetched pack enters the transaction cache. The most recent failed write's

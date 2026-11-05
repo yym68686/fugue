@@ -93,7 +93,7 @@ func readComponentManifest(ctx context.Context, db inputQueryer, digest string) 
 	return m, err
 }
 
-func ensureInputComponent(ctx context.Context, tx *sql.Tx, raw []byte, batch *sharedInputWriter) (string, uint64, error) {
+func ensureInputComponent(ctx context.Context, tx *sql.Tx, raw []byte, batch *sharedInputWriter, profile *separatedInputWriteProfile) (string, uint64, error) {
 	digest := sharedHash(sha256.Sum256(raw))
 	m, err := readComponentManifest(ctx, tx, digest)
 	if err == nil {
@@ -112,7 +112,7 @@ func ensureInputComponent(ctx context.Context, tx *sql.Tx, raw []byte, batch *sh
 	}
 	w := batch
 	if w == nil {
-		w = &sharedInputWriter{components: true, ctx: ctx, tx: tx, encoder: inputChunkEncoder{level: zlib.DefaultCompression}, objects: map[[32]byte]sharedObject{}, seen: map[[32]byte]bool{}}
+		w = &sharedInputWriter{components: true, ctx: ctx, tx: tx, encoder: inputChunkEncoder{level: zlib.DefaultCompression}, objects: map[[32]byte]sharedObject{}, seen: map[[32]byte]bool{}, profile: profile}
 	}
 	m, n, err := stageInputComponent(raw, digest, w)
 	if err != nil {
@@ -164,6 +164,55 @@ type separatedInputWriter struct {
 	escaped         bool
 	dnsHeader       uint8
 	dnsArray        bool
+	profile         *separatedInputWriteProfile
+}
+
+// separatedInputWriteProfile contains only bounded timings and size/count
+// aggregates. It never retains input bytes, identities, SQL text or evidence.
+// A profile belongs to one serialized compiler-input writer invocation.
+type separatedInputWriteProfile struct {
+	snapshotStreamNanos int64
+	evidenceCallNanos   int64
+	evidenceFlushNanos  int64
+	componentFlushNanos int64
+	packEncodeNanos     int64
+	frameStageNanos     int64
+	packEncodedBytes    int64
+	evidenceOccurrences int64
+	evidenceBytes       int64
+	uniqueEvidenceBytes int64
+	snapshotComplete    bool
+}
+
+func (p *separatedInputWriteProfile) aggregate(w *separatedInputWriter) map[string]int64 {
+	if p == nil || w == nil || w.batch == nil {
+		return nil
+	}
+	return map[string]int64{
+		"snapshot_stream_ms":              time.Duration(p.snapshotStreamNanos).Milliseconds(),
+		"evidence_callback_ms":            time.Duration(p.evidenceCallNanos).Milliseconds(),
+		"evidence_flush_ms":               time.Duration(p.evidenceFlushNanos).Milliseconds(),
+		"component_flush_ms":              time.Duration(p.componentFlushNanos).Milliseconds(),
+		"pack_encode_ms":                  time.Duration(p.packEncodeNanos).Milliseconds(),
+		"frame_stage_ms":                  time.Duration(p.frameStageNanos).Milliseconds(),
+		"snapshot_bytes":                  w.size,
+		"snapshot_complete":               boolInt(p.snapshotComplete),
+		"frame_bytes":                     int64(len(w.frame)),
+		"evidence_occurrences":            p.evidenceOccurrences,
+		"evidence_bytes":                  p.evidenceBytes,
+		"unique_evidence_components_seen": int64(len(w.verified)),
+		"unique_evidence_bytes":           p.uniqueEvidenceBytes,
+		"pack_encoded_bytes":              p.packEncodedBytes,
+		"evidence_batch_new_objects":      int64(w.batch.newObjects),
+		"evidence_batch_reused_objects":   int64(w.batch.reusedObjects),
+	}
+}
+
+func boolInt(value bool) int64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (w *separatedInputWriter) Write(p []byte) (int, error) {
@@ -260,11 +309,22 @@ func (w *separatedInputWriter) observeJSONShape(p []byte) {
 }
 
 func (w *separatedInputWriter) WriteRuntimeSnapshotEvidence(raw []byte) (int, error) {
+	if w.profile != nil {
+		started := time.Now()
+		defer func() { w.profile.evidenceCallNanos += time.Since(started).Nanoseconds() }()
+	}
 	if w.size+int64(len(raw)) > inputMaxBytes || len(w.parts) >= separatedPartLimit || len(w.frame)+4 > separatedFrameLimit {
 		return 0, errSharedInputBudget
 	}
 	digest := sharedHash(sha256.Sum256(raw))
+	if w.profile != nil {
+		w.profile.evidenceOccurrences++
+		w.profile.evidenceBytes += int64(len(raw))
+	}
 	if !w.verified[digest] {
+		if w.profile != nil {
+			w.profile.uniqueEvidenceBytes += int64(len(raw))
+		}
 		if len(w.pendingEvidence) >= 16 || w.pendingBytes+len(raw) > 4<<20 {
 			if err := w.flushEvidence(); err != nil {
 				return 0, err
@@ -296,8 +356,9 @@ func (w *separatedInputWriter) WriteRuntimeSnapshotEvidence(raw []byte) (int, er
 }
 
 func (s *Store) pgWriteSeparatedInput(ctx context.Context, tx *sql.Tx, snapshot platformconfig.RuntimeSnapshot, digest string, previous *inputManifest) (packResult uint64, resultErr error) {
-	w := &separatedInputWriter{ctx: ctx, tx: tx, hash: sha256.New(), verified: map[string]bool{}}
-	w.batch = &sharedInputWriter{components: true, ctx: ctx, tx: tx, encoder: inputChunkEncoder{level: zlib.DefaultCompression}, objects: map[[32]byte]sharedObject{}, seen: map[[32]byte]bool{}}
+	profile := &separatedInputWriteProfile{}
+	w := &separatedInputWriter{ctx: ctx, tx: tx, hash: sha256.New(), verified: map[string]bool{}, profile: profile}
+	w.batch = &sharedInputWriter{components: true, ctx: ctx, tx: tx, encoder: inputChunkEncoder{level: zlib.DefaultCompression}, objects: map[[32]byte]sharedObject{}, seen: map[[32]byte]bool{}, profile: profile}
 	started := time.Now()
 	phase := started
 	timings := map[string]int64{}
@@ -312,9 +373,11 @@ func (s *Store) pgWriteSeparatedInput(ctx context.Context, tx *sql.Tx, snapshot 
 		timings["total"] = time.Since(started).Milliseconds()
 		separatedInputStats.mu.Lock()
 		separatedInputStats.lastWriteTimings = timings
+		separatedInputStats.lastWriteProfile = profile.aggregate(w)
 		if resultErr != nil {
 			separatedInputStats.lastFailureTimings = timings
 			separatedInputStats.lastFailurePhase = phaseName
+			separatedInputStats.lastFailureProfile = profile.aggregate(w)
 		}
 		separatedInputStats.mu.Unlock()
 		if resultErr != nil {
@@ -325,9 +388,13 @@ func (s *Store) pgWriteSeparatedInput(ctx context.Context, tx *sql.Tx, snapshot 
 		separatedInputStats.logical.Add(uint64(w.size))
 		separatedInputStats.newPackBytes.Add(packResult)
 	}()
-	if err := platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
+	streamStarted := time.Now()
+	err := platformconfig.WriteRuntimeSnapshot(w, snapshot)
+	profile.snapshotStreamNanos += time.Since(streamStarted).Nanoseconds()
+	if err != nil {
 		return 0, err
 	}
+	profile.snapshotComplete = true
 	if err := w.flushEvidence(); err != nil {
 		return 0, err
 	}
@@ -339,7 +406,9 @@ func (s *Store) pgWriteSeparatedInput(ctx context.Context, tx *sql.Tx, snapshot 
 	if sharedHashBytes(w.hash.Sum(nil)) != digest {
 		return 0, ErrConflict
 	}
-	frame, packBytes, err := ensureInputComponent(ctx, tx, w.frame, nil)
+	frameStarted := time.Now()
+	frame, packBytes, err := ensureInputComponent(ctx, tx, w.frame, nil, profile)
+	profile.frameStageNanos += time.Since(frameStarted).Nanoseconds()
 	if err != nil {
 		return 0, fmt.Errorf("separated frame: %w", err)
 	}

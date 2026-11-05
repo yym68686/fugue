@@ -7,6 +7,10 @@ import "time"
 // the existing per-input bound. The final stored readback verifies reused and
 // new components equally; a metadata hit never replaces body verification.
 func (w *separatedInputWriter) flushEvidence() error {
+	if w.profile != nil {
+		started := time.Now()
+		defer func() { w.profile.evidenceFlushNanos += time.Since(started).Nanoseconds() }()
+	}
 	if len(w.pendingEvidence) == 0 {
 		return nil
 	}

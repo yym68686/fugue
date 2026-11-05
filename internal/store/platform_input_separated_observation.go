@@ -19,6 +19,8 @@ var separatedInputStats struct {
 	lastFailureAt                                     time.Time
 	lastWriteTimings                                  map[string]int64
 	lastFailureTimings                                map[string]int64
+	lastWriteProfile                                  map[string]int64
+	lastFailureProfile                                map[string]int64
 	lastFailurePhase                                  string
 }
 
@@ -27,6 +29,7 @@ func separatedInputObservation() any {
 	category, at := separatedInputStats.lastFailureCategory, separatedInputStats.lastFailureAt
 	timings := separatedInputStats.lastWriteTimings
 	failureTimings, failurePhase := separatedInputStats.lastFailureTimings, separatedInputStats.lastFailurePhase
+	profile, failureProfile := separatedInputStats.lastWriteProfile, separatedInputStats.lastFailureProfile
 	separatedInputStats.mu.Unlock()
 	return map[string]any{
 		"verified_write_attempts": separatedInputStats.writes.Load(),
@@ -38,6 +41,8 @@ func separatedInputObservation() any {
 		"last_failure_at":         at,
 		"last_write_timings_ms":   timings,
 		"last_failure_timings_ms": failureTimings,
+		"last_write_profile":      profile,
+		"last_failure_profile":    failureProfile,
 		"last_failure_phase":      failurePhase,
 	}
 }

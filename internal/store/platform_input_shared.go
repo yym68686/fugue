@@ -331,6 +331,7 @@ type sharedInputWriter struct {
 	seen                                    map[[32]byte]bool
 	recipeBytes                             int
 	newPackBytes, newObjects, reusedObjects uint64
+	profile                                 *separatedInputWriteProfile
 }
 
 func (w *sharedInputWriter) Write(p []byte) (int, error) {
@@ -392,6 +393,10 @@ func (w *sharedInputWriter) flush() error {
 	if len(w.recipes) == 0 {
 		return nil
 	}
+	if w.profile != nil {
+		started := time.Now()
+		defer func() { w.profile.componentFlushNanos += time.Since(started).Nanoseconds() }()
+	}
 	keys := make([][]byte, 0, len(w.order))
 	for _, h := range w.order {
 		keys = append(keys, h[:])
@@ -433,7 +438,12 @@ func (w *sharedInputWriter) flush() error {
 		if len(pack) == 0 {
 			return nil
 		}
+		started := time.Now()
 		encoded, e := w.encoder.encode(pack)
+		if w.profile != nil {
+			w.profile.packEncodeNanos += time.Since(started).Nanoseconds()
+			w.profile.packEncodedBytes += int64(len(encoded))
+		}
 		if e != nil {
 			return e
 		}
