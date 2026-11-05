@@ -3398,19 +3398,33 @@ jobs:
         with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
       - name: Install the trusted runner reader-decryption dependency
         run: |
-          python3 -m venv "$RUNNER_TEMP/input-readonly-python"
-          "$RUNNER_TEMP/input-readonly-python/bin/python" -m pip install -r scripts/requirements-input-readonly.txt
-          echo "INPUT_READONLY_PYTHON=$RUNNER_TEMP/input-readonly-python/bin/python" >> "$GITHUB_ENV"
+          # The managed runner already provides Debian's cryptography. Do not
+          # install system packages or assume ensurepip/venv exists there.
+          python3 -c 'from cryptography.hazmat.primitives.ciphers.aead import AESGCM; import cryptography; assert int(cryptography.__version__.split(".")[0]) >= 43'
+          echo "INPUT_READONLY_PYTHON=$(command -v python3)" >> "$GITHUB_ENV"
       - id: readonly
         env: {BASE_SHA: '${{ github.event.before }}'}
         run: |
           set -euo pipefail
           config=deploy/environments/production/compiler-input-readonly/operation.json
-          if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config"; then exit 0; fi
+          if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" scripts/compiler_input_readonly.py scripts/requirements-input-readonly.txt .github/workflows/ci.yml; then exit 0; fi
           git fetch origin main
           git diff --exit-code HEAD origin/main -- scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/requirements-input-readonly.txt deploy/releases "$config" .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m unittest scripts.test_compiler_input_readonly scripts.test_compiler_input_archive scripts.test_compiler_input_storage
-          echo 'selected=true' >> "$GITHUB_OUTPUT"
+          # Code/setup fixes may resume a declaration only if no durable
+          # execution attempt has ever been reserved for it.
+          "$INPUT_READONLY_PYTHON" - <<'PY'
+          import json, os
+          from scripts.compiler_input_readonly import identity, validate
+          from scripts.compiler_input_storage import kube
+          c=validate(json.load(open('deploy/environments/production/compiler-input-readonly/operation.json')))
+          name='fugue-input-readonly-'+identity(c)[:20]+'-receipt'
+          receipt=kube(c['namespace'],'get','configmap',name,'--ignore-not-found','-o','json')
+          if not receipt.strip():
+              with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('selected=true\n')
+          else:
+              print('Existing one-shot receipt: diagnostic will not be replayed.')
+          PY
       - if: steps.readonly.outputs.selected == 'true'
         name: Preview one isolated readonly diagnostic
         run: |
