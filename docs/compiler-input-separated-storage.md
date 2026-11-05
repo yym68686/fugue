@@ -79,6 +79,16 @@ complete byte stream on use. This path currently accepts only v1/v2 chunked
 inputs; v3/v4 inputs do not reside in the legacy chunks relation and are not
 part of its retirement coverage.
 
+`--mode archive-read-check --digest sha256:… --read-check-max-bytes N` is a
+bounded, read-only throughput/integrity measurement for exactly one already
+verified archive. It uses the platform-owned archive reader and the same
+segment, stored-byte, raw-byte, and full-input digest checks as normal archive
+verification. The explicit raw-byte ceiling is mandatory (maximum 1 GiB), the
+source representation must be v1/v2, and no archive row, object, route, lease,
+or source chunk is written. The result explicitly grants no retirement
+authority. It is not a substitute for the complete retirement plan or its
+independent retention, hot-copy, and fencing gates.
+
 `--mode collect` removes at most 16 unreferenced components and 16 unreferenced
 packs per transaction. It checks both v3 and component references, verifies FK
 barriers are present and enabled, and takes the common writer fence. It never
