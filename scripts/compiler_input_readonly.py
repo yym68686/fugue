@@ -50,7 +50,7 @@ def validate(c):
               'cluster', 'clusterUID', 'primary', 'primaryUID', 'postgresContainer', 'dataPath',
               'database', 'digest', 'rawBytes', 'storedBytes', 'segments', 'readCount',
               'apiService', 'readyURL', 'minimumFreeBytes'}
-    require(set(c) == fields and type(c['version']) is int and c['version'] == 1, 'invalid readonly declaration')
+    require(set(c) == fields and type(c['version']) is int and c['version'] == 2, 'invalid readonly declaration')
     require(c['executionAuthorized'] is True, 'readonly execution is not authorized')
     for key in ('namespace', 'node', 'cluster', 'primary', 'postgresContainer', 'database', 'apiService'):
         require(isinstance(c[key], str) and re.fullmatch('[a-z0-9][a-z0-9.-]{0,127}', c[key]), 'invalid readonly identity')
@@ -253,7 +253,7 @@ def job_manifest(c, name, session_name):
             'spec': {'suspend': True, 'backoffLimit': 0, 'activeDeadlineSeconds': 600, 'parallelism': 1, 'completions': 1, 'ttlSecondsAfterFinished': 3600,
                      'template': {'metadata': {'labels': {'fugue.pro/purpose': PURPOSE}, 'annotations': {'fugue.pro/source-commit': c['sourceCommit']}},
                                   'spec': {'restartPolicy': 'Never', 'terminationGracePeriodSeconds': 15, 'automountServiceAccountToken': False,
-                                           'nodeSelector': {'kubernetes.io/hostname': c['node']}, 'preemptionPolicy': 'Never',
+                                           'nodeSelector': {'kubernetes.io/hostname': c['node']}, 'priorityClassName': name, 'preemptionPolicy': 'Never',
                                            'securityContext': {'runAsNonRoot': True, 'runAsUser': 65532, 'runAsGroup': 65532, 'seccompProfile': {'type': 'RuntimeDefault'}},
                                            'containers': [{'name': 'readonly', 'image': c['image'], 'imagePullPolicy': 'IfNotPresent',
                                                            'resources': {'requests': dict(resources), 'limits': dict(resources)},
@@ -278,8 +278,9 @@ def create(value, dry=False):
 
 
 def delete_exact(c, kind, name, uid):
-    plural = {'Job': ('/apis/batch/v1', 'jobs'), 'Secret': ('/api/v1', 'secrets')}[kind]
-    return api_write(['delete', '--raw', plural[0]+'/namespaces/'+c['namespace']+'/'+plural[1]+'/'+name, '-f', '-'],
+    plural = {'Job': ('/apis/batch/v1', 'jobs'), 'Secret': ('/api/v1', 'secrets'), 'PriorityClass': ('/apis/scheduling.k8s.io/v1', 'priorityclasses')}[kind]
+    scope = '' if kind == 'PriorityClass' else '/namespaces/'+c['namespace']
+    return api_write(['delete', '--raw', plural[0]+scope+'/'+plural[1]+'/'+name, '-f', '-'],
                      {'apiVersion': 'v1', 'kind': 'DeleteOptions', 'preconditions': {'uid': uid}, 'propagationPolicy': 'Foreground'})
 
 
@@ -326,6 +327,7 @@ def result_contract(body, c):
 def pod_check(c, job_uid, pod):
     require(any(x.get('controller') and x.get('uid') == job_uid and x.get('kind') == 'Job' for x in pod['metadata'].get('ownerReferences', [])), 'readonly Pod owner differs')
     require(pod['spec'].get('nodeName') == c['node'] and pod['metadata'].get('annotations', {}).get('fugue.pro/source-commit') == c['sourceCommit'], 'readonly Pod node or source differs')
+    require(pod['spec'].get('priority') == -1000000 and pod['spec'].get('preemptionPolicy') == 'Never', 'readonly Pod preemption contract differs')
     statuses = pod['status'].get('containerStatuses', [])
     require(len(statuses) == 1 and statuses[0]['name'] == 'readonly' and statuses[0]['restartCount'] == 0
             and statuses[0]['imageID'].removeprefix('docker-pullable://') == c['image'], 'readonly Pod actual image or restart differs')
@@ -335,6 +337,8 @@ def pod_check(c, job_uid, pod):
 
 def execute(c, evidence, apply=False):
     registry = json.loads(Path('deploy/releases/components.json').read_text())
+    # Executor v2 uses a dedicated negative-priority, non-preempting class.
+    # v1 was refused before any Pod existed. Preserve its receipt forever.
     declaration_hash = identity(c)
     name = 'fugue-input-readonly-'+declaration_hash[:20]
     secret_name = name+'-session'
@@ -346,7 +350,7 @@ def execute(c, evidence, apply=False):
     # Reserve the evidence filename even for failed preflight; no overwrite.
     with evidence.open('x') as output:
         output.write(json.dumps(report)+'\n')
-    job_uid = secret_uid = None
+    job_uid = secret_uid = priority_uid = None
     try:
         if apply:
             require(os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('GITHUB_REF') == 'refs/heads/main'
@@ -366,6 +370,9 @@ def execute(c, evidence, apply=False):
         data = session(c, cluster, primary, deployment, executor, metadata)
         active = json.loads(kube(c['namespace'], 'get', 'jobs', '-l', 'fugue.pro/purpose='+PURPOSE, '-o', 'json'))['items']
         require(not active, 'another readonly execution resource exists; inspect before retrying')
+        priority = {'apiVersion': 'scheduling.k8s.io/v1', 'kind': 'PriorityClass', 'metadata': {'name': name},
+                    'value': -1000000, 'globalDefault': False, 'preemptionPolicy': 'Never', 'description': 'One-shot non-preempting compiler-input diagnostic'}
+        create(priority, dry=True)
         create(manifest, dry=True)
         report['status'] = 'preview-passed'
         if not apply:
@@ -375,6 +382,11 @@ def execute(c, evidence, apply=False):
         receipt = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'namespace': c['namespace'], 'name': name+'-receipt'},
                    'immutable': True, 'data': {'declaration-sha256': declaration_hash, 'intent': 'single-readonly-attempt-no-retry'}}
         create(receipt)
+        priority_uid = create(priority)['metadata']['uid']
+        # Job admission does not validate every eventual Pod admission plugin.
+        # Test the actual template (including the PriorityClass) before start.
+        create({'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'namespace': c['namespace'], 'name': name+'-admission',
+                **manifest['spec']['template']['metadata']}, 'spec': manifest['spec']['template']['spec']}, dry=True)
         created = create(manifest)
         job_uid = created['metadata']['uid']
         report.update(job_uid=job_uid, status='reserved')
@@ -396,6 +408,11 @@ def execute(c, evidence, apply=False):
         while time.monotonic() < deadline:
             job = get(c['namespace'], 'job', name)
             require(job['metadata']['uid'] == job_uid, 'readonly Job identity changed')
+            observed_priority = cluster_get('priorityclass', name)
+            require(observed_priority['metadata']['uid'] == priority_uid and observed_priority['value'] == -1000000
+                    and observed_priority['preemptionPolicy'] == 'Never' and not observed_priority.get('globalDefault'), 'readonly PriorityClass changed')
+            events = json.loads(kube(c['namespace'], 'get', 'events', '--field-selector=involvedObject.uid='+job_uid, '-o', 'json'))['items']
+            require(not any(e.get('reason') == 'FailedCreate' for e in events), 'readonly Pod admission failed; no automatic retry')
             pods = json.loads(kube(c['namespace'], 'get', 'pods', '-l', 'job-name='+name, '-o', 'json'))['items']
             require(len(pods) <= 1, 'readonly Job has multiple Pods')
             if pods and pods[0]['status'].get('containerStatuses') and pods[0]['status']['containerStatuses'][0].get('imageID'):
@@ -448,6 +465,13 @@ def execute(c, evidence, apply=False):
                 else:
                     raise ValueError('readonly session or Job cleanup remains pending')
                 report['cleanup_confirmed'] = True
+            except Exception as error:
+                report.update(cleanup_confirmed=False, cleanup_error_type=type(error).__name__)
+        if priority_uid and (job_uid is None or report['cleanup_confirmed']):
+            try:
+                delete_exact(c, 'PriorityClass', name, priority_uid)
+                classes = json.loads(cluster_kube('get', 'priorityclasses', '--field-selector=metadata.name='+name, '-o', 'json'))['items']
+                require(not classes, 'readonly priority class cleanup remains pending')
             except Exception as error:
                 report.update(cleanup_confirmed=False, cleanup_error_type=type(error).__name__)
         report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()

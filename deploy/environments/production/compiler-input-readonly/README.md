@@ -23,6 +23,12 @@ failure cancels only this exact Job; foreground UID-fenced cleanup confirms its
 Pod is gone before removing the exact session Secret. Cleanup failure remains
 visible and must be inspected; never force-delete a production Pod.
 
+Version 2 creates an exact-owned temporary PriorityClass at -1,000,000 with
+`preemptionPolicy: Never`, because Kubernetes priority admission rejects a Pod
+that sets this policy without a corresponding class. The class is not a global
+default and is removed by exact UID after the Job is gone. Admission failures
+cancel the attempt immediately instead of waiting or changing business policy.
+
 An immutable ConfigMap receipt survives resource cleanup and refuses replay of
 the same declaration. A CI rerun is not permission to repeat reads. A failure
 before unsuspension leaves no running inspector. An ambiguous create/start

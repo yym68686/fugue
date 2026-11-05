@@ -19,7 +19,7 @@ except ModuleNotFoundError:
 
 
 def declaration():
-    return dict(version=1, executionAuthorized=True, namespace='platform-system', node='runtime-one', nodeUID='1'*8+'-'+'1'*4+'-'+'1'*4+'-'+'1'*4+'-'+'1'*12,
+    return dict(version=2, executionAuthorized=True, namespace='platform-system', node='runtime-one', nodeUID='1'*8+'-'+'1'*4+'-'+'1'*4+'-'+'1'*4+'-'+'1'*12,
                 sourceCommit='a'*40, image='registry.example/platform@sha256:'+'b'*64, cluster='platform-postgres', clusterUID='2'*8+'-'+'2'*4+'-'+'2'*4+'-'+'2'*4+'-'+'2'*12,
                 primary='platform-postgres-1', primaryUID='3'*8+'-'+'3'*4+'-'+'3'*4+'-'+'3'*4+'-'+'3'*12,
                 postgresContainer='postgres', dataPath='/var/lib/postgresql/data', database='platform', digest='sha256:'+'c'*64,
@@ -109,7 +109,7 @@ class ReadonlyTest(unittest.TestCase):
         c = declaration()
         pod = {'metadata': {'name': 'job-pod', 'uid': 'pod-uid', 'annotations': {'fugue.pro/source-commit': c['sourceCommit']},
                             'ownerReferences': [{'kind': 'Job', 'controller': True, 'uid': 'job-uid'}]},
-               'spec': {'nodeName': c['node']}, 'status': {'phase': 'Succeeded', 'containerStatuses': [{'name': 'readonly', 'restartCount': 0, 'imageID': c['image']}]}}
+               'spec': {'nodeName': c['node'], 'priority': -1000000, 'preemptionPolicy': 'Never'}, 'status': {'phase': 'Succeeded', 'containerStatuses': [{'name': 'readonly', 'restartCount': 0, 'imageID': c['image']}]}}
         self.assertEqual(r.pod_check(c, 'job-uid', pod)['pod_uid'], 'pod-uid')
         for path, value in [(('spec', 'nodeName'), 'different'), (('metadata', 'uid'), 'irrelevant')]:
             if path[-1] == 'uid': continue
@@ -156,10 +156,11 @@ class ReadonlyTest(unittest.TestCase):
         deployment = {'spec': {'template': {'spec': {'containers': [{'name': 'api'}]}}}}
         pod = {'metadata': {'name': 'readonly-pod', 'uid': 'pod-uid', 'annotations': {'fugue.pro/source-commit': c['sourceCommit']},
                            'ownerReferences': [{'kind': 'Job', 'controller': True, 'uid': 'job-uid'}]},
-               'spec': {'nodeName': c['node']}, 'status': {'phase': 'Failed', 'containerStatuses': [{'name': 'readonly', 'imageID': c['image'], 'restartCount': 0}]}}
+               'spec': {'nodeName': c['node'], 'priority': -1000000, 'preemptionPolicy': 'Never'}, 'status': {'phase': 'Failed', 'containerStatuses': [{'name': 'readonly', 'imageID': c['image'], 'restartCount': 0}]}}
         logs = '\n'.join(json.dumps(x) for x in [failure(), read(c), read(c), read(c)])
         def kube(ns, *args):
             if args[:2] == ('get', 'jobs'): return '{"items":[]}'
+            if args[:2] == ('get', 'events'): return '{"items":[]}'
             if args[:2] == ('get', 'pods'):
                 return json.dumps({'items': [] if deleted else [pod]})
             if args[:2] == ('get', 'secret'): return '{"items":[]}'
@@ -173,7 +174,9 @@ class ReadonlyTest(unittest.TestCase):
                 patch.object(r, 'serving_gate', return_value=({'container': 'api'}, deployment, {})), \
                 patch.object(r, 'sql_metadata', return_value={}), patch.object(r, 'session', return_value={'reader': 'private-value'}), \
                 patch.object(r, 'kube', side_effect=kube), patch.object(r, 'get', side_effect=lambda ns, kind, name: {'metadata': {'uid': 'job-uid'}} if kind == 'job' else pod), \
-                patch.object(r, 'create', side_effect=[{}, {}, {'metadata': {'uid': 'job-uid'}}, {'metadata': {'uid': 'secret-uid'}}]) as create, \
+                patch.object(r, 'create', side_effect=[{}, {}, {}, {'metadata': {'uid': 'priority-uid'}}, {}, {'metadata': {'uid': 'job-uid'}}, {'metadata': {'uid': 'secret-uid'}}]) as create, \
+                patch.object(r, 'cluster_get', return_value={'metadata': {'uid': 'priority-uid'}, 'value': -1000000, 'preemptionPolicy': 'Never'}), \
+                patch.object(r, 'cluster_kube', return_value='{"items":[]}'), \
                 patch.object(r, 'api_write', return_value={}), patch.object(r, 'delete_exact', side_effect=remove):
             report = r.execute(c, Path(tmp)/'evidence.json', apply=True)
             self.assertEqual(report['status'], 'diagnostic-finished')
@@ -181,8 +184,8 @@ class ReadonlyTest(unittest.TestCase):
             self.assertFalse(report['result']['graph_command_completed'])
             self.assertTrue(report['result']['all_reads_verified'])
             self.assertNotIn('private-value', (Path(tmp)/'evidence.json').read_text())
-            self.assertEqual(deleted, [('Job', 'job-uid')])
-            receipt = create.call_args_list[1].args[0]
+            self.assertEqual(deleted, [('Job', 'job-uid'), ('PriorityClass', 'priority-uid')])
+            receipt = create.call_args_list[2].args[0]
             self.assertEqual(receipt['kind'], 'ConfigMap')
             self.assertTrue(receipt['immutable'])
             self.assertIn('no-retry', receipt['data']['intent'])
@@ -194,9 +197,9 @@ class ReadonlyTest(unittest.TestCase):
                 patch.object(r, 'primary_gate', return_value=({}, {'status': {'containerStatuses': []}}, 10 << 30)), patch.object(r, 'serving_gate', return_value=({}, {}, {})), \
                 patch.object(r, 'sql_metadata', return_value={}), patch.object(r, 'session', return_value={}), \
                 patch.object(r, 'kube', return_value='{"items":[]}'), \
-                patch.object(r, 'create', side_effect=[{}, r.Refusal('duplicate receipt')]) as create, patch.object(r, 'api_write') as write:
+                patch.object(r, 'create', side_effect=[{}, {}, r.Refusal('duplicate receipt')]) as create, patch.object(r, 'api_write') as write:
             with self.assertRaisesRegex(ValueError, 'duplicate receipt'): r.execute(c, Path(tmp)/'evidence.json', apply=True)
-            self.assertEqual(create.call_count, 2)
+            self.assertEqual(create.call_count, 3)
             write.assert_not_called()
 
 
