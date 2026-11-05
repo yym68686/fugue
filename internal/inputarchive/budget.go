@@ -119,14 +119,22 @@ func (r *budgetBody) Read(p []byte) (int, error) {
 	if left <= 0 {
 		return 0, ErrBudget
 	}
-	next := min(len(p), 64<<10, int(left))
-	if err := r.b.pace(r.ctx, next); err != nil {
+	if err := r.ctx.Err(); err != nil {
 		return 0, err
 	}
+	next := min(len(p), 64<<10, int(left))
+	// Read at most one bounded buffer and charge actual bytes, including
+	// bytes transferred before cancellation. Pace before returning payload;
+	// short reads and EOF must not pay for unused buffer capacity.
 	n, err := r.ReadCloser.Read(p[:next])
 	r.b.mu.Lock()
 	r.b.usage.GetBytes += int64(n)
 	r.b.mu.Unlock()
+	if n > 0 {
+		if paceErr := r.b.pace(r.ctx, n); paceErr != nil {
+			return n, errors.Join(err, paceErr)
+		}
+	}
 	return n, err
 }
 
@@ -144,13 +152,18 @@ func (r *pacedSource) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	next := min(len(p), 64<<10)
-	if err := r.b.pace(r.ctx, next); err != nil {
+	if err := r.ctx.Err(); err != nil {
 		return 0, err
 	}
+	next := min(len(p), 64<<10)
 	n, err := r.source.Read(p[:next])
 	r.b.mu.Lock()
 	r.b.usage.SourceBytes += int64(n)
 	r.b.mu.Unlock()
+	if n > 0 {
+		if paceErr := r.b.pace(r.ctx, n); paceErr != nil {
+			return n, errors.Join(err, paceErr)
+		}
+	}
 	return n, err
 }

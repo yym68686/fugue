@@ -118,3 +118,118 @@ func (o *memoryBudgetObjects) Put(_ context.Context, k string, b []byte) error {
 func (o *memoryBudgetObjects) Get(_ context.Context, k string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(o.values[k])), nil
 }
+
+func TestCopyBudgetShortReadsChargeActualBytes(t *testing.T) {
+	for _, remote := range []bool{false, true} {
+		t.Run(map[bool]string{false: "source", true: "get"}[remote], func(t *testing.T) {
+			o := &countedObjects{data: []byte("x")}
+			b, _ := NewBudgetObjects(o, o, CopyBudget{MaxPutBytes: 1 << 20, MaxGetBytes: 1 << 20,
+				MaxPutRequests: 1, MaxGetRequests: 1, BytesPerSecond: 64 << 10})
+			ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+			defer cancel()
+			var r io.Reader = b.Source(ctx, bytes.NewReader(o.data))
+			if remote {
+				body, err := b.Get(ctx, "x")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer body.Close()
+				r = body
+			}
+			// The requested buffer would cost a second. One actual byte plus
+			// EOF must fit without charging 64KiB of nonexistent payload.
+			buffer := make([]byte, 64<<10)
+			n, err := r.Read(buffer)
+			if n != 1 || err != nil || buffer[0] != 'x' {
+				t.Fatalf("short read: %d %v", n, err)
+			}
+			if n, err = r.Read(buffer); n != 0 || err != io.EOF {
+				t.Fatalf("EOF: %d %v", n, err)
+			}
+			u := b.Usage()
+			if remote && u.GetBytes != 1 || !remote && u.SourceBytes != 1 {
+				t.Fatal(u)
+			}
+		})
+	}
+}
+
+func TestCopyBudgetReadCancellationCountsTransferredBytes(t *testing.T) {
+	for _, remote := range []bool{false, true} {
+		t.Run(map[bool]string{false: "source", true: "get"}[remote], func(t *testing.T) {
+			o := &countedObjects{data: []byte("transferred")}
+			b, _ := NewBudgetObjects(o, o, CopyBudget{MaxPutBytes: 32, MaxGetBytes: 32,
+				MaxPutRequests: 1, MaxGetRequests: 1, BytesPerSecond: 1})
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+			defer cancel()
+			var r io.Reader = b.Source(ctx, bytes.NewReader(o.data))
+			if remote {
+				body, err := b.Get(ctx, "x")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer body.Close()
+				r = body
+			}
+			buffer := make([]byte, 32)
+			n, err := r.Read(buffer)
+			if n != len(o.data) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("transfer: %d %v", n, err)
+			}
+			u := b.Usage()
+			if remote && u.GetBytes != int64(n) || !remote && u.SourceBytes != int64(n) {
+				t.Fatal(u)
+			}
+			if n, err = r.Read(buffer); n != 0 || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("canceled: %d %v", n, err)
+			}
+		})
+	}
+}
+
+func TestCopyBudgetPacesActualReadPayload(t *testing.T) {
+	o := &countedObjects{data: bytes.Repeat([]byte{'x'}, 64<<10)}
+	b, _ := NewBudgetObjects(o, o, CopyBudget{MaxPutBytes: 1 << 20, MaxGetBytes: 1 << 20,
+		MaxPutRequests: 1, MaxGetRequests: 1, BytesPerSecond: 64 << 10})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+	buffer := make([]byte, 64<<10)
+	// Removing all read pacing would incorrectly finish before the deadline.
+	n, err := b.Source(ctx, bytes.NewReader(o.data)).Read(buffer)
+	if n != len(buffer) || !errors.Is(err, context.DeadlineExceeded) || b.Usage().SourceBytes != int64(n) {
+		t.Fatal(n, err, b.Usage())
+	}
+}
+
+type copyBudgetCancelReader struct {
+	cancel context.CancelFunc
+	cause  error
+}
+
+func (r copyBudgetCancelReader) Read(p []byte) (int, error) {
+	p[0] = 'x'
+	r.cancel()
+	return 1, r.cause
+}
+
+func TestCopyBudgetRetainsReadErrorWhenPacingCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cause := errors.New("synthetic read error")
+	o := &countedObjects{}
+	b, _ := NewBudgetObjects(o, o, CopyBudget{MaxPutBytes: 32, MaxGetBytes: 32,
+		MaxPutRequests: 1, MaxGetRequests: 1, BytesPerSecond: 1})
+	for _, remote := range []bool{false, true} {
+		ctx, cancel = context.WithCancel(t.Context())
+		source := copyBudgetCancelReader{cancel: cancel, cause: cause}
+		var reader io.Reader = b.Source(ctx, source)
+		if remote {
+			reader = &budgetBody{ReadCloser: io.NopCloser(source), ctx: ctx, b: b}
+		}
+		n, err := reader.Read(make([]byte, 4))
+		cancel()
+		if n != 1 || !errors.Is(err, cause) || !errors.Is(err, context.Canceled) {
+			t.Fatal(n, err)
+		}
+	}
+}
