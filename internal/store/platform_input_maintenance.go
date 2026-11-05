@@ -285,6 +285,13 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 		if archivePinned {
 			return report, fmt.Errorf("compiler input representation is pinned by an external archive: %w", ErrConflict)
 		}
+		localPinned, pinErr := compilerInputLocalPinsSource(ctx, tx, m.Digest)
+		if pinErr != nil {
+			return report, pinErr
+		}
+		if localPinned {
+			return report, fmt.Errorf("compiler input representation has an independent local pin: %w", ErrConflict)
+		}
 		report.OldFormat = m.Format
 		report.LogicalBytes = m.Size
 		if m.Size > o.MaxInputBytes || o.ExpectedFormat != "" && o.ExpectedFormat != m.Format {

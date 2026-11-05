@@ -2,6 +2,7 @@ package schemamigrate
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 )
 
@@ -18,6 +19,31 @@ CREATE TABLE IF NOT EXISTS fugue_platform_input_hot_chunks (
  data BYTEA NOT NULL CHECK (octet_length(data)>0 AND octet_length(data)<=262144),
  PRIMARY KEY(content_hash,ordinal)
 );
+CREATE TABLE IF NOT EXISTS fugue_platform_input_local_pins (
+ pin_key TEXT PRIMARY KEY CHECK (pin_key ~ '^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$'),
+ token BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE CHECK (token>0),
+ content_hash TEXT NOT NULL CHECK (content_hash ~ '^sha256:[0-9a-f]{64}$'),
+ protected_content_hash TEXT REFERENCES fugue_platform_input_manifests(content_hash) ON DELETE RESTRICT,
+ source_format TEXT NOT NULL CHECK (source_format IN ('runtime-snapshot-json-v1','runtime-snapshot-json-chunk-codec-v2','runtime-snapshot-shared-v3','runtime-snapshot-separated-v4')),
+ source_location TEXT NOT NULL CHECK (source_location IN ('legacy','hot')),
+ raw_bytes BIGINT NOT NULL CHECK (raw_bytes>0 AND raw_bytes<=1073741824),
+ chunk_size INTEGER NOT NULL CHECK (chunk_size>0 AND chunk_size<=262144),
+ chunk_count INTEGER NOT NULL CHECK (chunk_count>0 AND chunk_count<=1048576),
+ source_created_at TIMESTAMPTZ NOT NULL,
+ source_epoch BIGINT NOT NULL CHECK (source_epoch>=0),
+ state TEXT NOT NULL CHECK (state IN ('pending','verified','released')),
+ created_at TIMESTAMPTZ NOT NULL,
+ verified_at TIMESTAMPTZ NULL,
+ released_at TIMESTAMPTZ NULL,
+ CONSTRAINT fugue_platform_input_local_pins_timestamps_check CHECK ((state='verified' AND verified_at IS NOT NULL AND released_at IS NULL)
+     OR (state='pending' AND verified_at IS NULL AND released_at IS NULL)
+     OR (state='released' AND released_at IS NOT NULL)),
+ CONSTRAINT fugue_platform_input_local_pins_protection_check CHECK ((state IN ('pending','verified') AND protected_content_hash IS NOT NULL AND protected_content_hash=content_hash)
+     OR (state='released' AND protected_content_hash IS NULL)),
+ CHECK (source_format IN ('runtime-snapshot-shared-v3','runtime-snapshot-separated-v4') OR source_location='hot')
+);
+CREATE INDEX IF NOT EXISTS fugue_platform_input_local_pins_active_idx
+ ON fugue_platform_input_local_pins(content_hash) WHERE state IN ('pending','verified');
 CREATE TABLE IF NOT EXISTS fugue_platform_input_archives (
  content_hash TEXT PRIMARY KEY REFERENCES fugue_platform_input_manifests(content_hash) ON DELETE RESTRICT,
  archive_format TEXT NOT NULL CHECK (archive_format='compiler-input-archive-v1'),
@@ -110,6 +136,7 @@ func MigrateCompilerInputArchive(ctx context.Context, databaseURL string) error 
 	}
 	for _, table := range []struct{ name, columns, casts string }{
 		{"fugue_platform_input_hot_chunks", "content_hash,ordinal,chunk_hash,data", "NULL::text,NULL::integer,NULL::text,NULL::bytea"},
+		{"fugue_platform_input_local_pins", "pin_key,token,content_hash,protected_content_hash,source_format,source_location,raw_bytes,chunk_size,chunk_count,source_created_at,source_epoch,state,created_at,verified_at,released_at", "NULL::text,NULL::bigint,NULL::text,NULL::text,NULL::text,NULL::text,NULL::bigint,NULL::integer,NULL::integer,NULL::timestamptz,NULL::bigint,NULL::text,NULL::timestamptz,NULL::timestamptz,NULL::timestamptz"},
 		{"fugue_platform_input_manifests", "storage_location", "NULL::text"},
 		{"fugue_platform_input_archives", "content_hash,archive_format,source_format,raw_bytes,segment_bytes,segment_count,object_prefix,backend_hash,state,source_epoch,verified_digest,fencing_token,created_at,verified_at,routed_at,updated_at", "NULL::text,NULL::text,NULL::text,NULL::bigint,NULL::integer,NULL::integer,NULL::text,NULL::text,NULL::text,NULL::bigint,NULL::text,NULL::bigint,NULL::timestamptz,NULL::timestamptz,NULL::timestamptz,NULL::timestamptz"},
 		{"fugue_platform_input_archive_segments", "content_hash,ordinal,object_key,raw_bytes,stored_bytes,segment_hash,stored_hash,object_etag,uploaded_at,verified_at", "NULL::text,NULL::integer,NULL::text,NULL::integer,NULL::integer,NULL::text,NULL::text,NULL::text,NULL::timestamptz,NULL::timestamptz"},
@@ -124,8 +151,42 @@ func MigrateCompilerInputArchive(ctx context.Context, databaseURL string) error 
 			return queryErr
 		}
 	}
+	if err = VerifyCompilerInputLocalPins(ctx, tx); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// VerifyCompilerInputLocalPins does not bless a pre-existing lookalike table
+// whose key, token or reference barrier could silently drop protected inputs.
+func VerifyCompilerInputLocalPins(ctx context.Context, tx interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) error {
+	const table = "fugue_platform_input_local_pins"
+	for suffix, want := range map[string]string{
+		"pkey":                        "PRIMARY KEY (pin_key)",
+		"token_key":                   "UNIQUE (token)",
+		"token_check":                 "CHECK ((token > 0))",
+		"content_hash_check":          "CHECK ((content_hash ~ '^sha256:[0-9a-f]{64}$'::text))",
+		"protected_content_hash_fkey": "FOREIGN KEY (protected_content_hash) REFERENCES fugue_platform_input_manifests(content_hash) ON DELETE RESTRICT",
+		"protection_check":            "CHECK ((((state = ANY (ARRAY['pending'::text, 'verified'::text])) AND (protected_content_hash IS NOT NULL) AND (protected_content_hash = content_hash)) OR ((state = 'released'::text) AND (protected_content_hash IS NULL))))",
+		"timestamps_check":            "CHECK ((((state = 'verified'::text) AND (verified_at IS NOT NULL) AND (released_at IS NULL)) OR ((state = 'pending'::text) AND (verified_at IS NULL) AND (released_at IS NULL)) OR ((state = 'released'::text) AND (released_at IS NOT NULL))))",
+	} {
+		var actual string
+		if err := tx.QueryRowContext(ctx, `SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c WHERE c.conrelid=$1::regclass AND c.conname=$2 AND c.convalidated AND NOT EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgconstraint=c.oid AND t.tgenabled NOT IN ('O','A'))`, table, table+"_"+suffix).Scan(&actual); err != nil || actual != want {
+			return fmt.Errorf("compiler input local pin barrier missing or changed: %s", suffix)
+		}
+	}
+	var identity bool
+	if err := tx.QueryRowContext(ctx, `SELECT attidentity='a' AND attnotnull FROM pg_attribute WHERE attrelid=$1::regclass AND attname='token' AND NOT attisdropped`, table).Scan(&identity); err != nil || !identity {
+		return fmt.Errorf("compiler input local pin fencing token identity missing or changed")
+	}
+	var required bool
+	if err := tx.QueryRowContext(ctx, `SELECT count(*)=12 AND bool_and(attnotnull) FROM pg_attribute WHERE attrelid=$1::regclass AND attname IN ('pin_key','token','content_hash','source_format','source_location','raw_bytes','chunk_size','chunk_count','source_created_at','source_epoch','state','created_at') AND NOT attisdropped`, table).Scan(&required); err != nil || !required {
+		return fmt.Errorf("compiler input local pin required identity columns missing or nullable")
 	}
 	return nil
 }

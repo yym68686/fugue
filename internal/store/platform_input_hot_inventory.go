@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
+	"fugue/internal/schemamigrate"
 )
 
 const compilerInputHotRootLimit = 16384
@@ -120,6 +121,16 @@ func compilerInputHotInventorySnapshot(ctx context.Context, tx *sql.Tx, rootsOnl
 	if err != nil {
 		return report, err
 	}
+	var pinsInstalled bool
+	if err = tx.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_local_pins') IS NOT NULL`).Scan(&pinsInstalled); err != nil {
+		return report, err
+	}
+	if pinsInstalled {
+		if err = schemamigrate.VerifyCompilerInputLocalPins(ctx, tx); err != nil {
+			return report, err
+		}
+		report.UncoveredSources = report.UncoveredSources[1:]
+	}
 	report.RootInventoryComplete = true
 	for _, root := range roots {
 		report.RootCounts[root.Source]++
@@ -203,6 +214,34 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
 		}
 		if len(roots) > compilerInputHotRootLimit {
 			return nil, &compilerInputHotInventoryError{"root-budget-" + source, ErrConflict}
+		}
+	}
+	// Pending verification conservatively retains its source just like a
+	// verified pin. Released tombstones are audit records, not retention roots.
+	var pinsInstalled bool
+	if err := tx.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_local_pins') IS NOT NULL`).Scan(&pinsInstalled); err != nil {
+		return nil, err
+	}
+	if pinsInstalled {
+		rows, err := tx.QueryContext(ctx, `SELECT pin_key,content_hash FROM fugue_platform_input_local_pins WHERE state IN ('pending','verified') LIMIT $1`, compilerInputHotRootLimit-len(roots)+1)
+		if err != nil {
+			return nil, &compilerInputHotInventoryError{"local-pins", err}
+		}
+		for rows.Next() {
+			var key, digest string
+			if err = rows.Scan(&key, &digest); err != nil {
+				break
+			}
+			roots = append(roots, inputarchive.HotRoot{Source: "local-input-pin", ID: key, Reference: inputarchive.HotReference{Kind: "input", ID: digest, ExpectedHash: digest}})
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		if closeErr := rows.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil || len(roots) > compilerInputHotRootLimit {
+			return nil, &compilerInputHotInventoryError{"local-pins", errors.Join(err, ErrConflict)}
 		}
 	}
 	// Retain three distinct verified generations, in the existing rollback

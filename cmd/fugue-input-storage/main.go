@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-local-readback, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, observe")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
@@ -37,15 +37,18 @@ func main() {
 	archiveSegmentBytes := flag.Int("archive-segment-bytes", 16<<20, "bounded archive segment bytes; applies only to new receipts")
 	hotMaxStoredBytes := flag.Int64("hot-copy-max-stored-bytes", 0, "explicit stored-byte budget for one archive hot copy or restore; source remains intact")
 	readCheckMaxBytes := flag.Int64("read-check-max-bytes", 0, "explicit raw-byte ceiling for one complete read-only input check, at most 1GiB")
+	localPinKey := flag.String("local-pin-key", "", "unique local pin key, never reused after release")
+	localPinToken := flag.Int64("local-pin-token", 0, "exact positive token required to release a local pin")
 	rehearse := flag.Bool("rehearse", false, "encode/verify then roll back (consumes WAL and I/O)")
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
 	hotMode := *mode == "archive-hot-copy" || *mode == "archive-hot-restore"
-	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode) && !*apply
+	localPinMode := *mode == "archive-local-pin" || *mode == "archive-local-unpin"
+	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode || *mode == "archive-local-pin") && !*apply
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
-	if flag.NArg() != 0 || *apply && *rehearse || (*mode == "archive" || routeMode || hotMode || writeFenceMode || retirementMode) && *rehearse || routeMode && !*apply || writeFenceMode && !*apply || retirementMode && !*apply || *disarm && !writeFenceMode || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
+	if flag.NArg() != 0 || *apply && *rehearse || (*mode == "archive" || routeMode || hotMode || localPinMode || writeFenceMode || retirementMode) && *rehearse || routeMode && !*apply || writeFenceMode && !*apply || retirementMode && !*apply || *disarm && !writeFenceMode || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
 		fmt.Fprintln(os.Stderr, "select a read-only mode, or explicitly choose apply/rehearse")
 		os.Exit(2)
 	}
@@ -54,6 +57,25 @@ func main() {
 	if *mode == "observe" {
 		if err := observeStorage(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "runtime storage observation unavailable")
+			os.Exit(1)
+		}
+		return
+	}
+	if localPinMode {
+		dsn := os.Getenv("FUGUE_DATABASE_URL")
+		if dsn == "" {
+			fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
+			os.Exit(2)
+		}
+		report, err := store.RunCompilerInputLocalPin(ctx, dsn, store.CompilerInputLocalPinOptions{Key: *localPinKey, Digest: *digest, MaxRawBytes: *readCheckMaxBytes, Apply: *apply, Release: *mode == "archive-local-unpin", ExpectedToken: *localPinToken})
+		if err != nil {
+			// Registration can have committed a protective pending pin even if
+			// readback subsequently failed. Preserve that bounded state receipt.
+			_ = json.NewEncoder(os.Stdout).Encode(report)
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
 			os.Exit(1)
 		}
 		return

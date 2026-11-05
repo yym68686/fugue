@@ -95,6 +95,32 @@ barriers are present and enabled, and takes the common writer fence. It never
 deletes input manifests, artifacts, publications, pins or LKG roots. Retiring
 historical inputs is a separate complete dependency-graph GC problem.
 
+`--mode archive-local-pin --local-pin-key KEY --digest sha256:…
+--read-check-max-bytes N` previews one independent local representation. With
+`--apply` and the archive migration opt-in, a short writer transaction registers
+a durable pending pin, the existing native local reader verifies the complete
+original SHA-256 outside the global writer lock, and a second short transaction
+promotes that exact pin/manifest/epoch to verified. No R2 object or route is
+read or changed. v1/v2 require the independent hot relation; v3/v4 use local
+packs. Failed verification leaves a protective pending pin for inspection and
+exact retry. Preview never constitutes fresh byte verification.
+
+Pending and verified pins are roots in the coherent hot inventory and prevent
+the supported representation migrator/rollback from replacing local storage.
+Their FK prevents manifest deletion; existing component/pack references retain
+the byte closure. `--mode archive-local-unpin --apply --local-pin-key KEY
+--digest sha256:… --local-pin-token TOKEN` releases only that exact receipt.
+Released keys remain tombstones and cannot be reused; their FK is cleared so
+they do not permanently retain a historical input. Multiple pins are independent.
+No expiration or background unpin is implied.
+
+This registry is one building block, not a full publication/reactivation guard.
+All future historical collectors and rollback maintenance versions must honor
+it, and callers must not release a pin still required by an active root. It
+does not prove the complete hot closure, artifact signatures or current/rollback
+compatibility and does not authorize old-table retirement. Existing production
+maintenance declarations do not execute pin commands.
+
 The in-database representation migrator's hard per-input limit is 128 MiB;
 statement/lock/overall budgets are 5 seconds/250 ms/2 minutes. The separate
 external archive stream has a 1 GiB hard input limit and bounded segments.
