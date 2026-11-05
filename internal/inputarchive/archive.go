@@ -136,8 +136,8 @@ func Copy(ctx context.Context, objects Objects, source io.Reader, planned Manife
 		}
 		n := int(min(int64(planned.SegmentBytes), planned.RawBytes-int64(i)*int64(planned.SegmentBytes)))
 		raw := buffer[:n]
-		if _, err := io.ReadFull(source, raw); err != nil {
-			return Manifest{}, fmt.Errorf("archive source length: %w", ErrIntegrity)
+		if received, err := io.ReadFull(source, raw); err != nil {
+			return Manifest{}, &sourceReadError{ordinal: i, received: received, cause: err}
 		}
 		h.Write(raw)
 		if i < len(planned.Segments) {

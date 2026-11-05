@@ -83,7 +83,7 @@ func main() {
 		}
 		_ = file.Close()
 		report, err := store.RunCompilerInputArchiveCopy(ctx, os.Getenv("FUGUE_DATABASE_URL"), c)
-		_ = json.NewEncoder(os.Stdout).Encode(report)
+		_ = writeArchiveCopyReport(os.Stdout, report, err)
 		if err != nil {
 			reportMaintenanceError(err)
 			os.Exit(1)
@@ -305,6 +305,28 @@ func writeRetirementError(output io.Writer, err error) {
 
 var archiveReadCheckDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+func writeArchiveCopyReport(output io.Writer, report store.CompilerInputArchiveCopyReport, err error) error {
+	type failure struct {
+		Stage    string `json:"stage"`
+		Category string `json:"category"`
+		Ordinal  int    `json:"segment_ordinal"`
+		Received int    `json:"segment_bytes_read"`
+	}
+	receipt := struct {
+		store.CompilerInputArchiveCopyReport
+		Failure *failure `json:"failure,omitempty"`
+	}{CompilerInputArchiveCopyReport: report}
+	if err != nil {
+		stage := "unclassified"
+		ordinal, received, source := inputarchive.SourceReadFailure(err)
+		if source {
+			stage = "source-read"
+		}
+		receipt.Failure = &failure{Stage: stage, Category: maintenanceErrorCategory(err), Ordinal: ordinal, Received: received}
+	}
+	return json.NewEncoder(output).Encode(receipt)
+}
+
 func reportMaintenanceError(err error) {
 	fmt.Fprintln(os.Stderr, "compiler input maintenance completion not confirmed; inspect state before retrying; category="+maintenanceErrorCategory(err))
 }
@@ -357,6 +379,12 @@ func maintenanceErrorCategory(err error) string {
 		return "invalid-input"
 	case errors.As(err, &networkError):
 		return "network"
+	case errors.Is(err, inputarchive.ErrBudget):
+		return "budget"
+	case errors.Is(err, inputarchive.ErrIntegrity):
+		return "integrity"
+	case errors.Is(err, inputarchive.ErrInvalid):
+		return "invalid-input"
 	}
 	return "unclassified"
 }

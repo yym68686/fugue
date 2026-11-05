@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -16,6 +17,27 @@ type memoryObjects struct {
 	mu      sync.Mutex
 	values  map[string][]byte
 	corrupt bool
+}
+
+type failedSource struct{ cause error }
+
+func (r failedSource) Read([]byte) (int, error) { return 0, r.cause }
+
+func TestCopyShortSourcePreservesCauseAndSafePosition(t *testing.T) {
+	cause := errors.New("synthetic private source diagnostic")
+	const segment = 64 << 10
+	data := bytes.Repeat([]byte("x"), 2*segment)
+	planned := Manifest{Format: Format, Digest: digestRepeated([]byte("x"), int64(len(data))), RawBytes: int64(len(data)), SegmentBytes: segment, Prefix: "archive/source-failure"}
+	objects := &memoryObjects{}
+	var receipts int
+	_, err := Copy(t.Context(), objects, io.MultiReader(bytes.NewReader(data[:segment+7]), failedSource{cause}), planned, func(Segment) error { receipts++; return nil })
+	ordinal, received, found := SourceReadFailure(err)
+	if !found || ordinal != 1 || received != 7 || !errors.Is(err, ErrIntegrity) || !errors.Is(err, cause) || receipts != 1 || len(objects.values) != 1 {
+		t.Fatal("source cause/position or fail-closed behavior changed", ordinal, received, found, receipts, err)
+	}
+	if strings.Contains(err.Error(), "private") {
+		t.Fatal("source error message exposed its private cause")
+	}
 }
 
 func (m *memoryObjects) Put(_ context.Context, key string, b []byte) error {

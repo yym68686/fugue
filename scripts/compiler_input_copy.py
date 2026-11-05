@@ -237,13 +237,35 @@ def check_impact(c, initial, current):
     require(current['active_clients'] <= initial['active_clients']+4 and current['worker_connections'] <= 1, 'copy database connection pressure increased')
 
 
+def valid_error_category(category):
+    return isinstance(category, str) and (category in {'deadline', 'canceled', 'conflict', 'invalid-input', 'network', 'budget', 'integrity', 'unclassified'}
+                                         or re.fullmatch('[A-Z0-9]{5}', category) is not None)
+
+
+def error_category(body):
+    # Preserve only the executor's fixed bounded category before exact-UID
+    # cleanup removes Pod logs. No arbitrary stderr reaches CI evidence.
+    categories = re.findall(r'^compiler input maintenance completion not confirmed; inspect state before retrying; category=([A-Z0-9]{5}|[a-z0-9-]{1,32})$', body, re.MULTILINE)
+    require(len(categories) <= 1, 'copy error category is ambiguous')
+    require(not categories or valid_error_category(categories[0]), 'copy error category is invalid')
+    return categories[0] if categories else None
+
+
 def result_contract(body, c, success=True):
     require(len(body) <= 16384, 'copy output exceeds budget')
     lines = [json.loads(x) for x in body.splitlines() if x.startswith('{')]
     require(len(lines) == 1, 'copy native receipt missing or ambiguous')
     v = lines[0]
     fields = {'action', 'digest', 'source_format', 'raw_bytes', 'verified_raw_bytes', 'segments', 'state', 'source_preserved', 'route_unchanged', 'usage', 'elapsed_ms'}
-    require(set(v) == fields and v['action'] == 'archive-copy' and v['digest'] == c['copy']['digest'] and v['source_format'] == c['copy']['source_format'], 'copy result identity differs')
+    require(set(v) in (fields, fields | {'failure'}) and v['action'] == 'archive-copy' and v['digest'] == c['copy']['digest'] and v['source_format'] == c['copy']['source_format'], 'copy result identity differs')
+    if 'failure' in v:
+        f = v['failure']
+        require(not success and isinstance(f, dict) and set(f) == {'stage', 'category', 'segment_ordinal', 'segment_bytes_read'}
+                and f['stage'] in ('source-read', 'unclassified') and valid_error_category(f['category'])
+                and type(f['segment_ordinal']) is int and type(f['segment_bytes_read']) is int
+                and ((f['stage'] == 'source-read' and 0 <= f['segment_ordinal'] < c['copy']['max_put_requests']
+                      and 0 <= f['segment_bytes_read'] < min(c['copy']['segment_bytes'], c['copy']['raw_bytes']-f['segment_ordinal']*c['copy']['segment_bytes']))
+                     or (f['stage'] == 'unclassified' and f['segment_ordinal'] == -1 and f['segment_bytes_read'] == 0)), 'copy failure receipt differs')
     require(v['raw_bytes'] == c['copy']['raw_bytes'] and type(v['verified_raw_bytes']) is int and v['verified_raw_bytes'] in (0, c['copy']['raw_bytes'])
             and type(v['source_preserved']) is bool and type(v['route_unchanged']) is bool and v['state'] in ('', 'verified')
             and type(v['segments']) is int and 0 <= v['segments'] <= c['copy']['max_put_requests']
@@ -352,6 +374,8 @@ def execute(c, evidence, apply=False):
             time.sleep(15)
         require(completed is not None, 'copy worker did not finish within deadline')
         body = kube(c['namespace'], 'logs', completed['metadata']['name'], '-c', 'copy', '--limit-bytes=16385')
+        report['native_error_category'] = error_category(body)
+        save()
         report['native_result'] = result_contract(body, c, success=False)
         save()
         require(completed['status']['phase'] == 'Succeeded', 'copy worker failed; no automatic retry')

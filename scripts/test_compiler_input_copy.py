@@ -67,6 +67,20 @@ class CopyTest(unittest.TestCase):
         partial['usage'].update(put_requests=1, get_requests=1, get_payload_bytes=1234, source_raw_bytes=2000)
         self.assertEqual(c.result_contract(json.dumps(partial), v, success=False), partial)
         with self.assertRaises(ValueError): c.result_contract(json.dumps(partial), v)
+        partial['failure'] = dict(stage='source-read', category='55P03', segment_ordinal=1, segment_bytes_read=0)
+        self.assertEqual(c.result_contract(json.dumps(partial), v, success=False), partial)
+        with self.assertRaises(ValueError): c.result_contract(json.dumps(partial), v)
+        for key, value in [('stage', 'private message'), ('category', 'private SQL URL'), ('segment_ordinal', True), ('segment_bytes_read', 1), ('message', 'synthetic-private')]:
+            bad = copy.deepcopy(partial); bad['failure'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError): c.result_contract(json.dumps(bad), v, success=False)
+
+    def test_only_bounded_native_category_is_retained_before_cleanup(self):
+        prefix = 'compiler input maintenance completion not confirmed; inspect state before retrying; category='
+        self.assertEqual(c.error_category('{"action":"archive-copy"}\n'+prefix+'55P03\n'), '55P03')
+        self.assertEqual(c.error_category(prefix+'unclassified\n'), 'unclassified')
+        self.assertIsNone(c.error_category('arbitrary private diagnostic\n'))
+        with self.assertRaises(ValueError): c.error_category(prefix+'deadline\n'+prefix+'55P03\n')
+        with self.assertRaises(ValueError): c.error_category(prefix+'synthetic-private-value\n')
 
     def test_watchdog_stops_on_wal_source_or_connection_drift(self):
         v = declaration()

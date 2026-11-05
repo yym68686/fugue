@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"testing"
@@ -14,6 +15,46 @@ import (
 	"fugue/internal/store"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+type sourceFailure struct{ cause error }
+
+func (s sourceFailure) Read([]byte) (int, error) { return 0, s.cause }
+
+type unexpectedObjects struct{}
+
+func (unexpectedObjects) Put(context.Context, string, []byte) error {
+	return errors.New("unexpected PUT")
+}
+func (unexpectedObjects) Get(context.Context, string) (io.ReadCloser, error) {
+	return nil, errors.New("unexpected GET")
+}
+
+func TestCopyFailureReceiptPreservesSQLStateWithoutPrivateDetails(t *testing.T) {
+	plan := inputarchive.Manifest{Format: inputarchive.Format, Digest: "sha256:" + strings.Repeat("a", 64), RawBytes: 65536, SegmentBytes: 65536, Prefix: "archive/source-check"}
+	cause := &pgconn.PgError{Code: "55P03", Message: "synthetic-private-value"}
+	_, err := inputarchive.Copy(t.Context(), unexpectedObjects{}, io.MultiReader(bytes.NewBufferString("partial"), sourceFailure{cause}), plan, func(inputarchive.Segment) error { return nil })
+	var output bytes.Buffer
+	if encodeErr := writeArchiveCopyReport(&output, store.CompilerInputArchiveCopyReport{Action: "archive-copy"}, err); encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+	var receipt struct {
+		Failure struct {
+			Stage, Category string
+			Ordinal         int `json:"segment_ordinal"`
+			Received        int `json:"segment_bytes_read"`
+		}
+	}
+	if decodeErr := json.Unmarshal(output.Bytes(), &receipt); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if strings.Contains(output.String(), "private") || receipt.Failure.Stage != "source-read" || receipt.Failure.Category != "55P03" || receipt.Failure.Ordinal != 0 || receipt.Failure.Received != 7 || !errors.Is(err, inputarchive.ErrIntegrity) {
+		t.Fatal("copy failure lost bounded diagnosis or exposed driver details", output.String())
+	}
+	output.Reset()
+	if err := writeArchiveCopyReport(&output, store.CompilerInputArchiveCopyReport{State: "verified"}, nil); err != nil || strings.Contains(output.String(), "failure") {
+		t.Fatal("successful receipt has failure fields", output.String(), err)
+	}
+}
 
 func TestRetirementRefusalReportsMissingProofsWithoutDriverDetails(t *testing.T) {
 	var output bytes.Buffer
@@ -64,6 +105,9 @@ func TestMaintenanceErrorCategoryDoesNotExposeErrorDetails(t *testing.T) {
 		{context.Canceled, "canceled"},
 		{fmt.Errorf("private diagnostic: %w", store.ErrConflict), "conflict"},
 		{store.ErrInvalidInput, "invalid-input"},
+		{inputarchive.ErrInvalid, "invalid-input"},
+		{inputarchive.ErrIntegrity, "integrity"},
+		{inputarchive.ErrBudget, "budget"},
 		{&url.Error{Op: "Get", URL: "https://synthetic.invalid/private-value", Err: errors.New("synthetic-private-value")}, "network"},
 		{errors.New("synthetic-private-value"), "unclassified"},
 	} {
