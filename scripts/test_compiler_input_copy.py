@@ -82,6 +82,42 @@ class CopyTest(unittest.TestCase):
         with self.assertRaises(ValueError): c.error_category(prefix+'deadline\n'+prefix+'55P03\n')
         with self.assertRaises(ValueError): c.error_category(prefix+'synthetic-private-value\n')
 
+    def test_worker_termination_keeps_only_fixed_metadata(self):
+        terminated = dict(reason='OOMKilled', exitCode=137, signal=9,
+                          startedAt='2026-01-02T03:04:05Z', finishedAt='2026-01-02T03:04:06Z',
+                          message='synthetic-private-message', containerID='synthetic-private-runtime-id')
+        pod = {'status': {'phase': 'Failed', 'message': 'synthetic-private-pod-message',
+                          'containerStatuses': [{'name': 'copy', 'state': {'terminated': terminated},
+                                                 'lastState': {'terminated': {'message': 'synthetic-private-history'}}}]}}
+        observed = c.worker_terminal(pod)
+        self.assertEqual(observed, dict(phase='Failed', metadata_complete=True, reason='OOMKilled', exit_code=137,
+                                       signal=9, started_at=terminated['startedAt'], finished_at=terminated['finishedAt']))
+        self.assertNotIn('synthetic-private', json.dumps(observed))
+        terminated['reason'] = 'synthetic-private-reason'
+        self.assertEqual(c.worker_terminal(pod)['reason'], 'other')
+        del terminated['signal']
+        self.assertEqual(c.worker_terminal(pod)['signal'], 0)
+
+    def test_worker_termination_missing_or_malformed_is_not_completion_proof(self):
+        state = dict(reason='Completed', exitCode=0, signal=0,
+                     startedAt='2026-01-02T03:04:05Z', finishedAt='2026-01-02T03:04:06Z')
+        pod = {'status': {'phase': 'Succeeded', 'containerStatuses': [{'name': 'copy', 'state': {'terminated': state}}]}}
+        self.assertTrue(c.worker_terminal(pod)['metadata_complete'])
+        for key, changed in [('exitCode', True), ('exitCode', -1), ('signal', '9'), ('signal', 1 << 31),
+                             ('startedAt', 'synthetic-private-time'), ('finishedAt', '2026-02-30T00:00:00Z'),
+                             ('finishedAt', '2026-01-02T03:04:04Z'), ('finishedAt', '2026-01-02T03:04:06Z synthetic-private')]:
+            invalid = copy.deepcopy(pod); invalid['status']['containerStatuses'][0]['state']['terminated'][key] = changed
+            with self.subTest(key=key, changed=changed):
+                result = c.worker_terminal(invalid)
+                self.assertFalse(result['metadata_complete'])
+                self.assertNotIn('synthetic-private', json.dumps(result))
+        for statuses in (None, [], [{'name': 'other'}], [pod['status']['containerStatuses'][0]]*2,
+                         [{'name': 'copy', 'state': {}}], [{'name': 'copy', 'state': {'running': {}}}],
+                         [{'name': 'copy', 'state': {'terminated': state, 'running': {}}}]):
+            invalid = copy.deepcopy(pod); invalid['status']['containerStatuses'] = statuses
+            with self.subTest(statuses=statuses): self.assertFalse(c.worker_terminal(invalid)['metadata_complete'])
+        with self.assertRaises(ValueError): c.worker_terminal({'status': {'phase': 'Running'}})
+
     def test_watchdog_stops_on_wal_source_or_connection_drift(self):
         v = declaration()
         before = dict(epoch=0, manifest={'raw_bytes': 65537}, source_chunks=2, wal_bytes='1000', active_clients=3, worker_connections=0, other_leases=0, all_leases=0)

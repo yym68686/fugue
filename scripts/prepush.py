@@ -477,6 +477,12 @@ def main() -> int:
     readonly_python = os.environ.get("INPUT_READONLY_PYTHON", sys.executable)
     if any(name in {"scripts/compiler_input_readonly.py", "scripts/test_compiler_input_readonly.py", "scripts/requirements-input-readonly.txt"} or name.startswith("deploy/environments/production/compiler-input-readonly/") for name in paths):
         non_go_tasks["input-readonly-tests"] = [readonly_python, "-m", "unittest", "scripts.test_compiler_input_readonly"]
+    if any(name in {"scripts/compiler_input_copy.py", "scripts/compiler_input_copy_resume.py", "scripts/compiler_input_copy_resume_runner.py",
+                    "scripts/test_compiler_input_copy.py", "scripts/test_compiler_input_copy_resume.py", "scripts/test_compiler_input_copy_resume_runner.py",
+                    ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/compiler-input-copy/") for name in paths):
+        non_go_tasks["input-copy-tests"] = [readonly_python, "-m", "unittest", "scripts.test_compiler_input_copy", "scripts.test_compiler_input_copy_resume",
+                                          "scripts.test_compiler_input_copy_resume_runner", "scripts.test_compiler_input_readonly",
+                                          "scripts.test_compiler_input_archive", "scripts.test_compiler_input_storage"]
     if any(name in {"scripts/longhorn_snapshot_map.py", "scripts/plan_longhorn_snapshot_recovery.py", "scripts/recover_longhorn_snapshot.py", "scripts/test_longhorn_snapshot_map.py", "scripts/test_plan_longhorn_snapshot_recovery.py", "scripts/test_recover_longhorn_snapshot.py", ".github/workflows/ci.yml"} or name.startswith(("deploy/environments/production/local-snapshot-review/", "tests/snapshot-admission-cel/")) for name in paths):
         non_go_tasks["local-snapshot-review-tests"] = ["python3", "-m", "unittest", "scripts.test_longhorn_snapshot_map", "scripts.test_plan_longhorn_snapshot_recovery", "scripts.test_recover_longhorn_snapshot"]
         go_dependent_tasks["snapshot-admission-cel-tests"] = ["go", "-C", "tests/snapshot-admission-cel", "test", "-count=1", "./..."]

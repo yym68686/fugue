@@ -3389,7 +3389,7 @@ jobs:
     environment: production
     concurrency: {group: fugue-compiler-input-storage, cancel-in-progress: false, queue: max}
     timeout-minutes: 120
-    permissions: {contents: read}
+    permissions: {contents: read, actions: read}
     steps:
       - name: Inspect generated metadata before checkout
         working-directory: ${{ runner.temp }}
@@ -3450,10 +3450,11 @@ jobs:
         run: |
           set -euo pipefail
           config=deploy/environments/production/compiler-input-copy/operation.json
-          if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" scripts/compiler_input_copy.py .github/workflows/ci.yml; then exit 0; fi
+          copy_paths=(scripts/compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_copy_resume_runner.py scripts/test_compiler_input_copy.py scripts/test_compiler_input_copy_resume.py scripts/test_compiler_input_copy_resume_runner.py)
+          if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" "${copy_paths[@]}" .github/workflows/ci.yml; then exit 0; fi
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py deploy/releases "$config" .github/workflows/ci.yml
-          "$INPUT_READONLY_PYTHON" -m unittest scripts.test_compiler_input_copy scripts.test_compiler_input_readonly scripts.test_compiler_input_archive scripts.test_compiler_input_storage
+          git diff --exit-code HEAD origin/main -- "${copy_paths[@]}" scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py deploy/releases "$config" .github/workflows/ci.yml
+          "$INPUT_READONLY_PYTHON" -m unittest scripts.test_compiler_input_copy scripts.test_compiler_input_copy_resume scripts.test_compiler_input_copy_resume_runner scripts.test_compiler_input_readonly scripts.test_compiler_input_archive scripts.test_compiler_input_storage
           "$INPUT_READONLY_PYTHON" - <<'PY'
           import json, os
           from scripts.compiler_input_copy import validate
@@ -3469,14 +3470,17 @@ jobs:
           PY
       - if: steps.copy.outputs.selected == 'true'
         name: Preview the isolated copy-only contract without object IO
+        env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_copy deploy/environments/production/compiler-input-copy/operation.json --evidence "$RUNNER_TEMP/input-copy-preview-${{ github.sha }}.json"
       - if: steps.copy.outputs.selected == 'true'
         name: Copy one exact input and verify both GET passes
+        env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py deploy/releases deploy/environments/production/compiler-input-copy .github/workflows/ci.yml
+          copy_paths=(scripts/compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_copy_resume_runner.py scripts/test_compiler_input_copy.py scripts/test_compiler_input_copy_resume.py scripts/test_compiler_input_copy_resume_runner.py)
+          git diff --exit-code HEAD origin/main -- "${copy_paths[@]}" scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py deploy/releases deploy/environments/production/compiler-input-copy .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_copy deploy/environments/production/compiler-input-copy/operation.json --apply --evidence "$RUNNER_TEMP/input-copy-result-${{ github.sha }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && steps.copy.outputs.selected == 'true'

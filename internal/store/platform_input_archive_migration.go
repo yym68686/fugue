@@ -26,6 +26,9 @@ type CompilerInputArchiveMigrationOptions struct {
 	requireNew       bool
 	sourcePageChunks int
 	wrapSource       func(io.Reader) io.Reader
+	// Set only by an exact v2 copy contract. It never enables automatic retry
+	// or alters the prior one-shot v1 declaration.
+	expectedResume *inputArchiveResumeExpectation
 }
 
 type CompilerInputArchiveRouteOptions struct {
@@ -111,6 +114,9 @@ func RunCompilerInputArchiveMigration(ctx context.Context, databaseURL string, o
 func copyCompilerInputArchive(ctx context.Context, db *sql.DB, objects inputarchive.Objects, backendHash string, options CompilerInputArchiveMigrationOptions) (CompilerInputArchiveMigrationReport, error) {
 	report := CompilerInputArchiveMigrationReport{Action: "archive", Digest: options.Digest}
 	if !inputDigestPattern.MatchString(options.Digest) || options.SegmentBytes < 0 || options.SegmentBytes > inputarchive.MaxSegmentBytes || options.SegmentBytes > 0 && options.SegmentBytes < 65536 || options.Apply && (!inputDigestPattern.MatchString(backendHash) || objects == nil) {
+		return report, ErrInvalidInput
+	}
+	if options.expectedResume != nil && (!options.Apply || options.requireNew || options.expectedResume.validate() != nil) {
 		return report, ErrInvalidInput
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
@@ -637,6 +643,9 @@ func compilerInputArchiveRetirementStarted(ctx context.Context, db inputQueryer)
 
 func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash string, options CompilerInputArchiveMigrationOptions) (inputArchiveClaim, error) {
 	var claim inputArchiveClaim
+	if options.expectedResume != nil && (!options.Apply || options.requireNew || options.expectedResume.validate() != nil) {
+		return claim, ErrInvalidInput
+	}
 	owner, err := newArchiveWorkerID()
 	if err != nil {
 		return claim, err
@@ -657,6 +666,15 @@ func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash stri
 	if retiring {
 		return claim, fmt.Errorf("compiler input chunks relation is retired: %w", ErrConflict)
 	}
+	if options.expectedResume != nil {
+		fenced, fenceErr := compilerInputWritesFenced(ctx, tx)
+		if fenceErr != nil {
+			return claim, fenceErr
+		}
+		if fenced {
+			return claim, fmt.Errorf("resume source is write fenced: %w", ErrConflict)
+		}
+	}
 	if claim.source, err = readInputManifest(ctx, tx, options.Digest); err != nil {
 		return claim, err
 	}
@@ -665,6 +683,9 @@ func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash stri
 	}
 	if options.expectedFormat != "" && (claim.source.Format != options.expectedFormat || claim.source.Size != options.expectedRawBytes || claim.source.Location != "legacy") {
 		return claim, fmt.Errorf("copy source differs from exact declaration: %w", ErrConflict)
+	}
+	if options.expectedResume != nil && (claim.source.Location != "legacy" || claim.epoch != options.expectedResume.Epoch || inputArchiveSourceIdentityHash(claim.source) != options.expectedResume.SourceManifestSHA256) {
+		return claim, fmt.Errorf("resume source identity differs: %w", ErrConflict)
 	}
 	if !options.Apply {
 		return claim, nil
@@ -678,10 +699,14 @@ func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash stri
 			return claim, fmt.Errorf("one-shot copy already has an archive record: %w", ErrConflict)
 		}
 	}
-	var archiveFormat, sourceFormat, prefix, backend, state string
+	var archiveFormat, sourceFormat, prefix, backend, state, verifiedDigest string
+	var verified bool
 	var rawBytes, segmentBytes, segmentCount, sourceEpoch int64
-	err = tx.QueryRowContext(ctx, `SELECT archive_format,source_format,raw_bytes,segment_bytes,segment_count,object_prefix,backend_hash,state,source_epoch,fencing_token FROM fugue_platform_input_archives WHERE content_hash=$1 FOR UPDATE`, options.Digest).Scan(&archiveFormat, &sourceFormat, &rawBytes, &segmentBytes, &segmentCount, &prefix, &backend, &state, &sourceEpoch, &claim.token)
+	err = tx.QueryRowContext(ctx, `SELECT archive_format,source_format,raw_bytes,segment_bytes,segment_count,object_prefix,backend_hash,state,source_epoch,fencing_token,verified_digest,verified_at IS NOT NULL FROM fugue_platform_input_archives WHERE content_hash=$1 FOR UPDATE`, options.Digest).Scan(&archiveFormat, &sourceFormat, &rawBytes, &segmentBytes, &segmentCount, &prefix, &backend, &state, &sourceEpoch, &claim.token, &verifiedDigest, &verified)
 	if errors.Is(err, sql.ErrNoRows) {
+		if options.expectedResume != nil {
+			return claim, fmt.Errorf("resume archive is absent: %w", ErrConflict)
+		}
 		archiveFormat, sourceFormat, rawBytes, segmentBytes = inputarchive.Format, claim.source.Format, claim.source.Size, inputarchive.DefaultSegmentBytes
 		if options.SegmentBytes > 0 {
 			segmentBytes = int64(options.SegmentBytes)
@@ -703,15 +728,8 @@ func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash stri
 	if active {
 		return claim, fmt.Errorf("compiler input archive already has an active owner: %w", ErrConflict)
 	}
-	claim.token++
-	if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_platform_input_archive_leases(content_hash,owner,source_epoch,fencing_token,expires_at,updated_at) VALUES($1,$2,$3,$4,now()+interval '2 minutes',now()) ON CONFLICT(content_hash) DO UPDATE SET owner=excluded.owner,source_epoch=excluded.source_epoch,fencing_token=excluded.fencing_token,expires_at=excluded.expires_at,updated_at=now()`, options.Digest, owner, claim.epoch, claim.token); err != nil {
-		return claim, err
-	}
-	if _, err = tx.ExecContext(ctx, `UPDATE fugue_platform_input_archives SET state='uploading',verified_digest='',verified_at=NULL,fencing_token=$2,updated_at=now() WHERE content_hash=$1`, options.Digest, claim.token); err != nil {
-		return claim, err
-	}
 	claim.manifest = inputarchive.Manifest{Format: archiveFormat, Digest: options.Digest, RawBytes: rawBytes, SegmentBytes: int(segmentBytes), Prefix: prefix}
-	rows, err := tx.QueryContext(ctx, `SELECT ordinal,object_key,raw_bytes,stored_bytes,segment_hash,stored_hash FROM fugue_platform_input_archive_segments WHERE content_hash=$1 AND uploaded_at IS NOT NULL AND verified_at IS NOT NULL ORDER BY ordinal`, options.Digest)
+	rows, err := tx.QueryContext(ctx, `SELECT ordinal,object_key,raw_bytes,stored_bytes,segment_hash,stored_hash FROM fugue_platform_input_archive_segments WHERE content_hash=$1 AND uploaded_at IS NOT NULL AND verified_at IS NOT NULL ORDER BY ordinal LIMIT $2`, options.Digest, segmentCount+1)
 	if err != nil {
 		return claim, err
 	}
@@ -728,6 +746,30 @@ func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash stri
 	rows.Close()
 	if err != nil {
 		return claim, err
+	}
+	if options.expectedResume != nil {
+		if state != "uploading" || verified || verifiedDigest != "" || options.SegmentBytes != int(segmentBytes) || backend != options.expectedResume.BackendHash ||
+			options.expectedResume.matches(claim) != nil {
+			return claim, fmt.Errorf("resume verified prefix differs: %w", ErrConflict)
+		}
+		var incomplete bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_platform_input_archive_segments WHERE content_hash=$1 AND (uploaded_at IS NULL OR verified_at IS NULL))`, options.Digest).Scan(&incomplete); err != nil {
+			return claim, err
+		}
+		if incomplete {
+			return claim, fmt.Errorf("resume prefix has unverified receipts: %w", ErrConflict)
+		}
+	}
+	claim.token++
+	if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_platform_input_archive_leases(content_hash,owner,source_epoch,fencing_token,expires_at,updated_at) VALUES($1,$2,$3,$4,now()+interval '2 minutes',now()) ON CONFLICT(content_hash) DO UPDATE SET owner=excluded.owner,source_epoch=excluded.source_epoch,fencing_token=excluded.fencing_token,expires_at=excluded.expires_at,updated_at=now()`, options.Digest, owner, claim.epoch, claim.token); err != nil {
+		return claim, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE fugue_platform_input_archives SET state='uploading',verified_digest='',verified_at=NULL,fencing_token=$2,updated_at=now() WHERE content_hash=$1 AND fencing_token=$3`, options.Digest, claim.token, claim.token-1)
+	if err != nil {
+		return claim, err
+	}
+	if n, e := result.RowsAffected(); e != nil || n != 1 {
+		return claim, fmt.Errorf("archive claim token changed: %w", ErrConflict)
 	}
 	return claim, tx.Commit()
 }

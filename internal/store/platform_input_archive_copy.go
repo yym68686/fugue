@@ -13,22 +13,49 @@ import (
 // CompilerInputArchiveCopyContract is a single exact input, not a selector or
 // a route/retirement authorization. All payload budgets are explicit.
 type CompilerInputArchiveCopyContract struct {
-	Version        int    `json:"version"`
-	Digest         string `json:"digest"`
-	SourceFormat   string `json:"source_format"`
-	RawBytes       int64  `json:"raw_bytes"`
-	BackendHash    string `json:"backend_hash"`
-	SegmentBytes   int    `json:"segment_bytes"`
-	MaxPutBytes    int64  `json:"max_put_bytes"`
-	MaxGetBytes    int64  `json:"max_get_bytes"`
-	MaxPutRequests int64  `json:"max_put_requests"`
-	MaxGetRequests int64  `json:"max_get_requests"`
-	BytesPerSecond int64  `json:"payload_bytes_per_second"`
-	MaxSeconds     int    `json:"max_seconds"`
+	Version        int                                     `json:"version"`
+	Digest         string                                  `json:"digest"`
+	SourceFormat   string                                  `json:"source_format"`
+	RawBytes       int64                                   `json:"raw_bytes"`
+	BackendHash    string                                  `json:"backend_hash"`
+	SegmentBytes   int                                     `json:"segment_bytes"`
+	MaxPutBytes    int64                                   `json:"max_put_bytes"`
+	MaxGetBytes    int64                                   `json:"max_get_bytes"`
+	MaxPutRequests int64                                   `json:"max_put_requests"`
+	MaxGetRequests int64                                   `json:"max_get_requests"`
+	BytesPerSecond int64                                   `json:"payload_bytes_per_second"`
+	MaxSeconds     int                                     `json:"max_seconds"`
+	Resume         *CompilerInputArchiveCopyResumeContract `json:"resume,omitempty"`
+}
+
+// CompilerInputArchiveCopyResumeContract binds a new attempt to a previously
+// reviewed immutable receipt. The trusted runner must independently verify
+// that Kubernetes receipt's UID, content hash and prior declaration identity;
+// the isolated worker has no Kubernetes token and cannot do that itself.
+type CompilerInputArchiveCopyResumeContract struct {
+	SourceManifestSHA256 string `json:"source_manifest_sha256"`
+	ReceiptsSHA256       string `json:"receipts_sha256"`
+	Prefix               string `json:"prefix"`
+	Epoch                int64  `json:"epoch"`
+	Token                int64  `json:"token"`
+	VerifiedSegments     int    `json:"verified_segments"`
+	VerifiedStoredBytes  int64  `json:"verified_stored_bytes"`
+	PriorAttemptSHA256   string `json:"prior_attempt_sha256"`
+	PriorReceiptUID      string `json:"prior_receipt_uid"`
+	PriorReceiptSHA256   string `json:"prior_receipt_sha256"`
+}
+
+func (c CompilerInputArchiveCopyContract) resumeExpectation() *inputArchiveResumeExpectation {
+	if c.Resume == nil {
+		return nil
+	}
+	r := c.Resume
+	return &inputArchiveResumeExpectation{SourceManifestSHA256: r.SourceManifestSHA256, ReceiptsSHA256: r.ReceiptsSHA256,
+		BackendHash: c.BackendHash, Prefix: r.Prefix, Epoch: r.Epoch, Token: r.Token, Segments: r.VerifiedSegments, StoredBytes: r.VerifiedStoredBytes}
 }
 
 func (c CompilerInputArchiveCopyContract) Validate() error {
-	if c.Version != 1 || !inputDigestPattern.MatchString(c.Digest) || !inputDigestPattern.MatchString(c.BackendHash) ||
+	if (c.Version != 1 && c.Version != 2) || !inputDigestPattern.MatchString(c.Digest) || !inputDigestPattern.MatchString(c.BackendHash) ||
 		(c.SourceFormat != inputFormatV1 && c.SourceFormat != inputFormatCodecV2) || c.RawBytes < 1 || c.RawBytes > inputarchive.MaxInputBytes ||
 		c.SegmentBytes < 64<<10 || c.SegmentBytes > 1<<20 || c.MaxPutBytes < 1 || c.MaxPutBytes > 2<<30 ||
 		c.MaxGetBytes < 1 || c.MaxGetBytes > 4<<30 || c.MaxPutRequests < 1 || c.MaxPutRequests > 16384 ||
@@ -36,7 +63,27 @@ func (c CompilerInputArchiveCopyContract) Validate() error {
 		return ErrInvalidInput
 	}
 	segments := (c.RawBytes + int64(c.SegmentBytes) - 1) / int64(c.SegmentBytes)
-	if c.MaxPutRequests != segments || c.MaxGetRequests != 2*segments {
+	priorSegments := int64(0)
+	if c.Version == 1 {
+		if c.Resume != nil {
+			return ErrInvalidInput
+		}
+	} else {
+		if c.Resume == nil || c.resumeExpectation().validate() != nil ||
+			!inputDigestPattern.MatchString(c.Resume.PriorAttemptSHA256) || !inputDigestPattern.MatchString(c.Resume.PriorReceiptSHA256) ||
+			!archiveResumeReceiptUIDPattern.MatchString(c.Resume.PriorReceiptUID) ||
+			c.Resume.VerifiedSegments >= int(segments) {
+			return ErrInvalidInput
+		}
+		if (inputarchive.Manifest{Format: inputarchive.Format, Digest: c.Digest, RawBytes: c.RawBytes, SegmentBytes: c.SegmentBytes, Prefix: c.Resume.Prefix}).ValidatePlan() != nil {
+			return ErrInvalidInput
+		}
+		priorSegments = int64(c.Resume.VerifiedSegments)
+		if c.Resume.VerifiedStoredBytes > priorSegments*(int64(c.SegmentBytes)+(1<<20)) {
+			return ErrInvalidInput
+		}
+	}
+	if c.MaxPutRequests != segments-priorSegments || c.MaxGetRequests != 2*segments {
 		return ErrInvalidInput
 	}
 	return nil
@@ -121,7 +168,8 @@ func RunCompilerInputArchiveCopy(ctx context.Context, databaseURL string, c Comp
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	r, e := copyCompilerInputArchive(ctx, db, objects, fingerprint, CompilerInputArchiveMigrationOptions{Digest: c.Digest, Apply: true, SegmentBytes: c.SegmentBytes,
-		expectedFormat: c.SourceFormat, expectedRawBytes: c.RawBytes, requireNew: true, sourcePageChunks: 1, wrapSource: func(r io.Reader) io.Reader { return objects.Source(ctx, r) }})
+		expectedFormat: c.SourceFormat, expectedRawBytes: c.RawBytes, requireNew: c.Version == 1, expectedResume: c.resumeExpectation(),
+		sourcePageChunks: 1, wrapSource: func(r io.Reader) io.Reader { return objects.Source(ctx, r) }})
 	if e != nil {
 		err = e
 		return

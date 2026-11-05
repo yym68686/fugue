@@ -25,8 +25,11 @@ require = r.require
 
 def validate(c):
     extra = {'copy', 'storage', 'maxWalGrowthBytes', 'maxAvailableDropBytes', 'maxNewDeadlineFailures'}
+    require(type(c.get('version')) is int and c['version'] in (1, 2), 'invalid copy declaration')
+    if c['version'] == 2:
+        extra |= {'resumeProof', 'terminalReceiptRequired'}
+        require(c.get('terminalReceiptRequired') is True, 'resume must preserve an immutable terminal receipt')
     base = {k: v for k, v in c.items() if k not in extra}
-    require(type(base.get('version')) is int and base['version'] == 1, 'invalid copy declaration')
     base.update(version=3, readCount=0)
     r.validate(base)
     require(set(c) == (set(base)-{'readCount'}) | extra, 'invalid copy declaration fields')
@@ -34,6 +37,21 @@ def validate(c):
     for key, low, high in [('maxWalGrowthBytes', 1, 1 << 30), ('maxAvailableDropBytes', 1, 2 << 30), ('maxNewDeadlineFailures', 0, 8)]:
         require(type(c[key]) is int and low <= c[key] <= high, 'invalid copy impact bound')
     x = c['copy']
+    require(isinstance(x, dict) and type(x.get('version')) is int and x['version'] == c['version'], 'copy contract version differs')
+    if c['version'] == 2:
+        from scripts.compiler_input_copy_resume import validate_proof
+        validate_proof(x, c['resumeProof'])
+        prior = c['resumeProof']['prior_declaration']
+        require(all(c[key] == prior[key] for key in ('namespace', 'cluster', 'clusterUID', 'database')),
+                'resume database scope differs from the original attempt')
+        require(c['minimumFreeBytes'] >= prior['minimumFreeBytes']
+                and all(c[key] <= prior[key] for key in ('maxWalGrowthBytes', 'maxAvailableDropBytes', 'maxNewDeadlineFailures'))
+                and x['payload_bytes_per_second'] <= prior['copy']['payload_bytes_per_second']
+                and x['max_seconds'] <= prior['copy']['max_seconds'], 'resume cannot weaken original impact, rate or time bounds')
+        # The original v1 validator checks every common native field. Only
+        # prefix reuse and its separate proof belong to v2.
+        x = {k: v for k, v in x.items() if k != 'resume'}
+        x.update(version=1, max_put_requests=(x['raw_bytes']+x['segment_bytes']-1)//x['segment_bytes'])
     fields = {'version', 'digest', 'source_format', 'raw_bytes', 'backend_hash', 'segment_bytes', 'max_put_bytes', 'max_get_bytes', 'max_put_requests', 'max_get_requests', 'payload_bytes_per_second', 'max_seconds'}
     require(isinstance(x, dict) and set(x) == fields and type(x['version']) is int and x['version'] == 1, 'invalid native copy contract')
     require(isinstance(x['digest'], str) and re.fullmatch('sha256:[a-f0-9]{64}', x['digest'])
@@ -84,6 +102,10 @@ def job_manifest(c, name, session_name):
 def metadata(c, credentials=False):
     digest = c['copy']['digest']  # validated exact SHA, never arbitrary SQL
     platform = ", 'platform',(SELECT jsonb_build_object('account_id',body->>'account_id','compiler_input_archive',body->'compiler_input_archive') FROM fugue_object_storage_config WHERE id='platform')" if credentials else ''
+    resume = ''
+    if c['version'] == 2:
+        from scripts.compiler_input_copy_resume_runner import metadata_sql
+        resume = ", 'resume',"+metadata_sql(c)
     sql = """BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms'; SET LOCAL work_mem='1MB';
 SELECT json_build_object('manifest',(SELECT json_build_object('format',format,'raw_bytes',size_bytes,'chunk_size',chunk_size,'chunk_count',chunk_count,'created_at',created_at,'location',storage_location)
@@ -97,7 +119,7 @@ SELECT json_build_object('manifest',(SELECT json_build_object('format',format,'r
 'epoch',(SELECT epoch FROM fugue_platform_input_archive_control WHERE singleton),
 'wal_lsn',pg_current_wal_lsn(), 'wal_bytes',(SELECT wal_bytes::text FROM pg_stat_wal),
 'active_clients',(SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND state='active' AND pid<>pg_backend_pid()),
-'worker_connections',(SELECT count(*) FROM pg_stat_activity WHERE application_name='compiler-input-copy')"""+platform+");\nCOMMIT;\n"
+'worker_connections',(SELECT count(*) FROM pg_stat_activity WHERE application_name='compiler-input-copy')"""+platform+resume+");\nCOMMIT;\n"
     argv = ['kubectl', '-n', c['namespace'], 'exec', '-i', c['primary'], '-c', c['postgresContainer'], '--', 'psql', '-U', 'postgres', '-d', c['database'], '-qAt', '-v', 'ON_ERROR_STOP=1']
     p = subprocess.run(argv, input=sql, capture_output=True, text=True, timeout=20)
     require(p.returncode == 0 and len(p.stdout) <= 128 << 10, 'copy metadata observation unavailable')
@@ -256,6 +278,8 @@ def result_contract(body, c, success=True):
     lines = [json.loads(x) for x in body.splitlines() if x.startswith('{')]
     require(len(lines) == 1, 'copy native receipt missing or ambiguous')
     v = lines[0]
+    total_segments = c['copy']['max_get_requests']//2
+    prior_stored = c['copy'].get('resume', {}).get('verified_stored_bytes', 0)
     fields = {'action', 'digest', 'source_format', 'raw_bytes', 'verified_raw_bytes', 'segments', 'state', 'source_preserved', 'route_unchanged', 'usage', 'elapsed_ms'}
     require(set(v) in (fields, fields | {'failure'}) and v['action'] == 'archive-copy' and v['digest'] == c['copy']['digest'] and v['source_format'] == c['copy']['source_format'], 'copy result identity differs')
     if 'failure' in v:
@@ -263,12 +287,12 @@ def result_contract(body, c, success=True):
         require(not success and isinstance(f, dict) and set(f) == {'stage', 'category', 'segment_ordinal', 'segment_bytes_read'}
                 and f['stage'] in ('source-read', 'unclassified') and valid_error_category(f['category'])
                 and type(f['segment_ordinal']) is int and type(f['segment_bytes_read']) is int
-                and ((f['stage'] == 'source-read' and 0 <= f['segment_ordinal'] < c['copy']['max_put_requests']
+                and ((f['stage'] == 'source-read' and 0 <= f['segment_ordinal'] < total_segments
                       and 0 <= f['segment_bytes_read'] < min(c['copy']['segment_bytes'], c['copy']['raw_bytes']-f['segment_ordinal']*c['copy']['segment_bytes']))
                      or (f['stage'] == 'unclassified' and f['segment_ordinal'] == -1 and f['segment_bytes_read'] == 0)), 'copy failure receipt differs')
     require(v['raw_bytes'] == c['copy']['raw_bytes'] and type(v['verified_raw_bytes']) is int and v['verified_raw_bytes'] in (0, c['copy']['raw_bytes'])
             and type(v['source_preserved']) is bool and type(v['route_unchanged']) is bool and v['state'] in ('', 'verified')
-            and type(v['segments']) is int and 0 <= v['segments'] <= c['copy']['max_put_requests']
+            and type(v['segments']) is int and 0 <= v['segments'] <= total_segments
             and type(v['elapsed_ms']) is int and 0 <= v['elapsed_ms'] <= 1000*c['copy']['max_seconds']+5000, 'copy result shape differs')
     u = v['usage']
     require(set(u) == {'put_payload_bytes', 'get_payload_bytes', 'put_requests', 'get_requests', 'source_raw_bytes'}
@@ -280,13 +304,50 @@ def result_contract(body, c, success=True):
     require(v['state'] == 'verified' and v['source_preserved'] is True and v['route_unchanged'] is True
             and v['verified_raw_bytes'] == c['copy']['raw_bytes'], 'copy did not fully verify the original bytes')
     require(u['put_requests'] == c['copy']['max_put_requests'] and u['get_requests'] == c['copy']['max_get_requests']
-            and u['source_raw_bytes'] == c['copy']['raw_bytes'] and u['get_payload_bytes'] == 2*u['put_payload_bytes']
+            and u['source_raw_bytes'] == c['copy']['raw_bytes'] and u['get_payload_bytes'] == 2*(prior_stored+u['put_payload_bytes'])
             and u['put_payload_bytes'] <= c['copy']['max_put_bytes'] and u['get_payload_bytes'] <= c['copy']['max_get_bytes']
-            and v['segments'] == u['put_requests'] and type(v['elapsed_ms']) is int and 0 <= v['elapsed_ms'] <= 1000*c['copy']['max_seconds'], 'copy payload/request bounds differ')
+            and v['segments'] == total_segments and type(v['elapsed_ms']) is int and 0 <= v['elapsed_ms'] <= 1000*c['copy']['max_seconds'], 'copy payload/request bounds differ')
     return v
 
 
+def worker_terminal(pod):
+    """Only fixed termination metadata; never retain runtime messages."""
+    phase = pod.get('status', {}).get('phase')
+    require(phase in ('Succeeded', 'Failed'), 'copy Pod is not terminal')
+    result = {'phase': phase, 'metadata_complete': False}
+    statuses = pod.get('status', {}).get('containerStatuses')
+    if (type(statuses) is not list or len(statuses) != 1
+            or type(statuses[0]) is not dict or statuses[0].get('name') != 'copy'):
+        return result
+    state = statuses[0].get('state')
+    if type(state) is not dict or set(state) != {'terminated'} or type(state['terminated']) is not dict:
+        return result
+    terminated = state['terminated']
+    reason = terminated.get('reason')
+    result['reason'] = reason if reason in ('Completed', 'Error', 'OOMKilled', 'ContainerCannotRun', 'StartError', 'DeadlineExceeded') else 'other'
+    for source, target in (('exitCode', 'exit_code'), ('signal', 'signal')):
+        value = terminated.get(source, 0 if source == 'signal' else None)
+        if type(value) is not int or not 0 <= value <= 2147483647:
+            return result
+        result[target] = value
+    times = []
+    for source, target in (('startedAt', 'started_at'), ('finishedAt', 'finished_at')):
+        value = terminated.get(source)
+        if (type(value) is not str or len(value) > 35
+                or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})', value)):
+            return result
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return result
+        result[target] = value
+        times.append(parsed)
+    result['metadata_complete'] = times[1] >= times[0]
+    return result
+
+
 def execute(c, evidence, apply=False):
+    validate(c)
     declaration_hash = r.identity(c)
     name = 'fugue-input-copy-'+declaration_hash[:20]
     secret_name = name+'-session'
@@ -307,8 +368,17 @@ def execute(c, evidence, apply=False):
         executor, deployment, serving = r.serving_gate(c, registry)
         code = command(['git', 'show', c['sourceCommit']+':cmd/fugue-input-storage/main.go'])
         require('store.RunCompilerInputArchiveCopy' in code, 'copy worker executable lacks bounded mode')
+        if c['version'] == 2:
+            native = command(['git', 'show', c['sourceCommit']+':internal/store/platform_input_archive_copy.go'])
+            require('CompilerInputArchiveCopyResumeContract' in native and 'expectedResume:' in native,
+                    'copy worker source lacks the explicit resume guard')
         initial = metadata(c, credentials=True)
-        require(initial['archive'] is None and initial['all_leases'] == 0 and initial['worker_connections'] == 0, 'copy source already attempted or worker active')
+        require(initial['all_leases'] == 0 and initial['worker_connections'] == 0, 'copy worker is already active')
+        if c['version'] == 1:
+            require(initial['archive'] is None, 'copy source already attempted')
+        else:
+            from scripts.compiler_input_copy_resume_runner import fetch_proof
+            report['resume_proof'] = fetch_proof(c, initial)
         data = copy_session(c, cluster, primary, deployment, executor, initial)
         initial.pop('platform')
         report.update(before=initial, available_before=available, serving=serving, errors_before=api_activity(c, serving),
@@ -351,7 +421,10 @@ def execute(c, evidence, apply=False):
                   'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'Job', 'name': name, 'uid': job_uid, 'controller': True}]}, 'type': 'Opaque',
                   'data': {k: base64.b64encode(v.encode()).decode() for k, v in data.items()}}
         secret_uid = r.create(secret)['metadata']['uid']; data.clear(); secret.clear()
-        watch()
+        prestart = watch()
+        if c['version'] == 2:
+            from scripts.compiler_input_copy_resume import verify_metadata
+            verify_metadata(c['copy'], prestart['resume'])
         r.api_write(['-n', c['namespace'], 'patch', 'job', name, '--type=json', '--patch-file=/dev/stdin', '-o', 'json'],
                     [{'op': 'test', 'path': '/metadata/uid', 'value': job_uid}, {'op': 'test', 'path': '/spec/suspend', 'value': True}, {'op': 'replace', 'path': '/spec/suspend', 'value': False}])
         report['status'] = 'running'; save()
@@ -363,13 +436,20 @@ def execute(c, evidence, apply=False):
             pods = json.loads(kube(c['namespace'], 'get', 'pods', '-l', 'job-name='+name, '-o', 'json'))['items']
             require(len(pods) <= 1, 'copy has multiple Pods')
             if pods and pods[0]['status'].get('containerStatuses'):
+                require(len(pods[0]['status']['containerStatuses']) == 1, 'copy has multiple container statuses')
                 pod = pods[0]; status = pod['status']['containerStatuses'][0]
                 if status.get('imageID'):
                     require(any(x.get('controller') and x.get('uid') == job_uid for x in pod['metadata'].get('ownerReferences', []))
                             and pod['spec'].get('nodeName') == c['node'] and pod['spec'].get('priority') == -1000000 and pod['spec'].get('preemptionPolicy') == 'Never'
                             and status['name'] == 'copy' and status['restartCount'] == 0 and status['imageID'].removeprefix('docker-pullable://') == c['image'], 'copy actual execution identity differs')
                     report['execution'] = {'pod': pod['metadata']['name'], 'pod_uid': pod['metadata']['uid'], 'image_id': status['imageID'], 'restart_count': 0, 'node_uid': c['nodeUID']}
-                    if pod['status']['phase'] in ('Succeeded', 'Failed'): completed = pod; break
+                    if pod['status']['phase'] in ('Succeeded', 'Failed'):
+                        completed = pod
+                        report['execution']['terminal'] = worker_terminal(pod)
+                        # Persist before any log request or exact-UID cleanup:
+                        # unavailable/malformed native output must not erase it.
+                        save()
+                        break
             watch()
             time.sleep(15)
         require(completed is not None, 'copy worker did not finish within deadline')
@@ -377,13 +457,20 @@ def execute(c, evidence, apply=False):
         report['native_error_category'] = error_category(body)
         save()
         report['native_result'] = result_contract(body, c, success=False)
+        if c['version'] == 2:
+            from scripts.compiler_input_copy_resume_runner import cumulative_usage
+            report['cumulative_usage'] = cumulative_usage(c, report['resume_proof']['prior_usage'], report['native_result']['usage'])
         save()
         require(completed['status']['phase'] == 'Succeeded', 'copy worker failed; no automatic retry')
+        terminal = report['execution']['terminal']
+        require(terminal['metadata_complete'] and terminal['exit_code'] == 0 and terminal['signal'] == 0,
+                'copy successful termination is not confirmed')
         report['result'] = result_contract(body, c)
         final = watch()
         receipt = final['archive']
         require(receipt and receipt['state'] == 'verified' and receipt['verified'] is True and receipt['digest'] == c['copy']['digest']
-                and receipt['stored_bytes'] == report['result']['usage']['put_payload_bytes'] and receipt['raw_bytes'] == c['copy']['raw_bytes']
+                and receipt['stored_bytes'] == c['copy'].get('resume', {}).get('verified_stored_bytes', 0)+report['result']['usage']['put_payload_bytes']
+                and receipt['segments'] == report['result']['segments'] and receipt['raw_bytes'] == c['copy']['raw_bytes']
                 and final['all_leases'] == 0, 'copy durable verification receipt differs')
         report.update(after=final, status='copy-verified-source-preserved')
         return report
@@ -419,6 +506,13 @@ def execute(c, evidence, apply=False):
                 require(not json.loads(r.cluster_kube('get', 'priorityclasses', '--field-selector=metadata.name='+name, '-o', 'json'))['items'], 'copy priority cleanup remains pending')
             except Exception as error: report.update(cleanup_confirmed=False, cleanup_error_type=type(error).__name__)
         report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat(); save()
+        if c['version'] == 2 and job_uid and report['cleanup_confirmed'] and 'native_result' in report:
+            try:
+                from scripts.compiler_input_copy_resume_runner import terminal_receipt
+                report['terminal_receipt'] = terminal_receipt(c, report)
+            except Exception as error:
+                report['terminal_receipt'] = {'confirmed': False, 'error_type': type(error).__name__}
+            save()
 
 
 def main():
@@ -426,9 +520,12 @@ def main():
     parser.add_argument('declaration'); parser.add_argument('--apply', action='store_true'); parser.add_argument('--evidence', type=Path, required=True)
     args = parser.parse_args()
     try:
-        c = validate(json.loads(Path(args.declaration).read_text()))
+        from scripts.compiler_input_copy_resume import strict_json
+        c = validate(strict_json(Path(args.declaration).read_bytes()))
         report = execute(c, args.evidence, args.apply)
         if args.apply: require(report['cleanup_confirmed'] and report['status'] == 'copy-verified-source-preserved', 'copy execution or cleanup incomplete')
+        if args.apply and c['version'] == 2:
+            require(report.get('terminal_receipt', {}).get('confirmed') is True, 'resume terminal receipt is not confirmed')
         print(json.dumps({k: report[k] for k in ('job', 'status', 'cleanup_confirmed', 'retirement_authorized', 'route_changes_authorized')}))
     except Exception as error:
         raise SystemExit('bounded copy completion not confirmed; inspect evidence; category='+type(error).__name__) from None

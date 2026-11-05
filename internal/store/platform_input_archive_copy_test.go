@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -8,6 +9,53 @@ import (
 
 	"fugue/internal/inputarchive"
 )
+
+func TestCompilerInputArchiveResumeContractRequiresExplicitPriorReceiptAndRemainingBudget(t *testing.T) {
+	c := CompilerInputArchiveCopyContract{Version: 2, Digest: "sha256:" + strings.Repeat("a", 64), BackendHash: "sha256:" + strings.Repeat("b", 64),
+		SourceFormat: inputFormatCodecV2, RawBytes: 3*65536 + 1, SegmentBytes: 65536, MaxPutBytes: 4 * 65536, MaxGetBytes: 8 * 65536,
+		MaxPutRequests: 3, MaxGetRequests: 8, BytesPerSecond: 2 << 20, MaxSeconds: 540,
+		Resume: &CompilerInputArchiveCopyResumeContract{SourceManifestSHA256: "sha256:" + strings.Repeat("c", 64), ReceiptsSHA256: "sha256:" + strings.Repeat("d", 64),
+			Prefix: "input/synthetic/prior-owner", Epoch: 0, Token: 1, VerifiedSegments: 1, VerifiedStoredBytes: 1234,
+			PriorAttemptSHA256: "sha256:" + strings.Repeat("e", 64), PriorReceiptSHA256: "sha256:" + strings.Repeat("f", 64),
+			PriorReceiptUID: "11111111-2222-4333-8444-555555555555"}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*CompilerInputArchiveCopyContract){
+		"missing resume":      func(x *CompilerInputArchiveCopyContract) { x.Resume = nil },
+		"v1 resume":           func(x *CompilerInputArchiveCopyContract) { x.Version = 1 },
+		"unknown version":     func(x *CompilerInputArchiveCopyContract) { x.Version = 3 },
+		"all puts again":      func(x *CompilerInputArchiveCopyContract) { x.MaxPutRequests = 4 },
+		"omit prefix gets":    func(x *CompilerInputArchiveCopyContract) { x.MaxGetRequests = 7 },
+		"receipt omitted":     func(x *CompilerInputArchiveCopyContract) { x.Resume.PriorReceiptSHA256 = "" },
+		"attempt omitted":     func(x *CompilerInputArchiveCopyContract) { x.Resume.PriorAttemptSHA256 = "" },
+		"receipt uid omitted": func(x *CompilerInputArchiveCopyContract) { x.Resume.PriorReceiptUID = "" },
+		"receipt uid invalid": func(x *CompilerInputArchiveCopyContract) { x.Resume.PriorReceiptUID = "different" },
+		"unsafe prefix":       func(x *CompilerInputArchiveCopyContract) { x.Resume.Prefix = "../different" },
+		"zero token":          func(x *CompilerInputArchiveCopyContract) { x.Resume.Token = 0 },
+		"zero prefix":         func(x *CompilerInputArchiveCopyContract) { x.Resume.VerifiedSegments = 0 },
+		"complete prefix":     func(x *CompilerInputArchiveCopyContract) { x.Resume.VerifiedSegments = 4 },
+		"impossible stored":   func(x *CompilerInputArchiveCopyContract) { x.Resume.VerifiedStoredBytes = 3 << 20 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			x := c
+			resume := *c.Resume
+			x.Resume = &resume
+			mutate(&x)
+			if x.Validate() == nil {
+				t.Fatal("invalid exact resume contract accepted")
+			}
+		})
+	}
+	encoded, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded CompilerInputArchiveCopyContract
+	if err = json.Unmarshal(encoded, &decoded); err != nil || decoded.Validate() != nil || *decoded.resumeExpectation() != *c.resumeExpectation() {
+		t.Fatal("native contract lost its bound resume expectation", err)
+	}
+}
 
 func TestCompilerInputArchiveCopyExactDeclarationBeforeAnyClaim(t *testing.T) {
 	s := archiveTestStore(t)

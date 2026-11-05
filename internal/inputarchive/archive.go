@@ -74,11 +74,24 @@ func validateHeader(m Manifest) error {
 }
 
 func (m Manifest) Validate() error {
-	if err := validateHeader(m); err != nil {
+	if err := m.ValidatePlan(); err != nil {
 		return err
 	}
 	count := int((m.RawBytes + int64(m.SegmentBytes) - 1) / int64(m.SegmentBytes))
 	if len(m.Segments) != count {
+		return ErrInvalid
+	}
+	return nil
+}
+
+// ValidatePlan also accepts a contiguous verified prefix of a full manifest.
+// It performs no object reads and grants no authority to claim or resume it.
+func (m Manifest) ValidatePlan() error {
+	if err := validateHeader(m); err != nil {
+		return err
+	}
+	count := int((m.RawBytes + int64(m.SegmentBytes) - 1) / int64(m.SegmentBytes))
+	if len(m.Segments) > count {
 		return ErrInvalid
 	}
 	for i, s := range m.Segments {
@@ -104,6 +117,38 @@ func segmentKey(prefix string, ordinal int, digest string) string {
 
 func sum(b []byte) string { h := sha256.Sum256(b); return "sha256:" + hex.EncodeToString(h[:]) }
 
+// newSegmentStoredLimit bounds newly encoded objects independently of their
+// compression ratio. The allowance covers stored DEFLATE blocks, alignment,
+// the gzip header/trailer and the final empty block. Existing receipts retain
+// their original bytes and the broader legacy validation bound.
+func newSegmentStoredLimit(rawBytes int) int {
+	return rawBytes + 6*((rawBytes+65534)/65535) + 32
+}
+
+func boundSegmentEncoding(raw, encoded []byte) ([]byte, error) {
+	limit := newSegmentStoredLimit(len(raw))
+	if len(encoded) <= limit {
+		return encoded, nil
+	}
+	// A compressor change or an expanding input cannot consume the complete
+	// copy budget. A stored gzip member preserves the format and original SHA.
+	var stored bytes.Buffer
+	z, err := gzip.NewWriterLevel(&stored, gzip.NoCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = z.Write(raw); err != nil {
+		return nil, err
+	}
+	if err = z.Close(); err != nil {
+		return nil, err
+	}
+	if stored.Len() > limit {
+		return nil, fmt.Errorf("archive encoding exceeds stored bound: %w", ErrIntegrity)
+	}
+	return stored.Bytes(), nil
+}
+
 // Copy resumes by re-reading the bounded source stream and checking prior
 // segment receipts. No segment receipt is emitted until a full remote GET
 // verifies it. No Manifest is returned until the full source digest matches
@@ -114,18 +159,10 @@ func Copy(ctx context.Context, objects Objects, source io.Reader, planned Manife
 	if ctx == nil || objects == nil || source == nil || checkpoint == nil {
 		return Manifest{}, ErrInvalid
 	}
-	if err := validateHeader(planned); err != nil {
+	if err := planned.ValidatePlan(); err != nil {
 		return Manifest{}, err
 	}
 	count := int((planned.RawBytes + int64(planned.SegmentBytes) - 1) / int64(planned.SegmentBytes))
-	if len(planned.Segments) > count {
-		return Manifest{}, ErrInvalid
-	}
-	for i, s := range planned.Segments {
-		if err := validateSegment(planned, s, i); err != nil {
-			return Manifest{}, err
-		}
-	}
 	result := planned
 	result.Segments = nil
 	h := sha256.New()
@@ -167,7 +204,10 @@ func Copy(ctx context.Context, objects Objects, source io.Reader, planned Manife
 		if err = z.Close(); err != nil {
 			return Manifest{}, err
 		}
-		stored := compressed.Bytes()
+		stored, err := boundSegmentEncoding(raw, compressed.Bytes())
+		if err != nil {
+			return Manifest{}, err
+		}
 		s := Segment{Ordinal: i, RawBytes: n, StoredBytes: len(stored), RawHash: sum(raw), StoredHash: sum(stored)}
 		s.Key = segmentKey(planned.Prefix, i, s.StoredHash)
 		if err = validateSegment(planned, s, i); err != nil {
