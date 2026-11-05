@@ -14,18 +14,23 @@ import (
 // dependency decoder and manifest validation as single-identity reads. No
 // original compiler input bytes are fetched. All statements use the caller's
 // single read-only Repeatable Read snapshot and existing indexes.
-func resolveCompilerInputHotBatch(ctx context.Context, tx *sql.Tx, refs []inputarchive.HotReference) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
+func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []inputarchive.HotReference) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
 	if len(refs) < 1 || len(refs) > 32 {
 		return nil, ErrInvalidInput
 	}
 	out := map[inputarchive.HotReference]inputarchive.HotNode{}
 	artifacts, inputs := []string{}, []string{}
+	generations, releases := []inputarchive.HotReference{}, []inputarchive.HotReference{}
 	for _, ref := range refs {
 		switch ref.Kind {
 		case "artifact":
 			artifacts = append(artifacts, ref.ID)
 		case "input":
 			inputs = append(inputs, ref.ID)
+		case "generation":
+			generations = append(generations, ref)
+		case "release":
+			releases = append(releases, ref)
 		default:
 			node, err := resolveCompilerInputHotNode(ctx, tx, ref)
 			if err == nil {
@@ -34,6 +39,9 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx *sql.Tx, refs []inputa
 				return nil, err
 			}
 		}
+	}
+	if err := resolveCompilerInputHotLedgerBatch(ctx, tx, generations, releases, out); err != nil {
+		return nil, err
 	}
 	if len(artifacts) > 0 {
 		rows, err := tx.QueryContext(ctx, `SELECT id,artifact_kind,content_hash,

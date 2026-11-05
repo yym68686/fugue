@@ -255,7 +255,7 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
 	return roots, nil
 }
 
-func resolveCompilerInputHotNode(ctx context.Context, tx *sql.Tx, ref inputarchive.HotReference) (inputarchive.HotNode, error) {
+func resolveCompilerInputHotNode(ctx context.Context, tx inputQueryer, ref inputarchive.HotReference) (inputarchive.HotNode, error) {
 	node := inputarchive.HotNode{Identity: ref, References: []inputarchive.HotReference{}}
 	node.Identity.ExpectedHash = ""
 	add := func(kind, id, artifactKind, scope string) {
@@ -269,17 +269,14 @@ func resolveCompilerInputHotNode(ctx context.Context, tx *sql.Tx, ref inputarchi
 		if err := tx.QueryRowContext(ctx, `SELECT id,content_hash FROM fugue_platform_artifacts WHERE artifact_kind=$1 AND scope_key=$2 AND generation=$3`, ref.ArtifactKind, ref.ScopeKey, ref.ID).Scan(&id, &node.ContentHash); err != nil {
 			return node, err
 		}
-		add("artifact", id, "", "")
+		return compilerInputHotGenerationNode(ref, id, node.ContentHash), nil
 	case "release":
 		var id, kind, scope, generation string
 		var candidate, serving, lkg, pinned, rollback string
 		if err := tx.QueryRowContext(ctx, `SELECT artifact_id,artifact_kind,scope_key,generation,candidate_generation,serving_unverified_generation,verified_lkg_generation,pinned_rollback_generation,rollback_target_generation FROM fugue_platform_artifact_releases WHERE id=$1`, ref.ID).Scan(&id, &kind, &scope, &generation, &candidate, &serving, &lkg, &pinned, &rollback); err != nil {
 			return node, err
 		}
-		add("artifact", id, "", "")
-		for _, value := range []string{generation, candidate, serving, lkg, pinned, rollback} {
-			add("generation", value, kind, scope)
-		}
+		return compilerInputHotReleaseNode(ref, id, kind, scope, []string{generation, candidate, serving, lkg, pinned, rollback}), nil
 	case "expectation":
 		var parent, release, kind, scope, generation string
 		if err := tx.QueryRowContext(ctx, `SELECT release_set_id,artifact_release_id,artifact_kind,scope_key,expected_generation FROM fugue_platform_expected_consumer_sets WHERE id=$1`, ref.ID).Scan(&parent, &release, &kind, &scope, &generation); err != nil {

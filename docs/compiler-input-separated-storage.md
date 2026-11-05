@@ -321,6 +321,13 @@ identities; artifact text is capped at 8MiB per artifact and 32MiB per batch.
 Missing identities remain explicit blockers, while failed database statements
 abort the inventory instead of masquerading as missing dependencies. Batched
 and individual reads use the same typed dependency and manifest validation.
+Generation and release identities are also fetched in bounded batches, using
+the same node builders as individual lookups. A generation always matches its
+exact kind/scope/generation tuple; every candidate, serving, LKG, pinned and
+rollback slot is retained, including repeated generation edges. The batch
+uses the caller's existing read-only Repeatable Read transaction. Integration
+checks compare all 32 individual lookups against the two equivalent ledger
+queries, including concurrent replacements, missing identities and SQL failure.
 For DNS artifacts the database projects only the lineage, policy, current and
 previous publication envelopes, and declared DNS source. Answer/query/readiness
 views are not dependency identities and are not transferred to the inspector.
