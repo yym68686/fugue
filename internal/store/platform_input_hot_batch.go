@@ -44,10 +44,17 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []i
 		return nil, err
 	}
 	if len(artifacts) > 0 {
+		// jsonb_each materializes even discarded answer values and can spill
+		// them to disk. Read only dependency keys; SQL NULL excludes a missing
+		// key while JSON null remains present for the typed decoder to reject.
 		rows, err := tx.QueryContext(ctx, `SELECT id,artifact_kind,content_hash,
  left((CASE WHEN artifact_kind='dns_answer_bundle' AND jsonb_typeof(content_json)='object'
- THEN COALESCE((SELECT jsonb_object_agg(key,value) FROM jsonb_each(content_json)
- WHERE key IN ('lineage','policy','cell_route_publications','previous_traffic_publication','cell_dns_source')),'{}'::jsonb)
+ THEN COALESCE((SELECT jsonb_object_agg(key,value) FROM (VALUES
+ ('lineage',content_json->'lineage'),('policy',content_json->'policy'),
+ ('cell_route_publications',content_json->'cell_route_publications'),
+ ('previous_traffic_publication',content_json->'previous_traffic_publication'),
+ ('cell_dns_source',content_json->'cell_dns_source')) dependency(key,value)
+ WHERE value IS NOT NULL),'{}'::jsonb)
  ELSE content_json END)::text,$2),left(metadata_json::text,16385),octet_length(content_json::text)
  FROM fugue_platform_artifacts WHERE id=ANY($1::text[])`, artifacts, compilerInputHotArtifactBytes+1)
 		if err != nil {

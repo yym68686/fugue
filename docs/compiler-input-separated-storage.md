@@ -343,6 +343,10 @@ previous publication envelopes, and declared DNS source. Answer/query/readiness
 views are not dependency identities and are not transferred to the inspector.
 The full original JSON text size still counts against the unchanged artifact
 and batch limits; projection cannot admit an otherwise oversized source.
+The projection reads the five dependency keys directly. It does not expand
+unrelated answer values with `jsonb_each`, whose set materialization can spill
+to temporary storage before filtering. Missing keys remain absent, JSON null
+remains present, and the same typed dependency validation still runs.
 Typed publication validation shares one immutable JSON envelope rather than
 serializing the entire artifact for each dependency view. PostgreSQL integration
 checks compare projected and full reads, including transitions, conflicting

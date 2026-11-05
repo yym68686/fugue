@@ -302,6 +302,12 @@ func TestHotInventoryPostgresDNSProjectionPreservesTypedDependenciesAndBounds(t 
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Unrelated answer views must not be expanded into a tuplestore.
+			// Exercise the production no-temporary-file guard with a small
+			// local work_mem budget, including null lineage and transitions.
+			if _, err = tx.Exec(`SET LOCAL work_mem='64kB'; SET LOCAL temp_file_limit=0`); err != nil {
+				t.Fatal(err)
+			}
 			ref := inputarchive.HotReference{Kind: "artifact", ID: artifact.ID}
 			want, singleErr := resolveCompilerInputHotNode(t.Context(), tx, ref)
 			got, batchErr := resolveCompilerInputHotBatch(t.Context(), tx, []inputarchive.HotReference{ref})
