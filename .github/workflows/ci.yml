@@ -987,6 +987,11 @@ jobs:
           version: v4.2.0
       - name: Download Go modules before the bounded test budget
         run: go mod download
+      - name: Install the bounded readonly executor test dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/input-readonly-python"
+          "$RUNNER_TEMP/input-readonly-python/bin/python" -m pip install -r scripts/requirements-input-readonly.txt
+          echo "INPUT_READONLY_PYTHON=$RUNNER_TEMP/input-readonly-python/bin/python" >> "$GITHUB_ENV"
       - name: Run the repository prepush contract
         env:
           PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
@@ -3378,7 +3383,8 @@ jobs:
           python3 scripts/publish_storage_policy.py deploy/environments/production/storage-policy/policy.json --apply
 
   compiler_input_storage:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-compiler-input-storage, cancel-in-progress: false, queue: max}
@@ -3390,6 +3396,40 @@ jobs:
         run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Install the trusted runner reader-decryption dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/input-readonly-python"
+          "$RUNNER_TEMP/input-readonly-python/bin/python" -m pip install -r scripts/requirements-input-readonly.txt
+          echo "INPUT_READONLY_PYTHON=$RUNNER_TEMP/input-readonly-python/bin/python" >> "$GITHUB_ENV"
+      - id: readonly
+        env: {BASE_SHA: '${{ github.event.before }}'}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/compiler-input-readonly/operation.json
+          if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config"; then exit 0; fi
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/requirements-input-readonly.txt deploy/releases "$config" .github/workflows/ci.yml
+          "$INPUT_READONLY_PYTHON" -m unittest scripts.test_compiler_input_readonly scripts.test_compiler_input_archive scripts.test_compiler_input_storage
+          echo 'selected=true' >> "$GITHUB_OUTPUT"
+      - if: steps.readonly.outputs.selected == 'true'
+        name: Preview one isolated readonly diagnostic
+        run: |
+          "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_readonly deploy/environments/production/compiler-input-readonly/operation.json --evidence "$RUNNER_TEMP/input-readonly-preview-${{ github.sha }}.json"
+      - if: steps.readonly.outputs.selected == 'true'
+        name: Execute the exact one-shot diagnostic without migrating inputs
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py deploy/releases deploy/environments/production/compiler-input-readonly .github/workflows/ci.yml
+          "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_readonly deploy/environments/production/compiler-input-readonly/operation.json --apply --evidence "$RUNNER_TEMP/input-readonly-result-${{ github.sha }}.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.readonly.outputs.selected == 'true'
+        with:
+          name: fugue-input-readonly-${{ github.sha }}
+          path: ${{ runner.temp }}/input-readonly-*-${{ github.sha }}.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Check current maintenance implementation and reader barriers
         env:
           BASE_SHA: ${{ github.event.before }}

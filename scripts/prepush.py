@@ -474,6 +474,9 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    readonly_python = os.environ.get("INPUT_READONLY_PYTHON", sys.executable)
+    if any(name in {"scripts/compiler_input_readonly.py", "scripts/test_compiler_input_readonly.py", "scripts/requirements-input-readonly.txt"} or name.startswith("deploy/environments/production/compiler-input-readonly/") for name in paths):
+        non_go_tasks["input-readonly-tests"] = [readonly_python, "-m", "unittest", "scripts.test_compiler_input_readonly"]
     if any(name in {"scripts/longhorn_snapshot_map.py", "scripts/plan_longhorn_snapshot_recovery.py", "scripts/recover_longhorn_snapshot.py", "scripts/test_longhorn_snapshot_map.py", "scripts/test_plan_longhorn_snapshot_recovery.py", "scripts/test_recover_longhorn_snapshot.py", ".github/workflows/ci.yml"} or name.startswith(("deploy/environments/production/local-snapshot-review/", "tests/snapshot-admission-cel/")) for name in paths):
         non_go_tasks["local-snapshot-review-tests"] = ["python3", "-m", "unittest", "scripts.test_longhorn_snapshot_map", "scripts.test_plan_longhorn_snapshot_recovery", "scripts.test_recover_longhorn_snapshot"]
         go_dependent_tasks["snapshot-admission-cel-tests"] = ["go", "-C", "tests/snapshot-admission-cel", "test", "-count=1", "./..."]

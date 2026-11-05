@@ -1,0 +1,2 @@
+# Only the trusted CI runner decrypts the managed archive reader; never a Job.
+cryptography==43.0.0
