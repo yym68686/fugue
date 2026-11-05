@@ -127,6 +127,10 @@ func TestSeparatedInputPostgresRoundtripSharingAndRollback(t *testing.T) {
 	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
+	readback, err := RunCompilerInputLocalReadback(t.Context(), s.databaseURL, CompilerInputLocalReadbackOptions{Digest: digest, MaxRawBytes: inputMaxBytes})
+	if err != nil || !readback.Verified || readback.RetirementAuthorized || readback.Format != inputFormatSeparatedV4 {
+		t.Fatal("separated local full-stream readback did not verify", readback, err)
+	}
 	assertSeparatedEquivalent(t, s, snapshot, digest)
 	var components int
 	if err := s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_separated_refs WHERE content_hash=$1`, digest).Scan(&components); err != nil || components != 3 {

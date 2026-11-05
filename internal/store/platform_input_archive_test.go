@@ -182,6 +182,10 @@ func testCompilerInputArchiveHotCopyVerifiesThenPrefersLocalBytes(t *testing.T, 
 	if err = s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, digest).Scan(&hotRows); err != nil || hotRows != report.Chunks {
 		t.Fatal("hot chunk coverage differs", hotRows, err)
 	}
+	readback, err := RunCompilerInputLocalReadback(t.Context(), s.databaseURL, CompilerInputLocalReadbackOptions{Digest: digest, MaxRawBytes: report.RawBytes})
+	if err != nil || !readback.Verified || readback.RetirementAuthorized || readback.ReadBytes != report.RawBytes || readback.Location != "hot" {
+		t.Fatal("local full-stream readback did not verify the hot representation", readback, err)
+	}
 	// A broken R2 reader proves this hot input is read from local PostgreSQL,
 	// not the old external route. The source relation remains as rollback.
 	s.compilerInputArchiveObjects = &archiveTestObjects{failGet: true}
@@ -221,6 +225,9 @@ func TestCompilerInputArchiveHotCopyRejectsCorruptHotBytes(t *testing.T) {
 	}
 	if _, err = s.GetPlatformCompilerInput(digest); err == nil {
 		t.Fatal("corrupt hot input silently fell back to R2")
+	}
+	if report, err := RunCompilerInputLocalReadback(t.Context(), s.databaseURL, CompilerInputLocalReadbackOptions{Digest: digest, MaxRawBytes: hotCopyTestBudget}); err == nil || report.Verified || report.RetirementAuthorized {
+		t.Fatal("local full-stream readback accepted corrupt hot bytes", report, err)
 	}
 }
 

@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-local-readback, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, observe")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
@@ -36,12 +36,12 @@ func main() {
 	archiveLimit := flag.Int("archive-limit", 1, "maximum archive batch inputs, 1 through 1000")
 	archiveSegmentBytes := flag.Int("archive-segment-bytes", 16<<20, "bounded archive segment bytes; applies only to new receipts")
 	hotMaxStoredBytes := flag.Int64("hot-copy-max-stored-bytes", 0, "explicit stored-byte budget for one archive hot copy or restore; source remains intact")
-	readCheckMaxBytes := flag.Int64("read-check-max-bytes", 0, "explicit raw-byte ceiling for one read-only archive check, at most 1GiB")
+	readCheckMaxBytes := flag.Int64("read-check-max-bytes", 0, "explicit raw-byte ceiling for one complete read-only input check, at most 1GiB")
 	rehearse := flag.Bool("rehearse", false, "encode/verify then roll back (consumes WAL and I/O)")
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
 	hotMode := *mode == "archive-hot-copy" || *mode == "archive-hot-restore"
-	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode) && !*apply
+	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode) && !*apply
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
@@ -65,6 +65,22 @@ func main() {
 			os.Exit(2)
 		}
 		report, err := store.RunCompilerInputArchiveReadCheck(ctx, dsn, store.CompilerInputArchiveReadCheckOptions{Digest: *digest, MaxRawBytes: *readCheckMaxBytes})
+		if err != nil {
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if *mode == "archive-hot-local-readback" {
+		dsn := os.Getenv("FUGUE_DATABASE_URL")
+		if dsn == "" || !archiveReadCheckDigest.MatchString(*digest) || *readCheckMaxBytes < 1 || *readCheckMaxBytes > inputarchive.MaxInputBytes {
+			fmt.Fprintln(os.Stderr, "archive-hot-local-readback requires a SHA-256 digest and explicit 1..1GiB raw-byte budget")
+			os.Exit(2)
+		}
+		report, err := store.RunCompilerInputLocalReadback(ctx, dsn, store.CompilerInputLocalReadbackOptions{Digest: *digest, MaxRawBytes: *readCheckMaxBytes})
 		if err != nil {
 			reportMaintenanceError(err)
 			os.Exit(1)

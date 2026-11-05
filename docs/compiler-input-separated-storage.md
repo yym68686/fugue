@@ -396,6 +396,29 @@ reactivation admission still require their own proofs. Its deterministic graph
 hash is not an approved retirement plan or a publication barrier. Deploying the
 command does not run it or change any production read/write route.
 
+`archive-hot-local-readback --digest sha256:... --read-check-max-bytes N`
+provides the separate complete original-byte check for one local input. The
+explicit raw-byte ceiling is required and may be up to 1GiB; inputs larger
+than 128MiB are streamed rather than decoded into a whole snapshot. It acquires
+the session reader barrier before beginning one read-only Repeatable Read
+snapshot, checks the manifest and every stored chunk/recipe/pack/component with
+the normal native readers, and independently checks the final byte length and
+original SHA-256. For v1/v2 it requires `storage_location=hot` and refuses to use
+the old chunks relation. Shared v3 and separated v4 use their local pack stores,
+including manifests whose historical location default is `legacy`.
+
+This command never resolves R2 configuration or constructs an object-store
+client. A missing/corrupt local representation cannot fall back to an intact
+archive or the old source. Missing manifests and legacy inline JSONB remain
+explicit failures; they do not get substituted with different canonicalization
+or an unbounded allocation. The operation has a three-minute overall deadline,
+five-second SQL and 250ms lock limits, and one database connection. It writes
+no migration lease, pin, receipt or route. Its private report identifies the
+observed snapshot and this one digest's format, location and actual read bytes.
+`verified=true` proves only that complete local read in that snapshot; artifact
+signatures, the full dependency closure and persistent reactivation admission
+are still separate requirements, and `retirement_authorized` remains false.
+
 `archive-retire --apply` requires the exact plan hash, current and rollback
 reader release IDs, a committed write fence and database trigger, no active
 archive leases, a matching database-side recheck, and a drained session-level

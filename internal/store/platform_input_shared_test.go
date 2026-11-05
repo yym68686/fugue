@@ -121,6 +121,10 @@ func TestSharedInputPostgresRoundtripReuseAndCompatibility(t *testing.T) {
 	if err != nil || m.Format != inputFormatSharedV3 {
 		t.Fatal(m, err)
 	}
+	readback, err := RunCompilerInputLocalReadback(t.Context(), s.databaseURL, CompilerInputLocalReadbackOptions{Digest: digest, MaxRawBytes: inputMaxBytes})
+	if err != nil || !readback.Verified || readback.RetirementAuthorized || readback.Format != inputFormatSharedV3 {
+		t.Fatal("shared local full-stream readback did not verify", readback, err)
+	}
 	var objects, stored int64
 	if err = s.db.QueryRow(`SELECT (SELECT count(*) FROM fugue_platform_input_shared_objects WHERE pack_id IN(SELECT pack_id FROM fugue_platform_input_shared_refs WHERE content_hash=$1)),sum(octet_length(data)) FROM fugue_platform_input_shared_packs WHERE pack_id IN(SELECT pack_id FROM fugue_platform_input_shared_refs WHERE content_hash=$1)`, digest).Scan(&objects, &stored); err != nil {
 		t.Fatal(err)
