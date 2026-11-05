@@ -5,9 +5,54 @@ import (
 	"reflect"
 	"testing"
 
+	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/testfixture/celldns"
 )
+
+func TestDNSDependencyEvidenceMatchesIndependentTypedViews(t *testing.T) {
+	for _, transition := range []bool{false, true} {
+		req, _, _ := celldns.SourceAuthorizedRequest(t, transition)
+		artifact := celldns.Compile(t, req).DNSArtifact
+		before, _ := json.Marshal(artifact)
+		evidence, err := platformconfig.DecodeDNSRouteDependencyEvidence(artifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		publications, err := platformconfig.DecodeCellRoutePublications(artifact)
+		if err != nil || !reflect.DeepEqual(evidence.Publications, publications) {
+			t.Fatal("shared decoding changed typed publications", err)
+		}
+		previous, err := platformconfig.DecodePreviousTrafficPublication(artifact)
+		if err != nil || !reflect.DeepEqual(evidence.Previous, previous) {
+			t.Fatal("shared decoding changed retained predecessor", err)
+		}
+		dependencies, err := platformconfig.DNSRouteDependencies(artifact)
+		if err != nil || !reflect.DeepEqual(evidence.Dependencies, dependencies) {
+			t.Fatal("dependency views disagree", err)
+		}
+		for _, dependency := range evidence.Dependencies {
+			if dependency.ReleaseID == "" || len(dependency.Artifacts) < 3 {
+				t.Fatal("dependency publication composition disappeared")
+			}
+		}
+		after, _ := json.Marshal(artifact)
+		if string(before) != string(after) {
+			t.Fatal("shared decoding mutated the immutable artifact")
+		}
+	}
+	for _, content := range []map[string]any{
+		{"policy": 7},
+		{"cell_route_publications": []any{7}},
+		{"previous_traffic_publication": map[string]any{}},
+		{"unencodable": func() {}},
+	} {
+		evidence, err := platformconfig.DecodeDNSRouteDependencyEvidence(model.PlatformArtifact{Content: content})
+		if err == nil || len(evidence.Dependencies) != 0 || len(evidence.Publications) != 0 || evidence.Previous != nil {
+			t.Fatal("invalid evidence returned partial dependency authority", err)
+		}
+	}
+}
 
 func TestDNSAuthorityTransitionCompilesExplicitAlternativesWithoutExtraVotes(t *testing.T) {
 	req := celldns.TransitionRequest(t)

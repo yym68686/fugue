@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
 	"fugue/internal/schemamigrate"
+	"fugue/internal/testfixture/celldns"
 )
 
 func hotInventoryTestDatabase(t *testing.T) (*sql.DB, string, string) {
@@ -268,6 +270,63 @@ func TestHotInventoryPostgresBatchMatchesSingleIdentityValidation(t *testing.T) 
 	}
 	if _, err = resolveCompilerInputHotBatch(t.Context(), tx, refs); err == nil {
 		t.Fatal("aborted transaction was treated as missing graph identities")
+	}
+}
+
+func TestHotInventoryPostgresDNSProjectionPreservesTypedDependenciesAndBounds(t *testing.T) {
+	db, _, _ := hotInventoryTestDatabase(t)
+	for _, transition := range []bool{false, true} {
+		req, _, _ := celldns.SourceAuthorizedRequest(t, transition)
+		artifact := celldns.Compile(t, req).DNSArtifact
+		artifact.ID = fmt.Sprintf("neutral-projected-dns-%t", transition)
+		artifact.Content["query_views"] = strings.Repeat("irrelevant-answer-view", 16384)
+		artifact.Content["readiness_plan"] = strings.Repeat("irrelevant-probe-view", 8192)
+		for _, invalid := range []bool{false, true} {
+			if invalid {
+				artifact.Content["lineage"] = nil
+			}
+			content, err := json.Marshal(artifact.Content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata, err := json.Marshal(artifact.Metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`INSERT INTO fugue_platform_artifacts(id,artifact_kind,scope_key,generation,status,content_hash,content_json,metadata_json,created_at,updated_at)
+ VALUES($1,'dns_answer_bundle','scope-neutral',$1,'validated',$2,$3,$4,now(),now())
+ ON CONFLICT(id) DO UPDATE SET content_json=EXCLUDED.content_json`, artifact.ID, artifact.ContentHash, content, metadata); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := inputarchive.HotReference{Kind: "artifact", ID: artifact.ID}
+			want, singleErr := resolveCompilerInputHotNode(t.Context(), tx, ref)
+			got, batchErr := resolveCompilerInputHotBatch(t.Context(), tx, []inputarchive.HotReference{ref})
+			_ = tx.Rollback()
+			if batchErr != nil || invalid && (singleErr == nil || len(got) != 0) || !invalid && (singleErr != nil || !reflect.DeepEqual(want, got[ref])) {
+				t.Fatal("DNS projection changed dependency or invalid-lineage behavior", transition, invalid, singleErr, batchErr)
+			}
+		}
+	}
+	// Omitting a large answer body cannot turn an oversized source into a
+	// valid bounded artifact. Source size, not projected size, owns the cap.
+	large := `{"query_views":"` + strings.Repeat("x", compilerInputHotArtifactBytes+1) + `"}`
+	if _, err := db.Exec(`INSERT INTO fugue_platform_artifacts(id,artifact_kind,scope_key,generation,status,content_hash,content_json,metadata_json,created_at,updated_at)
+ VALUES('neutral-oversized-dns','dns_answer_bundle','scope-neutral','neutral-oversized-dns','validated',$1,$2,'{}',now(),now())`, "sha256:"+strings.Repeat("a", 64), large); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	ref := inputarchive.HotReference{Kind: "artifact", ID: "neutral-oversized-dns"}
+	got, err := resolveCompilerInputHotBatch(t.Context(), tx, []inputarchive.HotReference{ref})
+	if err != nil || len(got) != 0 {
+		t.Fatal("projected source bypassed original artifact size bound", got, err)
 	}
 }
 

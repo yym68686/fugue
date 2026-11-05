@@ -478,19 +478,46 @@ type DNSRouteDependency struct {
 	RequireVerified bool
 }
 
+// DNSRouteDependencyEvidence shares one immutable JSON envelope across the
+// typed dependency views. It is not signature or publication authorization.
+type DNSRouteDependencyEvidence struct {
+	Dependencies []DNSRouteDependency
+	Publications []CellRoutePublicationInput
+	Previous     *PreviousTrafficPublicationInput
+}
+
 func DNSRouteDependencies(a model.PlatformArtifact) ([]DNSRouteDependency, error) {
-	pubs, err := DecodeCellRoutePublications(a)
+	evidence, err := DecodeDNSRouteDependencyEvidence(a)
+	return evidence.Dependencies, err
+}
+
+func DecodeDNSRouteDependencyEvidence(a model.PlatformArtifact) (DNSRouteDependencyEvidence, error) {
+	var evidence DNSRouteDependencyEvidence
+	raw, err := json.Marshal(a.Content)
 	if err != nil {
-		return nil, err
+		return evidence, fmt.Errorf("DNS artifact content cannot be encoded: %w", err)
 	}
+	pubs, _, err := decodeCellRoutePublications(raw)
+	if err != nil {
+		return evidence, err
+	}
+	previous, err := decodePreviousTrafficPublication(raw)
+	if err != nil {
+		return evidence, err
+	}
+	dependencies, err := dnsRouteDependenciesFromDecoded(raw, pubs, previous)
+	if err != nil {
+		return evidence, err
+	}
+	evidence.Dependencies, evidence.Publications, evidence.Previous = dependencies, pubs, previous
+	return evidence, nil
+}
+
+func dnsRouteDependenciesFromDecoded(raw []byte, pubs []CellRoutePublicationInput, previous *PreviousTrafficPublicationInput) ([]DNSRouteDependency, error) {
 	out := make([]DNSRouteDependency, 0, len(pubs)+2)
 	for _, p := range pubs {
 		r := p.Reference
 		out = append(out, DNSRouteDependency{GroupID: r.AuthorityCellID, Parent: p.Parent, ReleaseID: r.ReleaseID, ReleaseChannel: r.ReleaseChannel, CanaryRuleRef: r.CanaryRuleRef, FencingToken: r.FencingToken, Artifacts: []model.PlatformArtifact{p.Parent, p.Route, p.TLS}})
-	}
-	previous, err := DecodePreviousTrafficPublication(a)
-	if err != nil {
-		return nil, err
 	}
 	if previous == nil {
 		return out, nil
@@ -498,7 +525,6 @@ func DNSRouteDependencies(a model.PlatformArtifact) ([]DNSRouteDependency, error
 	var payload struct {
 		Source *CellDNSPlanSource `json:"cell_dns_source"`
 	}
-	raw, _ := json.Marshal(a.Content)
 	if json.Unmarshal(raw, &payload) != nil || payload.Source == nil {
 		return nil, fmt.Errorf("DNS transition source missing")
 	}

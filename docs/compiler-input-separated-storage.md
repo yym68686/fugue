@@ -321,6 +321,16 @@ identities; artifact text is capped at 8MiB per artifact and 32MiB per batch.
 Missing identities remain explicit blockers, while failed database statements
 abort the inventory instead of masquerading as missing dependencies. Batched
 and individual reads use the same typed dependency and manifest validation.
+For DNS artifacts the database projects only the lineage, policy, current and
+previous publication envelopes, and declared DNS source. Answer/query/readiness
+views are not dependency identities and are not transferred to the inspector.
+The full original JSON text size still counts against the unchanged artifact
+and batch limits; projection cannot admit an otherwise oversized source.
+Typed publication validation shares one immutable JSON envelope rather than
+serializing the entire artifact for each dependency view. PostgreSQL integration
+checks compare projected and full reads, including transitions, conflicting
+lineage and oversized omitted bodies. This is a transport/decoding optimization,
+not proof that the production graph fits the existing deadline.
 
 This inventory deliberately does not grant retirement authority. Its
 `metadata_complete` field describes only the graph reachable from the collected

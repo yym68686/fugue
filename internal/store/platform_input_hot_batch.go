@@ -36,7 +36,11 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx *sql.Tx, refs []inputa
 		}
 	}
 	if len(artifacts) > 0 {
-		rows, err := tx.QueryContext(ctx, `SELECT id,artifact_kind,content_hash,left(content_json::text,$2),left(metadata_json::text,16385)
+		rows, err := tx.QueryContext(ctx, `SELECT id,artifact_kind,content_hash,
+ left((CASE WHEN artifact_kind='dns_answer_bundle' AND jsonb_typeof(content_json)='object'
+ THEN COALESCE((SELECT jsonb_object_agg(key,value) FROM jsonb_each(content_json)
+ WHERE key IN ('lineage','policy','cell_route_publications','previous_traffic_publication','cell_dns_source')),'{}'::jsonb)
+ ELSE content_json END)::text,$2),left(metadata_json::text,16385),octet_length(content_json::text)
  FROM fugue_platform_artifacts WHERE id=ANY($1::text[])`, artifacts, compilerInputHotArtifactBytes+1)
 		if err != nil {
 			return nil, err
@@ -47,15 +51,18 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx *sql.Tx, refs []inputa
 		for rows.Next() {
 			var a model.PlatformArtifact
 			var content, metadata []byte
-			if err = rows.Scan(&a.ID, &a.ArtifactKind, &a.ContentHash, &content, &metadata); err != nil {
+			var originalBytes int64
+			if err = rows.Scan(&a.ID, &a.ArtifactKind, &a.ContentHash, &content, &metadata, &originalBytes); err != nil {
 				break
 			}
-			bytes += len(content) + len(metadata)
+			// Count the full source size against the unchanged per-batch cap,
+			// even though unrelated DNS answer views are not transported.
+			bytes += int(originalBytes) + len(metadata)
 			if bytes > 32<<20 {
 				err = ErrConflict
 				break
 			}
-			if len(content) > compilerInputHotArtifactBytes || len(metadata) > 16<<10 || json.Unmarshal(content, &a.Content) != nil || json.Unmarshal(metadata, &a.Metadata) != nil {
+			if originalBytes > compilerInputHotArtifactBytes || len(content) > compilerInputHotArtifactBytes || len(metadata) > 16<<10 || json.Unmarshal(content, &a.Content) != nil || json.Unmarshal(metadata, &a.Metadata) != nil {
 				continue
 			}
 			node, decodeErr := compilerInputArtifactHotNode(a)

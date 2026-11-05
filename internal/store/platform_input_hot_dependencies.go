@@ -72,11 +72,11 @@ func compilerInputArtifactHotNode(artifact model.PlatformArtifact) (inputarchive
 		}
 	}
 	if artifact.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
-		dependencies, err := platformconfig.DNSRouteDependencies(artifact)
+		evidence, err := platformconfig.DecodeDNSRouteDependencyEvidence(artifact)
 		if err != nil {
 			return node, fmt.Errorf("hot DNS publication dependencies invalid: %w", ErrConflict)
 		}
-		for _, dependency := range dependencies {
+		for _, dependency := range evidence.Dependencies {
 			if err := add("release", dependency.ReleaseID, ""); err != nil {
 				return node, err
 			}
@@ -95,11 +95,7 @@ func compilerInputArtifactHotNode(artifact model.PlatformArtifact) (inputarchive
 				return node, err
 			}
 		}
-		cells, err := platformconfig.DecodeCellRoutePublications(artifact)
-		if err != nil {
-			return node, err
-		}
-		for _, cell := range cells {
+		for _, cell := range evidence.Publications {
 			if cell.ProducerPolicy != nil {
 				if err := add("release", cell.ProducerPolicy.ReleaseID, ""); err != nil {
 					return node, err
@@ -109,10 +105,7 @@ func compilerInputArtifactHotNode(artifact model.PlatformArtifact) (inputarchive
 				}
 			}
 		}
-		previous, err := platformconfig.DecodePreviousTrafficPublication(artifact)
-		if err != nil {
-			return node, err
-		}
+		previous := evidence.Previous
 		if previous != nil && previous.ProducerPolicy != nil {
 			if err := add("release", previous.ProducerPolicy.ReleaseID, ""); err != nil {
 				return node, err
