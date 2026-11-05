@@ -23,7 +23,8 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, observe")
+	copyContract := flag.String("copy-contract", "", "strict single-input archive-copy JSON contract path")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
@@ -54,6 +55,41 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *mode == "archive-copy" {
+		var c store.CompilerInputArchiveCopyContract
+		otherFlag := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name != "mode" && f.Name != "apply" && f.Name != "copy-contract" {
+				otherFlag = true
+			}
+		})
+		if *copyContract == "" || !*apply || *rehearse || otherFlag {
+			fmt.Fprintln(os.Stderr, "archive-copy requires explicit apply and a copy contract")
+			os.Exit(2)
+		}
+		file, err := os.Open(*copyContract)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "copy contract unavailable")
+			os.Exit(2)
+		}
+		decoder := json.NewDecoder(io.LimitReader(file, 16385))
+		decoder.DisallowUnknownFields()
+		err = decoder.Decode(&c)
+		var extra any
+		if err != nil || decoder.Decode(&extra) != io.EOF || c.Validate() != nil {
+			_ = file.Close()
+			fmt.Fprintln(os.Stderr, "invalid copy contract")
+			os.Exit(2)
+		}
+		_ = file.Close()
+		report, err := store.RunCompilerInputArchiveCopy(ctx, os.Getenv("FUGUE_DATABASE_URL"), c)
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		if err != nil {
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *mode == "observe" {
 		if err := observeStorage(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "runtime storage observation unavailable")

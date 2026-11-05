@@ -43,6 +43,7 @@ type archiveInputStream struct {
 	readLocation string // optional staging location; m still fences the canonical manifest
 	done         bool
 	err          error
+	pageChunks   int // bounded copy uses one; existing readers retain sixteen
 }
 
 func (r *archiveInputStream) Read(p []byte) (int, error) {
@@ -110,7 +111,14 @@ func (r *archiveInputStream) fetch() error {
 	if err != nil {
 		return err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT ordinal,chunk_hash,data FROM `+table+` WHERE content_hash=$1 AND ordinal >= $2 ORDER BY ordinal LIMIT 16`, r.m.Digest, r.next)
+	pageChunks := r.pageChunks
+	if pageChunks == 0 {
+		pageChunks = 16
+	}
+	if pageChunks < 1 || pageChunks > 16 {
+		return ErrInvalidInput
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT ordinal,chunk_hash,data FROM `+table+` WHERE content_hash=$1 AND ordinal >= $2 ORDER BY ordinal LIMIT $3`, r.m.Digest, r.next, pageChunks)
 	if err != nil {
 		return err
 	}

@@ -3444,6 +3444,48 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - id: copy
+        name: Select a new explicitly authorized copy-only attempt
+        env: {BASE_SHA: '${{ github.event.before }}'}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/compiler-input-copy/operation.json
+          if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" scripts/compiler_input_copy.py .github/workflows/ci.yml; then exit 0; fi
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py deploy/releases "$config" .github/workflows/ci.yml
+          "$INPUT_READONLY_PYTHON" -m unittest scripts.test_compiler_input_copy scripts.test_compiler_input_readonly scripts.test_compiler_input_archive scripts.test_compiler_input_storage
+          "$INPUT_READONLY_PYTHON" - <<'PY'
+          import json, os
+          from scripts.compiler_input_copy import validate
+          from scripts.compiler_input_readonly import identity
+          from scripts.compiler_input_storage import kube
+          c=validate(json.load(open('deploy/environments/production/compiler-input-copy/operation.json')))
+          name='fugue-input-copy-'+identity(c)[:20]+'-receipt'
+          receipt=kube(c['namespace'],'get','configmap',name,'--ignore-not-found','-o','json')
+          if not receipt.strip():
+              with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('selected=true\n')
+          else:
+              print('Existing one-shot copy receipt: operation will not be replayed.')
+          PY
+      - if: steps.copy.outputs.selected == 'true'
+        name: Preview the isolated copy-only contract without object IO
+        run: |
+          "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_copy deploy/environments/production/compiler-input-copy/operation.json --evidence "$RUNNER_TEMP/input-copy-preview-${{ github.sha }}.json"
+      - if: steps.copy.outputs.selected == 'true'
+        name: Copy one exact input and verify both GET passes
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py deploy/releases deploy/environments/production/compiler-input-copy .github/workflows/ci.yml
+          "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_copy deploy/environments/production/compiler-input-copy/operation.json --apply --evidence "$RUNNER_TEMP/input-copy-result-${{ github.sha }}.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.copy.outputs.selected == 'true'
+        with:
+          name: fugue-input-copy-${{ github.sha }}
+          path: ${{ runner.temp }}/input-copy-*-${{ github.sha }}.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Check current maintenance implementation and reader barriers
         env:
           BASE_SHA: ${{ github.event.before }}

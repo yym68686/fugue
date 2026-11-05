@@ -130,6 +130,16 @@ type S3Objects struct {
 }
 
 func NewS3(c S3Config) (*S3Objects, error) {
+	return newS3(c, false)
+}
+
+// NewSingleAttemptS3 is for explicitly budgeted one-shot copies. The regular
+// reader/writer client retains its existing retry behavior.
+func NewSingleAttemptS3(c S3Config) (*S3Objects, error) {
+	return newS3(c, true)
+}
+
+func newS3(c S3Config, singleAttempt bool) (*S3Objects, error) {
 	c.Prefix = strings.Trim(c.Prefix, "/")
 	if c.Endpoint == "" && c.AccountID != "" {
 		c.Endpoint = "https://" + c.AccountID + ".r2.cloudflarestorage.com"
@@ -138,6 +148,9 @@ func NewS3(c S3Config) (*S3Objects, error) {
 		return nil, err
 	}
 	opts := s3.Options{Region: c.Region, UsePathStyle: strings.TrimSpace(c.Endpoint) != "", Credentials: credentials.NewStaticCredentialsProvider(c.AccessKeyID, c.SecretAccessKey, c.SessionToken)}
+	if singleAttempt {
+		opts.RetryMaxAttempts = 1
+	}
 	if c.Endpoint != "" {
 		opts.BaseEndpoint = aws.String(strings.TrimRight(c.Endpoint, "/"))
 	}

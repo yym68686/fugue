@@ -19,6 +19,13 @@ type CompilerInputArchiveMigrationOptions struct {
 	Digest       string
 	Apply        bool
 	SegmentBytes int
+	// Only the bounded copy entrypoint sets these guards. Existing operator
+	// modes retain their prior behavior and receipts.
+	expectedFormat   string
+	expectedRawBytes int64
+	requireNew       bool
+	sourcePageChunks int
+	wrapSource       func(io.Reader) io.Reader
 }
 
 type CompilerInputArchiveRouteOptions struct {
@@ -117,8 +124,12 @@ func copyCompilerInputArchive(ctx context.Context, db *sql.DB, objects inputarch
 		report.State = "source-manifest-observed"
 		return report, nil
 	}
-	source := &archiveInputStream{ctx: ctx, db: db, m: claim.source, hash: sha256.New(), sourceEpoch: claim.epoch}
-	got, err := inputarchive.Copy(ctx, objects, source, claim.manifest, func(seg inputarchive.Segment) error {
+	source := &archiveInputStream{ctx: ctx, db: db, m: claim.source, hash: sha256.New(), sourceEpoch: claim.epoch, pageChunks: options.sourcePageChunks}
+	var stream io.Reader = source
+	if options.wrapSource != nil {
+		stream = options.wrapSource(stream)
+	}
+	got, err := inputarchive.Copy(ctx, objects, stream, claim.manifest, func(seg inputarchive.Segment) error {
 		return checkpointCompilerInputArchive(ctx, db, claim, seg)
 	})
 	if err != nil {
@@ -652,8 +663,20 @@ func claimCompilerInputArchive(ctx context.Context, db *sql.DB, backendHash stri
 	if claim.source.Format != inputFormatV1 && claim.source.Format != inputFormatCodecV2 {
 		return claim, fmt.Errorf("archive source must use v1/v2 chunks: %w", ErrConflict)
 	}
+	if options.expectedFormat != "" && (claim.source.Format != options.expectedFormat || claim.source.Size != options.expectedRawBytes || claim.source.Location != "legacy") {
+		return claim, fmt.Errorf("copy source differs from exact declaration: %w", ErrConflict)
+	}
 	if !options.Apply {
 		return claim, nil
+	}
+	if options.requireNew {
+		var exists bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_platform_input_archives WHERE content_hash=$1)`, options.Digest).Scan(&exists); err != nil {
+			return claim, err
+		}
+		if exists {
+			return claim, fmt.Errorf("one-shot copy already has an archive record: %w", ErrConflict)
+		}
 	}
 	var archiveFormat, sourceFormat, prefix, backend, state string
 	var rawBytes, segmentBytes, segmentCount, sourceEpoch int64

@@ -961,7 +961,10 @@ func TestCompilerInputArchiveMigrationStreamsBeyondLegacyLimit(t *testing.T) {
 	}
 	objects := &archiveTestObjects{}
 	backend := "sha256:" + strings.Repeat("e", 64)
-	archived, err := copyCompilerInputArchive(t.Context(), s.db, objects, backend, CompilerInputArchiveMigrationOptions{Digest: digest, Apply: true, SegmentBytes: 16 << 20})
+	// Exercise the isolated copy's one-chunk paging above the legacy 128MiB
+	// limit; the source and its business read location must remain intact.
+	archived, err := copyCompilerInputArchive(t.Context(), s.db, objects, backend, CompilerInputArchiveMigrationOptions{Digest: digest, Apply: true, SegmentBytes: 16 << 20,
+		expectedFormat: inputFormatV1, expectedRawBytes: size, requireNew: true, sourcePageChunks: 1})
 	if err != nil || int64(archived.Segments) != (size+(16<<20)-1)/(16<<20) || archived.SourceChunks != count || archived.RawBytes != size {
 		t.Fatal("streamed archive dimensions differ", archived, err)
 	}
