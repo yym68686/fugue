@@ -84,6 +84,25 @@ class ReadonlyTest(unittest.TestCase):
         incomplete = r.result_contract(json.dumps(graph), c)
         self.assertFalse(incomplete['all_reads_verified'])
 
+    def test_aggregate_costs_reject_identities_and_non_numeric_fields(self):
+        graph = failure()
+        graph['cost'] = dict(root_inventory_us=10, traversal_us=30, resolver_us=20,
+                             **{k: dict(queries=2, rows=3, query_return_us=10, rows_next_us=8, decode_us=5, source_bytes=1024, transport_bytes=64)
+                                for k in ('artifacts', 'inputs', 'ledger')})
+        got = r.result_contract(json.dumps(graph), declaration())
+        self.assertEqual(got['graph']['cost'], graph['cost'])
+        self.assertFalse(got['retirement_authorized'])
+        for field, value in [('source_bytes', -1), ('decode_us', True), ('query_return_us', 'private-value'), ('identity', 'private-value')]:
+            changed = copy.deepcopy(graph)
+            changed['cost']['artifacts'][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                r.result_contract(json.dumps(changed), declaration())
+        for value in (True, -1, 600_000_001, 'private-value'):
+            changed = copy.deepcopy(graph)
+            changed['cost']['traversal_us'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                r.result_contract(json.dumps(changed), declaration())
+
     def test_exact_delete_uses_uid_and_never_cascade_or_force(self):
         with patch.object(r, 'api_write', return_value={}) as write:
             r.delete_exact(declaration(), 'Job', 'synthetic', 'exact-uid')

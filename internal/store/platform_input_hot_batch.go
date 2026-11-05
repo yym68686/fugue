@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
@@ -15,6 +16,10 @@ import (
 // original compiler input bytes are fetched. All statements use the caller's
 // single read-only Repeatable Read snapshot and existing indexes.
 func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []inputarchive.HotReference) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
+	return resolveCompilerInputHotBatchObserved(ctx, tx, refs, nil)
+}
+
+func resolveCompilerInputHotBatchObserved(ctx context.Context, tx inputQueryer, refs []inputarchive.HotReference, cost *CompilerInputHotCost) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
 	if len(refs) < 1 || len(refs) > 32 {
 		return nil, ErrInvalidInput
 	}
@@ -40,21 +45,29 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []i
 			}
 		}
 	}
-	if err := resolveCompilerInputHotLedgerBatch(ctx, tx, generations, releases, out); err != nil {
+	var artifactCost, inputCost, ledgerCost *CompilerInputHotReadCost
+	if cost != nil {
+		artifactCost, inputCost, ledgerCost = &cost.Artifacts, &cost.Inputs, &cost.Ledger
+	}
+	if err := resolveCompilerInputHotLedgerBatchObserved(ctx, tx, generations, releases, out, ledgerCost); err != nil {
 		return nil, err
 	}
 	if len(artifacts) > 0 {
 		// jsonb_each materializes even discarded answer values and can spill
-		// them to disk. Read only dependency keys; SQL NULL excludes a missing
-		// key while JSON null remains present for the typed decoder to reject.
-		rows, err := tx.QueryContext(ctx, `SELECT id,artifact_kind,content_hash,
+		// them to disk. Decode the object once, then use its key set to preserve
+		// JSON null separately from a missing dependency key.
+		rows, err := queryCompilerInputHotRows(ctx, tx, artifactCost, `SELECT id,artifact_kind,content_hash,
  left((CASE WHEN artifact_kind='dns_answer_bundle' AND jsonb_typeof(content_json)='object'
- THEN COALESCE((SELECT jsonb_object_agg(key,value) FROM (VALUES
- ('lineage',content_json->'lineage'),('policy',content_json->'policy'),
- ('cell_route_publications',content_json->'cell_route_publications'),
- ('previous_traffic_publication',content_json->'previous_traffic_publication'),
- ('cell_dns_source',content_json->'cell_dns_source')) dependency(key,value)
- WHERE value IS NOT NULL),'{}'::jsonb)
+ THEN COALESCE((SELECT jsonb_object_agg(fields.key,fields.value)
+ FROM jsonb_to_record(content_json) AS dependency(lineage jsonb,policy jsonb,
+ cell_route_publications jsonb,previous_traffic_publication jsonb,cell_dns_source jsonb)
+ CROSS JOIN LATERAL (SELECT array_agg(key) AS present FROM jsonb_object_keys(content_json) AS object_keys(key)) keys
+ CROSS JOIN LATERAL (VALUES
+ ('lineage',COALESCE(dependency.lineage,'null'::jsonb)),('policy',COALESCE(dependency.policy,'null'::jsonb)),
+ ('cell_route_publications',COALESCE(dependency.cell_route_publications,'null'::jsonb)),
+ ('previous_traffic_publication',COALESCE(dependency.previous_traffic_publication,'null'::jsonb)),
+ ('cell_dns_source',COALESCE(dependency.cell_dns_source,'null'::jsonb))) fields(key,value)
+ WHERE fields.key=ANY(keys.present)),'{}'::jsonb)
  ELSE content_json END)::text,$2),left(metadata_json::text,16385),octet_length(content_json::text)
  FROM fugue_platform_artifacts WHERE id=ANY($1::text[])`, artifacts, compilerInputHotArtifactBytes+1)
 		if err != nil {
@@ -63,12 +76,16 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []i
 		// A single artifact is capped at 8MiB and a batch at 32MiB of text.
 		// Refuse large metadata rather than retaining unbounded configurations.
 		bytes := 0
-		for rows.Next() {
+		for nextCompilerInputHotRow(rows, artifactCost) {
 			var a model.PlatformArtifact
 			var content, metadata []byte
 			var originalBytes int64
 			if err = rows.Scan(&a.ID, &a.ArtifactKind, &a.ContentHash, &content, &metadata, &originalBytes); err != nil {
 				break
+			}
+			if artifactCost != nil {
+				artifactCost.SourceBytes += originalBytes
+				artifactCost.TransportBytes += int64(len(content) + len(metadata))
 			}
 			// Count the full source size against the unchanged per-batch cap,
 			// even though unrelated DNS answer views are not transported.
@@ -77,10 +94,11 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []i
 				err = ErrConflict
 				break
 			}
-			if originalBytes > compilerInputHotArtifactBytes || len(content) > compilerInputHotArtifactBytes || len(metadata) > 16<<10 || json.Unmarshal(content, &a.Content) != nil || json.Unmarshal(metadata, &a.Metadata) != nil {
-				continue
+			started := time.Now()
+			node, decodeErr := decodeCompilerInputHotBatchArtifact(a, content, metadata, originalBytes)
+			if artifactCost != nil {
+				artifactCost.DecodeUS += time.Since(started).Microseconds()
 			}
-			node, decodeErr := compilerInputArtifactHotNode(a)
 			if decodeErr == nil {
 				out[node.Identity] = node
 			}
@@ -96,7 +114,7 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []i
 		}
 	}
 	if len(inputs) > 0 {
-		rows, err := tx.QueryContext(ctx, `SELECT m.content_hash,m.format,m.size_bytes,m.chunk_size,m.chunk_count,m.created_at,m.storage_location,
+		rows, err := queryCompilerInputHotRows(ctx, tx, inputCost, `SELECT m.content_hash,m.format,m.size_bytes,m.chunk_size,m.chunk_count,m.created_at,m.storage_location,
  c.n,c.first,c.last,c.bytes
  FROM fugue_platform_input_manifests m LEFT JOIN LATERAL (
   SELECT count(*) n,COALESCE(min(ordinal),-1) first,COALESCE(max(ordinal),-1) last,COALESCE(sum(octet_length(data)),0) bytes
@@ -111,7 +129,7 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []i
 			return nil, err
 		}
 		found := map[string]bool{}
-		for rows.Next() {
+		for nextCompilerInputHotRow(rows, inputCost) {
 			var m inputManifest
 			var count, first, last, encoded sql.NullInt64
 			if err = rows.Scan(&m.Digest, &m.Format, &m.Size, &m.ChunkSize, &m.Count, &m.Created, &m.Location, &count, &first, &last, &encoded); err != nil {
@@ -149,11 +167,11 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []i
 			}
 		}
 		if len(missing) > 0 {
-			rows, err := tx.QueryContext(ctx, `SELECT content_hash,size_bytes FROM fugue_platform_artifact_contents WHERE content_hash=ANY($1::text[])`, missing)
+			rows, err := queryCompilerInputHotRows(ctx, tx, inputCost, `SELECT content_hash,size_bytes FROM fugue_platform_artifact_contents WHERE content_hash=ANY($1::text[])`, missing)
 			if err != nil {
 				return nil, err
 			}
-			for rows.Next() {
+			for nextCompilerInputHotRow(rows, inputCost) {
 				node := inputarchive.HotNode{Identity: inputarchive.HotReference{Kind: "input"}, Format: "legacy-inline", Location: "artifact-contents", References: []inputarchive.HotReference{}}
 				if err = rows.Scan(&node.Identity.ID, &node.LogicalBytes); err != nil {
 					break
@@ -173,4 +191,11 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []i
 		}
 	}
 	return out, nil
+}
+
+func decodeCompilerInputHotBatchArtifact(a model.PlatformArtifact, content, metadata []byte, originalBytes int64) (inputarchive.HotNode, error) {
+	if originalBytes > compilerInputHotArtifactBytes || len(content) > compilerInputHotArtifactBytes || len(metadata) > 16<<10 || json.Unmarshal(content, &a.Content) != nil || json.Unmarshal(metadata, &a.Metadata) != nil {
+		return inputarchive.HotNode{}, ErrConflict
+	}
+	return compilerInputArtifactHotNode(a)
 }

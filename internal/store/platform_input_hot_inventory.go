@@ -47,6 +47,7 @@ type CompilerInputHotInventory struct {
 	TraversalPerformed    bool                            `json:"traversal_performed"`
 	RootCounts            map[string]int                  `json:"root_counts"`
 	Progress              inputarchive.HotClosureProgress `json:"progress"`
+	Cost                  CompilerInputHotCost            `json:"cost"`
 	BodyVerification      bool                            `json:"body_verification"`
 	ReactivationProtected bool                            `json:"reactivation_protected"`
 	RetirementAuthorized  bool                            `json:"retirement_authorized"`
@@ -113,7 +114,9 @@ func compilerInputHotInventorySnapshot(ctx context.Context, tx *sql.Tx, rootsOnl
 	if !report.CoherentMetadata {
 		return report, fmt.Errorf("hot inventory requires one read-only repeatable-read snapshot: %w", ErrConflict)
 	}
+	rootStarted := time.Now()
 	roots, err := compilerInputHotRoots(ctx, tx)
+	report.Cost.RootInventoryUS = time.Since(rootStarted).Microseconds()
 	if err != nil {
 		return report, err
 	}
@@ -126,11 +129,16 @@ func compilerInputHotInventorySnapshot(ctx context.Context, tx *sql.Tx, rootsOnl
 		return report, nil
 	}
 	report.TraversalPerformed = true
+	traversalStarted := time.Now()
 	report.Closure, err = inputarchive.PlanHotClosureBatchedObserved(ctx, roots,
 		inputarchive.HotClosureBudget{Roots: compilerInputHotRootLimit, Nodes: 32768, Edges: 262144, Bindings: 524288},
 		func(ctx context.Context, refs []inputarchive.HotReference) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
-			return resolveCompilerInputHotBatch(ctx, tx, refs)
+			started := time.Now()
+			nodes, resolveErr := resolveCompilerInputHotBatchObserved(ctx, tx, refs, &report.Cost)
+			report.Cost.ResolverUS += time.Since(started).Microseconds()
+			return nodes, resolveErr
 		}, func(progress inputarchive.HotClosureProgress) { report.Progress = progress })
+	report.Cost.TraversalUS = time.Since(traversalStarted).Microseconds()
 	if err != nil {
 		return report, &compilerInputHotInventoryError{"dependency-graph", err}
 	}

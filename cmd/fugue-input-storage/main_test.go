@@ -18,6 +18,7 @@ import (
 func TestHotInventoryFailureOutputIsAggregateAndCannotAuthorizeRetirement(t *testing.T) {
 	report := store.CompilerInputHotInventory{CoherentMetadata: true, RootInventoryComplete: true,
 		RootCounts: map[string]int{"current-lkg": 2}, Progress: inputarchive.HotClosureProgress{Phase: "resolve-identities", ResolvedNodes: 7},
+		Cost:                 store.CompilerInputHotCost{RootInventoryUS: 11, Artifacts: store.CompilerInputHotReadCost{Queries: 2, Rows: 3, DecodeUS: 17}},
 		RetirementAuthorized: true, Closure: inputarchive.HotClosure{PlanSHA256: "private-proof", MetadataComplete: true}}
 	var output bytes.Buffer
 	if err := writeHotInventoryFailure(&output, report, fmt.Errorf("private SQL URL token: %w", context.DeadlineExceeded)); err != nil {
@@ -37,6 +38,9 @@ func TestHotInventoryFailureOutputIsAggregateAndCannotAuthorizeRetirement(t *tes
 	}
 	if failure["plan_sha256"] != "" || failure["reason"] != "deadline" || failure["category"] != "deadline" || failure["progress"].(map[string]any)["resolved_nodes"] != float64(7) {
 		t.Fatal("bounded diagnostic category/count missing", failure)
+	}
+	if failure["cost"].(map[string]any)["artifacts"].(map[string]any)["decode_us"] != float64(17) {
+		t.Fatal("failed inspection lost aggregate cost")
 	}
 }
 

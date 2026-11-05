@@ -301,16 +301,31 @@ def result_contract(body, c):
             and re.fullmatch('[a-z-]{0,48}', progress['phase']) and all(type(v) is int and 0 <= v <= 524289 for k, v in progress.items() if k != 'phase'), 'readonly graph progress contract differs')
     counts = graph.get('root_counts') or {}
     require(isinstance(counts, dict) and len(counts) <= 64 and all(re.fullmatch('[a-z-]{1,48}', k) and type(v) is int and 0 <= v <= 16385 for k, v in counts.items()), 'readonly root count contract differs')
+    # Older immutable executions have no cost field. New aggregate-only
+    # measurements must not create an arbitrary identity/content log channel.
+    extra = set()
+    if 'cost' in graph:
+        cost = graph['cost']
+        timers = {'root_inventory_us', 'traversal_us', 'resolver_us'}
+        groups = {'artifacts', 'inputs', 'ledger'}
+        read_fields = {'queries', 'rows', 'query_return_us', 'rows_next_us', 'decode_us', 'source_bytes', 'transport_bytes'}
+        require(isinstance(cost, dict) and set(cost) == timers | groups
+                and all(type(cost[k]) is int and 0 <= cost[k] <= 600_000_000 for k in timers), 'readonly cost contract differs')
+        for group in groups:
+            read = cost[group]
+            require(isinstance(read, dict) and set(read) == read_fields
+                    and all(type(v) is int and 0 <= v <= 1 << 50 for v in read.values()), 'readonly read cost contract differs')
+        extra.add('cost')
     if graph.get('schema') == 'fugue.compiler-input-hot-inventory-failure/v1':
         fields = {'schema', 'inspection_complete', 'metadata_complete', 'local_copies_verified', 'retirement_authorized', 'plan_sha256',
                   'stage', 'reason', 'category', 'coherent_metadata', 'root_inventory_complete', 'root_counts', 'progress'}
-        require(set(graph) == fields and all(graph[k] is False for k in ('inspection_complete', 'metadata_complete', 'local_copies_verified', 'retirement_authorized'))
+        require(set(graph) == fields | extra and all(graph[k] is False for k in ('inspection_complete', 'metadata_complete', 'local_copies_verified', 'retirement_authorized'))
                 and graph['plan_sha256'] == '' and all(re.fullmatch('[a-zA-Z0-9_-]{1,64}', graph[k]) for k in ('stage', 'reason', 'category')), 'readonly graph failure contract differs')
         complete = False
     else:
         fields = {'action', 'observed_at', 'database_snapshot', 'coherent_metadata', 'root_inventory_complete', 'traversal_performed',
                   'root_counts', 'progress', 'body_verification', 'reactivation_protected', 'retirement_authorized', 'uncovered_sources', 'closure'}
-        require(set(graph) == fields and graph['action'] == 'archive-hot-inventory' and graph['coherent_metadata'] is True
+        require(set(graph) == fields | extra and graph['action'] == 'archive-hot-inventory' and graph['coherent_metadata'] is True
                 and graph['root_inventory_complete'] is True and graph['traversal_performed'] is True
                 and all(graph[k] is False for k in ('body_verification', 'reactivation_protected', 'retirement_authorized')), 'readonly graph result contract differs')
         complete = True

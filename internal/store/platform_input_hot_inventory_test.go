@@ -260,6 +260,11 @@ func TestHotInventoryPostgresBatchMatchesSingleIdentityValidation(t *testing.T) 
 			t.Fatal("batch and single-identity validation disagree", ref, batch[ref], single)
 		}
 	}
+	var cost CompilerInputHotCost
+	observed, err := resolveCompilerInputHotBatchObserved(t.Context(), tx, refs, &cost)
+	if err != nil || !reflect.DeepEqual(batch, observed) || cost.Artifacts.Queries != 1 || cost.Artifacts.Rows != 1 || cost.Inputs.Queries != 2 || cost.Inputs.Rows != 1 || cost.Ledger.Queries != 1 || cost.Ledger.Rows != 1 || cost.Artifacts.SourceBytes < 1 || cost.Artifacts.TransportBytes < 1 {
+		t.Fatal("aggregate observation changed resolution or hid query/row coverage", cost, err)
+	}
 	// A statement-level failure must abort the batch. It cannot turn every
 	// affected input into a successful "not found" inventory.
 	if _, err = tx.Exec(`SET LOCAL statement_timeout='1ms'`); err != nil {
@@ -281,9 +286,17 @@ func TestHotInventoryPostgresDNSProjectionPreservesTypedDependenciesAndBounds(t 
 		artifact.ID = fmt.Sprintf("neutral-projected-dns-%t", transition)
 		artifact.Content["query_views"] = strings.Repeat("irrelevant-answer-view", 16384)
 		artifact.Content["readiness_plan"] = strings.Repeat("irrelevant-probe-view", 8192)
-		for _, invalid := range []bool{false, true} {
-			if invalid {
-				artifact.Content["lineage"] = nil
+		original := artifact.Content
+		for _, mutation := range []string{"valid", "missing-lineage", "null-lineage", "missing-policy", "null-policy", "missing-cell_route_publications", "null-cell_route_publications", "missing-previous_traffic_publication", "null-previous_traffic_publication", "missing-cell_dns_source", "null-cell_dns_source"} {
+			artifact.Content = map[string]any{}
+			for key, value := range original {
+				artifact.Content[key] = value
+			}
+			if key, ok := strings.CutPrefix(mutation, "missing-"); ok {
+				delete(artifact.Content, key)
+			}
+			if key, ok := strings.CutPrefix(mutation, "null-"); ok {
+				artifact.Content[key] = nil
 			}
 			content, err := json.Marshal(artifact.Content)
 			if err != nil {
@@ -312,8 +325,8 @@ func TestHotInventoryPostgresDNSProjectionPreservesTypedDependenciesAndBounds(t 
 			want, singleErr := resolveCompilerInputHotNode(t.Context(), tx, ref)
 			got, batchErr := resolveCompilerInputHotBatch(t.Context(), tx, []inputarchive.HotReference{ref})
 			_ = tx.Rollback()
-			if batchErr != nil || invalid && (singleErr == nil || len(got) != 0) || !invalid && (singleErr != nil || !reflect.DeepEqual(want, got[ref])) {
-				t.Fatal("DNS projection changed dependency or invalid-lineage behavior", transition, invalid, singleErr, batchErr)
+			if batchErr != nil || singleErr != nil && len(got) != 0 || singleErr == nil && !reflect.DeepEqual(want, got[ref]) {
+				t.Fatal("DNS projection changed typed dependency behavior", transition, mutation, singleErr, batchErr)
 			}
 		}
 	}

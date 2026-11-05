@@ -326,6 +326,14 @@ and emits a separate `fugue.compiler-input-hot-inventory-failure/v1` object
 with a fixed reason/category and these counts. Its completeness/verification/
 retirement flags remain false and its plan hash is empty; it contains neither
 an arbitrary error nor a partial graph that could be mistaken for authority.
+Successful and failed inventories also include bounded aggregate `cost` counters:
+root-inventory, traversal and resolver wall time, plus query count, returned rows,
+query-return/row-fetch/decode microseconds for artifact, input and ledger batches.
+Query return and row fetch can both include database work and transport; they
+are not server execution profiles. Artifact source bytes count original JSON
+text, while transported bytes count projected content and metadata payloads,
+excluding protocol and identity fields. No SQL, connection, content or identity
+is logged. Timings are excluded from the graph hash and cannot grant authority.
 Artifact and input metadata is fetched in batches of at most 32 unique
 identities; artifact text is capped at 8MiB per artifact and 32MiB per batch.
 Missing identities remain explicit blockers, while failed database statements
@@ -343,10 +351,13 @@ previous publication envelopes, and declared DNS source. Answer/query/readiness
 views are not dependency identities and are not transferred to the inspector.
 The full original JSON text size still counts against the unchanged artifact
 and batch limits; projection cannot admit an otherwise oversized source.
-The projection reads the five dependency keys directly. It does not expand
-unrelated answer values with `jsonb_each`, whose set materialization can spill
-to temporary storage before filtering. Missing keys remain absent, JSON null
-remains present, and the same typed dependency validation still runs.
+The projection decodes the five dependency fields together with `jsonb_to_record`
+instead of extracting each field separately. A key-only presence set distinguishes
+missing keys from JSON null, which the record decoder alone would collapse into
+SQL NULL. It does not expand unrelated answer values with `jsonb_each`, whose
+set materialization can spill to temporary storage before filtering. Missing
+keys remain absent, JSON null remains present, and the same typed dependency
+validation still runs. Complete source-size computation remains mandatory.
 Typed publication validation shares one immutable JSON envelope rather than
 serializing the entire artifact for each dependency view. PostgreSQL integration
 checks compare projected and full reads, including transitions, conflicting

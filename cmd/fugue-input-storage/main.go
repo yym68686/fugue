@@ -244,10 +244,11 @@ func writeHotInventoryFailure(output io.Writer, report store.CompilerInputHotInv
 		RootInventoryComplete bool                            `json:"root_inventory_complete"`
 		RootCounts            map[string]int                  `json:"root_counts"`
 		Progress              inputarchive.HotClosureProgress `json:"progress"`
+		Cost                  store.CompilerInputHotCost      `json:"cost"`
 	}{Schema: "fugue.compiler-input-hot-inventory-failure/v1",
 		Stage: store.HotInventoryFailureStage(err), Reason: inputarchive.HotClosureFailureReason(err),
 		Category: maintenanceErrorCategory(err), CoherentMetadata: report.CoherentMetadata,
-		RootInventoryComplete: report.RootInventoryComplete, RootCounts: report.RootCounts, Progress: report.Progress})
+		RootInventoryComplete: report.RootInventoryComplete, RootCounts: report.RootCounts, Progress: report.Progress, Cost: report.Cost})
 }
 
 // Return only a bounded category, never driver messages, SQL, URLs or keys.
