@@ -198,7 +198,7 @@ func main() {
 			ReaderDrainTimeout:           *readerDrainTimeout,
 		})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "compiler input retirement not confirmed; no success should be inferred; inspect control state and relation size")
+			writeRetirementError(os.Stderr, err)
 			os.Exit(1)
 		}
 		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
@@ -219,6 +219,14 @@ func main() {
 	if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
 		os.Exit(1)
 	}
+}
+
+func writeRetirementError(output io.Writer, err error) {
+	if errors.Is(err, store.ErrCompilerInputArchiveRetirementSafetyUnavailable) {
+		fmt.Fprintln(output, "compiler input retirement refused before database/object access: full local hot dependencies, persistent reactivation admission and actual current/rollback reader proofs are not yet enforced")
+		return
+	}
+	fmt.Fprintln(output, "compiler input retirement not confirmed; no success should be inferred; inspect control state and relation size")
 }
 
 var archiveReadCheckDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)

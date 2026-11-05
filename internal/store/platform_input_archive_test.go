@@ -671,6 +671,9 @@ func TestCompilerInputArchiveRetirementPlanWorksWithoutArchiveBackend(t *testing
 	if plan.Applied || plan.CanRetire || plan.RoutingEnabled || plan.BlockedInputCount != 1 || plan.ReclaimableRelationBytes != 0 || rowsAfter != rowsBefore || plan.Inputs[0].Digest != digest {
 		t.Fatal("archive-less plan changed data or overstated retirement coverage", plan, rowsBefore, rowsAfter)
 	}
+	if plan.ReplacementCoverageComplete || len(plan.SafetyBlockers) != 3 || plan.PlanSHA256 == "" {
+		t.Fatal("public plan omitted its missing independent safety prerequisites", plan)
+	}
 }
 
 func TestCompilerInputArchiveStartupRequiresMatchingBackendAfterRetirement(t *testing.T) {

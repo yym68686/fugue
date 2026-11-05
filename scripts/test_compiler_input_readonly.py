@@ -38,7 +38,54 @@ def read(c):
                 stored_bytes=c['storedBytes'], segments=c['segments'], metadata_elapsed_ms=12, readback_elapsed_ms=5200, total_elapsed_ms=5212)
 
 
+def metadata_declaration():
+    c = declaration()
+    c.update(version=3, readCount=0)
+    for key in ('digest', 'rawBytes', 'storedBytes', 'segments'):
+        del c[key]
+    return c
+
+
 class ReadonlyTest(unittest.TestCase):
+    def test_metadata_only_intent_cannot_expand_into_body_reads(self):
+        c = metadata_declaration()
+        self.assertEqual(r.validate(c), c)
+        for key, value in [('readCount', 1), ('readCount', False), ('digest', declaration()['digest']), ('rawBytes', 1)]:
+            changed = dict(c); changed[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError): r.validate(changed)
+        old = declaration(); old['readCount'] = 0
+        with self.assertRaises(ValueError): r.validate(old)
+        job = r.job_manifest(c, 'metadata-only', 'session')
+        container = job['spec']['template']['spec']['containers'][0]
+        self.assertEqual(container['args'][0].count('-mode=archive-hot-inventory'), 1)
+        self.assertNotIn('-mode=archive-read-check', json.dumps(job))
+        self.assertNotIn('FUGUE_COMPILER_INPUT_ARCHIVE_', json.dumps(job))
+        self.assertNotEqual(r.identity(c), r.identity(declaration()))
+        got = r.result_contract(json.dumps(failure()), c)
+        self.assertEqual(got['reads'], [])
+        self.assertFalse(got['native_archive_readback_performed'])
+        self.assertFalse(got['graph_command_completed'])
+        self.assertFalse(got['retirement_authorized'])
+        with self.assertRaises(ValueError): r.result_contract(json.dumps(failure())+'\n'+json.dumps(read(declaration())), c)
+
+    def test_metadata_only_session_does_not_fetch_or_decrypt_r2_credentials(self):
+        c = metadata_declaration()
+        cluster = {'spec': {'bootstrap': {'initdb': {'secret': {'name': 'application-role'}, 'database': c['database'], 'owner': 'app'}}}}
+        secret = {'data': {k: base64.b64encode(v.encode()).decode() for k, v in [('username', 'app'), ('password', 'synthetic-private-database-value')]}}
+        with patch.object(r, 'get', return_value=secret) as get, patch.object(r, 'credential_key') as key, patch.object(r, 'reader_session') as reader:
+            data = r.session(c, cluster, {'status': {'podIP': '127.0.0.1'}}, {}, {}, {})
+            key.assert_not_called(); reader.assert_not_called()
+            get.assert_called_once_with(c['namespace'], 'secret', 'application-role')
+        self.assertEqual(set(data), {'database-readonly-url'})
+        self.assertIn('default_transaction_read_only%3Don', data['database-readonly-url'])
+        response = types.SimpleNamespace(returncode=0, stdout='{"active_leases":0,"fenced":false}')
+        with patch.object(r.subprocess, 'run', return_value=response) as run:
+            self.assertEqual(r.sql_metadata(c), {'active_leases': 0, 'fenced': False})
+        query = run.call_args.kwargs['input']
+        for forbidden in ('fugue_object_storage_config', 'ciphertext', 'backend_hash', 'raw_bytes'):
+            self.assertNotIn(forbidden, query)
+        self.assertIn('REPEATABLE READ READ ONLY', query)
+
     def test_declaration_rejects_hidden_mutations_and_scope_expansion(self):
         self.assertEqual(r.validate(declaration()), declaration())
         for key, value in [('executionAuthorized', False), ('readCount', 4), ('readCount', True), ('rawBytes', 0), ('minimumFreeBytes', (1 << 30)-1),

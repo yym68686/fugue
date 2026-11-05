@@ -15,6 +15,14 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+func TestRetirementRefusalReportsMissingProofsWithoutDriverDetails(t *testing.T) {
+	var output bytes.Buffer
+	writeRetirementError(&output, fmt.Errorf("private connection details: %w", store.ErrCompilerInputArchiveRetirementSafetyUnavailable))
+	if strings.Contains(output.String(), "private") || !strings.Contains(output.String(), "before database/object access") || !strings.Contains(output.String(), "reactivation admission") {
+		t.Fatal("retirement refusal omitted its safety reason or leaked details", output.String())
+	}
+}
+
 func TestHotInventoryFailureOutputIsAggregateAndCannotAuthorizeRetirement(t *testing.T) {
 	report := store.CompilerInputHotInventory{CoherentMetadata: true, RootInventoryComplete: true,
 		RootCounts: map[string]int{"current-lkg": 2}, Progress: inputarchive.HotClosureProgress{Phase: "resolve-identities", ResolvedNodes: 7},

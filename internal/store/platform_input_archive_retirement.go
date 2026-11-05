@@ -62,6 +62,8 @@ type CompilerInputArchiveRetirementReport struct {
 	WriteTriggerInstalled        bool                                  `json:"write_trigger_installed"`
 	ArchiveRetentionGuards       bool                                  `json:"archive_retention_guards_installed"`
 	RoutingEnabled               bool                                  `json:"routing_enabled"`
+	ReplacementCoverageComplete  bool                                  `json:"replacement_coverage_complete"`
+	SafetyBlockers               []string                              `json:"safety_blockers"`
 	CanRetire                    bool                                  `json:"can_retire"`
 	ReclaimableRelationBytes     int64                                 `json:"reclaimable_relation_bytes"`
 	ReclaimableLogicalBytes      int64                                 `json:"reclaimable_logical_bytes"`
@@ -98,10 +100,11 @@ type compilerInputArchiveRetirementCandidate struct {
 	routedAt       sql.NullTime
 }
 
-// RunCompilerInputArchiveRetirement first performs a complete read-only
-// inventory and full object readback verification. Apply requires the exact
-// plan hash from that inventory, then rechecks the database under the writer
-// fence, drains session read leases, and issues TRUNCATE ... RESTRICT.
+// RunCompilerInputArchiveRetirement inventories replacement storage, including
+// full object readback. Replacement coverage does not authorize retirement:
+// complete local hot dependencies, persistent reactivation admission and actual
+// current/rollback reader compatibility are not yet enforced by this path.
+// Apply therefore fails before opening a database or reading any object.
 func RunCompilerInputArchiveRetirement(ctx context.Context, databaseURL string, options CompilerInputArchiveRetirementOptions) (CompilerInputArchiveRetirementReport, error) {
 	if options.Apply {
 		if !compilerInputRetirementPlanHash.MatchString(options.ExpectedPlanSHA256) ||
@@ -116,6 +119,9 @@ func RunCompilerInputArchiveRetirement(ctx context.Context, databaseURL string, 
 		if options.ReaderDrainTimeout > 5*time.Minute {
 			return CompilerInputArchiveRetirementReport{}, ErrInvalidInput
 		}
+		return restrictCompilerInputArchiveRetirement(CompilerInputArchiveRetirementReport{
+			Action: "archive-retire", Inputs: []CompilerInputArchiveRetirementInput{},
+		}), ErrCompilerInputArchiveRetirementSafetyUnavailable
 	}
 	db, err := openPostgresDatabase(databaseURL)
 	if err != nil {
@@ -142,25 +148,12 @@ func RunCompilerInputArchiveRetirement(ctx context.Context, databaseURL string, 
 			return CompilerInputArchiveRetirementReport{}, err
 		}
 	}
-	if options.Apply && (!configured || !routingEnabled) {
-		return CompilerInputArchiveRetirementReport{}, fmt.Errorf("dedicated archive backend and reader routing opt-in are required for retirement: %w", ErrConflict)
-	}
-	options.RoutingEnabled = routingEnabled
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Hour)
 	defer cancel()
 	report, err := compilerInputArchiveRetirementPlan(ctx, db, objects, backendHash, true, routingEnabled)
-	if err != nil || !options.Apply {
-		return report, err
-	}
-	if report.PlanSHA256 != options.ExpectedPlanSHA256 {
-		return report, fmt.Errorf("compiler input retirement plan changed: %w", ErrConflict)
-	}
-	if !report.CanRetire {
-		return report, fmt.Errorf("compiler input retirement preconditions are not satisfied: %w", ErrConflict)
-	}
-	return applyCompilerInputArchiveRetirement(ctx, db, backendHash, options, report)
+	return restrictCompilerInputArchiveRetirement(report), err
 }
 
 func compilerInputArchiveRetirementPlan(ctx context.Context, db *sql.DB, objects inputarchive.Objects, backendHash string, verifyObjects bool, routingEnabled ...bool) (CompilerInputArchiveRetirementReport, error) {
@@ -386,6 +379,10 @@ func compilerInputArchiveManifestHash(manifest inputarchive.Manifest) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// Storage retirement mechanics only. No production entrypoint calls this until
+// the independent hot/admission/reader safety gates are implemented. Integration
+// tests retain coverage of transaction draining, RESTRICT and atomic rollback;
+// a successful storage fixture is not a complete retirement authorization.
 func applyCompilerInputArchiveRetirement(ctx context.Context, db *sql.DB, backendHash string, options CompilerInputArchiveRetirementOptions, verified CompilerInputArchiveRetirementReport) (CompilerInputArchiveRetirementReport, error) {
 	if options.ExpectedPlanSHA256 != verified.PlanSHA256 || !verified.CanRetire || !options.RoutingEnabled ||
 		!compilerInputRetirementRelease.MatchString(options.CurrentReaderRelease) ||

@@ -279,6 +279,28 @@ the independent cutover gates remain required before retiring the legacy
 relation. Shipping this command does not authorize a production restore or
 retirement.
 
+The public retirement entrypoint currently rejects every apply **before opening
+a database or reading an object**. The complete hot/local-readback dependency
+proof, persistent reactivation admission, and actual current/rollback reader
+compatibility are not yet enforced there. Operator-supplied hashes or release
+names do not replace these proofs, and there is no bypass flag or environment
+opt-in. Read-only replacement plans expose `replacement_coverage_complete` and
+`safety_blockers`, always return `can_retire=false` and zero authorized
+`reclaimable_relation_bytes`, and bind those blockers into their public plan
+hash. Exact relation sizes and individual replacement receipts remain visible.
+The internal storage-only transaction tests exercise drain/RESTRICT mechanics;
+they are not proof that the complete retirement workflow is available.
+
+The one-shot read-only executor also accepts a distinct version-3 metadata-only
+declaration: `readCount` must be exactly zero and no digest/sample byte/segment
+fields are allowed. It runs the bounded hot inventory once and supplies only
+the default-read-only application database session; it neither loads/decrypts
+R2 credentials nor exposes archive environment variables or runs object reads.
+All identity, capacity, negative-priority/non-preemption, lifetime, immutable
+receipt and cleanup gates stay unchanged. An existing version-2 execution and
+its three sample reads are not authorization for a new declaration. Shipping
+this support does not schedule another Job or modify the production operation.
+
 Physical retirement has an explicit two-phase maintenance path. The
 read-only `archive-retirement-plan` inventories every digest with rows in the
 legacy relation, checks ordinal coverage and orphan rows, fully reads and

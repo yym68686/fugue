@@ -48,18 +48,27 @@ def cluster_get(kind, name):
 def validate(c):
     fields = {'version', 'executionAuthorized', 'namespace', 'node', 'nodeUID', 'sourceCommit', 'image',
               'cluster', 'clusterUID', 'primary', 'primaryUID', 'postgresContainer', 'dataPath',
-              'database', 'digest', 'rawBytes', 'storedBytes', 'segments', 'readCount',
+              'database', 'readCount',
               'apiService', 'readyURL', 'minimumFreeBytes'}
-    require(set(c) == fields and type(c['version']) is int and c['version'] == 2, 'invalid readonly declaration')
+    require(type(c.get('version')) is int and c['version'] in (2, 3), 'invalid readonly declaration')
+    if c['version'] == 2:
+        fields |= {'digest', 'rawBytes', 'storedBytes', 'segments'}
+    require(set(c) == fields, 'invalid readonly declaration')
     require(c['executionAuthorized'] is True, 'readonly execution is not authorized')
     for key in ('namespace', 'node', 'cluster', 'primary', 'postgresContainer', 'database', 'apiService'):
         require(isinstance(c[key], str) and re.fullmatch('[a-z0-9][a-z0-9.-]{0,127}', c[key]), 'invalid readonly identity')
     for key in ('nodeUID', 'clusterUID', 'primaryUID'):
         require(isinstance(c[key], str) and re.fullmatch('[a-f0-9-]{36}', c[key]), 'invalid readonly UID')
     require(re.fullmatch('[a-f0-9]{40}', c['sourceCommit']) and re.fullmatch(r'[a-z0-9./_-]+@sha256:[a-f0-9]{64}', c['image']), 'readonly executable is not pinned')
-    require(re.fullmatch('sha256:[a-f0-9]{64}', c['digest']), 'readonly digest is not exact')
-    for key, upper in (('rawBytes', 1 << 30), ('storedBytes', 1 << 30), ('segments', 65536), ('readCount', 3)):
-        require(type(c[key]) is int and 1 <= c[key] <= upper, 'invalid readonly read budget')
+    if c['version'] == 2:
+        require(re.fullmatch('sha256:[a-f0-9]{64}', c['digest']), 'readonly digest is not exact')
+        for key, upper in (('rawBytes', 1 << 30), ('storedBytes', 1 << 30), ('segments', 65536), ('readCount', 3)):
+            require(type(c[key]) is int and 1 <= c[key] <= upper, 'invalid readonly read budget')
+    else:
+        # Metadata-only declarations cannot acquire R2 credentials or request
+        # original bytes. This is a different one-shot intent, never a replay
+        # or mutation of an existing v2 receipt.
+        require(type(c['readCount']) is int and c['readCount'] == 0, 'metadata-only declaration cannot request archive reads')
     require(type(c['minimumFreeBytes']) is int and c['minimumFreeBytes'] >= 1 << 30, 'readonly database reserve is below 1GiB')
     require(re.fullmatch('/[a-zA-Z0-9/_-]{1,200}', c['dataPath']), 'invalid database data path')
     url = urllib.parse.urlsplit(c['readyURL'])
@@ -167,12 +176,14 @@ def serving_gate(c, registry):
 
 
 def sql_metadata(c):
-    # Select only the archive reader (never the writer/platform account token),
-    # in the same bounded read-only snapshot as its verified archive receipt.
-    digest = c['digest']  # validated SHA-256; no free-form SQL arguments
-    sql = """BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
-SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms'; SET LOCAL work_mem='1MB';
-SELECT json_build_object('platform', (SELECT jsonb_build_object('account_id',body->>'account_id',
+    # Metadata-only mode needs only the maintenance state. Sample-read mode
+    # additionally selects the encrypted reader (never writer/account token)
+    # in the same bounded read-only snapshot as the verified sample receipt.
+    select = """SELECT json_build_object('active_leases',(SELECT count(*) FROM fugue_platform_input_archive_leases WHERE expires_at>transaction_timestamp()),
+ 'fenced',(SELECT writes_fenced OR retirement_started_at IS NOT NULL FROM fugue_platform_input_archive_control WHERE singleton));"""
+    if c['version'] == 2:
+        digest = c['digest']  # validated SHA-256; no free-form SQL arguments
+        select = """SELECT json_build_object('platform', (SELECT jsonb_build_object('account_id',body->>'account_id',
  'compiler_input_archive',(body->'compiler_input_archive')-'writer') FROM fugue_object_storage_config WHERE id='platform'),
  'archive',(SELECT json_build_object('backend_hash',backend_hash,'raw_bytes',raw_bytes,'segments',segment_count,
  'stored_bytes',(SELECT sum(stored_bytes) FROM fugue_platform_input_archive_segments s WHERE s.content_hash=a.content_hash),
@@ -180,8 +191,10 @@ SELECT json_build_object('platform', (SELECT jsonb_build_object('account_id',bod
  FROM fugue_platform_input_archives a WHERE content_hash='"""+digest+"""'),
  'active_leases',(SELECT count(*) FROM fugue_platform_input_archive_leases WHERE expires_at>transaction_timestamp()),
  'fenced',(SELECT writes_fenced OR retirement_started_at IS NOT NULL FROM fugue_platform_input_archive_control WHERE singleton));
-COMMIT;
 """
+    sql = """BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms'; SET LOCAL work_mem='1MB';
+"""+select+"\nCOMMIT;\n"
     argv = ['kubectl', '-n', c['namespace'], 'exec', '-i', c['primary'], '-c', c['postgresContainer'], '--',
             'psql', '-U', 'postgres', '-d', c['database'], '-qAt', '-v', 'ON_ERROR_STOP=1']
     p = subprocess.run(argv, input=sql, capture_output=True, text=True, timeout=20)
@@ -191,8 +204,9 @@ COMMIT;
     except (ValueError, TypeError):
         raise ValueError('readonly credential metadata is invalid') from None
     require(value['active_leases'] == 0 and value['fenced'] is False, 'archive maintenance is active')
-    archive = value['archive']
-    require(archive and archive['verified'] is True and all(archive[k] == c[k2] for k, k2 in [('raw_bytes', 'rawBytes'), ('stored_bytes', 'storedBytes'), ('segments', 'segments')]), 'readonly sample receipt changed')
+    if c['version'] == 2:
+        archive = value['archive']
+        require(archive and archive['verified'] is True and all(archive[k] == c[k2] for k, k2 in [('raw_bytes', 'rawBytes'), ('stored_bytes', 'storedBytes'), ('segments', 'segments')]), 'readonly sample receipt changed')
     return value
 
 
@@ -220,9 +234,11 @@ def reader_session(platform, key, expected_backend):
 
 
 def session(c, cluster, pod, deployment, executor, metadata):
-    container = next(x for x in deployment['spec']['template']['spec']['containers'] if x['name'] == executor['container'])
-    key = credential_key(c['namespace'], container, {})
-    data = reader_session(metadata['platform'], key, metadata['archive']['backend_hash'])
+    data = {}
+    if c['version'] == 2:
+        container = next(x for x in deployment['spec']['template']['spec']['containers'] if x['name'] == executor['container'])
+        key = credential_key(c['namespace'], container, {})
+        data = reader_session(metadata['platform'], key, metadata['archive']['backend_hash'])
     secret = get(c['namespace'], 'secret', cluster['spec']['bootstrap']['initdb']['secret']['name'])
     user = base64.b64decode(secret['data']['username'], validate=True).decode()
     password = base64.b64decode(secret['data']['password'], validate=True).decode()
@@ -241,7 +257,8 @@ def session(c, cluster, pod, deployment, executor, metadata):
 
 def job_manifest(c, name, session_name):
     env = [{'name': 'FUGUE_DATABASE_URL', 'valueFrom': {'secretKeyRef': {'name': session_name, 'key': 'database-readonly-url'}}}]
-    for suffix, key in [('ENDPOINT', 'endpoint'), ('ACCOUNT_ID', 'account-id'), ('REGION', 'region'), ('BUCKET', 'bucket'), ('PREFIX', 'prefix'), ('ACCESS_KEY_ID', 'reader-access-key-id'), ('SECRET_ACCESS_KEY', 'reader-secret-access-key')]:
+    archive_env = [('ENDPOINT', 'endpoint'), ('ACCOUNT_ID', 'account-id'), ('REGION', 'region'), ('BUCKET', 'bucket'), ('PREFIX', 'prefix'), ('ACCESS_KEY_ID', 'reader-access-key-id'), ('SECRET_ACCESS_KEY', 'reader-secret-access-key')] if c['readCount'] else []
+    for suffix, key in archive_env:
         env.append({'name': 'FUGUE_COMPILER_INPUT_ARCHIVE_'+suffix, 'valueFrom': {'secretKeyRef': {'name': session_name, 'key': key}}})
     env += [{'name': 'PGOPTIONS', 'value': OPTIONS}, {'name': 'GOMAXPROCS', 'value': '1'}, {'name': 'GOMEMLIMIT', 'value': '128MiB'}]
     script = 'set -eu; graph_status=0; nice -n 19 /usr/local/bin/fugue-input-storage -mode=archive-hot-inventory || graph_status=$?; '
@@ -336,6 +353,7 @@ def result_contract(body, c):
                 and v['stored_bytes'] == c['storedBytes'] and v['segments'] == c['segments']
                 and all(type(v[k]) is int and v[k] >= 0 for k in ('raw_bytes', 'stored_bytes', 'segments', 'metadata_elapsed_ms', 'readback_elapsed_ms', 'total_elapsed_ms')), 'readonly read result contract differs')
     return {'graph_command_completed': complete, 'graph': graph, 'reads': values[1:], 'all_reads_verified': len(values) == c['readCount']+1,
+            'native_archive_readback_performed': len(values) > 1,
             'retirement_authorized': False}
 
 
