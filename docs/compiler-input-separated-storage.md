@@ -309,6 +309,13 @@ queries for separate root sources share the same transaction snapshot and each
 has the same five-second statement limit; no global sort over combined history
 is required. Active expectations use the existing release/revision index.
 Fixed failure-stage diagnostics contain no database or driver error text.
+The inventory also records aggregate traversal phase, resolved/unresolved
+identities, edges, root bindings and resolver calls. These diagnostics are
+excluded from the deterministic graph hash. On refusal the CLI exits nonzero
+and emits a separate `fugue.compiler-input-hot-inventory-failure/v1` object
+with a fixed reason/category and these counts. Its completeness/verification/
+retirement flags remain false and its plan hash is empty; it contains neither
+an arbitrary error nor a partial graph that could be mistaken for authority.
 Artifact and input metadata is fetched in batches of at most 32 unique
 identities; artifact text is capped at 8MiB per artifact and 32MiB per batch.
 Missing identities remain explicit blockers, while failed database statements

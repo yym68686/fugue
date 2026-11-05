@@ -13,6 +13,47 @@ func hotFixtureBudget() HotClosureBudget {
 	return HotClosureBudget{Roots: 16, Nodes: 32, Edges: 64, Bindings: 128}
 }
 
+func TestHotClosureProgressSeparatesRefusalFromProofAndPreservesHash(t *testing.T) {
+	parent := HotReference{Kind: "artifact", ID: "parent"}
+	child := HotReference{Kind: "artifact", ID: "child"}
+	roots := []HotRoot{{Source: "current", ID: "lane", Reference: parent}}
+	resolve := func(_ context.Context, refs []HotReference) (map[HotReference]HotNode, error) {
+		out := map[HotReference]HotNode{}
+		for _, ref := range refs {
+			node := HotNode{Identity: ref}
+			if ref == parent {
+				node.References = []HotReference{child}
+			}
+			out[ref] = node
+		}
+		return out, nil
+	}
+	var progress HotClosureProgress
+	observe := func(p HotClosureProgress) { progress = p }
+	budget := hotFixtureBudget()
+	budget.Bindings = 1
+	refused, err := PlanHotClosureBatchedObserved(t.Context(), roots, budget, resolve, observe)
+	if HotClosureFailureReason(err) != "root-binding-budget" || refused.MetadataComplete || refused.PlanSHA256 != "" || progress.Phase != "propagate-roots" || progress.ResolvedNodes != 2 || progress.Edges != 1 || progress.RootBindings != 2 {
+		t.Fatal("refusal lost exact phase/counts or granted proof", progress, refused, err)
+	}
+	plain, err := PlanHotClosureBatched(t.Context(), roots, hotFixtureBudget(), resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := PlanHotClosureBatchedObserved(t.Context(), roots, hotFixtureBudget(), resolve, observe)
+	if err != nil || !reflect.DeepEqual(plain, observed) || progress.Phase != "complete" || progress.ResolverCalls != 2 {
+		t.Fatal("diagnostics changed deterministic graph/proof", progress, err)
+	}
+	for _, item := range []struct {
+		err  error
+		want string
+	}{{context.DeadlineExceeded, "deadline"}, {context.Canceled, "canceled"}, {errors.New("private SQL connection token"), "resolver-unavailable"}} {
+		if got := HotClosureFailureReason(fmt.Errorf("private wrapper: %w", item.err)); got != item.want {
+			t.Fatalf("failure category leaked details or lost wrapper: %q", got)
+		}
+	}
+}
+
 func hotFixtureResolver(nodes map[string]HotNode, calls map[string]int) func(context.Context, HotReference) (HotNode, error) {
 	return func(_ context.Context, ref HotReference) (HotNode, error) {
 		key := hotReferenceKey(ref)

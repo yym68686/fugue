@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/inputarchive"
 	"fugue/internal/store"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -67,6 +68,7 @@ func main() {
 		}
 		report, err := run(ctx, dsn)
 		if err != nil {
+			_ = writeHotInventoryFailure(os.Stdout, report, err)
 			fmt.Fprintln(os.Stderr, "hot inventory incomplete; stage="+store.HotInventoryFailureStage(err))
 			reportMaintenanceError(err)
 			os.Exit(1)
@@ -203,6 +205,29 @@ func main() {
 
 func reportMaintenanceError(err error) {
 	fmt.Fprintln(os.Stderr, "compiler input maintenance completion not confirmed; inspect state before retrying; category="+maintenanceErrorCategory(err))
+}
+
+// Failure output is explicitly non-authoritative and aggregate only. Do not
+// serialize an arbitrary error, partial graph, connection or compiler contents.
+func writeHotInventoryFailure(output io.Writer, report store.CompilerInputHotInventory, err error) error {
+	return json.NewEncoder(output).Encode(struct {
+		Schema                string                          `json:"schema"`
+		InspectionComplete    bool                            `json:"inspection_complete"`
+		MetadataComplete      bool                            `json:"metadata_complete"`
+		LocalCopiesVerified   bool                            `json:"local_copies_verified"`
+		RetirementAuthorized  bool                            `json:"retirement_authorized"`
+		PlanSHA256            string                          `json:"plan_sha256"`
+		Stage                 string                          `json:"stage"`
+		Reason                string                          `json:"reason"`
+		Category              string                          `json:"category"`
+		CoherentMetadata      bool                            `json:"coherent_metadata"`
+		RootInventoryComplete bool                            `json:"root_inventory_complete"`
+		RootCounts            map[string]int                  `json:"root_counts"`
+		Progress              inputarchive.HotClosureProgress `json:"progress"`
+	}{Schema: "fugue.compiler-input-hot-inventory-failure/v1",
+		Stage: store.HotInventoryFailureStage(err), Reason: inputarchive.HotClosureFailureReason(err),
+		Category: maintenanceErrorCategory(err), CoherentMetadata: report.CoherentMetadata,
+		RootInventoryComplete: report.RootInventoryComplete, RootCounts: report.RootCounts, Progress: report.Progress})
 }
 
 // Return only a bounded category, never driver messages, SQL, URLs or keys.

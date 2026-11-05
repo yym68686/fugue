@@ -1,15 +1,44 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 
+	"fugue/internal/inputarchive"
 	"fugue/internal/store"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func TestHotInventoryFailureOutputIsAggregateAndCannotAuthorizeRetirement(t *testing.T) {
+	report := store.CompilerInputHotInventory{CoherentMetadata: true, RootInventoryComplete: true,
+		RootCounts: map[string]int{"current-lkg": 2}, Progress: inputarchive.HotClosureProgress{Phase: "resolve-identities", ResolvedNodes: 7},
+		RetirementAuthorized: true, Closure: inputarchive.HotClosure{PlanSHA256: "private-proof", MetadataComplete: true}}
+	var output bytes.Buffer
+	if err := writeHotInventoryFailure(&output, report, fmt.Errorf("private SQL URL token: %w", context.DeadlineExceeded)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "private") {
+		t.Fatal("partial proof or arbitrary error leaked")
+	}
+	var failure map[string]any
+	if err := json.Unmarshal(output.Bytes(), &failure); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"inspection_complete", "metadata_complete", "local_copies_verified", "retirement_authorized"} {
+		if failure[field] != false {
+			t.Fatal("incomplete observation granted authority", field)
+		}
+	}
+	if failure["plan_sha256"] != "" || failure["reason"] != "deadline" || failure["category"] != "deadline" || failure["progress"].(map[string]any)["resolved_nodes"] != float64(7) {
+		t.Fatal("bounded diagnostic category/count missing", failure)
+	}
+}
 
 func TestMaintenanceErrorCategoryDoesNotExposeErrorDetails(t *testing.T) {
 	for _, item := range []struct {

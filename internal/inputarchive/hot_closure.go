@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sort"
 )
 
@@ -67,12 +66,42 @@ type HotClosureBudget struct {
 	Bindings int
 }
 
+// HotClosureProgress is diagnostic only. It is never part of the proof hash,
+// contains no input contents, and remains useful when a bounded scan refuses.
+type HotClosureProgress struct {
+	Phase           string `json:"phase"`
+	ResolvedNodes   int    `json:"resolved_nodes"`
+	UnresolvedNodes int    `json:"unresolved_nodes"`
+	Edges           int    `json:"edges"`
+	RootBindings    int    `json:"root_bindings"`
+	ResolverCalls   int    `json:"resolver_calls"`
+}
+
+type hotClosureFailure struct{ reason string }
+
+func (e *hotClosureFailure) Error() string { return "hot closure incomplete: " + e.reason }
+
+// HotClosureFailureReason never exposes resolver, SQL or connection text.
+func HotClosureFailureReason(err error) string {
+	var failure *hotClosureFailure
+	if errors.As(err, &failure) {
+		return failure.reason
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	return "resolver-unavailable"
+}
+
 // PlanHotClosure resolves each identity once, validates every declared hash
 // (including converging edges), then propagates every root over the completed
 // graph. Traversal order cannot lose a later root at a shared descendant.
 // Bounds are refusal conditions, never permission to return a truncated proof.
 func PlanHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, HotReference) (HotNode, error)) (HotClosure, error) {
-	return planHotClosure(ctx, roots, budget, resolve, nil)
+	return planHotClosure(ctx, roots, budget, resolve, nil, nil)
 }
 
 // PlanHotClosureBatched amortizes metadata transport over at most 32 unique
@@ -81,13 +110,23 @@ func PlanHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 // "missing" dependencies. Returned keys must exactly match requested identities
 // with ExpectedHash cleared. Every incoming expected hash is still checked.
 func PlanHotClosureBatched(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, []HotReference) (map[HotReference]HotNode, error)) (HotClosure, error) {
-	return planHotClosure(ctx, roots, budget, nil, resolve)
+	return planHotClosure(ctx, roots, budget, nil, resolve, nil)
 }
 
-func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, HotReference) (HotNode, error), batch func(context.Context, []HotReference) (map[HotReference]HotNode, error)) (HotClosure, error) {
+// PlanHotClosureBatchedObserved reports aggregate progress on both success and
+// refusal. Observation does not change bounds, graph contents or proof bytes.
+func PlanHotClosureBatchedObserved(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, []HotReference) (map[HotReference]HotNode, error), observe func(HotClosureProgress)) (HotClosure, error) {
+	return planHotClosure(ctx, roots, budget, nil, resolve, observe)
+}
+
+func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, HotReference) (HotNode, error), batch func(context.Context, []HotReference) (map[HotReference]HotNode, error), observe func(HotClosureProgress)) (HotClosure, error) {
 	report := HotClosure{Roots: append([]HotRoot{}, roots...), Nodes: []HotClosureNode{}, Blockers: []HotClosureBlocker{}}
+	progress := HotClosureProgress{Phase: "validate-roots"}
+	if observe != nil {
+		defer func() { observe(progress) }()
+	}
 	if budget.Roots < 1 || budget.Nodes < 1 || budget.Edges < 1 || budget.Bindings < 1 || len(roots) > budget.Roots || resolve == nil && batch == nil {
-		return report, fmt.Errorf("hot closure budget or resolver invalid")
+		return report, &hotClosureFailure{"invalid-budget-or-resolver"}
 	}
 	sort.Slice(report.Roots, func(i, j int) bool { return hotRootKey(report.Roots[i]) < hotRootKey(report.Roots[j]) })
 	rootKeys := map[string]bool{}
@@ -95,7 +134,7 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 	for _, root := range report.Roots {
 		key := hotRootKey(root)
 		if root.Source == "" || len(root.Source) > 128 || root.ID == "" || len(root.ID) > 512 || rootKeys[key] || !validHotReference(root.Reference) {
-			return report, fmt.Errorf("hot closure root identity invalid or duplicate")
+			return report, &hotClosureFailure{"invalid-or-duplicate-root"}
 		}
 		rootKeys[key] = true
 		pending = append(pending, root.Reference)
@@ -104,23 +143,25 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 	failures := map[string]bool{}
 	cache := map[string]*HotNode{}
 	edges := 0
+	progress.Phase = "resolve-identities"
 	for next := 0; next < len(pending); next++ {
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
 		ref := pending[next]
 		if !validHotReference(ref) {
-			return report, fmt.Errorf("hot closure dependency identity invalid")
+			return report, &hotClosureFailure{"invalid-dependency"}
 		}
 		key := hotReferenceKey(ref)
 		if !failures[key] {
 			if _, exists := nodes[key]; !exists {
 				if len(nodes)+len(failures) >= budget.Nodes {
-					return report, fmt.Errorf("hot closure node budget exceeded")
+					return report, &hotClosureFailure{"node-budget"}
 				}
 				var node HotNode
 				var err error
 				if batch == nil {
+					progress.ResolverCalls++
 					node, err = resolve(ctx, ref)
 				} else {
 					if _, cached := cache[key]; !cached {
@@ -128,7 +169,7 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 						requested := map[HotReference]bool{}
 						for _, candidate := range pending[next:] {
 							if !validHotReference(candidate) {
-								return report, fmt.Errorf("hot closure dependency identity invalid")
+								return report, &hotClosureFailure{"invalid-dependency"}
 							}
 							candidate.ExpectedHash = ""
 							identity := hotReferenceKey(candidate)
@@ -143,13 +184,14 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 								break
 							}
 						}
+						progress.ResolverCalls++
 						resolved, batchErr := batch(ctx, requests)
 						if batchErr != nil {
 							return report, batchErr
 						}
 						for identity, resolvedNode := range resolved {
 							if !requested[identity] || resolvedNode.Identity != identity {
-								return report, fmt.Errorf("hot closure batch returned an unrequested identity")
+								return report, &hotClosureFailure{"unrequested-batch-identity"}
 							}
 						}
 						for _, identity := range requests {
@@ -174,24 +216,27 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 					// Resolver errors may contain credentials or arbitrary SQL. The
 					// operator report records the exact identity, never that text.
 					failures[key] = true
+					progress.UnresolvedNodes = len(failures)
 					report.Blockers = append(report.Blockers, HotClosureBlocker{ref, "identity-unresolved"})
 					continue
 				}
 				if hotReferenceKey(node.Identity) != key || node.LogicalBytes < 0 || node.EncodedBytes < 0 || node.Identity.ExpectedHash != "" {
-					return report, fmt.Errorf("hot closure resolver returned a different or invalid identity")
+					return report, &hotClosureFailure{"invalid-resolved-identity"}
 				}
 				if node.Identity.Kind == "input" && (node.ContentHash != ref.ID || len(node.References) != 0) {
-					return report, fmt.Errorf("hot closure input identity invalid")
+					return report, &hotClosureFailure{"invalid-input-identity"}
 				}
 				node.References = append([]HotReference{}, node.References...)
 				sort.Slice(node.References, func(i, j int) bool {
 					return hotReferenceBinding(node.References[i]) < hotReferenceBinding(node.References[j])
 				})
 				edges += len(node.References)
+				progress.Edges = edges
 				if edges > budget.Edges {
-					return report, fmt.Errorf("hot closure edge budget exceeded")
+					return report, &hotClosureFailure{"edge-budget"}
 				}
 				nodes[key] = node
+				progress.ResolvedNodes = len(nodes)
 				pending = append(pending, node.References...)
 			}
 		}
@@ -201,6 +246,7 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 	}
 	retainedBy := map[string]map[string]bool{}
 	bindings := 0
+	progress.Phase = "propagate-roots"
 	for _, root := range report.Roots {
 		name := hotRootKey(root)
 		queue := []string{hotReferenceKey(root.Reference)}
@@ -216,8 +262,9 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 				continue
 			}
 			bindings++
+			progress.RootBindings = bindings
 			if bindings > budget.Bindings {
-				return report, fmt.Errorf("hot closure root binding budget exceeded")
+				return report, &hotClosureFailure{"root-binding-budget"}
 			}
 			retainedBy[key][name] = true
 			for _, child := range nodes[key].References {
@@ -225,6 +272,7 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 			}
 		}
 	}
+	progress.Phase = "finalize-proof"
 	report.LocalCopiesVerified = true
 	for key, node := range nodes {
 		item := HotClosureNode{HotNode: node, Roots: []string{}}
@@ -235,7 +283,7 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 		if node.Identity.Kind == "input" {
 			if node.NeedsLocalCopy {
 				if node.EncodedBytes > int64(^uint64(0)>>1)-report.RequiredLocalCopyBytes {
-					return report, fmt.Errorf("hot closure local copy byte budget overflow")
+					return report, &hotClosureFailure{"local-copy-byte-overflow"}
 				}
 				report.RequiredLocalCopyBytes += node.EncodedBytes
 			}
@@ -263,6 +311,7 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 	}
 	sum := sha256.Sum256(raw)
 	report.PlanSHA256 = hex.EncodeToString(sum[:])
+	progress.Phase = "complete"
 	return report, nil
 }
 

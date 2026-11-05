@@ -39,18 +39,19 @@ func HotInventoryFailureStage(err error) string {
 // Full local byte verification and the persistent reactivation admission
 // barrier are separate gates and are deliberately never inferred here.
 type CompilerInputHotInventory struct {
-	Action                string                  `json:"action"`
-	ObservedAt            time.Time               `json:"observed_at"`
-	Snapshot              string                  `json:"database_snapshot"`
-	CoherentMetadata      bool                    `json:"coherent_metadata"`
-	RootInventoryComplete bool                    `json:"root_inventory_complete"`
-	TraversalPerformed    bool                    `json:"traversal_performed"`
-	RootCounts            map[string]int          `json:"root_counts"`
-	BodyVerification      bool                    `json:"body_verification"`
-	ReactivationProtected bool                    `json:"reactivation_protected"`
-	RetirementAuthorized  bool                    `json:"retirement_authorized"`
-	UncoveredSources      []string                `json:"uncovered_sources"`
-	Closure               inputarchive.HotClosure `json:"closure"`
+	Action                string                          `json:"action"`
+	ObservedAt            time.Time                       `json:"observed_at"`
+	Snapshot              string                          `json:"database_snapshot"`
+	CoherentMetadata      bool                            `json:"coherent_metadata"`
+	RootInventoryComplete bool                            `json:"root_inventory_complete"`
+	TraversalPerformed    bool                            `json:"traversal_performed"`
+	RootCounts            map[string]int                  `json:"root_counts"`
+	Progress              inputarchive.HotClosureProgress `json:"progress"`
+	BodyVerification      bool                            `json:"body_verification"`
+	ReactivationProtected bool                            `json:"reactivation_protected"`
+	RetirementAuthorized  bool                            `json:"retirement_authorized"`
+	UncoveredSources      []string                        `json:"uncovered_sources"`
+	Closure               inputarchive.HotClosure         `json:"closure"`
 }
 
 func RunCompilerInputHotInventory(ctx context.Context, databaseURL string) (CompilerInputHotInventory, error) {
@@ -125,11 +126,11 @@ func compilerInputHotInventorySnapshot(ctx context.Context, tx *sql.Tx, rootsOnl
 		return report, nil
 	}
 	report.TraversalPerformed = true
-	report.Closure, err = inputarchive.PlanHotClosureBatched(ctx, roots,
+	report.Closure, err = inputarchive.PlanHotClosureBatchedObserved(ctx, roots,
 		inputarchive.HotClosureBudget{Roots: compilerInputHotRootLimit, Nodes: 32768, Edges: 262144, Bindings: 524288},
 		func(ctx context.Context, refs []inputarchive.HotReference) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
 			return resolveCompilerInputHotBatch(ctx, tx, refs)
-		})
+		}, func(progress inputarchive.HotClosureProgress) { report.Progress = progress })
 	if err != nil {
 		return report, &compilerInputHotInventoryError{"dependency-graph", err}
 	}
