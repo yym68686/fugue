@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -9,6 +10,32 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/store"
 )
+
+// Manual administrator records retain authority. Add exact provider requirements
+// only when compatible; never silently replace existing MX, SPF or DKIM.
+func appMailDNSRules(config model.MailPlatformConfig, binding model.AppMailBinding, provider []model.AppMailDNSRecord) ([]model.AppMailDNSRecord, error) {
+	rules := append(append([]model.AppMailDNSRecord(nil), config.DNSRecords...), config.AppDNSRecords[binding.AppID]...)
+	for _, record := range provider {
+		found := false
+		for _, existing := range rules {
+			if existing.Name != record.Name || existing.Type != record.Type {
+				continue
+			}
+			if !appMailDNSMatches(record.Type, record.Values, existing.Values) || !appMailDNSMatches(record.Type, existing.Values, record.Values) {
+				return nil, fmt.Errorf("mail DNS conflicts with administrator policy")
+			}
+			found = true
+		}
+		if !found {
+			rules = append(rules, record)
+		}
+	}
+	return rules, validateMailDNSPolicy(rules)
+}
+
+func sameAppMailBinding(a, b model.AppMailBinding) bool {
+	return reflect.DeepEqual(a, b)
+}
 
 func validateMailDNSPolicy(records []model.AppMailDNSRecord) error {
 	if len(records) > 12 {
@@ -80,7 +107,10 @@ func projectAppMailDNS(result *platformIntentProjectionResponse, business store.
 		if b.State != "active" || !exists || err != nil || host != b.Hostname || app.ID != b.AppID || app.TenantID != b.TenantID || app.ProjectID != b.ProjectID || app.Status.Phase == "deleted" || app.Status.Phase == "deleting" || app.Status.Phase == "disabled" {
 			continue
 		}
-		rules := append(append([]model.AppMailDNSRecord(nil), cfg.DNSRecords...), cfg.AppDNSRecords[b.AppID]...)
+		rules, rulesErr := appMailDNSRules(*cfg, b, b.ProviderDNSRecords)
+		if rulesErr != nil {
+			return rulesErr
+		}
 		for _, rule := range rules {
 			name := host
 			if rule.Name != "@" {

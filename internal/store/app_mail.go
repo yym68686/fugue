@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"sort"
 	"time"
 
@@ -114,6 +115,7 @@ func (s *Store) SaveAppMailBinding(v model.AppMailBinding, expected uint64) (mod
 				return ErrConflict
 			}
 			v.CreatedAt = prior.CreatedAt
+			v.ProviderDNSRecords = prior.ProviderDNSRecords
 		} else if expected != 0 || v.State != "active" {
 			return ErrConflict
 		}
@@ -191,6 +193,64 @@ func (s *Store) SaveAppMailBinding(v model.AppMailBinding, expected uint64) (mod
 		return nil
 	})
 	return v, err
+}
+
+// Provider observations are independent of user lifecycle generations. Exact
+// identity/generation CAS prevents a delayed response from changing revoked DNS.
+func (s *Store) SaveAppMailProviderDNS(binding model.AppMailBinding, records []model.AppMailDNSRecord) error {
+	apply := func(current *model.AppMailBinding) error {
+		if current.AppID != binding.AppID || current.TenantID != binding.TenantID || current.ProjectID != binding.ProjectID || current.Hostname != binding.Hostname || current.Generation != binding.Generation || current.State != "active" || binding.State != "active" {
+			return ErrConflict
+		}
+		if !reflect.DeepEqual(current.ProviderDNSRecords, binding.ProviderDNSRecords) && !reflect.DeepEqual(current.ProviderDNSRecords, records) {
+			return ErrConflict
+		}
+		current.ProviderDNSRecords = records
+		return nil
+	}
+	if s.usingDatabase() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err = tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "fugue-mail:"+binding.AppID); err != nil {
+			return err
+		}
+		var raw []byte
+		if err = tx.QueryRowContext(ctx, "SELECT body FROM fugue_app_mail_bindings WHERE app_id=$1 FOR UPDATE", binding.AppID).Scan(&raw); err != nil {
+			return mapDBErr(err)
+		}
+		var current model.AppMailBinding
+		if err = json.Unmarshal(raw, &current); err != nil {
+			return err
+		}
+		unchanged := reflect.DeepEqual(current.ProviderDNSRecords, records)
+		if err = apply(&current); err != nil {
+			return err
+		}
+		if unchanged {
+			return tx.Commit()
+		}
+		raw, err = json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE fugue_app_mail_bindings SET body=$2::jsonb WHERE app_id=$1", binding.AppID, string(raw)); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	return s.withLockedState(true, func(state *model.State) error {
+		for i := range state.AppMailBindings {
+			if state.AppMailBindings[i].AppID == binding.AppID {
+				return apply(&state.AppMailBindings[i])
+			}
+		}
+		return ErrNotFound
+	})
 }
 
 func (s *Store) ListAppMailBindings(after string, limit int) ([]model.AppMailBinding, error) {

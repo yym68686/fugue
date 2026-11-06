@@ -38,6 +38,28 @@ func TestAppMailDNSCoexistsWithWebAndPreservesManualRecords(t *testing.T) {
 		t.Fatal("not idempotent", err)
 	}
 }
+
+func TestAppMailProviderDNSParticipatesInFrozenProjectionAndConflictsFailClosed(t *testing.T) {
+	b := mailDNSFixture()
+	b.AppMailBindings[0].ProviderDNSRecords = []model.AppMailDNSRecord{{Name: "relay._domainkey", Type: "TXT", Values: []string{"p=synthetic-key"}, TTL: 300}}
+	r := platformIntentProjectionResponse{}
+	if err := projectAppMailDNS(&r, b, "apps.example.test"); err != nil || len(r.Intent.DNS) != 4 {
+		t.Fatal("provider requirements omitted", r.Intent.DNS, err)
+	}
+	b.AppMailBindings[0].ProviderDNSRecords = []model.AppMailDNSRecord{{Name: "@", Type: "MX", Values: []string{"10 conflicting.example.test."}, TTL: 60}}
+	if err := projectAppMailDNS(&platformIntentProjectionResponse{}, b, "apps.example.test"); err == nil {
+		t.Fatal("provider silently replaced operator MX")
+	}
+	b.AppMailBindings[0].ProviderDNSRecords = []model.AppMailDNSRecord{{Name: "@", Type: "MX", Values: []string{"10 mx.example.test."}, TTL: 60}}
+	r = platformIntentProjectionResponse{}
+	if err := projectAppMailDNS(&r, b, "apps.example.test"); err != nil || len(r.Intent.DNS) != 3 {
+		t.Fatal("matching DNS not deduplicated", r.Intent.DNS, err)
+	}
+	b.AppMailBindings[0].ProviderDNSRecords = []model.AppMailDNSRecord{{Name: "escape.", Type: "TXT", Values: []string{"p=invalid"}, TTL: 300}}
+	if err := projectAppMailDNS(&platformIntentProjectionResponse{}, b, "apps.example.test"); err == nil {
+		t.Fatal("provider DNS escaped application namespace")
+	}
+}
 func TestAppMailDNSDoesNotReplaceManualMXOrSPF(t *testing.T) {
 	b := mailDNSFixture()
 	host := b.AppMailBindings[0].Hostname

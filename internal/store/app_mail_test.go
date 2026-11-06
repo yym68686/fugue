@@ -146,3 +146,45 @@ func TestAppMailPlatformInterlockInspectsBindingsBeyondFirstPage(t *testing.T) {
 		t.Fatal("missed binding beyond page", err)
 	}
 }
+
+func TestAppMailProviderDNSIsFencedAndPreservedAcrossLifecycleChanges(t *testing.T) {
+	for _, pg := range []bool{false, true} {
+		t.Run(map[bool]string{false: "file", true: "postgres"}[pg], func(t *testing.T) {
+			s := mailTestStore(t, pg)
+			if err := s.SaveMailPlatformConfig(model.MailPlatformConfig{MailflareAppID: "provider", Enabled: true}); err != nil {
+				t.Fatal(err)
+			}
+			binding, err := s.SaveAppMailBinding(model.AppMailBinding{AppID: "app", TenantID: "tenant", ProjectID: "project", Hostname: "app.apps.example.test", LocalPart: "support", State: "active"}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			records := []model.AppMailDNSRecord{{Name: "@", Type: "MX", Values: []string{"10 mx.example.test."}, TTL: 60}}
+			if err = s.SaveAppMailProviderDNS(binding, records); err != nil {
+				t.Fatal(err)
+			}
+			current, _ := s.GetAppMailBinding(binding.AppID)
+			if len(current.ProviderDNSRecords) != 1 || current.Generation != binding.Generation || current.UpdatedAt != binding.UpdatedAt {
+				t.Fatal("provider update changed lifecycle", current)
+			}
+			if err = s.SaveAppMailProviderDNS(binding, records); err != nil {
+				t.Fatal("replay", err)
+			}
+			if err = s.SaveAppMailProviderDNS(binding, nil); !errors.Is(err, ErrConflict) {
+				t.Fatal("out-of-order response replaced newer requirements", err)
+			}
+			wrong := binding
+			wrong.TenantID = "peer"
+			if err = s.SaveAppMailProviderDNS(wrong, records); !errors.Is(err, ErrConflict) {
+				t.Fatal("cross-tenant DNS", err)
+			}
+			binding.State = "suspended"
+			paused, err := s.SaveAppMailBinding(binding, binding.Generation)
+			if err != nil || len(paused.ProviderDNSRecords) != 1 {
+				t.Fatal("lifecycle erased DNS", paused, err)
+			}
+			if err = s.SaveAppMailProviderDNS(current, nil); !errors.Is(err, ErrConflict) {
+				t.Fatal("late provider response cleared suspended DNS", err)
+			}
+		})
+	}
+}

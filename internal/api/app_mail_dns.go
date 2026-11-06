@@ -53,7 +53,11 @@ func (s *Server) handleGetAppMailDNS(w http.ResponseWriter, r *http.Request) {
 	status := "inactive"
 	records := []appMailDNSRecordObservation{}
 	if cfg.Enabled && binding.State == "active" && app.Status.Phase != "deleted" && app.Status.Phase != "deleting" && app.Status.Phase != "disabled" {
-		rules := append(append([]model.AppMailDNSRecord(nil), cfg.DNSRecords...), cfg.AppDNSRecords[app.ID]...)
+		rules, ruleErr := appMailDNSRules(cfg, binding, binding.ProviderDNSRecords)
+		if ruleErr != nil {
+			httpx.WriteError(w, 409, "mail DNS policy conflicts with provider requirements")
+			return
+		}
 		lookup := s.mailDNSLookup
 		if lookup == nil {
 			lookup = lookupAppMailDNS
@@ -68,7 +72,7 @@ func (s *Server) handleGetAppMailDNS(w http.ResponseWriter, r *http.Request) {
 	saved, savedErr := s.store.GetAppMailBinding(app.ID)
 	policy, policyErr := s.store.GetMailPlatformConfig()
 	currentHost, routeErr := appMailHostname(current, s.appBaseDomain)
-	if currentErr != nil || savedErr != nil || policyErr != nil || routeErr != nil || currentHost != host || current.TenantID != app.TenantID || current.ProjectID != app.ProjectID || current.Status.Phase != app.Status.Phase || saved != binding || policy.Enabled != cfg.Enabled || !reflect.DeepEqual(policy.DNSRecords, cfg.DNSRecords) || !reflect.DeepEqual(policy.AppDNSRecords[app.ID], cfg.AppDNSRecords[app.ID]) {
+	if currentErr != nil || savedErr != nil || policyErr != nil || routeErr != nil || currentHost != host || current.TenantID != app.TenantID || current.ProjectID != app.ProjectID || current.Status.Phase != app.Status.Phase || !sameAppMailBinding(saved, binding) || policy.Enabled != cfg.Enabled || !reflect.DeepEqual(policy.DNSRecords, cfg.DNSRecords) || !reflect.DeepEqual(policy.AppDNSRecords[app.ID], cfg.AppDNSRecords[app.ID]) {
 		httpx.WriteError(w, 409, "mail DNS intent changed during observation; refresh")
 		return
 	}

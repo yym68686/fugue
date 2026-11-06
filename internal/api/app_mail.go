@@ -100,7 +100,31 @@ func (s *Server) syncAppMail(ctx context.Context, binding model.AppMailBinding) 
 	if err != nil {
 		return nil, err
 	}
-	return raw, validateMailObservation(raw, binding)
+	if err = validateMailObservation(raw, binding); err != nil {
+		return nil, err
+	}
+	var observation struct {
+		DNSRecords *[]model.AppMailDNSRecord `json:"dnsRecords"`
+	}
+	if err = json.Unmarshal(raw, &observation); err != nil {
+		return nil, err
+	}
+	if observation.DNSRecords != nil && binding.State == "active" {
+		if err = validateMailDNSPolicy(*observation.DNSRecords); err != nil {
+			return nil, errors.New("mail provider DNS policy invalid")
+		}
+		cfg, configErr := s.store.GetMailPlatformConfig()
+		if configErr != nil {
+			return nil, configErr
+		}
+		if _, err = appMailDNSRules(cfg, binding, *observation.DNSRecords); err != nil {
+			return nil, err
+		}
+		if err = s.store.SaveAppMailProviderDNS(binding, *observation.DNSRecords); err != nil {
+			return nil, err
+		}
+	}
+	return raw, nil
 }
 
 func validateMailObservation(raw json.RawMessage, binding model.AppMailBinding) error {

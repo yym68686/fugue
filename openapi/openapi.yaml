@@ -24077,6 +24077,12 @@ components:
         state: {type: string, enum: [active, suspended, revoked]}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
+        provider_dns_records:
+          type: array
+          readOnly: true
+          maxItems: 12
+          description: Public DNS requirements reconciled from the authenticated mail provider for this exact binding. Published by the normal signed DNS producer; not caller supplied.
+          items: {$ref: '#/components/schemas/AppMailDNSRecord'}
     AppMailProviderStatus:
       type: object
       required: [bindingId, tenantId, projectId, appId, generation, state, hostname, sendingReady, receivingReady, mailboxes, usage]
@@ -24091,6 +24097,18 @@ components:
         sendingReady: {type: boolean}
         receivingReady: {type: boolean}
         mxHost: {type: string, nullable: true}
+        dnsRecords:
+          type: array
+          maxItems: 12
+          description: Public relative mail DNS requirements for this exact application; credentials are never included.
+          items: {$ref: '#/components/schemas/AppMailDNSRecord'}
+        setup:
+          type: object
+          required: [code, checkedAt, nextCheckAt]
+          properties:
+            code: {type: string, enum: [ready, dns_pending, provider_pending, provider_credentials_required, provider_key_restricted, provider_limit, provider_unavailable, inactive]}
+            checkedAt: {type: string, format: date-time, nullable: true}
+            nextCheckAt: {type: string, format: date-time, nullable: true}
         credentials:
           type: array
           items:

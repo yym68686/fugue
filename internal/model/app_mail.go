@@ -21,13 +21,14 @@ type AppMailDNSRecord struct {
 // Intent survives provider and application releases. A revoked row is a
 // tombstone, retained after application deletion to fence stale enables.
 type AppMailBinding struct {
-	AppID      string    `json:"app_id"`
-	TenantID   string    `json:"tenant_id"`
-	ProjectID  string    `json:"project_id"`
-	Hostname   string    `json:"hostname"`
-	LocalPart  string    `json:"local_part"`
-	Generation uint64    `json:"generation"`
-	State      string    `json:"state"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	AppID              string             `json:"app_id"`
+	TenantID           string             `json:"tenant_id"`
+	ProjectID          string             `json:"project_id"`
+	Hostname           string             `json:"hostname"`
+	LocalPart          string             `json:"local_part"`
+	Generation         uint64             `json:"generation"`
+	State              string             `json:"state"`
+	CreatedAt          time.Time          `json:"created_at"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+	ProviderDNSRecords []AppMailDNSRecord `json:"provider_dns_records,omitempty"`
 }
