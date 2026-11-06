@@ -26,6 +26,36 @@ def receipt(v):
 
 
 class CopyTest(unittest.TestCase):
+    def test_outer_writer_impact_covers_queue_failures_without_changing_old_counters(self):
+        v = declaration()
+        writer = dict(schema='fugue.compiler-input-writer.observation.v1', attempts=4, in_flight=1,
+                      successful_returns=1, deadline_failures=1, canceled_failures=1, other_failures=0)
+        baseline = dict(outer_writer=writer, write_failures=0, budget_fallbacks=0)
+        current = copy.deepcopy(baseline)
+        current['outer_writer'].update(attempts=9, in_flight=0, successful_returns=3, deadline_failures=5)
+        c.check_writer_impact(v, baseline, current)
+        for category in ('deadline_failures', 'canceled_failures', 'other_failures'):
+            bad = copy.deepcopy(current)
+            bad['outer_writer'][category] += 1
+            bad['outer_writer']['attempts'] += 1
+            with self.subTest(category=category), self.assertRaises(ValueError): c.check_writer_impact(v, baseline, bad)
+        reset = copy.deepcopy(baseline)
+        reset['outer_writer'].update(attempts=3, canceled_failures=0)
+        with self.assertRaises(ValueError): c.check_writer_impact(v, baseline, reset)
+
+    def test_outer_writer_observation_fails_closed_on_missing_inconsistent_or_private_fields(self):
+        good = dict(schema='fugue.compiler-input-writer.observation.v1', attempts=1, in_flight=1,
+                    successful_returns=0, deadline_failures=0, canceled_failures=0, other_failures=0)
+        self.assertEqual(c.writer_activity({'compiler_input_writer_activity': good}), good)
+        for key, changed in [('schema', 'other'), ('attempts', True), ('attempts', 2), ('in_flight', -1),
+                             ('other_failures', 1 << 64), ('private_message', 'synthetic')]:
+            bad = dict(good); bad[key] = changed
+            with self.subTest(key=key), self.assertRaises(ValueError): c.writer_activity({'compiler_input_writer_activity': bad})
+        for bad in ({}, {'compiler_input_writer_activity': None}, {'compiler_input_writer_activity': {}},
+                    {'compiler_input_writer_activity': {k: x for k, x in good.items() if k != 'canceled_failures'}}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError): c.writer_activity(bad)
+        with self.assertRaises(ValueError): c.check_writer_impact(declaration(), {}, {})
+
     def test_authority_and_budgets_cannot_expand(self):
         v = declaration()
         self.assertEqual(c.validate(v), v)

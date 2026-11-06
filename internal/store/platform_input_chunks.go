@@ -335,7 +335,15 @@ func (w *inputChunkWriter) flushPending() error {
 	return nil
 }
 
-func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformconfig.RuntimeSnapshot, digest string) error {
+func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformconfig.RuntimeSnapshot, digest string) (resultErr error) {
+	finishObservation := compilerInputWriterStats.begin()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			finishObservation(errors.New("compiler-input writer panic"))
+			panic(recovered)
+		}
+		finishObservation(resultErr)
+	}()
 	if !inputDigestPattern.MatchString(digest) {
 		return ErrInvalidInput
 	}

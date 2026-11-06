@@ -226,8 +226,33 @@ def api_activity(c, serving):
         require(all(type(v) is int and v >= 0 for v in selected.values()), 'copy error baseline malformed')
         selected['category'] = fields['last_failure_category']
         require(selected['category'] in ('', 'deadline'), 'copy baseline has a new writer failure category')
+        selected['outer_writer'] = writer_activity(raw)
         observed[uid] = selected
     return observed
+
+
+def writer_activity(raw):
+    fields = raw.get('compiler_input_writer_activity')
+    counters = {'attempts', 'in_flight', 'successful_returns', 'deadline_failures', 'canceled_failures', 'other_failures'}
+    require(isinstance(fields, dict) and set(fields) == counters | {'schema'}
+            and fields['schema'] == 'fugue.compiler-input-writer.observation.v1', 'copy outer writer observation unavailable')
+    require(all(type(fields[k]) is int and 0 <= fields[k] <= (1 << 64)-1 for k in counters), 'copy outer writer observation malformed')
+    require(fields['attempts'] == sum(fields[k] for k in counters-{'attempts'}), 'copy outer writer observation inconsistent')
+    return dict(fields)
+
+
+def check_writer_impact(c, baseline, current):
+    # Validate both snapshots here too; orchestration must never turn a missing
+    # or partial observation into zero failures. Pod/container identity is gated
+    # separately by serving_gate on every sample.
+    before = writer_activity({'compiler_input_writer_activity': baseline.get('outer_writer')})
+    now = writer_activity({'compiler_input_writer_activity': current.get('outer_writer')})
+    monotonic = ('attempts', 'successful_returns', 'deadline_failures', 'canceled_failures', 'other_failures')
+    require(all(now[k] >= before[k] for k in monotonic), 'copy outer writer counter reset')
+    require(now['canceled_failures'] == before['canceled_failures'] and now['other_failures'] == before['other_failures'],
+            'copy outer writer cancellation or other failure appeared')
+    require(now['deadline_failures']-before['deadline_failures'] <= c['maxNewDeadlineFailures'],
+            'copy outer writer deadline impact budget exceeded')
 
 
 def api_log_signals(c, serving):
@@ -401,6 +426,7 @@ def execute(c, evidence, apply=False):
             bounded_logs = api_log_signals(c, serving)
             for uid, item in errors.items():
                 baseline = report['errors_before'][uid]
+                check_writer_impact(c, baseline, item)
                 require(item['budget_fallbacks'] == baseline['budget_fallbacks'] and 0 <= item['write_failures']-baseline['write_failures'] <= c['maxNewDeadlineFailures'], 'copy writer error impact budget exceeded')
             node = node_gate(c, job_uid or '')
             sample = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'available_bytes': free, 'metadata': current, 'errors': errors, 'bounded_logs': bounded_logs, 'node': node, 'backing': backing}

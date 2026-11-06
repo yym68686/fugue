@@ -118,6 +118,7 @@ func (s *Store) StorageObservation(ctx context.Context) (any, error) {
 	out["compiler_input_separated"] = separated
 	out["compiler_input_separated_read_failed"] = separatedFailed
 	out["compiler_input_separated_activity"] = separatedInputObservation()
+	out["compiler_input_writer_activity"] = compilerInputWriterStats.snapshot()
 	out["observation_retention"] = s.retentionObservation()
 	if s.db != nil {
 		out["database_pool"] = s.db.Stats()

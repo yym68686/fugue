@@ -90,3 +90,28 @@ Deploying this capability does not authorize a production resume. The
 production operation must stay unchanged until a fresh complete declaration
 and its concrete resource/IO envelope are explicitly approved. The normal
 main-push CI path remains the only production release/execution entrypoint.
+
+## Writer impact observations
+
+The private runtime storage snapshot exposes a separate
+`compiler_input_writer_activity` observation with schema
+`fugue.compiler-input-writer.observation.v1`. Its process-local counters cover
+the whole `pgEnsureChunkedInput` call, including transaction start, the writer
+barrier queue, existing-input verification, encoding and commit. They retain
+no raw errors, input digests, SQL or source content. A coherent snapshot obeys
+`attempts = in_flight + successful_returns + deadline_failures + canceled_failures + other_failures`.
+`successful_returns` counts nil function returns; it is not an independent
+durable-commit receipt. In-flight calls have no completed outcome yet. A panic
+still propagates and is counted as another failure rather than success.
+
+The copy runner requires this complete observation from every exact serving
+API owner before creating an execution reservation and on every impact check.
+Missing, malformed, inconsistent or reset counters refuse execution. New
+cancellations or other failures stop the attempt; new outer deadline failures
+use the existing per-API deadline allowance. The separated writer's existing
+failure/fallback checks and counter semantics stay intact. The two deadline
+counters can describe the same call and are checked independently against the
+same limit, rather than added together. This adds observation coverage without
+changing writer deadlines, cancellation propagation, validation or copy limits.
+Process replacement and restarts remain independent identity-gate failures;
+a counter snapshot or a quiet log tail cannot establish their absence.

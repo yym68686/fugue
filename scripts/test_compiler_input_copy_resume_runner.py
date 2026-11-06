@@ -51,8 +51,20 @@ def simulated_executor(c, value, failure=''):
         return result
     def get(namespace, kind, name):
         if kind == 'job': return {'metadata': {'uid': uid}}
+        if kind == 'pod': return {'metadata': {'uid': uid}}
         raise AssertionError('unexpected read '+kind)
     def kube(namespace, verb, *args):
+        if verb == 'exec':
+            raw = {'compiler_input_separated_activity': dict(write_failures=0, budget_fallbacks=0, last_failure_category='')}
+            if failure != 'writer-observation-missing':
+                outer = dict(schema='fugue.compiler-input-writer.observation.v1', attempts=0, in_flight=0,
+                             successful_returns=0, deadline_failures=0, canceled_failures=0, other_failures=0)
+                if failure == 'writer-prestart-canceled' and state['reserved']:
+                    outer.update(attempts=1, canceled_failures=1)
+                if failure == 'writer-final-other' and state['completed']:
+                    outer.update(attempts=1, other_failures=1)
+                raw['compiler_input_writer_activity'] = outer
+            return json.dumps(raw)
         if verb == 'logs':
             if state.get('before_logs'): state['before_logs']()
             if failure == 'logs-unavailable': raise readonly_refusal('copy log observation unavailable')
@@ -98,7 +110,6 @@ def simulated_executor(c, value, failure=''):
                         (runner, 'backing_gate', lambda *args, **kwargs: {'capacity_gate_passed': True}),
                         (runner.r, 'serving_gate', lambda *args: ({}, {}, serving)), (runner, 'metadata', metadata),
                         (trusted, 'fetch_proof', lambda *args: prior_proof), (runner, 'copy_session', lambda *args: {'copy.json': '{}'}),
-                        (runner, 'api_activity', lambda *args: {uid: {'write_failures': 0, 'budget_fallbacks': 0}}),
                         (runner, 'api_log_signals', lambda *args: {}), (runner, 'get', get), (runner, 'kube', kube),
                         (runner.r, 'cluster_kube', lambda *args: '{"items":[]}'), (runner.r, 'create', create),
                         (runner.r, 'api_write', release), (runner.r, 'delete_exact', delete),
@@ -108,6 +119,30 @@ def simulated_executor(c, value, failure=''):
 
 
 class ResumeRunnerTest(unittest.TestCase):
+    def test_missing_outer_writer_observation_refuses_before_any_reservation(self):
+        c, value = declaration()
+        with tempfile.TemporaryDirectory() as directory, simulated_executor(c, value, failure='writer-observation-missing') as state:
+            target = Path(directory)/'receipt.json'
+            with self.assertRaisesRegex(ValueError, 'outer writer observation unavailable'):
+                runner.execute(c, target, apply=True)
+            report = json.loads(target.read_text())
+        self.assertFalse(state['reserved']); self.assertFalse(state['released']); self.assertFalse(state['deleted'])
+        self.assertEqual(report['status'], 'completion-not-confirmed')
+
+    def test_outer_queue_cancel_and_post_execution_failure_trigger_exact_cleanup(self):
+        for failure in ('writer-prestart-canceled', 'writer-final-other'):
+            c, value = declaration()
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory, simulated_executor(c, value, failure=failure) as state:
+                target = Path(directory)/'receipt.json'
+                with self.assertRaisesRegex(ValueError, 'outer writer cancellation or other failure appeared'):
+                    runner.execute(c, target, apply=True)
+                report = json.loads(target.read_text())
+            self.assertEqual(state['released'], failure == 'writer-final-other')
+            self.assertTrue(report['cleanup_confirmed'])
+            self.assertEqual(report['status'], 'completion-not-confirmed')
+            self.assertEqual(state['reserved'].count('Job'), 1)
+            self.assertEqual([item[1] for item in state['deleted']], ['Job', 'PriorityClass'])
+
     def test_new_outer_contract_requires_its_own_authorization_and_complete_proof(self):
         c, _ = declaration()
         self.assertEqual(runner.validate(c), c)
