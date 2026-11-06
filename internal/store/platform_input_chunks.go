@@ -18,7 +18,6 @@ import (
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
-	"fugue/internal/runtimeobservation"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -28,6 +27,11 @@ const inputMaxBytes = 1 << 30
 // Bound the additional write buffer to four MiB while amortizing database
 // round trips. The stored chunk format and transaction are unchanged.
 const inputChunkBatchSize = 16
+
+// A large, valid snapshot must fit its encode/write/full-readback cycle after
+// waiting for the shared writer. Keep the operation bounded and let a shorter
+// caller deadline or cancellation release the writer queue promptly.
+const compilerInputWriteTimeout = 2 * time.Minute
 
 var inputDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
@@ -335,7 +339,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	if !inputDigestPattern.MatchString(digest) {
 		return ErrInvalidInput
 	}
-	ctx, cancel := context.WithTimeout(runtimeobservation.CopyDatabaseOperation(context.Background(), parent), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, compilerInputWriteTimeout)
 	defer cancel()
 	// One cluster-wide writer bounds database parse/transfer concurrency even
 	// while multiple API replicas compile distinct scopes. No serving lock is held.

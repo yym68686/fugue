@@ -28,3 +28,9 @@ read-only and no status response proves final recipient delivery.
 Verification includes PostgreSQL/file-store generation and response-order fencing,
 frozen DNS projection, namespace restrictions, manual-policy conflict handling,
 the generated OpenAPI drift gate and the synchronized console contract.
+
+The shared compiler-input writer permits up to two minutes for queueing,
+encoding and complete readback, while honoring shorter caller deadlines and
+cancellation. A fixed thirty-second transaction could repeatedly reject a valid
+large global snapshot and prevent newly provisioned mail DNS from publishing.
+The writer remains serialized and verification and publication fences are unchanged.
