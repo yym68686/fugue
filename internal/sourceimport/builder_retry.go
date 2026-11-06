@@ -180,6 +180,12 @@ func shouldRetryBuilderJobFailure(err error) (bool, string) {
 	if errors.As(err, &exhausted) {
 		return false, exhausted.Code()
 	}
+	var placement *builderPlacementError
+	if errors.As(err, &placement) {
+		// Placement already waited through its bounded selection window. A
+		// second job attempt must not restart that wait or escalate resources.
+		return false, "builder_placement_unavailable"
+	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	if isEmptyKubectlGetJobExitStatusOne(message) {
 		return true, "kubectl get job exit status 1"

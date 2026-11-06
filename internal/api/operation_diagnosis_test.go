@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
@@ -234,26 +234,26 @@ func TestGetOperationDiagnosisExplainsBuilderPlacementFailure(t *testing.T) {
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
 	})
-	server.inspectBuilderPlacement = func(ctx context.Context, namespace string, policy sourceimport.BuilderPodPolicy, profile, buildStrategy string, stateful bool, requiredNodeLabels map[string]string) (model.BuilderPlacementInspection, error) {
-		return model.BuilderPlacementInspection{
-			Profile:       profile,
-			BuildStrategy: buildStrategy,
-			Demand: model.BuilderResourceSnapshot{
-				CPUMilli:       750,
-				MemoryBytes:    1 << 30,
-				EphemeralBytes: 3 << 30,
-			},
-			Reservations: []model.BuilderPlacementReservationInspection{
-				{Name: "reservation-a", NodeName: "gcp1"},
-			},
-			Locks: []model.BuilderPlacementLockInspection{
-				{Name: "lock-gcp1", NodeName: "gcp1", HolderIdentity: "build-demo"},
-			},
-			Nodes: []model.BuilderPlacementNodeInspection{
-				{NodeName: "gcp1", Eligible: false, Ready: true, Reasons: []string{"DiskPressure=True"}},
-				{NodeName: "gcp2", Eligible: true, Ready: true, Rank: 1},
-			},
-		}, nil
+	observedAt := time.Now().UTC().Add(-time.Hour)
+	inspection := model.BuilderPlacementInspection{
+		ObservedAt:    &observedAt,
+		Profile:       "heavy",
+		BuildStrategy: "dockerfile",
+		Demand: model.BuilderResourceSnapshot{
+			CPUMilli:       750,
+			MemoryBytes:    1 << 30,
+			EphemeralBytes: 3 << 30,
+		},
+		Reservations: []model.BuilderPlacementReservationInspection{
+			{Name: "reservation-a", NodeName: "gcp1"},
+		},
+		Locks: []model.BuilderPlacementLockInspection{
+			{Name: "lock-gcp1", NodeName: "gcp1", HolderIdentity: "build-demo"},
+		},
+		Nodes: []model.BuilderPlacementNodeInspection{
+			{NodeName: "gcp1", Eligible: false, Ready: true, Reasons: []string{"DiskPressure=True"}},
+			{NodeName: "gcp2", Eligible: true, Ready: true, Rank: 1},
+		},
 	}
 
 	source := model.AppSource{
@@ -277,6 +277,16 @@ func TestGetOperationDiagnosisExplainsBuilderPlacementFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fail import operation: %v", err)
 	}
+	_, err = stateStore.RecordOperationEvidence(model.OperationEvidence{
+		TenantID: app.TenantID, AppID: app.ID, OperationID: op.ID,
+		Type: model.OperationEvidenceTypeBuildAttempt, Source: "import_controller", Severity: "error", Confidence: "confirmed",
+		ObservedAt: observedAt, Summary: "Build attempt rejected", PayloadVersion: 1,
+		Payload: map[string]any{"build_attempt": model.BuilderAttemptEvidence{Attempt: 3, Outcome: "rejected"},
+			"builder_diagnostics": map[string]any{"builder_placement": inspection}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/diagnosis", apiKey, nil)
 	if recorder.Code != http.StatusOK {
@@ -296,6 +306,9 @@ func TestGetOperationDiagnosisExplainsBuilderPlacementFailure(t *testing.T) {
 	if response.Diagnosis.BuilderPlacement.Profile != "heavy" {
 		t.Fatalf("expected heavy builder profile, got %+v", response.Diagnosis.BuilderPlacement)
 	}
+	if !response.Diagnosis.BuilderPlacement.ObservedAt.Equal(observedAt) {
+		t.Fatal("diagnosis replaced the historical observation with current state")
+	}
 	joinedEvidence := strings.Join(response.Diagnosis.Evidence, "\n")
 	for _, want := range []string{
 		"active builder reservations: reservation-a@gcp1",
@@ -311,6 +324,39 @@ func TestGetOperationDiagnosisExplainsBuilderPlacementFailure(t *testing.T) {
 	}
 	if summary := diagnosisBuilderPlacementSummary("builder-insufficient-resources", "heavy", "dockerfile", ""); !strings.Contains(summary, "unreserved") || strings.Contains(summary, "readiness") {
 		t.Fatalf("capacity failure got misleading diagnosis: %s", summary)
+	}
+	// A later rejection without a snapshot must never inherit an earlier retry's
+	// profile, OOM floor, storage tier or node observations.
+	_, err = stateStore.RecordOperationEvidence(model.OperationEvidence{
+		TenantID: app.TenantID, AppID: app.ID, OperationID: op.ID,
+		Type: model.OperationEvidenceTypeBuildAttempt, Source: "import_controller", Severity: "error", Confidence: "confirmed",
+		Summary: "Build attempt 4 rejected", PayloadVersion: 1,
+		Payload: map[string]any{"build_attempt": model.BuilderAttemptEvidence{Attempt: 4, Outcome: "rejected"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/diagnosis", apiKey, nil)
+	response.Diagnosis = model.OperationDiagnosis{}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.BuilderPlacement != nil || response.Diagnosis.Confidence != model.OperationEvidenceConfidenceInsufficientEvidence || len(response.Diagnosis.MissingEvidence) == 0 {
+		t.Fatalf("later attempt inherited stale admission inputs: %+v", response.Diagnosis)
+	}
+}
+
+func TestLegacyBuilderAdmissionDiagnosisDoesNotGuessAutoProfile(t *testing.T) {
+	state, server, key, app, op := setupOperationEvidenceAPITest(t)
+	_, err := state.FailOperation(op.ID, "select builder placement: builder_memory_not_increased: no eligible memory allocation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/diagnosis", key, nil)
+	var payload struct {
+		Diagnosis model.OperationDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, response, &payload)
+	if response.Code != http.StatusOK || payload.Diagnosis.BuilderPlacement != nil || payload.Diagnosis.Confidence != model.OperationEvidenceConfidenceInsufficientEvidence || len(payload.Diagnosis.MissingEvidence) == 0 {
+		t.Fatalf("legacy failure was reconstructed from guessed config: %+v app=%s", payload, app.ID)
 	}
 }
 

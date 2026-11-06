@@ -61,6 +61,17 @@ is persisted before admission and the historical memory guard still applies.
 Operation diagnosis distinguishes insufficient resources, lock contention,
 unavailable statistics, and node eligibility failures. Per-node reasons include
 explicit build-disable labels, and inspection exposes existing Pod requests,
-available resources, and the prospective allocation. `observed_at` identifies a
-live inspection; it does not reconstruct historical failure state. Inspections
+available resources, and the prospective allocation. Temporary capacity shortages
+wait within the existing selection window (600 seconds by default, polling every
+5 seconds), including after an OOM or storage retry. Only an incompatible policy
+ceiling is immediately terminal; the existence of OOM history alone cannot
+classify a CPU, storage or placement shortage as a memory policy refusal. An
+exhausted selection window does not start another job retry window.
+
+Pre-Pod placement failures persist the effective retry policy, strict OOM floor,
+storage demand and the node inputs actually evaluated. Operation diagnosis uses
+the latest attempt's persisted snapshot and its `observed_at`, without replacing
+it with current state or a guessed `auto` profile. Older records without that
+snapshot explicitly report missing evidence. Diagnostic policy and raw build
+details remain restricted to platform administrators. Standalone live inspections
 do not create reservations. Failed builds preserve the currently serving app.

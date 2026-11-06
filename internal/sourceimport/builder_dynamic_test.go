@@ -95,7 +95,7 @@ func TestHeavyPlacementReservesLiveHeadroomBelowLegacySixGiFloor(t *testing.T) {
 			}
 			placement, reservation, err := s.tryReservePlacement(ctx, "build-first")
 			if mode == "equal OOM limit" || mode == "lower than OOM limit" {
-				var blocked *BuilderMemoryAdmissionError
+				var blocked *builderPlacementError
 				if !errors.As(err, &blocked) || reservation != "" {
 					t.Fatalf("unsafe reservation: %+v %s %v", placement, reservation, err)
 				}

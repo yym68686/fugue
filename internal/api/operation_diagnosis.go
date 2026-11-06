@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,22 +13,11 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
-	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
 var diagnosisQueuedDeployOperationPattern = regexp.MustCompile(`queued deploy operation ([A-Za-z0-9_-]+)`)
 var diagnosisBuilderPlacementProfilePattern = regexp.MustCompile(`profile ([A-Za-z0-9_-]+)`)
-
-type builderPlacementInspector func(
-	ctx context.Context,
-	namespace string,
-	policy sourceimport.BuilderPodPolicy,
-	profile string,
-	buildStrategy string,
-	stateful bool,
-	requiredNodeLabels map[string]string,
-) (model.BuilderPlacementInspection, error)
 
 func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
@@ -488,18 +478,50 @@ func (s *Server) diagnoseFailedBuilderPlacement(ctx context.Context, op model.Op
 		AppName:  diagnosisAppName(app, appFound),
 		Service:  diagnosisComposeService(op, app, appFound),
 	}
-	namespace := firstNonEmpty(strings.TrimSpace(s.controlPlaneNamespace), "fugue-system")
-	inspector := s.inspectBuilderPlacement
-	if inspector == nil {
-		inspector = sourceimport.InspectBuilderPlacementForProfile
-	}
-	inspection, err := inspector(ctx, namespace, s.importer.BuilderPolicy, profile, buildStrategy, false, nil)
+	// Only the captured admission inputs establish this attempt's effective
+	// profile, OOM floor, storage retry tier and node constraints. Re-running an
+	// inspection from desired source/default policy can misdiagnose the failure.
+	items, err := s.store.ListOperationEvidence(model.OperationEvidenceFilter{
+		TenantID: op.TenantID, PlatformAdmin: true, OperationID: op.ID,
+		Types: []string{model.OperationEvidenceTypeBuildAttempt}, Limit: 1000,
+	})
 	if err != nil {
-		diagnosis.Evidence = append(diagnosis.Evidence, fmt.Sprintf("builder placement inspection unavailable: %v", err))
+		diagnosis.MissingEvidence = []string{"builder_placement_snapshot"}
+		diagnosis.Confidence = model.OperationEvidenceConfidenceInsufficientEvidence
 		return diagnosis, true
 	}
-	diagnosis.BuilderPlacement = &inspection
-	diagnosis.Evidence = append(diagnosis.Evidence, diagnosisBuilderPlacementEvidence(inspection)...)
+	var latest model.OperationEvidence
+	type admissionPayload struct {
+		Attempt     model.BuilderAttemptEvidence `json:"build_attempt"`
+		Diagnostics struct {
+			Placement *model.BuilderPlacementInspection `json:"builder_placement"`
+		} `json:"builder_diagnostics"`
+	}
+	var captured admissionPayload
+	for _, item := range items {
+		data, marshalErr := json.Marshal(item.Payload)
+		var candidate admissionPayload
+		if marshalErr != nil || json.Unmarshal(data, &candidate) != nil || candidate.Attempt.Attempt < 1 {
+			continue
+		}
+		if latest.ID == "" || candidate.Attempt.Attempt > captured.Attempt.Attempt || (candidate.Attempt.Attempt == captured.Attempt.Attempt && item.ObservedAt.After(latest.ObservedAt)) {
+			latest, captured = item, candidate
+		}
+	}
+	inspection := captured.Diagnostics.Placement
+	if captured.Attempt.Outcome != "rejected" || inspection == nil || inspection.ObservedAt == nil || inspection.Profile == "" {
+		diagnosis.Confidence = model.OperationEvidenceConfidenceInsufficientEvidence
+		diagnosis.MissingEvidence = []string{"builder_placement_snapshot", "effective_builder_retry_policy"}
+		diagnosis.Hint = "Historical admission inputs were not captured. Current node state cannot establish the cause; inspect a subsequent attempt's persisted builder evidence."
+		return diagnosis, true
+	}
+	diagnosis.PrimaryEvidenceID = latest.ID
+	diagnosis.Confidence = latest.Confidence
+	diagnosis.MissingEvidence = append([]string(nil), captured.Attempt.MissingEvidence...)
+	diagnosis.BuilderPlacement = inspection
+	diagnosis.Summary = diagnosisBuilderPlacementSummary(category, inspection.Profile, inspection.BuildStrategy, message)
+	diagnosis.Evidence = append(diagnosis.Evidence, "historical builder admission snapshot: "+latest.ID)
+	diagnosis.Evidence = append(diagnosis.Evidence, diagnosisBuilderPlacementEvidence(*inspection)...)
 	return diagnosis, true
 }
 
@@ -514,6 +536,8 @@ func diagnosisBuilderPlacementProfile(message string) string {
 func diagnosisBuilderPlacementCategory(message string) string {
 	message = strings.ToLower(strings.TrimSpace(message))
 	switch {
+	case strings.Contains(message, "builder_memory_not_increased"):
+		return "builder-memory-admission-rejected"
 	case strings.Contains(message, "after lock contention"):
 		return "builder-lock-contention"
 	case strings.Contains(message, "load builder node stats summaries"):
@@ -551,13 +575,13 @@ func diagnosisBuilderPlacementSummary(category, profile, buildStrategy, fallback
 func diagnosisBuilderPlacementHint(category string) string {
 	switch category {
 	case "builder-lock-contention":
-		return "Retry after the active builder locks clear. The builder placement snapshot below shows the current locks and reservations."
+		return "Retry after builder locks clear. The persisted snapshot records the failed admission inputs."
 	case "builder-node-summary-unavailable":
 		return "Check kubelet summary availability and control-plane access to the node stats endpoints for the builder nodes."
 	case "builder-no-eligible-nodes":
-		return "Check node build permission, readiness, taints, statistics, and resource headroom. The snapshot below is a current live inspection, not historical failure state."
+		return "Check node build permission, readiness, taints, statistics, and resource headroom in the persisted admission snapshot."
 	case "builder-insufficient-resources":
-		return "Compare minimum demand with available resources after physical safety, Kubernetes Pod requests, and active reservations. Wait for capacity or add builder capacity. The snapshot below is current live state."
+		return "Compare effective retry demand with the recorded headroom after physical safety, Kubernetes Pod requests, and active reservations. Wait for authorized capacity to become available."
 	default:
 		return "Inspect the builder placement snapshot below for reservations, locks, and per-node exclusion reasons."
 	}

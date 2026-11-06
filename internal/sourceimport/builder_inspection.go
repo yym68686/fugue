@@ -36,55 +36,34 @@ func normalizeBuilderInspectionProfile(profile, buildStrategy string, stateful b
 }
 
 func (s *builderScheduler) inspectPlacement(ctx context.Context, buildStrategy string) (model.BuilderPlacementInspection, error) {
-	observedAt := time.Now().UTC()
-	report := model.BuilderPlacementInspection{
-		ObservedAt:         &observedAt,
-		Profile:            string(s.profile),
-		BuildStrategy:      strings.TrimSpace(buildStrategy),
-		RequiredNodeLabels: cloneBuilderStringMap(s.requiredNodeLabels),
-		Demand:             builderResourceSnapshot(s.demand),
-	}
-	if s.profile == builderWorkloadProfileHeavy {
-		report.MemoryCeilingBytes = parseBuilderBytes(s.policy.HeavyMemoryLimitCeiling)
-	}
-
-	nodes, err := s.client.listNodes(ctx)
+	observation, err := s.loadNodeObservation(ctx)
 	if err != nil {
-		return report, err
-	}
-	snapshots := make([]builderNodeSnapshot, 0, len(nodes))
-	summaryErrors := make(map[string]string)
-	for _, node := range nodes {
-		snapshot := builderSnapshotFromKubeNode(node)
-		if s.nodeNeedsSummary(snapshot) {
-			pods, podErr := s.client.listNodePods(ctx, snapshot.Name)
-			if podErr != nil {
-				summaryErrors[snapshot.Name] = fmt.Sprintf("pod requests unavailable: %v", podErr)
-			} else {
-				snapshot.Requested = builderNodePodRequests(pods)
-			}
-			summary, summaryErr := s.client.getNodeSummary(ctx, snapshot.Name)
-			if summaryErr != nil {
-				summaryErrors[snapshot.Name] = appendBuilderInspectionError(summaryErrors[snapshot.Name], fmt.Sprintf("stats summary unavailable: %v", summaryErr))
-			} else {
-				snapshot.Used = builderUsedResources(summary, snapshot.Allocatable.MemoryBytes)
-				snapshot.FilesystemAvailableBytes = builderNodeFilesystemAvailableBytes(summary)
-				snapshot.SummaryLoaded = true
-			}
-		}
-		snapshots = append(snapshots, snapshot)
+		return s.placementInspection(observation, nil, nil, buildStrategy), err
 	}
 
 	now := time.Now()
 	reservations, err := s.listActiveReservations(ctx, now)
 	if err != nil {
-		return report, err
+		return s.placementInspection(observation, nil, nil, buildStrategy), err
 	}
 	locks, err := s.listActiveNodeLocks(ctx, now)
 	if err != nil {
-		return report, err
+		return s.placementInspection(observation, reservations, nil, buildStrategy), err
 	}
+	return s.placementInspection(observation, reservations, locks, buildStrategy), nil
+}
 
+// Render the very inputs used by admission. Do not recollect live state after a
+// failed decision: capacity and the effective retry policy may already differ.
+func (s *builderScheduler) placementInspection(observation builderNodeObservation, reservations []builderReservation, locks []builderNodeLock, buildStrategy string) model.BuilderPlacementInspection {
+	snapshots, summaryErrors := observation.Snapshots, observation.Errors
+	report := model.BuilderPlacementInspection{
+		ObservedAt: &observation.ObservedAt, Profile: string(s.profile), BuildStrategy: strings.TrimSpace(buildStrategy),
+		RequiredNodeLabels: cloneBuilderStringMap(s.requiredNodeLabels), Demand: builderResourceSnapshot(s.demand),
+	}
+	if s.profile == builderWorkloadProfileHeavy {
+		report.MemoryCeilingBytes = parseBuilderBytes(s.policy.HeavyMemoryLimitCeiling)
+	}
 	report.Reservations = builderReservationInspections(reservations)
 	report.Locks = builderLockInspections(locks)
 
@@ -146,19 +125,7 @@ func (s *builderScheduler) inspectPlacement(ctx context.Context, buildStrategy s
 		}
 	})
 
-	return report, nil
-}
-
-func appendBuilderInspectionError(existing, next string) string {
-	existing = strings.TrimSpace(existing)
-	next = strings.TrimSpace(next)
-	if existing == "" {
-		return next
-	}
-	if next == "" {
-		return existing
-	}
-	return existing + "; " + next
+	return report
 }
 
 func builderInspectionSchedulingSnapshots(s *builderScheduler, snapshots []builderNodeSnapshot, summaryErrors map[string]string) []builderNodeSnapshot {

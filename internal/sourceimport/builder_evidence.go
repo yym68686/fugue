@@ -30,13 +30,58 @@ func recordBuilderAttempt(ctx context.Context, jobName string, attempt builderJo
 	if runErr != nil {
 		fact.Outcome = "failed"
 	}
+	var placement *builderPlacementError
+	if errors.As(runErr, &placement) {
+		fact.Outcome = "rejected"
+		diagnostics["execution_started"] = false
+		diagnostics["builder_placement"] = placement.Inspection
+		diagnostics["effective_policy"] = placement.Policy
+		diagnostics["previous_oom_memory_bytes"] = placement.PreviousOOMBytes
+		diagnostics["oom_retry_count"] = attempt.OOMRetryCount
+		diagnostics["ephemeral_retry_count"] = attempt.EphemeralRetryCount
+		fact.MissingEvidence = append(fact.MissingEvidence, placement.MissingEvidence...)
+		for _, node := range placement.Inspection.Nodes {
+			for _, reason := range node.Reasons {
+				switch {
+				case strings.HasPrefix(reason, "insufficient cpu_milli:"):
+					addBuilderCauses(&fact, "builder_cpu_unavailable")
+				case strings.HasPrefix(reason, "insufficient memory_bytes:"):
+					addBuilderCauses(&fact, "builder_memory_unavailable")
+				case strings.HasPrefix(reason, "insufficient ephemeral_bytes:"):
+					addBuilderCauses(&fact, "builder_storage_unavailable")
+				}
+			}
+		}
+		if len(placement.Inspection.Nodes) == 0 {
+			fact.MissingEvidence = append(fact.MissingEvidence, "builder_node_snapshots")
+		}
+		for _, node := range placement.Inspection.Nodes {
+			for _, reason := range node.Reasons {
+				if strings.Contains(reason, "unavailable:") {
+					fact.MissingEvidence = append(fact.MissingEvidence, "builder_node_observations")
+					break
+				}
+			}
+		}
+		if len(fact.Causes) == 0 {
+			if len(fact.MissingEvidence) > 0 {
+				addBuilderCauses(&fact, "evidence_unavailable")
+			} else {
+				addBuilderCauses(&fact, "placement_constraints_unsatisfied")
+			}
+		}
+		record(fact, diagnostics)
+		return
+	}
 	var admission *BuilderMemoryAdmissionError
 	if errors.As(runErr, &admission) {
 		fact.Outcome = "rejected"
 		fact.Causes = []string{"builder_memory_not_increased"}
-		fact.MemoryLimitBytes = admission.AllocatedBytes
 		diagnostics["execution_started"] = false
 		diagnostics["previous_oom_memory_bytes"] = admission.PreviousOOMBytes
+		diagnostics["policy_memory_limit_bytes"] = admission.AllocatedBytes
+		// This is a policy ceiling refusal, not an executed Pod allocation.
+		fact.MemoryLimitBytes = 0
 		record(fact, diagnostics)
 		return
 	}

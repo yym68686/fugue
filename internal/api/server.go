@@ -108,7 +108,6 @@ type Server struct {
 	automationRequestOutcomeQuery          automationRequestOutcomeQueryFunc
 	importer                               *sourceimport.Importer
 	resolveRemoteImageDigest               func(context.Context, string) (string, error)
-	inspectBuilderPlacement                builderPlacementInspector
 	appImageRegistry                       appImageRegistry
 	requestRegistryGC                      func(context.Context, string) error
 	projectImageUsageCache                 expiringResponseCache[projectImageUsageResponse]
@@ -296,7 +295,6 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		automationShadowLoopConfig:             normalizeAutomationShadowLoopConfig(cfg.AutomationShadowLoop),
 		importer:                               sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		resolveRemoteImageDigest:               sourceimport.ResolveRemoteImageDigest,
-		inspectBuilderPlacement:                sourceimport.InspectBuilderPlacementForProfile,
 		appImageRegistry:                       newRemoteAppImageRegistry(),
 		projectImageUsageCache:                 newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
 		backupUsageReconciliationCache:         newExpiringResponseCache[backupusage.Reconciliation](defaultBackupUsageReconciliationCacheTTL),

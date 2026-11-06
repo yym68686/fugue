@@ -855,8 +855,9 @@ func TestLoadNodeSnapshotsFailsWhenAllEligibleSummariesAreUnavailable(t *testing
 	if !strings.Contains(err.Error(), "load builder node stats summaries") {
 		t.Fatalf("expected summary error context, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "node-a") {
-		t.Fatalf("expected failing node name in error, got %v", err)
+	observation, err := scheduler.loadNodeObservation(context.Background())
+	if err != nil || !strings.Contains(observation.Errors["node-a"], "stats summary unavailable") {
+		t.Fatalf("missing per-node observation error: %+v %v", observation, err)
 	}
 }
 

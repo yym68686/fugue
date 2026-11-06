@@ -25948,7 +25948,7 @@ components:
         observed_at:
           type: string
           format: date-time
-          description: Time of this live inspection, not a reconstruction of the failed operation's historical node state.
+          description: Time the node inputs were observed. In a failed operation diagnosis this is the persisted admission snapshot, never a reconstruction from current live state.
         profile:
           type: string
         build_strategy:
@@ -25996,6 +25996,7 @@ components:
           items:
             type: string
         builder_placement:
+          description: Persisted inputs from the failed builder admission decision. Omitted with missing_evidence when the historical configuration or snapshot was not captured.
           $ref: "#/components/schemas/BuilderPlacementInspection"
         dependency_chain:
           type: array
@@ -26109,9 +26110,12 @@ components:
             build_attempt:
               $ref: "#/components/schemas/BuilderAttemptEvidence"
             builder_diagnostics:
-              description: Bounded build snapshots and redacted log tails. Returned only to platform administrators with include_payload; never included in public CLI deployment results.
+              description: Bounded build snapshots, effective retry policy, admission inputs and redacted log tails. Returned only to platform administrators with include_payload; never included in public CLI deployment results.
               type: object
               additionalProperties: true
+              properties:
+                builder_placement:
+                  $ref: "#/components/schemas/BuilderPlacementInspection"
         payload_version:
           type: integer
           format: int32

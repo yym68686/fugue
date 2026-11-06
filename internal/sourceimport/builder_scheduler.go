@@ -82,6 +82,29 @@ type builderNodeSnapshot struct {
 	FilesystemAvailableBytes int64
 }
 
+type builderNodeObservation struct {
+	ObservedAt time.Time
+	Snapshots  []builderNodeSnapshot
+	Errors     map[string]string
+}
+
+// A capacity rejection is transient within the selection window. It is not a
+// policy refusal, even when a prior OOM raised the minimum admission demand.
+type builderPlacementError struct {
+	cause            error
+	Inspection       model.BuilderPlacementInspection
+	Policy           BuilderPodPolicy
+	PreviousOOMBytes int64
+	MissingEvidence  []string
+}
+
+func (e *builderPlacementError) Error() string { return e.cause.Error() }
+func (e *builderPlacementError) Unwrap() error { return e.cause }
+
+func (s *builderScheduler) placementError(cause error, observation builderNodeObservation, reservations []builderReservation) *builderPlacementError {
+	return &builderPlacementError{cause: cause, Inspection: s.placementInspection(observation, reservations, nil, ""), Policy: s.policy, PreviousOOMBytes: s.previousOOMBytes}
+}
+
 type builderReservation struct {
 	Name      string
 	NodeName  string
@@ -109,6 +132,7 @@ type builderScheduler struct {
 	selectionTimeout         time.Duration
 	retryInterval            time.Duration
 	reservationLeaseDuration time.Duration
+	previousOOMBytes         int64
 }
 
 type builderKubeClient struct {
@@ -351,69 +375,98 @@ func newBuilderScheduler(namespace string, policy BuilderPodPolicy, profile buil
 }
 
 func (s *builderScheduler) reservePlacement(ctx context.Context, jobName string) (builderJobPlacement, string, error) {
-	deadline := time.Now().Add(s.selectionTimeout)
-	lastErr := errNoBuilderPlacement
+	selectionCtx, cancel := context.WithTimeout(ctx, s.selectionTimeout)
+	defer cancel()
+	var lastErr error
 	for {
-		placement, reservationName, err := s.tryReservePlacement(ctx, jobName)
+		placement, reservationName, err := s.tryReservePlacement(selectionCtx, jobName)
 		if err == nil {
 			return placement, reservationName, nil
 		}
-		lastErr = err
+		if selectionCtx.Err() == nil || lastErr == nil {
+			lastErr = err
+		}
 		var admission *BuilderMemoryAdmissionError
 		if errors.As(err, &admission) {
 			return builderJobPlacement{}, "", err
 		}
-		if ctx.Err() != nil {
-			return builderJobPlacement{}, "", ctx.Err()
-		}
-		if time.Now().After(deadline) {
+		if selectionCtx.Err() != nil {
+			if ctx.Err() != nil {
+				lastErr = errors.Join(lastErr, ctx.Err())
+			}
 			return builderJobPlacement{}, "", lastErr
 		}
 		timer := time.NewTimer(s.retryInterval)
 		select {
-		case <-ctx.Done():
+		case <-selectionCtx.Done():
 			timer.Stop()
-			return builderJobPlacement{}, "", ctx.Err()
+			if ctx.Err() != nil {
+				lastErr = errors.Join(lastErr, ctx.Err())
+			}
+			return builderJobPlacement{}, "", lastErr
 		case <-timer.C:
 		}
 	}
 }
 
 func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName string) (builderJobPlacement, string, error) {
-	snapshots, err := s.loadNodeSnapshots(ctx)
+	previousOOM, err := loadBuilderOOMLimit(ctx, s.profile)
 	if err != nil {
 		return builderJobPlacement{}, "", err
+	}
+	policy, err := builderPolicyAfterOOM(s.policy, s.profile, previousOOM)
+	if err != nil {
+		return builderJobPlacement{}, "", err
+	}
+	s.policy = policy
+	s.previousOOMBytes = previousOOM
+	s.demand, err = builderDemandForProfile(policy, s.profile)
+	if err != nil {
+		return builderJobPlacement{}, "", err
+	}
+	observation, err := s.loadNodeObservation(ctx)
+	if err != nil {
+		return builderJobPlacement{}, "", s.placementError(err, observation, nil)
+	}
+	snapshots := builderInspectionSchedulingSnapshots(s, observation.Snapshots, observation.Errors)
+	complete := 0
+	for _, snapshot := range snapshots {
+		if s.nodeNeedsSummary(snapshot) && snapshot.SummaryLoaded {
+			complete++
+		}
+	}
+	if complete == 0 && len(observation.Errors) > 0 {
+		return builderJobPlacement{}, "", s.placementError(fmt.Errorf("load builder node stats summaries: no complete eligible node observations"), observation, nil)
 	}
 	now := time.Now()
 	reservations, err := s.listActiveReservations(ctx, now)
 	if err != nil {
-		return builderJobPlacement{}, "", err
+		failure := s.placementError(err, observation, nil)
+		failure.MissingEvidence = []string{"builder_reservations"}
+		return builderJobPlacement{}, "", failure
 	}
 	candidates := selectBuilderCandidates(s.policy, s.profile, s.demand, snapshots, reservations, s.requiredNodeLabels)
 	candidates = builderFittingCandidates(candidates, s.demand)
 	candidates = builderPlacementCandidates(candidates, s.profile, s.candidateCount)
 	if len(candidates) == 0 {
-		limit, historyErr := loadBuilderOOMLimit(ctx, s.profile)
-		if historyErr != nil {
-			return builderJobPlacement{}, "", historyErr
+		if len(sortedBuilderCandidates(s.policy, s.profile, s.demand, snapshots, reservations, s.requiredNodeLabels)) > 0 {
+			return builderJobPlacement{}, "", s.placementError(fmt.Errorf("%w: insufficient resources for profile %s (minimum cpu=%dm memory=%d bytes ephemeral=%d bytes)", errNoBuilderPlacement, s.profile, s.demand.CPUMilli, s.demand.MemoryBytes, s.demand.EphemeralBytes), observation, reservations)
 		}
-		if limit > 0 {
-			return builderJobPlacement{}, "", &BuilderMemoryAdmissionError{PreviousOOMBytes: limit}
-		}
-		if len(snapshots) > 0 {
-			return builderJobPlacement{}, "", fmt.Errorf("%w: insufficient resources for profile %s (minimum cpu=%dm memory=%d bytes ephemeral=%d bytes)", errNoBuilderPlacement, s.profile, s.demand.CPUMilli, s.demand.MemoryBytes, s.demand.EphemeralBytes)
-		}
-		return builderJobPlacement{}, "", fmt.Errorf("%w for profile %s", errNoBuilderPlacement, s.profile)
+		return builderJobPlacement{}, "", s.placementError(fmt.Errorf("%w for profile %s", errNoBuilderPlacement, s.profile), observation, reservations)
 	}
 
+	acquiredAnyLock := false
 	for _, candidate := range candidates {
 		acquired, err := s.tryAcquireNodeLock(ctx, candidate.Node.Name, jobName)
 		if err != nil {
-			return builderJobPlacement{}, "", err
+			failure := s.placementError(err, observation, reservations)
+			failure.MissingEvidence = []string{"builder_node_locks"}
+			return builderJobPlacement{}, "", failure
 		}
 		if !acquired {
 			continue
 		}
+		acquiredAnyLock = true
 
 		lockReleased := false
 		releaseLock := func() {
@@ -426,16 +479,20 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 			_ = s.releaseNodeLock(releaseCtx, candidate.Node.Name)
 		}
 
-		refreshedSnapshots, err := s.loadNodeSnapshots(ctx)
+		refreshedObservation, err := s.loadNodeObservation(ctx)
 		if err != nil {
 			releaseLock()
-			return builderJobPlacement{}, "", err
+			return builderJobPlacement{}, "", s.placementError(err, refreshedObservation, nil)
 		}
 		refreshedReservations, err := s.listActiveReservations(ctx, time.Now())
 		if err != nil {
 			releaseLock()
-			return builderJobPlacement{}, "", err
+			failure := s.placementError(err, refreshedObservation, nil)
+			failure.MissingEvidence = []string{"builder_reservations"}
+			return builderJobPlacement{}, "", failure
 		}
+		observation, reservations = refreshedObservation, refreshedReservations
+		refreshedSnapshots := builderInspectionSchedulingSnapshots(s, observation.Snapshots, observation.Errors)
 		refreshedCandidates := selectBuilderCandidates(s.policy, s.profile, s.demand, refreshedSnapshots, refreshedReservations, s.requiredNodeLabels)
 		refreshedCandidates = builderFittingCandidates(refreshedCandidates, s.demand)
 		refreshedCandidates = builderPlacementCandidates(refreshedCandidates, s.profile, s.candidateCount)
@@ -461,7 +518,9 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 		}
 		if previousOOM > 0 && actualLimit <= previousOOM {
 			releaseLock()
-			return builderJobPlacement{}, "", &BuilderMemoryAdmissionError{previousOOM, actualLimit}
+			// The durable floor can change while we hold the node lock. Recheck
+			// admission on the next selection pass instead of starting this Pod.
+			continue
 		}
 		if !builderDemandFits(allocatedDemand, s.demand) || !builderDemandFits(selectedCandidate.Available, allocatedDemand) {
 			releaseLock()
@@ -470,7 +529,9 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 		reservationName := builderReservationLeaseName(jobName)
 		if err := s.upsertReservation(ctx, reservationName, candidate.Node.Name, allocatedDemand); err != nil {
 			releaseLock()
-			return builderJobPlacement{}, "", err
+			failure := s.placementError(err, observation, reservations)
+			failure.MissingEvidence = []string{"builder_reservation_write"}
+			return builderJobPlacement{}, "", failure
 		}
 		releaseLock()
 
@@ -479,41 +540,59 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 		return placement, reservationName, nil
 	}
 
-	return builderJobPlacement{}, "", fmt.Errorf("%w after lock contention", errNoBuilderPlacement)
+	if !acquiredAnyLock {
+		failure := s.placementError(fmt.Errorf("%w after lock contention for profile %s", errNoBuilderPlacement, s.profile), observation, reservations)
+		failure.MissingEvidence = []string{"builder_node_locks"}
+		return builderJobPlacement{}, "", failure
+	}
+	return builderJobPlacement{}, "", s.placementError(fmt.Errorf("%w after candidate lock/capacity revalidation for profile %s", errNoBuilderPlacement, s.profile), observation, reservations)
 }
 
-func (s *builderScheduler) loadNodeSnapshots(ctx context.Context) ([]builderNodeSnapshot, error) {
+func (s *builderScheduler) loadNodeObservation(ctx context.Context) (builderNodeObservation, error) {
+	observation := builderNodeObservation{ObservedAt: time.Now().UTC(), Errors: map[string]string{}}
 	nodes, err := s.client.listNodes(ctx)
 	if err != nil {
-		return nil, err
+		return observation, err
 	}
-	snapshots := make([]builderNodeSnapshot, 0, len(nodes))
-	eligibleCount := 0
-	var lastSummaryErr error
 	for _, node := range nodes {
 		snapshot := builderSnapshotFromKubeNode(node)
+		index := len(observation.Snapshots)
+		observation.Snapshots = append(observation.Snapshots, snapshot)
 		if !s.nodeNeedsSummary(snapshot) {
 			continue
 		}
-		eligibleCount++
 		pods, err := s.client.listNodePods(ctx, snapshot.Name)
 		if err != nil {
-			lastSummaryErr = fmt.Errorf("node %s pod requests: %w", snapshot.Name, err)
+			observation.Errors[snapshot.Name] = fmt.Sprintf("pod requests unavailable: %v", err)
 			continue
 		}
 		summary, err := s.client.getNodeSummary(ctx, snapshot.Name)
 		if err != nil {
-			lastSummaryErr = fmt.Errorf("node %s: %w", snapshot.Name, err)
+			observation.Errors[snapshot.Name] = fmt.Sprintf("stats summary unavailable: %v", err)
 			continue
 		}
 		snapshot.Used = builderUsedResources(summary, snapshot.Allocatable.MemoryBytes)
 		snapshot.Requested = builderNodePodRequests(pods)
 		snapshot.FilesystemAvailableBytes = builderNodeFilesystemAvailableBytes(summary)
 		snapshot.SummaryLoaded = true
-		snapshots = append(snapshots, snapshot)
+		observation.Snapshots[index] = snapshot
 	}
-	if eligibleCount > 0 && len(snapshots) == 0 && lastSummaryErr != nil {
-		return nil, fmt.Errorf("load builder node stats summaries: %w", lastSummaryErr)
+	return observation, nil
+}
+
+func (s *builderScheduler) loadNodeSnapshots(ctx context.Context) ([]builderNodeSnapshot, error) {
+	observation, err := s.loadNodeObservation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var snapshots []builderNodeSnapshot
+	for _, snapshot := range observation.Snapshots {
+		if s.nodeNeedsSummary(snapshot) && observation.Errors[snapshot.Name] == "" && snapshot.SummaryLoaded {
+			snapshots = append(snapshots, snapshot)
+		}
+	}
+	if len(snapshots) == 0 && len(observation.Errors) > 0 {
+		return nil, fmt.Errorf("load builder node stats summaries: no complete eligible node observations")
 	}
 	return snapshots, nil
 }
