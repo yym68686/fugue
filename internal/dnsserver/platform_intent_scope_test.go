@@ -18,7 +18,7 @@ func TestDNSRecordRecoveryScopesIntentToTheAffectedHostname(t *testing.T) {
 		{Hostname: "challenge.example.test", Type: "TXT", TTL: 30, Values: []string{"previous-value"}},
 	}, Policy: platformconfig.PolicySnapshot{MaxStaleSeconds: 3600, DNSReadiness: &readiness}}
 	raw := mustDNSJSON(t, base)
-	for _, scenario := range []string{"add unrelated", "remove unrelated", "change unrelated", "same host type", "address", "tenant", "application", "ttl", "remove target"} {
+	for _, scenario := range []string{"add unrelated", "remove unrelated", "change unrelated", "same host type", "alias", "ipv6", "address", "tenant", "application", "ttl", "remove target"} {
 		t.Run(scenario, func(t *testing.T) {
 			var previous, next dnsServingPayload
 			json.Unmarshal(raw, &previous)
@@ -36,6 +36,11 @@ func TestDNSRecordRecoveryScopesIntentToTheAffectedHostname(t *testing.T) {
 				want = true
 			case "same host type":
 				next.Records = append(next.Records, platformconfig.DNSIntent{Hostname: hostname, Type: "TXT", TTL: 30, Values: []string{"new-value"}})
+				want = true
+			case "alias":
+				next.Records = append(next.Records, platformconfig.DNSIntent{Hostname: hostname, Type: "CNAME", TTL: 30, Values: []string{"alias.example.test"}})
+			case "ipv6":
+				next.Records = append(next.Records, platformconfig.DNSIntent{Hostname: hostname, Type: "AAAA", TTL: 30, Values: []string{"2001:db8::1"}})
 			case "address":
 				next.Records[0].Values = []string{"192.0.2.99"}
 			case "tenant":

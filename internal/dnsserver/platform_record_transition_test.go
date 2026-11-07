@@ -169,6 +169,7 @@ func TestDNSRecordTransitionIsolatesChangedAliasSharingRouteProofs(t *testing.T)
 	}
 	next.Policy.DNSAnswerRules[1].PhysicalOrder.OrderedEdgeIDs = []string{"edge-b", "edge-a"}
 	next.Queries[0].Records[len(view.Records)-1].AnswerPolicy.PhysicalOrder.OrderedEdgeIDs = []string{"edge-b", "edge-a"}
+	next.Queries[0].Records[len(view.Records)-1].AnswerPolicy.TTLSeconds++
 	record := dnsServingCheckpoint{AppliedAt: now.Add(-time.Minute), Positive: true, Candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "previous", ReleasedAt: now.Add(-time.Minute)}}}
 	old := &dnsServingState{payload: previous, record: record}
 	bridge := &dnsReleaseBridge{payload: next, candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "next", ReleasedAt: now}}}

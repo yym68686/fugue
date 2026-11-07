@@ -150,7 +150,7 @@ func TestDNSNarrowedPhysicalTransitionRetainsAuthorizationBoundaries(t *testing.
 			case "older publication":
 				bridge.candidate.Release.ReleasedAt = old.record.Candidate.Release.ReleasedAt
 			}
-			if dnsTransitionRecords(old, bridge)[old.payload.Plan.Records[0].Hostname] {
+			if dnsTransitionRecords(old, bridge)[old.payload.Plan.Records[0].Hostname] != (scenario == "reordered" || scenario == "primary changed" || scenario == "epoch changed") {
 				t.Fatal("narrowing bypassed an independent authorization boundary")
 			}
 		})

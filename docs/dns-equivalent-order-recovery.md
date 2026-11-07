@@ -23,9 +23,12 @@ fixed order of [a, b, c] may recover through a signed quality selection of [a, b
 when that successor has its own complete, fresh proof quorum. This does not
 permit proof bridging into the broader old selector. The successor answers
 with its original policy, and an expired or incomplete successor still fails
-closed. Reordering, widening the selection or changing the primary remains
-incompatible. The original quorum is not reduced to the number of selected
-endpoints.
+closed. Forward recovery additionally permits changing the primary, ordering or
+selection within an identical signed candidate inventory, using only the
+successor's original selector and exact proofs. An added candidate, changed
+address, business allocation or other hard policy remains incompatible. The
+original quorum is not reduced to the number of selected endpoints. See
+[publication continuity](dns-rrset-publication-continuity.md).
 
 No signed payload is mutated and the retained checkpoint continues answering
 with its original selection. Fresh successor proofs still require the exact

@@ -45,6 +45,9 @@ func dnsReleaseCompatibilityForProof(old *dnsServingState, bridge *dnsReleaseBri
 	previous, next := old.payload, bridge.payload
 	oldRules, newRules := dnsBridgeRules(previous.Policy.DNSAnswerRules), dnsBridgeRules(next.Policy.DNSAnswerRules)
 	oldQueries, newQueries := dnsBridgeQueries(previous.Queries), dnsBridgeQueries(next.Queries)
+	if !retainSelection {
+		normalizeDNSForwardPhysicalOrders(oldQueries, newQueries, oldRules, newRules)
+	}
 	normalizeDNSPhysicalOrders(oldQueries, newQueries, oldRules, newRules, !retainSelection)
 	if retainSelection {
 		retainDNSSelectionComparison(oldQueries)
@@ -93,14 +96,22 @@ func dnsReleaseCompatibilityForProof(old *dnsServingState, bridge *dnsReleaseBri
 }
 
 // An unrelated record addition (for example a bounded TXT challenge) must not
-// veto an unchanged hostname's exact route proofs. Keep all intent fields and
-// all record types for this hostname, including ownership and value expiry.
+// veto an unchanged address route's exact proofs. Address and alias intents keep
+// every field, including ownership and value expiry. Other RR types are served
+// independently and cannot change the authorization of an A/AAAA route.
 func dnsBridgeRecordIntents(records []platformconfig.DNSIntent) map[string][]platformconfig.DNSIntent {
 	byHost := make(map[string][]platformconfig.DNSIntent)
 	for _, record := range records {
+		if !dnsRouteRecordType(record.Type) {
+			continue
+		}
 		byHost[record.Hostname] = append(byHost[record.Hostname], record)
 	}
 	return byHost
+}
+
+func dnsRouteRecordType(kind string) bool {
+	return kind == "A" || kind == "AAAA" || kind == "CNAME"
 }
 
 // Equivalent representations can share proofs while retaining the old selector.
@@ -195,12 +206,14 @@ func narrowerDNSPhysicalOrder(before, after []string) bool {
 func indexDNSPhysicalRules(rules []platformconfig.DNSAnswerRule) map[string]*platformconfig.DNSAnswerRule {
 	indexed := make(map[string]*platformconfig.DNSAnswerRule, len(rules))
 	for index := range rules {
-		rule := &rules[index]
+		// Keep the original rule while comparison projections update the slice.
+		// A wildcard rule can be checked by more than one node's query view.
+		rule := rules[index]
 		key := rule.NodeID + "\x00" + rule.Type
 		if _, exists := indexed[key]; exists {
 			indexed[key] = nil
 		} else {
-			indexed[key] = rule
+			indexed[key] = &rule
 		}
 	}
 	return indexed
@@ -285,6 +298,9 @@ func dnsBridgeTrafficConstraints(payload dnsServingPayload) map[string][]platfor
 func dnsBridgeRules(rules []platformconfig.DNSAnswerRule) map[string][]platformconfig.DNSAnswerRule {
 	byHost := make(map[string][]platformconfig.DNSAnswerRule)
 	for _, rule := range rules {
+		if !dnsRouteRecordType(rule.Type) {
+			continue
+		}
 		byHost[rule.Hostname] = append(byHost[rule.Hostname], rule)
 	}
 	return byHost
@@ -294,6 +310,9 @@ func dnsBridgeQueries(views []platformconfig.DNSQueryView) map[string][]platform
 	byHost := make(map[string][]platformconfig.DNSQueryView)
 	for _, view := range views {
 		for _, record := range view.Records {
+			if !dnsRouteRecordType(record.Type) {
+				continue
+			}
 			row := record
 			row.AnswerPolicy.PhysicalSelection = dnsBridgePhysicalSelection(record.AnswerPolicy.PhysicalSelection)
 			row.Candidates = dnsBridgeCandidates(record.Candidates)
