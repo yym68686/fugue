@@ -32,6 +32,7 @@ func archiveTestStore(t *testing.T) *Store {
 		}
 	}
 	resetCompilerInputArchiveTestLedger(t, s)
+	enforceCompilerInputHistoryTestPhase(t, s)
 	return s
 }
 

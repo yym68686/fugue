@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,14 +18,33 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/bundleauth"
+	"fugue/internal/config"
 	"fugue/internal/inputarchive"
+	"fugue/internal/inputhistory"
 	"fugue/internal/store"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, observe")
+	if handled, err := inputhistory.WriteCapabilities(os.Args[1:], "store", os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, observe")
 	copyContract := flag.String("copy-contract", "", "strict single-input archive-copy JSON contract path")
+	taskContract := flag.String("task-input-contract", "", "strict bounded task-input-prepare contract path; trusted API-role maintenance only")
+	taskPlan := flag.String("task-input-plan", "", "strict signed task preparation plan path; contains a public verification key only")
+	taskBackend := flag.String("task-input-backend", "", "exact archive backend fingerprint for trusted task-input-plan")
+	publicationContract := flag.String("publication-input-contract", "", "strict bounded ordinary publication preparation contract; trusted plan only")
+	publicationPlan := flag.String("publication-input-plan", "", "strict signed publication preparation plan with public verification key")
+	publicationBackend := flag.String("publication-input-backend", "", "exact archive backend fingerprint for trusted publication-input-plan")
+	consumerContract := flag.String("consumer-input-contract", "", "strict bounded consumer preparation contract; trusted plan only")
+	consumerPlan := flag.String("consumer-input-plan", "", "strict signed consumer preparation plan with public verification key")
+	consumerBackend := flag.String("consumer-input-backend", "", "exact archive backend fingerprint for trusted consumer-input-plan")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
@@ -46,8 +66,11 @@ func main() {
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
 	hotMode := *mode == "archive-hot-copy" || *mode == "archive-hot-restore"
+	taskTicketMode := *mode == "task-input-plan" || *mode == "task-input-restore" || *mode == "task-input-confirm"
+	publicationTicketMode := *mode == "publication-input-plan" || *mode == "publication-input-restore" || *mode == "publication-input-confirm"
+	consumerTicketMode := *mode == "consumer-input-plan" || *mode == "consumer-input-restore" || *mode == "consumer-input-confirm"
 	localPinMode := *mode == "archive-local-pin" || *mode == "archive-local-unpin"
-	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode || *mode == "archive-local-pin") && !*apply
+	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "task-input-plan" || *mode == "publication-input-plan" || *mode == "consumer-input-plan" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode || *mode == "archive-local-pin" || *mode == "task-input-prepare") && !*apply
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
@@ -57,6 +80,134 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if consumerTicketMode {
+		allowed := map[string]bool{"mode": true}
+		if *mode == "consumer-input-plan" {
+			allowed["consumer-input-contract"], allowed["consumer-input-backend"] = true, true
+		} else {
+			allowed["consumer-input-plan"], allowed["apply"] = true, true
+		}
+		other := false
+		flag.Visit(func(f *flag.Flag) { other = other || !allowed[f.Name] })
+		if other || *rehearse {
+			fmt.Fprintln(os.Stderr, "consumer preparation mode has unrelated flags")
+			os.Exit(2)
+		}
+		output, err := runConsumerPreparation(ctx, *mode, *consumerContract, *consumerPlan, *consumerBackend)
+		if output != nil {
+			_ = json.NewEncoder(os.Stdout).Encode(output)
+		}
+		if err != nil {
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		return
+	}
+	if publicationTicketMode {
+		allowed := map[string]bool{"mode": true}
+		if *mode == "publication-input-plan" {
+			allowed["publication-input-contract"], allowed["publication-input-backend"] = true, true
+		} else {
+			allowed["publication-input-plan"], allowed["apply"] = true, true
+		}
+		otherFlag := false
+		flag.Visit(func(f *flag.Flag) { otherFlag = otherFlag || !allowed[f.Name] })
+		if otherFlag || *rehearse {
+			fmt.Fprintln(os.Stderr, "publication preparation mode has unrelated flags")
+			os.Exit(2)
+		}
+		output, err := runPublicationPreparation(ctx, *mode, *publicationContract, *publicationPlan, *publicationBackend)
+		if output != nil {
+			_ = json.NewEncoder(os.Stdout).Encode(output)
+		}
+		if err != nil {
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		return
+	}
+	if taskTicketMode {
+		allowed := map[string]bool{"mode": true}
+		if *mode == "task-input-plan" {
+			allowed["task-input-contract"], allowed["task-input-backend"] = true, true
+		} else {
+			allowed["task-input-plan"], allowed["apply"] = true, true
+		}
+		otherFlag := false
+		flag.Visit(func(f *flag.Flag) { otherFlag = otherFlag || !allowed[f.Name] })
+		if otherFlag || *rehearse {
+			fmt.Fprintln(os.Stderr, "task preparation mode has unrelated flags")
+			os.Exit(2)
+		}
+		var output any
+		var err error
+		if *mode == "task-input-plan" {
+			var c store.NodeTaskInputPreparationContract
+			c, err = readTaskPreparationContract(*taskContract)
+			if err == nil {
+				output, err = store.RunNodeTaskInputPreparationPlan(ctx, os.Getenv("FUGUE_DATABASE_URL"), taskPreparationKeyring(), c, *taskBackend)
+			}
+		} else {
+			var plan store.NodeTaskInputPreparationPlan
+			plan, err = readTaskInputPreparationPlan(*taskPlan)
+			if err == nil && *mode == "task-input-confirm" {
+				output, err = store.RunNodeTaskInputPreparationConfirmation(ctx, os.Getenv("FUGUE_DATABASE_URL"), taskPreparationKeyring(), plan.Ticket)
+			} else if err == nil {
+				var reader inputarchive.S3Config
+				// The public key is pinned independently by the immutable trusted
+				// runner intent, never accepted solely from the plan being read.
+				key := os.Getenv("FUGUE_TASK_INPUT_PREPARATION_VERIFICATION_KEY")
+				if key == "" || key != plan.VerificationKey {
+					err = store.ErrConflict
+				} else {
+					reader, err = store.NodeTaskPreparationReaderFromEnv()
+				}
+				if err == nil {
+					output, err = store.RunNodeTaskInputRestore(ctx, os.Getenv("FUGUE_DATABASE_URL"), plan.Ticket, key, reader)
+				}
+			}
+		}
+		if output != nil {
+			_ = json.NewEncoder(os.Stdout).Encode(output)
+		}
+		if err != nil {
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *mode == "task-input-prepare" {
+		otherFlag := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name != "mode" && f.Name != "apply" && f.Name != "task-input-contract" {
+				otherFlag = true
+			}
+		})
+		if *taskContract == "" || *rehearse || otherFlag {
+			fmt.Fprintln(os.Stderr, "task-input-prepare requires an exact contract and no unrelated flags")
+			os.Exit(2)
+		}
+		file, err := os.Open(*taskContract)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "task input contract unavailable")
+			os.Exit(2)
+		}
+		c, err := decodeTaskInputPreparationContract(file, *apply)
+		_ = file.Close()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invalid task input contract")
+			os.Exit(2)
+		}
+		cfg := config.APIFromEnv()
+		keys := bundleauth.NewKeyring(cfg.BundleSigningKey, cfg.BundleSigningKeyID, cfg.BundleSigningPreviousKey, cfg.BundleSigningPreviousKeyID, cfg.BundleRevokedKeyIDs)
+		report, err := store.RunNodeTaskInputPreparation(ctx, os.Getenv("FUGUE_DATABASE_URL"), keys, c, *apply)
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		if err != nil {
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *mode == "archive-copy" {
 		var c store.CompilerInputArchiveCopyContract
 		otherFlag := false
@@ -310,6 +461,75 @@ func main() {
 	if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
 		os.Exit(1)
 	}
+}
+
+func decodeTaskInputPreparationContract(r io.Reader, apply bool) (store.NodeTaskInputPreparationContract, error) {
+	var c store.NodeTaskInputPreparationContract
+	raw, err := io.ReadAll(io.LimitReader(r, 16385))
+	if err != nil || len(raw) > 16384 {
+		return c, store.ErrInvalidInput
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&c); err != nil {
+		return c, store.ErrInvalidInput
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF || c.Validate(apply) != nil {
+		return c, store.ErrInvalidInput
+	}
+	return c, nil
+}
+
+func readTaskPreparationContract(path string) (store.NodeTaskInputPreparationContract, error) {
+	if path == "-" {
+		return decodeTaskInputPreparationContract(os.Stdin, false)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return store.NodeTaskInputPreparationContract{}, store.ErrInvalidInput
+	}
+	defer file.Close()
+	return decodeTaskInputPreparationContract(file, false)
+}
+
+// Trusted coordination uses bounded stdin, never a file write or a shell in a
+// serving API container. The isolated worker reads its immutable Secret mount.
+func readTaskInputPreparationPlan(path string) (store.NodeTaskInputPreparationPlan, error) {
+	if path == "-" {
+		return decodeTaskInputPreparationPlan(os.Stdin, time.Now())
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return store.NodeTaskInputPreparationPlan{}, store.ErrInvalidInput
+	}
+	defer file.Close()
+	return decodeTaskInputPreparationPlan(file, time.Now())
+}
+
+func taskPreparationKeyring() bundleauth.Keyring {
+	cfg := config.APIFromEnv()
+	return bundleauth.NewKeyring(cfg.BundleSigningKey, cfg.BundleSigningKeyID, cfg.BundleSigningPreviousKey, cfg.BundleSigningPreviousKeyID, cfg.BundleRevokedKeyIDs)
+}
+
+func decodeTaskInputPreparationPlan(r io.Reader, now time.Time) (store.NodeTaskInputPreparationPlan, error) {
+	var p store.NodeTaskInputPreparationPlan
+	// The ticket itself has an independent 512KiB signed bound. Include the
+	// public-key envelope, but reject oversized whitespace as well as fields.
+	raw, err := io.ReadAll(io.LimitReader(r, (513<<10)+1))
+	if err != nil || len(raw) > 513<<10 {
+		return p, store.ErrInvalidInput
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&p); err != nil {
+		return p, store.ErrInvalidInput
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF || p.Ticket.Validate(p.VerificationKey, now) != nil {
+		return p, store.ErrInvalidInput
+	}
+	return p, nil
 }
 
 func writeRetirementError(output io.Writer, err error) {

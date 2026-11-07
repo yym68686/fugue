@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"reflect"
 	"regexp"
 	"sort"
 
@@ -10,11 +12,36 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/routeartifact"
+	"fugue/internal/store"
 	"fugue/internal/trafficbinding"
 )
 
 var trafficSourceGroup = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 var errTrafficSourceChanged = errors.New("traffic release changed during route observation")
+
+// The serving HTTP read consumes the complete selected publication's input
+// proof, then repeats the original authority/topology observation using a new
+// immutable-body cache. Metadata-only assignment selection stays independent:
+// an unrelated cold candidate is not authority to reject a serving request.
+func (s *Server) edgeRouteIntentSnapshotForRead(ctx context.Context, group, scope string) (model.EdgeRouteIntentSnapshot, bool, error) {
+	var reads []store.PlatformInputReadSelection
+	before, found, err := s.trafficRouteSourceWithInputCapture(group, scope, newConsumerArtifactReader(s.store.GetPlatformArtifact), nil, func(r []store.PlatformInputReadSelection) { reads = r })
+	if err != nil || !found {
+		return before, found, err
+	}
+	if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
+		return model.EdgeRouteIntentSnapshot{}, true, err
+	}
+	var freshReads []store.PlatformInputReadSelection
+	after, found, err := s.trafficRouteSourceWithInputCapture(group, scope, newConsumerArtifactReader(s.store.GetPlatformArtifact), nil, func(r []store.PlatformInputReadSelection) { freshReads = r })
+	if err != nil || !found || !reflect.DeepEqual(before, after) || !reflect.DeepEqual(reads, freshReads) {
+		return model.EdgeRouteIntentSnapshot{}, true, errTrafficSourceChanged
+	}
+	if err := ctx.Err(); err != nil {
+		return model.EdgeRouteIntentSnapshot{}, true, err
+	}
+	return after, true, nil
+}
 
 // A release selection is authoritative even when it cannot yet be consumed.
 // Returning an error preserves the consumer's serving artifact instead of
@@ -37,8 +64,12 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficScope(group, scope string, re
 // returns a complete projection. Both paths perform the same fresh authority
 // and topology reads, including the final publication-change check.
 func (s *Server) edgeRouteIntentSnapshotFromTrafficScopeWithBindingReader(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (model.EdgeRouteIntentSnapshot, bool, error) {
+	return s.trafficRouteSourceWithInputCapture(group, scope, readArtifact, readBinding, nil)
+}
+
+func (s *Server) trafficRouteSourceWithInputCapture(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, capture func([]store.PlatformInputReadSelection)) (model.EdgeRouteIntentSnapshot, bool, error) {
 	for attempt := 0; ; attempt++ {
-		snapshot, found, err := s.observeTrafficRouteSourceWithBindingReader(group, scope, readArtifact, readBinding)
+		snapshot, found, err := s.observeTrafficRouteSourceWithInputCapture(group, scope, readArtifact, readBinding, capture)
 		if !errors.Is(err, errTrafficSourceChanged) || attempt == 2 {
 			return snapshot, found, err
 		}
@@ -50,6 +81,10 @@ func (s *Server) observeTrafficRouteSource(group, scope string, readArtifact fun
 }
 
 func (s *Server) observeTrafficRouteSourceWithBindingReader(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (model.EdgeRouteIntentSnapshot, bool, error) {
+	return s.observeTrafficRouteSourceWithInputCapture(group, scope, readArtifact, readBinding, nil)
+}
+
+func (s *Server) observeTrafficRouteSourceWithInputCapture(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, capture func([]store.PlatformInputReadSelection)) (model.EdgeRouteIntentSnapshot, bool, error) {
 	defer s.observeOperation("traffic-source")()
 	parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, scope)
 	if err != nil || !found {
@@ -63,6 +98,7 @@ func (s *Server) observeTrafficRouteSourceWithBindingReader(group, scope string,
 	}
 	var child model.PlatformArtifact
 	var latest model.PlatformExpectedConsumerSet
+	var reads []store.PlatformInputReadSelection
 	// Every member of the signed publication role must be prepared. An ordinary
 	// traffic release still requires route, DNS and TLS membership.
 	kinds, err := platformconfig.ValidateReleaseComposition(parent)
@@ -104,6 +140,10 @@ func (s *Server) observeTrafficRouteSourceWithBindingReader(group, scope string,
 		if !member {
 			return fail()
 		}
+		if capture != nil {
+			reads = append(reads, store.PlatformInputReadSelection{ArtifactID: artifact.ID, ContentHash: artifact.ContentHash,
+				ParentID: parent.ID, ParentHash: parent.ContentHash, ReleaseID: release.ID, ExpectedConsumerSetID: set.ID})
+		}
 		if kind == model.PlatformArtifactKindEdgeRouteBundle {
 			child, latest = artifact, set
 		}
@@ -126,6 +166,9 @@ func (s *Server) observeTrafficRouteSourceWithBindingReader(group, scope string,
 	}
 	if current.ID != parent.ID || current.ContentHash != parent.ContentHash || active.ID != release.ID || active.FencingToken != release.FencingToken || active.CanaryRuleRef != release.CanaryRuleRef {
 		return model.EdgeRouteIntentSnapshot{}, true, errTrafficSourceChanged
+	}
+	if capture != nil {
+		capture(reads)
 	}
 	return snapshot, true, nil
 }

@@ -10,11 +10,56 @@ import (
 	"time"
 
 	"fugue/internal/inputarchive"
+	"fugue/internal/model"
 )
 
 type hotInventoryQueryCounter struct {
 	inputQueryer
 	queries int
+}
+
+func TestHotInventoryPostgresReleasePolicyScopeSurvivesAllReadPaths(t *testing.T) {
+	db, address, _ := hotInventoryTestDatabase(t)
+	installHotIndexTest(t, db, address)
+	s := &Store{db: db, databaseURL: address}
+	configureTestPlatformArtifactSigning(s)
+	refs := []inputarchive.HotReference{}
+	for _, scope := range []string{"scope-neutral-a", "scope-neutral-b"} {
+		id := "parent-" + scope
+		a, err := s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindReleaseSet,
+			Scope: model.PlatformArtifactScope{Key: scope}, Generation: id, Content: map[string]any{"artifact_ids": []string{"child-" + scope}},
+			Metadata: map[string]string{"policy_generation": "shared-policy-generation"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs = append(refs, inputarchive.HotReference{Kind: "artifact", ID: a.ID})
+	}
+	tx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for _, indexed := range []bool{false, true} {
+		batch, err := resolveCompilerInputHotBatchWithIndex(t.Context(), tx, refs, nil, indexed)
+		if err != nil || len(batch) != 2 {
+			t.Fatal("policy parent transport failed", indexed, batch, err)
+		}
+		for i, ref := range refs {
+			single, err := resolveCompilerInputHotNode(t.Context(), tx, ref)
+			if err != nil || !reflect.DeepEqual(single, batch[ref]) {
+				t.Fatal("batch changed scoped promotion policy", indexed, single, batch[ref], err)
+			}
+			want := inputarchive.HotReference{Kind: "generation", ID: "shared-policy-generation", ArtifactKind: model.PlatformArtifactKindPolicySnapshot,
+				ScopeKey: []string{"scope-neutral-a", "scope-neutral-b"}[i]}
+			found := false
+			for _, dependency := range single.References {
+				found = found || dependency == want
+			}
+			if !found {
+				t.Fatal("policy generation lost its exact original scope", indexed, want, single)
+			}
+		}
+	}
 }
 
 func (q *hotInventoryQueryCounter) QueryContext(ctx context.Context, statement string, args ...any) (*sql.Rows, error) {

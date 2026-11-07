@@ -1337,12 +1337,14 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	servingOnly := false
 	if values, ok := r.URL.Query()["serving_only"]; ok {
 		if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
 			httpx.WriteError(w, http.StatusBadRequest, "serving_only must be one boolean")
 			return
 		}
 		if values[0] == "true" {
+			servingOnly = true
 			selected, selectErr := selectServingConsumerAssignments(resolved, func() ([]consumerArtifactLookup, error) {
 				return s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 			}, func(item consumerArtifactLookup) (bool, error) {
@@ -1375,6 +1377,10 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 	}
 	if len(resolved) == 0 {
 		httpx.WriteError(w, http.StatusNotFound, "no expected consumer assignment found")
+		return
+	}
+	if err := s.checkConsumerInputReads(r.Context(), claims, resolved, readArtifact, servingOnly); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
 		return
 	}
 	assignments := make([]model.PlatformConsumerAssignment, 0, len(resolved))
@@ -1464,6 +1470,10 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer parent artifact unavailable")
 				return
 			}
+			if err := s.checkConsumerInputReads(r.Context(), claims, []consumerArtifactLookup{result}, readArtifact, false); err != nil {
+				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
+				return
+			}
 			result.Artifact = parent
 			w.Header().Set("Cache-Control", "private, no-store")
 			w.Header().Set("ETag", strconv.Quote(parent.ContentHash))
@@ -1471,6 +1481,10 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 			return
 		}
 		if result.Artifact.ID == r.PathValue("artifact_id") && result.Assignment.ExpectedConsumerSetID == setIDs[0] {
+			if err := s.checkConsumerInputReads(r.Context(), claims, []consumerArtifactLookup{result}, readArtifact, false); err != nil {
+				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
+				return
+			}
 			w.Header().Set("Cache-Control", "private, no-store")
 			w.Header().Set("ETag", strconv.Quote(result.Artifact.ContentHash))
 			httpx.WriteJSON(w, http.StatusOK, result)

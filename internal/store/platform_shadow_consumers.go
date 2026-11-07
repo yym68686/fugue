@@ -167,20 +167,36 @@ func (s *Store) ListPlatformShadowConsumers(kind, scope string) ([]model.Platfor
 }
 
 func (s *Store) pgAcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
+	h, size, err := cloneCompilerInputConsumerHeartbeat(h)
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
-	defer tx.Rollback()
-	if err = pgLockPromotionScope(ctx, tx, claims.ScopeKey, true); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	proof, pins, err := s.prepareCompilerInputConsumer(ctx, compilerInputConsumerIntent{expectedID: h.ExpectedConsumerSetID, heartbeat: &h, bytes: size})
+	if err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
-	// Serialize first inserts as well as updates without touching the serving row.
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "fugue-shadow/"+claims.ConsumerID()+"/"+claims.ScopeKey); err != nil {
-		return model.PlatformConsumerInstance{}, err
-	}
+	var out model.PlatformConsumerInstance
+	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+		if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, true); err != nil {
+			return err
+		}
+		// Serialize first inserts as well as updates without touching serving.
+		_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "fugue-shadow/"+claims.ConsumerID()+"/"+claims.ScopeKey)
+		return err
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		acceptAt := time.Now().UTC()
+		if at.After(acceptAt) {
+			acceptAt = at
+		}
+		out, err = s.pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx, tx, claims, h, acceptAt, audit)
+		return err
+	})
+	return out, err
+}
+
+func (s *Store) pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx context.Context, tx *sql.Tx, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
 	set, err := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, `SELECT id,release_set_id,artifact_release_id,artifact_kind,scope_key,scope_json,expected_generation,topology_revision,revision,requires_consumers,required_cardinality,optional_cardinality,heartbeat_deadline,convergence_deadline,consumers_json,created_at,updated_at FROM fugue_platform_expected_consumer_sets WHERE id=$1 FOR SHARE`, h.ExpectedConsumerSetID))
 	if err != nil {
 		return model.PlatformConsumerInstance{}, mapDBErr(err)
@@ -247,7 +263,7 @@ func (s *Store) pgAcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.P
 	if err = validateShadowObservation(state, set, h, s.platformArtifactSigningKeyring()); err != nil {
 		return out, err
 	}
-	return out, tx.Commit()
+	return out, nil
 }
 
 // A shadow record can supply executable capability only for the exact selected

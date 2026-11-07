@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"fugue/internal/inputarchive"
@@ -82,13 +83,15 @@ func runCompilerInputHotInventory(ctx context.Context, databaseURL string, roots
 		return CompilerInputHotInventory{}, err
 	}
 	defer tx.Rollback()
-	// The ordinary database role cannot set temp_file_limit. Do not grant
-	// superuser privileges just to inspect metadata. Time, graph and response
-	// bounds remain mandatory; this is not a zero-temporary-file guarantee.
+	// Use the same fixed admin-owned transaction-local guard as activation.
+	// No arbitrary SET privilege or superuser role is granted to the caller.
 	for _, statement := range []string{`SET LOCAL statement_timeout='5s'`, `SET LOCAL lock_timeout='250ms'`, `SET LOCAL work_mem='1MB'`, `SET LOCAL max_parallel_workers_per_gather=0`, `SET LOCAL jit=off`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			return CompilerInputHotInventory{}, err
 		}
+	}
+	if err = schemamigrate.EnforceCompilerInputZeroTemp(ctx, tx); err != nil {
+		return CompilerInputHotInventory{}, err
 	}
 	report, err := compilerInputHotInventorySnapshot(ctx, tx, rootsOnly)
 	if err != nil {
@@ -345,7 +348,7 @@ func resolveCompilerInputHotNode(ctx context.Context, tx inputQueryer, ref input
 		var artifact model.PlatformArtifact
 		var content, metadata []byte
 		artifact.ID = ref.ID
-		err := tx.QueryRowContext(ctx, `SELECT artifact_kind,content_hash,left(content_json::text,$2),left(metadata_json::text,16385) FROM fugue_platform_artifacts WHERE id=$1`, ref.ID, compilerInputHotArtifactBytes+1).Scan(&artifact.ArtifactKind, &artifact.ContentHash, &content, &metadata)
+		err := tx.QueryRowContext(ctx, `SELECT artifact_kind,scope_key,content_hash,left(content_json::text,$2),left(metadata_json::text,16385) FROM fugue_platform_artifacts WHERE id=$1`, ref.ID, compilerInputHotArtifactBytes+1).Scan(&artifact.ArtifactKind, &artifact.ScopeKey, &artifact.ContentHash, &content, &metadata)
 		if err != nil {
 			return node, err
 		}
@@ -384,25 +387,35 @@ func resolveCompilerInputHotNode(ctx context.Context, tx inputQueryer, ref input
 		}
 	case "task":
 		var payload []byte
-		if err := tx.QueryRowContext(ctx, `SELECT left(COALESCE(payload_json,'{}'::jsonb)::text,65537) FROM fugue_node_update_tasks WHERE id=$1 AND status IN ('pending','running')`, ref.ID).Scan(&payload); err != nil {
+		var taskType string
+		if err := tx.QueryRowContext(ctx, `SELECT task_type,left(COALESCE(payload_json,'{}'::jsonb)::text,65537) FROM fugue_node_update_tasks WHERE id=$1 AND status IN ('pending','running')`, ref.ID).Scan(&taskType, &payload); err != nil {
 			return node, err
 		}
-		if len(payload) > 65536 {
-			return node, ErrConflict
-		}
-		var value any
-		if json.Unmarshal(payload, &value) != nil {
-			return node, ErrConflict
-		}
-		refs, err := compilerInputHotTaskReferences(value)
+		resolved, err := compilerInputTaskHotNode(ctx, tx, taskType, payload)
 		if err != nil {
 			return node, err
 		}
-		node.References = refs
+		node.References = resolved.References
 	default:
 		return node, ErrInvalidInput
 	}
 	return node, nil
+}
+
+func compilerInputTaskHotNode(ctx context.Context, tx inputQueryer, taskType string, payload []byte) (inputarchive.HotNode, error) {
+	var value any
+	if len(payload) > 65536 || json.Unmarshal(payload, &value) != nil {
+		return inputarchive.HotNode{}, ErrConflict
+	}
+	refs, err := compilerInputHotTaskReferences(value)
+	if err != nil {
+		return inputarchive.HotNode{}, err
+	}
+	implicit, err := compilerInputTaskConfigurationReferences(ctx, tx, taskType, value)
+	if err != nil {
+		return inputarchive.HotNode{}, err
+	}
+	return inputarchive.HotNode{References: append(refs, implicit...)}, nil
 }
 
 func compilerInputHotTaskReferences(value any) ([]inputarchive.HotReference, error) {
@@ -415,6 +428,15 @@ func compilerInputHotTaskReferences(value any) ([]inputarchive.HotReference, err
 			return ErrConflict
 		}
 		switch v := value.(type) {
+		case map[string]string:
+			// NodeUpdateTask's public model uses string values, whereas the
+			// database JSON decoder uses map[string]any. Apply the identical
+			// dependency rules to both; a typed map must not bypass admission.
+			object := make(map[string]any, len(v))
+			for key, child := range v {
+				object[key] = child
+			}
+			return walk(object, depth+1)
 		case []any:
 			for _, child := range v {
 				if err := walk(child, depth+1); err != nil {
@@ -422,6 +444,21 @@ func compilerInputHotTaskReferences(value any) ([]inputarchive.HotReference, err
 				}
 			}
 		case map[string]any:
+			// Generation identity is meaningful only with its exact kind and
+			// scope. Do not infer an artifact ID from a display generation.
+			if generation, exists := v["generation"]; exists {
+				kind, hasKind := v["artifact_kind"]
+				scope, hasScope := v["scope_key"]
+				if hasKind || hasScope {
+					g, gOK := generation.(string)
+					k, kOK := kind.(string)
+					s, sOK := scope.(string)
+					if !gOK || !kOK || !sOK || g == "" || k == "" || s == "" || len(g) > 512 || len(k) > 128 || len(s) > 512 {
+						return ErrConflict
+					}
+					refs = append(refs, inputarchive.HotReference{Kind: "generation", ID: g, ArtifactKind: k, ScopeKey: s})
+				}
+			}
 			for key, child := range v {
 				kind := ""
 				switch key {
@@ -444,10 +481,29 @@ func compilerInputHotTaskReferences(value any) ([]inputarchive.HotReference, err
 				if err := walk(child, depth+1); err != nil {
 					return err
 				}
+				// Public task payloads encode structured arguments as strings.
+				// Decode only the explicit JSON argument convention; arbitrary
+				// text/log strings are not treated as guessed dependencies.
+				if strings.HasSuffix(key, "_json") {
+					raw, ok := child.(string)
+					if !ok || len(raw) > 65536 {
+						return ErrConflict
+					}
+					var nested any
+					if json.Unmarshal([]byte(raw), &nested) != nil {
+						return ErrConflict
+					}
+					if err := walk(nested, depth+1); err != nil {
+						return err
+					}
+				}
 			}
 		}
 		return nil
 	}
 	err := walk(value, 0)
+	if len(refs) > 256 {
+		return nil, ErrConflict
+	}
 	return refs, err
 }

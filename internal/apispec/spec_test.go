@@ -45,6 +45,42 @@ func TestRequestExplainContractCoversAllResponseFields(t *testing.T) {
 	}
 }
 
+func TestNodeUpdateTaskCreationDeclaresInputAdmissionConflict(t *testing.T) {
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(YAML())
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := doc.Paths.Find("/v1/node-update-tasks").Post
+	if op == nil || op.OperationID != "createNodeUpdateTask" || op.Responses.Status(409) == nil {
+		t.Fatal("task create input-admission conflict is undocumented")
+	}
+	for _, term := range []string{"signed dependency closure", "In PostgreSQL, cold inputs may be queued", "full-readback pins", "global verified ReleaseSet selector", "without", "never restores", "Maintenance tasks", "File storage verifies actual original", "canonical full SHA", "same locked state"} {
+		if !strings.Contains(op.Description, term) {
+			t.Errorf("task create admission contract omits %q", term)
+		}
+	}
+}
+
+func TestAdminCompilerInputUnavailableProofHasErrorOnlyResponse(t *testing.T) {
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(YAML())
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := doc.Paths.Find("/v1/admin/artifacts/{artifact_id}/compiler-input").Get
+	if op == nil || op.OperationID != "getPlatformArtifactCompilerInput" || op.Responses.Status(503) == nil {
+		t.Fatal("complete input proof unavailability is undocumented")
+	}
+	schema := op.Responses.Status(503).Value.Content["application/json"].Schema.Value
+	if err := schema.VisitJSON(map[string]any{"error": "compiler input dependency proof unavailable"}); err != nil {
+		t.Fatal("actual unavailable response violates contract", err)
+	}
+	if err := schema.VisitJSON(map[string]any{"error": "unavailable", "runtime_snapshot": map[string]any{}}); err == nil {
+		t.Fatal("unavailable response schema permits input disclosure")
+	}
+}
+
 func TestGeneratedArtifactsAreUpToDate(t *testing.T) {
 	cmd := exec.Command(
 		"go", "run", "../../cmd/fugue-openapi-gen",

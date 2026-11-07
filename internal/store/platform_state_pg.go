@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -343,12 +344,44 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	defer cancel()
 	ctx, trace := startPlatformMutationTrace(ctx, "platform-release")
 	defer func() { resultErr = trace.finish(resultErr) }()
-	trace.advance("begin")
-	tx, err := s.db.BeginTx(ctx, nil)
+	trace.advance("prepare-input-admission")
+	proof, pins, err := s.prepareCompilerInputPublication(ctx, id, "", guard, req)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	defer tx.Rollback()
+	return s.pgReleasePreparedPlatformArtifact(ctx, id, req, principal, guard, proof, pins, trace)
+}
+
+func (s *Store) pgReleasePreparedPlatformArtifact(ctx context.Context, id string, req model.PlatformArtifactReleaseRequest, principal model.Principal, guard *platformProducerReleaseGuard, proof *compilerInputActivationProof, pins []compilerInputPinBinding, trace *platformMutationTrace) (artifact model.PlatformArtifact, release model.PlatformArtifactRelease, message model.PlatformReleaseMessage, lkg *model.PlatformLKGSnapshot, err error) {
+	requestBindings, bindingErr := compilerInputPublicationRequestBindings(req)
+	if !compilerInputProofHasPublication(proof, id, "", guard) ||
+		bindingErr != nil || proof.publication.requestBindings != requestBindings ||
+		(req.DNSPublicationPrecondition != nil || req.ProducerReconfiguration != nil) && proof.publication.artifactID != id {
+		return artifact, release, message, nil, ErrInvalidInput
+	}
+	canonicalID := proof.publication.artifactID
+	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+		if err := pgLockProducerReconfiguration(ctx, tx, canonicalID, req); err != nil {
+			return err
+		}
+		if guard != nil {
+			if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
+				return err
+			}
+		}
+		return pgLockPlatformReleaseMutation(ctx, tx, canonicalID, guard != nil || req.DNSPublicationPrecondition != nil || NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow)
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		var inner error
+		artifact, release, message, lkg, inner = s.pgReleasePlatformArtifactInTransaction(ctx, tx, canonicalID, req, principal, guard, trace)
+		return inner
+	})
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	return artifact, release, message, lkg, nil
+}
+
+func (s *Store) pgReleasePlatformArtifactInTransaction(ctx context.Context, tx *sql.Tx, id string, req model.PlatformArtifactReleaseRequest, principal model.Principal, guard *platformProducerReleaseGuard, trace *platformMutationTrace) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	trace.advance("reconfiguration-lock")
 	if err := pgLockProducerReconfiguration(ctx, tx, id, req); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -369,10 +402,9 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
-	if req.DNSPublicationPrecondition != nil && artifact.ID != id {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
+	if artifact.ID != id {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
-
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
 	if err := validateProducerPolicyPublication(artifact, channel); err != nil {
@@ -566,10 +598,6 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	if err := s.pgDNSPublicationGuard(ctx, tx, artifact, req); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("dns_precondition", err)
 	}
-	trace.advance("commit")
-	if err := tx.Commit(); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
-	}
 	return artifact, release, message, lkg, nil
 }
 
@@ -578,12 +606,38 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	defer cancel()
 	ctx, trace := startPlatformMutationTrace(ctx, "platform-rollback")
 	defer func() { resultErr = trace.finish(resultErr) }()
-	trace.advance("begin")
-	tx, err := s.db.BeginTx(ctx, nil)
+	trace.advance("prepare-input-admission")
+	proof, pins, err := s.prepareCompilerInputPublication(ctx, id, req.ToGeneration, guard)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	defer tx.Rollback()
+	return s.pgRollbackPreparedPlatformArtifact(ctx, id, req, principal, guard, proof, pins, trace)
+}
+
+func (s *Store) pgRollbackPreparedPlatformArtifact(ctx context.Context, id string, req model.PlatformArtifactRollbackRequest, principal model.Principal, guard *platformProducerReleaseGuard, proof *compilerInputActivationProof, pins []compilerInputPinBinding, trace *platformMutationTrace) (artifact model.PlatformArtifact, release model.PlatformArtifactRelease, message model.PlatformReleaseMessage, lkg *model.PlatformLKGSnapshot, err error) {
+	if req.ToGeneration == "" || !compilerInputProofHasPublication(proof, id, req.ToGeneration, guard) {
+		return artifact, release, message, nil, ErrInvalidInput
+	}
+	canonicalID := proof.publication.artifactID
+	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+		if guard != nil {
+			if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
+				return err
+			}
+		}
+		return pgLockPlatformReleaseMutation(ctx, tx, canonicalID, NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow)
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		var inner error
+		artifact, release, message, lkg, inner = s.pgRollbackPlatformArtifactInTransaction(ctx, tx, canonicalID, req, principal, guard, trace)
+		return inner
+	})
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	return artifact, release, message, lkg, nil
+}
+
+func (s *Store) pgRollbackPlatformArtifactInTransaction(ctx context.Context, tx *sql.Tx, id string, req model.PlatformArtifactRollbackRequest, principal model.Principal, guard *platformProducerReleaseGuard, trace *platformMutationTrace) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	trace.advance("producer-authority")
 	if guard != nil {
 		if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
@@ -600,6 +654,9 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	current, err := pgGetPlatformArtifactForUpdate(ctx, tx, id, true)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
+	}
+	if current.ID != id {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 
 	trace.advance("read-rollback-target")
@@ -774,25 +831,59 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	if err := validateVerifiedTrafficRecoveryAdmission(admissionSnapshot, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC(), lkg, guard); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	trace.advance("commit")
-	if err := tx.Commit(); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
-	}
 	return target, release, message, lkg, nil
 }
 
 func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal, guard *platformProducerReleaseGuard) (resultArtifact model.PlatformArtifact, resultRelease model.PlatformArtifactRelease, resultMessage model.PlatformReleaseMessage, resultLKG *model.PlatformLKGSnapshot, resultErr error) {
-	_ = principal
 	ctx, cancel := context.WithTimeout(context.Background(), platformPublicationTransactionTimeout)
 	defer cancel()
 	ctx, trace := startPlatformMutationTrace(ctx, "platform-lkg-verify")
 	defer func() { resultErr = trace.finish(resultErr) }()
-	trace.advance("begin")
-	tx, err := s.db.BeginTx(ctx, nil)
+	trace.advance("prepare-input-admission")
+	proof, err := s.prepareCompilerInputLKGPromotion(ctx, releaseID, guard)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
+	}
+	proof, pins, err := s.prepareCompilerInputActivationPins(ctx, proof)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	defer tx.Rollback()
+	return s.pgVerifyPreparedPlatformArtifactReleaseLKG(ctx, releaseID, req, principal, guard, proof, pins, trace)
+}
+
+func (s *Store) pgVerifyPreparedPlatformArtifactReleaseLKG(ctx context.Context, releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal, guard *platformProducerReleaseGuard, proof *compilerInputActivationProof, pins []compilerInputPinBinding, trace *platformMutationTrace) (artifact model.PlatformArtifact, release model.PlatformArtifactRelease, message model.PlatformReleaseMessage, lkg *model.PlatformLKGSnapshot, err error) {
+	// The proof must belong to this exact server-derived entry point, not an
+	// unrelated artifact proof whose complete closure happens to be smaller.
+	if !compilerInputProofHasLKGPromotionRoot(proof, releaseID, guard) {
+		return artifact, release, message, nil, ErrInvalidInput
+	}
+	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+		trace.advance("publication-input-lock-order")
+		if guard != nil {
+			if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
+				return err
+			}
+		}
+		release, err := pgGetPlatformArtifactRelease(ctx, tx, releaseID, false)
+		if err != nil {
+			return mapDBErr(err)
+		}
+		return pgLockPromotionScope(ctx, tx, release.ScopeKey, true)
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		var innerErr error
+		artifact, release, message, lkg, innerErr = s.pgVerifyPlatformArtifactReleaseLKGInTransaction(ctx, tx, releaseID, req, principal, guard, trace)
+		return innerErr
+	})
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	return artifact, release, message, lkg, nil
+}
+
+func (s *Store) pgVerifyPlatformArtifactReleaseLKGInTransaction(ctx context.Context, tx *sql.Tx, releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal, guard *platformProducerReleaseGuard, trace *platformMutationTrace) (resultArtifact model.PlatformArtifact, resultRelease model.PlatformArtifactRelease, resultMessage model.PlatformReleaseMessage, resultLKG *model.PlatformLKGSnapshot, resultErr error) {
+	// Producer/scope locks precede the barrier, pins and graph tuples in the
+	// owning transaction; reacquiring them here is harmless. Never fetch
+	// archives, restore inputs or commit independently in this callback.
 	trace.advance("producer-authority")
 	if guard != nil {
 		if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
@@ -963,10 +1054,7 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.P
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
 	}
-	trace.advance("commit")
-	if err := tx.Commit(); err != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
-	}
+	trace.advance("admission-commit")
 	return artifact, release, message, &lkg, nil
 }
 
@@ -1556,24 +1644,28 @@ WHERE artifact_kind = $1 AND scope_key = $2`
 }
 
 func (s *Store) pgCreatePlatformExpectedConsumerSet(set model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	raw, err := json.Marshal(set)
+	if err != nil || len(raw) > compilerInputHotArtifactBytes {
+		return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+	}
+	var intentSet model.PlatformExpectedConsumerSet
+	if err := json.Unmarshal(raw, &intentSet); err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
+	proof, pins, err := s.prepareCompilerInputConsumer(ctx, compilerInputConsumerIntent{prospective: &intentSet, expectedID: intentSet.ID, bytes: len(raw)})
 	if err != nil {
 		return model.PlatformExpectedConsumerSet{}, err
 	}
-	defer tx.Rollback()
-	if err := pgLockPromotionScope(ctx, tx, set.ScopeKey, false); err != nil {
-		return model.PlatformExpectedConsumerSet{}, err
-	}
-	out, err := pgInsertPlatformExpectedConsumerSet(ctx, tx, set)
-	if err != nil {
-		return model.PlatformExpectedConsumerSet{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return model.PlatformExpectedConsumerSet{}, err
-	}
-	return out, nil
+	var out model.PlatformExpectedConsumerSet
+	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+		return pgLockPromotionScope(ctx, tx, intentSet.ScopeKey, false)
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		out, err = pgInsertPlatformExpectedConsumerSet(ctx, tx, intentSet)
+		return err
+	})
+	return out, err
 }
 
 func pgInsertPlatformExpectedConsumerSet(ctx context.Context, db platformStateDB, set model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
@@ -1774,26 +1866,55 @@ func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeat(
 	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
 	auditKeyring *bundleauth.Keyring,
 ) (model.PlatformConsumerInstance, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
+	heartbeat, size, err := cloneCompilerInputConsumerHeartbeat(heartbeat)
 	if err != nil {
-		return model.PlatformConsumerInstance{}, mapDBErr(err)
+		return model.PlatformConsumerInstance{}, err
 	}
-	defer tx.Rollback()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	proof, pins, err := s.prepareCompilerInputConsumer(ctx, compilerInputConsumerIntent{expectedID: expectedSetID, heartbeat: &heartbeat, bytes: size})
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
+	var out model.PlatformConsumerInstance
+	var rollbackScope bool
+	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+		lockHeartbeat := heartbeat
+		lockHeartbeat.ArtifactKind = proof.consumerKind
+		rollbackScope, err = pgLockConsumerHeartbeatScope(ctx, tx, claims, lockHeartbeat)
+		return err
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		// Preparation can take longer than a point lookup. Recheck real
+		// freshness/identity expiry at acceptance, never using its old start
+		// time to admit a heartbeat which expired while preparing.
+		acceptAt := time.Now().UTC()
+		if receivedAt.After(acceptAt) {
+			acceptAt = receivedAt
+		}
+		out, err = s.pgAcceptTrustedPlatformConsumerHeartbeatInTransaction(ctx, tx, claims, expectedSetID, heartbeat, acceptAt, policy, auditKeyring, rollbackScope)
+		return err
+	})
+	return out, err
+}
 
+func pgLockConsumerHeartbeatScope(ctx context.Context, tx *sql.Tx, claims platformcontrol.PlatformComponentIdentityClaims, heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope) (bool, error) {
 	// Detect a possible backwards artifact transition before taking row locks.
 	// Never upgrade a shared advisory lock: competing rollback heartbeats could
 	// deadlock. If another writer advances the cursor meanwhile, reject and let
 	// the next heartbeat retry with the exclusive scope lock.
 	var rollbackScope bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_platform_consumer_instances WHERE consumer_id=$1 AND artifact_kind=$2 AND scope_key=$3 AND identity_verified AND generation_sequence>$4)`, claims.ConsumerID(), NormalizePlatformArtifactKind(heartbeat.ArtifactKind), strings.ToLower(strings.TrimSpace(claims.ScopeKey)), heartbeat.GenerationSequence).Scan(&rollbackScope); err != nil {
-		return model.PlatformConsumerInstance{}, err
+		return false, err
 	}
 	if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, rollbackScope); err != nil {
-		return model.PlatformConsumerInstance{}, err
+		return false, err
 	}
+	return rollbackScope, nil
+}
 
+// Business validation remains inside the same short transaction as admission,
+// cursor persistence and auditing. This helper never starts or commits a tx.
+func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeatInTransaction(ctx context.Context, tx *sql.Tx, claims platformcontrol.PlatformComponentIdentityClaims, expectedSetID string, heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope, receivedAt time.Time, policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy, auditKeyring *bundleauth.Keyring, rollbackScope bool) (model.PlatformConsumerInstance, error) {
 	expectedSet, err := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, `
 SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
 	expected_generation, topology_revision, revision, requires_consumers,
@@ -1888,9 +2009,6 @@ FOR UPDATE`, bound.ConsumerID, bound.ArtifactKind, bound.ScopeKey))
 		if err := s.pgAppendPlatformConsumerHeartbeatAuditEventTx(ctx, tx, out, *auditKeyring); err != nil {
 			return model.PlatformConsumerInstance{}, err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return model.PlatformConsumerInstance{}, mapDBErr(err)
 	}
 	return out, nil
 }

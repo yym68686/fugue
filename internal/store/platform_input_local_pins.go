@@ -41,30 +41,29 @@ type CompilerInputLocalPinReport struct {
 // Failed/cancelled verification leaves a visible pending pin for exact retry or
 // explicit release; it never holds the global writer across the full readback.
 func RunCompilerInputLocalPin(ctx context.Context, databaseURL string, options CompilerInputLocalPinOptions) (CompilerInputLocalPinReport, error) {
-	report := CompilerInputLocalPinReport{Action: "archive-local-pin", Key: options.Key, Digest: options.Digest}
-	if options.Release {
-		report.Action = "archive-local-unpin"
+	if err := validateCompilerInputLocalPinOptions(options); err != nil {
+		return CompilerInputLocalPinReport{}, err
 	}
-	if !compilerInputPinKeyPattern.MatchString(options.Key) || !inputDigestPattern.MatchString(options.Digest) ||
-		options.Release && (!options.Apply || options.ExpectedToken < 1 || options.MaxRawBytes != 0) ||
-		!options.Release && (options.ExpectedToken != 0 || options.MaxRawBytes < 1 || options.MaxRawBytes > inputarchive.MaxInputBytes) {
-		return report, ErrInvalidInput
-	}
-	if options.Apply {
-		enabled, err := inputarchive.MigrationEnabledFromEnv()
-		if err != nil || !enabled {
-			return report, fmt.Errorf("local pin mutation requires migration opt-in: %w", ErrConflict)
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
 	db, err := openPostgresDatabase(databaseURL)
 	if err != nil {
-		return report, err
+		return CompilerInputLocalPinReport{}, err
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	return runCompilerInputLocalPin(ctx, db, options)
+}
+
+func runCompilerInputLocalPin(ctx context.Context, db *sql.DB, options CompilerInputLocalPinOptions) (CompilerInputLocalPinReport, error) {
+	report := CompilerInputLocalPinReport{Action: "archive-local-pin", Key: options.Key, Digest: options.Digest}
+	if options.Release {
+		report.Action = "archive-local-unpin"
+	}
+	if err := validateCompilerInputLocalPinOptions(options); err != nil {
+		return report, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
 	if options.Release {
 		return releaseCompilerInputLocalPin(ctx, db, options, report)
 	}
@@ -136,7 +135,7 @@ func RunCompilerInputLocalPin(ctx context.Context, databaseURL string, options C
 	}
 	report.Applied = true // includes a durable pending pin if the next read fails
 	report.State = "pending"
-	readback, err := RunCompilerInputLocalReadback(ctx, databaseURL, CompilerInputLocalReadbackOptions{Digest: m.Digest, MaxRawBytes: options.MaxRawBytes})
+	readback, err := runCompilerInputLocalReadback(ctx, db, CompilerInputLocalReadbackOptions{Digest: m.Digest, MaxRawBytes: options.MaxRawBytes})
 	if err != nil || !readback.Verified {
 		if err == nil {
 			err = ErrConflict
@@ -163,6 +162,21 @@ func RunCompilerInputLocalPin(ctx context.Context, databaseURL string, options C
 	}
 	report.Verified, report.State = true, "verified"
 	return report, nil
+}
+
+func validateCompilerInputLocalPinOptions(options CompilerInputLocalPinOptions) error {
+	if !compilerInputPinKeyPattern.MatchString(options.Key) || !inputDigestPattern.MatchString(options.Digest) ||
+		options.Release && (!options.Apply || options.ExpectedToken < 1 || options.MaxRawBytes != 0) ||
+		!options.Release && (options.ExpectedToken != 0 || options.MaxRawBytes < 1 || options.MaxRawBytes > inputarchive.MaxInputBytes) {
+		return ErrInvalidInput
+	}
+	if options.Apply {
+		enabled, err := inputarchive.MigrationEnabledFromEnv()
+		if err != nil || !enabled {
+			return fmt.Errorf("local pin mutation requires migration opt-in: %w", ErrConflict)
+		}
+	}
+	return nil
 }
 
 func validateCompilerInputLocalPinManifest(m inputManifest, maxBytes int64) error {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"fugue/internal/storagerecovery"
 	"sort"
@@ -230,6 +231,10 @@ func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clust
 		return s.pgCreateNodeUpdateTask(principal, updaterID, clusterNodeName, runtimeID, taskType, payload)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	s.platformArtifactKeyringMu.RLock()
+	defer s.platformArtifactKeyringMu.RUnlock()
 	var task model.NodeUpdateTask
 	err := s.withLockedState(true, func(state *model.State) error {
 		updater, err := findNodeUpdaterTarget(state, updaterID, clusterNodeName, runtimeID)
@@ -246,6 +251,9 @@ func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clust
 		if existing, ok := duplicatePendingNodeUpdateTask(state, updater.ID, taskType, taskPayload); ok {
 			task = existing
 			return nil
+		}
+		if err := checkFileNodeTaskInputAdmission(ctx, state, taskType, taskPayload, s.platformArtifactKeyring); err != nil {
+			return err
 		}
 		now := time.Now().UTC()
 		task = model.NodeUpdateTask{
@@ -539,6 +547,10 @@ func (s *Store) ClaimNodeUpdateTask(taskID, updaterID string) (model.NodeUpdateT
 	if s.usingDatabase() {
 		return s.pgClaimNodeUpdateTask(taskID, updaterID)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	s.platformArtifactKeyringMu.RLock()
+	defer s.platformArtifactKeyringMu.RUnlock()
 	var task model.NodeUpdateTask
 	err := s.withLockedState(true, func(state *model.State) error {
 		index := findNodeUpdateTask(state, taskID)
@@ -547,6 +559,9 @@ func (s *Store) ClaimNodeUpdateTask(taskID, updaterID string) (model.NodeUpdateT
 		}
 		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
 			return ErrNotFound
+		}
+		if err := checkFileNodeTaskInputAdmission(ctx, state, state.NodeUpdateTasks[index].Type, state.NodeUpdateTasks[index].Payload, s.platformArtifactKeyring); err != nil {
+			return err
 		}
 		switch state.NodeUpdateTasks[index].Status {
 		case model.NodeUpdateTaskStatusPending:

@@ -269,6 +269,14 @@ func RunCompilerInputArchiveWriteFence(ctx context.Context, databaseURL string, 
 		report.Applied = true
 		return report, nil
 	}
+	// Capability deployment alone is not readiness to fence legacy writers.
+	// Require the one-way retained-input admission switch independently of
+	// the fence's own database trigger and external resource/version gates.
+	var admissionPhase string
+	err = tx.QueryRowContext(ctx, `SELECT phase FROM fugue_platform_input_history_admission WHERE singleton FOR SHARE`).Scan(&admissionPhase)
+	if err != nil || admissionPhase != "enforced" {
+		return report, fmt.Errorf("compiler input history admission must be enforced before writer fencing: %w", errors.Join(err, ErrConflict))
+	}
 	if fenced != triggerInstalled {
 		return report, fmt.Errorf("compiler input write fence state and database trigger disagree: %w", ErrConflict)
 	}

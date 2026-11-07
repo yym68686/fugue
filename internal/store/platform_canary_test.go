@@ -29,11 +29,13 @@ func testTrafficCanaryPublication(t *testing.T, address string) {
 		t.Run(ref, func(t *testing.T) {
 			s := New(t.TempDir()+"/state.json", address)
 			if address != "" {
-				t.Cleanup(func() { s.db.Close() })
+				s = platformStatePostgresFixture(t)
 			}
 			configureTestPlatformArtifactSigning(s)
-			if err := s.Init(); err != nil {
-				t.Fatal(err)
+			if address == "" {
+				if err := s.Init(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			scope := "canary-" + model.NewID("test")
 			f := prepareTrafficLKGFixture(t, s, scope, "shadow", false)

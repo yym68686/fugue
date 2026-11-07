@@ -143,26 +143,59 @@ func TestProducerDependencyRefreshPostgres(t *testing.T) {
 func dnsDependencyFixture(t *testing.T, address string) reconfigurationFixture {
 	t.Helper()
 	f := newReconfigurationFixture(t, address)
-	req, policies, releases := celldns.SourceAuthorizedRequest(t, true)
+	req, policies, releases := prepareAuthorizedCellDNSPublication(t, f.s, true)
 	celldns.RetainGlobalOnly(&req)
 	pin := *req.PreviousTrafficPublication.ProducerPolicy
+	previousPin := pin
 	for i, a := range policies {
 		if a.ID == pin.ArtifactID {
 			if _, _, err := f.s.EnsurePlatformArtifact(a); err != nil {
 				t.Fatal(err)
 			}
 			seedDNSRouteRelease(t, f.s, releases[i])
+			if f.s.db != nil {
+				// The previous producer must reference a real, signed historical
+				// authority rather than a nonexistent placeholder. It is retained
+				// without replacing the current source's active lane.
+				previous := a
+				previous.Content = make(map[string]any, len(a.Content))
+				for key, value := range a.Content {
+					previous.Content[key] = value
+				}
+				previous.Generation += "-previous"
+				previous.Content["generation"] = previous.Generation
+				previous = celldns.Sign(t, previous, "previous-approved-policy", 1)
+				previous, _, err := f.s.EnsurePlatformArtifact(previous)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r := releases[i]
+				r.ID, r.ArtifactID, r.Generation = "previous-approved-release", previous.ID, previous.Generation
+				r.Status, r.Version = model.PlatformArtifactReleaseStatusSuperseded, 1
+				r.CreatedAt, r.UpdatedAt = r.ReleasedAt, r.ReleasedAt
+				if _, err := pgInsertPlatformArtifactRelease(t.Context(), f.s.db, r); err != nil {
+					t.Fatal(err)
+				}
+				previousPin = model.PlatformPublicationPrecondition{ArtifactID: previous.ID, ContentHash: previous.ContentHash, ReleaseID: r.ID, FencingToken: r.FencingToken}
+			}
 		}
 	}
 	seedCellDNSRoutePublications(t, f.s, &req)
 	p := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "dns-before", Mode: "serving", InputSource: platformproducer.DNSProducerInputSource, PublicationRole: platformconfig.PublicationRoleCellDNS, AuthorityCellID: "cell-dns", TargetScope: "authority-cell:cell-dns", IntervalSeconds: 30, RefreshSeconds: 120, Serving: &platformproducer.ServingPolicy{CanaryRuleRef: "cohort=complete", GrayMinSeconds: 1, FullMinSeconds: 1, RolloutTimeoutSeconds: 60}, DNSSource: &platformproducer.DNSProducerSource{ProducerPolicy: pin, PreviousTopology: req.Intent.RouteAuthorityTransition.PreviousTopology, DNSNodeIDs: []string{"dns-a"}}}
 	p.DNSSource.ProducerPolicy.ArtifactID = "previous-approved-policy"
+	if f.s.db != nil {
+		p.DNSSource.ProducerPolicy = previousPin
+	}
 	f.old = f.save(t, p)
 	_, oldRelease, _, _, err := f.s.ReleasePlatformArtifact(f.old.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, testPlatformPrincipal())
 	if err != nil {
 		t.Fatal(err)
 	}
 	compiled := celldns.Compile(t, req)
+	prepareCompiledInputPin(t, f.s, compiled)
+	if _, _, err := f.s.EnsurePlatformArtifact(compiled.PolicyArtifact); err != nil {
+		t.Fatal(err)
+	}
 	child, _, err := f.s.EnsurePlatformArtifact(compiled.DNSArtifact)
 	if err != nil {
 		t.Fatal(err)

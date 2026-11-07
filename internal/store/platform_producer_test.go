@@ -37,12 +37,16 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 				t.Skip("real PostgreSQL queue")
 			}
 			s := New(t.TempDir()+"/state.json", dsn)
+			if dsn != "" {
+				s = platformStatePostgresFixture(t)
+			}
 			configureTestPlatformArtifactSigning(s)
-			if err := s.Init(); err != nil {
-				t.Fatal(err)
+			if dsn == "" {
+				if err := s.Init(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if dsn != "" {
-				t.Cleanup(func() { s.db.Close() })
 				if _, err := s.db.Exec(`UPDATE fugue_platform_release_lanes SET frozen=false WHERE scope_key IN ('global','platform-config-producer')`); err != nil {
 					t.Fatal(err)
 				}
@@ -145,15 +149,34 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					t.Fatal(err)
 				}
 				_, r, _, _, err := s.ReleasePlatformArtifact(a.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, principal)
+				if dsn != "" && (scenario == "static digest" || scenario == "dns digest") {
+					// Publication itself now refuses an incorrectly bound signed
+					// dependency, before this policy can grant producer authority.
+					if !errors.Is(err, ErrConflict) {
+						t.Fatal("incorrect dependency digest granted authority", err)
+					}
+					var count int
+					if err := s.db.QueryRow(`SELECT count(*) FROM fugue_platform_artifact_releases WHERE artifact_id=$1`, a.ID).Scan(&count); err != nil || count != 0 {
+						t.Fatal("rejected dependency policy advanced publication", count, err)
+					}
+					return model.PlatformArtifactRelease{}
+				}
 				if err != nil {
 					t.Fatal(err)
 				}
 				return r
 			}
 			authority := makePolicy("shadow")
+			if dsn != "" && (scenario == "static digest" || scenario == "dns digest") {
+				return
+			}
 			gen := model.NewID("producer-input")
 			compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: gen, Scope: "global"}, Policy: platformconfig.PolicySnapshot{Generation: gen, Scope: "global"}})
 			if err != nil {
+				t.Fatal(err)
+			}
+			prepareCompiledInputPin(t, s, compiled)
+			if _, _, err := s.EnsurePlatformArtifact(compiled.PolicyArtifact); err != nil {
 				t.Fatal(err)
 			}
 			ids := []string{}

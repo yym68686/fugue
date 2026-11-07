@@ -55,6 +55,15 @@ func compilerInputArtifactHotNode(artifact model.PlatformArtifact) (inputarchive
 		}
 	}
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+		// LKG promotion independently loads this policy by exact kind/scope/
+		// generation. Its inputs are dependencies too, not merely the direct
+		// artifact_ids children or a trusted metadata label.
+		if generation := artifact.Metadata["policy_generation"]; generation != "" {
+			if len(generation) > 512 || artifact.ScopeKey == "" {
+				return node, ErrConflict
+			}
+			node.References = append(node.References, inputarchive.HotReference{Kind: "generation", ID: generation, ArtifactKind: model.PlatformArtifactKindPolicySnapshot, ScopeKey: artifact.ScopeKey})
+		}
 		raw, err := json.Marshal(artifact.Content["artifact_ids"])
 		var ids []string
 		if err != nil || len(raw) > 64<<10 || json.Unmarshal(raw, &ids) != nil || len(ids) == 0 || len(ids) > 64 {
@@ -120,11 +129,29 @@ func compilerInputArtifactHotNode(artifact model.PlatformArtifact) (inputarchive
 		if err != nil {
 			return node, err
 		}
-		if err := add("artifact", policy.StaticIntentArtifactID, policy.StaticIntentDigest); err != nil {
-			return node, err
-		}
-		if err := add("artifact", policy.DNSPolicyArtifactID, policy.DNSPolicyDigest); err != nil {
-			return node, err
+		if policy.DNSSource != nil {
+			// The transitional DNS producer reads a verified global source,
+			// not the business-static-intent fields (which must be empty).
+			// Retain its exact policy and activation; that policy recursively
+			// introduces the immutable static/projection dependencies.
+			source := policy.DNSSource.ProducerPolicy
+			if err := add("artifact", source.ArtifactID, source.ContentHash); err != nil {
+				return node, err
+			}
+			if err := add("release", source.ReleaseID, ""); err != nil {
+				return node, err
+			}
+		} else {
+			if err := add("artifact", policy.StaticIntentArtifactID, policy.StaticIntentDigest); err != nil {
+				return node, err
+			}
+			// A valid shadow static producer need not consume projection
+			// policy. Decode already rejects a partial ID/digest pair.
+			if policy.DNSPolicyArtifactID != "" {
+				if err := add("artifact", policy.DNSPolicyArtifactID, policy.DNSPolicyDigest); err != nil {
+					return node, err
+				}
+			}
 		}
 	}
 	// Keep different expected hashes as different edges. Deduplicating by ID

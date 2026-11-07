@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/inputhistory"
 	"fugue/internal/model"
 	"fugue/internal/sshcontrol"
 	"fugue/internal/store"
@@ -24,6 +25,12 @@ import (
 )
 
 func main() {
+	if handled, err := inputhistory.WriteCapabilities(os.Args[1:], "store", os.Stdout); handled {
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	var namespace, runtimeFile, signingFile, identityFile, kubeconfig, health string
 	var once bool
 	var apiQPS float64

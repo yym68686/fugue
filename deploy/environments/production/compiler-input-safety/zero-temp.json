@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "namespace": "fugue-system",
+  "cluster": "fugue-fugue-control-plane-postgres",
+  "clusterUID": "603cac0e-43a9-4480-bd25-d1364e6aecc2",
+  "systemID": "7639860969142538261",
+  "primary": "fugue-fugue-control-plane-postgres-8",
+  "primaryUID": "60643c24-5aec-46db-bdc9-0ed56894a75d",
+  "database": "fugue",
+  "container": "postgres"
+}

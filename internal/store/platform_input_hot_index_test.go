@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -140,6 +141,38 @@ func TestHotIndexPostgresDerivesGuardsAndInvalidatesEverySourceUpdate(t *testing
 	}
 	if err = schemamigrate.MigrateCompilerInputHotIndex(t.Context(), address); err == nil {
 		t.Fatal("migration silently repaired an untrusted existing index")
+	}
+}
+
+func TestHotIndexPostgresOrdinaryRoleUsesFixedZeroTempGuard(t *testing.T) {
+	db, address, schema := hotInventoryTestDatabase(t)
+	installHotIndexTest(t, db, address)
+	ref := seedHotIndexDNS(t, db, "neutral-ordinary-index", 2<<20)
+	role := "hot_index_role_" + strings.ReplaceAll(schema, "-", "_")
+	quotedRole := quotePostgresIntegrationIdentifier(t, role)
+	quotedSchema := quotePostgresIntegrationIdentifier(t, schema)
+	if _, err := db.Exec("CREATE ROLE " + quotedRole + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, q := range []string{"DROP OWNED BY " + quotedRole, "DROP ROLE " + quotedRole} {
+			if _, err := db.Exec(q); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	if _, err := db.Exec("GRANT USAGE ON SCHEMA " + quotedSchema + " TO " + quotedRole +
+		"; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA " + quotedSchema + " TO " + quotedRole); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.User(role)
+	report, err := RunCompilerInputHotIndex(t.Context(), u.String(), CompilerInputHotIndexOptions{Limit: 1, Apply: true})
+	if err != nil || !report.Applied || report.Selected != 1 || report.NextAfterID != ref.ID || report.RetirementAuthorized {
+		t.Fatal("ordinary-role bounded index", report, err)
 	}
 }
 

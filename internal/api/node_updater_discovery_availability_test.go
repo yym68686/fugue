@@ -48,46 +48,58 @@ func TestNodeUpdaterDesiredStateRetainsConfigurationWhenDiscoveryUnavailable(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	var original model.State
-	if err := json.Unmarshal(raw, &original); err != nil {
-		t.Fatal(err)
-	}
-	if len(original.PlatformLKGSnapshots) == 0 {
-		t.Fatal("fixture requires a verified LKG")
-	}
-	original.PlatformLKGSnapshots[0].SnapshotProvenance.Signature = "corrupt"
-	damaged, err := json.Marshal(original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, damaged, 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, route := range []string{"/v1/discovery/bundle", "/v1/node-updater/desired-state"} {
-		response := performJSONRequest(t, server, http.MethodGet, route, token, nil)
-		if response.Code != http.StatusServiceUnavailable {
-			t.Fatalf("%s returned %d instead of temporary unavailability: %s", route, response.Code, response.Body.String())
+	for _, scenario := range []string{"LKG signature", "missing input", "corrupt input"} {
+		var original model.State
+		if err := json.Unmarshal(raw, &original); err != nil {
+			t.Fatal(err)
 		}
-		if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("ETag") != "" {
-			t.Fatalf("unavailable discovery may not become cacheable configuration: %v", response.Header())
+		if len(original.PlatformLKGSnapshots) == 0 || len(original.PlatformArtifactContents) == 0 {
+			t.Fatal("fixture requires a verified LKG and actual original input")
 		}
-		if !strings.Contains(response.Body.String(), errDiscoveryRoutesUnavailable.Error()) || strings.Contains(response.Body.String(), "desired_state") || strings.Contains(response.Body.String(), "platform_routes") {
-			t.Fatalf("unexpected unavailable response: %s", response.Body.String())
+		switch scenario {
+		case "LKG signature":
+			original.PlatformLKGSnapshots[0].SnapshotProvenance.Signature = "corrupt"
+		case "missing input":
+			original.PlatformArtifactContents = nil
+		case "corrupt input":
+			for i := range original.PlatformArtifactContents {
+				original.PlatformArtifactContents[i].Content = map[string]any{"changed": true}
+			}
 		}
-		after, err := os.ReadFile(path)
+		damaged, err := json.Marshal(original)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var persisted model.State
-		if err := json.Unmarshal(after, &persisted); err != nil {
+		if err := os.WriteFile(path, damaged, 0600); err != nil {
 			t.Fatal(err)
 		}
-		// Authentication may update credential last-use metadata. Configuration
-		// artifacts and their LKG verification must remain byte-for-byte equal
-		// after decoding the independent store snapshot.
-		if !reflect.DeepEqual(persisted.PlatformArtifacts, original.PlatformArtifacts) ||
-			!reflect.DeepEqual(persisted.PlatformLKGSnapshots, original.PlatformLKGSnapshots) {
-			t.Fatal("read rewrote configuration or its failed verification")
+		for _, route := range []string{"/v1/discovery/bundle", "/v1/node-updater/desired-state"} {
+			response := performJSONRequest(t, server, http.MethodGet, route, token, nil)
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s %s returned %d instead of temporary unavailability: %s", scenario, route, response.Code, response.Body.String())
+			}
+			if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("ETag") != "" {
+				t.Fatalf("unavailable discovery may not become cacheable configuration: %v", response.Header())
+			}
+			if !strings.Contains(response.Body.String(), errDiscoveryRoutesUnavailable.Error()) || strings.Contains(response.Body.String(), "desired_state") || strings.Contains(response.Body.String(), "platform_routes") {
+				t.Fatalf("unexpected unavailable response: %s", response.Body.String())
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted model.State
+			if err := json.Unmarshal(after, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			// Authentication may update credential last-use metadata. Configuration
+			// artifacts and their LKG verification must remain byte-for-byte equal
+			// after decoding the independent store snapshot.
+			if !reflect.DeepEqual(persisted.PlatformArtifacts, original.PlatformArtifacts) ||
+				!reflect.DeepEqual(persisted.PlatformLKGSnapshots, original.PlatformLKGSnapshots) ||
+				!reflect.DeepEqual(persisted.PlatformArtifactContents, original.PlatformArtifactContents) {
+				t.Fatal("read rewrote configuration or its failed verification")
+			}
 		}
 	}
 	if err := os.WriteFile(path, raw, 0600); err != nil {

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -36,6 +37,21 @@ type CompilerInputLocalReadbackReport struct {
 // A successful read is evidence for this digest only; it is not a dependency
 // closure, persistent pin, or authority to retire the legacy relation.
 func RunCompilerInputLocalReadback(ctx context.Context, databaseURL string, options CompilerInputLocalReadbackOptions) (CompilerInputLocalReadbackReport, error) {
+	if !inputDigestPattern.MatchString(options.Digest) || options.MaxRawBytes < 1 || options.MaxRawBytes > inputarchive.MaxInputBytes {
+		return CompilerInputLocalReadbackReport{Action: "archive-hot-local-readback", Digest: options.Digest, ReadOnly: true}, ErrInvalidInput
+	}
+	db, err := openPostgresDatabase(databaseURL)
+	if err != nil {
+		return CompilerInputLocalReadbackReport{}, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return runCompilerInputLocalReadback(ctx, db, options)
+}
+
+// Reuse one maintenance session sequentially, with no writer lock over body IO.
+func runCompilerInputLocalReadback(ctx context.Context, db *sql.DB, options CompilerInputLocalReadbackOptions) (CompilerInputLocalReadbackReport, error) {
 	report := CompilerInputLocalReadbackReport{Action: "archive-hot-local-readback", Digest: options.Digest, ReadOnly: true}
 	if !inputDigestPattern.MatchString(options.Digest) || options.MaxRawBytes < 1 || options.MaxRawBytes > inputarchive.MaxInputBytes {
 		return report, ErrInvalidInput
@@ -43,13 +59,6 @@ func RunCompilerInputLocalReadback(ctx context.Context, databaseURL string, opti
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	started := time.Now()
-	db, err := openPostgresDatabase(databaseURL)
-	if err != nil {
-		return report, err
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
 	s := &Store{db: db, compilerInputArchiveReadLeaseEnabled: true}
 	tx, finish, err := s.BeginCompilerInputReadLease(ctx)
 	if err != nil {

@@ -88,6 +88,7 @@ func TestCompilerInputArchiveSchemaCompatibilityAndFences(t *testing.T) {
 	for i, ddl := range []string{
 		`CREATE TABLE fugue_platform_input_archive_segments(content_hash text,ordinal text)`,
 		`CREATE TABLE fugue_platform_input_archive_control(singleton text)`,
+		`CREATE TABLE fugue_platform_input_history_admission(singleton boolean,phase integer,plan_sha256 text,enforced_at timestamptz)`,
 	} {
 		schema := fmt.Sprintf("archive_schema_test_%d_%d", time.Now().UnixNano(), i)
 		if _, err = db.Exec("CREATE SCHEMA " + schema); err != nil {

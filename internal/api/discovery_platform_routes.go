@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
 	"fugue/internal/routeartifact"
+	"fugue/internal/store"
 )
 
 var errDiscoveryRoutesUnavailable = errors.New("verified discovery platform routes unavailable; retain current discovery")
@@ -19,12 +21,18 @@ var errDiscoveryRoutesUnavailable = errors.New("verified discovery platform rout
 // Public bootstrap metadata may summarize only the static platform entry names
 // explicitly pinned to the verified traffic baseline. The full traffic graph
 // also contains tenant routes and cannot be exposed as this summary.
-func (s *Server) publishedDiscoveryPlatformRoutes() ([]model.PlatformRoute, error) {
+func (s *Server) publishedDiscoveryPlatformRoutes(ctx context.Context) ([]model.PlatformRoute, error) {
+	if ctx == nil {
+		return nil, errDiscoveryRoutesUnavailable
+	}
 	lkg, err := s.store.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
 	if err != nil {
 		return nil, errDiscoveryRoutesUnavailable
 	}
 	if lkg == nil {
+		if s.store.CheckPlatformInputRead(ctx, []store.PlatformInputReadSelection{{LKGKind: model.PlatformArtifactKindReleaseSet, LKGScope: "global"}}) != nil {
+			return nil, errDiscoveryRoutesUnavailable
+		}
 		return []model.PlatformRoute{}, nil
 	}
 	read := newConsumerArtifactReader(s.store.GetPlatformArtifact)
@@ -52,6 +60,9 @@ func (s *Server) publishedDiscoveryPlatformRoutes() ([]model.PlatformRoute, erro
 	}
 	out, err := discoveryPlatformRouteSummary(child, base.Routes)
 	if err != nil {
+		return nil, errDiscoveryRoutesUnavailable
+	}
+	if s.store.CheckPlatformInputRead(ctx, []store.PlatformInputReadSelection{{LKGKind: model.PlatformArtifactKindReleaseSet, LKGScope: "global", LKG: lkg}}) != nil {
 		return nil, errDiscoveryRoutesUnavailable
 	}
 	current, err := s.store.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")

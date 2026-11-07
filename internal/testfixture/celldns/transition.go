@@ -32,6 +32,10 @@ func transitionRequest(t testing.TB, activeQuality bool, minimum ...int) platfor
 }
 
 func transitionRequestSource(t testing.TB, activeQuality bool, original *platformconfig.CompileRequest, minimum ...int) platformconfig.CompileRequest {
+	return transitionRequestInputs(t, activeQuality, original, nil, minimum...)
+}
+
+func transitionRequestInputs(t testing.TB, activeQuality bool, original *platformconfig.CompileRequest, inputs *[]platformconfig.CompileResult, minimum ...int) platformconfig.CompileRequest {
 	t.Helper()
 	req := Request(t)
 	if activeQuality {
@@ -65,6 +69,9 @@ func transitionRequestSource(t testing.TB, activeQuality bool, original *platfor
 		c, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: routePolicy, CreatedAt: req.CreatedAt})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if inputs != nil {
+			*inputs = append(*inputs, c)
 		}
 		p.Route = Sign(t, c.RouteArtifact, p.Route.ID, 1)
 		p.TLS = Sign(t, c.TLSArtifact, p.TLS.ID, 1)
@@ -112,6 +119,9 @@ func transitionRequestSource(t testing.TB, activeQuality bool, original *platfor
 	c, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: policy, RuntimeSnapshot: snapshot, CreatedAt: req.CreatedAt})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if inputs != nil {
+		*inputs = append(*inputs, c)
 	}
 	route := Sign(t, c.RouteArtifact, "previous-route", 1)
 	tls := Sign(t, c.TLSArtifact, "previous-tls", 1)

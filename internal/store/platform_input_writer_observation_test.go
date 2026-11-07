@@ -52,6 +52,7 @@ func TestCompilerInputOuterWriterObservesQueueAndCommitOutcomes(t *testing.T) {
 					lock.WillReturnResult(sqlmock.NewResult(0, 1))
 					mock.ExpectQuery("SELECT format,size_bytes,chunk_size,chunk_count,created_at").WithArgs(digest).
 						WillReturnRows(sqlmock.NewRows([]string{"format", "size", "chunk_size", "count", "created", "location"}).AddRow(inputFormatV1, len(raw), inputChunkBytes, 1, time.Now(), "legacy"))
+					mock.ExpectQuery(regexp.QuoteMeta(`SELECT to_regclass('fugue_platform_input_archives') IS NOT NULL`)).WillReturnRows(sqlmock.NewRows([]string{"installed"}).AddRow(false))
 					hash := sha256.Sum256(raw)
 					mock.ExpectQuery("SELECT ordinal,chunk_hash,octet_length").WithArgs(digest).
 						WillReturnRows(sqlmock.NewRows([]string{"ordinal", "hash", "size", "actual"}).AddRow(0, "sha256:"+hex.EncodeToString(hash[:]), len(raw), hash[:]))

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"fugue/internal/model"
@@ -63,7 +64,20 @@ func (s *Store) EnsurePlatformCompilerInputContext(ctx context.Context, snapshot
 	})
 }
 
-func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot platformconfig.RuntimeSnapshot, digest string) error {
+func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot platformconfig.RuntimeSnapshot, digest string) (resultErr error) {
+	finishObservation := compilerInputWriterStats.begin()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			finishObservation(errors.New("compiler-input writer panic"))
+			panic(recovered)
+		}
+		finishObservation(resultErr)
+	}()
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	raw, err := platformconfig.EncodeRuntimeSnapshot(snapshot)
 	if err != nil {
 		return err
@@ -72,15 +86,43 @@ func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot p
 	if "sha256:"+hex.EncodeToString(sum[:]) != digest {
 		return ErrConflict
 	}
-	ctx, cancel := context.WithTimeout(runtimeobservation.CopyDatabaseOperation(context.Background(), parent), 10*time.Second)
-	defer cancel()
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(315609238744290)`); err != nil {
+		return err
+	}
+	fenced, err := compilerInputWritesFenced(ctx, tx)
+	if err != nil {
+		return err
+	}
+	var manifestTable, hasManifest bool
+	if err = tx.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_manifests') IS NOT NULL`).Scan(&manifestTable); err != nil {
+		return err
+	}
+	if manifestTable {
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_platform_input_manifests WHERE content_hash=$1)`, digest).Scan(&hasManifest); err != nil {
+			return err
+		}
+	}
+	if fenced || hasManifest {
+		// Policy controls the preferred encoding, not permission to bypass the
+		// retirement fence or replace an existing canonical representation.
+		// Keep its original caller budget and transaction.
+		return s.pgEnsureChunkedInputTx(ctx, tx, snapshot, digest)
+	}
 	now := time.Now().UTC()
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_platform_artifact_contents (content_hash, content_json, size_bytes, created_at, updated_at) VALUES ($1,$2::jsonb,$3,$4,$4) ON CONFLICT (content_hash) DO NOTHING`, digest, raw, int64(len(raw)), now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO fugue_platform_artifact_contents (content_hash, content_json, size_bytes, created_at, updated_at) VALUES ($1,$2::jsonb,$3,$4,$4) ON CONFLICT (content_hash) DO NOTHING`, digest, raw, int64(len(raw)), now); err != nil {
 		return mapDBErr(err)
 	}
 	var stored []byte
 	readCtx := runtimeobservation.WithDatabaseOperation(ctx, "compiler-input-read")
-	if err := s.db.QueryRowContext(readCtx, `SELECT content_json FROM fugue_platform_artifact_contents WHERE content_hash = $1`, digest).Scan(&stored); err != nil {
+	if err := tx.QueryRowContext(readCtx, `SELECT content_json FROM fugue_platform_artifact_contents WHERE content_hash = $1`, digest).Scan(&stored); err != nil {
 		return mapDBErr(err)
 	}
 	runtimeobservation.DatabaseObservations.RecordOutput(readCtx, int64(len(stored)))
@@ -95,5 +137,5 @@ func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot p
 	if actual != digest {
 		return ErrConflict
 	}
-	return nil
+	return tx.Commit()
 }

@@ -62,6 +62,9 @@ func RunCompilerInputHotIndex(ctx context.Context, databaseURL string, options C
 			return report, err
 		}
 	}
+	if err = schemamigrate.EnforceCompilerInputZeroTemp(ctx, tx); err != nil {
+		return report, err
+	}
 	if err = schemamigrate.VerifyCompilerInputHotIndex(ctx, tx); err != nil {
 		return report, err
 	}

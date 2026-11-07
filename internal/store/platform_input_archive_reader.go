@@ -160,12 +160,18 @@ func compilerInputArchiveManifest(ctx context.Context, db inputQueryer, m inputM
 }
 
 func (s *Store) compilerInputArchiveRouted(ctx context.Context, db inputQueryer, m inputManifest) (bool, error) {
+	if !s.compilerInputArchiveReadLeaseEnabled {
+		return false, nil
+	}
+	return compilerInputArchiveRoute(ctx, db, m)
+}
+
+// A writer must honor a committed cold route even when its reader policy is
+// disabled. Policy cannot authorize replacing the canonical representation.
+func compilerInputArchiveRoute(ctx context.Context, db inputQueryer, m inputManifest) (bool, error) {
 	// A verified local hot copy is authoritative even if the independently
 	// retained archive receipt remains routed. Hot inputs must not require R2.
 	if m.Location == "hot" {
-		return false, nil
-	}
-	if !s.compilerInputArchiveReadLeaseEnabled {
 		return false, nil
 	}
 	if m.Format != inputFormatV1 && m.Format != inputFormatCodecV2 {

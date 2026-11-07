@@ -11,6 +11,7 @@ import time
 import subprocess
 
 from scripts.compiler_input_storage import command, readers, free_bytes, get, primary
+from scripts.compiler_input_history_compatibility import check_history_compatibility
 
 
 def validate_operation(value):
@@ -58,6 +59,10 @@ def managed_reader(revision):
 def hot_reader(revision):
     body = command(['git', 'show', revision+':internal/store/platform_input_archive_reader.go'])
     function = body.split('func (s *Store) compilerInputArchiveRouted(', 1)[-1].split('\nfunc ', 1)[0]
+    # New readers delegate the shared route test so writers honor a committed
+    # route even when their archive-reader preference is disabled.
+    if 'return compilerInputArchiveRoute(ctx, db, m)' in function:
+        function = body.split('func compilerInputArchiveRoute(', 1)[-1].split('\nfunc ', 1)[0]
     if not re.search(r'if m\.Location == "hot"\s*\{\s*return false, nil\s*\}', function):
         raise ValueError('reader does not prioritize the verified local hot copy')
     chunks = command(['git', 'show', revision+':internal/store/platform_input_chunks.go'])
@@ -171,6 +176,18 @@ def execute_item(argv, database, minimum_free_bytes, deadline, max_duration_seco
     return command(argv, timeout=1850)
 
 
+def route_protocol_gate(registry, current, mode):
+    if mode not in ('archive-route', 'archive-route-batch'):
+        return None  # Copy/preparation and recovery unroute keep their own gates.
+    proof = check_history_compatibility(registry)
+    actual = {x['component']: (x['revision'], x['rollback_revision'], x['image'])
+              for x in proof['registered_releases']}
+    expected = {x['component']: (x['revision'], x['rollback_revision'], x['image']) for x in current}
+    if actual != expected:
+        raise ValueError('archive reader releases changed before writer compatibility check')
+    return proof
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--operation', required=True)
@@ -180,6 +197,7 @@ def main():
     hot_mode = value['mode'] in ('archive-hot-copy', 'archive-hot-restore')
     route_mode = value['mode'] in ('archive-route', 'archive-route-batch', 'archive-unroute') or hot_mode
     current = readers(registry, archive_required=route_mode)
+    protocol_proof = route_protocol_gate(registry, current, value['mode'])
     executor = next(x for x in current if x['component'] == 'api')
     if executor['revision'] != value['expectedExecutorRevision']:
         raise ValueError('archive executor differs from reviewed revision')
@@ -233,6 +251,15 @@ def main():
             print(json.dumps({'operation': json.loads(line), 'free_bytes_initial': before}), flush=True)
         if not value['apply']:
             break
+    if protocol_proof is not None:
+        # Operation receipts have already been emitted. A post-check failure
+        # must not conceal a route which may have committed or cause a replay.
+        try:
+            after_protocol = check_history_compatibility(registry)
+        except (ValueError, KeyError, StopIteration, subprocess.SubprocessError):
+            raise ValueError('archive route committed or uncertain; history postcheck unavailable; do not replay') from None
+        if after_protocol['registered_releases'] != protocol_proof['registered_releases']:
+            raise ValueError('archive route committed or uncertain; history release identity changed; do not replay')
     readers(registry)
     print(json.dumps({'postcheck': 'healthy', 'free_bytes_after': free_bytes(database)}), flush=True)
 

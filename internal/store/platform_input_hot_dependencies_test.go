@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -8,8 +9,66 @@ import (
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
 	"fugue/internal/testfixture/celldns"
 )
+
+func TestCompilerInputHotDependenciesFollowTypedProducerSources(t *testing.T) {
+	req, policies, releases, _, _ := celldns.CompletePublication(t, true, true)
+	previous := req.PreviousTrafficPublication
+	p := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "dns-source-policy", PublicationRole: platformconfig.PublicationRoleCellDNS,
+		AuthorityCellID: "cell-dns", TargetScope: "authority-cell:cell-dns", Mode: "shadow", InputSource: platformproducer.DNSProducerInputSource,
+		IntervalSeconds: 30, RefreshSeconds: 120, DNSSource: &platformproducer.DNSProducerSource{ProducerPolicy: *previous.ProducerPolicy,
+			PreviousTopology: req.Intent.RouteAuthorityTransition.PreviousTopology, DNSNodeIDs: []string{"dns-a"}}}
+	makeArtifact := func(policy platformproducer.Policy) model.PlatformArtifact {
+		raw, err := json.Marshal(policy)
+		var content map[string]any
+		if err != nil || json.Unmarshal(raw, &content) != nil {
+			t.Fatal(err)
+		}
+		scope, err := platformproducer.PolicyScopeForTarget(policy.TargetScope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return celldns.Sign(t, model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot,
+			Scope: model.PlatformArtifactScope{Key: scope}, Generation: policy.Generation, Content: content}, "typed-producer-source", 1)
+	}
+	node, err := compilerInputArtifactHotNode(makeArtifact(p))
+	want := map[inputarchive.HotReference]bool{
+		{Kind: "artifact", ID: previous.ProducerPolicy.ArtifactID, ExpectedHash: previous.ProducerPolicy.ContentHash}: true,
+		{Kind: "release", ID: previous.ProducerPolicy.ReleaseID}:                                                      true,
+	}
+	if err != nil || len(node.References) != len(want) {
+		t.Fatal("DNS producer omitted its typed source or invented empty static refs", node, err)
+	}
+	for _, ref := range node.References {
+		if !want[ref] {
+			t.Fatal("DNS producer changed exact nested source identity", ref)
+		}
+	}
+	var static platformproducer.Policy
+	for i, policy := range policies {
+		if policy.ID == previous.ProducerPolicy.ArtifactID {
+			if releases[i].ID != previous.ProducerPolicy.ReleaseID {
+				t.Fatal("fixture source activation mismatch")
+			}
+			static, err = platformproducer.Decode(policy)
+		}
+	}
+	if err != nil || static.StaticIntentArtifactID == "" {
+		t.Fatal("missing source policy", err)
+	}
+	static.Mode, static.Serving, static.RequireApplicationDomains, static.RequireRouteDefaults, static.RequireDNSQueryPolicy = "shadow", nil, false, false, false
+	static.DNSPolicyArtifactID, static.DNSPolicyDigest = "", ""
+	node, err = compilerInputArtifactHotNode(makeArtifact(static))
+	if err != nil || len(node.References) != 1 || node.References[0].ID != static.StaticIntentArtifactID {
+		t.Fatal("optional absent projection hid valid static source", node, err)
+	}
+	p.DNSSource.ProducerPolicy.ContentHash = "invalid"
+	if _, err := compilerInputArtifactHotNode(makeArtifact(p)); err == nil {
+		t.Fatal("malformed nested source was ignored")
+	}
+}
 
 func TestCompilerInputHotDependenciesRetainDNSPublicationAndProducerAncestors(t *testing.T) {
 	for _, transition := range []bool{false, true} {

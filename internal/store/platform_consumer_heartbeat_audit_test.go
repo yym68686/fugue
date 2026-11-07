@@ -167,18 +167,16 @@ func TestAcceptTrustedPlatformConsumerHeartbeatWithAuditPostgres(t *testing.T) {
 		t.Fatalf("refusing to run trusted heartbeat audit integration test against non-test database URL %q", databaseURL)
 	}
 
-	s := New("", databaseURL)
-	if err := s.Init(); err != nil {
-		t.Fatalf("init postgres store: %v", err)
-	}
+	s, _, _ := inputActivationFixture(t, 0)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	suffix := model.NewID("heartbeat-audit")
 	nodeID := "edge-" + suffix
+	activationInsertSigned(t, s, "release-"+suffix, model.PlatformArtifactKindEdgeRankingPolicy, map[string]any{"neutral": true}, nil)
 	set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{
 		ReleaseSetID: "release-" + suffix,
 		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
 		ScopeKey:     "global",
-		Generation:   "generation-" + suffix,
+		Generation:   "release-" + suffix,
 		PreparedAt:   now,
 		Topology: platformcontrol.ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{
 			ID: nodeID, EdgeGroupID: "edge-group-" + suffix, Country: "US",

@@ -368,7 +368,10 @@ def pod_check(c, job_uid, pod):
             'image_id': statuses[0]['imageID'], 'restart_count': statuses[0]['restartCount'], 'phase': pod['status']['phase']}
 
 
-def execute(c, evidence, apply=False):
+def execute(c, evidence, apply=False, cumulative_watch=None, output_limit=64 << 20, evidence_limit=None):
+    require(type(output_limit) is int and 16384 <= output_limit <= 64 << 20, 'readonly output budget invalid')
+    require(evidence_limit is None or type(evidence_limit) is int and evidence_limit >= 16384,
+            'readonly evidence budget invalid')
     registry = json.loads(Path('deploy/releases/components.json').read_text())
     # Executor v2 uses a dedicated negative-priority, non-preempting class.
     # v1 was refused before any Pod existed. Preserve its receipt forever.
@@ -379,7 +382,9 @@ def execute(c, evidence, apply=False):
     report = {'declaration_sha256': declaration_hash, 'execution_authorized': True, 'job': name,
               'production_storage_mutations': False, 'retirement_authorized': False, 'status': 'preflight', 'cleanup_confirmed': False}
     def save():
-        evidence.write_text(json.dumps(report, separators=(',', ':'))+'\n')
+        body = json.dumps(report, separators=(',', ':'))+'\n'
+        require(evidence_limit is None or len(body.encode()) <= evidence_limit, 'readonly evidence budget exceeded')
+        evidence.write_text(body)
     # Reserve the evidence filename even for failed preflight; no overwrite.
     with evidence.open('x') as output:
         output.write(json.dumps(report)+'\n')
@@ -398,6 +403,10 @@ def execute(c, evidence, apply=False):
             require({x['name']: x['restartCount'] for x in observed['status']['containerStatuses']} == primary_restarts, 'primary restarted during readonly diagnostic')
             _, _, current = serving_gate(c, registry)
             require(current == serving, 'API identity or restarts changed during readonly diagnostic')
+            if cumulative_watch is not None:
+                cumulative_watch(job_uid or '')
+        if cumulative_watch is not None:
+            cumulative_watch()
         metadata = sql_metadata(c)
         # Even plan mode validates the credential path, but never persists it.
         data = session(c, cluster, primary, deployment, executor, metadata)
@@ -430,7 +439,7 @@ def execute(c, evidence, apply=False):
         secret_uid = create(secret)['metadata']['uid']
         data.clear()
         # Recheck after all writes and immediately before releasing the Pod.
-        node_gate(c)
+        node_gate(c, job_uid)
         health_watch()
         api_write(['-n', c['namespace'], 'patch', 'job', name, '--type=json', '--patch-file=/dev/stdin', '-o', 'json'],
                   [{'op': 'test', 'path': '/metadata/uid', 'value': job_uid}, {'op': 'test', 'path': '/spec/suspend', 'value': True}, {'op': 'replace', 'path': '/spec/suspend', 'value': False}])
@@ -452,15 +461,23 @@ def execute(c, evidence, apply=False):
                 last_pod = pods[0]
                 report['execution'] = pod_check(c, job_uid, last_pod)
                 if last_pod['status']['phase'] in ('Succeeded', 'Failed'):
+                    from scripts.compiler_input_copy import worker_terminal
+                    report['execution']['terminal'] = worker_terminal(last_pod, 'readonly')
+                    save()
                     break
             health_watch()
             node_gate(c, job_uid)
             save()
             time.sleep(10)
         require(last_pod is not None and last_pod['status']['phase'] in ('Succeeded', 'Failed'), 'readonly Job did not finish within deadline')
-        body = kube(c['namespace'], 'logs', last_pod['metadata']['name'], '-c', 'readonly', '--limit-bytes=67108864')
+        body = kube(c['namespace'], 'logs', last_pod['metadata']['name'], '-c', 'readonly', '--limit-bytes='+str(output_limit+1))
+        require(len(body.encode()) <= output_limit, 'readonly output exceeds evidence budget')
         report['result'] = result_contract(body, c)
-        report['execution'] = pod_check(c, job_uid, get(c['namespace'], 'pod', last_pod['metadata']['name']))
+        observed_pod = get(c['namespace'], 'pod', last_pod['metadata']['name'])
+        require(observed_pod['metadata']['uid'] == last_pod['metadata']['uid'], 'readonly terminal Pod replaced')
+        report['execution'] = pod_check(c, job_uid, observed_pod)
+        from scripts.compiler_input_copy import worker_terminal
+        report['execution']['terminal'] = worker_terminal(observed_pod, 'readonly')
         health_watch()
         report.update(status='diagnostic-finished', execution_identity_rechecked=True)
         return report
@@ -478,7 +495,9 @@ def execute(c, evidence, apply=False):
                 # Pod before deleting its session. Do not force kill anything.
                 for _ in range(12):
                     remaining = json.loads(kube(c['namespace'], 'get', 'pods', '-l', 'job-name='+name, '-o', 'json'))['items']
-                    if not any(any(x.get('uid') == job_uid for x in p['metadata'].get('ownerReferences', [])) for p in remaining):
+                    require(all(any(x.get('uid') == job_uid and x.get('controller') for x in p['metadata'].get('ownerReferences', [])) for p in remaining),
+                            'readonly cleanup found unrelated Pod')
+                    if not remaining:
                         break
                     time.sleep(5)
                 else:

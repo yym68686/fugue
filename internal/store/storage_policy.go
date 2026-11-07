@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"fugue/internal/inputhistory"
 )
 
 // StoragePolicy is a independently published runtime constraint, not serving
@@ -119,6 +121,11 @@ func (s *Store) StorageObservation(ctx context.Context) (any, error) {
 	out["compiler_input_separated_read_failed"] = separatedFailed
 	out["compiler_input_separated_activity"] = separatedInputObservation()
 	out["compiler_input_writer_activity"] = compilerInputWriterStats.snapshot()
+	capabilities, err := inputhistory.BinaryCapabilities("store")
+	if err != nil {
+		return nil, err
+	}
+	out["compiler_input_history_capabilities"] = capabilities
 	out["observation_retention"] = s.retentionObservation()
 	if s.db != nil {
 		out["database_pool"] = s.db.Stats()

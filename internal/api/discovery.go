@@ -74,7 +74,7 @@ func (s *Server) deriveDiscoveryBundle(r *http.Request, principal model.Principa
 	sort.Slice(dnsNodes, func(i, j int) bool { return dnsNodes[i].ID < dnsNodes[j].ID })
 	sort.Slice(nodePolicies, func(i, j int) bool { return nodePolicies[i].NodeName < nodePolicies[j].NodeName })
 
-	platformRoutes, err := s.publishedDiscoveryPlatformRoutes()
+	platformRoutes, err := s.publishedDiscoveryPlatformRoutes(r.Context())
 	if err != nil {
 		return model.DiscoveryBundle{}, err
 	}

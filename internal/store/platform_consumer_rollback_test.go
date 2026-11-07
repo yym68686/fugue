@@ -38,12 +38,14 @@ func testTrafficConsumerRollback(t *testing.T, address string) {
 				t.Skip("Postgres concurrency")
 			}
 			s := New(t.TempDir()+"/state.json", address)
-			configureTestPlatformArtifactSigning(s)
-			if err := s.Init(); err != nil {
-				t.Fatal(err)
-			}
 			if address != "" {
-				t.Cleanup(func() { s.db.Close() })
+				s = platformStatePostgresFixture(t)
+			}
+			configureTestPlatformArtifactSigning(s)
+			if address == "" {
+				if err := s.Init(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			scope := "rollback-" + model.NewID("test")
 			old := preparePromotionFixture(t, s, scope)
@@ -52,6 +54,7 @@ func testTrafficConsumerRollback(t *testing.T, address string) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			prepareCompiledInputPin(t, s, compiled)
 			children := []model.PlatformArtifact{}
 			for _, a := range []model.PlatformArtifact{compiled.RouteArtifact, compiled.DNSArtifact, compiled.TLSArtifact} {
 				a, err = s.CreatePlatformArtifact(a)

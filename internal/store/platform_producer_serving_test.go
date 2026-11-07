@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,22 +18,56 @@ import (
 )
 
 type servingFixture struct {
-	s         *Store
-	policy    platformproducer.Policy
-	authority model.PlatformArtifactRelease
-	input     platformconfig.PolicySnapshot
-	base      model.PlatformArtifact
+	s           *Store
+	policy      platformproducer.Policy
+	authority   model.PlatformArtifactRelease
+	input       platformconfig.PolicySnapshot
+	base        model.PlatformArtifact
+	coldDigest  string
+	coldObjects *archiveTestObjects
 }
 
-func newServingFixture(t *testing.T, dsn string) servingFixture {
+func newServingFixture(t *testing.T, dsn string, legacyPolicyInput ...bool) servingFixture {
 	t.Helper()
 	s := New(t.TempDir()+"/state.json", dsn)
-	configureTestPlatformArtifactSigning(s)
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
 	if dsn != "" {
-		t.Cleanup(func() { s.db.Close() })
+		db, isolated, _ := hotInventoryTestDatabase(t)
+		s = &Store{db: db, databaseURL: isolated}
+	}
+	configureTestPlatformArtifactSigning(s)
+	if dsn == "" {
+		if err := s.Init(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var coldDigest string
+	var coldObjects *archiveTestObjects
+	if len(legacyPolicyInput) > 0 && legacyPolicyInput[0] {
+		t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED", "true")
+		if s.db == nil {
+			t.Fatal("cold producer fixture requires isolated PostgreSQL")
+		}
+		prepareCompilerInputTestSchema(t, s)
+		snapshot := platformconfig.RuntimeSnapshot{Facts: map[string]any{"neutral_policy_source": true}}
+		var err error
+		coldDigest, err = platformconfig.RuntimeSnapshotDigest(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = s.pgEnsureChunkedInput(t.Context(), snapshot, coldDigest); err != nil {
+			t.Fatal(err)
+		}
+		coldObjects = &archiveTestObjects{}
+		backend := "sha256:" + strings.Repeat("b", 64)
+		if _, err = copyCompilerInputArchive(t.Context(), s.db, coldObjects, backend, CompilerInputArchiveMigrationOptions{Digest: coldDigest, Apply: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = copyCompilerInputArchiveHot(t.Context(), s.db, coldObjects, backend, CompilerInputArchiveHotOptions{Digest: coldDigest, Apply: true, MaxStoredBytes: 1 << 20}); err != nil {
+			t.Fatal(err)
+		}
+		if pin, err := RunCompilerInputLocalPin(t.Context(), s.databaseURL, CompilerInputLocalPinOptions{Key: "fixture/producer/source", Digest: coldDigest, MaxRawBytes: 1 << 20, Apply: true}); err != nil || !pin.Verified {
+			t.Fatal(pin, err)
+		}
 	}
 	save := func(kind, scope, generation string, content any) model.PlatformArtifact {
 		t.Helper()
@@ -42,7 +77,11 @@ func newServingFixture(t *testing.T, dsn string) servingFixture {
 		}
 		var value map[string]any
 		json.Unmarshal(raw, &value)
-		a, err := s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: kind, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: scope}, Generation: generation, Content: value})
+		metadata := map[string]string{}
+		if coldDigest != "" && kind == model.PlatformArtifactKindPolicySnapshot && platformproducer.IsPolicyScope(scope) {
+			metadata["input_snapshot_digest"] = coldDigest
+		}
+		a, err := s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: kind, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: scope}, Generation: generation, Content: value, Metadata: metadata})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -67,7 +106,7 @@ func newServingFixture(t *testing.T, dsn string) servingFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return servingFixture{s: s, policy: p, authority: authority, input: input, base: base}
+	return servingFixture{s: s, policy: p, authority: authority, input: input, base: base, coldDigest: coldDigest, coldObjects: coldObjects}
 }
 
 func (f servingFixture) candidate(t *testing.T) model.PlatformArtifact {
@@ -80,6 +119,7 @@ func (f servingFixture) candidate(t *testing.T) model.PlatformArtifact {
 	if err != nil {
 		t.Fatal(err)
 	}
+	prepareCompiledInputPin(t, f.s, compiled)
 	save := func(a model.PlatformArtifact) model.PlatformArtifact {
 		t.Helper()
 		a, err := f.s.CreatePlatformArtifact(a)
@@ -231,8 +271,8 @@ func TestProducedTrafficLifecyclePostgres(t *testing.T) {
 		t.Skip("requires disposable PostgreSQL")
 	}
 	u, err := url.Parse(dsn)
-	if err != nil || u.Hostname() != "127.0.0.1" || u.Path != "/fugue_test_serving" {
-		t.Fatal("requires isolated loopback fugue_test_serving database")
+	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
+		t.Fatal("requires disposable loopback fugue_test database; each fixture uses its own schema")
 	}
 	testProducedTrafficLifecycle(t, dsn)
 }

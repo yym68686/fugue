@@ -57,6 +57,9 @@ func hotInventoryTestDatabase(t *testing.T) (*sql.DB, string, string) {
 			t.Fatal("disposable hot-inventory schema", err)
 		}
 	}
+	if _, err = db.Exec(schemamigrate.CompilerInputZeroTempSQL); err != nil {
+		t.Fatal("disposable admin zero-temp installation", err)
+	}
 	return db, address, schema
 }
 

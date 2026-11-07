@@ -48,6 +48,11 @@ func TestCompilerInputPostgresRetainsFormatAndVerifiesActualStoredContent(t *tes
 			if scenario == "wrong_digest" {
 				digest = "sha256:unrelated"
 			} else {
+				mock.ExpectBegin()
+				mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+				for _, table := range []string{"fugue_platform_input_archive_control", "fugue_platform_input_manifests"} {
+					mock.ExpectQuery(regexp.QuoteMeta(`SELECT to_regclass('` + table + `') IS NOT NULL`)).WillReturnRows(sqlmock.NewRows([]string{"installed"}).AddRow(false))
+				}
 				affected := int64(1)
 				if scenario == "existing" || scenario == "corrupt" {
 					affected = 0
@@ -56,6 +61,11 @@ func TestCompilerInputPostgresRetainsFormatAndVerifiesActualStoredContent(t *tes
 					WithArgs(digest, encoded, int64(len(encoded)), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, affected))
 				mock.ExpectQuery(regexp.QuoteMeta(`SELECT content_json FROM fugue_platform_artifact_contents WHERE content_hash = $1`)).WithArgs(digest).
 					WillReturnRows(sqlmock.NewRows([]string{"content_json"}).AddRow(stored))
+				if scenario == "inserted" || scenario == "existing" || scenario == "reordered" {
+					mock.ExpectCommit()
+				} else {
+					mock.ExpectRollback()
+				}
 			}
 			err = state.EnsurePlatformCompilerInput(snapshot, digest)
 			valid := scenario == "inserted" || scenario == "existing" || scenario == "reordered"

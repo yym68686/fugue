@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
+	"fugue/internal/store"
 )
 
 // Read only signed stored inputs. In particular, this independent worker never
@@ -54,6 +56,13 @@ func (s *Server) captureDNSProducer(ctx context.Context, p platformproducer.Poli
 		Reference: platformconfig.PreviousTrafficPublicationReference{ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, ReleaseID: release.ID, FencingToken: release.FencingToken, RouteArtifactID: route.ID, RouteArtifactDigest: route.ContentHash, TLSArtifactID: tls.ID, TLSArtifactDigest: tls.ContentHash, DNSArtifactID: dns.ID, DNSArtifactDigest: dns.ContentHash}}
 	var intent platformconfig.PlatformIntent
 	var policy platformconfig.PolicySnapshot
+	reads := []store.PlatformInputReadSelection{
+		{ArtifactID: producer.ID, ContentHash: producer.ContentHash, ReleaseID: activation.ID},
+		{ArtifactID: parent.ID, ContentHash: parent.ContentHash, ReleaseID: release.ID, LKGKind: lkg.ArtifactKind, LKGScope: lkg.ScopeKey, LKG: lkg},
+	}
+	for _, child := range []model.PlatformArtifact{route, tls, dns} {
+		reads = append(reads, store.PlatformInputReadSelection{ArtifactID: child.ID, ContentHash: child.ContentHash})
+	}
 	for _, input := range []struct {
 		kind, generation string
 		target           any
@@ -65,10 +74,17 @@ func (s *Server) captureDNSProducer(ctx context.Context, p platformproducer.Poli
 		if err != nil || a.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(a) != nil {
 			return fail()
 		}
+		reads = append(reads, store.PlatformInputReadSelection{ArtifactID: a.ID, ContentHash: a.ContentHash})
 		raw, err := json.Marshal(a.Content)
 		if err != nil || json.Unmarshal(raw, input.target) != nil {
 			return fail()
 		}
+	}
+	// Source admission is separate from the producer's mutation guard. Consume
+	// one complete signed closure and current full-readback pins BEFORE reading
+	// the original runtime input; never trigger R2 restoration on this reader.
+	if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
+		return fail()
 	}
 	snapshot, err := s.store.GetPlatformCompilerInput(parent.Metadata["input_snapshot_digest"])
 	if err != nil || snapshot.IntentGeneration != intent.Generation || snapshot.PolicyGeneration != policy.Generation {
@@ -90,6 +106,10 @@ func (s *Server) captureDNSProducer(ctx context.Context, p platformproducer.Poli
 	}
 	if err := ctx.Err(); err != nil {
 		return platformconfig.CompileRequest{}, err
+	}
+	afterLKG, err := s.store.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
+	if err != nil || !reflect.DeepEqual(lkg, afterLKG) {
+		return fail()
 	}
 	if err := s.store.ValidateDNSProducerSelection(ctx, pin, model.PlatformPublicationPrecondition{ArtifactID: parent.ID, ContentHash: parent.ContentHash, ReleaseID: release.ID, FencingToken: release.FencingToken}); err != nil {
 		return fail()

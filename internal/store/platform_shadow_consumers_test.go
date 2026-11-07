@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -97,6 +98,42 @@ func testShadowObservationIsolation(t *testing.T, s *Store, parent model.Platfor
 		preserve()
 	}
 	seal(&h)
+	if s.db != nil {
+		proof, _, err := s.prepareCompilerInputConsumer(t.Context(), compilerInputConsumerIntent{expectedID: set.ID, heartbeat: &h})
+		if err != nil || len(proof.inputs) == 0 {
+			t.Fatal("shadow input closure unavailable", err)
+		}
+		digest := proof.inputs[0]
+		counts := consumerInputCounts(t, s)
+		if _, err := s.db.Exec(`UPDATE fugue_platform_input_local_pins SET state='pending',verified_at=NULL WHERE content_hash=$1 AND state='verified'`, digest); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.AcceptPlatformShadowConsumerHeartbeat(claims, h, time.Now().UTC(), celldns.Keys()); err == nil || consumerInputCounts(t, s) != counts {
+			t.Fatal("cold shadow advanced observation/audit", err)
+		}
+		plan, err := s.planConsumerInputPreparation(t.Context(), ConsumerInputPreparationContract{Version: 1, Mode: "shadow", ExpectedSetID: set.ID, Heartbeat: &h, OperationKey: "neutral-shadow-preparation",
+			CompilerInputPreparationBudget: CompilerInputPreparationBudget{MaxInputs: 32, MaxRawBytes: 128 << 20, MaxStoredBytes: 128 << 20, MaxGetBytes: 448 << 20, MaxGetRequests: 32768, MaxSeconds: 30}}, "sha256:"+strings.Repeat("b", 64))
+		if err != nil {
+			t.Fatal("shadow purpose-specific preparation", err)
+		}
+		objects := &archiveTestObjects{failGet: true}
+		if restored, err := restoreConsumerInputs(t.Context(), s.db, plan.Ticket, plan.VerificationKey, objects); err != nil || restored.Prepared || restored.ConsumerActivated || restored.Usage.GetRequests != 0 || consumerInputCounts(t, s) != counts {
+			t.Fatal("shadow local full-readback changed business", restored, err)
+		}
+		if confirmed, err := s.confirmConsumerInputPreparation(t.Context(), plan.Ticket); err != nil || !confirmed.Prepared || confirmed.ConsumerActivated || consumerInputCounts(t, s) != counts {
+			t.Fatal("shadow fresh trusted confirmation", confirmed, err)
+		}
+		// No objects or archive reader are configured. The original full DNS
+		// fixture now proceeds from a new pool using only durable local pins.
+		db, err := openPostgresDatabase(s.databaseURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		fresh := &Store{db: db, databaseURL: s.databaseURL}
+		fresh.ConfigurePlatformArtifactSigning(s.platformArtifactSigningKeyring())
+		s = fresh
+	}
 	if _, e := s.AcceptPlatformShadowConsumerHeartbeat(claims, h, time.Now().UTC(), bundleauth.Keyring{}); e == nil {
 		t.Fatal("shadow committed without signed audit")
 	}

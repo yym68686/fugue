@@ -17,6 +17,7 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/config"
 	"fugue/internal/edgeauthkey"
+	"fugue/internal/inputhistory"
 	"fugue/internal/kubeauth"
 	"fugue/internal/livediagnostics"
 	"fugue/internal/model"
@@ -25,6 +26,12 @@ import (
 )
 
 func main() {
+	if handled, err := inputhistory.WriteCapabilities(os.Args[1:], "store", os.Stdout); handled {
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	cfg := config.APIFromEnv()
 	if len(os.Args) == 2 && (os.Args[1] == "sign-edge-activation" || os.Args[1] == "sign-edge-remediation") {
 		if err := runEdgeActivationSigner(os.Args[1], cfg.EdgeActivationPlanSigningProjectionDir); err != nil {

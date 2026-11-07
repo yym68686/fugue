@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 	"fugue/internal/store"
@@ -24,9 +25,16 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 	keys := celldns.Keys()
 	s.bundleSigningKey, s.bundleSigningKeyID = keys.PrimaryKey, keys.PrimaryKeyID
 	s.auth.PlatformComponentIdentityKeyring = edgeRouteIntentTestKeyring()
-	req, policies, policyReleases := celldns.SourceAuthorizedRequest(t, true)
+	req, policies, policyReleases, inputs, sources := celldns.CompletePublication(t, true, true)
 	compiled := celldns.Compile(t, req)
 	state := model.State{PlatformArtifacts: policies, PlatformArtifactReleases: policyReleases}
+	state.PlatformArtifacts = append(state.PlatformArtifacts, sources...)
+	inputs = append(inputs, compiled)
+	for i, input := range inputs {
+		if input.PolicyArtifact.ID == "" {
+			state.PlatformArtifacts = append(state.PlatformArtifacts, celldns.Sign(t, input.PolicyArtifact, "input-policy-"+input.PolicyArtifact.Generation, int64(i+1)))
+		}
+	}
 	add := func(r model.PlatformArtifactRelease) {
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
 		state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, ActiveReleaseID: r.ID, FencingToken: r.FencingToken, Version: 1})
@@ -57,6 +65,15 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 	}
 	s.store = store.New(path)
 	s.store.ConfigurePlatformArtifactSigning(keys)
+	for _, input := range inputs {
+		if err := s.store.EnsurePlatformCompilerInput(input.InputSnapshot, input.Lineage.InputSnapshotDigest); err != nil {
+			t.Fatal("persist actual normalized compiler input", err)
+		}
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil || json.Unmarshal(raw, &state) != nil {
+		t.Fatal("read complete persisted fixture", err)
+	}
 	issue := func(component, node, authority, kind string) string {
 		t.Helper()
 		token, err := platformcontrol.IssuePlatformComponentIdentity(edgeRouteIntentTestKeyring(), platformcontrol.PlatformComponentIdentityClaims{CredentialID: "kubernetes:test-system:dns-account:pod-a", Component: component, NodeID: node, AuthorityID: authority, ScopeKey: "authority-cell:" + authority, ArtifactKinds: []string{kind}}, time.Now().UTC(), time.Minute)
@@ -88,6 +105,43 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 	first := read(token, url, http.StatusOK)
 	if first.Assignment.ExpectedConsumerSetID != set.ID || first.Assignment.ArtifactID != compiled.DNSArtifact.ID || len(first.Snapshot.Scopes) != 3 {
 		t.Fatal("source response lost exact DNS assignment")
+	}
+	for _, digest := range []string{inputs[0].Lineage.InputSnapshotDigest, compiled.Lineage.InputSnapshotDigest} {
+		var missing model.State
+		if err := json.Unmarshal(raw, &missing); err != nil {
+			t.Fatal(err)
+		}
+		contents := missing.PlatformArtifactContents[:0]
+		removed := false
+		for _, c := range missing.PlatformArtifactContents {
+			if c.ContentHash == digest {
+				removed = true
+			} else {
+				contents = append(contents, c)
+			}
+		}
+		if !removed {
+			t.Fatal("missing-input fixture did not remove a selected dependency")
+		}
+		missing.PlatformArtifactContents = contents
+		damaged, _ := json.Marshal(missing)
+		if err := os.WriteFile(path, damaged, 0600); err != nil {
+			t.Fatal(err)
+		}
+		read(token, url, http.StatusConflict)
+		for _, route := range []string{"/v1/platform-state/consumers/assignment", "/v1/platform-state/consumers/artifacts/" + compiled.DNSArtifact.ID + "?expected_consumer_set_id=" + set.ID, "/v1/platform-state/consumers/artifacts/" + compiled.ReleaseArtifact.ID + "?expected_consumer_set_id=" + set.ID} {
+			response := performJSONRequest(t, s, http.MethodGet, route, token, nil)
+			if response.Code != http.StatusServiceUnavailable || response.Header().Get("ETag") != "" || strings.Contains(response.Body.String(), compiled.DNSArtifact.ID) {
+				t.Fatal("missing selected input disclosed an assignment/artifact", route, response.Code, response.Body.String())
+			}
+		}
+		after, _ := os.ReadFile(path)
+		if !reflect.DeepEqual(after, damaged) {
+			t.Fatal("failed reader restored input or changed configuration/runtime state")
+		}
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	read(tenant, url, http.StatusUnauthorized)
 	read(admin, url, http.StatusUnauthorized)
@@ -133,6 +187,48 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 			t.Fatal("DNS-only authority acquired route membership or selected the wrong release")
 		}
 	}
+	// A distinct cold shadow must fail its own read, while the current full
+	// publication and the later positive retained LKG remain independently usable.
+	var coldRequest platformconfig.CompileRequest
+	encodedRequest, _ := json.Marshal(req)
+	if err := json.Unmarshal(encodedRequest, &coldRequest); err != nil {
+		t.Fatal(err)
+	}
+	coldRequest.Intent.Generation, coldRequest.Policy.Generation = "cold-shadow-intent", "cold-shadow-policy"
+	cold := celldns.Compile(t, coldRequest)
+	if cold.Lineage.InputSnapshotDigest == compiled.Lineage.InputSnapshotDigest {
+		t.Fatal("cold shadow must have a distinct unrestored original input")
+	}
+	cold.DNSArtifact = celldns.Sign(t, cold.DNSArtifact, "cold-shadow-child", 2)
+	cold.ReleaseArtifact = celldns.Sign(t, platformconfig.BuildReleaseSetArtifact(cold.ReleaseSet, []string{cold.DNSArtifact.ID}, coldRequest.CreatedAt), "cold-shadow-parent", 2)
+	state.PlatformArtifacts = append(state.PlatformArtifacts, cold.ReleaseArtifact, cold.DNSArtifact, celldns.Sign(t, cold.PolicyArtifact, "cold-shadow-policy", 2))
+	coldRelease := dnsRelease
+	coldRelease.ArtifactID, coldRelease.Generation = cold.ReleaseArtifact.ID, cold.ReleaseArtifact.Generation
+	for i := range state.PlatformArtifactReleases {
+		if state.PlatformArtifactReleases[i].ID == coldRelease.ID {
+			state.PlatformArtifactReleases[i] = coldRelease
+		}
+	}
+	coldSet, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: cold.ReleaseArtifact.ID, ArtifactReleaseID: coldRelease.ID, ArtifactKind: cold.DNSArtifact.ArtifactKind, Scope: cold.DNSArtifact.Scope, ScopeKey: cold.DNSArtifact.ScopeKey, Generation: cold.DNSArtifact.Generation, Revision: 9, PreparedAt: time.Now().UTC(), Topology: topology})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.ExpectedConsumerSets = append([]model.PlatformExpectedConsumerSet{coldSet}, state.ExpectedConsumerSets...)
+	raw, _ = json.Marshal(state)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	servingOnly := performJSONRequest(t, s, http.MethodGet, "/v1/platform-state/consumers/assignment?serving_only=true", token, nil)
+	if servingOnly.Code != http.StatusOK || strings.Contains(servingOnly.Body.String(), cold.DNSArtifact.ID) {
+		t.Fatal("unselected cold shadow blocked serving-only reads", servingOnly.Code, servingOnly.Body.String())
+	}
+	if response := performJSONRequest(t, s, http.MethodGet, "/v1/platform-state/consumers/assignment", token, nil); response.Code != http.StatusServiceUnavailable {
+		t.Fatal("cold shadow assignment was disclosed", response.Code, response.Body.String())
+	}
+	read(token, url, http.StatusOK)
+	if response := performJSONRequest(t, s, http.MethodGet, "/v1/platform-state/consumers/artifacts/"+cold.DNSArtifact.ID+"?expected_consumer_set_id="+coldSet.ID, token, nil); response.Code != http.StatusServiceUnavailable {
+		t.Fatal("cold shadow artifact was disclosed", response.Code, response.Body.String())
+	}
 	// Superseding the DNS assignment revokes this artifact's source access even
 	// though its signed contents and routing sources remain valid.
 	state.PlatformArtifactReleases[len(state.PlatformArtifactReleases)-1].Status = model.PlatformArtifactReleaseStatusSuperseded
@@ -164,7 +260,7 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 		t.Fatal("retained response lost positive full LKG binding")
 	}
 	baseline, _ := json.Marshal(state)
-	for _, scenario := range []string{"valid", "corrupt LKG", "expired LKG", "missing LKG", "foreign parent", "rolled back", "unverified", "wrong set", "foreign node", "foreign authority", "non DNS"} {
+	for _, scenario := range []string{"valid", "missing input", "corrupt LKG", "expired LKG", "missing LKG", "foreign parent", "rolled back", "unverified", "wrong set", "foreign node", "foreign authority", "non DNS"} {
 		t.Run("retained/"+scenario, func(t *testing.T) {
 			var next model.State
 			if err := json.Unmarshal(baseline, &next); err != nil {
@@ -175,6 +271,9 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 			switch scenario {
 			case "valid":
 				code = http.StatusOK
+			case "missing input":
+				next.PlatformArtifactContents = nil
+				code = http.StatusConflict
 			case "corrupt LKG":
 				next.PlatformLKGSnapshots[0].SnapshotProvenance.Signature = "invalid"
 			case "expired LKG":

@@ -19,7 +19,7 @@ import (
 func TestDiscoveryPlatformRoutesFailClosedWithoutVerifiedTrafficArtifact(t *testing.T) {
 	_, s, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	s.platformRoutes = []model.PlatformRoute{{Hostname: "ambient.example.test", UpstreamURL: "http://ambient:8080"}}
-	routes, err := s.publishedDiscoveryPlatformRoutes()
+	routes, err := s.publishedDiscoveryPlatformRoutes(t.Context())
 	if err != nil || len(routes) != 0 {
 		t.Fatal("ambient routes accepted", routes, err)
 	}
@@ -93,7 +93,7 @@ func TestPublicDiscoveryVerifiesPinnedPlatformMembershipAndEveryMember(t *testin
 	}
 	// Use the disposable file store to model persisted corruption. It is never
 	// published, and every read must reject without re-signing the bad input.
-	for _, scenario := range []string{"route signature", "DNS signature", "TLS signature", "base signature", "base digest", "member lineage", "missing child", "LKG signature"} {
+	for _, scenario := range []string{"route signature", "DNS signature", "TLS signature", "base signature", "base digest", "member lineage", "missing child", "LKG signature", "missing input", "input content", "input length"} {
 		t.Run(scenario, func(t *testing.T) {
 			var st model.State
 			if err := json.Unmarshal(raw, &st); err != nil {
@@ -128,6 +128,21 @@ func TestPublicDiscoveryVerifiesPinnedPlatformMembershipAndEveryMember(t *testin
 			if scenario == "LKG signature" {
 				for i := range st.PlatformLKGSnapshots {
 					st.PlatformLKGSnapshots[i].SnapshotProvenance.Signature = "corrupt"
+				}
+			}
+			switch scenario {
+			case "missing input":
+				st.PlatformArtifactContents = nil
+			case "input content":
+				if len(st.PlatformArtifactContents) == 0 {
+					t.Fatal("fixture must retain its actual compiler input")
+				}
+				for i := range st.PlatformArtifactContents {
+					st.PlatformArtifactContents[i].Content = map[string]any{"changed": true}
+				}
+			case "input length":
+				for i := range st.PlatformArtifactContents {
+					st.PlatformArtifactContents[i].SizeBytes++
 				}
 			}
 			damaged, _ := json.Marshal(st)

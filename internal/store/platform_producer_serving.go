@@ -12,26 +12,29 @@ import (
 )
 
 func (s *Store) VerifyProducedTrafficLKG(releaseID, policyReleaseID, baselineArtifactID string, request model.PlatformArtifactVerifyLKGRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
-	if request.AllowInitialLKG {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
+	guard, err := producedVerificationIntent(releaseID, policyReleaseID, baselineArtifactID, "verify", request)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	return s.verifyPlatformArtifactReleaseLKG(releaseID, request, principal, &platformProducerReleaseGuard{PolicyReleaseID: policyReleaseID, PreviousReleaseID: releaseID, PreviousFullReleaseID: releaseID, BaselineArtifactID: baselineArtifactID, Phase: "verify"})
+	return s.verifyPlatformArtifactReleaseLKG(releaseID, request, principal, guard)
 }
 
 // VerifyProducedTrafficRecoveryLKG verifies a new full publication of the exact
 // positive baseline, using new consumer evidence and the current policy fence.
 func (s *Store) VerifyProducedTrafficRecoveryLKG(releaseID, policyReleaseID, baselineArtifactID string, request model.PlatformArtifactVerifyLKGRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
-	if request.AllowInitialLKG {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
+	guard, err := producedVerificationIntent(releaseID, policyReleaseID, baselineArtifactID, "verify-recovery", request)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	return s.verifyPlatformArtifactReleaseLKG(releaseID, request, principal, &platformProducerReleaseGuard{PolicyReleaseID: policyReleaseID, PreviousReleaseID: releaseID, PreviousFullReleaseID: releaseID, BaselineArtifactID: baselineArtifactID, Phase: "verify-recovery"})
+	return s.verifyPlatformArtifactReleaseLKG(releaseID, request, principal, guard)
 }
 
 func (s *Store) RollbackProducedTraffic(id, failedReleaseID, policyReleaseID, previousFullReleaseID, baselineArtifactID string, req model.PlatformArtifactRollbackRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
-	if req.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || req.SoftOverride || req.ForcePublish || req.KernelBreakGlass != nil {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
+	guard, err := producedRollbackIntent(failedReleaseID, policyReleaseID, previousFullReleaseID, baselineArtifactID, req)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	return s.rollbackPlatformArtifact(id, req, principal, &platformProducerReleaseGuard{PolicyReleaseID: policyReleaseID, PreviousReleaseID: failedReleaseID, PreviousFullReleaseID: previousFullReleaseID, BaselineArtifactID: baselineArtifactID, FailedReleaseID: failedReleaseID, Phase: "rollback"})
+	return s.rollbackPlatformArtifact(id, req, principal, guard)
 }
 
 func producerActivePublication(state *model.State, scope, channel string) (model.PlatformArtifactRelease, bool) {

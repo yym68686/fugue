@@ -11,7 +11,24 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformsafety"
+	"fugue/internal/schemamigrate"
 )
+
+func platformStatePostgresFixture(t *testing.T) *Store {
+	t.Helper()
+	db, address, _ := hotInventoryTestDatabase(t)
+	// Init verifies the independent schema-owned receipt; install the real
+	// migration in this disposable schema, never fake its marker or skip it.
+	if err := schemamigrate.MigrateEdgeInstanceFencing(t.Context(), address); err != nil {
+		t.Fatal("migrate isolated edge fencing", err)
+	}
+	s := &Store{db: db, databaseURL: address}
+	configureTestPlatformArtifactSigning(s)
+	if err := s.Init(); err != nil {
+		t.Fatal("init isolated platform state", err)
+	}
+	return s
+}
 
 func TestPlatformReleaseStateMachinePostgres(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
@@ -22,11 +39,7 @@ func TestPlatformReleaseStateMachinePostgres(t *testing.T) {
 		t.Fatalf("refusing to run platform release integration test against non-test database URL %q", databaseURL)
 	}
 
-	s := New("", databaseURL)
-	configureTestPlatformArtifactSigning(s)
-	if err := s.Init(); err != nil {
-		t.Fatalf("init postgres store: %v", err)
-	}
+	s := platformStatePostgresFixture(t)
 
 	scopeKey := "pg-release-" + model.NewID("scope")
 	scope := model.PlatformArtifactScope{ScopeType: "test", Key: scopeKey}
@@ -305,7 +318,19 @@ WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3`,
 			t.Fatalf("iteration %d concurrent verification returned non-conflict error: %v", iteration, verifyErr)
 		}
 		if nextResult.err != nil {
-			t.Fatalf("iteration %d concurrent next release failed: %v", iteration, nextResult.err)
+			if !errors.Is(nextResult.err, ErrConflict) || verifyErr != nil {
+				t.Fatalf("iteration %d concurrent next release failed without an advancing verifier: %v", iteration, nextResult.err)
+			}
+			// The verifier replaced the exact LKG selected by the concurrent
+			// publication. Refusing that stale proof is required; a fresh,
+			// explicit attempt may use the new independently prepared baseline.
+			_, nextResult.release, _, _, nextResult.err = s.ReleasePlatformArtifact(nextCandidate.ID, model.PlatformArtifactReleaseRequest{
+				ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+				IdempotencyKey: "next-race-release-" + nextCandidate.Generation,
+			}, testPlatformPrincipal())
+			if nextResult.err != nil {
+				t.Fatalf("iteration %d fresh baseline publication failed: %v", iteration, nextResult.err)
+			}
 		}
 		_, _, _, _, err = s.VerifyPlatformArtifactReleaseLKG(
 			nextResult.release.ID,
@@ -342,11 +367,8 @@ func TestPlatformServingUnverifiedCrashRecoveryPostgres(t *testing.T) {
 		t.Fatalf("refusing to run platform crash recovery integration test against non-test database URL %q", databaseURL)
 	}
 
-	s := New("", databaseURL)
-	configureTestPlatformArtifactSigning(s)
-	if err := s.Init(); err != nil {
-		t.Fatalf("init postgres store: %v", err)
-	}
+	s := platformStatePostgresFixture(t)
+	databaseURL = s.databaseURL
 	scopeKey := "pg-crash-" + model.NewID("scope")
 	scope := model.PlatformArtifactScope{ScopeType: "test", Key: scopeKey}
 	createValidated := func(generation string, revision int) model.PlatformArtifact {
@@ -385,6 +407,7 @@ func TestPlatformServingUnverifiedCrashRecoveryPostgres(t *testing.T) {
 	}
 
 	restarted := New("", databaseURL)
+	t.Cleanup(func() { _ = restarted.db.Close() })
 	configureTestPlatformArtifactSigning(restarted)
 	if err := restarted.Init(); err != nil {
 		t.Fatalf("restart PostgreSQL store while candidate is serving-unverified: %v", err)
@@ -423,6 +446,7 @@ func TestPlatformServingUnverifiedCrashRecoveryPostgres(t *testing.T) {
 	}
 
 	restartedAgain := New("", databaseURL)
+	t.Cleanup(func() { _ = restartedAgain.db.Close() })
 	configureTestPlatformArtifactSigning(restartedAgain)
 	if err := restartedAgain.Init(); err != nil {
 		t.Fatalf("restart PostgreSQL store while rollback is serving-unverified: %v", err)
@@ -468,11 +492,7 @@ func TestPlatformOverrideAuditPostgres(t *testing.T) {
 		t.Fatalf("refusing to run platform override integration test against non-test database URL %q", databaseURL)
 	}
 
-	s := New("", databaseURL)
-	configureTestPlatformArtifactSigning(s)
-	if err := s.Init(); err != nil {
-		t.Fatalf("init postgres store: %v", err)
-	}
+	s := platformStatePostgresFixture(t)
 	scopeKey := "pg-override-" + model.NewID("scope")
 	scope := model.PlatformArtifactScope{ScopeType: "test", Key: scopeKey}
 	createDraft := func(generation string) model.PlatformArtifact {

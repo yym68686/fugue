@@ -201,6 +201,57 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	}
 }
 
+func TestNodeUpdaterTaskCreateConflictDoesNotQueueDependency(t *testing.T) {
+	t.Parallel()
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := s.CreateTenant("Neutral Task Admission")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "neutral")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updater, _, err := s.EnrollNodeUpdater(nodeSecret, "worker-neutral", "https://worker.invalid", nil,
+		"worker-neutral", "neutral-fingerprint", "v1", "v1", []string{model.NodeUpdateTaskTypeDiagnoseNode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, apiSecret, err := s.CreateAPIKey(tenant.ID, "neutral-task-key", []string{"runtime.attach"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/node-update-tasks", apiSecret, map[string]any{
+		"node_updater_id": updater.ID, "type": model.NodeUpdateTaskTypeDiagnoseNode,
+		"payload": map[string]string{"arguments_json": `{"artifact_id":"unavailable-artifact"}`},
+	})
+	if response.Code != http.StatusConflict {
+		t.Fatalf("dependency admission status=%d body=%s", response.Code, response.Body.String())
+	}
+	var failure struct {
+		Error string `json:"error"`
+	}
+	mustDecodeJSON(t, response, &failure)
+	if failure.Error == "" {
+		t.Fatal("409 did not use the contract error envelope")
+	}
+	tasks, err := s.ListNodeUpdateTasksWithOptions(tenant.ID, false, updater.ID, "", store.NodeUpdateTaskListOptions{})
+	if err != nil || len(tasks) != 0 {
+		t.Fatal("rejected HTTP create queued a task", tasks, err)
+	}
+	response = performJSONRequest(t, server, http.MethodPost, "/v1/node-update-tasks", apiSecret, map[string]any{
+		"node_updater_id": updater.ID, "type": model.NodeUpdateTaskTypeDiagnoseNode,
+		"payload": map[string]string{"targets_json": `[]`},
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("unrelated maintenance blocked: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestNodeUpdaterEdgeCredentialRequiresExplicitGroupIdentity(t *testing.T) {
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := s.Init(); err != nil {

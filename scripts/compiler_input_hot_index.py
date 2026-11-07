@@ -200,7 +200,9 @@ def cleanup(c, name, secret_name, job_uid, secret_uid, priority_uid):
                 'dependency index priority cleanup pending')
 
 
-def execute(c, evidence, apply=False):
+def execute(c, evidence, apply=False, cumulative_watch=None, evidence_limit=None):
+    require(evidence_limit is None or type(evidence_limit) is int and evidence_limit >= 16384,
+            'dependency index evidence budget invalid')
     validate(c)
     declaration_hash = r.identity(c)
     name = 'fugue-input-index-'+declaration_hash[:20]
@@ -212,7 +214,10 @@ def execute(c, evidence, apply=False):
     job_uid = secret_uid = priority_uid = None
     data = {}
     def save():
-        evidence.write_text(json.dumps(report, separators=(',', ':'))+'\n')
+        body = json.dumps(report, separators=(',', ':'))+'\n'
+        require(evidence_limit is None or len(body.encode()) <= evidence_limit,
+                'dependency index evidence budget exceeded')
+        evidence.write_text(body)
     with evidence.open('x') as output:
         output.write(json.dumps(report)+'\n')
     try:
@@ -255,6 +260,8 @@ def execute(c, evidence, apply=False):
             report['impact_samples'].append(sample)
             require(len(report['impact_samples']) <= 50, 'dependency index watchdog bound exhausted')
             save()
+            if cumulative_watch is not None:
+                cumulative_watch(job_uid or '')
         # Do not race a copy, readonly inventory or another preparation worker.
         for purpose in (PURPOSE, impact.PURPOSE, r.PURPOSE):
             require(not json.loads(kube(c['namespace'], 'get', 'jobs', '-l', 'fugue.pro/purpose='+purpose, '-o', 'json'))['items'],
@@ -267,6 +274,8 @@ def execute(c, evidence, apply=False):
         save()
         if not apply:
             return report
+        if cumulative_watch is not None:
+            cumulative_watch()
         intent = r.create({'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'namespace': c['namespace'], 'name': name+'-receipt'},
                            'immutable': True, 'data': {'declaration-sha256': declaration_hash, 'intent': 'single-index-page-attempt-no-retry'}})
         report['intent_uid'] = intent['metadata']['uid']
@@ -346,13 +355,23 @@ def execute(c, evidence, apply=False):
         except Exception as error:
             report.update(cleanup_confirmed=False, cleanup_error_type=type(error).__name__)
         report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        save()
+        evidence_error = None
+        try:
+            save()
+        except Exception as error:
+            evidence_error = error
+            report.update(status='completion-not-confirmed', error_type=type(error).__name__)
         if job_uid and report['cleanup_confirmed']:
             try:
                 report['terminal_receipt'] = terminal_receipt(c, report)
             except Exception as error:
                 report['terminal_receipt'] = {'confirmed': False, 'error_type': type(error).__name__}
-            save()
+            try:
+                save()
+            except Exception as error:
+                evidence_error = error
+        if evidence_error is not None:
+            raise evidence_error
 
 
 def main():

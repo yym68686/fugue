@@ -5,6 +5,7 @@ DOCKER ?= docker
 .PHONY: test test-scripts prepush generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
 
 test:
+	python3 -m unittest scripts.test_install_compiler_input_zero_temp
 	python3 -m unittest scripts.test_install_longhorn_gc
 	python3 -m unittest scripts.test_refresh_producer_dependencies
 	python3 -m unittest scripts.test_cnpg_backup_retention scripts.test_cnpg_backup_history
@@ -23,8 +24,11 @@ test:
 	python3 -m unittest scripts.test_select_managed_ssh_transport
 	python3 -m unittest scripts.test_publish_storage_policy
 	python3 -m unittest scripts.test_compiler_input_storage
+	python3 -m unittest scripts.test_compiler_input_history_compatibility
 	python3 -m unittest scripts.test_compiler_input_archive
 	$(if $(INPUT_READONLY_PYTHON),$(INPUT_READONLY_PYTHON),python3) -m unittest scripts.test_compiler_input_readonly
+	$(if $(INPUT_READONLY_PYTHON),$(INPUT_READONLY_PYTHON),python3) -m unittest scripts.test_compiler_input_task_prepare scripts.test_compiler_input_publication_prepare scripts.test_compiler_input_consumer_prepare
+	$(if $(INPUT_READONLY_PYTHON),$(INPUT_READONLY_PYTHON),python3) -m unittest scripts.test_compiler_input_stage1 scripts.test_compiler_input_hot_index
 	python3 -m unittest scripts.test_verify_managed_ssh_image
 	python3 -m unittest scripts.test_reconcile_managed_ssh_keys
 	python3 -m unittest scripts.test_observe_worker_standby
@@ -51,6 +55,7 @@ test:
 	$(MAKE) test-static-edge-observability
 
 test-scripts:
+	python3 -m unittest scripts.test_install_compiler_input_zero_temp
 	python3 -m unittest scripts.test_refresh_producer_dependencies
 	python3 -m unittest scripts.test_cnpg_backup_retention scripts.test_cnpg_backup_history
 	python3 -m unittest discover -s scripts -p test_reconcile_postgres_protection.py

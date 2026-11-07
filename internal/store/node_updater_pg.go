@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"fugue/internal/storagerecovery"
@@ -264,11 +265,76 @@ func (s *Store) pgCreateNodeUpdateTask(principal model.Principal, updaterID, clu
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
+	refs, err := compilerInputHotTaskReferences(taskPayload)
+	if err != nil {
+		return model.NodeUpdateTask{}, ErrConflict
+	}
+	if len(refs) > 0 || compilerInputTaskUsesConfiguration(task.Type, taskPayload) {
+		proof, err := s.prepareNodeTaskCreateAdmission(ctx, task)
+		if err != nil {
+			return model.NodeUpdateTask{}, err
+		}
+		return s.pgCreatePreparedNodeUpdateTask(ctx, principal, proof)
+	}
+	if err := insertNodeUpdateTask(ctx, s.db, task); err != nil {
+		return model.NodeUpdateTask{}, mapDBErr(err)
+	}
+	return redactNodeUpdateTask(task), nil
+}
+
+func (s *Store) pgCreatePreparedNodeUpdateTask(ctx context.Context, principal model.Principal, proof *compilerInputActivationProof) (model.NodeUpdateTask, error) {
+	if proof == nil || proof.newTask == nil {
+		return model.NodeUpdateTask{}, ErrInvalidInput
+	}
+	task := *proof.newTask
+	err := s.withPreparedCompilerInputTaskCreation(ctx, proof, func(ctx context.Context, tx *sql.Tx) error {
+		// Serialize admission against target deletion/reassignment and other
+		// dependent creates. Recheck normal authorization/capabilities here;
+		// the graph proof is not target authority.
+		var id string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM fugue_node_updaters WHERE id=$1 FOR UPDATE`, task.NodeUpdaterID).Scan(&id); err != nil {
+			return err
+		}
+		updater, err := s.pgFindNodeUpdaterTarget(ctx, tx, id, "", "")
+		if err != nil {
+			return err
+		}
+		if !principal.IsPlatformAdmin() && strings.TrimSpace(updater.TenantID) != strings.TrimSpace(principal.TenantID) {
+			return ErrNotFound
+		}
+		if strings.TrimSpace(updater.TenantID) != task.TenantID || updater.MachineID != task.MachineID ||
+			updater.RuntimeID != task.RuntimeID || updater.NodeKeyID != task.NodeKeyID || updater.ClusterNodeName != task.ClusterNodeName ||
+			!nodeUpdaterSupportsTask(updater, task.Type) {
+			return ErrConflict
+		}
+		payloadJSON, err := marshalNullableJSON(task.Payload)
+		if err != nil {
+			return err
+		}
+		if existing, found, err := duplicatePendingNodeUpdateTaskQuery(ctx, tx, task.NodeUpdaterID, task.Type, payloadJSON); err != nil {
+			return err
+		} else if found {
+			task = existing
+			return nil
+		}
+		return insertNodeUpdateTask(ctx, tx, task)
+	})
+	if err != nil {
+		return model.NodeUpdateTask{}, mapDBErr(err)
+	}
+	return redactNodeUpdateTask(task), nil
+}
+
+func insertNodeUpdateTask(ctx context.Context, q platformStateDB, task model.NodeUpdateTask) error {
+	payloadJSON, err := marshalNullableJSON(task.Payload)
+	if err != nil {
+		return err
+	}
 	logsJSON, err := marshalNullableJSON(task.Logs)
 	if err != nil {
-		return model.NodeUpdateTask{}, err
+		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	_, err = q.ExecContext(ctx, `
 INSERT INTO fugue_node_update_tasks (
 	id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id,
 	cluster_node_name, task_type, status, payload_json, result_message,
@@ -279,13 +345,15 @@ INSERT INTO fugue_node_update_tasks (
 	$7, $8, $9, $10, $11,
 	$12, $13, $14, $15, $16,
 	$17, $18, $19
-)`, task.ID, nullIfEmpty(task.TenantID), task.NodeUpdaterID, task.MachineID, task.RuntimeID, nullIfEmpty(task.NodeKeyID), task.ClusterNodeName, task.Type, task.Status, payloadJSON, task.ResultMessage, task.ErrorMessage, logsJSON, task.RequestedByType, task.RequestedByID, task.CreatedAt, task.UpdatedAt, task.ClaimedAt, task.CompletedAt); err != nil {
-		return model.NodeUpdateTask{}, mapDBErr(err)
-	}
-	return redactNodeUpdateTask(task), nil
+)`, task.ID, nullIfEmpty(task.TenantID), task.NodeUpdaterID, task.MachineID, task.RuntimeID, nullIfEmpty(task.NodeKeyID), task.ClusterNodeName, task.Type, task.Status, payloadJSON, task.ResultMessage, task.ErrorMessage, logsJSON, task.RequestedByType, task.RequestedByID, task.CreatedAt, task.UpdatedAt, task.ClaimedAt, task.CompletedAt)
+	return err
 }
 
 func (s *Store) pgDuplicatePendingNodeUpdateTask(ctx context.Context, updaterID, taskType string, payloadJSON []byte) (model.NodeUpdateTask, bool, error) {
+	return duplicatePendingNodeUpdateTaskQuery(ctx, s.db, updaterID, taskType, payloadJSON)
+}
+
+func duplicatePendingNodeUpdateTaskQuery(ctx context.Context, q sqlQueryer, updaterID, taskType string, payloadJSON []byte) (model.NodeUpdateTask, bool, error) {
 	switch taskType {
 	case model.NodeUpdateTaskTypeUpgradeUpdater,
 		model.NodeUpdateTaskTypePrepullAppImages,
@@ -316,7 +384,7 @@ func (s *Store) pgDuplicatePendingNodeUpdateTask(ctx context.Context, updaterID,
 		args = append(args, payloadJSON)
 		payloadClause = fmt.Sprintf("payload_json = $%d::jsonb", len(args))
 	}
-	task, err := scanNodeUpdateTask(s.db.QueryRowContext(ctx, `
+	task, err := scanNodeUpdateTask(q.QueryRowContext(ctx, `
 SELECT id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, cluster_node_name, task_type, status, payload_json, result_message, error_message, logs_json, requested_by_type, requested_by_id, created_at, updated_at, claimed_at, completed_at
 FROM fugue_node_update_tasks
 WHERE node_updater_id = $1 AND task_type = $2 AND status IN ($3, $4) AND `+payloadClause+`
@@ -452,17 +520,80 @@ WHERE node_updater_id = $1 AND status = $2 AND updated_at < $7
 func (s *Store) pgClaimNodeUpdateTask(taskID, updaterID string) (model.NodeUpdateTask, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	now := time.Now().UTC()
-	task, err := scanNodeUpdateTask(s.db.QueryRowContext(ctx, `
-UPDATE fugue_node_update_tasks
-SET status = $3, claimed_at = COALESCE(claimed_at, $4), updated_at = $4
-WHERE id = $1 AND node_updater_id = $2 AND status IN ($5, $3)
-RETURNING id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, cluster_node_name, task_type, status, payload_json, result_message, error_message, logs_json, requested_by_type, requested_by_id, created_at, updated_at, claimed_at, completed_at
-`, strings.TrimSpace(taskID), strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusRunning, now, model.NodeUpdateTaskStatusPending))
+	// Inspect a bounded task payload under its own row lock. Unrelated
+	// maintenance tasks must not depend on archive control/pins/signing keys
+	// or contend with the global archive barrier. The lock keeps a concurrent
+	// payload change from inserting dependencies between inspection and claim.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{`SET LOCAL lock_timeout='250ms'`, `SET LOCAL statement_timeout='5s'`} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return model.NodeUpdateTask{}, err
+		}
+	}
+	var status, taskType string
+	var payload []byte
+	err = tx.QueryRowContext(ctx, `SELECT status,task_type,CASE WHEN octet_length(COALESCE(payload_json,'{}'::jsonb)::text)<=65536 THEN COALESCE(payload_json,'{}'::jsonb)::text END
+ FROM fugue_node_update_tasks WHERE id=$1 AND node_updater_id=$2 FOR UPDATE`, strings.TrimSpace(taskID), strings.TrimSpace(updaterID)).Scan(&status, &taskType, &payload)
+	if err != nil {
+		return model.NodeUpdateTask{}, mapDBErr(err)
+	}
+	if status != model.NodeUpdateTaskStatusPending && status != model.NodeUpdateTaskStatusRunning {
+		return model.NodeUpdateTask{}, ErrConflict
+	}
+	var value any
+	if len(payload) == 0 || json.Unmarshal(payload, &value) != nil {
+		return model.NodeUpdateTask{}, ErrConflict
+	}
+	refs, err := compilerInputHotTaskReferences(value)
+	if err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	if len(refs) == 0 && !compilerInputTaskUsesConfiguration(taskType, value) {
+		task, err := claimNodeUpdateTaskInTransaction(ctx, tx, taskID, updaterID)
+		if err != nil {
+			return model.NodeUpdateTask{}, mapDBErr(err)
+		}
+		if err := tx.Commit(); err != nil {
+			return model.NodeUpdateTask{}, err
+		}
+		return redactNodeUpdateTask(task), nil
+	}
+	// Never retain this task lock across signature/closure inspection. The
+	// prepared path later rechecks its complete physical tuple under barrier.
+	if err := tx.Rollback(); err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	proof, pins, err := s.prepareNodeTaskInputAdmission(ctx, strings.TrimSpace(taskID))
+	if err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	return s.pgClaimPreparedNodeUpdateTask(ctx, taskID, updaterID, proof, pins)
+}
+
+func (s *Store) pgClaimPreparedNodeUpdateTask(ctx context.Context, taskID, updaterID string, proof *compilerInputActivationProof, pins []compilerInputPinBinding) (model.NodeUpdateTask, error) {
+	var task model.NodeUpdateTask
+	err := s.withPreparedCompilerInputActivation(ctx, proof, pins, func(ctx context.Context, tx *sql.Tx) error {
+		var err error
+		task, err = claimNodeUpdateTaskInTransaction(ctx, tx, taskID, updaterID)
+		return err
+	})
 	if err != nil {
 		return model.NodeUpdateTask{}, mapDBErr(err)
 	}
 	return redactNodeUpdateTask(task), nil
+}
+
+func claimNodeUpdateTaskInTransaction(ctx context.Context, tx *sql.Tx, taskID, updaterID string) (model.NodeUpdateTask, error) {
+	return scanNodeUpdateTask(tx.QueryRowContext(ctx, `
+UPDATE fugue_node_update_tasks
+SET status = $3, claimed_at = COALESCE(claimed_at, $4), updated_at = $4
+WHERE id = $1 AND node_updater_id = $2 AND status IN ($5, $3)
+RETURNING id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, cluster_node_name, task_type, status, payload_json, result_message, error_message, logs_json, requested_by_type, requested_by_id, created_at, updated_at, claimed_at, completed_at
+`, strings.TrimSpace(taskID), strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusRunning, time.Now().UTC(), model.NodeUpdateTaskStatusPending))
 }
 
 func (s *Store) pgAppendNodeUpdateTaskLog(taskID, updaterID, message string) (model.NodeUpdateTask, error) {

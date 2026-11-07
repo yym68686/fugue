@@ -1,0 +1,16 @@
+{
+  "schema": "fugue.compiler-input-history.capability-contract.v1",
+  "version": 1,
+  "roles": {
+    "store": [
+      "input-formats-v1-v2-v3-v4",
+      "archive-reader-lease-and-startup-guard-v1",
+      "all-input-writers-transaction-barrier-v2",
+      "input-writer-caller-cancellation-v1",
+      "fenced-new-inputs-independent-local-storage-v1",
+      "cold-input-writer-explicit-preparation-v1",
+      "durable-history-admission-phases-v1"
+    ],
+    "schema": ["compiler-input-additive-migrations-v1"]
+  }
+}

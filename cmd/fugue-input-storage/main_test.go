@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/store"
@@ -113,6 +116,76 @@ func TestMaintenanceErrorCategoryDoesNotExposeErrorDetails(t *testing.T) {
 	} {
 		if got := maintenanceErrorCategory(item.err); got != item.want {
 			t.Fatalf("unexpected bounded category: %q, want %q", got, item.want)
+		}
+	}
+}
+
+func TestTaskPreparationContractIsStrictAndApplyRequiresExactPlan(t *testing.T) {
+	c := store.NodeTaskInputPreparationContract{Version: 1, TaskID: "neutral-task", UpdaterID: "neutral-updater", OperationKey: "neutral-operation", MaxInputs: 1, MaxRawBytes: 1024, MaxStoredBytes: 1024, MaxGetBytes: 65536, MaxGetRequests: 1, MaxSeconds: 60}
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeTaskInputPreparationContract(bytes.NewReader(raw), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeTaskInputPreparationContract(bytes.NewReader(raw), true); err == nil {
+		t.Fatal("apply accepted without plan")
+	}
+	c.ExpectedPlanSHA256 = strings.Repeat("a", 64)
+	raw, _ = json.Marshal(c)
+	if _, err := decodeTaskInputPreparationContract(bytes.NewReader(raw), true); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{string(raw) + "{}", strings.TrimSuffix(string(raw), "}") + `,"unreviewed":true}`, `{}`, strings.Repeat(" ", 16385) + string(raw), string(raw) + strings.Repeat(" ", 16385)} {
+		if _, err := decodeTaskInputPreparationContract(strings.NewReader(bad), true); err == nil {
+			t.Fatal("non-strict contract accepted")
+		}
+	}
+	for _, change := range []func(*store.NodeTaskInputPreparationContract){
+		func(c *store.NodeTaskInputPreparationContract) { c.MaxInputs = 33 },
+		func(c *store.NodeTaskInputPreparationContract) { c.MaxRawBytes = 129 << 20 },
+		func(c *store.NodeTaskInputPreparationContract) { c.MaxStoredBytes = 129 << 20 },
+		func(c *store.NodeTaskInputPreparationContract) { c.MaxGetBytes = 449 << 20 },
+		func(c *store.NodeTaskInputPreparationContract) { c.MaxGetRequests = 32769 },
+		func(c *store.NodeTaskInputPreparationContract) { c.MaxSeconds = 541 },
+		func(c *store.NodeTaskInputPreparationContract) { c.OperationKey = strings.Repeat("x", 49) },
+	} {
+		bad := c
+		change(&bad)
+		if bad.Validate(true) == nil {
+			t.Fatal("budget contract accepted", bad)
+		}
+	}
+}
+
+func TestTaskPreparationPlanDecoderStrictPublicEnvelope(t *testing.T) {
+	now := time.Now().UTC()
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+	key := base64.StdEncoding.EncodeToString(private.Public().(ed25519.PublicKey))
+	// Construct through JSON: tuple/manifest details stay internal to store.
+	raw := map[string]any{
+		"version": 1, "contract": store.NodeTaskInputPreparationContract{Version: 1, TaskID: "neutral-task", UpdaterID: "neutral-updater", OperationKey: "neutral-op", ExpectedPlanSHA256: strings.Repeat("a", 64), MaxInputs: 1, MaxRawBytes: 1024, MaxStoredBytes: 1024, MaxGetBytes: 65536, MaxGetRequests: 1, MaxSeconds: 30},
+		"backend_hash": "sha256:" + strings.Repeat("b", 64), "closure_sha256": strings.Repeat("c", 64), "epoch": 0, "horizon": 1,
+		"issued_at": now, "expires_at": now.Add(10 * time.Minute), "inputs": []any{},
+		"tuples": []any{map[string]any{"table": "fugue_node_update_tasks", "key": "neutral-task", "xmin": "1", "ctid": "(1,1)", "relation": 1, "filenode": 1}}, "signature": "",
+	}
+	data, _ := json.Marshal(raw)
+	var ticket store.NodeTaskInputPreparationTicket
+	if err := json.Unmarshal(data, &ticket); err != nil {
+		t.Fatal(err)
+	}
+	// Sign the typed canonical payload, not map serialization.
+	data, _ = json.Marshal(ticket)
+	ticket.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(private, data))
+	plan := store.NodeTaskInputPreparationPlan{Ticket: ticket, VerificationKey: key}
+	data, _ = json.Marshal(plan)
+	if _, err := decodeTaskInputPreparationPlan(bytes.NewReader(data), now); err != nil {
+		t.Fatal("valid public plan", err)
+	}
+	for _, bad := range []string{string(data) + "{}", strings.TrimSuffix(string(data), "}") + `,"unreviewed":true}`, strings.Replace(string(data), `"epoch":0`, `"epoch":1`, 1), strings.Repeat(" ", (513<<10)+1) + string(data), `{}`} {
+		if _, err := decodeTaskInputPreparationPlan(strings.NewReader(bad), now); err == nil {
+			t.Fatal("non-strict or unsigned change accepted")
 		}
 	}
 }

@@ -31,7 +31,29 @@ func (s *Server) handleGetPlatformConsumerDNSRouteSources(w http.ResponseWriter,
 	}
 	response, err := observeAssignedDNSRouteSources(r.Context(), func() (consumerArtifactLookup, error) {
 		return s.assignedDNSRouteSourceOwner(claims, r.PathValue("artifact_id"), ids[0])
-	}, s.store.ObserveDNSRouteSources)
+	}, func(ctx context.Context, dns model.PlatformArtifact) (model.PlatformDNSRouteSourceSnapshot, error) {
+		snapshot, err := s.store.ObserveDNSRouteSources(ctx, dns)
+		if err != nil {
+			return model.PlatformDNSRouteSourceSnapshot{}, err
+		}
+		owner, err := s.assignedDNSRouteSourceOwner(claims, dns.ID, ids[0])
+		if err != nil {
+			return model.PlatformDNSRouteSourceSnapshot{}, err
+		}
+		parent, err := s.store.GetPlatformArtifact(owner.Assignment.ReleaseSetID)
+		if err != nil {
+			return model.PlatformDNSRouteSourceSnapshot{}, err
+		}
+		reads := append(dnsSourceInputReadSelections(snapshot), consumerInputReadSelection(owner, parent))
+		if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
+			return model.PlatformDNSRouteSourceSnapshot{}, err
+		}
+		current, err := s.store.ObserveDNSRouteSources(ctx, dns)
+		if err != nil || current.SelectionDigest != snapshot.SelectionDigest {
+			return model.PlatformDNSRouteSourceSnapshot{}, store.ErrConflict
+		}
+		return snapshot, nil
+	})
 	if err != nil {
 		code := http.StatusServiceUnavailable
 		if errors.Is(err, store.ErrConflict) {

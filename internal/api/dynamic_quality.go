@@ -310,7 +310,7 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 	if len(jobs) > 20000 {
 		return fmt.Errorf("dynamic quality query inventory exceeds bound")
 	}
-	if err := s.preservePublishedDynamicOrder(projection, jobs); err != nil {
+	if err := s.preservePublishedDynamicOrderContext(ctx, projection, jobs); err != nil {
 		return err
 	}
 	work := s.dynamicQuality.schedule(jobs, policy.DynamicQuality.RefreshQueriesPerCycle, time.Now().UTC())
@@ -505,6 +505,15 @@ func captureDynamicQualityJobs(ctx context.Context, work []dynamicQualityJob, co
 }
 
 func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProjectionResponse, jobs []dynamicQualityJob) error {
+	return s.preservePublishedDynamicOrderContext(context.Background(), projection, jobs)
+}
+
+func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context, projection *platformIntentProjectionResponse, jobs []dynamicQualityJob) error {
+	ctx, cancel := context.WithTimeout(parentCtx, time.Minute)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	state, err := s.producedTrafficState(projection.Intent.Scope)
 	if err != nil {
 		return err
@@ -515,6 +524,10 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 	baseline, err := s.store.GetPlatformArtifact(state.lkg.ArtifactID)
 	if err != nil || baseline.ContentHash != state.lkg.ContentHash || baseline.Generation != state.lkg.Generation || baseline.ScopeKey != projection.Intent.Scope || s.store.VerifyPlatformArtifactIntegrity(baseline) != nil {
 		return fmt.Errorf("dynamic quality positive LKG integrity is unproven")
+	}
+	inputSource, err := s.observeQualityInputSource(baseline)
+	if err != nil || s.checkQualityInputSource(ctx, inputSource) != nil {
+		return fmt.Errorf("dynamic quality baseline input proof unavailable")
 	}
 	var set platformconfig.ReleaseSet
 	if _, err := platformconfig.ValidateReleaseComposition(baseline); err != nil {
@@ -548,7 +561,7 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 	if json.Unmarshal(raw, &payload) != nil {
 		return fmt.Errorf("dynamic quality baseline query views invalid")
 	}
-	s.restorePublishedQualityEvidence(*projection, jobs, baseline)
+	s.restorePublishedQualityEvidenceContext(ctx, *projection, jobs, baseline, time.Now)
 	orders := map[string][]string{}
 	epochs := map[string]*time.Time{}
 	for _, view := range payload.Views {
@@ -569,6 +582,9 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 	covered := map[string]bool{}
 	for _, job := range jobs {
 		covered[job.Key] = true
+	}
+	if !s.qualityInputSourceUnchanged(ctx, inputSource) {
+		return fmt.Errorf("dynamic quality baseline input authority changed")
 	}
 	for index, rule := range projection.Policy.DNSAnswerRules {
 		key := rule.NodeID + "\x00" + rule.Hostname
@@ -639,8 +655,21 @@ func (s *Server) restorePublishedQualityEvidence(projection platformIntentProjec
 }
 
 func (s *Server) restorePublishedQualityEvidenceAt(projection platformIntentProjectionResponse, jobs []dynamicQualityJob, parent model.PlatformArtifact, now func() time.Time) {
+	s.restorePublishedQualityEvidenceContext(context.Background(), projection, jobs, parent, now)
+}
+
+func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Context, projection platformIntentProjectionResponse, jobs []dynamicQualityJob, parent model.PlatformArtifact, now func() time.Time) {
+	ctx, cancel := context.WithTimeout(parentCtx, time.Minute)
+	defer cancel()
+	if ctx.Err() != nil {
+		return
+	}
 	if len(jobs) == 0 || parent.Metadata["intent_generation"] != projection.Intent.Generation {
 		return
+	}
+	source, err := s.observeQualityInputSource(parent)
+	if err != nil || s.checkQualityInputSource(ctx, source) != nil {
+		return // Missing historical evidence never clears independent live entries.
 	}
 	requested := map[string]dynamicQualityJob{}
 	for _, job := range jobs {
@@ -677,6 +706,7 @@ func (s *Server) restorePublishedQualityEvidenceAt(projection platformIntentProj
 		return
 	}
 	contextFor := newDynamicQualityContextReader(projection, jobs)
+	prepared := map[string]dynamicQualityEntry{}
 	for _, fact := range snapshot.DNSSelections {
 		job, found := requested[fact.NodeID+"\x00"+fact.Hostname]
 		if !found || fact.PhysicalSelection == nil || len(fact.PhysicalEvidence) == 0 {
@@ -717,17 +747,32 @@ func (s *Server) restorePublishedQualityEvidenceAt(projection platformIntentProj
 		if err != nil {
 			continue
 		}
-		s.dynamicQuality.mu.Lock()
+		prepared[job.Key] = dynamicQualityEntry{ContextDigest: contextDigest,
+			Compiled: compiledPhysicalDNSSelection{Selection: compiled, Evidence: append(json.RawMessage(nil), fact.PhysicalEvidence...), proofFreshUntil: proofFreshUntil}}
+	}
+	// Validate all evidence before rechecking the original positive authority.
+	// A revoked/changed LKG must not partially install an earlier loop member.
+	if !s.qualityInputSourceUnchanged(ctx, source) {
+		return
+	}
+	s.dynamicQuality.mu.Lock()
+	defer s.dynamicQuality.mu.Unlock()
+	installAt := now()
+	if ctx.Err() != nil {
+		return
+	}
+	for key, restored := range prepared {
+		if dynamicQualityEntryUnavailable(restored, restored.ContextDigest, nil, requested[key].Route.Policy, installAt) != "" {
+			continue
+		}
 		if s.dynamicQuality.entries == nil {
 			s.dynamicQuality.entries = map[string]dynamicQualityEntry{}
 		}
-		entry := s.dynamicQuality.entries[job.Key]
-		if entry.Compiled.Selection == nil || entry.Compiled.Selection.CapturedAt.Before(compiled.CapturedAt) {
-			entry.ContextDigest = contextDigest
-			entry.Compiled = compiledPhysicalDNSSelection{Selection: compiled, Evidence: append(json.RawMessage(nil), fact.PhysicalEvidence...), proofFreshUntil: proofFreshUntil}
-			s.dynamicQuality.entries[job.Key] = entry
+		entry := s.dynamicQuality.entries[key]
+		if entry.Compiled.Selection == nil || entry.Compiled.Selection.CapturedAt.Before(restored.Compiled.Selection.CapturedAt) {
+			entry.ContextDigest, entry.Compiled = restored.ContextDigest, restored.Compiled
+			s.dynamicQuality.entries[key] = entry
 		}
-		s.dynamicQuality.mu.Unlock()
 	}
 }
 

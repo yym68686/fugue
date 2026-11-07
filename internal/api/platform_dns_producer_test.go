@@ -24,14 +24,18 @@ func dnsProducerServer(t *testing.T) (*Server, string, platformproducer.Policy, 
 	_, s, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	keys := celldns.Keys()
 	s.bundleSigningKey, s.bundleSigningKeyID = keys.PrimaryKey, keys.PrimaryKeyID
-	req, policies, activations := celldns.SourceAuthorizedRequest(t, true)
+	req, policies, activations, inputs, sources := celldns.CompletePublication(t, true, true)
 	celldns.RetainGlobalOnly(&req)
-	_, source := celldns.TransitionRequestWithSource(t)
-	compiled, err := platformconfig.Compile(source)
-	if err != nil {
-		t.Fatal(err)
-	}
 	previous := req.PreviousTrafficPublication
+	var compiled platformconfig.CompileResult
+	for _, input := range inputs {
+		if input.Lineage.InputSnapshotDigest == previous.Parent.Metadata["input_snapshot_digest"] {
+			compiled = input
+		}
+	}
+	if compiled.Lineage.InputSnapshotDigest == "" {
+		t.Fatal("actual normalized global compiler input missing")
+	}
 	state := model.State{}
 	add := func(r model.PlatformArtifactRelease) {
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
@@ -43,8 +47,8 @@ func dnsProducerServer(t *testing.T) (*Server, string, platformproducer.Policy, 
 			add(activations[i])
 		}
 	}
-	state.PlatformArtifacts = append(state.PlatformArtifacts, previous.Parent, previous.Route, previous.TLS, previous.DNS,
-		celldns.Sign(t, compiled.IntentArtifact, "source-intent", 1), celldns.Sign(t, compiled.PolicyArtifact, "source-policy", 1))
+	state.PlatformArtifacts = append(state.PlatformArtifacts, previous.Parent, previous.Route, previous.TLS, previous.DNS)
+	state.PlatformArtifacts = append(state.PlatformArtifacts, sources...)
 	r := celldns.PreviousPublication(*previous)
 	add(r)
 	now := time.Now().UTC()
@@ -68,8 +72,10 @@ func dnsProducerServer(t *testing.T) (*Server, string, platformproducer.Policy, 
 	}
 	s.store = store.New(path)
 	s.store.ConfigurePlatformArtifactSigning(keys)
-	if err := s.store.EnsurePlatformCompilerInput(compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
-		t.Fatal(err)
+	for _, input := range inputs {
+		if err := s.store.EnsurePlatformCompilerInput(input.InputSnapshot, input.Lineage.InputSnapshotDigest); err != nil {
+			t.Fatal(err)
+		}
 	}
 	raw, _ = os.ReadFile(path)
 	json.Unmarshal(raw, &state)
@@ -132,7 +138,7 @@ func TestDNSProducerCaptureAndShadowAreIndependentAndReadOnlyForSources(t *testi
 }
 
 func TestDNSProducerRefusesUnverifiedChangedOrUnavailableSource(t *testing.T) {
-	for _, scenario := range []string{"source activation", "full fence", "unverified", "expired LKG", "corrupt LKG", "unsigned input", "missing input", "canceled"} {
+	for _, scenario := range []string{"source activation", "full fence", "unverified", "expired LKG", "corrupt LKG", "unsigned input", "missing input", "missing producer dependency", "missing runtime input", "corrupt runtime input", "runtime input size", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, path, p, state := dnsProducerServer(t)
 			ctx := context.Background()
@@ -148,9 +154,60 @@ func TestDNSProducerRefusesUnverifiedChangedOrUnavailableSource(t *testing.T) {
 			case "corrupt LKG":
 				state.PlatformLKGSnapshots[0].SnapshotProvenance.Signature = "corrupt"
 			case "unsigned input":
-				state.PlatformArtifacts[5].Provenance.Signature = "corrupt"
+				for i := range state.PlatformArtifacts {
+					if state.PlatformArtifacts[i].ArtifactKind == model.PlatformArtifactKindPlatformIntent && state.PlatformArtifacts[i].ScopeKey == "global" {
+						state.PlatformArtifacts[i].Provenance.Signature = "corrupt"
+					}
+				}
 			case "missing input":
-				state.PlatformArtifacts = append(state.PlatformArtifacts[:5], state.PlatformArtifacts[6:]...)
+				for i, a := range state.PlatformArtifacts {
+					if a.ArtifactKind == model.PlatformArtifactKindPlatformIntent && a.ScopeKey == "global" {
+						state.PlatformArtifacts = append(state.PlatformArtifacts[:i], state.PlatformArtifacts[i+1:]...)
+						break
+					}
+				}
+			case "missing producer dependency":
+				for _, a := range state.PlatformArtifacts {
+					if a.ID == p.DNSSource.ProducerPolicy.ArtifactID {
+						producer, err := platformproducer.Decode(a)
+						if err != nil {
+							t.Fatal(err)
+						}
+						for j, dependency := range state.PlatformArtifacts {
+							if dependency.ID == producer.DNSPolicyArtifactID {
+								state.PlatformArtifacts = append(state.PlatformArtifacts[:j], state.PlatformArtifacts[j+1:]...)
+								break
+							}
+						}
+						break
+					}
+				}
+			case "missing runtime input", "corrupt runtime input", "runtime input size":
+				var digest string
+				for _, a := range state.PlatformArtifacts {
+					if a.ArtifactKind == model.PlatformArtifactKindReleaseSet && a.ScopeKey == "global" {
+						digest = a.Metadata["input_snapshot_digest"]
+					}
+				}
+				changed := false
+				for i := range state.PlatformArtifactContents {
+					c := &state.PlatformArtifactContents[i]
+					if c.ContentHash != digest {
+						continue
+					}
+					changed = true
+					if scenario == "missing runtime input" {
+						state.PlatformArtifactContents = append(state.PlatformArtifactContents[:i], state.PlatformArtifactContents[i+1:]...)
+					} else if scenario == "corrupt runtime input" {
+						c.Content = map[string]any{"intent_generation": "corrupt"}
+					} else {
+						c.SizeBytes++
+					}
+					break
+				}
+				if !changed {
+					t.Fatal("runtime corruption did not select an actual original input")
+				}
 			case "canceled":
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)

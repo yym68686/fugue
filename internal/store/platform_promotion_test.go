@@ -126,6 +126,7 @@ func prepareTrafficLKGFixture(t *testing.T, s *Store, scope, channel string, see
 	if err != nil {
 		t.Fatal(err)
 	}
+	prepareCompiledInputPin(t, s, compiled)
 	policy, err := s.CreatePlatformArtifact(compiled.PolicyArtifact)
 	if err != nil {
 		t.Fatal(err)

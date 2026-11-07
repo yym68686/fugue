@@ -48,6 +48,7 @@ func testDNSPublicationSuccessorGuard(t *testing.T, s *Store, input platformconf
 		if err != nil {
 			t.Fatal(err)
 		}
+		prepareCompiledInputPin(t, s, compiled)
 		save(compiled.PolicyArtifact)
 		child := save(compiled.DNSArtifact)
 		return save(platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, []string{child.ID}, time.Now().UTC()))

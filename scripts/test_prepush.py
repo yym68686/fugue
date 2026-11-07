@@ -38,6 +38,68 @@ class LocalPVGenerationTest(unittest.TestCase):
 
 
 class CanonicalReceiptTest(unittest.TestCase):
+    def test_history_capability_gate_and_import_dependencies_are_checked(self):
+        for dependency in ('internal/inputhistory/capabilities.json', 'internal/inputhistory/capabilities.go',
+                           'scripts/compiler_input_history_compatibility.py', 'scripts/test_compiler_input_history_compatibility.py',
+                           'scripts/compiler_input_storage.py', 'scripts/compiler_input_archive.py', 'deploy/releases/components.json'):
+            with self.subTest(dependency=dependency):
+                status, receipt = self.run_main_with_fake(lambda *args: (0, ''), paths=[dependency])
+                self.assertEqual(status, 0)
+                self.assertEqual(receipt['checks']['input-history-compatibility-tests']['status'], 'pass')
+        workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/ci.yml').read_text()
+        for line in workflow.splitlines():
+            if 'scripts/compiler_input_storage.py' in line:
+                self.assertIn('scripts/compiler_input_history_compatibility.py', line)
+        for purpose in ('stage', 'task', 'publication', 'consumer'):
+            selected = next(line for line in workflow.splitlines() if purpose+'_paths=(' in line)
+            self.assertIn('scripts/compiler_input_history_compatibility.py', selected)
+
+    def test_preparation_checks_follow_executor_test_dependencies_and_both_ci_lanes(self):
+        dependencies = (
+            'scripts/compiler_input_prepare.py', 'scripts/compiler_input_hot_index.py',
+            'scripts/test_compiler_input_hot_index.py', 'scripts/compiler_input_copy.py',
+            'scripts/test_compiler_input_copy.py', 'scripts/compiler_input_copy_resume.py',
+            'scripts/compiler_input_readonly.py', 'scripts/test_compiler_input_readonly.py',
+            'scripts/compiler_input_archive.py', 'scripts/compiler_input_storage.py',
+            'scripts/compiler_input_history_compatibility.py', 'scripts/test_compiler_input_history_compatibility.py',
+            'scripts/requirements-input-readonly.txt',
+        )
+        workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/ci.yml').read_text()
+        for purpose in ('task', 'publication'):
+            selected = next(line for line in workflow.splitlines() if purpose+'_paths=(' in line)
+            applied = next(line for line in workflow.splitlines()
+                           if 'git diff --exit-code HEAD origin/main -- scripts/compiler_input_'+purpose+'_prepare.py' in line)
+            for dependency in dependencies + ('scripts/compiler_input_'+purpose+'_prepare.py',
+                                              'scripts/test_compiler_input_'+purpose+'_prepare.py'):
+                with self.subTest(purpose=purpose, dependency=dependency):
+                    status, receipt = self.run_main_with_fake(lambda *args: (0, ''), paths=[dependency])
+                    self.assertEqual(status, 0)
+                    self.assertEqual(receipt['checks']['input-task-prepare-tests']['status'], 'pass')
+                    self.assertIn(dependency, selected)
+                    self.assertIn(dependency, applied)
+
+    def test_stage_one_checks_follow_executor_and_test_dependencies(self):
+        dependencies = (
+            "scripts/compiler_input_stage1.py", "scripts/test_compiler_input_stage1.py",
+            "scripts/compiler_input_hot_index.py", "scripts/test_compiler_input_hot_index.py",
+            "scripts/compiler_input_readonly.py", "scripts/test_compiler_input_readonly.py",
+            "scripts/compiler_input_copy.py", "scripts/test_compiler_input_copy.py",
+            "scripts/compiler_input_storage.py", "scripts/compiler_input_archive.py",
+            "scripts/compiler_input_history_compatibility.py", "scripts/test_compiler_input_history_compatibility.py",
+            "scripts/compiler_input_copy_resume.py", "scripts/requirements-input-readonly.txt",
+        )
+        workflow = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text()
+        selection = next(line for line in workflow.splitlines() if "stage_paths=(" in line)
+        apply_parity = next(line for line in workflow.splitlines()
+                            if "git diff --exit-code HEAD origin/main -- scripts/compiler_input_stage1.py" in line)
+        for dependency in dependencies:
+            with self.subTest(dependency=dependency):
+                result, receipt = self.run_main_with_fake(lambda *args: (0, ""), paths=[dependency])
+                self.assertEqual(result, 0)
+                self.assertEqual(receipt["checks"]["input-stage1-tests"]["status"], "pass")
+                self.assertIn(dependency, selection)
+                self.assertIn(dependency, apply_parity)
+
     def test_nested_modules_use_their_own_go_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

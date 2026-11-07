@@ -24,14 +24,16 @@ type platformProducerReleaseGuard struct {
 }
 
 func (s *Store) ReleaseProducedPlatformArtifact(id, policyReleaseID, previousReleaseID string, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
-	return s.releasePlatformArtifact(id, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", Reason: "versioned platform configuration producer", IdempotencyKey: "producer/" + policyReleaseID + "/" + id}, principal, &platformProducerReleaseGuard{PolicyReleaseID: policyReleaseID, PreviousReleaseID: previousReleaseID})
+	req, guard := producedShadowIntent(id, policyReleaseID, previousReleaseID)
+	return s.releasePlatformArtifact(id, req, principal, guard)
 }
 
 func (s *Store) ReleaseProducedTrafficArtifact(id, policyReleaseID, channel, previousReleaseID, previousFullReleaseID, baselineArtifactID, canaryRef string, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
-	if channel != model.PlatformArtifactReleaseChannelGray && channel != model.PlatformArtifactReleaseChannelFull {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
+	req, guard, err := producedTrafficIntent(id, policyReleaseID, channel, previousReleaseID, previousFullReleaseID, baselineArtifactID, canaryRef)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	return s.releasePlatformArtifact(id, model.PlatformArtifactReleaseRequest{ReleaseChannel: channel, CanaryRuleRef: canaryRef, Reason: "versioned platform configuration serving producer", IdempotencyKey: "producer/" + policyReleaseID + "/" + channel + "/" + id}, principal, &platformProducerReleaseGuard{PolicyReleaseID: policyReleaseID, PreviousReleaseID: previousReleaseID, PreviousFullReleaseID: previousFullReleaseID, BaselineArtifactID: baselineArtifactID, Phase: channel})
+	return s.releasePlatformArtifact(id, req, principal, guard)
 }
 
 func validateProducerPolicyPublication(a model.PlatformArtifact, channel string) error {

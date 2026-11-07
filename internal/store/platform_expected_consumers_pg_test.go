@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -9,7 +10,10 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-func TestPostgresPlatformExpectedConsumerSetCreateGetAndList(t *testing.T) {
+// This SQL mock checks row persistence/scanning. Public registration's complete
+// signed-closure and verified-pin gate is covered by the real PostgreSQL tests
+// in platform_input_consumer_admission_test.go.
+func TestPostgresPlatformExpectedConsumerSetInsertGetAndList(t *testing.T) {
 	t.Parallel()
 
 	db, mock, err := sqlmock.New()
@@ -28,9 +32,21 @@ func TestPostgresPlatformExpectedConsumerSetCreateGetAndList(t *testing.T) {
 	mock.ExpectQuery(`(?s)INSERT INTO fugue_platform_expected_consumer_sets .*RETURNING`).
 		WillReturnRows(expectedConsumerSetRows(t, set))
 	mock.ExpectCommit()
-	created, err := s.CreatePlatformExpectedConsumerSet(set)
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := pgLockPromotionScope(ctx, tx, set.ScopeKey, false); err != nil {
+		t.Fatal(err)
+	}
+	created, err := pgInsertPlatformExpectedConsumerSet(ctx, tx, set)
 	if err != nil {
 		t.Fatalf("create postgres expected consumer set: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 	if created.ID != set.ID || len(created.Consumers) != 1 {
 		t.Fatalf("unexpected created expected consumer set: %+v", created)

@@ -49,12 +49,14 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				t.Skip("Postgres concurrency")
 			}
 			s := New(t.TempDir()+"/state.json", address)
-			configureTestPlatformArtifactSigning(s)
-			if err := s.Init(); err != nil {
-				t.Fatal(err)
-			}
 			if address != "" {
-				t.Cleanup(func() { s.db.Close() })
+				s = platformStatePostgresFixture(t)
+			}
+			configureTestPlatformArtifactSigning(s)
+			if address == "" {
+				if err := s.Init(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			scope := model.NewID("leased-admission")
 			now := time.Now().UTC()

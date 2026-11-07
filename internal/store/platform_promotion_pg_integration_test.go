@@ -21,12 +21,7 @@ func TestFullReleaseSetPostgresAtomicPromotion(t *testing.T) {
 	if !strings.Contains(address, "fugue_test") && !strings.Contains(address, "fugue-pgtest") {
 		t.Fatal("requires disposable test database")
 	}
-	s := New("", address)
-	configureTestPlatformArtifactSigning(s)
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	defer s.db.Close()
+	s := platformStatePostgresFixture(t)
 	waitBlocked := func(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)

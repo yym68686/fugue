@@ -2,9 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"fugue/internal/model"
 	"fugue/internal/platformconfig"
-	"fugue/internal/store"
 	"testing"
 	"time"
 )
@@ -25,20 +23,8 @@ func TestDynamicQualityRestoreRetainsHistoricalProofLifetime(t *testing.T) {
 	fact.PhysicalSelection = selection
 	fact.PhysicalEvidence = raw
 	snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: "intent-a", PolicyGeneration: "policy-a", DNSSelections: []platformconfig.DNSSelectionObservation{fact}}
-	state := store.New(t.TempDir() + "/state.json")
-	if err := state.Init(); err != nil {
-		t.Fatal(err)
-	}
-	digest, err := platformconfig.RuntimeSnapshotDigest(snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := state.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
-		t.Fatal(err)
-	}
 	job := dynamicQualityJob{NodeID: fact.NodeID, Key: fact.NodeID + "\x00" + fact.Hostname, EvidenceHostname: route.Hostname, Route: route}
-	s := &Server{store: state}
-	parent := model.PlatformArtifact{Metadata: map[string]string{"input_snapshot_digest": digest, "intent_generation": "intent-a", "policy_generation": "policy-a"}}
+	s, parent, _ := qualityRestoreInputFixture(t, snapshot)
 	s.restorePublishedQualityEvidenceAt(projection, []dynamicQualityJob{job}, parent, func() time.Time { return at.Add(time.Minute) })
 	entry := s.dynamicQuality.entries[job.Key]
 	if entry.Compiled.Selection == nil || !entry.Compiled.proofFreshUntil.Equal(at.Add(599*time.Second)) {

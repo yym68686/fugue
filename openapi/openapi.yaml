@@ -1,4 +1,18 @@
 openapi: 3.1.0
+x-fugue-compiler-input-history-admission:
+  semantics: >-
+    PostgreSQL history admission is deployed in two durable phases. Initial
+    capability deployment preserves original publication, reader, task and
+    consumer business authorization while full original readback and pins are
+    prepared. Complete dependency closure and pin admission requirements below
+    apply in the enforced phase, and always while input writes are fenced or
+    retirement has started. Explicit preparation and confirmation always perform
+    strict verification, including in capability phase. File storage always
+    verifies its original inputs. Missing or invalid persisted phase state fails
+    closed. Enforcement is one-way and survives restarts and schema reruns;
+    requests and environment flags cannot disable it. Capability deployment does
+    not authorize routing, fencing, deletion or retirement, and does not assert
+    that the complete retained inventory or rollback processes are ready.
 x-fugue-dns-availability:
   semantics: >-
     dns_availability is an independently fenced producer transition that changes
@@ -959,7 +973,13 @@ paths:
         projection for the required edge_group_id. Gray applies only to its
         signed cohort; a newer full supersedes an older gray lane. The selected
         release must have immutable expected topology for the group and verified
-        parent/child integrity and lineage. Missing, invalid or unprepared
+        parent/child integrity and lineage. Its complete signed compiler-input
+        dependency closure must, under enforced PostgreSQL history admission, be locally available with current durable
+        full-readback pins in PostgreSQL, or actual verified original inputs in
+        file storage. The selected publication and expected topology are
+        rechecked before returning; this read never restores cold inputs or
+        falls back to unrelated shadow or historical publications.
+        Missing, invalid, cold or unprepared
         releases return 503 so Edge Control retains its current serving artifact.
         This serving endpoint never reads mutable business tables or standalone
         route LKGs to synthesize configuration. Shadow releases never select
@@ -3592,7 +3612,7 @@ paths:
     get:
       operationId: getPlatformArtifactCompilerInput
       summary: Read Frozen Compiler Runtime Input
-      description: Platform administrators with artifact.read can retrieve the exact normalized runtime snapshot bound by a trusted artifact's input_snapshot_digest. Recomputes the digest and checks intent/policy generation binding. The optional dns_configuration view returns only frozen DNS inputs and omits bulky physical replay evidence; it retains original observation times and selection identities, reports its own projection digest, and never claims that projected bytes match the original input digest. Older artifacts without a retained snapshot return 404; missing or corrupt input never falls back to live business data.
+      description: Platform administrators with artifact.read can retrieve the exact normalized runtime snapshot bound by a trusted artifact's input_snapshot_digest. Verifies the complete signed dependency closure and current durable full-readback input pins in PostgreSQL, or actual canonical original input SHA and size in file storage, then rechecks the original artifact before disclosure. Historical artifacts remain readable under the same administrative authority without becoming active. Recomputes the digest and checks intent/policy generation binding. The optional dns_configuration view returns only frozen DNS inputs and omits bulky physical replay evidence; it retains original observation times and selection identities, reports its own projection digest, and never claims that projected bytes match the original input digest. Older artifacts without a retained snapshot return 404; cold or changed dependency proof returns 503, and missing or corrupt input never falls back to live business data or initiates archive restoration.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformArtifactCompilerInput
       security:
@@ -3631,6 +3651,12 @@ paths:
                     type: string
                   runtime_snapshot:
                     $ref: '#/components/schemas/PlatformRuntimeSnapshot'
+        '503':
+          description: Complete original input dependency proof is unavailable or changed; no runtime snapshot or projection is disclosed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         default:
           $ref: '#/components/responses/ErrorResponse'
   /v1/admin/artifacts/{artifact_id}/lineage:
@@ -3692,6 +3718,10 @@ paths:
       summary: Release Platform Artifact
       description: >-
         Platform administrators may use the normal artifact release policy.
+        Enforced PostgreSQL history admission requires the complete signed candidate and current
+        rollback-baseline dependency closures with current durable full-readback
+        input pins. Cold or changed dependencies reject without advancing the
+        lane; this endpoint does not restore them or enable input retirement.
         DNS artifacts containing per-value expiration and ReleaseSets containing them are restricted to shadow until DNS consumers support absolute value leases. Soft overrides cannot bypass this compatibility restriction.
       tags: [Admin]
       x-fugue-handler: handleReleasePlatformArtifact
@@ -3720,7 +3750,14 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/rollback:
     post:
-      description: Rollback targets containing leased DNS values remain restricted to shadow until DNS consumer expiration support is available.
+      description: >-
+        Enforced PostgreSQL history admission requires the complete signed exact rollback target and current
+        rollback-baseline dependency closures with current durable
+        full-readback input pins. Missing, cold or changed dependencies reject
+        without modifying the lane. The failed candidate is identity-bound but
+        its input bytes are not reactivated. This endpoint does not restore cold inputs
+        or enable input retirement. Rollback targets containing leased DNS values
+        remain restricted to shadow until DNS consumer expiration support is available.
       operationId: rollbackPlatformArtifact
       summary: Roll Back Platform Artifact
       tags: [Admin]
@@ -3752,6 +3789,12 @@ paths:
     post:
       operationId: verifyPlatformArtifactReleaseLKG
       summary: Verify Platform Artifact Release And Promote LKG
+      description: >-
+        Enforced PostgreSQL history admission requires the complete signed dependency closure of
+        the release, including its rollback generations. Input dependencies must
+        already have current durable full-readback pins; promotion does not fetch
+        or restore cold inputs. Missing, changed or unprepared dependencies reject
+        without modifying the release or LKG. This does not enable input retirement.
       tags: [Admin]
       x-fugue-handler: handleVerifyPlatformArtifactReleaseLKG
       security:
@@ -4263,6 +4306,11 @@ paths:
         This check does not change artifacts, serving configuration or local
         readiness. Independently provisioned non-Kubernetes component identities
         retain their existing authentication contract.
+        Enforced PostgreSQL history admission also requires the complete signed dependency closure
+        of the selected expectation and every reported desired, actual, candidate
+        and LKG generation to have current durable verified local input pins.
+        Missing, cold or changed dependencies return a conflict without advancing
+        the consumer cursor or audit chain. Heartbeats do not restore inputs.
       tags: [Admin]
       x-fugue-handler: handleTrustedPlatformConsumerHeartbeat
       security:
@@ -4313,6 +4361,10 @@ paths:
         exact shadow release; serving convergence never reads them. Candidate
         capability admission can use only the exact currently selected shadow.
         Existing clients keep their original heartbeat contract.
+        PostgreSQL acceptance additionally rechecks the complete signed input
+        closure and current durable verified local pins before committing the
+        shadow observation and audit event. Cold or changed dependencies refuse
+        the observation; this endpoint never restores inputs.
       tags: [Admin]
       x-fugue-handler: handlePlatformShadowConsumerHeartbeat
       security:
@@ -4401,7 +4453,7 @@ paths:
     get:
       operationId: getPlatformConsumerAssignment
       summary: Get the expected ReleaseSet assignments for a trusted consumer
-      description: Returns the latest expected set revision for each authorized artifact kind in each active ReleaseSet channel. Assignments are bound to the signed child artifact and the active release fencing token. Shadow assignments authorize validation only and must not replace serving state. Superseded releases and unrelated topology are excluded. Serving-only selection honors the signed publication role; cell-dns requires its prepared DNS membership and selected parent/fence without requiring a route child.
+      description: Returns the latest expected set revision for each authorized artifact kind in each active ReleaseSet channel. Assignments are bound to the signed child artifact and the active release fencing token. Shadow assignments authorize validation only and must not replace serving state. Superseded releases and unrelated topology are excluded. Serving-only selection honors the signed publication role; cell-dns requires its prepared DNS membership and selected parent/fence without requiring a route child. After selection, each returned publication requires its complete signed input dependency closure and current durable full-readback pins in PostgreSQL, or verified original input content in file mode. Cold, missing or changed dependencies return 503 without restoration or fallback. Unselected shadow publications do not add a serving-only dependency. Assignment authority is independently rechecked before disclosure.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerAssignment
       security:
@@ -4430,7 +4482,7 @@ paths:
     get:
       operationId: getPlatformConsumerArtifact
       summary: Pull an artifact assigned to a trusted consumer
-      description: Returns a validated signed child artifact or its exact signed ReleaseSet parent only when the verified component identity is currently present in that child assignment. Parent reads require the same expected_consumer_set_id and retain the child assignment and release envelope; arbitrary parents and nonselected canary members are denied. The endpoint is read-only and never records runtime facts.
+      description: Returns a validated signed child artifact or its exact signed ReleaseSet parent only when the verified component identity is currently present in that child assignment. Parent reads require the same expected_consumer_set_id and retain the child assignment and release envelope; arbitrary parents and nonselected canary members are denied. The selected publication requires its complete signed input dependency closure and current durable full-readback pins in PostgreSQL, or verified original input content in file mode; cold, missing or changed dependencies return 503 without restoration or fallback. Assignment authority is independently rechecked before disclosure. The endpoint is read-only and never records runtime facts.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerArtifact
       security:
@@ -4468,7 +4520,7 @@ paths:
     get:
       operationId: getPlatformConsumerDNSRouteSources
       summary: Read approved routing publications for an assigned DNS artifact
-      description: Read-only private observation for a trusted cell DNS identity in the exact current artifact and expected consumer set. Only immutable producer policies approved by dns_route_sources can supply route/TLS publications. Each scope includes its current gray/full lane cursors and approved selected publications, plus the unexpired verified full LKG when available. Failed or rolled-back publications and arbitrary history are excluded. The API authenticates all artifacts and producer activation bindings in one coherent source snapshot, then rechecks the DNS assignment before disclosure. The selection digest excludes observation time and changes when any returned authority binding changes. Readers must re-read and compare it after probing; neither this response nor a matching digest grants readiness, renews a proof deadline or selects public transport. Response encoding is bounded to 16 MiB. A source update cannot widen the signed DNS record, owner, candidate or failure-domain policy.
+      description: Read-only private observation for a trusted cell DNS identity in the exact current artifact and expected consumer set. Only immutable producer policies approved by dns_route_sources can supply route/TLS publications. Each scope includes its current gray/full lane cursors and approved selected publications, plus the unexpired verified full LKG when available. Failed or rolled-back publications and arbitrary history are excluded. The API authenticates all artifacts and producer activation bindings in one coherent source snapshot. The exact DNS owner and every returned source publication require complete signed input closures and current verified local evidence. The source selection digest and original DNS ownership are rechecked after admission. Cold, missing or changed dependencies fail closed without restoration, fallback or runtime facts. The selection digest excludes observation time and changes when any returned authority binding changes. Readers must re-read and compare it after probing; neither this response nor a matching digest grants readiness, renews a proof deadline or selects public transport. Response encoding is bounded to 16 MiB. A source update cannot widen the signed DNS record, owner, candidate or failure-domain policy.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerDNSRouteSources
       security:
@@ -4499,7 +4551,7 @@ paths:
     get:
       operationId: getPlatformConsumerRetainedDNSRouteSources
       summary: Read approved routing sources for the current positive DNS LKG
-      description: Read-only private observation for the exact signed current positive LKG of a DNS authority, independently of a pending successor assignment. Requires the verified scoped DNS identity to remain in the latest declared expected set of the full release that verified the LKG. The full release may be active or superseded, but never rolled back or unverified. The LKG signature, expiry, parent, child and original source policy are validated, and ownership and the current LKG are rechecked after observing sources. No arbitrary historical artifact, successor source policy, configuration mutation, readiness grant, public transport selection or checkpoint renewal is permitted. Readers must independently verify the returned LKG and recheck both its identity and source selection digest after probing. Existing checkpoint and proof deadlines remain in force and source observations are additionally bounded by the returned LKG expiry. Response encoding is bounded to 16 MiB.
+      description: Read-only private observation for the exact signed current positive LKG of a DNS authority, independently of a pending successor assignment. Requires the verified scoped DNS identity to remain in the latest declared expected set of the full release that verified the LKG. The full release may be active or superseded, but never rolled back or unverified. The positive LKG selector, its exact DNS owner and every returned source publication require complete signed input closures and current verified local evidence. The original LKG ownership and source selection digest are rechecked after admission independently of successor lanes. Cold, missing or changed dependencies fail closed without restoration or checkpoint renewal. The LKG signature, expiry, parent, child and original source policy are validated, and ownership and the current LKG are rechecked after observing sources. No arbitrary historical artifact, successor source policy, configuration mutation, readiness grant, public transport selection or checkpoint renewal is permitted. Readers must independently verify the returned LKG and recheck both its identity and source selection digest after probing. Existing checkpoint and proof deadlines remain in force and source observations are additionally bounded by the returned LKG expiry. Response encoding is bounded to 16 MiB.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerRetainedDNSRouteSources
       security:
@@ -4530,7 +4582,7 @@ paths:
     get:
       operationId: getPlatformConsumerTLSCertificate
       summary: Read a custom-domain certificate authorized by a serving cell publication
-      description: A verified Edge Worker identity can read one existing certificate only when its exact current gray or full cell assignment includes the signed TLS reference and locally owned route for that hostname. The expected set, authority, route/TLS parent, publication fence, tenant and app ownership are rechecked before disclosure. Shadow, foreign cells, stale assignments, unverified domains and missing certificates are denied. This read never issues certificates, modifies domain status, reports readiness or changes LKG. Responses are private and no-store.
+      description: A verified Edge Worker identity can read one existing certificate only when its exact current gray or full cell assignment includes the signed TLS reference and locally owned route for that hostname. The exact serving publication requires its complete signed input closure and current verified local evidence before credentials can be disclosed. Cold, missing or changed dependencies return 503 without restoration, fallback or credential authority delegation. The expected set, authority, route/TLS parent, publication fence, tenant and app ownership are independently rechecked before disclosure. Shadow, foreign cells, stale assignments, unverified domains and missing certificates are denied. This read never issues certificates, modifies domain status, reports readiness or changes LKG. Responses are private and no-store.
       tags: [Edge]
       x-fugue-handler: handleGetPlatformConsumerTLSCertificate
       security:
@@ -6471,6 +6523,12 @@ paths:
         intent identity/digest are verified. Application-owned and non-root
         routes are excluded; weighted targets are never flattened to one origin.
         Group modes, TTL, disabled state and route policy retain artifact semantics.
+        The exact selected LKG requires its complete signed input dependency closure
+        and current durable full-readback pins in PostgreSQL, or verified original
+        input content in file mode, including when a node reselects configuration
+        after claiming a task. This read never restores cold inputs or falls back
+        to disposable history. LKG selection, including initial absence, is checked
+        again with the input proof before disclosure.
         Missing initial LKG returns topology without platform routes. Invalid or
         changing verified configuration returns 503 without a signed bundle.
         Environment routes and mutable business policies are not fallback sources.
@@ -12228,6 +12286,22 @@ paths:
     post:
       operationId: createNodeUpdateTask
       summary: Create Node Update Task
+      description: |
+        Under enforced PostgreSQL history admission, a task declaring compiler-input dependencies, including structured
+        *_json arguments, requires a complete signed dependency closure before
+        the pending retention root is atomically inserted under the input
+        admission barrier. Configuration-fetching or reader-restarting tasks also
+        bind the current global verified ReleaseSet selector. Missing,
+        changed, or over-budget dependency metadata returns 409 without
+        creating a task. In PostgreSQL, cold inputs may be queued and remain
+        protected; claim still requires current durable full-readback pins
+        after bounded preparation. File storage verifies actual original
+        input size and canonical full SHA with the complete signed closure
+        and current LKG in the same locked state before creating or claiming
+        a dependent task; missing or corrupt originals return 409.
+        Creation never restores archives or claims the task.
+        Maintenance tasks with no such dependencies remain independent of
+        compiler-input archive admission.
       tags: [Node Updater]
       x-fugue-handler: handleCreateNodeUpdateTask
       security:
@@ -12245,6 +12319,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NodeUpdateTaskResponse"
+        '409':
+          description: Task dependency metadata unavailable, changed, or over budget, or required file-backed original input missing or corrupt; no task created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/node-updater/enroll:
@@ -12556,6 +12636,20 @@ paths:
     post:
       operationId: nodeUpdaterClaimTask
       summary: Node Updater Claim Task
+      description: >-
+        Claims an authorized pending or running task only after the server has
+        verified its complete declared artifact and input dependency closure.
+        In PostgreSQL, referenced compiler inputs must have an independent local
+        representation protected by durable verified pins produced by complete
+        local readback. File storage instead verifies actual original size and
+        canonical full SHA, complete signatures and the current LKG together
+        with the task under one state lock before changing its status.
+        A missing, cold, changed, unsigned, or unprepared dependency returns a
+        conflict without changing task state; restore and verify dependencies
+        before claiming again. This endpoint does not restore cold archives or
+        weaken existing task authorization, expiry, or execution checks.
+        Unrelated maintenance tasks require no archive infrastructure in either
+        backend.
       tags: [Node Updater]
       x-fugue-handler: handleNodeUpdaterClaimTask
       security:
@@ -12569,6 +12663,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NodeUpdateTaskResponse"
+        '409':
+          description: Task or its complete local dependency admission is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/node-updater/tasks/{id}/log:

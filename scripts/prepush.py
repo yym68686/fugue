@@ -474,7 +474,27 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if any(name in {"scripts/install_compiler_input_zero_temp.py", "scripts/test_install_compiler_input_zero_temp.py", "internal/schemamigrate/compiler_input_zero_temp.sql", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/compiler-input-safety/") for name in paths):
+        non_go_tasks["input-zero-temp-tests"] = ["python3", "-m", "unittest", "scripts.test_install_compiler_input_zero_temp"]
     readonly_python = os.environ.get("INPUT_READONLY_PYTHON", sys.executable)
+    if any(name.startswith("internal/inputhistory/") or name in {
+            "scripts/compiler_input_history_compatibility.py", "scripts/test_compiler_input_history_compatibility.py",
+            "scripts/compiler_input_storage.py", "scripts/test_compiler_input_storage.py",
+            "scripts/compiler_input_archive.py", "scripts/test_compiler_input_archive.py",
+            "deploy/releases/components.json", ".github/workflows/ci.yml"} for name in paths):
+        non_go_tasks["input-history-compatibility-tests"] = [sys.executable, "-m", "unittest",
+            "scripts.test_compiler_input_history_compatibility", "scripts.test_compiler_input_storage", "scripts.test_compiler_input_archive"]
+    if any(name in {"scripts/compiler_input_stage1.py", "scripts/test_compiler_input_stage1.py",
+                    "scripts/compiler_input_hot_index.py", "scripts/test_compiler_input_hot_index.py",
+                    "scripts/compiler_input_readonly.py", "scripts/test_compiler_input_readonly.py",
+                    "scripts/compiler_input_copy.py", "scripts/test_compiler_input_copy.py",
+                    "scripts/compiler_input_storage.py", "scripts/compiler_input_archive.py",
+                    "scripts/compiler_input_history_compatibility.py", "scripts/test_compiler_input_history_compatibility.py",
+                    "scripts/compiler_input_copy_resume.py", "scripts/requirements-input-readonly.txt",
+                    ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/compiler-input-stage1/") for name in paths):
+        non_go_tasks["input-stage1-tests"] = [readonly_python, "-m", "unittest", "scripts.test_compiler_input_stage1", "scripts.test_compiler_input_hot_index", "scripts.test_compiler_input_readonly"]
+    if any(name in {"scripts/compiler_input_prepare.py", "scripts/compiler_input_consumer_prepare.py", "scripts/test_compiler_input_consumer_prepare.py", "scripts/compiler_input_task_prepare.py", "scripts/test_compiler_input_task_prepare.py", "scripts/compiler_input_publication_prepare.py", "scripts/test_compiler_input_publication_prepare.py", "scripts/compiler_input_hot_index.py", "scripts/test_compiler_input_hot_index.py", "scripts/compiler_input_copy.py", "scripts/test_compiler_input_copy.py", "scripts/compiler_input_copy_resume.py", "scripts/compiler_input_readonly.py", "scripts/test_compiler_input_readonly.py", "scripts/compiler_input_archive.py", "scripts/compiler_input_storage.py", "scripts/compiler_input_history_compatibility.py", "scripts/test_compiler_input_history_compatibility.py", "scripts/requirements-input-readonly.txt", ".github/workflows/ci.yml"} or name.startswith(("deploy/environments/production/compiler-input-consumer-prepare/", "deploy/environments/production/compiler-input-task-prepare/", "deploy/environments/production/compiler-input-publication-prepare/")) for name in paths):
+        non_go_tasks["input-task-prepare-tests"] = [readonly_python, "-m", "unittest", "scripts.test_compiler_input_task_prepare", "scripts.test_compiler_input_publication_prepare", "scripts.test_compiler_input_consumer_prepare"]
     if any(name in {"scripts/compiler_input_hot_index.py", "scripts/test_compiler_input_hot_index.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/compiler-input-hot-index/") for name in paths):
         non_go_tasks["input-hot-index-tests"] = [readonly_python, "-m", "unittest", "scripts.test_compiler_input_hot_index"]
     if any(name in {"scripts/compiler_input_readonly.py", "scripts/test_compiler_input_readonly.py", "scripts/requirements-input-readonly.txt"} or name.startswith("deploy/environments/production/compiler-input-readonly/") for name in paths):

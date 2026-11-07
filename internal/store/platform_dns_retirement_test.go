@@ -78,6 +78,7 @@ func TestDNSRetirementTransactionPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	prepareCompilerInputTestSchema(t, target)
 	tx, err = database.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)

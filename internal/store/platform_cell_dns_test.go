@@ -2,9 +2,7 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -14,7 +12,6 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
-	"fugue/internal/schemamigrate"
 	"fugue/internal/testfixture/celldns"
 )
 
@@ -104,51 +101,14 @@ func TestCellDNSPublicationWithSourceAuthorization(t *testing.T) {
 func testCellDNSPublication(t *testing.T, address string, transition bool, sources ...bool) {
 	s := New(t.TempDir()+"/state.json", address)
 	if address != "" {
-		base, err := sql.Open("pgx", address)
-		if err != nil {
-			t.Fatal(err)
-		}
-		schema := fmt.Sprintf("cell_dns_%d", time.Now().UnixNano())
-		if _, err := base.Exec("CREATE SCHEMA " + schema); err != nil {
-			base.Close()
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if _, err := base.Exec("DROP SCHEMA " + schema + " CASCADE"); err != nil {
-				t.Error(err)
-			}
-			base.Close()
-		})
-		address = postgresIntegrationURLWithSearchPath(t, address, schema)
-		db, err := sql.Open("pgx", address)
-		if err != nil {
-			t.Fatal(err)
-		}
-		s = &Store{db: db, databaseURL: address}
-		ctx := context.Background()
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.applyPostgresSchemaTx(ctx, tx); err != nil {
-			tx.Rollback()
-			t.Fatal(err)
-		}
-		if err := tx.Commit(); err != nil {
-			t.Fatal(err)
-		}
-		for _, migrate := range []func(context.Context, string) error{schemamigrate.MigratePlatformState, schemamigrate.MigratePlatformShadowConsumers, schemamigrate.MigrateImageCacheManifestGraph, schemamigrate.MigrateEdgeInstanceFencing, schemamigrate.MigrateSourceUploadSessions} {
-			if err := migrate(ctx, address); err != nil {
-				t.Fatal(err)
-			}
-		}
+		db, isolated, _ := hotInventoryTestDatabase(t)
+		s = &Store{db: db, databaseURL: isolated}
 	}
 	s.ConfigurePlatformArtifactSigning(celldns.Keys())
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	if s.db != nil {
-		t.Cleanup(func() { s.db.Close() })
+	if s.db == nil {
+		if err := s.Init(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	req := celldns.Request(t)
 	if transition {
@@ -156,10 +116,28 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	}
 	withSources := len(sources) > 0 && sources[0]
 	retained := len(sources) > 1 && sources[1]
+	var policies []model.PlatformArtifact
+	var releases []model.PlatformArtifactRelease
+	if s.db != nil {
+		var inputs []platformconfig.CompileResult
+		var originals []model.PlatformArtifact
+		req, policies, releases, inputs, originals = celldns.CompletePublication(t, transition, withSources)
+		for _, c := range inputs {
+			prepareCompiledInputPin(t, s, c)
+			if _, _, err := s.EnsurePlatformArtifact(c.PolicyArtifact); err != nil {
+				t.Fatal("persist exact scoped publication policy", err)
+			}
+		}
+		for _, a := range originals {
+			if _, _, err := s.EnsurePlatformArtifact(a); err != nil {
+				t.Fatal("persist exact producer source", err)
+			}
+		}
+	}
 	if withSources {
-		var policies []model.PlatformArtifact
-		var releases []model.PlatformArtifactRelease
-		req, policies, releases = celldns.SourceAuthorizedRequest(t, transition)
+		if s.db == nil {
+			req, policies, releases = celldns.SourceAuthorizedRequest(t, transition)
+		}
 		for _, policy := range policies {
 			if _, _, err := s.EnsurePlatformArtifact(policy); err != nil {
 				t.Fatal(err)
@@ -177,6 +155,7 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	if err != nil {
 		t.Fatal(err)
 	}
+	prepareCompiledInputPin(t, s, compiled)
 	if err := s.ValidateDNSPublicationReferences(compiled.DNSArtifact); err != nil {
 		t.Fatal("coherent compilation reference snapshot rejected", err)
 	}
@@ -513,13 +492,13 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	}
 	if withSources && retained {
 		if s.db != nil && len(sources) == 2 {
-			testDNSPublicationBudgetBeyondPointQueryTimeout(t, s, parent)
+			testDNSPublicationAdmissionRefusesLongContention(t, s, parent)
 		}
 		testDNSPositiveRecoveryAfterSourceRevocation(t, s, parent)
 	}
 }
 
-func testDNSPublicationBudgetBeyondPointQueryTimeout(t *testing.T, s *Store, parent model.PlatformArtifact) {
+func testDNSPublicationAdmissionRefusesLongContention(t *testing.T, s *Store, parent model.PlatformArtifact) {
 	t.Helper()
 	before, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
 	if err != nil || before == nil {
@@ -549,27 +528,31 @@ func testDNSPublicationBudgetBeyondPointQueryTimeout(t *testing.T, s *Store, par
 		_, _, _, _, err := s.ReleasePlatformArtifact(successor.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "bounded-publication-delay"}, testPlatformPrincipal())
 		done <- err
 	}()
-	// A transaction delayed beyond the point-query budget must still perform
-	// all publication checks and commit within its independent bounded budget.
-	timer := time.NewTimer(11 * time.Second)
-	defer timer.Stop()
-	<-timer.C
+	// Input admission adds a strict 250ms lock bound. A queued publication
+	// must refuse without changing its lane; a later explicit request prepares
+	// a new proof instead of continuing the old transaction or retrying itself.
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("publication bypassed the held scope")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("publication exceeded bounded admission lock wait")
+	}
+	if _, _, found, err := s.GetActivePlatformArtifact(successor.ArtifactKind, successor.ScopeKey, "shadow"); err != nil || found {
+		t.Fatal("refused publication changed lane", err)
+	}
 	if err := blocker.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal("valid publication exhausted the point-query budget", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("publication did not complete after contention cleared")
+	if _, _, _, _, err := s.ReleasePlatformArtifact(successor.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "bounded-publication-delay"}, testPlatformPrincipal()); err != nil {
+		t.Fatal("fresh publication failed after contention cleared", err)
 	}
 	after, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
 	if err != nil || after == nil || after.ID != before.ID || after.VerifiedByReleaseID != before.VerifiedByReleaseID || !after.ExpiresAt.Equal(before.ExpiresAt) {
 		t.Fatal("publication wait renewed or replaced verified LKG", err)
 	}
-	t.Logf("publication completed after a bounded delay exceeding the point-query timeout: %s", time.Since(started))
+	t.Logf("bounded refusal and fresh publication completed in %s", time.Since(started))
 }
 
 // Source consumer state does not authorize a DNS routing reference. Exercise

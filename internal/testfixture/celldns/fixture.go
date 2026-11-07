@@ -32,6 +32,10 @@ func Sign(t testing.TB, a model.PlatformArtifact, id string, sequence int64) mod
 }
 
 func Request(t testing.TB) platformconfig.CompileRequest {
+	return requestWithInputs(t, nil)
+}
+
+func requestWithInputs(t testing.TB, inputs *[]platformconfig.CompileResult) platformconfig.CompileRequest {
 	t.Helper()
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	probe := &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 10, ProbeTimeoutSeconds: 2, FactFreshnessSeconds: 60, MaxConcurrency: 4, MaxProbes: 1024}
@@ -54,6 +58,9 @@ func Request(t testing.TB) platformconfig.CompileRequest {
 		compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: policy, CreatedAt: now})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if inputs != nil {
+			*inputs = append(*inputs, compiled)
 		}
 		route := Sign(t, compiled.RouteArtifact, "route-"+suffix, 1)
 		tls := Sign(t, compiled.TLSArtifact, "tls-"+suffix, 1)

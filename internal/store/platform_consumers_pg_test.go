@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -12,6 +13,28 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+// These SQL mocks exercise the original cursor/audit transaction, not the
+// complete signed-closure gate. Public admission is covered with real isolated
+// PostgreSQL in platform_input_consumer_admission_test.go.
+func consumerHeartbeatBusinessTransaction(t *testing.T, s *Store, claims platformcontrol.PlatformComponentIdentityClaims, expectedID string, heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy, audit *bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
+	defer tx.Rollback()
+	rollback, err := pgLockConsumerHeartbeatScope(ctx, tx, claims, heartbeat)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
+	out, err := s.pgAcceptTrustedPlatformConsumerHeartbeatInTransaction(ctx, tx, claims, expectedID, heartbeat, at, policy, audit, rollback)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
+	return out, tx.Commit()
+}
 
 func TestPostgresPlatformConsumerHeartbeatPersistsShadowEnvelope(t *testing.T) {
 	t.Parallel()
@@ -147,8 +170,8 @@ func testPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t *testin
 		WillReturnRows(platformConsumerRows(t, verified))
 	mock.ExpectCommit()
 
-	created, err := s.AcceptTrustedPlatformConsumerHeartbeat(
-		claims, set.ID, heartbeat, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
+	created, err := consumerHeartbeatBusinessTransaction(t, s,
+		claims, set.ID, heartbeat, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}, nil,
 	)
 	if err != nil {
 		t.Fatalf("accept postgres trusted heartbeat: %v", err)
@@ -209,13 +232,14 @@ func TestPostgresAcceptTrustedPlatformConsumerHeartbeatWithAuditCommitsAtomicall
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	created, err := s.AcceptTrustedPlatformConsumerHeartbeatWithAudit(
+	audit := bundleauth.NewKeyring("audit-key", "heartbeat-audit:key", "", "", nil)
+	created, err := consumerHeartbeatBusinessTransaction(t, s,
 		claims,
 		set.ID,
 		heartbeat,
 		now,
 		platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
-		bundleauth.NewKeyring("audit-key", "heartbeat-audit:key", "", "", nil),
+		&audit,
 	)
 	if err != nil {
 		t.Fatalf("accept postgres audited trusted heartbeat: %v", err)
@@ -261,8 +285,8 @@ func TestPostgresTrustedHeartbeatRejectsConcurrentReplayAtUpsert(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(platformConsumerColumns()))
 	mock.ExpectRollback()
 
-	_, err = s.AcceptTrustedPlatformConsumerHeartbeat(
-		claims, set.ID, heartbeat, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
+	_, err = consumerHeartbeatBusinessTransaction(t, s,
+		claims, set.ID, heartbeat, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}, nil,
 	)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("concurrent replay must lose guarded upsert, got %v", err)
@@ -306,8 +330,8 @@ func TestPostgresTrustedHeartbeatRejectsReplayBeforeWrite(t *testing.T) {
 		WillReturnRows(platformConsumerRows(t, existing))
 	mock.ExpectRollback()
 
-	_, err = s.AcceptTrustedPlatformConsumerHeartbeat(
-		claims, set.ID, heartbeat, now.Add(time.Second), platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
+	_, err = consumerHeartbeatBusinessTransaction(t, s,
+		claims, set.ID, heartbeat, now.Add(time.Second), platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}, nil,
 	)
 	if !errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatReplay) {
 		t.Fatalf("stored replay must be rejected before write, got %v", err)

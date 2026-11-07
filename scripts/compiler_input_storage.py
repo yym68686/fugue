@@ -167,13 +167,18 @@ def free_bytes(database):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--operation', help='exact reviewed operation declaration from main')
-    parser.add_argument('--mode', choices=['check-readers', 'check-archive-readers', 'check-api-candidate', 'inspect', 'migrate', 'rollback', 'collect'], default='check-readers')
+    parser.add_argument('--mode', choices=['check-readers', 'check-archive-readers', 'check-history-compatibility', 'check-api-candidate', 'inspect', 'migrate', 'rollback', 'collect'], default='check-readers')
     parser.add_argument('--candidate-revision', default='')
     parser.add_argument('--digest', default='')
     parser.add_argument('--expected-format', default='')
     parser.add_argument('--max-input-bytes', type=int, default=128 << 20)
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
+    # Reject before an operation can replace the requested diagnostic mode or
+    # even read an operation file. A read-only invocation must never dispatch a
+    # mutation because --operation normally supplies its own mode.
+    if args.mode == 'check-history-compatibility' and (args.operation or args.apply):
+        raise ValueError('history compatibility is read-only and does not accept an operation or apply')
     expected_revision = None
     if args.operation:
         value = json.loads(Path(args.operation).read_text())
@@ -183,7 +188,7 @@ def main():
         args.mode, args.digest, args.expected_format = value['mode'], value['digest'], value['expectedFormat']
         args.max_input_bytes, args.apply = value['maxInputBytes'], value['apply']
         expected_revision = value['expectedExecutorRevision']
-    read_modes = ('check-readers', 'check-archive-readers', 'check-api-candidate')
+    read_modes = ('check-readers', 'check-archive-readers', 'check-history-compatibility', 'check-api-candidate')
     if not 0 < args.max_input_bytes <= 128 << 20 or args.mode not in (*read_modes, 'collect') and not re.fullmatch(r'sha256:[0-9a-f]{64}', args.digest):
         raise ValueError('invalid maintenance input bound or identity')
     if args.mode == 'check-api-candidate':
@@ -198,6 +203,12 @@ def main():
         if args.apply:
             raise ValueError('read-only operation cannot apply')
     registry = json.loads(Path('deploy/releases/components.json').read_text())
+    if args.mode == 'check-history-compatibility':
+        if args.operation:
+            raise ValueError('history compatibility is read-only and does not accept an operation')
+        from scripts.compiler_input_history_compatibility import check_history_compatibility
+        print(json.dumps(check_history_compatibility(registry)))
+        return
     current = readers(registry, archive_required=args.mode == 'check-archive-readers')
     if args.mode == 'check-readers':
         print(json.dumps({'compatible_readers_and_rollback': current}))

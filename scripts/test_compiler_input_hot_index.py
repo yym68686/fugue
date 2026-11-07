@@ -265,6 +265,23 @@ class HotIndexTest(unittest.TestCase):
             else:
                 self.assertFalse(state['created']); self.assertFalse(state['deleted']); self.assertIsNone(state['terminal'])
 
+    def test_external_cumulative_stop_aborts_and_cleans_before_next_step(self):
+        c = declaration()
+        calls = []
+        def watch(uid=''):
+            calls.append(uid)
+            if uid:
+                raise h.r.Refusal('cumulative stage budget exceeded')
+        with tempfile.TemporaryDirectory() as directory, simulated_executor(c) as state:
+            path = Path(directory)/'result.json'
+            with self.assertRaisesRegex(ValueError, 'cumulative stage budget'):
+                h.execute(c, path, True, cumulative_watch=watch)
+            report = json.loads(path.read_text())
+            self.assertTrue(report['cleanup_confirmed'])
+            self.assertTrue(report['terminal_receipt']['confirmed'])
+            self.assertFalse(state['released'])
+            self.assertEqual(calls, ['', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'])
+
     def test_backing_reserve_refuses_before_credentials_or_any_resources(self):
         c = declaration()
         with tempfile.TemporaryDirectory() as directory, simulated_executor(c, 'backing-reserve') as state, \
@@ -323,6 +340,30 @@ class HotIndexTest(unittest.TestCase):
             self.assertFalse(report['cleanup_confirmed'] and report.get('terminal_receipt', {}).get('confirmed') is True)
             if failure == 'cleanup-unavailable':
                 self.assertIsNone(state['terminal'])
+
+    def test_evidence_limit_preserves_last_bounded_file_and_terminal_receipt(self):
+        with tempfile.TemporaryDirectory() as directory, simulated_executor(declaration()) as state:
+            target = Path(directory)/'result.json'
+            def overflow_after_terminal():
+                terminal = json.loads(target.read_text())['execution']['terminal']
+                self.assertTrue(terminal['metadata_complete'])
+                return 'x'*(32 << 10)
+            with patch.object(h.impact, 'error_category', side_effect=lambda *args: overflow_after_terminal()):
+                with self.assertRaisesRegex(ValueError, 'evidence budget exceeded'):
+                    h.execute(declaration(), target, True, evidence_limit=16384)
+            self.assertLessEqual(target.stat().st_size, 16384)
+            self.assertTrue(state['deleted'])
+            self.assertEqual(state['terminal']['status'], 'completion-not-confirmed')
+            self.assertTrue(state['terminal']['cleanup_confirmed'])
+            self.assertTrue(state['terminal']['execution']['terminal']['metadata_complete'])
+
+    def test_invalid_evidence_limit_refuses_before_creating_output(self):
+        for limit in (True, 16383, -1):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory)/'result.json'
+                with self.assertRaisesRegex(ValueError, 'evidence budget invalid'):
+                    h.execute(declaration(), target, True, evidence_limit=limit)
+                self.assertFalse(target.exists())
 
     def test_terminal_receipt_is_immutable_and_read_back_exactly(self):
         c = declaration()

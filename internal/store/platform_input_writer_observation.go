@@ -7,7 +7,8 @@ import (
 )
 
 // Separate from the separated encoder's return counters: this covers the whole
-// chunked writer, including transaction/queue acquisition and commit errors.
+// PostgreSQL input writer, including policy-disabled JSONB writes, transaction/
+// queue acquisition and commit errors.
 // A nil return is an outcome, not an independent durable-commit receipt.
 var compilerInputWriterStats compilerInputWriterRecorder
 

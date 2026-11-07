@@ -12,6 +12,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformsafety"
+	"fugue/internal/store"
 )
 
 type retainedTrafficSource struct {
@@ -22,9 +23,36 @@ type retainedTrafficSource struct {
 	policy        platformconfig.PolicySnapshot
 	snapshot      platformconfig.RuntimeSnapshot
 	routes        map[string][]platformconfig.CompiledRoute
+	inputs        []model.PlatformArtifact
 }
 
 func (s *Server) readRetainedTrafficSource(ctx context.Context, scope string) (retainedTrafficSource, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	source, err := s.observeRetainedTrafficSource(ctx, scope)
+	if err != nil {
+		return retainedTrafficSource{}, err
+	}
+	reads := []store.PlatformInputReadSelection{{ArtifactID: source.parent.ID, ContentHash: source.parent.ContentHash,
+		ReleaseID: source.release.ID, LKGKind: source.lkg.ArtifactKind, LKGScope: source.lkg.ScopeKey, LKG: &source.lkg},
+		{ArtifactID: source.route.ID, ContentHash: source.route.ContentHash}}
+	for _, input := range source.inputs {
+		reads = append(reads, store.PlatformInputReadSelection{ArtifactID: input.ID, ContentHash: input.ContentHash})
+	}
+	if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
+		return retainedTrafficSource{}, fmt.Errorf("retained partition complete input proof unavailable: %w", err)
+	}
+	// Re-run the original full selection, convergence, lineage and input read.
+	// A still-signed old publication cannot borrow a successor's current LKG,
+	// and rereading never renews the original input observation timestamps.
+	current, err := s.observeRetainedTrafficSource(ctx, scope)
+	if err != nil || !reflect.DeepEqual(source, current) || ctx.Err() != nil {
+		return retainedTrafficSource{}, fmt.Errorf("retained partition source changed during read")
+	}
+	return source, nil
+}
+
+func (s *Server) observeRetainedTrafficSource(ctx context.Context, scope string) (retainedTrafficSource, error) {
 	var source retainedTrafficSource
 	parent, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, scope, "full")
 	if err != nil || !found || release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.VerifiedLKGGeneration != parent.Generation || !s.validateReleaseSetReferences(parent).Pass {
@@ -56,6 +84,7 @@ func (s *Server) readRetainedTrafficSource(ctx context.Context, scope string) (r
 		if err != nil || json.Unmarshal(raw, in.target) != nil {
 			return source, fmt.Errorf("retained partition source input invalid")
 		}
+		source.inputs = append(source.inputs, a)
 	}
 	if digest, _ := platformconfig.Digest(source.intent); digest != parent.Metadata["intent_digest"] {
 		return source, fmt.Errorf("retained partition intent lineage differs")

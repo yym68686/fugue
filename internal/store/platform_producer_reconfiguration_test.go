@@ -78,10 +78,30 @@ func newReconfigurationFixture(t *testing.T, address string) reconfigurationFixt
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
+	prepareCompilerInputTestSchema(t, s)
 	if s.db != nil {
 		t.Cleanup(func() { s.db.Close() })
 	}
 	compiled := celldns.Request(t)
+	var staticSource, projectionSource model.PlatformArtifact
+	if s.db != nil {
+		var inputs []platformconfig.CompileResult
+		compiled, _, _, inputs, _ = celldns.CompletePublication(t, false, false)
+		for _, input := range inputs {
+			prepareCompiledInputPin(t, s, input)
+			policy, _, err := s.EnsurePlatformArtifact(input.PolicyArtifact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if input.PolicyArtifact.Scope.Key == compiled.CellRoutePublications[0].Parent.ScopeKey {
+				staticSource, _, err = s.EnsurePlatformArtifact(input.IntentArtifact)
+				if err != nil {
+					t.Fatal(err)
+				}
+				projectionSource = policy
+			}
+		}
+	}
 	seedCellDNSRoutePublications(t, s, &compiled)
 	pub := compiled.CellRoutePublications[0]
 	full := celldns.Publication(pub)
@@ -105,6 +125,10 @@ func newReconfigurationFixture(t *testing.T, address string) reconfigurationFixt
 		t.Fatal(err)
 	}
 	p := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "producer-old", Mode: "shadow", PublicationRole: platformconfig.PublicationRoleCellRoutes, AuthorityCellID: "cell-a", InputSource: "business-static-intent", TargetScope: parent.ScopeKey, IntervalSeconds: 30, RefreshSeconds: 120, RequireApplicationDomains: true, RequireRouteDefaults: true, StaticIntentArtifactID: "static", StaticIntentDigest: "sha256:" + strings.Repeat("b", 64), DNSPolicyArtifactID: "projection", DNSPolicyDigest: "sha256:" + strings.Repeat("c", 64)}
+	if s.db != nil {
+		p.StaticIntentArtifactID, p.StaticIntentDigest = staticSource.ID, staticSource.ContentHash
+		p.DNSPolicyArtifactID, p.DNSPolicyDigest = projectionSource.ID, projectionSource.ContentHash
+	}
 	f := reconfigurationFixture{s: s, policy: p, lkg: lkg}
 	f.old = f.save(t, p)
 	_, previous, _, _, err := s.ReleasePlatformArtifact(f.old.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, testPlatformPrincipal())

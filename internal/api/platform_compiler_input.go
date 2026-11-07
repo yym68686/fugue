@@ -2,9 +2,11 @@ package api
 
 import (
 	"net/http"
+	"reflect"
 
 	"fugue/internal/httpx"
 	"fugue/internal/platformconfig"
+	"fugue/internal/store"
 )
 
 func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r *http.Request) {
@@ -33,6 +35,10 @@ func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r
 		httpx.WriteError(w, http.StatusNotFound, "artifact has no compiler runtime input")
 		return
 	}
+	if err := s.store.CheckPlatformInputRead(r.Context(), []store.PlatformInputReadSelection{{ArtifactID: a.ID, ContentHash: a.ContentHash}}); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "compiler input dependency proof unavailable")
+		return
+	}
 	snapshot, err := s.store.GetPlatformCompilerInput(digest)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -42,7 +48,6 @@ func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r
 		httpx.WriteError(w, http.StatusConflict, "compiler input integrity or lineage differs")
 		return
 	}
-	w.Header().Set("Cache-Control", "private, no-store")
 	response := map[string]any{"artifact_id": a.ID, "input_snapshot_digest": digest, "runtime_snapshot": snapshot}
 	if view == "dns_configuration" {
 		projected := dnsConfigurationInput(snapshot)
@@ -53,6 +58,12 @@ func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r
 		}
 		response["runtime_snapshot"], response["projection"], response["projection_digest"] = projected, view, projectedDigest
 	}
+	current, err := s.store.GetPlatformArtifact(a.ID)
+	if err != nil || !reflect.DeepEqual(a, current) || s.store.VerifyPlatformArtifactIntegrity(current) != nil || r.Context().Err() != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "compiler input artifact changed during read")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	httpx.WriteJSON(w, http.StatusOK, response)
 }
 

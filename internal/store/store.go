@@ -66,11 +66,12 @@ type Store struct {
 	backupRunObjectCleanup         map[string]time.Time
 	backupRunObjectCleanupAttempts map[string]time.Time
 
-	platformArtifactKeyringMu sync.RWMutex
-	platformArtifactKeyring   bundleauth.Keyring
-	sshIdentityKeyringMu      sync.RWMutex
-	sshIdentityKeyring        sshidentity.Keyring
-	sshIdentityKeyFile        string
+	platformArtifactKeyringMu       sync.RWMutex
+	platformArtifactKeyring         bundleauth.Keyring
+	platformArtifactKeyringRevision uint64
+	sshIdentityKeyringMu            sync.RWMutex
+	sshIdentityKeyring              sshidentity.Keyring
+	sshIdentityKeyFile              string
 }
 
 func (s *Store) ConfigurePlatformArtifactSigning(keyring bundleauth.Keyring) {
@@ -86,6 +87,7 @@ func (s *Store) ConfigurePlatformArtifactSigning(keyring bundleauth.Keyring) {
 		keyring.PreviousKeyID,
 		platformArtifactRevokedKeyIDs(keyring),
 	)
+	s.platformArtifactKeyringRevision++
 }
 
 func (s *Store) platformArtifactSigningKeyring() bundleauth.Keyring {

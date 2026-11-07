@@ -43,6 +43,10 @@ func (s *Server) handleGetPlatformConsumerTLSCertificate(w http.ResponseWriter, 
 		httpx.WriteError(w, http.StatusNotFound, "authorized certificate unavailable")
 		return
 	}
+	if err := s.checkConsumerInputReads(r.Context(), claims, []consumerArtifactLookup{lookup}, newConsumerArtifactReader(s.store.GetPlatformArtifact), false); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "serving input dependencies unavailable or changed")
+		return
+	}
 	// No cached assignment can disclose credentials after a serving authority
 	// or domain owner change observed during this request.
 	current, currentRef, err := s.servingTLSCertificateOwner(claims, r.PathValue("artifact_id"), setIDs[0], host)

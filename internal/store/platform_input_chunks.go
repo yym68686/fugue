@@ -359,9 +359,16 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(315609238744290)`); err != nil {
 		return err
 	}
+	return s.pgEnsureChunkedInputTx(ctx, tx, snapshot, digest)
+}
+
+// Both policy-selected writers hold the same exclusive barrier through full
+// verification and commit. This helper never starts a new budget or records a
+// second outer attempt when a fenced JSONB writer uses an independent format.
+func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot platformconfig.RuntimeSnapshot, digest string) error {
 	m, err := readInputManifest(ctx, tx, digest)
 	if err == nil {
-		archiveRouted, routeErr := s.compilerInputArchiveRouted(ctx, tx, m)
+		archiveRouted, routeErr := compilerInputArchiveRoute(ctx, tx, m)
 		if routeErr != nil {
 			return routeErr
 		}
@@ -370,12 +377,10 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 			if e != nil || actual != digest {
 				return ErrConflict
 			}
-			r, e := s.openArchiveInput(ctx, tx, m)
-			if e != nil {
-				return e
-			}
-			defer r.Close()
-			if e = verifyArchiveReader(r, m.Digest, m.Size); e != nil {
+			// Preparation owns remote restoration and durable pin admission.
+			// A normal writer must not GET cold history under the writer lock,
+			// or mask missing/corrupt canonical bytes with the caller's copy.
+			if _, e = verifyCompilerInputLocalRepresentation(ctx, tx, m, inputMaxBytes); e != nil {
 				return e
 			}
 			return tx.Commit()

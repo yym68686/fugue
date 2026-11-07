@@ -1,5 +1,6 @@
 import base64
 import copy
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -46,7 +47,101 @@ def metadata_declaration():
     return c
 
 
+@contextmanager
+def simulated_executor(c, fault=''):
+    pod = {'metadata': {'name': 'readonly-pod', 'uid': 'pod-uid', 'annotations': {'fugue.pro/source-commit': c['sourceCommit']},
+                       'ownerReferences': [{'kind': 'Job', 'controller': True, 'uid': 'job-uid'}]},
+           'spec': {'nodeName': c['node'], 'priority': -1000000, 'preemptionPolicy': 'Never'},
+           'status': {'phase': 'Failed', 'containerStatuses': [{'name': 'readonly', 'imageID': c['image'], 'restartCount': 0,
+               'state': {'terminated': {'reason': 'Error', 'exitCode': 1, 'signal': 0,
+                   'startedAt': '2026-01-01T00:00:00Z', 'finishedAt': '2026-01-01T00:00:01Z'}}}]}}
+    if fault == 'missing-terminal':
+        del pod['status']['containerStatuses'][0]['state']
+    state = {'deleted': [], 'created': [], 'node_calls': [], 'log_commands': []}
+    def kube(ns, *args):
+        if args[:2] in (('get', 'jobs'), ('get', 'events'), ('get', 'secret')):
+            return '{"items":[]}'
+        if args[:2] == ('get', 'pods'):
+            items = [pod] if not state['deleted'] else []
+            if state['deleted'] and fault == 'unrelated-pod':
+                other = copy.deepcopy(pod)
+                other['metadata']['ownerReferences'][0]['uid'] = 'not-ours'
+                items = [other]
+            return json.dumps({'items': items})
+        if args[0] == 'logs':
+            state['log_commands'].append(args)
+            if fault == 'logs-unavailable':
+                raise RuntimeError('synthetic unavailable log')
+            return 'x'*16385 if fault == 'logs-overflow' else json.dumps(failure())
+        raise AssertionError('unexpected command')
+    def get(ns, kind, name):
+        if kind == 'job':
+            return {'metadata': {'uid': 'job-uid'}}
+        value = copy.deepcopy(pod)
+        if fault == 'replaced-pod':
+            value['metadata']['uid'] = 'replacement'
+        return value
+    def create(item, dry=False):
+        state['created'].append(copy.deepcopy(item))
+        return {'metadata': {'uid': {'Job': 'job-uid', 'Secret': 'secret-uid', 'PriorityClass': 'priority-uid'}.get(item['kind'], 'receipt-uid')}}
+    def node(config, uid=''):
+        state['node_calls'].append(uid)
+        return {}
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(r.os.environ, GITHUB_ACTIONS='true', GITHUB_REF='refs/heads/main', GITHUB_SHA='d'*40))
+        for key, function in [('command', lambda *a: 'd'*40), ('node_gate', node),
+                ('primary_gate', lambda *a: ({}, {'status': {'containerStatuses': []}}, 10 << 30)),
+                ('serving_gate', lambda *a: ({}, {}, {})), ('sql_metadata', lambda *a: {}),
+                ('session', lambda *a: {'private-session': 'never-record-this'}), ('kube', kube), ('get', get), ('create', create),
+                ('cluster_get', lambda *a: {'metadata': {'uid': 'priority-uid'}, 'value': -1000000, 'preemptionPolicy': 'Never'}),
+                ('cluster_kube', lambda *a: '{"items":[]}'), ('api_write', lambda *a: {}),
+                ('delete_exact', lambda c, kind, name, uid: state['deleted'].append((kind, uid)))]:
+            stack.enter_context(patch.object(r, key, side_effect=function))
+        yield state
+
+
 class ReadonlyTest(unittest.TestCase):
+    def test_terminal_evidence_survives_log_failure_or_replaced_pod(self):
+        for fault in ('logs-unavailable', 'logs-overflow', 'replaced-pod'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp, simulated_executor(metadata_declaration(), fault) as state:
+                path = Path(tmp)/'result.json'
+                with self.assertRaises((ValueError, RuntimeError)):
+                    r.execute(metadata_declaration(), path, True, output_limit=16384)
+                report = json.loads(path.read_text())
+                self.assertEqual(report['status'], 'completion-not-confirmed')
+                self.assertTrue(report['execution']['terminal']['metadata_complete'])
+                self.assertTrue(report['cleanup_confirmed'])
+                self.assertEqual(state['deleted'], [('Job', 'job-uid'), ('PriorityClass', 'priority-uid')])
+                self.assertIn('--limit-bytes=16385', state['log_commands'][0])
+                self.assertNotIn('never-record-this', path.read_text())
+
+    def test_cumulative_stop_before_unsuspend_preserves_exact_cleanup(self):
+        calls = []
+        def watch(uid=''):
+            calls.append(uid)
+            if uid:
+                raise r.Refusal('cumulative stage stop')
+        with tempfile.TemporaryDirectory() as tmp, simulated_executor(metadata_declaration()) as state, patch.object(r, 'api_write') as write:
+            path = Path(tmp)/'result.json'
+            with self.assertRaisesRegex(ValueError, 'cumulative stage stop'):
+                r.execute(metadata_declaration(), path, True, cumulative_watch=watch)
+            write.assert_not_called()
+            self.assertEqual(calls, ['', 'job-uid'])
+            self.assertEqual(state['node_calls'], ['', 'job-uid'])
+            self.assertTrue(json.loads(path.read_text())['cleanup_confirmed'])
+
+    def test_missing_terminal_is_recorded_not_fabricated(self):
+        with tempfile.TemporaryDirectory() as tmp, simulated_executor(metadata_declaration(), 'missing-terminal'):
+            report = r.execute(metadata_declaration(), Path(tmp)/'result.json', True)
+            self.assertFalse(report['execution']['terminal']['metadata_complete'])
+            self.assertTrue(report['cleanup_confirmed'])
+
+    def test_unrelated_cleanup_pod_never_reported_as_cleared(self):
+        with tempfile.TemporaryDirectory() as tmp, simulated_executor(metadata_declaration(), 'unrelated-pod') as state:
+            report = r.execute(metadata_declaration(), Path(tmp)/'result.json', True)
+            self.assertFalse(report['cleanup_confirmed'])
+            self.assertEqual(state['deleted'], [('Job', 'job-uid')])
+
     def test_metadata_only_intent_cannot_expand_into_body_reads(self):
         c = metadata_declaration()
         self.assertEqual(r.validate(c), c)

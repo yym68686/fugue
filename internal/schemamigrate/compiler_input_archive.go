@@ -106,6 +106,7 @@ ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retire
 ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retirement_archive_policy_sha256 TEXT NOT NULL DEFAULT '' CHECK (retirement_archive_policy_sha256='' OR retirement_archive_policy_sha256 ~ '^[0-9a-f]{64}$');
 INSERT INTO fugue_platform_input_archive_control(singleton,epoch,writes_fenced,updated_at)
  VALUES(TRUE,0,FALSE,now()) ON CONFLICT(singleton) DO NOTHING;
+` + CompilerInputHistoryAdmissionSQL + `
 `
 
 func MigrateCompilerInputArchive(ctx context.Context, databaseURL string) error {
@@ -138,6 +139,7 @@ func MigrateCompilerInputArchive(ctx context.Context, databaseURL string) error 
 		{"fugue_platform_input_hot_chunks", "content_hash,ordinal,chunk_hash,data", "NULL::text,NULL::integer,NULL::text,NULL::bytea"},
 		{"fugue_platform_input_local_pins", "pin_key,token,content_hash,protected_content_hash,source_format,source_location,raw_bytes,chunk_size,chunk_count,source_created_at,source_epoch,state,created_at,verified_at,released_at", "NULL::text,NULL::bigint,NULL::text,NULL::text,NULL::text,NULL::text,NULL::bigint,NULL::integer,NULL::integer,NULL::timestamptz,NULL::bigint,NULL::text,NULL::timestamptz,NULL::timestamptz,NULL::timestamptz"},
 		{"fugue_platform_input_manifests", "storage_location", "NULL::text"},
+		{"fugue_platform_input_history_admission", "singleton,phase,plan_sha256,enforced_at", "NULL::boolean,NULL::text,NULL::text,NULL::timestamptz"},
 		{"fugue_platform_input_archives", "content_hash,archive_format,source_format,raw_bytes,segment_bytes,segment_count,object_prefix,backend_hash,state,source_epoch,verified_digest,fencing_token,created_at,verified_at,routed_at,updated_at", "NULL::text,NULL::text,NULL::text,NULL::bigint,NULL::integer,NULL::integer,NULL::text,NULL::text,NULL::text,NULL::bigint,NULL::text,NULL::bigint,NULL::timestamptz,NULL::timestamptz,NULL::timestamptz,NULL::timestamptz"},
 		{"fugue_platform_input_archive_segments", "content_hash,ordinal,object_key,raw_bytes,stored_bytes,segment_hash,stored_hash,object_etag,uploaded_at,verified_at", "NULL::text,NULL::integer,NULL::text,NULL::integer,NULL::integer,NULL::text,NULL::text,NULL::text,NULL::timestamptz,NULL::timestamptz"},
 		{"fugue_platform_input_archive_leases", "content_hash,owner,source_epoch,fencing_token,expires_at,updated_at", "NULL::text,NULL::text,NULL::bigint,NULL::bigint,NULL::timestamptz,NULL::timestamptz"},

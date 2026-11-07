@@ -2,13 +2,32 @@ import base64
 import copy
 import hashlib
 import json
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from scripts.compiler_input_archive import validate_operation, managed_reader, hot_reader, hot_restore_executor, credential_key, shared_reader_keys, execute_item
+from scripts.compiler_input_archive import validate_operation, managed_reader, hot_reader, hot_restore_executor, credential_key, shared_reader_keys, execute_item, route_protocol_gate
 
 
 class ArchiveOperationTest(unittest.TestCase):
+    @patch('scripts.compiler_input_archive.check_history_compatibility')
+    def test_new_cold_route_requires_all_current_and_rollback_writer_protocols(self, compatibility):
+        current = [{'component': 'control', 'revision': 'a'*40, 'rollback_revision': 'b'*40, 'image': 'image@sha256:'+'c'*64}]
+        proof = {'registered_releases': copy.deepcopy(current), 'retirement_ready': False}
+        compatibility.return_value = proof
+        self.assertIs(route_protocol_gate({}, current, 'archive-route'), proof)
+        compatibility.side_effect = ValueError('old writer protocol unavailable')
+        with self.assertRaisesRegex(ValueError, 'old writer'):
+            route_protocol_gate({}, current, 'archive-route-batch')
+        compatibility.side_effect = None
+        compatibility.return_value = {'registered_releases': [dict(current[0], rollback_revision='d'*40)]}
+        with self.assertRaisesRegex(ValueError, 'releases changed'):
+            route_protocol_gate({}, current, 'archive-route')
+        compatibility.reset_mock()
+        for mode in ('archive', 'archive-batch', 'archive-hot-copy', 'archive-hot-restore', 'archive-unroute'):
+            self.assertIsNone(route_protocol_gate({}, current, mode))
+        compatibility.assert_not_called()
+
     @patch('scripts.compiler_input_archive.time.monotonic', return_value=1)
     @patch('scripts.compiler_input_archive.free_bytes', return_value=1024 << 20)
     @patch('scripts.compiler_input_archive.command', return_value='receipt')
@@ -110,6 +129,15 @@ class ArchiveOperationTest(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError): validate_operation(invalid)
         del item['maxStoredBytes']
         with self.assertRaises(ValueError): validate_operation(item)
+
+    @patch('scripts.compiler_input_archive.command')
+    def test_hot_reader_supports_shared_writer_route_helper_without_skipping_hot_check(self, command):
+        reader = (Path(__file__).resolve().parent.parent / 'internal/store/platform_input_archive_reader.go').read_text()
+        chunks = (Path(__file__).resolve().parent.parent / 'internal/store/platform_input_chunks.go').read_text()
+        command.side_effect = [reader, chunks]
+        hot_reader('a'*40)
+        command.side_effect = [reader.replace('if m.Location == "hot" {', 'if m.Location == "legacy" {')]
+        with self.assertRaises(ValueError): hot_reader('a'*40)
 
     def test_hot_restore_requires_exact_digest_and_copy_wal_budget(self):
         item = self.fixture()

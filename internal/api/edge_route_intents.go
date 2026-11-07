@@ -54,7 +54,7 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusForbidden, "Control identity cannot read another authority")
 		return
 	}
-	if snapshot, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, newConsumerArtifactReader(s.store.GetPlatformArtifact)); err != nil {
+	if snapshot, found, err := s.edgeRouteIntentSnapshotForRead(r.Context(), group, claims.ScopeKey); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "traffic release recovery state is unavailable; retain the current serving bundle")
 		return
 	} else if found {

@@ -12,10 +12,31 @@ import (
 )
 
 func SourceAuthorizedRequest(t testing.TB, transition bool) (platformconfig.CompileRequest, []model.PlatformArtifact, []model.PlatformArtifactRelease) {
+	return sourceAuthorizedRequestInputs(t, transition, nil, nil)
+}
+
+// CompletePublication retains the actual normalized compile results and pinned
+// producer source artifacts used to build this synthetic graph. Database tests
+// can persist those dependencies rather than forge pins or drop signed edges.
+func CompletePublication(t testing.TB, transition, authorized bool) (req platformconfig.CompileRequest, policies []model.PlatformArtifact, releases []model.PlatformArtifactRelease, inputs []platformconfig.CompileResult, sources []model.PlatformArtifact) {
 	t.Helper()
-	req := Request(t)
+	if authorized {
+		req, policies, releases = sourceAuthorizedRequestInputs(t, transition, &inputs, &sources)
+	} else if transition {
+		req = transitionRequestInputs(t, false, nil, &inputs)
+	} else {
+		req = requestWithInputs(t, &inputs)
+	}
+	return
+}
+
+func sourceAuthorizedRequestInputs(t testing.TB, transition bool, inputs *[]platformconfig.CompileResult, sources *[]model.PlatformArtifact) (platformconfig.CompileRequest, []model.PlatformArtifact, []model.PlatformArtifactRelease) {
+	t.Helper()
+	var req platformconfig.CompileRequest
 	if transition {
-		req = TransitionRequest(t)
+		req = transitionRequestInputs(t, false, nil, inputs)
+	} else {
+		req = requestWithInputs(t, inputs)
 	}
 	var artifacts []model.PlatformArtifact
 	var releases []model.PlatformArtifactRelease
@@ -31,6 +52,25 @@ func SourceAuthorizedRequest(t testing.TB, transition bool) (platformconfig.Comp
 		} else {
 			policy.AuthorityCellID = strings.TrimPrefix(parent.ScopeKey, "authority-cell:")
 			policy.PublicationRole = platformconfig.PublicationRoleCellRoutes
+		}
+		if sources != nil {
+			// Real signed source objects replace the historical fixture's hash
+			// placeholders; existing callers keep their original fixture shape.
+			var source *platformconfig.CompileResult
+			for i := range *inputs {
+				c := &(*inputs)[i]
+				if c.Lineage.InputSnapshotDigest == parent.Metadata["input_snapshot_digest"] && c.PolicyArtifact.Scope.Key == parent.ScopeKey {
+					source = c
+				}
+			}
+			if source == nil {
+				t.Fatal("compiled producer source unavailable")
+			}
+			static := Sign(t, source.IntentArtifact, policy.StaticIntentArtifactID, 1)
+			projection := Sign(t, source.PolicyArtifact, policy.DNSPolicyArtifactID, 1)
+			source.IntentArtifact, source.PolicyArtifact = static, projection
+			policy.StaticIntentDigest, policy.DNSPolicyDigest = static.ContentHash, projection.ContentHash
+			*sources = append(*sources, static, projection)
 		}
 		raw, _ := json.Marshal(policy)
 		var content map[string]any

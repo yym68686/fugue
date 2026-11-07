@@ -40,7 +40,7 @@ func testDNSProducerPublicationGuard(t *testing.T, dsn string) {
 			if err != nil || beforeLKG == nil {
 				t.Fatal("fixture LKG unavailable", err)
 			}
-			req, policies, releases := celldns.SourceAuthorizedRequest(t, true)
+			req, policies, releases := prepareAuthorizedCellDNSPublication(t, s, true)
 			celldns.RetainGlobalOnly(&req)
 			for i, a := range policies {
 				if a.ID != req.PreviousTrafficPublication.ProducerPolicy.ArtifactID {
@@ -91,6 +91,10 @@ func testDNSProducerPublicationGuard(t *testing.T, dsn string) {
 			}
 			compiled, err := platformconfig.Compile(projection)
 			if err != nil {
+				t.Fatal(err)
+			}
+			prepareCompiledInputPin(t, s, compiled)
+			if _, _, err := s.EnsurePlatformArtifact(compiled.PolicyArtifact); err != nil {
 				t.Fatal(err)
 			}
 			child := save(compiled.DNSArtifact)

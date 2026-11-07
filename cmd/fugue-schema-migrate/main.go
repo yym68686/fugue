@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/inputhistory"
 	"fugue/internal/schemamigrate"
 )
 
@@ -26,6 +27,12 @@ const (
 )
 
 func main() {
+	if handled, err := inputhistory.WriteCapabilities(os.Args[1:], "schema", os.Stdout); handled {
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	signalContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := run(signalContext, os.Args, os.Getenv, migrateSchema, serveHealth); err != nil {

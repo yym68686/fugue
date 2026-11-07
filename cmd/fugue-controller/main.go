@@ -15,6 +15,7 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/config"
 	"fugue/internal/controller"
+	"fugue/internal/inputhistory"
 	"fugue/internal/kubeauth"
 	"fugue/internal/livediagnostics"
 	"fugue/internal/runtimeobservation"
@@ -22,6 +23,12 @@ import (
 )
 
 func main() {
+	if handled, err := inputhistory.WriteCapabilities(os.Args[1:], "store", os.Stdout); handled {
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--data-prewarm-worker" {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()

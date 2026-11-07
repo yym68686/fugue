@@ -54,12 +54,15 @@ func testTrafficLKGAtomicRecovery(t *testing.T, address string) {
 				t.Skip("Postgres concurrency")
 			}
 			s := New(t.TempDir()+"/state.json", address)
-			configureTestPlatformArtifactSigning(s)
-			if err := s.Init(); err != nil {
-				t.Fatal(err)
-			}
 			if address != "" {
-				t.Cleanup(func() { s.db.Close() })
+				db, isolated, _ := hotInventoryTestDatabase(t)
+				s = &Store{db: db, databaseURL: isolated}
+			}
+			configureTestPlatformArtifactSigning(s)
+			if address == "" {
+				if err := s.Init(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			scope := "recovery-" + model.NewID("test")
 			channel := "gray"
@@ -75,6 +78,13 @@ func testTrafficLKGAtomicRecovery(t *testing.T, address string) {
 					t.Fatal(err)
 				}
 				seedVerifiedPlatformLKG(t, s, child)
+			}
+			if address != "" && (scenario == "complete" || scenario == "full complete") {
+				// The actual traffic-member promotion must not parse or read the
+				// retired relation, even when all inputs were written by v4.
+				if _, err := s.db.Exec(`DROP TABLE fugue_platform_input_chunks`); err != nil {
+					t.Fatal(err)
+				}
 			}
 			before := trafficLKGState(t, s, scope)
 			request := completePlatformVerificationRequest(f.release.FencingToken, true)
