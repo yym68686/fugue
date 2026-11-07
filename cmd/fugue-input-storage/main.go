@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, observe")
 	copyContract := flag.String("copy-contract", "", "strict single-input archive-copy JSON contract path")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
@@ -35,6 +35,8 @@ func main() {
 	archiveRetentionPolicySHA256 := flag.String("archive-retention-policy-sha256", "", "64-hex operator attestation of the independently reviewed archive retention policy")
 	readerDrainTimeout := flag.Duration("reader-drain-timeout", 30*time.Second, "maximum wait for session-level compiler-input readers")
 	archiveLimit := flag.Int("archive-limit", 1, "maximum archive batch inputs, 1 through 1000")
+	hotIndexAfter := flag.String("hot-index-after", "", "exclusive artifact key cursor for one derived dependency index page")
+	hotIndexLimit := flag.Int("hot-index-limit", 1, "maximum derived DNS dependency index entries, 1 through 32")
 	archiveSegmentBytes := flag.Int("archive-segment-bytes", 16<<20, "bounded archive segment bytes; applies only to new receipts")
 	hotMaxStoredBytes := flag.Int64("hot-copy-max-stored-bytes", 0, "explicit stored-byte budget for one archive hot copy or restore; source remains intact")
 	readCheckMaxBytes := flag.Int64("read-check-max-bytes", 0, "explicit raw-byte ceiling for one complete read-only input check, at most 1GiB")
@@ -93,6 +95,21 @@ func main() {
 	if *mode == "observe" {
 		if err := observeStorage(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "runtime storage observation unavailable")
+			os.Exit(1)
+		}
+		return
+	}
+	if *mode == "archive-hot-index" {
+		if *hotIndexLimit < 1 || *hotIndexLimit > 32 || len(*hotIndexAfter) > 512 {
+			fmt.Fprintln(os.Stderr, "archive-hot-index requires a bounded keyset page")
+			os.Exit(2)
+		}
+		report, err := store.RunCompilerInputHotIndex(ctx, os.Getenv("FUGUE_DATABASE_URL"), store.CompilerInputHotIndexOptions{AfterID: *hotIndexAfter, Limit: *hotIndexLimit, Apply: *apply})
+		if err != nil {
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
 			os.Exit(1)
 		}
 		return

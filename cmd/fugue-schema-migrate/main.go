@@ -179,6 +179,9 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigratePlatformArtifactReadIndex(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate platform-artifact read index: %w", err)
 	}
+	if err := schemamigrate.MigrateCompilerInputHotIndex(ctx, databaseURL); err != nil {
+		return fmt.Errorf("migrate compiler input dependency index: %w", err)
+	}
 	if err := schemamigrate.MigrateNodeUpdateTaskScheduler(ctx, databaseURL); err != nil {
 		return err
 	}

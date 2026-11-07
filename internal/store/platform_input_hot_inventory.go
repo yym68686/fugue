@@ -139,13 +139,22 @@ func compilerInputHotInventorySnapshot(ctx context.Context, tx *sql.Tx, rootsOnl
 		report.Closure.Roots = roots
 		return report, nil
 	}
+	var indexed bool
+	if err = tx.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_hot_dependency_index_v1') IS NOT NULL`).Scan(&indexed); err != nil {
+		return report, err
+	}
+	if indexed {
+		if err = schemamigrate.VerifyCompilerInputHotIndex(ctx, tx); err != nil {
+			return report, &compilerInputHotInventoryError{"dependency-index", err}
+		}
+	}
 	report.TraversalPerformed = true
 	traversalStarted := time.Now()
 	report.Closure, err = inputarchive.PlanHotClosureBatchedObserved(ctx, roots,
 		inputarchive.HotClosureBudget{Roots: compilerInputHotRootLimit, Nodes: 32768, Edges: 262144, Bindings: 524288},
 		func(ctx context.Context, refs []inputarchive.HotReference) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
 			started := time.Now()
-			nodes, resolveErr := resolveCompilerInputHotBatchObserved(ctx, tx, refs, &report.Cost)
+			nodes, resolveErr := resolveCompilerInputHotBatchWithIndex(ctx, tx, refs, &report.Cost, indexed)
 			report.Cost.ResolverUS += time.Since(started).Microseconds()
 			return nodes, resolveErr
 		}, func(progress inputarchive.HotClosureProgress) { report.Progress = progress })

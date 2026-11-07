@@ -9,6 +9,7 @@ import (
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
+	"fugue/internal/schemamigrate"
 )
 
 // Only artifact/input transport is batched; both still use the same typed
@@ -20,6 +21,12 @@ func resolveCompilerInputHotBatch(ctx context.Context, tx inputQueryer, refs []i
 }
 
 func resolveCompilerInputHotBatchObserved(ctx context.Context, tx inputQueryer, refs []inputarchive.HotReference, cost *CompilerInputHotCost) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
+	return resolveCompilerInputHotBatchWithIndex(ctx, tx, refs, cost, false)
+}
+
+// indexed is enabled only after verifying the exact derivation trigger in the
+// same RR snapshot. A missing/stale entry uses the original bounded projection.
+func resolveCompilerInputHotBatchWithIndex(ctx context.Context, tx inputQueryer, refs []inputarchive.HotReference, cost *CompilerInputHotCost, indexed bool) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
 	if len(refs) < 1 || len(refs) > 32 {
 		return nil, ErrInvalidInput
 	}
@@ -56,20 +63,18 @@ func resolveCompilerInputHotBatchObserved(ctx context.Context, tx inputQueryer, 
 		// jsonb_each materializes even discarded answer values and can spill
 		// them to disk. Decode the object once, then use its key set to preserve
 		// JSON null separately from a missing dependency key.
-		rows, err := queryCompilerInputHotRows(ctx, tx, artifactCost, `SELECT id,artifact_kind,content_hash,
- left((CASE WHEN artifact_kind='dns_answer_bundle' AND jsonb_typeof(content_json)='object'
- THEN COALESCE((SELECT jsonb_object_agg(fields.key,fields.value)
- FROM jsonb_to_record(content_json) AS dependency(lineage jsonb,policy jsonb,
- cell_route_publications jsonb,previous_traffic_publication jsonb,cell_dns_source jsonb)
- CROSS JOIN LATERAL (SELECT array_agg(key) AS present FROM jsonb_object_keys(content_json) AS object_keys(key)) keys
- CROSS JOIN LATERAL (VALUES
- ('lineage',COALESCE(dependency.lineage,'null'::jsonb)),('policy',COALESCE(dependency.policy,'null'::jsonb)),
- ('cell_route_publications',COALESCE(dependency.cell_route_publications,'null'::jsonb)),
- ('previous_traffic_publication',COALESCE(dependency.previous_traffic_publication,'null'::jsonb)),
- ('cell_dns_source',COALESCE(dependency.cell_dns_source,'null'::jsonb))) fields(key,value)
- WHERE fields.key=ANY(keys.present)),'{}'::jsonb)
- ELSE content_json END)::text,$2),left(metadata_json::text,16385),octet_length(content_json::text)
- FROM fugue_platform_artifacts WHERE id=ANY($1::text[])`, artifacts, compilerInputHotArtifactBytes+1)
+		statement := `SELECT id,artifact_kind,content_hash,
+ left((` + schemamigrate.CompilerInputHotProjection + `)::text,$2),left(metadata_json::text,16385),octet_length(content_json::text)
+ FROM fugue_platform_artifacts WHERE id=ANY($1::text[])`
+		if indexed {
+			statement = `SELECT a.id,a.artifact_kind,a.content_hash,
+ CASE WHEN i.artifact_id IS NOT NULL THEN i.content_text ELSE left((` + schemamigrate.CompilerInputHotProjection + `)::text,$2) END,
+ CASE WHEN i.artifact_id IS NOT NULL THEN i.metadata_text ELSE left(a.metadata_json::text,16385) END,
+ CASE WHEN i.artifact_id IS NOT NULL THEN i.source_bytes ELSE octet_length(a.content_json::text) END
+ FROM fugue_platform_artifacts a LEFT JOIN fugue_platform_input_hot_dependency_index_v1 i
+ ON i.artifact_id=a.id AND ` + compilerInputHotIndexCurrent + ` WHERE a.id=ANY($1::text[])`
+		}
+		rows, err := queryCompilerInputHotRows(ctx, tx, artifactCost, statement, artifacts, compilerInputHotArtifactBytes+1)
 		if err != nil {
 			return nil, err
 		}
