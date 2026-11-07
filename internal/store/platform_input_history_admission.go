@@ -120,6 +120,15 @@ func (s *Store) enforcePreparedCompilerInputHistory(ctx context.Context, prepare
 	if phase != "capability" {
 		return "", ErrConflict // no replay or replacement of the enabling plan
 	}
+	// A session can hold a pre-switch RR snapshot without ever touching an
+	// input table or participating in the application advisory barriers. It
+	// must drain naturally, as must every prepared transaction. Full statistics
+	// visibility is mandatory; hidden NULL fields are not evidence of idleness.
+	// This is necessary transaction evidence, not an inventory of compatible
+	// clients or a promise that an offline old binary cannot reconnect.
+	if _, err := compilerInputArchiveTransactionDrain(ctx, tx); err != nil {
+		return "", err
+	}
 	epoch, err := readInputArchiveEpoch(ctx, tx, -1)
 	if err != nil || epoch != p.sourceEpoch {
 		return "", errors.Join(err, ErrConflict)
@@ -189,6 +198,12 @@ func (s *Store) enforcePreparedCompilerInputHistory(ctx context.Context, prepare
 	}
 	if n, err := result.RowsAffected(); err != nil || n != 1 {
 		return "", errors.Join(err, ErrConflict)
+	}
+	// Clear the statistics cache and check again after all witness work and
+	// the phase CAS. Any new outstanding snapshot rolls back that CAS; do not
+	// commit a checked prefix or cancel another session to obtain success.
+	if _, err := compilerInputArchiveTransactionDrain(ctx, tx); err != nil {
+		return "", err
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err

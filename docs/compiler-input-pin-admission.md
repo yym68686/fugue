@@ -1,9 +1,13 @@
 # Transaction-side verified pin admission
 
-`lockCompilerInputVerifiedPins` is an internal, bounded building block, not a
-completed release or reactivation admission system. No production activation
-entry point invokes it yet. It does not change the retirement safety rejection,
-reader routing, retention policy, writer fallback or current service behavior.
+`lockCompilerInputVerifiedPins` is an internal, bounded building block used by
+the dependency preparation and admission paths. The persisted history phase
+controls ordinary requests: `capability` preserves their original business
+checks, while `enforced` also requires the signed dependency closure and exact
+durable readback pins. Explicit preparation confirmation is strict in either
+phase. Fenced or retired storage cannot use the capability compatibility path.
+The complete production enforcement coordinator and physical retirement are
+still unfinished; public retirement remains refused.
 
 The existing local-pin protocol first commits a protective pending record,
 performs complete independent local SHA readback outside the writer lock, then
@@ -27,34 +31,58 @@ activation's durable retention root and commit in the same transaction. The
 check protects through commit only; it neither transfers pin ownership nor
 provides lifetime protection after the activation root is retired.
 
-## Remaining integration contract
+## Preparation and consumption
 
-The list of up to 32 pins is not evidence of a complete closure. A future
-preparation/consumption protocol must bind the server-derived complete closure,
-all artifact identities/signatures and representations, pending protection,
-restore/readback results and an immutable activation intent. It must recheck
-the closure/witness at consumption and install all retention roots atomically,
-without doing full-SHA work under publication or heartbeat locks. No new
-operator assertion may replace that proof, and batching cannot return a partial
-activation as success.
+One batch of up to 32 pins is not evidence of a complete closure. Preparation
+binds the server-derived complete closure, artifact signatures, physical tuple
+witnesses, representation, keyring revision, epoch and short expiry. Consumption
+rechecks every batch and witness in one transaction and installs the real
+retention root atomically. Restore and full-SHA work remain outside publication
+and heartbeat locks. Operator booleans cannot replace the proof; a checked
+prefix cannot commit as a successful activation.
 
-Required entry points identified so far:
+Integrated entry points retain their original request-specific authority:
 
-| Activation | Current transaction boundary | Required integration |
+| Activation | Transaction boundary | Dependency admission |
 | --- | --- | --- |
-| Publication / rollback | `pgReleasePlatformArtifact`, `pgRollbackPlatformArtifact` | Prepare outside short publication lock; consume exact closure witness inside the transaction |
+| Publication / rollback | `pgReleasePlatformArtifact`, `pgRollbackPlatformArtifact` | Prepare outside the short publication lock; consume the exact closure witness inside the transaction |
 | Expected consumer set | `pgCreatePlatformExpectedConsumerSet` / insert helper | Bind parent, selected release, child generation and scope |
 | Consumer registration / heartbeat | both trusted and ordinary consumer paths | Protect new identities or generation transitions without rereading all bytes on every unchanged heartbeat |
 | Shadow consumer | `pgAcceptPlatformShadowConsumerHeartbeat` | Same scope/parent identity and durable admission rules |
-| Task creation / claim | `pgCreateNodeUpdateTask`, `pgClaimNodeUpdateTask` | Transactional server-derived payload dependencies; claim must not bypass pending protection |
+| Task creation / claim | `pgCreateNodeUpdateTask`, `pgClaimNodeUpdateTask` | Bind server-derived payload dependencies; pending protection precedes creation and verified pins precede claim |
+
+## One-way enforcement transition
+
+The process-owned preparation for the private enforcement transition covers the
+complete native retained census, signed closure and existing verified pins. Its
+short commit takes exclusive GC/archive barriers and root-table SHARE locks,
+then rechecks roots, tuple identities, pin tokens/representations, epoch, keyring
+and expiry before the one-way phase CAS. The persisted enforced phase cannot be
+downgraded, erased or replaced by a different plan.
+
+Both before witness checks and after the CAS, fresh PostgreSQL statistics must
+show no outstanding old snapshot transaction or prepared transaction. Effective
+full statistics visibility is required; hidden NULL fields cannot prove an idle
+session. Statistics are cleared before each check. Failure rolls back the CAS;
+the transition never cancels sessions or resolves another prepared transaction.
+This catches a reader that has not touched an input table or application lease.
+
+Transaction drainage is separate from complete reader inventory. It cannot
+certify an unregistered or offline binary, all promised rollback versions,
+external retention authorities, resource headroom or a confidential restore.
+The private switch has no production HTTP/CLI activation path: the formal
+coordinator must verify those remaining real prerequisites before exposing one.
 
 Signatures, authorization, lease/TTL, rollback retention and missing-history
-isolation remain mandatory. Full H/C/D/U, all entry-point coverage, same-version
-isolated restore/restart and real physical retirement are still unproved.
+isolation remain mandatory. Complete H/C/D/U, exhaustive reader/writer coverage,
+same-version isolated production restore/restart and real physical retirement
+are still unproved.
 
 Tests use disposable loopback PostgreSQL with the real schema and real full
 local readback. They cover fresh-connection persistence, concurrent admissions,
 unpin exclusion through commit, exact token/digest/key, pending/epoch/schema/
 representation failures, timeout tightening, old snapshots, cancellation,
-writer contention and multi-pin rollback. Local PostgreSQL 14 is not evidence
-of a production PostgreSQL 18 restore or a production activation exercise.
+writer contention and multi-pin rollback. Isolated PostgreSQL 18 additionally
+checks native phase enforcement, unregistered old snapshots, prepared
+transactions, effective statistics privilege and durable downgrade refusal.
+Synthetic local tests are not a production restore or activation exercise.

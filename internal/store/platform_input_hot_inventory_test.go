@@ -387,6 +387,10 @@ func TestHotInventoryPostgresWorksWithReadOnlyOrdinaryRole(t *testing.T) {
 	if report.RetirementAuthorized || report.BodyVerification || report.ReactivationProtected || report.Closure.LocalCopiesVerified {
 		t.Fatal("read-only metadata was promoted to destructive authority", report)
 	}
+	retention, err := RunCompilerInputRetentionInventory(t.Context(), u.String())
+	if err != nil || !retention.UniverseComplete || retention.ClassificationComplete || retention.ExecutionAuthorized || retention.Totals["H"].Inputs != 1 || retention.Totals["D"].Inputs != 0 {
+		t.Fatal("ordinary read-only role could not audit the universe without destructive authority", retention, err)
+	}
 }
 
 func TestHotInventoryPostgresKeepsScopedShadowRootsAndUnresolvedNativeIdentities(t *testing.T) {

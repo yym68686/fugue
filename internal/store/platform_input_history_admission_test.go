@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,140 @@ func TestHistoryPhasePostgresEnforcementSurvivesNewPoolMigrationAndCannotDowngra
 	releaseHistoryFixturePins(t, s, pins)
 	if err := fresh.CheckPlatformInputRead(t.Context(), read); !errors.Is(err, ErrConflict) {
 		t.Fatal("fresh process ignored enforced missing pin", err)
+	}
+}
+
+func TestHistoryPhasePostgresEnforcementWaitsForUnregisteredSnapshot(t *testing.T) {
+	s, _, _ := inputActivationFixturePhase(t, 1, false)
+	installHistoryPhaseRoot(t, s)
+	prepared, err := s.prepareCompilerInputHistoryEnforcement(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := s.db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Rollback()
+	// No input table, row lock or application advisory lease is touched. This
+	// snapshot is newer than preparation but still predates the switching CAS.
+	var snapshot string
+	if err := reader.QueryRow(`SELECT pg_current_snapshot()::text`).Scan(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if plan, err := s.enforcePreparedCompilerInputHistory(t.Context(), prepared); !errors.Is(err, ErrConflict) || plan != "" || historyPhase(t, s) != "capability" {
+		t.Fatal("unregistered snapshot did not abort enforcement atomically", plan, err)
+	}
+	var stillActive bool
+	if err := reader.QueryRow(`SELECT true`).Scan(&stillActive); err != nil || !stillActive {
+		t.Fatal("enforcement cancelled another session instead of waiting", err)
+	}
+	if err := reader.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if plan, err := s.enforcePreparedCompilerInputHistory(t.Context(), prepared); err != nil || len(plan) != 64 || historyPhase(t, s) != "enforced" {
+		t.Fatal("naturally drained snapshot still blocked exact prepared transition", plan, err)
+	}
+}
+
+func TestHistoryPhasePostgresEnforcementWaitsForPreparedTransaction(t *testing.T) {
+	s, _, _ := inputActivationFixturePhase(t, 1, false)
+	installHistoryPhaseRoot(t, s)
+	prepared, err := s.prepareCompilerInputHistoryEnforcement(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var limit int
+	if err := s.db.QueryRow(`SHOW max_prepared_transactions`).Scan(&limit); err != nil {
+		t.Fatal(err)
+	}
+	if limit == 0 {
+		t.Skip("disposable PostgreSQL needs max_prepared_transactions>0")
+	}
+	conn, err := s.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	const prepare = `PREPARE TRANSACTION 'neutral_history_enforcement_drain'`
+	const rollback = `ROLLBACK PREPARED 'neutral_history_enforcement_drain'`
+	for _, query := range []string{`BEGIN`, `SELECT 1`, prepare} {
+		if _, err := conn.ExecContext(t.Context(), query); err != nil {
+			_, _ = conn.ExecContext(t.Context(), `ROLLBACK`)
+			t.Fatal(err)
+		}
+	}
+	active := true
+	defer func() {
+		if active {
+			if _, err := conn.ExecContext(t.Context(), rollback); err != nil {
+				t.Error("clean disposable prepared transaction", err)
+			}
+		}
+	}()
+	if plan, err := s.enforcePreparedCompilerInputHistory(t.Context(), prepared); !errors.Is(err, ErrConflict) || plan != "" || historyPhase(t, s) != "capability" {
+		t.Fatal("prepared transaction did not abort enforcement", plan, err)
+	}
+	var remaining int
+	if err := s.db.QueryRow(`SELECT count(*) FROM pg_prepared_xacts WHERE database=current_database() AND gid='neutral_history_enforcement_drain'`).Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatal("enforcement disposed of another prepared transaction", remaining, err)
+	}
+	if _, err := conn.ExecContext(t.Context(), rollback); err != nil {
+		t.Fatal(err)
+	}
+	active = false
+	if plan, err := s.enforcePreparedCompilerInputHistory(t.Context(), prepared); err != nil || len(plan) != 64 || historyPhase(t, s) != "enforced" {
+		t.Fatal("finished prepared transaction still blocked transition", plan, err)
+	}
+}
+
+func TestHistoryPhasePostgresEnforcementRequiresFullStatsVisibility(t *testing.T) {
+	s, _, _ := inputActivationFixturePhase(t, 1, false)
+	installHistoryPhaseRoot(t, s)
+	var schema string
+	if err := s.db.QueryRow(`SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	role := quotePostgresIntegrationIdentifier(t, model.NewID("history_enforcement_reader_test"))
+	if _, err := s.db.Exec("CREATE ROLE " + role + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, query := range []string{"DROP OWNED BY " + role, "DROP ROLE " + role} {
+			if _, err := s.db.Exec(query); err != nil {
+				t.Error("clean disposable enforcement role", err)
+			}
+		}
+	})
+	if _, err := s.db.Exec("GRANT USAGE ON SCHEMA " + quotePostgresIntegrationIdentifier(t, schema) + " TO " + role + "; GRANT SELECT,UPDATE ON ALL TABLES IN SCHEMA " + quotePostgresIntegrationIdentifier(t, schema) + " TO " + role); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(s.databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.User(strings.Trim(role, `"`))
+	db, err := openPostgresDatabase(u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	limited := &Store{db: db, databaseURL: u.String()}
+	limited.ConfigurePlatformArtifactSigning(s.platformArtifactSigningKeyring())
+	prepared, err := limited.prepareCompilerInputHistoryEnforcement(t.Context())
+	if err != nil {
+		t.Fatal("limited role could not prepare the real retained closure", err)
+	}
+	if plan, err := limited.enforcePreparedCompilerInputHistory(t.Context(), prepared); !errors.Is(err, ErrConflict) || plan != "" || historyPhase(t, s) != "capability" {
+		t.Fatal("hidden transaction metadata was accepted as drained", plan, err)
+	}
+	// Only the disposable role gains statistics visibility; no application
+	// credential or production grant is changed by this test or implementation.
+	if _, err := s.db.Exec("GRANT pg_read_all_stats TO " + role); err != nil {
+		t.Fatal(err)
+	}
+	if plan, err := limited.enforcePreparedCompilerInputHistory(t.Context(), prepared); err != nil || len(plan) != 64 || historyPhase(t, s) != "enforced" {
+		t.Fatal("full effective visibility did not permit drained transition", plan, err)
 	}
 }
 

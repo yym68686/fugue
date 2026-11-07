@@ -34,7 +34,7 @@ func main() {
 		}
 		return
 	}
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-retention-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, observe")
 	copyContract := flag.String("copy-contract", "", "strict single-input archive-copy JSON contract path")
 	taskContract := flag.String("task-input-contract", "", "strict bounded task-input-prepare contract path; trusted API-role maintenance only")
 	taskPlan := flag.String("task-input-plan", "", "strict signed task preparation plan path; contains a public verification key only")
@@ -71,6 +71,7 @@ func main() {
 	consumerTicketMode := *mode == "consumer-input-plan" || *mode == "consumer-input-restore" || *mode == "consumer-input-confirm"
 	localPinMode := *mode == "archive-local-pin" || *mode == "archive-local-unpin"
 	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "task-input-plan" || *mode == "publication-input-plan" || *mode == "consumer-input-plan" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode || *mode == "archive-local-pin" || *mode == "task-input-prepare") && !*apply
+	readOnly = readOnly || *mode == "archive-retention-inventory"
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
@@ -246,6 +247,25 @@ func main() {
 	if *mode == "observe" {
 		if err := observeStorage(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "runtime storage observation unavailable")
+			os.Exit(1)
+		}
+		return
+	}
+	if *mode == "archive-retention-inventory" {
+		// An audit cannot be converted into a maintenance action by accepting
+		// otherwise unrelated apply, route, contract or rehearsal flags.
+		other := false
+		flag.Visit(func(f *flag.Flag) { other = other || f.Name != "mode" })
+		if other || os.Getenv("FUGUE_DATABASE_URL") == "" {
+			fmt.Fprintln(os.Stderr, "archive-retention-inventory requires only mode and a database")
+			os.Exit(2)
+		}
+		report, err := store.RunCompilerInputRetentionInventory(ctx, os.Getenv("FUGUE_DATABASE_URL"))
+		if encodeErr := json.NewEncoder(os.Stdout).Encode(report); encodeErr != nil {
+			os.Exit(1)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "retention inventory incomplete; stage="+store.HotInventoryFailureStage(err))
 			os.Exit(1)
 		}
 		return
