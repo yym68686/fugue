@@ -3490,6 +3490,53 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - id: hot_index
+        name: Select one bounded dependency-index preparation page
+        env: {BASE_SHA: '${{ github.event.before }}'}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/compiler-input-hot-index/operation.json
+          index_paths=(scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_storage.py)
+          # No operation file means no data operation. A future exact page is
+          # pinned only after serving identity and all fresh resource gates pass.
+          if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" "${index_paths[@]}" .github/workflows/ci.yml; then exit 0; fi
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "${index_paths[@]}" deploy/releases "$config" .github/workflows/ci.yml
+          "$INPUT_READONLY_PYTHON" -m unittest scripts.test_compiler_input_hot_index scripts.test_compiler_input_copy scripts.test_compiler_input_readonly
+          "$INPUT_READONLY_PYTHON" - <<'PY'
+          import os
+          from pathlib import Path
+          from scripts.compiler_input_copy_resume import strict_json
+          from scripts.compiler_input_hot_index import validate
+          from scripts.compiler_input_readonly import identity
+          from scripts.compiler_input_storage import kube
+          c=validate(strict_json(Path('deploy/environments/production/compiler-input-hot-index/operation.json').read_bytes()))
+          name='fugue-input-index-'+identity(c)[:20]+'-receipt'
+          receipt=kube(c['namespace'],'get','configmap',name,'--ignore-not-found','-o','json')
+          if not receipt.strip():
+              with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('selected=true\n')
+          else:
+              print('Existing immutable dependency-index intent: page will not be replayed.')
+          PY
+      - if: steps.hot_index.outputs.selected == 'true'
+        name: Preview dependency-index gates without native rehearsal or WAL
+        run: |
+          "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_hot_index deploy/environments/production/compiler-input-hot-index/operation.json --evidence "$RUNNER_TEMP/input-hot-index-preview-${{ github.sha }}.json"
+      - if: steps.hot_index.outputs.selected == 'true'
+        name: Prepare exactly one receipted dependency-index page
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_storage.py deploy/releases deploy/environments/production/compiler-input-hot-index .github/workflows/ci.yml
+          "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_hot_index deploy/environments/production/compiler-input-hot-index/operation.json --apply --evidence "$RUNNER_TEMP/input-hot-index-result-${{ github.sha }}.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.hot_index.outputs.selected == 'true'
+        with:
+          name: fugue-input-hot-index-${{ github.sha }}
+          path: ${{ runner.temp }}/input-hot-index-*-${{ github.sha }}.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Check current maintenance implementation and reader barriers
         env:
           BASE_SHA: ${{ github.event.before }}

@@ -335,14 +335,14 @@ def result_contract(body, c, success=True):
     return v
 
 
-def worker_terminal(pod):
+def worker_terminal(pod, container='copy'):
     """Only fixed termination metadata; never retain runtime messages."""
     phase = pod.get('status', {}).get('phase')
     require(phase in ('Succeeded', 'Failed'), 'copy Pod is not terminal')
     result = {'phase': phase, 'metadata_complete': False}
     statuses = pod.get('status', {}).get('containerStatuses')
     if (type(statuses) is not list or len(statuses) != 1
-            or type(statuses[0]) is not dict or statuses[0].get('name') != 'copy'):
+            or type(statuses[0]) is not dict or statuses[0].get('name') != container):
         return result
     state = statuses[0].get('state')
     if type(state) is not dict or set(state) != {'terminated'} or type(state['terminated']) is not dict:

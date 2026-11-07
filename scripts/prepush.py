@@ -475,6 +475,8 @@ def main() -> int:
     }
     non_go_tasks: dict[str, list[str] | None] = {}
     readonly_python = os.environ.get("INPUT_READONLY_PYTHON", sys.executable)
+    if any(name in {"scripts/compiler_input_hot_index.py", "scripts/test_compiler_input_hot_index.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/compiler-input-hot-index/") for name in paths):
+        non_go_tasks["input-hot-index-tests"] = [readonly_python, "-m", "unittest", "scripts.test_compiler_input_hot_index"]
     if any(name in {"scripts/compiler_input_readonly.py", "scripts/test_compiler_input_readonly.py", "scripts/requirements-input-readonly.txt"} or name.startswith("deploy/environments/production/compiler-input-readonly/") for name in paths):
         non_go_tasks["input-readonly-tests"] = [readonly_python, "-m", "unittest", "scripts.test_compiler_input_readonly"]
     if any(name in {"scripts/compiler_input_copy.py", "scripts/compiler_input_copy_resume.py", "scripts/compiler_input_copy_resume_runner.py",

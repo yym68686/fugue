@@ -27,7 +27,20 @@ WAL. These counters do not attribute concurrent WAL to the index operation.
 Production filling must use the trusted runner's exact runtime, source-space,
 WAL, worker, load and receipt gates. The native page primitive alone does not
 establish those gates. No automatic full-store loop or production filling is
-enabled by this change. The cursor is preparation progress, not a coherent
+enabled by the schema change. `scripts/compiler_input_hot_index.py` supplies
+the trusted orchestration through the existing serialized
+`compiler_input_storage` job in the single production CI workflow. It has no
+default operation declaration: absent an explicit pinned page, it creates no
+execution resources. Preview checks admission and dry-runs resource shapes but
+never invokes native rehearsal. Apply creates an immutable no-retry intent,
+then one suspended, non-preempting Job and a DB-only session Secret. It checks
+the original PG/Longhorn/worker reserves, runtime identity, WAL/reset/epoch,
+writer counters and bounded logs before release and during execution. Native
+termination metadata is saved before logs or cleanup; exact UID cleanup and a
+read-back immutable terminal receipt are required for completion. An uncertain
+attempt is not replayed. It never receives archive or platform signing keys.
+
+The cursor is preparation progress, not a coherent
 retention proof; the subsequent complete inventory must still run within one
 60-second snapshot with all existing graph, statement and byte bounds.
 
