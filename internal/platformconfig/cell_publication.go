@@ -106,7 +106,7 @@ func ValidateCellRoutePublication(p CellRoutePublicationInput) error {
 	}
 	for i, a := range []model.PlatformArtifact{parent, p.Route, p.TLS} {
 		kind := []string{model.PlatformArtifactKindReleaseSet, model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig}[i]
-		digest, err := Digest(a.Content)
+		digest, digestRaw, native, err := dnsValidationContentDigest(a.Content)
 		if err != nil || digest != a.ContentHash || a.ArtifactKind != kind || a.Status != model.PlatformArtifactStatusValidated || a.SchemaVersion != model.PlatformArtifactSchemaVersionV1 || a.GenerationSequence <= 0 || a.ScopeKey != AuthorityCellScope(r.AuthorityCellID) || a.Scope.Key != a.ScopeKey {
 			return fail()
 		}
@@ -121,7 +121,7 @@ func ValidateCellRoutePublication(p CellRoutePublicationInput) error {
 			Policy  PolicySnapshot `json:"policy"`
 			Lineage Lineage        `json:"lineage"`
 		}
-		raw, _ = json.Marshal(a.Content)
+		raw, _ = marshalDNSChildValidationFields(a.Content, digestRaw, native)
 		if json.Unmarshal(raw, &payload) != nil || !reflect.DeepEqual(payload.Lineage, set.Lineage) || ValidatePolicySnapshot(payload.Policy) != nil {
 			return fail()
 		}

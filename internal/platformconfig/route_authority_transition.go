@@ -134,7 +134,7 @@ func validatePreviousTrafficPublication(p PreviousTrafficPublicationInput) error
 	hashes := []string{r.ReleaseSetDigest, r.RouteArtifactDigest, r.TLSArtifactDigest, r.DNSArtifactDigest}
 	kinds := []string{model.PlatformArtifactKindReleaseSet, model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig, model.PlatformArtifactKindDNSAnswerBundle}
 	for i, a := range artifacts {
-		hash, err := Digest(a.Content)
+		hash, digestRaw, native, err := dnsValidationContentDigest(a.Content)
 		if err != nil || a.ID != ids[i] || a.ContentHash != hashes[i] || hash != a.ContentHash || a.ArtifactKind != kinds[i] || a.Status != model.PlatformArtifactStatusValidated || a.SchemaVersion != model.PlatformArtifactSchemaVersionV1 || a.GenerationSequence <= 0 || a.ScopeKey != "global" || a.Scope.Key != a.ScopeKey {
 			return fmt.Errorf("previous publication differs from exact artifact pins")
 		}
@@ -149,7 +149,7 @@ func validatePreviousTrafficPublication(p PreviousTrafficPublicationInput) error
 			Policy  PolicySnapshot `json:"policy"`
 			Lineage Lineage        `json:"lineage"`
 		}
-		raw, _ := json.Marshal(a.Content)
+		raw, _ := marshalDNSChildValidationFields(a.Content, digestRaw, native)
 		if json.Unmarshal(raw, &payload) != nil || !reflect.DeepEqual(payload.Lineage, set.Lineage) || ValidatePolicySnapshot(payload.Policy) != nil {
 			return fmt.Errorf("previous policy or lineage invalid")
 		}
