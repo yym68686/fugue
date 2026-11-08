@@ -98,7 +98,7 @@ func resolveCompilerInputHotBatchWithIndex(ctx context.Context, tx inputQueryer,
 				break
 			}
 			started := time.Now()
-			node, decodeErr := decodeCompilerInputHotBatchArtifact(a, content, metadata, originalBytes)
+			node, decodeErr := decodeCompilerInputHotBatchArtifactObserved(a, content, metadata, originalBytes, compilerInputHotDecodeCost(artifactCost, a.ArtifactKind))
 			if artifactCost != nil {
 				artifactCost.DecodeUS += time.Since(started).Microseconds()
 			}
@@ -197,8 +197,35 @@ func resolveCompilerInputHotBatchWithIndex(ctx context.Context, tx inputQueryer,
 }
 
 func decodeCompilerInputHotBatchArtifact(a model.PlatformArtifact, content, metadata []byte, originalBytes int64) (inputarchive.HotNode, error) {
+	return decodeCompilerInputHotBatchArtifactObserved(a, content, metadata, originalBytes, nil)
+}
+
+func decodeCompilerInputHotBatchArtifactObserved(a model.PlatformArtifact, content, metadata []byte, originalBytes int64, cost *CompilerInputHotDecodeCost) (node inputarchive.HotNode, err error) {
+	var started time.Time
+	if cost != nil {
+		cost.Attempts++
+		cost.SourceBytes += originalBytes
+		cost.TransportBytes += int64(len(content) + len(metadata))
+		started = time.Now()
+		defer func() {
+			if err != nil {
+				cost.Rejected++
+			}
+		}()
+	}
 	if originalBytes > compilerInputHotArtifactBytes || len(content) > compilerInputHotArtifactBytes || len(metadata) > 16<<10 || json.Unmarshal(content, &a.Content) != nil || json.Unmarshal(metadata, &a.Metadata) != nil {
+		if cost != nil {
+			cost.JSONUS += time.Since(started).Microseconds()
+		}
 		return inputarchive.HotNode{}, ErrConflict
 	}
-	return compilerInputArtifactHotNode(a)
+	if cost != nil {
+		cost.JSONUS += time.Since(started).Microseconds()
+		started = time.Now()
+	}
+	node, err = compilerInputArtifactHotNode(a)
+	if cost != nil {
+		cost.DependenciesUS += time.Since(started).Microseconds()
+	}
+	return node, err
 }

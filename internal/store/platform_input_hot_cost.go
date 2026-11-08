@@ -4,19 +4,53 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"fugue/internal/model"
 )
 
 // Aggregate wall-clock measurements, not PostgreSQL server execution times.
 // Query return and Next can both include server work and transport. Never
 // serialize SQL, identities, driver errors, connection strings or content.
 type CompilerInputHotReadCost struct {
-	Queries        int64 `json:"queries"`
-	Rows           int64 `json:"rows"`
-	QueryReturnUS  int64 `json:"query_return_us"`
-	RowsNextUS     int64 `json:"rows_next_us"`
-	DecodeUS       int64 `json:"decode_us"`
+	Queries        int64                                  `json:"queries"`
+	Rows           int64                                  `json:"rows"`
+	QueryReturnUS  int64                                  `json:"query_return_us"`
+	RowsNextUS     int64                                  `json:"rows_next_us"`
+	DecodeUS       int64                                  `json:"decode_us"`
+	SourceBytes    int64                                  `json:"source_bytes"`
+	TransportBytes int64                                  `json:"transport_bytes"`
+	DecodeByKind   map[string]*CompilerInputHotDecodeCost `json:"decode_by_kind,omitempty"`
+}
+
+// Fixed kind buckets describe work, never arbitrary artifact identities or
+// content. JSON decoding and dependency validation remain separately visible.
+type CompilerInputHotDecodeCost struct {
+	Attempts       int64 `json:"attempts"`
+	Rejected       int64 `json:"rejected"`
+	JSONUS         int64 `json:"json_us"`
+	DependenciesUS int64 `json:"dependencies_us"`
 	SourceBytes    int64 `json:"source_bytes"`
 	TransportBytes int64 `json:"transport_bytes"`
+}
+
+func compilerInputHotDecodeCost(cost *CompilerInputHotReadCost, kind string) *CompilerInputHotDecodeCost {
+	if cost == nil {
+		return nil
+	}
+	switch kind {
+	case model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindEdgeRouteBundle,
+		model.PlatformArtifactKindCaddyRouteConfig, model.PlatformArtifactKindPolicySnapshot,
+		model.PlatformArtifactKindReleaseSet:
+	default:
+		kind = "other"
+	}
+	if cost.DecodeByKind == nil {
+		cost.DecodeByKind = map[string]*CompilerInputHotDecodeCost{}
+	}
+	if cost.DecodeByKind[kind] == nil {
+		cost.DecodeByKind[kind] = &CompilerInputHotDecodeCost{}
+	}
+	return cost.DecodeByKind[kind]
 }
 
 type CompilerInputHotCost struct {

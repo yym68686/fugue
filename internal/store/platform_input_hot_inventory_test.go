@@ -342,6 +342,10 @@ func TestHotInventoryPostgresBatchMatchesSingleIdentityValidation(t *testing.T) 
 	if err != nil || !reflect.DeepEqual(batch, observed) || cost.Artifacts.Queries != 1 || cost.Artifacts.Rows != 1 || cost.Inputs.Queries != 2 || cost.Inputs.Rows != 1 || cost.Ledger.Queries != 1 || cost.Ledger.Rows != 1 || cost.Artifacts.SourceBytes < 1 || cost.Artifacts.TransportBytes < 1 {
 		t.Fatal("aggregate observation changed resolution or hid query/row coverage", cost, err)
 	}
+	decode := cost.Artifacts.DecodeByKind[model.PlatformArtifactKindEdgeRouteBundle]
+	if len(cost.Artifacts.DecodeByKind) != 1 || decode == nil || decode.Attempts != 1 || decode.Rejected != 0 || decode.SourceBytes != cost.Artifacts.SourceBytes || decode.TransportBytes != cost.Artifacts.TransportBytes {
+		t.Fatal("decode breakdown lost artifact or source/transport accounting", cost.Artifacts)
+	}
 	// A statement-level failure must abort the batch. It cannot turn every
 	// affected input into a successful "not found" inventory.
 	if _, err = tx.Exec(`SET LOCAL statement_timeout='1ms'`); err != nil {
