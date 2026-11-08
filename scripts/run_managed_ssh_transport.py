@@ -79,6 +79,7 @@ def run(operation, probe_binary):
     probe = lambda target, identity: observation.probe_identity(probe_binary, target, identity)
     deadline = time.monotonic()+180
     observe = lambda public: await_evidence(lambda: observation.observe(stage, config['node'], config['applications'], api, probe, public=public), deadline)
+    observe_serving = lambda public: await_evidence(lambda: observation.observe(stage, config['node'], config['applications'], api, probe, public=public, allow_serving=True), deadline)
     with tempfile.TemporaryDirectory(prefix='fugue-ssh-transport-witness-') as directory:
         witness = None
         if operation['action'] != 'stage':
@@ -90,7 +91,7 @@ def run(operation, probe_binary):
             with os.fdopen(descriptor, 'w') as output:
                 output.write(private_key.rstrip()+'\n')
             witness = lambda address, binding: transport.HeldSSH(address, binding, str(path))
-        return transport.select(config, stage, operation['action'], observe, witness)
+        return transport.select(config, stage, operation['action'], observe, witness, observe_serving=observe_serving)
 
 
 if __name__ == '__main__':

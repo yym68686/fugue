@@ -211,6 +211,33 @@ class SSHTransportSelectionTest(unittest.TestCase):
                 self.assertEqual(state['service'],before)
                 self.assertEqual(len(writes),2)
 
+    def test_serving_evidence_is_restricted_to_validated_read_only_reobservation(self):
+        config, stage, evidence, state, writes, kube, observe, witness, witnesses = self.fixture()
+        transport.select(config, stage, 'stage', observe, kube=kube)
+        def desired_pending(public):
+            raise EvidencePending('desired authorization still projecting')
+        serving = mock.Mock(side_effect=observe)
+        with self.assertRaises(EvidencePending):
+            transport.select(config, stage, 'activate', desired_pending, witness, kube, observe_serving=serving)
+        serving.assert_not_called()
+        self.assertEqual(len(writes), 1)
+        transport.select(config, stage, 'activate', observe, witness, kube, lambda _:None)
+        result = transport.select(config, stage, 'activate', desired_pending, witness, kube, observe_serving=serving)
+        self.assertTrue(result['already_selected'])
+        self.assertFalse(result['public_changed'])
+        self.assertEqual(serving.call_args_list, [mock.call(False), mock.call(True)])
+        self.assertEqual(len(writes), 2)
+        # Matching generation alone cannot bypass ownership/selection checks.
+        for field, value in ((transport.INTENT, 'foreign-intent'), (transport.PHASE, 'staged'), (transport.SELECTION, 'foreign-selection')):
+            before = copy.deepcopy(state['service'])
+            state['service']['metadata']['annotations'][field] = value
+            with self.assertRaises(ValueError):
+                transport.select(config, stage, 'activate', desired_pending, witness, kube, observe_serving=serving)
+            state['service'] = before
+        with self.assertRaises(EvidencePending):
+            transport.select(config, stage, 'compensate', desired_pending, witness, kube, observe_serving=serving)
+        self.assertEqual(len(writes), 2)
+
     def test_newer_or_foreign_selection_cannot_be_overwritten_by_compensation(self):
         config, stage, evidence, state, writes, kube, observe, witness, witnesses = self.fixture()
         transport.select(config, stage, 'stage', observe, kube=kube)

@@ -77,6 +77,35 @@ class SSHFrontObservationTest(unittest.TestCase):
             result = observe.observe(config, 'worker-a', ['app_fixture'], api, probe, kube, lambda url: health)
             self.assertEqual(result['pod']['metadata']['uid'], 'pod-a')
 
+    def test_read_only_recheck_accepts_only_fresh_authorization_covered_projection(self):
+        for change in ('valid', 'not-serving', 'revoked', 'expired', 'deadline', 'unknown-loaded', 'no-runtime', 'retiring', 'changed-during-probe'):
+            with self.subTest(change=change):
+                config, records, identity, status, ack, health, kube, api, probe, probes = self.fixture()
+                active = status['control']['active']
+                active.update(verified=False, serving=True, convergence_state='pending_apply', loaded_artifact_digest='sha256:'+'c'*64, valid_until=ack['acknowledgement']['expires_at'], pending_apply={'deadline': ack['acknowledgement']['expires_at']})
+                active['evidence'].update(artifact_digest=active['loaded_artifact_digest'], key_exchange_verified=True, runtime_verified=True)
+                # Even healthy projection cannot authorize initial selection.
+                with self.assertRaises(observe.EvidencePending):
+                    observe.observe(config, 'worker-a', ['app_fixture'], api, probe, kube, lambda url: health)
+                if change == 'not-serving':active['serving'] = False
+                if change == 'revoked':active['verification_failure'] = 'loaded_authorization_revoked_or_expired'
+                if change == 'expired':active['evidence']['expires_at'] = observe.now().isoformat()
+                if change == 'deadline':active['pending_apply']['deadline'] = observe.now().isoformat()
+                if change == 'unknown-loaded':active['loaded_artifact_digest'] = 'sha256:'+'d'*64
+                if change == 'no-runtime':active['evidence']['runtime_verified'] = False
+                if change == 'retiring':active['retiring_at'] = observe.now().isoformat()
+                def checked_probe(target, key):
+                    result = probe(target, key)
+                    if change == 'changed-during-probe':active['serving'] = False
+                    return result
+                if change == 'valid':
+                    result = observe.observe(config, 'worker-a', ['app_fixture'], api, checked_probe, kube, lambda url: health, public=True, allow_serving=True)
+                    self.assertTrue(result['verified'])
+                    self.assertEqual(probes, ['10.1.1.2:24000', '8.8.8.8:24000'])
+                else:
+                    with self.assertRaises(observe.EvidencePending):
+                        observe.observe(config, 'worker-a', ['app_fixture'], api, checked_probe, kube, lambda url: health, allow_serving=True)
+
     def test_rejects_stale_foreign_and_incomplete_acknowledgements(self):
         for change in ('stale', 'old-routes', 'foreign-instance', 'missing-connections', 'expired', 'draining', 'live-digest'):
             with self.subTest(change=change):

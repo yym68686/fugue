@@ -74,7 +74,7 @@ def validate_ack(value, node, pod, health, evaluated):
     return ack
 
 
-def selected_binding(app_id, status, identity, ack, node):
+def selected_binding(app_id, status, identity, ack, node, allow_serving=False):
     intent, binding, control = status['intent'], status['binding'], status['control']
     active = control.get('active')
     if not active or not intent['spec']['enabled'] or intent['app_id'] != app_id or binding['app_id'] != app_id or identity['app_id'] != app_id:
@@ -92,7 +92,24 @@ def selected_binding(app_id, status, identity, ack, node):
     evidence = active.get('evidence')
     if evidence and (evidence.get('fingerprint') != identity['fingerprint'] or evidence.get('identity_id') != identity['id']):
         raise ValueError('active managed target identity differs from its public inventory')
-    if not active.get('verified') or not evidence or timestamp(evidence['expires_at']) <= now()+datetime.timedelta(seconds=10):
+    horizon = now()+datetime.timedelta(seconds=10)
+    # Only the read-only recheck of an already selected transport may accept
+    # the API's authorization-covered old artifact during bounded projection.
+    # New publication still requires the desired artifact to be verified.
+    pending = active.get('pending_apply') or {}
+    serving_projection = (
+        allow_serving and active.get('serving') is True
+        and not active.get('verification_failure')
+        and active.get('convergence_state') == 'pending_apply'
+        and not active.get('retiring_at') and not active.get('retired_at')
+        and evidence and evidence.get('key_exchange_verified') is True
+        and evidence.get('runtime_verified') is True
+        and bool(active.get('loaded_artifact_digest'))
+        and evidence.get('artifact_digest') == active['loaded_artifact_digest']
+        and pending.get('deadline') and timestamp(pending['deadline']) > horizon
+        and active.get('valid_until') and timestamp(active['valid_until']) > horizon
+    )
+    if not (active.get('verified') is True or serving_projection) or not evidence or timestamp(evidence['expires_at']) <= horizon:
         raise EvidencePending('active managed target is awaiting fresh identity evidence: '+app_id)
     return {'app_id': app_id, 'tenant_id': identity['tenant_id'], 'identity_id': identity['id'], 'binding_id': binding['id'], 'public_port': binding['public_port'], 'public_key': identity['public_key'], 'fingerprint': identity['fingerprint'], 'route': route, 'slot_id': active['id'], 'route_generation': control['route_generation']}
 
@@ -134,7 +151,7 @@ def endpoint_witness(service, pod, slices, ports):
     return {'service_uid': metadata['uid'], 'pod_uid': target['uid'], 'ports': sorted(ports), 'address': pod['status']['podIP']}
 
 
-def observe(stage, node_id, app_ids, api, probe, kube=kubectl, health_read=read_json, public=False):
+def observe(stage, node_id, app_ids, api, probe, kube=kubectl, health_read=read_json, public=False, allow_serving=False):
     name(node_id)
     if not isinstance(app_ids, list) or not 1 <= len(app_ids) <= 100 or len(set(app_ids)) != len(app_ids) or any(not isinstance(app, str) or not app.startswith('app_') or any(character not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_' for character in app) for app in app_ids):
         raise ValueError('bounded unique application identities required')
@@ -179,7 +196,7 @@ def observe(stage, node_id, app_ids, api, probe, kube=kubectl, health_read=read_
     for app_id in app_ids:
         status = api('/v1/apps/'+app_id+'/ssh/managed/status')
         identity = api('/v1/apps/'+app_id+'/ssh/identity')['identity']
-        binding = selected_binding(app_id, status, identity, ack, node)
+        binding = selected_binding(app_id, status, identity, ack, node, allow_serving)
         binding['candidate_probe'] = probe(host+':'+str(binding['public_port']), identity)
         if public:
             public_host = '['+node['publicAddress']+']' if ':' in node['publicAddress'] else node['publicAddress']
@@ -191,7 +208,7 @@ def observe(stage, node_id, app_ids, api, probe, kube=kubectl, health_read=read_
     validate_ack(latest, node, pod, health_read('http://'+host+':7836/healthz'), now())
     for binding in bindings:
         app_id = binding['app_id']
-        current = selected_binding(app_id, api('/v1/apps/'+app_id+'/ssh/managed/status'), api('/v1/apps/'+app_id+'/ssh/identity')['identity'], latest['acknowledgement'], node)
+        current = selected_binding(app_id, api('/v1/apps/'+app_id+'/ssh/managed/status'), api('/v1/apps/'+app_id+'/ssh/identity')['identity'], latest['acknowledgement'], node, allow_serving)
         if current != {key: value for key, value in binding.items() if key not in ('candidate_probe', 'public_probe')}:
             raise ValueError('managed binding changed during observation')
     current_pod = strict_json(kube(['get', 'pod', pod['metadata']['name'], '-n', namespace, '-o', 'json']))

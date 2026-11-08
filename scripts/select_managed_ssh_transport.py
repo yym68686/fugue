@@ -172,13 +172,10 @@ def patch_selection(current, specification, annotations):
     return patch
 
 
-def select(config, stage, action, observe, witness=None, kube=kubectl, sleep=time.sleep):
+def select(config, stage, action, observe, witness=None, kube=kubectl, sleep=time.sleep, observe_serving=None):
     if action not in ('stage', 'activate', 'compensate'):
         raise ValueError('explicit transport operation required')
     node = validate(config, stage)
-    evidence = observe(False)
-    private_spec = spec_for(config, evidence, node['publicAddress'], False)
-    public_spec = spec_for(config, evidence, node['publicAddress'], True)
     namespace = config['namespace']
     staged_generation, serving_generation, compensation_generation = (config[field] for field in ('stagedGeneration','servingGeneration','compensationGeneration'))
     baseline_phase = 'compensated' if config.get('previousServiceUID') else 'staged'
@@ -189,6 +186,13 @@ def select(config, stage, action, observe, witness=None, kube=kubectl, sleep=tim
     def annotations(generation, phase, spec):
         return {GENERATION: str(generation), INTENT: digest(config), PHASE: phase, SELECTION: digest(projection(spec))}
     current = read()
+    # This alternate observer can only reach the validated, no-write branch.
+    # A staged/new selection and compensation always require desired evidence.
+    if action == 'activate' and current is not None and current['metadata'].get('annotations', {}).get(GENERATION) == str(serving_generation) and observe_serving is not None:
+        observe = observe_serving
+    evidence = observe(False)
+    private_spec = spec_for(config, evidence, node['publicAddress'], False)
+    public_spec = spec_for(config, evidence, node['publicAddress'], True)
     if action == 'stage':
         if current is not None:
             validate_service(current, config, private_spec, staged_generation, baseline_phase, baseline_intent)
@@ -299,5 +303,6 @@ if __name__ == '__main__':
     api = lambda path: observation.read_json(args.api_url.rstrip('/')+path, token)
     probe = lambda target, identity: observation.probe_identity(args.probe_binary, target, identity)
     observe = lambda public: observation.observe(stage, config['node'], config['applications'], api, probe, public=public)
+    observe_serving = lambda public: observation.observe(stage, config['node'], config['applications'], api, probe, public=public, allow_serving=True)
     witness = (lambda address, binding: HeldSSH(address, binding, args.witness_key)) if args.witness_key else None
-    print(canonical(select(config, stage, args.action, observe, witness)))
+    print(canonical(select(config, stage, args.action, observe, witness, observe_serving=observe_serving)))
