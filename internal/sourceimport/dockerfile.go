@@ -407,6 +407,9 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 		if err != nil {
 			return err
 		}
+		if err := placement.verifyReservation(attemptCtx); err != nil {
+			return fmt.Errorf("verify builder reservation before submission: %w", err)
+		}
 		if err := kubectlRun(attemptCtx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
 			logger.Printf("builder job apply failed kind=dockerfile name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 			return fmt.Errorf("apply kaniko job: %w", err)

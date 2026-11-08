@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	"fugue/internal/kubeauth"
 	"fugue/internal/model"
+	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
@@ -25,7 +27,10 @@ func (s *Service) cleanupZombieBuildJobs(ctx context.Context) error {
 		}
 		return fmt.Errorf("create kubernetes client for build job cleanup: %w", err)
 	}
-	return s.cleanupZombieBuildJobsWithClient(ctx, client)
+	// Run reservation recovery even if a Job deletion failed. It independently
+	// verifies Job/Pod termination and retries incomplete releases on later sweeps.
+	return errors.Join(s.cleanupZombieBuildJobsWithClient(ctx, client), sourceimport.ReconcileBuilderReservations(ctx,
+		kubeauth.Config{Namespace: client.namespace, BaseURL: client.baseURL, Token: client.bearerToken}, client.client))
 }
 
 func (s *Service) cleanupZombieBuildJobsWithClient(ctx context.Context, client builderJobClient) error {

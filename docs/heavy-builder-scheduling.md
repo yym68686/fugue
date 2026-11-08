@@ -75,3 +75,12 @@ it with current state or a guessed `auto` profile. Older records without that
 snapshot explicitly report missing evidence. Diagnostic policy and raw build
 details remain restricted to platform administrators. Standalone live inspections
 do not create reservations. Failed builds preserve the currently serving app.
+
+Reservation release retries transient Kubernetes API failures. Startup and
+periodic controller recovery also reclaim orphan reservations after multiple
+missed renewals (90 seconds), rather than waiting for the 35-minute lease expiry.
+Recovery requires an absent or terminal Job, no nonterminal Pods, and a Ready
+node; unavailable observations preserve the reservation. Fresh admissions remain
+protected while their Job is being submitted. Each admission has a distinct
+holder identity, checked again before submission, and deletes use both lease UID
+and resource-version preconditions so an old attempt cannot release a successor.

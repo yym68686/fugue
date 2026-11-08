@@ -3,6 +3,7 @@ package sourceimport
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 
 	"encoding/hex"
@@ -54,6 +55,7 @@ type builderJobPlacement struct {
 	CandidateHostnames []string
 	PreferredHostname  string
 	AllocatedDemand    builderResourceDemand
+	verifyReservation  func(context.Context) error
 }
 
 type builderResourceDemand struct {
@@ -132,6 +134,7 @@ type builderScheduler struct {
 	selectionTimeout         time.Duration
 	retryInterval            time.Duration
 	reservationLeaseDuration time.Duration
+	reservationHolder        string
 	previousOOMBytes         int64
 }
 
@@ -248,6 +251,7 @@ type builderKubeLease struct {
 		Name            string            `json:"name,omitempty"`
 		Namespace       string            `json:"namespace,omitempty"`
 		ResourceVersion string            `json:"resourceVersion,omitempty"`
+		UID             string            `json:"uid,omitempty"`
 		Labels          map[string]string `json:"labels,omitempty"`
 		Annotations     map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
@@ -291,18 +295,26 @@ func acquireBuilderPlacement(ctx context.Context, namespace, jobName string, pol
 	if err != nil {
 		return builderJobPlacement{}, nil, err
 	}
+	if err := scheduler.reconcileReservations(ctx, time.Now()); err != nil {
+		log.Printf("builder reservation recovery deferred err=%v", err)
+	}
 	placement, reservationName, err := scheduler.reservePlacement(ctx, jobName)
 	if err != nil {
 		return builderJobPlacement{}, nil, err
 	}
 	stopRenewal := scheduler.startReservationRenewal(reservationName)
+	placement.verifyReservation = func(ctx context.Context) error {
+		return scheduler.renewReservation(ctx, reservationName)
+	}
 	var releaseOnce sync.Once
 	return placement, func() {
 		releaseOnce.Do(func() {
 			stopRenewal()
-			releaseCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 			defer cancel()
-			_ = scheduler.releaseReservation(releaseCtx, reservationName)
+			if err := scheduler.releaseReservationWithRetry(releaseCtx, reservationName, time.Second); err != nil {
+				log.Printf("builder reservation release deferred reservation=%s err=%v", reservationName, err)
+			}
 		})
 	}, nil
 }
@@ -346,6 +358,9 @@ func (s *builderScheduler) renewReservation(ctx context.Context, reservationName
 	if !found {
 		return fmt.Errorf("builder reservation %s disappeared", reservationName)
 	}
+	if lease.Spec.HolderIdentity != s.reservationHolderFor(reservationName) {
+		return fmt.Errorf("builder reservation %s changed owner", reservationName)
+	}
 	lease.Spec.RenewTime = formatKubeTimestamp(time.Now())
 	return s.client.updateLease(ctx, lease)
 }
@@ -371,12 +386,14 @@ func newBuilderScheduler(namespace string, policy BuilderPodPolicy, profile buil
 		selectionTimeout:         time.Duration(policy.SelectionTimeoutSeconds) * time.Second,
 		retryInterval:            time.Duration(policy.RetryIntervalSeconds) * time.Second,
 		reservationLeaseDuration: time.Duration(policy.ReservationLeaseDurationSecs) * time.Second,
+		reservationHolder:        "builder-" + rand.Text(),
 	}, nil
 }
 
 func (s *builderScheduler) reservePlacement(ctx context.Context, jobName string) (builderJobPlacement, string, error) {
 	selectionCtx, cancel := context.WithTimeout(ctx, s.selectionTimeout)
 	defer cancel()
+	lastRecovery := time.Now()
 	var lastErr error
 	for {
 		placement, reservationName, err := s.tryReservePlacement(selectionCtx, jobName)
@@ -395,6 +412,12 @@ func (s *builderScheduler) reservePlacement(ctx context.Context, jobName string)
 				lastErr = errors.Join(lastErr, ctx.Err())
 			}
 			return builderJobPlacement{}, "", lastErr
+		}
+		if time.Since(lastRecovery) >= 30*time.Second {
+			if err := s.reconcileReservations(selectionCtx, time.Now()); err != nil {
+				log.Printf("builder reservation recovery deferred err=%v", err)
+			}
+			lastRecovery = time.Now()
 		}
 		timer := time.NewTimer(s.retryInterval)
 		select {
@@ -745,10 +768,13 @@ func (s *builderScheduler) upsertReservation(ctx context.Context, reservationNam
 		return err
 	}
 	if !found {
-		record := newBuilderLease(reservationName, builderReservationComponentValue, reservationName, s.reservationLeaseDuration, annotations, now)
+		record := newBuilderLease(reservationName, builderReservationComponentValue, s.reservationHolderFor(reservationName), s.reservationLeaseDuration, annotations, now)
 		return s.client.createLease(ctx, record)
 	}
-	lease.Spec.HolderIdentity = reservationName
+	if lease.Spec.HolderIdentity != s.reservationHolderFor(reservationName) {
+		return fmt.Errorf("builder reservation %s is held by another attempt", reservationName)
+	}
+	lease.Spec.HolderIdentity = s.reservationHolderFor(reservationName)
 	lease.Spec.LeaseDurationSeconds = int(s.reservationLeaseDuration.Seconds())
 	lease.Spec.AcquireTime = formatKubeTimestamp(now)
 	lease.Spec.RenewTime = formatKubeTimestamp(now)
@@ -762,7 +788,21 @@ func (s *builderScheduler) upsertReservation(ctx context.Context, reservationNam
 }
 
 func (s *builderScheduler) releaseReservation(ctx context.Context, reservationName string) error {
-	return s.client.deleteLease(ctx, reservationName)
+	lease, found, err := s.client.getLease(ctx, reservationName)
+	if err != nil || !found {
+		return err
+	}
+	if lease.Spec.HolderIdentity != s.reservationHolderFor(reservationName) {
+		return nil // A delayed release must never delete a successor's reservation.
+	}
+	safe, err := s.client.reservationWorkloadStopped(ctx, lease)
+	if err != nil {
+		return err
+	}
+	if !safe {
+		return fmt.Errorf("builder workload has not stopped")
+	}
+	return s.client.deleteReservation(ctx, lease)
 }
 
 func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadProfile, demand builderResourceDemand, snapshots []builderNodeSnapshot, reservations []builderReservation, requiredNodeLabels map[string]string) []builderCandidate {
