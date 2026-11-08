@@ -60,11 +60,13 @@ func resolveCompilerInputHotBatchWithIndex(ctx context.Context, tx inputQueryer,
 	if len(artifacts) > 0 {
 		// Scalar key projection avoids materializing wide dependency records.
 		// It preserves JSON null separately from a missing dependency key.
-		statement := `SELECT id,artifact_kind,scope_key,content_hash,
+		// Producer policies compare their content generation against the
+		// stored ledger envelope; never infer it from the content itself.
+		statement := `SELECT id,artifact_kind,scope_key,generation,content_hash,
  left((` + compilerInputHotReadProjection + `)::text,$2),left(metadata_json::text,16385),octet_length(content_json::text)
  FROM fugue_platform_artifacts WHERE id=ANY($1::text[])`
 		if indexed {
-			statement = `SELECT a.id,a.artifact_kind,a.scope_key,a.content_hash,
+			statement = `SELECT a.id,a.artifact_kind,a.scope_key,a.generation,a.content_hash,
  CASE WHEN i.artifact_id IS NOT NULL THEN i.content_text ELSE left((` + compilerInputHotReadProjection + `)::text,$2) END,
  CASE WHEN i.artifact_id IS NOT NULL THEN i.metadata_text ELSE left(a.metadata_json::text,16385) END,
  CASE WHEN i.artifact_id IS NOT NULL THEN i.source_bytes ELSE octet_length(a.content_json::text) END
@@ -82,7 +84,7 @@ func resolveCompilerInputHotBatchWithIndex(ctx context.Context, tx inputQueryer,
 			var a model.PlatformArtifact
 			var content, metadata []byte
 			var originalBytes int64
-			if err = rows.Scan(&a.ID, &a.ArtifactKind, &a.ScopeKey, &a.ContentHash, &content, &metadata, &originalBytes); err != nil {
+			if err = rows.Scan(&a.ID, &a.ArtifactKind, &a.ScopeKey, &a.Generation, &a.ContentHash, &content, &metadata, &originalBytes); err != nil {
 				break
 			}
 			if artifactCost != nil {

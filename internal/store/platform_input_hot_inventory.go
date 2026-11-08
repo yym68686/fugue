@@ -394,7 +394,7 @@ func resolveCompilerInputHotNode(ctx context.Context, tx inputQueryer, ref input
 		var artifact model.PlatformArtifact
 		var content, metadata []byte
 		artifact.ID = ref.ID
-		err := tx.QueryRowContext(ctx, `SELECT artifact_kind,scope_key,content_hash,left(content_json::text,$2),left(metadata_json::text,16385) FROM fugue_platform_artifacts WHERE id=$1`, ref.ID, compilerInputHotArtifactBytes+1).Scan(&artifact.ArtifactKind, &artifact.ScopeKey, &artifact.ContentHash, &content, &metadata)
+		err := tx.QueryRowContext(ctx, `SELECT artifact_kind,scope_key,generation,content_hash,left(content_json::text,$2),left(metadata_json::text,16385) FROM fugue_platform_artifacts WHERE id=$1`, ref.ID, compilerInputHotArtifactBytes+1).Scan(&artifact.ArtifactKind, &artifact.ScopeKey, &artifact.Generation, &artifact.ContentHash, &content, &metadata)
 		if err != nil {
 			return node, err
 		}
