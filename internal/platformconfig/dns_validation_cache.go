@@ -22,6 +22,7 @@ type dnsValidationCache struct {
 
 var dnsPlanValidations dnsValidationCache
 var dnsPreviousValidations dnsValidationCache
+var dnsCellPublicationValidations dnsValidationCache
 
 func (c *dnsValidationCache) contains(key [32]byte) bool {
 	c.Lock()
@@ -79,6 +80,36 @@ func dnsPreviousValidationKey(p PreviousTrafficPublicationInput) ([32]byte, bool
 	}
 	// The remaining input is small and contains no arbitrary JSON content.
 	p.Parent, p.Route, p.TLS, p.DNS = model.PlatformArtifact{}, model.PlatformArtifact{}, model.PlatformArtifact{}, model.PlatformArtifact{}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	h.Write(raw)
+	var key [32]byte
+	h.Sum(key[:0])
+	return key, true
+}
+
+// Every actual child tree and complete envelope participates, including fields
+// that the current pure validator does not read. The small remainder includes
+// the reference and producer policy. No claimed digest or mutable selection can
+// stand in for actual content; non-native trees keep the original validator.
+func dnsCellPublicationValidationKey(p CellRoutePublicationInput) ([32]byte, bool) {
+	h := sha256.New()
+	h.Write([]byte("fugue-dns-cell-publication-validation/v1\x00"))
+	size := 0
+	for _, a := range []model.PlatformArtifact{p.Parent, p.Route, p.TLS} {
+		key, n, ok := dnsValidationArtifactKey(a)
+		if !ok {
+			return [32]byte{}, false
+		}
+		size += n
+		h.Write(key[:])
+	}
+	if size < 16<<10 {
+		return [32]byte{}, false
+	}
+	p.Parent, p.Route, p.TLS = model.PlatformArtifact{}, model.PlatformArtifact{}, model.PlatformArtifact{}
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return [32]byte{}, false

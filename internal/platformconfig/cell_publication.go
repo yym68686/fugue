@@ -61,6 +61,24 @@ func (r CellRoutePublicationReference) Validate() error {
 	return nil
 }
 
+// Only large decoded DNS envelopes use bounded deterministic validation reuse.
+func validateDNSCellRoutePublication(p CellRoutePublicationInput, encodedPublicationsBytes int) error {
+	// The caller already has the complete encoded array. Keep small envelopes
+	// on their original path without paying to fingerprint their trees.
+	if encodedPublicationsBytes < 64<<10 {
+		return ValidateCellRoutePublication(p)
+	}
+	key, cacheable := dnsCellPublicationValidationKey(p)
+	if cacheable && dnsCellPublicationValidations.contains(key) {
+		return nil
+	}
+	err := ValidateCellRoutePublication(p)
+	if err == nil && cacheable {
+		dnsCellPublicationValidations.remember(key)
+	}
+	return err
+}
+
 // ValidateCellRoutePublication checks content and membership without pretending
 // to authenticate a signature or the mutable release transport.
 func ValidateCellRoutePublication(p CellRoutePublicationInput) error {
@@ -200,7 +218,7 @@ func decodeCellRoutePublicationFields(publicationsRaw, policyRaw json.RawMessage
 		if p.Reference.AuthorityCellID == policy.AuthorityCellID || i > 0 && publications[i-1].Reference.AuthorityCellID >= p.Reference.AuthorityCellID {
 			return nil, policy, fmt.Errorf("DNS Cell references must be independent, sorted and unique")
 		}
-		if err := ValidateCellRoutePublication(p); err != nil {
+		if err := validateDNSCellRoutePublication(p, len(publicationsRaw)); err != nil {
 			return nil, policy, err
 		}
 	}
