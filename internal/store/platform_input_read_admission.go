@@ -24,6 +24,18 @@ type PlatformInputReadSelection struct {
 	ReleaseID, ExpectedConsumerSetID string
 	LKGKind, LKGScope                string
 	LKG                              *model.PlatformLKGSnapshot
+	// OriginalInput is used only by explicit full-history reads. Ordinary
+	// runtime reads must not require the audit body of an opted-in artifact.
+	OriginalInput bool `json:",omitempty"`
+}
+
+func compilerInputReadRetainsOriginal(reads []PlatformInputReadSelection) bool {
+	for _, read := range reads {
+		if read.OriginalInput {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckPlatformInputRead verifies a COMPLETE dependency closure and consumes
@@ -68,6 +80,9 @@ func (s *Store) CheckPlatformInputRead(ctx context.Context, selections []Platfor
 }
 
 func validateCompilerInputReadSelection(r PlatformInputReadSelection) error {
+	if r.OriginalInput && r.ArtifactID == "" {
+		return ErrInvalidInput
+	}
 	for _, id := range []string{r.ArtifactID, r.ParentID, r.ReleaseID, r.ExpectedConsumerSetID} {
 		if len(id) > 512 {
 			return ErrInvalidInput

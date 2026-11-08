@@ -8,7 +8,7 @@ import (
 	"fugue/internal/model"
 )
 
-// Route and TLS dependency extraction reads only lineage and metadata. Keep
+// Route and TLS dependency extraction reads lineage, policy and metadata. Keep
 // the full JSON syntax, depth and float64 checks, without allocating unrelated
 // configuration subtrees. Small sources keep the original decoder: the extra
 // validation pass is useful only when it avoids a substantial object graph.
@@ -24,12 +24,15 @@ func decodeCompilerInputHotArtifactJSON(a *model.PlatformArtifact, content, meta
 	if json.Unmarshal(content, &fields) != nil || !compilerInputHotJSONNumbersRepresentable(content) || json.Unmarshal(metadata, &a.Metadata) != nil {
 		return ErrConflict
 	}
-	if raw, present := fields["lineage"]; present {
-		var lineage any
-		if json.Unmarshal(raw, &lineage) != nil {
-			return ErrConflict
+	a.Content = map[string]any{}
+	for _, key := range []string{"lineage", "policy"} {
+		if raw, present := fields[key]; present {
+			var value any
+			if json.Unmarshal(raw, &value) != nil {
+				return ErrConflict
+			}
+			a.Content[key] = value
 		}
-		a.Content = map[string]any{"lineage": lineage}
 	}
 	return nil
 }

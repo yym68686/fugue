@@ -82,11 +82,11 @@ func (s *Server) captureDNSProducer(ctx context.Context, p platformproducer.Poli
 	}
 	// Source admission is separate from the producer's mutation guard. Consume
 	// one complete signed closure and current full-readback pins BEFORE reading
-	// the original runtime input; never trigger R2 restoration on this reader.
+	// the signed operational input; never trigger R2 restoration on this reader.
 	if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
 		return fail()
 	}
-	snapshot, err := s.store.GetPlatformCompilerInput(parent.Metadata["input_snapshot_digest"])
+	snapshot, err := s.store.GetPlatformArtifactRuntimeInput(parent)
 	if err != nil || snapshot.IntentGeneration != intent.Generation || snapshot.PolicyGeneration != policy.Generation {
 		return fail()
 	}

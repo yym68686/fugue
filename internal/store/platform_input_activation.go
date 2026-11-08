@@ -301,7 +301,12 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 				if configurationSnapshot != nil && configurationSnapshot.ArtifactID == artifact.ID {
 					configurationVerified = platformsafety.EvaluatePlatformLKGSnapshot(*configurationSnapshot, artifact, keyring, time.Now()).Pass
 				}
-				node, err := compilerInputArtifactHotNode(artifact)
+				var node inputarchive.HotNode
+				if inventory || compilerInputReadRetainsOriginal(reads) {
+					node, err = compilerInputArtifactHotNode(artifact)
+				} else {
+					node, err = compilerInputArtifactRuntimeNode(artifact)
+				}
 				if err != nil {
 					return nil, err
 				}

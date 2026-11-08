@@ -24,6 +24,7 @@ func projectConfigurationDNS(result *platformIntentProjectionResponse, declared 
 	result.Policy.DNSAuthorities = authorities
 	result.Policy.DNSClientPolicies = input.Clients
 	result.Policy.DNSPlacementMode = input.DNSPlacementMode
+	result.Policy.RuntimeInputMode = input.RuntimeInputMode
 	result.Policy.DNSQueryPolicy = input.DNSQueryPolicy
 	result.Policy.DNSReadiness = input.DNSReadiness
 	result.Policy.TLSReadiness = input.TLSReadiness

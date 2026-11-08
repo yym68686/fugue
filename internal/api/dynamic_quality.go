@@ -685,7 +685,10 @@ func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Contex
 		s.dynamicQuality.mu.Unlock()
 		return dynamicQualityRestoreNeeded(summary, job, entry, now())
 	}
-	digest := parent.Metadata["input_snapshot_digest"]
+	digest, err := platformconfig.ArtifactRuntimeInputDigest(parent)
+	if err != nil {
+		return
+	}
 	snapshot, err := s.store.GetPlatformCompilerInputDNSSelections(digest, needed)
 	if err != nil {
 		return

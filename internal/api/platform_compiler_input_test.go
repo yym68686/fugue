@@ -95,3 +95,40 @@ func TestDNSConfigurationProjectionRetainsSelectionAndDoesNotMutateReplay(t *tes
 		t.Fatal("projection changed authority, observation time or stored replay")
 	}
 }
+
+func TestCompilerInputViewUsesExplicitSignedRuntimeContract(t *testing.T) {
+	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	at := time.Now().UTC().Add(-time.Minute)
+	req := platformConfigCompileRequest{Intent: platformconfig.PlatformIntent{Generation: "independent-intent"},
+		Policy:          platformconfig.PolicySnapshot{Generation: "independent-policy", RuntimeInputMode: platformconfig.RuntimeInputConfigurationV1},
+		RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &at, Facts: map[string]any{"audit": "full-only"}}}
+	r := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, req)
+	if r.Code != http.StatusCreated {
+		t.Fatal(r.Body.String())
+	}
+	var compiled platformConfigCompileResponse
+	mustDecodeJSON(t, r, &compiled)
+	path := "/v1/admin/artifacts/" + compiled.ReleaseArtifact.ID + "/compiler-input"
+	for _, view := range []string{"full", "dns_configuration"} {
+		r = performJSONRequest(t, server, http.MethodGet, path+"?view="+view, admin, nil)
+		if r.Code != http.StatusOK {
+			t.Fatal(view, r.Body.String())
+		}
+		var body struct {
+			Original string                         `json:"input_snapshot_digest"`
+			Runtime  string                         `json:"runtime_input_digest"`
+			Snapshot platformconfig.RuntimeSnapshot `json:"runtime_snapshot"`
+		}
+		mustDecodeJSON(t, r, &body)
+		if body.Original != compiled.Lineage.InputSnapshotDigest || body.Snapshot.CapturedAt == nil || !body.Snapshot.CapturedAt.Equal(at) {
+			t.Fatal("view changed provenance or original time")
+		}
+		if view == "full" {
+			if body.Runtime != "" || body.Snapshot.Facts["audit"] != "full-only" {
+				t.Fatal("full view stopped reading original")
+			}
+		} else if body.Runtime != compiled.Lineage.RuntimeInputDigest || body.Runtime == body.Original || body.Snapshot.Facts != nil {
+			t.Fatal("DNS view did not disclose its distinct signed input")
+		}
+	}
+}

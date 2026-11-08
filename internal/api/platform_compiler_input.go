@@ -35,11 +35,16 @@ func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r
 		httpx.WriteError(w, http.StatusNotFound, "artifact has no compiler runtime input")
 		return
 	}
-	if err := s.store.CheckPlatformInputRead(r.Context(), []store.PlatformInputReadSelection{{ArtifactID: a.ID, ContentHash: a.ContentHash}}); err != nil {
+	if err := s.store.CheckPlatformInputRead(r.Context(), []store.PlatformInputReadSelection{{ArtifactID: a.ID, ContentHash: a.ContentHash, OriginalInput: view != "dns_configuration"}}); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "compiler input dependency proof unavailable")
 		return
 	}
-	snapshot, err := s.store.GetPlatformCompilerInput(digest)
+	var snapshot platformconfig.RuntimeSnapshot
+	if view == "dns_configuration" {
+		snapshot, err = s.store.GetPlatformArtifactRuntimeInput(a)
+	} else {
+		snapshot, err = s.store.GetPlatformCompilerInput(digest)
+	}
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -50,6 +55,9 @@ func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r
 	}
 	response := map[string]any{"artifact_id": a.ID, "input_snapshot_digest": digest, "runtime_snapshot": snapshot}
 	if view == "dns_configuration" {
+		if runtimeDigest := a.Metadata["runtime_input_digest"]; runtimeDigest != "" {
+			response["runtime_input_digest"] = runtimeDigest
+		}
 		projected := dnsConfigurationInput(snapshot)
 		projectedDigest, err := platformconfig.RuntimeSnapshotDigest(projected)
 		if err != nil {
@@ -67,7 +75,7 @@ func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r
 	httpx.WriteJSON(w, http.StatusOK, response)
 }
 
-// Projection follows full stored-input verification. No observation time,
+// Projection follows exact signed input verification. No observation time,
 // selection, capability or readiness value is created or renewed here.
 func dnsConfigurationInput(in platformconfig.RuntimeSnapshot) platformconfig.RuntimeSnapshot {
 	out := platformconfig.RuntimeSnapshot{IntentGeneration: in.IntentGeneration, PolicyGeneration: in.PolicyGeneration, CapturedAt: in.CapturedAt,

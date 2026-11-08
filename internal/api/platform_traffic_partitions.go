@@ -121,7 +121,7 @@ func (s *Server) observeRetainedTrafficSource(ctx context.Context, scope string)
 	// Preserve the independently checked authority and signed route on a body
 	// read failure. This partial result never authorizes reuse: it only lets the
 	// handoff guard distinguish an unreadable positive source from no source.
-	source.snapshot, err = s.store.GetPlatformCompilerInput(parent.Metadata["input_snapshot_digest"])
+	source.snapshot, err = s.store.GetPlatformArtifactRuntimeInput(parent)
 	if err != nil {
 		return source, fmt.Errorf("retained partition source observations unavailable: %w", err)
 	}

@@ -135,6 +135,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	RuntimeInputMode         string                    `json:"runtime_input_mode,omitempty"`
 	StaticEdgeRoutes         []StaticEdgeDNSRoute      `json:"static_edge_routes,omitempty"`
 	PublicationRole          string                    `json:"publication_role,omitempty"`
 	AuthorityCellID          string                    `json:"authority_cell_id,omitempty"`
@@ -181,6 +182,7 @@ type Lineage struct {
 	IntentDigest        string `json:"intent_digest"`
 	PolicyDigest        string `json:"policy_digest"`
 	InputSnapshotDigest string `json:"input_snapshot_digest,omitempty"`
+	RuntimeInputDigest  string `json:"runtime_input_digest,omitempty"`
 	CompilerVersion     string `json:"compiler_version"`
 }
 
@@ -251,6 +253,7 @@ type ReleaseObservation struct {
 
 type CompileResult struct {
 	InputSnapshot   RuntimeSnapshot
+	RuntimeInput    *RuntimeSnapshot
 	IntentArtifact  model.PlatformArtifact
 	PolicyArtifact  model.PlatformArtifact
 	RouteArtifact   model.PlatformArtifact
@@ -416,6 +419,16 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		InputSnapshotDigest: snapshotDigest,
 		CompilerVersion:     CompilerVersion,
 	}
+	var runtimeInput *RuntimeSnapshot
+	if policy.RuntimeInputMode == RuntimeInputConfigurationV1 {
+		compact := ConfigurationRuntimeInput(runtimeSnapshot)
+		lineage.RuntimeInputDigest, err = RuntimeSnapshotDigest(compact)
+		if err != nil {
+			return CompileResult{}, fmt.Errorf("digest configuration runtime input: %w", err)
+		}
+		lineage.CompilerVersion = ConfigurationInputCompilerVersion
+		runtimeInput = &compact
+	}
 	if intent.Scope != policy.Scope {
 		return CompileResult{}, fmt.Errorf("intent and policy scopes must match")
 	}
@@ -543,6 +556,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	releaseArtifact := buildArtifact(model.PlatformArtifactKindReleaseSet, intent.Scope, releaseSet.Generation, releaseSet, metadata, now)
 	return CompileResult{
 		InputSnapshot:   runtimeSnapshot,
+		RuntimeInput:    runtimeInput,
 		IntentArtifact:  intentArtifact,
 		PolicyArtifact:  policyArtifact,
 		RouteArtifact:   routeArtifact,
@@ -826,6 +840,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if in.RuntimeInputMode != "" && in.RuntimeInputMode != RuntimeInputConfigurationV1 {
+		return fmt.Errorf("unsupported runtime_input_mode")
+	}
 	if err := validateStaticEdgeDNSRoutes(in); err != nil {
 		return err
 	}
@@ -1032,6 +1049,7 @@ func LineageFromArtifact(artifact model.PlatformArtifact) Lineage {
 		IntentDigest:        artifact.Metadata["intent_digest"],
 		PolicyDigest:        artifact.Metadata["policy_digest"],
 		InputSnapshotDigest: artifact.Metadata["input_snapshot_digest"],
+		RuntimeInputDigest:  artifact.Metadata["runtime_input_digest"],
 		CompilerVersion:     artifact.Metadata["compiler_version"],
 	}
 }
@@ -1057,7 +1075,7 @@ func buildArtifact(kind, scope, generation string, content any, metadata map[str
 }
 
 func lineageMetadata(lineage Lineage) map[string]string {
-	return map[string]string{
+	metadata := map[string]string{
 		"intent_generation":     lineage.IntentGeneration,
 		"policy_generation":     lineage.PolicyGeneration,
 		"intent_digest":         lineage.IntentDigest,
@@ -1065,6 +1083,10 @@ func lineageMetadata(lineage Lineage) map[string]string {
 		"input_snapshot_digest": lineage.InputSnapshotDigest,
 		"compiler_version":      lineage.CompilerVersion,
 	}
+	if lineage.RuntimeInputDigest != "" {
+		metadata["runtime_input_digest"] = lineage.RuntimeInputDigest
+	}
+	return metadata
 }
 
 func firstNonEmpty(values ...string) string {

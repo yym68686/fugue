@@ -12,6 +12,7 @@ import (
 // ProjectionPolicyInput is the supported producer subset of PolicySnapshot.
 // Unused fields are rejected rather than silently ignored.
 type ProjectionPolicyInput struct {
+	RuntimeInputMode         string                                    `json:"runtime_input_mode,omitempty"`
 	OfflineEdges             []OfflineEdge                             `json:"offline_edges,omitempty"`
 	PublicationRole          string                                    `json:"publication_role,omitempty"`
 	AuthorityCellID          string                                    `json:"authority_cell_id,omitempty"`
@@ -51,10 +52,13 @@ func DecodeProjectionPolicy(a model.PlatformArtifact, consumers []platformconfig
 		return fail()
 	}
 
-	for _, key := range []string{"minimum_healthy_edges", "max_stale_seconds", "route_constraints", "edge_selection_constraints", "dns_route_state_constraints", "offline_edges"} {
+	for _, key := range []string{"minimum_healthy_edges", "max_stale_seconds", "route_constraints", "edge_selection_constraints", "dns_route_state_constraints", "offline_edges", "runtime_input_mode"} {
 		if value, present := a.Content[key]; present && value == nil {
 			return fail()
 		}
+	}
+	if p.RuntimeInputMode != "" && p.RuntimeInputMode != platformconfig.RuntimeInputConfigurationV1 {
+		return fail()
 	}
 	for _, key := range []string{"dns_query_policy", "dns_placement_mode"} {
 		if value, present := a.Content[key]; present && (value == nil || key == "dns_placement_mode" && value == "") {
@@ -131,6 +135,7 @@ func (p ProjectionPolicyInput) RouteDefaults() (platformconfig.PolicySnapshot, b
 		scope = "global"
 	}
 	out := platformconfig.PolicySnapshot{PublicationRole: p.PublicationRole, SchemaVersion: platformconfig.SchemaVersion, Scope: scope, AuthorityCellID: p.AuthorityCellID, ConsumerTopologyDigest: p.ConsumerTopologyDigest, Generation: p.Generation, MinimumHealthyEdges: *p.MinimumHealthyEdges, MaxStaleSeconds: *p.MaxStaleSeconds, RouteConstraints: *p.RouteConstraints, DNSRouteStateConstraints: *p.DNSRouteStateConstraints}
+	out.RuntimeInputMode = p.RuntimeInputMode
 	if p.PublicationRole == platformconfig.PublicationRoleCellRoutes {
 		out.TLSReadiness, out.TrafficRolloutCohorts = p.TLSReadiness, p.Cohorts
 	}

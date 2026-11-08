@@ -82,6 +82,51 @@ func retainedTrafficAPIFixture(t *testing.T, configure ...func(*platformconfig.C
 	return s, r, parent, path
 }
 
+func TestRetainedTrafficRuntimeSourceSurvivesAbsentOriginalAfterRestart(t *testing.T) {
+	s, _, parent, path := retainedTrafficAPIFixture(t, func(r *platformconfig.CompileRequest) {
+		r.Policy.RuntimeInputMode = platformconfig.RuntimeInputConfigurationV1
+		r.RuntimeSnapshot.Facts = map[string]any{"audit": strings.Repeat("replay", 1000)}
+	})
+	before, err := s.readRetainedTrafficSource(context.Background(), "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state model.State
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	kept := state.PlatformArtifactContents[:0]
+	for _, content := range state.PlatformArtifactContents {
+		if content.ContentHash != parent.Metadata["input_snapshot_digest"] {
+			kept = append(kept, content)
+		}
+	}
+	state.PlatformArtifactContents = kept
+	data, err = json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Restart the store with no cached original. This synthetic source test
+	// exercises the real retained-traffic reader, not full recovery acceptance.
+	fresh := store.New(path)
+	fresh.ConfigurePlatformArtifactSigning(s.bundleKeyring())
+	s.store = fresh
+	after, err := s.readRetainedTrafficSource(context.Background(), "global")
+	if err != nil {
+		t.Fatal("retained source still requires original history", err)
+	}
+	if !before.expiry("tenant-a", "app-a").Equal(after.expiry("tenant-a", "app-a")) || !reflect.DeepEqual(before.routes, after.routes) || !reflect.DeepEqual(before.snapshot, after.snapshot) {
+		t.Fatal("restart renewed retained leases or changed source facts")
+	}
+}
+
 func TestRetainedTrafficHostnameProjectionPreservesMultiHostAndSharedPaths(t *testing.T) {
 	now := time.Now().UTC()
 	r := platformconfig.CompileRequest{

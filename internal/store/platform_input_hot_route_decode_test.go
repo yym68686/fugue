@@ -9,6 +9,7 @@ import (
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/testfixture/celldns"
 )
 
@@ -97,6 +98,32 @@ func TestHotRouteDecodeMatchesFullObject(t *testing.T) {
 	nested := []byte(`{"ignored":` + strings.Repeat("[", 10001) + "0" + strings.Repeat("]", 10001) + "}")
 	nested = append([]byte(strings.Repeat(" ", 64<<10)), nested...)
 	assertHotRouteDecodeEquivalent(t, a, nested, metadata, int64(len(nested)))
+}
+
+func TestHotRouteDecodePreservesConfigurationRuntimePolicyBinding(t *testing.T) {
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent"}, Policy: platformconfig.PolicySnapshot{Generation: "policy", RuntimeInputMode: platformconfig.RuntimeInputConfigurationV1}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{Facts: map[string]any{"audit": true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []model.PlatformArtifact{compiled.RouteArtifact, compiled.TLSArtifact} {
+		a.ID, a.ContentHash = "runtime-child", "sha256:"+strings.Repeat("a", 64)
+		a.Content["unrelated_padding"] = strings.Repeat("x", 70<<10)
+		content, _ := json.Marshal(a.Content)
+		metadata, _ := json.Marshal(a.Metadata)
+		a.Content = nil
+		assertHotRouteDecodeEquivalent(t, a, content, metadata, int64(len(content)))
+		node, err := decodeCompilerInputHotBatchArtifact(a, content, metadata, int64(len(content)))
+		if err != nil || len(node.References) != 2 {
+			t.Fatal("large optimized decode lost runtime or original retention binding", node, err)
+		}
+		seen := map[string]bool{}
+		for _, ref := range node.References {
+			seen[ref.ID] = true
+		}
+		if !seen[compiled.Lineage.RuntimeInputDigest] || !seen[compiled.Lineage.InputSnapshotDigest] {
+			t.Fatal("retention decoder dropped original provenance", node)
+		}
+	}
 }
 
 func FuzzHotRouteDecodeMatchesFullObject(f *testing.F) {

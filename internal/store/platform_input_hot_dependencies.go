@@ -20,6 +20,17 @@ func compilerInputArtifactHotNode(artifact model.PlatformArtifact) (inputarchive
 }
 
 func compilerInputArtifactHotNodeObserved(artifact model.PlatformArtifact, cost *CompilerInputHotDecodeCost) (inputarchive.HotNode, error) {
+	return compilerInputArtifactDependencyNode(artifact, cost, true)
+}
+
+// Ordinary serving/activation follows the new signed operational dependency.
+// Retention inventory and explicit full-history reads retain BOTH dependencies:
+// changing a runtime reader never releases the original provenance obligation.
+func compilerInputArtifactRuntimeNode(artifact model.PlatformArtifact) (inputarchive.HotNode, error) {
+	return compilerInputArtifactDependencyNode(artifact, nil, false)
+}
+
+func compilerInputArtifactDependencyNode(artifact model.PlatformArtifact, cost *CompilerInputHotDecodeCost, retainOriginal bool) (inputarchive.HotNode, error) {
 	node := inputarchive.HotNode{Identity: inputarchive.HotReference{Kind: "artifact", ID: artifact.ID}, ContentHash: artifact.ContentHash, References: []inputarchive.HotReference{}}
 	if artifact.ID == "" || !inputDigestPattern.MatchString(artifact.ContentHash) {
 		return node, fmt.Errorf("hot artifact identity invalid: %w", ErrConflict)
@@ -31,25 +42,20 @@ func compilerInputArtifactHotNodeObserved(artifact model.PlatformArtifact, cost 
 		node.References = append(node.References, inputarchive.HotReference{Kind: kind, ID: id, ExpectedHash: expected})
 		return nil
 	}
-	input := artifact.Metadata["input_snapshot_digest"]
-	if rawLineage, exists := artifact.Content["lineage"]; exists {
-		raw, err := json.Marshal(rawLineage)
-		var lineage platformconfig.Lineage
-		if err != nil || len(raw) > 16<<10 || json.Unmarshal(raw, &lineage) != nil || string(raw) == "null" {
-			return node, fmt.Errorf("hot artifact lineage invalid: %w", ErrConflict)
-		}
-		if input != "" && lineage.InputSnapshotDigest != "" && input != lineage.InputSnapshotDigest {
-			return node, fmt.Errorf("hot artifact lineage conflicts with metadata: %w", ErrConflict)
-		}
-		if input == "" {
-			input = lineage.InputSnapshotDigest
-		}
+	input, err := platformconfig.ArtifactRuntimeInputDigest(artifact)
+	if err != nil {
+		return node, fmt.Errorf("hot artifact runtime input contract invalid: %w", ErrConflict)
 	}
 	if input != "" {
 		if !inputDigestPattern.MatchString(input) {
 			return node, fmt.Errorf("hot artifact input digest invalid: %w", ErrConflict)
 		}
 		if err := add("input", input, input); err != nil {
+			return node, err
+		}
+	}
+	if original := artifact.Metadata["input_snapshot_digest"]; retainOriginal && artifact.Metadata["runtime_input_digest"] != "" && original != input {
+		if err := add("input", original, original); err != nil {
 			return node, err
 		}
 	}

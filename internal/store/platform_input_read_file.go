@@ -132,7 +132,11 @@ func checkFileCompilerInputClosure(ctx context.Context, state *model.State, root
 					if e != nil || len(body) > compilerInputHotArtifactBytes || !platformsafety.EvaluateArtifactIntegrity(a, keyring).Pass {
 						return nil, ErrConflict
 					}
-					node, err = compilerInputArtifactHotNode(a)
+					if compilerInputReadRetainsOriginal(reads) {
+						node, err = compilerInputArtifactHotNode(a)
+					} else {
+						node, err = compilerInputArtifactRuntimeNode(a)
+					}
 					metadata = a
 				case "generation":
 					key := ref
