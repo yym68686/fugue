@@ -426,6 +426,63 @@ func TestHotInventoryPostgresDNSProjectionPreservesTypedDependenciesAndBounds(t 
 	}
 }
 
+func TestHotInventoryPostgresLargeDNSDependencyFieldsDoNotMaterialize(t *testing.T) {
+	db, address, _ := hotInventoryTestDatabase(t)
+	installHotIndexTest(t, db, address)
+	req, _, _ := celldns.SourceAuthorizedRequest(t, false)
+	artifact := celldns.Compile(t, req).DNSArtifact
+	content, err := json.Marshal(artifact.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, variant := range []string{"large-policy", "large-lineage", "null-policy", "missing-policy"} {
+		var value map[string]any
+		if err = json.Unmarshal(content, &value); err != nil {
+			t.Fatal(err)
+		}
+		switch variant {
+		case "large-policy", "large-lineage":
+			field := strings.TrimPrefix(variant, "large-")
+			object, ok := value[field].(map[string]any)
+			if !ok {
+				t.Fatal("fixture dependency must be an object", field)
+			}
+			object["synthetic_padding"] = strings.Repeat("x", 2<<20)
+		case "null-policy":
+			value["policy"] = nil
+		case "missing-policy":
+			delete(value, "policy")
+		}
+		body, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := "neutral-large-dependency-" + variant
+		if _, err = db.Exec(`INSERT INTO fugue_platform_artifacts(id,artifact_kind,scope_key,generation,status,content_hash,content_json,metadata_json,created_at,updated_at)
+ VALUES($1,'dns_answer_bundle','neutral-scope',$1,'validated',$2,$3,'{}',now(),now())`, id, artifact.ContentHash, body); err != nil {
+			t.Fatal(err)
+		}
+		for _, indexed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/indexed-%t", variant, indexed), func(t *testing.T) {
+				tx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback()
+				if _, err = tx.Exec(`SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms'; SET LOCAL work_mem='1MB'; SET LOCAL temp_file_limit=0; SET LOCAL max_parallel_workers_per_gather=0; SET LOCAL jit=off`); err != nil {
+					t.Fatal(err)
+				}
+				ref := inputarchive.HotReference{Kind: "artifact", ID: id}
+				want, singleErr := resolveCompilerInputHotNode(t.Context(), tx, ref)
+				got, batchErr := resolveCompilerInputHotBatchWithIndex(t.Context(), tx, []inputarchive.HotReference{ref}, nil, indexed)
+				if batchErr != nil || singleErr != nil && len(got) != 0 || singleErr == nil && !reflect.DeepEqual(want, got[ref]) {
+					t.Fatal("large dependency transport changed bounded single-read semantics", singleErr, batchErr)
+				}
+			})
+		}
+	}
+}
+
 func TestHotInventoryPostgresWorksWithReadOnlyOrdinaryRole(t *testing.T) {
 	db, address, schema := hotInventoryTestDatabase(t)
 	seedHotInventoryHistory(t, db)

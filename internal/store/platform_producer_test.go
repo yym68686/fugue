@@ -39,6 +39,9 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			s := New(t.TempDir()+"/state.json", dsn)
 			if dsn != "" {
 				s = platformStatePostgresFixture(t)
+				if historyPhase(t, s) != "capability" {
+					t.Fatal("producer business guard fixture must exercise the capability phase")
+				}
 			}
 			configureTestPlatformArtifactSigning(s)
 			if dsn == "" {
@@ -149,27 +152,17 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					t.Fatal(err)
 				}
 				_, r, _, _, err := s.ReleasePlatformArtifact(a.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, principal)
-				if dsn != "" && (scenario == "static digest" || scenario == "dns digest") {
-					// Publication itself now refuses an incorrectly bound signed
-					// dependency, before this policy can grant producer authority.
-					if !errors.Is(err, ErrConflict) {
-						t.Fatal("incorrect dependency digest granted authority", err)
-					}
-					var count int
-					if err := s.db.QueryRow(`SELECT count(*) FROM fugue_platform_artifact_releases WHERE artifact_id=$1`, a.ID).Scan(&count); err != nil || count != 0 {
-						t.Fatal("rejected dependency policy advanced publication", count, err)
-					}
-					return model.PlatformArtifactRelease{}
-				}
 				if err != nil {
 					t.Fatal(err)
 				}
 				return r
 			}
 			authority := makePolicy("shadow")
-			if dsn != "" && (scenario == "static digest" || scenario == "dns digest") {
-				return
-			}
+			// Capability retains the original shadow policy publication behavior
+			// in both stores. A wrong static/DNS digest must still be refused by
+			// the actual producer guard below, without a produced release/message.
+			// Strict dependency/pin admission belongs to the separate enforced
+			// phase and its real PostgreSQL history-phase tests.
 			gen := model.NewID("producer-input")
 			compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: gen, Scope: "global"}, Policy: platformconfig.PolicySnapshot{Generation: gen, Scope: "global"}})
 			if err != nil {

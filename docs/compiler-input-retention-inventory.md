@@ -22,6 +22,14 @@ storage before its output limit; it does not reduce retained history, stop
 after a row prefix, or extend statement and transaction deadlines. Duplicate
 events still consume read time and metadata transport within those deadlines.
 
+Uncached DNS dependency fields use scalar JSON key extraction. A wide retained
+policy or lineage must not spill merely because a record-expansion function
+materializes it. Missing keys and explicit JSON null remain distinct; the full
+source size still owns the 8MiB artifact and 32MiB batch limits. The existing v1
+index derivation and tuple-version checks are unchanged. This addresses a
+locally reproduced refusal; a production SQLSTATE alone does not prove which
+expression or input caused that refusal.
+
 Each entry contains its exact digest, logical size, format, storage location,
 local representation and all native root bindings. Native retained inputs are
 conservatively H, without asserting that their bytes or signatures have been

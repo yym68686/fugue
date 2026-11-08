@@ -9,7 +9,6 @@ import (
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
-	"fugue/internal/schemamigrate"
 )
 
 // Only artifact/input transport is batched; both still use the same typed
@@ -60,15 +59,14 @@ func resolveCompilerInputHotBatchWithIndex(ctx context.Context, tx inputQueryer,
 		return nil, err
 	}
 	if len(artifacts) > 0 {
-		// jsonb_each materializes even discarded answer values and can spill
-		// them to disk. Decode the object once, then use its key set to preserve
-		// JSON null separately from a missing dependency key.
+		// Scalar key projection avoids materializing wide dependency records.
+		// It preserves JSON null separately from a missing dependency key.
 		statement := `SELECT id,artifact_kind,scope_key,content_hash,
- left((` + schemamigrate.CompilerInputHotProjection + `)::text,$2),left(metadata_json::text,16385),octet_length(content_json::text)
+ left((` + compilerInputHotReadProjection + `)::text,$2),left(metadata_json::text,16385),octet_length(content_json::text)
  FROM fugue_platform_artifacts WHERE id=ANY($1::text[])`
 		if indexed {
 			statement = `SELECT a.id,a.artifact_kind,a.scope_key,a.content_hash,
- CASE WHEN i.artifact_id IS NOT NULL THEN i.content_text ELSE left((` + schemamigrate.CompilerInputHotProjection + `)::text,$2) END,
+ CASE WHEN i.artifact_id IS NOT NULL THEN i.content_text ELSE left((` + compilerInputHotReadProjection + `)::text,$2) END,
  CASE WHEN i.artifact_id IS NOT NULL THEN i.metadata_text ELSE left(a.metadata_json::text,16385) END,
  CASE WHEN i.artifact_id IS NOT NULL THEN i.source_bytes ELSE octet_length(a.content_json::text) END
  FROM fugue_platform_artifacts a LEFT JOIN fugue_platform_input_hot_dependency_index_v1 i
