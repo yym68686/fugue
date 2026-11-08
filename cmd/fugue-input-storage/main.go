@@ -34,8 +34,9 @@ func main() {
 		}
 		return
 	}
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-retention-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-retention-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, observe")
 	copyContract := flag.String("copy-contract", "", "strict single-input archive-copy JSON contract path")
+	sourceVerificationContract := flag.String("source-verification-contract", "", "strict one-parent read-only compiler-source verification contract; no caller keys")
 	taskContract := flag.String("task-input-contract", "", "strict bounded task-input-prepare contract path; trusted API-role maintenance only")
 	taskPlan := flag.String("task-input-plan", "", "strict signed task preparation plan path; contains a public verification key only")
 	taskBackend := flag.String("task-input-backend", "", "exact archive backend fingerprint for trusted task-input-plan")
@@ -72,6 +73,7 @@ func main() {
 	localPinMode := *mode == "archive-local-pin" || *mode == "archive-local-unpin"
 	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "task-input-plan" || *mode == "publication-input-plan" || *mode == "consumer-input-plan" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode || *mode == "archive-local-pin" || *mode == "task-input-prepare") && !*apply
 	readOnly = readOnly || *mode == "archive-retention-inventory"
+	readOnly = readOnly || *mode == "compiler-source-verify"
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
@@ -81,6 +83,27 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *mode == "compiler-source-verify" {
+		selected := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { selected[f.Name] = true })
+		if !validSourceVerificationFlags(selected) || *sourceVerificationContract == "" || os.Getenv("FUGUE_DATABASE_URL") == "" {
+			fmt.Fprintln(os.Stderr, "compiler-source-verify requires only mode, exact contract and API-role database")
+			os.Exit(2)
+		}
+		report, err := runSourceVerification(ctx, *sourceVerificationContract)
+		if encodeErr := json.NewEncoder(os.Stdout).Encode(report); encodeErr != nil {
+			os.Exit(1)
+		}
+		if err != nil {
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *sourceVerificationContract != "" {
+		fmt.Fprintln(os.Stderr, "source verification contract requires compiler-source-verify mode")
+		os.Exit(2)
+	}
 	if consumerTicketMode {
 		allowed := map[string]bool{"mode": true}
 		if *mode == "consumer-input-plan" {
