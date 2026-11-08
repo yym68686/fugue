@@ -176,7 +176,6 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
  SELECT 'active-lane',lane_key,'release',active_release_id,'','','' FROM fugue_platform_release_lanes WHERE active_release_id<>''
  UNION ALL SELECT 'active-release',id,'release',id,'','','' FROM fugue_platform_artifact_releases WHERE status='active'
  UNION ALL SELECT 'current-lkg',id,'artifact',artifact_id,'','',content_hash FROM fugue_platform_lkg_snapshots
- UNION ALL SELECT 'unexpired-lkg',artifact_id,'artifact',artifact_id,'','',content_hash FROM fugue_platform_lkg_snapshot_history WHERE expires_at>transaction_timestamp() GROUP BY artifact_id,content_hash
  UNION ALL SELECT 'consumer-'||g.role,c.id,'generation',g.generation,c.artifact_kind,c.scope_key,''
  FROM fugue_platform_consumer_instances c CROSS JOIN LATERAL (VALUES
  ('desired',c.desired_generation),('actual',c.actual_generation),('candidate',c.candidate_generation),('lkg',c.lkg_generation)) g(role,generation) WHERE g.generation<>''
@@ -204,6 +203,17 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
 		"consumer-desired", "consumer-actual", "consumer-candidate", "consumer-lkg", "consumer-parent", "consumer-expectation",
 		"shadow-consumer-desired", "shadow-consumer-actual", "shadow-consumer-candidate", "shadow-consumer-lkg", "shadow-consumer-parent", "shadow-consumer-expectation",
 		"active-expectation", "active-message", "active-task", "archive-owner"} {
+		if source == "unexpired-lkg" {
+			retained, err := compilerInputUnexpiredLKGRoots(ctx, tx, compilerInputHotRootLimit-len(roots))
+			if err != nil {
+				return nil, &compilerInputHotInventoryError{"direct-unexpired-lkg", err}
+			}
+			roots = append(roots, retained...)
+			if len(roots) > compilerInputHotRootLimit {
+				return nil, &compilerInputHotInventoryError{"root-budget-unexpired-lkg", ErrConflict}
+			}
+			continue
+		}
 		rows, err := tx.QueryContext(ctx, direct, compilerInputHotRootLimit-len(roots)+1, source)
 		if err != nil {
 			return nil, &compilerInputHotInventoryError{"direct-" + source, err}
@@ -310,6 +320,42 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
 	}
 	if len(roots) > compilerInputHotRootLimit {
 		return nil, &compilerInputHotInventoryError{"rollback-root-budget", ErrConflict}
+	}
+	return roots, nil
+}
+
+func compilerInputUnexpiredLKGRoots(ctx context.Context, tx *sql.Tx, limit int) ([]inputarchive.HotRoot, error) {
+	// Re-verification can produce many events for the same retained artifact.
+	// Stream the original predicate in this RR snapshot instead of requiring a
+	// server GROUP BY to fit work_mem or spill before its output LIMIT. Keep
+	// BOTH artifact and expected hash in the dedup key: a conflicting binding
+	// must survive for graph validation. The map has at most limit+1 entries;
+	// the existing statement/transaction deadlines also bound duplicate scans.
+	rows, err := tx.QueryContext(ctx, `SELECT artifact_id,content_hash FROM fugue_platform_lkg_snapshot_history WHERE expires_at>transaction_timestamp()`)
+	if err != nil {
+		return nil, err
+	}
+	roots := []inputarchive.HotRoot{}
+	seen := make(map[[2]string]struct{})
+	for rows.Next() {
+		var id, hash string
+		if err = rows.Scan(&id, &hash); err != nil {
+			break
+		}
+		key := [2]string{id, hash}
+		if _, found := seen[key]; found {
+			continue
+		}
+		seen[key] = struct{}{}
+		roots = append(roots, inputarchive.HotRoot{Source: "unexpired-lkg", ID: id,
+			Reference: inputarchive.HotReference{Kind: "artifact", ID: id, ExpectedHash: hash}})
+		if len(roots) > limit {
+			break // Refusal sentinel, never an accepted prefix.
+		}
+	}
+	err = errors.Join(err, rows.Err(), rows.Close())
+	if err != nil {
+		return nil, err
 	}
 	return roots, nil
 }

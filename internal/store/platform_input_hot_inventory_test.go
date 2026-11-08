@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
@@ -229,6 +230,79 @@ func TestHotInventoryFailureStageDoesNotIncludeDriverText(t *testing.T) {
 	err := &compilerInputHotInventoryError{stage: "direct-active-lane", cause: fmt.Errorf("synthetic private DSN")}
 	if HotInventoryFailureStage(err) != "direct-active-lane" || strings.Contains(err.Error(), "private") || HotInventoryFailureStage(fmt.Errorf("synthetic private DSN")) != "connection-or-snapshot" {
 		t.Fatal("operator diagnostic exposed error details")
+	}
+}
+
+func TestHotInventoryPostgresUnexpiredEventsPreserveHashConflictsAndSnapshot(t *testing.T) {
+	db, _, _ := hotInventoryTestDatabase(t)
+	seedHotInventoryHistory(t, db)
+	if _, err := db.Exec(`UPDATE fugue_platform_lkg_snapshot_history SET expires_at=now()+interval '1 day' WHERE artifact_id='artifact-neutral-1'`); err != nil {
+		t.Fatal(err)
+	}
+	// Same artifact with two expected hashes must remain two roots, while
+	// duplicate verification events of the same binding count only once.
+	other := "sha256:" + strings.Repeat("b", 64)
+	if _, err := db.Exec(`UPDATE fugue_platform_lkg_snapshot_history SET content_hash=$1 WHERE id='history-neutral-1-2'`, other); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	roots, err := compilerInputUnexpiredLKGRoots(t.Context(), tx, compilerInputHotRootLimit)
+	if err != nil || len(roots) != 2 || roots[0].Reference.ExpectedHash == roots[1].Reference.ExpectedHash {
+		t.Fatal("dedup collapsed a conflicting binding or retained expired rows", roots, err)
+	}
+	if _, err := db.Exec(`UPDATE fugue_platform_lkg_snapshot_history SET expires_at=now()+interval '1 day' WHERE artifact_id='artifact-neutral-4'`); err != nil {
+		t.Fatal(err)
+	}
+	again, err := compilerInputUnexpiredLKGRoots(t.Context(), tx, compilerInputHotRootLimit)
+	if err != nil || len(again) != 2 {
+		t.Fatal("unexpired census crossed snapshots", again, err)
+	}
+	limited, err := compilerInputUnexpiredLKGRoots(t.Context(), tx, 1)
+	if err != nil || len(limited) != 2 {
+		t.Fatal("distinct-root overflow sentinel disappeared", limited, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Rollback()
+	roots, err = compilerInputUnexpiredLKGRoots(t.Context(), fresh, compilerInputHotRootLimit)
+	if err != nil || len(roots) != 3 {
+		t.Fatal("fresh snapshot failed to retain newly unexpired history", roots, err)
+	}
+}
+
+func TestHotInventoryPostgresStreamsLargeUnexpiredHistoryWithinOriginalGuards(t *testing.T) {
+	db, address, _ := hotInventoryTestDatabase(t)
+	insert := func(first, last, events int) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO fugue_platform_artifacts(id,artifact_kind,scope_key,generation,status,content_hash,content_json,metadata_json,created_at,updated_at)
+ SELECT 'artifact-neutral-'||lpad(n::text,64,'0'),'edge_route_bundle','scope-neutral',n::text,'validated','sha256:'||repeat('a',64),'{}','{}',now(),now() FROM generate_series($1::int,$2::int) n`, first, last); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO fugue_platform_lkg_snapshot_history(id,artifact_id,artifact_kind,scope_key,generation,content_hash,expires_at,created_at,updated_at)
+ SELECT 'history-neutral-'||n||'-'||event,'artifact-neutral-'||lpad(n::text,64,'0'),'edge_route_bundle','scope-neutral',n::text,'sha256:'||repeat('a',64),now()+interval '1 day',now(),now() FROM generate_series($1::int,$2::int) n CROSS JOIN generate_series(1,$3::int) event`, first, last, events); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert(1, 8000, 4)
+	started := time.Now()
+	report, err := RunCompilerInputHotRootsInventory(t.Context(), address)
+	if err != nil || !report.RootInventoryComplete || report.RootCounts["unexpired-lkg"] != 8000 || report.RootCounts["rollback-history"] != 3 || len(report.Closure.Roots) != 8003 || report.RetirementAuthorized || report.Closure.MetadataComplete {
+		t.Fatal("large deduplicated census refused or lost a retention authority", report.RootCounts, err)
+	}
+	t.Logf("32000 unexpired verification events, 8000 retained bindings under SQL5s/temp0/workmem1MiB: %s", time.Since(started))
+	insert(8001, compilerInputHotRootLimit+1, 1)
+	report, err = RunCompilerInputHotRootsInventory(t.Context(), address)
+	if err == nil || HotInventoryFailureStage(err) != "root-budget-unexpired-lkg" || report.RootInventoryComplete || report.Closure.PlanSHA256 != "" || len(report.Closure.Roots) != 0 {
+		t.Fatal("overflow was treated as a complete retained set", report.RootCounts, err)
 	}
 }
 

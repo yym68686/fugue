@@ -120,6 +120,45 @@ func TestMaintenanceErrorCategoryDoesNotExposeErrorDetails(t *testing.T) {
 	}
 }
 
+func TestRetentionInventoryFailurePreservesSafeCategoryAndWithholdsComplement(t *testing.T) {
+	report := store.CompilerInputRetentionInventory{Schema: "fugue.compiler-input-retention-inventory.v1",
+		UniverseComplete: true, ClassificationComplete: true, ExecutionAuthorized: true, AuditSHA256: "private-proof",
+		Entries: []store.CompilerInputRetentionEntry{{Digest: "private-input", Class: "U"}},
+		Totals:  map[string]store.CompilerInputRetentionTotal{"U": {Inputs: 1}}}
+	for _, code := range []string{"53400", "57014", "55P03", "private-invalid-code"} {
+		var output bytes.Buffer
+		err := fmt.Errorf("private SQL and URL: %w", &pgconn.PgError{Code: code, Message: "private-driver-message", Detail: "private-value"})
+		if e := writeRetentionInventoryReport(&output, report, err); e != nil {
+			t.Fatal(e)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		want := code
+		if code == "private-invalid-code" {
+			want = "unclassified"
+		}
+		failure := got["failure"].(map[string]any)
+		if failure["stage"] != "connection-or-snapshot" || failure["category"] != want || strings.Contains(output.String(), "private") || got["entries"] != nil || got["totals"] != nil || got["audit_sha256"] != "" {
+			t.Fatal("refusal lost safe diagnosis or exposed a partial complement", output.String())
+		}
+		for _, field := range []string{"universe_complete", "classification_complete", "execution_authorized"} {
+			if got[field] != false {
+				t.Fatal("failed audit retained a complete/authority flag", field)
+			}
+		}
+	}
+	var success bytes.Buffer
+	if err := writeRetentionInventoryReport(&success, report, nil); err != nil {
+		t.Fatal(err)
+	}
+	original, _ := json.Marshal(report)
+	if strings.TrimSpace(success.String()) != string(original) || strings.Contains(success.String(), `"failure"`) {
+		t.Fatal("successful inventory shape changed", success.String())
+	}
+}
+
 func TestTaskPreparationContractIsStrictAndApplyRequiresExactPlan(t *testing.T) {
 	c := store.NodeTaskInputPreparationContract{Version: 1, TaskID: "neutral-task", UpdaterID: "neutral-updater", OperationKey: "neutral-operation", MaxInputs: 1, MaxRawBytes: 1024, MaxStoredBytes: 1024, MaxGetBytes: 65536, MaxGetRequests: 1, MaxSeconds: 60}
 	raw, err := json.Marshal(c)

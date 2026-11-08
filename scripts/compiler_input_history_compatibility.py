@@ -34,12 +34,23 @@ def require(condition, message):
 
 
 def strict_json(raw):
+    return _strict_json(raw, 16384, 'history capability evidence exceeds bound')
+
+
+def release_json(raw):
+    # Release manifests/monitor records are a different document type from
+    # the small executable capability protocol. Keep that protocol at 16KiB;
+    # immutable release evidence uses the existing 2MiB metadata boundary.
+    return _strict_json(raw, 2 << 20, 'history release evidence exceeds bound')
+
+
+def _strict_json(raw, maximum, overflow):
     require(isinstance(raw, str), 'invalid history capability evidence')
     try:
         size = len(raw.encode())
     except UnicodeError:
         raise ValueError('invalid history capability evidence') from None
-    require(size <= 16384, 'history capability evidence exceeds bound')
+    require(size <= maximum, overflow)
     def pairs(items):
         value = {}
         for key, item in items:
@@ -149,7 +160,7 @@ def snapshot(registry, cache, deadline):
                 'history deployment replica count is invalid')
         pods = exact_owned_pods(namespace, deployment)
         pointer = get(namespace, 'configmap', 'fugue-release-monitor-'+component['id'])
-        state = strict_json(pointer['data']['state.json'])
+        state = release_json(pointer['data']['state.json'])
         require(type(state) is dict and type(state.get('consecutiveFailures')) is int and
                 state['consecutiveFailures'] == 0 and state.get('rollbackStatus', '') == '',
                 'history release has an unresolved failure or rollback')
@@ -160,14 +171,14 @@ def snapshot(registry, cache, deadline):
         reader = validate_reader(component, deployment, pods, record, archive_required=role == 'store')
         current = source_contract(reader['revision'], role, component['artifact']['buildPackage'], cache)
         rollback = source_contract(reader['rollback_revision'], role, component['artifact']['buildPackage'], cache)
-        envelope = strict_json(record['data']['record.json'])
-        rollback_workload = primary(strict_json(record['data']['lkg.json']), w)
+        envelope = release_json(record['data']['record.json'])
+        rollback_workload = primary(release_json(record['data']['lkg.json']), w)
         rollback_containers = [x for x in rollback_workload['spec']['template']['spec']['containers'] if x['name'] == w['container']]
         require(len(rollback_containers) == 1 and re.fullmatch(r'.+@sha256:[0-9a-f]{64}', rollback_containers[0]['image']),
                 'history rollback image is not immutable')
         # The trusted immutable forward record must bind the running IMAGE as
         # well as the revision. A copied source annotation is insufficient.
-        forward_workload = primary(strict_json(record['data']['forward.json']), w)
+        forward_workload = primary(release_json(record['data']['forward.json']), w)
         forward_containers = [x for x in forward_workload['spec']['template']['spec']['containers'] if x['name'] == w['container']]
         require(len(forward_containers) == 1 and forward_containers[0]['image'] == reader['image'],
                 'history forward image differs from live image')

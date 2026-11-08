@@ -114,6 +114,27 @@ class HistoryCompatibilityTest(unittest.TestCase):
             with self.subTest(mutate=mutate), self.assertRaisesRegex(ValueError, 'live executable'):
                 self.execute(f)
 
+    def test_release_documents_have_a_separate_bound_from_binary_capabilities(self):
+        f = self.fixture()
+        envelope = json.loads(f['record']['data']['record.json'])
+        for filename, key in (('forward.json', 'forwardManifestDigest'), ('lkg.json', 'lkgManifestDigest')):
+            manifest = json.loads(f['record']['data'][filename])
+            manifest['items'][0]['spec']['template']['metadata']['annotations']['neutral-metadata'] = 'x' * 32768
+            raw = json.dumps(manifest)
+            f['record']['data'][filename] = raw
+            envelope[key] = 'sha256:' + hashlib.sha256(raw.encode()).hexdigest()
+        f['record']['data']['record.json'] = json.dumps(envelope)
+        self.assertFalse(self.execute(f)['retirement_ready'])
+        # The larger release-document allowance cannot enlarge the executable
+        # protocol, hide duplicates or bypass the release-document ceiling.
+        raw = json.dumps({'neutral': 'x' * 32768})
+        with self.assertRaisesRegex(ValueError, 'capability evidence exceeds bound'):
+            h.strict_json(raw)
+        self.assertEqual(h.release_json(raw)['neutral'], 'x' * 32768)
+        for bad in ('{"id":1,"id":2}', '{broken', '"' + 'x' * (2 << 20) + '"'):
+            with self.subTest(prefix=bad[:24]), self.assertRaises(ValueError):
+                h.release_json(bad)
+
     def test_old_promised_rollback_is_not_certified_by_new_live_binary(self):
         f = self.fixture(); f['missing_source'] = True
         with self.assertRaisesRegex(ValueError, 'source-compatibility'):

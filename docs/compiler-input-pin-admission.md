@@ -86,3 +86,10 @@ writer contention and multi-pin rollback. Isolated PostgreSQL 18 additionally
 checks native phase enforcement, unregistered old snapshots, prepared
 transactions, effective statistics privilege and durable downgrade refusal.
 Synthetic local tests are not a production restore or activation exercise.
+
+The registered binary/current/LKG checker keeps executable capability JSON at
+16KiB. Immutable release manifests and monitor records use their separate
+2MiB metadata boundary, with duplicate-key rejection and exact manifest/image
+bindings intact. A normal API manifest can exceed the executable protocol's
+limit without implying an incompatible binary. This separation does not
+certify old schema rollback binaries or unregistered/offline clients.

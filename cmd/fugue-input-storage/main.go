@@ -261,7 +261,7 @@ func main() {
 			os.Exit(2)
 		}
 		report, err := store.RunCompilerInputRetentionInventory(ctx, os.Getenv("FUGUE_DATABASE_URL"))
-		if encodeErr := json.NewEncoder(os.Stdout).Encode(report); encodeErr != nil {
+		if encodeErr := writeRetentionInventoryReport(os.Stdout, report, err); encodeErr != nil {
 			os.Exit(1)
 		}
 		if err != nil {
@@ -586,6 +586,26 @@ func writeArchiveCopyReport(output io.Writer, report store.CompilerInputArchiveC
 
 func reportMaintenanceError(err error) {
 	fmt.Fprintln(os.Stderr, "compiler input maintenance completion not confirmed; inspect state before retrying; category="+maintenanceErrorCategory(err))
+}
+
+func writeRetentionInventoryReport(output io.Writer, report store.CompilerInputRetentionInventory, err error) error {
+	type failure struct {
+		Stage    string `json:"stage"`
+		Category string `json:"category"`
+	}
+	receipt := struct {
+		store.CompilerInputRetentionInventory
+		Failure *failure `json:"failure,omitempty"`
+	}{CompilerInputRetentionInventory: report}
+	if err != nil {
+		// Preserve snapshot/cost diagnostics, but never a partial complement or
+		// a digest/complete flag from an unsuccessful audit. Error text can
+		// contain SQL, URLs or source data; emit only the existing safe enums.
+		receipt.UniverseComplete, receipt.ClassificationComplete, receipt.ExecutionAuthorized = false, false, false
+		receipt.Entries, receipt.Totals, receipt.AuditSHA256 = nil, nil, ""
+		receipt.Failure = &failure{Stage: store.HotInventoryFailureStage(err), Category: maintenanceErrorCategory(err)}
+	}
+	return json.NewEncoder(output).Encode(receipt)
 }
 
 // Failure output is explicitly non-authoritative and aggregate only. Do not
