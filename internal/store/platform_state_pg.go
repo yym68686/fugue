@@ -216,7 +216,11 @@ INSERT INTO fugue_platform_artifacts (
 }
 
 func (s *Store) pgGetPlatformArtifactContent(contentHash string) (model.PlatformArtifactContent, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return s.pgGetPlatformArtifactContentContext(context.Background(), contentHash)
+}
+
+func (s *Store) pgGetPlatformArtifactContentContext(parent context.Context, contentHash string) (model.PlatformArtifactContent, error) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	content, err := scanPlatformArtifactContent(s.db.QueryRowContext(ctx, `
 SELECT content_hash, content_json, size_bytes, created_at, updated_at

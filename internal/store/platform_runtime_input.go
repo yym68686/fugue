@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 
 	"fugue/internal/model"
@@ -12,6 +13,13 @@ import (
 // Callers still consume CheckPlatformInputRead for their complete source set
 // and recheck source identity before performing any business mutation.
 func (s *Store) GetPlatformArtifactRuntimeInput(a model.PlatformArtifact) (platformconfig.RuntimeSnapshot, error) {
+	return s.GetPlatformArtifactRuntimeInputContext(context.Background(), a)
+}
+
+func (s *Store) GetPlatformArtifactRuntimeInputContext(ctx context.Context, a model.PlatformArtifact) (platformconfig.RuntimeSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return platformconfig.RuntimeSnapshot{}, err
+	}
 	fail := func() (platformconfig.RuntimeSnapshot, error) {
 		return platformconfig.RuntimeSnapshot{}, fmt.Errorf("runtime input contract or lineage invalid: %w", ErrConflict)
 	}
@@ -25,7 +33,7 @@ func (s *Store) GetPlatformArtifactRuntimeInput(a model.PlatformArtifact) (platf
 	if digest == "" {
 		return platformconfig.RuntimeSnapshot{}, ErrNotFound
 	}
-	snapshot, err := s.GetPlatformCompilerInput(digest)
+	snapshot, err := s.GetPlatformCompilerInputContext(ctx, digest)
 	if err != nil {
 		return platformconfig.RuntimeSnapshot{}, err
 	}
@@ -34,6 +42,9 @@ func (s *Store) GetPlatformArtifactRuntimeInput(a model.PlatformArtifact) (platf
 	}
 	if a.Metadata["runtime_input_digest"] != "" {
 		compactDigest, err := platformconfig.RuntimeSnapshotDigest(platformconfig.ConfigurationRuntimeInput(snapshot))
+		if ctx.Err() != nil {
+			return platformconfig.RuntimeSnapshot{}, ctx.Err()
+		}
 		if err != nil || compactDigest != digest {
 			return fail()
 		}

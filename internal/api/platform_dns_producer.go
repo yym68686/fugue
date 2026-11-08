@@ -86,7 +86,7 @@ func (s *Server) captureDNSProducer(ctx context.Context, p platformproducer.Poli
 	if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
 		return fail()
 	}
-	snapshot, err := s.store.GetPlatformArtifactRuntimeInput(parent)
+	snapshot, err := s.store.GetPlatformArtifactRuntimeInputContext(ctx, parent)
 	if err != nil || snapshot.IntentGeneration != intent.Generation || snapshot.PolicyGeneration != policy.Generation {
 		return fail()
 	}

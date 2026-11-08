@@ -324,7 +324,7 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 			return report, err
 		}
 		var snapshot platformconfig.RuntimeSnapshot
-		snapshot, err = s.readCompilerInputSnapshot(ctx, tx, m)
+		snapshot, err = s.readCompilerInputSnapshot(ctx, tx, m, false)
 		if err != nil {
 			return report, err
 		}
@@ -346,7 +346,7 @@ func (s *Store) maintainCompilerInput(ctx context.Context, o CompilerInputMainte
 		if err != nil {
 			return report, err
 		}
-		snapshot, err = s.readCompilerInputSnapshot(ctx, tx, current)
+		snapshot, err = s.readCompilerInputSnapshot(ctx, tx, current, false)
 		if err != nil {
 			return report, err
 		}

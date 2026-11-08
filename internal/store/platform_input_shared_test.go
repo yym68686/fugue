@@ -265,7 +265,7 @@ func TestSharedInputWarmOmissionVerifiesPhysicalBytes(t *testing.T) {
 	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetPlatformCompilerInput(digest); err != nil {
+	if _, err := s.GetPlatformCompilerInputDNSSelections(digest, nil); err != nil {
 		t.Fatal(err)
 	}
 	c := s.compilerDNSInputs.get(digest)

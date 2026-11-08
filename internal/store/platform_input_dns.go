@@ -165,7 +165,7 @@ func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func
 			// Keep a cold read in the manifest's snapshot too. Ending this
 			// transaction and starting a second full read would reopen the
 			// collection race specifically on a cache miss.
-			snapshot, err := s.readCompilerInputSnapshot(ctx, tx, m)
+			snapshot, err := s.readCompilerInputSnapshot(ctx, tx, m, true)
 			if err != nil {
 				return CompilerInputDNSSelections{}, err
 			}

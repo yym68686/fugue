@@ -42,6 +42,17 @@ PostgreSQL retention census that keeps both digests H. Corrupt operational
 input refuses even when the complete original is present. Existing v4 complete
 SHA/corruption refusals remain unchanged.
 
+Full reads reconstruct and verify the entire selected input in one database
+snapshot. They do not synchronously build the optional DNS selection index;
+the selective reader prepares that bounded index on its own cold read and
+continues to verify physical witnesses on warm reads. Administrative full and
+DNS-projection requests, DNS producer capture and retained traffic reads pass
+their caller cancellation/deadline through the input reader, including the
+legacy content fallback. The existing maximum read duration remains 30 seconds.
+A small projection response still requires complete input verification; these
+changes neither establish the cause of a previous timeout nor promise that a
+large legacy input will complete within that limit.
+
 These tests do not prove a real scope's complete minimal recovery set. Before
 production policy activation, complete the effective scope/consumer/task and
 promised rollback inventory with actual stored bytes; prove compatible readers;

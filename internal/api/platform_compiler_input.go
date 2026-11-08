@@ -41,9 +41,9 @@ func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r
 	}
 	var snapshot platformconfig.RuntimeSnapshot
 	if view == "dns_configuration" {
-		snapshot, err = s.store.GetPlatformArtifactRuntimeInput(a)
+		snapshot, err = s.store.GetPlatformArtifactRuntimeInputContext(r.Context(), a)
 	} else {
-		snapshot, err = s.store.GetPlatformCompilerInput(digest)
+		snapshot, err = s.store.GetPlatformCompilerInputContext(r.Context(), digest)
 	}
 	if err != nil {
 		s.writeStoreError(w, err)

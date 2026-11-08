@@ -682,12 +682,22 @@ func verifyInputChunkHashesInTable(ctx context.Context, db inputQueryer, m input
 }
 
 func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeSnapshot, error) {
+	return s.GetPlatformCompilerInputContext(context.Background(), digest)
+}
+
+// GetPlatformCompilerInputContext reconstructs and verifies the complete input.
+// DNS selection indexes are prepared only by the selective reader, not as
+// additional synchronous work on a full read or an HTTP projection.
+func (s *Store) GetPlatformCompilerInputContext(parent context.Context, digest string) (platformconfig.RuntimeSnapshot, error) {
 	if !inputDigestPattern.MatchString(digest) {
 		return platformconfig.RuntimeSnapshot{}, ErrInvalidInput
 	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return platformconfig.RuntimeSnapshot{}, err
+	}
 	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
 		// Keep the manifest and every streamed chunk in one MVCC snapshot.
 		// A concurrent GC may commit after the manifest read; this reader must
 		// still see the complete pre-collection representation.
@@ -697,15 +707,27 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 		}
 		defer finish()
 		m, err := readInputManifest(ctx, tx, digest)
+		if ctx.Err() != nil {
+			return platformconfig.RuntimeSnapshot{}, ctx.Err()
+		}
 		if err == nil {
-			return s.readCompilerInputSnapshot(ctx, tx, m)
+			return s.readCompilerInputSnapshot(ctx, tx, m, false)
 		}
 		if !absentInputManifest(err) {
 			return platformconfig.RuntimeSnapshot{}, err
 		}
 		finish() // Release the connection and session lease before the legacy fallback.
 	}
-	content, err := s.GetPlatformArtifactContent(digest)
+	var content model.PlatformArtifactContent
+	var err error
+	if s.usingDatabase() {
+		content, err = s.pgGetPlatformArtifactContentContext(ctx, digest)
+	} else {
+		content, err = s.GetPlatformArtifactContent(digest)
+	}
+	if ctx.Err() != nil {
+		return platformconfig.RuntimeSnapshot{}, ctx.Err()
+	}
 	if err != nil {
 		return platformconfig.RuntimeSnapshot{}, err
 	}
@@ -714,6 +736,9 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 		return snapshot, fmt.Errorf("compiler input cannot be decoded: %w", ErrConflict)
 	}
 	actual, err := platformconfig.RuntimeSnapshotDigest(snapshot)
+	if ctx.Err() != nil {
+		return platformconfig.RuntimeSnapshot{}, ctx.Err()
+	}
 	if err != nil {
 		return snapshot, fmt.Errorf("compiler input cannot be hashed: %w", ErrConflict)
 	}
@@ -723,18 +748,39 @@ func (s *Store) GetPlatformCompilerInput(digest string) (platformconfig.RuntimeS
 	return snapshot, nil
 }
 
-func (s *Store) readCompilerInputSnapshot(ctx context.Context, db inputQueryer, m inputManifest) (platformconfig.RuntimeSnapshot, error) {
+type compilerInputContextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r compilerInputContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
+func (s *Store) readCompilerInputSnapshot(ctx context.Context, db inputQueryer, m inputManifest, prepareDNSIndex bool) (platformconfig.RuntimeSnapshot, error) {
 	r, err := s.openInputChunks(ctx, db, m)
 	if err != nil {
+		if ctx.Err() != nil {
+			return platformconfig.RuntimeSnapshot{}, ctx.Err()
+		}
 		return platformconfig.RuntimeSnapshot{}, err
 	}
 	defer r.Close()
-	out, err := platformconfig.DecodeRuntimeSnapshotReader(r)
+	out, err := platformconfig.DecodeRuntimeSnapshotReader(compilerInputContextReader{ctx: ctx, r: r})
+	if ctx.Err() != nil {
+		return platformconfig.RuntimeSnapshot{}, ctx.Err()
+	}
 	if err != nil {
 		return platformconfig.RuntimeSnapshot{}, fmt.Errorf("compiler input cannot be decoded or verified: %w", ErrConflict)
 	}
 	if !r.done || r.err != nil {
 		return platformconfig.RuntimeSnapshot{}, ErrConflict
+	}
+	if !prepareDNSIndex {
+		return out, nil
 	}
 	if r.shared != nil {
 		s.rememberSharedDNSInput(out, m, r.shared)
