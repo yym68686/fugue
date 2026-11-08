@@ -45,8 +45,12 @@ func (i *Importer) ImportGitHubSource(ctx context.Context, req GitHubSourceImpor
 	sourceType := model.ResolveGitHubAppSourceType(req.SourceType, strings.TrimSpace(req.RepoAuthToken) != "")
 
 	switch buildStrategy {
-	case model.AppBuildStrategyAuto:
-		importResult, err := i.ImportGitHubAuto(ctx, GitHubAutoImportRequest{
+	case model.AppBuildStrategyAuto, model.AppBuildStrategyWorkers:
+		importFn := i.ImportGitHubAuto
+		if buildStrategy == model.AppBuildStrategyWorkers {
+			importFn = i.ImportGitHubWorkers
+		}
+		importResult, err := importFn(ctx, GitHubAutoImportRequest{
 			SourceType:                  sourceType,
 			RepoURL:                     req.RepoURL,
 			RepoAuthToken:               req.RepoAuthToken,

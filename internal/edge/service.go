@@ -1631,7 +1631,11 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 				req.Out.Header.Set(edgeHealthProbeTargetIPHeader, observed.HealthProbeTargetIP)
 			}
 			req.Out.Host = target.Host
-			req.Out.Header.Set("X-Forwarded-Host", host)
+			publicHost := req.In.Header.Get("X-Forwarded-Host")
+			if normalizeRouteHost(publicHost) != host {
+				publicHost = host
+			}
+			req.Out.Header.Set("X-Forwarded-Host", publicHost)
 			req.Out.Header.Set("X-Fugue-Edge-Route", strings.TrimSpace(route.Hostname))
 			req.Out.Header.Set("X-Fugue-Edge-App-ID", strings.TrimSpace(route.AppID))
 			if observed != nil {
@@ -2411,6 +2415,11 @@ func setEdgeXForwarded(req *httputil.ProxyRequest) {
 		req.Out.Header.Set("X-Forwarded-For", forwardedFor)
 	}
 	req.SetXForwarded()
+	// Caddy overwrites this header from the actual public request. Preserve its
+	// scheme across the private HTTP hop to the edge proxy.
+	if scheme := req.In.Header.Get("X-Forwarded-Proto"); scheme == "http" || scheme == "https" {
+		req.Out.Header.Set("X-Forwarded-Proto", scheme)
+	}
 }
 
 func lastForwardedForValue(values []string) string {

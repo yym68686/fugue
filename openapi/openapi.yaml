@@ -19091,6 +19091,7 @@ components:
           type: string
         build_strategy:
           type: string
+          description: Build strategy (auto, workers, static-site, dockerfile, buildpacks, or nixpacks). Workers runs HTTP/WebSocket Workers on a pinned workerd runtime; unsupported Cloudflare bindings fail validation.
         commit_sha:
           type: string
         commit_committed_at:
@@ -26734,6 +26735,7 @@ components:
           type: string
         build_strategy:
           type: string
+          description: Build strategy override (auto, workers, static-site, dockerfile, buildpacks, or nixpacks).
         compose_service:
           type: string
         clear_files:
@@ -31745,6 +31747,7 @@ components:
           type: string
         build_strategy:
           type: string
+          description: Build strategy override (auto, workers, static-site, dockerfile, buildpacks, or nixpacks). Auto detects Wrangler projects and unambiguous standalone Workers; environment secrets are supplied separately.
         runtime_id:
           type: string
         replicas:
@@ -31872,6 +31875,7 @@ components:
           type: string
         build_strategy:
           type: string
+          description: Build strategy override (auto, workers, static-site, dockerfile, buildpacks, or nixpacks). Auto detects Wrangler projects and unambiguous standalone Workers; environment secrets are supplied separately.
         runtime_id:
           type: string
         replicas:

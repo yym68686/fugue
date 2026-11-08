@@ -53,7 +53,7 @@ func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeI
 			switch normalizeBuildStrategy(buildStrategy) {
 			case model.AppBuildStrategyStaticSite:
 				servicePort = 80
-			case model.AppBuildStrategyBuildpacks:
+			case model.AppBuildStrategyBuildpacks, model.AppBuildStrategyWorkers:
 				servicePort = 8080
 			case model.AppBuildStrategyNixpacks:
 				servicePort = 3000

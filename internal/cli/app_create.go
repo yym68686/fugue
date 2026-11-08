@@ -146,7 +146,7 @@ func bindAppCreateFlags(cmd *cobra.Command, opts *appCreateOptions) {
 	cmd.Flags().IntVar(&opts.Replicas, "replicas", opts.Replicas, "Desired replica count after deploy")
 	cmd.Flags().IntVar(&opts.ServicePort, "port", 0, "Service port override")
 	cmd.Flags().StringVar(&opts.SourceDir, "source-dir", "", "Source directory relative to the repo or upload root")
-	cmd.Flags().StringVar(&opts.BuildStrategy, "build", opts.BuildStrategy, "Override build detection: auto, static-site, dockerfile, buildpacks, nixpacks")
+	cmd.Flags().StringVar(&opts.BuildStrategy, "build", opts.BuildStrategy, "Override build detection: auto, workers, static-site, dockerfile, buildpacks, nixpacks")
 	cmd.Flags().StringVar(&opts.DockerfilePath, "dockerfile", "", "Dockerfile path relative to the source root")
 	cmd.Flags().StringVar(&opts.BuildContextDir, "context", "", "Docker build context relative to the source root")
 	cmd.Flags().BoolVar(&opts.Background, "background", false, "Create the app as a background worker with no public ingress")
@@ -227,7 +227,7 @@ func appCreateServicePort(source model.AppSource, requested int, background bool
 			return 8080
 		case model.AppBuildStrategyNixpacks:
 			return 3000
-		case model.AppBuildStrategyDockerfile, model.AppBuildStrategyAuto, "":
+		case model.AppBuildStrategyDockerfile, model.AppBuildStrategyWorkers, model.AppBuildStrategyAuto, "":
 			// Leave the port unset so the import worker can apply Dockerfile
 			// EXPOSE (or another detected runtime signal) after the source is built.
 			return 0

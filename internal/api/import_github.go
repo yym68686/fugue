@@ -554,7 +554,7 @@ func normalizeGitHubRepoVisibility(raw string) string {
 func buildQueuedGitHubSource(repoURL, repoVisibility, repoAuthToken, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, imageNameSuffix, composeService string) (model.AppSource, error) {
 	buildStrategy = normalizeBuildStrategy(buildStrategy)
 	switch buildStrategy {
-	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks, model.AppBuildStrategyWorkers:
 	default:
 		return model.AppSource{}, fmt.Errorf("unsupported build strategy %q", buildStrategy)
 	}
@@ -597,7 +597,7 @@ func buildQueuedGitHubSource(repoURL, repoVisibility, repoAuthToken, branch, sou
 		source.RepoAuthToken = ""
 	}
 	switch buildStrategy {
-	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks, model.AppBuildStrategyWorkers:
 		source.DockerfilePath = ""
 		source.BuildContextDir = ""
 	case model.AppBuildStrategyDockerfile:

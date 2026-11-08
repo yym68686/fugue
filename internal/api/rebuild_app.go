@@ -75,7 +75,7 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	dockerfilePath := strings.TrimSpace(baselineSource.DockerfilePath)
 	buildContextDir := strings.TrimSpace(baselineSource.BuildContextDir)
 	switch buildStrategy {
-	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks, model.AppBuildStrategyWorkers:
 		if req.SourceDir != nil {
 			sourceDir = strings.TrimSpace(*req.SourceDir)
 		}

@@ -854,7 +854,7 @@ func effectiveImportPort(detected int, buildStrategy string) int {
 	switch strings.TrimSpace(buildStrategy) {
 	case model.AppBuildStrategyStaticSite:
 		return 80
-	case model.AppBuildStrategyBuildpacks:
+	case model.AppBuildStrategyBuildpacks, model.AppBuildStrategyWorkers:
 		return 8080
 	case model.AppBuildStrategyNixpacks:
 		return 3000
@@ -959,7 +959,7 @@ func importRequiresBuilderJobEvidence(sourceType, buildStrategy string) bool {
 		return false
 	}
 	switch buildStrategy {
-	case model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks, model.AppBuildStrategyWorkers:
 		return true
 	default:
 		return false

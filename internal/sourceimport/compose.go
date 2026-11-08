@@ -405,6 +405,8 @@ func resolveComposeBuildInputs(repoDir string, buildSpec composeBuildSpec) (stri
 		}
 	case model.AppBuildStrategyStaticSite:
 		port = 80
+	case model.AppBuildStrategyWorkers:
+		port = workersPort
 	case model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
 		_, port = detectZeroConfigProviderAndPort(repoDir, sourceDir)
 	default:

@@ -699,7 +699,7 @@ func decodeImportUploadMultipart(r *http.Request) (importUploadRequest, *multipa
 func buildQueuedUploadSource(upload model.SourceUpload, sourceDir, dockerfilePath, buildContextDir, buildStrategy, imageNameSuffix, composeService string) (model.AppSource, error) {
 	buildStrategy = normalizeBuildStrategy(buildStrategy)
 	switch buildStrategy {
-	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks, model.AppBuildStrategyWorkers:
 	default:
 		return model.AppSource{}, fmt.Errorf("unsupported build strategy %q", buildStrategy)
 	}
@@ -721,7 +721,7 @@ func buildQueuedUploadSource(upload model.SourceUpload, sourceDir, dockerfilePat
 		ComposeService:   strings.TrimSpace(composeService),
 	}
 	switch buildStrategy {
-	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks, model.AppBuildStrategyWorkers:
 		source.DockerfilePath = ""
 		source.BuildContextDir = ""
 	case model.AppBuildStrategyDockerfile:

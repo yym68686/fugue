@@ -86,6 +86,9 @@ func (i *Importer) ImportGitHubAuto(ctx context.Context, req GitHubAutoImportReq
 	}
 
 	switch buildStrategy {
+	case model.AppBuildStrategyWorkers:
+		req.SourceDir = sourceDir
+		return importWorkersFromClonedRepo(ctx, repo, req, i)
 	case model.AppBuildStrategyDockerfile:
 		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, dockerfilePath, buildContextDir, req.RegistryPushBase, req.DestinationRegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 	case model.AppBuildStrategyStaticSite:
@@ -198,6 +201,11 @@ func detectAutoImportInputs(repoDir, requestedSourceDir, requestedDockerfilePath
 		if _, _, err := detectDockerBuildInputs(repoDir, defaultDockerfileInSourceDir, requestedSourceDir); err == nil {
 			return model.AppBuildStrategyDockerfile, "", defaultDockerfileInSourceDir, filepath.ToSlash(requestedSourceDir), nil
 		}
+		if worker, err := detectWorkersProject(repoDir, requestedSourceDir); err != nil {
+			return "", "", "", "", err
+		} else if worker != nil {
+			return model.AppBuildStrategyWorkers, requestedSourceDir, "", "", nil
+		}
 		if staticDir, err := detectStaticSiteDir(repoDir, requestedSourceDir); err == nil {
 			return model.AppBuildStrategyStaticSite, relativeImportedSourceDir(repoDir, staticDir), "", "", nil
 		}
@@ -219,6 +227,11 @@ func detectAutoImportInputs(repoDir, requestedSourceDir, requestedDockerfilePath
 		return model.AppBuildStrategyDockerfile, "", dockerfilePath, buildContextDir, nil
 	}
 
+	if worker, err := detectWorkersProject(repoDir, "."); err != nil {
+		return "", "", "", "", err
+	} else if worker != nil {
+		return model.AppBuildStrategyWorkers, ".", "", "", nil
+	}
 	if staticDir, err := detectAutoStaticSiteDir(repoDir); err == nil {
 		return model.AppBuildStrategyStaticSite, relativeImportedSourceDir(repoDir, staticDir), "", "", nil
 	}

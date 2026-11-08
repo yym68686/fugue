@@ -945,6 +945,19 @@ func resolveFugueBuildInputs(repoDir string, raw any) (string, string, string, s
 			return "", "", "", "", 0, err
 		}
 		return model.AppBuildStrategyStaticSite, normalizeImportedSourceDirValue(relativeImportedSourceDir(repoDir, staticDir)), "", "", 80, nil
+	case model.AppBuildStrategyWorkers:
+		normalized, err := normalizeRepoSourceDir(repoDir, sourceDir)
+		if err != nil {
+			return "", "", "", "", 0, err
+		}
+		worker, err := detectWorkersProject(repoDir, normalized)
+		if err != nil {
+			return "", "", "", "", 0, err
+		}
+		if worker == nil {
+			return "", "", "", "", 0, fmt.Errorf("no Workers entrypoint found")
+		}
+		return model.AppBuildStrategyWorkers, normalized, "", "", workersPort, nil
 	case model.AppBuildStrategyBuildpacks:
 		normalizedSourceDir, err := normalizeRepoSourceDir(repoDir, sourceDir)
 		if err != nil {
@@ -1066,6 +1079,8 @@ func detectImportPortForStrategy(repoDir, buildStrategy, sourceDir, dockerfilePa
 		return detectDockerfilePort(repoDir, dockerfilePath)
 	case model.AppBuildStrategyStaticSite:
 		return 80, nil
+	case model.AppBuildStrategyWorkers:
+		return workersPort, nil
 	case model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
 		_, port := detectZeroConfigProviderAndPort(repoDir, sourceDir)
 		return port, nil

@@ -50,9 +50,9 @@ func TestRealCaddySharedPoolPreservesHostBoundary(t *testing.T) {
 	if binary == "" {
 		t.Skip("set FUGUE_TEST_CADDY_BINARY for real Caddy integration")
 	}
-	type observation struct{ Host, RouteHost, ForwardedFor, ForwardedHost, Path, Connection string }
+	type observation struct{ Host, RouteHost, ForwardedFor, ForwardedHost, Path, Connection, Proto string }
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(observation{r.Host, r.Header.Get("X-Fugue-Edge-Route-Host"), r.Header.Get("X-Forwarded-For"), r.Header.Get("X-Forwarded-Host"), r.URL.RequestURI(), r.RemoteAddr})
+		json.NewEncoder(w).Encode(observation{r.Host, r.Header.Get("X-Fugue-Edge-Route-Host"), r.Header.Get("X-Forwarded-For"), r.Header.Get("X-Forwarded-Host"), r.URL.RequestURI(), r.RemoteAddr, r.Header.Get("X-Forwarded-Proto")})
 	}))
 	defer upstream.Close()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -126,6 +126,7 @@ func TestRealCaddySharedPoolPreservesHostBoundary(t *testing.T) {
 		req.Header.Set("X-Fugue-Edge-Route-Host", "spoofed.example.test")
 		req.Header.Set("X-Forwarded-For", "192.0.2.1")
 		req.Header.Set("X-Forwarded-Host", "spoofed.example.test")
+		req.Header.Set("X-Forwarded-Proto", "https")
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -140,11 +141,7 @@ func TestRealCaddySharedPoolPreservesHostBoundary(t *testing.T) {
 			}
 			continue
 		}
-		forwardedHost := tc.host
-		if host, _, err := net.SplitHostPort(tc.host); err == nil {
-			forwardedHost = host // Existing http.request.host placeholder omits the port.
-		}
-		if decodeErr != nil || resp.StatusCode != http.StatusOK || got.RouteHost != tc.selected || got.Host != tc.host || got.ForwardedHost != forwardedHost || got.ForwardedFor != "127.0.0.1" || got.Path != "/path/child?q=one" {
+		if decodeErr != nil || resp.StatusCode != http.StatusOK || got.RouteHost != tc.selected || got.Host != tc.host || got.ForwardedHost != tc.host || got.Proto != "http" || got.ForwardedFor != "127.0.0.1" || got.Path != "/path/child?q=one" {
 			t.Fatalf("host boundary changed for %s: %+v (%v)", tc.host, got, decodeErr)
 		}
 		connections[got.Connection] = true

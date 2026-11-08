@@ -999,6 +999,13 @@ jobs:
           PREPUSH_TIMEOUT_SECONDS: "360"
           PREPUSH_MAX_ELAPSED_SECONDS: "360"
         run: make prepush
+      - name: Verify Workers against the pinned production runtime
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          tools_dir="$(mktemp -d "$RUNNER_TEMP/fugue-workers-tools.XXXXXX")"
+          npm install --prefix "$tools_dir" --no-audit --no-fund --save-exact workerd@1.20261108.1 esbuild@0.28.2
+          FUGUE_TEST_WORKERS_NODE_MODULES="$tools_dir/node_modules" go test ./internal/sourceimport -run '^TestWorkersRuntime$' -count=1 -v
       - name: Materialize the exact declarative component plan
         id: release
         env:

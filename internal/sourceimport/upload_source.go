@@ -201,8 +201,14 @@ func (i *Importer) importUploadedArchiveSource(ctx context.Context, req UploadSo
 		}
 		logUploadImportResult(buildStrategy, output, nil)
 		return output, nil
-	case model.AppBuildStrategyBuildpacks:
-		result, err := importBuildpacksFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.DestinationRegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
+	case model.AppBuildStrategyBuildpacks, model.AppBuildStrategyWorkers:
+		var result GitHubImportResult
+		var err error
+		if buildStrategy == model.AppBuildStrategyWorkers {
+			result, err = i.importWorkersFromUpload(ctx, src, req)
+		} else {
+			result, err = importBuildpacksFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.DestinationRegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
+		}
 		if err != nil {
 			logUploadImportResult(buildStrategy, GitHubSourceImportOutput{}, err)
 			return GitHubSourceImportOutput{}, err
@@ -281,7 +287,7 @@ func validateUploadedImportOutput(buildStrategy string, req UploadSourceImportRe
 		)
 	}
 	switch strings.TrimSpace(buildStrategy) {
-	case model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks, model.AppBuildStrategyWorkers:
 		if strings.TrimSpace(output.ImportResult.BuildJobName) == "" {
 			return fmt.Errorf(
 				"upload import produced empty builder job name (upload_id=%s strategy=%s compose_service=%s image=%s)",

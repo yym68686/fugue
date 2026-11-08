@@ -210,7 +210,13 @@ func testReloadGrace(t *testing.T, grace time.Duration, completeWithinGrace, obs
 	if reloaded.StatusCode != 200 {
 		t.Fatal("reload rejected", reloaded.StatusCode)
 	}
-	probe, err := ready.Get("https://" + address + "/ready")
+	// The old HTTP/2 transport still owns a streaming connection. GOAWAY is
+	// asynchronous, so an immediate pooled request may legitimately race onto
+	// that previous generation. Probe the replacement listener with a fresh
+	// connection while the original transports keep proving graceful draining.
+	newGenerationTransport := &http2.Transport{TLSClientConfig: tlsConfig.Clone()}
+	defer newGenerationTransport.CloseIdleConnections()
+	probe, err := (&http.Client{Transport: newGenerationTransport, Timeout: time.Second}).Get("https://" + address + "/ready")
 	if err != nil {
 		t.Fatal(err)
 	}

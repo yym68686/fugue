@@ -56,6 +56,7 @@ const (
 	AppSourceSyncPhaseSuspended = "suspended"
 
 	AppBuildStrategyAuto       = "auto"
+	AppBuildStrategyWorkers    = "workers"
 	AppBuildStrategyStaticSite = "static-site"
 	AppBuildStrategyDockerfile = "dockerfile"
 	AppBuildStrategyBuildpacks = "buildpacks"
