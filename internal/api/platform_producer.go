@@ -197,22 +197,33 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			return interval, err
 		}
 	}
-	runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
+	// Runtime capture includes several independently bounded network probes.
+	// Give artifact persistence its own budget after capture succeeds: sharing
+	// the capture deadline starves verified object-store readback whenever the
+	// observations use most of their allowance. Neither budget renews evidence
+	// timestamps or relaxes policy, integrity, convergence or LKG checks.
+	captureCtx, cancelCapture := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancelCapture()
 	var projection platformIntentProjectionResponse
 	var dnsRequest platformconfig.CompileRequest
 	advance("capture_inputs")
 	if policy.InputSource == platformproducer.DNSProducerInputSource {
-		dnsRequest, err = s.captureDNSProducer(runCtx, policy)
+		dnsRequest, err = s.captureDNSProducer(captureCtx, policy)
 		projection.Intent, projection.Policy, projection.RuntimeSnapshot = dnsRequest.Intent, dnsRequest.Policy, dnsRequest.RuntimeSnapshot
 	} else if capture != nil {
-		projection, err = capture(runCtx, principal)
+		projection, err = capture(captureCtx, principal)
 	} else {
-		projection, err = s.capturePlatformIntentForProducer(runCtx, principal, policy)
+		projection, err = s.capturePlatformIntentForProducer(captureCtx, principal, policy)
 	}
 	if err != nil {
 		return interval, err
 	}
+	if err := captureCtx.Err(); err != nil {
+		return interval, err
+	}
+	cancelCapture()
+	runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
 	s.rememberProducerQualityPlan(policy, projection)
 	advance("source_digest")
 	var sourceDigest string

@@ -126,7 +126,19 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	return s.projectPlatformIntentWithInputs(ctx, principal, static, dnsPolicy, templates, true)
 }
 
-func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate, collectRuntime bool, producerPolicies ...platformproducer.Policy) (platformIntentProjectionResponse, error) {
+func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate, collectRuntime bool, producerPolicies ...platformproducer.Policy) (result platformIntentProjectionResponse, resultErr error) {
+	started, phaseStarted, phase := time.Now(), time.Now(), "business_snapshot"
+	durations := map[string]int64{}
+	advance := func(next string) {
+		durations[phase] += time.Since(phaseStarted).Milliseconds()
+		phase, phaseStarted = next, time.Now()
+	}
+	defer func() {
+		if collectRuntime && s.log != nil && (resultErr != nil || time.Since(started) > 30*time.Second) {
+			durations[phase] += time.Since(phaseStarted).Milliseconds()
+			s.log.Printf("platform runtime capture phase timing scope=%s phase=%s elapsed_ms=%d durations_ms=%v error=%v", static.Scope, phase, time.Since(started).Milliseconds(), durations, resultErr)
+		}
+	}()
 	domainsConfig, err := s.applicationDomainsForProjection(static.ApplicationDomains)
 	if err != nil {
 		return platformIntentProjectionResponse{}, err
@@ -143,6 +155,7 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 	}
 	source := &platformProjectionSource{edgeRouteIntentSource: routeBusinessSource{business}}
 	observed := map[string]model.App{}
+	advance("route_projection")
 	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithCapture(ctx, source, func(apps []model.App) {
 		for _, app := range apps {
 			observed[app.ID] = app
@@ -196,6 +209,7 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 	if err := projectDomainTLSLifecycle(&projection, snapshot.TLSAllowlist, business.Domains); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("TLS domain lifecycle projection invalid")
 	}
+	advance("release_readiness")
 	if collectRuntime {
 		var retentionBudget time.Duration
 		for _, policy := range producerPolicies {
@@ -248,6 +262,7 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 	}
 	var dnsNodes []model.DNSNode
 	var cellEdges []model.EdgeNode
+	advance("dns_inputs")
 	if static.AuthorityCellID != "" {
 		cellEdges, dnsNodes, err = s.captureCellEndpoints(ctx, static)
 	} else {
@@ -290,6 +305,7 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 			return platformIntentProjectionResponse{}, errors.New("DNS client policy declaration invalid")
 		}
 	}
+	advance("dns_readiness")
 	if len(dnsNodes) > 0 {
 		edges := cellEdges
 		if static.AuthorityCellID == "" {
@@ -308,6 +324,7 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 			return platformIntentProjectionResponse{}, errors.New("DNS readiness topology invalid")
 		}
 	}
+	advance("dns_queries")
 	if len(dnsNodes) > 0 && dnsPolicy != nil && dnsPolicy.DNSQueryPolicy != nil {
 		if err := s.captureDirectDNSQueriesWithNodes(ctx, &projection, *dnsPolicy.DNSQueryPolicy, cellEdges); err != nil {
 			return platformIntentProjectionResponse{}, err
@@ -317,11 +334,13 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 			return platformIntentProjectionResponse{}, fmt.Errorf("signed DNS query migration input unavailable: %w", err)
 		}
 	}
+	advance("dns_flatten")
 	resolver := newHostedDNSFlattenResolver()
 	if err := projectAppStaticEdgeDNS(&projection, business, domainsConfig.AppBaseDomain); err != nil {
 		return platformIntentProjectionResponse{}, err
 	}
 	captureDNSFlattenFacts(ctx, &projection, resolver.resolve)
+	advance("placements")
 	s.capturePlatformPlacements(ctx, &projection)
 	issues := projection.Issues[:0]
 	for _, issue := range projection.Issues {
