@@ -114,9 +114,13 @@ func managedHandoffSourcePositive(source retainedTrafficSource, h platformconfig
 	return true
 }
 
-func (s *Server) captureManagedHandoffPartitions(ctx context.Context, p *platformIntentProjectionResponse, b store.RouteBusinessSnapshot, budgets ...time.Duration) {
+func (s *Server) captureManagedHandoffPartitions(ctx context.Context, p *platformIntentProjectionResponse, b store.RouteBusinessSnapshot, budgets ...time.Duration) error {
+	return s.captureManagedHandoffPartitionsWithSource(ctx, p, b, s.newRetainedTrafficSourceReader(ctx, p.Intent.Scope), budgets...)
+}
+
+func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, p *platformIntentProjectionResponse, b store.RouteBusinessSnapshot, readSource retainedTrafficSourceReader, budgets ...time.Duration) error {
 	if !p.RuntimeSnapshot.IsolateTrafficAvailability {
-		return
+		return nil
 	}
 	var candidates []platformconfig.ManagedServingHandoff
 	for _, r := range p.RuntimeSnapshot.Releases {
@@ -134,11 +138,21 @@ func (s *Server) captureManagedHandoffPartitions(ctx context.Context, p *platfor
 		}
 	}
 	if len(candidates) == 0 {
-		return
+		return nil
 	}
-	source, err := s.readRetainedTrafficSource(ctx, p.Intent.Scope)
+	source, err := readSource()
 	if err != nil {
-		return
+		for _, h := range candidates {
+			app, _ := managedHandoffOperation(b, h)
+			if managedHandoffAuthorityEqual(source, p.Intent, p.Policy, h) && managedHandoffSourcePositive(source, h, app.Spec.RuntimeID) && managedHandoffOriginPending(*p, h) {
+				// A failed complete proof is not a negative workload observation.
+				// Do not publish an empty replacement for a signed positive path.
+				// Retry capture; do not copy the partial proof, renew its expiry or
+				// mark the new workload healthy. Existing Edge expiry still applies.
+				return fmt.Errorf("managed app serving handoff evidence unavailable: app_id=%s operation_id=%s; retry capture without publication: %w", h.AppID, h.OperationID, err)
+			}
+		}
+		return nil
 	}
 	minimum := p.CapturedAt
 	if len(budgets) > 0 && budgets[0] > 0 {
@@ -177,6 +191,26 @@ func (s *Server) captureManagedHandoffPartitions(ctx context.Context, p *platfor
 		_ = json.Unmarshal(raw, &values)
 		p.RuntimeSnapshot.Facts[platformconfig.ManagedServingHandoffsFact] = values
 	}
+	return nil
+}
+
+func managedHandoffOriginPending(p platformIntentProjectionResponse, h platformconfig.ManagedServingHandoff) bool {
+	origins := map[string]platformconfig.OriginObservation{}
+	for _, origin := range p.RuntimeSnapshot.Origins {
+		origins[origin.Ref] = origin
+	}
+	found := false
+	for _, r := range p.Intent.Routes {
+		if r.AppID != h.AppID || r.TenantID != h.TenantID {
+			continue
+		}
+		origin, ok := origins[r.OriginRef]
+		if !ok || origin.Status != model.EdgeRouteStatusUnavailable || origin.StatusReason != platformconfig.ManagedHandoffOriginReason {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 // Admission repeats the business gate, not just the claimed runtime fact. A

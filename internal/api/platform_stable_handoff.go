@@ -21,6 +21,10 @@ const inPlaceDeployReadinessReason = platformconfig.ManagedHandoffReleaseReason
 // Explicit configuration/policy changes and first deployments keep the normal
 // fail-closed compiler behavior. No release is invented or declared healthy.
 func (s *Server) guardPendingStableHandoffs(ctx context.Context, p platformIntentProjectionResponse, business store.RouteBusinessSnapshot) error {
+	return s.guardPendingStableHandoffsWithSource(ctx, p, business, s.newRetainedTrafficSourceReader(ctx, p.Intent.Scope))
+}
+
+func (s *Server) guardPendingStableHandoffsWithSource(ctx context.Context, p platformIntentProjectionResponse, business store.RouteBusinessSnapshot, readSource retainedTrafficSourceReader) error {
 	policies := map[string]model.AppTrafficPolicy{}
 	automatic := map[string]bool{}
 	inFlightManagedDeploy := map[string]bool{}
@@ -71,7 +75,7 @@ func (s *Server) guardPendingStableHandoffs(ctx context.Context, p platformInten
 	if len(pending) == 0 {
 		return nil
 	}
-	source, err := s.readRetainedTrafficSource(ctx, p.Intent.Scope)
+	source, err := readSource()
 	if err != nil {
 		// No independently verified positive source means no special handoff
 		// protection. Keep normal strict compilation (including configuration

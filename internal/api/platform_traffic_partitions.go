@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/model"
@@ -26,12 +27,27 @@ type retainedTrafficSource struct {
 	inputs        []model.PlatformArtifact
 }
 
+type retainedTrafficSourceReader func() (retainedTrafficSource, error)
+
+// All continuity decisions in one capture use the same complete, twice-read
+// proof. Repeating this large read for each guard adds no freshness guarantee:
+// publication admission independently rereads the current source and its fence.
+func (s *Server) newRetainedTrafficSourceReader(ctx context.Context, scope string) retainedTrafficSourceReader {
+	var once sync.Once
+	var source retainedTrafficSource
+	var err error
+	return func() (retainedTrafficSource, error) {
+		once.Do(func() { source, err = s.readRetainedTrafficSource(ctx, scope) })
+		return source, err
+	}
+}
+
 func (s *Server) readRetainedTrafficSource(ctx context.Context, scope string) (retainedTrafficSource, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	source, err := s.observeRetainedTrafficSource(ctx, scope)
 	if err != nil {
-		return retainedTrafficSource{}, err
+		return source, err
 	}
 	reads := []store.PlatformInputReadSelection{{ArtifactID: source.parent.ID, ContentHash: source.parent.ContentHash,
 		ReleaseID: source.release.ID, LKGKind: source.lkg.ArtifactKind, LKGScope: source.lkg.ScopeKey, LKG: &source.lkg},
@@ -40,14 +56,14 @@ func (s *Server) readRetainedTrafficSource(ctx context.Context, scope string) (r
 		reads = append(reads, store.PlatformInputReadSelection{ArtifactID: input.ID, ContentHash: input.ContentHash})
 	}
 	if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
-		return retainedTrafficSource{}, fmt.Errorf("retained partition complete input proof unavailable: %w", err)
+		return source, fmt.Errorf("retained partition complete input proof unavailable: %w", err)
 	}
 	// Re-run the original full selection, convergence, lineage and input read.
 	// A still-signed old publication cannot borrow a successor's current LKG,
 	// and rereading never renews the original input observation timestamps.
 	current, err := s.observeRetainedTrafficSource(ctx, scope)
 	if err != nil || !reflect.DeepEqual(source, current) || ctx.Err() != nil {
-		return retainedTrafficSource{}, fmt.Errorf("retained partition source changed during read")
+		return source, fmt.Errorf("retained partition source changed during read")
 	}
 	return source, nil
 }
@@ -65,9 +81,6 @@ func (s *Server) observeRetainedTrafficSource(ctx context.Context, scope string)
 	route, err := s.consumerAssignmentChild(parent, model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil || !platformsafety.EvaluateArtifactIntegrity(route, s.bundleKeyring()).Pass {
 		return source, fmt.Errorf("retained partition route signature unavailable")
-	}
-	if gate := s.validateReleaseSetConvergence(ctx, parent); !gate.Pass {
-		return source, fmt.Errorf("retained partition current consumer evidence unavailable")
 	}
 	for _, in := range []struct {
 		kind, generation string
@@ -92,10 +105,6 @@ func (s *Server) observeRetainedTrafficSource(ctx context.Context, scope string)
 	if digest, _ := platformconfig.Digest(source.policy); digest != parent.Metadata["policy_digest"] {
 		return source, fmt.Errorf("retained partition policy lineage differs")
 	}
-	source.snapshot, err = s.store.GetPlatformCompilerInput(parent.Metadata["input_snapshot_digest"])
-	if err != nil || source.snapshot.IntentGeneration != source.intent.Generation || source.snapshot.PolicyGeneration != source.policy.Generation {
-		return source, fmt.Errorf("retained partition source observations unavailable")
-	}
 	var routes []platformconfig.CompiledRoute
 	raw, _ := json.Marshal(route.Content["routes"])
 	if json.Unmarshal(raw, &routes) != nil {
@@ -106,6 +115,19 @@ func (s *Server) observeRetainedTrafficSource(ctx context.Context, scope string)
 		source.routes[r.TenantID+"\x00"+r.AppID] = append(source.routes[r.TenantID+"\x00"+r.AppID], r)
 	}
 	source.parent, source.route, source.release, source.lkg = parent, route, release, *lkg
+	if gate := s.validateReleaseSetConvergence(ctx, parent); !gate.Pass {
+		return source, fmt.Errorf("retained partition current consumer evidence unavailable")
+	}
+	// Preserve the independently checked authority and signed route on a body
+	// read failure. This partial result never authorizes reuse: it only lets the
+	// handoff guard distinguish an unreadable positive source from no source.
+	source.snapshot, err = s.store.GetPlatformCompilerInput(parent.Metadata["input_snapshot_digest"])
+	if err != nil {
+		return source, fmt.Errorf("retained partition source observations unavailable: %w", err)
+	}
+	if source.snapshot.IntentGeneration != source.intent.Generation || source.snapshot.PolicyGeneration != source.policy.Generation {
+		return source, fmt.Errorf("retained partition source observation lineage differs")
+	}
 	return source, nil
 }
 
@@ -152,6 +174,10 @@ func (source retainedTrafficSource) expiry(tenant, app string) time.Time {
 }
 
 func (s *Server) captureRetainedTrafficPartitions(ctx context.Context, p *platformIntentProjectionResponse, budgets ...time.Duration) {
+	s.captureRetainedTrafficPartitionsWithSource(ctx, p, s.newRetainedTrafficSourceReader(ctx, p.Intent.Scope), budgets...)
+}
+
+func (s *Server) captureRetainedTrafficPartitionsWithSource(ctx context.Context, p *platformIntentProjectionResponse, readSource retainedTrafficSourceReader, budgets ...time.Duration) {
 	if !p.RuntimeSnapshot.IsolateTrafficAvailability {
 		return
 	}
@@ -186,7 +212,7 @@ func (s *Server) captureRetainedTrafficPartitions(ctx context.Context, p *platfo
 	if len(bad) == 0 {
 		return
 	}
-	source, sourceErr := s.readRetainedTrafficSource(ctx, p.Intent.Scope)
+	source, sourceErr := readSource()
 	minimumExpiry := p.CapturedAt
 	if len(budgets) > 0 && budgets[0] > 0 {
 		minimumExpiry = minimumExpiry.Add(budgets[0])

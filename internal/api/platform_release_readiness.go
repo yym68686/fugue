@@ -107,11 +107,14 @@ func (s *Server) captureReleaseRuntimeReadiness(ctx context.Context, projection 
 	projection.RuntimeSnapshot.Facts["release_readiness"] = value
 	projection.CapturedAt = time.Now().UTC()
 	projection.RuntimeSnapshot.CapturedAt = &projection.CapturedAt
-	if err := s.guardPendingStableHandoffs(ctx, *projection, business); err != nil {
+	readSource := s.newRetainedTrafficSourceReader(ctx, projection.Intent.Scope)
+	if err := s.guardPendingStableHandoffsWithSource(ctx, *projection, business, readSource); err != nil {
 		return err
 	}
-	s.captureManagedHandoffPartitions(ctx, projection, business, retentionBudgets...)
-	s.captureRetainedTrafficPartitions(ctx, projection, retentionBudgets...)
+	if err := s.captureManagedHandoffPartitionsWithSource(ctx, projection, business, readSource, retentionBudgets...); err != nil {
+		return err
+	}
+	s.captureRetainedTrafficPartitionsWithSource(ctx, projection, readSource, retentionBudgets...)
 	if err := projectReadyReleaseOrigins(projection, proofs); err != nil {
 		return releaseReadinessDiagnostic(err, proofs)
 	}
