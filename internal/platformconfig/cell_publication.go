@@ -167,14 +167,19 @@ func decodeCellRoutePublications(raw []byte) ([]CellRoutePublicationInput, Polic
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, policy, fmt.Errorf("DNS artifact envelope cannot be decoded: %w", err)
 	}
-	if len(payload.Policy) > 0 {
-		if err := json.Unmarshal(payload.Policy, &policy); err != nil {
+	return decodeCellRoutePublicationFields(payload.Publications, payload.Policy, payload.Source)
+}
+
+func decodeCellRoutePublicationFields(publicationsRaw, policyRaw json.RawMessage, source *CellDNSPlanSource) ([]CellRoutePublicationInput, PolicySnapshot, error) {
+	var policy PolicySnapshot
+	if len(policyRaw) > 0 {
+		if err := json.Unmarshal(policyRaw, &policy); err != nil {
 			return nil, policy, fmt.Errorf("DNS artifact policy cannot be decoded: %w", err)
 		}
 	}
 	var publications []CellRoutePublicationInput
-	if len(payload.Publications) > 0 {
-		if err := json.Unmarshal(payload.Publications, &publications); err != nil {
+	if len(publicationsRaw) > 0 {
+		if err := json.Unmarshal(publicationsRaw, &publications); err != nil {
 			return nil, policy, fmt.Errorf("DNS Cell references cannot be decoded: %w", err)
 		}
 	}
@@ -184,7 +189,7 @@ func decodeCellRoutePublications(raw []byte) ([]CellRoutePublicationInput, Polic
 		}
 		return nil, policy, nil
 	}
-	retained := payload.Source != nil && DNSUsesRetainedRoutes(payload.Source.Intent)
+	retained := source != nil && DNSUsesRetainedRoutes(source.Intent)
 	if retained && len(publications) != 0 {
 		return nil, policy, fmt.Errorf("retained DNS cannot mix replacement routing publications")
 	}

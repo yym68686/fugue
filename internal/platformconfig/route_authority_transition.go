@@ -191,19 +191,23 @@ func decodePreviousTrafficPublication(raw []byte) (*PreviousTrafficPublicationIn
 	if json.Unmarshal(raw, &payload) != nil {
 		return nil, fmt.Errorf("previous traffic publication cannot be decoded")
 	}
-	declared := payload.Source != nil && payload.Source.Intent.RouteAuthorityTransition != nil
-	if (payload.Previous != nil) != declared {
+	return validateDecodedPreviousTrafficPublication(payload.Previous, payload.Source)
+}
+
+func validateDecodedPreviousTrafficPublication(previous *PreviousTrafficPublicationInput, source *CellDNSPlanSource) (*PreviousTrafficPublicationInput, error) {
+	declared := source != nil && source.Intent.RouteAuthorityTransition != nil
+	if (previous != nil) != declared {
 		return nil, fmt.Errorf("previous publication requires explicit signed transition")
 	}
-	if payload.Previous != nil {
-		if err := ValidatePreviousTrafficPublication(*payload.Previous); err != nil {
+	if previous != nil {
+		if err := ValidatePreviousTrafficPublication(*previous); err != nil {
 			return nil, err
 		}
-		if payload.Previous.Reference != payload.Source.Intent.RouteAuthorityTransition.PreviousPublication {
+		if previous.Reference != source.Intent.RouteAuthorityTransition.PreviousPublication {
 			return nil, fmt.Errorf("previous publication differs from intent")
 		}
 	}
-	return payload.Previous, nil
+	return previous, nil
 }
 
 // Compare all compiled route behavior, cache policies, TLS authorization and
@@ -497,6 +501,47 @@ func DecodeDNSRouteDependencyEvidence(a model.PlatformArtifact) (DNSRouteDepende
 	if err != nil {
 		return evidence, fmt.Errorf("DNS artifact content cannot be encoded: %w", err)
 	}
+	// Noncanonical aliases can merge typed fields while replacing RawMessages.
+	// Keep their original decoding and error order, rather than changing that
+	// compatibility behavior to enable reuse on the canonical compiler envelope.
+	for key := range a.Content {
+		for _, field := range []string{"policy", "cell_route_publications", "cell_dns_source", "previous_traffic_publication"} {
+			if key != field && strings.EqualFold(key, field) {
+				return decodeDNSRouteDependencyViews(raw)
+			}
+		}
+	}
+	var payload struct {
+		Publications json.RawMessage    `json:"cell_route_publications"`
+		Policy       json.RawMessage    `json:"policy"`
+		Source       *CellDNSPlanSource `json:"cell_dns_source"`
+		Previous     json.RawMessage    `json:"previous_traffic_publication"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return evidence, fmt.Errorf("DNS artifact envelope cannot be decoded: %w", err)
+	}
+	pubs, _, err := decodeCellRoutePublicationFields(payload.Publications, payload.Policy, payload.Source)
+	if err != nil {
+		return evidence, err
+	}
+	var previous *PreviousTrafficPublicationInput
+	if len(payload.Previous) > 0 && json.Unmarshal(payload.Previous, &previous) != nil {
+		return evidence, fmt.Errorf("previous traffic publication cannot be decoded")
+	}
+	previous, err = validateDecodedPreviousTrafficPublication(previous, payload.Source)
+	if err != nil {
+		return evidence, err
+	}
+	dependencies, err := dnsRouteDependenciesFromSource(payload.Source, pubs, previous)
+	if err != nil {
+		return evidence, err
+	}
+	evidence.Dependencies, evidence.Publications, evidence.Previous = dependencies, pubs, previous
+	return evidence, nil
+}
+
+func decodeDNSRouteDependencyViews(raw []byte) (DNSRouteDependencyEvidence, error) {
+	var evidence DNSRouteDependencyEvidence
 	pubs, _, err := decodeCellRoutePublications(raw)
 	if err != nil {
 		return evidence, err
@@ -514,6 +559,19 @@ func DecodeDNSRouteDependencyEvidence(a model.PlatformArtifact) (DNSRouteDepende
 }
 
 func dnsRouteDependenciesFromDecoded(raw []byte, pubs []CellRoutePublicationInput, previous *PreviousTrafficPublicationInput) ([]DNSRouteDependency, error) {
+	if previous == nil {
+		return dnsRouteDependenciesFromSource(nil, pubs, nil)
+	}
+	var payload struct {
+		Source *CellDNSPlanSource `json:"cell_dns_source"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil, fmt.Errorf("DNS transition source missing")
+	}
+	return dnsRouteDependenciesFromSource(payload.Source, pubs, previous)
+}
+
+func dnsRouteDependenciesFromSource(source *CellDNSPlanSource, pubs []CellRoutePublicationInput, previous *PreviousTrafficPublicationInput) ([]DNSRouteDependency, error) {
 	out := make([]DNSRouteDependency, 0, len(pubs)+2)
 	for _, p := range pubs {
 		r := p.Reference
@@ -522,13 +580,10 @@ func dnsRouteDependenciesFromDecoded(raw []byte, pubs []CellRoutePublicationInpu
 	if previous == nil {
 		return out, nil
 	}
-	var payload struct {
-		Source *CellDNSPlanSource `json:"cell_dns_source"`
-	}
-	if json.Unmarshal(raw, &payload) != nil || payload.Source == nil {
+	if source == nil {
 		return nil, fmt.Errorf("DNS transition source missing")
 	}
-	aliases, err := RouteAuthorityAliases(payload.Source.Intent)
+	aliases, err := RouteAuthorityAliases(source.Intent)
 	if err != nil {
 		return nil, err
 	}
