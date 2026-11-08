@@ -24,6 +24,21 @@ func TestConfigurationRuntimeRetentionStillProtectsOriginalProvenancePostgres(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Retention must resolve the original compiler sources as well as the
+	// independently stored runtime input. A source absent from the ledger is
+	// an incomplete inventory, even when both snapshots are present.
+	for _, source := range []model.PlatformArtifact{compiled.IntentArtifact, compiled.PolicyArtifact} {
+		source, err := normalizePlatformArtifactForStore(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content, _ := json.Marshal(source.Content)
+		metadata, _ := json.Marshal(source.Metadata)
+		if _, err := db.Exec(`INSERT INTO fugue_platform_artifacts(id,artifact_kind,scope_key,generation,status,content_hash,content_json,metadata_json,created_at,updated_at)
+ VALUES($1,$2,$3,$4,'validated',$5,$6,$7,now(),now())`, source.ID, source.ArtifactKind, source.ScopeKey, source.Generation, source.ContentHash, content, metadata); err != nil {
+			t.Fatal(err)
+		}
+	}
 	a, err := normalizePlatformArtifactForStore(compiled.RouteArtifact)
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +70,13 @@ func TestConfigurationRuntimeRetentionStillProtectsOriginalProvenancePostgres(t 
 	report, err := RunCompilerInputRetentionInventory(t.Context(), address)
 	if err != nil || !report.UniverseComplete || report.Totals["H"].Inputs != 2 || report.Totals["D"].Inputs != 0 || report.ExecutionAuthorized {
 		t.Fatal("operational independence released original provenance protection", report, err)
+	}
+	if _, err := db.Exec(`DELETE FROM fugue_platform_artifacts WHERE artifact_kind=$1 AND generation=$2`, model.PlatformArtifactKindPlatformIntent, compiled.IntentArtifact.Generation); err != nil {
+		t.Fatal(err)
+	}
+	report, err = RunCompilerInputRetentionInventory(t.Context(), address)
+	if err == nil || report.UniverseComplete || report.ClassificationComplete || len(report.Entries) != 0 || report.ExecutionAuthorized {
+		t.Fatal("missing original compiler source was treated as disposable or a complete inventory", report, err)
 	}
 }
 

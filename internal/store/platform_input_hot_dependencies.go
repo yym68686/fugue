@@ -59,6 +59,15 @@ func compilerInputArtifactDependencyNode(artifact model.PlatformArtifact, cost *
 			return node, err
 		}
 	}
+	retainedLineage := false
+	if retainOriginal {
+		refs, declared, err := compilerInputRetainedLineageSources(artifact)
+		if err != nil {
+			return node, err
+		}
+		node.References = append(node.References, refs...)
+		retainedLineage = declared
+	}
 	if id := artifact.Metadata[platformconfig.ProducerPolicyReleaseMetadata]; id != "" {
 		if err := add("release", id, ""); err != nil {
 			return node, err
@@ -68,7 +77,7 @@ func compilerInputArtifactDependencyNode(artifact model.PlatformArtifact, cost *
 		// LKG promotion independently loads this policy by exact kind/scope/
 		// generation. Its inputs are dependencies too, not merely the direct
 		// artifact_ids children or a trusted metadata label.
-		if generation := artifact.Metadata["policy_generation"]; generation != "" {
+		if generation := artifact.Metadata["policy_generation"]; generation != "" && !retainedLineage {
 			if len(generation) > 512 || artifact.ScopeKey == "" {
 				return node, ErrConflict
 			}
@@ -188,4 +197,46 @@ func compilerInputArtifactDependencyNode(artifact model.PlatformArtifact, cost *
 		node.References = append(node.References, byBinding[key])
 	}
 	return node, nil
+}
+
+// Full retention includes the immutable compiler sources, independently of
+// the operational snapshot. A compact runtime input cannot release the intent
+// and policy used to produce its original signed generation. Resolve both by
+// exact kind/scope/generation; the same-snapshot ledger resolver then binds the
+// source artifact's content hash. Lineage digests use typed encoding and must
+// not be confused with the map-encoded artifact content hash. This metadata
+// traversal does not independently authenticate either original source.
+func compilerInputRetainedLineageSources(a model.PlatformArtifact) ([]inputarchive.HotReference, bool, error) {
+	var lineage platformconfig.Lineage
+	if raw, exists := a.Content["lineage"]; exists {
+		encoded, err := json.Marshal(raw)
+		if err != nil || len(encoded) > 16<<10 || json.Unmarshal(encoded, &lineage) != nil {
+			return nil, true, ErrConflict
+		}
+	}
+	declared := a.Metadata["compiler_version"] != "" || lineage.CompilerVersion != "" ||
+		lineage.IntentGeneration != "" || lineage.PolicyGeneration != "" || lineage.IntentDigest != "" || lineage.PolicyDigest != ""
+	if !declared {
+		return nil, false, nil
+	}
+	if a.ScopeKey == "" || lineage.CompilerVersion == "" {
+		return nil, true, ErrConflict
+	}
+	for key, value := range platformconfig.LineageMetadata(lineage) {
+		if a.Metadata[key] != value {
+			return nil, true, ErrConflict
+		}
+	}
+	refs := make([]inputarchive.HotReference, 0, 2)
+	for _, source := range []struct{ kind, generation, digest string }{
+		{model.PlatformArtifactKindPlatformIntent, lineage.IntentGeneration, lineage.IntentDigest},
+		{model.PlatformArtifactKindPolicySnapshot, lineage.PolicyGeneration, lineage.PolicyDigest},
+	} {
+		if source.generation == "" || len(source.generation) > 512 || !inputDigestPattern.MatchString(source.digest) {
+			return nil, true, ErrConflict
+		}
+		refs = append(refs, inputarchive.HotReference{Kind: "generation", ID: source.generation,
+			ArtifactKind: source.kind, ScopeKey: a.ScopeKey})
+	}
+	return refs, true, nil
 }

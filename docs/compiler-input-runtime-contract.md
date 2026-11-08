@@ -29,6 +29,12 @@ full-input provenance, pins, rollback and history obligations are not released
 by opting in, and no old artifact is rewritten. The public retirement path
 remains unavailable until its existing safety capabilities are implemented.
 
+Full retention also resolves both original compiler source generations (intent
+and policy) by their exact kind and scope. Missing or conflicting declared
+lineage makes the inventory incomplete. Typed lineage digests differ from
+artifact content hashes; metadata traversal does not authenticate the original
+sources or replace full local readback and authority verification.
+
 Local coverage includes persisted file-store cold reads after removing only a
 synthetic original, retained-route reuse after a fresh Store instance, an actual
 disposable PostgreSQL18 separated-input read without original chunks, and a

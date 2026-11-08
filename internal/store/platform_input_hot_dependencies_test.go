@@ -175,3 +175,88 @@ func TestCompilerInputHotDependenciesBindCompositionAndRejectConflictingLineage(
 		}
 	}
 }
+
+func compilerInputHotLineageFixture(t *testing.T, compact bool) platformconfig.CompileResult {
+	t.Helper()
+	req := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent-neutral"},
+		Policy:          platformconfig.PolicySnapshot{Generation: "policy-neutral"},
+		RuntimeSnapshot: platformconfig.RuntimeSnapshot{Facts: map[string]any{"audit": "retained-original"}}}
+	if compact {
+		req.Policy.RuntimeInputMode = platformconfig.RuntimeInputConfigurationV1
+	}
+	compiled, err := platformconfig.Compile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range []*model.PlatformArtifact{&compiled.IntentArtifact, &compiled.PolicyArtifact, &compiled.RouteArtifact, &compiled.DNSArtifact, &compiled.TLSArtifact} {
+		*artifact, err = normalizePlatformArtifactForStore(*artifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	compiled.ReleaseArtifact, err = normalizePlatformArtifactForStore(platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet,
+		[]string{compiled.RouteArtifact.ID, compiled.DNSArtifact.ID, compiled.TLSArtifact.ID}, compiled.RouteArtifact.CreatedAt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compiled
+}
+
+func TestCompilerInputHotRetentionKeepsExactCompilerSources(t *testing.T) {
+	for _, compact := range []bool{false, true} {
+		compiled := compilerInputHotLineageFixture(t, compact)
+		for _, artifact := range []model.PlatformArtifact{compiled.ReleaseArtifact, compiled.RouteArtifact, compiled.DNSArtifact, compiled.TLSArtifact} {
+			node, err := compilerInputArtifactHotNode(artifact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, source := range []model.PlatformArtifact{compiled.IntentArtifact, compiled.PolicyArtifact} {
+				want := inputarchive.HotReference{Kind: "generation", ID: source.Generation,
+					ArtifactKind: source.ArtifactKind, ScopeKey: source.ScopeKey}
+				found := false
+				for _, ref := range node.References {
+					found = found || ref == want
+				}
+				if !found {
+					t.Fatal("retention lost the exact original source", compact, artifact.ArtifactKind, want)
+				}
+			}
+			// Operational admission keeps its established dependency contract;
+			// historical provenance is not a new serving dependency.
+			runtime, err := compilerInputArtifactRuntimeNode(artifact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, ref := range runtime.References {
+				if ref.Kind == "generation" && ref.ArtifactKind == model.PlatformArtifactKindPlatformIntent {
+					t.Fatal("retained source became an operational dependency")
+				}
+			}
+		}
+	}
+}
+
+func TestCompilerInputHotRetentionRefusesIncompleteOrChangedCompilerSources(t *testing.T) {
+	compiled := compilerInputHotLineageFixture(t, false)
+	for _, change := range []func(*model.PlatformArtifact){
+		func(a *model.PlatformArtifact) { delete(a.Content, "lineage") },
+		func(a *model.PlatformArtifact) { a.ScopeKey = "" },
+		func(a *model.PlatformArtifact) { delete(a.Metadata, "intent_digest") },
+		func(a *model.PlatformArtifact) { a.Metadata["policy_digest"] = "sha256:" + strings.Repeat("a", 64) },
+		func(a *model.PlatformArtifact) {
+			lineage := compiled.Lineage
+			lineage.IntentGeneration = "changed-generation"
+			a.Content["lineage"] = lineage
+		},
+	} {
+		raw, err := json.Marshal(compiled.RouteArtifact)
+		var artifact model.PlatformArtifact
+		if err != nil || json.Unmarshal(raw, &artifact) != nil {
+			t.Fatal("fixture copy failed")
+		}
+		change(&artifact)
+		if _, err := compilerInputArtifactHotNode(artifact); err == nil {
+			t.Fatal("incomplete or changed compiler source was treated as a complete graph")
+		}
+	}
+}
