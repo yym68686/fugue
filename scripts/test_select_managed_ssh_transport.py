@@ -86,7 +86,7 @@ class SSHTransportSelectionTest(unittest.TestCase):
             if args[0] == 'get':
                 if args[1] == 'service':return json.dumps(state['service']) if 'service' in state else ''
                 if args[1] == 'services':return json.dumps({'items': [state['service']]+state.get('foreign', [])})
-                if args[1] == 'endpointslices':return json.dumps({'items': [{'metadata': {'ownerReferences': [{'kind': 'Service', 'uid': state['service']['metadata']['uid'], 'controller': True}]}, 'ports': [{'name': 'ssh-24000', 'protocol': 'TCP', 'port': 24000}], 'endpoints': [{'nodeName': 'worker-a', 'addresses': ['10.1.1.2'], 'targetRef': {'kind': 'Pod', **pod['metadata']}, 'conditions': {'ready': True}}]}]})
+                if args[1] == 'endpointslices':return json.dumps({'items': [{'metadata': {'ownerReferences': [{'kind': 'Service', 'uid': state['service']['metadata']['uid'], 'controller': True}]}, 'ports': state.get('endpoint_ports',[{key:port[key] for key in ('name','protocol','port')} for port in state['service']['spec']['ports']]), 'endpoints': [{'nodeName': 'worker-a', 'addresses': ['10.1.1.2'], 'targetRef': {'kind': 'Pod', **pod['metadata']}, 'conditions': {'ready': True}}]}]})
                 self.fail(args)
             if args[0] == 'create':
                 if state.get('service'):raise ValueError('already exists')
@@ -182,6 +182,34 @@ class SSHTransportSelectionTest(unittest.TestCase):
         self.assertEqual(state['service']['metadata']['annotations'][transport.GENERATION], '3')
         self.assertNotIn('externalIPs', state['service']['spec'])
         self.assertTrue(all(value.closed for value in witnesses))
+
+    def test_reobservation_preserves_controller_published_ports_without_writing(self):
+        for change in ('valid','orphan','wrong-binding','wrong-target','selector','address','digest','missing-declared','missing-endpoint'):
+            with self.subTest(change=change):
+                config, stage, evidence, state, writes, kube, observe, witness, witnesses = self.fixture()
+                transport.select(config, stage, 'stage', observe, kube=kube)
+                transport.select(config, stage, 'activate', observe, witness, kube, lambda _:None)
+                service=state['service']
+                service['spec']['ports'].append({'name':'ssh-24001','protocol':'TCP','port':24001,'targetPort':24001})
+                binding={'id':'binding-extra','tenant_id':'tenant-extra','app_id':'app-extra','identity_id':'identity-extra','public_port':24001}
+                if change=='wrong-binding': binding['public_port']=24002
+                service['metadata']['annotations'][transport.BINDINGS]=json.dumps({'24001':binding} if change!='orphan' else {})
+                if change=='wrong-target': service['spec']['ports'][-1]['targetPort']=24002
+                if change=='selector': service['spec']['selector']={'slot':'another-front'}
+                if change=='address': service['spec']['externalIPs']=['1.1.1.1']
+                if change=='missing-declared': service['spec']['ports'].pop(0)
+                if change=='missing-endpoint': state['endpoint_ports']=[{'name':'ssh-24000','protocol':'TCP','port':24000}]
+                service['metadata']['annotations'][transport.SELECTION]=transport.digest(transport.projection(service['spec']))
+                if change=='digest': service['metadata']['annotations'][transport.SELECTION]='sha256:'+'0'*64
+                before=copy.deepcopy(service)
+                if change=='valid':
+                    result=transport.select(config,stage,'activate',observe,witness,kube)
+                    self.assertTrue(result['already_selected'])
+                    self.assertFalse(result['public_changed'])
+                else:
+                    with self.assertRaises(ValueError): transport.select(config,stage,'activate',observe,witness,kube)
+                self.assertEqual(state['service'],before)
+                self.assertEqual(len(writes),2)
 
     def test_newer_or_foreign_selection_cannot_be_overwritten_by_compensation(self):
         config, stage, evidence, state, writes, kube, observe, witness, witnesses = self.fixture()

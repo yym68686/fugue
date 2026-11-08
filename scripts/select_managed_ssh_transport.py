@@ -21,6 +21,7 @@ GENERATION = 'ssh.fugue.dev/transport-generation'
 INTENT = 'ssh.fugue.dev/transport-intent'
 PHASE = 'ssh.fugue.dev/transport-phase'
 SELECTION = 'ssh.fugue.dev/transport-selection'
+BINDINGS = 'ssh.fugue.dev/transport-bindings'
 
 
 class HeldSSH:
@@ -106,6 +107,46 @@ def projection(spec):
     return {'type': spec.get('type'), 'selector': spec.get('selector'), 'ports': [{key: item.get(key) for key in ('name', 'protocol', 'port', 'targetPort')} for item in spec.get('ports', [])], 'publishNotReadyAddresses': bool(spec.get('publishNotReadyAddresses')), 'internalTrafficPolicy': spec.get('internalTrafficPolicy'), 'externalIPs': spec.get('externalIPs') or [], 'externalTrafficPolicy': spec.get('externalTrafficPolicy') or ''}
 
 
+def published_selection_spec(current, expected_spec):
+    """Recognize controller-owned additions during read-only re-observation.
+
+    This cannot authorize a transition or a new port. The exact selection hash,
+    selector, address, generation, endpoints and held witness are still checked.
+    """
+    expected = projection(expected_spec)
+    actual = projection(current['spec'])
+    if actual['ports'] == expected['ports']:
+        return expected_spec
+    raw = current['metadata'].get('annotations', {}).get(BINDINGS, '')
+    if not isinstance(raw, str) or not raw or len(raw.encode()) > 128*1024:
+        raise ValueError('bounded managed binding inventory required for published ports')
+    bindings = strict_json(raw)
+    if not isinstance(bindings, dict) or not 1 <= len(bindings) <= 100:
+        raise ValueError('invalid managed binding inventory')
+    declared = {item['port']: item for item in expected['ports']}
+    ports = {}
+    identities = set()
+    for item in actual['ports']:
+        port = item['port']
+        if type(port) is not int or not 1024 <= port <= 65535 or port in ports:
+            raise ValueError('published managed port is invalid or duplicated')
+        if port in declared:
+            if item != declared[port]:
+                raise ValueError('declared port selection changed')
+        else:
+            binding = bindings.get(str(port))
+            if not isinstance(binding, dict) or type(binding.get('public_port')) is not int or binding['public_port'] != port or any(not isinstance(binding.get(field), str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', binding[field]) for field in ('id','tenant_id','app_id','identity_id')):
+                raise ValueError('published port lacks exact managed binding ownership')
+            identity = (binding['tenant_id'], binding['app_id'], binding['identity_id'])
+            if identity in identities or item != {'name':'ssh-'+str(port),'protocol':'TCP','port':port,'targetPort':port}:
+                raise ValueError('published binding or transport is ambiguous')
+            identities.add(identity)
+        ports[port] = item
+    if not declared.keys() <= ports.keys() or len(ports) > 100:
+        raise ValueError('declared managed port is missing or inventory exceeds bound')
+    return dict(expected_spec, ports=[ports[port] for port in sorted(ports)])
+
+
 def validate_service(current, config, expected_spec, generation, phase, intent_digest=None):
     meta = current['metadata']
     annotations = meta.get('annotations', {})
@@ -165,6 +206,8 @@ def select(config, stage, action, observe, witness=None, kube=kubectl, sleep=tim
     desired_spec, desired_generation, desired_phase = (public_spec, serving_generation, 'serving') if action == 'activate' else (private_spec, compensation_generation, 'compensated')
     already_selected = current['metadata'].get('annotations',{}).get(GENERATION) == str(desired_generation)
     if already_selected:
+        if desired_phase == 'serving':
+            desired_spec = published_selection_spec(current, desired_spec)
         validate_service(current, config, desired_spec, desired_generation, desired_phase)
     else:
         before_spec, before_generation, before_phase = (private_spec, staged_generation, baseline_phase) if action == 'activate' else (public_spec, serving_generation, 'serving')
@@ -172,7 +215,7 @@ def select(config, stage, action, observe, witness=None, kube=kubectl, sleep=tim
     services = strict_json(kube(['get', 'services', '-A', '-o', 'json']))
     if services.get('metadata', {}).get('continue'):
         raise ValueError('public transport ownership inventory incomplete')
-    ports = {binding['public_port'] for binding in evidence['bindings']}
+    ports = {item['port'] for item in desired_spec['ports']} if already_selected else {binding['public_port'] for binding in evidence['bindings']}
     for service in services['items']:
         if service['metadata'].get('uid') == current['metadata']['uid']:
             continue

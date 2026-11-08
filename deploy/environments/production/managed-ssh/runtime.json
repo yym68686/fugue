@@ -1,9 +1,9 @@
 {
   "apiVersion": "ssh.fugue.dev/v1",
   "kind": "ManagedSSHRuntimeIntent",
-  "generation": 13,
-  "expectedPreviousGeneration": 10,
-  "expectedPreviousDigest": "sha256:4fe9bce267204e26ae5c400f5d30d8f6fe0ffff313a0da97ad901a7e5f3995fb",
+  "generation": 14,
+  "expectedPreviousGeneration": 13,
+  "expectedPreviousDigest": "sha256:de7924aaccd4b0adc1c02d62230156e62837e054c8fac25e1ff2c5b53b58bc6f",
   "controllerNamespace": "fugue-system",
   "controllerAccount": "fugue-ssh-control",
   "runtimeConfigMap": "fugue-ssh-runtime",
@@ -57,6 +57,7 @@
       },
       {
         "edge_id": "86eabf26-42a9-4f9d-998a-754115f8b829",
+        "publication_suspended": true,
         "edge_group_id": "edge-group-country-us",
         "namespace": "fugue-system",
         "pod_labels": {"fugue.pro/ssh-front-slot": "ssh-front-01ac958544d7c26a7164ca13"},
