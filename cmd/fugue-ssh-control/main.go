@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -85,6 +86,7 @@ func run(ctx context.Context, namespace, runtimeFile, signingFile, identityFile,
 	reconciler := &sshcontrol.Reconciler{Store: stateStore, Runtime: runtime, Namespace: namespace, SigningKeyFile: signingFile}
 	var completed, failed atomic.Uint64
 	var lastSweep atomic.Int64
+	var reports failureLog
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
@@ -105,6 +107,11 @@ func run(ctx context.Context, namespace, runtimeFile, signingFile, identityFile,
 		if err != nil {
 			return fmt.Errorf("managed SSH intent inventory unavailable")
 		}
+		keys := map[string]bool{"sweep": true}
+		for _, intent := range intents {
+			keys[intent.AppID] = true
+		}
+		reports.retain(keys)
 		jobs := make(chan model.ManagedSSHIntent)
 		var workers sync.WaitGroup
 		var errorsMu sync.Mutex
@@ -120,10 +127,14 @@ func run(ctx context.Context, namespace, runtimeFile, signingFile, identityFile,
 					completed.Add(1)
 					if err != nil {
 						failed.Add(1)
-						log.Printf("managed SSH reconciliation failed; app_id=%s error=%v", intent.AppID, err)
+						if emit, suppressed := reports.observe(intent.AppID, err, time.Now()); emit {
+							log.Printf("managed SSH reconciliation failed; app_id=%s repeated=%d error=%v", intent.AppID, suppressed, err)
+						}
 						errorsMu.Lock()
 						failures = append(failures, fmt.Errorf("app %s reconciliation failed", intent.AppID))
 						errorsMu.Unlock()
+					} else if emit, suppressed := reports.observe(intent.AppID, nil, time.Now()); emit {
+						log.Printf("managed SSH reconciliation recovered; app_id=%s repeated=%d", intent.AppID, suppressed)
 					}
 				}
 			}()
@@ -140,6 +151,7 @@ func run(ctx context.Context, namespace, runtimeFile, signingFile, identityFile,
 		close(jobs)
 		workers.Wait()
 		lastSweep.Store(time.Now().Unix())
+		sort.Slice(failures, func(i, j int) bool { return failures[i].Error() < failures[j].Error() })
 		return errors.Join(failures...)
 	}
 	for {
@@ -147,7 +159,11 @@ func run(ctx context.Context, namespace, runtimeFile, signingFile, identityFile,
 			if once {
 				return err
 			}
-			log.Printf("managed SSH sweep incomplete: %v", err)
+			if emit, suppressed := reports.observe("sweep", err, time.Now()); emit {
+				log.Printf("managed SSH sweep incomplete; repeated=%d: %v", suppressed, err)
+			}
+		} else if emit, suppressed := reports.observe("sweep", nil, time.Now()); emit {
+			log.Printf("managed SSH sweep recovered; repeated=%d", suppressed)
 		}
 		if once {
 			return nil

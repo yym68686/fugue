@@ -67,6 +67,16 @@ class SSHFrontObservationTest(unittest.TestCase):
         self.assertEqual(probes, ['10.1.1.2:24000', '8.8.8.8:24000'])
         self.assertEqual(result['pod']['metadata']['uid'], 'pod-a')
 
+    def test_terminal_history_does_not_compete_with_replacement(self):
+        for phase in ('Failed', 'Succeeded'):
+            config, records, identity, status, ack, health, kube, api, probe, probes = self.fixture()
+            old = copy.deepcopy(records['pod'])
+            old['metadata']['uid'] = 'old-pod'
+            old['status'] = {'phase': phase}
+            records['pods']['items'].insert(0, old)
+            result = observe.observe(config, 'worker-a', ['app_fixture'], api, probe, kube, lambda url: health)
+            self.assertEqual(result['pod']['metadata']['uid'], 'pod-a')
+
     def test_rejects_stale_foreign_and_incomplete_acknowledgements(self):
         for change in ('stale', 'old-routes', 'foreign-instance', 'missing-connections', 'expired', 'draining', 'live-digest'):
             with self.subTest(change=change):

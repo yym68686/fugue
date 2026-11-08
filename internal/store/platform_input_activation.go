@@ -575,7 +575,7 @@ func readCompilerInputActivationTuple(ctx context.Context, tx *sql.Tx, tuple *co
 			// Only a missing lane needs table SHARE to exclude insertion.
 			// Re-read after acquiring it: an insertion in that gap must not
 			// be mistaken for the prepared absence witness.
-			if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_release_lanes IN SHARE MODE`); err != nil {
+			if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_release_lanes IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 				return err
 			}
 			err = read()
@@ -591,10 +591,12 @@ func readCompilerInputActivationTuple(ctx context.Context, tx *sql.Tx, tuple *co
 		if err != nil {
 			return ErrInvalidInput
 		}
-		// Table SHARE is short and only protects selector phantom insertion
-		// while consuming a prepared proof. No body/network work under it.
+		// This transaction may subsequently upsert an LKG. Acquire a
+		// self-exclusive writer-compatible guard up front: two SHARE holders
+		// upgrading to RowExclusive for INSERT otherwise deadlock. Phantom
+		// insertion remains fenced; no body/network work occurs under it.
 		if lock {
-			if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE MODE`); err != nil {
+			if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 				return err
 			}
 		}

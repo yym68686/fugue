@@ -113,9 +113,11 @@ def validate(config, receipt):
         raise ValueError("bounded edge consumers required")
     seen_edges=set()
     for edge in options["required_edges"]:
+        if 'publication_suspended' in edge and type(edge['publication_suspended']) is not bool:
+            raise ValueError('publication suspension must be explicit boolean intent')
         base_fields={"edge_id","edge_group_id","namespace","pod_labels","public_address"}
         service_fields={"public_service","service_uid","image"}
-        if set(edge) not in (base_fields,base_fields|service_fields,base_fields|service_fields|{'binding_publication'}) or edge["edge_id"] in seen_edges:
+        if set(edge)-{'publication_suspended'} not in (base_fields,base_fields|service_fields,base_fields|service_fields|{'binding_publication'}) or edge["edge_id"] in seen_edges:
             raise ValueError("invalid or duplicated edge consumer")
         if "public_service" in edge:
             name(edge["public_service"])

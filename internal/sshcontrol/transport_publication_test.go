@@ -57,7 +57,7 @@ func publicationFixture(test *testing.T) (corev1.Service, EdgeConsumer, corev1.P
 }
 
 func TestPublicBindingRuntimeFencesConcurrentServiceChanges(test *testing.T) {
-	for _, scenario := range []string{"publish", "concurrent-change", "wrong-host-identity", "outside-policy"} {
+	for _, scenario := range []string{"publish", "terminal-history", "suspended", "concurrent-change", "wrong-host-identity", "outside-policy"} {
 		test.Run(scenario, func(test *testing.T) {
 			conflict := scenario == "concurrent-change"
 			service, edge, pod, binding, state, ack, _ := publicationFixture(test)
@@ -67,6 +67,20 @@ func TestPublicBindingRuntimeFencesConcurrentServiceChanges(test *testing.T) {
 			slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "selected", Namespace: edge.Namespace, Labels: map[string]string{"kubernetes.io/service-name": service.Name}, OwnerReferences: []metav1.OwnerReference{{Kind: "Service", UID: service.UID, Controller: &controller}}}, AddressType: discoveryv1.AddressTypeIPv4, Ports: []discoveryv1.EndpointPort{{Name: &portName, Protocol: &protocol, Port: &port}}, Endpoints: []discoveryv1.Endpoint{{NodeName: &edge.EdgeID, Addresses: []string{pod.Status.PodIP}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID}, Conditions: discoveryv1.EndpointConditions{Ready: &ready}}}}
 			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: edge.EdgeID}, Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeExternalIP, Address: edge.PublicAddress}}}}
 			client := fake.NewClientset(service.DeepCopy(), pod.DeepCopy(), slice, node)
+			if scenario == "terminal-history" {
+				for _, phase := range []corev1.PodPhase{corev1.PodFailed, corev1.PodSucceeded} {
+					old := pod.DeepCopy()
+					old.Name = "old-" + strings.ToLower(string(phase))
+					old.UID = "old-uid"
+					old.Status.Phase = phase
+					if _, err := client.CoreV1().Pods(edge.Namespace).Create(test.Context(), old, metav1.CreateOptions{}); err != nil {
+						test.Fatal(err)
+					}
+				}
+			}
+			if scenario == "suspended" {
+				edge.PublicationSuspended = true
+			}
 			patches := 0
 			client.PrependReactor("patch", "services", func(action kubetesting.Action) (bool, kuberuntime.Object, error) {
 				patches++
@@ -116,10 +130,10 @@ func TestPublicBindingRuntimeFencesConcurrentServiceChanges(test *testing.T) {
 			})
 			expectedPatches := 1
 			expectedProbes := 1
-			if scenario == "wrong-host-identity" || scenario == "outside-policy" {
+			if scenario == "wrong-host-identity" || scenario == "outside-policy" || scenario == "suspended" {
 				expectedPatches = 0
 			}
-			if scenario == "outside-policy" {
+			if scenario == "outside-policy" || scenario == "suspended" {
 				expectedProbes = 0
 				if len(client.Actions()) != 0 {
 					test.Fatal("unenrolled binding touched a public Service")
@@ -129,7 +143,7 @@ func TestPublicBindingRuntimeFencesConcurrentServiceChanges(test *testing.T) {
 				test.Fatal("unexpected publication or conflict result", patches, err)
 			}
 			actual, err := client.CoreV1().Services(edge.Namespace).Get(context.Background(), service.Name, metav1.GetOptions{})
-			if err != nil || len(actual.Spec.Ports) != map[bool]int{true: 2, false: 1}[scenario == "publish"] || !reflect.DeepEqual(actual.Spec.Ports[0], service.Spec.Ports[0]) {
+			if err != nil || len(actual.Spec.Ports) != map[bool]int{true: 2, false: 1}[scenario == "publish" || scenario == "terminal-history"] || !reflect.DeepEqual(actual.Spec.Ports[0], service.Spec.Ports[0]) {
 				test.Fatal("publication lost previous selection", err)
 			}
 		})

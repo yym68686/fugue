@@ -56,14 +56,10 @@ func (runtime *KubernetesRuntime) RetirementPolicy(ctx context.Context, binding 
 		if binding.EdgeGroupID != "" && edge.EdgeGroupID != binding.EdgeGroupID {
 			continue
 		}
-		pods, err := runtime.client.CoreV1().Pods(edge.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(edge.PodLabels).String(), FieldSelector: "spec.nodeName=" + edge.EdgeID, Limit: 3})
+		pod, err := runtime.edgePod(ctx, edge)
 		if err != nil {
 			return nil, 0, err
 		}
-		if pods.Continue != "" || len(pods.Items) != 1 {
-			return nil, 0, errors.New("SSH edge instance set is missing or ambiguous")
-		}
-		pod := pods.Items[0]
 		if string(pod.UID) == "" || pod.Spec.NodeName != edge.EdgeID || pod.DeletionTimestamp != nil || len(pod.Status.ContainerStatuses) != 1 || !pod.Status.ContainerStatuses[0].Ready {
 			return nil, 0, errors.New("SSH edge instance is not positively serving")
 		}
@@ -190,7 +186,7 @@ func (runtime *KubernetesRuntime) StopDrainedSlot(ctx context.Context, slot mana
 	if !ownedSlotLabels(deployment.Labels, slot) || deployment.DeletionTimestamp != nil || deployment.Spec.Replicas == nil || len(deployment.Spec.Template.Spec.Containers) != 1 || deployment.Spec.Template.Spec.Containers[0].Image != slot.Release.Image {
 		return false, managedssh.ErrUnauthorized
 	}
-	pods, err := runtime.client.CoreV1().Pods(slot.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set{"fugue.pro/ssh-instance": slot.ID}.String(), Limit: 3})
+	pods, err := runtime.client.CoreV1().Pods(slot.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set{"fugue.pro/ssh-instance": slot.ID}.String(), FieldSelector: livePodFields, Limit: 3})
 	if err != nil {
 		return false, err
 	}

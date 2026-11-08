@@ -13,6 +13,11 @@ class ManagedSSHRuntimeTest(unittest.TestCase):
         runtime.validate(config,receipt)
         edge['binding_publication']={'port_start':24000,'port_end':25000,'intent_digest':'sha256:'+'e'*64}
         runtime.validate(config,receipt)
+        edge['publication_suspended'] = True
+        runtime.validate(config,receipt)
+        edge['publication_suspended'] = 'true'
+        with self.assertRaises(ValueError):runtime.validate(config,receipt)
+        edge['publication_suspended'] = True
         publication=[resource for resource in runtime.objects(config) if resource['kind']=='Role' and resource['metadata']['name']=='managed-ssh-public-binding']
         self.assertEqual(len(publication),1)
         self.assertEqual(publication[0]['rules'],[{'apiGroups':[''],'resources':['services'],'resourceNames':['public-ssh'],'verbs':['get','patch']}])

@@ -21,7 +21,6 @@ import (
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -135,20 +134,16 @@ func (runtime *KubernetesRuntime) ReconcilePublicBinding(ctx context.Context, bi
 		return err
 	}
 	for _, edge := range options.RequiredEdges {
-		if edge.Publication == nil || binding.EdgeGroupID != "" && binding.EdgeGroupID != edge.EdgeGroupID {
+		if edge.PublicationSuspended || edge.Publication == nil || binding.EdgeGroupID != "" && binding.EdgeGroupID != edge.EdgeGroupID {
 			continue
 		}
 		if binding.PublicPort < edge.Publication.PortStart || binding.PublicPort > edge.Publication.PortEnd {
 			continue
 		}
-		pods, err := runtime.client.CoreV1().Pods(edge.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(edge.PodLabels).String(), FieldSelector: "spec.nodeName=" + edge.EdgeID, Limit: 3})
+		pod, err := runtime.edgePod(ctx, edge)
 		if err != nil {
 			return err
 		}
-		if pods.Continue != "" || len(pods.Items) != 1 {
-			return errors.New("public port candidate is missing or ambiguous")
-		}
-		pod := pods.Items[0]
 		if pod.DeletionTimestamp != nil || pod.UID == "" || pod.Spec.HostNetwork || pod.Spec.NodeName != edge.EdgeID || len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Image != edge.Image || len(pod.Status.ContainerStatuses) != 1 || !pod.Status.ContainerStatuses[0].Ready || strings.TrimPrefix(pod.Status.ContainerStatuses[0].ImageID, "docker-pullable://") != edge.Image {
 			return errors.New("public port candidate is not the selected immutable front")
 		}

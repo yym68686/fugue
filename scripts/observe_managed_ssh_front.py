@@ -152,10 +152,11 @@ def observe(stage, node_id, app_ids, api, probe, kube=kubectl, health_read=read_
     template = deployment['spec']['template']['spec']
     if deployment['metadata'].get('annotations', {}).get(DIGEST) != digest(stage) or deployment['metadata'].get('labels', {}).get('app.kubernetes.io/managed-by') != MANAGER or deployment['metadata'].get('deletionTimestamp') or deployment['spec'].get('replicas') != 1 or deployment['spec']['selector']['matchLabels'] != selector or template.get('nodeName') != node_id or template.get('hostNetwork') is True or len(template['containers']) != 1 or template['containers'][0]['image'] != stage['image']:
         raise ValueError('front executor differs from its stage')
-    pods = strict_json(kube(['get', 'pods', '-n', namespace, '-l', 'fugue.pro/ssh-front-slot='+slot, '-o', 'json']))
-    if pods.get('metadata', {}).get('continue') or len(pods['items']) != 1:
+    pods = strict_json(kube(['get', 'pods', '-n', namespace, '-l', 'fugue.pro/ssh-front-slot='+slot, '--field-selector', 'status.phase!=Failed,status.phase!=Succeeded', '--chunk-size=3', '-o', 'json']))
+    candidates = [pod for pod in pods['items'] if pod.get('status', {}).get('phase') not in ('Failed', 'Succeeded')]
+    if pods.get('metadata', {}).get('continue') or len(candidates) != 1:
         raise ValueError('front Pod selection is missing or ambiguous')
-    pod = pods['items'][0]
+    pod = candidates[0]
     containers = pod['status'].get('containerStatuses', [])
     if pod['metadata'].get('deletionTimestamp') or not pod['metadata'].get('uid') or pod['spec']['nodeName'] != node_id or pod['spec'].get('hostNetwork') is True or len(containers) != 1 or containers[0].get('ready') is not True or containers[0].get('restartCount') != 0 or containers[0].get('imageID', '').removeprefix('docker-pullable://') != stage['image'] or pod['spec']['containers'][0]['image'] != stage['image']:
         raise ValueError('front Pod is not the exact healthy immutable executor')

@@ -15,6 +15,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/managedssh"
@@ -65,6 +66,9 @@ type EdgeConsumer struct {
 	ServiceUID    string                    `json:"service_uid,omitempty"`
 	Image         string                    `json:"image,omitempty"`
 	Publication   *BindingPublicationPolicy `json:"binding_publication,omitempty"`
+	// Suspension stops new port publication, but never waives the positive
+	// connection/drain evidence required before retiring an old backend.
+	PublicationSuspended bool `json:"publication_suspended,omitempty"`
 }
 
 type BindingPublicationPolicy struct {
@@ -79,6 +83,8 @@ type KubernetesRuntime struct {
 	dynamic           dynamic.Interface
 	httpClient        *http.Client
 	probeSSH          func(context.Context, string, ssh.PublicKey, time.Duration) (sshidentity.Observation, error)
+	selectionMu       sync.Mutex
+	selectionFailures map[string]*edgeSelectionFailure
 }
 
 func NewKubernetesRuntime(configuration *rest.Config, configurationFile string) (*KubernetesRuntime, error) {
@@ -459,7 +465,7 @@ func safeResourceError(kind, name string, err error) error {
 func (runtime *KubernetesRuntime) Observe(ctx context.Context, slot managedssh.ServingSlot) (managedssh.CandidateEvidence, error) {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
-	pods, err := runtime.client.CoreV1().Pods(slot.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set{"fugue.pro/ssh-instance": slot.ID}.String(), Limit: 2})
+	pods, err := runtime.client.CoreV1().Pods(slot.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set{"fugue.pro/ssh-instance": slot.ID}.String(), FieldSelector: livePodFields, Limit: 2})
 	if err != nil {
 		return managedssh.CandidateEvidence{}, err
 	}
