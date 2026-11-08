@@ -84,13 +84,11 @@ func lockCompilerInputAdmissionBarrier(ctx context.Context, tx *sql.Tx) (int64, 
 	// writer barrier. Shared mode permits other short activations; unpin,
 	// re-verification, representation changes and retirement need exclusive.
 	// No retries and no network/body I/O occur while these locks are held.
-	for _, statement := range []string{
-		`SELECT pg_advisory_xact_lock_shared(hashtextextended('fugue.compiler-input-gc.v1',0))`,
-		`SELECT pg_advisory_xact_lock_shared(315609238744290)`,
-	} {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return 0, err
-		}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('fugue.compiler-input-gc.v1',0))`); err != nil {
+		return 0, err
+	}
+	if err := waitCompilerInputAdmissionWriter(ctx, tx); err != nil {
+		return 0, err
 	}
 	return readInputArchiveEpoch(ctx, tx, -1)
 }

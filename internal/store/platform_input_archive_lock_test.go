@@ -30,7 +30,7 @@ func TestCompilerInputArchiveBarrierDoesNotRetryUnknownOrUnconfirmedRollback(t *
 				mock.ExpectExec(regexp.QuoteMeta(q)).WillReturnResult(sqlmock.NewResult(0, 0))
 			}
 			cause := &pgconn.PgError{Code: test.code}
-			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744290)`)).WillReturnError(cause)
+			mock.ExpectQuery(regexp.QuoteMeta(`SELECT pg_try_advisory_xact_lock(315609238744290)`)).WillReturnError(cause)
 			mock.ExpectRollback().WillReturnError(test.rollback)
 			if tx, err := beginInputArchiveTx(context.Background(), db); tx != nil || !errors.Is(err, cause) {
 				t.Fatal("unsafe barrier error was retried or hidden", tx, err)

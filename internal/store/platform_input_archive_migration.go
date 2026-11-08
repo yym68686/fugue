@@ -562,14 +562,15 @@ func beginInputArchiveClaimTx(ctx context.Context, db *sql.DB, apply bool) (*sql
 // unsuccessful attempt is rolled back before yielding, so no transaction,
 // row lock, or partial mutation survives the wait. Never retry a statement
 // after acquisition, a commit, a lease conflict, or an unknown database error.
-// This bounds contention without increasing the 250ms database lock timeout
-// or changing fencing, pin, epoch, and compare-and-swap checks.
+// A try-lock reports normal contention without generating a database ERROR.
+// This preserves fencing, pin, epoch, compare-and-swap and the five-second bound.
 func beginInputArchiveLockedTx(ctx context.Context, db *sql.DB, readOnly, shared, workMem bool) (*sql.Tx, error) {
-	lock := `SELECT pg_advisory_xact_lock_shared(315609238744290)`
+	lock := `SELECT pg_try_advisory_xact_lock_shared(315609238744290)`
 	if !shared {
-		lock = `SELECT pg_advisory_xact_lock(315609238744290)`
+		lock = `SELECT pg_try_advisory_xact_lock(315609238744290)`
 	}
 	deadline := time.Now().Add(5 * time.Second)
+	delay := 100 * time.Millisecond
 	for {
 		tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: readOnly})
 		if err != nil {
@@ -585,8 +586,13 @@ func beginInputArchiveLockedTx(ctx context.Context, db *sql.DB, readOnly, shared
 				return nil, err
 			}
 		}
-		if _, err = tx.ExecContext(ctx, lock); err == nil {
+		var acquired bool
+		err = tx.QueryRowContext(ctx, lock).Scan(&acquired)
+		if err == nil && acquired {
 			return tx, nil
+		}
+		if err == nil {
+			err = compilerInputBarrierBusy()
 		}
 		if rollbackErr := tx.Rollback(); rollbackErr != nil {
 			return nil, err // rollback not confirmed; do not retry
@@ -595,13 +601,14 @@ func beginInputArchiveLockedTx(ctx context.Context, db *sql.DB, readOnly, shared
 		if !errors.As(err, &state) || state.SQLState() != "55P03" || !time.Now().Before(deadline) {
 			return nil, err
 		}
-		timer := time.NewTimer(100 * time.Millisecond)
+		timer := time.NewTimer(min(delay, time.Until(deadline)))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
+		delay = min(delay*2, 500*time.Millisecond)
 	}
 }
 
