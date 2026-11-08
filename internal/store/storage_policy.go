@@ -121,6 +121,7 @@ func (s *Store) StorageObservation(ctx context.Context) (any, error) {
 	out["compiler_input_separated_read_failed"] = separatedFailed
 	out["compiler_input_separated_activity"] = separatedInputObservation()
 	out["compiler_input_writer_activity"] = compilerInputWriterStats.snapshot()
+	out["compiler_input_writer_diagnostic"] = compilerInputWriterStats.diagnosticSnapshot()
 	capabilities, err := inputhistory.BinaryCapabilities("store")
 	if err != nil {
 		return nil, err

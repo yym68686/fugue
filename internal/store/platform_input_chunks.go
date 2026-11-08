@@ -336,36 +336,43 @@ func (w *inputChunkWriter) flushPending() error {
 }
 
 func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformconfig.RuntimeSnapshot, digest string) (resultErr error) {
-	finishObservation := compilerInputWriterStats.begin()
+	observation := compilerInputWriterStats.beginObserved(parent)
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			finishObservation(errors.New("compiler-input writer panic"))
+			observation.finish(errors.New("compiler-input writer panic"))
 			panic(recovered)
 		}
-		finishObservation(resultErr)
+		observation.finish(resultErr)
 	}()
 	if !inputDigestPattern.MatchString(digest) {
 		return ErrInvalidInput
 	}
 	ctx, cancel := context.WithTimeout(parent, compilerInputWriteTimeout)
 	defer cancel()
+	defer observation.stopWork()
+	observation.setWriterContext(ctx)
 	// One cluster-wide writer bounds database parse/transfer concurrency even
 	// while multiple API replicas compile distinct scopes. No serving lock is held.
+	observation.advance(compilerInputWriterBeginTx)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer observation.rollback(tx)
+	observation.afterBegin()
+	observation.advance(compilerInputWriterBarrier)
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(315609238744290)`); err != nil {
 		return err
 	}
-	return s.pgEnsureChunkedInputTx(ctx, tx, snapshot, digest)
+	observation.afterBarrier()
+	observation.advance(compilerInputWriterPersist)
+	return s.pgEnsureChunkedInputTx(ctx, tx, snapshot, digest, observation)
 }
 
 // Both policy-selected writers hold the same exclusive barrier through full
 // verification and commit. This helper never starts a new budget or records a
 // second outer attempt when a fenced JSONB writer uses an independent format.
-func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot platformconfig.RuntimeSnapshot, digest string) error {
+func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot platformconfig.RuntimeSnapshot, digest string, observation *compilerInputWriterAttempt) error {
 	m, err := readInputManifest(ctx, tx, digest)
 	if err == nil {
 		archiveRouted, routeErr := compilerInputArchiveRoute(ctx, tx, m)
@@ -383,7 +390,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 			if _, e = verifyCompilerInputLocalRepresentation(ctx, tx, m, inputMaxBytes); e != nil {
 				return e
 			}
-			return tx.Commit()
+			return observation.commit(tx)
 		}
 		if m.Format == inputFormatSeparatedV4 {
 			actual, e := platformconfig.RuntimeSnapshotDigest(snapshot)
@@ -395,7 +402,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 			}
 			if cached := s.compilerDNSInputs.get(digest); !archiveRouted && cached != nil && cached.Manifest == m {
 				if _, e := readSeparatedDNSSelections(ctx, tx, m, cached, func(CompilerDNSSelectionSummary) bool { return false }); e == nil {
-					return tx.Commit()
+					return observation.commit(tx)
 				}
 				// A completed migration can replace the closure while retaining
 				// the identity. Only a full verified read can establish it again.
@@ -407,7 +414,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 			if _, e = io.Copy(io.Discard, r); e != nil {
 				return e
 			}
-			return tx.Commit()
+			return observation.commit(tx)
 		}
 		if m.Format == inputFormatSharedV3 {
 			actual, err := platformconfig.RuntimeSnapshotDigest(snapshot)
@@ -421,7 +428,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 				if _, err := readSharedDNSSelections(ctx, tx, m, cached, func(CompilerDNSSelectionSummary) bool { return false }); err != nil {
 					return err
 				}
-				return tx.Commit()
+				return observation.commit(tx)
 			}
 			r, err := openSharedInput(ctx, tx, m)
 			if err != nil {
@@ -430,7 +437,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 			if _, err = io.Copy(io.Discard, r); err != nil {
 				return err
 			}
-			if err = tx.Commit(); err != nil {
+			if err = observation.commit(tx); err != nil {
 				return err
 			}
 			s.rememberSharedDNSInput(snapshot, m, r)
@@ -451,7 +458,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 					if err := verifyInputChunkHashesInTable(ctx, tx, m, cached.Hashes, m.Location, cached.StoredSizes); err != nil {
 						return err
 					}
-					return tx.Commit()
+					return observation.commit(tx)
 				}
 			}
 			r, err := s.openInputChunks(ctx, tx, m)
@@ -472,7 +479,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 					return err
 				}
 				w.expected, w.storedSizes = r.storedHashes, r.storedSizes
-				if err := tx.Commit(); err != nil {
+				if err := observation.commit(tx); err != nil {
 					return err
 				}
 				s.rememberCompilerDNSInput(snapshot, m, w)
@@ -492,13 +499,13 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 			if err := verifyInputChunkHashesInTable(ctx, tx, m, w.expected, m.Location); err != nil {
 				return err
 			}
-			if err := tx.Commit(); err != nil {
+			if err := observation.commit(tx); err != nil {
 				return err
 			}
 			s.rememberCompilerDNSInput(snapshot, m, w)
 			return nil
 		}
-		return tx.Commit()
+		return observation.commit(tx)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -532,7 +539,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 		if actual != digest {
 			return ErrConflict
 		}
-		return tx.Commit()
+		return observation.commit(tx)
 	}
 	if s.compilerInputSeparatedEnabled() {
 		if _, err = tx.ExecContext(ctx, `SAVEPOINT separated_input_budget`); err != nil {
@@ -540,7 +547,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 		}
 		_, err = s.pgWriteSeparatedInput(ctx, tx, snapshot, digest, nil)
 		if err == nil {
-			return tx.Commit()
+			return observation.commit(tx)
 		}
 		if !errors.Is(err, errSharedInputBudget) {
 			return err
@@ -556,7 +563,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 		}
 		err = s.pgWriteSharedInput(ctx, tx, snapshot, digest)
 		if err == nil {
-			return tx.Commit()
+			return observation.commit(tx)
 		}
 		if !errors.Is(err, errSharedInputBudget) {
 			return err
@@ -611,7 +618,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 	if err = verifyInputChunkHashesInTable(ctx, tx, m, w.expected, location, w.storedSizes); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := observation.commit(tx); err != nil {
 		return err
 	}
 	s.rememberCompilerDNSInput(snapshot, m, w)

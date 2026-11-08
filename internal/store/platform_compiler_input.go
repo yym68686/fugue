@@ -65,19 +65,22 @@ func (s *Store) EnsurePlatformCompilerInputContext(ctx context.Context, snapshot
 }
 
 func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot platformconfig.RuntimeSnapshot, digest string) (resultErr error) {
-	finishObservation := compilerInputWriterStats.begin()
+	observation := compilerInputWriterStats.beginObserved(parent)
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			finishObservation(errors.New("compiler-input writer panic"))
+			observation.finish(errors.New("compiler-input writer panic"))
 			panic(recovered)
 		}
-		finishObservation(resultErr)
+		observation.finish(resultErr)
 	}()
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
+	defer observation.stopWork()
+	observation.setWriterContext(ctx)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	observation.advance(compilerInputWriterEncode)
 	raw, err := platformconfig.EncodeRuntimeSnapshot(snapshot)
 	if err != nil {
 		return err
@@ -89,14 +92,19 @@ func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot p
 	if err = ctx.Err(); err != nil {
 		return err
 	}
+	observation.advance(compilerInputWriterBeginTx)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer observation.rollback(tx)
+	observation.afterBegin()
+	observation.advance(compilerInputWriterBarrier)
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(315609238744290)`); err != nil {
 		return err
 	}
+	observation.afterBarrier()
+	observation.advance(compilerInputWriterPersist)
 	fenced, err := compilerInputWritesFenced(ctx, tx)
 	if err != nil {
 		return err
@@ -114,7 +122,7 @@ func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot p
 		// Policy controls the preferred encoding, not permission to bypass the
 		// retirement fence or replace an existing canonical representation.
 		// Keep its original caller budget and transaction.
-		return s.pgEnsureChunkedInputTx(ctx, tx, snapshot, digest)
+		return s.pgEnsureChunkedInputTx(ctx, tx, snapshot, digest, observation)
 	}
 	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO fugue_platform_artifact_contents (content_hash, content_json, size_bytes, created_at, updated_at) VALUES ($1,$2::jsonb,$3,$4,$4) ON CONFLICT (content_hash) DO NOTHING`, digest, raw, int64(len(raw)), now); err != nil {
@@ -137,5 +145,5 @@ func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot p
 	if actual != digest {
 		return ErrConflict
 	}
-	return tx.Commit()
+	return observation.commit(tx)
 }

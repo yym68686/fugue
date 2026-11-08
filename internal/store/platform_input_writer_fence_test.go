@@ -50,6 +50,16 @@ func TestCompilerInputJSONBWriterAdditiveSchemaAndCommitOutcomes(t *testing.T) {
 				t.Fatal(outcome, err)
 			}
 			after := compilerInputWriterStats.snapshot()
+			if outcome != "success" {
+				failure := compilerInputWriterStats.diagnosticSnapshot()["last_failure"].(compilerInputWriterFailure)
+				wantPhase := "persist_verify"
+				if outcome == "commit-failed" {
+					wantPhase = "commit"
+				}
+				if failure.Phase != wantPhase || failure.WriterStateAtFailure != "active_with_deadline" || failure.DeadlineSource != "non_deadline_failure" {
+					t.Fatal("JSONB phase/cleanup diagnostic", failure)
+				}
+			}
 			want := "other_failures"
 			if outcome == "success" {
 				want = "successful_returns"
