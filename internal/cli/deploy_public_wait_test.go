@@ -69,7 +69,8 @@ func TestPublicAppWaitRefreshesStaleObservationInsteadOfReportingSuccess(t *test
 				}
 				hits++
 				current := app
-				current.ObservedStatus = &model.AppObservedStatus{Fresh: hits >= 2, ObservedAt: time.Now()}
+				ready := 1
+				current.ObservedStatus = &model.AppObservedStatus{Fresh: hits >= 2, ObservedAt: time.Now(), ReadyReplicas: &ready, Phase: "deployed"}
 				_ = json.NewEncoder(w).Encode(map[string]any{"app": current})
 			}))
 			defer server.Close()
@@ -88,6 +89,38 @@ func TestPublicAppWaitRefreshesStaleObservationInsteadOfReportingSuccess(t *test
 				t.Fatalf("premature success or lost observation: hits=%d app=%+v err=%v", hits, app, err)
 			}
 		})
+	}
+}
+
+func TestPublicAppWaitRefreshesObservationAfterSlowPublicRecovery(t *testing.T) {
+	ready := 1
+	app := model.App{ID: "app_wait", Spec: model.AppSpec{Replicas: 1}, Route: &model.AppRoute{PublicURL: "https://worker.example"}, ObservedStatus: &model.AppObservedStatus{Fresh: true, ObservedAt: time.Now(), ReadyReplicas: &ready, Phase: "deployed"}}
+	hits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/apps/app_wait" {
+			t.Errorf("unexpected observation request: %s %s", r.Method, r.URL)
+		}
+		hits++
+		current := app
+		current.ObservedStatus = &model.AppObservedStatus{Fresh: true, ObservedAt: time.Now(), ReadyReplicas: &ready, Phase: "deployed"}
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": current})
+	}))
+	defer server.Close()
+	client, err := newClientWithOptions(server.URL, "token", clientOptions{Context: context.Background(), ReadRetryCount: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli := newCLI(&bytes.Buffer{}, &bytes.Buffer{})
+	err = cli.waitForPublicAppWithProbe(client, &app, func(_ context.Context, target string) error {
+		if target != app.Route.PublicURL || hits != 0 {
+			t.Fatalf("unexpected public probe: target=%s observations=%d", target, hits)
+		}
+		// Simulate evidence aging while the public route is being published.
+		app.ObservedStatus.ObservedAt = time.Now().Add(-3 * time.Minute)
+		return nil
+	})
+	if err != nil || hits != 1 || publicServingState(app).Status != "ready" {
+		t.Fatalf("public recovery retained stale evidence: hits=%d state=%+v err=%v", hits, publicServingState(app), err)
 	}
 }
 

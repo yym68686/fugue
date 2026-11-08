@@ -13,6 +13,12 @@ import (
 )
 
 func (c *CLI) waitForPublicApp(client *Client, app *model.App) error {
+	return c.waitForPublicAppWithProbe(client, app, func(ctx context.Context, target string) error {
+		return c.waitForPublicURL(ctx, target, nil)
+	})
+}
+
+func (c *CLI) waitForPublicAppWithProbe(client *Client, app *model.App, probe func(context.Context, string) error) error {
 	if app.Spec.Replicas <= 0 || model.AppUsesBackgroundNetwork(app.Spec) || model.AppUsesInternalNetwork(app.Spec) || app.Route == nil || strings.TrimSpace(app.Route.PublicURL) == "" {
 		return nil
 	}
@@ -24,12 +30,26 @@ func (c *CLI) waitForPublicApp(client *Client, app *model.App) error {
 	defer cancel()
 	observingClient := *client
 	observingClient.context = ctx
+	if err := c.refreshPublicAppObservation(&observingClient, app); err != nil {
+		return err
+	}
+	if err := probe(ctx, app.Route.PublicURL); err != nil {
+		return err
+	}
+	// Public publication can take longer than the runtime evidence lifetime.
+	// Retain a current observation for the final result rather than reporting
+	// unknown from the snapshot obtained before waiting for the route.
+	return c.refreshPublicAppObservation(&observingClient, app)
+}
+
+func (c *CLI) refreshPublicAppObservation(observingClient *Client, app *model.App) error {
+	ctx := observingClient.context
 	// A deployment response without a fresh runtime observation is not enough
 	// evidence that this app owns a live public route. The control plane may
 	// still be returning a cached route while the operation settles; refresh the
 	// app until its observation is fresh before probing the public endpoint.
 	transientErrors := deployWaitTransientErrorTracker{}
-	for app.ObservedStatus == nil || !app.ObservedStatus.Fresh {
+	for publicServingState(*app).Status == "unknown" {
 		if err := ctx.Err(); err != nil {
 			return withExitCode(fmt.Errorf("deployment operation completed; runtime observation remains stale: %w", err), ExitCodeIndeterminate)
 		}
@@ -54,7 +74,7 @@ func (c *CLI) waitForPublicApp(client *Client, app *model.App) error {
 			return withExitCode(errors.New("deployment operation completed; app identity or public route changed while waiting for runtime observation"), ExitCodeIndeterminate)
 		}
 		*app = refreshed
-		if app.ObservedStatus == nil || !app.ObservedStatus.Fresh {
+		if publicServingState(*app).Status == "unknown" {
 			if err := waitRequestRetry(ctx, deployWaitPollInterval); err != nil {
 				return withExitCode(fmt.Errorf("deployment operation completed; runtime observation remains stale: %w", err), ExitCodeIndeterminate)
 			}
@@ -63,7 +83,7 @@ func (c *CLI) waitForPublicApp(client *Client, app *model.App) error {
 	if publicServingState(*app).Status == "not_ready" {
 		return withExitCode(errors.New("deployment operation completed; runtime observation is not ready"), ExitCodeIndeterminate)
 	}
-	return c.waitForPublicURL(ctx, app.Route.PublicURL, nil)
+	return nil
 }
 
 func (c *CLI) waitForPublicURL(ctx context.Context, target string, transport *http.Client) error {
