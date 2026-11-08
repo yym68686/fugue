@@ -496,8 +496,24 @@ func DNSRouteDependencies(a model.PlatformArtifact) ([]DNSRouteDependency, error
 }
 
 func DecodeDNSRouteDependencyEvidence(a model.PlatformArtifact) (DNSRouteDependencyEvidence, error) {
-	var evidence DNSRouteDependencyEvidence
+	return DecodeDNSRouteDependencyEvidenceObserved(a, nil)
+}
+
+// DecodeDNSRouteDependencyEvidenceObserved preserves the exact decoder and
+// error order while reporting fixed aggregate stages for bounded inventories.
+// Timings are diagnostics, never part of a dependency or authorization proof.
+func DecodeDNSRouteDependencyEvidenceObserved(a model.PlatformArtifact, cost *DNSDependencyDecodeCost) (evidence DNSRouteDependencyEvidence, err error) {
+	if cost != nil {
+		cost.Attempts++
+		defer func() {
+			if err != nil {
+				cost.Rejected++
+			}
+		}()
+	}
+	started := cost.start()
 	raw, err := json.Marshal(a.Content)
+	cost.record(dnsDependencyEnvelopeEncode, started)
 	if err != nil {
 		return evidence, fmt.Errorf("DNS artifact content cannot be encoded: %w", err)
 	}
@@ -507,7 +523,10 @@ func DecodeDNSRouteDependencyEvidence(a model.PlatformArtifact) (DNSRouteDepende
 	for key := range a.Content {
 		for _, field := range []string{"policy", "cell_route_publications", "cell_dns_source", "previous_traffic_publication"} {
 			if key != field && strings.EqualFold(key, field) {
-				return decodeDNSRouteDependencyViews(raw)
+				started = cost.start()
+				evidence, err = decodeDNSRouteDependencyViews(raw)
+				cost.record(dnsDependencyAliasFallback, started)
+				return evidence, err
 			}
 		}
 	}
@@ -517,22 +536,37 @@ func DecodeDNSRouteDependencyEvidence(a model.PlatformArtifact) (DNSRouteDepende
 		Source       *CellDNSPlanSource `json:"cell_dns_source"`
 		Previous     json.RawMessage    `json:"previous_traffic_publication"`
 	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	started = cost.start()
+	err = json.Unmarshal(raw, &payload)
+	cost.record(dnsDependencyEnvelopeDecode, started)
+	if err != nil {
 		return evidence, fmt.Errorf("DNS artifact envelope cannot be decoded: %w", err)
 	}
+	started = cost.start()
 	pubs, _, err := decodeCellRoutePublicationFields(payload.Publications, payload.Policy, payload.Source)
+	cost.record(dnsDependencyCells, started)
 	if err != nil {
 		return evidence, err
 	}
 	var previous *PreviousTrafficPublicationInput
-	if len(payload.Previous) > 0 && json.Unmarshal(payload.Previous, &previous) != nil {
+	started = cost.start()
+	var previousErr error
+	if len(payload.Previous) > 0 {
+		previousErr = json.Unmarshal(payload.Previous, &previous)
+	}
+	cost.record(dnsDependencyPreviousDecode, started)
+	if previousErr != nil {
 		return evidence, fmt.Errorf("previous traffic publication cannot be decoded")
 	}
+	started = cost.start()
 	previous, err = validateDecodedPreviousTrafficPublication(previous, payload.Source)
+	cost.record(dnsDependencyPreviousValidation, started)
 	if err != nil {
 		return evidence, err
 	}
+	started = cost.start()
 	dependencies, err := dnsRouteDependenciesFromSource(payload.Source, pubs, previous)
+	cost.record(dnsDependencySource, started)
 	if err != nil {
 		return evidence, err
 	}

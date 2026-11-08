@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 )
 
 // Aggregate wall-clock measurements, not PostgreSQL server execution times.
@@ -25,12 +26,17 @@ type CompilerInputHotReadCost struct {
 // Fixed kind buckets describe work, never arbitrary artifact identities or
 // content. JSON decoding and dependency validation remain separately visible.
 type CompilerInputHotDecodeCost struct {
-	Attempts       int64 `json:"attempts"`
-	Rejected       int64 `json:"rejected"`
-	JSONUS         int64 `json:"json_us"`
-	DependenciesUS int64 `json:"dependencies_us"`
-	SourceBytes    int64 `json:"source_bytes"`
-	TransportBytes int64 `json:"transport_bytes"`
+	Attempts              int64                                   `json:"attempts"`
+	Rejected              int64                                   `json:"rejected"`
+	JSONUS                int64                                   `json:"json_us"`
+	DependenciesUS        int64                                   `json:"dependencies_us"`
+	SourceBytes           int64                                   `json:"source_bytes"`
+	TransportBytes        int64                                   `json:"transport_bytes"`
+	SourceBoundRejected   int64                                   `json:"source_bound_rejected"`
+	MetadataBoundRejected int64                                   `json:"metadata_bound_rejected"`
+	JSONRejected          int64                                   `json:"json_rejected"`
+	DependencyRejected    int64                                   `json:"dependency_rejected"`
+	DNS                   *platformconfig.DNSDependencyDecodeCost `json:"dns_dependency_stages,omitempty"`
 }
 
 func compilerInputHotDecodeCost(cost *CompilerInputHotReadCost, kind string) *CompilerInputHotDecodeCost {

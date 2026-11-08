@@ -70,6 +70,21 @@ func TestDNSDependencyDecodePreservesTypedViewsAndErrors(t *testing.T) {
 			if fmt.Sprint(oldErr) != fmt.Sprint(newErr) || !reflect.DeepEqual(want, got) {
 				t.Fatalf("typed views changed: old error=%v new error=%v results equal=%t", oldErr, newErr, reflect.DeepEqual(want, got))
 			}
+			var cost platformconfig.DNSDependencyDecodeCost
+			observed, observedErr := platformconfig.DecodeDNSRouteDependencyEvidenceObserved(a, &cost)
+			if fmt.Sprint(oldErr) != fmt.Sprint(observedErr) || !reflect.DeepEqual(want, observed) || cost.Attempts != 1 || (cost.Rejected == 1) != (oldErr != nil) {
+				t.Fatalf("observed decoder changed results or rejection: cost=%+v old=%v observed=%v", cost, oldErr, observedErr)
+			}
+			for _, us := range []int64{cost.EnvelopeEncodeUS, cost.EnvelopeDecodeUS, cost.CellPublicationsUS, cost.PreviousDecodeUS, cost.PreviousValidationUS, cost.SourceDependenciesUS, cost.AliasFallbackUS} {
+				if us < 0 {
+					t.Fatal("negative stage duration", cost)
+				}
+			}
+			// Alias compatibility keeps its entire original path. Its time
+			// must not be misreported as canonical typed-stage work.
+			if cost.AliasFallbacks != 0 && (cost.AliasFallbacks != 1 || cost.EnvelopeDecodeUS != 0 || cost.CellPublicationsUS != 0 || cost.PreviousDecodeUS != 0 || cost.PreviousValidationUS != 0 || cost.SourceDependenciesUS != 0) {
+				t.Fatal("alias work mixed with canonical stages", cost)
+			}
 			after, _ := json.Marshal(a)
 			if string(before) != string(after) {
 				t.Fatal("immutable input was mutated")

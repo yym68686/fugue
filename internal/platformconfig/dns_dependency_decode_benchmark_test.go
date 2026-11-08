@@ -38,3 +38,24 @@ func BenchmarkDNSRouteDependencyTypedDecode(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkDNSDependencyStageObservation(b *testing.B) {
+	req, _, _ := celldns.SourceAuthorizedRequest(b, true)
+	a := celldns.Compile(b, req).DNSArtifact
+	a.Content["policy"].(map[string]any)["unknown_padding"] = strings.Repeat("x", 256<<10)
+	for _, observed := range []bool{false, true} {
+		b.Run(fmt.Sprintf("observed-%t", observed), func(b *testing.B) {
+			var cost *platformconfig.DNSDependencyDecodeCost
+			if observed {
+				cost = &platformconfig.DNSDependencyDecodeCost{}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := platformconfig.DecodeDNSRouteDependencyEvidenceObserved(a, cost); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

@@ -212,7 +212,25 @@ func decodeCompilerInputHotBatchArtifactObserved(a model.PlatformArtifact, conte
 			}
 		}()
 	}
-	if originalBytes > compilerInputHotArtifactBytes || len(content) > compilerInputHotArtifactBytes || len(metadata) > 16<<10 || decodeCompilerInputHotArtifactJSON(&a, content, metadata) != nil {
+	var rejected bool
+	switch {
+	case originalBytes > compilerInputHotArtifactBytes || len(content) > compilerInputHotArtifactBytes:
+		rejected = true
+		if cost != nil {
+			cost.SourceBoundRejected++
+		}
+	case len(metadata) > 16<<10:
+		rejected = true
+		if cost != nil {
+			cost.MetadataBoundRejected++
+		}
+	case decodeCompilerInputHotArtifactJSON(&a, content, metadata) != nil:
+		rejected = true
+		if cost != nil {
+			cost.JSONRejected++
+		}
+	}
+	if rejected {
 		if cost != nil {
 			cost.JSONUS += time.Since(started).Microseconds()
 		}
@@ -222,9 +240,12 @@ func decodeCompilerInputHotBatchArtifactObserved(a model.PlatformArtifact, conte
 		cost.JSONUS += time.Since(started).Microseconds()
 		started = time.Now()
 	}
-	node, err = compilerInputArtifactHotNode(a)
+	node, err = compilerInputArtifactHotNodeObserved(a, cost)
 	if cost != nil {
 		cost.DependenciesUS += time.Since(started).Microseconds()
+		if err != nil {
+			cost.DependencyRejected++
+		}
 	}
 	return node, err
 }

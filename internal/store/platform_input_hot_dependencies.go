@@ -16,6 +16,10 @@ import (
 // hashes, not replacement ledger rows: every edge is resolved independently.
 // This parses metadata only; it never confers signature or body verification.
 func compilerInputArtifactHotNode(artifact model.PlatformArtifact) (inputarchive.HotNode, error) {
+	return compilerInputArtifactHotNodeObserved(artifact, nil)
+}
+
+func compilerInputArtifactHotNodeObserved(artifact model.PlatformArtifact, cost *CompilerInputHotDecodeCost) (inputarchive.HotNode, error) {
 	node := inputarchive.HotNode{Identity: inputarchive.HotReference{Kind: "artifact", ID: artifact.ID}, ContentHash: artifact.ContentHash, References: []inputarchive.HotReference{}}
 	if artifact.ID == "" || !inputDigestPattern.MatchString(artifact.ContentHash) {
 		return node, fmt.Errorf("hot artifact identity invalid: %w", ErrConflict)
@@ -81,7 +85,14 @@ func compilerInputArtifactHotNode(artifact model.PlatformArtifact) (inputarchive
 		}
 	}
 	if artifact.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
-		evidence, err := platformconfig.DecodeDNSRouteDependencyEvidence(artifact)
+		var dnsCost *platformconfig.DNSDependencyDecodeCost
+		if cost != nil {
+			if cost.DNS == nil {
+				cost.DNS = &platformconfig.DNSDependencyDecodeCost{}
+			}
+			dnsCost = cost.DNS
+		}
+		evidence, err := platformconfig.DecodeDNSRouteDependencyEvidenceObserved(artifact, dnsCost)
 		if err != nil {
 			return node, fmt.Errorf("hot DNS publication dependencies invalid: %w", ErrConflict)
 		}
