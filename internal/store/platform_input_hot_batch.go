@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -213,7 +212,7 @@ func decodeCompilerInputHotBatchArtifactObserved(a model.PlatformArtifact, conte
 			}
 		}()
 	}
-	if originalBytes > compilerInputHotArtifactBytes || len(content) > compilerInputHotArtifactBytes || len(metadata) > 16<<10 || json.Unmarshal(content, &a.Content) != nil || json.Unmarshal(metadata, &a.Metadata) != nil {
+	if originalBytes > compilerInputHotArtifactBytes || len(content) > compilerInputHotArtifactBytes || len(metadata) > 16<<10 || decodeCompilerInputHotArtifactJSON(&a, content, metadata) != nil {
 		if cost != nil {
 			cost.JSONUS += time.Since(started).Microseconds()
 		}

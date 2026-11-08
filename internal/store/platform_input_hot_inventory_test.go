@@ -359,6 +359,74 @@ func TestHotInventoryPostgresBatchMatchesSingleIdentityValidation(t *testing.T) 
 	}
 }
 
+func TestHotInventoryPostgresLargeRouteDecodeMatchesSingle(t *testing.T) {
+	db, _, _ := hotInventoryTestDatabase(t)
+	req, _, _ := celldns.SourceAuthorizedRequest(t, false)
+	for _, base := range []model.PlatformArtifact{req.CellRoutePublications[0].Route, req.CellRoutePublications[0].TLS} {
+		for _, variant := range []string{"valid", "null-lineage", "bad-lineage", "ignored-overflow"} {
+			a := base
+			a.ID = "neutral-large-" + a.ArtifactKind + "-" + variant
+			// Keep a substantial unrelated object tree in the real JSONB row.
+			content, err := json.Marshal(base.Content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.Content = nil
+			if err = json.Unmarshal(content, &a.Content); err != nil {
+				t.Fatal(err)
+			}
+			view := make([]any, 1000)
+			for i := range view {
+				view[i] = map[string]any{"host": "neutral.example.test", "ports": []int{80, 443}, "enabled": true}
+			}
+			a.Content["ignored_view"] = view
+			if variant == "null-lineage" {
+				a.Content["lineage"] = nil
+			} else if variant == "bad-lineage" {
+				a.Content["lineage"] = map[string]any{"input_snapshot_digest": "invalid"}
+			}
+			content, err = json.Marshal(a.Content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if variant == "ignored-overflow" {
+				content = append(content[:len(content)-1], []byte(`,"numeric_overflow":1e400}`)...)
+			}
+			metadata, err := json.Marshal(a.Metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`INSERT INTO fugue_platform_artifacts(id,artifact_kind,scope_key,generation,status,content_hash,content_json,metadata_json,created_at,updated_at)
+ VALUES($1,$2,$3,$1,'validated',$4,$5,$6,now(),now())`, a.ID, a.ArtifactKind, a.ScopeKey, a.ContentHash, content, metadata); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = tx.Exec(`SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms'; SET LOCAL work_mem='1MB'; SET LOCAL temp_file_limit=0`); err != nil {
+				t.Fatal(err)
+			}
+			ref := inputarchive.HotReference{Kind: "artifact", ID: a.ID}
+			want, singleErr := resolveCompilerInputHotNode(t.Context(), tx, ref)
+			var cost CompilerInputHotCost
+			got, batchErr := resolveCompilerInputHotBatchObserved(t.Context(), tx, []inputarchive.HotReference{ref}, &cost)
+			_ = tx.Rollback()
+			if batchErr != nil || singleErr != nil && len(got) != 0 || singleErr == nil && !reflect.DeepEqual(want, got[ref]) {
+				t.Fatal("large route/TLS decoder changed single-read semantics", a.ArtifactKind, variant, singleErr, batchErr)
+			}
+			decode := cost.Artifacts.DecodeByKind[a.ArtifactKind]
+			var rejected int64
+			if singleErr != nil {
+				rejected = 1
+			}
+			if decode == nil || decode.Attempts != 1 || decode.SourceBytes < 64<<10 || decode.TransportBytes < 64<<10 || decode.Rejected != rejected {
+				t.Fatal("large source accounting or rejection changed", a.ArtifactKind, variant, cost.Artifacts)
+			}
+		}
+	}
+}
+
 func TestHotInventoryPostgresDNSProjectionPreservesTypedDependenciesAndBounds(t *testing.T) {
 	db, _, _ := hotInventoryTestDatabase(t)
 	for _, transition := range []bool{false, true} {
