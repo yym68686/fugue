@@ -259,7 +259,8 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 				}
 			}
 			managedSnapshot := app
-			app, useStoredBaseline := selectManagedAppDesiredApp(managedSnapshot, storedApp, false)
+			var useStoredBaseline bool
+			app, useStoredBaseline = selectManagedAppDesiredApp(managedSnapshot, storedApp, false)
 			if useStoredBaseline && appHasOnlineRolloutIntent(managedSnapshot) {
 				s.recordManagedAppOnlineRolloutSnapshotRejected(ctx, managedSnapshot, storedApp)
 			}
