@@ -46,3 +46,28 @@ func TestPublicRouteDefaultTransportRejectsPrivateTargets(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestPublicRouteApplication404RequiresOriginResponseEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name, requestID, timing string
+		reachable               bool
+	}{
+		{name: "missing-route"},
+		{name: "edge-request-only", requestID: "edge_probe"},
+		{name: "origin-timing-only", timing: "fugue_origin_ttfb;dur=2"},
+		{name: "connection-without-response", requestID: "edge_probe", timing: "fugue_origin_connect;dur=2"},
+		{name: "application-not-found", requestID: "edge_probe", timing: "fugue_origin_connect;dur=1, fugue_origin_ttfb;dur=2", reachable: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Fugue-Edge-Request-Id", test.requestID)
+				w.Header().Set("Server-Timing", test.timing)
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer server.Close()
+			if got := ObservePublicRoute(context.Background(), server.URL, server.Client()); got.Reachable != test.reachable {
+				t.Fatalf("wrong availability: %+v", got)
+			}
+		})
+	}
+}

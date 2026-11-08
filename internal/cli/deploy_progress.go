@@ -116,8 +116,8 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 		}
 
 		if pending == 0 {
-			for _, app := range currentApps {
-				if err := c.waitForPublicApp(client, app); err != nil {
+			for i := range currentApps {
+				if err := c.waitForPublicApp(client, &currentApps[i]); err != nil {
 					return bundle, nil, err
 				}
 			}

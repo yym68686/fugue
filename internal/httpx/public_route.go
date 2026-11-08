@@ -51,13 +51,28 @@ func ObservePublicRoute(ctx context.Context, rawURL string, client *http.Client)
 	}
 	defer resp.Body.Close()
 	observation := PublicRouteObservation{StatusCode: resp.StatusCode, RequestID: boundedProbeHeader(resp.Header.Get("X-Fugue-Edge-Request-Id")), BundleVersion: boundedProbeHeader(resp.Header.Get("X-Fugue-Route-Bundle-Version"))}
-	// An authenticated application can legitimately reject HEAD. A 404 cannot
-	// distinguish a missing Edge route from an application-level missing path.
-	observation.Reachable = resp.StatusCode >= 200 && resp.StatusCode < 500 && resp.StatusCode != http.StatusNotFound
+	// An authenticated application can legitimately reject HEAD, including with
+	// 404. Accept that response only when Edge also reports an origin response;
+	// an Edge request ID alone is present for missing routes as well. These are
+	// availability observations, never release identity or authorization proofs.
+	originResponded := observation.RequestID != "" && hasOriginResponseTiming(resp.Header)
+	observation.Reachable = resp.StatusCode >= 200 && resp.StatusCode < 500 && (resp.StatusCode != http.StatusNotFound || originResponded)
 	if !observation.Reachable {
 		observation.Reason = fmt.Sprintf("public route returned HTTP %d", resp.StatusCode)
 	}
 	return observation
+}
+
+func hasOriginResponseTiming(header http.Header) bool {
+	for _, value := range header.Values("Server-Timing") {
+		for _, metric := range strings.Split(value, ",") {
+			name, _, _ := strings.Cut(strings.TrimSpace(metric), ";")
+			if name == "fugue_origin_ttfb" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func boundedProbeHeader(value string) string {

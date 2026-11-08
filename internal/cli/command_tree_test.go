@@ -1676,7 +1676,7 @@ func TestRunDeployGitHubSubcommandNormalizesOwnerRepo(t *testing.T) {
 	}
 }
 
-func TestRunDeployGitHubWaitShowsMissingImageDiagnosis(t *testing.T) {
+func TestRunDeployGitHubWaitDoesNotClaimSuccessForUnreadyRuntime(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1709,7 +1709,7 @@ func TestRunDeployGitHubWaitShowsMissingImageDiagnosis(t *testing.T) {
 				"updated_at":"2026-04-02T00:01:00Z"
 			}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
-			_, _ = w.Write([]byte(`{"app":{
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"app":{
 				"id":"app_123",
 				"tenant_id":"tenant_123",
 				"project_id":"project_123",
@@ -1724,9 +1724,10 @@ func TestRunDeployGitHubWaitShowsMissingImageDiagnosis(t *testing.T) {
 				},
 				"spec":{"image":"registry.example.com/demo-runtime:sha256","runtime_id":"runtime_managed_shared","replicas":1},
 				"status":{"phase":"degraded","current_runtime_id":"runtime_managed_shared","current_replicas":1},
+				"observed_status":{"fresh":true,"phase":"unavailable","ready_replicas":0,"observed_at":%q},
 				"created_at":"2026-04-02T00:00:00Z",
 				"updated_at":"2026-04-02T00:03:00Z"
-			}}`))
+			}}`, time.Now().UTC().Format(time.RFC3339Nano))))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
 			if got := r.URL.Query().Get("app_id"); got != "app_123" {
 				t.Fatalf("expected app_id filter app_123, got %q", got)
@@ -1794,12 +1795,12 @@ func TestRunDeployGitHubWaitShowsMissingImageDiagnosis(t *testing.T) {
 		"--token", "token",
 		"deploy", "github", "example/demo",
 	}, &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("run deploy github with wait: %v", err)
+	if ExitCodeForError(err) != ExitCodeIndeterminate {
+		t.Fatalf("unready runtime counted as success: %v", err)
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"app_id=app_123", "operation_id=op_import", "outcome=succeeded", "url=https://demo.example.com"} {
+	for _, want := range []string{"outcome=unknown"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in %q", want, out)
 		}
