@@ -341,6 +341,13 @@ func buildAppFilesSecretObjects(namespace, appName string, files []model.AppFile
 	return objects
 }
 
+// BuildAppFilesSecretObjects renders only declarative file content for an
+// existing workload identity. Recovery must not render mutable credentials or
+// change the workload while restoring a release's immutable file snapshot.
+func BuildAppFilesSecretObjects(app model.App, workloadName string) []map[string]any {
+	return buildAppFilesSecretObjects(NamespaceForTenant(app.TenantID), workloadName, app.Spec.Files, appLabels(app))
+}
+
 func buildAppSSHAuthorizedKeysSecretObject(namespace, appName string, authorizedKeys []string, labels map[string]string) map[string]any {
 	content := strings.TrimSpace(strings.Join(model.NormalizeSSHPublicKeys(authorizedKeys), "\n"))
 	if content != "" {

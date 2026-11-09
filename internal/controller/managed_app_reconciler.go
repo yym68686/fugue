@@ -3205,6 +3205,9 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 	if err != nil {
 		return err
 	}
+	if err := s.preserveManagedAppWorkloadSecrets(ctx, client, namespace, app, deployments, secrets, desiredObjects, desiredByKind); err != nil {
+		return err
+	}
 	for _, name := range secrets {
 		if _, ok := desiredByKind["Secret"][name]; ok {
 			continue
