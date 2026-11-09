@@ -241,6 +241,19 @@ func pruneObservationTable(ctx context.Context, conn *sql.Conn, table observatio
 const heartbeatRetentionAnchorPrefix = "observation-retention/heartbeat-boundary/"
 const auditObservationColumns = `id,tenant_id,actor_type,actor_id,action,target_type,target_id,metadata_json,chain_id,chain_sequence,previous_hash,event_hash,provenance_json,created_at`
 
+// Both normal and shadow consumers use the same signed heartbeat chain
+// writer. Bind the closed event kinds to that writer's exact target identity;
+// sharing its chain namespace must never make unrelated audit events eligible.
+func heartbeatRetentionEventAllowed(event model.AuditEvent, chain string) bool {
+	if event.TargetID == "" || event.ChainID != chain || chain != "platform-consumer-heartbeat:"+event.TargetID {
+		return false
+	}
+	if strings.HasPrefix(event.TargetID, "shadow_") {
+		return event.Action == "platform_consumer.shadow_observed" && event.TargetType == "platform_shadow_consumer"
+	}
+	return event.Action == "platform_consumer.heartbeat_accepted" && event.TargetType == "platform_consumer"
+}
+
 // Include the partial index predicate explicitly: a generic prepared plan
 // cannot infer that the parameter can never be an empty chain ID.
 const heartbeatRetentionSelectSQL = `SELECT ` + auditObservationColumns + ` FROM fugue_audit_events WHERE chain_id=$1 AND chain_id<>'' AND chain_sequence>0 ORDER BY chain_sequence LIMIT $2`
@@ -307,7 +320,7 @@ func pruneHeartbeatChain(ctx context.Context, conn *sql.Conn, chain string, p Ob
 	var raw string
 	err = tx.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, heartbeatRetentionAnchorPrefix+chain).Scan(&raw)
 	if err == nil {
-		if json.Unmarshal([]byte(raw), &anchor) != nil || anchor.ChainID != chain || anchor.Action != "platform_consumer.heartbeat_accepted" || platformsafety.VerifyTamperEvidentAuditEvent(anchor, keys) != nil {
+		if json.Unmarshal([]byte(raw), &anchor) != nil || !heartbeatRetentionEventAllowed(anchor, chain) || platformsafety.VerifyTamperEvidentAuditEvent(anchor, keys) != nil {
 			return 0, &observationRetentionIntegrityError{category: "anchor_integrity"}
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -339,7 +352,7 @@ func pruneHeartbeatChain(ctx context.Context, conn *sql.Conn, chain string, p Ob
 			(!event.CreatedAt.Before(now.Add(-time.Duration(p.HeartbeatDays)*24*time.Hour)) && event.ChainSequence > head-int64(p.HeartbeatRowsPerChain)) {
 			break
 		}
-		if event.Action != "platform_consumer.heartbeat_accepted" || event.TargetType != "platform_consumer" || event.ChainSequence != boundary.ChainSequence+1 || event.PreviousHash != boundary.EventHash || platformsafety.VerifyTamperEvidentAuditEvent(event, keys) != nil {
+		if !heartbeatRetentionEventAllowed(event, chain) || event.ChainSequence != boundary.ChainSequence+1 || event.PreviousHash != boundary.EventHash || platformsafety.VerifyTamperEvidentAuditEvent(event, keys) != nil {
 			return 0, &observationRetentionIntegrityError{category: "prefix_integrity"}
 		}
 		boundary = event
@@ -357,7 +370,7 @@ func pruneHeartbeatChain(ctx context.Context, conn *sql.Conn, chain string, p Ob
 	if _, err = tx.ExecContext(ctx, `INSERT INTO fugue_meta(key,value,updated_at) VALUES($1,$2,$3) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at`, heartbeatRetentionAnchorPrefix+chain, string(encoded), now); err != nil {
 		return 0, err
 	}
-	result, err := tx.ExecContext(ctx, `DELETE FROM fugue_audit_events WHERE id=ANY($1) AND chain_id=$2 AND action='platform_consumer.heartbeat_accepted'`, ids, chain)
+	result, err := tx.ExecContext(ctx, `DELETE FROM fugue_audit_events WHERE id=ANY($1) AND chain_id=$2 AND action=$3 AND target_type=$4 AND target_id=$5`, ids, chain, boundary.Action, boundary.TargetType, boundary.TargetID)
 	if err != nil {
 		return 0, err
 	}
