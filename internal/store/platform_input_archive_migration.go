@@ -237,15 +237,15 @@ func RunCompilerInputArchiveWriteFence(ctx context.Context, databaseURL string, 
 	if err = tx.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_hot_chunks') IS NOT NULL`).Scan(&hotTableInstalled); err != nil || !hotTableInstalled {
 		return report, fmt.Errorf("compiler input hot chunk relation is unavailable: %w", ErrConflict)
 	}
-	var triggerInstalled bool
-	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='fugue_platform_input_chunks'::regclass AND tgname='fugue_platform_input_chunks_archive_write_fence' AND NOT tgisinternal)`).Scan(&triggerInstalled); err != nil {
+	fence, err := compilerInputArchiveWriteFenceState(ctx, tx)
+	if err != nil {
 		return report, err
 	}
 	if retiredAt.Valid {
 		return report, fmt.Errorf("compiler input chunks relation has entered retirement and cannot be unfenced: %w", ErrConflict)
 	}
 	if disarm {
-		if fenced != triggerInstalled {
+		if fenced != fence.Present || fence.Present && !fence.Compatible {
 			return report, fmt.Errorf("compiler input write fence state and database trigger disagree: %w", ErrConflict)
 		}
 		if !fenced {
@@ -277,20 +277,29 @@ func RunCompilerInputArchiveWriteFence(ctx context.Context, databaseURL string, 
 	if err != nil || admissionPhase != "enforced" {
 		return report, fmt.Errorf("compiler input history admission must be enforced before writer fencing: %w", errors.Join(err, ErrConflict))
 	}
-	if fenced != triggerInstalled {
+	if fenced != fence.Present || fence.Present && !fence.Compatible {
 		return report, fmt.Errorf("compiler input write fence state and database trigger disagree: %w", ErrConflict)
 	}
 	if fenced {
+		if !fence.Always {
+			if _, err = tx.ExecContext(ctx, `ALTER TABLE fugue_platform_input_chunks ENABLE ALWAYS TRIGGER fugue_platform_input_chunks_archive_write_fence`); err != nil {
+				return report, err
+			}
+		}
 		if err = tx.Commit(); err != nil {
 			return report, err
 		}
+		report.Applied = !fence.Always
 		report.WritesFenced, report.TriggerInstalled = true, true
 		return report, nil
 	}
-	if _, err = tx.ExecContext(ctx, `CREATE FUNCTION fugue_platform_input_chunks_archive_write_fence() RETURNS trigger LANGUAGE plpgsql AS $fence$ BEGIN RAISE EXCEPTION 'compiler input chunks are read-only during archive retirement' USING ERRCODE='55000'; END $fence$`); err != nil {
+	if _, err = tx.ExecContext(ctx, `CREATE FUNCTION fugue_platform_input_chunks_archive_write_fence() RETURNS trigger LANGUAGE plpgsql AS $fence$`+compilerInputArchiveFenceBody+`$fence$`); err != nil {
 		return report, err
 	}
 	if _, err = tx.ExecContext(ctx, `CREATE TRIGGER fugue_platform_input_chunks_archive_write_fence BEFORE INSERT OR UPDATE OR DELETE ON fugue_platform_input_chunks FOR EACH STATEMENT EXECUTE FUNCTION fugue_platform_input_chunks_archive_write_fence()`); err != nil {
+		return report, err
+	}
+	if _, err = tx.ExecContext(ctx, `ALTER TABLE fugue_platform_input_chunks ENABLE ALWAYS TRIGGER fugue_platform_input_chunks_archive_write_fence`); err != nil {
 		return report, err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE fugue_platform_input_archive_control SET writes_fenced=true,updated_at=now() WHERE singleton AND writes_fenced=false AND retirement_started_at IS NULL`); err != nil {

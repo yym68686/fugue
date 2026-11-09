@@ -184,9 +184,11 @@ func compilerInputArchiveRetirementPlanFromQuery(ctx context.Context, query inpu
 	if retiredAt.Valid {
 		return report, fmt.Errorf("legacy compiler input relation is already retired: %w", ErrConflict)
 	}
-	if err := query.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='fugue_platform_input_chunks'::regclass AND tgname='fugue_platform_input_chunks_archive_write_fence' AND NOT tgisinternal)`).Scan(&report.WriteTriggerInstalled); err != nil {
+	fence, err := compilerInputArchiveWriteFenceState(ctx, query)
+	if err != nil {
 		return report, err
 	}
+	report.WriteTriggerInstalled = fence.installed()
 	if err := query.QueryRowContext(ctx, `SELECT count(*) FROM fugue_platform_input_archive_leases WHERE expires_at>now()`).Scan(&report.ActiveArchiveLeases); err != nil {
 		return report, err
 	}
@@ -410,8 +412,8 @@ func applyCompilerInputArchiveRetirement(ctx context.Context, db *sql.DB, backen
 	if err = tx.QueryRowContext(ctx, `SELECT writes_fenced,retirement_started_at FROM fugue_platform_input_archive_control WHERE singleton FOR UPDATE`).Scan(&fenced, &retiredAt); err != nil || !fenced || retiredAt.Valid {
 		return verified, fmt.Errorf("compiler input write fence changed before retirement: %w", ErrConflict)
 	}
-	var triggerInstalled bool
-	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='fugue_platform_input_chunks'::regclass AND tgname='fugue_platform_input_chunks_archive_write_fence' AND NOT tgisinternal)`).Scan(&triggerInstalled); err != nil || !triggerInstalled {
+	fence, err := compilerInputArchiveWriteFenceState(ctx, tx)
+	if err != nil || !fence.installed() {
 		return verified, fmt.Errorf("compiler input database write trigger is unavailable: %w", ErrConflict)
 	}
 	current, err := compilerInputArchiveRetirementPlanMetadata(ctx, db, backendHash, options.RoutingEnabled)
