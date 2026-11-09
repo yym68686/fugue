@@ -34,12 +34,13 @@ func main() {
 		}
 		return
 	}
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-retention-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, encoded-backup, decode-backup, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-retention-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, encoded-backup, decode-backup, release-backup, observe")
 	copyContract := flag.String("copy-contract", "", "strict single-input archive-copy JSON contract path")
 	sourceVerificationContract := flag.String("source-verification-contract", "", "strict one-parent read-only compiler-source verification contract; no caller keys")
 	backupContract := flag.String("backup-contract", "", "exact encoded-backup/decode-backup contract; independently authenticated original SHA")
 	backupInput := flag.String("backup-input", "", "private encoded backup file for offline decode-backup")
 	backupOutput := flag.String("backup-output", "", "new 0600 original-byte output in a private directory; offline decode-backup only")
+	releaseBackupContract := flag.String("release-backup-contract", "", "strict exact read-only platform release ledger backup contract")
 	taskContract := flag.String("task-input-contract", "", "strict bounded task-input-prepare contract path; trusted API-role maintenance only")
 	taskPlan := flag.String("task-input-plan", "", "strict signed task preparation plan path; contains a public verification key only")
 	taskBackend := flag.String("task-input-backend", "", "exact archive backend fingerprint for trusted task-input-plan")
@@ -79,6 +80,7 @@ func main() {
 	readOnly = readOnly || *mode == "compiler-source-verify"
 	backupMode := *mode == "encoded-backup" || *mode == "decode-backup"
 	readOnly = readOnly || backupMode
+	readOnly = readOnly || *mode == "release-backup"
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
@@ -88,6 +90,27 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *mode == "release-backup" {
+		selected := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { selected[f.Name] = true })
+		if !validReleaseBackupFlags(selected) || *releaseBackupContract == "" || os.Getenv("FUGUE_DATABASE_URL") == "" {
+			fmt.Fprintln(os.Stderr, "release-backup requires only mode, exact contract and API-role database")
+			os.Exit(2)
+		}
+		report, err := runReleaseBackup(ctx, *releaseBackupContract, os.Stdout)
+		if json.NewEncoder(os.Stderr).Encode(report) != nil {
+			os.Exit(1)
+		}
+		if err != nil {
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *releaseBackupContract != "" {
+		fmt.Fprintln(os.Stderr, "release-backup-contract requires release-backup mode")
+		os.Exit(2)
+	}
 	if backupMode {
 		selected := map[string]bool{}
 		flag.Visit(func(f *flag.Flag) { selected[f.Name] = true })
