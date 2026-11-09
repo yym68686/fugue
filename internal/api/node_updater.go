@@ -481,7 +481,7 @@ func (s *Server) handleCreateNodeUpdateTask(w http.ResponseWriter, r *http.Reque
 	}
 	task, err := s.store.CreateNodeUpdateTask(principal, req.NodeUpdaterID, req.ClusterNodeName, req.RuntimeID, req.Type, req.Payload)
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeNodeUpdateTaskAdmissionError(w, err)
 		return
 	}
 	s.appendAudit(principal, "node_update_task.create", "node_update_task", task.ID, task.TenantID, map[string]string{
@@ -570,10 +570,21 @@ func (s *Server) handleNodeUpdaterClaimTask(w http.ResponseWriter, r *http.Reque
 	}
 	task, err := s.store.ClaimNodeUpdateTask(r.PathValue("id"), principal.ActorID)
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeNodeUpdateTaskAdmissionError(w, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"task": task})
+}
+
+// Dependency admission can join the missing dependency's ErrNotFound with
+// ErrConflict. The task/target may still exist: preserve that distinction from
+// a plain lookup failure without changing error precedence for other APIs.
+func (s *Server) writeNodeUpdateTaskAdmissionError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrConflict) {
+		httpx.WriteError(w, http.StatusConflict, "resource conflict")
+		return
+	}
+	s.writeStoreError(w, err)
 }
 
 func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.NodeUpdateTask) (string, error) {

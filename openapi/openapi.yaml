@@ -12306,6 +12306,8 @@ paths:
         Creation never restores archives or claims the task.
         Maintenance tasks with no such dependencies remain independent of
         compiler-input archive admission.
+        A missing dependency is a conflict (409); it is distinct from a
+        missing or inaccessible task target (404).
       tags: [Node Updater]
       x-fugue-handler: handleCreateNodeUpdateTask
       security:
@@ -12652,6 +12654,8 @@ paths:
         conflict without changing task state; restore and verify dependencies
         before claiming again. This endpoint does not restore cold archives or
         weaken existing task authorization, expiry, or execution checks.
+        A missing dependency is a conflict (409); a missing or inaccessible
+        task remains not found (404).
         Unrelated maintenance tasks require no archive infrastructure in either
         backend.
       tags: [Node Updater]
