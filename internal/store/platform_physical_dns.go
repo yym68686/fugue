@@ -31,7 +31,7 @@ func validateProducerDNSInputChange(state *model.State, previous, next platformp
 			return ErrConflict
 		}
 		artifact := state.PlatformArtifacts[index]
-		if artifact.ID != reference.id || artifact.ContentHash != reference.digest || artifact.ArtifactKind != reference.kind || artifact.ScopeKey != "global" || artifact.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass {
+		if artifact.ID != reference.id || artifact.ContentHash != reference.digest || artifact.ArtifactKind != reference.kind || artifact.ScopeKey != previous.TargetScope || artifact.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass {
 			return ErrConflict
 		}
 		inputs = append(inputs, artifact)

@@ -23,6 +23,10 @@ func globalDNSReconfiguration(operation string) bool {
 	return operation == "physical_dns" || operation == "retire_dns_selector" || operation == "dynamic_quality" || operation == "edge_offline" || operation == "business_exploration" || operation == "dns_availability" || operation == "dns_availability_recovery"
 }
 
+func sourcePolicyReconfiguration(operation string) bool {
+	return globalDNSReconfiguration(operation) || operation == "runtime_input"
+}
+
 func producerReconfigurationKey(a model.PlatformArtifact, precondition model.PlatformProducerReconfiguration) (string, error) {
 	raw, err := json.Marshal(precondition)
 	if err != nil {
@@ -50,6 +54,10 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 			r.Operation == "dns_source" && (p.PublicationRole != platformconfig.PublicationRoleCellDNS || p.DNSSource == nil) {
 			return p, ErrInvalidInput
 		}
+	} else if r.Operation == "runtime_input" {
+		if p.InputSource != "business-static-intent" || p.StaticIntentArtifactID == "" || p.DNSPolicyArtifactID == "" {
+			return p, ErrInvalidInput
+		}
 	} else if globalDNSReconfiguration(r.Operation) {
 		if p.PublicationRole != "" || p.TargetScope != "global" || p.RoutePlacementTransition != nil || !p.RequireDNSQueryPolicy {
 			return p, ErrInvalidInput
@@ -66,7 +74,7 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 		if p.Mode != "serving" || p.Serving == nil || !p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
-	case "placement_constraints", "dns_source", "continuous_serving", "physical_dns", "retire_dns_selector", "dynamic_quality", "edge_offline", "business_exploration", "dns_availability", "dns_availability_recovery":
+	case "placement_constraints", "dns_source", "continuous_serving", "physical_dns", "retire_dns_selector", "dynamic_quality", "edge_offline", "business_exploration", "dns_availability", "dns_availability_recovery", "runtime_input":
 		if p.Mode != "serving" || p.Serving == nil || p.Serving.SinglePublication {
 			return p, ErrInvalidInput
 		}
@@ -136,7 +144,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 	if err != nil || p.Generation == previous.Generation || a.GenerationSequence <= old.GenerationSequence {
 		return ErrConflict
 	}
-	if globalDNSReconfiguration(r.Operation) {
+	if sourcePolicyReconfiguration(r.Operation) {
 		if previous.Mode != "serving" || previous.Serving == nil || previous.Serving.SinglePublication {
 			return ErrConflict
 		}
@@ -152,6 +160,11 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		return ErrConflict
 	}
 	oldSources := previous
+	if r.Operation == "runtime_input" {
+		if err := validateProducerDNSInputChange(state, previous, p, keys, platformproducer.ValidateRuntimeInputUpdate); err != nil {
+			return err
+		}
+	}
 	if r.Operation == "dns_availability_recovery" {
 		if err := validateProducerDNSInputChange(state, previous, p, keys, platformproducer.ValidateDNSAvailabilityRecoveryUpdate); err != nil {
 			return err
@@ -203,7 +216,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		previous.StaticIntentDigest, p.StaticIntentDigest = "", ""
 		previous.DNSPolicyArtifactID, p.DNSPolicyArtifactID = "", ""
 		previous.DNSPolicyDigest, p.DNSPolicyDigest = "", ""
-	} else if globalDNSReconfiguration(r.Operation) {
+	} else if sourcePolicyReconfiguration(r.Operation) {
 		previous.DNSPolicyArtifactID, p.DNSPolicyArtifactID = "", ""
 		previous.DNSPolicyDigest, p.DNSPolicyDigest = "", ""
 	} else if r.Operation != "refresh_serving" {
@@ -227,13 +240,21 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 		return err
 	}
 	full, release, err := exactPublication(state, r.ServingFull, model.PlatformArtifactKindReleaseSet, p.TargetScope, "full", keys, true)
-	if err != nil || !globalDNSReconfiguration(r.Operation) && full.Content["publication_role"] != platformconfig.PublicationRoleCellRoutes || globalDNSReconfiguration(r.Operation) && full.Content["publication_role"] != nil && full.Content["publication_role"] != "" {
+	if err != nil {
+		return ErrConflict
+	}
+	if r.Operation == "runtime_input" {
+		role, _ := full.Content["publication_role"].(string)
+		if role != p.PublicationRole {
+			return ErrConflict
+		}
+	} else if !globalDNSReconfiguration(r.Operation) && full.Content["publication_role"] != platformconfig.PublicationRoleCellRoutes || globalDNSReconfiguration(r.Operation) && full.Content["publication_role"] != nil && full.Content["publication_role"] != "" {
 		return ErrConflict
 	}
 	if _, err := platformconfig.ValidateReleaseComposition(full); err != nil {
 		return ErrConflict
 	}
-	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation) {
+	if r.Operation == "activate_serving" || r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || membershipReconfiguration(r.Operation) || sourcePolicyReconfiguration(r.Operation) {
 		// Resolve the cohort against the exact current baseline before enabling
 		// automatic publication; fresh candidate admission remains independent.
 		target, err := platformproducer.Decode(a)
@@ -248,10 +269,10 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 				return ErrConflict
 			}
 		}
-		if (r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation)) && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
+		if (r.Operation == "refresh_serving" || r.Operation == "continuous_serving" || membershipReconfiguration(r.Operation) || sourcePolicyReconfiguration(r.Operation)) && (full.Metadata[platformproducer.PolicyReleaseMetadata] != r.PreviousPolicy.ReleaseID || !producerOwnsPublication(release)) {
 			return ErrConflict
 		}
-		if (membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation)) && (full.Metadata[platformproducer.StaticIntentIDMetadata] != oldSources.StaticIntentArtifactID || full.Metadata[platformproducer.StaticIntentDigestMetadata] != oldSources.StaticIntentDigest || full.Metadata[platformproducer.DNSPolicyIDMetadata] != oldSources.DNSPolicyArtifactID || full.Metadata[platformproducer.DNSPolicyDigestMetadata] != oldSources.DNSPolicyDigest) {
+		if (membershipReconfiguration(r.Operation) || sourcePolicyReconfiguration(r.Operation)) && (full.Metadata[platformproducer.StaticIntentIDMetadata] != oldSources.StaticIntentArtifactID || full.Metadata[platformproducer.StaticIntentDigestMetadata] != oldSources.StaticIntentDigest || full.Metadata[platformproducer.DNSPolicyIDMetadata] != oldSources.DNSPolicyArtifactID || full.Metadata[platformproducer.DNSPolicyDigestMetadata] != oldSources.DNSPolicyDigest) {
 			return ErrConflict
 		}
 		if membershipReconfiguration(r.Operation) {
@@ -259,7 +280,7 @@ func validateProducerReconfiguration(state *model.State, a model.PlatformArtifac
 				return err
 			}
 		}
-		if globalDNSReconfiguration(r.Operation) {
+		if sourcePolicyReconfiguration(r.Operation) {
 			if err := validatePhysicalDNSGrayBaseline(state, oldSources, release); err != nil {
 				return err
 			}
@@ -322,7 +343,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 		state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	}
-	if membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation) {
+	if membershipReconfiguration(r.Operation) || sourcePolicyReconfiguration(r.Operation) {
 		index := platformArtifactIndex(state.PlatformArtifacts, r.PreviousPolicy.ArtifactID)
 		if index < 0 {
 			return ErrConflict
@@ -346,7 +367,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 		platformsafety.ReleaseLaneKey(a.ArtifactKind, a.ScopeKey, "full"),
 		platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, p.TargetScope, "full"),
 	}
-	if membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation) {
+	if membershipReconfiguration(r.Operation) || sourcePolicyReconfiguration(r.Operation) {
 		laneKeys = append(laneKeys, platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, p.TargetScope, "gray"))
 	}
 	for _, key := range laneKeys {
@@ -358,7 +379,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 			return err
 		}
 		state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, lane)
-		if (membershipReconfiguration(r.Operation) || globalDNSReconfiguration(r.Operation)) && lane.ArtifactKind == model.PlatformArtifactKindReleaseSet && lane.ReleaseChannel == "gray" && lane.ActiveReleaseID != "" {
+		if (membershipReconfiguration(r.Operation) || sourcePolicyReconfiguration(r.Operation)) && lane.ArtifactKind == model.PlatformArtifactKindReleaseSet && lane.ReleaseChannel == "gray" && lane.ActiveReleaseID != "" {
 			gray, err := pgGetPlatformArtifactRelease(ctx, tx, lane.ActiveReleaseID, false)
 			if err != nil {
 				return err
