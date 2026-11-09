@@ -140,6 +140,49 @@ func dnsSupplementTransitionFacts(successor, retained *dnsServingState, now time
 	return result, changed
 }
 
+// An already verified transition can receive a late exact observation while
+// its assignment API is unavailable. This cannot renew pending authority:
+// each replacement is bounded by that requirement's original proof deadline.
+// Missing, duplicate or expired original evidence cannot admit a new proof.
+func dnsSupplementBoundedTransitionFacts(successor, retained *dnsServingState, now time.Time, scheduler *dnsReadinessScheduler) ([]dnsReadinessFact, bool) {
+	observed, changed := dnsSupplementTransitionFacts(successor, retained, now, nil)
+	if !changed {
+		return nil, false
+	}
+	positions := make(map[string]int, len(successor.facts))
+	for i, fact := range successor.facts {
+		if _, exists := positions[fact.ProbeID]; exists {
+			positions[fact.ProbeID] = -1
+		} else {
+			positions[fact.ProbeID] = i
+		}
+	}
+	result, changed := successor.facts, false
+	for _, fact := range observed {
+		i, exists := positions[fact.ProbeID]
+		if !exists || i < 0 || !fact.Ready || !fact.Proof.CheckedAt.After(successor.facts[i].Proof.CheckedAt) {
+			continue
+		}
+		deadline := successor.facts[i].Proof.ValidUntil
+		if !deadline.After(now) {
+			continue
+		}
+		if deadline.Before(fact.Proof.ValidUntil) {
+			fact.Proof.ValidUntil = deadline
+		}
+		if scheduler != nil {
+			scheduler.mu.Lock()
+			scheduler.observeProbeHistory(&fact, successor.payload.Policy.DNSReadiness, now)
+			scheduler.mu.Unlock()
+		}
+		if !changed {
+			result, changed = slices.Clone(result), true
+		}
+		result[i] = fact
+	}
+	return result, changed
+}
+
 func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[string]bool {
 	if old == nil || bridge == nil || old.payload.Plan == nil || bridge.payload.Plan == nil {
 		return nil

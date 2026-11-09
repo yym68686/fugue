@@ -566,9 +566,17 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 	if err == nil {
 		st.fallback = reason
 		if bridge == nil {
-			// Control-plane loss cannot renew pending evidence. Its original
-			// proof deadlines and retained checkpoint deadline still apply.
+			// Control-plane loss cannot renew pending evidence. Late exact
+			// observations may complete it only within its original deadlines.
 			st.transition = old.transition
+			if old.transition != nil && old.transition.state != nil {
+				pending := old.transition.state
+				if supplemented, changed := dnsSupplementBoundedTransitionFacts(pending, st, now, s.servingDNSProbes.shareHistory(s.probeHistoryStore())); changed {
+					if next, buildErr := buildDNSServingState(pending.record, pending.payload, pending.routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, supplemented, now); buildErr == nil {
+						st.transition = &dnsRecordTransition{state: next, hosts: old.transition.hosts}
+					}
+				}
+			}
 		}
 	}
 	return st, err
