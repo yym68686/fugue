@@ -14,12 +14,23 @@ witness; a decoded ledger entry or caller-provided digest cannot supply it.
 The inventory is compared in full under the same durable writer lock. A changed
 heartbeat cannot substitute for the original observation even when its semantic
 hash is unchanged. Source and ledger advance in the same atomic file replacement.
+New captures also carry a domain-separated HMAC over the complete original input
+and its group, final sequence, original time, key ID and keyring revision. The
+native CAS loads the private projected group signing policy before and after
+sealing, rejects a changed policy, and never stores raw key material. Missing or
+invalid keys refuse the entire CAS. A decoded original cannot request a new seal.
 
 The group records `compile_inputs_required` on its first capture. Closing and
 reopening with the option off, or an old Append caller, cannot bypass that
 requirement. Repeated reconciliation of an unchanged legacy generation does not
 backfill it. Old absent originals stay absent. A new generation can begin capture
 without pretending that earlier generations have been recovered.
+The separate durable `compile_input_attestations_required` flag prevents later
+unsigned captures after the first sealed record. Existing unsigned prefixes
+remain unchanged and readable; no historical input is re-signed. Revoked keys
+do not make retained files unreadable, but prevent source authentication under
+current trust. Capture still defaults to false and requires compatible current
+and promised rollback readers before enablement.
 
 Reading a captured source reruns native compilation with its original time,
 freshness, bootstrap and producer projection, and compares the whole unsigned
@@ -38,7 +49,12 @@ permission to trust a serialized `verified` flag. Existing missing historical
 sources and all external registry/admission obligations remain in force.
 
 For each retained original input and exact signed publication body, the export
-can additionally derive a `publication_bindings` entry. It reruns compilation,
+can additionally derive a `publication_bindings` entry only when the original
+input attestation verifies under the independently loaded current group policy.
+Its `input_digest` excludes the attestation itself; the binding's
+`original_input_digest` includes the complete sealed record. Recomputing native
+file checksums or a semantic-equivalent heartbeat cannot replace the source MAC.
+The binding reruns compilation,
 checks the complete unsigned candidate, publication sequence and candidate
 sequence, original signing time, version and inherited recovery epoch, and
 verifies the original primary signature against the independently loaded current
@@ -57,3 +73,6 @@ commitments and exported verification fields are diagnostic values, not accepted
 external roots or caller-supplied admission tokens. The existing 8MiB generation,
 32MiB batch, current-keyring recheck and read-only boundaries also apply to these
 derived entries. No production capture or retirement policy is enabled by export.
+The source seal does not prove independent custody or complete registration.
+Publish-before-register exclusion and the final same-RR database root check
+remain necessary; a file export alone cannot close that cross-store race.

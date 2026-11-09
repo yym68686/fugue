@@ -2,6 +2,7 @@ package edgecontrol
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -15,9 +16,10 @@ const groupCompileInputSchema = "fugue.group-compile-input.v1"
 var ErrGroupCompileInput = errors.New("edge-control original compile input unavailable")
 
 // GroupCompileInput is the exact input to one successful native CAS, including
-// original time, freshness policy and authenticated producer projection. It is
-// NOT an attestation: custody, current trust and the complete external registry
-// must be independently admitted before a dependency census can accept it.
+// original time, freshness policy and authenticated producer projection.
+// Optional native attestation authenticates the complete input under current
+// group trust. Custody and the complete external registry must still be
+// independently admitted before a dependency census can accept it.
 // New capture is opt-in, bounded and append-only. Historical entries are never
 // backfilled from a newer heartbeat, current route intent or renewed signature.
 type GroupCompileInput struct {
@@ -30,6 +32,7 @@ type GroupCompileInput struct {
 	InventoryMaxAgeNanoseconds   int64                         `json:"inventory_max_age_nanoseconds"`
 	AllowBootstrap               bool                          `json:"allow_bootstrap"`
 	PreviousSuccessfulGeneration string                        `json:"previous_successful_generation"`
+	Attestation                  *GroupCompileInputAttestation `json:"attestation,omitempty"`
 }
 
 // Only the native compiler can supply this process-local witness. In
@@ -42,7 +45,7 @@ type groupCompileInputWitness struct {
 	allowBootstrap  bool
 }
 
-func retainGroupCompileInput(state *persistentGroupState, entry GroupShadowLedgerEntry, witness *groupCompileInputWitness, allowLegacy bool) error {
+func retainGroupCompileInput(ctx context.Context, state *persistentGroupState, entry GroupShadowLedgerEntry, witness *groupCompileInputWitness, allowLegacy bool, keyringDir string) error {
 	if witness == nil || state.Inventory == nil || len(state.RetentionInputs) >= 32 {
 		return ErrGroupCompileInput
 	}
@@ -66,6 +69,11 @@ func retainGroupCompileInput(state *persistentGroupState, entry GroupShadowLedge
 	if validateGroupCompileInput(input, state.GroupID) != nil {
 		return ErrGroupCompileInput
 	}
+	// Only this native successful CAS can seal a new source. In particular,
+	// loading an old unsigned record never re-signs or backfills that record.
+	if err := sealGroupCompileInput(ctx, &input, keyringDir); err != nil {
+		return err
+	}
 	// The exporter and census retain at most 32 records/32MiB, one record at
 	// most 8MiB. Refuse the entire CAS before touching durable state. Never
 	// prune a protected original to admit another generation.
@@ -78,6 +86,7 @@ func retainGroupCompileInput(state *persistentGroupState, entry GroupShadowLedge
 		total += len(raw)
 	}
 	state.CompileInputsRequired = true
+	state.CompileInputAttestationsRequired = true
 	state.RetentionInputs = append(state.RetentionInputs, input)
 	return nil
 }
@@ -117,12 +126,15 @@ func validateGroupCompileInput(input GroupCompileInput, groupID string) error {
 	if err != nil || e.BundleGeneration != bundle.Generation || !sameGroupCompileValue(e.Bundle, &bundle) {
 		return ErrGroupCompileInput
 	}
+	if input.Attestation != nil && !validGroupCompileInputAttestation(input) {
+		return ErrGroupCompileInput
+	}
 	return nil
 }
 
 func validateGroupCompileInputs(state persistentGroupState) error {
 	if len(state.RetentionInputs) == 0 {
-		if state.CompileInputsRequired {
+		if state.CompileInputsRequired || state.CompileInputAttestationsRequired {
 			return ErrGroupCompileInput
 		}
 		return nil // Legacy absence stays absence, never an empty proof.
@@ -132,6 +144,7 @@ func validateGroupCompileInputs(state persistentGroupState) error {
 	}
 	previous, total := uint64(0), 0
 	seen := map[uint64]bool{}
+	sealed := false
 	for _, input := range state.RetentionInputs {
 		seq := input.Entry.Sequence
 		raw, err := json.Marshal(input)
@@ -139,6 +152,11 @@ func validateGroupCompileInputs(state persistentGroupState) error {
 			return ErrGroupCompileInput
 		}
 		total += len(raw)
+		if input.Attestation != nil {
+			sealed = true
+		} else if sealed {
+			return ErrGroupCompileInput
+		}
 		stored := state.Ledger[seq-1]
 		stored.compileInput = nil
 		if stored.BundleArchived {
@@ -149,6 +167,9 @@ func validateGroupCompileInputs(state persistentGroupState) error {
 			return ErrGroupCompileInput
 		}
 		seen[seq], previous = true, seq
+	}
+	if sealed != state.CompileInputAttestationsRequired {
+		return ErrGroupCompileInput
 	}
 	// Once enabled, old append callers and a subsequent reopen with the
 	// capture option off cannot create an unrecorded successful generation.

@@ -19,7 +19,7 @@ func compileInputFixture(t *testing.T, retain bool) (*PersistentGroupStore, stri
 	t.Helper()
 	group := "edge-group-neutral"
 	now := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
-	s, err := OpenPersistentGroupStoreWithOptions(privateStateDir(t), PersistentGroupStoreOptions{RetainCompileInputs: retain})
+	s, err := OpenPersistentGroupStoreWithOptions(privateStateDir(t), PersistentGroupStoreOptions{RetainCompileInputs: retain, CompileInputKeyringDir: compileInputTestKeys(t, group)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,6 +29,11 @@ func compileInputFixture(t *testing.T, retain bool) (*PersistentGroupStore, stri
 		t.Fatal(err)
 	}
 	return s, group, now, routeIntentFixture()
+}
+
+func compileInputTestKeys(t *testing.T, group string) string {
+	t.Helper()
+	return originalExportKeys(t, group, "signing-"+strings.TrimPrefix(group, "edge-group-country-")+"-1", bytes.Repeat([]byte{0x73}, 32))
 }
 
 func compileInputRun(t *testing.T, s *PersistentGroupStore, group string, now time.Time, intent model.EdgeRouteIntentSnapshot) GroupShadowBatch {
@@ -114,7 +119,7 @@ func TestGroupCompileInputNoLegacyBackfillOrJSONWitness(t *testing.T) {
 	if state.CompileInputsRequired || len(state.RetentionInputs) != 0 {
 		t.Fatal("default writer changed durable format")
 	}
-	upgraded, err := OpenPersistentGroupStoreWithOptions(s.root, PersistentGroupStoreOptions{RetainCompileInputs: true})
+	upgraded, err := OpenPersistentGroupStoreWithOptions(s.root, PersistentGroupStoreOptions{RetainCompileInputs: true, CompileInputKeyringDir: s.compileInputKeyringDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +270,7 @@ func TestGroupCompileInputCASBindsOriginalHeartbeatNotOnlySemanticHash(t *testin
 func TestGroupCompileInputReplaysAuthenticatedBootstrapProducer(t *testing.T) {
 	group := "cell-original-test"
 	now := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
-	s, err := OpenPersistentGroupStoreWithOptions(privateStateDir(t), PersistentGroupStoreOptions{RetainCompileInputs: true})
+	s, err := OpenPersistentGroupStoreWithOptions(privateStateDir(t), PersistentGroupStoreOptions{RetainCompileInputs: true, CompileInputKeyringDir: compileInputTestKeys(t, group)})
 	if err != nil {
 		t.Fatal(err)
 	}

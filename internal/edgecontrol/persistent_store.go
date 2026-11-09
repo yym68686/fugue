@@ -44,19 +44,20 @@ var (
 )
 
 type persistentGroupState struct {
-	Schema                string                       `json:"schema"`
-	GroupID               string                       `json:"edge_group_id"`
-	Revision              uint64                       `json:"revision"`
-	Inventory             *GroupInventorySnapshot      `json:"inventory,omitempty"`
-	InventoryProducer     *GroupInventoryProducerState `json:"inventory_producer,omitempty"`
-	Ledger                []GroupShadowLedgerEntry     `json:"ledger,omitempty"`
-	AuthorityLedger       []GroupAuthorityLedgerEntry  `json:"authority_ledger,omitempty"`
-	Published             *GroupPublishedBundle        `json:"published_bundle,omitempty"`
-	Candidate             *GroupCandidateBundle        `json:"candidate_bundle,omitempty"`
-	CandidateHistory      []GroupCandidateBundle       `json:"candidate_history,omitempty"`
-	CompileInputsRequired bool                         `json:"compile_inputs_required,omitempty"`
-	RetentionInputs       []GroupCompileInput          `json:"retention_inputs,omitempty"`
-	Digest                string                       `json:"digest"`
+	Schema                           string                       `json:"schema"`
+	GroupID                          string                       `json:"edge_group_id"`
+	Revision                         uint64                       `json:"revision"`
+	Inventory                        *GroupInventorySnapshot      `json:"inventory,omitempty"`
+	InventoryProducer                *GroupInventoryProducerState `json:"inventory_producer,omitempty"`
+	Ledger                           []GroupShadowLedgerEntry     `json:"ledger,omitempty"`
+	AuthorityLedger                  []GroupAuthorityLedgerEntry  `json:"authority_ledger,omitempty"`
+	Published                        *GroupPublishedBundle        `json:"published_bundle,omitempty"`
+	Candidate                        *GroupCandidateBundle        `json:"candidate_bundle,omitempty"`
+	CandidateHistory                 []GroupCandidateBundle       `json:"candidate_history,omitempty"`
+	CompileInputsRequired            bool                         `json:"compile_inputs_required,omitempty"`
+	CompileInputAttestationsRequired bool                         `json:"compile_input_attestations_required,omitempty"`
+	RetentionInputs                  []GroupCompileInput          `json:"retention_inputs,omitempty"`
+	Digest                           string                       `json:"digest"`
 }
 
 // PersistentGroupStore owns one checksummed, atomically replaced state file
@@ -67,6 +68,7 @@ type PersistentGroupStore struct {
 	deferInventoryEpochWrite bool
 	compressStateWrites      bool
 	retainCompileInputs      bool
+	compileInputKeyringDir   string
 	summaryMu                sync.RWMutex
 	summaries                map[string]persistentGroupSummary
 	stateMu                  sync.Mutex
@@ -94,6 +96,9 @@ type PersistentGroupStoreOptions struct {
 	// Reader-first format capability; never enabled implicitly. Once a group
 	// records this requirement, reopening with false cannot bypass it.
 	RetainCompileInputs bool
+	// Trusted projected group policy, required for every new source capture.
+	// Reopening without it permits historical reads, never unsigned appends.
+	CompileInputKeyringDir string
 }
 
 func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
@@ -101,6 +106,10 @@ func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
 }
 
 func OpenPersistentGroupStoreWithOptions(root string, options PersistentGroupStoreOptions) (*PersistentGroupStore, error) {
+	keyringDir := strings.TrimSpace(options.CompileInputKeyringDir)
+	if keyringDir != options.CompileInputKeyringDir || keyringDir != "" && (!filepath.IsAbs(keyringDir) || filepath.Clean(keyringDir) != keyringDir) || options.RetainCompileInputs && keyringDir == "" {
+		return nil, ErrGroupCompileInput
+	}
 	root = strings.TrimSpace(root)
 	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return nil, errors.New("edge-control persistent state directory must be an absolute normalized path")
@@ -133,7 +142,7 @@ func OpenPersistentGroupStoreWithOptions(root string, options PersistentGroupSto
 			}
 		}
 	}
-	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, compressStateWrites: options.CompressStateWrites, retainCompileInputs: options.RetainCompileInputs, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState), compressedGroups: map[string]bool{}, storageReports: map[string]time.Time{}}, nil
+	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, compressStateWrites: options.CompressStateWrites, retainCompileInputs: options.RetainCompileInputs, compileInputKeyringDir: keyringDir, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState), compressedGroups: map[string]bool{}, storageReports: map[string]time.Time{}}, nil
 }
 
 func (store *PersistentGroupStore) StoreGroupInventoryCAS(ctx context.Context, groupID string, expectedSequence uint64, snapshot GroupInventorySnapshot) error {
@@ -210,7 +219,7 @@ func (store *PersistentGroupStore) AppendCAS(ctx context.Context, groupID string
 			return err
 		}
 		if (store.retainCompileInputs || state.CompileInputsRequired) && appended.Status == GroupShadowStatusCompiled {
-			if err := retainGroupCompileInput(state, appended, entry.compileInput, store.deferInventoryEpochWrite); err != nil {
+			if err := retainGroupCompileInput(ctx, state, appended, entry.compileInput, store.deferInventoryEpochWrite, store.compileInputKeyringDir); err != nil {
 				return err
 			}
 		}

@@ -314,7 +314,7 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	if !cfg.AuthorityRuntimeEnabled {
 		return nil, nil, nil
 	}
-	store, err := edgecontrol.OpenPersistentGroupStoreWithOptions(cfg.AuthorityStateDir, edgecontrol.PersistentGroupStoreOptions{DeferInventoryEpochWrite: cfg.DeferInventoryEpochWrite, CompressStateWrites: cfg.CompressStateWrites, RetainCompileInputs: cfg.RetainCompileInputs})
+	store, err := edgecontrol.OpenPersistentGroupStoreWithOptions(cfg.AuthorityStateDir, edgecontrol.PersistentGroupStoreOptions{DeferInventoryEpochWrite: cfg.DeferInventoryEpochWrite, CompressStateWrites: cfg.CompressStateWrites, RetainCompileInputs: cfg.RetainCompileInputs, CompileInputKeyringDir: cfg.GroupSigningKeyringDir})
 	if err != nil {
 		return nil, nil, err
 	}

@@ -42,7 +42,7 @@ type GroupOriginalPublicationBinding struct {
 func bindGroupOriginalPublication(group string, input GroupCompileInput, pub GroupAuthorityLedgerEntry, body model.EdgeRouteBundle, recovery uint64, keys groupBundleSigningKey) (GroupOriginalPublicationBinding, error) {
 	var empty GroupOriginalPublicationBinding
 	raw, err := json.Marshal(input)
-	if err != nil || len(raw) > groupOriginalRecordBytes || validateGroupCompileInput(input, group) != nil {
+	if err != nil || len(raw) > groupOriginalRecordBytes || validateGroupCompileInput(input, group) != nil || !verifyGroupCompileInputAttestation(input, keys) {
 		return empty, ErrGroupOriginalPublication
 	}
 	e := input.Entry
