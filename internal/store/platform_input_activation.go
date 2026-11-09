@@ -747,6 +747,18 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	if err := apply(ctx, tx); err != nil {
 		return err
 	}
+	if proof.pendingRoot != nil && proof.pendingRoot.checkAdmission != nil {
+		// Configuration changes cannot race this final check and commit. The
+		// source and allocation witnesses must also reject their own drift.
+		s.pendingRootAdmissionMu.RLock()
+		defer s.pendingRootAdmissionMu.RUnlock()
+		if s.pendingRootAdmissionRevision != proof.pendingRoot.admissionRevision {
+			return ErrConflict
+		}
+		if err := proof.pendingRoot.checkAdmission(ctx); err != nil {
+			return err
+		}
+	}
 	// Revocation/rotation during apply rolls back all its writes. Keep this
 	// lock only through commit, after the callback's own signature checks.
 	s.platformArtifactKeyringMu.RLock()

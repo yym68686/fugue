@@ -41,6 +41,30 @@ func externalRootCount(t *testing.T, s *Store) int {
 	return count
 }
 
+// These tests exercise the private native transaction, not a permissive
+// production source/admission provider. The public entrypoint is tested below.
+func retainPendingExternalFixture(ctx context.Context, s *Store, r inputarchive.PendingRootRegistration) (inputarchive.PendingRootReceipt, error) {
+	proof, err := preparePendingExternalFixture(ctx, s, r)
+	if err != nil {
+		return inputarchive.PendingRootReceipt{}, err
+	}
+	return s.commitPendingCompilerInputExternalRoot(ctx, proof)
+}
+
+func preparePendingExternalFixture(ctx context.Context, s *Store, r inputarchive.PendingRootRegistration) (*compilerInputActivationProof, error) {
+	proof, err := s.preparePendingCompilerInputExternalRoot(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	// Only the native dependency/CAS contract is under test in this fixture.
+	// No production constructor supplies this synthetic admission witness.
+	proof.pendingRoot.checkAdmission = func(context.Context) error { return nil }
+	s.pendingRootAdmissionMu.RLock()
+	proof.pendingRoot.admissionRevision = s.pendingRootAdmissionRevision
+	s.pendingRootAdmissionMu.RUnlock()
+	return proof, nil
+}
+
 func TestPendingExternalRootPostgresCrashRetentionIdempotenceAndNativeFK(t *testing.T) {
 	s, r, pins := pendingExternalRootFixture(t)
 	releaseHistoryFixturePins(t, s, pins)
@@ -49,7 +73,7 @@ func TestPendingExternalRootPostgresCrashRetentionIdempotenceAndNativeFK(t *test
 	if _, err := s.db.Exec(`DROP TABLE fugue_platform_input_chunks`); err != nil {
 		t.Fatal(err)
 	}
-	first, err := s.RetainPendingCompilerInputExternalRoot(t.Context(), r)
+	first, err := retainPendingExternalFixture(t.Context(), s, r)
 	if err != nil || !first.Matches(r) {
 		t.Fatal(first, err)
 	}
@@ -60,7 +84,7 @@ func TestPendingExternalRootPostgresCrashRetentionIdempotenceAndNativeFK(t *test
 	defer db.Close()
 	fresh := &Store{db: db, databaseURL: s.databaseURL}
 	fresh.ConfigurePlatformArtifactSigning(s.platformArtifactSigningKeyring())
-	second, err := fresh.RetainPendingCompilerInputExternalRoot(t.Context(), r)
+	second, err := retainPendingExternalFixture(t.Context(), fresh, r)
 	if err != nil || second != first || externalRootCount(t, s) != 1 {
 		t.Fatal("lost acknowledgement duplicated or changed root", first, second, err)
 	}
@@ -118,7 +142,7 @@ func TestPendingExternalRootPostgresCrashRetentionIdempotenceAndNativeFK(t *test
 		}
 	}
 	r.SourceDigest = "sha256:" + strings.Repeat("b", 64)
-	if _, err := fresh.RetainPendingCompilerInputExternalRoot(t.Context(), r); !errors.Is(err, ErrConflict) || externalRootCount(t, s) != 1 {
+	if _, err := retainPendingExternalFixture(t.Context(), fresh, r); !errors.Is(err, ErrConflict) || externalRootCount(t, s) != 1 {
 		t.Fatal("same owner/generation changed its source", err)
 	}
 }
@@ -127,7 +151,7 @@ func TestPendingExternalRootPostgresNativeDriftAndWrongAuthorityRefuseBeforeComm
 	for _, change := range []string{"dependency", "epoch", "policy", "expired", "intent", "activation"} {
 		t.Run(change, func(t *testing.T) {
 			s, r, _ := pendingExternalRootFixture(t)
-			proof, err := s.preparePendingCompilerInputExternalRoot(t.Context(), r)
+			proof, err := preparePendingExternalFixture(t.Context(), s, r)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -166,7 +190,7 @@ func TestPendingExternalRootPostgresNewRecordInvalidatesFullCensusEvenForSameInp
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RetainPendingCompilerInputExternalRoot(t.Context(), r); err != nil {
+	if _, err := retainPendingExternalFixture(t.Context(), s, r); err != nil {
 		t.Fatal(err)
 	}
 	if plan, err := s.enforcePreparedCompilerInputHistory(t.Context(), prepared); !errors.Is(err, ErrConflict) || plan != "" || historyPhase(t, s) != "capability" {
@@ -178,12 +202,12 @@ func TestPendingExternalRootPostgresBoundsNeverEvictAndBadSchemaNeverEmpty(t *te
 	s, r, _ := pendingExternalRootFixture(t)
 	for i := 0; i < compilerInputExternalOwnerLimit; i++ {
 		r.Generation = fmt.Sprintf("generation-%03d", i)
-		if _, err := s.RetainPendingCompilerInputExternalRoot(t.Context(), r); err != nil {
+		if _, err := retainPendingExternalFixture(t.Context(), s, r); err != nil {
 			t.Fatal(i, err)
 		}
 	}
 	r.Generation = "one-too-many"
-	if _, err := s.RetainPendingCompilerInputExternalRoot(t.Context(), r); !errors.Is(err, ErrConflict) || externalRootCount(t, s) != compilerInputExternalOwnerLimit {
+	if _, err := retainPendingExternalFixture(t.Context(), s, r); !errors.Is(err, ErrConflict) || externalRootCount(t, s) != compilerInputExternalOwnerLimit {
 		t.Fatal("owner cap evicted protection or accepted overflow", err)
 	}
 	// A direct multi-row/alternate caller cannot bypass the persistent cap.

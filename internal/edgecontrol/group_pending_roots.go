@@ -18,7 +18,7 @@ var ErrGroupPendingRoot = errors.New("edge-control pending retention registratio
 // never complete source custody, activation, pin or retirement authority.
 // No command/production transport opts into this capability implicitly.
 type GroupPendingRootRegistrar interface {
-	RetainPendingCompilerInputExternalRoot(context.Context, inputarchive.PendingRootRegistration) (inputarchive.PendingRootReceipt, error)
+	RetainPendingCompilerInputExternalRoot(context.Context, inputarchive.PendingRootRequest) (inputarchive.PendingRootReceipt, error)
 }
 
 type GroupPendingRootRecord struct {
@@ -102,7 +102,11 @@ func (store *PersistentGroupStore) retainPendingGroupPublication(ctx context.Con
 		if len(state.PendingRootRecords) >= 32 {
 			return ErrGroupPendingRoot
 		}
-		receipt, err = store.pendingRootRegistrar.RetainPendingCompilerInputExternalRoot(ctx, registration)
+		request, requestErr := pendingGroupRootRequest(state.GroupID, *input, state.AuthorityLedger[pub.PublicationSequence-1], pub.Bundle, pub.RecoveryEpoch, binding)
+		if requestErr != nil {
+			return ErrGroupPendingRoot
+		}
+		receipt, err = store.pendingRootRegistrar.RetainPendingCompilerInputExternalRoot(ctx, request)
 		if err != nil || !receipt.Matches(registration) {
 			return ErrGroupPendingRoot
 		}

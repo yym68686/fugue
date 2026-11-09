@@ -18,9 +18,11 @@ const compilerInputExternalOwnerLimit = 32
 const compilerInputExternalReferenceLimit = 32768
 
 type compilerInputPendingRootIntent struct {
-	registration inputarchive.PendingRootRegistration
-	raw          string
-	hash         string
+	registration      inputarchive.PendingRootRegistration
+	raw               string
+	hash              string
+	admissionRevision uint64
+	checkAdmission    func(context.Context) error
 }
 
 // preparePendingCompilerInputExternalRoot authenticates the COMPLETE native
@@ -45,24 +47,89 @@ func (s *Store) preparePendingCompilerInputExternalRoot(ctx context.Context, reg
 	if err != nil {
 		return nil, err
 	}
-	proof.pendingRoot = &compilerInputPendingRootIntent{copy, string(raw), hash}
+	proof.pendingRoot = &compilerInputPendingRootIntent{registration: copy, raw: string(raw), hash: hash}
 	return proof, nil
 }
 
+// ConfigurePendingRootAdmission installs trusted process providers. It does
+// not install the registry or enable any producer/route/retirement policy.
+// Reconfiguration invalidates every prepared witness, including idempotent
+// requests: an old receipt never bypasses current authorization or admission.
+func (s *Store) ConfigurePendingRootAdmission(source inputarchive.PendingRootSourceVerifier, admission inputarchive.PendingRootAdmission) {
+	if s == nil {
+		return
+	}
+	s.pendingRootAdmissionMu.Lock()
+	defer s.pendingRootAdmissionMu.Unlock()
+	s.pendingRootSourceVerifier, s.pendingRootAdmission = source, admission
+	s.pendingRootAdmissionRevision++
+}
+
 // RetainPendingCompilerInputExternalRoot is an internal, retention-only store
-// operation, not an HTTP surface. Its caller must bind the owner to an
-// authenticated producer and independently gate storage/WAL/exit allocation.
+// operation, not an HTTP surface. Missing source or allocation providers fail
+// before DB access. The complete request is copied before any provider call.
 // No production caller or ordinary migration enables it implicitly. A crash or
 // lost reply after commit leaves the exact root protected; retrying the SAME
 // registration is idempotent. Changing its source/ref set is never replacement.
-func (s *Store) RetainPendingCompilerInputExternalRoot(ctx context.Context, registration inputarchive.PendingRootRegistration) (inputarchive.PendingRootReceipt, error) {
+func (s *Store) RetainPendingCompilerInputExternalRoot(ctx context.Context, request inputarchive.PendingRootRequest) (inputarchive.PendingRootReceipt, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	proof, err := s.preparePendingCompilerInputExternalRoot(ctx, registration)
+	if s == nil {
+		return inputarchive.PendingRootReceipt{}, ErrConflict
+	}
+	raw, _, err := request.Canonical()
+	if err != nil {
+		return inputarchive.PendingRootReceipt{}, ErrInvalidInput
+	}
+	var isolated inputarchive.PendingRootRequest
+	if err := json.Unmarshal(raw, &isolated); err != nil {
+		return inputarchive.PendingRootReceipt{}, ErrInvalidInput
+	}
+	request = isolated // never reuse the caller's slices or RawMessage backing array
+	s.pendingRootAdmissionMu.RLock()
+	source, admission, revision := s.pendingRootSourceVerifier, s.pendingRootAdmission, s.pendingRootAdmissionRevision
+	s.pendingRootAdmissionMu.RUnlock()
+	if source == nil || admission == nil {
+		return inputarchive.PendingRootReceipt{}, ErrConflict
+	}
+	witness, err := source.VerifyPendingRootSource(ctx, request)
+	if err != nil || witness == nil {
+		return inputarchive.PendingRootReceipt{}, ErrConflict
+	}
+	if err := witness.CheckPendingRootSource(ctx, request); err != nil {
+		return inputarchive.PendingRootReceipt{}, err
+	}
+	reservation, err := admission.ReservePendingRoot(ctx, request)
+	if err != nil || reservation == nil {
+		return inputarchive.PendingRootReceipt{}, ErrConflict
+	}
+	outcome := inputarchive.PendingRootNotAttempted
+	defer func() { reservation.RecordPendingRootOutcome(outcome) }()
+	check := func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := witness.CheckPendingRootSource(ctx, request); err != nil {
+			return err
+		}
+		return reservation.CheckPendingRootReservation(ctx)
+	}
+	if err := check(ctx); err != nil {
+		return inputarchive.PendingRootReceipt{}, err
+	}
+	proof, err := s.preparePendingCompilerInputExternalRoot(ctx, request.Registration)
 	if err != nil {
 		return inputarchive.PendingRootReceipt{}, err
 	}
-	return s.commitPendingCompilerInputExternalRoot(ctx, proof)
+	proof.pendingRoot.admissionRevision, proof.pendingRoot.checkAdmission = revision, check
+	// Any transaction error is conservatively ambiguous to the reservation
+	// provider. A caller timeout is never permission to release retained costs.
+	outcome = inputarchive.PendingRootCompletionNotConfirmed
+	receipt, err := s.commitPendingCompilerInputExternalRoot(ctx, proof)
+	if err == nil {
+		outcome = inputarchive.PendingRootCommitted
+	}
+	return receipt, err
 }
 
 func (s *Store) commitPendingCompilerInputExternalRoot(ctx context.Context, proof *compilerInputActivationProof) (inputarchive.PendingRootReceipt, error) {
@@ -71,6 +138,9 @@ func (s *Store) commitPendingCompilerInputExternalRoot(ctx context.Context, proo
 		return receipt, ErrInvalidInput
 	}
 	intent := proof.pendingRoot
+	if intent.checkAdmission == nil {
+		return receipt, ErrConflict // private preparation is not authorization
+	}
 	raw, hash, err := intent.registration.Canonical()
 	if err != nil || string(raw) != intent.raw || hash != intent.hash {
 		return receipt, ErrInvalidInput

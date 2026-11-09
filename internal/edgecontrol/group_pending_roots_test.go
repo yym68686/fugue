@@ -17,8 +17,8 @@ import (
 
 type pendingRegistrarFunc func(context.Context, inputarchive.PendingRootRegistration) (inputarchive.PendingRootReceipt, error)
 
-func (f pendingRegistrarFunc) RetainPendingCompilerInputExternalRoot(ctx context.Context, r inputarchive.PendingRootRegistration) (inputarchive.PendingRootReceipt, error) {
-	return f(ctx, r)
+func (f pendingRegistrarFunc) RetainPendingCompilerInputExternalRoot(ctx context.Context, r inputarchive.PendingRootRequest) (inputarchive.PendingRootReceipt, error) {
+	return f(ctx, r.Registration)
 }
 
 func pendingPublicationFixture(t *testing.T, bound bool) (*PersistentGroupStore, *fixtureGroupSigner, string, time.Time, GroupShadowBatch) {

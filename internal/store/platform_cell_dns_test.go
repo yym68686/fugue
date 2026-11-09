@@ -217,6 +217,14 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		}
 		h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 		if _, err = s.AcceptTrustedPlatformConsumerHeartbeat(claims, set.ID, h, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err != nil {
+			// Preserve the replay inputs when this multi-stage fixture fails;
+			// do not turn an unexplained clock/sequence failure into a retry.
+			previous, readErr := s.ListPlatformConsumers(child.ArtifactKind, parent.ScopeKey)
+			for _, consumer := range previous {
+				if consumer.ConsumerID == h.ConsumerID {
+					t.Logf("heartbeat rejected: sequence=%d previous=%d issued=%s previous_issued=%v nonce_reused=%t read_error=%v", h.Sequence, consumer.Sequence, h.IssuedAt.Format(time.RFC3339Nano), consumer.IssuedAt, h.Nonce == consumer.Nonce, readErr)
+				}
+			}
 			t.Fatal(err)
 		}
 	}

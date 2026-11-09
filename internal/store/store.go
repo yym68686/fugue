@@ -48,6 +48,10 @@ type Store struct {
 	retention                            observationRetentionState
 	compilerInputArchiveObjects          inputarchive.Objects
 	compilerInputArchiveReadLeaseEnabled bool
+	pendingRootAdmissionMu               sync.RWMutex
+	pendingRootAdmissionRevision         uint64
+	pendingRootSourceVerifier            inputarchive.PendingRootSourceVerifier
+	pendingRootAdmission                 inputarchive.PendingRootAdmission
 
 	advisoryLockMu sync.Mutex
 	advisoryLocks  map[string]bool
