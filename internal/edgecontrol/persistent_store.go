@@ -44,17 +44,19 @@ var (
 )
 
 type persistentGroupState struct {
-	Schema            string                       `json:"schema"`
-	GroupID           string                       `json:"edge_group_id"`
-	Revision          uint64                       `json:"revision"`
-	Inventory         *GroupInventorySnapshot      `json:"inventory,omitempty"`
-	InventoryProducer *GroupInventoryProducerState `json:"inventory_producer,omitempty"`
-	Ledger            []GroupShadowLedgerEntry     `json:"ledger,omitempty"`
-	AuthorityLedger   []GroupAuthorityLedgerEntry  `json:"authority_ledger,omitempty"`
-	Published         *GroupPublishedBundle        `json:"published_bundle,omitempty"`
-	Candidate         *GroupCandidateBundle        `json:"candidate_bundle,omitempty"`
-	CandidateHistory  []GroupCandidateBundle       `json:"candidate_history,omitempty"`
-	Digest            string                       `json:"digest"`
+	Schema                string                       `json:"schema"`
+	GroupID               string                       `json:"edge_group_id"`
+	Revision              uint64                       `json:"revision"`
+	Inventory             *GroupInventorySnapshot      `json:"inventory,omitempty"`
+	InventoryProducer     *GroupInventoryProducerState `json:"inventory_producer,omitempty"`
+	Ledger                []GroupShadowLedgerEntry     `json:"ledger,omitempty"`
+	AuthorityLedger       []GroupAuthorityLedgerEntry  `json:"authority_ledger,omitempty"`
+	Published             *GroupPublishedBundle        `json:"published_bundle,omitempty"`
+	Candidate             *GroupCandidateBundle        `json:"candidate_bundle,omitempty"`
+	CandidateHistory      []GroupCandidateBundle       `json:"candidate_history,omitempty"`
+	CompileInputsRequired bool                         `json:"compile_inputs_required,omitempty"`
+	RetentionInputs       []GroupCompileInput          `json:"retention_inputs,omitempty"`
+	Digest                string                       `json:"digest"`
 }
 
 // PersistentGroupStore owns one checksummed, atomically replaced state file
@@ -64,6 +66,7 @@ type PersistentGroupStore struct {
 	root                     string
 	deferInventoryEpochWrite bool
 	compressStateWrites      bool
+	retainCompileInputs      bool
 	summaryMu                sync.RWMutex
 	summaries                map[string]persistentGroupSummary
 	stateMu                  sync.Mutex
@@ -88,6 +91,9 @@ type persistentGroupSummary struct {
 type PersistentGroupStoreOptions struct {
 	DeferInventoryEpochWrite bool
 	CompressStateWrites      bool
+	// Reader-first format capability; never enabled implicitly. Once a group
+	// records this requirement, reopening with false cannot bypass it.
+	RetainCompileInputs bool
 }
 
 func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
@@ -127,7 +133,7 @@ func OpenPersistentGroupStoreWithOptions(root string, options PersistentGroupSto
 			}
 		}
 	}
-	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, compressStateWrites: options.CompressStateWrites, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState), compressedGroups: map[string]bool{}, storageReports: map[string]time.Time{}}, nil
+	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, compressStateWrites: options.CompressStateWrites, retainCompileInputs: options.RetainCompileInputs, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState), compressedGroups: map[string]bool{}, storageReports: map[string]time.Time{}}, nil
 }
 
 func (store *PersistentGroupStore) StoreGroupInventoryCAS(ctx context.Context, groupID string, expectedSequence uint64, snapshot GroupInventorySnapshot) error {
@@ -203,6 +209,12 @@ func (store *PersistentGroupStore) AppendCAS(ctx context.Context, groupID string
 		if err != nil {
 			return err
 		}
+		if (store.retainCompileInputs || state.CompileInputsRequired) && appended.Status == GroupShadowStatusCompiled {
+			if err := retainGroupCompileInput(state, appended, entry.compileInput, store.deferInventoryEpochWrite); err != nil {
+				return err
+			}
+		}
+		appended.compileInput = nil
 		state.Ledger = append(state.Ledger, appended)
 		return nil
 	})
@@ -1376,6 +1388,9 @@ func validatePersistentGroupStateContents(state persistentGroupState, groupID st
 	if state.Schema != persistentGroupStateSchemaV1 || normalizeGroupID(state.GroupID) != groupID || state.Revision == 0 {
 		return errors.New("edge-control persistent group state identity or digest is invalid")
 	}
+	if err := validateGroupCompileInputs(state); err != nil {
+		return err
+	}
 	if state.Inventory != nil {
 		if state.Inventory.Schema != GroupInventorySchemaV1 || normalizeGroupID(state.Inventory.GroupID) != groupID || state.Inventory.Sequence == 0 || strings.TrimSpace(state.Inventory.Generation) == "" {
 			return errors.New("edge-control persistent group inventory is invalid")
@@ -1543,6 +1558,13 @@ func persistentGroupStateDigest(state persistentGroupState) string {
 }
 
 func clonePersistentGroupState(state persistentGroupState) persistentGroupState {
+	if state.RetentionInputs != nil {
+		inputs := make([]GroupCompileInput, len(state.RetentionInputs))
+		for i := range inputs {
+			inputs[i] = cloneGroupCompileInput(state.RetentionInputs[i])
+		}
+		state.RetentionInputs = inputs
+	}
 	if state.Inventory != nil {
 		inventory := cloneGroupInventorySnapshot(*state.Inventory)
 		state.Inventory = &inventory

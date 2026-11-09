@@ -279,20 +279,16 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 					if item.CurrentBundle != nil {
 						retained += groupOriginalAddBody(&out, wanted, key+".current_bundle", *item.CurrentBundle, verifier)
 					}
-				default:
-					// Future native typed compile inputs can be exported without
-					// interpreting a new unsigned snapshot as old provenance.
-					if key == "retention_inputs" {
-						var id struct {
-							Entry GroupShadowLedgerEntry `json:"entry"`
-						}
-						if json.Unmarshal(canonical, &id) != nil {
+				case GroupCompileInput:
+					if i, ok := wanted[item.Entry.BundleGeneration]; ok {
+						shadow, found := shadows[item.Entry.Sequence]
+						original := item.Entry
+						original.Bundle, original.BundleArchived = nil, shadow.BundleArchived
+						if !found || validateGroupCompileInput(item, groupID) != nil || !sameGroupCompileValue(shadow, original) {
 							return empty, ErrGroupOriginalExport
 						}
-						if i, ok := wanted[id.Entry.BundleGeneration]; ok {
-							out.Generations[i].CompileInputs = append(out.Generations[i].CompileInputs, json.RawMessage(canonical))
-							retained += len(canonical)
-						}
+						out.Generations[i].CompileInputs = append(out.Generations[i].CompileInputs, json.RawMessage(canonical))
+						retained += len(canonical)
 					}
 				}
 				if retained > groupOriginalBatchBytes {

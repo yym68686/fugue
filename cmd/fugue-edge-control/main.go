@@ -48,6 +48,7 @@ type config struct {
 	InventoryKeyringDir      string
 	DeferInventoryEpochWrite bool
 	CompressStateWrites      bool
+	RetainCompileInputs      bool
 	AuthorityRuntimeEnabled  bool
 	AuthorityStateDir        string
 	AuthorityGroupIDs        []string
@@ -195,6 +196,10 @@ func configFromEnv(getenv func(string) string) (config, error) {
 		if err != nil {
 			return config{}, fmt.Errorf("FUGUE_EDGE_CONTROL_COMPRESS_STATE_WRITES: %w", err)
 		}
+		cfg.RetainCompileInputs, err = strictBool(getenv("FUGUE_EDGE_CONTROL_RETAIN_COMPILE_INPUTS"))
+		if err != nil {
+			return config{}, fmt.Errorf("FUGUE_EDGE_CONTROL_RETAIN_COMPILE_INPUTS: %w", err)
+		}
 		cfg.AuthorityStateDir = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"))
 		cfg.AuthorityGroupIDs, err = parseEdgeGroupIDs(getenv("FUGUE_EDGE_CONTROL_AUTHORITY_GROUP_IDS"))
 		if err != nil {
@@ -309,7 +314,7 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	if !cfg.AuthorityRuntimeEnabled {
 		return nil, nil, nil
 	}
-	store, err := edgecontrol.OpenPersistentGroupStoreWithOptions(cfg.AuthorityStateDir, edgecontrol.PersistentGroupStoreOptions{DeferInventoryEpochWrite: cfg.DeferInventoryEpochWrite, CompressStateWrites: cfg.CompressStateWrites})
+	store, err := edgecontrol.OpenPersistentGroupStoreWithOptions(cfg.AuthorityStateDir, edgecontrol.PersistentGroupStoreOptions{DeferInventoryEpochWrite: cfg.DeferInventoryEpochWrite, CompressStateWrites: cfg.CompressStateWrites, RetainCompileInputs: cfg.RetainCompileInputs})
 	if err != nil {
 		return nil, nil, err
 	}

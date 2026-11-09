@@ -144,6 +144,9 @@ type GroupShadowLedgerEntry struct {
 	RecordedAt                     time.Time              `json:"recorded_at"`
 	Bundle                         *model.EdgeRouteBundle `json:"bundle,omitempty"`
 	BundleArchived                 bool                   `json:"bundle_archived,omitempty"`
+	// Process-local compiler witness. JSON/operators cannot supply it, and it
+	// is consumed only by the explicitly enabled persistent source capture.
+	compileInput *groupCompileInputWitness
 }
 
 // GroupShadowLedger provides one CAS sequence per edge group. Implementations
@@ -324,6 +327,8 @@ func (compiler GroupShadowCompiler) reconcileGroupAttempt(ctx context.Context, s
 	entry.BundleGeneration = bundle.Generation
 	entry.LastSuccessfulBundleGeneration = bundle.Generation
 	entry.Bundle = &bundle
+	entry.compileInput = &groupCompileInputWitness{routeIntent: snapshot, inventory: inventory,
+		inventoryMaxAge: compiler.InventoryMaxAge, allowBootstrap: allowBootstrap}
 	if exists && head.Status == GroupShadowStatusCompiled && head.Bundle != nil && head.InputDigest == entry.InputDigest &&
 		head.RouteIntentGeneration == entry.RouteIntentGeneration && head.BundleGeneration == entry.BundleGeneration {
 		return groupShadowResultFromEntry(head), nil
@@ -1053,6 +1058,7 @@ func prepareGroupShadowLedgerAppend(groupID string, expectedSequence uint64, ent
 	}
 	entry.GroupID = groupID
 	entry.Sequence = currentSequence + 1
+	entry.compileInput = nil
 	entry = cloneGroupShadowLedgerEntry(entry)
 	return entry, nil
 }
