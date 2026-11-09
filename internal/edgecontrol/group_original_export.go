@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 )
 
@@ -55,11 +53,12 @@ type GroupOriginalExport struct {
 }
 
 type GroupOriginalGeneration struct {
-	Generation    string                      `json:"generation"`
-	Shadow        []GroupShadowLedgerEntry    `json:"shadow"`
-	Publications  []GroupAuthorityLedgerEntry `json:"publications"`
-	SignedBodies  []GroupOriginalSignedBody   `json:"signed_bodies"`
-	CompileInputs []json.RawMessage           `json:"compile_inputs"`
+	Generation          string                            `json:"generation"`
+	Shadow              []GroupShadowLedgerEntry          `json:"shadow"`
+	Publications        []GroupAuthorityLedgerEntry       `json:"publications"`
+	SignedBodies        []GroupOriginalSignedBody         `json:"signed_bodies"`
+	CompileInputs       []json.RawMessage                 `json:"compile_inputs"`
+	PublicationBindings []GroupOriginalPublicationBinding `json:"publication_bindings"`
 }
 
 type GroupOriginalSignedBody struct {
@@ -103,7 +102,7 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 			return empty, ErrGroupOriginalExport
 		}
 		wanted[g] = i
-		out.Generations[i] = GroupOriginalGeneration{Generation: g, Shadow: []GroupShadowLedgerEntry{}, Publications: []GroupAuthorityLedgerEntry{}, SignedBodies: []GroupOriginalSignedBody{}, CompileInputs: []json.RawMessage{}}
+		out.Generations[i] = GroupOriginalGeneration{Generation: g, Shadow: []GroupShadowLedgerEntry{}, Publications: []GroupAuthorityLedgerEntry{}, SignedBodies: []GroupOriginalSignedBody{}, CompileInputs: []json.RawMessage{}, PublicationBindings: []GroupOriginalPublicationBinding{}}
 	}
 	if err := ctx.Err(); err != nil {
 		return empty, err
@@ -123,11 +122,6 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 	if err != nil {
 		return empty, ErrGroupOriginalExport
 	}
-	primary, _ := base64.RawURLEncoding.DecodeString(keys.PrimaryKey)
-	defer zeroBytes(primary)
-	previous, _ := base64.RawURLEncoding.DecodeString(keys.PreviousKey)
-	defer zeroBytes(previous)
-	verifier := bundleauth.NewKeyring(string(primary), keys.PrimaryKeyID, string(previous), keys.PreviousKeyID, keys.RevokedKeyIDs)
 	wireHash := sha256.New()
 	encodedLimit := &io.LimitedReader{R: f, N: groupOriginalBatchBytes + 1}
 	encoded := bufio.NewReader(io.TeeReader(encodedLimit, wireHash))
@@ -164,6 +158,8 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 	// Only selected cross-reference witnesses remain resident. Unselected
 	// history is checked and discarded one record at a time.
 	shadows := map[uint64]GroupShadowLedgerEntry{}
+	publicationRecovery := map[uint64]uint64{}
+	recoveryEpoch := uint64(0)
 	if p.expect('{') != nil {
 		return empty, ErrGroupOriginalExport
 	}
@@ -261,6 +257,15 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 					if item.Sequence != uint64(count) || item.GroupID != groupID || item.Schema != GroupAuthorityLedgerSchemaV1 {
 						return empty, ErrGroupOriginalExport
 					}
+					// Normal publications inherit the preceding recovery epoch;
+					// their legacy ledger rows deliberately carry zero. Scan the
+					// complete bounded sequence, retaining only selected witnesses.
+					if item.RecoveryEpoch != 0 {
+						if item.RecoveryEpoch != recoveryEpoch+1 || item.Status != GroupAuthorityStatusPublished || strings.TrimSpace(item.RecoveryReason) == "" {
+							return empty, ErrGroupOriginalExport
+						}
+						recoveryEpoch = item.RecoveryEpoch
+					}
 					if i, ok := wanted[item.BundleGeneration]; ok {
 						s, found := shadows[item.CandidateLedgerSequence]
 						if item.Status != GroupAuthorityStatusPublished || !found || item.Authority != "edge-control" || !item.PublicationEnabled || item.RecordedAt.IsZero() || item.FailureCode != "" ||
@@ -269,15 +274,16 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 							return empty, ErrGroupOriginalExport
 						}
 						out.Generations[i].Publications = append(out.Generations[i].Publications, item)
+						publicationRecovery[item.Sequence] = recoveryEpoch
 						retained += len(canonical)
 					}
 				case GroupCandidateBundle:
 					if validateGroupCandidateBundle(groupID, item) != nil {
 						return empty, ErrGroupOriginalExport
 					}
-					retained += groupOriginalAddBody(&out, wanted, key, item.Bundle, verifier)
+					retained += groupOriginalAddBody(&out, wanted, key, item.Bundle, keys)
 					if item.CurrentBundle != nil {
-						retained += groupOriginalAddBody(&out, wanted, key+".current_bundle", *item.CurrentBundle, verifier)
+						retained += groupOriginalAddBody(&out, wanted, key+".current_bundle", *item.CurrentBundle, keys)
 					}
 				case GroupCompileInput:
 					if i, ok := wanted[item.Entry.BundleGeneration]; ok {
@@ -341,15 +347,15 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 				if pub == nil || validateGroupPublishedBundle(groupID, *pub) != nil {
 					return empty, ErrGroupOriginalExport
 				}
-				retained += groupOriginalAddBody(&out, wanted, key, pub.Bundle, verifier)
+				retained += groupOriginalAddBody(&out, wanted, key, pub.Bundle, keys)
 			case "candidate_bundle":
 				candidate := v.Elem().Interface().(*GroupCandidateBundle)
 				if candidate == nil || validateGroupCandidateBundle(groupID, *candidate) != nil {
 					return empty, ErrGroupOriginalExport
 				}
-				retained += groupOriginalAddBody(&out, wanted, key, candidate.Bundle, verifier)
+				retained += groupOriginalAddBody(&out, wanted, key, candidate.Bundle, keys)
 				if candidate.CurrentBundle != nil {
-					retained += groupOriginalAddBody(&out, wanted, key+".current_bundle", *candidate.CurrentBundle, verifier)
+					retained += groupOriginalAddBody(&out, wanted, key+".current_bundle", *candidate.CurrentBundle, keys)
 				}
 			}
 			if retained > groupOriginalBatchBytes {
@@ -375,12 +381,52 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 	}
 	for i := range out.Generations {
 		g := &out.Generations[i]
+		inputs := map[uint64]GroupCompileInput{}
+		bodies := map[string]model.EdgeRouteBundle{}
 		for j := range g.SignedBodies {
 			body := &g.SignedBodies[j]
+			bodies[body.Digest] = body.Bundle
 			for _, pub := range g.Publications {
 				if pub.PublishedBundleDigest == body.Digest && pub.SigningKeyID == body.Bundle.KeyID {
 					body.PublicationSequences = append(body.PublicationSequences, pub.Sequence)
 				}
+			}
+		}
+		for _, rawInput := range g.CompileInputs {
+			var input GroupCompileInput
+			if _, err := groupOriginalDecode(rawInput, &input); err != nil {
+				return empty, ErrGroupOriginalExport
+			}
+			inputs[input.Entry.Sequence] = input
+		}
+		generationRaw, err := json.Marshal(g)
+		if err != nil || len(generationRaw) > groupOriginalRecordBytes {
+			return empty, ErrGroupOriginalExport
+		}
+		generationBytes := len(generationRaw)
+		for _, pub := range g.Publications {
+			if ctx.Err() != nil {
+				return empty, ctx.Err()
+			}
+			input, haveInput := inputs[pub.CandidateLedgerSequence]
+			body, haveBody := bodies[pub.PublishedBundleDigest]
+			if !haveInput || !haveBody {
+				continue
+			}
+			// No cross product over inputs, publications and signed bodies.
+			// Reject an unrelated issuance before replaying the native compiler.
+			if body.Version != groupPublicationVersion(pub.BundleGeneration, pub.Sequence, publicationRecovery[pub.Sequence]) {
+				continue
+			}
+			binding, err := bindGroupOriginalPublication(groupID, input, pub, body, publicationRecovery[pub.Sequence], keys)
+			if err == nil {
+				raw, err := json.Marshal(binding)
+				if err != nil || len(raw)+1 > groupOriginalRecordBytes-generationBytes || len(raw)+1 > groupOriginalBatchBytes-retained {
+					return empty, ErrGroupOriginalExport
+				}
+				generationBytes += len(raw) + 1
+				retained += len(raw) + 1
+				g.PublicationBindings = append(g.PublicationBindings, binding)
 			}
 		}
 		// A generation is the exported artifact unit, including all original
@@ -412,7 +458,7 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 	return out, nil
 }
 
-func groupOriginalAddBody(out *GroupOriginalExport, wanted map[string]int, source string, b model.EdgeRouteBundle, keys bundleauth.Keyring) int {
+func groupOriginalAddBody(out *GroupOriginalExport, wanted map[string]int, source string, b model.EdgeRouteBundle, keys groupBundleSigningKey) int {
 	i, ok := wanted[b.Generation]
 	if !ok {
 		return 0
@@ -423,7 +469,7 @@ func groupOriginalAddBody(out *GroupOriginalExport, wanted map[string]int, sourc
 			return 0
 		}
 	}
-	body := GroupOriginalSignedBody{Source: source, Digest: digest, Bundle: b, SignatureVerified: b.EdgeGroupID == out.GroupID && !b.GeneratedAt.IsZero() && bundleauth.VerifyEdgeRouteBundleWithKeyring(b, keys, b.GeneratedAt) == nil, PublicationSequences: []uint64{}}
+	body := GroupOriginalSignedBody{Source: source, Digest: digest, Bundle: b, SignatureVerified: verifyGroupOriginalIssuance(out.GroupID, b, keys), PublicationSequences: []uint64{}}
 	out.Generations[i].SignedBodies = append(out.Generations[i].SignedBodies, body)
 	raw, _ := json.Marshal(body)
 	return len(raw)

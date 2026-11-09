@@ -33,7 +33,27 @@ enabled as an unreviewed way to repair a historical source gap.
 Selective original export includes only requested captured generations and
 validates each selected input against its exact shadow sequence. It remains a
 diagnostic: native replay and a file checksum do not authenticate source custody,
-current authority, original publication signatures, complete dependency roots or
-retirement. Captured producer metadata is a historical consistency witness, not
+current authority, complete dependency roots or retirement. Captured producer metadata is a historical consistency witness, not
 permission to trust a serialized `verified` flag. Existing missing historical
 sources and all external registry/admission obligations remain in force.
+
+For each retained original input and exact signed publication body, the export
+can additionally derive a `publication_bindings` entry. It reruns compilation,
+checks the complete unsigned candidate, publication sequence and candidate
+sequence, original signing time, version and inherited recovery epoch, and
+verifies the original primary signature against the independently loaded current
+projected keyring. A still-valid secondary signature cannot substitute for a
+revoked original issuance key. Historical expiry is checked at original issuance;
+this does not authorize serving or reactivation with an expired bundle today.
+
+A signed traffic-release binding supplies concrete release-set artifact, route
+artifact, release and original input references. They still need native DB
+resolution, signatures, complete registry/custody coverage and the final shared
+snapshot before admission. Legacy unbound originals have
+`dependency_binding_known=false`; an empty reference list is not proof of a
+dependency-free leaf. Missing originals or unverifiable publications do not gain
+a binding, and a refreshed signature never backfills the old issuance. Binding
+commitments and exported verification fields are diagnostic values, not accepted
+external roots or caller-supplied admission tokens. The existing 8MiB generation,
+32MiB batch, current-keyring recheck and read-only boundaries also apply to these
+derived entries. No production capture or retirement policy is enabled by export.
