@@ -34,7 +34,8 @@ func main() {
 		}
 		return
 	}
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-retention-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, encoded-backup, decode-backup, release-backup, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-root-obligations, archive-retention-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, encoded-backup, decode-backup, release-backup, observe")
+	rootObligationTargets := flag.String("root-obligation-targets", "", "strict JSON array of 1..32 exact references; archive-root-obligations read-only diagnostic")
 	copyContract := flag.String("copy-contract", "", "strict single-input archive-copy JSON contract path")
 	sourceVerificationContract := flag.String("source-verification-contract", "", "strict one-parent read-only compiler-source verification contract; no caller keys")
 	backupContract := flag.String("backup-contract", "", "exact encoded-backup/decode-backup contract; independently authenticated original SHA")
@@ -81,6 +82,7 @@ func main() {
 	backupMode := *mode == "encoded-backup" || *mode == "decode-backup"
 	readOnly = readOnly || backupMode
 	readOnly = readOnly || *mode == "release-backup"
+	readOnly = readOnly || *mode == "archive-root-obligations"
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
 	retirementMode := *mode == "archive-retire"
@@ -90,6 +92,34 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *mode == "archive-root-obligations" {
+		selected := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { selected[f.Name] = true })
+		targets, targetErr := inputarchive.DecodeHotObligationTargets(*rootObligationTargets)
+		if !validRootObligationFlags(selected) || targetErr != nil || os.Getenv("FUGUE_DATABASE_URL") == "" {
+			fmt.Fprintln(os.Stderr, "archive-root-obligations requires only mode, exact targets and API-role database")
+			os.Exit(2)
+		}
+		report, err := store.RunCompilerInputHotObligations(ctx, os.Getenv("FUGUE_DATABASE_URL"), targets)
+		if report.Schema == "" {
+			report.Schema = "fugue.compiler-input-root-obligations/v1"
+			report.FailureStage, report.FailureReason = "snapshot-open", maintenanceErrorCategory(err)
+		}
+		if writeErr := writeRootObligations(os.Stdout, report); writeErr != nil {
+			fmt.Fprintln(os.Stderr, "root obligation diagnostic output refused")
+			os.Exit(1)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "root obligation inspection incomplete; stage="+report.FailureStage)
+			reportMaintenanceError(err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *rootObligationTargets != "" {
+		fmt.Fprintln(os.Stderr, "root-obligation-targets requires archive-root-obligations")
+		os.Exit(2)
+	}
 	if *mode == "release-backup" {
 		selected := map[string]bool{}
 		flag.Visit(func(f *flag.Flag) { selected[f.Name] = true })
@@ -682,6 +712,22 @@ func writeRetentionInventoryReport(output io.Writer, report store.CompilerInputR
 
 // Failure output is explicitly non-authoritative and aggregate only. Do not
 // serialize an arbitrary error, partial graph, connection or compiler contents.
+func validRootObligationFlags(selected map[string]bool) bool {
+	return selected["mode"] && selected["root-obligation-targets"] && len(selected) == 2
+}
+
+func writeRootObligations(output io.Writer, report store.CompilerInputHotObligations) error {
+	// Buffer first: an oversized diagnostic must not become a valid JSON prefix.
+	// This explicit diagnostic mode never grants proof or execution authority.
+	report.AllSourcesComplete, report.BodyVerification, report.RetirementAuthorized, report.PlanSHA256 = false, false, false, ""
+	raw, err := json.Marshal(report)
+	if err != nil || len(raw) >= 32<<20 {
+		return errors.New("root obligation diagnostic output budget")
+	}
+	_, err = output.Write(append(raw, '\n'))
+	return err
+}
+
 func writeHotInventoryFailure(output io.Writer, report store.CompilerInputHotInventory, err error) error {
 	return json.NewEncoder(output).Encode(struct {
 		Schema                string                          `json:"schema"`

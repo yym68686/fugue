@@ -58,3 +58,43 @@ Partial native diagnostics cannot establish an unreferenced complement. This
 audit supplies the exact inventory needed by the remaining classification and
 formal enforcement coordinator; it does not replace those steps or the isolated
 same-version production restore and physical retirement proofs.
+
+## Exact root obligations
+
+`fugue-input-storage -mode=archive-root-obligations -root-obligation-targets='[{"kind":"artifact","id":"artifact-example"}]'`
+adds a separate read-only diagnostic for 1–32 exact references. Generations
+require their original kind and scope. Unknown fields, duplicate identities,
+trailing JSON, write flags and unrelated options are refused before opening the
+database. Use private operator storage for this identity-bearing report.
+
+The native root predicates and same-RR resolver are unchanged. Each root now
+has its original message release/expiry, current-LKG expiry, registered consumer
+identity/heartbeat, task/pin state or latest original expiry across duplicate
+LKG events when applicable. Current-LKG, latest-three-generation and consumer
+roles have independent state protection: an expired timestamp or stale heartbeat
+does not release them. An unexpired root's timestamp is not a disposal deadline
+for the identity; all other roots and external obligations still apply.
+
+The output preserves already-observed parent edges if a later resolver query,
+graph bound or deadline refuses. Where time and binding/output bounds allow,
+it includes one shortest observed path from every root to each selected target,
+including unresolved targets. `declared_hashes_match` concerns only that witness
+path, not every alternate edge, original bytes or signatures. The paths refer
+to zero-based indices in `roots`. Raw observed edges remain available for a
+bounded offline diagnostic if cancellation prevented path construction.
+
+`observed_obligations` counts witnessed roots and reports state protection and
+the latest witnessed time-root expiry. `strongest_root_known` remains false
+while external sources and missing graph edges may impose stronger obligations.
+No matching observed path is not evidence of no root. `observed_paths_complete`
+only covers the already-observed graph; `traversal_complete` does not cover the
+external generation ledger, original signatures/bytes or reactivation admission.
+These sources remain explicit. `all_sources_complete`, `body_verification`,
+`retirement_authorized` and `plan_sha256` are always false/empty.
+
+The 60-second RR, 5-second statement, 250ms lock, 1MiB work memory, zero-temp,
+16384-root/32768-node/262144-edge/524288-binding limits remain. Diagnostic output
+has an independent 32MiB ceiling. Errors return exit 1 with sanitized categories
+and the bounded observations, never a truncated proof, unreferenced complement,
+disposable list, executable hash, SQL or driver text. This mode performs no
+original input reads, object requests, pin changes, admission, routing or deletion.

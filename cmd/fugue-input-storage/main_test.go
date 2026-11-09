@@ -21,6 +21,25 @@ import (
 
 type sourceFailure struct{ cause error }
 
+func TestRootObligationDiagnosticCannotAuthorizeOrAcceptWriteFlags(t *testing.T) {
+	selected := map[string]bool{"mode": true, "root-obligation-targets": true}
+	if !validRootObligationFlags(selected) {
+		t.Fatal("read-only target invocation rejected")
+	}
+	selected["apply"] = true
+	if validRootObligationFlags(selected) {
+		t.Fatal("write flag admitted")
+	}
+	var output bytes.Buffer
+	if err := writeRootObligations(&output, store.CompilerInputHotObligations{AllSourcesComplete: true, BodyVerification: true, RetirementAuthorized: true, PlanSHA256: "must-not-be-proof"}); err != nil {
+		t.Fatal(err)
+	}
+	var got store.CompilerInputHotObligations
+	if err := json.Unmarshal(output.Bytes(), &got); err != nil || got.AllSourcesComplete || got.BodyVerification || got.RetirementAuthorized || got.PlanSHA256 != "" {
+		t.Fatal("diagnostic became an authority", got, err)
+	}
+}
+
 func (s sourceFailure) Read([]byte) (int, error) { return 0, s.cause }
 
 type unexpectedObjects struct{}

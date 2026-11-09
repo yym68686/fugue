@@ -101,7 +101,7 @@ func HotClosureFailureReason(err error) string {
 // graph. Traversal order cannot lose a later root at a shared descendant.
 // Bounds are refusal conditions, never permission to return a truncated proof.
 func PlanHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, HotReference) (HotNode, error)) (HotClosure, error) {
-	return planHotClosure(ctx, roots, budget, resolve, nil, nil)
+	return planHotClosure(ctx, roots, budget, resolve, nil, nil, nil)
 }
 
 // PlanHotClosureBatched amortizes metadata transport over at most 32 unique
@@ -110,16 +110,24 @@ func PlanHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 // "missing" dependencies. Returned keys must exactly match requested identities
 // with ExpectedHash cleared. Every incoming expected hash is still checked.
 func PlanHotClosureBatched(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, []HotReference) (map[HotReference]HotNode, error)) (HotClosure, error) {
-	return planHotClosure(ctx, roots, budget, nil, resolve, nil)
+	return planHotClosure(ctx, roots, budget, nil, resolve, nil, nil)
 }
 
 // PlanHotClosureBatchedObserved reports aggregate progress on both success and
 // refusal. Observation does not change bounds, graph contents or proof bytes.
 func PlanHotClosureBatchedObserved(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, []HotReference) (map[HotReference]HotNode, error), observe func(HotClosureProgress)) (HotClosure, error) {
-	return planHotClosure(ctx, roots, budget, nil, resolve, observe)
+	return planHotClosure(ctx, roots, budget, nil, resolve, observe, nil)
 }
 
-func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, HotReference) (HotNode, error), batch func(context.Context, []HotReference) (map[HotReference]HotNode, error), observe func(HotClosureProgress)) (HotClosure, error) {
+// PlanHotClosureBatchedDiagnostic additionally observes resolved metadata edges.
+// Observations survive refusal but are NOT a closure or verification proof:
+// later edges may conflict, and unresolved nodes may hide additional roots.
+// The observer may refuse its own output budget without relaxing graph bounds.
+func PlanHotClosureBatchedDiagnostic(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, []HotReference) (map[HotReference]HotNode, error), progress func(HotClosureProgress), node func(HotNode) error) (HotClosure, error) {
+	return planHotClosure(ctx, roots, budget, nil, resolve, progress, node)
+}
+
+func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudget, resolve func(context.Context, HotReference) (HotNode, error), batch func(context.Context, []HotReference) (map[HotReference]HotNode, error), observe func(HotClosureProgress), observeNode func(HotNode) error) (HotClosure, error) {
 	report := HotClosure{Roots: append([]HotRoot{}, roots...), Nodes: []HotClosureNode{}, Blockers: []HotClosureBlocker{}}
 	progress := HotClosureProgress{Phase: "validate-roots"}
 	if observe != nil {
@@ -227,6 +235,11 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 					return report, &hotClosureFailure{"invalid-input-identity"}
 				}
 				node.References = append([]HotReference{}, node.References...)
+				for _, child := range node.References {
+					if !validHotReference(child) {
+						return report, &hotClosureFailure{"invalid-dependency"}
+					}
+				}
 				sort.Slice(node.References, func(i, j int) bool {
 					return hotReferenceBinding(node.References[i]) < hotReferenceBinding(node.References[j])
 				})
@@ -234,6 +247,14 @@ func planHotClosure(ctx context.Context, roots []HotRoot, budget HotClosureBudge
 				progress.Edges = edges
 				if edges > budget.Edges {
 					return report, &hotClosureFailure{"edge-budget"}
+				}
+				if observeNode != nil {
+					// Do not let an observer mutate resolver-owned graph slices.
+					observation := node
+					observation.References = append([]HotReference{}, node.References...)
+					if err := observeNode(observation); err != nil {
+						return report, &hotClosureFailure{"diagnostic-output-budget"}
+					}
 				}
 				nodes[key] = node
 				progress.ResolvedNodes = len(nodes)

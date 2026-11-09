@@ -590,6 +590,18 @@ func TestHotInventoryPostgresWorksWithReadOnlyOrdinaryRole(t *testing.T) {
 	if report.RetirementAuthorized || report.BodyVerification || report.ReactivationProtected || report.Closure.LocalCopiesVerified {
 		t.Fatal("read-only metadata was promoted to destructive authority", report)
 	}
+	obligations, err := RunCompilerInputHotObligations(t.Context(), u.String(), []inputarchive.HotReference{{Kind: "artifact", ID: "artifact-neutral-1"}})
+	if err != nil || !obligations.CoherentMetadata || !obligations.RootInventoryComplete || !obligations.TraversalComplete || !obligations.PathsComplete || len(obligations.Paths) == 0 {
+		t.Fatal("ordinary read-only role could not inspect original root obligations", obligations, err)
+	}
+	if obligations.AllSourcesComplete || obligations.BodyVerification || obligations.RetirementAuthorized || obligations.PlanSHA256 != "" {
+		t.Fatal("read-only root witnesses were promoted to destructive authority", obligations)
+	}
+	for _, obligation := range obligations.Obligations {
+		if obligation.StrongestRootKnown || obligation.DisposalAuthorized {
+			t.Fatal("partial root witnesses were promoted to complete retention authority", obligation)
+		}
+	}
 	retention, err := RunCompilerInputRetentionInventory(t.Context(), u.String())
 	if err != nil || !retention.UniverseComplete || retention.ClassificationComplete || retention.ExecutionAuthorized || retention.Totals["H"].Inputs != 1 || retention.Totals["D"].Inputs != 0 {
 		t.Fatal("ordinary read-only role could not audit the universe without destructive authority", retention, err)

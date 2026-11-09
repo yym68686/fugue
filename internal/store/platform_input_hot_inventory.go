@@ -169,6 +169,10 @@ func compilerInputHotInventorySnapshot(ctx context.Context, tx *sql.Tx, rootsOnl
 }
 
 func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotRoot, error) {
+	return compilerInputHotRootsObserved(ctx, tx, nil)
+}
+
+func compilerInputHotRootsObserved(ctx context.Context, tx *sql.Tx, observe func(inputarchive.HotRoot, compilerInputRootState) error) ([]inputarchive.HotRoot, error) {
 	// Historical messages/expected sets cannot reactivate an input by
 	// themselves. Current lanes, active releases, observed consumer identities
 	// and selected expectations retain it; future activation needs admission.
@@ -193,7 +197,18 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
  WHERE (m.expires_at IS NULL OR m.expires_at>transaction_timestamp()) AND EXISTS(SELECT 1 FROM fugue_platform_artifact_releases r WHERE r.id=m.release_id AND r.status='active')
  UNION ALL SELECT 'active-task',id,'task',id,'','','' FROM fugue_node_update_tasks WHERE status IN ('pending','running')
  UNION ALL SELECT 'archive-owner',content_hash,'input',content_hash,'','',content_hash FROM fugue_platform_input_archive_leases WHERE expires_at>transaction_timestamp()
-) SELECT source,id,kind,identity,artifact_kind,scope_key,expected_hash FROM roots WHERE source=$2 LIMIT $1`
+) SELECT source,id,kind,identity,artifact_kind,scope_key,expected_hash,
+ CASE WHEN NOT $3 THEN '{}'::jsonb ELSE CASE
+ WHEN source='active-message' THEN (SELECT jsonb_build_object('release_id',m.release_id,'expires_at',m.expires_at,'artifact_kind',m.artifact_kind,'scope_key',m.scope_key,'generation',m.generation) FROM fugue_platform_release_messages m WHERE m.id=roots.id)
+ WHEN source='current-lkg' THEN (SELECT jsonb_build_object('expires_at',l.expires_at,'artifact_kind',l.artifact_kind,'scope_key',l.scope_key,'generation',l.generation) FROM fugue_platform_lkg_snapshots l WHERE l.id=roots.id)
+ WHEN source LIKE 'consumer-%' THEN (SELECT jsonb_build_object('consumer_id',c.consumer_id,'release_set_id',c.release_set_id,'artifact_kind',c.artifact_kind,'scope_key',c.scope_key,'last_heartbeat_at',c.last_heartbeat_at) FROM fugue_platform_consumer_instances c WHERE c.id=roots.id)
+ WHEN source LIKE 'shadow-consumer-%' THEN (SELECT jsonb_build_object('consumer_id',c.consumer_id,'release_set_id',c.body->>'release_set_id','artifact_kind',c.artifact_kind,'scope_key',c.scope_key,'last_heartbeat_at',NULLIF(c.body->>'last_heartbeat_at','')) FROM fugue_platform_shadow_consumers c WHERE jsonb_build_array(c.consumer_id,c.artifact_kind,c.scope_key)::text=roots.id)
+ WHEN source='active-release' THEN (SELECT jsonb_build_object('state',r.status,'artifact_kind',r.artifact_kind,'scope_key',r.scope_key,'generation',r.generation) FROM fugue_platform_artifact_releases r WHERE r.id=roots.id)
+ WHEN source='active-expectation' THEN (SELECT jsonb_build_object('release_id',e.artifact_release_id,'artifact_kind',e.artifact_kind,'scope_key',e.scope_key,'generation',e.expected_generation) FROM fugue_platform_expected_consumer_sets e WHERE e.id=roots.id)
+ WHEN source='active-task' THEN (SELECT jsonb_build_object('state',t.status) FROM fugue_node_update_tasks t WHERE t.id=roots.id)
+ WHEN source='archive-owner' THEN (SELECT jsonb_build_object('expires_at',l.expires_at) FROM fugue_platform_input_archive_leases l WHERE l.content_hash=roots.id)
+ ELSE '{}'::jsonb END END
+ FROM roots WHERE source=$2 LIMIT $1`
 	roots := []inputarchive.HotRoot{}
 	// Evaluate each source independently: a final sort over a UNION of all
 	// historical tables otherwise defeats the output limit and spends one
@@ -204,7 +219,7 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
 		"shadow-consumer-desired", "shadow-consumer-actual", "shadow-consumer-candidate", "shadow-consumer-lkg", "shadow-consumer-parent", "shadow-consumer-expectation",
 		"active-expectation", "active-message", "active-task", "archive-owner"} {
 		if source == "unexpired-lkg" {
-			retained, err := compilerInputUnexpiredLKGRoots(ctx, tx, compilerInputHotRootLimit-len(roots))
+			retained, err := compilerInputUnexpiredLKGRootsObserved(ctx, tx, compilerInputHotRootLimit-len(roots), observe)
 			if err != nil {
 				return nil, &compilerInputHotInventoryError{"direct-unexpired-lkg", err}
 			}
@@ -214,16 +229,26 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
 			}
 			continue
 		}
-		rows, err := tx.QueryContext(ctx, direct, compilerInputHotRootLimit-len(roots)+1, source)
+		rows, err := tx.QueryContext(ctx, direct, compilerInputHotRootLimit-len(roots)+1, source, observe != nil)
 		if err != nil {
 			return nil, &compilerInputHotInventoryError{"direct-" + source, err}
 		}
 		for rows.Next() {
 			var root inputarchive.HotRoot
-			if err = rows.Scan(&root.Source, &root.ID, &root.Reference.Kind, &root.Reference.ID, &root.Reference.ArtifactKind, &root.Reference.ScopeKey, &root.Reference.ExpectedHash); err != nil {
+			var raw []byte
+			if err = rows.Scan(&root.Source, &root.ID, &root.Reference.Kind, &root.Reference.ID, &root.Reference.ArtifactKind, &root.Reference.ScopeKey, &root.Reference.ExpectedHash, &raw); err != nil {
 				break
 			}
 			roots = append(roots, root)
+			if observe != nil {
+				var state compilerInputRootState
+				if err = json.Unmarshal(raw, &state); err != nil {
+					break
+				}
+				if err = observe(root, state); err != nil {
+					break
+				}
+			}
 		}
 		if err == nil {
 			err = rows.Err()
@@ -245,16 +270,22 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
 		return nil, err
 	}
 	if pinsInstalled {
-		rows, err := tx.QueryContext(ctx, `SELECT pin_key,content_hash FROM fugue_platform_input_local_pins WHERE state IN ('pending','verified') LIMIT $1`, compilerInputHotRootLimit-len(roots)+1)
+		rows, err := tx.QueryContext(ctx, `SELECT pin_key,content_hash,state FROM fugue_platform_input_local_pins WHERE state IN ('pending','verified') LIMIT $1`, compilerInputHotRootLimit-len(roots)+1)
 		if err != nil {
 			return nil, &compilerInputHotInventoryError{"local-pins", err}
 		}
 		for rows.Next() {
-			var key, digest string
-			if err = rows.Scan(&key, &digest); err != nil {
+			var key, digest, state string
+			if err = rows.Scan(&key, &digest, &state); err != nil {
 				break
 			}
-			roots = append(roots, inputarchive.HotRoot{Source: "local-input-pin", ID: key, Reference: inputarchive.HotReference{Kind: "input", ID: digest, ExpectedHash: digest}})
+			root := inputarchive.HotRoot{Source: "local-input-pin", ID: key, Reference: inputarchive.HotReference{Kind: "input", ID: digest, ExpectedHash: digest}}
+			roots = append(roots, root)
+			if observe != nil {
+				if err = observe(root, compilerInputRootState{State: state}); err != nil {
+					break
+				}
+			}
 		}
 		if err == nil {
 			err = rows.Err()
@@ -307,7 +338,13 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
 		if err = rows.Scan(&id, &hash); err != nil {
 			break
 		}
-		roots = append(roots, inputarchive.HotRoot{Source: "rollback-history", ID: id, Reference: inputarchive.HotReference{Kind: "artifact", ID: id, ExpectedHash: hash}})
+		root := inputarchive.HotRoot{Source: "rollback-history", ID: id, Reference: inputarchive.HotReference{Kind: "artifact", ID: id, ExpectedHash: hash}}
+		roots = append(roots, root)
+		if observe != nil {
+			if err = observe(root, compilerInputRootState{}); err != nil {
+				break
+			}
+		}
 	}
 	if err == nil {
 		err = rows.Err()
@@ -325,28 +362,36 @@ func compilerInputHotRoots(ctx context.Context, tx *sql.Tx) ([]inputarchive.HotR
 }
 
 func compilerInputUnexpiredLKGRoots(ctx context.Context, tx *sql.Tx, limit int) ([]inputarchive.HotRoot, error) {
+	return compilerInputUnexpiredLKGRootsObserved(ctx, tx, limit, nil)
+}
+
+func compilerInputUnexpiredLKGRootsObserved(ctx context.Context, tx *sql.Tx, limit int, observe func(inputarchive.HotRoot, compilerInputRootState) error) ([]inputarchive.HotRoot, error) {
 	// Re-verification can produce many events for the same retained artifact.
 	// Stream the original predicate in this RR snapshot instead of requiring a
 	// server GROUP BY to fit work_mem or spill before its output LIMIT. Keep
 	// BOTH artifact and expected hash in the dedup key: a conflicting binding
 	// must survive for graph validation. The map has at most limit+1 entries;
 	// the existing statement/transaction deadlines also bound duplicate scans.
-	rows, err := tx.QueryContext(ctx, `SELECT artifact_id,content_hash FROM fugue_platform_lkg_snapshot_history WHERE expires_at>transaction_timestamp()`)
+	rows, err := tx.QueryContext(ctx, `SELECT artifact_id,content_hash,expires_at FROM fugue_platform_lkg_snapshot_history WHERE expires_at>transaction_timestamp()`)
 	if err != nil {
 		return nil, err
 	}
 	roots := []inputarchive.HotRoot{}
-	seen := make(map[[2]string]struct{})
+	seen := make(map[[2]string]time.Time)
 	for rows.Next() {
 		var id, hash string
-		if err = rows.Scan(&id, &hash); err != nil {
+		var expires time.Time
+		if err = rows.Scan(&id, &hash, &expires); err != nil {
 			break
 		}
 		key := [2]string{id, hash}
-		if _, found := seen[key]; found {
+		previous, found := seen[key]
+		if expires.After(previous) {
+			seen[key] = expires
+		}
+		if found {
 			continue
 		}
-		seen[key] = struct{}{}
 		roots = append(roots, inputarchive.HotRoot{Source: "unexpired-lkg", ID: id,
 			Reference: inputarchive.HotReference{Kind: "artifact", ID: id, ExpectedHash: hash}})
 		if len(roots) > limit {
@@ -356,6 +401,14 @@ func compilerInputUnexpiredLKGRoots(ctx context.Context, tx *sql.Tx, limit int) 
 	err = errors.Join(err, rows.Err(), rows.Close())
 	if err != nil {
 		return nil, err
+	}
+	if observe != nil && len(roots) <= limit {
+		for _, root := range roots {
+			expires := seen[[2]string{root.Reference.ID, root.Reference.ExpectedHash}]
+			if err = observe(root, compilerInputRootState{ExpiresAt: &expires}); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return roots, nil
 }
