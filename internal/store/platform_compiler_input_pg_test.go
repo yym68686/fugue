@@ -57,7 +57,7 @@ func TestCompilerInputPostgresRetainsFormatAndVerifiesActualStoredContent(t *tes
 				if scenario == "existing" || scenario == "corrupt" {
 					affected = 0
 				}
-				mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO fugue_platform_artifact_contents (content_hash, content_json, size_bytes, created_at, updated_at) VALUES ($1,$2::jsonb,$3,$4,$4) ON CONFLICT (content_hash) DO NOTHING`)).
+				mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO fugue_platform_artifact_contents (content_hash, content_json, size_bytes, created_at, updated_at, content_kind) VALUES ($1,$2::jsonb,$3,$4,$4,'compiler-input-v1') ON CONFLICT (content_hash) DO NOTHING`)).
 					WithArgs(digest, encoded, int64(len(encoded)), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, affected))
 				mock.ExpectQuery(regexp.QuoteMeta(`SELECT content_json FROM fugue_platform_artifact_contents WHERE content_hash = $1`)).WithArgs(digest).
 					WillReturnRows(sqlmock.NewRows([]string{"content_json"}).AddRow(stored))

@@ -761,7 +761,10 @@ func resetArchiveFenceFixture(t *testing.T, s *Store) {
 		if _, err := s.db.ExecContext(ctx, `DROP FUNCTION IF EXISTS fugue_platform_input_archive_retirement_guard()`); err != nil {
 			t.Error("reset disposable archive guard function", err)
 		}
-		_, err := s.db.ExecContext(ctx, `DROP TRIGGER IF EXISTS fugue_platform_input_chunks_archive_write_fence ON fugue_platform_input_chunks; DROP FUNCTION IF EXISTS fugue_platform_input_chunks_archive_write_fence(); UPDATE fugue_platform_input_archive_control SET epoch=0,writes_fenced=false,retirement_started_at=NULL,retirement_plan_sha256='',retirement_reader_current='',retirement_reader_rollback='',retirement_archive_policy_sha256='' WHERE singleton`)
+		if _, err := s.db.ExecContext(ctx, `DROP TRIGGER IF EXISTS fugue_platform_input_inline_truncate_fence ON fugue_platform_artifact_contents; DROP FUNCTION IF EXISTS fugue_platform_input_inline_truncate_fence()`); err != nil {
+			t.Error("reset disposable inline truncate guard", err)
+		}
+		_, err := s.db.ExecContext(ctx, `DROP TRIGGER IF EXISTS fugue_platform_input_inline_write_fence ON fugue_platform_artifact_contents; DROP FUNCTION IF EXISTS fugue_platform_input_inline_write_fence(); DROP TRIGGER IF EXISTS fugue_platform_input_chunks_archive_write_fence ON fugue_platform_input_chunks; DROP FUNCTION IF EXISTS fugue_platform_input_chunks_archive_write_fence(); UPDATE fugue_platform_input_archive_control SET epoch=0,writes_fenced=false,retirement_started_at=NULL,retirement_plan_sha256='',retirement_reader_current='',retirement_reader_rollback='',retirement_archive_policy_sha256='' WHERE singleton`)
 		if err != nil {
 			t.Error("reset disposable write-fence fixture", err)
 		}

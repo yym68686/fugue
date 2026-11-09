@@ -2111,6 +2111,7 @@ $$`,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	schemamigrate.ArtifactContentKindSQL,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_artifact_contents_updated_at ON fugue_platform_artifact_contents (updated_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_platform_artifacts (
 		id TEXT PRIMARY KEY,

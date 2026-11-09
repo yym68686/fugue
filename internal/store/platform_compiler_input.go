@@ -125,7 +125,7 @@ func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot p
 		return s.pgEnsureChunkedInputTx(ctx, tx, snapshot, digest, observation)
 	}
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO fugue_platform_artifact_contents (content_hash, content_json, size_bytes, created_at, updated_at) VALUES ($1,$2::jsonb,$3,$4,$4) ON CONFLICT (content_hash) DO NOTHING`, digest, raw, int64(len(raw)), now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO fugue_platform_artifact_contents (content_hash, content_json, size_bytes, created_at, updated_at, content_kind) VALUES ($1,$2::jsonb,$3,$4,$4,'compiler-input-v1') ON CONFLICT (content_hash) DO NOTHING`, digest, raw, int64(len(raw)), now); err != nil {
 		return mapDBErr(err)
 	}
 	var stored []byte

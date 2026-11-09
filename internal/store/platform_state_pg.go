@@ -158,9 +158,9 @@ func pgUpsertPlatformArtifactContent(ctx context.Context, db platformStateDB, co
 	}
 	out, err := scanPlatformArtifactContent(db.QueryRowContext(ctx, `
 INSERT INTO fugue_platform_artifact_contents (
-	content_hash, content_json, size_bytes, created_at, updated_at
+	content_hash, content_json, size_bytes, created_at, updated_at, content_kind
 ) VALUES (
-	$1, $2::jsonb, $3, $4, $5
+	$1, $2::jsonb, $3, $4, $5, 'platform-artifact-v1'
 ) ON CONFLICT (content_hash) DO NOTHING
 RETURNING content_hash, content_json, size_bytes, created_at, updated_at`,
 		content.ContentHash, contentJSON, content.SizeBytes, content.CreatedAt, content.UpdatedAt))

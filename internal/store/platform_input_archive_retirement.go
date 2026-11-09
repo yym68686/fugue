@@ -188,7 +188,11 @@ func compilerInputArchiveRetirementPlanFromQuery(ctx context.Context, query inpu
 	if err != nil {
 		return report, err
 	}
-	report.WriteTriggerInstalled = fence.installed()
+	inline, err := compilerInputArchiveInlineWriteFenceState(ctx, query)
+	if err != nil {
+		return report, err
+	}
+	report.WriteTriggerInstalled = fence.installed() && inline.installed()
 	if err := query.QueryRowContext(ctx, `SELECT count(*) FROM fugue_platform_input_archive_leases WHERE expires_at>now()`).Scan(&report.ActiveArchiveLeases); err != nil {
 		return report, err
 	}
@@ -415,6 +419,10 @@ func applyCompilerInputArchiveRetirement(ctx context.Context, db *sql.DB, backen
 	fence, err := compilerInputArchiveWriteFenceState(ctx, tx)
 	if err != nil || !fence.installed() {
 		return verified, fmt.Errorf("compiler input database write trigger is unavailable: %w", ErrConflict)
+	}
+	inline, err := compilerInputArchiveInlineWriteFenceState(ctx, tx)
+	if err != nil || !inline.installed() {
+		return verified, fmt.Errorf("compiler input inline database write trigger is unavailable: %w", ErrConflict)
 	}
 	current, err := compilerInputArchiveRetirementPlanMetadata(ctx, db, backendHash, options.RoutingEnabled)
 	if err != nil {

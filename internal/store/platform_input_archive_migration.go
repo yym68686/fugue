@@ -241,11 +241,15 @@ func RunCompilerInputArchiveWriteFence(ctx context.Context, databaseURL string, 
 	if err != nil {
 		return report, err
 	}
+	inline, err := compilerInputArchiveInlineWriteFenceState(ctx, tx)
+	if err != nil {
+		return report, err
+	}
 	if retiredAt.Valid {
 		return report, fmt.Errorf("compiler input chunks relation has entered retirement and cannot be unfenced: %w", ErrConflict)
 	}
 	if disarm {
-		if fenced != fence.Present || fence.Present && !fence.Compatible {
+		if fenced != fence.Present || fence.Present && !fence.Compatible || inline.unexpected(fenced) {
 			return report, fmt.Errorf("compiler input write fence state and database trigger disagree: %w", ErrConflict)
 		}
 		if !fenced {
@@ -253,6 +257,16 @@ func RunCompilerInputArchiveWriteFence(ctx context.Context, databaseURL string, 
 				return report, err
 			}
 			return report, nil
+		}
+		if inline.Present {
+			if _, err = tx.ExecContext(ctx, `DROP TRIGGER fugue_platform_input_inline_write_fence ON fugue_platform_artifact_contents; DROP FUNCTION fugue_platform_input_inline_write_fence()`); err != nil {
+				return report, err
+			}
+		}
+		if inline.Truncate.Present {
+			if _, err = tx.ExecContext(ctx, `DROP TRIGGER fugue_platform_input_inline_truncate_fence ON fugue_platform_artifact_contents; DROP FUNCTION fugue_platform_input_inline_truncate_fence()`); err != nil {
+				return report, err
+			}
 		}
 		if _, err = tx.ExecContext(ctx, `DROP TRIGGER fugue_platform_input_chunks_archive_write_fence ON fugue_platform_input_chunks`); err != nil {
 			return report, err
@@ -277,8 +291,12 @@ func RunCompilerInputArchiveWriteFence(ctx context.Context, databaseURL string, 
 	if err != nil || admissionPhase != "enforced" {
 		return report, fmt.Errorf("compiler input history admission must be enforced before writer fencing: %w", errors.Join(err, ErrConflict))
 	}
-	if fenced != fence.Present || fence.Present && !fence.Compatible {
+	if fenced != fence.Present || fence.Present && !fence.Compatible || !inline.SchemaCompatible || inline.unexpected(fenced) {
 		return report, fmt.Errorf("compiler input write fence state and database trigger disagree: %w", ErrConflict)
+	}
+	inlineChanged, err := installCompilerInputInlineWriteFence(ctx, tx, inline)
+	if err != nil {
+		return report, err
 	}
 	if fenced {
 		if !fence.Always {
@@ -289,7 +307,7 @@ func RunCompilerInputArchiveWriteFence(ctx context.Context, databaseURL string, 
 		if err = tx.Commit(); err != nil {
 			return report, err
 		}
-		report.Applied = !fence.Always
+		report.Applied = !fence.Always || inlineChanged
 		report.WritesFenced, report.TriggerInstalled = true, true
 		return report, nil
 	}

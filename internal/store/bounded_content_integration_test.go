@@ -133,7 +133,7 @@ func TestChunkedCompilerInputPostgresCompatibilityCorruptionAndRollback(t *testi
 	}
 	old, oldDigest := chunkedInputFixture(t)
 	raw, _ := platformconfig.EncodeRuntimeSnapshot(old)
-	if _, err = s.db.Exec(`INSERT INTO fugue_platform_artifact_contents VALUES($1,$2::jsonb,$3,NOW(),NOW())`, oldDigest, raw, len(raw)); err != nil {
+	if _, err = s.db.Exec(`INSERT INTO fugue_platform_artifact_contents(content_hash,content_json,size_bytes,created_at,updated_at) VALUES($1,$2::jsonb,$3,NOW(),NOW())`, oldDigest, raw, len(raw)); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.EnsurePlatformCompilerInput(old, oldDigest); err != nil {

@@ -7,7 +7,11 @@ import (
 
 // These are additive stores. Legacy content/checkpoints are never rewritten by
 // migration, and readers are deployed before either new writer is enabled.
-const BoundedContentSQL = `
+// Empty denotes pre-typing content. Do not infer its representation from JSON
+// keys or backfill old rows. The constant default adds no per-row rewrite.
+const ArtifactContentKindSQL = `ALTER TABLE IF EXISTS fugue_platform_artifact_contents ADD COLUMN IF NOT EXISTS content_kind TEXT NOT NULL DEFAULT ''`
+
+const BoundedContentSQL = ArtifactContentKindSQL + `;
 CREATE TABLE IF NOT EXISTS fugue_platform_input_manifests (
  content_hash TEXT PRIMARY KEY CHECK (content_hash ~ '^sha256:[0-9a-f]{64}$'),
  format TEXT NOT NULL CHECK (format = 'runtime-snapshot-json-v1'),
