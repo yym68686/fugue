@@ -56,6 +56,7 @@ class CanonicalReceiptTest(unittest.TestCase):
 
     def test_preparation_checks_follow_executor_test_dependencies_and_both_ci_lanes(self):
         dependencies = (
+            'scripts/compiler_input_deadline.py', 'scripts/test_compiler_input_deadline.py',
             'scripts/compiler_input_prepare.py', 'scripts/compiler_input_hot_index.py',
             'scripts/test_compiler_input_hot_index.py', 'scripts/compiler_input_copy.py',
             'scripts/test_compiler_input_copy.py', 'scripts/compiler_input_copy_resume.py',

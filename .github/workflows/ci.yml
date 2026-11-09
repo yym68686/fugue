@@ -3416,7 +3416,7 @@ jobs:
           config=deploy/environments/production/compiler-input-readonly/operation.json
           if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" scripts/compiler_input_readonly.py scripts/requirements-input-readonly.txt .github/workflows/ci.yml; then exit 0; fi
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt deploy/releases "$config" .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt deploy/releases "$config" .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m unittest scripts.test_compiler_input_readonly scripts.test_compiler_input_archive scripts.test_compiler_input_storage scripts.test_compiler_input_history_compatibility
           # Code/setup fixes may resume a declaration only if no durable
           # execution attempt has ever been reserved for it.
@@ -3441,7 +3441,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/compiler-input-readonly .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/compiler-input-readonly .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_readonly deploy/environments/production/compiler-input-readonly/operation.json --apply --evidence "$RUNNER_TEMP/input-readonly-result-${{ github.sha }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && steps.readonly.outputs.selected == 'true'
@@ -3460,7 +3460,7 @@ jobs:
           copy_paths=(scripts/compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_copy_resume_runner.py scripts/test_compiler_input_copy.py scripts/test_compiler_input_copy_resume.py scripts/test_compiler_input_copy_resume_runner.py)
           if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" "${copy_paths[@]}" .github/workflows/ci.yml; then exit 0; fi
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- "${copy_paths[@]}" scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases "$config" .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- "${copy_paths[@]}" scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases "$config" .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m unittest scripts.test_compiler_input_copy scripts.test_compiler_input_copy_resume scripts.test_compiler_input_copy_resume_runner scripts.test_compiler_input_readonly scripts.test_compiler_input_archive scripts.test_compiler_input_storage scripts.test_compiler_input_history_compatibility
           "$INPUT_READONLY_PYTHON" - <<'PY'
           import json, os
@@ -3487,7 +3487,7 @@ jobs:
           set -euo pipefail
           git fetch origin main
           copy_paths=(scripts/compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_copy_resume_runner.py scripts/test_compiler_input_copy.py scripts/test_compiler_input_copy_resume.py scripts/test_compiler_input_copy_resume_runner.py)
-          git diff --exit-code HEAD origin/main -- "${copy_paths[@]}" scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/compiler-input-copy .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- "${copy_paths[@]}" scripts/compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/compiler-input-copy .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_copy deploy/environments/production/compiler-input-copy/operation.json --apply --evidence "$RUNNER_TEMP/input-copy-result-${{ github.sha }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && steps.copy.outputs.selected == 'true'
@@ -3503,7 +3503,7 @@ jobs:
         run: |
           set -euo pipefail
           config=deploy/environments/production/compiler-input-hot-index/operation.json
-          index_paths=(scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py)
+          index_paths=(scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py)
           # No operation file means no data operation. A future exact page is
           # pinned only after serving identity and all fresh resource gates pass.
           if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" "${index_paths[@]}" .github/workflows/ci.yml; then exit 0; fi
@@ -3534,7 +3534,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/compiler-input-hot-index .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/compiler_input_readonly.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/compiler-input-hot-index .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_hot_index deploy/environments/production/compiler-input-hot-index/operation.json --apply --evidence "$RUNNER_TEMP/input-hot-index-result-${{ github.sha }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && steps.hot_index.outputs.selected == 'true'
@@ -3550,7 +3550,7 @@ jobs:
         run: |
           set -euo pipefail
           config=deploy/environments/production/compiler-input-stage1/operation.json
-          stage_paths=(scripts/compiler_input_stage1.py scripts/test_compiler_input_stage1.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/compiler_input_archive.py scripts/compiler_input_copy_resume.py scripts/requirements-input-readonly.txt)
+          stage_paths=(scripts/compiler_input_stage1.py scripts/test_compiler_input_stage1.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/compiler_input_archive.py scripts/compiler_input_copy_resume.py scripts/requirements-input-readonly.txt)
           if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" "${stage_paths[@]}" .github/workflows/ci.yml; then exit 0; fi
           git fetch origin main
           git diff --exit-code HEAD origin/main -- "${stage_paths[@]}" deploy/releases "$config" .github/workflows/ci.yml
@@ -3579,7 +3579,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_stage1.py scripts/test_compiler_input_stage1.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/compiler_input_archive.py scripts/compiler_input_copy_resume.py scripts/requirements-input-readonly.txt deploy/releases deploy/environments/production/compiler-input-stage1 .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_stage1.py scripts/test_compiler_input_stage1.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/compiler_input_archive.py scripts/compiler_input_copy_resume.py scripts/requirements-input-readonly.txt deploy/releases deploy/environments/production/compiler-input-stage1 .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_stage1 deploy/environments/production/compiler-input-stage1/operation.json --apply --evidence "$RUNNER_TEMP/input-stage1-result-${{ github.sha }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && steps.input_stage1.outputs.selected == 'true'
@@ -3595,7 +3595,7 @@ jobs:
         run: |
           set -euo pipefail
           config=deploy/environments/production/compiler-input-consumer-prepare/operation.json
-          consumer_paths=(scripts/compiler_input_consumer_prepare.py scripts/test_compiler_input_consumer_prepare.py scripts/compiler_input_publication_prepare.py scripts/test_compiler_input_publication_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt)
+          consumer_paths=(scripts/compiler_input_consumer_prepare.py scripts/test_compiler_input_consumer_prepare.py scripts/compiler_input_publication_prepare.py scripts/test_compiler_input_publication_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt)
           # Capability consumer alone creates no worker or pins. A reviewed
           # declaration binds the complete business request and physical plan.
           if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" "${consumer_paths[@]}" .github/workflows/ci.yml; then exit 0; fi
@@ -3626,7 +3626,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_consumer_prepare.py scripts/test_compiler_input_consumer_prepare.py scripts/compiler_input_publication_prepare.py scripts/test_compiler_input_publication_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt deploy/releases deploy/environments/production/compiler-input-consumer-prepare .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_consumer_prepare.py scripts/test_compiler_input_consumer_prepare.py scripts/compiler_input_publication_prepare.py scripts/test_compiler_input_publication_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt deploy/releases deploy/environments/production/compiler-input-consumer-prepare .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_consumer_prepare deploy/environments/production/compiler-input-consumer-prepare/operation.json --apply --evidence "$RUNNER_TEMP/input-consumer-result-${{ github.sha }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && steps.consumer_prepare.outputs.selected == 'true'
@@ -3642,7 +3642,7 @@ jobs:
         run: |
           set -euo pipefail
           config=deploy/environments/production/compiler-input-publication-prepare/operation.json
-          publication_paths=(scripts/compiler_input_publication_prepare.py scripts/test_compiler_input_publication_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt)
+          publication_paths=(scripts/compiler_input_publication_prepare.py scripts/test_compiler_input_publication_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt)
           # Capability publication alone creates no worker or pins. A reviewed
           # declaration binds the complete business request and physical plan.
           if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" "${publication_paths[@]}" .github/workflows/ci.yml; then exit 0; fi
@@ -3673,7 +3673,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_publication_prepare.py scripts/test_compiler_input_publication_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt deploy/releases deploy/environments/production/compiler-input-publication-prepare .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_publication_prepare.py scripts/test_compiler_input_publication_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt deploy/releases deploy/environments/production/compiler-input-publication-prepare .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_publication_prepare deploy/environments/production/compiler-input-publication-prepare/operation.json --apply --evidence "$RUNNER_TEMP/input-publication-result-${{ github.sha }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && steps.publication_prepare.outputs.selected == 'true'
@@ -3689,7 +3689,7 @@ jobs:
         run: |
           set -euo pipefail
           config=deploy/environments/production/compiler-input-task-prepare/operation.json
-          task_paths=(scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt)
+          task_paths=(scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt)
           # A declaration is a separate reviewed data operation. Publishing
           # preparation capability without one creates no worker or pins.
           if [ ! -f "$config" ] || git diff --quiet "$BASE_SHA" HEAD -- "$config" "${task_paths[@]}" .github/workflows/ci.yml; then exit 0; fi
@@ -3720,7 +3720,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt deploy/releases deploy/environments/production/compiler-input-task-prepare .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_task_prepare.py scripts/test_compiler_input_task_prepare.py scripts/compiler_input_prepare.py scripts/compiler_input_hot_index.py scripts/test_compiler_input_hot_index.py scripts/compiler_input_copy.py scripts/test_compiler_input_copy.py scripts/compiler_input_copy_resume.py scripts/compiler_input_readonly.py scripts/test_compiler_input_readonly.py scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py scripts/requirements-input-readonly.txt deploy/releases deploy/environments/production/compiler-input-task-prepare .github/workflows/ci.yml
           "$INPUT_READONLY_PYTHON" -m scripts.compiler_input_task_prepare deploy/environments/production/compiler-input-task-prepare/operation.json --apply --evidence "$RUNNER_TEMP/input-task-result-${{ github.sha }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && steps.task_prepare.outputs.selected == 'true'
@@ -3738,7 +3738,7 @@ jobs:
           archive=deploy/environments/production/storage-policy/archive-operation.json
           if [ -f "$archive" ] && ! git diff --quiet "$BASE_SHA" HEAD -- "$archive"; then
             git fetch origin main
-            git diff --exit-code HEAD origin/main -- scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/storage-policy .github/workflows/ci.yml
+            git diff --exit-code HEAD origin/main -- scripts/compiler_input_archive.py scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/storage-policy .github/workflows/ci.yml
             python3 -m unittest scripts.test_compiler_input_archive scripts.test_compiler_input_storage scripts.test_compiler_input_history_compatibility
             python3 -m scripts.compiler_input_archive --operation "$archive"
           fi
@@ -3746,7 +3746,7 @@ jobs:
           if [ ! -f "$operation" ]; then exit 0; fi
           if git diff --quiet "$BASE_SHA" HEAD -- "$operation"; then exit 0; fi
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- scripts/compiler_input_storage.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/storage-policy .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- scripts/compiler_input_storage.py scripts/compiler_input_deadline.py scripts/test_compiler_input_deadline.py scripts/compiler_input_history_compatibility.py scripts/test_compiler_input_history_compatibility.py deploy/releases deploy/environments/production/storage-policy .github/workflows/ci.yml
           python3 -m unittest scripts.test_compiler_input_storage scripts.test_compiler_input_history_compatibility
           python3 -m scripts.compiler_input_storage --operation "$operation"
 

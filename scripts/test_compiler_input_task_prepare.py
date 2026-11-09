@@ -67,7 +67,8 @@ def simulated(c, failure='', adapter=task, plan_factory=plan, result_factory=res
         return {'metadata': {'uid': UID}}
     def get(namespace, kind, name):
         if kind == 'job':
-            return {'metadata': {'uid': UID if failure != 'job-uid' else 'changed'}}
+            return {'metadata': {'uid': UID if failure != 'job-uid' else 'changed'},
+                    'spec': {'suspend': False, 'activeDeadlineSeconds': state.get('worker_seconds')}}
         found = copy.deepcopy(state['resources'][name])
         if failure == 'intent-readback' and name.endswith('-receipt'):
             found['data']['verification-key'] = 'different'
@@ -136,6 +137,7 @@ def simulated(c, failure='', adapter=task, plan_factory=plan, result_factory=res
         if failure == 'unsuspend':
             raise task.r.Refusal('release completion uncertain')
         state['unsuspended'] = True
+        state['worker_seconds'] = next(x['value'] for x in args[1] if x['path'] == '/spec/activeDeadlineSeconds' and x['op'] == 'replace')
     def cleanup(*args):
         state['events'].append('cleanup')
         state['cleaned'] = failure != 'cleanup'

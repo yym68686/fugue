@@ -17,6 +17,7 @@ import subprocess
 import time
 import urllib.parse
 
+from scripts import compiler_input_deadline as deadline
 from scripts import compiler_input_copy as impact
 from scripts import compiler_input_readonly as r
 from scripts.compiler_input_storage import command, get, kube
@@ -177,7 +178,7 @@ def cleanup(c, name, secret_name, job_uid, secret_uid, priority_uid):
                     'dependency index cleanup found unrelated Pod')
             if not pods:
                 break
-            time.sleep(5)
+            deadline.pause(5)
         else:
             raise r.Refusal('dependency index Pod cleanup pending')
         secrets = json.loads(kube(c['namespace'], 'get', 'secret', '--field-selector=metadata.name='+secret_name, '-o', 'json'))['items']
@@ -191,7 +192,7 @@ def cleanup(c, name, secret_name, job_uid, secret_uid, priority_uid):
                          for kind, target in [('secrets', secret_name), ('jobs', name)]]
             if not any(remaining):
                 break
-            time.sleep(5)
+            deadline.pause(5)
         else:
             raise r.Refusal('dependency index resources cleanup pending')
     if priority_uid:

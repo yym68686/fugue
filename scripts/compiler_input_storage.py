@@ -11,12 +11,14 @@ from pathlib import Path
 import re
 import subprocess
 
+from scripts import compiler_input_deadline as deadline
+
 
 FORMAT = 'runtime-snapshot-separated-v4'
 
 
 def command(args, timeout=30):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    result = deadline.run(args, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         stage = 'cluster-read'
         if args[0] == 'git':

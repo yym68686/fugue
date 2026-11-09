@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 
 from scripts.compiler_input_archive import credential_key
+from scripts import compiler_input_deadline as deadline
 from scripts.compiler_input_storage import command, get, kube, readers, owned_pods
 
 
@@ -142,6 +143,10 @@ def primary_gate(c):
 
 
 def public_gate(c):
+    if deadline.active():
+        body = deadline.public_read(c['readyURL'])
+        require(len(body) <= 16384 and json.loads(body).get('status') == 'ok', 'public readiness failed')
+        return
     with urllib.request.urlopen(c['readyURL'], timeout=10) as response:
         require(response.status == 200, 'public readiness failed')
         body = response.read(16385)
@@ -197,7 +202,7 @@ SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms'; SET LOCAL work
 """+select+"\nCOMMIT;\n"
     argv = ['kubectl', '-n', c['namespace'], 'exec', '-i', c['primary'], '-c', c['postgresContainer'], '--',
             'psql', '-U', 'postgres', '-d', c['database'], '-qAt', '-v', 'ON_ERROR_STOP=1']
-    p = subprocess.run(argv, input=sql, capture_output=True, text=True, timeout=20)
+    p = deadline.run(argv, input=sql, capture_output=True, text=True, timeout=20)
     require(p.returncode == 0 and len(p.stdout) <= 128 << 10, 'readonly credential metadata query unavailable')
     try:
         value = json.loads(p.stdout)
@@ -282,7 +287,7 @@ def api_write(argv, value, timeout=30):
     # Credentials travel on stdin only. Never relay kubectl errors: they may
     # embed the submitted Secret or request body.
     require(os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('GITHUB_REF') == 'refs/heads/main', 'readonly resource writes require the main CI lane')
-    p = subprocess.run(['kubectl', *argv], input=json.dumps(value), capture_output=True, text=True, timeout=timeout)
+    p = deadline.run(['kubectl', *argv], input=json.dumps(value), capture_output=True, text=True, timeout=timeout)
     require(p.returncode == 0, 'readonly execution resource write was not confirmed')
     try:
         return json.loads(p.stdout) if p.stdout.strip() else {}

@@ -17,6 +17,7 @@ import re
 import subprocess
 import time
 
+from scripts import compiler_input_deadline as deadline
 from scripts import compiler_input_copy as impact
 from scripts import compiler_input_hot_index as index
 from scripts import compiler_input_readonly as r
@@ -56,7 +57,7 @@ def native(c, executor, mode, payload, adapter):
     argv = ['kubectl', '-n', c['namespace'], 'exec', '-i', executor['pod'], '-c', executor['container'], '--',
             '/usr/local/bin/fugue-input-storage', '-mode='+adapter.NATIVE_PREFIX+'-'+mode, flag]
     argv += ['-'+adapter.NATIVE_PREFIX+'-backend='+c['backendHash']] if mode == 'plan' else ['-apply']
-    p = subprocess.run(argv, input=raw, capture_output=True, text=True, timeout=75)
+    p = deadline.run(argv, input=raw, capture_output=True, text=True, timeout=75)
     require(p.returncode == 0 and len(p.stdout.encode()) <= 513 << 10, 'trusted task coordination not confirmed')
     return strict_json(p.stdout)
 
@@ -151,7 +152,7 @@ SELECT json_build_object('epoch',(SELECT epoch FROM fugue_platform_input_archive
 'active_clients',(SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND state='active' AND pid<>pg_backend_pid()),
 'worker_connections',(SELECT count(*) FROM pg_stat_activity WHERE application_name IN ('compiler-input-task-prepare','compiler-input-publication-prepare','compiler-input-consumer-prepare')),
 'index_present',to_regclass('fugue_platform_input_hot_dependency_index_v1') IS NOT NULL"""+platform+");\nCOMMIT;\n"
-    p = subprocess.run(['kubectl', '-n', c['namespace'], 'exec', '-i', c['primary'], '-c', c['postgresContainer'], '--',
+    p = deadline.run(['kubectl', '-n', c['namespace'], 'exec', '-i', c['primary'], '-c', c['postgresContainer'], '--',
                         'psql', '-U', 'postgres', '-d', c['database'], '-qAt', '-v', 'ON_ERROR_STOP=1'],
                        input=sql, capture_output=True, text=True, timeout=20)
     require(p.returncode == 0 and len(p.stdout.encode()) <= 128 << 10, 'input preparation metadata unavailable')
@@ -236,6 +237,11 @@ def result_contract(value, c, plan, adapter, confirmed=False):
     return value
 
 def execute(c, evidence, apply, adapter):
+    with deadline.scope() as elapsed:
+        return _execute(c, evidence, apply, adapter, elapsed)
+
+
+def _execute(c, evidence, apply, adapter, elapsed):
     adapter.validate(c)
     command, get, kube = adapter.command, adapter.get, adapter.kube
     native, metadata, session = adapter.native, adapter.metadata, adapter.session
@@ -253,6 +259,7 @@ def execute(c, evidence, apply, adapter):
     job_uid = secret_uid = priority_uid = None
     data = {}
     def save():
+        report['time_budget'] = elapsed.snapshot()
         payload = json.dumps(report, separators=(',', ':'))+'\n'
         require(len(payload.encode()) <= 32 << 20, 'input preparation evidence exceeds budget')
         evidence.write_text(payload)
@@ -275,6 +282,7 @@ def execute(c, evidence, apply, adapter):
         report.update(ticket_sha256=plan_hash, verification_key=plan['verification_key'])
         primary_restarts = {x['name']: x['restartCount'] for x in primary['status']['containerStatuses']}
         def watch():
+            deadline.check()
             # One cumulative allowance covers reservation, execution and cleanup.
             # Exclude only this attempt's exact Job UID, never a name or label.
             adapter.maintenance_gate(c, job_uid or '')
@@ -298,6 +306,7 @@ def execute(c, evidence, apply, adapter):
                 'metadata': now, 'errors': errors, 'backing': backing, 'node': impact.node_gate(c, job_uid or ''),
                 'bounded_logs': impact.api_log_signals(c, serving)})
             require(len(report['impact_samples']) <= 50, 'input preparation preparation watchdog exhausted')
+            deadline.check()
             save()
         priority = {'apiVersion': 'scheduling.k8s.io/v1', 'kind': 'PriorityClass', 'metadata': {'name': name},
                     'value': -1000000, 'globalDefault': False, 'preemptionPolicy': 'Never', 'description': 'One bounded '+adapter.SUBJECT+' input restoration'}
@@ -312,6 +321,9 @@ def execute(c, evidence, apply, adapter):
                        'intent': 'single-'+adapter.SUBJECT+'-restore-attempt-no-retry', 'preparation-purpose': adapter.PURPOSE,
                        'subject.json': json.dumps(adapter.receipt_identity(c), separators=(',', ':'))}
         intent_name = name+'-receipt'
+        deadline.check()
+        report['intent_attempted'] = True
+        save()
         intent = r.create({'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'namespace': c['namespace'], 'name': intent_name},
                            'immutable': True, 'data': intent_data})
         report['intent_uid'] = intent['metadata']['uid']
@@ -335,16 +347,25 @@ def execute(c, evidence, apply, adapter):
         data.clear()
         secret.clear()
         watch()
-        require((instant(plan['ticket']['expires_at'])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()
-                >= budget['max_seconds']+30, 'input preparation ticket setup exhausted execution window')
+        seconds = deadline.worker_seconds(budget['max_seconds'],
+            (instant(plan['ticket']['expires_at'])-datetime.datetime.now(datetime.timezone.utc)).total_seconds())
+        report['worker_active_deadline_seconds'] = seconds
+        save()
         r.api_write(['-n', c['namespace'], 'patch', 'job', name, '--type=json', '--patch-file=/dev/stdin', '-o', 'json'],
                     [{'op': 'test', 'path': '/metadata/uid', 'value': job_uid}, {'op': 'test', 'path': '/spec/suspend', 'value': True},
+                     {'op': 'test', 'path': '/spec/activeDeadlineSeconds', 'value': 600},
+                     {'op': 'replace', 'path': '/spec/activeDeadlineSeconds', 'value': seconds},
                      {'op': 'replace', 'path': '/spec/suspend', 'value': False}])
         report['status'] = 'running'
         save()
-        deadline, completed = time.monotonic()+630, None
-        while time.monotonic() < deadline:
-            require(get(c['namespace'], 'job', name)['metadata']['uid'] == job_uid, 'input preparation preparation Job identity changed')
+        completed = None
+        while True:
+            deadline.check()
+            observed_job = get(c['namespace'], 'job', name)
+            require(observed_job['metadata']['uid'] == job_uid
+                    and observed_job['spec'].get('suspend') is False
+                    and observed_job['spec'].get('activeDeadlineSeconds') == seconds,
+                    'input preparation preparation Job identity or deadline changed')
             actual_priority = r.cluster_get('priorityclass', name)
             require(actual_priority['metadata']['uid'] == priority_uid and actual_priority['value'] == -1000000
                     and actual_priority['preemptionPolicy'] == 'Never' and not actual_priority.get('globalDefault'), 'input preparation preparation priority changed')
@@ -368,7 +389,7 @@ def execute(c, evidence, apply, adapter):
                         save()
                         break
             watch()
-            time.sleep(15)
+            deadline.pause(15)
         require(completed is not None, 'input preparation preparation worker deadline exceeded')
         body = kube(c['namespace'], 'logs', completed['metadata']['name'], '-c', 'restore', '--limit-bytes=131073')
         require(len(body.encode()) <= 128 << 10, 'input preparation preparation result exceeds bound')
@@ -384,6 +405,7 @@ def execute(c, evidence, apply, adapter):
                 'trusted confirmation pin tokens differ from restoration')
         report['confirmation'] = confirmed
         watch()
+        deadline.check()
         report['status'] = adapter.SUCCESS
         return report
     except Exception as error:
@@ -393,8 +415,11 @@ def execute(c, evidence, apply, adapter):
         raise
     finally:
         data.clear()
+        elapsed.cleanup()
         try:
+            deadline.check()
             index.cleanup(c, name, secret_name, job_uid, secret_uid, priority_uid)
+            deadline.check()
             report['cleanup_confirmed'] = bool(job_uid)
         except Exception as error:
             report.update(status='completion-not-confirmed', cleanup_confirmed=False, cleanup_error_type=type(error).__name__)
@@ -404,6 +429,7 @@ def execute(c, evidence, apply, adapter):
             except Exception as error:
                 report.update(status='completion-not-confirmed', cleanup_impact_error_type=type(error).__name__)
         report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        elapsed.receipt()
         try:
             save()
         except Exception as error:
@@ -411,11 +437,15 @@ def execute(c, evidence, apply, adapter):
             raise
         finally:
             # Local evidence failure must not suppress an independent terminal.
-            if report.get('intent_uid'):
+            if report.get('intent_attempted'):
                 try:
+                    deadline.check()
                     report['terminal_receipt'] = terminal_receipt(c, report)
+                    deadline.check()
                 except Exception as error:
                     report['terminal_receipt'] = {'confirmed': False, 'error_type': type(error).__name__}
+                if report['terminal_receipt'].get('confirmed') is not True:
+                    report['status'] = 'completion-not-confirmed'
                 save()
 
 def terminal_receipt(c, report, adapter):
@@ -423,10 +453,12 @@ def terminal_receipt(c, report, adapter):
     # Failed-before-Job attempts are terminal too: the consumed intent remains.
     fields = ('declaration_sha256', 'intent_uid', 'ticket_sha256', 'verification_key', 'job', 'status',
               'cleanup_confirmed', 'source_preserved', 'route_changes_authorized', 'retirement_authorized', adapter.ACTIVATED_FIELD, 'finished_at')
-    value = {k: report[k] for k in fields}
+    value = {k: report[k] for k in fields if k != 'intent_uid'}
+    value['intent_uid'] = report.get('intent_uid')
     value.update(preparation_purpose=adapter.PURPOSE, subject=adapter.receipt_identity(c))
     for k in ('job_uid', 'execution', 'restore_result', 'confirmation', 'refusal_reason',
-              'cleanup_error_type', 'cleanup_impact_error_type', 'evidence_error_type'):
+              'cleanup_error_type', 'cleanup_impact_error_type', 'evidence_error_type', 'error_type',
+              'intent_attempted', 'time_budget', 'worker_active_deadline_seconds'):
         if k in report:
             value[k] = report[k]
     payload = json.dumps(value, separators=(',', ':'))

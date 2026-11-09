@@ -27,7 +27,7 @@ test:
 	python3 -m unittest scripts.test_compiler_input_history_compatibility
 	python3 -m unittest scripts.test_compiler_input_archive
 	$(if $(INPUT_READONLY_PYTHON),$(INPUT_READONLY_PYTHON),python3) -m unittest scripts.test_compiler_input_readonly
-	$(if $(INPUT_READONLY_PYTHON),$(INPUT_READONLY_PYTHON),python3) -m unittest scripts.test_compiler_input_task_prepare scripts.test_compiler_input_publication_prepare scripts.test_compiler_input_consumer_prepare
+	$(if $(INPUT_READONLY_PYTHON),$(INPUT_READONLY_PYTHON),python3) -m unittest scripts.test_compiler_input_deadline scripts.test_compiler_input_task_prepare scripts.test_compiler_input_publication_prepare scripts.test_compiler_input_consumer_prepare
 	$(if $(INPUT_READONLY_PYTHON),$(INPUT_READONLY_PYTHON),python3) -m unittest scripts.test_compiler_input_stage1 scripts.test_compiler_input_hot_index
 	python3 -m unittest scripts.test_verify_managed_ssh_image
 	python3 -m unittest scripts.test_reconcile_managed_ssh_keys
