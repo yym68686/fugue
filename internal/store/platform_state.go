@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -131,7 +132,10 @@ func (s *Store) CreatePlatformArtifact(in model.PlatformArtifact) (model.Platfor
 				return ErrConflict
 			}
 		}
-		state.PlatformArtifactContents = upsertPlatformArtifactContent(state.PlatformArtifactContents, buildPlatformArtifactContent(artifact))
+		state.PlatformArtifactContents, err = upsertPlatformArtifactContent(state.PlatformArtifactContents, buildPlatformArtifactContent(artifact))
+		if err != nil {
+			return err
+		}
 		state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
 		return nil
 	})
@@ -187,7 +191,10 @@ func (s *Store) EnsurePlatformArtifact(in model.PlatformArtifact) (model.Platfor
 				return ErrConflict
 			}
 		}
-		state.PlatformArtifactContents = upsertPlatformArtifactContent(state.PlatformArtifactContents, buildPlatformArtifactContent(artifact))
+		state.PlatformArtifactContents, err = upsertPlatformArtifactContent(state.PlatformArtifactContents, buildPlatformArtifactContent(artifact))
+		if err != nil {
+			return err
+		}
 		state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
 		created = true
 		return nil
@@ -1335,17 +1342,31 @@ func buildPlatformArtifactContent(artifact model.PlatformArtifact) model.Platfor
 	}
 }
 
-func upsertPlatformArtifactContent(contents []model.PlatformArtifactContent, content model.PlatformArtifactContent) []model.PlatformArtifactContent {
+func verifyReusedPlatformArtifactContent(existing, candidate model.PlatformArtifactContent) error {
+	existingBytes, err := platformArtifactContentBytes(existing.Content)
+	if err != nil {
+		return err
+	}
+	candidateBytes, err := platformArtifactContentBytes(candidate.Content)
+	if err != nil {
+		return err
+	}
+	if existing.ContentHash != candidate.ContentHash || existing.SizeBytes != candidate.SizeBytes || !bytes.Equal(existingBytes, candidateBytes) {
+		return fmt.Errorf("%w: existing platform artifact content differs", ErrConflict)
+	}
+	return nil
+}
+
+func upsertPlatformArtifactContent(contents []model.PlatformArtifactContent, content model.PlatformArtifactContent) ([]model.PlatformArtifactContent, error) {
 	for index := range contents {
 		if contents[index].ContentHash == content.ContentHash {
-			if content.CreatedAt.IsZero() {
-				content.CreatedAt = contents[index].CreatedAt
+			if err := verifyReusedPlatformArtifactContent(contents[index], content); err != nil {
+				return contents, err
 			}
-			contents[index] = content
-			return contents
+			return contents, nil
 		}
 	}
-	return append(contents, content)
+	return append(contents, content), nil
 }
 
 func platformArtifactMatchesFilter(artifact model.PlatformArtifact, filter model.PlatformArtifactFilter) bool {

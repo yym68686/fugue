@@ -161,14 +161,23 @@ INSERT INTO fugue_platform_artifact_contents (
 	content_hash, content_json, size_bytes, created_at, updated_at
 ) VALUES (
 	$1, $2::jsonb, $3, $4, $5
-) ON CONFLICT (content_hash) DO UPDATE SET
-	content_json = EXCLUDED.content_json,
-	size_bytes = EXCLUDED.size_bytes,
-	updated_at = EXCLUDED.updated_at
+) ON CONFLICT (content_hash) DO NOTHING
 RETURNING content_hash, content_json, size_bytes, created_at, updated_at`,
 		content.ContentHash, contentJSON, content.SizeBytes, content.CreatedAt, content.UpdatedAt))
+	if errors.Is(err, ErrNotFound) {
+		// A separate statement sees an equivalent concurrent insert after its
+		// transaction commits. A CTE sharing the insert's snapshot can miss it.
+		// Content-addressed bytes are immutable: neither rewrite TOAST/index
+		// storage nor renew their timestamps when another generation reuses them.
+		out, err = scanPlatformArtifactContent(db.QueryRowContext(ctx, `
+SELECT content_hash, content_json, size_bytes, created_at, updated_at
+FROM fugue_platform_artifact_contents WHERE content_hash = $1`, content.ContentHash))
+	}
 	if err != nil {
 		return model.PlatformArtifactContent{}, mapDBErr(err)
+	}
+	if err := verifyReusedPlatformArtifactContent(out, content); err != nil {
+		return model.PlatformArtifactContent{}, err
 	}
 	return out, nil
 }
