@@ -61,6 +61,14 @@ type config struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "export-group-original-evidence" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := runOriginalEvidenceExport(ctx, os.Args[2:], os.Stdout); err != nil {
+			log.Fatalf("edge-control original evidence export: %v", err)
+		}
+		return
+	}
 	cfg, err := configFromEnv(os.Getenv)
 	if err != nil {
 		log.Fatalf("edge-control config: %v", err)

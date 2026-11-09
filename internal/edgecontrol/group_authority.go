@@ -530,6 +530,7 @@ type groupBundleSigningKey struct {
 	PreviousKeyID string   `json:"previous_key_id,omitempty"`
 	PreviousKey   string   `json:"previous_key,omitempty"`
 	RevokedKeyIDs []string `json:"revoked_key_ids,omitempty"`
+	generation    uint64
 }
 
 func loadGroupBundleSigningKeyring(path, expectedGroupID string) (groupBundleSigningKey, error) {
@@ -589,6 +590,7 @@ func loadGroupBundleSigningKeyring(path, expectedGroupID string) (groupBundleSig
 		}
 		revoked[id] = struct{}{}
 	}
+	group.generation = file.Generation
 	return group, nil
 }
 
