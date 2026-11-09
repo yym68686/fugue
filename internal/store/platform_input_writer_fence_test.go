@@ -249,6 +249,10 @@ func TestCompilerInputFencedWriterPoliciesSurviveMissingOldTableAndRestart(t *te
 			// isolation must not indiscriminately prohibit their normal writes.
 			now := time.Now().UTC()
 			artifact := buildPlatformArtifactContent(model.PlatformArtifact{Content: map[string]any{"normal_artifact": policy}, CreatedAt: now, UpdatedAt: now})
+			artifact.ContentHash, err = platformArtifactContentHash(artifact.Content)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if _, err = pgUpsertPlatformArtifactContent(t.Context(), db, artifact); err != nil {
 				t.Fatal("input fence blocked normal artifact payloads", err)
 			}
