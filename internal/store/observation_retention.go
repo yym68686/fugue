@@ -34,15 +34,16 @@ type ObservationRetentionPolicy struct {
 }
 
 type observationRetentionState struct {
-	mu               sync.Mutex
-	policy           ObservationRetentionPolicy
-	observedAt       time.Time
-	configError      bool
-	lastError        bool
-	lastFailureStage string
-	last             map[string]int64
-	total            map[string]int64
-	chainCursor      string
+	mu                    sync.Mutex
+	policy                ObservationRetentionPolicy
+	observedAt            time.Time
+	configError           bool
+	lastError             bool
+	lastFailureStage      string
+	lastFailureCategories []string
+	last                  map[string]int64
+	total                 map[string]int64
+	chainCursor           string
 }
 
 func ParseObservationRetentionPolicy(raw []byte) (ObservationRetentionPolicy, error) {
@@ -90,6 +91,7 @@ func (s *Store) RunObservationRetention(ctx context.Context, storagePolicyPath s
 			s.retention.mu.Lock()
 			s.retention.observedAt = lastRun
 			s.retention.lastError = runErr != nil
+			s.retention.lastFailureCategories = observationRetentionFailureCategories(runErr)
 			s.retention.lastFailureStage = ""
 			var failure *retentionFailure
 			if errors.As(runErr, &failure) {
@@ -125,7 +127,8 @@ func (s *Store) retentionObservation() any {
 		total[k] = v
 	}
 	return map[string]any{"policy": s.retention.policy, "last_run_at": s.retention.observedAt, "policy_read_failed": s.retention.configError,
-		"last_run_failed": s.retention.lastError, "last_failure_stage": s.retention.lastFailureStage, "last_deleted_rows": last, "process_deleted_rows": total,
+		"last_run_failed": s.retention.lastError, "last_failure_stage": s.retention.lastFailureStage,
+		"last_failure_categories": append([]string(nil), s.retention.lastFailureCategories...), "last_deleted_rows": last, "process_deleted_rows": total,
 		"diagnostic_job_ttl_seconds": 3600, "minimum_heartbeat_history_seconds": 86400,
 		"minimum_probe_history_seconds": 604800, "capacity_semantics": "row budgets apply only after minimum protected history; physical bytes need vacuum/reuse"}
 }
@@ -305,7 +308,7 @@ func pruneHeartbeatChain(ctx context.Context, conn *sql.Conn, chain string, p Ob
 	err = tx.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, heartbeatRetentionAnchorPrefix+chain).Scan(&raw)
 	if err == nil {
 		if json.Unmarshal([]byte(raw), &anchor) != nil || anchor.ChainID != chain || anchor.Action != "platform_consumer.heartbeat_accepted" || platformsafety.VerifyTamperEvidentAuditEvent(anchor, keys) != nil {
-			return 0, errors.New("heartbeat retention anchor is not trusted")
+			return 0, &observationRetentionIntegrityError{category: "anchor_integrity"}
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
@@ -337,7 +340,7 @@ func pruneHeartbeatChain(ctx context.Context, conn *sql.Conn, chain string, p Ob
 			break
 		}
 		if event.Action != "platform_consumer.heartbeat_accepted" || event.TargetType != "platform_consumer" || event.ChainSequence != boundary.ChainSequence+1 || event.PreviousHash != boundary.EventHash || platformsafety.VerifyTamperEvidentAuditEvent(event, keys) != nil {
-			return 0, errors.New("heartbeat prefix cannot be pruned without verified contiguous evidence")
+			return 0, &observationRetentionIntegrityError{category: "prefix_integrity"}
 		}
 		boundary = event
 		ids = append(ids, event.ID)
@@ -363,7 +366,7 @@ func pruneHeartbeatChain(ctx context.Context, conn *sql.Conn, chain string, p Ob
 		return 0, err
 	}
 	if n != int64(len(ids)) {
-		return 0, errors.New("heartbeat prefix changed during retention")
+		return 0, &observationRetentionIntegrityError{category: "prefix_changed"}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err

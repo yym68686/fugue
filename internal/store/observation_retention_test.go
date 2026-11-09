@@ -155,6 +155,9 @@ func TestObservationRetentionPostgresPreservesBusinessAndVerifiableHeartbeatSuff
 	if _, err = pruneHeartbeatChain(t.Context(), conn, chain, p, keys, now); err == nil {
 		t.Fatal("corrupt history pruned")
 	}
+	if categories := observationRetentionFailureCategories(err); len(categories) != 1 || categories[0] != "prefix_integrity" {
+		t.Fatal("corrupt prefix diagnostic lost its fixed category", categories)
+	}
 	conn.Close()
 	var after string
 	s.db.QueryRow(`SELECT value FROM fugue_meta WHERE key=$1`, heartbeatRetentionAnchorPrefix+chain).Scan(&after)
