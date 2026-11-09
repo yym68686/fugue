@@ -358,6 +358,14 @@ func compilerInputHotRootsObserved(ctx context.Context, tx *sql.Tx, observe func
 	if len(roots) > compilerInputHotRootLimit {
 		return nil, &compilerInputHotInventoryError{"rollback-root-budget", ErrConflict}
 	}
+	// Registered external roots remain conservative native retention roots even
+	// if publication failed, its producer disappeared, or no heartbeat arrived.
+	// Their presence does not close the separate external source/custody census.
+	external, _, err := compilerInputExternalRoots(ctx, tx, compilerInputHotRootLimit-len(roots), observe)
+	if err != nil {
+		return nil, &compilerInputHotInventoryError{"pending-external-roots", err}
+	}
+	roots = append(roots, external...)
 	return roots, nil
 }
 

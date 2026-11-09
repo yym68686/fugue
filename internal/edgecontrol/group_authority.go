@@ -40,6 +40,7 @@ const (
 	GroupAuthorityFailureRecoveryEpochCAS      = "recovery_epoch_cas_failed"
 	GroupAuthorityFailureAuditTailCAS          = "audit_tail_cas_failed"
 	GroupAuthorityFailurePublicationValidation = "publication_validation_failed"
+	GroupAuthorityFailurePendingRetention      = "pending_retention_unavailable"
 
 	GroupBundleSigningKeyringSchemaV1 = "edge-control-group-bundle-signing-keyring/v1"
 
@@ -327,6 +328,9 @@ func (publisher GroupAuthorityPublisher) publishGroup(ctx context.Context, route
 	}
 	appended, appendErr := publisher.Store.AppendGroupAuthorityCAS(ctx, groupID, expectedAuthoritySequence, candidate.Sequence, entry, &signed)
 	if appendErr != nil {
+		if errors.Is(appendErr, ErrGroupPendingRoot) {
+			return fail(GroupAuthorityFailurePendingRetention, candidate.Sequence)
+		}
 		return GroupAuthorityResult{GroupID: groupID, Status: GroupAuthorityStatusFailed, PublicationSequence: expectedAuthoritySequence,
 			CandidateLedgerSequence: candidate.Sequence, LastPublishedBundleGeneration: lastPublished, FailureCode: GroupAuthorityFailurePublicationCAS}
 	}
@@ -393,6 +397,9 @@ func (publisher GroupAuthorityPublisher) refreshPublishedLKG(ctx context.Context
 		appended, err := recovery.RecoverPublishedLKG(ctx, groupID, observed.Published.PublicationSequence,
 			observed.Published.RecoveryEpoch, observed.Published.Bundle.Generation, signed, reason, now)
 		if err != nil {
+			if errors.Is(err, ErrGroupPendingRoot) {
+				return publisher.recordPendingRootRefreshFailure(ctx, groupID, observed, now), true
+			}
 			if errors.Is(err, ErrGroupAuthorityCandidateCAS) {
 				return failed(GroupAuthorityFailureCandidateCAS)
 			}

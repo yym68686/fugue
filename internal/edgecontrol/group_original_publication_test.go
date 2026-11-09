@@ -66,7 +66,7 @@ func TestGroupOriginalPublicationBindsNativeSourceWithoutAdmittingClosure(t *tes
 			if bound {
 				if len(b.References) != 4 || !reflect.DeepEqual(b.TrafficRelease, state.RetentionInputs[0].RouteIntent.TrafficRelease) ||
 					b.References[0].ID != "release-set" || b.References[1].ID != "route-artifact" ||
-					b.References[2].Kind != "release" || b.References[3].Kind != "input" || b.References[3].ExpectedHash != strings.Repeat("a", 64) {
+					b.References[2].Kind != "release" || b.References[3].Kind != "input" || b.References[3].ExpectedHash != "sha256:"+strings.Repeat("a", 64) || b.References[3].ID != b.References[3].ExpectedHash {
 					t.Fatal("signed dependency references changed", b)
 				}
 				b.TrafficRelease.ReleaseID = "caller-change"

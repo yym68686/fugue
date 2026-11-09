@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"strings"
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/inputarchive"
@@ -76,10 +75,10 @@ func bindGroupOriginalPublication(group string, input GroupCompileInput, pub Gro
 		proof.TrafficRelease = &copy
 		proof.DependencyBindingKnown = true
 		proof.References = []inputarchive.HotReference{
-			{Kind: "artifact", ID: b.ReleaseSetID, ExpectedHash: strings.TrimPrefix(b.ReleaseSetDigest, "sha256:")},
-			{Kind: "artifact", ID: b.RouteArtifactID, ExpectedHash: strings.TrimPrefix(b.RouteArtifactDigest, "sha256:")},
+			{Kind: "artifact", ID: b.ReleaseSetID, ExpectedHash: b.ReleaseSetDigest},
+			{Kind: "artifact", ID: b.RouteArtifactID, ExpectedHash: b.RouteArtifactDigest},
 			{Kind: "release", ID: b.ReleaseID},
-			{Kind: "input", ID: strings.TrimPrefix(b.InputSnapshotDigest, "sha256:"), ExpectedHash: strings.TrimPrefix(b.InputSnapshotDigest, "sha256:")},
+			{Kind: "input", ID: b.InputSnapshotDigest, ExpectedHash: b.InputSnapshotDigest},
 		}
 	}
 	proof.Commitment = digestJSON(proof)

@@ -35,6 +35,7 @@ type compilerInputActivationProof struct {
 	// before admission. Its descendants and selector are checked in the same
 	// RR snapshot; consume inserts this exact pending root atomically.
 	newTask      *model.NodeUpdateTask
+	pendingRoot  *compilerInputPendingRootIntent
 	publication  *compilerInputPublicationIntent
 	consumerKind string
 	// Capability-only ordinary requests retain original business checks. This
@@ -654,7 +655,8 @@ func (s *Store) withPreparedCompilerInputTaskCreation(ctx context.Context, proof
 
 func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compilerInputActivationProof, pins []compilerInputPinBinding, pendingOnly bool, beforeInputLocks, apply func(context.Context, *sql.Tx) error) error {
 	if s == nil || proof == nil || proof.store != s || proof.database != s.db || apply == nil ||
-		!time.Now().Before(proof.expires) || pendingOnly != (proof.newTask != nil) ||
+		!time.Now().Before(proof.expires) || pendingOnly != (proof.newTask != nil || proof.pendingRoot != nil) ||
+		proof.pendingRoot != nil && (!pendingCompilerInputProofMatches(proof) || proof.newTask != nil || proof.ordinary || proof.fullInventory) ||
 		!pendingOnly && len(pins) != len(proof.inputs) || !proof.closure.MetadataComplete && !(proof.ordinary && proof.capabilityOnly) || proof.fullInventory {
 		return ErrInvalidInput
 	}

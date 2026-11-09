@@ -113,6 +113,9 @@ func (s *Store) enforcePreparedCompilerInputHistory(ctx context.Context, prepare
 			return "", err
 		}
 	}
+	if err := lockCompilerInputExternalRootRegistry(ctx, tx); err != nil {
+		return "", err
+	}
 	var phase string
 	if err := tx.QueryRowContext(ctx, `SELECT phase FROM fugue_platform_input_history_admission WHERE singleton FOR UPDATE`).Scan(&phase); err != nil {
 		return "", err

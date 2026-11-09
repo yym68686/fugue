@@ -226,7 +226,7 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 				if key == "candidate_history" {
 					limit = retainedGroupCandidateBundles
 				}
-				if key == "retention_inputs" {
+				if key == "retention_inputs" || key == "pending_root_records" {
 					limit = 32
 				}
 				if count > limit || entryCount > groupOriginalEntries {

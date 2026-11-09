@@ -57,6 +57,8 @@ type persistentGroupState struct {
 	CompileInputsRequired            bool                         `json:"compile_inputs_required,omitempty"`
 	CompileInputAttestationsRequired bool                         `json:"compile_input_attestations_required,omitempty"`
 	RetentionInputs                  []GroupCompileInput          `json:"retention_inputs,omitempty"`
+	PendingRootsRequired             bool                         `json:"pending_roots_required,omitempty"`
+	PendingRootRecords               []GroupPendingRootRecord     `json:"pending_root_records,omitempty"`
 	Digest                           string                       `json:"digest"`
 }
 
@@ -69,6 +71,7 @@ type PersistentGroupStore struct {
 	compressStateWrites      bool
 	retainCompileInputs      bool
 	compileInputKeyringDir   string
+	pendingRootRegistrar     GroupPendingRootRegistrar
 	summaryMu                sync.RWMutex
 	summaries                map[string]persistentGroupSummary
 	stateMu                  sync.Mutex
@@ -99,6 +102,9 @@ type PersistentGroupStoreOptions struct {
 	// Trusted projected group policy, required for every new source capture.
 	// Reopening without it permits historical reads, never unsigned appends.
 	CompileInputKeyringDir string
+	// OFF unless an independently authenticated, budgeted registry transport
+	// is explicitly supplied. Durable policy cannot be disabled on reopen.
+	PendingRootRegistrar GroupPendingRootRegistrar
 }
 
 func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
@@ -107,7 +113,7 @@ func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
 
 func OpenPersistentGroupStoreWithOptions(root string, options PersistentGroupStoreOptions) (*PersistentGroupStore, error) {
 	keyringDir := strings.TrimSpace(options.CompileInputKeyringDir)
-	if keyringDir != options.CompileInputKeyringDir || keyringDir != "" && (!filepath.IsAbs(keyringDir) || filepath.Clean(keyringDir) != keyringDir) || options.RetainCompileInputs && keyringDir == "" {
+	if keyringDir != options.CompileInputKeyringDir || keyringDir != "" && (!filepath.IsAbs(keyringDir) || filepath.Clean(keyringDir) != keyringDir) || (options.RetainCompileInputs || options.PendingRootRegistrar != nil) && keyringDir == "" {
 		return nil, ErrGroupCompileInput
 	}
 	root = strings.TrimSpace(root)
@@ -142,7 +148,7 @@ func OpenPersistentGroupStoreWithOptions(root string, options PersistentGroupSto
 			}
 		}
 	}
-	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, compressStateWrites: options.CompressStateWrites, retainCompileInputs: options.RetainCompileInputs, compileInputKeyringDir: keyringDir, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState), compressedGroups: map[string]bool{}, storageReports: map[string]time.Time{}}, nil
+	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, compressStateWrites: options.CompressStateWrites, retainCompileInputs: options.RetainCompileInputs, compileInputKeyringDir: keyringDir, pendingRootRegistrar: options.PendingRootRegistrar, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState), compressedGroups: map[string]bool{}, storageReports: map[string]time.Time{}}, nil
 }
 
 func (store *PersistentGroupStore) StoreGroupInventoryCAS(ctx context.Context, groupID string, expectedSequence uint64, snapshot GroupInventorySnapshot) error {
@@ -946,11 +952,23 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 	if err != nil {
 		return err
 	}
+	var before *GroupPublishedBundle
+	if write && state.Published != nil {
+		copy := cloneGroupPublishedBundle(*state.Published)
+		before = &copy
+	}
+	required := state.PendingRootsRequired
 	if err := fn(&state); err != nil {
 		return err
 	}
 	if !write {
 		return nil
+	}
+	if required && !state.PendingRootsRequired {
+		return ErrGroupPendingRoot
+	}
+	if err := store.retainPendingGroupPublication(ctx, before, &state); err != nil {
+		return err
 	}
 	compactPersistentGroupState(&state)
 	state.Revision++
@@ -1400,6 +1418,9 @@ func validatePersistentGroupStateContents(state persistentGroupState, groupID st
 	if err := validateGroupCompileInputs(state); err != nil {
 		return err
 	}
+	if err := validateGroupPendingRoots(state); err != nil {
+		return err
+	}
 	if state.Inventory != nil {
 		if state.Inventory.Schema != GroupInventorySchemaV1 || normalizeGroupID(state.Inventory.GroupID) != groupID || state.Inventory.Sequence == 0 || strings.TrimSpace(state.Inventory.Generation) == "" {
 			return errors.New("edge-control persistent group inventory is invalid")
@@ -1567,6 +1588,9 @@ func persistentGroupStateDigest(state persistentGroupState) string {
 }
 
 func clonePersistentGroupState(state persistentGroupState) persistentGroupState {
+	if state.PendingRootRecords != nil {
+		state.PendingRootRecords = append([]GroupPendingRootRecord(nil), state.PendingRootRecords...)
+	}
 	if state.RetentionInputs != nil {
 		inputs := make([]GroupCompileInput, len(state.RetentionInputs))
 		for i := range inputs {

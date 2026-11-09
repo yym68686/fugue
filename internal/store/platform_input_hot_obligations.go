@@ -241,6 +241,8 @@ func compilerInputRootExitRule(source string) string {
 		return "registered-role-replaced-or-lawfully-retired; heartbeat-age-does-not-release"
 	case source == "local-input-pin":
 		return "pin-explicitly-released; pending-and-verified-retain"
+	case source == "pending-external-root":
+		return "append-only-pending-retention; publication-success-crash-or-heartbeat-age-never-releases"
 	case source == "active-task":
 		return "task-no-longer-pending-or-running"
 	default:
