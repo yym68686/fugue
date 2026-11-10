@@ -127,7 +127,18 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	keyring := s.platformArtifactKeyring
 	proof.keyringRevision = s.platformArtifactKeyringRevision
 	s.platformArtifactKeyringMu.RUnlock()
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	var tx *sql.Tx
+	var err error
+	if len(pending) == 1 {
+		var native *pendingRootNativeTx
+		native, err = beginPendingRootPolicyTx(ctx, s.db, true)
+		if err == nil {
+			tx = native.Tx
+			defer native.Rollback()
+		}
+	} else {
+		tx, err = s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -736,7 +747,18 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	if currentRevision != proof.keyringRevision {
 		return ErrConflict
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	var tx *sql.Tx
+	var err error
+	if proof.pendingRoot != nil {
+		var native *pendingRootNativeTx
+		native, err = beginPendingRootPolicyTx(ctx, s.db, false)
+		if err == nil {
+			tx = native.Tx
+			defer native.Rollback()
+		}
+	} else {
+		tx, err = s.db.BeginTx(ctx, nil)
+	}
 	if err != nil {
 		return err
 	}

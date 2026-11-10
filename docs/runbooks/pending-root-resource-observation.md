@@ -53,3 +53,21 @@ including pool installation and its own ticket/reservation/outcome allocation.
 Keep the existing PG/Longhorn/worker reserves, no-refund accounting, retention,
 reader/writer barriers and physical-retirement gates. Observation success is not
 copy acceptance, a root-closure proof, or evidence of freed old relation bytes.
+
+Native pending transactions also install a transaction-local server timer
+(PostgreSQL 17 or later is required) before ledger/business SQL. It is capped at
+the remaining enclosing context, or one minute for a caller without a deadline;
+a stricter existing session timer is preserved. The owned connection and context
+are released on commit, rollback and initialization failure. Pending-root
+preparation and application use this path too. Ordinary activation transactions
+retain their existing behavior. This server timer complements client cancellation
+when a connection is lost; it does not prove I/O cancellation, rollback completion,
+the sum of all transactions, or a six-bound whole-operation budget.
+
+Every native pending write transaction, including reservation journals and
+outcomes, uses transaction-local synchronous commit. A stronger `remote_apply`
+session policy is preserved; `fsync` and `full_page_writes` must already be enabled.
+No server/role setting, replica count or membership is changed. A failed or lost
+commit acknowledgement remains uncertain, with the existing full charge retained
+and no retry/refund. Installation/bootstrap costs, all ledger allocation/WAL,
+and failure/uncertain-ACK exit escrow still require independent bounds.

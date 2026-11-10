@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"sync"
 )
@@ -10,12 +11,16 @@ import (
 // its pool by itself, including after context cancellation has rolled it back.
 type pendingRootNativeTx struct {
 	*sql.Tx
-	conn *sql.Conn
-	once sync.Once
+	conn   *sql.Conn
+	cancel context.CancelFunc
+	once   sync.Once
 }
 
 func (tx *pendingRootNativeTx) release() {
-	tx.once.Do(func() { _ = tx.conn.Close() })
+	tx.once.Do(func() {
+		_ = tx.conn.Close()
+		tx.cancel()
+	})
 }
 
 func (tx *pendingRootNativeTx) Commit() error {

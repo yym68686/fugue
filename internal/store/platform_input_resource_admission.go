@@ -247,9 +247,6 @@ func (a *PendingRootResourceAdmission) reserve(ctx context.Context, operation Pe
 	// acknowledged BEFORE allocation-bearing journal/business SQL. An unknown
 	// ticket ACK starts no operation. No setval/reset/epoch rollover is provided.
 	var ticket int64
-	if _, err := tx.ExecContext(ctx, `SET LOCAL synchronous_commit='on'`); err != nil {
-		return nil, err
-	}
 	if err := tx.QueryRowContext(ctx, `SELECT nextval('fugue_platform_input_resource_tickets')`).Scan(&ticket); err != nil || ticket != int64(count)+1 {
 		return nil, ErrConflict
 	}

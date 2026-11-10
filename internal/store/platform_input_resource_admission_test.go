@@ -380,3 +380,59 @@ func TestPendingRootResourcePostgresRolledBackJournalStillCharged(t *testing.T) 
 		t.Fatal("reopen refunded a rolled-back journal write")
 	}
 }
+
+func TestPendingRootResourcePostgresEveryJournalCommitOverridesAsyncDefault(t *testing.T) {
+	s, registration, _ := pendingExternalRootFixture(t)
+	pool, source := resourcePoolFixture(t, s, 2)
+	a := seedResourcePool(t, s, pool, source)
+	// The same pooled session deliberately starts asynchronous. The real
+	// reservation journal, retained root/reference rows and outcome all reject
+	// writes unless their own transaction has installed synchronous commit.
+	s.db.SetMaxOpenConns(4) // admission rechecks while the root transaction is open
+	if _, err := s.db.Exec(`CREATE FUNCTION pending_native_durability_probe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ IF current_setting('synchronous_commit') NOT IN ('on','remote_apply') THEN
+  RAISE EXCEPTION 'synthetic asynchronous pending write';
+ END IF;
+ RETURN NEW;
+ END $$;
+ CREATE TRIGGER pending_native_durability_probe BEFORE INSERT ON fugue_platform_input_resource_reservations FOR EACH ROW EXECUTE FUNCTION pending_native_durability_probe();
+ CREATE TRIGGER pending_native_durability_probe BEFORE INSERT ON fugue_platform_input_resource_outcomes FOR EACH ROW EXECUTE FUNCTION pending_native_durability_probe();
+ CREATE TRIGGER pending_native_durability_probe BEFORE INSERT ON fugue_platform_input_external_roots FOR EACH ROW EXECUTE FUNCTION pending_native_durability_probe();
+ CREATE TRIGGER pending_native_durability_probe BEFORE INSERT ON fugue_platform_input_external_root_refs FOR EACH ROW EXECUTE FUNCTION pending_native_durability_probe()`); err != nil {
+		t.Fatal(err)
+	}
+	// Hold and configure all four actual pool connections before returning
+	// them. No role, database or server default is changed by the fixture.
+	connections := []*sql.Conn{}
+	defer func() {
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+	}()
+	for range 4 {
+		conn, err := s.db.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections = append(connections, conn)
+		if _, err := conn.ExecContext(t.Context(), `SET synchronous_commit='off'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, conn := range connections {
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.ConfigureStrictPendingRootAdmission(pendingSourceVerifierFunc(func(ctx context.Context, request inputarchive.PendingRootRequest) (inputarchive.PendingRootSourceWitness, error) {
+		return pendingSourceWitnessFunc(func(ctx context.Context, request inputarchive.PendingRootRequest) error { return ctx.Err() }), nil
+	}), a, pool.Limits, pool.Epoch)
+	receipt, err := s.RetainPendingCompilerInputExternalRoot(t.Context(), pendingAdmissionRequest(registration))
+	if err != nil || !receipt.Matches(registration) {
+		t.Fatal("pending-root business/journal/outcome used asynchronous acknowledgement", receipt, err)
+	}
+	var outcome, mode string
+	if err := s.db.QueryRow(`SELECT outcome,current_setting('synchronous_commit') FROM fugue_platform_input_resource_outcomes`).Scan(&outcome, &mode); err != nil || outcome != "committed" || mode != "off" {
+		t.Fatal("outcome missing or native setting changed the shared session", outcome, mode, err)
+	}
+}

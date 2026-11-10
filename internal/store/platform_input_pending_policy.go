@@ -191,6 +191,16 @@ func beginPendingRootPolicyTx(ctx context.Context, db *sql.DB, readOnly bool) (*
 	if ctx == nil || db == nil {
 		return nil, ErrConflict
 	}
+	// This context belongs to the owned transaction, not only acquisition. A
+	// caller without a deadline must not leave an unlimited native transaction.
+	// Shorter enclosing operation/observation/outcome deadlines still win.
+	ctx, stop := context.WithTimeout(ctx, time.Minute)
+	owned := false
+	defer func() {
+		if !owned {
+			stop()
+		}
+	}()
 	// Bound only connection acquisition. Using this context for BeginTx would
 	// also cancel a healthy transaction after five seconds. The owned connection
 	// instead runs under the original shared operation deadline and is returned
@@ -210,8 +220,45 @@ func beginPendingRootPolicyTx(ctx context.Context, db *sql.DB, readOnly bool) (*
 		_ = conn.Close()
 		return nil, err
 	}
-	tx := &pendingRootNativeTx{Tx: native, conn: conn}
-	for _, statement := range []string{`SET LOCAL statement_timeout='5s'`, `SET LOCAL lock_timeout='250ms'`, `SET LOCAL work_mem='1MB'`, `SET LOCAL max_parallel_workers_per_gather=0`} {
+	tx := &pendingRootNativeTx{Tx: native, conn: conn, cancel: stop}
+	owned = true
+	// Client cancellation alone cannot police an idle backend after a lost
+	// connection. Install the server's transaction timer before any ledger or
+	// business SQL; retain a stricter session policy. Missing support fails
+	// closed (PostgreSQL 17+), without changing a role/server default. This is a
+	// per-transaction stop, not proof of whole-operation/physical-exit time.
+	deadline, _ := ctx.Deadline()
+	milliseconds := time.Until(deadline).Milliseconds()
+	if milliseconds < 1 {
+		tx.Rollback()
+		return nil, context.DeadlineExceeded
+	}
+	var timeout string
+	if err := tx.QueryRowContext(ctx, `SELECT set_config('transaction_timeout',
+ (CASE WHEN setting::bigint>0 THEN LEAST(setting::bigint,$1::bigint) ELSE $1::bigint END)::text,true)
+ FROM pg_settings WHERE name='transaction_timeout'`, milliseconds).Scan(&timeout); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	if !readOnly {
+		// All ticket/journal/policy/root/outcome commits require a durable ACK,
+		// even when the pool's default is asynchronous. Do not weaken an existing
+		// remote_apply policy or change replication membership. Unknown/lost ACKs
+		// remain uncertain and charged. fsync/full-page protection is prerequisite,
+		// not something this opt-in path is permitted to reconfigure.
+		var durability string
+		if err := tx.QueryRowContext(ctx, `SELECT set_config('synchronous_commit',
+ CASE WHEN current_setting('synchronous_commit')='remote_apply' THEN 'remote_apply' ELSE 'on' END,true)
+ WHERE current_setting('fsync')='on' AND current_setting('full_page_writes')='on'`).Scan(&durability); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+	}
+	if err := setCompilerInputAdmissionTimeouts(ctx, tx.Tx); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	for _, statement := range []string{`SET LOCAL work_mem='1MB'`, `SET LOCAL max_parallel_workers_per_gather=0`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			tx.Rollback()
 			return nil, err

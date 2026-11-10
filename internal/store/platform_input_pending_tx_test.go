@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -53,6 +54,115 @@ func TestPendingRootNativePostgresPoolAcquireBound(t *testing.T) {
 	}
 	if s.db.Stats().InUse != 0 {
 		t.Fatal("canceled acquisition leaked its connection", s.db.Stats())
+	}
+}
+
+func TestPendingRootNativePostgresDurableSettingsAreLocal(t *testing.T) {
+	s := pendingPolicyFixture(t)
+	s.db.SetMaxOpenConns(1)
+	if _, err := s.db.ExecContext(t.Context(), `SET statement_timeout='2s'; SET lock_timeout='100ms'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"off", "local", "remote_write", "on", "remote_apply"} {
+		t.Run(mode, func(t *testing.T) {
+			if _, err := s.db.ExecContext(t.Context(), `SELECT set_config('synchronous_commit',$1,false)`, mode); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := beginPendingRootPolicyTx(t.Context(), s.db, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			var actual, timer string
+			if err := tx.QueryRowContext(t.Context(), `SELECT current_setting('synchronous_commit'),setting FROM pg_settings WHERE name='transaction_timeout'`).Scan(&actual, &timer); err != nil {
+				t.Fatal(err)
+			}
+			want := "on"
+			if mode == "remote_apply" {
+				want = mode
+			}
+			ms, err := strconv.Atoi(timer)
+			if err != nil || ms < 1 || ms > 60000 || actual != want {
+				t.Fatal("durability weakened or transaction unbounded", actual, timer, err)
+			}
+			var stricter bool
+			if err := tx.QueryRowContext(t.Context(), `SELECT current_setting('statement_timeout')='2s' AND current_setting('lock_timeout')='100ms'`).Scan(&stricter); err != nil || !stricter {
+				t.Fatal("native guard relaxed stricter statement/lock policy", stricter, err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRowContext(t.Context(), `SELECT current_setting('synchronous_commit'),current_setting('transaction_timeout')`).Scan(&actual, &timer); err != nil || actual != mode || timer != "0" {
+				t.Fatal("transaction-local settings leaked into shared pool", actual, timer, err)
+			}
+		})
+	}
+}
+
+func TestPendingRootNativePostgresServerStopsIdleTransaction(t *testing.T) {
+	for _, readOnly := range []bool{true, false} {
+		t.Run(strconv.FormatBool(readOnly), func(t *testing.T) {
+			s := pendingPolicyFixture(t)
+			s.db.SetMaxOpenConns(1)
+			if _, err := s.db.ExecContext(t.Context(), `CREATE TABLE pending_native_probe(id integer PRIMARY KEY); SET transaction_timeout='300ms'`); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			tx, err := beginPendingRootPolicyTx(ctx, s.db, readOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			var pid int
+			var timer string
+			if err := tx.QueryRowContext(ctx, `SELECT pg_backend_pid(),current_setting('transaction_timeout')`).Scan(&pid, &timer); err != nil || timer != "300ms" {
+				t.Fatal("stricter session timer was relaxed", timer, err)
+			}
+			if !readOnly {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO pending_native_probe VALUES(1)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Leave the transaction idle without canceling its client context. An
+			// independent connection observes backend exit and rollback, rather
+			// than mistaking a client-side error for server-side cleanup.
+			observer, err := sql.Open("pgx", s.databaseURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer observer.Close()
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				var alive bool
+				if err := observer.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)`, pid).Scan(&alive); err != nil {
+					t.Fatal(err)
+				}
+				if !alive {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("idle backend outlived server timer with client still connected")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if ctx.Err() != nil {
+				t.Fatal("client cancellation, rather than server timer, ended the backend", ctx.Err())
+			}
+			var count int
+			if err := observer.QueryRowContext(ctx, `SELECT count(*) FROM pending_native_probe`).Scan(&count); err != nil || count != 0 {
+				t.Fatal("server expiry preserved an uncommitted write", count, err)
+			}
+			if err := tx.Commit(); err == nil {
+				t.Fatal("expired transaction claimed commit acknowledgement")
+			}
+			if s.db.Stats().InUse != 0 {
+				t.Fatal("server-terminated transaction retained owned connection", s.db.Stats())
+			}
+			if err := s.db.PingContext(ctx); err != nil {
+				t.Fatal("pool failed to replace server-terminated connection", err)
+			}
+		})
 	}
 }
 
