@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -56,6 +57,65 @@ func TestOOMHistoryIsMonotonicDurableAndInputScoped(t *testing.T) {
 	other, err = s.readBuildOOMHistory(context.Background(), app, fp)
 	if err != nil || other.MemoryLimitBytes != 0 {
 		t.Fatal("tenant history leaked", other, err)
+	}
+}
+
+func TestOOMHistoryWaitsForCheckpointContentionAndHonorsCancellation(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "released", true: "canceled"}[canceled], func(t *testing.T) {
+			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			if err := state.Init(); err != nil {
+				t.Fatal(err)
+			}
+			app := model.App{ID: "app-neutral", TenantID: "tenant-neutral"}
+			fingerprint := buildOOMInputFingerprint(model.AppSource{CommitSHA: strings.Repeat("c", 40)}, model.AppSpec{})
+			locked, release, holderDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+			go func() {
+				_, err := state.UpdateObservationCheckpoint(t.Context(), buildOOMHistoryKey(app, fingerprint), func([]byte) ([]byte, error) {
+					close(locked)
+					<-release
+					return nil, nil
+				})
+				holderDone <- err
+			}()
+			<-locked
+			var once sync.Once
+			unlock := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(unlock)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- (&Service{Store: state}).recordBuildOOM(ctx, app, "operation-neutral", fingerprint, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 7 << 30})
+			}()
+			if canceled {
+				cancel()
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Fatalf("canceled lock wait: %v", err)
+				}
+				unlock()
+			} else {
+				// Longer than the old eight 10ms retries; the lock owner is a
+				// live, bounded writer, not a corrupt checkpoint or failed write.
+				select {
+				case err := <-done:
+					t.Fatalf("returned before lock release: %v", err)
+				case <-time.After(150 * time.Millisecond):
+				}
+				unlock()
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				raw, err := state.ReadObservationCheckpoint(t.Context(), buildOOMHistoryKey(app, fingerprint))
+				history, decodeErr := decodeBuildOOMHistory(raw)
+				if err != nil || decodeErr != nil || history.MemoryLimitBytes != 7<<30 {
+					t.Fatalf("lost OOM after contention: %+v %v %v", history, err, decodeErr)
+				}
+			}
+			if err := <-holderDone; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

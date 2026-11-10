@@ -202,6 +202,7 @@ type Server struct {
 	offlineCapacityCode                    func(context.Context, model.EdgeNode) (platformproducer.CapacityCodeIdentity, error)
 	offlineCapacityMeasure                 func(context.Context, model.EdgeClientProbePlan) (model.EdgeClientProbeReport, error)
 	pendingRootConfigureMu                 sync.Mutex
+	pendingResourceObservationMu           sync.Mutex
 	pendingRootTransport                   atomic.Pointer[pendingRootTransport]
 }
 

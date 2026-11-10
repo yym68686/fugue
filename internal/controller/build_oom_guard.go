@@ -109,8 +109,14 @@ func (s *Service) writeBuildOOMHistory(ctx context.Context, app model.App, finge
 	if fingerprint == "" {
 		return errors.New("cannot persist OOM without resolved build input")
 	}
-	for attempt := 0; attempt < 8; attempt++ {
-		written, err := s.Store.UpdateObservationCheckpoint(ctx, buildOOMHistoryKey(app, fingerprint), func(raw []byte) ([]byte, error) {
+	if ctx == nil {
+		return errors.New("cannot persist OOM without a context")
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	delay := 10 * time.Millisecond
+	for {
+		written, err := s.Store.UpdateObservationCheckpoint(writeCtx, buildOOMHistoryKey(app, fingerprint), func(raw []byte) ([]byte, error) {
 			previous, err := decodeBuildOOMHistory(raw)
 			if err != nil {
 				return nil, err
@@ -130,15 +136,20 @@ func (s *Service) writeBuildOOMHistory(ctx context.Context, app model.App, finge
 		if err != nil || written {
 			return err
 		}
-		timer := time.NewTimer(10 * time.Millisecond)
+		timer := time.NewTimer(delay)
 		select {
-		case <-ctx.Done():
+		case <-writeCtx.Done():
 			timer.Stop()
-			return ctx.Err()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return errors.New("builder OOM history is concurrently updating")
 		case <-timer.C:
 		}
+		if delay < 80*time.Millisecond {
+			delay *= 2
+		}
 	}
-	return errors.New("builder OOM history is concurrently updating")
 }
 
 func (s *Service) resolveBuildOOMProfile(ctx context.Context, app model.App, fingerprint, profile string) (buildOOMHistory, error) {
