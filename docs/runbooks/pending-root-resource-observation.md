@@ -6,6 +6,15 @@ it does not install a ledger, grant database privileges, issue a reservation, or
 enable input capture. This is a source for resource investigation, not an
 implementation of `PendingRootResourceSource` or proof of its six operation bounds.
 
+`pending-resource-status` reads the last completed attempt in the same API process
+without another database or Kubernetes request. It records only fixed phase,
+stage, reason and SQL category values with start/completion timestamps. It never
+returns raw transport/driver errors, SQL statements, paths, object bodies or
+credentials. A concurrent attempt may replace that last result; this is not a
+durable operation history or per-operation correlation. A refused resource
+snapshot still returns HTTP 503, and neither status success nor a fixed refusal
+category grants admission or changes any observation guard.
+
 The observer currently supports one healthy CNPG primary backed by a bound
 Longhorn filesystem PVC. It verifies the primary owner, SQL endpoint address and
 postmaster identity, PVC/PV claim UID, CSI handle, Longhorn attachment and node UID.

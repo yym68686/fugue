@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -147,6 +148,22 @@ func TestPendingResourceObservationRejectsSourceDriftAndNeverGrantsBudget(t *tes
 				if err == nil || result != nil {
 					t.Fatal("drift or untrusted sample accepted", result, err)
 				}
+				want := map[string][3]string{
+					"wrong-db-endpoint":  {"", "database-before", "endpoint-or-guard"},
+					"pod-replaced":       {"", "storage-consistency", "resource-version-or-identity-changed"},
+					"pv-rebound":         {"storage-after", "pv", "identity-or-capacity"},
+					"node-replaced":      {"", "storage-consistency", "resource-version-or-identity-changed"},
+					"stale-stats":        {"", "volume-stats", "stale-or-clock"},
+					"wrong-stats-uid":    {"", "volume-stats", "missing"},
+					"db-restarted":       {"", "database-consistency", "identity-or-guard-changed"},
+					"ledger-rewritten":   {"", "database-consistency", "identity-or-guard-changed"},
+					"oversized-response": {"", "volume-stats", "response-limit"},
+					"duplicate-stats":    {"", "volume-stats", "duplicate"},
+				}[variant]
+				var refusal *pendingResourceRefusal
+				if !errors.As(err, &refusal) || [3]string{refusal.phase, refusal.stage, refusal.reason} != want || !errors.Is(err, errPendingResourceObservation) {
+					t.Fatal("refusal classification lost", variant, refusal)
+				}
 				return
 			}
 			if err != nil {
@@ -182,9 +199,13 @@ func TestPendingResourceObservationHonorsDeadlineAndSingleFlight(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
-	err := pendingResourceGet(ctx, &kubeLogsClient{client: server.Client(), baseURL: server.URL}, "/exact-object", &map[string]any{})
+	err := pendingResourceGet(ctx, &kubeLogsClient{client: server.Client(), baseURL: server.URL}, "cluster", "/exact-object", &map[string]any{})
 	if err == nil || ctx.Err() != context.DeadlineExceeded {
 		t.Fatal("read escaped deadline", err, ctx.Err())
+	}
+	var refusal *pendingResourceRefusal
+	if !errors.As(err, &refusal) || refusal.reason != "deadline" || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("deadline cause lost", err)
 	}
 	s := &Server{}
 	s.pendingResourceObservationMu.Lock()
