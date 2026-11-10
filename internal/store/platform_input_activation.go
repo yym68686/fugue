@@ -38,6 +38,10 @@ type compilerInputActivationProof struct {
 	pendingRoot  *compilerInputPendingRootIntent
 	publication  *compilerInputPublicationIntent
 	consumerKind string
+	// Only consumer receipts and selected-input reads may share an LKG guard:
+	// their apply callbacks never write an LKG. Publication, promotion, rollback
+	// and task activation keep the writer guard, including absent selectors.
+	lkgReadOnly bool
 	// Capability-only ordinary requests retain original business checks. This
 	// is never a complete dependency proof and cannot be used for preparation
 	// confirmation, enforcement, fencing or retirement.
@@ -93,7 +97,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	proof := &compilerInputActivationProof{store: s, database: s.db, expires: time.Now().Add(time.Minute), inputManifests: map[string]inputManifest{}, ordinary: ordinary, fullInventory: inventory}
+	proof := &compilerInputActivationProof{store: s, database: s.db, expires: time.Now().Add(time.Minute), inputManifests: map[string]inputManifest{}, ordinary: ordinary, fullInventory: inventory, lkgReadOnly: consumer != nil || len(reads) != 0}
 	// Validate the current global LKG while its artifact is in the bounded
 	// batch, then discard the body. Never cache the entire closure's bodies or
 	// fetch them again outside the batch transport budget. If a mixed root set
@@ -565,6 +569,10 @@ func (s *compilerInputActivationArtifactScanner) Scan(dest ...any) error {
 }
 
 func readCompilerInputActivationTuple(ctx context.Context, tx *sql.Tx, tuple *compilerInputActivationTuple, lock bool) error {
+	return readCompilerInputActivationTupleMode(ctx, tx, tuple, lock, false)
+}
+
+func readCompilerInputActivationTupleMode(ctx context.Context, tx *sql.Tx, tuple *compilerInputActivationTuple, lock, lkgReadOnly bool) error {
 	if tuple.table == "fugue_platform_release_lanes" {
 		if tuple.key == "" || len(tuple.key) > 2048 {
 			return ErrInvalidInput
@@ -602,7 +610,14 @@ func readCompilerInputActivationTuple(ctx context.Context, tx *sql.Tx, tuple *co
 		// upgrading to RowExclusive for INSERT otherwise deadlock. Phantom
 		// insertion remains fenced; no body/network work occurs under it.
 		if lock {
-			if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+			guard := `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`
+			if lkgReadOnly {
+				// SHARE permits concurrent readers but still excludes every LKG
+				// INSERT/UPDATE/DELETE and relation replacement. Never use it for
+				// callbacks which may upsert: two readers upgrading can deadlock.
+				guard = `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE MODE`
+			}
+			if _, err := tx.ExecContext(ctx, guard); err != nil {
 				return err
 			}
 		}
@@ -737,7 +752,7 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	}
 	for _, original := range proof.tuples {
 		current := original
-		if err := readCompilerInputActivationTuple(ctx, tx, &current, true); err != nil {
+		if err := readCompilerInputActivationTupleMode(ctx, tx, &current, true, proof.lkgReadOnly); err != nil {
 			return fmt.Errorf("activation dependency no longer available: %w", ErrConflict)
 		}
 		if current != original {
