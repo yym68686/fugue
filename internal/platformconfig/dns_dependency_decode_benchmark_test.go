@@ -59,3 +59,35 @@ func BenchmarkDNSDependencyStageObservation(b *testing.B) {
 		})
 	}
 }
+
+// Retained DNS content belongs to the exact previous publication and must
+// still be fully decoded and hashed. Measure the temporary envelope copying
+// separately from a large unknown field in the current policy.
+func BenchmarkDNSDependencyRetainedContent(b *testing.B) {
+	for _, padding := range []int{0, 256 << 10} {
+		b.Run(fmt.Sprintf("previous-DNS-padding-%d", padding), func(b *testing.B) {
+			req, _, _ := celldns.SourceAuthorizedRequest(b, true)
+			previous := req.PreviousTrafficPublication
+			previous.DNS.Content["unknown_padding"] = strings.Repeat("x", padding)
+			previous.DNS = celldns.Sign(b, previous.DNS, previous.DNS.ID, previous.DNS.GenerationSequence)
+			previous.Reference.DNSArtifactDigest = previous.DNS.ContentHash
+			req.Intent.RouteAuthorityTransition.PreviousPublication = previous.Reference
+			a := celldns.Compile(b, req).DNSArtifact
+			raw, err := json.Marshal(a.Content)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if _, err := platformconfig.DecodeDNSRouteDependencyEvidence(a); err != nil {
+				b.Fatal(err)
+			}
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := platformconfig.DecodeDNSRouteDependencyEvidence(a); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

@@ -19,12 +19,27 @@ func platformProducerPrincipal() model.Principal {
 	return model.Principal{ActorType: model.ActorTypeBootstrap, ActorID: platformproducer.Actor, Scopes: map[string]struct{}{"platform.admin": {}}}
 }
 
+// The durable bridge is deliberately not installed by NewServer. A future
+// approved enrollment protocol must prove all replicas use it before any
+// control can claim a complete drain. It performs no schema installation.
+func (s *Server) admitPlatformProducerCapture(ctx context.Context, scope string, policy model.PlatformPublicationPrecondition) (func(context.Context) error, bool, error) {
+	if s.producerCaptureParticipant == nil {
+		return nil, false, fmt.Errorf("producer capture participant unavailable")
+	}
+	return s.producerCaptureParticipant.admit(ctx, scope, policy)
+}
+
 // One existing store advisory lock elects the producer. Policy and target CAS
 // checks still run in the publication transaction: leadership is not authority.
 func (s *Server) StartBackgroundPlatformConfiguration(ctx context.Context) {
 	if s == nil || s.store == nil {
 		return
 	}
+	s.markPlatformProducerCaptureStarted()
+	defer s.platformProducerRuntime().manager()()
+	// Registered participants close only after scope workers have returned.
+	// Loss of the leader-lock connection is not evidence of that return.
+	defer s.closePlatformProducerCaptureParticipant(ctx)
 	// Each authority has its own scheduling and lock. A cell's unavailable
 	// dependencies cannot stall legacy publication or another cell's recovery.
 	var workers sync.WaitGroup
@@ -38,8 +53,13 @@ func (s *Server) StartBackgroundPlatformConfiguration(ctx context.Context) {
 	start := func(scope string) {
 		workerCtx, cancel := context.WithCancel(ctx)
 		started[scope] = cancel
+		returned := s.platformProducerRuntime().worker(workerCtx, scope)
 		workers.Add(1)
-		go func() { defer workers.Done(); s.runPlatformConfigurationScope(workerCtx, scope) }()
+		go func() {
+			defer workers.Done()
+			defer returned()
+			s.runPlatformConfigurationScope(workerCtx, scope)
+		}()
 	}
 	start(platformproducer.Scope)
 	workers.Add(1)
@@ -149,6 +169,7 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 }
 
 func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope string, capture func(context.Context, model.Principal) (platformIntentProjectionResponse, error)) (interval time.Duration, resultErr error) {
+	s.markPlatformProducerCaptureStarted()
 	interval = 30 * time.Second
 	started, phaseStarted, phase := time.Now(), time.Now(), "load_policy"
 	phaseDurations := map[string]int64{}
@@ -208,6 +229,31 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		if _, err := s.preparePlatformReleaseSetConsumers(ctx, principal, current, previous); err != nil {
 			return interval, err
 		}
+	}
+	// Keep pending safety recovery, timeout, no-new-input quality observation
+	// and interrupted shadow preparation above this new-input-only boundary.
+	// A ticket covers the entire capture/compile/persist/publication attempt.
+	// Track this boundary even when durable admission is not installed. A
+	// canceled worker remains observable until its entire function returns.
+	defer s.platformProducerRuntime().input(scope)()
+	if s.producerCaptureAdmission != nil {
+		advance("admit_new_input")
+		finish, deferred, err := s.producerCaptureAdmission(ctx, scope, model.PlatformPublicationPrecondition{ArtifactID: policyArtifact.ID, ContentHash: policyArtifact.ContentHash, ReleaseID: authority.ID, FencingToken: authority.FencingToken})
+		if err != nil {
+			return interval, err
+		}
+		if deferred {
+			decision = "new_input_deferred"
+			return interval, s.refreshPendingProducerQuality(ctx, policy)
+		}
+		if finish == nil {
+			return interval, fmt.Errorf("producer capture admission missing completion handle")
+		}
+		defer func() {
+			exitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			resultErr = errors.Join(resultErr, finish(exitCtx))
+		}()
 	}
 	// Runtime capture includes several independently bounded network probes.
 	// Give artifact persistence its own budget after capture succeeds: sharing

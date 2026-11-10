@@ -531,10 +531,10 @@ func DecodeDNSRouteDependencyEvidenceObserved(a model.PlatformArtifact, cost *DN
 		}
 	}
 	var payload struct {
-		Publications json.RawMessage    `json:"cell_route_publications"`
-		Policy       json.RawMessage    `json:"policy"`
-		Source       *CellDNSPlanSource `json:"cell_dns_source"`
-		Previous     json.RawMessage    `json:"previous_traffic_publication"`
+		Publications dnsDependencyJSONView `json:"cell_route_publications"`
+		Policy       dnsDependencyJSONView `json:"policy"`
+		Source       *CellDNSPlanSource    `json:"cell_dns_source"`
+		Previous     dnsDependencyJSONView `json:"previous_traffic_publication"`
 	}
 	started = cost.start()
 	err = json.Unmarshal(raw, &payload)
@@ -543,7 +543,7 @@ func DecodeDNSRouteDependencyEvidenceObserved(a model.PlatformArtifact, cost *DN
 		return evidence, fmt.Errorf("DNS artifact envelope cannot be decoded: %w", err)
 	}
 	started = cost.start()
-	pubs, _, err := decodeCellRoutePublicationFields(payload.Publications, payload.Policy, payload.Source)
+	pubs, _, err := decodeCellRoutePublicationFields(json.RawMessage(payload.Publications), json.RawMessage(payload.Policy), payload.Source)
 	cost.record(dnsDependencyCells, started)
 	if err != nil {
 		return evidence, err
@@ -572,6 +572,19 @@ func DecodeDNSRouteDependencyEvidenceObserved(a model.PlatformArtifact, cost *DN
 	}
 	evidence.Dependencies, evidence.Publications, evidence.Previous = dependencies, pubs, previous
 	return evidence, nil
+}
+
+// The complete envelope is already owned by this decoder. Borrow its field
+// bytes until the typed views have been decoded, rather than copying each large
+// publication a second time as json.RawMessage does. These views never escape
+// into evidence or a cache; all returned maps, strings and slices still come
+// from the ordinary typed JSON decoders. Unmarshal validates the whole envelope
+// and retains its original field/error order before any view is consumed.
+type dnsDependencyJSONView []byte
+
+func (v *dnsDependencyJSONView) UnmarshalJSON(raw []byte) error {
+	*v = raw
+	return nil
 }
 
 func decodeDNSRouteDependencyViews(raw []byte) (DNSRouteDependencyEvidence, error) {

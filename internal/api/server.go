@@ -205,6 +205,13 @@ type Server struct {
 	pendingResourceObservationMu           sync.Mutex
 	pendingResourceStatus                  pendingResourceObservationStatus
 	pendingRootTransport                   atomic.Pointer[pendingRootTransport]
+	// Nil by default. No HTTP, environment or startup path installs this gate.
+	// Enrollment/enablement requires the separate approved rollout protocol.
+	producerCaptureAdmission   func(context.Context, string, model.PlatformPublicationPrecondition) (func(context.Context) error, bool, error)
+	producerCaptureMu          sync.Mutex
+	producerCaptureStarted     bool
+	producerCaptureParticipant *platformProducerCaptureParticipant
+	producerCaptureRuntime     *producerCaptureRuntime
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
@@ -234,6 +241,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		auth:                            authn,
 		log:                             logger,
 		metricsStartedAt:                time.Now().UTC(),
+		producerCaptureRuntime:          newProducerCaptureRuntime(),
 		backupInventoryConfig:           cfg.BackupInventory.normalized(),
 		controlPlaneDatabaseURL:         strings.TrimSpace(cfg.DatabaseURL),
 		objectStorageUsageTimeout:       normalizeObjectStorageUsageTimeout(cfg.ObjectStorageUsageTimeout),

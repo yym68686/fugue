@@ -24,14 +24,18 @@ func TestServingProducerProgressesRecoversAndDoesNotRetryFailedSource(t *testing
 		t.Run(fmt.Sprintf("dynamic_quality_%t", dynamic), func(t *testing.T) {
 			for _, supersede := range []bool{false, true} {
 				t.Run(fmt.Sprintf("supersede_recovery_%t", supersede), func(t *testing.T) {
-					testServingProducerProgressesRecovers(t, dynamic, supersede)
+					testServingProducerProgressesRecovers(t, dynamic, supersede, false)
 				})
 			}
 		})
 	}
 }
 
-func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede bool) {
+func TestCaptureDeferralPreservesRealPendingRecoveryAndObservation(t *testing.T) {
+	testServingProducerProgressesRecovers(t, true, false, true)
+}
+
+func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gated bool) {
 	path := t.TempDir() + "/state.json"
 	state := store.New(path)
 	if err := state.Init(); err != nil {
@@ -39,7 +43,31 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede bool
 	}
 	config := ServerConfig{BundleSigningKey: "synthetic-serving-key", BundleSigningKeyID: "key"}
 	server := NewServer(state, auth.New(state, ""), nil, config)
+	deferNewInput, admissions, completions := false, 0, 0
+	defer func() {
+		if gated && (admissions == 0 || admissions != completions) {
+			t.Error("capture completion handle did not cover all admitted work", admissions, completions)
+		}
+	}()
 	seedInventory := func() {
+		if gated {
+			server.producerCaptureAdmission = func(ctx context.Context, scope string, policy model.PlatformPublicationPrecondition) (func(context.Context) error, bool, error) {
+				if scope != platformproducer.Scope || policy.ArtifactID == "" || policy.ContentHash == "" || policy.ReleaseID == "" || policy.FencingToken < 1 {
+					t.Fatal("capture gate lost exact signed authority")
+				}
+				if deferNewInput {
+					return nil, true, nil
+				}
+				admissions++
+				return func(ctx context.Context) error {
+					if ctx.Err() != nil {
+						t.Fatal("capture finish inherited a canceled work context")
+					}
+					completions++
+					return nil
+				}, false, nil
+			}
+		}
 		server.clusterNodeInventoryCache = newExpiringResponseCache[[]clusterNodeSnapshot](time.Hour)
 		server.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, []clusterNodeSnapshot{
 			{node: model.ClusterNode{Name: "edge-a"}, labels: map[string]string{runtimepkg.EdgeRoleLabelKey: runtimepkg.NodeRoleLabelValue}},
@@ -102,6 +130,20 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede bool
 		t.Helper()
 		if _, err := server.reconcilePlatformConfiguration(ctx); err != nil {
 			t.Fatal(err)
+		}
+	}
+	if gated {
+		if finish, held, err := server.admitPlatformProducerCapture(ctx, platformproducer.Scope, model.PlatformPublicationPrecondition{}); err == nil || held || finish != nil {
+			t.Fatal("uninstalled durable bridge admitted work")
+		}
+		canceled, cancel := context.WithCancel(ctx)
+		_, err := server.reconcilePlatformConfigurationWithCapture(canceled, func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
+			cancel()
+			return platformIntentProjectionResponse{}, context.Canceled
+		})
+		cancel()
+		if !errors.Is(err, context.Canceled) || admissions != 1 || completions != 1 {
+			t.Fatal("canceled capture did not finish through independent bounded exit", admissions, completions, err)
 		}
 	}
 	active := func(channel string) (model.PlatformArtifact, model.PlatformArtifactRelease) {
@@ -188,6 +230,7 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede bool
 	if nextGray.ArtifactID == first.ID {
 		t.Fatal("new source not staged")
 	}
+	deferNewInput = gated
 	// Observation refresh must not re-enter the publishable projection's
 	// business readiness gates. Exercise the actual queue, even when its public
 	// DNS evidence is unavailable, and retain every publication/LKG identity.
@@ -274,11 +317,30 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede bool
 	if err != nil || lkg.ArtifactID != candidate.ID {
 		t.Fatal("full was not verified", err)
 	}
+	if gated {
+		// With no pending safety work, the same gate now refuses the actual
+		// new-input boundary. Pending progression above crossed a server restart
+		// and refreshed the real no-new-input observation queue despite it.
+		before, priorCompletions := admissions, completions
+		if _, err := server.reconcilePlatformConfigurationWithCapture(ctx, func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
+			t.Fatal("deferred producer entered new input capture")
+			return platformIntentProjectionResponse{}, errors.New("unexpected capture")
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_, sameShadow := active("shadow")
+		_, sameFull := active("full")
+		if admissions != before || completions != priorCompletions || sameShadow.ID != shadow.ID || sameFull.ID != nextFull.ID {
+			t.Fatal("deferral changed a publication or admitted new input")
+		}
+		deferNewInput = false
+	}
 	// Refresh under the same source creates another candidate. A failed full
 	// parent cannot prepare topology; timeout must still restore verified LKG.
 	age(shadow.ID, 301)
 	reconcile()
 	failed, badGray := active("gray")
+	deferNewInput = gated
 	_, shadow = active("shadow")
 	age(nextFull.ID, 10)
 	age(shadow.ID, 5)
@@ -365,6 +427,7 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede bool
 	}
 	p.Generation = "producer-three"
 	activate()
+	deferNewInput = false
 	reconcile()
 	_, fresh := active("gray")
 	if fresh.ID == badGray.ID {

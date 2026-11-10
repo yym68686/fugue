@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -55,6 +56,40 @@ func independentDNSDependencyEvidence(a model.PlatformArtifact) (platformconfig.
 	}
 	evidence.Dependencies, evidence.Publications, evidence.Previous = deps, pubs, previous
 	return evidence, nil
+}
+
+// Dependency evidence outlives the decoder's intermediate envelope. Mutating
+// the caller's source or a returned view must not alter the other, including
+// large fields that take the bounded validation-cache path.
+func TestDNSDependencyEvidenceOwnsDecodedViews(t *testing.T) {
+	req, _, _ := celldns.SourceAuthorizedRequest(t, true)
+	a := celldns.Compile(t, req).DNSArtifact
+	a.Content["policy"].(map[string]any)["unknown_padding"] = strings.Repeat("x", 256<<10)
+	evidence, err := platformconfig.DecodeDNSRouteDependencyEvidence(a)
+	if err != nil || evidence.Previous == nil || len(evidence.Publications) == 0 {
+		t.Fatal("missing complete publication evidence", err)
+	}
+	before, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := a.Content["previous_traffic_publication"].(map[string]any)
+	previous["route"].(map[string]any)["content"].(map[string]any)["caller_mutation"] = true
+	a.Content["cell_route_publications"].([]any)[0].(map[string]any)["parent"].(map[string]any)["content"].(map[string]any)["caller_mutation"] = true
+	after, err := json.Marshal(evidence)
+	if err != nil || string(before) != string(after) {
+		t.Fatal("source mutation changed decoded evidence", err)
+	}
+	source, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence.Previous.Route.Content["returned_mutation"] = true
+	evidence.Publications[0].Parent.Content["returned_mutation"] = true
+	unchanged, err := json.Marshal(a)
+	if err != nil || string(source) != string(unchanged) {
+		t.Fatal("decoded evidence mutation changed source", err)
+	}
 }
 
 func TestDNSDependencyDecodePreservesTypedViewsAndErrors(t *testing.T) {
