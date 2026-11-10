@@ -51,7 +51,7 @@ func (client *Client) resumeUploadSession(v model.SourceUploadSession, archive [
 			continue
 		}
 		var out uploadSessionResponse
-		err := client.doJSON(http.MethodPut, fmt.Sprintf("/v1/source-upload-sessions/%s/chunks/%d", url.PathEscape(v.ID), index), map[string]any{"sha256": digest, "data": data}, &out)
+		err := client.doJSONWithTimeout(http.MethodPut, fmt.Sprintf("/v1/source-upload-sessions/%s/chunks/%d", url.PathEscape(v.ID), index), map[string]any{"sha256": digest, "data": data}, &out, client.sourceUploadChunkTimeout)
 		if err != nil {
 			return v, err
 		}

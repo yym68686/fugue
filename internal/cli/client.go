@@ -16,30 +16,35 @@ import (
 	"fugue/internal/model"
 )
 
-const sourceUploadClientTimeout = 6 * time.Minute
+const (
+	sourceUploadChunkRequestTimeout = 5 * time.Minute
+	sourceUploadClientTimeout       = 6 * time.Minute
+)
 
 type Client struct {
-	strictReferences     bool
-	context              context.Context
-	baseURL              string
-	token                string
-	cookie               string
-	httpClient           *http.Client
-	dataObjectHTTPClient *http.Client
-	observer             requestObserver
-	readRetryCount       int
-	readRetryDelay       time.Duration
+	strictReferences         bool
+	context                  context.Context
+	baseURL                  string
+	token                    string
+	cookie                   string
+	sourceUploadChunkTimeout time.Duration
+	httpClient               *http.Client
+	dataObjectHTTPClient     *http.Client
+	observer                 requestObserver
+	readRetryCount           int
+	readRetryDelay           time.Duration
 }
 
 type clientOptions struct {
-	StrictReferences bool
-	Context          context.Context
-	Cookie           string
-	Observer         requestObserver
-	RequireToken     bool
-	RequestTimeout   time.Duration
-	ReadRetryCount   int
-	ReadRetryDelay   time.Duration
+	StrictReferences         bool
+	Context                  context.Context
+	Cookie                   string
+	Observer                 requestObserver
+	RequireToken             bool
+	RequestTimeout           time.Duration
+	SourceUploadChunkTimeout time.Duration
+	ReadRetryCount           int
+	ReadRetryDelay           time.Duration
 }
 
 type importProjectRequest struct {
@@ -508,6 +513,10 @@ func newClientWithOptions(baseURL, token string, opts clientOptions) (*Client, e
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
+	sourceUploadChunkTimeout := opts.SourceUploadChunkTimeout
+	if sourceUploadChunkTimeout <= 0 {
+		sourceUploadChunkTimeout = sourceUploadChunkRequestTimeout
+	}
 	readRetryCount := opts.ReadRetryCount
 	if readRetryCount == 0 {
 		readRetryCount = 2
@@ -520,11 +529,12 @@ func newClientWithOptions(baseURL, token string, opts clientOptions) (*Client, e
 		readRetryDelay = 250 * time.Millisecond
 	}
 	return &Client{
-		strictReferences: opts.StrictReferences,
-		context:          opts.Context,
-		baseURL:          strings.TrimRight(baseURL, "/"),
-		token:            token,
-		cookie:           strings.TrimSpace(opts.Cookie),
+		strictReferences:         opts.StrictReferences,
+		context:                  opts.Context,
+		baseURL:                  strings.TrimRight(baseURL, "/"),
+		token:                    token,
+		cookie:                   strings.TrimSpace(opts.Cookie),
+		sourceUploadChunkTimeout: sourceUploadChunkTimeout,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},

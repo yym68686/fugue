@@ -36,6 +36,8 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"Use a tenant API key for normal deploys. Use a platform-admin/bootstrap key only for admin commands.",
 		"export FUGUE_API_KEY=<copied-access-key>",
 		"Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then https://api.fugue.pro.",
+		"Source upload chunks allow up to five minutes by default; override with --source-upload-chunk-timeout.",
+		"--source-upload-chunk-timeout",
 		"Web Base URL defaults to FUGUE_WEB_BASE_URL, then APP_BASE_URL, then a best-effort guess from the API base URL.",
 		"Tenant is auto-selected when your key only sees one tenant.",
 		"Deploy and create flows default to the \"default\" project when you do not pass --project.",
@@ -125,6 +127,32 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 	} {
 		if strings.Contains(out, unwanted) {
 			t.Fatalf("expected help output to omit %q, got %q", unwanted, out)
+		}
+	}
+}
+
+func TestSourceUploadChunkTimeoutFlag(t *testing.T) {
+	t.Parallel()
+
+	c := newCLI(io.Discard, io.Discard)
+	cmd := c.newRootCommand()
+	if err := cmd.ParseFlags([]string{"--base-url", "https://api.example.com", "--token", "token", "--source-upload-chunk-timeout", "8m"}); err != nil {
+		t.Fatalf("parse timeout flag: %v", err)
+	}
+	client, err := c.newClient()
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if client.sourceUploadChunkTimeout != 8*time.Minute {
+		t.Fatalf("expected 8m chunk timeout, got %s", client.sourceUploadChunkTimeout)
+	}
+	if client.httpClient.Timeout != time.Minute {
+		t.Fatalf("expected unchanged 1m API timeout, got %s", client.httpClient.Timeout)
+	}
+	for _, value := range []string{"0", "-1m"} {
+		err := runWithStreams([]string{"version", "--source-upload-chunk-timeout", value}, io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "--source-upload-chunk-timeout must be greater than zero") {
+			t.Fatalf("expected invalid timeout %q to be rejected, got %v", value, err)
 		}
 	}
 }

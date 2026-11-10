@@ -1,14 +1,20 @@
 package cli
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"fugue/internal/model"
 )
 
 type retryRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -141,5 +147,72 @@ func TestSourceUploadRequestsUseDedicatedTimeout(t *testing.T) {
 	}
 	if client.httpClient.Timeout != 10*time.Millisecond {
 		t.Fatalf("source upload must not mutate the base client timeout, got %s", client.httpClient.Timeout)
+	}
+}
+
+func TestSourceUploadChunkUsesConfigurableTimeout(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name           string
+		requestTimeout time.Duration
+		chunkTimeout   time.Duration
+		wantTimeout    bool
+	}{
+		{name: "default", requestTimeout: 10 * time.Millisecond},
+		{name: "longer override", requestTimeout: 10 * time.Millisecond, chunkTimeout: time.Second},
+		{name: "shorter override", requestTimeout: time.Second, chunkTimeout: 10 * time.Millisecond, wantTimeout: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			archive := []byte("slow chunk")
+			digest := fmt.Sprintf("%x", sha256.Sum256(archive))
+			session := model.SourceUploadSession{
+				ID:        "upload_123",
+				SHA256:    digest,
+				SizeBytes: int64(len(archive)),
+				ChunkSize: 4 << 20,
+			}
+			var chunks atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/chunks/0") {
+					chunks.Add(1)
+					time.Sleep(50 * time.Millisecond)
+				}
+				if r.Context().Err() != nil {
+					return
+				}
+				out := session
+				out.Chunks = map[int]string{0: digest}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(uploadSessionResponse{Session: out}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			client, err := newClientWithOptions(server.URL, "token", clientOptions{
+				RequireToken:             true,
+				RequestTimeout:           tt.requestTimeout,
+				SourceUploadChunkTimeout: tt.chunkTimeout,
+			})
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			_, err = client.resumeUploadSession(session, archive)
+			if tt.wantTimeout {
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("expected chunk deadline, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("resume upload session: %v", err)
+			}
+			if chunks.Load() != 1 {
+				t.Fatalf("expected one chunk request without retries, got %d", chunks.Load())
+			}
+			if client.httpClient.Timeout != tt.requestTimeout {
+				t.Fatalf("source upload changed base timeout from %s to %s", tt.requestTimeout, client.httpClient.Timeout)
+			}
+		})
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	cliterminal "fugue/internal/cli/terminal"
 
@@ -27,23 +28,24 @@ built_at={{index .Annotations "` + rootVersionBuildTimeAnnotation + `"}}
 )
 
 type rootOptions struct {
-	BaseURL     string
-	WebBaseURL  string
-	Token       string
-	Account     string
-	TenantID    string
-	TenantName  string
-	ProjectID   string
-	ProjectName string
-	Output      string
-	Color       string
-	Interactive string
-	JSONOutput  bool
-	ShowIDs     bool
-	OutputFile  string
-	Redact      bool
-	ConfirmRaw  bool
-	SaveToken   bool
+	BaseURL                  string
+	WebBaseURL               string
+	SourceUploadChunkTimeout time.Duration
+	Token                    string
+	Account                  string
+	TenantID                 string
+	TenantName               string
+	ProjectID                string
+	ProjectName              string
+	Output                   string
+	Color                    string
+	Interactive              string
+	JSONOutput               bool
+	ShowIDs                  bool
+	OutputFile               string
+	Redact                   bool
+	ConfirmRaw               bool
+	SaveToken                bool
 }
 
 type CLI struct {
@@ -104,10 +106,11 @@ func newCLI(stdout, stderr io.Writer) *CLI {
 		stdout: stdout,
 		stderr: stderr,
 		root: rootOptions{
-			Output:      "text",
-			Color:       cliterminal.ModeAuto.String(),
-			Interactive: cliterminal.ModeAuto.String(),
-			Redact:      true,
+			Output:                   "text",
+			Color:                    cliterminal.ModeAuto.String(),
+			Interactive:              cliterminal.ModeAuto.String(),
+			SourceUploadChunkTimeout: sourceUploadChunkRequestTimeout,
+			Redact:                   true,
 		},
 	}
 }
@@ -144,6 +147,7 @@ Quick start for most users:
 
 	Defaults and auto-selection:
 	  - Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then ` + defaultCloudBaseURL + `.
+	  - Source upload chunks allow up to five minutes by default; override with --source-upload-chunk-timeout.
 	  - API keys can be saved with "fugue auth login"; explicit --token and environment variables still override saved keys.
 	  - Web Base URL defaults to FUGUE_WEB_BASE_URL, then APP_BASE_URL, then a best-effort guess from the API base URL.
 	  - Tenant is auto-selected when your key only sees one tenant.
@@ -251,6 +255,9 @@ Environment variables:
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			c.context = cmd.Context()
 			c.commandEffect = commandEffect(cmd)
+			if c.root.SourceUploadChunkTimeout <= 0 {
+				return fmt.Errorf("--source-upload-chunk-timeout must be greater than zero")
+			}
 			if cmd.CommandPath() == "fugue app db query" {
 				c.rawAppOutput = true
 			}
@@ -324,6 +331,7 @@ Environment variables:
 	flags := cmd.PersistentFlags()
 	flags.StringVar(&c.root.BaseURL, "base-url", c.root.BaseURL, "Optional API base URL. Defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then "+defaultCloudBaseURL)
 	flags.StringVar(&c.root.WebBaseURL, "web-base-url", c.root.WebBaseURL, "Optional web base URL. Defaults to FUGUE_WEB_BASE_URL, then APP_BASE_URL, then a best-effort guess from --base-url")
+	flags.DurationVar(&c.root.SourceUploadChunkTimeout, "source-upload-chunk-timeout", c.root.SourceUploadChunkTimeout, "Timeout for each source upload chunk request")
 	flags.StringVar(&c.root.Token, "token", c.root.Token, "API key or bootstrap key. Reads FUGUE_API_KEY, FUGUE_TOKEN, or FUGUE_BOOTSTRAP_KEY")
 	flags.StringVar(&c.root.Account, "account", c.root.Account, "Admin-only account email to resolve through fugue-web for workspace targeting")
 	flags.StringVar(&c.root.TenantName, "tenant", c.root.TenantName, "Optional tenant name or slug. Needed only when your key can see multiple tenants")
@@ -472,10 +480,11 @@ func (c *CLI) newClient() (*Client, error) {
 		return nil, err
 	}
 	return newClientWithOptions(c.effectiveBaseURL(), c.effectiveToken(), clientOptions{
-		Context:          c.context,
-		StrictReferences: c.commandEffect == "may_change_state" || c.commandEffect == "caller_defined",
-		Observer:         c.observer,
-		RequireToken:     true,
+		Context:                  c.context,
+		StrictReferences:         c.commandEffect == "may_change_state" || c.commandEffect == "caller_defined",
+		Observer:                 c.observer,
+		RequireToken:             true,
+		SourceUploadChunkTimeout: c.root.SourceUploadChunkTimeout,
 	})
 }
 
