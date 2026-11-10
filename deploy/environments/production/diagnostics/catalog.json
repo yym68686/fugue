@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 44,
+    "generation": 45,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -43,6 +43,8 @@
                 "policy_read_failed",
                 "compiler_input_chunk_bytes",
                 "compiler_input_database_writer_limit",
+                "compiler_input_writer_activity",
+                "compiler_input_writer_diagnostic",
                 "database_pool",
                 "observation_retention"
               ]
