@@ -4315,6 +4315,9 @@ paths:
         and LKG generation to have current durable verified local input pins.
         Missing, cold or changed dependencies return a conflict without advancing
         the consumer cursor or audit chain. Heartbeats do not restore inputs.
+        A bounded admission lock refusal returns retryable HTTP 503 with
+        Retry-After: 1. The heartbeat remains unrecorded; normal identity,
+        evidence and conflict errors retain their existing classifications.
       tags: [Admin]
       x-fugue-handler: handleTrustedPlatformConsumerHeartbeat
       security:
@@ -4369,6 +4372,8 @@ paths:
         closure and current durable verified local pins before committing the
         shadow observation and audit event. Cold or changed dependencies refuse
         the observation; this endpoint never restores inputs.
+        A bounded admission lock refusal returns retryable HTTP 503 with
+        Retry-After: 1 without committing the observation or audit event.
       tags: [Admin]
       x-fugue-handler: handlePlatformShadowConsumerHeartbeat
       security:

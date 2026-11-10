@@ -1520,6 +1520,7 @@ func consumerAssignmentChild(releaseSet model.PlatformArtifact, kind string, rea
 }
 
 func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error) {
+	var databaseError interface{ SQLState() string }
 	switch {
 	case errors.Is(err, store.ErrInvalidInput):
 		httpx.WriteError(w, http.StatusBadRequest, "invalid trusted heartbeat request")
@@ -1538,6 +1539,12 @@ func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error
 		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatFuture),
 		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatEvidence):
 		httpx.WriteError(w, http.StatusUnprocessableEntity, "trusted heartbeat evidence is invalid")
+	case errors.As(err, &databaseError) && databaseError.SQLState() == "55P03":
+		// A bounded admission lock refusal leaves this heartbeat unrecorded.
+		// Preserve that refusal, but distinguish retryable contention from an
+		// unexpected server failure without exposing database details.
+		w.Header().Set("Retry-After", "1")
+		httpx.WriteError(w, http.StatusServiceUnavailable, "trusted heartbeat admission is busy")
 	default:
 		httpx.WriteError(w, http.StatusInternalServerError, "trusted heartbeat could not be recorded")
 	}
