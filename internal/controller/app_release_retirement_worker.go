@@ -32,6 +32,7 @@ func (s *Service) reconcileAppReleaseRetirementInline(ctx context.Context, app m
 }
 
 func (s *Service) reconcileAppReleaseRetirements(ctx context.Context, lastApp *string) error {
+	ctx = withRetirementSweepInventory(ctx)
 	// Metadata discovery omits every executable snapshot. Load app state and
 	// full drain snapshots only for apps with a withdrawn lifecycle entry.
 	targets, err := s.Store.ListAppReleaseRetirementTargets(ctx)

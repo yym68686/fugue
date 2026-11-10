@@ -94,5 +94,6 @@ func (s *Service) quiesceUnstartedRelease(ctx context.Context, client *kubeClien
 	if err != nil {
 		return fmt.Errorf("cancel unstarted release: %w", err)
 	}
+	noteRetirementProgress(ctx)
 	return fmt.Errorf("unstarted release cancelled; awaiting observed zero replicas and Pod removal")
 }

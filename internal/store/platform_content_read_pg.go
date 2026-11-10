@@ -37,6 +37,10 @@ func (s *platformContentDigestScanner) Scan(dest ...any) error {
 }
 
 func (s *Store) pgReadPlatformArtifact(ctx context.Context, idOrGeneration string) (artifact model.PlatformArtifact, err error) {
+	return s.pgReadPlatformArtifactSession(ctx, idOrGeneration, nil)
+}
+
+func (s *Store) pgReadPlatformArtifactSession(ctx context.Context, idOrGeneration string, session *platformContentSession) (artifact model.PlatformArtifact, err error) {
 	started := time.Now()
 	defer func() {
 		rows := 0
@@ -65,6 +69,9 @@ func (s *Store) pgReadPlatformArtifact(ctx context.Context, idOrGeneration strin
 				return nil, fmt.Errorf("platform artifact conditional read omitted uncached content")
 			}
 			s.readMetrics[artifactReadMetric].bodyElisions.Add(1)
+			if session != nil {
+				return session.owned(key, pinned), nil
+			}
 			return clonePlatformContent(pinned), nil
 		}
 		s.readMetrics[artifactReadMetric].bodyBytes.Add(uint64(len(raw)))
@@ -87,6 +94,11 @@ func (s *Store) pgReadPlatformArtifact(ctx context.Context, idOrGeneration strin
 				}
 				s.platformContentHints[idOrGeneration] = actual
 				s.platformContentHintMu.Unlock()
+			}
+			if session != nil {
+				if immutable, ok := platformContentDecodings.get(actual); ok {
+					return session.owned(actual, immutable), nil
+				}
 			}
 		}
 		return content, err

@@ -1330,7 +1330,8 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
 		return
 	}
-	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	loadArtifact := s.store.NewPlatformArtifactReadSession()
+	readArtifact := newConsumerArtifactReader(loadArtifact)
 	readBinding := routeartifact.NewRequestBindingReader()
 	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil {
@@ -1379,7 +1380,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 		httpx.WriteError(w, http.StatusNotFound, "no expected consumer assignment found")
 		return
 	}
-	if err := s.checkConsumerInputReads(r.Context(), claims, resolved, readArtifact, servingOnly); err != nil {
+	if err := s.checkConsumerInputReadsWithLoader(r.Context(), claims, resolved, readArtifact, servingOnly, loadArtifact); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
 		return
 	}
@@ -1457,7 +1458,8 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 		httpx.WriteError(w, http.StatusBadRequest, "one expected_consumer_set_id is required")
 		return
 	}
-	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	loadArtifact := s.store.NewPlatformArtifactReadSession()
+	readArtifact := newConsumerArtifactReader(loadArtifact)
 	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
@@ -1470,7 +1472,7 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer parent artifact unavailable")
 				return
 			}
-			if err := s.checkConsumerInputReads(r.Context(), claims, []consumerArtifactLookup{result}, readArtifact, false); err != nil {
+			if err := s.checkConsumerInputReadsWithLoader(r.Context(), claims, []consumerArtifactLookup{result}, readArtifact, false, loadArtifact); err != nil {
 				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
 				return
 			}
@@ -1481,7 +1483,7 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 			return
 		}
 		if result.Artifact.ID == r.PathValue("artifact_id") && result.Assignment.ExpectedConsumerSetID == setIDs[0] {
-			if err := s.checkConsumerInputReads(r.Context(), claims, []consumerArtifactLookup{result}, readArtifact, false); err != nil {
+			if err := s.checkConsumerInputReadsWithLoader(r.Context(), claims, []consumerArtifactLookup{result}, readArtifact, false, loadArtifact); err != nil {
 				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
 				return
 			}

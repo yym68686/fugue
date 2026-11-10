@@ -26,9 +26,13 @@ type DNSArtifactPayload struct {
 }
 
 // DecodeDNSArtifact performs the consumer schema, lineage, Cell, readiness and
-// query-view checks using one encoding of this call's content. It retains no
-// state between calls and does not establish serving authorization.
+// query-view checks. Bounded reuse keys the actual content and envelope and
+// returns isolated mutable results; it never establishes serving authorization.
 func DecodeDNSArtifact(artifact model.PlatformArtifact) (DNSArtifactPayload, error) {
+	return decodedDNSPayloads.decode(artifact)
+}
+
+func decodeDNSArtifactUncached(artifact model.PlatformArtifact) (DNSArtifactPayload, error) {
 	var payload DNSArtifactPayload
 	raw, err := json.Marshal(artifact.Content)
 	if err != nil {

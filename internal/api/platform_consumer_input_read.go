@@ -40,6 +40,10 @@ func dnsSourceInputReadSelections(snapshot model.PlatformDNSRouteSourceSnapshot)
 // turn a valid serving-only request into a blanket outage. A fresh resolver,
 // including a fresh immutable-body cache, then rechecks ordinary authority.
 func (s *Server) checkConsumerInputReads(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, selected []consumerArtifactLookup, read func(string) (model.PlatformArtifact, error), servingOnly bool) error {
+	return s.checkConsumerInputReadsWithLoader(ctx, claims, selected, read, servingOnly, s.store.GetPlatformArtifact)
+}
+
+func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, selected []consumerArtifactLookup, read func(string) (model.PlatformArtifact, error), servingOnly bool, load func(string) (model.PlatformArtifact, error)) error {
 	reads := make([]store.PlatformInputReadSelection, 0, len(selected))
 	parents := make([]model.PlatformArtifact, 0, len(selected))
 	for _, item := range selected {
@@ -53,7 +57,7 @@ func (s *Server) checkConsumerInputReads(ctx context.Context, claims platformcon
 	if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
 		return err
 	}
-	freshRead := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	freshRead := newConsumerArtifactReader(load)
 	current, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, freshRead)
 	if err != nil {
 		return err
@@ -61,6 +65,9 @@ func (s *Server) checkConsumerInputReads(ctx context.Context, claims platformcon
 	for i, before := range selected {
 		found := false
 		for _, after := range current {
+			// Request-scoped immutable bodies share map identity only after a
+			// fresh database digest and mutation check. DeepEqual still checks
+			// every fresh envelope, assignment and release field.
 			if reflect.DeepEqual(before, after) {
 				parent, err := freshRead(after.Assignment.ReleaseSetID)
 				if err != nil || !reflect.DeepEqual(parent, parents[i]) {

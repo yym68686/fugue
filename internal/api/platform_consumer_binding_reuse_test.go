@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -66,6 +67,24 @@ func TestConsumerBindingReuseRetainsFreshTopologyTrustAndPublication(t *testing.
 			t.Fatal("valid selection failed", ok, err)
 		}
 	}
+	// Body reuse must still perform a second authority observation and apply
+	// the current trust configuration, even inside one logical request.
+	load := state.NewPlatformArtifactReadSession()
+	sharedRead := newConsumerArtifactReader(load)
+	selected, err := server.resolvePlatformConsumerAssignmentsWithReader(claims, sharedRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshLoads := 0
+	fresh := func(id string) (model.PlatformArtifact, error) { freshLoads++; return load(id) }
+	if err := server.checkConsumerInputReadsWithLoader(context.Background(), claims, selected, sharedRead, true, fresh); err != nil || freshLoads == 0 {
+		t.Fatal("fresh authority pass missing", err)
+	}
+	server.bundleRevokedKeyIDs = append(server.bundleRevokedKeyIDs, compiled.RouteArtifact.Provenance.KeyID)
+	if err := server.checkConsumerInputReadsWithLoader(context.Background(), claims, selected, sharedRead, true, fresh); err == nil {
+		t.Fatal("request body reuse bypassed signing-key revocation")
+	}
+	server.bundleRevokedKeyIDs = nil
 	// Reusing projection work cannot retain a group removed by newer topology.
 	prepare(compiled, release, "edge-group-test-b")
 	if ok, err := server.consumerAssignmentIsSelectedWithBindingReader(items[0], "edge-group-test-a", readArtifact, readBinding); ok || err == nil {

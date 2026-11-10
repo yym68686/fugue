@@ -512,29 +512,64 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	if stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing {
 		return nil
 	}
+	intent := retirementIntentVersion(app, stable, policy)
+	ready := make([]model.AppRelease, 0, len(releases))
+	for _, release := range releases {
+		if !store.AppReleaseAwaitingDrain(release) && !(release.Status == model.AppReleaseStatusRetired && release.RevisionWorkload != nil) {
+			continue
+		}
+		key := retirementRetryKey{app.TenantID, app.ID, release.ID}
+		if s.retirementRetries.ready(key, retirementReleaseVersion(intent, release), s.rolloutObservationTime()) {
+			ready = append(ready, release)
+		}
+	}
+	releases = ready
+	if len(releases) == 0 {
+		return nil
+	}
+	// Share discovery across this worker sweep, never across the independent
+	// post-drain proof reads below.
+	if s.Config.KubectlApply {
+		client, err := s.kubeClient()
+		if err != nil {
+			return err
+		}
+		filtered := filterAbsentRetiredReleaseResources(ctx, client, runtime.NamespaceForTenant(app.TenantID), releases)
+		kept := make(map[string]bool, len(filtered))
+		for _, release := range filtered {
+			kept[release.ID] = true
+		}
+		for _, release := range releases {
+			if !kept[release.ID] {
+				s.retirementRetries.attempted(retirementRetryKey{app.TenantID, app.ID, release.ID}, retirementReleaseVersion(intent, release), s.rolloutObservationTime(), true)
+			}
+		}
+		releases = filtered
+	}
+	if len(releases) == 0 {
+		return nil
+	}
 	var inventory *releaseDrainInventory
 	if s.Config.KubectlApply {
 		client, err := s.kubeClient()
 		if err != nil {
 			return err
 		}
-		inventory, err = readReleaseDrainInventory(withInitialReleaseDrainInventory(ctx), client, runtime.NamespaceForTenant(app.TenantID))
+		inventory, err = readReleaseDrainInventory(retirementInitialDiscoveryContext(ctx, runtime.NamespaceForTenant(app.TenantID)), client, runtime.NamespaceForTenant(app.TenantID))
 		if err != nil {
 			return err
 		}
-	}
-	if s.Config.KubectlApply {
-		client, err := s.kubeClient()
-		if err != nil {
-			return err
-		}
-		releases = filterAbsentRetiredReleaseResources(ctx, client, runtime.NamespaceForTenant(app.TenantID), releases)
 	}
 	queue := prioritizeAppReleaseRetirement(releases, positions, inventory)
 	ctx = context.WithValue(ctx, releaseRetirementDiscoveryKey{}, inventory)
 	startedAt := time.Now()
 	err = runAppReleaseRetirementQueue(ctx, queue, &positions, func(attempt context.Context, item prioritizedReleaseRetirement) {
+		progress := &retirementProgress{}
+		attempt = context.WithValue(attempt, retirementProgressKey{}, progress)
 		s.retryOneAppReleaseRetirement(attempt, app, item.release, stable, policy)
+		if ctx.Err() == nil && !progress.Load() {
+			s.retirementRetries.attempted(retirementRetryKey{app.TenantID, app.ID, item.release.ID}, retirementReleaseVersion(intent, item.release), s.rolloutObservationTime(), item.release.RevisionWorkload != nil)
+		}
 	})
 	if len(queue) > 0 && s.Logger != nil {
 		s.Logger.Printf("release retirement sweep app=%s queued=%d concurrency=%d duration_ms=%d error=%v", app.ID, len(queue), min(appReleaseRetirementConcurrency, len(queue)), time.Since(startedAt).Milliseconds(), err)

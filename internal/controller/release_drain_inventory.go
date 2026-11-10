@@ -13,15 +13,39 @@ import (
 )
 
 func filterAbsentRetiredReleaseResources(ctx context.Context, client *kubeClient, ns string, releases []model.AppRelease) []model.AppRelease {
+	presence, err := readRetirementResourcePresence(ctx, client, ns)
+	if err != nil {
+		return releases
+	}
+	filtered := make([]model.AppRelease, 0, len(releases))
+	for _, r := range releases {
+		b := r.RevisionWorkload
+		if r.Status == model.AppReleaseStatusRetired && b != nil && !presence.deployments[b.DeploymentName] && !presence.services[b.ServiceName] {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return filtered
+}
+
+func readRetirementResourcePresence(ctx context.Context, client *kubeClient, ns string) (*retirementResourcePresence, error) {
+	entry := retirementNamespace(ctx, ns)
+	if entry != nil {
+		entry.Lock()
+		defer entry.Unlock()
+		if entry.presence != nil {
+			return entry.presence, nil
+		}
+	}
 	var deployments, services kubeObjectList
 	if _, err := client.doMetadataList(ctx, "/apis/apps/v1/namespaces/"+url.PathEscape(ns)+"/deployments", &deployments); err != nil {
-		return releases
+		return nil, err
 	}
 	if _, err := client.doMetadataList(ctx, "/api/v1/namespaces/"+url.PathEscape(ns)+"/services", &services); err != nil {
-		return releases
+		return nil, err
 	}
 	if deployments.Metadata.Continue != "" || services.Metadata.Continue != "" {
-		return releases
+		return nil, fmt.Errorf("release resource presence is incomplete (continued list)")
 	}
 	presentDeployments, presentServices := map[string]bool{}, map[string]bool{}
 	for _, d := range deployments.Items {
@@ -30,15 +54,11 @@ func filterAbsentRetiredReleaseResources(ctx context.Context, client *kubeClient
 	for _, s := range services.Items {
 		presentServices[objectStringField(objectMapField(s, "metadata"), "name")] = true
 	}
-	filtered := make([]model.AppRelease, 0, len(releases))
-	for _, r := range releases {
-		b := r.RevisionWorkload
-		if r.Status == model.AppReleaseStatusRetired && b != nil && !presentDeployments[b.DeploymentName] && !presentServices[b.ServiceName] {
-			continue
-		}
-		filtered = append(filtered, r)
+	presence := &retirementResourcePresence{presentDeployments, presentServices}
+	if entry != nil {
+		entry.presence = presence
 	}
-	return filtered
+	return presence, nil
 }
 
 // A complete, unfiltered ownership index. Labels alone cannot reveal a child

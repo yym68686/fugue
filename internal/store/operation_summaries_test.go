@@ -1,7 +1,9 @@
 package store
 
 import (
+	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +11,33 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestPGActiveOperationSummariesFilterBeforeReadingHistory(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(_ string, query string) error {
+		for _, required := range []string{"o.tenant_id = $1", "o.app_id = $2", "lower(o.type) IN ($3)", "lower(o.status) IN ($4, $5, $6)"} {
+			if !strings.Contains(query, required) {
+				return fmt.Errorf("missing query boundary %s", required)
+			}
+		}
+		if strings.Contains(query, "desired_spec_json") || strings.Contains(query, "LIMIT") {
+			return fmt.Errorf("history/spec materialization or active-operation truncation: %s", query)
+		}
+		return nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+	mock.ExpectQuery("active summaries").WithArgs("tenant", "app", model.OperationTypeMigrate, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	_, err = s.ListOperationSummariesFiltered("tenant", false, OperationListFilter{AppID: "app", Types: []string{model.OperationTypeMigrate}, Statuses: []string{model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestListOperationSummariesOmitsDesiredState(t *testing.T) {
 	t.Parallel()

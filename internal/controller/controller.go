@@ -59,6 +59,7 @@ type Service struct {
 	kubeClients                     map[string]*kubeClient
 	managedRolloutCapacityLocks     sync.Map
 	retirementScans                 appReleaseRetirementScans
+	retirementRetries               retirementRetries
 	retirementWorkerRunning         atomic.Bool
 	managedPostgresStorageNoticeMu  sync.Mutex
 	managedPostgresStorageNotices   map[string]struct{}

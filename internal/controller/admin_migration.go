@@ -7,6 +7,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/storagerecovery"
+	"fugue/internal/store"
 )
 
 // Authority belongs to the authenticated operation, never to tenant-editable
@@ -60,7 +61,15 @@ func (s *Service) activeAdministratorMigration(ctx context.Context, app model.Ap
 	}
 	// Background reconciliation resumes the same durable operation, not an
 	// app annotation that could grant permanent maintenance privileges.
-	ops, err := s.Store.ListOperationsByApp(app.TenantID, false, app.ID)
+	// Maintenance authority needs current actor/status metadata, never every
+	// historical operation's executable desired spec. Do not impose a newest-N
+	// limit: an older active operation must remain visible.
+	ops, err := s.Store.ListOperationSummariesFiltered(app.TenantID, false, store.OperationListFilter{
+		AppID:    app.ID,
+		Statuses: []string{model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent},
+		Types: []string{model.OperationTypeMigrate, model.OperationTypeDatabaseSwitchover,
+			model.OperationTypeDatabaseLocalize, storagerecovery.OperationType, model.OperationTypeScale},
+	})
 	if err == nil {
 		for _, op := range ops {
 			if valid(op) {
