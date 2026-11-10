@@ -99,13 +99,16 @@ func emergencyOwnershipManager(manager string) bool {
 }
 
 type kubectlCluster struct {
-	edgeCohorts      map[string]edgecohort.Snapshot
-	kubectl          string
-	verifier         string
-	timeout          time.Duration
-	readTimeout      time.Duration
-	readAttempts     int
-	readRetryDelay   time.Duration
+	edgeCohorts    map[string]edgecohort.Snapshot
+	kubectl        string
+	verifier       string
+	timeout        time.Duration
+	readTimeout    time.Duration
+	readAttempts   int
+	readRetryDelay time.Duration
+	// readCommand allows retry semantics to be checked independently of OS
+	// process startup. Mutating commands always use run directly.
+	readCommand      func(context.Context, []byte, string, ...string) ([]byte, error)
 	serviceHTTPURL   func(string, string, int) string
 	metadata         metadataclient.Interface
 	resources        dynamic.Interface
@@ -3387,6 +3390,10 @@ func (cluster *kubectlCluster) kubectlRun(ctx context.Context, input []byte, arg
 // of the durable activation file through exec. Mutating exec/CAS commands must
 // keep using kubectlRun so an unknown write result is never blindly replayed.
 func (cluster *kubectlCluster) kubectlRead(ctx context.Context, input []byte, arguments ...string) ([]byte, error) {
+	run := cluster.run
+	if cluster.readCommand != nil {
+		run = cluster.readCommand
+	}
 	timeout := cluster.readTimeout
 	if timeout <= 0 {
 		timeout = defaultKubectlReadTimeout
@@ -3402,7 +3409,7 @@ func (cluster *kubectlCluster) kubectlRead(ctx context.Context, input []byte, ar
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		readCtx, cancel := context.WithTimeout(ctx, timeout)
-		output, err := cluster.run(readCtx, input, cluster.kubectl, arguments...)
+		output, err := run(readCtx, input, cluster.kubectl, arguments...)
 		cancel()
 		if err == nil {
 			return output, nil

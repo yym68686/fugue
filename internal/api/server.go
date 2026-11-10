@@ -201,6 +201,8 @@ type Server struct {
 	offlineEdgeRecoveryProbe               agentEdgeProbeFunc
 	offlineCapacityCode                    func(context.Context, model.EdgeNode) (platformproducer.CapacityCodeIdentity, error)
 	offlineCapacityMeasure                 func(context.Context, model.EdgeClientProbePlan) (model.EdgeClientProbeReport, error)
+	pendingRootConfigureMu                 sync.Mutex
+	pendingRootTransport                   atomic.Pointer[pendingRootTransport]
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {

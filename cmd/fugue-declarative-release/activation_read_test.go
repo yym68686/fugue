@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -18,38 +16,38 @@ func TestActivationEvidenceReadRetriesTransportFailure(t *testing.T) {
 		failures  int
 		response  string
 		wantError bool
-		attempts  string
+		attempts  int
 		present   bool
 	}{
-		{"transient EOF", 1, `{"schema":"` + edgeActivationStateSchema + `","edge_group_id":"edge-group-test","generation":1,"authority":"` + edgeActivationAuthority + `","active_slot":"a"}`, false, "2", true},
-		{"absent file after EOF", 1, "absent", false, "2", false},
-		{"persistent EOF", 3, "absent", true, "2", false},
-		{"invalid evidence", 0, `{}`, true, "1", false},
-		{"wrong group", 0, `{"schema":"` + edgeActivationStateSchema + `","edge_group_id":"edge-group-other","generation":1,"authority":"` + edgeActivationAuthority + `","active_slot":"a"}`, true, "1", false},
+		{"transient EOF", 1, `{"schema":"` + edgeActivationStateSchema + `","edge_group_id":"edge-group-test","generation":1,"authority":"` + edgeActivationAuthority + `","active_slot":"a"}`, false, 2, true},
+		{"absent file after EOF", 1, "absent", false, 2, false},
+		{"persistent EOF", 3, "absent", true, 2, false},
+		{"invalid evidence", 0, `{}`, true, 1, false},
+		{"wrong group", 0, `{"schema":"` + edgeActivationStateSchema + `","edge_group_id":"edge-group-other","generation":1,"authority":"` + edgeActivationAuthority + `","active_slot":"a"}`, true, 1, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			directory := t.TempDir()
-			counter := filepath.Join(directory, "attempts")
-			kubectl := filepath.Join(directory, "kubectl")
-			program := fmt.Sprintf(`#!/bin/sh
-set -eu
-count=0
-if test -f "$ACTIVATION_READ_COUNT"; then read -r count <"$ACTIVATION_READ_COUNT"; fi
-count=$((count + 1))
-printf '%%s\n' "$count" >"$ACTIVATION_READ_COUNT"
-if test "$count" -le %d; then
-  printf 'Error from server: error dialing backend: EOF\n' >&2
-  exit 1
-fi
-printf '%%s\n' '%s'
-`, test.failures, test.response)
-			if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
-				t.Fatal(err)
+			// Count actual read invocations, not shell starts that can be killed
+			// before writing their counter on a busy builder. Real process timeout
+			// and read/write separation retain their own integration coverage.
+			attempts := 0
+			var readContexts []context.Context
+			cluster := &kubectlCluster{kubectl: "kubectl", readAttempts: 2, readTimeout: 5 * time.Second, readRetryDelay: time.Millisecond}
+			cluster.readCommand = func(ctx context.Context, input []byte, binary string, arguments ...string) ([]byte, error) {
+				attempts++
+				readContexts = append(readContexts, ctx)
+				deadline, bounded := ctx.Deadline()
+				if !bounded || time.Until(deadline) > 5*time.Second || ctx.Err() != nil {
+					t.Fatal("read attempt lost its unchanged deadline")
+				}
+				want := []string{"exec", "--namespace", "control", "front", "--container", "edge-front", "--", "sh", "-ceu", `if [ ! -e "$1" ]; then printf 'absent\n'; exit 0; fi; cat "$1"`, "sh", "/state/activation.json"}
+				if binary != "kubectl" || len(input) != 0 || !reflect.DeepEqual(arguments, want) {
+					t.Fatalf("activation read command changed: %s %q", binary, arguments)
+				}
+				if attempts <= test.failures {
+					return nil, errors.New("error dialing backend: EOF")
+				}
+				return []byte(test.response + "\n"), nil
 			}
-			t.Setenv("ACTIVATION_READ_COUNT", counter)
-			// Verify transport retry semantics without counting slow process startup
-			// on a busy builder as an additional simulated EOF. Attempt assertions remain exact.
-			cluster := &kubectlCluster{kubectl: kubectl, readAttempts: 2, readTimeout: 5 * time.Second, readRetryDelay: time.Millisecond}
 			release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{Namespace: "control"}}
 			transition := declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-test", ActivationStatePath: "/state/activation.json"}
 			state, exists, err := cluster.readEdgeActivationStateFromPod(context.Background(), release, transition, edgeGroupPod{Name: "front"}, "edge-front")
@@ -59,9 +57,13 @@ printf '%%s\n' '%s'
 			if exists && (state.GroupID != transition.GroupID || state.Generation != 1 || state.ActiveSlot != "a") {
 				t.Fatalf("read changed activation evidence: %+v", state)
 			}
-			count, readErr := os.ReadFile(counter)
-			if readErr != nil || strings.TrimSpace(string(count)) != test.attempts {
-				t.Fatalf("attempts=%q err=%v", count, readErr)
+			if attempts != test.attempts {
+				t.Fatalf("attempts=%d want=%d", attempts, test.attempts)
+			}
+			for _, readCtx := range readContexts {
+				if !errors.Is(readCtx.Err(), context.Canceled) {
+					t.Fatal("completed read attempt context was not canceled")
+				}
 			}
 		})
 	}

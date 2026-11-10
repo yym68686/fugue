@@ -478,6 +478,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/operations/{id}/evidence", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperationEvidence)))
 	mux.Handle("GET /v1/operations/{id}/timeline", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperationTimeline)))
 	mux.Handle("GET /v1/platform-state/artifacts/{artifact_kind}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformStateArtifact)))
+	mux.Handle("POST /v1/platform-state/compiler-inputs/pending-roots", s.requirePendingRootPod(http.HandlerFunc(s.handleRetainPendingCompilerInputRoot)))
 	mux.Handle("GET /v1/platform-state/consumers/artifacts/{artifact_id}", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetPlatformConsumerArtifact)))
 	mux.Handle("GET /v1/platform-state/consumers/artifacts/{artifact_id}/retained-route-sources", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetPlatformConsumerRetainedDNSRouteSources)))
 	mux.Handle("GET /v1/platform-state/consumers/artifacts/{artifact_id}/route-sources", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetPlatformConsumerDNSRouteSources)))

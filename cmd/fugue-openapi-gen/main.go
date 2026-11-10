@@ -177,6 +177,12 @@ func inferAuthKind(doc *openapi3.T, operation *openapi3.Operation) (string, erro
 
 	auth := "none"
 	for _, requirement := range security {
+		if _, ok := requirement["PendingRootPodBearerAuth"]; ok {
+			if auth != "none" || len(security) != 1 || len(requirement) != 1 {
+				return "", errors.New("pending-root Pod auth must be exclusive")
+			}
+			auth = "pending-root-pod"
+		}
 		if _, ok := requirement["EdgeRouteIntentComponentBearerAuth"]; ok {
 			if auth != "none" {
 				return "", errors.New("cannot combine bearer auth schemes on the same operation")
@@ -223,6 +229,8 @@ func renderRoutesFile(routes []routeDefinition) ([]byte, error) {
 	for _, route := range routes {
 		handlerExpr := "http.HandlerFunc(s." + route.HandlerName + ")"
 		switch route.Auth {
+		case "pending-root-pod":
+			handlerExpr = "s.requirePendingRootPod(" + handlerExpr + ")"
 		case "api":
 			handlerExpr = "s.auth.RequireAPI(" + handlerExpr + ")"
 		case "runtime":

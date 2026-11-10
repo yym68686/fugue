@@ -23,6 +23,9 @@ type compilerInputPendingRootIntent struct {
 	hash              string
 	admissionRevision uint64
 	checkAdmission    func(context.Context) error
+	authority         inputarchive.PendingRootAuthority
+	policy            compilerInputPendingPolicyWitness
+	registry          compilerInputPendingRegistryWitness
 }
 
 // preparePendingCompilerInputExternalRoot authenticates the COMPLETE native
@@ -30,7 +33,10 @@ type compilerInputPendingRootIntent struct {
 // It does not authenticate the external source/custody or grant activation.
 // Cold original bytes may remain unavailable: registration adds conservative
 // retention before restoration, just as prospective pending task creation does.
-func (s *Store) preparePendingCompilerInputExternalRoot(ctx context.Context, registration inputarchive.PendingRootRegistration) (*compilerInputActivationProof, error) {
+func (s *Store) preparePendingCompilerInputExternalRoot(ctx context.Context, registration inputarchive.PendingRootRegistration, authority inputarchive.PendingRootAuthority) (*compilerInputActivationProof, error) {
+	if !authority.Valid() || authority.Owner != registration.Owner {
+		return nil, ErrConflict
+	}
 	raw, hash, err := registration.Canonical()
 	if err != nil {
 		return nil, ErrInvalidInput
@@ -43,12 +49,8 @@ func (s *Store) preparePendingCompilerInputExternalRoot(ctx context.Context, reg
 	for i, ref := range copy.References {
 		roots[i] = inputarchive.HotRoot{Source: "pending-external-root", ID: hash + "/" + strconv.Itoa(i), Reference: ref}
 	}
-	proof, err := s.prepareCompilerInputActivation(ctx, roots)
-	if err != nil {
-		return nil, err
-	}
-	proof.pendingRoot = &compilerInputPendingRootIntent{registration: copy, raw: string(raw), hash: hash}
-	return proof, nil
+	intent := &compilerInputPendingRootIntent{registration: copy, raw: string(raw), hash: hash, authority: authority}
+	return s.prepareCompilerInputProof(ctx, roots, nil, nil, nil, nil, false, false, intent)
 }
 
 // ConfigurePendingRootAdmission installs trusted process providers. It does
@@ -65,8 +67,22 @@ func (s *Store) ConfigurePendingRootAdmission(source inputarchive.PendingRootSou
 	s.pendingRootAdmissionRevision++
 }
 
+// ConfigureStrictPendingRootAdmission installs the opt-in admission wrapper
+// that requires an operation-specific six-bound resource proof. It does not
+// enable any producer, route, or retirement policy; callers still need an
+// independently authenticated source verifier and a real resource provider.
+func (s *Store) ConfigureStrictPendingRootAdmission(source inputarchive.PendingRootSourceVerifier, admission inputarchive.PendingRootAdmission, limits inputarchive.PendingRootWholeOperationBudgetLimits, reservationEpoch uint64) {
+	s.ConfigurePendingRootAdmission(source, inputarchive.StrictPendingRootAdmission{
+		Inner:            admission,
+		Limits:           limits,
+		ReservationEpoch: reservationEpoch,
+	})
+}
+
 // RetainPendingCompilerInputExternalRoot is an internal, retention-only store
-// operation, not an HTTP surface. Missing source or allocation providers fail
+// operation. Its private HTTP adapter must independently authenticate owner and
+// source; this entry point alone never supplies transport authority.
+// Missing source or allocation providers fail
 // before DB access. The complete request is copied before any provider call.
 // No production caller or ordinary migration enables it implicitly. A crash or
 // lost reply after commit leaves the exact root protected; retrying the SAME
@@ -99,6 +115,11 @@ func (s *Store) RetainPendingCompilerInputExternalRoot(ctx context.Context, requ
 	if err := witness.CheckPendingRootSource(ctx, request); err != nil {
 		return inputarchive.PendingRootReceipt{}, err
 	}
+	bound, ok := witness.(inputarchive.PendingRootAuthorizedSourceWitness)
+	if !ok || !bound.PendingRootAuthority().Valid() || bound.PendingRootAuthority().Owner != request.Registration.Owner {
+		return inputarchive.PendingRootReceipt{}, ErrConflict
+	}
+	authority := bound.PendingRootAuthority()
 	reservation, err := admission.ReservePendingRoot(ctx, request)
 	if err != nil || reservation == nil {
 		return inputarchive.PendingRootReceipt{}, ErrConflict
@@ -112,12 +133,15 @@ func (s *Store) RetainPendingCompilerInputExternalRoot(ctx context.Context, requ
 		if err := witness.CheckPendingRootSource(ctx, request); err != nil {
 			return err
 		}
+		if bound.PendingRootAuthority() != authority {
+			return ErrConflict
+		}
 		return reservation.CheckPendingRootReservation(ctx)
 	}
 	if err := check(ctx); err != nil {
 		return inputarchive.PendingRootReceipt{}, err
 	}
-	proof, err := s.preparePendingCompilerInputExternalRoot(ctx, request.Registration)
+	proof, err := s.preparePendingCompilerInputExternalRoot(ctx, request.Registration, authority)
 	if err != nil {
 		return inputarchive.PendingRootReceipt{}, err
 	}
@@ -167,6 +191,12 @@ func (s *Store) commitPendingCompilerInputExternalRoot(ctx context.Context, proo
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('fugue.compiler-input-external-roots.v1',0))`); err != nil {
+			return err
+		}
+		// Serialize the complete append registry and hold the native policy row
+		// against updates until commit. Another API process cannot use its stale
+		// local configuration to bypass a committed revocation or registry drift.
+		if err := checkPendingRootNativeWitness(ctx, tx, intent); err != nil {
 			return err
 		}
 		var existingHash, existingRaw string

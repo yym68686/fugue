@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	"fugue/internal/inputarchive"
@@ -20,6 +22,10 @@ type pendingSourceWitnessFunc func(context.Context, inputarchive.PendingRootRequ
 
 func (f pendingSourceWitnessFunc) CheckPendingRootSource(ctx context.Context, r inputarchive.PendingRootRequest) error {
 	return f(ctx, r)
+}
+
+func (pendingSourceWitnessFunc) PendingRootAuthority() inputarchive.PendingRootAuthority {
+	return pendingAuthorityFixture()
 }
 
 type pendingAdmissionFunc func(context.Context, inputarchive.PendingRootRequest) (inputarchive.PendingRootReservation, error)
@@ -183,11 +189,85 @@ func TestPendingExternalRootPostgresAdmissionAndSourceRecheckBeforeCommit(t *tes
 
 func TestPendingExternalRootPostgresPreparationDoesNotAuthorizePrivateCommit(t *testing.T) {
 	s, r, _ := pendingExternalRootFixture(t)
-	proof, err := s.preparePendingCompilerInputExternalRoot(t.Context(), r)
+	proof, err := s.preparePendingCompilerInputExternalRoot(t.Context(), r, pendingAuthorityFixture())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if receipt, err := s.commitPendingCompilerInputExternalRoot(t.Context(), proof); !errors.Is(err, ErrConflict) || receipt.RegistryRevision != 0 || externalRootCount(t, s) != 0 {
 		t.Fatal("bare native preparation bypassed source/allocation admission", receipt, err)
+	}
+}
+
+func TestPendingExternalRootPostgresCrossConnectionRevocationSerializesWithCommit(t *testing.T) {
+	s, r, _ := pendingExternalRootFixture(t)
+	checks := 0
+	source := pendingSourceVerifierFunc(func(context.Context, inputarchive.PendingRootRequest) (inputarchive.PendingRootSourceWitness, error) {
+		return pendingSourceWitnessFunc(func(context.Context, inputarchive.PendingRootRequest) error {
+			checks++
+			if checks != 3 {
+				return nil
+			}
+			// Independent connection models another API/coordinator. Its policy
+			// update cannot pass the final native lease row lock during commit.
+			tx, err := s.db.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err = tx.Exec(`SET LOCAL lock_timeout='50ms'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = tx.Exec(`UPDATE fugue_platform_input_pending_authorities SET revision=revision+1`); err == nil || !strings.Contains(err.Error(), "lock timeout") {
+				t.Fatal("revocation crossed final native authority lock", err)
+			}
+			return nil
+		}), nil
+	})
+	reservation := &pendingReservationFixture{check: func(context.Context) error { return nil }}
+	s.ConfigurePendingRootAdmission(source, pendingAdmissionFunc(func(context.Context, inputarchive.PendingRootRequest) (inputarchive.PendingRootReservation, error) {
+		return reservation, nil
+	}))
+	first, err := s.RetainPendingCompilerInputExternalRoot(t.Context(), pendingAdmissionRequest(r))
+	if err != nil || !first.Matches(r) || checks != 3 {
+		t.Fatal(first, checks, err)
+	}
+	// The writer can now revoke after commit; the still-configured API cannot
+	// replay an old receipt after that database revision has committed.
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_pending_authorities SET revision=revision+1,policy_json='{"schema":"fugue.compiler-input.pending-root-authority-policy.v1","leases":[]}'`); err != nil {
+		t.Fatal(err)
+	}
+	if receipt, err := s.RetainPendingCompilerInputExternalRoot(t.Context(), pendingAdmissionRequest(r)); err == nil || receipt.RegistryRevision != 0 || externalRootCount(t, s) != 1 {
+		t.Fatal("old receipt bypassed native revocation", receipt, err)
+	}
+}
+
+func TestPendingExternalRootPostgresAuthorityPolicyRequiresExplicitInstallation(t *testing.T) {
+	s, r, _ := pendingExternalRootFixture(t)
+	for _, mode := range []string{"no-row", "invalid-policy", "wrong-authority", "guard-replaced"} {
+		t.Run(mode, func(t *testing.T) {
+			tx, err := s.db.BeginTx(t.Context(), &sql.TxOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			switch mode {
+			case "no-row":
+				_, err = tx.Exec(`ALTER TABLE fugue_platform_input_pending_authorities DISABLE TRIGGER fugue_pending_authorities_guard;DELETE FROM fugue_platform_input_pending_authorities;ALTER TABLE fugue_platform_input_pending_authorities ENABLE ALWAYS TRIGGER fugue_pending_authorities_guard`)
+			case "invalid-policy":
+				_, err = tx.Exec(`UPDATE fugue_platform_input_pending_authorities SET revision=revision+1,policy_json='{}'`)
+			case "guard-replaced":
+				_, err = tx.Exec(`ALTER TABLE fugue_platform_input_pending_authorities DISABLE TRIGGER fugue_pending_authorities_revision`)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := pendingAuthorityFixture()
+			if mode == "wrong-authority" {
+				a.SourceSHA = strings.Repeat("d", 40)
+			}
+			if _, err := readPendingRootPolicy(t.Context(), tx, a, false); err == nil {
+				t.Fatal("missing/invalid policy authorized", r.Owner)
+			}
+		})
 	}
 }

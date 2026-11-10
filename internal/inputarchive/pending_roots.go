@@ -80,7 +80,9 @@ type PendingRootSourceWitness interface {
 // Admission must reserve physical allocation, WAL, temporary and mandatory
 // failure/exit costs for this exact operation under current policy. A count
 // limit or an available-space observation alone is not such a reservation.
-// There is deliberately no permissive default implementation.
+// There is deliberately no permissive default implementation. Production
+// callers should install StrictPendingRootAdmission so the six whole-operation
+// bounds are checked before this interface can be used.
 type PendingRootAdmission interface {
 	ReservePendingRoot(context.Context, PendingRootRequest) (PendingRootReservation, error)
 }

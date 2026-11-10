@@ -16,6 +16,7 @@ import (
 const (
 	edgeControlRouteIntentPathV1       = "/v1/edge/route-intents"
 	edgeControlIdentityExchangePathV1  = "/v1/platform-state/consumers/identity"
+	edgeControlPendingRootPathV1       = "/v1/platform-state/compiler-inputs/pending-roots"
 	edgeControlRouteIntentTLSBindAddr  = ":8443"
 	edgeControlRouteIntentTLSDirectory = "/var/run/secrets/fugue-api-tls"
 )
@@ -84,7 +85,8 @@ func edgeControlRouteIntentTLSHandler(next http.Handler, serverName string) (htt
 		}
 		routeRead := r.Method == http.MethodGet && r.URL.EscapedPath() == edgeControlRouteIntentPathV1 && validEdgeControlRouteIntentQuery(r.URL.RawQuery)
 		identityExchange := r.Method == http.MethodPost && r.URL.EscapedPath() == edgeControlIdentityExchangePathV1 && r.URL.RawQuery == "" && !r.URL.ForceQuery
-		if r.TLS == nil || sni != serverName || (!routeRead && !identityExchange) || host != serverName {
+		pendingRoot := r.Method == http.MethodPost && r.URL.EscapedPath() == edgeControlPendingRootPathV1 && r.URL.RawQuery == "" && !r.URL.ForceQuery
+		if r.TLS == nil || sni != serverName || (!routeRead && !identityExchange && !pendingRoot) || host != serverName {
 			http.NotFound(w, r)
 			return
 		}

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,6 +24,17 @@ func pendingExternalRootFixture(t *testing.T) (*Store, inputarchive.PendingRootR
 	if err := schemamigrate.VerifyCompilerInputExternalRoots(t.Context(), s.db); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(schemamigrate.CompilerInputPendingAuthoritiesSQL); err != nil {
+		t.Fatal(err)
+	}
+	policy := inputarchive.PendingRootAuthorityPolicy{Schema: inputarchive.PendingRootAuthorityPolicySchema, Leases: []inputarchive.PendingRootAuthorityLease{{Authority: pendingAuthorityFixture(), LeaseID: strings.Repeat("c", 64), ExpiresUnix: time.Now().Add(time.Minute).Unix()}}}
+	raw, err := policy.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`INSERT INTO fugue_platform_input_pending_authorities(singleton,revision,policy_json) VALUES(TRUE,1,$1)`, string(raw)); err != nil {
+		t.Fatal(err)
+	}
 	root, err := s.GetPlatformArtifact("activation-root")
 	if err != nil {
 		t.Fatal(err)
@@ -30,6 +42,10 @@ func pendingExternalRootFixture(t *testing.T) (*Store, inputarchive.PendingRootR
 	r := inputarchive.PendingRootRegistration{Schema: inputarchive.PendingRootSchema, Owner: "authority/neutral", Generation: "generation-neutral",
 		SourceDigest: "sha256:" + strings.Repeat("a", 64), References: []inputarchive.HotReference{{Kind: "artifact", ID: root.ID, ExpectedHash: root.ContentHash}}}
 	return s, r, pins
+}
+
+func pendingAuthorityFixture() inputarchive.PendingRootAuthority {
+	return inputarchive.PendingRootAuthority{Owner: "authority/neutral", Namespace: "platform-test", ServiceAccount: "neutral", ServiceAccountUID: "sa-uid", Deployment: "neutral", DeploymentUID: "deployment-uid", PodUID: "pod-uid", SourceSHA: strings.Repeat("a", 40), ImageRef: "registry.test/neutral@sha256:" + strings.Repeat("b", 64), PolicyRevision: "policy-1"}
 }
 
 func externalRootCount(t *testing.T, s *Store) int {
@@ -52,7 +68,7 @@ func retainPendingExternalFixture(ctx context.Context, s *Store, r inputarchive.
 }
 
 func preparePendingExternalFixture(ctx context.Context, s *Store, r inputarchive.PendingRootRegistration) (*compilerInputActivationProof, error) {
-	proof, err := s.preparePendingCompilerInputExternalRoot(ctx, r)
+	proof, err := s.preparePendingCompilerInputExternalRoot(ctx, r, pendingAuthorityFixture())
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +79,66 @@ func preparePendingExternalFixture(ctx context.Context, s *Store, r inputarchive
 	proof.pendingRoot.admissionRevision = s.pendingRootAdmissionRevision
 	s.pendingRootAdmissionMu.RUnlock()
 	return proof, nil
+}
+
+func TestPendingExternalRootPostgresNativePolicyAndWholeRegistryDrift(t *testing.T) {
+	for _, mode := range []string{"revoked", "expired", "pod-replaced", "revision-only", "registry-append", "binding-append", "guard-disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			s, r, _ := pendingExternalRootFixture(t)
+			if mode == "binding-append" {
+				if _, err := retainPendingExternalFixture(t.Context(), s, r); err != nil {
+					t.Fatal(err)
+				}
+				r.Generation = "second-generation"
+			}
+			proof, err := preparePendingExternalFixture(t.Context(), s, r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var before int
+			switch mode {
+			case "registry-append":
+				other := r
+				other.Generation = "concurrent-generation"
+				if _, err = retainPendingExternalFixture(t.Context(), s, other); err != nil {
+					t.Fatal(err)
+				}
+			case "binding-append":
+				_, err = s.db.Exec(`INSERT INTO fugue_platform_input_external_root_refs(registration_sha256,ordinal,artifact_id) SELECT registration_sha256,32767,'activation-root' FROM fugue_platform_input_external_roots`)
+			case "guard-disabled":
+				_, err = s.db.Exec(`ALTER TABLE fugue_platform_input_pending_authorities DISABLE TRIGGER fugue_pending_authorities_revision`)
+			default:
+				var raw string
+				if err = s.db.QueryRow(`SELECT policy_json FROM fugue_platform_input_pending_authorities`).Scan(&raw); err != nil {
+					t.Fatal(err)
+				}
+				var policy inputarchive.PendingRootAuthorityPolicy
+				if err = json.Unmarshal([]byte(raw), &policy); err != nil {
+					t.Fatal(err)
+				}
+				switch mode {
+				case "revoked":
+					policy.Leases = []inputarchive.PendingRootAuthorityLease{}
+				case "expired":
+					policy.Leases[0].ExpiresUnix = time.Now().Add(-time.Second).Unix()
+				case "pod-replaced":
+					policy.Leases[0].Authority.PodUID = "replacement"
+				}
+				var encoded []byte
+				encoded, err = policy.Canonical()
+				if err == nil {
+					_, err = s.db.Exec(`UPDATE fugue_platform_input_pending_authorities SET revision=revision+1,policy_json=$1`, string(encoded))
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before = externalRootCount(t, s)
+			if receipt, err := s.commitPendingCompilerInputExternalRoot(t.Context(), proof); err == nil || receipt.RegistryRevision != 0 || externalRootCount(t, s) != before {
+				t.Fatal("native policy/complete registry drift committed", receipt, err)
+			}
+		})
+	}
 }
 
 func TestPendingExternalRootPostgresCrashRetentionIdempotenceAndNativeFK(t *testing.T) {

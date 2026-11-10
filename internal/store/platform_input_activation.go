@@ -91,7 +91,10 @@ func (s *Store) prepareOrdinaryCompilerInputProof(ctx context.Context, roots []i
 	return s.prepareCompilerInputProof(ctx, roots, task, publication, consumer, reads, true, false)
 }
 
-func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection, ordinary, inventory bool) (*compilerInputActivationProof, error) {
+func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection, ordinary, inventory bool, pending ...*compilerInputPendingRootIntent) (*compilerInputActivationProof, error) {
+	if len(pending) > 1 || len(pending) == 1 && (pending[0] == nil || task != nil || publication != nil || consumer != nil || len(reads) != 0 || ordinary || inventory) {
+		return nil, ErrInvalidInput
+	}
 	if s == nil || s.db == nil || !inventory && len(roots) == 0 && publication == nil && consumer == nil && len(reads) == 0 || len(roots) > compilerInputHotRootLimit || task != nil && publication != nil || consumer != nil && (task != nil || publication != nil || len(roots) != 0) || len(reads) != 0 && (task != nil || publication != nil || consumer != nil || len(roots) != 0) || inventory && (ordinary || task != nil || publication != nil || consumer != nil || len(reads) != 0 || len(roots) != 0) {
 		return nil, ErrInvalidInput
 	}
@@ -159,6 +162,15 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	var publicationSnapshots []model.PlatformLKGSnapshot
 	var publicationVerified []bool
 	publicationBytes := 0
+	if len(pending) == 1 {
+		proof.pendingRoot = pending[0]
+		if publicationBytes, err = preparePendingRootNativeWitness(ctx, tx, proof.pendingRoot); err != nil {
+			return nil, err
+		}
+		if expiry := time.Unix(proof.pendingRoot.policy.expiresUnix, 0); expiry.Before(proof.expires) {
+			proof.expires = expiry
+		}
+	}
 	if consumer != nil {
 		roots, err = prepareCompilerInputConsumerRoots(ctx, tx, consumer)
 		if err != nil {
@@ -795,6 +807,9 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 			return ErrConflict
 		}
 		if err := proof.pendingRoot.checkAdmission(ctx); err != nil {
+			return err
+		}
+		if err := checkPendingRootLeaseTime(ctx, tx, proof.pendingRoot.policy.expiresUnix); err != nil {
 			return err
 		}
 	}
