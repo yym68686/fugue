@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 )
 
 // Route and TLS dependency extraction reads lineage, policy and metadata. Keep
@@ -27,6 +28,14 @@ func decodeCompilerInputHotArtifactJSON(a *model.PlatformArtifact, content, meta
 	a.Content = map[string]any{}
 	for _, key := range []string{"lineage", "policy"} {
 		if raw, present := fields[key]; present {
+			// Configuration-v1 route/TLS artifacts must bind the policy.
+			// Skip materializing it only when the existing contract validator
+			// already accepts the dependency declaration without it.
+			if key == "policy" {
+				if _, err := platformconfig.ArtifactRuntimeInputDigest(*a); err == nil {
+					continue
+				}
+			}
 			var value any
 			if json.Unmarshal(raw, &value) != nil {
 				return ErrConflict
