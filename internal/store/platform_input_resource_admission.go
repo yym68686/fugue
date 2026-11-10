@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -286,10 +285,10 @@ func (a *PendingRootResourceAdmission) reserve(ctx context.Context, operation Pe
 	return &pendingRootResourceReservation{admission: a, pool: before, operation: operation, id: id, raw: allocationRaw, allocation: allocation, witness: witness}, nil
 }
 
-func (a *PendingRootResourceAdmission) readPool(ctx context.Context, tx *sql.Tx) (PendingRootResourcePoolSnapshot, time.Time, error) {
+func (a *PendingRootResourceAdmission) readPool(ctx context.Context, tx *pendingRootNativeTx) (PendingRootResourcePoolSnapshot, time.Time, error) {
 	var snapshot PendingRootResourcePoolSnapshot
 	var now time.Time
-	if err := schemamigrate.VerifyCompilerInputResourceReservations(ctx, tx); err != nil {
+	if err := schemamigrate.VerifyCompilerInputResourceReservations(ctx, tx.Tx); err != nil {
 		return snapshot, now, err
 	}
 	var raw, database, schema string
@@ -309,7 +308,7 @@ func (a *PendingRootResourceAdmission) readPool(ctx context.Context, tx *sql.Tx)
 	return snapshot, now, nil
 }
 
-func (a *PendingRootResourceAdmission) charged(ctx context.Context, tx *sql.Tx) (uint32, inputarchive.PendingRootWholeOperationBounds, error) {
+func (a *PendingRootResourceAdmission) charged(ctx context.Context, tx *pendingRootNativeTx) (uint32, inputarchive.PendingRootWholeOperationBounds, error) {
 	var count uint32
 	var total inputarchive.PendingRootWholeOperationBounds
 	var last int64
@@ -469,7 +468,7 @@ func (r *pendingRootResourceReservation) recordOutcome(ctx context.Context, outc
 	defer tx.Rollback()
 	// Outcome recording is permitted after expiry but only against the original
 	// guarded relations, original immutable pool row and exact reservation.
-	if err := schemamigrate.VerifyCompilerInputResourceReservations(ctx, tx); err != nil {
+	if err := schemamigrate.VerifyCompilerInputResourceReservations(ctx, tx.Tx); err != nil {
 		return err
 	}
 	var raw, xmin, ctid string

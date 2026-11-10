@@ -176,7 +176,7 @@ func (c *PendingRootPolicyCoordinator) Reconcile(ctx context.Context) (PendingRo
 				expiry = lease.ExpiresUnix
 			}
 		}
-		if err := checkPendingRootLeaseTime(ctx, tx, expiry); err != nil {
+		if err := checkPendingRootLeaseTime(ctx, tx.Tx, expiry); err != nil {
 			return PendingRootPolicySnapshot{}, err
 		}
 	}
@@ -187,31 +187,46 @@ func (c *PendingRootPolicyCoordinator) Reconcile(ctx context.Context) (PendingRo
 	return after, nil
 }
 
-func beginPendingRootPolicyTx(ctx context.Context, db *sql.DB, readOnly bool) (*sql.Tx, error) {
+func beginPendingRootPolicyTx(ctx context.Context, db *sql.DB, readOnly bool) (*pendingRootNativeTx, error) {
+	if ctx == nil || db == nil {
+		return nil, ErrConflict
+	}
+	// Bound only connection acquisition. Using this context for BeginTx would
+	// also cancel a healthy transaction after five seconds. The owned connection
+	// instead runs under the original shared operation deadline and is returned
+	// to the pool on every initialization failure, commit or rollback.
+	acquireCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	conn, err := db.Conn(acquireCtx)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
 	isolation := sql.LevelReadCommitted
 	if readOnly {
 		isolation = sql.LevelRepeatableRead
 	}
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: isolation, ReadOnly: readOnly})
+	native, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: isolation, ReadOnly: readOnly})
 	if err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
+	tx := &pendingRootNativeTx{Tx: native, conn: conn}
 	for _, statement := range []string{`SET LOCAL statement_timeout='5s'`, `SET LOCAL lock_timeout='250ms'`, `SET LOCAL work_mem='1MB'`, `SET LOCAL max_parallel_workers_per_gather=0`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			tx.Rollback()
 			return nil, err
 		}
 	}
-	if err := schemamigrate.EnforceCompilerInputZeroTemp(ctx, tx); err != nil {
+	if err := schemamigrate.EnforceCompilerInputZeroTemp(ctx, tx.Tx); err != nil {
 		tx.Rollback()
 		return nil, err
 	}
 	return tx, nil
 }
 
-func readPendingRootPolicySnapshot(ctx context.Context, tx *sql.Tx, lock bool) (PendingRootPolicySnapshot, error) {
+func readPendingRootPolicySnapshot(ctx context.Context, tx *pendingRootNativeTx, lock bool) (PendingRootPolicySnapshot, error) {
 	var state PendingRootPolicySnapshot
-	if err := schemamigrate.VerifyCompilerInputPendingAuthorities(ctx, tx); err != nil {
+	if err := schemamigrate.VerifyCompilerInputPendingAuthorities(ctx, tx.Tx); err != nil {
 		return state, err
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT 'fugue_platform_input_pending_authorities'::regclass::oid::bigint,pg_relation_filenode('fugue_platform_input_pending_authorities'::regclass)`).Scan(&state.Relation, &state.Filenode); err != nil {
