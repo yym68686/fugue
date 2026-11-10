@@ -1209,14 +1209,16 @@ LIMIT 1`, laneKey, strings.TrimSpace(idempotencyKey)))
 	return release, true, nil
 }
 
-func pgGetLatestPlatformReleaseMessage(ctx context.Context, db platformStateDB, releaseID string) (model.PlatformReleaseMessage, error) {
-	message, err := scanPlatformReleaseMessage(db.QueryRowContext(ctx, `
+const pgLatestPlatformReleaseMessageSQL = `
 SELECT id, release_id, artifact_id, artifact_kind, scope_key, scope_json, generation,
 	release_channel, message_type, created_at, expires_at, ack_count
 FROM fugue_platform_release_messages
 WHERE release_id = $1
 ORDER BY created_at DESC, id ASC
-LIMIT 1`, releaseID))
+LIMIT 1`
+
+func pgGetLatestPlatformReleaseMessage(ctx context.Context, db platformStateDB, releaseID string) (model.PlatformReleaseMessage, error) {
+	message, err := scanPlatformReleaseMessage(db.QueryRowContext(ctx, pgLatestPlatformReleaseMessageSQL, releaseID))
 	if err != nil {
 		return model.PlatformReleaseMessage{}, mapDBErr(err)
 	}

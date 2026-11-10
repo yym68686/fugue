@@ -2214,6 +2214,7 @@ $$`,
 		ack_count INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_messages_kind_scope_created ON fugue_platform_release_messages (artifact_kind, scope_key, created_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_messages_release_created_id ON fugue_platform_release_messages (release_id, created_at DESC, id ASC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_platform_consumer_instances (
 		id TEXT PRIMARY KEY,
 		consumer_id TEXT NOT NULL,
