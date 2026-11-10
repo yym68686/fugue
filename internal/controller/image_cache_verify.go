@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/observability"
 	"fugue/internal/store"
 )
 
@@ -37,6 +38,19 @@ type destinationImageCacheVerifyFunc func(
 	string,
 	string,
 ) (destinationImageCacheVerification, error)
+
+type destinationImageCacheHTTPError struct {
+	StatusCode int
+	Detail     string
+}
+
+func (e *destinationImageCacheHTTPError) Error() string {
+	message := fmt.Sprintf("destination image-cache verification returned status %d", e.StatusCode)
+	if e.Detail != "" {
+		message += ": " + e.Detail
+	}
+	return message
+}
 
 func imageCacheManagementTokenFromEnv() string {
 	return strings.TrimSpace(os.Getenv("FUGUE_BOOTSTRAP_ADMIN_KEY"))
@@ -100,7 +114,20 @@ func newDestinationImageCacheVerifier(managementToken string) destinationImageCa
 			return destinationImageCacheVerification{}, fmt.Errorf("destination image-cache verification response is too large")
 		}
 		if resp.StatusCode != http.StatusOK {
-			return destinationImageCacheVerification{}, fmt.Errorf("destination image-cache verification returned status %d", resp.StatusCode)
+			failure := &destinationImageCacheHTTPError{StatusCode: resp.StatusCode}
+			var result destinationImageCacheVerification
+			// Only retain the identity-matched structured cache error, never an
+			// arbitrary proxy response or credentials. Keep durable errors bounded.
+			repo, target, ok := managedImageRepoTarget(managedImageRef)
+			if json.Unmarshal(responseBody, &result) == nil && ok && result.Repo == repo && result.Target == target {
+				detail := strings.ReplaceAll(result.Error, managementToken, "[redacted]")
+				detail = observability.RedactDiagnosticText(detail).Text
+				if len(detail) > 2048 {
+					detail = detail[:2048] + " [truncated]"
+				}
+				failure.Detail = detail
+			}
+			return destinationImageCacheVerification{}, failure
 		}
 		var result destinationImageCacheVerification
 		decoder := json.NewDecoder(bytes.NewReader(responseBody))

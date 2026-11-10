@@ -119,32 +119,20 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	var output sourceimport.GitHubSourceImportOutput
 	queuedDockerImageRef := ""
 	stopImportProgress := s.startImportOperationProgressHeartbeat(importCtx, op.ID)
+	defer stopImportProgress()
 	switch strings.TrimSpace(op.DesiredSource.Type) {
 	case model.AppSourceTypeDockerImage:
 		queuedDockerImageRef = strings.TrimSpace(op.DesiredSource.ImageRef)
 		if queuedDockerImageRef == "" {
 			return fmt.Errorf("import operation %s missing image_ref", op.ID)
 		}
-		// An internal image is already owned by Fugue's node-local registry.
-		// Never send that reference through crane's remote-registry resolver:
-		// the cluster DNS name is intentionally not resolvable from the
-		// controller.  Verify the complete graph on the selected cache instead.
-		if strings.HasPrefix(queuedDockerImageRef, strings.Trim(s.registryPushBase, "/")+"/") && imageDestination.CacheEndpoint != "" && s.verifyDestinationImageCache != nil {
-			verified, verifyErr := s.verifyDestinationImageCache(ctx, imageDestination.CacheEndpoint, queuedDockerImageRef)
-			if verifyErr != nil {
-				return fmt.Errorf("verify internal image on target cache: %w", verifyErr)
-			}
-			if verifyErr := validateDestinationImageCacheVerification(verified, queuedDockerImageRef); verifyErr != nil {
-				return fmt.Errorf("verify internal image on target cache: %w", verifyErr)
-			}
-			cacheRef := cacheEndpointImageRef(imageDestination.CacheEndpoint, queuedDockerImageRef)
-			output = sourceimport.GitHubSourceImportOutput{
-				ImportResult: sourceimport.GitHubImportResult{
-					DetectedProvider:    model.AppSourceTypeDockerImage,
-					ImageRef:            queuedDockerImageRef,
-					DestinationImageRef: cacheRef,
-				},
-				Source: model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: queuedDockerImageRef, ResolvedImageRef: queuedDockerImageRef, DetectedProvider: model.AppSourceTypeDockerImage},
+		// Internal references belong to node-local caches, not a central registry.
+		// Verify an authorized source before queuing deploy; the selected runtime
+		// need not already hold the image. Deploy prepares its own target replica.
+		if managedRef, _, internal := configuredManagedImportImageRefs(queuedDockerImageRef, s.registryPushBase, s.registryPullBase); internal && s.verifyDestinationImageCache != nil && (s.nodeLocalBuilderRegistryEnabled() || s.imageStoreDistributedMode()) {
+			output, imageDestination, err = s.importInternalCachedImage(importCtx, app, op, managedRef, imageDestination)
+			if err != nil {
+				return err
 			}
 			break
 		}

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,61 @@ import (
 	"sync/atomic"
 	"testing"
 )
+
+func TestDestinationImageCacheVerifierPreservesBoundedRedactedFailure(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"manifest-missing", "blob-missing", "wrong-identity", "proxy-error", "oversized-detail"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				if scenario == "proxy-error" {
+					_, _ = w.Write([]byte("arbitrary proxy body " + imageCacheVerifyTestAuthToken))
+					return
+				}
+				repo, target, _ := managedImageRepoTarget(imageCacheVerifyTestRef)
+				detail := "MANIFEST_UNKNOWN management-secret PASSWORD=secret-value"
+				if scenario == "blob-missing" {
+					detail = "local blob " + imageCacheVerifyTestBlob + " status=404"
+				}
+				if scenario == "wrong-identity" {
+					repo = "fugue-apps/other"
+				}
+				if scenario == "oversized-detail" {
+					detail = strings.Repeat("x", 4096)
+				}
+				_ = json.NewEncoder(w).Encode(destinationImageCacheVerification{Repo: repo, Target: target, Error: detail})
+			}))
+			t.Cleanup(server.Close)
+			_, err := newDestinationImageCacheVerifier(imageCacheVerifyTestAuthToken)(context.Background(), server.URL, imageCacheVerifyTestRef)
+			var failure *destinationImageCacheHTTPError
+			if !errors.As(err, &failure) || failure.StatusCode != 404 {
+				t.Fatalf("missing HTTP status: %v", err)
+			}
+			if strings.Contains(err.Error(), imageCacheVerifyTestAuthToken) || strings.Contains(err.Error(), "secret-value") {
+				t.Fatalf("unredacted error: %v", err)
+			}
+			switch scenario {
+			case "manifest-missing":
+				if !strings.Contains(failure.Detail, "MANIFEST_UNKNOWN") {
+					t.Fatalf("missing cause: %v", err)
+				}
+			case "blob-missing":
+				if !strings.Contains(failure.Detail, imageCacheVerifyTestBlob) {
+					t.Fatalf("missing blob: %v", err)
+				}
+			case "wrong-identity", "proxy-error":
+				if failure.Detail != "" {
+					t.Fatalf("untrusted body retained: %v", err)
+				}
+			case "oversized-detail":
+				if len(failure.Detail) > 2100 || !strings.HasSuffix(failure.Detail, "[truncated]") {
+					t.Fatalf("unbounded detail: %d", len(failure.Detail))
+				}
+			}
+		})
+	}
+}
 
 const (
 	imageCacheVerifyTestRef       = "registry.fugue.internal:5000/fugue-apps/demo:image-abc123"
