@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,36 @@ func TestRunBuilderJobWithRetryEscalatesEphemeralFailures(t *testing.T) {
 	got := []int{attempts[0].EphemeralRetryCount, attempts[1].EphemeralRetryCount}
 	if want := []int{0, 1}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ephemeral retry counts = %v, want %v; attempts=%+v", got, want, attempts)
+	}
+}
+
+func TestRunBuilderJobWithRetryRecoversHeapFailureAfterTraceback(t *testing.T) {
+	t.Parallel()
+
+	var attempts []builderJobAttempt
+	var recordedOOM []BuilderOOMObservation
+	ctx := WithBuilderOOMGuard(context.Background(), nil, func(_ context.Context, fact BuilderOOMObservation) error {
+		recordedOOM = append(recordedOOM, fact)
+		return nil
+	})
+	actual := builderPodPolicyWithAllocatedDemand(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, builderResourceDemand{MemoryBytes: 1 << 30})
+	err := runBuilderJobWithRetry(ctx, "dockerfile", "synthetic-build", "registry.example/build:test", nil, func(_ context.Context, attempt builderJobAttempt) error {
+		attempts = append(attempts, attempt)
+		if len(attempts) == 1 {
+			output := "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n" +
+				strings.Repeat("native stack frame\n", 30) + "Aborted (core dumped)\nerror building image: exit status 134\n"
+			return withBuilderAttemptFailure(errors.New(summarizeBuilderLogTail(output)), actual, builderWorkloadProfileHeavy)
+		}
+		return nil
+	})
+	if err != nil || len(attempts) != 2 {
+		t.Fatalf("heap failure did not recover: attempts=%+v err=%v", attempts, err)
+	}
+	if attempts[1].OOMRetryCount != 1 || attempts[1].MinimumMemoryBytes <= 1<<30 {
+		t.Fatalf("retry did not use the existing memory escalation policy: %+v", attempts[1])
+	}
+	if len(recordedOOM) != 0 {
+		t.Fatalf("process heap exhaustion was recorded as a confirmed Kubernetes OOM: %+v", recordedOOM)
 	}
 }
 

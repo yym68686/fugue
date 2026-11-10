@@ -2,7 +2,9 @@ package sourceimport
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestBuilderJobFailedWithFailedCondition(t *testing.T) {
@@ -85,6 +87,62 @@ func TestSummarizeBuilderLogTailUsesLastNonEmptyLines(t *testing.T) {
 	want := "line two | line three | line four"
 	if got != want {
 		t.Fatalf("unexpected log tail summary:\nwant: %s\ngot:  %s", want, got)
+	}
+}
+
+func TestSummarizeBuilderLogTailPreservesFailureSignals(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, cause, signal string
+		oom                 bool
+	}{
+		{"heap exhaustion", "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory", "out of memory", true},
+		{"transport failure", "failed to fetch layer: unexpected EOF", "unexpected eof", false},
+		{"storage failure", "write failed: no space left on device", "no space left on device", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A runtime traceback and a long build wrapper used to discard the
+			// causal line both at the three-line and the 320-byte boundaries.
+			output := tc.cause + "\r\n" + strings.Repeat("native stack frame\n", 30) +
+				"Aborted (core dumped)\nerror building image: " + strings.Repeat("wrapper detail ", 30) + "exit status 134\n"
+			summary := summarizeBuilderLogTail(output)
+			if !strings.Contains(summary, tc.cause) || len(summary) > 320 {
+				t.Fatalf("causal line lost or unbounded summary: %q", summary)
+			}
+			err := errors.New(summary)
+			retry, signal := shouldRetryBuilderJobFailure(err)
+			if !retry || signal != tc.signal || isBuilderOOMFailure(err, signal) != tc.oom {
+				t.Fatalf("incorrect retry decision: retry=%v signal=%q oom=%v", retry, signal, isBuilderOOMFailure(err, signal))
+			}
+		})
+	}
+}
+
+func TestSummarizeBuilderLogTailPrioritizesMemoryAndBoundsUnicode(t *testing.T) {
+	t.Parallel()
+	for _, output := range []string{
+		strings.Repeat("构建", 200),
+		strings.Repeat("构建", 200) + " OUT OF MEMORY\n" + strings.Repeat("stack frame\n", 3),
+		"out of memory\n" + strings.Repeat("stack frame\n", 3) + "unexpected EOF\n",
+	} {
+		summary := summarizeBuilderLogTail(output)
+		if len(summary) > 320 || !utf8.ValidString(summary) {
+			t.Fatalf("invalid bounded summary: %q", summary)
+		}
+		if strings.Contains(strings.ToLower(output), "out of memory") && !isBuilderOOMFailure(errors.New(summary), "") {
+			t.Fatalf("memory failure lost: %q", summary)
+		}
+	}
+}
+
+func TestSummarizeBuilderLogTailDoesNotInferOOMFromExitCode(t *testing.T) {
+	t.Parallel()
+	for _, output := range []string{"", "Aborted (core dumped)\nexit status 134", "Killed\nexit status 137"} {
+		summary := summarizeBuilderLogTail(output)
+		retry, signal := shouldRetryBuilderJobFailure(errors.New(summary))
+		if retry || isBuilderOOMFailure(errors.New(summary), signal) {
+			t.Fatalf("unconfirmed memory failure inferred from %q", summary)
+		}
 	}
 }
 

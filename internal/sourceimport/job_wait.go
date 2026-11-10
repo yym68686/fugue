@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type builderJob struct {
@@ -240,7 +241,9 @@ func summarizeBuilderPodFailureLogTail(ctx context.Context, namespace string, po
 	if containerName == "" {
 		return "", ""
 	}
-	output, err := kubectlOutput(ctx, nil, "-n", namespace, "logs", pod.Metadata.Name, "-c", containerName, "--tail=20")
+	// Runtime stack traces can push the actual failure beyond the last 20 lines.
+	// Bound both the number of lines and bytes read from a failed container.
+	output, err := kubectlOutput(ctx, nil, "-n", namespace, "logs", pod.Metadata.Name, "-c", containerName, "--tail=80", "--limit-bytes=16384")
 	if err != nil {
 		return "", ""
 	}
@@ -259,13 +262,50 @@ func summarizeBuilderLogTail(output string) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	if len(lines) > 3 {
-		lines = lines[len(lines)-3:]
+	tail := lines[max(0, len(lines)-3):]
+	summary := strings.Join(tail, " | ")
+	// Retry decisions consume this summary. Preserve a canonical failure signal
+	// before presentation truncation, even when a traceback or wrapper follows it.
+	// Resource failures take precedence over secondary transport errors.
+	signal, failureLine, priority := "", "", 0
+	for _, candidate := range retriableBuilderFailureSignals {
+		candidatePriority := 1
+		if isBuilderOOMFailure(nil, candidate) {
+			candidatePriority = 3
+		} else if isBuilderEphemeralStorageFailure(nil, candidate) {
+			candidatePriority = 2
+		}
+		if candidatePriority <= priority {
+			continue
+		}
+		for i := len(lines) - 1; i >= 0; i-- {
+			if strings.Contains(strings.ToLower(lines[i]), candidate) {
+				signal, failureLine, priority = candidate, lines[i], candidatePriority
+				break
+			}
+		}
 	}
-	summary := strings.Join(lines, " | ")
 	const maxLen = 320
+	if signal != "" {
+		if strings.Contains(strings.ToLower(summary), signal) && len(summary) <= maxLen {
+			return summary
+		}
+		summary = signal + ": " + failureLine + " | " + summary
+		if len(summary) > maxLen {
+			end := maxLen - 3
+			for !utf8.RuneStart(summary[end]) {
+				end--
+			}
+			summary = summary[:end] + "..."
+		}
+		return summary
+	}
 	if len(summary) > maxLen {
-		summary = "..." + summary[len(summary)-maxLen+3:]
+		start := len(summary) - maxLen + 3
+		for !utf8.RuneStart(summary[start]) {
+			start++
+		}
+		summary = "..." + summary[start:]
 	}
 	return summary
 }
