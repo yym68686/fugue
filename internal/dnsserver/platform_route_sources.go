@@ -22,7 +22,7 @@ func (s *Service) replayDNSRouteContext(p dnsServingPayload, c dnsPlatformCandid
 	// The checkpoint authenticates the original observation. Retained-only LKG
 	// proof deadlines are enforced independently; an unused expired LKG entry
 	// cannot invalidate an active source during bounded offline recovery.
-	plans, err := s.routeSourceCompiler.Build(c.Artifact, source.Snapshot, s.platformDNSKeys(), source.Snapshot.ObservedAt)
+	plans, err := s.buildDNSRouteSources(context.Background(), c.Artifact, source.Snapshot, source.Snapshot.ObservedAt)
 	if err != nil {
 		return p, err
 	}
@@ -43,8 +43,16 @@ func (s *Service) replayDNSRouteContext(p dnsServingPayload, c dnsPlatformCandid
 }
 
 func (s *Service) observeDNSRouteSources(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, c dnsPlatformCandidate, p dnsServingPayload, previous *dnsroutesource.Context, probe dnsReadinessProbeFunc) (dnsServingPayload, []dnsReadinessFact, error) {
+	var prior []model.PlatformDNSRouteSourceSnapshot
+	if previous != nil {
+		prior = []model.PlatformDNSRouteSourceSnapshot{previous.Snapshot}
+	}
 	return s.observeDNSRouteSourcesWithReader(ctx, c, p, previous, probe, func(ctx context.Context) (model.PlatformDNSRouteSourceSnapshot, error) {
-		return client.DNSRouteSources(ctx, id, c.Assignment, c.Release)
+		snapshot, err := client.DNSRouteSources(ctx, id, c.Assignment, c.Release, prior...)
+		if err == nil {
+			prior = []model.PlatformDNSRouteSourceSnapshot{snapshot}
+		}
+		return snapshot, err
 	})
 }
 
@@ -76,7 +84,7 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 	}
 	reuseDNSRouteSourceContent(&snapshot, previous)
 	_, finishBuild := observeDNSSyncPhase(ctx, "source_plan_build")
-	plans, err := s.routeSourceCompiler.Build(c.Artifact, snapshot, s.platformDNSKeys(), now)
+	plans, err := s.buildDNSRouteSources(ctx, c.Artifact, snapshot, now)
 	finishBuild(err)
 	if err != nil {
 		return p, nil, err
@@ -152,7 +160,7 @@ func (s *Service) checkDNSRouteSources(ctx context.Context, client platformconsu
 	if source == nil {
 		return nil
 	}
-	next, err := client.DNSRouteSources(ctx, id, c.Assignment, c.Release)
+	next, err := client.DNSRouteSources(ctx, id, c.Assignment, c.Release, source.Snapshot)
 	if err != nil {
 		return err
 	}

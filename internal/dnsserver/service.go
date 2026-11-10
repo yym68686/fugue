@@ -70,6 +70,7 @@ type Service struct {
 	udpListening                  atomic.Bool
 	tcpListening                  atomic.Bool
 	platformServing               atomic.Pointer[dnsServingState]
+	platformCheckpoint            atomic.Pointer[dnsPersistedCheckpoint]
 	platformRenewal               atomic.Pointer[dnsServingRenewal]
 	platformServingBound          atomic.Bool
 	platformServingReported       time.Time
@@ -83,6 +84,8 @@ type Service struct {
 	shadowValidationParent        *Service
 	dnsProbeHistories             dnsProbeHistoryStore
 	sharedProbeHistories          *dnsProbeHistoryStore
+	dnsContentBudget              dnsContentBudget
+	sharedContentBudget           *dnsContentBudget
 	servingDNSProbes              dnsReadinessScheduler
 	candidateDNSProbes            dnsReadinessScheduler
 	retainedDNSProbes             dnsReadinessScheduler

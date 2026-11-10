@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"sync"
 
+	"fugue/internal/platformsafety"
+
 	"golang.org/x/sync/singleflight"
 )
 
@@ -24,9 +26,11 @@ type platformContentCache struct {
 }
 
 type platformContentEntry struct {
-	key     [32]byte
-	content map[string]any
-	bytes   int
+	key           [32]byte
+	content       map[string]any
+	bytes         int
+	fingerprint   [32]byte
+	fingerprintOK bool
 }
 
 func newPlatformContentCache(maxBytes, maxEntries int) *platformContentCache {
@@ -34,49 +38,73 @@ func newPlatformContentCache(maxBytes, maxEntries int) *platformContentCache {
 }
 
 func (c *platformContentCache) decode(raw []byte) (map[string]any, error) {
-	// Small documents cost less to decode than to clone and manage. Huge
-	// documents must not displace the entire working set or enter singleflight.
 	if len(raw) < 1024 || len(raw) > 8<<20 || c.maxBytes <= 0 || c.maxEntries <= 0 {
 		return decodeJSONValue[map[string]any](raw)
 	}
-	key := sha256.Sum256(raw)
-	if content, ok := c.get(key); ok {
-		return clonePlatformContent(content), nil
+	entry, err := c.decodeImmutable(raw, sha256.Sum256(raw))
+	if err != nil {
+		return nil, err
+	}
+	return clonePlatformContent(entry.content), nil
+}
+
+// decodeImmutable is internal to the store: its containers must never escape
+// to callers. Metadata belongs to these exact bytes and is calculated once.
+// The caller must hash the actual raw bytes, never a declared artifact hash.
+func (c *platformContentCache) decodeImmutable(raw []byte, key [32]byte) (platformContentEntry, error) {
+	// Small documents cost less to decode than to clone and manage. Huge
+	// documents must not displace the entire working set or enter singleflight.
+	if len(raw) < 1024 || len(raw) > 8<<20 || c.maxBytes <= 0 || c.maxEntries <= 0 {
+		content, err := decodeJSONValue[map[string]any](raw)
+		return newPlatformContentEntry(key, content), err
+	}
+	if entry, ok := c.getEntry(key); ok {
+		return entry, nil
 	}
 	value, err, _ := c.flights.Do(string(key[:]), func() (any, error) {
-		if content, ok := c.get(key); ok {
-			return content, nil
+		if entry, ok := c.getEntry(key); ok {
+			return entry, nil
 		}
 		content, err := decodeJSONValue[map[string]any](raw)
 		if err != nil {
 			return nil, err
 		}
+		entry := newPlatformContentEntry(key, content)
 		if content != nil {
-			c.put(key, content)
+			c.putEntry(entry)
 		}
-		return content, nil
+		return entry, nil
 	})
 	if err != nil {
-		return nil, err
+		return platformContentEntry{}, err
 	}
-	// Cached maps/slices never escape. Scalars and immutable strings can be
-	// shared; every caller owns all mutable containers, including on a miss.
-	return clonePlatformContent(value.(map[string]any)), nil
+	// Only store-internal ownership boundaries may consume this entry.
+	return value.(platformContentEntry), nil
+}
+
+func newPlatformContentEntry(key [32]byte, content map[string]any) platformContentEntry {
+	fingerprint, ok := platformsafety.FingerprintArtifactContent(content)
+	return platformContentEntry{key: key, content: content, bytes: 256 + platformContentSize(content), fingerprint: fingerprint, fingerprintOK: ok}
 }
 
 func (c *platformContentCache) get(key [32]byte) (map[string]any, bool) {
+	entry, ok := c.getEntry(key)
+	return entry.content, ok
+}
+
+func (c *platformContentCache) getEntry(key [32]byte) (platformContentEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.entries[key]
 	if !ok {
-		return nil, false
+		return platformContentEntry{}, false
 	}
 	c.lru.MoveToFront(entry)
-	return entry.Value.(platformContentEntry).content, true
+	return entry.Value.(platformContentEntry), true
 }
 
-func (c *platformContentCache) put(key [32]byte, content map[string]any) {
-	size := 256 + platformContentSize(content)
+func (c *platformContentCache) putEntry(candidate platformContentEntry) {
+	key, size := candidate.key, candidate.bytes
 	if size > c.maxBytes {
 		return
 	}
@@ -92,7 +120,7 @@ func (c *platformContentCache) put(key [32]byte, content map[string]any) {
 		c.bytes -= entry.bytes
 		c.lru.Remove(last)
 	}
-	c.entries[key] = c.lru.PushFront(platformContentEntry{key: key, content: content, bytes: size})
+	c.entries[key] = c.lru.PushFront(candidate)
 	c.bytes += size
 }
 

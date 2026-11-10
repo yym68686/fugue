@@ -234,6 +234,10 @@ func (c Client) json(ctx context.Context, endpoint, token, method string, in, ou
 }
 
 func (c Client) jsonLimit(ctx context.Context, endpoint, token, method string, in, out any, limit int64) error {
+	return c.jsonRevalidated(ctx, endpoint, token, method, in, out, limit, "", nil)
+}
+
+func (c Client) jsonRevalidated(ctx context.Context, endpoint, token, method string, in, out any, limit int64, validator string, unchanged func(http.Header) error) error {
 	var body io.Reader
 	if in != nil {
 		raw, err := json.Marshal(in)
@@ -248,6 +252,9 @@ func (c Client) jsonLimit(ctx context.Context, endpoint, token, method string, i
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	if validator != "" && unchanged != nil {
+		req.Header.Set("If-None-Match", validator)
+	}
 	client := c.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
@@ -262,6 +269,9 @@ func (c Client) jsonLimit(ctx context.Context, endpoint, token, method string, i
 		return ErrUnavailable
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotModified && validator != "" && unchanged != nil && resp.Header.Get("ETag") == validator {
+		return unchanged(resp.Header)
+	}
 	if resp.StatusCode != http.StatusOK {
 		status := &responseStatusError{Code: resp.StatusCode}
 		if resp.StatusCode == http.StatusConflict && (req.URL.Path == "/v1/platform-state/consumers/trusted-heartbeat" || req.URL.Path == "/v1/platform-state/consumers/shadow-heartbeat") {

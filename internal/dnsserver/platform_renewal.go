@@ -66,7 +66,7 @@ func (s *Service) newDNSRenewalWorker() *Service {
 	cfg.CachePath += ".renewal"
 	// Network scheduling and cursors are independent. Only authenticated
 	// observation continuity is shared; neither scheduler owns its authority.
-	return &Service{Config: cfg, HTTPClient: s.HTTPClient, Logger: s.Logger, PlatformTokenFile: s.PlatformTokenFile, sharedProbeHistories: s.probeHistoryStore()}
+	return &Service{Config: cfg, HTTPClient: s.HTTPClient, Logger: s.Logger, PlatformTokenFile: s.PlatformTokenFile, sharedProbeHistories: s.probeHistoryStore(), sharedContentBudget: s.contentBudget()}
 }
 
 func (s *Service) probeHistoryStore() *dnsProbeHistoryStore {

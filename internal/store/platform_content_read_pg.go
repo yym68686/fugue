@@ -53,9 +53,9 @@ func (s *Store) pgReadPlatformArtifactSession(ctx context.Context, idOrGeneratio
 	key, hinted := s.platformContentHints[idOrGeneration]
 	s.platformContentHintMu.Unlock()
 	var validator []byte
-	var pinned map[string]any
+	var pinned platformContentEntry
 	if hinted {
-		if content, ok := platformContentDecodings.get(key); ok {
+		if content, ok := platformContentDecodings.getEntry(key); ok {
 			// Retain the immutable map until the query completes, even if the
 			// bounded LRU evicts its entry while this request is in flight.
 			pinned = content
@@ -65,21 +65,21 @@ func (s *Store) pgReadPlatformArtifactSession(ctx context.Context, idOrGeneratio
 	scanner := &platformContentDigestScanner{sqlScanner: s.db.QueryRowContext(ctx, platformArtifactConditionalReadSQL, idOrGeneration, validator)}
 	artifact, err = scanPlatformArtifactWithDecoder(scanner, func(raw []byte) (map[string]any, error) {
 		if raw == nil {
-			if pinned == nil || !bytes.Equal(scanner.digest, validator) {
+			if pinned.content == nil || !bytes.Equal(scanner.digest, validator) {
 				return nil, fmt.Errorf("platform artifact conditional read omitted uncached content")
 			}
 			s.readMetrics[artifactReadMetric].bodyElisions.Add(1)
 			if session != nil {
-				return session.owned(key, pinned), nil
+				return session.ownedEntry(pinned), nil
 			}
-			return clonePlatformContent(pinned), nil
+			return clonePlatformContent(pinned.content), nil
 		}
 		s.readMetrics[artifactReadMetric].bodyBytes.Add(uint64(len(raw)))
 		actual := sha256.Sum256(raw)
 		if !bytes.Equal(actual[:], scanner.digest) {
 			return nil, fmt.Errorf("platform artifact content transport digest mismatch")
 		}
-		content, err := platformContentDecodings.decode(raw)
+		content, err := platformContentDecodings.decodeImmutable(raw, actual)
 		if err == nil {
 			if _, cached := platformContentDecodings.get(actual); cached {
 				s.platformContentHintMu.Lock()
@@ -96,12 +96,10 @@ func (s *Store) pgReadPlatformArtifactSession(ctx context.Context, idOrGeneratio
 				s.platformContentHintMu.Unlock()
 			}
 			if session != nil {
-				if immutable, ok := platformContentDecodings.get(actual); ok {
-					return session.owned(actual, immutable), nil
-				}
+				return session.ownedEntry(content), nil
 			}
 		}
-		return content, err
+		return clonePlatformContent(content.content), err
 	})
 	return artifact, err
 }

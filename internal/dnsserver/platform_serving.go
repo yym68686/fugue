@@ -38,6 +38,14 @@ type dnsServingCheckpoint struct {
 	KeyID        string                  `json:"key_id"`
 	Signature    string                  `json:"signature,omitempty"`
 }
+
+// One already materialized checkpoint, bound to the actual persisted bytes.
+// This saves reparsing the old graph while a new graph is live. It never
+// stores a validity verdict: trust, signatures, expiry and binding are rechecked.
+type dnsPersistedCheckpoint struct {
+	digest [32]byte
+	record dnsServingCheckpoint
+}
 type DNSServingStatus struct {
 	State          string              `json:"state"`
 	ReleaseSetID   string              `json:"release_set_id,omitempty"`
@@ -85,7 +93,18 @@ func (s *Service) decodeDNSCheckpoint(raw []byte) (dnsServingCheckpoint, error) 
 // the embedded publication graphs a second time. This is not a trust cache.
 func (s *Service) decodeDNSCheckpointPayload(raw []byte) (dnsServingCheckpoint, dnsServingPayload, string, error) {
 	var c dnsServingCheckpoint
-	if len(raw) > 32<<20 || json.Unmarshal(raw, &c) != nil || c.Schema != "fugue.dns.positive-checkpoint/v1" || !c.Positive || c.NodeID != s.Config.DNSNodeID || c.GroupID != s.Config.EdgeGroupID || c.AppliedAt.IsZero() || c.AppliedAt.After(time.Now().Add(time.Second)) {
+	if len(raw) > 32<<20 || json.Unmarshal(raw, &c) != nil {
+		return c, dnsServingPayload{}, "", errors.New("DNS positive checkpoint invalid")
+	}
+	c, p, routeID, err := s.verifyMaterializedDNSCheckpoint(c)
+	if err == nil {
+		compactDNSArtifactContent(&c.Candidate.Artifact)
+	}
+	return c, p, routeID, err
+}
+
+func (s *Service) verifyMaterializedDNSCheckpoint(c dnsServingCheckpoint) (dnsServingCheckpoint, dnsServingPayload, string, error) {
+	if c.Schema != "fugue.dns.positive-checkpoint/v1" || !c.Positive || c.NodeID != s.Config.DNSNodeID || c.GroupID != s.Config.EdgeGroupID || c.AppliedAt.IsZero() || c.AppliedAt.After(time.Now().Add(time.Second)) {
 		return c, dnsServingPayload{}, "", errors.New("DNS positive checkpoint invalid")
 	}
 	k := s.platformDNSKeys()
@@ -105,8 +124,19 @@ func (s *Service) decodeDNSCheckpointPayload(raw []byte) (dnsServingCheckpoint, 
 	if err != nil {
 		return c, dnsServingPayload{}, "", err
 	}
-	compactDNSArtifactContent(&c.Candidate.Artifact)
 	return c, p, routeID, nil
+}
+
+func (s *Service) validPreviousDNSCheckpoint(raw []byte) bool {
+	if known := s.platformCheckpoint.Load(); known != nil && len(raw) <= 32<<20 && sha256.Sum256(raw) == known.digest {
+		if _, _, _, err := s.verifyMaterializedDNSCheckpoint(known.record); err == nil {
+			return true
+		}
+		// A changed in-memory graph must not stand in for the actual file.
+		// Recover from its bytes using the ordinary verification path.
+	}
+	_, err := s.decodeDNSCheckpoint(raw)
+	return err == nil
 }
 
 var errDNSCheckpointMissing = errors.New("DNS positive serving checkpoint missing")
@@ -148,6 +178,7 @@ func (s *Service) loadDNSServingCache() (loaded bool, resultErr error) {
 			continue
 		}
 		st.fallback = "restart_requires_fresh_readiness"
+		s.platformCheckpoint.Store(&dnsPersistedCheckpoint{sha256.Sum256(item.Data), c})
 		s.platformServing.Store(st)
 		s.platformServingBound.Store(true)
 		return true, nil
@@ -506,7 +537,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		return errors.New("DNS serving cache path unavailable")
 	}
 	if old != nil && !same {
-		if err = lkgcache.PreservePrevious(path, func(data []byte) bool { _, e := s.decodeDNSCheckpoint(data); return e == nil }); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err = lkgcache.PreservePrevious(path, s.validPreviousDNSCheckpoint); err != nil && !errors.Is(err, os.ErrNotExist) {
 			rollback()
 			return err
 		}
@@ -515,6 +546,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		rollback()
 		return err
 	}
+	s.platformCheckpoint.Store(&dnsPersistedCheckpoint{sha256.Sum256(raw), st.record})
 	return s.reportDNSServing(ctx, client, id, st)
 }
 

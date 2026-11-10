@@ -19,7 +19,7 @@ func (s *Service) newIsolatedDNSShadowValidator() *Service {
 	cfg.CachePath += ".shadow-validation"
 	// This object never starts listeners, ambient configuration, zone services or
 	// serving synchronization. Only the existing signed shadow validator runs.
-	return &Service{Config: cfg, HTTPClient: s.HTTPClient, Logger: s.Logger, PlatformTokenFile: s.PlatformTokenFile, shadowValidationParent: s}
+	return &Service{Config: cfg, HTTPClient: s.HTTPClient, Logger: s.Logger, PlatformTokenFile: s.PlatformTokenFile, shadowValidationParent: s, sharedContentBudget: s.contentBudget()}
 }
 
 func (s *Service) runIsolatedDNSShadow(ctx context.Context, worker *Service) {
@@ -37,6 +37,11 @@ func (s *Service) runIsolatedDNSShadow(ctx context.Context, worker *Service) {
 
 func (s *Service) syncIsolatedDNSShadowOnce(ctx context.Context, worker *Service) {
 	err := worker.SyncPlatformShadowOnce(ctx)
+	if errors.Is(err, errDNSContentBusy) {
+		// Resource contention is not failed readiness or successful validation.
+		// The bounded worker interval retries without queuing ahead of renewal.
+		return
+	}
 	if ctx.Err() != nil {
 		return
 	}

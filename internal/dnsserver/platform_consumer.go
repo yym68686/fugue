@@ -1,7 +1,6 @@
 package dnsserver
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -335,8 +334,8 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	return counts, err
 }
 
-// Return the strictly decoded, validated payload to the release validator in
-// this call. No cross-call payload cache and no trust decision is reused.
+// Reuse only deterministic decoding of the actual content/envelope. The typed
+// decoder returns owned containers; trust, membership and time remain fresh.
 func (s *Service) decodePlatformDNSCandidate(c dnsPlatformCandidate, a model.PlatformConsumerAssignment) (dnsCandidateCounts, dnsServingPayload, error) {
 	if platformcontrol.ValidateConsumerScope(s.Config.PlatformScopeKey, s.Config.EdgeGroupID) != nil || a.ScopeKey != platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey) {
 		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate belongs to another configured scope")
@@ -362,19 +361,25 @@ func (s *Service) decodePlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	if !platformsafety.EvaluateArtifactIntegrity(c.Artifact, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)).Pass {
 		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate signature or digest rejected")
 	}
-	if err := platformconfig.ValidateDNSCellPlan(artifact); err != nil {
+	releaseContent, err := s.acquireDNSContent(context.Background())
+	if err != nil {
 		return dnsCandidateCounts{}, dnsServingPayload{}, err
 	}
-	var payload dnsServingPayload
-	raw, err := json.Marshal(c.Artifact.Content)
+	decoded, err := platformconfig.DecodeDNSArtifact(artifact)
+	releaseContent()
 	if err != nil {
-		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate content invalid")
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if dec.Decode(&payload) != nil || payload.Schema != platformconfig.SchemaVersion || payload.Generation != c.Artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
+		// Preserve the historical policy/plan diagnostics and strict schema
+		// error contract. This extra work runs only for rejected content.
+		if cause := platformconfig.ValidateDNSCellPlan(artifact); cause != nil {
+			return dnsCandidateCounts{}, dnsServingPayload{}, cause
+		}
 		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate schema invalid")
 	}
+	payload := dnsServingPayload{Schema: decoded.Schema, Generation: decoded.Generation,
+		Records: decoded.Records, Views: decoded.ConsumerViews, Plan: decoded.ReadinessPlan,
+		Queries: decoded.QueryViews, Policy: decoded.Policy, Lineage: decoded.Lineage,
+		CellRoutePublications: decoded.CellRoutePublications, CellDNSSource: decoded.CellDNSSource,
+		PreviousTrafficPublication: decoded.PreviousTrafficPublication}
 	// The strict decoder above already materialized these exact signed inputs.
 	// Recheck their current trust without separately marshaling and decoding the
 	// entire DNS artifact for each embedded publication. Pure plan validation
@@ -400,24 +405,6 @@ func (s *Service) decodePlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	}
 	if err := platformconfig.ValidateDNSClientPolicyOwnership(payload.Policy.DNSClientPolicies, consumers); err != nil {
 		return dnsCandidateCounts{}, dnsServingPayload{}, err
-	}
-	if err := platformconfig.ValidateDNSIntents(payload.Records); err != nil {
-		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate intent semantics invalid")
-	}
-	policyDigest, err := platformconfig.Digest(payload.Policy)
-	if err != nil || payload.Policy.Scope != a.ScopeKey || payload.Lineage.PolicyDigest != policyDigest || payload.Lineage.IntentGeneration != payload.Generation || payload.Lineage.PolicyGeneration != payload.Policy.Generation {
-		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate policy lineage invalid")
-	}
-	for key, value := range platformconfig.LineageMetadata(payload.Lineage) {
-		if value == "" || c.Artifact.Metadata[key] != value {
-			return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS candidate lineage binding invalid")
-		}
-	}
-	if err := platformconfig.ValidateDNSReadinessPlan(payload.Plan, payload.Policy.DNSReadiness); err != nil {
-		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS readiness plan invalid")
-	}
-	if err := platformconfig.ValidateDNSQueryViews(payload.Queries, payload.Records, payload.Views, payload.Plan, payload.Policy); err != nil {
-		return dnsCandidateCounts{}, dnsServingPayload{}, errors.New("DNS query view invalid")
 	}
 	if err := validateServingDNSSelectors(payload.Queries); err != nil {
 		return dnsCandidateCounts{}, dnsServingPayload{}, err

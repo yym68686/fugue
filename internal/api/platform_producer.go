@@ -86,6 +86,7 @@ func (s *Server) runPlatformConfigurationScope(ctx context.Context, scope string
 			}
 			var nextRun time.Time
 			lastAuthority := ""
+			failures := 0
 			for ctx.Err() == nil {
 				_, authority, _, readErr := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, scope, "shadow")
 				if readErr != nil {
@@ -93,7 +94,16 @@ func (s *Server) runPlatformConfigurationScope(ctx context.Context, scope string
 						s.log.Printf("platform configuration producer policy unavailable scope=%s: %v", scope, readErr)
 					}
 				} else if authority.ID != lastAuthority || !time.Now().Before(nextRun) {
+					if authority.ID != lastAuthority {
+						failures = 0
+					}
 					interval, err := s.reconcilePlatformConfigurationScope(ctx, scope, nil)
+					if err != nil {
+						failures = min(failures+1, 4)
+						interval = max(interval, platformProducerRetryDelay(scope, failures))
+					} else {
+						failures = 0
+					}
 					if err != nil && s.log != nil {
 						s.log.Printf("platform configuration producer failed scope=%s; retaining release: %v", scope, err)
 					}

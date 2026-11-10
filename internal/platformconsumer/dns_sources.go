@@ -6,17 +6,35 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
+	"time"
 
+	"fugue/internal/dnsroutewire"
 	"fugue/internal/model"
 )
 
 // DNSRouteSources observes the routing ledger bound to this exact DNS
 // assignment. Signature/policy validation belongs to the DNS consumer.
-func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease) (model.PlatformDNSRouteSourceSnapshot, error) {
+func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease, previous ...model.PlatformDNSRouteSourceSnapshot) (model.PlatformDNSRouteSourceSnapshot, error) {
 	var result model.PlatformConsumerDNSRouteSourcesResponse
+	validator := ""
+	var unchanged func(http.Header) error
+	if len(previous) == 1 && previous[0].DNSArtifactID == a.ArtifactID && previous[0].DNSArtifactDigest == a.ContentHash {
+		prior := model.PlatformConsumerDNSRouteSourcesResponse{Assignment: a, Release: r, Snapshot: previous[0]}
+		validator, _ = dnsroutewire.Validator(prior, nil)
+		unchanged = func(headers http.Header) error {
+			observed, err := freshDNSObservation(headers, prior.Snapshot.ObservedAt)
+			if err == nil {
+				result = prior
+				result.Snapshot = ownDNSSourceSnapshotEnvelopes(prior.Snapshot)
+				result.Snapshot.ObservedAt = observed
+			}
+			return err
+		}
+	}
 	endpoint := strings.TrimRight(c.BaseURL, "/") + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(a.ArtifactID) + "/route-sources?expected_consumer_set_id=" + url.QueryEscape(a.ExpectedConsumerSetID)
-	if err := c.jsonLimit(ctx, endpoint, id.Token, http.MethodGet, nil, &result, 16<<20); err != nil {
+	if err := c.jsonRevalidated(ctx, endpoint, id.Token, http.MethodGet, nil, &result, 16<<20, validator, unchanged); err != nil {
 		var status *responseStatusError
 		if errors.As(err, &status) && status.Code == http.StatusConflict {
 			return result.Snapshot, ErrAssignmentChanged
@@ -45,10 +63,25 @@ func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.Platfo
 // RetainedDNSRouteSources reads only the authority's current positive LKG.
 // Verification metadata may advance after the cached release was applied; its
 // immutable publication binding and exact expected membership must not change.
-func (c Client) RetainedDNSRouteSources(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease) (model.PlatformConsumerRetainedDNSRouteSourcesResponse, error) {
+func (c Client) RetainedDNSRouteSources(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease, previous ...model.PlatformConsumerRetainedDNSRouteSourcesResponse) (model.PlatformConsumerRetainedDNSRouteSourcesResponse, error) {
 	var result model.PlatformConsumerRetainedDNSRouteSourcesResponse
+	validator := ""
+	var unchanged func(http.Header) error
+	if len(previous) == 1 && reflect.DeepEqual(previous[0].Assignment, a) && previous[0].Release.ID == r.ID {
+		prior := previous[0]
+		validator, _ = dnsroutewire.Validator(prior.PlatformConsumerDNSRouteSourcesResponse, &prior.RetainedLKG)
+		unchanged = func(headers http.Header) error {
+			observed, err := freshDNSObservation(headers, prior.Snapshot.ObservedAt)
+			if err == nil {
+				result = prior
+				result.Snapshot = ownDNSSourceSnapshotEnvelopes(prior.Snapshot)
+				result.Snapshot.ObservedAt = observed
+			}
+			return err
+		}
+	}
 	endpoint := strings.TrimRight(c.BaseURL, "/") + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(a.ArtifactID) + "/retained-route-sources?expected_consumer_set_id=" + url.QueryEscape(a.ExpectedConsumerSetID)
-	if err := c.jsonLimit(ctx, endpoint, id.Token, http.MethodGet, nil, &result, 16<<20); err != nil {
+	if err := c.jsonRevalidated(ctx, endpoint, id.Token, http.MethodGet, nil, &result, 16<<20, validator, unchanged); err != nil {
 		return result, err
 	}
 	got := result.Release
@@ -56,4 +89,29 @@ func (c Client) RetainedDNSRouteSources(ctx context.Context, id Identity, a mode
 		return result, ErrAssignmentChanged
 	}
 	return result, nil
+}
+
+// Content is immutable and verified against actual bytes on both sides. Own
+// the small containing slices so a consumer can replace content references
+// without writing a previously published serving snapshot's envelopes.
+func ownDNSSourceSnapshotEnvelopes(snapshot model.PlatformDNSRouteSourceSnapshot) model.PlatformDNSRouteSourceSnapshot {
+	snapshot.Scopes = slices.Clone(snapshot.Scopes)
+	for i := range snapshot.Scopes {
+		scope := &snapshot.Scopes[i]
+		scope.Lanes = slices.Clone(scope.Lanes)
+		scope.Publications = slices.Clone(scope.Publications)
+		for j := range scope.Publications {
+			scope.Publications[j].Selections = slices.Clone(scope.Publications[j].Selections)
+		}
+	}
+	return snapshot
+}
+
+func freshDNSObservation(headers http.Header, previous time.Time) (time.Time, error) {
+	observed, err := time.Parse(time.RFC3339Nano, headers.Get(dnsroutewire.ObservedAtHeader))
+	now := time.Now()
+	if err != nil || observed.IsZero() || !observed.After(previous) || observed.After(now.Add(time.Second)) || now.Sub(observed) > time.Minute {
+		return time.Time{}, errors.New("DNS source revalidation observation is not fresh")
+	}
+	return observed, nil
 }

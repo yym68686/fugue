@@ -47,6 +47,11 @@ func (s *Store) NewPlatformArtifactReadSession() func(string) (model.PlatformArt
 }
 
 func (s *platformContentSession) owned(key [32]byte, source map[string]any) map[string]any {
+	return s.ownedEntry(newPlatformContentEntry(key, source))
+}
+
+func (s *platformContentSession) ownedEntry(source platformContentEntry) map[string]any {
+	key := source.key
 	s.Lock()
 	defer s.Unlock()
 	if prior, ok := s.values[key]; ok {
@@ -58,14 +63,13 @@ func (s *platformContentSession) owned(key [32]byte, source map[string]any) map[
 		delete(s.values, key)
 		s.bytes -= prior.bytes
 	}
-	owned := clonePlatformContent(source)
-	fingerprint, supported := platformsafety.FingerprintArtifactContent(owned)
-	size := 256 + platformContentSize(owned)
-	if supported && len(s.values) < 32 && s.bytes+size <= 32<<20 {
+	owned := clonePlatformContent(source.content)
+	size := source.bytes
+	if source.fingerprintOK && len(s.values) < 32 && s.bytes+size <= 32<<20 {
 		if s.values == nil {
 			s.values = make(map[[32]byte]platformSessionContent)
 		}
-		s.values[key] = platformSessionContent{owned, fingerprint, size}
+		s.values[key] = platformSessionContent{owned, source.fingerprint, size}
 		s.bytes += size
 	}
 	return owned

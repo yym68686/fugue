@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	neturl "net/url"
 	"os"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/dnsroutewire"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -94,7 +96,8 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 		var out model.PlatformConsumerDNSRouteSourcesResponse
 		if code == http.StatusOK {
 			mustDecodeJSON(t, res, &out)
-			if res.Header().Get("Cache-Control") != "private, no-store" || res.Header().Get("ETag") != "\""+out.Snapshot.SelectionDigest+"\"" {
+			validator, _ := dnsroutewire.Validator(out, nil)
+			if res.Header().Get("Cache-Control") != "private, no-store" || res.Header().Get("ETag") != validator {
 				t.Fatal("observation caching or digest binding lost")
 			}
 		} else if strings.Contains(res.Body.String(), policies[0].ID) {
@@ -103,6 +106,25 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 		return out
 	}
 	first := read(token, url, http.StatusOK)
+	validator, _ := dnsroutewire.Validator(first, nil)
+	revalidate := func(want int) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("If-None-Match", validator)
+		res := httptest.NewRecorder()
+		s.Handler().ServeHTTP(res, req)
+		if res.Code != want {
+			t.Fatalf("fresh source revalidation %d want %d: %s", res.Code, want, res.Body.String())
+		}
+		if want == http.StatusNotModified {
+			observed, err := time.Parse(time.RFC3339Nano, res.Header().Get(dnsroutewire.ObservedAtHeader))
+			if err != nil || !observed.After(first.Snapshot.ObservedAt) || res.Body.Len() != 0 {
+				t.Fatal("revalidation reused an old observation or returned a body", err)
+			}
+		}
+	}
+	revalidate(http.StatusNotModified)
 	if first.Assignment.ExpectedConsumerSetID != set.ID || first.Assignment.ArtifactID != compiled.DNSArtifact.ID || len(first.Snapshot.Scopes) != 3 {
 		t.Fatal("source response lost exact DNS assignment")
 	}
@@ -129,6 +151,7 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 			t.Fatal(err)
 		}
 		read(token, url, http.StatusConflict)
+		revalidate(http.StatusConflict)
 		for _, route := range []string{"/v1/platform-state/consumers/assignment", "/v1/platform-state/consumers/artifacts/" + compiled.DNSArtifact.ID + "?expected_consumer_set_id=" + set.ID, "/v1/platform-state/consumers/artifacts/" + compiled.ReleaseArtifact.ID + "?expected_consumer_set_id=" + set.ID} {
 			response := performJSONRequest(t, s, http.MethodGet, route, token, nil)
 			if response.Code != http.StatusServiceUnavailable || response.Header().Get("ETag") != "" || strings.Contains(response.Body.String(), compiled.DNSArtifact.ID) {

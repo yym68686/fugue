@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
-	"strconv"
 	"strings"
 
 	"fugue/internal/auth"
@@ -65,12 +64,14 @@ func (s *Server) handleGetPlatformConsumerDNSRouteSources(w http.ResponseWriter,
 		httpx.WriteError(w, code, "approved routing source observation unavailable")
 		return
 	}
+	if revalidateDNSSourceResponse(w, r, response, nil) {
+		return
+	}
 	raw, err := json.Marshal(response)
 	if err != nil || len(raw) > 16<<20 {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "routing source response exceeds bound")
 		return
 	}
-	w.Header().Set("ETag", strconv.Quote(response.Snapshot.SelectionDigest))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)

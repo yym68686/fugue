@@ -4617,6 +4617,10 @@ paths:
       security:
         - PlatformComponentBearerAuth: []
       parameters:
+        - in: header
+          name: If-None-Match
+          description: Optional validator of the complete prior response excluding only snapshot.observed_at. All current authorization, signatures, publication bindings and input admission still run before a 304.
+          schema: {type: string}
         - in: path
           name: artifact_id
           required: true
@@ -4631,6 +4635,13 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/PlatformConsumerDNSRouteSourcesResponse"}
+        '304':
+          description: Complete source response is unchanged except observation time after fresh validation; reuse prior content only with the returned fresh X-Fugue-Observed-At. This does not extend readiness, checkpoint age, LKG expiry or proof deadlines.
+          headers:
+            ETag:
+              schema: {type: string}
+            X-Fugue-Observed-At:
+              schema: {type: string, format: date-time}
         '400': {$ref: "#/components/responses/ErrorResponse"}
         '401': {$ref: "#/components/responses/ErrorResponse"}
         '403': {$ref: "#/components/responses/ErrorResponse"}
@@ -4648,6 +4659,10 @@ paths:
       security:
         - PlatformComponentBearerAuth: []
       parameters:
+        - in: header
+          name: If-None-Match
+          description: Optional validator of the complete prior response excluding only snapshot.observed_at. All current authorization, signatures, publication bindings and input admission still run before a 304.
+          schema: {type: string}
         - in: path
           name: artifact_id
           required: true
@@ -4662,6 +4677,13 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/PlatformConsumerRetainedDNSRouteSourcesResponse"}
+        '304':
+          description: Complete source response is unchanged except observation time after fresh validation; reuse prior content only with the returned fresh X-Fugue-Observed-At. This does not extend readiness, checkpoint age, LKG expiry or proof deadlines.
+          headers:
+            ETag:
+              schema: {type: string}
+            X-Fugue-Observed-At:
+              schema: {type: string, format: date-time}
         '400': {$ref: "#/components/responses/ErrorResponse"}
         '401': {$ref: "#/components/responses/ErrorResponse"}
         '403': {$ref: "#/components/responses/ErrorResponse"}

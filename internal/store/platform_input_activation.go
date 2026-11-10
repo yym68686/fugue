@@ -617,10 +617,15 @@ func readCompilerInputActivationTupleMode(ctx context.Context, tx *sql.Tx, tuple
 		if err != nil {
 			return ErrInvalidInput
 		}
-		// Writers may subsequently upsert. Keep their self-exclusive guard:
-		// two SHARE holders upgrading to RowExclusive can deadlock.
 		if lock && !lkgReadOnly {
-			if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+			// Acquire the eventual write lock before any row lock. Existing
+			// selectors can then be written independently; absence still needs
+			// a self-exclusive gap guard to prevent concurrent insertions.
+			guard := `LOCK TABLE fugue_platform_lkg_snapshots IN ROW EXCLUSIVE MODE`
+			if tuple.xmin == "0" || tuple.xmin == "" {
+				guard = `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`
+			}
+			if _, err := tx.ExecContext(ctx, guard); err != nil {
 				return err
 			}
 		}
@@ -630,20 +635,26 @@ func readCompilerInputActivationTupleMode(ctx context.Context, tx *sql.Tx, tuple
 			// A present unique selector needs only a row guard. Unrelated
 			// scopes may advance while this exact row and relation stay pinned.
 			q += ` FOR SHARE`
+		} else if lock {
+			q += ` FOR UPDATE`
 		}
 		read := func() error {
 			return tx.QueryRowContext(ctx, q, kind, scope).Scan(&tuple.xmin, &tuple.ctid, &tuple.relation, &tuple.filenode)
 		}
 		err = read()
-		if errors.Is(err, sql.ErrNoRows) && lock && lkgReadOnly {
-			if tuple.xmin != "0" {
+		if errors.Is(err, sql.ErrNoRows) && lock {
+			if tuple.xmin != "0" && tuple.xmin != "" {
 				// A previously present row disappeared. Fail without upgrading
 				// a row guard to a table guard behind a waiting writer.
 				return ErrConflict
 			}
 			// Rows cannot fence absence. Exclude insertion, then reread: a row
 			// inserted in the gap must invalidate the prepared absence witness.
-			if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE MODE`); err != nil {
+			guard := `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE MODE`
+			if !lkgReadOnly {
+				guard = `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`
+			}
+			if _, err := tx.ExecContext(ctx, guard); err != nil {
 				return err
 			}
 			err = read()
@@ -774,16 +785,28 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 			return err
 		}
 	}
-	if proof.lkgReadOnly {
-		for _, original := range proof.tuples {
-			if original.table == "fugue_platform_lkg_snapshots" && original.xmin == "0" {
-				// Acquire a gap guard before any row guard. Otherwise a mixed
-				// present/absent proof could deadlock with a guarded LKG writer.
-				if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE MODE`); err != nil {
-					return err
-				}
-				break
-			}
+	hasLKG, absentLKG := false, false
+	for _, original := range proof.tuples {
+		if original.table == "fugue_platform_lkg_snapshots" {
+			hasLKG = true
+			absentLKG = absentLKG || original.xmin == "0"
+		}
+	}
+	// All relation/gap guards precede all dependency row guards. In
+	// particular a writer must not hold a row and then upgrade behind an
+	// absent-selector reader that holds SHARE and is waiting for that row.
+	guard := ""
+	if proof.lkgReadOnly && absentLKG {
+		guard = `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE MODE`
+	} else if !proof.lkgReadOnly && hasLKG {
+		guard = `LOCK TABLE fugue_platform_lkg_snapshots IN ROW EXCLUSIVE MODE`
+		if absentLKG {
+			guard = `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`
+		}
+	}
+	if guard != "" {
+		if _, err := tx.ExecContext(ctx, guard); err != nil {
+			return err
 		}
 	}
 	for _, original := range proof.tuples {

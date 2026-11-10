@@ -93,6 +93,7 @@ func BenchmarkPlatformReadSession(b *testing.B) {
 	}
 	raw, _ := json.Marshal(source)
 	key := sha256.Sum256(raw)
+	entry := newPlatformContentEntry(key, source)
 	for _, shared := range []bool{false, true} {
 		name := "clone"
 		if shared {
@@ -100,12 +101,12 @@ func BenchmarkPlatformReadSession(b *testing.B) {
 		}
 		b.Run(name, func(b *testing.B) {
 			var session platformContentSession
-			session.owned(key, source)
+			session.ownedEntry(entry)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				if shared {
-					session.owned(key, source)
+					session.ownedEntry(entry)
 				} else {
 					clonePlatformContent(source)
 				}

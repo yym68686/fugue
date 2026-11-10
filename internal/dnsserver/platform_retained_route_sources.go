@@ -33,8 +33,9 @@ func (s *Service) refreshRetainedDNSRouteSources(ctx context.Context, old *dnsSe
 		}
 	}()
 	var grant *model.PlatformLKGSnapshot
+	var previous []model.PlatformConsumerRetainedDNSRouteSourcesResponse
 	read := func(ctx context.Context) (model.PlatformDNSRouteSourceSnapshot, error) {
-		result, err := reader.client.RetainedDNSRouteSources(ctx, reader.identity, old.record.Candidate.Assignment, old.record.Candidate.Release)
+		result, err := reader.client.RetainedDNSRouteSources(ctx, reader.identity, old.record.Candidate.Assignment, old.record.Candidate.Release, previous...)
 		if err != nil {
 			return result.Snapshot, err
 		}
@@ -45,6 +46,7 @@ func (s *Service) refreshRetainedDNSRouteSources(ctx context.Context, old *dnsSe
 			return result.Snapshot, platformconsumer.ErrAssignmentChanged
 		}
 		grant = &result.RetainedLKG
+		previous = []model.PlatformConsumerRetainedDNSRouteSourcesResponse{result}
 		return result.Snapshot, nil
 	}
 	payload, facts, err := s.observeDNSRouteSourcesWithReader(ctx, old.record.Candidate, old.payload, old.record.RouteSources, probe, read)

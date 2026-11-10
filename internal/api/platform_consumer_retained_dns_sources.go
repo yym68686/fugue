@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -68,12 +67,14 @@ func (s *Server) handleGetPlatformConsumerRetainedDNSRouteSources(w http.Respons
 		httpx.WriteError(w, code, "retained DNS source observation unavailable")
 		return
 	}
+	if revalidateDNSSourceResponse(w, r, response.PlatformConsumerDNSRouteSourcesResponse, &response.RetainedLKG) {
+		return
+	}
 	raw, err := json.Marshal(response)
 	if err != nil || len(raw) > 16<<20 {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "routing source response exceeds bound")
 		return
 	}
-	w.Header().Set("ETag", strconv.Quote(response.Snapshot.SelectionDigest))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
