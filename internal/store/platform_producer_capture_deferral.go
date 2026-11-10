@@ -44,6 +44,8 @@ CREATE INDEX fugue_producer_capture_work_scope ON fugue_producer_capture_work(sc
 CREATE INDEX fugue_producer_capture_work_participant ON fugue_producer_capture_work(participant_id,scope_key);
 `
 
+var ErrProducerCaptureDeferralUnavailable = errors.New("capture deferral requires installed PostgreSQL storage")
+
 // ProducerCaptureWork is an admission ticket, never proof of a successful
 // capture or commit. An abandoned ticket remains occupied after process/PG
 // restart: it cannot be declared complete by a lease timeout. A draining control
@@ -68,7 +70,7 @@ func captureDeferralProducer(p model.Principal) bool {
 // capture, artifact write or pending recovery is held behind a drain.
 func (s *Store) captureDeferralTransaction(ctx context.Context, apply func(context.Context, *sql.Tx) error) error {
 	if s == nil || s.db == nil {
-		return fmt.Errorf("capture deferral requires installed PostgreSQL storage: %w", ErrConflict)
+		return ErrProducerCaptureDeferralUnavailable
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -183,6 +185,28 @@ func (s *Store) captureDeferralObservation(ctx context.Context, tx *sql.Tx, requ
 	return observation, err
 }
 
+// Terminal replay and absolute expiry remove no ordinary authority guard. They
+// only end this optional gate, so they must not await historical policy rows or
+// work counters that are no longer needed to make that decision. New capture
+// still obtains its own fresh signed-policy observation after this transition.
+func (s *Store) advanceCaptureDeferral(ctx context.Context, tx *sql.Tx, previous platformproducer.CaptureDeferralRecord) (platformproducer.CaptureDeferralRecord, error) {
+	if previous.EndedAt != nil {
+		return previous, nil // loadCaptureDeferral already validated this tombstone
+	}
+	at, err := captureDeferralNow(ctx, tx)
+	if err != nil {
+		return platformproducer.CaptureDeferralRecord{}, err
+	}
+	if at.Before(previous.ObservedAt) || !at.Before(previous.Request.ExpiresAt) {
+		return platformproducer.AdvanceCaptureDeferral(previous, platformproducer.CaptureDeferralObservation{At: at})
+	}
+	observation, err := s.captureDeferralObservation(ctx, tx, previous.Request)
+	if err != nil {
+		return platformproducer.CaptureDeferralRecord{}, err
+	}
+	return platformproducer.AdvanceCaptureDeferral(previous, observation)
+}
+
 // PrepareProducerCaptureDeferral has no HTTP/config/startup caller. A trusted
 // administrative principal alone does not approve an availability restriction;
 // the external enable protocol must first establish approval, all-replica
@@ -243,17 +267,34 @@ func (s *Store) PrepareProducerCaptureDeferral(ctx context.Context, request plat
 	return record, nil
 }
 
-func (s *Store) UpdateProducerCaptureDeferral(ctx context.Context, operationID string, release bool, principal model.Principal) (platformproducer.CaptureDeferralRecord, error) {
-	var record platformproducer.CaptureDeferralRecord
-	if !captureDeferralAdmin(principal) || operationID == "" || len(operationID) > 128 {
-		return record, ErrInvalidInput
+// The receipt describes one committed control transaction, including a replay
+// that only read an existing terminal record. It is not a fleet drain, business
+// result or independently authenticated proof; the adapter authenticates its
+// administrative caller before it performs any database I/O.
+type ProducerCaptureDeferralReceipt struct {
+	Control   platformproducer.CaptureDeferralControlRequest `json:"control"`
+	Record    platformproducer.CaptureDeferralRecord         `json:"record"`
+	Version   int64                                          `json:"version"`
+	Changed   bool                                           `json:"changed"`
+	ActorType string                                         `json:"actor_type"`
+	ActorID   string                                         `json:"actor_id"`
+}
+
+func (s *Store) UpdateProducerCaptureDeferral(ctx context.Context, request platformproducer.CaptureDeferralControlRequest, principal model.Principal) (ProducerCaptureDeferralReceipt, error) {
+	var receipt ProducerCaptureDeferralReceipt
+	if !captureDeferralAdmin(principal) || principal.ActorType == "" || request.Validate() != nil {
+		return receipt, ErrInvalidInput
 	}
 	err := s.captureDeferralTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		previous, version, err := loadCaptureDeferral(ctx, tx, operationID)
+		previous, version, err := loadCaptureDeferral(ctx, tx, request.OperationID)
 		if err != nil {
 			return err
 		}
-		if release {
+		if previous.RequestDigest != request.RequestDigest {
+			return fmt.Errorf("capture deferral control target changed: %w", ErrConflict)
+		}
+		var record platformproducer.CaptureDeferralRecord
+		if request.Action == "release" {
 			at, err := captureDeferralNow(ctx, tx)
 			if err != nil {
 				return err
@@ -263,11 +304,7 @@ func (s *Store) UpdateProducerCaptureDeferral(ctx context.Context, operationID s
 				return err
 			}
 		} else {
-			observation, err := s.captureDeferralObservation(ctx, tx, previous.Request)
-			if err != nil {
-				return err
-			}
-			record, err = platformproducer.AdvanceCaptureDeferral(previous, observation)
+			record, err = s.advanceCaptureDeferral(ctx, tx, previous)
 			if err != nil {
 				return err
 			}
@@ -276,14 +313,19 @@ func (s *Store) UpdateProducerCaptureDeferral(ctx context.Context, operationID s
 			// No WAL on unchanged polling; preserve prior observed time, and hence
 			// the original monotonic floor, instead of renewing a live control.
 			record = previous
-			return nil
+		} else {
+			if err := saveCaptureDeferral(ctx, tx, record, version); err != nil {
+				return err
+			}
+			version++
 		}
-		return saveCaptureDeferral(ctx, tx, record, version)
+		receipt = ProducerCaptureDeferralReceipt{Control: request, Record: record, Version: version, Changed: previous.Phase != record.Phase, ActorType: principal.ActorType, ActorID: principal.ActorID}
+		return nil
 	})
 	if err != nil {
-		return platformproducer.CaptureDeferralRecord{}, err
+		return ProducerCaptureDeferralReceipt{}, err // ambiguous commit is not a receipt
 	}
-	return record, nil
+	return receipt, nil
 }
 
 func (s *Store) BeginProducerCapture(ctx context.Context, participantID, scope string, policy model.PlatformPublicationPrecondition, principal model.Principal) (ProducerCaptureWork, bool, error) {
@@ -310,11 +352,7 @@ func (s *Store) BeginProducerCapture(ctx context.Context, participantID, scope s
 			if err != nil {
 				return err
 			}
-			observation, err := s.captureDeferralObservation(ctx, tx, previous.Request)
-			if err != nil {
-				return err
-			}
-			record, err := platformproducer.AdvanceCaptureDeferral(previous, observation)
+			record, err := s.advanceCaptureDeferral(ctx, tx, previous)
 			if err != nil {
 				return err
 			}
@@ -323,7 +361,7 @@ func (s *Store) BeginProducerCapture(ctx context.Context, participantID, scope s
 					return err
 				}
 			}
-			deferred, err = record.DefersNewInput(scope, policy, observation.At)
+			deferred, err = record.DefersNewInput(scope, policy, record.ObservedAt)
 			if err != nil || deferred {
 				return err
 			}

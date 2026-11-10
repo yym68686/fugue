@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 
 type producerCaptureParticipantStore interface {
 	RegisterProducerCaptureParticipant(context.Context, store.ProducerCaptureParticipant, model.Principal) error
+	AddProducerCaptureParticipantScopes(context.Context, store.ProducerCaptureParticipant, model.Principal) (store.ProducerCaptureParticipant, error)
+	GetProducerCaptureParticipant(context.Context, string, model.Principal) (store.ProducerCaptureParticipant, error)
 	BeginProducerCapture(context.Context, string, string, model.PlatformPublicationPrecondition, model.Principal) (store.ProducerCaptureWork, bool, error)
 	FinishProducerCapture(context.Context, store.ProducerCaptureWork, model.Principal) error
 	CloseProducerCaptureParticipant(context.Context, store.ProducerCaptureParticipant, model.Principal) error
@@ -53,7 +56,29 @@ func (p *platformProducerCaptureParticipant) admit(ctx context.Context, scope st
 	// Reserve the local attempt before I/O, so close can join it without
 	// holding a non-cancelable mutex behind a slow/uncertain admission commit.
 	p.active++
+	known := slices.Contains(p.identity.Scopes, scope)
 	p.mu.Unlock()
+	if !known {
+		registered, err := p.store.AddProducerCaptureParticipantScopes(ctx, store.ProducerCaptureParticipant{ID: p.identity.ID, Scopes: []string{scope}}, platformProducerPrincipal())
+		if err != nil {
+			p.finishLocal()
+			return nil, false, err // uncertain enrollment never grants capture
+		}
+		if registered.ID != p.identity.ID || !slices.Contains(registered.Scopes, scope) {
+			p.finishLocal()
+			return nil, false, fmt.Errorf("capture scope enrollment returned an unbound identity")
+		}
+		p.mu.Lock()
+		// Concurrent extensions can return different serialized snapshots. A
+		// late older reply must not erase a scope learned by another admission.
+		for _, registeredScope := range registered.Scopes {
+			if !slices.Contains(p.identity.Scopes, registeredScope) {
+				p.identity.Scopes = append(p.identity.Scopes, registeredScope)
+			}
+		}
+		slices.Sort(p.identity.Scopes)
+		p.mu.Unlock()
+	}
 	work, deferred, err := p.store.BeginProducerCapture(ctx, p.identity.ID, scope, policy, platformProducerPrincipal())
 	if err != nil || deferred {
 		p.finishLocal()
@@ -101,10 +126,21 @@ func (p *platformProducerCaptureParticipant) close(ctx context.Context) error {
 		return ctx.Err() // no cancellation of the already admitted work
 	case <-p.drained:
 	}
-	if err := p.store.CloseProducerCaptureParticipant(ctx, p.identity, platformProducerPrincipal()); err != nil {
+	// An enrollment may have committed while its response was lost. Refresh
+	// the complete durable scope set after local attempts join; cached scopes
+	// cannot prove an exact exit. No new admission can start once closing.
+	registered, err := p.store.GetProducerCaptureParticipant(ctx, p.identity.ID, platformProducerPrincipal())
+	if err != nil {
+		return err
+	}
+	if registered.ID != p.identity.ID {
+		return fmt.Errorf("capture participant exit returned an unbound identity")
+	}
+	if err := p.store.CloseProducerCaptureParticipant(ctx, registered, platformProducerPrincipal()); err != nil {
 		return err
 	}
 	p.mu.Lock()
+	p.identity.Scopes = slices.Clone(registered.Scopes)
 	p.closed = true
 	p.mu.Unlock()
 	return nil

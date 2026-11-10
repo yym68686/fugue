@@ -2,8 +2,9 @@
 
 Status: local implementation and isolated validation only. The local process
 registration/join adapter exists; there is no production installation, complete
-rollout enrollment proof, control endpoint, configuration switch or enabled
-deferral. The normal server leaves the admission hook nil.
+rollout enrollment proof, prepare/enable endpoint, configuration switch or enabled
+deferral. An authenticated observe/release endpoint exists for retained controls;
+the normal server leaves the admission hook nil.
 
 The private Unix `producer-runtime` observation is registered in the normal API
 process independently of that hook. It makes no database/network call, installs
@@ -67,12 +68,63 @@ neither canceled nor retried. Activation requires zero tickets for every scope.
 Operation tombstones survive termination and restart; overlapping scope claims
 and replay refuse. Unchanged-phase polling does not rewrite the record or renew
 its persisted observation floor. A clock behind that floor invalidates control.
-CAS and claim removal commit together. Transactions have a five-second context,
+CAS and claim removal commit together.
+
+Terminal observation replays the retained record without reading historical
+policy or work rows. A live control checks the database clock before that
+observation: absolute expiry or clock regression can end this optional gate
+even when the historical policy relation is unavailable. The terminal CAS and
+scope-claim removal still commit atomically. This does not complete or erase
+already admitted tickets. New capture still requires its separate fresh signed
+policy and resource checks; removing an expired gate cannot bypass unavailable
+ordinary authority storage.
+
+Transactions have a five-second context,
 SQL at most five seconds, lock at most 250ms, work_mem 1MB and temp-file limit
 zero. Limits are 64KiB per record, 32 scopes, 1MiB per policy body, 4096 retained
 operations and 4096 occupied tickets per scope. Exhaustion refuses; no automatic
 tombstone/orphan cleanup exists. These bounds are not full disk/WAL budgets or
 independently reserved exit capacity.
+
+Native observe/release requests name the immutable original request digest as
+well as its operation ID. The original request can be digested after a lost
+prepare response. Unsupported actions (including extension), malformed targets,
+unprivileged callers and digest mismatches refuse before any transition. A
+successful transaction returns its exact target/action, persisted record and
+version, whether it changed phase, and its authenticated administrative caller.
+An uncertain commit returns no receipt. Replaying release reads the retained
+terminal record without another write or renewed deadline, including after a
+PostgreSQL restart. These transaction receipts do not attest fleet coverage or
+business success and are not standalone cryptographic authorization. They add
+no production installer, enrollment or enable path.
+
+### Authenticated observe/release
+
+`POST /v1/admin/platform/producer-capture-deferrals/control` uses the ordinary API
+Bearer authentication middleware. It requires both `platform.admin` and explicit
+`producer_capture.control`; an ordinary admin key does not inherit this power.
+The bootstrap recovery identity retains its existing root permission. The
+OpenAPI contract is authoritative. No existing frontend flow consumes this new
+operator endpoint.
+
+Send exactly `schema_version`, `operation_id`, `request_digest`, and `action`
+as strings in one `application/json` object, at most 2048 bytes. Only `observe`
+and `release` are supported. Duplicate keys, alternate field casing, unknown
+fields (including caller identities), nulls, trailing JSON and query parameters
+refuse before storage access. The authenticated principal, never request data,
+supplies the receipt's actor. The endpoint cannot prepare a control, renew its
+deadline, install schema or change the local admission hook.
+
+HTTP 200 contains only the complete committed native receipt and is marked
+`Cache-Control: private, no-store`. Missing operation is 404; an exact-target
+conflict is 409. Missing optional storage, failed transaction or uncertain commit
+is 503 without a partial receipt or raw database details. A caller that loses
+the response must retain the original ID/digest and may explicitly observe or
+release that same retained operation; it must not prepare a replacement, infer
+business completion or assume the release happened. There is no automatic retry
+or schema installation. Removing the gate still grants no ordinary work or
+resource authority. Missing all-replica coverage and full-path budgets continue
+to prohibit production enablement.
 
 ## Process registration and old work
 
@@ -86,6 +138,22 @@ No heartbeat timeout, connection disappearance or leader-lock turnover closes a
 participant or deletes work. The legacy session leader lock alone is not a drain
 proof: its connection may die while the old function continues on other pooled
 connections. This is why older unenrolled work remains a separate rollout gate.
+
+Dynamic discovery may introduce another policy scope after startup. Before the
+first capture in that scope, the enrolled process appends it under the same
+admission barrier. Only an already registered open boot can extend; the per-boot
+32-scope and global 4096-row limits include all retained tombstones. Replaying
+an acknowledged or uncertain extension adds no duplicate row, renews no original
+enrollment, and never reopens a closed boot. Captures wait for the extension's
+commit; an ambiguous reply starts no work. Already registered scopes remain
+subject to the usual exact signed-policy and ticket checks.
+
+Exit joins pending extensions as well as admissions and completions without
+holding a local mutex across I/O. It reloads the complete durable roster before
+the exact close CAS, including scopes whose commit reply was lost. A stale
+subset cannot certify exit. Concurrent extension and close serialize; a failed
+lookup or close leaves the participant unclosed. This is still an optional
+adapter, not a production installer, fleet attestation or enable operation.
 
 The private local Server configuration refuses installation after any producer
 reconciliation could have started. Its process object serializes new admission
@@ -111,7 +179,8 @@ replicas and capture entry points (including draining older unenrolled work),
 fresh exact authority CAS, bounded installation/exit budgets and finite enable,
 drain and exit receipts remain required. None is inferred from these methods
 or local tests. Evidence TTLs are unchanged; expiration can cause normal
-publication/recovery refusal. No production enable path is supplied here.
+publication/recovery refusal. The observe/release transport does not supply the
+remaining production prepare/enable path.
 
 ## Local validation
 
@@ -127,7 +196,10 @@ synthetic loopback fsync/full-page-write/synchronous-commit cluster. It covers
 concurrent clients, missing-schema refusal, exact authority/signature checks,
 occupied work across real immediate stop/restart, zero-ticket activation,
 unchanged deadlines, scope conflicts, terminal replay after another restart and
-absolute expiry. Set `FUGUE_PRODUCER_DEFERRAL_POSTGRES_BIN` to PostgreSQL 17+ tools;
+absolute expiry. It also makes the policy relation unavailable in the private
+fixture: terminal observation and expiry still return committed receipts,
+ordinary capture refuses, and a pre-expiry admitted ticket remains occupied
+until its exact completion. Set `FUGUE_PRODUCER_DEFERRAL_POSTGRES_BIN` to PostgreSQL 17+ tools;
 it accepts no external DSN, existing data directory or production clone.
 
 `TestCaptureDeferralPreservesRealPendingRecoveryAndObservation` exercises the
@@ -146,3 +218,11 @@ refusal before and after a crash, cross-member completion refusal and closed
 boot replay after another real PostgreSQL restart. These tests do not supply
 the external rollout roster, old-process termination/exit proof or resource
 budget needed for production enablement.
+
+`TestCaptureControlHTTP*` covers the real Bearer authentication middleware,
+separate explicit permission, strict request boundaries, authenticated caller
+binding and refusal to serialize partial, uncertain or unbound receipts. The
+generated route refuses on a real ordinary file store without installing the
+optional schema or enabling admission. Successful HTTP responses in these tests
+use a synthetic native callback; real PostgreSQL transaction/restart behavior is
+tested separately above. This is not a full fleet or production HTTP/PG rehearsal.

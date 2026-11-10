@@ -95,6 +95,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/platform-state/runtime-facts", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformRuntimeFacts)))
 	mux.Handle("GET /v1/admin/platform/autonomy/status", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformAutonomyStatus)))
 	mux.Handle("POST /v1/admin/platform/failure-drills", s.auth.RequireAPI(http.HandlerFunc(s.handleRunPlatformFailureDrill)))
+	mux.Handle("POST /v1/admin/platform/producer-capture-deferrals/control", s.auth.RequireAPI(http.HandlerFunc(s.handleUpdateProducerCaptureDeferral)))
 	mux.Handle("GET /v1/admin/release-guard/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetReleaseGuardStatus)))
 	mux.Handle("GET /v1/admin/requests/{request_id}/explain", s.auth.RequireAPI(http.HandlerFunc(s.handleExplainRequest)))
 	mux.Handle("GET /v1/admin/robustness/check/{subject}", s.auth.RequireAPI(http.HandlerFunc(s.handleCheckRobustnessSubject)))

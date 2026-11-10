@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	CaptureDeferralSchema = "fugue.platform.producer.capture-deferral/v1"
-	MaxCaptureDeferral    = 30 * time.Minute
-	maxDeferredScopes     = 32
+	CaptureDeferralSchema        = "fugue.platform.producer.capture-deferral/v1"
+	CaptureDeferralControlSchema = "fugue.platform.producer.capture-deferral-control/v1"
+	MaxCaptureDeferral           = 30 * time.Minute
+	maxDeferredScopes            = 32
 )
 
 // CaptureDeferralAuthority binds a control to an exact signed producer policy.
@@ -29,6 +30,29 @@ type CaptureDeferralRequest struct {
 	RequestedAt   time.Time                  `json:"requested_at"`
 	ExpiresAt     time.Time                  `json:"expires_at"`
 	Authorities   []CaptureDeferralAuthority `json:"authorities"`
+}
+
+// A control targets the complete immutable original request, not an operation
+// name alone. Observe may advance a drain or persist an expiry; release only
+// removes this optional gate. Neither action renews or creates an operation.
+type CaptureDeferralControlRequest struct {
+	SchemaVersion string `json:"schema_version"`
+	OperationID   string `json:"operation_id"`
+	RequestDigest string `json:"request_digest"`
+	Action        string `json:"action"`
+}
+
+func (request CaptureDeferralControlRequest) Validate() error {
+	if request.SchemaVersion != CaptureDeferralControlSchema || !validCaptureDeferralOperationID(request.OperationID) || !ValidDigest(request.RequestDigest) || request.Action != "observe" && request.Action != "release" {
+		return fmt.Errorf("capture deferral control target or action invalid")
+	}
+	return nil
+}
+
+// Digest lets a caller address the original request after a lost prepare
+// response. Computing it grants no permission to prepare, observe or release.
+func (request CaptureDeferralRequest) Digest() (string, error) {
+	return captureDeferralDigest(request)
 }
 
 // CaptureDeferralRecord is a value for a durable, authenticated control adapter.
@@ -55,8 +79,12 @@ type CaptureDeferralObservation struct {
 	InFlight    map[string]uint64
 }
 
+func validCaptureDeferralOperationID(id string) bool {
+	return id != "" && len(id) <= 128 && strings.TrimSpace(id) == id && !strings.ContainsAny(id, "\x00\r\n\t ")
+}
+
 func captureDeferralDigest(request CaptureDeferralRequest) (string, error) {
-	if request.SchemaVersion != CaptureDeferralSchema || request.OperationID == "" || len(request.OperationID) > 128 || strings.TrimSpace(request.OperationID) != request.OperationID || strings.ContainsAny(request.OperationID, "\x00\r\n\t ") {
+	if request.SchemaVersion != CaptureDeferralSchema || !validCaptureDeferralOperationID(request.OperationID) {
 		return "", fmt.Errorf("invalid capture deferral identity")
 	}
 	if request.RequestedAt.IsZero() || request.ExpiresAt.IsZero() || !request.ExpiresAt.After(request.RequestedAt) || request.ExpiresAt.Sub(request.RequestedAt) > MaxCaptureDeferral {

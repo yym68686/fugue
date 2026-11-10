@@ -21,6 +21,47 @@ func testCaptureDeferral() (CaptureDeferralRequest, CaptureDeferralObservation) 
 	return request, observation
 }
 
+func TestCaptureDeferralExactControlTargets(t *testing.T) {
+	request, _ := testCaptureDeferral()
+	digest, err := request.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy := request
+	copy.Authorities = []CaptureDeferralAuthority{request.Authorities[1], request.Authorities[0]}
+	copy.RequestedAt = copy.RequestedAt.In(time.FixedZone("fixture", 3600))
+	if other, err := copy.Digest(); err != nil || digest != other {
+		t.Fatal("equivalent request lost its stable control target", other, err)
+	}
+	copy.ExpiresAt = copy.ExpiresAt.Add(-time.Second)
+	if other, err := copy.Digest(); err != nil || digest == other {
+		t.Fatal("deadline change retained the original control target", other, err)
+	}
+	valid := CaptureDeferralControlRequest{SchemaVersion: CaptureDeferralControlSchema, OperationID: request.OperationID, RequestDigest: digest, Action: "observe"}
+	for _, action := range []string{"observe", "release"} {
+		valid.Action = action
+		if err := valid.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, change := range []func(*CaptureDeferralControlRequest){
+		func(r *CaptureDeferralControlRequest) { r.SchemaVersion = CaptureDeferralSchema },
+		func(r *CaptureDeferralControlRequest) { r.OperationID = "" },
+		func(r *CaptureDeferralControlRequest) { r.OperationID += "\n" },
+		func(r *CaptureDeferralControlRequest) { r.OperationID = strings.Repeat("a", 129) },
+		func(r *CaptureDeferralControlRequest) { r.RequestDigest = "" },
+		func(r *CaptureDeferralControlRequest) { r.RequestDigest = strings.ToUpper(digest) },
+		func(r *CaptureDeferralControlRequest) { r.Action = "extend" },
+		func(r *CaptureDeferralControlRequest) { r.Action = "" },
+	} {
+		invalid := valid
+		change(&invalid)
+		if err := invalid.Validate(); err == nil {
+			t.Fatal("invalid control accepted", invalid)
+		}
+	}
+}
+
 func restartCaptureDeferral(t *testing.T, record CaptureDeferralRecord) CaptureDeferralRecord {
 	t.Helper()
 	raw, err := json.Marshal(record)

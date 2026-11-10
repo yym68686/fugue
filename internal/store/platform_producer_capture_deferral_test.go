@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -26,6 +27,19 @@ func TestCaptureDeferralRejectsUnprivilegedOrUninstalledControl(t *testing.T) {
 	request := platformproducer.CaptureDeferralRequest{}
 	if _, err := s.PrepareProducerCaptureDeferral(t.Context(), request, model.Principal{ActorID: "ordinary"}); err == nil {
 		t.Fatal("unprivileged control was accepted")
+	}
+	control := platformproducer.CaptureDeferralControlRequest{SchemaVersion: platformproducer.CaptureDeferralControlSchema, OperationID: "control-alpha", RequestDigest: "sha256:" + strings.Repeat("a", 64), Action: "release"}
+	if _, err := s.UpdateProducerCaptureDeferral(t.Context(), control, model.Principal{ActorID: "ordinary"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatal("unprivileged update reached storage", err)
+	}
+	identityless := captureDeferralTestPrincipal()
+	identityless.ActorType = ""
+	if _, err := s.UpdateProducerCaptureDeferral(t.Context(), control, identityless); !errors.Is(err, ErrInvalidInput) {
+		t.Fatal("control with an incomplete caller identity reached storage", err)
+	}
+	control.Action = "extend"
+	if _, err := s.UpdateProducerCaptureDeferral(t.Context(), control, captureDeferralTestPrincipal()); !errors.Is(err, ErrInvalidInput) {
+		t.Fatal("unsupported update reached storage", err)
 	}
 	principal := captureDeferralTestPrincipal()
 	if _, _, err := s.BeginProducerCapture(t.Context(), "boot-alpha", platformproducer.Scope, model.PlatformPublicationPrecondition{}, principal); err == nil {
@@ -185,6 +199,23 @@ func TestCaptureDeferralPrivatePostgresAtomicDrainCrashAndExpiry(t *testing.T) {
 		at := time.Now().UTC().Add(-time.Millisecond)
 		return platformproducer.CaptureDeferralRequest{SchemaVersion: platformproducer.CaptureDeferralSchema, OperationID: id, RequestedAt: at, ExpiresAt: at.Add(duration), Authorities: []platformproducer.CaptureDeferralAuthority{{Scope: a.ScopeKey, Policy: binding}}}
 	}
+	control := func(request platformproducer.CaptureDeferralRequest, action string) platformproducer.CaptureDeferralControlRequest {
+		t.Helper()
+		digest, err := request.Digest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return platformproducer.CaptureDeferralControlRequest{SchemaVersion: platformproducer.CaptureDeferralControlSchema, OperationID: request.OperationID, RequestDigest: digest, Action: action}
+	}
+	update := func(db *Store, request platformproducer.CaptureDeferralRequest, action string) (platformproducer.CaptureDeferralRecord, error) {
+		t.Helper()
+		c := control(request, action)
+		receipt, err := db.UpdateProducerCaptureDeferral(ctx, c, principal)
+		if err == nil && (receipt.Control != c || receipt.Record.RequestDigest != c.RequestDigest || receipt.Record.Request.OperationID != c.OperationID || receipt.Version < 1 || receipt.ActorID != principal.ActorID || receipt.ActorType != principal.ActorType) {
+			t.Fatal("committed control receipt lost its target or caller", receipt)
+		}
+		return receipt.Record, err
+	}
 	work, deferred, err := s.BeginProducerCapture(ctx, participant.ID, a.ScopeKey, binding, principal)
 	if err != nil || deferred || work.ID == "" {
 		t.Fatal("initial admission", work, deferred, err)
@@ -203,6 +234,17 @@ func TestCaptureDeferralPrivatePostgresAtomicDrainCrashAndExpiry(t *testing.T) {
 	if err != nil || record.Phase != "draining" {
 		t.Fatal("in-flight work was not retained", record, err)
 	}
+	for _, action := range []string{"observe", "release"} {
+		wrong := control(req, action)
+		wrong.RequestDigest = "sha256:" + strings.Repeat("f", 64)
+		if got, err := s.UpdateProducerCaptureDeferral(ctx, wrong, principal); !errors.Is(err, ErrConflict) || got.Version != 0 || got.Record.RequestDigest != "" {
+			t.Fatal("mismatched target changed a control or returned a receipt", got, err)
+		}
+	}
+	polled, err := s.UpdateProducerCaptureDeferral(ctx, control(req, "observe"), principal)
+	if err != nil || polled.Version != 1 || polled.Changed || polled.Record.Phase != "draining" || !polled.Record.ObservedAt.Equal(record.ObservedAt) {
+		t.Fatal("unchanged poll rewrote or renewed a control", polled, err)
+	}
 	if _, err := s.PrepareProducerCaptureDeferral(ctx, request("overlap", time.Minute), principal); err == nil {
 		t.Fatal("overlapping scope claim was accepted")
 	}
@@ -210,7 +252,7 @@ func TestCaptureDeferralPrivatePostgresAtomicDrainCrashAndExpiry(t *testing.T) {
 	// a real fsync-enabled PG, then use a new Store and pool as another replica.
 	crash()
 	restarted := open()
-	record, err = restarted.UpdateProducerCaptureDeferral(ctx, req.OperationID, false, principal)
+	record, err = update(restarted, req, "observe")
 	if err != nil || record.Phase != "draining" || !record.Request.ExpiresAt.Equal(req.ExpiresAt) {
 		t.Fatal("crash lost the drain or reset its deadline", record, err)
 	}
@@ -242,16 +284,45 @@ func TestCaptureDeferralPrivatePostgresAtomicDrainCrashAndExpiry(t *testing.T) {
 	if err := restarted.FinishProducerCapture(ctx, work, principal); err != nil {
 		t.Fatal(err)
 	}
-	record, err = restarted.UpdateProducerCaptureDeferral(ctx, req.OperationID, false, principal)
+	record, err = update(restarted, req, "observe")
 	if err != nil || record.Phase != "active" || !record.Request.ExpiresAt.Equal(req.ExpiresAt) {
 		t.Fatal("zero-ticket activation", record, err)
 	}
-	record, err = restarted.UpdateProducerCaptureDeferral(ctx, req.OperationID, true, principal)
+	released, err := restarted.UpdateProducerCaptureDeferral(ctx, control(req, "release"), principal)
+	record = released.Record
 	if err != nil || record.Phase != "released" {
 		t.Fatal("release", record, err)
 	}
+	if !released.Changed || released.Version != 3 || released.ActorID != principal.ActorID || released.Control != control(req, "release") {
+		t.Fatal("release receipt did not describe its committed CAS", released)
+	}
 	crash()
 	restarted = open()
+	// A lost release response can be retried using the original request. Read
+	// the persisted terminal record without another write or deadline renewal.
+	replayed, err := restarted.UpdateProducerCaptureDeferral(ctx, control(req, "release"), principal)
+	if err != nil || replayed.Changed || replayed.Version != released.Version || replayed.Record.Phase != "released" || !replayed.Record.EndedAt.Equal(*released.Record.EndedAt) || !replayed.Record.Request.ExpiresAt.Equal(req.ExpiresAt) {
+		t.Fatal("release replay changed the durable terminal receipt", replayed, err)
+	}
+	// A retained terminal control no longer needs its historical policy. Make
+	// the policy relation unavailable, rather than supplying an empty fake
+	// observation, and verify that observe still returns the committed receipt.
+	policyOffline := func(offline bool) {
+		t.Helper()
+		statement := `ALTER TABLE fugue_platform_release_lanes RENAME TO capture_test_offline_lanes`
+		if !offline {
+			statement = `ALTER TABLE capture_test_offline_lanes RENAME TO fugue_platform_release_lanes`
+		}
+		if _, err := restarted.db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policyOffline(true)
+	terminal, err := restarted.UpdateProducerCaptureDeferral(ctx, control(req, "observe"), principal)
+	if err != nil || terminal.Changed || terminal.Version != released.Version || !terminal.Record.EndedAt.Equal(*released.Record.EndedAt) {
+		t.Fatal("terminal observation depended on historical policy availability", terminal, err)
+	}
+	policyOffline(false)
 	if _, err := restarted.PrepareProducerCaptureDeferral(ctx, req, principal); err == nil {
 		t.Fatal("terminal operation replayed after real PG restart")
 	}
@@ -259,11 +330,31 @@ func TestCaptureDeferralPrivatePostgresAtomicDrainCrashAndExpiry(t *testing.T) {
 	if err := restarted.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM fugue_producer_capture_deferral_scopes),(SELECT count(*) FROM fugue_producer_capture_deferrals)`).Scan(&scopes, &retained); err != nil || scopes != 0 || retained != 1 {
 		t.Fatal("overlap rolled back incompletely or tombstone lost", scopes, retained, err)
 	}
+	expiryWork, held, err := restarted.BeginProducerCapture(ctx, participant.ID, a.ScopeKey, binding, principal)
+	if err != nil || held || expiryWork.ID == "" {
+		t.Fatal("admission before finite drain", expiryWork, held, err)
+	}
 	short := request("control-expiry", 400*time.Millisecond)
-	if record, err = restarted.PrepareProducerCaptureDeferral(ctx, short, principal); err != nil || record.Phase != "active" {
+	if record, err = restarted.PrepareProducerCaptureDeferral(ctx, short, principal); err != nil || record.Phase != "draining" {
 		t.Fatal(record, err)
 	}
 	<-time.After(500 * time.Millisecond)
+	policyOffline(true)
+	expired, err := restarted.UpdateProducerCaptureDeferral(ctx, control(short, "observe"), principal)
+	if err != nil || !expired.Changed || expired.Version != 2 || expired.Record.Phase != "expired" || expired.Record.EndedAt == nil || !expired.Record.Request.ExpiresAt.Equal(short.ExpiresAt) {
+		t.Fatal("absolute expiry depended on historical policy availability", expired, err)
+	}
+	if _, _, err := restarted.BeginProducerCapture(ctx, participant.ID, a.ScopeKey, binding, principal); err == nil {
+		t.Fatal("expiry bypassed ordinary policy storage validation")
+	}
+	terminal, err = restarted.UpdateProducerCaptureDeferral(ctx, control(short, "observe"), principal)
+	if err != nil || terminal.Changed || terminal.Version != expired.Version || !terminal.Record.EndedAt.Equal(*expired.Record.EndedAt) {
+		t.Fatal("terminal expiry observation rewrote its receipt", terminal, err)
+	}
+	policyOffline(false)
+	if err := restarted.CloseProducerCaptureParticipant(ctx, participant, principal); err == nil {
+		t.Fatal("expiry erased previously admitted work")
+	}
 	work, deferred, err = restarted.BeginProducerCapture(ctx, participant.ID, a.ScopeKey, binding, principal)
 	if err != nil || deferred || work.ID == "" {
 		t.Fatal("absolute expiry remained restrictive", work, deferred, err)
@@ -271,17 +362,21 @@ func TestCaptureDeferralPrivatePostgresAtomicDrainCrashAndExpiry(t *testing.T) {
 	if err := restarted.FinishProducerCapture(ctx, work, principal); err != nil {
 		t.Fatal(err)
 	}
-	record, err = restarted.UpdateProducerCaptureDeferral(ctx, short.OperationID, false, principal)
+	if err := restarted.FinishProducerCapture(ctx, expiryWork, principal); err != nil {
+		t.Fatal("pre-expiry ticket did not retain its exact completion", err)
+	}
+	record, err = update(restarted, short, "observe")
 	if err != nil || record.Phase != "expired" || !record.Request.ExpiresAt.Equal(short.ExpiresAt) {
 		t.Fatal("expiry tombstone", record, err)
 	}
-	if _, err := restarted.PrepareProducerCaptureDeferral(ctx, request("control-authority", time.Minute), principal); err != nil {
+	authorityRequest := request("control-authority", time.Minute)
+	if _, err := restarted.PrepareProducerCaptureDeferral(ctx, authorityRequest, principal); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := restarted.db.ExecContext(ctx, `UPDATE fugue_platform_release_lanes SET frozen=true WHERE lane_key=$1`, lane); err != nil {
 		t.Fatal(err)
 	}
-	record, err = restarted.UpdateProducerCaptureDeferral(ctx, "control-authority", false, principal)
+	record, err = update(restarted, authorityRequest, "observe")
 	if err != nil || record.Phase != "invalidated" {
 		t.Fatal("authority drift was not terminal", record, err)
 	}

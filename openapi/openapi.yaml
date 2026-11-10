@@ -2398,6 +2398,60 @@ paths:
                 $ref: "#/components/schemas/PlatformFailureDrillResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform/producer-capture-deferrals/control:
+    post:
+      operationId: updateProducerCaptureDeferral
+      summary: Observe or release an existing producer capture deferral
+      description: >-
+        Requires platform.admin and the explicit producer_capture.control scope
+        (or the bootstrap recovery identity). Targets the immutable original
+        operation ID and request digest. Observe may persist drain, expiry or
+        invalidation; release removes only this optional new-input gate. Neither
+        action creates, enables, extends or renews a deferral, installs storage,
+        enrolls a runtime, approves work or changes signed policy/TTL. Missing
+        optional storage refuses. A successful response describes the committed
+        native transaction, not fleet coverage or business success. An uncertain
+        commit returns no receipt; a later explicit request must use the same
+        target, never a new operation or deadline. The request accepts one strict
+        JSON object of at most 2048 bytes, no duplicate keys or query parameters.
+      tags: [Admin]
+      x-fugue-handler: handleUpdateProducerCaptureDeferral
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProducerCaptureDeferralControlRequest"
+      responses:
+        '200':
+          description: Committed control transaction or retained terminal replay; no deadline renewal.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: ["private, no-store"]}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProducerCaptureDeferralControlReceipt"
+        '400':
+          description: Invalid, ambiguous, unsupported or noncanonical control request.
+        '401':
+          description: Authentication required.
+        '403':
+          description: Platform administrator with explicit producer_capture.control permission required.
+        '404':
+          description: No retained operation with this ID.
+        '409':
+          description: Exact original request digest or durable record conflict.
+        '413':
+          description: Request body exceeds 2048 bytes.
+        '415':
+          description: application/json content type required.
+        '503':
+          description: Optional storage unavailable, transaction failed or commit outcome uncertain; no receipt.
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/invariants:
     get:
       operationId: listInvariantDefinitions
@@ -36332,6 +36386,84 @@ components:
       properties:
         inventory:
           $ref: "#/components/schemas/PlatformControlInventory"
+    ProducerCaptureDeferralControlRequest:
+      type: object
+      additionalProperties: false
+      required: [schema_version, operation_id, request_digest, action]
+      properties:
+        schema_version:
+          type: string
+          enum: [fugue.platform.producer.capture-deferral-control/v1]
+        operation_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[^\x00\r\n\t ]+$'
+        request_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        action:
+          type: string
+          enum: [observe, release]
+    ProducerCaptureDeferralOriginalRequest:
+      type: object
+      additionalProperties: false
+      required: [schema_version, operation_id, requested_at, expires_at, authorities]
+      properties:
+        schema_version:
+          type: string
+          enum: [fugue.platform.producer.capture-deferral/v1]
+        operation_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        requested_at: {type: string, format: date-time}
+        expires_at:
+          type: string
+          format: date-time
+          description: Original absolute deadline, at most 30 minutes after requested_at, including drain time.
+        authorities:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required: [scope, policy]
+            properties:
+              scope: {type: string, minLength: 1}
+              policy:
+                $ref: "#/components/schemas/PlatformPublicationPrecondition"
+    ProducerCaptureDeferralRecord:
+      type: object
+      additionalProperties: false
+      required: [request, request_digest, phase, observed_at]
+      properties:
+        request:
+          $ref: "#/components/schemas/ProducerCaptureDeferralOriginalRequest"
+        request_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        phase:
+          type: string
+          enum: [draining, active, expired, released, invalidated]
+        observed_at:
+          type: string
+          format: date-time
+          description: Persisted observation floor; unchanged polling does not renew it.
+        activated_at: {type: string, format: date-time}
+        ended_at: {type: string, format: date-time}
+    ProducerCaptureDeferralControlReceipt:
+      type: object
+      additionalProperties: false
+      required: [control, record, version, changed, actor_type, actor_id]
+      properties:
+        control:
+          $ref: "#/components/schemas/ProducerCaptureDeferralControlRequest"
+        record:
+          $ref: "#/components/schemas/ProducerCaptureDeferralRecord"
+        version: {type: integer, format: int64, minimum: 1}
+        changed: {type: boolean}
+        actor_type: {type: string, minLength: 1}
+        actor_id: {type: string, minLength: 1}
     ResilienceInventoryItem:
       type: object
       additionalProperties: false
