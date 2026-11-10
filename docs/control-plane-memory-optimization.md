@@ -128,6 +128,9 @@ original candidate set that filters to zero reports no eligible candidate and
 still rejects shadow execution/positive ACK. Malformed original authorization
 remains rejected. Live selector retirement and historical replay keep their
 existing separate admission boundaries.
+New query-failure witnesses use v2 semantics; v1 witnesses replay the original
+post-filter error classification and materialization boundary. This diagnostic
+compatibility path never admits a live candidate or creates positive evidence.
 
 ## Verification
 

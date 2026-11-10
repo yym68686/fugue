@@ -11,7 +11,55 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 )
+
+func TestQueryFailureReplayKeepsV1ClassificationAndV2Boundary(t *testing.T) {
+	for _, invalidOriginal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "recovering", true: "invalid-original"}[invalidOriginal], func(t *testing.T) {
+			view, plan, policy, _, now := queryExecutionFixture()
+			view.Records = view.Records[:1]
+			view.Records[0].AnswerPolicy.Availability = availabilityTestPolicy()
+			if invalidOriginal {
+				view.Records[0].Candidates = nil
+				view.Records[0].Values = nil
+			}
+			records, err := materializeDNSQueriesVersion(view, &plan, &policy, nil, now, false)
+			if err != nil || len(records) != 1 {
+				t.Fatal("historical materialization failed", err)
+			}
+			_, cause := executeDNSQueryRecordVersion(records[0], dnsGeoHint{}, now, false)
+			if cause == nil || cause.Error() != "invalid DNS availability authorization" {
+				t.Fatal("v1 error semantics changed", cause)
+			}
+			w := dnsQueryFailureWitness{Schema: "fugue.dns-query-failure/v1", ObservedAt: now, View: view, Plan: plan, Policy: policy, Materialized: records[0], Error: cause.Error()}
+			encode := func() []byte {
+				w.Digest = ""
+				w.Digest, err = platformconfig.Digest(w)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, err := json.Marshal(w)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return raw
+			}
+			if matched, err := ReplayDNSQueryFailure(encode()); err != nil || !matched {
+				t.Fatal("existing v1 evidence no longer replays", matched, err)
+			}
+			w.Schema = dnsQueryFailureSchema
+			if matched, _ := ReplayDNSQueryFailure(encode()); matched {
+				t.Fatal("v2 replay used the retired classification or authorization boundary")
+			}
+			if invalidOriginal {
+				if _, err := materializeDNSQueries(view, &plan, &policy, nil, now); err == nil {
+					t.Fatal("historical replay weakened live admission")
+				}
+			}
+		})
+	}
+}
 
 func TestQueryFailureWitnessReplaysMissingRecoveryWithoutAuthorizingServing(t *testing.T) {
 	for _, mode := range []string{"no-history", "expired", "failed-path"} {
@@ -56,6 +104,9 @@ func TestQueryFailureWitnessReplaysMissingRecoveryWithoutAuthorizingServing(t *t
 			}
 			var changed dnsQueryFailureWitness
 			json.Unmarshal(raw, &changed)
+			if changed.Schema != dnsQueryFailureSchema {
+				t.Fatal("current failure written under historical semantics")
+			}
 			changed.Facts[0].Ready = !changed.Facts[0].Ready
 			raw, _ = json.Marshal(changed)
 			if _, err := ReplayDNSQueryFailure(raw); err == nil {

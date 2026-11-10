@@ -12,6 +12,8 @@ import (
 
 const dnsQueryFailureLimit = 2 << 20
 
+const dnsQueryFailureSchema = "fugue.dns-query-failure/v2"
+
 type dnsQueryFailureWitness struct {
 	Schema         string                            `json:"schema"`
 	Digest         string                            `json:"digest,omitempty"`
@@ -34,7 +36,7 @@ func (s *Service) retainDNSQueryFailure(c dnsPlatformCandidate, a model.Platform
 	if s.Config.CachePath == "" || plan == nil || policy == nil || cause == nil {
 		return
 	}
-	witness := dnsQueryFailureWitness{Schema: "fugue.dns-query-failure/v1", ArtifactID: c.Artifact.ID, ArtifactDigest: c.Artifact.ContentHash, Assignment: a, ObservedAt: at, View: view, Policy: *policy, Materialized: record, Hint: hint, Error: cause.Error()}
+	witness := dnsQueryFailureWitness{Schema: dnsQueryFailureSchema, ArtifactID: c.Artifact.ID, ArtifactDigest: c.Artifact.ContentHash, Assignment: a, ObservedAt: at, View: view, Policy: *policy, Materialized: record, Hint: hint, Error: cause.Error()}
 	witness.View.Records = nil
 	for _, r := range view.Records {
 		if r.Name == record.Name && r.Type == record.Type {
@@ -96,7 +98,7 @@ func ReplayDNSQueryFailure(raw []byte) (bool, error) {
 		return false, errors.New("DNS query witness exceeds bound")
 	}
 	var w dnsQueryFailureWitness
-	if json.Unmarshal(raw, &w) != nil || w.Schema != "fugue.dns-query-failure/v1" || w.ObservedAt.IsZero() || len(w.View.Records) != 1 || w.Error == "" {
+	if json.Unmarshal(raw, &w) != nil || w.Schema != "fugue.dns-query-failure/v1" && w.Schema != dnsQueryFailureSchema || w.ObservedAt.IsZero() || len(w.View.Records) != 1 || w.Error == "" {
 		return false, errors.New("invalid DNS query witness")
 	}
 	want := w.Digest
@@ -105,7 +107,11 @@ func ReplayDNSQueryFailure(raw []byte) (bool, error) {
 	if err != nil || want != got {
 		return false, errors.New("DNS query witness digest mismatch")
 	}
-	records, err := materializeDNSQueries(w.View, &w.Plan, &w.Policy, w.Facts, w.ObservedAt)
+	// Historical v1 evidence used post-filter structural validation and its
+	// original error classification. This diagnostic replay grants no serving
+	// authority. Live admission/execution always use the current boundaries.
+	current := w.Schema == dnsQueryFailureSchema
+	records, err := materializeDNSQueriesVersion(w.View, &w.Plan, &w.Policy, w.Facts, w.ObservedAt, current)
 	if err != nil || len(records) != 1 {
 		return false, errors.New("DNS query materialization failed")
 	}
@@ -114,6 +120,6 @@ func ReplayDNSQueryFailure(raw []byte) (bool, error) {
 	if actualErr != nil || expectedErr != nil || actualDigest != expectedDigest {
 		return false, errors.New("DNS query materialization differs")
 	}
-	_, err = executeDNSQueryRecord(records[0], w.Hint, w.ObservedAt)
+	_, err = executeDNSQueryRecordVersion(records[0], w.Hint, w.ObservedAt, current)
 	return err != nil && err.Error() == w.Error, nil
 }
