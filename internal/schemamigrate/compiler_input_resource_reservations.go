@@ -46,8 +46,28 @@ END `
 
 func VerifyCompilerInputResourceReservations(ctx context.Context, tx interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }) error {
+	var origin, readOnly bool
+	if err := tx.QueryRowContext(ctx, `SELECT current_setting('session_replication_role')='origin',current_setting('transaction_read_only')='on'`).Scan(&origin, &readOnly); err != nil || !origin {
+		return fmt.Errorf("compiler input resource trigger execution unavailable")
+	}
+	// A write transaction must hold the verified table shape until its ACK.
+	// SHARE UPDATE EXCLUSIVE also excludes concurrent index builds, which a
+	// mere AccessShare/RowExclusive lock would allow. The native caller's lock
+	// timeout still applies. Read-only checks cannot grant execution and the
+	// subsequent write transaction independently locks and verifies again.
+	mode := "SHARE UPDATE EXCLUSIVE"
+	if readOnly {
+		mode = "ACCESS SHARE"
+	}
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE ONLY fugue_platform_input_resource_pool, ONLY fugue_platform_input_resource_reservations, ONLY fugue_platform_input_resource_outcomes IN `+mode+` MODE`); err != nil {
+		return fmt.Errorf("compiler input resource schema lock unavailable")
+	}
 	for _, table := range []string{"fugue_platform_input_resource_pool", "fugue_platform_input_resource_reservations", "fugue_platform_input_resource_outcomes"} {
+		if err := verifyCompilerInputResourceContract(ctx, tx, table); err != nil {
+			return err
+		}
 		var valid bool
 		if err := tx.QueryRowContext(ctx, `SELECT t.tgenabled='A' AND t.tgtype=58 AND p.prosrc=$2 AND NOT p.prosecdef
  AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
@@ -69,8 +89,11 @@ func VerifyCompilerInputResourceReservations(ctx context.Context, tx interface {
 		}
 	}
 	var sequenceValid bool
-	if err := tx.QueryRowContext(ctx, `SELECT s.seqtypid='int8'::regtype AND s.seqstart=1 AND s.seqincrement=1 AND s.seqmin=1 AND s.seqmax=1024 AND s.seqcache=1 AND NOT s.seqcycle AND c.relpersistence='p'
- FROM pg_sequence s JOIN pg_class c ON c.oid=s.seqrelid WHERE s.seqrelid='fugue_platform_input_resource_tickets'::regclass`).Scan(&sequenceValid); err != nil || !sequenceValid {
+	if err := tx.QueryRowContext(ctx, `SELECT s.seqtypid='int8'::regtype AND s.seqstart=1 AND s.seqincrement=1 AND s.seqmin=1 AND s.seqmax=1024 AND s.seqcache=1 AND NOT s.seqcycle
+ AND c.relkind='S' AND c.relpersistence='p' AND n.nspname=current_schema()
+ AND NOT EXISTS(SELECT 1 FROM pg_depend WHERE classid='pg_class'::regclass AND objid=c.oid AND deptype IN ('a','i'))
+ FROM pg_sequence s JOIN pg_class c ON c.oid=s.seqrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+ WHERE s.seqrelid='fugue_platform_input_resource_tickets'::regclass`).Scan(&sequenceValid); err != nil || !sequenceValid {
 		return fmt.Errorf("compiler input resource ticket bound unavailable")
 	}
 	return nil

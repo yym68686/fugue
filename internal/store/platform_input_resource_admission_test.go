@@ -86,6 +86,131 @@ func resourceReservationCount(t *testing.T, s *Store) int {
 	return count
 }
 
+func TestPendingRootResourcePostgresClosedCatalog(t *testing.T) {
+	s := pendingPolicyFixture(t)
+	resourcePoolFixture(t, s, 1)
+	tx, err := beginPendingRootPolicyTx(t.Context(), s.db, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := schemamigrate.VerifyCompilerInputResourceReservations(t.Context(), tx); err != nil {
+		for _, table := range []string{"fugue_platform_input_resource_pool", "fugue_platform_input_resource_reservations", "fugue_platform_input_resource_outcomes"} {
+			var definitions string
+			_ = s.db.QueryRow(`SELECT COALESCE(string_agg(contype::text||':'||pg_get_constraintdef(oid),';' ORDER BY contype::text||':'||pg_get_constraintdef(oid)),'') FROM pg_constraint WHERE conrelid=to_regclass($1)`, table).Scan(&definitions)
+			t.Log(table, definitions)
+		}
+		t.Fatal(err)
+	}
+}
+
+func TestPendingRootResourcePostgresRejectsAllocationBearingCatalogDrift(t *testing.T) {
+	mutations := map[string]string{
+		"extra-index":      `CREATE INDEX resource_extra ON fugue_platform_input_resource_reservations(created_at)`,
+		"included-index":   `CREATE INDEX resource_extra ON fugue_platform_input_resource_reservations(ticket) INCLUDE(allocation_json)`,
+		"expression-index": `CREATE INDEX resource_extra ON fugue_platform_input_resource_reservations(lower(allocation_json))`,
+		"column-default":   `ALTER TABLE fugue_platform_input_resource_reservations ALTER COLUMN created_at SET DEFAULT now()`,
+		"extra-column":     `ALTER TABLE fugue_platform_input_resource_outcomes ADD COLUMN extra TEXT`,
+		"missing-not-null": `ALTER TABLE fugue_platform_input_resource_reservations ALTER COLUMN created_at DROP NOT NULL`,
+		"missing-check": `DO $$ DECLARE target TEXT; BEGIN
+ SELECT conname INTO STRICT target FROM pg_constraint WHERE conrelid='fugue_platform_input_resource_reservations'::regclass
+ AND contype='c' AND pg_get_constraintdef(oid) LIKE '%octet_length(allocation_json)%';
+ EXECUTE format('ALTER TABLE fugue_platform_input_resource_reservations DROP CONSTRAINT %I',target); END $$`,
+		"missing-foreign-key": `ALTER TABLE fugue_platform_input_resource_outcomes DROP CONSTRAINT fugue_platform_input_resource_outcomes_reservation_id_fkey`,
+		"table-options":       `ALTER TABLE fugue_platform_input_resource_reservations SET(fillfactor=50)`,
+		"toast-options":       `ALTER TABLE fugue_platform_input_resource_reservations SET(toast.autovacuum_enabled=false)`,
+		"column-storage":      `ALTER TABLE fugue_platform_input_resource_reservations ALTER COLUMN allocation_json SET STORAGE PLAIN`,
+		"column-compression":  `ALTER TABLE fugue_platform_input_resource_reservations ALTER COLUMN allocation_json SET COMPRESSION pglz`,
+		"sequence-owned":      `ALTER SEQUENCE fugue_platform_input_resource_tickets OWNED BY fugue_platform_input_resource_reservations.ticket`,
+		"extra-trigger": `CREATE FUNCTION resource_side_effect() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+ CREATE TRIGGER resource_side_effect BEFORE INSERT ON fugue_platform_input_resource_reservations FOR EACH ROW EXECUTE FUNCTION resource_side_effect()`,
+		"rewrite-rule": `CREATE RULE resource_side_effect AS ON INSERT TO fugue_platform_input_resource_outcomes DO ALSO NOTIFY resource_side_effect`,
+	}
+	for name, mutation := range mutations {
+		t.Run(name, func(t *testing.T) {
+			for _, charged := range []bool{false, true} {
+				s := pendingPolicyFixture(t)
+				pool, source := resourcePoolFixture(t, s, 2)
+				var preparations atomic.Int32
+				counted := resourceSourceFunc(func(ctx context.Context, op PendingRootResourceOperation, snapshot PendingRootResourcePoolSnapshot) (PendingRootResourceWitness, error) {
+					preparations.Add(1)
+					return source(ctx, op, snapshot)
+				})
+				a := seedResourcePool(t, s, pool, counted)
+				var reservation inputarchive.PendingRootReservation
+				if charged {
+					var err error
+					reservation, err = a.ReservePendingRoot(t.Context(), resourceTestRequest())
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := s.db.Exec(mutation); err != nil {
+					t.Fatal("disposable mutation", err)
+				}
+				before := preparations.Load()
+				if got, err := a.ReservePendingRoot(t.Context(), resourceTestRequest()); err == nil || got != nil || preparations.Load() != before {
+					t.Fatal("drift reached independent preparation/admission", err, charged)
+				}
+				if charged {
+					if reservation.CheckPendingRootReservation(t.Context()) == nil {
+						t.Fatal("existing handle accepted catalog drift")
+					}
+					if reservation.(*pendingRootResourceReservation).RecordOutcome(t.Context(), inputarchive.PendingRootCompletionNotConfirmed) == nil {
+						t.Fatal("outcome wrote to a changed allocation contract")
+					}
+				}
+				var called bool
+				var outcomes int
+				if err := s.db.QueryRow(`SELECT is_called FROM fugue_platform_input_resource_tickets`).Scan(&called); err != nil || called != charged {
+					t.Fatal("refusal consumed/refunded ticket", called, charged, err)
+				}
+				want := 0
+				if charged {
+					want = 1
+				}
+				if resourceReservationCount(t, s) != want {
+					t.Fatal("refusal changed journal charge")
+				}
+				if err := s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_resource_outcomes`).Scan(&outcomes); err != nil || outcomes != 0 {
+					t.Fatal("refusal fabricated outcome", outcomes, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPendingRootResourcePostgresCatalogLockExcludesConcurrentDDL(t *testing.T) {
+	s := pendingPolicyFixture(t)
+	resourcePoolFixture(t, s, 1)
+	tx, err := beginPendingRootPolicyTx(t.Context(), s.db, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := schemamigrate.VerifyCompilerInputResourceReservations(t.Context(), tx); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := s.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(t.Context(), `SET lock_timeout='100ms'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, ddl := range []string{
+		`ALTER TABLE fugue_platform_input_resource_outcomes ADD COLUMN extra TEXT`,
+		`CREATE INDEX CONCURRENTLY resource_racing ON fugue_platform_input_resource_reservations(created_at)`,
+	} {
+		_, err := conn.ExecContext(t.Context(), ddl)
+		var state interface{ SQLState() string }
+		if !errors.As(err, &state) || state.SQLState() != "55P03" {
+			t.Fatal("verified write shape changed before transaction end", err)
+		}
+	}
+}
+
 func TestPendingRootResourceBoundsConservativeVolumeAndOverflow(t *testing.T) {
 	b := inputarchive.PendingRootWholeOperationBounds{NewPhysicalAllocationBoundBytes: math.MaxUint64, PeakWALBytes: 1}
 	if _, ok := resourceVolumeCharge(b); ok {
@@ -357,20 +482,26 @@ func TestPendingRootResourcePostgresRolledBackJournalStillCharged(t *testing.T) 
 	s := pendingPolicyFixture(t)
 	pool, source := resourcePoolFixture(t, s, 1)
 	a := seedResourcePool(t, s, pool, source)
-	// Fault only a disposable schema, after the durable ticket acknowledgement.
-	if _, err := s.db.Exec(`CREATE FUNCTION resource_test_reject() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic journal failure'; END $$;
- CREATE TRIGGER resource_test_reject BEFORE INSERT ON fugue_platform_input_resource_reservations FOR EACH ROW EXECUTE FUNCTION resource_test_reject()`); err != nil {
-		t.Fatal(err)
-	}
+	// Revoke the independent source after the real journal INSERT but before
+	// its commit. The schema stays closed, the inserted row rolls back, and the
+	// previously acknowledged nontransactional ticket must remain charged.
+	var checks atomic.Int32
+	a.source = resourceSourceFunc(func(ctx context.Context, operation PendingRootResourceOperation, snapshot PendingRootResourcePoolSnapshot) (PendingRootResourceWitness, error) {
+		witness, err := source(ctx, operation, snapshot)
+		witness.(*resourceWitnessFixture).check = func(ctx context.Context) error {
+			if checks.Add(1) == 3 {
+				return ErrConflict
+			}
+			return ctx.Err()
+		}
+		return witness, err
+	})
 	if _, err := a.ReservePendingRoot(t.Context(), resourceTestRequest()); err == nil || resourceReservationCount(t, s) != 0 {
 		t.Fatal("journal failure acknowledged a reservation")
 	}
 	var used int
 	if err := s.db.QueryRow(`SELECT last_value FROM fugue_platform_input_resource_tickets`).Scan(&used); err != nil || used != 1 {
 		t.Fatal("rollback returned its durable ticket", used, err)
-	}
-	if _, err := s.db.Exec(`DROP TRIGGER resource_test_reject ON fugue_platform_input_resource_reservations`); err != nil {
-		t.Fatal(err)
 	}
 	reopened, err := NewPendingRootResourceAdmission(s, source, pool)
 	if err != nil {
@@ -386,8 +517,9 @@ func TestPendingRootResourcePostgresEveryJournalCommitOverridesAsyncDefault(t *t
 	pool, source := resourcePoolFixture(t, s, 2)
 	a := seedResourcePool(t, s, pool, source)
 	// The same pooled session deliberately starts asynchronous. The real
-	// reservation journal, retained root/reference rows and outcome all reject
-	// writes unless their own transaction has installed synchronous commit.
+	// native transaction guard checks synchronous commit for every write tx;
+	// business root/reference triggers independently reject async execution.
+	// Ledger triggers are not injected: their exact closed catalog is required.
 	s.db.SetMaxOpenConns(4) // admission rechecks while the root transaction is open
 	if _, err := s.db.Exec(`CREATE FUNCTION pending_native_durability_probe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
  IF current_setting('synchronous_commit') NOT IN ('on','remote_apply') THEN
@@ -395,8 +527,6 @@ func TestPendingRootResourcePostgresEveryJournalCommitOverridesAsyncDefault(t *t
  END IF;
  RETURN NEW;
  END $$;
- CREATE TRIGGER pending_native_durability_probe BEFORE INSERT ON fugue_platform_input_resource_reservations FOR EACH ROW EXECUTE FUNCTION pending_native_durability_probe();
- CREATE TRIGGER pending_native_durability_probe BEFORE INSERT ON fugue_platform_input_resource_outcomes FOR EACH ROW EXECUTE FUNCTION pending_native_durability_probe();
  CREATE TRIGGER pending_native_durability_probe BEFORE INSERT ON fugue_platform_input_external_roots FOR EACH ROW EXECUTE FUNCTION pending_native_durability_probe();
  CREATE TRIGGER pending_native_durability_probe BEFORE INSERT ON fugue_platform_input_external_root_refs FOR EACH ROW EXECUTE FUNCTION pending_native_durability_probe()`); err != nil {
 		t.Fatal(err)

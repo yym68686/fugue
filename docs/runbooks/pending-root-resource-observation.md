@@ -71,3 +71,16 @@ No server/role setting, replica count or membership is changed. A failed or lost
 commit acknowledgement remains uncertain, with the existing full charge retained
 and no retry/refund. Installation/bootstrap costs, all ledger allocation/WAL,
 and failure/uncertain-ACK exit escrow still require independent bounds.
+
+The native ledger requires its closed catalog contract before independent
+resource preparation, ticket consumption, reservation checks and outcome writes.
+Column types/nullability/storage, exact validated constraints and foreign keys,
+the permitted unique btree indexes, triggers and noncycling sequence must match.
+Additional columns/defaults/indexes/triggers/rules, changed TOAST/table options,
+replica trigger mode and other allocation-bearing drift are refused without DDL
+repair or a new ticket. A write transaction holds table schema locks through its
+acknowledgement, including exclusion of concurrent index creation; the existing
+short lock timeout remains in force. Failed outcomes keep their full charge.
+This fixes the shape to which an independent cost proof must apply. It does not
+provide that proof, cover administrator sequence changes, attest physical storage
+paths or establish installation/bootstrap, shared growth or failure-exit bounds.
