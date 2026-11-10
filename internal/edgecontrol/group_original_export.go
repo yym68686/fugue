@@ -226,7 +226,7 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 				if key == "candidate_history" {
 					limit = retainedGroupCandidateBundles
 				}
-				if key == "retention_inputs" || key == "pending_root_records" {
+				if key == "retention_inputs" || key == "pending_root_records" || key == "publication_originals" {
 					limit = 32
 				}
 				if count > limit || entryCount > groupOriginalEntries {
@@ -296,6 +296,11 @@ func ExportGroupOriginalEvidence(ctx context.Context, stateFile, groupID, keyrin
 						out.Generations[i].CompileInputs = append(out.Generations[i].CompileInputs, json.RawMessage(canonical))
 						retained += len(canonical)
 					}
+				case GroupPublishedBundle:
+					if validateGroupPublishedBundle(groupID, item) != nil {
+						return empty, ErrGroupOriginalExport
+					}
+					retained += groupOriginalAddBody(&out, wanted, key, item.Bundle, keys)
 				}
 				if retained > groupOriginalBatchBytes {
 					return empty, ErrGroupOriginalExport

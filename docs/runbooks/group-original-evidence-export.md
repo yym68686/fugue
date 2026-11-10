@@ -31,6 +31,16 @@ can have a valid signature with no matching publication sequence. A refreshed
 LKG cannot supply a missing historical publication signature. Original source
 and signing key material are never created, modified or re-signed.
 
+With original-input capture explicitly enabled, `publication_originals` can
+supply exact signed issuances retained by a native atomic publication CAS,
+including old refreshes after their current pointer has been superseded.
+The exporter still applies current primary-key revocation and derives each
+binding from the exact original input, signed body and publication ledger.
+It does not infer that older uncaptured publications have been recovered or
+that a current checksum authenticates independent custody. Capture's finite
+32-issuance/shared-32MiB stop condition and reader-first upgrade requirements
+are documented in `docs/group-compile-input-retention.md`.
+
 `checksum_verified` is file-integrity evidence, not authentication of custody.
 `state_contents_validated`, `admission_authenticated` and `dependency_closure`
 remain false: unselected transitions and the full dependency graph are not

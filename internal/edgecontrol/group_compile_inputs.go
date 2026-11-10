@@ -88,6 +88,9 @@ func retainGroupCompileInput(ctx context.Context, state *persistentGroupState, e
 	state.CompileInputsRequired = true
 	state.CompileInputAttestationsRequired = true
 	state.RetentionInputs = append(state.RetentionInputs, input)
+	if validateGroupPublicationOriginals(*state) != nil {
+		return ErrGroupCompileInput
+	}
 	return nil
 }
 

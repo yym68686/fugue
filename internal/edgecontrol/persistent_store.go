@@ -59,6 +59,8 @@ type persistentGroupState struct {
 	RetentionInputs                  []GroupCompileInput          `json:"retention_inputs,omitempty"`
 	PendingRootsRequired             bool                         `json:"pending_roots_required,omitempty"`
 	PendingRootRecords               []GroupPendingRootRecord     `json:"pending_root_records,omitempty"`
+	PublicationOriginalsFromSequence uint64                       `json:"publication_originals_from_sequence,omitempty"`
+	PublicationOriginals             []GroupPublishedBundle       `json:"publication_originals,omitempty"`
 	Digest                           string                       `json:"digest"`
 }
 
@@ -958,6 +960,7 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 		before = &copy
 	}
 	required := state.PendingRootsRequired
+	originalsFromSequence := state.PublicationOriginalsFromSequence
 	if err := fn(&state); err != nil {
 		return err
 	}
@@ -966,6 +969,12 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 	}
 	if required && !state.PendingRootsRequired {
 		return ErrGroupPendingRoot
+	}
+	if originalsFromSequence != 0 && originalsFromSequence != state.PublicationOriginalsFromSequence {
+		return ErrGroupPublicationOriginal
+	}
+	if err := store.retainGroupPublicationOriginal(ctx, before, &state); err != nil {
+		return err
 	}
 	if err := store.retainPendingGroupPublication(ctx, before, &state); err != nil {
 		return err
@@ -1418,6 +1427,9 @@ func validatePersistentGroupStateContents(state persistentGroupState, groupID st
 	if err := validateGroupCompileInputs(state); err != nil {
 		return err
 	}
+	if err := validateGroupPublicationOriginals(state); err != nil {
+		return err
+	}
 	if err := validateGroupPendingRoots(state); err != nil {
 		return err
 	}
@@ -1588,6 +1600,13 @@ func persistentGroupStateDigest(state persistentGroupState) string {
 }
 
 func clonePersistentGroupState(state persistentGroupState) persistentGroupState {
+	if state.PublicationOriginals != nil {
+		originals := make([]GroupPublishedBundle, len(state.PublicationOriginals))
+		for i := range originals {
+			originals[i] = cloneGroupPublishedBundle(state.PublicationOriginals[i])
+		}
+		state.PublicationOriginals = originals
+	}
 	if state.PendingRootRecords != nil {
 		state.PendingRootRecords = append([]GroupPendingRootRecord(nil), state.PendingRootRecords...)
 	}

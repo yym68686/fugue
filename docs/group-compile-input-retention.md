@@ -36,10 +36,37 @@ Reading a captured source reruns native compilation with its original time,
 freshness, bootstrap and producer projection, and compares the whole unsigned
 bundle and ledger binding. Compaction can archive the redundant shadow payload
 but never prunes the captured original. There are at most 32 records, at most
-8MiB per record and 32MiB total. Exhaustion refuses the entire next successful
+8MiB per record and 32MiB total shared with captured publication originals. Exhaustion refuses the entire next successful
 CAS; it does not drop protected records or silently continue without capture.
 This is an explicit operational stop condition, so the option must not be
 enabled as an unreviewed way to repair a historical source gap.
+
+Once a captured input is published, the exact signed `GroupPublishedBundle`
+is retained in `publication_originals` in the same atomic state replacement
+as the publication ledger and current pointer. Validity refresh, recovery and
+candidate promotion use that same capture boundary. The durable
+`publication_originals_from_sequence` boundary prevents subsequent unrecorded issuances
+after reopening with the process option off. Each captured issuance retains
+its original publication/candidate sequences, signature, issuance clock and
+recovery epoch; a refresh is a separate issuance, never a replacement for the
+old signature. Inputs are not changed or re-sealed to add this output.
+
+There are at most 32 captured issuances, including refreshes. They share the
+existing 32MiB custody bound with original inputs, with at most 8MiB per value.
+The next publication is refused atomically when either bound is exhausted;
+existing LKG and protected originals remain intact, and the mandatory deduplicated
+failure audit still records the refusal. Compaction never
+prunes these bodies. This finite stop condition requires an explicit reviewed
+custody/exit budget before enabling capture. Deploy compatible readers first:
+older strict readers reject the new optional fields, so promised rollback
+compatibility must be established before writing them. Capture remains OFF by
+default. Legacy prefixes are not backfilled, and a missing original input
+cannot be replaced by the current projection to admit a publication.
+
+Selective export can reproduce a retained old signature after supersession,
+compaction and a cold reopen. It still verifies the primary issuance signature
+and input MAC under current trust, and leaves custody authentication, registry
+completeness, restore pins and activation/retirement admission unproven.
 
 Selective original export includes only requested captured generations and
 validates each selected input against its exact shadow sequence. It remains a
