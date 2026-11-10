@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"fugue/internal/model"
@@ -114,6 +115,82 @@ func managedHandoffSourcePositive(source retainedTrafficSource, h platformconfig
 	return true
 }
 
+// Successive automatic deployments can advance the durable stable selection
+// before an intermediate traffic publication becomes verified. Compare the
+// current operation's epoch and that system-authored selection together. This
+// authorizes only the exact earlier verified path, never a relabeled upstream
+// or readiness for the intermediate release. An operator selection cannot use
+// this exception; admission repeats the durable actor and operation checks.
+func managedHandoffMatchesSource(source retainedTrafficSource, intent platformconfig.PlatformIntent, policy platformconfig.PolicySnapshot, b store.RouteBusinessSnapshot, h platformconfig.ManagedServingHandoff, runtimeID string) bool {
+	previous := h
+	foundSourcePolicy := false
+	for _, rule := range source.policy.TrafficConstraints {
+		if rule.AppID == h.AppID && rule.TenantID == h.TenantID {
+			if rule.Mode != model.AppTrafficModeSingle || rule.StableWeight != 100 || rule.CandidateWeight != 0 || rule.CandidateReleaseID != "" || rule.StableReleaseID == "" {
+				return false
+			}
+			previous.ReleaseID = rule.StableReleaseID
+			foundSourcePolicy = true
+		}
+	}
+	if !foundSourcePolicy {
+		return false
+	}
+	if previous.ReleaseID != h.ReleaseID {
+		automatic := false
+		for _, current := range b.TrafficPolicies {
+			if current.AppID == h.AppID && current.TenantID == h.TenantID && current.StableReleaseID == h.ReleaseID && current.UpdatedByType == model.ActorTypeSystem && current.UpdatedByID == "stable-release-sync" && current.Mode == model.AppTrafficModeSingle && current.StableWeight == 100 && current.CandidateWeight == 0 && current.CandidateReleaseID == "" {
+				automatic = true
+			}
+		}
+		if !automatic {
+			return false
+		}
+		policy.TrafficConstraints = append([]platformconfig.TrafficPolicyConstraint(nil), policy.TrafficConstraints...)
+		found := false
+		for i := range policy.TrafficConstraints {
+			rule := &policy.TrafficConstraints[i]
+			if rule.AppID == h.AppID && rule.TenantID == h.TenantID {
+				if rule.StableReleaseID != h.ReleaseID {
+					return false
+				}
+				rule.StableReleaseID = previous.ReleaseID
+				found = true
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if !managedHandoffAuthorityEqual(source, intent, policy, h) {
+		return false
+	}
+	routes := source.routes[h.TenantID+"\x00"+h.AppID]
+	if len(routes) == 0 || len(routes[0].Upstreams) != 1 {
+		return false
+	}
+	if selected := routes[0].Upstreams[0].ReleaseID; selected != previous.ReleaseID {
+		// A verified retained publication can itself be the next source. Its
+		// signed retention metadata must account for the exact earlier route;
+		// never infer a new release identity or flatten away that provenance.
+		parts, err := platformconfig.RetainedTrafficPartitionsFromArtifact(source.route)
+		if err != nil {
+			return false
+		}
+		retained := false
+		for _, part := range parts {
+			if part.TenantID == h.TenantID && part.AppID == h.AppID && reflect.DeepEqual(platformconfig.NormalizeTrafficPartitionRoutes(part.Routes), platformconfig.NormalizeTrafficPartitionRoutes(routes)) {
+				retained = true
+			}
+		}
+		if !retained || selected == "" {
+			return false
+		}
+		previous.ReleaseID = selected
+	}
+	return managedHandoffSourcePositive(source, previous, runtimeID)
+}
+
 func (s *Server) captureManagedHandoffPartitions(ctx context.Context, p *platformIntentProjectionResponse, b store.RouteBusinessSnapshot, budgets ...time.Duration) error {
 	return s.captureManagedHandoffPartitionsWithSource(ctx, p, b, s.newRetainedTrafficSourceReader(ctx, p.Intent.Scope), budgets...)
 }
@@ -144,7 +221,7 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 	if err != nil {
 		for _, h := range candidates {
 			app, _ := managedHandoffOperation(b, h)
-			if managedHandoffAuthorityEqual(source, p.Intent, p.Policy, h) && managedHandoffSourcePositive(source, h, app.Spec.RuntimeID) && managedHandoffOriginPending(*p, h) {
+			if managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, app.Spec.RuntimeID) && managedHandoffOriginPending(*p, h) {
 				// A failed complete proof is not a negative workload observation.
 				// Do not publish an empty replacement for a signed positive path.
 				// Retry capture; do not copy the partial proof, renew its expiry or
@@ -161,7 +238,7 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 	var facts []platformconfig.ManagedServingHandoff
 	for _, h := range candidates {
 		app, _ := managedHandoffOperation(b, h)
-		if !managedHandoffAuthorityEqual(source, p.Intent, p.Policy, h) || !managedHandoffSourcePositive(source, h, app.Spec.RuntimeID) {
+		if !managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, app.Spec.RuntimeID) {
 			continue
 		}
 		expires := source.expiry(h.TenantID, h.AppID)
@@ -235,7 +312,7 @@ func (s *Server) validateManagedHandoffCompilation(ctx context.Context, compiled
 	}
 	for _, h := range facts {
 		app, ok := managedHandoffOperation(b, h)
-		if !ok || !managedHandoffAuthorityEqual(source, intent, policy, h) || !managedHandoffSourcePositive(source, h, app.Spec.RuntimeID) {
+		if !ok || !managedHandoffMatchesSource(source, intent, policy, b, h, app.Spec.RuntimeID) {
 			return nil, fmt.Errorf("managed handoff operation or authority changed")
 		}
 		digest, err := platformconfig.TrafficPartitionInputDigest(intent, policy, h.TenantID, h.AppID)

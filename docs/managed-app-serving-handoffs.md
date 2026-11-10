@@ -13,7 +13,7 @@ Admission requires all of the following:
 
 - The application's exact current deploy operation on a managed runtime must be
   pending, running or waiting-agent and nonfailed, with an enabled single
-  stable100 policy naming the same old stable release. Its lifecycle identity is
+  stable100 policy naming the captured pending release. Its lifecycle identity is
   captured with the application in the same business snapshot. The application's
   presentation phase may already be `deployed` before the operation commits;
   that phase is not evidence of completion.
@@ -23,6 +23,14 @@ Admission requires all of the following:
 - Unchanged per-application HTTP authority, ownership, runtime, endpoints, TLS,
   cache policy and constraints. Only the current operation's generic deployment
   generation and derived cache namespace can differ from the signed old input.
+  A completed-deploy stable selection may also differ when the durable policy
+  still identifies the system's `stable-release-sync` actor. These two automatic
+  changes are checked together: a second deployment can begin before the first
+  one's stable selection reaches a verified full traffic publication. The old
+  exact route keeps its original release identity and expiry; the intermediate
+  release is neither relabeled into that route nor declared ready. Explicit
+  stable selections do not receive this exception, including edits made after
+  capture and before materialization.
 - A currently verified full source, signed positive LKG, fresh actual consumer
   convergence, exact source fence and exact old compiled route content.
 - The original evidence expiry covers the remaining rollout budget. Captures,

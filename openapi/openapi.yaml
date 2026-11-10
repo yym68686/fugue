@@ -38280,7 +38280,7 @@ components:
             managed_serving_handoffs:
               type: array
               maxItems: 4096
-              description: Bounded continuity observations for a managed in-place deployment. These facts never mark the desired origin or release ready. Admission independently rechecks the durable deploying operation, unchanged per-application HTTP authority (apart from the operation-derived deployment/cache epoch), exact signed positive LKG route, consumer convergence and original evidence expiry. Only the exact current_image_mismatch transition may retain that old route while independent DNS or peer configuration advances. Disabled routes, maintenance, other origin failures and explicit authority changes still win.
+              description: Bounded continuity observations for a managed in-place deployment. These facts never mark the desired origin or release ready. Admission independently rechecks the durable deploying operation, unchanged per-application HTTP authority (apart from the operation-derived deployment/cache epoch and a durable system-authored completed-deploy stable selection), exact signed positive LKG route, consumer convergence and original evidence expiry. Successive automatic deployments may retain an earlier verified route while the intermediate stable selection is not yet verified; this neither relabels that route nor declares the intermediate release ready. Only the exact current_image_mismatch transition may retain that old route while independent DNS or peer configuration advances. Disabled routes, maintenance, other origin failures and explicit authority changes still win.
               items:
                 type: object
                 additionalProperties: false
