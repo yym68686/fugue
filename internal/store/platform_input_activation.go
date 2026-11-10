@@ -605,25 +605,37 @@ func readCompilerInputActivationTupleMode(ctx context.Context, tx *sql.Tx, tuple
 		if err != nil {
 			return ErrInvalidInput
 		}
-		// This transaction may subsequently upsert an LKG. Acquire a
-		// self-exclusive writer-compatible guard up front: two SHARE holders
-		// upgrading to RowExclusive for INSERT otherwise deadlock. Phantom
-		// insertion remains fenced; no body/network work occurs under it.
-		if lock {
-			guard := `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`
-			if lkgReadOnly {
-				// SHARE permits concurrent readers but still excludes every LKG
-				// INSERT/UPDATE/DELETE and relation replacement. Never use it for
-				// callbacks which may upsert: two readers upgrading can deadlock.
-				guard = `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE MODE`
-			}
-			if _, err := tx.ExecContext(ctx, guard); err != nil {
+		// Writers may subsequently upsert. Keep their self-exclusive guard:
+		// two SHARE holders upgrading to RowExclusive can deadlock.
+		if lock && !lkgReadOnly {
+			if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 				return err
 			}
 		}
 		q := `SELECT xmin::text,ctid::text,tableoid::bigint,pg_relation_filenode(tableoid)::bigint
  FROM fugue_platform_lkg_snapshots WHERE artifact_kind=$1 AND scope_key=$2`
-		err = tx.QueryRowContext(ctx, q, kind, scope).Scan(&tuple.xmin, &tuple.ctid, &tuple.relation, &tuple.filenode)
+		if lock && lkgReadOnly {
+			// A present unique selector needs only a row guard. Unrelated
+			// scopes may advance while this exact row and relation stay pinned.
+			q += ` FOR SHARE`
+		}
+		read := func() error {
+			return tx.QueryRowContext(ctx, q, kind, scope).Scan(&tuple.xmin, &tuple.ctid, &tuple.relation, &tuple.filenode)
+		}
+		err = read()
+		if errors.Is(err, sql.ErrNoRows) && lock && lkgReadOnly {
+			if tuple.xmin != "0" {
+				// A previously present row disappeared. Fail without upgrading
+				// a row guard to a table guard behind a waiting writer.
+				return ErrConflict
+			}
+			// Rows cannot fence absence. Exclude insertion, then reread: a row
+			// inserted in the gap must invalidate the prepared absence witness.
+			if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE MODE`); err != nil {
+				return err
+			}
+			err = read()
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			// Bind absence to the physical relation as well, not a reusable
 			// all-zero identity after DROP/recreate or TRUNCATE.
@@ -748,6 +760,18 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	for start := 0; start < len(ordered); start += 32 {
 		if err := checkCompilerInputVerifiedPins(ctx, tx, ordered[start:min(start+32, len(ordered))], epoch); err != nil {
 			return err
+		}
+	}
+	if proof.lkgReadOnly {
+		for _, original := range proof.tuples {
+			if original.table == "fugue_platform_lkg_snapshots" && original.xmin == "0" {
+				// Acquire a gap guard before any row guard. Otherwise a mixed
+				// present/absent proof could deadlock with a guarded LKG writer.
+				if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_lkg_snapshots IN SHARE MODE`); err != nil {
+					return err
+				}
+				break
+			}
 		}
 	}
 	for _, original := range proof.tuples {

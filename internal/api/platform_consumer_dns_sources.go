@@ -29,18 +29,19 @@ func (s *Server) handleGetPlatformConsumerDNSRouteSources(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusBadRequest, "exact DNS artifact and expected set required")
 		return
 	}
+	loadArtifact := s.store.NewPlatformArtifactReadSession()
 	response, err := observeAssignedDNSRouteSources(r.Context(), func() (consumerArtifactLookup, error) {
-		return s.assignedDNSRouteSourceOwner(claims, r.PathValue("artifact_id"), ids[0])
+		return s.assignedDNSRouteSourceOwnerWithReader(claims, r.PathValue("artifact_id"), ids[0], loadArtifact)
 	}, func(ctx context.Context, dns model.PlatformArtifact) (model.PlatformDNSRouteSourceSnapshot, error) {
 		snapshot, err := s.store.ObserveDNSRouteSources(ctx, dns)
 		if err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
 		}
-		owner, err := s.assignedDNSRouteSourceOwner(claims, dns.ID, ids[0])
+		owner, err := s.assignedDNSRouteSourceOwnerWithReader(claims, dns.ID, ids[0], loadArtifact)
 		if err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
 		}
-		parent, err := s.store.GetPlatformArtifact(owner.Assignment.ReleaseSetID)
+		parent, err := loadArtifact(owner.Assignment.ReleaseSetID)
 		if err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
 		}
@@ -92,7 +93,12 @@ func observeAssignedDNSRouteSources(ctx context.Context, lookup func() (consumer
 }
 
 func (s *Server) assignedDNSRouteSourceOwner(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID string) (consumerArtifactLookup, error) {
-	items, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, newConsumerArtifactReader(s.store.GetPlatformArtifact))
+	return s.assignedDNSRouteSourceOwnerWithReader(claims, artifactID, setID, s.store.GetPlatformArtifact)
+}
+
+func (s *Server) assignedDNSRouteSourceOwnerWithReader(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID string, loadArtifact func(string) (model.PlatformArtifact, error)) (consumerArtifactLookup, error) {
+	readArtifact := newConsumerArtifactReader(loadArtifact)
+	items, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil {
 		return consumerArtifactLookup{}, err
 	}
@@ -107,7 +113,7 @@ func (s *Server) assignedDNSRouteSourceOwner(claims platformcontrol.PlatformComp
 		// For serving reads the same exact release must still be selected for
 		// this DNS authority. Shadow remains a validation-only observation.
 		if item.Release.ReleaseChannel != "shadow" {
-			selected, err := s.consumerAssignmentIsSelected(item, claims.AuthorityID, newConsumerArtifactReader(s.store.GetPlatformArtifact))
+			selected, err := s.consumerAssignmentIsSelected(item, claims.AuthorityID, newConsumerArtifactReader(loadArtifact))
 			if err != nil || !selected {
 				return consumerArtifactLookup{}, store.ErrNotFound
 			}

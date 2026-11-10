@@ -177,6 +177,22 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 		if selected.Release.ID != serving.ID {
 			t.Fatal("DNS-only serving source read selected another release")
 		}
+		// Sharing immutable bodies must not share the resolver's envelope
+		// observation with the later serving-selection check.
+		parentReads := 0
+		claims := platformcontrol.PlatformComponentIdentityClaims{Component: model.PlatformConsumerComponentDNSServer, NodeID: "dns-a", AuthorityID: "cell-dns", ScopeKey: "authority-cell:cell-dns", ArtifactKinds: []string{model.PlatformArtifactKindDNSAnswerBundle}}
+		_, err = s.assignedDNSRouteSourceOwnerWithReader(claims, compiled.DNSArtifact.ID, next.ID, func(id string) (model.PlatformArtifact, error) {
+			if id == compiled.ReleaseArtifact.ID {
+				parentReads++
+				if parentReads > 1 {
+					return model.PlatformArtifact{}, store.ErrNotFound
+				}
+			}
+			return s.store.GetPlatformArtifact(id)
+		})
+		if !errors.Is(err, store.ErrNotFound) || parentReads != 2 {
+			t.Fatal("serving selection reused a stale parent observation", parentReads, err)
+		}
 		assignment := performJSONRequest(t, s, http.MethodGet, "/v1/platform-state/consumers/assignment?serving_only=true", token, nil)
 		if assignment.Code != http.StatusOK {
 			t.Fatalf("DNS-only serving assignment failed: %d %s", assignment.Code, assignment.Body.String())

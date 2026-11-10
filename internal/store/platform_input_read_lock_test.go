@@ -10,20 +10,23 @@ import (
 )
 
 func TestPlatformInputReadPostgresConcurrentLKGSelectors(t *testing.T) {
-	for _, present := range []bool{false, true} {
-		t.Run(map[bool]string{false: "absent", true: "present"}[present], func(t *testing.T) {
+	for _, mode := range []string{"absent", "present", "mixed"} {
+		t.Run(mode, func(t *testing.T) {
 			s, _, _ := inputActivationFixture(t, 1)
 			if _, err := s.ValidatePlatformArtifact("activation-root", []model.PlatformArtifactValidationResult{{Name: "schema", Pass: true}}); err != nil {
 				t.Fatal(err)
 			}
 			reads := []PlatformInputReadSelection{{LKGKind: model.PlatformArtifactKindReleaseSet, LKGScope: "global"}}
-			if present {
+			if mode != "absent" {
 				insertTaskConfigurationLKG(t, s, "activation-root")
 				var err error
 				reads[0].LKG, err = s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
 				if err != nil || reads[0].LKG == nil {
 					t.Fatal(reads, err)
 				}
+			}
+			if mode == "mixed" {
+				reads = append(reads, PlatformInputReadSelection{LKGKind: model.PlatformArtifactKindReleaseSet, LKGScope: "neutral-scope"})
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
@@ -68,15 +71,24 @@ func TestPlatformInputReadPostgresConcurrentLKGSelectors(t *testing.T) {
 			if err := s.withPreparedCompilerInputActivation(ctx, second, otherPins, func(context.Context, *sql.Tx) error { return nil }); err != nil {
 				t.Fatal("independent read serialized behind another read", err)
 			}
-			// Both positive selection and absence must still fence writers,
-			// including direct SQL which does not use Fugue advisory locks.
-			for _, query := range []string{
-				`LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`,
-				`INSERT INTO fugue_platform_lkg_snapshots(id,artifact_kind,scope_key) VALUES('neutral-phantom','release_set','neutral-scope')`,
+			// Both positive selection and absence still fence changes to this
+			// witness, including SQL outside Fugue's advisory-lock protocol.
+			blocked := []string{
 				`UPDATE fugue_platform_lkg_snapshots SET updated_at=updated_at`,
 				`DELETE FROM fugue_platform_lkg_snapshots`,
 				`TRUNCATE fugue_platform_lkg_snapshots`,
-			} {
+				`DROP INDEX idx_fugue_platform_lkg_kind_scope`,
+			}
+			unrelated := []string{
+				`LOCK TABLE fugue_platform_lkg_snapshots IN SHARE ROW EXCLUSIVE MODE`,
+				`INSERT INTO fugue_platform_lkg_snapshots(id,artifact_id,artifact_kind,scope_key,generation,content_hash,expires_at,created_at,updated_at)
+ VALUES('neutral-phantom','activation-root','release_set','neutral-scope','neutral','neutral',NOW()+INTERVAL '1 hour',NOW(),NOW())`,
+			}
+			if mode != "present" {
+				blocked = append(blocked, unrelated...)
+				unrelated = nil
+			}
+			for _, query := range append(blocked, unrelated...) {
 				tx, err := s.db.BeginTx(ctx, nil)
 				if err != nil {
 					t.Fatal(err)
@@ -87,8 +99,15 @@ func TestPlatformInputReadPostgresConcurrentLKGSelectors(t *testing.T) {
 				}
 				_, err = tx.ExecContext(ctx, query)
 				_ = tx.Rollback()
-				if stringSQLState(err) != "55P03" {
+				mustBlock := false
+				for _, q := range blocked {
+					mustBlock = mustBlock || q == query
+				}
+				if mustBlock && stringSQLState(err) != "55P03" {
 					t.Fatalf("reader did not fence LKG write %q: %v", query, err)
+				}
+				if !mustBlock && err != nil {
+					t.Fatalf("present selector blocked an unrelated scope %q: %v", query, err)
 				}
 			}
 		})
