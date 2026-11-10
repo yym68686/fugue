@@ -22,6 +22,7 @@ const (
 	compilerInputWriterValidate compilerInputWriterPhase = iota
 	compilerInputWriterEncode
 	compilerInputWriterBeginTx
+	compilerInputWriterQueue
 	compilerInputWriterBarrier
 	compilerInputWriterPersist
 	compilerInputWriterCommit
@@ -29,7 +30,7 @@ const (
 	compilerInputWriterPhaseCount
 )
 
-var compilerInputWriterPhaseNames = [...]string{"validate", "encode_snapshot", "begin_tx", "writer_barrier", "persist_verify", "commit", "after_commit_return"}
+var compilerInputWriterPhaseNames = [...]string{"validate", "encode_snapshot", "begin_tx", "append_queue", "writer_barrier", "persist_verify", "commit", "after_commit_return"}
 
 type compilerInputWriterFailure struct {
 	At                         time.Time        `json:"at"`
@@ -52,6 +53,7 @@ type compilerInputWriterRecorder struct {
 	mu                                                        sync.Mutex
 	attempts, inFlight, succeeded, deadlines, canceled, other uint64
 	lastFailure                                               *compilerInputWriterFailure
+	phaseTotals                                               [compilerInputWriterPhaseCount]time.Duration
 }
 
 type compilerInputWriterAttempt struct {
@@ -155,6 +157,9 @@ func (a *compilerInputWriterAttempt) finish(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.inFlight--
+	for i, elapsed := range a.phaseTime {
+		r.phaseTotals[i] += elapsed
+	}
 	switch {
 	case err == nil:
 		r.succeeded++
@@ -273,5 +278,9 @@ func (r *compilerInputWriterRecorder) diagnosticSnapshot() map[string]any {
 		copy.PhaseMS = phases
 		last = copy
 	}
-	return map[string]any{"schema": "fugue.compiler-input-writer-diagnostic.observation.v1", "last_failure": last}
+	phases := make(map[string]int64, len(compilerInputWriterPhaseNames))
+	for i, name := range compilerInputWriterPhaseNames {
+		phases[name] = r.phaseTotals[i].Milliseconds()
+	}
+	return map[string]any{"schema": "fugue.compiler-input-writer-diagnostic.observation.v1", "last_failure": last, "phase_total_ms": phases}
 }

@@ -13,6 +13,26 @@ import (
 	"github.com/miekg/dns"
 )
 
+func TestDNSQueryDistinguishesRecoveringCandidatesFromInvalidOriginalAuthorization(t *testing.T) {
+	view, plan, policy, facts, now := queryExecutionFixture()
+	view.Records[0].AnswerPolicy.Availability = &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}
+	// Fresh positive proofs without the declared sustained recovery history do
+	// not authorize an answer or a positive execution receipt.
+	records, err := materializeDNSQueries(view, &plan, &policy, facts, now)
+	if err != nil || len(records[0].Candidates) != 0 {
+		t.Fatal("recovering candidates were accepted or mistaken for malformed source", err)
+	}
+	answers, err := executeDNSQueryRecord(records[0], dnsGeoHint{}, now)
+	if len(answers) != 0 || err == nil || !strings.Contains(err.Error(), "no eligible availability candidate") {
+		t.Fatal("recovering execution did not remain a correctly classified rejection", err)
+	}
+	view.Records[0].Candidates = nil
+	view.Records[0].Values = nil
+	if _, err := materializeDNSQueries(view, &plan, &policy, facts, now); err == nil || !strings.Contains(err.Error(), "invalid DNS availability authorization") {
+		t.Fatal("invalid original authorization was accepted as a runtime state", err)
+	}
+}
+
 func queryExecutionFixture() (platformconfig.DNSQueryView, platformconfig.DNSReadinessPlan, platformconfig.DNSReadinessPolicy, []dnsReadinessFact, time.Time) {
 	plan, policy := readinessTestPlan()
 	now := time.Now().UTC()

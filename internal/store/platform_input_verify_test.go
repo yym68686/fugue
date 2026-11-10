@@ -39,7 +39,8 @@ func TestExistingCompilerInputVerifiesStoredBytesWithoutReturningBody(t *testing
 				size--
 			}
 			mock.ExpectBegin()
-			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744291)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock_shared(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT format,size_bytes,chunk_size,chunk_count,created_at,COALESCE(to_jsonb(m)->>'storage_location','legacy') FROM fugue_platform_input_manifests m WHERE content_hash=$1`)).WithArgs(digest).WillReturnRows(sqlmock.NewRows([]string{"format", "size_bytes", "chunk_size", "chunk_count", "created_at", "location"}).AddRow("runtime-snapshot-json-v1", size, chunkSize, count, time.Now(), "legacy"))
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT to_regclass('fugue_platform_input_archives') IS NOT NULL`)).WillReturnRows(sqlmock.NewRows([]string{"installed"}).AddRow(false))
 			if scenario != "wrong_manifest_size" {
@@ -201,7 +202,8 @@ func TestCompilerInputSmallChunkManifestRetainsBoundedReadback(t *testing.T) {
 			}
 			digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
 			mock.ExpectBegin()
-			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744291)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock_shared(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT format,size_bytes,chunk_size,chunk_count,created_at,COALESCE(to_jsonb(m)->>'storage_location','legacy') FROM fugue_platform_input_manifests m WHERE content_hash=$1`)).WithArgs(digest).WillReturnRows(sqlmock.NewRows([]string{"format", "size_bytes", "chunk_size", "chunk_count", "created_at", "location"}).AddRow("runtime-snapshot-json-v1", len(raw), 1, len(raw), time.Now(), "legacy"))
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT to_regclass('fugue_platform_input_archives') IS NOT NULL`)).WillReturnRows(sqlmock.NewRows([]string{"installed"}).AddRow(false))
 			rows := sqlmock.NewRows([]string{"ordinal", "chunk_hash", "data"})

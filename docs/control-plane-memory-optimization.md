@@ -51,9 +51,20 @@ the stored bytes; the writer compares them with independent hashes from the
 input stream. This preserves read-after-write verification without returning
 the complete stored body or decoding it again. Retried writes verify existing
 bytes too; corruption is reported rather than silently replaced. The maximum
-document is 1 GiB, each chunk is 256 KiB, and the operation has a 30-second
-database deadline. These limits do not grant release authority or bypass
+document is 1 GiB, each chunk is 256 KiB, and the chunked writer has a two-minute
+deadline (a shorter caller deadline still wins). These limits do not grant release authority or bypass
 signatures.
+
+Append-only compiler-input writers now acquire a separate exclusive queue
+(`315609238744291`) before the shared lifecycle barrier (`315609238744290`).
+Only one writer encodes/writes/verifies at a time, but admission can keep reading
+already committed inputs during that work. Retirement, migration and fencing
+still acquire the exclusive lifecycle barrier; older exclusive writers also
+remain compatible during rolling updates. No partial input is visible before
+the original full verification and atomic commit. Acquire the queue first so
+waiting writers do not hold lifecycle locks. The writer diagnostic distinguishes
+`append_queue` from `writer_barrier` and reports cumulative `phase_total_ms`.
+This reduces reader exclusion without promising shorter write transactions.
 
 Canonical hashing/encoding streams array elements and preserves the existing
 v1 byte representation. Decoding buffers one array element rather than the
@@ -89,6 +100,34 @@ artifact. The policy-projection cache hashes actual tree values before any
 full encoding, never trusting a claimed content digest as its cache key.
 The cache remains bounded to 256 identities. Capability checks decode content
 once instead of six times; authority and freshness are not cached.
+
+Retained DNS source requests use the same request-local artifact session for
+owner and parent reads. Reuse compares caller-owned native JSON against a
+private decode of the current database bytes; a nested mutation discards that
+copy. This remains O(nodes), but avoids sorting keys and hashing strings again.
+It does not remove the fresh database digest or release/membership checks.
+
+DNS compilers share at most 64 immutable publication projections within an
+8 MiB conservative retention budget. Only freshly verified actual content and
+the complete publication binding can identify an entry. Lane/selection changes
+can reuse base plans; current restrictions are reapplied after every lookup.
+No readiness facts, signature verdicts or LKG deadlines are retained. Returned
+plans own their mutable slices/maps/pointers. Request-local policy and owner
+projections decode only the sections they use, once per scope/publication.
+Sync logs include bounded projection/payload cache counters. Producer logs
+include the decision that caused compilation or an unchanged-source skip.
+
+DNS source validators retain up to 128 successful v1 validator strings. Actual
+native content is fingerprinted on every call, together with the complete fresh
+envelope; unsupported trees use the original encoding. Reuse avoids full JSON
+encoding but is still O(body bytes), and preserves the exact existing v1 ETag.
+Authorization and final publication binding checks precede conditional replies.
+
+Availability authorization is checked before readiness filtering. A valid
+original candidate set that filters to zero reports no eligible candidate and
+still rejects shadow execution/positive ACK. Malformed original authorization
+remains rejected. Live selector retirement and historical replay keep their
+existing separate admission boundaries.
 
 ## Verification
 

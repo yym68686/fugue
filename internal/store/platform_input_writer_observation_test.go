@@ -43,7 +43,8 @@ func TestCompilerInputOuterWriterObservesQueueAndCommitOutcomes(t *testing.T) {
 			if scenario == "begin" {
 				begin.WillReturnError(errors.New("synthetic begin failure"))
 			} else {
-				lock := mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744290)`))
+				mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744291)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+				lock := mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock_shared(315609238744290)`))
 				switch scenario {
 				case "queue-canceled":
 					lock.WillReturnError(fmt.Errorf("queue: %w", context.Canceled))
@@ -99,7 +100,7 @@ func TestCompilerInputOuterWriterObservesQueueAndCommitOutcomes(t *testing.T) {
 			}
 			diagnostic := observation.(map[string]any)["compiler_input_writer_diagnostic"].(map[string]any)
 			if scenario == "success" {
-				if !reflect.DeepEqual(priorDiagnostic, diagnostic) {
+				if !reflect.DeepEqual(priorDiagnostic["last_failure"], diagnostic["last_failure"]) {
 					t.Fatal("a successful return erased the last failure")
 				}
 			} else {
@@ -211,7 +212,7 @@ func TestCompilerInputWriterDiagnosticIsBoundedAndIndependentOfV1Counters(t *tes
 	}
 	before := recorder.diagnosticSnapshot()
 	recorder.begin()(nil)
-	if !reflect.DeepEqual(before, recorder.diagnosticSnapshot()) {
+	if !reflect.DeepEqual(before["last_failure"], recorder.diagnosticSnapshot()["last_failure"]) {
 		t.Fatal("success erased failure evidence")
 	}
 }

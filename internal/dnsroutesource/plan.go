@@ -47,13 +47,15 @@ func Build(dns model.PlatformArtifact, snapshot model.PlatformDNSRouteSourceSnap
 	return buildVerified(dns, snapshot)
 }
 
-func buildVerified(dns model.PlatformArtifact, snapshot model.PlatformDNSRouteSourceSnapshot) (*Plans, error) {
+func buildVerified(dns model.PlatformArtifact, snapshot model.PlatformDNSRouteSourceSnapshot, caches ...*publicationProjectionCache) (*Plans, error) {
 	var p struct {
 		Source *platformconfig.CellDNSPlanSource `json:"cell_dns_source"`
 		Policy platformconfig.PolicySnapshot     `json:"policy"`
 		Plan   *platformconfig.DNSReadinessPlan  `json:"readiness_plan"`
 	}
-	raw, _ := json.Marshal(dns.Content)
+	// This phase needs only these typed sections, not query views, consumer
+	// views, records or nested audit content in the rest of the DNS artifact.
+	raw, _ := json.Marshal(map[string]any{"cell_dns_source": dns.Content["cell_dns_source"], "policy": dns.Content["policy"], "readiness_plan": dns.Content["readiness_plan"]})
 	if json.Unmarshal(raw, &p) != nil || p.Source == nil || p.Plan == nil {
 		return nil, fmt.Errorf("DNS runtime source missing")
 	}
@@ -75,16 +77,31 @@ func buildVerified(dns model.PlatformArtifact, snapshot model.PlatformDNSRouteSo
 				selected = append(selected, pub)
 			}
 		}
+		restrictions, err := platformconfig.PrepareDNSRuntimeSourceRestrictions(*p.Source, selected)
+		if err != nil {
+			return nil, err
+		}
 		for _, pub := range scope.Publications {
+			owners, err := restrictions.ForPublication(pub)
+			if err != nil {
+				return nil, err
+			}
 			for _, cell := range p.Source.Intent.EdgeTopology.Cells {
 				if scope.ScopeKey != platformconfig.GlobalScopeKey && scope.ScopeKey != platformconfig.AuthorityCellScope(cell.ID) {
 					continue
 				}
-				plan, b, err := platformconfig.DNSRuntimeSourcePlan(*p.Source, p.Policy, pub, cell.ID)
+				var plan *platformconfig.DNSReadinessPlan
+				var b *model.TrafficReleaseBinding
+				var err error
+				if len(caches) != 0 {
+					plan, b, err = caches[0].buildVerified(dns, *p.Source, p.Policy, pub, cell.ID)
+				} else {
+					plan, b, err = platformconfig.DNSRuntimeSourcePlan(*p.Source, p.Policy, pub, cell.ID)
+				}
 				if err != nil {
 					return nil, err
 				}
-				if err := platformconfig.RestrictDNSRuntimeSourcePlan(plan, *p.Source, pub, selected); err != nil {
+				if err := owners.Restrict(plan); err != nil {
 					return nil, err
 				}
 				recovery, err := recoveryConstraints(plan)

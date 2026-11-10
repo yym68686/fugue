@@ -29,7 +29,8 @@ func TestExistingCodecInputRechecksPhysicalBytesWithoutBody(t *testing.T) {
 			m := inputManifest{Digest: digest, Format: inputFormatCodecV2, Size: int64(len(raw)), ChunkSize: len(raw), Count: 1, Created: time.Now()}
 			s.compilerDNSInputs.put(&compilerDNSInput{Manifest: m, Hashes: [][sha256.Size]byte{physical}, StoredSizes: []int{len(encoded)}, Bytes: 512})
 			mock.ExpectBegin()
-			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744291)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock_shared(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT format,size_bytes,chunk_size,chunk_count,created_at,COALESCE(to_jsonb(m)->>'storage_location','legacy') FROM fugue_platform_input_manifests m WHERE content_hash=$1`)).WithArgs(digest).WillReturnRows(sqlmock.NewRows([]string{"format", "size", "chunk_size", "count", "created", "location"}).AddRow(m.Format, m.Size, m.ChunkSize, m.Count, m.Created, "legacy"))
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT to_regclass('fugue_platform_input_archives') IS NOT NULL`)).WillReturnRows(sqlmock.NewRows([]string{"installed"}).AddRow(false))
 			if corrupt {

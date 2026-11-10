@@ -3,10 +3,34 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestPlatformSessionComparisonDetectsEveryNativeMutation(t *testing.T) {
+	for name, change := range map[string]func(map[string]any){
+		"missing-null": func(m map[string]any) { delete(m, "null") },
+		"signed-zero":  func(m map[string]any) { m["number"] = math.Copysign(0, -1) },
+		"type":         func(m map[string]any) { m["number"] = "0" },
+		"nested-slice": func(m map[string]any) { m["nested"].([]any)[0] = false },
+		"extra-null":   func(m map[string]any) { m["extra"] = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := map[string]any{"null": nil, "number": float64(0), "nested": []any{true}}
+			raw, _ := json.Marshal(source)
+			entry := newPlatformContentEntry(sha256.Sum256(raw), source)
+			var session platformContentSession
+			first := session.ownedEntry(entry)
+			change(first)
+			repaired := session.ownedEntry(entry)
+			if !reflect.DeepEqual(repaired, source) || reflect.ValueOf(first).Pointer() == reflect.ValueOf(repaired).Pointer() {
+				t.Fatal("mutable graph impersonated the actual immutable body")
+			}
+		})
+	}
+}
 
 func TestPlatformReadSessionIsolatesRequestsAndRejectsMutation(t *testing.T) {
 	raw := contentCacheFixture("session")

@@ -351,8 +351,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	defer cancel()
 	defer observation.stopWork()
 	observation.setWriterContext(ctx)
-	// One cluster-wide writer bounds database parse/transfer concurrency even
-	// while multiple API replicas compile distinct scopes. No serving lock is held.
+	// Bound append concurrency independently of the shared lifecycle barrier.
 	observation.advance(compilerInputWriterBeginTx)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -360,8 +359,7 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	}
 	defer observation.rollback(tx)
 	observation.afterBegin()
-	observation.advance(compilerInputWriterBarrier)
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(315609238744290)`); err != nil {
+	if err = lockCompilerInputAppend(ctx, tx, observation); err != nil {
 		return err
 	}
 	observation.afterBarrier()
@@ -369,8 +367,8 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	return s.pgEnsureChunkedInputTx(ctx, tx, snapshot, digest, observation)
 }
 
-// Both policy-selected writers hold the same exclusive barrier through full
-// verification and commit. This helper never starts a new budget or records a
+// Both policy-selected writers hold the append queue and shared lifecycle
+// barrier through full verification and commit. This helper never starts a new budget or records a
 // second outer attempt when a fenced JSONB writer uses an independent format.
 func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot platformconfig.RuntimeSnapshot, digest string, observation *compilerInputWriterAttempt) error {
 	m, err := readInputManifest(ctx, tx, digest)

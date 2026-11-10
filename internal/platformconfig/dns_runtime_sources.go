@@ -154,40 +154,86 @@ func normalizeDNSRuntimeAliases(value any, aliases map[string]string) {
 // A failed candidate cannot erase LKG route behavior; explicit exclusions and
 // disabled policy still take effect, and quorum can only increase.
 func RestrictDNSRuntimeSourcePlan(plan *DNSReadinessPlan, source CellDNSPlanSource, pub model.PlatformDNSRouteSourcePublication, selected []model.PlatformDNSRouteSourcePublication) error {
-	aliases, err := RouteAuthorityAliases(source.Intent)
+	restrictions, err := PrepareDNSRuntimeSourceRestrictions(source, selected)
 	if err != nil {
 		return err
 	}
-	var own struct {
-		Routes []CompiledRoute `json:"routes"`
+	return restrictions.Restrict(plan, pub)
+}
+
+type dnsRuntimeSourcePolicy struct {
+	minimum int
+	rules   map[string]RoutePolicyConstraint
+}
+
+// DNSRuntimeSourceRestrictions is a request-local typed view of current hard
+// policy. It contains no readiness or authorization verdict. Prepare once per
+// observed scope, then apply to every publication/cell, including retained LKG.
+type DNSRuntimeSourceRestrictions struct {
+	aliases map[string]string
+	records map[string]DNSIntent
+	current []dnsRuntimeSourcePolicy
+}
+
+func PrepareDNSRuntimeSourceRestrictions(source CellDNSPlanSource, selected []model.PlatformDNSRouteSourcePublication) (*DNSRuntimeSourceRestrictions, error) {
+	aliases, err := RouteAuthorityAliases(source.Intent)
+	if err != nil {
+		return nil, err
 	}
-	raw, _ := json.Marshal(pub.Route.Content)
-	if json.Unmarshal(raw, &own) != nil {
-		return fmt.Errorf("routing source owners invalid")
-	}
-	byHost := map[string][]CompiledRoute{}
-	for _, r := range own.Routes {
-		byHost[r.Hostname] = append(byHost[r.Hostname], r)
-	}
-	records := map[string]DNSIntent{}
+	out := &DNSRuntimeSourceRestrictions{aliases: aliases, records: map[string]DNSIntent{}}
 	for _, r := range source.Intent.DNS {
-		records[r.Hostname] = r
+		out.records[r.Hostname] = r
 	}
 	for _, current := range selected {
-		var content struct {
-			Policy PolicySnapshot `json:"policy"`
-		}
-		raw, _ := json.Marshal(current.Route.Content)
-		if json.Unmarshal(raw, &content) != nil {
-			return fmt.Errorf("current route constraints unavailable")
+		var policy PolicySnapshot
+		raw, err := json.Marshal(current.Route.Content["policy"])
+		if err != nil || json.Unmarshal(raw, &policy) != nil {
+			return nil, fmt.Errorf("current route constraints unavailable")
 		}
 		rules := map[string]RoutePolicyConstraint{}
-		for _, rule := range content.Policy.RouteConstraints {
+		for _, rule := range policy.RouteConstraints {
 			rules[rule.Hostname] = rule
 		}
+		out.current = append(out.current, dnsRuntimeSourcePolicy{minimum: policy.MinimumHealthyEdges, rules: rules})
+	}
+	return out, nil
+}
+
+func (restriction *DNSRuntimeSourceRestrictions) Restrict(plan *DNSReadinessPlan, pub model.PlatformDNSRouteSourcePublication) error {
+	owners, err := restriction.ForPublication(pub)
+	if err != nil {
+		return err
+	}
+	return owners.Restrict(plan)
+}
+
+type DNSRuntimePublicationRestrictions struct {
+	current *DNSRuntimeSourceRestrictions
+	byHost  map[string][]CompiledRoute
+}
+
+// ForPublication decodes owner fields once, independent of the number of cells.
+func (restriction *DNSRuntimeSourceRestrictions) ForPublication(pub model.PlatformDNSRouteSourcePublication) (*DNSRuntimePublicationRestrictions, error) {
+	var routes []CompiledRoute
+	raw, err := json.Marshal(pub.Route.Content["routes"])
+	if err != nil || json.Unmarshal(raw, &routes) != nil {
+		return nil, fmt.Errorf("routing source owners invalid")
+	}
+	byHost := map[string][]CompiledRoute{}
+	for _, route := range routes {
+		byHost[route.Hostname] = append(byHost[route.Hostname], route)
+	}
+	return &DNSRuntimePublicationRestrictions{current: restriction, byHost: byHost}, nil
+}
+
+func (owners *DNSRuntimePublicationRestrictions) Restrict(plan *DNSReadinessPlan) error {
+	restriction, byHost := owners.current, owners.byHost
+	aliases, records := restriction.aliases, restriction.records
+	for _, current := range restriction.current {
+		rules := current.rules
 		for i := range plan.Records {
 			r := &plan.Records[i]
-			r.MinimumHealthyEdges = max(r.MinimumHealthyEdges, content.Policy.MinimumHealthyEdges)
+			r.MinimumHealthyEdges = max(r.MinimumHealthyEdges, current.minimum)
 			targets := r.Targets[:0]
 			for _, target := range r.Targets {
 				allowed := true

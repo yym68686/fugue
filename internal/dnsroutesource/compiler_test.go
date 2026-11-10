@@ -139,11 +139,7 @@ func BenchmarkSourceCompiler(b *testing.B) {
 	dns := celldns.Compile(b, req).DNSArtifact
 	now := time.Now().UTC()
 	snapshot := celldns.SourceSnapshot(b, req, dns, policies, activations, now)
-	for _, cached := range []bool{false, true} {
-		name := "uncached"
-		if cached {
-			name = "warm"
-		}
+	for _, name := range []string{"uncached", "warm", "lane-change"} {
 		b.Run(name, func(b *testing.B) {
 			var compiler dnsroutesource.Compiler
 			if _, err := compiler.Build(dns, snapshot, celldns.Keys(), now); err != nil {
@@ -153,7 +149,14 @@ func BenchmarkSourceCompiler(b *testing.B) {
 			b.ResetTimer()
 			for b.Loop() {
 				var err error
-				if cached {
+				if name == "lane-change" {
+					snapshot.Scopes[0].Lanes[0].Version++
+					snapshot.SelectionDigest, err = dnsroutesource.SelectionDigest(snapshot)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				if name != "uncached" {
 					_, err = compiler.Build(dns, snapshot, celldns.Keys(), now)
 				} else {
 					_, err = dnsroutesource.Build(dns, snapshot, celldns.Keys(), now)

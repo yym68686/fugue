@@ -152,6 +152,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	interval = 30 * time.Second
 	started, phaseStarted, phase := time.Now(), time.Now(), "load_policy"
 	phaseDurations := map[string]int64{}
+	decision := "policy_or_pending"
 	advance := func(next string) {
 		phaseDurations[phase] += time.Since(phaseStarted).Milliseconds()
 		phase, phaseStarted = next, time.Now()
@@ -159,7 +160,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	defer func() {
 		phaseDurations[phase] += time.Since(phaseStarted).Milliseconds()
 		if s.log != nil && (resultErr != nil || time.Since(started) > 30*time.Second) {
-			s.log.Printf("platform configuration producer phase timing scope=%s phase=%s elapsed_ms=%d durations_ms=%v error=%v", scope, phase, time.Since(started).Milliseconds(), phaseDurations, resultErr)
+			s.log.Printf("platform configuration producer phase timing scope=%s phase=%s elapsed_ms=%d durations_ms=%v decision=%s error=%v", scope, phase, time.Since(started).Milliseconds(), phaseDurations, decision, resultErr)
 		}
 	}()
 	if err := ctx.Err(); err != nil {
@@ -184,6 +185,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			return interval, err
 		}
 		if handled {
+			decision = "pending_observation"
 			advance("refresh_pending_quality")
 			return interval, s.refreshPendingProducerQuality(ctx, policy)
 		}
@@ -255,6 +257,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		}
 	}
 	if owned && current.Metadata[platformproducer.SourceDigestMetadata] == sourceDigest && time.Since(previous.ReleasedAt) < time.Duration(policy.RefreshSeconds)*time.Second {
+		decision = "unchanged_source"
 		if policy.Mode == "serving" {
 			// A rejected older candidate must not block capturing a corrected
 			// source. Prepare only the candidate we are about to reuse, after
@@ -268,6 +271,13 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			s.log.Printf("platform configuration producer unchanged policy_release=%s release=%s source_digest=%s", authority.ID, previous.ID, sourceDigest)
 		}
 		return interval, nil
+	}
+	decision = "initial_publication"
+	if owned {
+		decision = "source_changed"
+		if current.Metadata[platformproducer.SourceDigestMetadata] == sourceDigest {
+			decision = "refresh_due"
+		}
 	}
 	if projection.Intent.Scope != policy.TargetScope || projection.Policy.Scope != policy.TargetScope {
 		return interval, fmt.Errorf("producer capture scope differs")

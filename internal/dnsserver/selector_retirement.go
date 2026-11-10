@@ -10,10 +10,8 @@ import (
 func validateServingDNSSelectors(views []platformconfig.DNSQueryView) error {
 	for _, view := range views {
 		for _, record := range view.Records {
-			if availability := record.AnswerPolicy.Availability; availability != nil {
-				if model.ValidateDNSAvailabilityPolicy(availability) != nil || len(record.Candidates) == 0 || len(record.ScopedCandidates) != 0 || !record.AnswerPolicy.HealthRequired || !record.AnswerPolicy.RouteReadyRequired {
-					return errors.New("invalid DNS availability authorization")
-				}
+			if err := validateDNSAvailabilityAuthorization(record); err != nil {
+				return err
 			}
 			if len(record.Candidates) == 0 {
 				continue
@@ -23,6 +21,15 @@ func validateServingDNSSelectors(views []platformconfig.DNSQueryView) error {
 			default:
 				return errors.New("legacy DNS selector retired; signed physical order required")
 			}
+		}
+	}
+	return nil
+}
+
+func validateDNSAvailabilityAuthorization(record model.EdgeDNSRecord) error {
+	if availability := record.AnswerPolicy.Availability; availability != nil {
+		if model.ValidateDNSAvailabilityPolicy(availability) != nil || len(record.Candidates) == 0 || len(record.ScopedCandidates) != 0 || !record.AnswerPolicy.HealthRequired || !record.AnswerPolicy.RouteReadyRequired {
+			return errors.New("invalid DNS availability authorization")
 		}
 	}
 	return nil

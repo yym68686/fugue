@@ -27,7 +27,8 @@ func TestCompilerInputJSONBWriterAdditiveSchemaAndCommitOutcomes(t *testing.T) {
 			digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
 			raw, _ := platformconfig.EncodeRuntimeSnapshot(snapshot)
 			mock.ExpectBegin()
-			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744291)`)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock_shared(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
 			// Both additive migrations may be absent in a supported older DB.
 			for _, table := range []string{"fugue_platform_input_archive_control", "fugue_platform_input_manifests"} {
 				mock.ExpectQuery(regexp.QuoteMeta(`SELECT to_regclass('` + table + `') IS NOT NULL`)).WillReturnRows(sqlmock.NewRows([]string{"installed"}).AddRow(false))

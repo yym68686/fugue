@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"fugue/internal/dnsroutesource"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
 )
 
@@ -74,15 +76,23 @@ func observeDNSSyncPhase(ctx context.Context, name string) (context.Context, fun
 		case err != nil:
 			outcome = "failed"
 		}
+		var projections map[string]uint64
+		var payloads map[string]uint64
+		if name == "source_plan_build" {
+			projections = dnsroutesource.PublicationProjectionCacheObservation()
+			payloads = platformconfig.DNSPayloadCacheObservation()
+		}
 		report, marshalErr := json.Marshal(struct {
-			Event      string    `json:"event"`
-			TraceID    string    `json:"sync_trace_id"`
-			Phase      string    `json:"sync_phase"`
-			StartedAt  time.Time `json:"started_at"`
-			FinishedAt time.Time `json:"finished_at"`
-			ElapsedMS  int64     `json:"elapsed_ms"`
-			Outcome    string    `json:"outcome"`
-		}{"dns_sync_phase", phase.trace.id, path, started.UTC(), time.Now().UTC(), time.Since(started).Milliseconds(), outcome})
+			Event       string            `json:"event"`
+			TraceID     string            `json:"sync_trace_id"`
+			Phase       string            `json:"sync_phase"`
+			StartedAt   time.Time         `json:"started_at"`
+			FinishedAt  time.Time         `json:"finished_at"`
+			ElapsedMS   int64             `json:"elapsed_ms"`
+			Outcome     string            `json:"outcome"`
+			Projections map[string]uint64 `json:"publication_projection_cache,omitempty"`
+			Payloads    map[string]uint64 `json:"payload_cache,omitempty"`
+		}{"dns_sync_phase", phase.trace.id, path, started.UTC(), time.Now().UTC(), time.Since(started).Milliseconds(), outcome, projections, payloads})
 		if marshalErr == nil {
 			phase.trace.logger.Print(string(report))
 		}

@@ -191,6 +191,15 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 }
 
 func materializeDNSQueries(view platformconfig.DNSQueryView, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, now time.Time) ([]model.EdgeDNSRecord, error) {
+	// Validate the signed, unfiltered authorization. Losing all candidates to
+	// current readiness/recovery is a runtime state, not malformed authorization.
+	// Selector retirement is enforced at live admission/execution boundaries;
+	// this materializer is also used to replay historical decision receipts.
+	for _, record := range view.Records {
+		if err := validateDNSAvailabilityAuthorization(record); err != nil {
+			return nil, err
+		}
+	}
 	raw, err := json.Marshal(view.Records)
 	if err != nil {
 		return nil, err
@@ -291,6 +300,11 @@ func materializeDNSQueries(view platformconfig.DNSQueryView, plan *platformconfi
 }
 
 func executeDNSQueryRecord(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time) ([]dns.RR, error) {
+	if availability := record.AnswerPolicy.Availability; availability != nil && len(record.Candidates) == 0 && model.ValidateDNSAvailabilityPolicy(availability) == nil && len(record.ScopedCandidates) == 0 && record.AnswerPolicy.HealthRequired && record.AnswerPolicy.RouteReadyRequired {
+		// This remains a failed candidate execution: never turn a recovering
+		// publication into a positive ACK or a successful empty DNS answer.
+		return nil, errors.New("DNS query has no eligible availability candidate")
+	}
 	if err := validateServingDNSSelectors([]platformconfig.DNSQueryView{{Records: []model.EdgeDNSRecord{record}}}); err != nil {
 		return nil, err
 	}

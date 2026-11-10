@@ -34,7 +34,7 @@ func (c *Compiler) Build(dns model.PlatformArtifact, snapshot model.PlatformDNSR
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.plans == nil || c.key != key {
-		plans, err := buildVerified(dns, snapshot)
+		plans, err := buildVerified(dns, snapshot, &runtimePublicationProjections)
 		if err != nil {
 			return nil, err
 		}
@@ -54,11 +54,7 @@ func clonePlans(p *Plans) *Plans {
 	out.RecoveryConstraints = maps.Clone(p.RecoveryConstraints)
 	out.Probes = maps.Clone(p.Probes)
 	for id, probe := range out.Probes {
-		if probe.PreviousAuthority != nil {
-			previous := *probe.PreviousAuthority
-			probe.PreviousAuthority = &previous
-			out.Probes[id] = probe
-		}
+		out.Probes[id] = cloneReadinessProbe(probe)
 	}
 	out.Bindings = make(map[string]*model.TrafficReleaseBinding, len(p.Bindings))
 	for id, binding := range p.Bindings {

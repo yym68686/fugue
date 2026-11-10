@@ -99,8 +99,7 @@ func (s *Store) pgEnsurePlatformCompilerInput(parent context.Context, snapshot p
 	}
 	defer observation.rollback(tx)
 	observation.afterBegin()
-	observation.advance(compilerInputWriterBarrier)
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(315609238744290)`); err != nil {
+	if err = lockCompilerInputAppend(ctx, tx, observation); err != nil {
 		return err
 	}
 	observation.afterBarrier()

@@ -14,13 +14,21 @@ type dnsPayloadEntry struct {
 }
 type dnsPayloadCache struct {
 	sync.Mutex
-	entries map[[32]byte]dnsPayloadEntry
-	order   [][32]byte
-	bytes   int
-	flights singleflight.Group
+	entries                                            map[[32]byte]dnsPayloadEntry
+	order                                              [][32]byte
+	bytes                                              int
+	hits, misses, small, large, unsupported, evictions uint64
+	flights                                            singleflight.Group
 }
 
 var decodedDNSPayloads dnsPayloadCache
+
+func DNSPayloadCacheObservation() map[string]uint64 {
+	c := &decodedDNSPayloads
+	c.Lock()
+	defer c.Unlock()
+	return map[string]uint64{"hits": c.hits, "misses": c.misses, "bypass_small": c.small, "bypass_large": c.large, "bypass_unsupported": c.unsupported, "evictions": c.evictions, "entries": uint64(len(c.entries)), "retained_bytes": uint64(c.bytes)}
+}
 
 // Only deterministic decoding/validation is reused. The key visits actual
 // content and the complete envelope; live signatures, trust, freshness and
@@ -28,11 +36,26 @@ var decodedDNSPayloads dnsPayloadCache
 func (c *dnsPayloadCache) decode(a model.PlatformArtifact) (DNSArtifactPayload, error) {
 	key, size, ok := dnsValidationArtifactKey(a)
 	if !ok || a.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || size < 16<<10 || size > 4<<20 {
+		c.Lock()
+		switch {
+		case !ok || a.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle:
+			c.unsupported++
+		case size < 16<<10:
+			c.small++
+		default:
+			c.large++
+		}
+		c.Unlock()
 		return decodeDNSArtifactUncached(a)
 	}
 	value, err, _ := c.flights.Do(string(key[:]), func() (any, error) {
 		c.Lock()
 		entry, hit := c.entries[key]
+		if hit {
+			c.hits++
+		} else {
+			c.misses++
+		}
 		c.Unlock()
 		if hit {
 			return entry.payload, nil
@@ -53,6 +76,7 @@ func (c *dnsPayloadCache) decode(a model.PlatformArtifact) (DNSArtifactPayload, 
 			old := c.order[0]
 			c.order = c.order[1:]
 			c.bytes -= c.entries[old].bytes
+			c.evictions++
 			delete(c.entries, old)
 		}
 		if cost <= 32<<20 {

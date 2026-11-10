@@ -31,18 +31,19 @@ func (s *Server) handleGetPlatformConsumerRetainedDNSRouteSources(w http.Respons
 		httpx.WriteError(w, http.StatusBadRequest, "exact DNS artifact and expected set required")
 		return
 	}
+	loadArtifact := s.store.NewPlatformArtifactReadSession()
 	response, err := observeRetainedDNSRouteSources(r.Context(), func() (consumerArtifactLookup, model.PlatformLKGSnapshot, error) {
-		return s.retainedDNSRouteSourceOwner(claims, r.PathValue("artifact_id"), ids[0])
+		return s.retainedDNSRouteSourceOwnerWithReader(claims, r.PathValue("artifact_id"), ids[0], loadArtifact)
 	}, func(ctx context.Context, dns model.PlatformArtifact) (model.PlatformDNSRouteSourceSnapshot, error) {
 		snapshot, err := s.store.ObserveDNSRouteSources(ctx, dns)
 		if err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
 		}
-		owner, lkg, err := s.retainedDNSRouteSourceOwner(claims, dns.ID, ids[0])
+		owner, lkg, err := s.retainedDNSRouteSourceOwnerWithReader(claims, dns.ID, ids[0], loadArtifact)
 		if err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
 		}
-		parent, err := s.store.GetPlatformArtifact(owner.Assignment.ReleaseSetID)
+		parent, err := loadArtifact(owner.Assignment.ReleaseSetID)
 		if err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
 		}
@@ -100,6 +101,10 @@ func observeRetainedDNSRouteSources(ctx context.Context, lookup func() (consumer
 // cannot lend its policy to an old DNS artifact or revoke its read just by being
 // selected. Conversely, arbitrary historical full releases grant no access.
 func (s *Server) retainedDNSRouteSourceOwner(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID string) (consumerArtifactLookup, model.PlatformLKGSnapshot, error) {
+	return s.retainedDNSRouteSourceOwnerWithReader(claims, artifactID, setID, s.store.GetPlatformArtifact)
+}
+
+func (s *Server) retainedDNSRouteSourceOwnerWithReader(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID string, loadArtifact func(string) (model.PlatformArtifact, error)) (consumerArtifactLookup, model.PlatformLKGSnapshot, error) {
 	fail := func() (consumerArtifactLookup, model.PlatformLKGSnapshot, error) {
 		return consumerArtifactLookup{}, model.PlatformLKGSnapshot{}, store.ErrNotFound
 	}
@@ -110,7 +115,7 @@ func (s *Server) retainedDNSRouteSourceOwner(claims platformcontrol.PlatformComp
 	if lkg == nil {
 		return fail()
 	}
-	read := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	read := newConsumerArtifactReader(loadArtifact)
 	parent, err := read(lkg.ArtifactID)
 	if err != nil || parent.ScopeKey != claims.ScopeKey || parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluatePlatformLKGSnapshot(*lkg, parent, s.bundleKeyring(), time.Now().UTC()).Pass || !validateReleaseSetReferences(parent, read).Pass {
 		return fail()

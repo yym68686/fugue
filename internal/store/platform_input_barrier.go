@@ -14,6 +14,22 @@ func compilerInputBarrierBusy() error {
 	return &pgconn.PgError{Code: "55P03", Message: "compiler input writer barrier is busy"}
 }
 
+// Append-only input writes serialize on a separate queue. They never replace
+// committed canonical bytes: new manifests/refs become visible together only
+// after their complete readback verification and commit. The shared lifecycle
+// barrier still excludes retirement, migration, fencing and old exclusive
+// writers, while allowing readers of already committed inputs to proceed.
+// Acquire the queue first so queued writers do not hold up lifecycle changes.
+func lockCompilerInputAppend(ctx context.Context, tx *sql.Tx, observation *compilerInputWriterAttempt) error {
+	observation.advance(compilerInputWriterQueue)
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(315609238744291)`); err != nil {
+		return err
+	}
+	observation.advance(compilerInputWriterBarrier)
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(315609238744290)`)
+	return err
+}
+
 func waitCompilerInputAdmissionWriter(ctx context.Context, tx *sql.Tx) error {
 	var acquired bool
 	var timeoutMS int64

@@ -2,18 +2,17 @@ package store
 
 import (
 	"context"
+	"math"
 	"strings"
 	"sync"
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/platformsafety"
 )
 
 type platformSessionContent struct {
-	content     map[string]any
-	fingerprint [32]byte
-	bytes       int
+	content map[string]any
+	bytes   int
 }
 type platformContentSession struct {
 	sync.Mutex
@@ -57,7 +56,7 @@ func (s *platformContentSession) ownedEntry(source platformContentEntry) map[str
 	if prior, ok := s.values[key]; ok {
 		// A caller-mutated map can never impersonate the newly read database
 		// bytes, even when its declared ContentHash was left unchanged.
-		if fingerprint, supported := platformsafety.FingerprintArtifactContent(prior.content); supported && fingerprint == prior.fingerprint {
+		if equalPlatformJSON(prior.content, source.content) {
 			return prior.content
 		}
 		delete(s.values, key)
@@ -69,8 +68,54 @@ func (s *platformContentSession) ownedEntry(source platformContentEntry) map[str
 		if s.values == nil {
 			s.values = make(map[[32]byte]platformSessionContent)
 		}
-		s.values[key] = platformSessionContent{owned, source.fingerprint, size}
+		s.values[key] = platformSessionContent{owned, size}
 		s.bytes += size
 	}
 	return owned
+}
+
+// Compare the caller-owned graph with the private immutable decode of the
+// actual current database bytes. Unlike re-fingerprinting, this needs neither
+// key sorting nor hashing/copying strings on every request-local reuse. Mutable
+// maps/slices are still visited, so a caller mutation cannot impersonate fresh
+// content. Only native encoding/json values reach this ownership boundary.
+func equalPlatformJSON(a, b any) bool {
+	switch x := a.(type) {
+	case map[string]any:
+		y, ok := b.(map[string]any)
+		if !ok || len(x) != len(y) || (x == nil) != (y == nil) {
+			return false
+		}
+		for key, value := range x {
+			other, exists := y[key]
+			if !exists || !equalPlatformJSON(value, other) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		y, ok := b.([]any)
+		if !ok || len(x) != len(y) || (x == nil) != (y == nil) {
+			return false
+		}
+		for i, value := range x {
+			if !equalPlatformJSON(value, y[i]) {
+				return false
+			}
+		}
+		return true
+	case string:
+		y, ok := b.(string)
+		return ok && x == y
+	case float64:
+		y, ok := b.(float64)
+		return ok && math.Float64bits(x) == math.Float64bits(y)
+	case bool:
+		y, ok := b.(bool)
+		return ok && x == y
+	case nil:
+		return b == nil
+	default:
+		return false
+	}
 }
