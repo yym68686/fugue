@@ -3,6 +3,7 @@ package platformproducer
 import (
 	"errors"
 	"reflect"
+	"time"
 
 	"fugue/internal/platformconfig"
 )
@@ -13,6 +14,10 @@ func cloneBusinessProjectionPolicy(policy ProjectionPolicyInput) ProjectionPolic
 }
 
 func validateBusinessExplorationDelta(previous, next ProjectionPolicyInput) error {
+	return validateBusinessExplorationDeltaAt(previous, next, time.Now().UTC())
+}
+
+func validateBusinessExplorationDeltaAt(previous, next ProjectionPolicyInput, now time.Time) error {
 	previous, next = cloneBusinessProjectionPolicy(previous), cloneBusinessProjectionPolicy(next)
 	if previous.Generation == next.Generation || previous.DNSQueryPolicy == nil || next.DNSQueryPolicy == nil {
 		return errors.New("business exploration requires new explicit query-policy generation")
@@ -37,6 +42,10 @@ func validateBusinessExplorationDelta(previous, next ProjectionPolicyInput) erro
 			continue
 		}
 		changed++
+		if old.BusinessExploration != nil && (!present || current.BusinessExploration == nil) &&
+			(old.BusinessExploration.ExpiresAt.IsZero() || now.Before(old.BusinessExploration.ExpiresAt)) {
+			return errors.New("active business exploration cannot be retired")
+		}
 		if old.BusinessExploration == nil && (!present || current.BusinessExploration == nil) {
 			return errors.New("business exploration cannot remove or alter an unrelated quality route")
 		}

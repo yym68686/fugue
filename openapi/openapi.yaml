@@ -63,6 +63,9 @@ x-fugue-business-exploration:
     business_exploration is an independently fenced producer configuration
     transition. It may add, change, pause or remove exactly one explicit
     business-exploration route. Changing its settings requires a new intent_id;
+    removing a route or its business intent requires the predecessor lease
+    to have expired. An active intent may be paused with a new intent_id.
+    Expiry alone does not remove the explicit policy or renew exploration;
     all unrelated DNS and producer constraints remain identical. Configuration
     publication does not itself allocate traffic: signed candidate artifacts,
     fresh route proofs, executor capability admission and normal gray/full

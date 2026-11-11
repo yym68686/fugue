@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +25,85 @@ def fixture():
 
 
 class BusinessExplorationConfigurationTests(unittest.TestCase):
+    def retirement_fixture(self):
+        config, _ = fixture()
+        source = copy.deepcopy(config["projection_policy"])
+        host = "app.example.test"
+        availability = [{"hostname": host, "policy": {"version": "dns-availability-v1", "ordered_edge_ids": ["edge-a", "edge-b"], "recovery_successes": 3, "recovery_min_seconds": 60}}]
+        source["dns_query_policy"]["availability_routes"] = copy.deepcopy(availability)
+        config["projection_policy"]["dns_query_policy"]["availability_routes"] = availability
+        intent = source["dns_query_policy"]["physical_routes"][0]["business_exploration"]
+        config["business_retirement"] = {"hostname": host, "intent_id": intent["intent_id"], "expires_at": intent["expires_at"]}
+        config["projection_policy"]["dns_query_policy"]["physical_routes"] = []
+        source["generation"] = "prior"
+        _, old, _ = physical_fixture()
+        old["dns_policy_digest"] = quality.digest(source)
+        config["precondition"]["previous_policy"]["content_hash"] = quality.digest(old)
+        # The ledger's unrelated receipt fixture requires one legacy route.
+        ledger_config = copy.deepcopy(config)
+        ledger_config["hostname"] = host
+        ledger_config["projection_policy"]["dns_query_policy"]["physical_routes"] = source["dns_query_policy"]["physical_routes"]
+        ledger = Ledger(ledger_config, old, source)
+        ledger.preview.update(intent={"generation": "unchanged"}, business_snapshot_revision="fixed")
+        ledger.preview["runtime_snapshot"] = {"dns_selections": [{"hostname": host, "node_id": node, "type": "A"} for node in ["dns-a", "dns-b"]],
+            "facts": {"dynamic_quality_coverage": {"mode": "all_dynamic", "query_count": 2, "hostnames": {host: "learning_current_ready_primary"}}}}
+        return config, source, ledger
+
+    def test_expired_retirement_rejoins_dynamic_learning_through_existing_cas(self):
+        config, source, ledger = self.retirement_fixture()
+        before = copy.deepcopy(config)
+        with patch.object(business, "now", return_value=datetime(2026, 1, 3, tzinfo=timezone.utc)):
+            result = quality.publish_once(config, ledger, lambda _: None)
+        self.assertEqual(config, before)
+        self.assertTrue(result["producer_activated"])
+        self.assertFalse(result["routing_acceptance_complete"])
+        self.assertEqual(result["coverage"]["dns_nodes"], ["dns-a", "dns-b"])
+        self.assertEqual(result["coverage"]["retired_intent"], config["business_retirement"])
+        self.assertEqual(ledger.release_bodies[0]["producer_reconfiguration"], config["precondition"])
+        successor = ledger.authorities[("policy_snapshot", quality.SCOPE, "shadow")]["artifact"]["content"]
+        published = ledger.artifacts[successor["dns_policy_artifact_id"]]["content"]
+        self.assertEqual(published["dns_query_policy"]["physical_routes"], [])
+        self.assertEqual(published["dns_query_policy"]["availability_routes"], source["dns_query_policy"]["availability_routes"])
+
+    def test_retirement_rejects_active_distinct_or_unrelated_intent_before_release(self):
+        for scenario in ["active", "identity", "expiry", "quality", "host", "availability", "anchor", "operation", "null"]:
+            with self.subTest(scenario=scenario):
+                config, source, ledger = self.retirement_fixture()
+                if scenario == "active": config["business_retirement"]["expires_at"] = "2026-01-04T00:00:00Z"
+                elif scenario == "identity": config["business_retirement"]["intent_id"] = "different"
+                elif scenario == "expiry": config["business_retirement"]["expires_at"] = "2026-01-01T23:00:00Z"
+                elif scenario == "quality": config["projection_policy"]["dns_query_policy"]["dynamic_quality"]["policy"]["advantage_ms"] += 1
+                elif scenario == "host": config["business_retirement"]["hostname"] = "other.example.test"
+                elif scenario == "availability": config["projection_policy"]["dns_query_policy"]["availability_routes"] = []
+                elif scenario == "anchor": config["business_anchor_mode"] = "latest_verified_same_baseline"
+                elif scenario == "operation": config["precondition"]["operation"] = "dynamic_quality"
+                else: config["business_retirement"] = None
+                with patch.object(business, "now", return_value=datetime(2026, 1, 3, tzinfo=timezone.utc)), self.assertRaises(ValueError):
+                    quality.publish_once(config, ledger, lambda _: None)
+                self.assertEqual(ledger.release_bodies, [])
+
+    def test_retirement_requires_complete_dynamic_preview_and_preserves_publication_fences(self):
+        for scenario in ["explicit", "missing_dns", "duplicate", "business_allocation", "lingering_exploration", "changed_full"]:
+            with self.subTest(scenario=scenario):
+                config, _, ledger = self.retirement_fixture()
+                captures = 0
+                def on_capture(api):
+                    nonlocal captures
+                    captures += 1
+                    if captures == 1:
+                        return
+                    snapshot = api.preview["runtime_snapshot"]
+                    if scenario == "explicit": snapshot["facts"]["dynamic_quality_coverage"]["hostnames"]["app.example.test"] = "explicit_quality_policy"
+                    elif scenario == "missing_dns": snapshot["dns_selections"].pop()
+                    elif scenario == "duplicate": snapshot["dns_selections"].append(copy.deepcopy(snapshot["dns_selections"][0]))
+                    elif scenario == "business_allocation": snapshot["dns_selections"][0]["physical_selection"] = {"business_allocation": {"intent_id": "intent-a"}}
+                    elif scenario == "lingering_exploration": snapshot["facts"]["business_exploration_coverage"] = [{"hostname": "app.example.test"}]
+                    else: api.authorities[("release_set", "global", "full")]["artifact"]["metadata"]["producer_policy_release_id"] = "foreign-producer-release"
+                ledger.on_capture = on_capture
+                with patch.object(business, "now", return_value=datetime(2026, 1, 3, tzinfo=timezone.utc)), patch.object(quality.time, "sleep"), self.assertRaises(ValueError):
+                    quality.publish_once(config, ledger, lambda _: None)
+                self.assertEqual(ledger.release_bodies, [])
+
     def test_unified_policy_relaxes_comparison_without_legacy_ceiling(self):
         config, _ = fixture()
         routes = config["projection_policy"]["dns_query_policy"]["physical_routes"]

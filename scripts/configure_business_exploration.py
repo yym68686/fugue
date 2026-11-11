@@ -7,10 +7,68 @@ import json
 import urllib.parse
 
 from scripts.bootstrap_cell_producer import digest
+from scripts.observe_front_candidate import now, timestamp
 
 
 class BusinessBaselineChanged(ValueError):
     pass
+
+
+def validate_business_retirement(config):
+    if "business_retirement" not in config:
+        return
+    retirement = config["business_retirement"]
+    if (not isinstance(retirement, dict) or set(retirement) != {"hostname", "intent_id", "expires_at"}
+            or config["precondition"]["operation"] != "business_exploration"
+            or config.get("business_anchor_mode", "declared") != "declared"):
+        raise ValueError("retirement requires one explicit expired business intent without anchor renewal")
+    hostname = retirement["hostname"]
+    if (not isinstance(hostname, str) or len(hostname) > 253 or len(hostname.split(".")) < 2
+            or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in hostname.split("."))
+            or not isinstance(retirement["intent_id"], str)
+            or not re.fullmatch(r"[^\s\x00]{1,128}", retirement["intent_id"])):
+        raise ValueError("retirement requires canonical hostname and exact intent identity")
+    if not isinstance(retirement["expires_at"], str) or timestamp(retirement["expires_at"]) > now():
+        raise ValueError("active business exploration cannot use expired-intent retirement")
+    query = config["projection_policy"]["dns_query_policy"]
+    if (any(route["hostname"] == hostname for route in query.get("physical_routes", []))
+            or not any(route["hostname"] == hostname for route in query.get("availability_routes", []))):
+        raise ValueError("retirement must remove the explicit route and retain independent host availability")
+
+
+def check_business_retirement(previous, config, hostname):
+    retirement = config["business_retirement"]
+    if hostname != retirement["hostname"]:
+        raise ValueError("retirement changed a different hostname")
+    prior = [route for route in previous["dns_query_policy"].get("physical_routes", []) if route["hostname"] == hostname]
+    if len(prior) != 1 or not prior[0].get("business_exploration"):
+        raise ValueError("retirement lacks exact predecessor business intent")
+    intent = prior[0]["business_exploration"]
+    if (intent["intent_id"] != retirement["intent_id"] or intent["expires_at"] != retirement["expires_at"]
+            or timestamp(intent["expires_at"]) > now()):
+        raise ValueError("retirement differs from exact expired predecessor intent")
+    if prior[0]["policy"] != config["projection_policy"]["dns_query_policy"]["dynamic_quality"]["policy"]:
+        raise ValueError("retirement cannot discard a distinct per-service quality constraint")
+
+
+def validate_business_retirement_preview(before, preview, config, hostname):
+    validate_business_preview(preview, config["projection_policy"], hostname)
+    snapshot = preview.get("runtime_snapshot", {})
+    coverage = snapshot.get("facts", {}).get("dynamic_quality_coverage", {})
+    state = coverage.get("hostnames", {}).get(hostname)
+    if coverage.get("mode") != "all_dynamic" or state not in {"measured", "learning_current_ready_primary", "availability_only_quality_unavailable"}:
+        raise ValueError("retired hostname did not return to bounded dynamic quality learning")
+    def assignments(value):
+        return [(fact.get("node_id"), fact.get("type")) for fact in value.get("runtime_snapshot", {}).get("dns_selections", []) if fact.get("hostname") == hostname]
+    expected, actual = assignments(before), assignments(preview)
+    if (not expected or len(set(expected)) != len(expected) or len(set(actual)) != len(actual)
+            or set(actual) != set(expected) or any(not node or kind != "A" for node, kind in actual)):
+        raise ValueError("retirement must preserve every existing IPv4 DNS assignment")
+    for fact in snapshot.get("dns_selections", []):
+        if fact.get("hostname") == hostname and (fact.get("physical_selection") or {}).get("business_allocation"):
+            raise ValueError("retirement retained a business allocation")
+    return {"hostname": hostname, "retired_intent": config["business_retirement"], "dynamic_quality_state": state,
+            "dns_nodes": sorted(node for node, _ in actual), "routing_acceptance_complete": False}
 
 
 ANCHOR_BLOCKER_CODES = frozenset({

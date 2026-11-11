@@ -53,6 +53,16 @@ Capture uses a per-cycle query budget, bounded concurrency and least-recently-at
 
 The independent `dynamic_quality` producer transaction may change only the default quality strategy and producer/input generations. It cannot modify static intent, pinned constraints, configured baseline orders, timing or other producer controls. Current verified full/LKG and absence of pending gray are checked under publication locks.
 
+## Retiring expired business experiments
+
+An explicit business experiment continues to exclude its hostname from universal learning after its lease expires. Expiration stops exploration; it does not authorize renewal, discard sticky stops, or override a changed serving baseline. Retire the experiment through the existing signed `business_exploration` configuration transaction rather than weakening its baseline checks.
+
+A declaration may include `business_retirement: {hostname, intent_id, expires_at}`. This CI path accepts only the exact expired predecessor intent, removes its entire explicit physical route, and requires the default dynamic quality policy to equal the removed route's quality policy. The single-host delta validator preserves all other constraints, independent availability membership, configured orders, thresholds and producer controls. Active experiments require their separate explicitly authorized lifecycle operation.
+
+The retirement preview must retain every existing IPv4 DNS assignment, remove business allocations and exploration coverage, and account for the hostname as measured, learning with its current ready primary, or using independently authorized availability while evidence is unavailable. A static or pinned exclusion cannot pass as retirement to dynamic learning. The publication still checks the current producer and verified full/LKG fences. Retained transaction evidence identifies the retired intent and DNS nodes; producer activation alone never claims routing acceptance.
+
+After full publication and consumer convergence, inspect actual DNS receipts and collect fresh comparable client cohorts across the configured buckets. One successful probe cannot authorize a quality switch. Historical experiment receipts remain replayable, and the availability policy continues to gate recovering edges independently.
+
 Universal source TCP probing is opt-in through explicit worker configuration. It rotates all loaded eligible routes with a bounded batch and opens no application request. A single stable upstream entry matching the declared destination is measurable; multiple distinct upstreams remain ambiguous until their identity can be captured separately.
 
 Passive samples retain the loaded route proof identity separately from metadata resolved for one selected upstream. Source socket samples require that the executed route exactly matches the loaded route's sole configured upstream; a different destination, runtime, path or fallback rejects the sample. Selecting a release must not make an otherwise valid network observation lose its signed route binding.

@@ -2,6 +2,7 @@ package platformproducer
 
 import (
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -9,7 +10,7 @@ import (
 
 func TestBusinessExplorationConfigurationHasIndependentSingleRouteBoundary(t *testing.T) {
 	prior := ProjectionPolicyInput{Generation: "before", Scope: "global", DNSQueryPolicy: &platformconfig.DNSQueryPolicy{RankingMode: "active"}}
-	route := platformconfig.PhysicalQualityRoute{Hostname: "app.example.test", PathPrefix: "/", TrafficClass: "streaming", BusinessExploration: &model.BusinessEdgeExplorationPolicy{IntentID: "intent-a", Mode: "observe", CandidateEdgeIDs: []string{"edge-a", "edge-b"}}}
+	route := platformconfig.PhysicalQualityRoute{Hostname: "app.example.test", PathPrefix: "/", TrafficClass: "streaming", BusinessExploration: &model.BusinessEdgeExplorationPolicy{IntentID: "intent-a", Mode: "observe", CandidateEdgeIDs: []string{"edge-a", "edge-b"}, ExpiresAt: time.Now().UTC().Add(-time.Minute)}}
 	next := cloneBusinessProjectionPolicy(prior)
 	next.Generation = "after"
 	next.DNSQueryPolicy.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{route}
@@ -56,5 +57,33 @@ func TestBusinessExplorationConfigurationHasIndependentSingleRouteBoundary(t *te
 	}
 	if next.DNSQueryPolicy.PhysicalRoutes[0].BusinessExploration.Mode != "observe" {
 		t.Fatal("validation mutated independent configuration")
+	}
+}
+
+func TestBusinessExplorationRemovalRequiresExpiredLease(t *testing.T) {
+	expires := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	prior := ProjectionPolicyInput{Generation: "before", Scope: "global", DNSQueryPolicy: &platformconfig.DNSQueryPolicy{RankingMode: "active", PhysicalRoutes: []platformconfig.PhysicalQualityRoute{{
+		Hostname: "app.example.test", BusinessExploration: &model.BusinessEdgeExplorationPolicy{IntentID: "intent-a", ExpiresAt: expires},
+	}}}}
+	for _, scenario := range []struct {
+		name string
+		now  time.Time
+	}{
+		{name: "before expiry", now: expires.Add(-time.Nanosecond)},
+		{name: "at expiry", now: expires},
+		{name: "after expiry", now: expires.Add(time.Nanosecond)},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			next := cloneBusinessProjectionPolicy(prior)
+			next.Generation = "after"
+			next.DNSQueryPolicy.PhysicalRoutes = nil
+			err := validateBusinessExplorationDeltaAt(prior, next, scenario.now)
+			if !scenario.now.Before(expires) && err != nil {
+				t.Fatal("expired intent could not be retired", err)
+			}
+			if scenario.now.Before(expires) && err == nil {
+				t.Fatal("active intent was retireable")
+			}
+		})
 	}
 }

@@ -14,12 +14,12 @@ from scripts.observe_front_candidate import now
 from scripts.publish_agent_edge_shadow import API, canonical
 from scripts.reconfigure_cell_producer import DIGEST, IDENTITY, validate_ref
 from scripts.reconfigure_physical_dns import POLICY_FIELDS, SCOPE, baseline, bounded_json, resolve_baseline
-from scripts.configure_business_exploration import BusinessBaselineChanged, check_business_delta, resolve_business_anchors, validate_business_preview, validate_business_routes
+from scripts.configure_business_exploration import BusinessBaselineChanged, check_business_delta, check_business_retirement, resolve_business_anchors, validate_business_preview, validate_business_retirement, validate_business_retirement_preview, validate_business_routes
 
 
 def validate(config):
     fields = {"schema", "generation", "origin", "producer_generation", "precondition", "projection_policy", "baseline_mode"}
-    if not isinstance(config, dict) or not fields.issubset(config) or set(config) - fields - {"business_anchor_mode", "api_connect_address"} or not bounded_json(config) or config["schema"] != "fugue.dynamic-quality-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config["baseline_mode"] not in ["declared", "latest_verified_same_policy", dns_availability_recovery.FOLLOW_SAME_ARTIFACT]:
+    if not isinstance(config, dict) or not fields.issubset(config) or set(config) - fields - {"business_anchor_mode", "business_retirement", "api_connect_address"} or not bounded_json(config) or config["schema"] != "fugue.dynamic-quality-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config["baseline_mode"] not in ["declared", "latest_verified_same_policy", dns_availability_recovery.FOLLOW_SAME_ARTIFACT]:
         raise ValueError("complete explicit dynamic quality declaration required")
     origin = urllib.parse.urlsplit(config["origin"])
     if origin.scheme != "https" or config["origin"] != "https://" + str(origin.hostname) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", str(origin.hostname)):
@@ -53,6 +53,7 @@ def validate(config):
     validate_availability_routes(query.get("availability_routes", []))
     if precondition["operation"] == "business_exploration":
         validate_business_routes(query.get("physical_routes", []))
+    validate_business_retirement(config)
     return config
 
 
@@ -176,6 +177,8 @@ def publish_once(config, api, save):
         changed_hostname = check_availability_delta(source["content"], config["projection_policy"])
     elif business:
         changed_hostname = check_business_delta(source["content"], config["projection_policy"])
+        if "business_retirement" in config:
+            check_business_retirement(source["content"], config, changed_hostname)
         config = resolve_business_anchors(config, api, serving, changed_hostname)
         validate(config)
         check_business_delta(source["content"], config["projection_policy"])
@@ -207,6 +210,8 @@ def publish_once(config, api, save):
         coverage = validate_availability_preview(preview, config["projection_policy"], changed_hostname)
     elif business:
         coverage = validate_business_preview(preview, config["projection_policy"], changed_hostname)
+        if "business_retirement" in config:
+            coverage = validate_business_retirement_preview(before, preview, config, changed_hostname)
     if config.get("business_anchor_mode") == "latest_verified_same_baseline":
         try:
             baseline(config, api)
