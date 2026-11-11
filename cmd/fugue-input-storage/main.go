@@ -34,7 +34,7 @@ func main() {
 		}
 		return
 	}
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-root-obligations, archive-retention-inventory, archive-retention-prepared-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, encoded-backup, decode-backup, release-backup, observe")
+	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-root-obligations, archive-retention-inventory, archive-retention-prepared-inventory, archive-retention-idle-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, encoded-backup, decode-backup, release-backup, observe")
 	rootObligationTargets := flag.String("root-obligation-targets", "", "strict JSON array of 1..32 exact references; archive-root-obligations read-only diagnostic")
 	copyContract := flag.String("copy-contract", "", "strict single-input archive-copy JSON contract path")
 	sourceVerificationContract := flag.String("source-verification-contract", "", "strict one-parent read-only compiler-source verification contract; no caller keys")
@@ -71,13 +71,29 @@ func main() {
 	rehearse := flag.Bool("rehearse", false, "encode/verify then roll back (consumes WAL and I/O)")
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
+	// This separate read-only mode fails before database access unless the
+	// native process and all of its runtime threads have verified idle policy.
+	// Existing inspection and mutation modes never change scheduling policy.
+	if *mode == idleRetentionMode {
+		other := false
+		flag.Visit(func(f *flag.Flag) { other = other || f.Name != "mode" })
+		if other || flag.NArg() != 0 || os.Getenv("FUGUE_DATABASE_URL") == "" {
+			fmt.Fprintln(os.Stderr, "idle retention inventory requires only mode and a database")
+			os.Exit(2)
+		}
+		if err := enterIdleRetention(); err != nil {
+			fmt.Fprintln(os.Stderr, "idle retention execution contract unavailable")
+			os.Exit(2)
+		}
+		fmt.Fprintln(os.Stderr, "idle retention execution verified: policy=5 nice=19 gomaxprocs=1 gomemlimit=128MiB")
+	}
 	hotMode := *mode == "archive-hot-copy" || *mode == "archive-hot-restore"
 	taskTicketMode := *mode == "task-input-plan" || *mode == "task-input-restore" || *mode == "task-input-confirm"
 	publicationTicketMode := *mode == "publication-input-plan" || *mode == "publication-input-restore" || *mode == "publication-input-confirm"
 	consumerTicketMode := *mode == "consumer-input-plan" || *mode == "consumer-input-restore" || *mode == "consumer-input-confirm"
 	localPinMode := *mode == "archive-local-pin" || *mode == "archive-local-unpin"
 	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "task-input-plan" || *mode == "publication-input-plan" || *mode == "consumer-input-plan" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode || *mode == "archive-local-pin" || *mode == "task-input-prepare") && !*apply
-	readOnly = readOnly || *mode == "archive-retention-inventory" || *mode == "archive-retention-prepared-inventory"
+	readOnly = readOnly || isRetentionInventoryMode(*mode)
 	readOnly = readOnly || *mode == "compiler-source-verify"
 	backupMode := *mode == "encoded-backup" || *mode == "decode-backup"
 	readOnly = readOnly || backupMode
@@ -353,7 +369,7 @@ func main() {
 		}
 		return
 	}
-	if *mode == "archive-retention-inventory" || *mode == "archive-retention-prepared-inventory" {
+	if isRetentionInventoryMode(*mode) {
 		// An audit cannot be converted into a maintenance action by accepting
 		// otherwise unrelated apply, route, contract or rehearsal flags.
 		other := false
@@ -363,7 +379,7 @@ func main() {
 			os.Exit(2)
 		}
 		run := store.RunCompilerInputRetentionInventory
-		if *mode == "archive-retention-prepared-inventory" {
+		if *mode == "archive-retention-prepared-inventory" || *mode == idleRetentionMode {
 			run = store.RunCompilerInputPreparedRetentionInventory
 		}
 		report, err := run(ctx, os.Getenv("FUGUE_DATABASE_URL"))

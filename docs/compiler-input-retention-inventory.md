@@ -93,6 +93,30 @@ metadata, final hits/misses and version-read work; timings and these counters
 do not enter the audit digest. This mode does not permit copying, routing,
 fencing or retirement, or complete any signature/original-byte authority gate.
 
+### Idle execution
+
+`-mode=archive-retention-idle-inventory` selects the same prepared audit with
+an additional Linux execution contract, verified before database access. The
+launcher demotes its locked OS thread to `SCHED_IDLE` and nice19, then execs
+only its own executable with `GOMAXPROCS=1` and `GOMEMLIMIT=128MiB`. The new
+runtime verifies every live thread's policy and priority; future threads inherit
+them. A caller-supplied child marker cannot bypass verification. An unsupported
+kernel/platform, denied syscall or failed verification refuses the operation.
+No external scheduling utility or transferred binary is required.
+
+This scheduling class gives the diagnostic lower CPU priority; it is not a CPU
+reservation, hard CPU quota, memory cap, or guarantee of service isolation.
+`GOMEMLIMIT` is a Go runtime soft target and excludes some process memory.
+Existing container limits and fresh execution-node/container memory, node
+pressure, service health and database resource checks still apply. The mode
+does not relax a migration worker's resource gate or permit new allocation
+under a migration free-space stopline. It may time out under contention. The
+two-minute native and final60s RR/SQL5s/lock250ms/zero-temp budgets are unchanged.
+Ordinary modes retain their existing scheduling and runtime settings. Like the
+other retention inventory modes, this mode accepts only `mode`, never apply,
+write, resource-override or budget flags. Scheduling verification is reported
+on stderr; it is not a graph proof or retirement authority.
+
 ## Exact root obligations
 
 `fugue-input-storage -mode=archive-root-obligations -root-obligation-targets='[{"kind":"artifact","id":"artifact-example"}]'`
