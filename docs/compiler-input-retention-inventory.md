@@ -117,6 +117,26 @@ other retention inventory modes, this mode accepts only `mode`, never apply,
 write, resource-override or budget flags. Scheduling verification is reported
 on stderr; it is not a graph proof or retirement authority.
 
+### Repeated publication checks
+
+The canonical DNS dependency projection has a separate fixed cache of at most
+1024 SHA256 success fingerprints for deterministic embedded Cell-publication
+validation. The ordinary serving decoder keeps its original 64-entry cache.
+Each lookup fingerprints the complete actual content trees and artifact
+envelopes, reference and producer-policy fields. Claimed content hashes cannot
+replace actual bytes. Failed checks and custom JSON values use the original
+validator and are never remembered. Only fixed-size keys and FIFO bookkeeping
+remain in the cache; decoded objects, original bytes, signatures, selections,
+expiry, live readiness and publication authority are not cached.
+
+The larger bounded working set can avoid repeated pure validation when an
+inventory revisits more than64 distinct publications. It does not change the
+O(content bytes) fingerprint cost or guarantee a complete graph. Optional
+`cell_validation_checks`, `cell_validation_hits`, `cell_validation_misses` and
+`cell_validation_uncached` diagnostic counters distinguish reuse from full
+validation, without entering a proof hash or changing retained dependencies.
+All same-snapshot and resource stoplines still apply.
+
 ## Exact root obligations
 
 `fugue-input-storage -mode=archive-root-obligations -root-obligation-targets='[{"kind":"artifact","id":"artifact-example"}]'`

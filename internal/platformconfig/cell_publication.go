@@ -63,18 +63,42 @@ func (r CellRoutePublicationReference) Validate() error {
 
 // Only large decoded DNS envelopes use bounded deterministic validation reuse.
 func validateDNSCellRoutePublication(p CellRoutePublicationInput, encodedPublicationsBytes int) error {
+	return validateDNSCellRoutePublicationObserved(p, encodedPublicationsBytes, nil)
+}
+
+func validateDNSCellRoutePublicationObserved(p CellRoutePublicationInput, encodedPublicationsBytes int, cost *DNSDependencyDecodeCost) error {
+	return validateDNSCellRoutePublicationCached(p, encodedPublicationsBytes, cost, &dnsCellPublicationValidations)
+}
+
+func validateDNSCellRoutePublicationCached(p CellRoutePublicationInput, encodedPublicationsBytes int, cost *DNSDependencyDecodeCost, cache *dnsValidationCache) error {
+	if cost != nil {
+		cost.CellValidationChecks++
+	}
 	// The caller already has the complete encoded array. Keep small envelopes
 	// on their original path without paying to fingerprint their trees.
 	if encodedPublicationsBytes < 64<<10 {
+		if cost != nil {
+			cost.CellValidationUncached++
+		}
 		return ValidateCellRoutePublication(p)
 	}
 	key, cacheable := dnsCellPublicationValidationKey(p)
-	if cacheable && dnsCellPublicationValidations.contains(key) {
+	if cacheable && cache.contains(key) {
+		if cost != nil {
+			cost.CellValidationHits++
+		}
 		return nil
+	}
+	if cost != nil {
+		if cacheable {
+			cost.CellValidationMisses++
+		} else {
+			cost.CellValidationUncached++
+		}
 	}
 	err := ValidateCellRoutePublication(p)
 	if err == nil && cacheable {
-		dnsCellPublicationValidations.remember(key)
+		cache.remember(key)
 	}
 	return err
 }
@@ -189,6 +213,14 @@ func decodeCellRoutePublications(raw []byte) ([]CellRoutePublicationInput, Polic
 }
 
 func decodeCellRoutePublicationFields(publicationsRaw, policyRaw json.RawMessage, source *CellDNSPlanSource) ([]CellRoutePublicationInput, PolicySnapshot, error) {
+	return decodeCellRoutePublicationFieldsObserved(publicationsRaw, policyRaw, source, nil)
+}
+
+func decodeCellRoutePublicationFieldsObserved(publicationsRaw, policyRaw json.RawMessage, source *CellDNSPlanSource, cost *DNSDependencyDecodeCost) ([]CellRoutePublicationInput, PolicySnapshot, error) {
+	return decodeCellRoutePublicationFieldsCached(publicationsRaw, policyRaw, source, cost, &dnsCellPublicationValidations)
+}
+
+func decodeCellRoutePublicationFieldsCached(publicationsRaw, policyRaw json.RawMessage, source *CellDNSPlanSource, cost *DNSDependencyDecodeCost, cache *dnsValidationCache) ([]CellRoutePublicationInput, PolicySnapshot, error) {
 	var policy PolicySnapshot
 	if len(policyRaw) > 0 {
 		if err := json.Unmarshal(policyRaw, &policy); err != nil {
@@ -218,7 +250,7 @@ func decodeCellRoutePublicationFields(publicationsRaw, policyRaw json.RawMessage
 		if p.Reference.AuthorityCellID == policy.AuthorityCellID || i > 0 && publications[i-1].Reference.AuthorityCellID >= p.Reference.AuthorityCellID {
 			return nil, policy, fmt.Errorf("DNS Cell references must be independent, sorted and unique")
 		}
-		if err := validateDNSCellRoutePublication(p, len(publicationsRaw)); err != nil {
+		if err := validateDNSCellRoutePublicationCached(p, len(publicationsRaw), cost, cache); err != nil {
 			return nil, policy, err
 		}
 	}

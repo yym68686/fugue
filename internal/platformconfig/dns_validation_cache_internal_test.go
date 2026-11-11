@@ -31,6 +31,35 @@ func TestDNSValidationCacheBoundedAndConcurrent(t *testing.T) {
 	}
 }
 
+func TestDNSCellPublicationCacheCapacityAndEviction(t *testing.T) {
+	if dnsCellPublicationValidations.capacity != 0 || dnsCellPublicationInspectionValidations.capacity != dnsCellPublicationValidationLimit {
+		t.Fatal("inspection capacity changed the ordinary serving cache")
+	}
+	var keys [2048][32]byte
+	cache := dnsValidationCache{capacity: dnsCellPublicationValidationLimit}
+	for i := range keys {
+		keys[i] = sha256.Sum256([]byte(fmt.Sprint(i)))
+		cache.remember(keys[i])
+	}
+	if len(cache.keys) != dnsCellPublicationValidationLimit || len(cache.ring) != dnsCellPublicationValidationLimit {
+		t.Fatal("publication fingerprint cache exceeded its bound")
+	}
+	for i, key := range keys {
+		if cache.contains(key) != (i >= len(keys)-dnsCellPublicationValidationLimit) {
+			t.Fatal("FIFO eviction changed", i)
+		}
+	}
+	for _, capacity := range []int{-1, 0, dnsCellPublicationValidationLimit + 1} {
+		cache := dnsValidationCache{capacity: capacity}
+		for _, key := range keys[:128] {
+			cache.remember(key)
+		}
+		if len(cache.keys) != 64 || len(cache.ring) != 64 {
+			t.Fatal("invalid capacity exceeded the default bound", capacity)
+		}
+	}
+}
+
 func TestDNSFingerprintDoesNotInvokeCustomMarshalers(t *testing.T) {
 	calls := 0
 	v := map[string]any{"policy": countedDNSPlanJSON{raw: []byte(`{}`), calls: &calls}}

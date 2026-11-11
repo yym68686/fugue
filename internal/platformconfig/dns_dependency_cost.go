@@ -6,16 +6,20 @@ import "time"
 // stages. It contains no identities, content, errors, trust or serving proof.
 // A caller owns one value; observations are never global or merged implicitly.
 type DNSDependencyDecodeCost struct {
-	Attempts             int64 `json:"attempts"`
-	Rejected             int64 `json:"rejected"`
-	EnvelopeEncodeUS     int64 `json:"envelope_encode_us"`
-	EnvelopeDecodeUS     int64 `json:"envelope_decode_us"`
-	CellPublicationsUS   int64 `json:"cell_publications_us"`
-	PreviousDecodeUS     int64 `json:"previous_decode_us"`
-	PreviousValidationUS int64 `json:"previous_validation_us"`
-	SourceDependenciesUS int64 `json:"source_dependencies_us"`
-	AliasFallbacks       int64 `json:"alias_fallbacks"`
-	AliasFallbackUS      int64 `json:"alias_fallback_us"`
+	Attempts               int64 `json:"attempts"`
+	Rejected               int64 `json:"rejected"`
+	EnvelopeEncodeUS       int64 `json:"envelope_encode_us"`
+	EnvelopeDecodeUS       int64 `json:"envelope_decode_us"`
+	CellPublicationsUS     int64 `json:"cell_publications_us"`
+	PreviousDecodeUS       int64 `json:"previous_decode_us"`
+	PreviousValidationUS   int64 `json:"previous_validation_us"`
+	SourceDependenciesUS   int64 `json:"source_dependencies_us"`
+	AliasFallbacks         int64 `json:"alias_fallbacks"`
+	AliasFallbackUS        int64 `json:"alias_fallback_us"`
+	CellValidationChecks   int64 `json:"cell_validation_checks,omitempty"`
+	CellValidationHits     int64 `json:"cell_validation_hits,omitempty"`
+	CellValidationMisses   int64 `json:"cell_validation_misses,omitempty"`
+	CellValidationUncached int64 `json:"cell_validation_uncached,omitempty"`
 }
 
 type dnsDependencyStage uint8

@@ -55,5 +55,5 @@ func DecodeProjectedDNSRouteDependencyEvidenceObserved(a model.PlatformArtifact,
 			}
 		}()
 	}
-	return decodeDNSRouteDependencyFieldsObserved(publications, policy, previous, source, cost)
+	return decodeDNSRouteDependencyFieldsCached(publications, policy, previous, source, cost, &dnsCellPublicationInspectionValidations)
 }

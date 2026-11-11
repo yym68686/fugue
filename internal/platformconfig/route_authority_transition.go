@@ -546,8 +546,12 @@ func DecodeDNSRouteDependencyEvidenceObserved(a model.PlatformArtifact, cost *DN
 }
 
 func decodeDNSRouteDependencyFieldsObserved(publications, policy, previousRaw []byte, source *CellDNSPlanSource, cost *DNSDependencyDecodeCost) (evidence DNSRouteDependencyEvidence, err error) {
+	return decodeDNSRouteDependencyFieldsCached(publications, policy, previousRaw, source, cost, &dnsCellPublicationValidations)
+}
+
+func decodeDNSRouteDependencyFieldsCached(publications, policy, previousRaw []byte, source *CellDNSPlanSource, cost *DNSDependencyDecodeCost, cache *dnsValidationCache) (evidence DNSRouteDependencyEvidence, err error) {
 	started := cost.start()
-	pubs, _, err := decodeCellRoutePublicationFields(publications, policy, source)
+	pubs, _, err := decodeCellRoutePublicationFieldsCached(publications, policy, source, cost, cache)
 	cost.record(dnsDependencyCells, started)
 	if err != nil {
 		return evidence, err

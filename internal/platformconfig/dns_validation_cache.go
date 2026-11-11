@@ -15,14 +15,23 @@ import (
 // Trust, release selection, fences, expiry and live readiness remain uncached.
 type dnsValidationCache struct {
 	sync.Mutex
-	keys map[[32]byte]bool
-	ring [64][32]byte
-	next int
+	keys     map[[32]byte]bool
+	ring     [][32]byte
+	next     int
+	capacity int
 }
+
+const dnsCellPublicationValidationLimit = 1024
 
 var dnsPlanValidations dnsValidationCache
 var dnsPreviousValidations dnsValidationCache
+
 var dnsCellPublicationValidations dnsValidationCache
+
+// A retained DNS census visits many distinct publication envelopes. Its
+// separate cache stores only success fingerprints; serving keeps its original
+// 64-entry working set. Actual trees and live authority remain uncached.
+var dnsCellPublicationInspectionValidations = dnsValidationCache{capacity: dnsCellPublicationValidationLimit}
 
 func (c *dnsValidationCache) contains(key [32]byte) bool {
 	c.Lock()
@@ -34,6 +43,11 @@ func (c *dnsValidationCache) remember(key [32]byte) {
 	defer c.Unlock()
 	if c.keys == nil {
 		c.keys = make(map[[32]byte]bool)
+		capacity := c.capacity
+		if capacity < 1 || capacity > dnsCellPublicationValidationLimit {
+			capacity = 64
+		}
+		c.ring = make([][32]byte, capacity)
 	}
 	if c.keys[key] {
 		return
