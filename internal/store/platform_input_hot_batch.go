@@ -242,7 +242,7 @@ func decodeCompilerInputHotBatchArtifactObserved(a model.PlatformArtifact, conte
 		cost.JSONUS += time.Since(started).Microseconds()
 		started = time.Now()
 	}
-	node, err = compilerInputArtifactHotNodeObserved(a, cost)
+	node, err = compilerInputProjectedArtifactHotNodeObserved(a, cost)
 	if cost != nil {
 		cost.DependenciesUS += time.Since(started).Microseconds()
 		if err != nil {

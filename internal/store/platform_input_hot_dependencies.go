@@ -16,21 +16,23 @@ import (
 // hashes, not replacement ledger rows: every edge is resolved independently.
 // This parses metadata only; it never confers signature or body verification.
 func compilerInputArtifactHotNode(artifact model.PlatformArtifact) (inputarchive.HotNode, error) {
-	return compilerInputArtifactHotNodeObserved(artifact, nil)
+	return compilerInputArtifactDependencyNode(artifact, nil, true, platformconfig.DecodeDNSRouteDependencyEvidenceObserved)
 }
 
-func compilerInputArtifactHotNodeObserved(artifact model.PlatformArtifact, cost *CompilerInputHotDecodeCost) (inputarchive.HotNode, error) {
-	return compilerInputArtifactDependencyNode(artifact, cost, true)
+func compilerInputProjectedArtifactHotNodeObserved(artifact model.PlatformArtifact, cost *CompilerInputHotDecodeCost) (inputarchive.HotNode, error) {
+	return compilerInputArtifactDependencyNode(artifact, cost, true, platformconfig.DecodeProjectedDNSRouteDependencyEvidenceObserved)
 }
 
 // Ordinary serving/activation follows the new signed operational dependency.
 // Retention inventory and explicit full-history reads retain BOTH dependencies:
 // changing a runtime reader never releases the original provenance obligation.
 func compilerInputArtifactRuntimeNode(artifact model.PlatformArtifact) (inputarchive.HotNode, error) {
-	return compilerInputArtifactDependencyNode(artifact, nil, false)
+	return compilerInputArtifactDependencyNode(artifact, nil, false, platformconfig.DecodeDNSRouteDependencyEvidenceObserved)
 }
 
-func compilerInputArtifactDependencyNode(artifact model.PlatformArtifact, cost *CompilerInputHotDecodeCost, retainOriginal bool) (inputarchive.HotNode, error) {
+type compilerInputDNSDependencyDecoder func(model.PlatformArtifact, *platformconfig.DNSDependencyDecodeCost) (platformconfig.DNSRouteDependencyEvidence, error)
+
+func compilerInputArtifactDependencyNode(artifact model.PlatformArtifact, cost *CompilerInputHotDecodeCost, retainOriginal bool, decodeDNS compilerInputDNSDependencyDecoder) (inputarchive.HotNode, error) {
 	node := inputarchive.HotNode{Identity: inputarchive.HotReference{Kind: "artifact", ID: artifact.ID}, ContentHash: artifact.ContentHash, References: []inputarchive.HotReference{}}
 	if artifact.ID == "" || !inputDigestPattern.MatchString(artifact.ContentHash) {
 		return node, fmt.Errorf("hot artifact identity invalid: %w", ErrConflict)
@@ -107,7 +109,7 @@ func compilerInputArtifactDependencyNode(artifact model.PlatformArtifact, cost *
 			}
 			dnsCost = cost.DNS
 		}
-		evidence, err := platformconfig.DecodeDNSRouteDependencyEvidenceObserved(artifact, dnsCost)
+		evidence, err := decodeDNS(artifact, dnsCost)
 		if err != nil {
 			return node, fmt.Errorf("hot DNS publication dependencies invalid: %w", ErrConflict)
 		}
