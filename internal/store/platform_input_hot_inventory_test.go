@@ -360,7 +360,8 @@ func TestHotInventoryPostgresBatchMatchesSingleIdentityValidation(t *testing.T) 
 }
 
 func TestHotInventoryPostgresLargeRouteDecodeMatchesSingle(t *testing.T) {
-	db, _, _ := hotInventoryTestDatabase(t)
+	db, address, _ := hotInventoryTestDatabase(t)
+	installHotIndexTest(t, db, address)
 	req, _, _ := celldns.SourceAuthorizedRequest(t, false)
 	for _, base := range []model.PlatformArtifact{req.CellRoutePublications[0].Route, req.CellRoutePublications[0].TLS} {
 		for _, variant := range []string{"valid", "null-lineage", "bad-lineage", "ignored-overflow"} {
@@ -400,28 +401,38 @@ func TestHotInventoryPostgresLargeRouteDecodeMatchesSingle(t *testing.T) {
  VALUES($1,$2,$3,$1,'validated',$4,$5,$6,now(),now())`, a.ID, a.ArtifactKind, a.ScopeKey, a.ContentHash, content, metadata); err != nil {
 				t.Fatal(err)
 			}
-			tx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err = tx.Exec(`SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms'; SET LOCAL work_mem='1MB'; SET LOCAL temp_file_limit=0`); err != nil {
-				t.Fatal(err)
-			}
-			ref := inputarchive.HotReference{Kind: "artifact", ID: a.ID}
-			want, singleErr := resolveCompilerInputHotNode(t.Context(), tx, ref)
-			var cost CompilerInputHotCost
-			got, batchErr := resolveCompilerInputHotBatchObserved(t.Context(), tx, []inputarchive.HotReference{ref}, &cost)
-			_ = tx.Rollback()
-			if batchErr != nil || singleErr != nil && len(got) != 0 || singleErr == nil && !reflect.DeepEqual(want, got[ref]) {
-				t.Fatal("large route/TLS decoder changed single-read semantics", a.ArtifactKind, variant, singleErr, batchErr)
-			}
-			decode := cost.Artifacts.DecodeByKind[a.ArtifactKind]
-			var rejected int64
-			if singleErr != nil {
-				rejected = 1
-			}
-			if decode == nil || decode.Attempts != 1 || decode.SourceBytes < 64<<10 || decode.TransportBytes < 64<<10 || decode.Rejected != rejected {
-				t.Fatal("large source accounting or rejection changed", a.ArtifactKind, variant, cost.Artifacts)
+			for _, indexed := range []bool{false, true} {
+				tx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = tx.Exec(`SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms'; SET LOCAL work_mem='1MB'; SET LOCAL temp_file_limit=0`); err != nil {
+					t.Fatal(err)
+				}
+				ref := inputarchive.HotReference{Kind: "artifact", ID: a.ID}
+				want, singleErr := resolveCompilerInputHotNode(t.Context(), tx, ref)
+				var cost CompilerInputHotCost
+				got, batchErr := resolveCompilerInputHotBatchWithIndex(t.Context(), tx, []inputarchive.HotReference{ref}, &cost, indexed)
+				_ = tx.Rollback()
+				if batchErr != nil || singleErr != nil && len(got) != 0 || singleErr == nil && !reflect.DeepEqual(want, got[ref]) {
+					t.Fatal("large route/TLS decoder changed single-read semantics", indexed, a.ArtifactKind, variant, singleErr, batchErr)
+				}
+				decode := cost.Artifacts.DecodeByKind[a.ArtifactKind]
+				var rejected int64
+				if singleErr != nil {
+					rejected = 1
+				}
+				if decode == nil || decode.Attempts != 1 || decode.SourceBytes < 64<<10 || decode.Rejected != rejected {
+					t.Fatal("large source accounting or rejection changed", indexed, a.ArtifactKind, variant, cost.Artifacts)
+				}
+				// Safe shallow route/TLS sources transport only dependency fields;
+				// overflow sources retain full bytes for the generic decoder.
+				if variant == "ignored-overflow" && decode.TransportBytes < 64<<10 {
+					t.Fatal("overflow source was projected instead of retaining full bytes", indexed, a.ArtifactKind, cost.Artifacts)
+				}
+				if variant != "ignored-overflow" && decode.TransportBytes >= decode.SourceBytes {
+					t.Fatal("safe large source did not reduce transport", indexed, a.ArtifactKind, variant, cost.Artifacts)
+				}
 			}
 		}
 	}

@@ -21,7 +21,10 @@ func decodeCompilerInputHotArtifactJSON(a *model.PlatformArtifact, content, meta
 		}
 		return nil
 	}
-	var fields map[string]json.RawMessage
+	// Borrow each field only for this call. RawMessage copies even discarded
+	// route configuration, although dependency extraction never retains it.
+	// Unmarshal still validates the entire object before any view is consumed.
+	var fields map[string]compilerInputHotJSONView
 	if json.Unmarshal(content, &fields) != nil || !compilerInputHotJSONNumbersRepresentable(content) || json.Unmarshal(metadata, &a.Metadata) != nil {
 		return ErrConflict
 	}
@@ -46,7 +49,16 @@ func decodeCompilerInputHotArtifactJSON(a *model.PlatformArtifact, content, meta
 	return nil
 }
 
-// RawMessage decoding above already checked syntax and maximum JSON depth.
+// Views cannot escape into a.Content: selected values are decoded again into
+// owned generic values before returning. The caller may reuse its input bytes.
+type compilerInputHotJSONView []byte
+
+func (v *compilerInputHotJSONView) UnmarshalJSON(raw []byte) error {
+	*v = raw
+	return nil
+}
+
+// Object decoding above already checked syntax and maximum JSON depth.
 // Match the generic map decoder's float64 overflow refusal in ignored values.
 func compilerInputHotJSONNumbersRepresentable(raw []byte) bool {
 	for i := 0; i < len(raw); i++ {

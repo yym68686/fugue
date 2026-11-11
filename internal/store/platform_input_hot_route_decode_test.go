@@ -9,6 +9,7 @@ import (
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/testfixture/celldns"
 )
 
@@ -209,4 +210,68 @@ func BenchmarkHotRouteDecodeLargeString(b *testing.B) {
 			}
 		})
 	}
+}
+
+// Isolate the predecessor's RawMessage copy from the same validation and
+// dependency extraction. The complete-object oracle above remains independent.
+func BenchmarkHotRouteBorrowedViews(b *testing.B) {
+	req, _, _ := celldns.SourceAuthorizedRequest(b, false)
+	for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig} {
+		a := req.CellRoutePublications[0].Route
+		a.ArtifactKind = kind
+		content := make(map[string]any, len(a.Content)+1)
+		for key, value := range a.Content {
+			content[key] = value
+		}
+		view := make([]any, 2000)
+		for i := range view {
+			view[i] = map[string]any{"host": fmt.Sprintf("host-%d.example.test", i), "ports": []int{80, 443}, "enabled": true, "weight": 1.0}
+		}
+		content["ignored_view"] = view
+		raw, _ := json.Marshal(content)
+		metadata, _ := json.Marshal(a.Metadata)
+		a.Content = nil
+		assertHotRouteDecodeEquivalent(b, a, raw, metadata, int64(len(raw)))
+		for _, previous := range []bool{true, false} {
+			b.Run(fmt.Sprintf("%s/previous-%t", kind, previous), func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(len(raw)))
+				for i := 0; i < b.N; i++ {
+					decode := rawMessageHotRouteDecode
+					if !previous {
+						decode = decodeCompilerInputHotBatchArtifact
+					}
+					if _, err := decode(a, raw, metadata, int64(len(raw))); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func rawMessageHotRouteDecode(a model.PlatformArtifact, content, metadata []byte, originalBytes int64) (inputarchive.HotNode, error) {
+	if originalBytes > compilerInputHotArtifactBytes || len(content) > compilerInputHotArtifactBytes || len(metadata) > 16<<10 {
+		return inputarchive.HotNode{}, ErrConflict
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(content, &fields) != nil || !compilerInputHotJSONNumbersRepresentable(content) || json.Unmarshal(metadata, &a.Metadata) != nil {
+		return inputarchive.HotNode{}, ErrConflict
+	}
+	a.Content = map[string]any{}
+	for _, key := range []string{"lineage", "policy"} {
+		if raw, present := fields[key]; present {
+			if key == "policy" {
+				if _, err := platformconfig.ArtifactRuntimeInputDigest(a); err == nil {
+					continue
+				}
+			}
+			var value any
+			if json.Unmarshal(raw, &value) != nil {
+				return inputarchive.HotNode{}, ErrConflict
+			}
+			a.Content[key] = value
+		}
+	}
+	return compilerInputArtifactHotNode(a)
 }
