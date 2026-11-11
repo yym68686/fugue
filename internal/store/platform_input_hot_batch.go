@@ -25,6 +25,12 @@ func resolveCompilerInputHotBatchObserved(ctx context.Context, tx inputQueryer, 
 // indexed is enabled only after verifying the exact derivation trigger in the
 // same RR snapshot. A missing/stale entry uses the original bounded projection.
 func resolveCompilerInputHotBatchWithIndex(ctx context.Context, tx inputQueryer, refs []inputarchive.HotReference, cost *CompilerInputHotCost, indexed bool) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
+	return resolveCompilerInputHotBatchRead(ctx, tx, refs, cost, indexed, 0, nil)
+}
+
+// priorBytes charges revalidated cache hits against the SAME batch ceiling as
+// misses. capture sees only successfully decoded, owned dependency metadata.
+func resolveCompilerInputHotBatchRead(ctx context.Context, tx inputQueryer, refs []inputarchive.HotReference, cost *CompilerInputHotCost, indexed bool, priorBytes int, capture func(inputarchive.HotNode, int64, int) error) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
 	if len(refs) < 1 || len(refs) > 32 {
 		return nil, ErrInvalidInput
 	}
@@ -83,7 +89,7 @@ func resolveCompilerInputHotBatchWithIndex(ctx context.Context, tx inputQueryer,
 		}
 		// A single artifact is capped at 8MiB and a batch at 32MiB of text.
 		// Refuse large metadata rather than retaining unbounded configurations.
-		bytes := 0
+		bytes := priorBytes
 		for nextCompilerInputHotRow(rows, artifactCost) {
 			var a model.PlatformArtifact
 			var content, metadata []byte
@@ -109,6 +115,11 @@ func resolveCompilerInputHotBatchWithIndex(ctx context.Context, tx inputQueryer,
 			}
 			if decodeErr == nil {
 				out[node.Identity] = node
+				if capture != nil {
+					if err = capture(node, originalBytes, len(metadata)); err != nil {
+						break
+					}
+				}
 			}
 		}
 		if err == nil {

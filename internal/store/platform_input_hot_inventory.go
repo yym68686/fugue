@@ -108,6 +108,10 @@ func compilerInputHotInventoryFromSnapshot(ctx context.Context, tx *sql.Tx) (Com
 }
 
 func compilerInputHotInventorySnapshot(ctx context.Context, tx *sql.Tx, rootsOnly bool) (CompilerInputHotInventory, error) {
+	return compilerInputHotInventorySnapshotCached(ctx, tx, rootsOnly, nil)
+}
+
+func compilerInputHotInventorySnapshotCached(ctx context.Context, tx *sql.Tx, rootsOnly bool, cache *compilerInputHotCache) (CompilerInputHotInventory, error) {
 	report := CompilerInputHotInventory{Action: "archive-hot-inventory", RootCounts: map[string]int{}, UncoveredSources: []string{"manual-input-pins-registry", "external-generation-ledger-validation", "artifact-signatures-and-local-original-bytes", "persistent-reactivation-admission"}}
 	if rootsOnly {
 		report.Action = "archive-hot-roots"
@@ -157,7 +161,13 @@ func compilerInputHotInventorySnapshot(ctx context.Context, tx *sql.Tx, rootsOnl
 		inputarchive.HotClosureBudget{Roots: compilerInputHotRootLimit, Nodes: 32768, Edges: 262144, Bindings: 524288},
 		func(ctx context.Context, refs []inputarchive.HotReference) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
 			started := time.Now()
-			nodes, resolveErr := resolveCompilerInputHotBatchWithIndex(ctx, tx, refs, &report.Cost, indexed)
+			var nodes map[inputarchive.HotReference]inputarchive.HotNode
+			var resolveErr error
+			if cache == nil {
+				nodes, resolveErr = resolveCompilerInputHotBatchWithIndex(ctx, tx, refs, &report.Cost, indexed)
+			} else {
+				nodes, resolveErr = cache.resolve(ctx, tx, refs, &report.Cost, indexed)
+			}
 			report.Cost.ResolverUS += time.Since(started).Microseconds()
 			return nodes, resolveErr
 		}, func(progress inputarchive.HotClosureProgress) { report.Progress = progress })

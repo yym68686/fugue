@@ -59,6 +59,40 @@ audit supplies the exact inventory needed by the remaining classification and
 formal enforcement coordinator; it does not replace those steps or the isolated
 same-version production restore and physical retirement proofs.
 
+## Prepared dependency reads
+
+`-mode=archive-retention-prepared-inventory` opts into one additional bounded,
+read-only preparation pass before the final audit. The ordinary mode is
+unchanged. Preparation stops before starting another batch after 45 seconds,
+has its own hard 60-second RR, and retains at most 32768 artifact nodes, 262144
+references and 8MiB of encoded dependency/version metadata. It retains no raw
+artifact JSON, input bytes, earlier roots, classification or proof. The entire
+operation has a two-minute ceiling; the final proof still has its original
+60-second RR, SQL5s, lock250ms, workmem1MiB and zero-temp guards. Preparation
+is extra bounded work, not evidence that the complete operation will finish.
+
+Both passes use the same dedicated physical connection. Before reuse, the
+final RR checks the backend/server start, database, role, schema/search path,
+relation OID/filenode and 64-bit XID horizon. It holds an AccessShare relation
+lock until the final RR ends. A relation/session mismatch discards the cache;
+a lost or canceled connection refuses the operation without reconnecting.
+Every cache hit requires a row visible in the final snapshot with identical
+primary key, table OID, xmin/ctid and kind/scope/generation/content hash. Updates
+(including HOT), deletion, reinsertion or missing entries take the ordinary
+bounded source decoder. Ambiguous old/frozen 32-bit xmin values are not cached,
+and reuse is refused beyond the safe half-range of XIDs. Decoder identity is
+the same running binary; cache entries are never persisted or accepted from a
+caller. Reused nodes own their strings and reference slices.
+
+The final audit collects all roots, edges, input manifests/chunk metadata and
+the complete universe anew. Cached artifact source and metadata lengths still
+count against the original 8MiB/32MiB bounds, including batches that mix hits
+and misses. A full/partial preparation cannot supply an absent final root,
+input, graph edge or complement. `preparation` reports separate cost, retained
+metadata, final hits/misses and version-read work; timings and these counters
+do not enter the audit digest. This mode does not permit copying, routing,
+fencing or retirement, or complete any signature/original-byte authority gate.
+
 ## Exact root obligations
 
 `fugue-input-storage -mode=archive-root-obligations -root-obligation-targets='[{"kind":"artifact","id":"artifact-example"}]'`

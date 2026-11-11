@@ -54,6 +54,7 @@ type CompilerInputRetentionInventory struct {
 	Totals                 map[string]CompilerInputRetentionTotal `json:"totals"`
 	Entries                []CompilerInputRetentionEntry          `json:"entries"`
 	AuditSHA256            string                                 `json:"audit_sha256"`
+	Preparation            *CompilerInputHotPreparation           `json:"preparation,omitempty"`
 }
 
 func RunCompilerInputRetentionInventory(ctx context.Context, databaseURL string) (CompilerInputRetentionInventory, error) {
@@ -90,6 +91,10 @@ func RunCompilerInputRetentionInventory(ctx context.Context, databaseURL string)
 }
 
 func compilerInputRetentionInventorySnapshot(ctx context.Context, tx *sql.Tx) (report CompilerInputRetentionInventory, err error) {
+	return compilerInputRetentionInventorySnapshotCached(ctx, tx, nil)
+}
+
+func compilerInputRetentionInventorySnapshotCached(ctx context.Context, tx *sql.Tx, cache *compilerInputHotCache) (report CompilerInputRetentionInventory, err error) {
 	report.Action = "archive-retention-inventory"
 	report.Schema = "fugue.compiler-input-retention-inventory.v1"
 	report.UniverseSources = []string{"input-manifests", "inline-input-contents"}
@@ -104,7 +109,7 @@ func compilerInputRetentionInventorySnapshot(ctx context.Context, tx *sql.Tx) (r
 	if err = tx.QueryRowContext(ctx, `SELECT current_database(),current_schema()`).Scan(&report.Database, &report.DatabaseSchema); err != nil {
 		return report, err
 	}
-	report.Native, err = compilerInputHotInventoryFromSnapshot(ctx, tx)
+	report.Native, err = compilerInputHotInventorySnapshotCached(ctx, tx, false, cache)
 	if err != nil {
 		return report, err
 	}

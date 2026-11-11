@@ -617,6 +617,10 @@ func TestHotInventoryPostgresWorksWithReadOnlyOrdinaryRole(t *testing.T) {
 	if err != nil || !retention.UniverseComplete || retention.ClassificationComplete || retention.ExecutionAuthorized || retention.Totals["H"].Inputs != 1 || retention.Totals["D"].Inputs != 0 {
 		t.Fatal("ordinary read-only role could not audit the universe without destructive authority", retention, err)
 	}
+	prepared, err := RunCompilerInputPreparedRetentionInventory(t.Context(), u.String())
+	if err != nil || !prepared.UniverseComplete || prepared.ClassificationComplete || prepared.ExecutionAuthorized || prepared.Preparation == nil || !prepared.Preparation.SessionValidated || prepared.Preparation.Hits == 0 || prepared.Totals["H"].Inputs != 1 || prepared.Totals["D"].Inputs != 0 {
+		t.Fatal("read-only role could not revalidate prepared dependency metadata", prepared, err)
+	}
 }
 
 func TestHotInventoryPostgresKeepsScopedShadowRootsAndUnresolvedNativeIdentities(t *testing.T) {
