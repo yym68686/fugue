@@ -32,7 +32,7 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "valid-static-policy", "valid-bundle-renewal", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-group-generation", "valid-static-policy", "valid-bundle-renewal", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
@@ -108,6 +108,9 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				t.Fatal(err)
 			}
 			bundle.Version = "group-publication"
+			if mode == "valid-group-generation" {
+				bundle.Generation = "independent-group-generation"
+			}
 			bundle.GeneratedAt = now
 			bundle = bundleauth.SignEdgeRouteBundleWithKeyring(bundle, keys, time.Hour)
 			var reports []platformcontrol.PlatformConsumerHeartbeatEnvelope
@@ -373,7 +376,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				if strings.HasPrefix(mode, "valid-cell") && (h.ConsumerID != "edge-worker:cell-a:edge" || h.NodeID != "edge") {
 					t.Fatal("neutral serving fact lost its authority", h)
 				}
-				if h.ApplyStatus != "applied" || h.ProbeStatus != "passed" || h.ActualGeneration != h.DesiredGeneration || h.LKGGeneration != bundle.Generation || h.ServingLKG {
+				if h.ApplyStatus != "applied" || h.ProbeStatus != "passed" || h.ActualGeneration != h.DesiredGeneration || h.LKGGeneration != h.DesiredGeneration || (mode == "valid-group-generation" && h.LKGGeneration == bundle.Generation) || h.ServingLKG {
 					t.Fatal("incorrect serving or LKG claim", h)
 				}
 			}

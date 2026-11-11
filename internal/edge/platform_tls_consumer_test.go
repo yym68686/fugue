@@ -202,7 +202,7 @@ func testTLSShadowConsumer(t *testing.T, role string) {
 			json.NewEncoder(w).Encode(route)
 		case "/v1/platform-state/consumers/artifacts/release-set":
 			json.NewEncoder(w).Encode(map[string]any{"artifact": route.ReleaseSet, "assignment": route.Assignment, "release": route.Release})
-		case "/v1/platform-state/consumers/trusted-heartbeat":
+		case "/v1/platform-state/consumers/shadow-heartbeat":
 			var h platformcontrol.PlatformConsumerHeartbeatEnvelope
 			if json.NewDecoder(r.Body).Decode(&h) != nil {
 				t.Fatal("invalid heartbeat")

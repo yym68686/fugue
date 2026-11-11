@@ -183,6 +183,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if assignment.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
+		return errors.New("edge shadow observation requires a shadow assignment")
+	}
 	projection, err := routeartifact.ProjectRelease(parent, artifact, assignment, release, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs))
 	if err != nil {
 		return err
@@ -223,7 +226,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if _, err := rand.Read(nonce); err != nil {
 		return err
 	}
-	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: assignment.ArtifactKind, ScopeKey: assignment.ScopeKey, ReleaseSetID: assignment.ReleaseSetID, ExpectedConsumerSetID: assignment.ExpectedConsumerSetID, FencingToken: assignment.FencingToken, ProtocolVersion: model.PlatformConsumerProtocolVersionV1, SchemaVersion: model.PlatformConsumerSchemaVersionV1, Sequence: c.Sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assignment.GenerationSequence, DesiredGeneration: assignment.ExpectedGeneration, ActualGeneration: status.ServingGeneration, CandidateGeneration: assignment.ExpectedGeneration, LKGGeneration: status.LKGGeneration, ApplyStatus: "staged", ProbeStatus: "shadow_validated", ServingLKG: status.StaleCache, LKGExpired: status.MaxStaleExceeded}
+	// Candidate verification cannot identify the independent applied/LKG
+	// member. Keep those facts, their cursor and retention roots in serving.
+	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: assignment.ArtifactKind, ScopeKey: assignment.ScopeKey, ReleaseSetID: assignment.ReleaseSetID, ExpectedConsumerSetID: assignment.ExpectedConsumerSetID, FencingToken: assignment.FencingToken, ProtocolVersion: model.PlatformConsumerProtocolVersionV1, SchemaVersion: model.PlatformConsumerSchemaVersionV1, Sequence: c.Sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assignment.GenerationSequence, DesiredGeneration: assignment.ExpectedGeneration, CandidateGeneration: assignment.ExpectedGeneration, ApplyStatus: "staged", ProbeStatus: "shadow_validated"}
 	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellRoutesCapabilityV1, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5, platformcontrol.PhysicalComparableDeliveryCapabilityV6, platformcontrol.PhysicalDynamicQualityCapabilityV1, platformcontrol.PhysicalOrderCapabilityV1, platformcontrol.PhysicalOrderProjectionCapabilityV1, platformcontrol.BusinessEdgeExplorationCapabilityV1, platformcontrol.BusinessDNSBaselineCapabilityV1, platformcontrol.BusinessUnifiedCapabilityV2, platformcontrol.DNSAvailabilityCapabilityV1}
 	h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.DNSAvailabilityRedundantCapabilityV2, platformcontrol.StaticEdgePolicyCapabilityV1)
 	if strings.TrimSpace(status.CaddyAppliedVersion) == strings.TrimSpace(status.BundleVersion) && strings.TrimSpace(status.CaddyLastError) == "" && s.metricSnapshot().Metrics.CaddyRouteCount > 0 {
@@ -238,7 +243,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil || currentSelection != selection {
 		return errors.New("edge platform reporting activation changed")
 	}
-	if err = client.PostJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id.Token, h, &receipt); err != nil {
+	if err = client.PostJSON(ctx, "/v1/platform-state/consumers/shadow-heartbeat", id.Token, h, &receipt); err != nil {
 		return err
 	}
 	if !receipt.Consumer.IdentityVerified || receipt.Consumer.ConsumerID != h.ConsumerID || receipt.Consumer.Sequence != h.Sequence || receipt.Consumer.ExpectedConsumerSetID != h.ExpectedConsumerSetID || receipt.Consumer.EvidenceHash != h.EvidenceHash {

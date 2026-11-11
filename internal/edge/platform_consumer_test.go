@@ -273,7 +273,7 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 				t.Error("expected set missing")
 			}
 			json.NewEncoder(w).Encode(candidate)
-		case "/v1/platform-state/consumers/trusted-heartbeat":
+		case "/v1/platform-state/consumers/shadow-heartbeat":
 			if r.Header.Get("Authorization") != "Bearer component-token" {
 				t.Error("heartbeat credential mismatch")
 			}
@@ -284,7 +284,7 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 				return
 			}
 			hash, _ := platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
-			if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) || h.Sequence <= lastSequence || hash != h.EvidenceHash || h.ApplyStatus != "staged" || h.ProbeStatus != "shadow_validated" || h.ActualGeneration == h.DesiredGeneration {
+			if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) || h.Sequence <= lastSequence || hash != h.EvidenceHash || h.ApplyStatus != "staged" || h.ProbeStatus != "shadow_validated" || h.ActualGeneration != "" || h.LKGGeneration != "" || h.ServingLKG || h.LKGExpired {
 				t.Errorf("false shadow evidence: %+v", h)
 			}
 			lastSequence = h.Sequence

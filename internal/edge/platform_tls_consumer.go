@@ -164,6 +164,9 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 		return err
 	}
 	c := edgePlatformCandidate{Artifact: artifact, Assignment: a, Release: release}
+	if a.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
+		return errors.New("TLS shadow observation requires a shadow assignment")
+	}
 	payload, err := s.verifyPlatformTLSCandidate(c, edgePlatformCandidate{Artifact: route, Assignment: ra, Release: rr})
 	if err != nil {
 		return err
@@ -245,7 +248,7 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 		return errors.New("TLS reporting activation changed")
 	}
 	var receipt model.PlatformConsumerHeartbeatResponse
-	if err = client.PostJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id.Token, h, &receipt); err != nil {
+	if err = client.PostJSON(ctx, "/v1/platform-state/consumers/shadow-heartbeat", id.Token, h, &receipt); err != nil {
 		return err
 	}
 	if !receipt.Consumer.IdentityVerified || receipt.Consumer.ConsumerID != h.ConsumerID || receipt.Consumer.Sequence != h.Sequence || receipt.Consumer.ExpectedConsumerSetID != h.ExpectedConsumerSetID || receipt.Consumer.EvidenceHash != h.EvidenceHash {
