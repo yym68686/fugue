@@ -355,6 +355,12 @@ produce a sample. The retained sample includes the transport identities but
 never the raw client endpoint. An unavailable or changed transport yields no
 sample and does not block the business request or DNS. This diagnostic fallback
 does not restart, replace or reconfigure the serving Front.
+The per-node API budget remains one observation per second per API process.
+One colliding caller can reserve the next slot and wait at most one second,
+within the original two-second request deadline. Further callers receive 429;
+canceling a waiter does not release its reservation for a burst. This prevents
+ordinary telemetry from making a simultaneous signed recovery measurement
+fail solely because both need the same observation budget.
 
 The private Front health listener also supports an indexed mode of
 `GET /edge/tcp-connections?request=<JSON>`; its contract is
