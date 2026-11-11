@@ -63,8 +63,8 @@ env:
 
 jobs:
   edge_capacity_external_observation:
-    needs: [deploy_api]
-    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main') && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') }}
+    needs: [prepush, deploy_api]
+    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success') && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: production
     concurrency: {group: fugue-edge-capacity-external-observation, cancel-in-progress: false, queue: max}

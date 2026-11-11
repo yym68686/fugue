@@ -298,7 +298,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "app_tcp_transport", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_backup_count_retention", "cnpg_candidate_artifact", "compiler_input_storage", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_image_gc", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_promotion", "dns_authority_promotion_plan", "dns_authority_stage", "dns_authority_stage_plan", "dns_configuration_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_slot_retirement", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_member_recovery", "edge_member_recovery_plan", "edge_offline_configuration", "edge_release_hold", "edge_release_hold_plan", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "k3s_transport_integration", "longhorn_gc_build", "longhorn_gc_install", "managed_postgres_cpu_policy", "managed_postgres_cpu_policy_plan", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_runtime_plan", "managed_ssh_transport", "node_resource_policy", "node_resource_policy_tasks", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_bootstrap_cpu", "postgres_bootstrap_cpu_plan", "postgres_protection", "postgres_volume_recovery", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "tls_issuance_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_promotion", "dns_authority_promotion_plan", "dns_authority_stage", "dns_authority_stage_plan", "dns_configuration_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_slot_retirement", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_capacity_external_observation", "edge_member_recovery", "edge_member_recovery_plan", "edge_offline_configuration", "edge_release_hold", "edge_release_hold_plan", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "k3s_transport_integration", "longhorn_gc_build", "longhorn_gc_install", "managed_postgres_cpu_policy", "managed_postgres_cpu_policy_plan", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_runtime_plan", "managed_ssh_transport", "node_resource_policy", "node_resource_policy_tasks", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_bootstrap_cpu", "postgres_bootstrap_cpu_plan", "postgres_protection", "postgres_volume_recovery", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "tls_issuance_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -868,7 +868,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"deploy_edge_client_de", "deploy_edge_client_us", "deploy_edge_control_de", "deploy_edge_control_us", "deploy_edge_worker_de", "deploy_edge_worker_us",
-		"monitor-plan", "monitor-production", "emit-monitor-output", "'*/5 * * * *'",
+		"monitor-plan", "monitor-production", "emit-monitor-output",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("CI workflow retained fixed group job %q", forbidden)
@@ -916,6 +916,37 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	} {
 		if strings.Contains(source+"\n"+action, forbidden) {
 			t.Fatalf("CI workflow retained legacy release token %q", forbidden)
+		}
+	}
+}
+
+func TestCapacityRecoveryScheduleIsExternalObservationOnly(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	jobs := yamlMappingValue(t, document.Content[0], "jobs")
+	observer := yamlMappingValue(t, jobs, "edge_capacity_external_observation")
+	if yamlMappingValue(t, observer, "runs-on").Value != "ubuntu-latest" || yamlMappingValue(t, observer, "timeout-minutes").Value != "3" {
+		t.Fatal("capacity recovery must run on a bounded external runner")
+	}
+	queue := yamlMappingValue(t, observer, "concurrency")
+	if yamlMappingValue(t, queue, "cancel-in-progress").Value != "false" {
+		t.Fatal("observation must not be canceled between claim and report")
+	}
+	encoded, _ := yaml.Marshal(observer)
+	for _, forbidden := range []string{"kubectl", "--apply", "deploy-declarative-component", "BUNDLE_SIGNING"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("external observation cannot release code or access signing keys: %s", forbidden)
+		}
+	}
+	for _, name := range []string{"dns_public_observation", "node_resource_policy", "node_resource_policy_tasks", "workload_memory_policy", "audit"} {
+		if !strings.Contains(yamlMappingValue(t, yamlMappingValue(t, jobs, name), "if").Value, "github.event.schedule == '23 18 * * *'") {
+			t.Fatalf("frequent observation must not reschedule daily work: %s", name)
 		}
 	}
 }
