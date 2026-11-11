@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 )
 
 func (s *Store) pgRollbackReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, channel string, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) (*model.State, error) {
@@ -158,8 +159,8 @@ func pgLoadReleaseSetConsumers(ctx context.Context, tx *sql.Tx, parent model.Pla
 		return nil, err
 	}
 	rows.Close()
-	if dnsOnlyPublication(parent) {
-		rows, err = tx.QueryContext(ctx, `SELECT body FROM fugue_platform_shadow_consumers WHERE artifact_kind=$1 AND scope_key=$2 ORDER BY consumer_id FOR SHARE`, model.PlatformArtifactKindDNSAnswerBundle, parent.ScopeKey)
+	if _, compositionErr := platformconfig.ValidateReleaseComposition(parent); compositionErr == nil {
+		rows, err = tx.QueryContext(ctx, `SELECT body FROM fugue_platform_shadow_consumers WHERE scope_key=$1 AND artifact_kind IN ($2,$3,$4) ORDER BY artifact_kind,consumer_id FOR SHARE`, parent.ScopeKey, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig)
 		if err != nil {
 			return nil, err
 		}

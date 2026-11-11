@@ -1,19 +1,27 @@
 package api
 
 import (
-	"fugue/internal/model"
+	"errors"
 	"sort"
-	"strings"
+
+	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 // Only explicit shadow convergence can consult the isolated observation lane.
 // Legacy initial-enrollment receipts remain readable when no new receipt exists.
 func (s *Server) platformConsumersForConvergence(set model.PlatformExpectedConsumerSet) ([]model.PlatformConsumerInstance, error) {
 	serving, err := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
-	if err != nil || set.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || !strings.HasPrefix(set.ScopeKey, "authority-cell:") || set.ArtifactReleaseID == "" {
+	kind := set.ArtifactKind
+	if err != nil || (kind != model.PlatformArtifactKindDNSAnswerBundle && kind != model.PlatformArtifactKindEdgeRouteBundle && kind != model.PlatformArtifactKindCaddyRouteConfig) || set.ArtifactReleaseID == "" {
 		return serving, err
 	}
 	release, err := s.store.GetPlatformArtifactRelease(set.ArtifactReleaseID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Historical expectations remain inspectable as unknown. Their missing
+		// publication cannot select a shadow observation or authorize promotion.
+		return serving, nil
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -4408,11 +4408,15 @@ paths:
   /v1/platform-state/consumers/shadow-heartbeat:
     post:
       operationId: shadowPlatformConsumerHeartbeat
-      summary: Report Isolated DNS Shadow Observation
+      summary: Report Isolated Traffic Shadow Observation
       description: >-
-        Validates an explicitly assigned cell-dns shadow with the same live Pod,
-        declared backend, signed artifact, exact expectation, fence, freshness,
-        replay and capability checks as trusted heartbeats. Only staged and
+        Validates an explicitly assigned edge route/TLS or cell-dns shadow with
+        the same component identity, signed ReleaseSet membership, exact
+        expectation, fence, freshness, replay and capability checks as trusted
+        heartbeats. DNS retains its live Pod and declared backend checks.
+        Edge shadow reports must leave actual_generation and lkg_generation
+        empty and must not claim serving_lkg or lkg_expired. A staged candidate
+        does not establish an applied or recoverable generation. Only staged and
         shadow_validated observations are accepted. Stores one bounded latest
         shadow observation and an independent monotonic cursor per consumer,
         artifact kind and authority scope. It never changes serving observations,
@@ -4421,7 +4425,10 @@ paths:
         The normal convergence endpoint selects these observations only for their
         exact shadow release; serving convergence never reads them. Candidate
         capability admission can use only the exact currently selected shadow.
-        Existing clients keep their original heartbeat contract.
+        Serving edge reports use the verified route or TLS member generation in
+        the reported artifact kind and scope, never the enclosing group bundle
+        generation. Existing serving registrations are not rewritten by shadow
+        observations, including their retained LKG roots.
         PostgreSQL acceptance additionally rechecks the complete signed input
         closure and current durable verified local pins before committing the
         shadow observation and audit event. Cold or changed dependencies refuse

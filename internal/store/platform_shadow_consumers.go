@@ -10,12 +10,18 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 )
 
 func validateShadowObservation(state *model.State, set model.PlatformExpectedConsumerSet, h platformcontrol.PlatformConsumerHeartbeatEnvelope, keys bundleauth.Keyring) error {
-	if h.Component != model.PlatformConsumerComponentDNSServer || h.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || !strings.HasPrefix(h.ScopeKey, "authority-cell:cell-") || h.ApplyStatus != "staged" || h.ProbeStatus != "shadow_validated" || h.LastError != "" || set.ArtifactReleaseID == "" {
+	edge := h.Component == model.PlatformConsumerComponentEdgeWorker && (h.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle || h.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig)
+	dns := h.Component == model.PlatformConsumerComponentDNSServer && h.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && strings.HasPrefix(h.ScopeKey, "authority-cell:cell-")
+	if (!edge && !dns) || h.ApplyStatus != "staged" || h.ProbeStatus != "shadow_validated" || h.LastError != "" || set.ArtifactReleaseID == "" {
+		return ErrInvalidInput
+	}
+	if edge && (h.ActualGeneration != "" || h.LKGGeneration != "" || h.ServingLKG || h.LKGExpired) {
 		return ErrInvalidInput
 	}
 	var parent model.PlatformArtifact
@@ -33,24 +39,20 @@ func validateShadowObservation(state *model.State, set model.PlatformExpectedCon
 		}
 	}
 	lane, found := platformReleaseLaneByKey(state.PlatformReleaseLanes, release.LaneKey)
-	if !dnsOnlyPublication(parent) || parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass || parent.ScopeKey != set.ScopeKey || platformcontrol.ValidateDeclaredTrafficConsumerSet(parent, set) != nil ||
+	childID, memberErr := shadowObservationMember(parent, set.ArtifactKind)
+	if memberErr != nil || dns && !dnsOnlyPublication(parent) || parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass || parent.ScopeKey != set.ScopeKey || platformcontrol.ValidateDeclaredTrafficConsumerSet(parent, set) != nil ||
 		release.ArtifactID != parent.ID || release.ArtifactKind != parent.ArtifactKind || release.ScopeKey != parent.ScopeKey || release.ReleaseChannel != "shadow" || release.Status != model.PlatformArtifactReleaseStatusActive || release.LaneKey != platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, "shadow") || !found || lane.Frozen || lane.ActiveReleaseID != release.ID || lane.FencingToken != release.FencingToken || h.FencingToken != release.FencingToken {
 		return ErrConflict
 	}
-	ids, ok := parent.Content["artifact_ids"].([]any)
-	if !ok || len(ids) != 1 {
-		return ErrConflict
-	}
-	id, ok := ids[0].(string)
-	if !ok {
-		return ErrConflict
-	}
-	index := platformArtifactIndex(state.PlatformArtifacts, id)
+	index := platformArtifactIndex(state.PlatformArtifacts, childID)
 	if index < 0 {
 		return ErrConflict
 	}
 	child := state.PlatformArtifacts[index]
 	if child.ArtifactKind != set.ArtifactKind || child.ScopeKey != parent.ScopeKey || child.Generation != set.ExpectedGeneration || child.GenerationSequence != h.GenerationSequence || child.Metadata["release_set_generation"] != parent.Generation || child.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(child, keys).Pass {
+		return ErrConflict
+	}
+	if edge && (h.CandidateGeneration != child.Generation || platformconfig.ValidateTrafficCohortProjection(parent, child) != nil) {
 		return ErrConflict
 	}
 	for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
@@ -64,6 +66,27 @@ func validateShadowObservation(state *model.State, set model.PlatformExpectedCon
 		}
 	}
 	return nil
+}
+
+// Resolve a kind only through the signed complete parent composition. Group
+// bundle generations and string prefixes never identify an artifact member.
+func shadowObservationMember(parent model.PlatformArtifact, kind string) (string, error) {
+	if _, err := platformconfig.ValidateReleaseComposition(parent); err != nil {
+		return "", ErrConflict
+	}
+	ids, idsOK := parent.Content["artifact_ids"].([]any)
+	kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
+	if !idsOK || !kindsOK || len(ids) != len(kinds) {
+		return "", ErrConflict
+	}
+	for i, raw := range kinds {
+		if raw == kind {
+			if id, ok := ids[i].(string); ok && id != "" {
+				return id, nil
+			}
+		}
+	}
+	return "", ErrConflict
 }
 
 func acceptShadowObservation(state *model.State, claims platformcontrol.PlatformComponentIdentityClaims, set model.PlatformExpectedConsumerSet, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, keys bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
@@ -214,13 +237,9 @@ func (s *Store) pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx context
 		return model.PlatformConsumerInstance{}, err
 	}
 	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{parent}, PlatformArtifactReleases: []model.PlatformArtifactRelease{release}, PlatformReleaseLanes: []model.PlatformReleaseLane{lane}, ExpectedConsumerSets: []model.PlatformExpectedConsumerSet{set}}
-	ids, ok := parent.Content["artifact_ids"].([]any)
-	if !ok || len(ids) != 1 {
-		return model.PlatformConsumerInstance{}, ErrConflict
-	}
-	childID, ok := ids[0].(string)
-	if !ok {
-		return model.PlatformConsumerInstance{}, ErrConflict
+	childID, err := shadowObservationMember(parent, set.ArtifactKind)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
 	}
 	child, err := pgGetPlatformArtifactForUpdate(ctx, tx, childID, true)
 	if err != nil {
@@ -269,7 +288,7 @@ func (s *Store) pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx context
 // A shadow record can supply executable capability only for the exact selected
 // candidate. It is never appended to serving convergence or LKG inputs.
 func trafficCapabilityObservations(state *model.State, parent, child model.PlatformArtifact, set model.PlatformExpectedConsumerSet, now time.Time) []model.PlatformConsumerInstance {
-	if !dnsOnlyPublication(parent) {
+	if id, err := shadowObservationMember(parent, child.ArtifactKind); err != nil || id != child.ID {
 		return state.PlatformConsumerInstances
 	}
 	out := append([]model.PlatformConsumerInstance(nil), state.PlatformConsumerInstances...)
