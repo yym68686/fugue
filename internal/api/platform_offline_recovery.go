@@ -59,6 +59,11 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 		if hold.Recovery == nil {
 			continue
 		}
+		// The external observer owns interval claims for capacity rounds. A
+		// cluster-local rejection must not reset its consecutive successes.
+		if hold.Recovery.Capacity != nil && externalCapacityRecoveryEnabled() {
+			continue
+		}
 		authorized := false
 		for _, route := range static.Routes {
 			if route.Hostname == hold.Recovery.Hostname && route.Status != model.EdgeRouteStatusDisabled && model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) && (hold.Recovery.Capacity == nil || hold.Recovery.Capacity.TrafficClass == "streaming") {

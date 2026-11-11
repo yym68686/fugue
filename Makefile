@@ -19,6 +19,7 @@ test:
 	python3 -m unittest scripts.test_stage_managed_ssh_fronts scripts.test_reconcile_fixed_node_retention
 	python3 -m unittest scripts.test_configure_edge_offline scripts.test_configure_dynamic_quality scripts.test_dns_availability_recovery
 	python3 -m unittest scripts.test_configure_edge_offline_recovery
+	python3 -m unittest scripts.test_capacity_observer scripts.test_reconcile_edge_member
 	python3 -m unittest scripts.test_observe_dns_failure_timeline
 	python3 -m unittest scripts.test_observe_managed_ssh_front
 	python3 -m unittest scripts.test_select_managed_ssh_transport

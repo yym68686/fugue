@@ -80,12 +80,29 @@ the resulting HTTP 503 is not a capacity measurement. Preserve this public-peer
 check. Qualifying an external observer and its signed, identical-payload control
 round is required before using that path for automatic capacity recovery.
 
+With `FUGUE_EDGE_CAPACITY_OBSERVER=external`, the background worker leaves capacity
+interval claims to the external observer while continuing ordinary route recovery.
+The production CI workflow runs the observer on an external runner every five
+minutes. GitHub scheduling delays never relax freshness or stability requirements.
+`POST /v1/admin/edge-recovery/client-probes` requires a platform administrator with
+explicit `edge.quality.observe` scope. It resolves the current signed policy,
+claims one due interval atomically, checks physical code and fresh paired route
+proofs, then returns two short-lived signed permits, or 204 when nothing is due.
+The observer sends the bounded report to the corresponding `/report` endpoint.
+The API resolves policy and code again, verifies both complete transfers and
+executor attestations, persists the signed round and records the existing capacity
+gate. Pending plans are bound to the observer identity and declaration digest.
+Report retries complete the same persisted result without adding successes;
+changed reports, superseded claims and removed declarations cannot grant admission.
+The runner receives permits and API authorization, never a measurement signing key.
+
 Each declaration retains its latest eight full rounds separately from the compact
 recovery checkpoint, bounded to 1 MiB. Full reports are not copied into DNS bundles.
 The signed parent pins compact successful evidence for historical membership;
 later observation failures cannot rewrite already accepted historical evidence.
-Kubernetes metadata reads have an 8 MiB response limit. No new public probe endpoint
-or authentication bypass is introduced.
+Kubernetes metadata reads have an 8 MiB response limit. The authenticated recovery
+control endpoints reuse the existing public measurement protocol and do not bypass
+route authorization or executor proof checks.
 
 ## Validation and remaining rollout work
 

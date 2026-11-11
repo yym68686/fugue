@@ -5,6 +5,7 @@ on:
   pull_request:
   schedule:
     - cron: '23 18 * * *'
+    - cron: '*/5 * * * *'
 
 permissions:
   contents: read
@@ -61,6 +62,31 @@ env:
         print('Observed root-owned generated entries: 0')
 
 jobs:
+  edge_capacity_external_observation:
+    needs: [deploy_api]
+    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main') && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency: {group: fugue-edge-capacity-external-observation, cancel-in-progress: false, queue: max}
+    timeout-minutes: 3
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}'}
+      - run: python3 -m unittest scripts.test_capacity_observer
+      - name: Measure signed recovery pair outside the serving cluster
+        env:
+          FUGUE_SMOKE_URL: ${{ vars.FUGUE_SMOKE_URL }}
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: FUGUE_API_URL="${FUGUE_SMOKE_URL%/healthz}" python3 -m scripts.observe_capacity_recovery --report "$RUNNER_TEMP/edge-capacity-external.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: fugue-edge-capacity-external-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/edge-capacity-external.json
+          if-no-files-found: ignore
+          retention-days: 7
+
   longhorn_gc_build:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
@@ -2951,7 +2977,7 @@ jobs:
 
   dns_public_observation:
     needs: [dns_transport, dns_port_retirement]
-    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ always() && (github.event_name == 'schedule' && github.event.schedule == '23 18 * * *' || github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {contents: read}
@@ -3276,7 +3302,7 @@ jobs:
 
   node_resource_policy:
     # Persisted intent remains writable even when a component build fails.
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' && github.event.schedule == '23 18 * * *' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-node-resource-policy, cancel-in-progress: false}
@@ -3308,7 +3334,7 @@ jobs:
 
   node_resource_policy_tasks:
     # Persisted intent remains writable even when a component build fails.
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' && github.event.schedule == '23 18 * * *' }}
     runs-on: ubuntu-latest
     environment: production
     concurrency: {group: fugue-node-resource-policy-tasks, cancel-in-progress: false}
@@ -3752,7 +3778,7 @@ jobs:
 
   workload_memory_policy:
     # Admission configuration remains recoverable if a component build fails.
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' && github.event.schedule == '23 18 * * *' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-workload-memory-policy, cancel-in-progress: false}

@@ -24,10 +24,17 @@ type capacityRecoveryResult struct {
 	reason     string
 }
 
-func (s *Server) probeCapacityRecovery(parent context.Context, hold platformproducer.OfflineEdge, holds []platformproducer.OfflineEdge) capacityRecoveryResult {
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
-	defer cancel()
-	fail := func(reason string) capacityRecoveryResult { return capacityRecoveryResult{reason: reason} }
+type preparedCapacityRecovery struct {
+	Plan       model.EdgeClientProbePlan             `json:"plan"`
+	Code       platformproducer.CapacityCodeIdentity `json:"code"`
+	Reference  string                                `json:"reference"`
+	ValidUntil time.Time                             `json:"valid_until"`
+}
+
+func (s *Server) prepareCapacityRecovery(ctx context.Context, hold platformproducer.OfflineEdge, holds []platformproducer.OfflineEdge) (*preparedCapacityRecovery, capacityRecoveryResult) {
+	fail := func(reason string) (*preparedCapacityRecovery, capacityRecoveryResult) {
+		return nil, capacityRecoveryResult{reason: reason}
+	}
 	now := time.Now().UTC()
 	node, _, err := s.store.GetEdgeNode(hold.EdgeID)
 	if err != nil || node.EdgeGroupID != hold.EdgeGroupID || node.PublicIPv4 != hold.PublicIPv4 || !edgeNodeRouteServingCapable(node, now) || node.Draining {
@@ -39,10 +46,10 @@ func (s *Server) probeCapacityRecovery(parent context.Context, hold platformprod
 	}
 	before, err := readCode(ctx, node)
 	if err != nil {
-		return capacityCodeFailureResult(err)
+		return nil, capacityCodeFailureResult(err)
 	}
 	if !before.Valid() {
-		return capacityCodeFailureResult(codeObservationError("code_identity_conflict", "code_binding"))
+		return nil, capacityCodeFailureResult(codeObservationError("code_identity_conflict", "code_binding"))
 	}
 	probe := s.offlineEdgeRecoveryProbe
 	if probe == nil {
@@ -101,36 +108,60 @@ func (s *Server) probeCapacityRecovery(parent context.Context, hold platformprod
 		}
 		plan.Permits = append(plan.Permits, permit)
 	}
+	validUntil := proof.ValidUntil
+	if referenceProof.ValidUntil.Before(validUntil) {
+		validUntil = referenceProof.ValidUntil
+	}
+	return &preparedCapacityRecovery{Plan: plan, Code: before, Reference: reference.ID, ValidUntil: validUntil}, capacityRecoveryResult{}
+}
+
+func (s *Server) probeCapacityRecovery(parent context.Context, hold platformproducer.OfflineEdge, holds []platformproducer.OfflineEdge) capacityRecoveryResult {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	round, failure := s.prepareCapacityRecovery(ctx, hold, holds)
+	if round == nil {
+		return failure
+	}
 	measure := s.offlineCapacityMeasure
 	if measure == nil {
 		measure = clientmeasurement.MeasureRound
 	}
 	measureCtx, stop := context.WithTimeout(ctx, time.Duration(hold.Recovery.Capacity.MaxElapsedMilliseconds)*time.Millisecond)
-	report, err := measure(measureCtx, plan)
+	report, err := measure(measureCtx, round.Plan)
 	stop()
-	if err != nil || !reflect.DeepEqual(report.Plan, plan) {
-		return fail("capacity_unavailable")
+	if err != nil || !reflect.DeepEqual(report.Plan, round.Plan) {
+		return capacityRecoveryResult{reason: "capacity_unavailable"}
+	}
+	return s.finishCapacityRecovery(ctx, hold, *round, report)
+}
+
+func (s *Server) finishCapacityRecovery(ctx context.Context, hold platformproducer.OfflineEdge, round preparedCapacityRecovery, report model.EdgeClientProbeReport) capacityRecoveryResult {
+	fail := func(reason string) capacityRecoveryResult { return capacityRecoveryResult{reason: reason} }
+	node, _, err := s.store.GetEdgeNode(hold.EdgeID)
+	if err != nil || node.EdgeGroupID != hold.EdgeGroupID || node.PublicIPv4 != hold.PublicIPv4 || !edgeNodeRouteServingCapable(node, time.Now().UTC()) || node.Draining || !reflect.DeepEqual(round.Plan, report.Plan) {
+		return fail("route_unavailable")
+	}
+	readCode := s.offlineCapacityCode
+	if readCode == nil {
+		readCode = s.readCapacityCode
 	}
 	after, err := readCode(ctx, node)
 	if err != nil {
 		return capacityCodeFailureResult(err)
 	}
-	if before != after {
+	if round.Code != after {
 		return capacityCodeFailureResult(codeObservationError("code_identity_conflict", "observation_changed"))
 	}
 	checked := time.Now().UTC()
-	evidence, reason := s.evaluateCapacityRound(hold, reference.ID, report, before, checked)
+	evidence, reason := s.evaluateCapacityRound(hold, round.Reference, report, round.Code, checked)
 	// Retain a bounded audit ring separately from the compact signed projection;
 	// raw reports never enter every DNS consumer's retained configuration graph.
 	// Failed measurements are diagnostic evidence too. Retaining one never
 	// grants admission; only the independently validated successful result can.
-	if err := s.retainCapacityRound(ctx, hold, report, before, checked); err != nil {
+	if err := s.retainCapacityRound(ctx, hold, report, round.Code, checked); err != nil {
 		return fail("evidence_unavailable")
 	}
-	validUntil := proof.ValidUntil
-	if referenceProof.ValidUntil.Before(validUntil) {
-		validUntil = referenceProof.ValidUntil
-	}
+	validUntil := round.ValidUntil
 	if !validUntil.After(checked) {
 		return fail("route_unavailable")
 	}

@@ -1342,6 +1342,66 @@ paths:
         '401': {$ref: '#/components/responses/ErrorResponse'}
         '403': {$ref: '#/components/responses/ErrorResponse'}
         '503': {$ref: '#/components/responses/ErrorResponse'}
+  /v1/admin/edge-recovery/client-probes:
+    post:
+      operationId: issueEdgeRecoveryClientProbePlan
+      summary: Claim one due capacity recovery round for an external observer
+      description: >-
+        Requires explicit edge.quality.observe authority and configured external
+        capacity observation. Uses only the active signed recovery policy, its
+        exact held physical edge and a permitted healthy reference. Captures
+        current code and route identities before issuing a single-use paired
+        plan. One claim per configured probe interval; no request body or caller
+        supplied target is accepted. Does not change serving authority.
+      tags: [Edge]
+      x-fugue-handler: handleIssueEdgeRecoveryClientProbePlan
+      security: [{BearerAuth: []}]
+      responses:
+        '200':
+          description: Signed paired measurement plan bound to the current policy and observer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EdgeClientProbePlan'}
+        '204': {description: No due recoverable capacity round.}
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '503': {$ref: '#/components/responses/ErrorResponse'}
+  /v1/admin/edge-recovery/client-probes/report:
+    post:
+      operationId: reportEdgeRecoveryClientProbeRound
+      summary: Verify and retain an external capacity recovery round
+      description: >-
+        Requires the same explicit observer authority and exact unconsumed plan.
+        Revalidates the active signed recovery policy, public Front attestations,
+        identical payloads and physical code identity after measurement. Records
+        at most one result for the claimed interval. Only existing consecutive
+        success, stable duration and publication gates can admit a recovered
+        edge; this endpoint does not publish DNS or remove code release holds.
+      tags: [Edge]
+      x-fugue-handler: handleReportEdgeRecoveryClientProbeRound
+      security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EdgeClientProbeReport'}
+      responses:
+        '200':
+          description: Verified recovery observation recorded, without direct routing authorization.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [accepted, recovery_result]
+                properties:
+                  accepted: {type: boolean, enum: [true]}
+                  recovery_result: {type: string}
+        '400': {$ref: '#/components/responses/ErrorResponse'}
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '409': {$ref: '#/components/responses/ErrorResponse'}
+        '503': {$ref: '#/components/responses/ErrorResponse'}
   /v1/edge/quality-rank/{hostname}:
     get:
       operationId: getEdgeQualityRank
