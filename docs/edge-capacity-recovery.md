@@ -46,6 +46,8 @@ publication to other authorized members. Preview and inventory calls do not prob
   request**, including connection, TLS and headers. Fast body delivery after slow
   headers cannot pass. An unavailable or slow reference also prevents admission;
   the system does not infer provider quota from a single failed path.
+  Observer wall-clock timestamps use the protocol's existing two-second skew
+  allowance; request duration still uses the complete start-to-finish interval.
 - Observe the held member's physical code again and require it to be unchanged.
   Bind its socket attestation to the observed public Front, Service and slot.
 - Persist the signed round before recording success. Require distinct scheduled

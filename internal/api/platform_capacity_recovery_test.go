@@ -82,7 +82,7 @@ func TestCapacityRecoveryRoundRequiresBothSignaturesFullElapsedAndPhysicalIdenti
 		}
 		raw.Plan.Permits[i], _ = clientmeasurement.SignPermit(p, s.clientProbeKeys())
 	}
-	for _, scenario := range []string{"valid", "forged_permit", "forged_attestation", "revoked_key", "foreign_observer", "wrong_class", "held_slow_headers", "reference_slow_headers", "partial_body", "foreign_front", "foreign_service", "wrong_socket_slot", "future", "duplicate_edge", "missing_reference", "reference_failed", "subject_failed", "subject_rejected", "subject_slow_reference_rejected"} {
+	for _, scenario := range []string{"valid", "bounded_clock_skew", "forged_permit", "forged_attestation", "revoked_key", "foreign_observer", "wrong_class", "held_slow_headers", "reference_slow_headers", "partial_body", "foreign_front", "foreign_service", "wrong_socket_slot", "future", "duplicate_edge", "missing_reference", "reference_failed", "subject_failed", "subject_rejected", "subject_slow_reference_rejected"} {
 		t.Run(scenario, func(t *testing.T) {
 			issued := raw.Plan.Permits[0].IssuedAt
 			plan := raw.Plan
@@ -92,6 +92,11 @@ func TestCapacityRecoveryRoundRequiresBothSignaturesFullElapsedAndPhysicalIdenti
 			revoked := s.bundleRevokedKeyIDs
 			defer func() { s.bundleRevokedKeyIDs = revoked }()
 			switch scenario {
+			case "bounded_clock_skew":
+				for i := range report.Outcomes {
+					report.Outcomes[i].StartedAt = report.Outcomes[i].StartedAt.Add(-1500 * time.Millisecond)
+					report.Outcomes[i].CompletedAt = report.Outcomes[i].CompletedAt.Add(-1500 * time.Millisecond)
+				}
 			case "forged_permit":
 				report.Plan.Permits[0].Signature = "forged"
 			case "forged_attestation":
@@ -117,7 +122,7 @@ func TestCapacityRecoveryRoundRequiresBothSignaturesFullElapsedAndPhysicalIdenti
 			case "wrong_socket_slot":
 				code.Slot = "b"
 			case "future":
-				report.Outcomes[0].CompletedAt = time.Now().Add(time.Second)
+				report.Outcomes[0].CompletedAt = time.Now().Add(clientmeasurement.ClientClockSkew + time.Second)
 			case "duplicate_edge":
 				report.Plan.Permits[1] = report.Plan.Permits[0]
 			case "missing_reference":
@@ -140,7 +145,7 @@ func TestCapacityRecoveryRoundRequiresBothSignaturesFullElapsedAndPhysicalIdenti
 				report.Outcomes[1].BytesReceived = 0
 			}
 			e, reason := s.evaluateCapacityRound(h, "edge-b", report, code, time.Now().UTC())
-			if (e != nil && reason == "capacity_verified") != (scenario == "valid") {
+			if (e != nil && reason == "capacity_verified") != (scenario == "valid" || scenario == "bounded_clock_skew") {
 				t.Fatal(scenario, e, reason)
 			}
 			if e != nil && e.ElapsedMilliseconds != 2000 {

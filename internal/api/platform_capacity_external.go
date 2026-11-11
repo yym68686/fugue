@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"sort"
 	"time"
 
 	"fugue/internal/clientmeasurement"
@@ -224,10 +225,27 @@ func (s *Server) handleIssueEdgeRecoveryClientProbePlan(w http.ResponseWriter, r
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	type candidate struct {
+		hold platformproducer.OfflineEdge
+		last time.Time
+	}
+	candidates := []candidate{}
 	for _, hold := range holds {
 		if hold.Recovery == nil || hold.Recovery.Capacity == nil {
 			continue
 		}
+		observation, err := s.readOfflineRecovery(ctx, hold)
+		if err != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "recovery observation unavailable")
+			return
+		}
+		candidates = append(candidates, candidate{hold, observation.LastAttempt})
+	}
+	// The first declaration must not consume every scheduled runner when
+	// several declarations share the same observation interval.
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].last.Before(candidates[j].last) })
+	for _, candidate := range candidates {
+		hold := candidate.hold
 		round, err := s.claimExternalCapacity(ctx, hold, holds, clientProbeObserver(p))
 		if err != nil {
 			httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())

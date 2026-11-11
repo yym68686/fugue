@@ -185,7 +185,7 @@ func (s *Server) evaluateCapacityRound(hold platformproducer.OfflineEdge, refere
 		}
 		i := slices.IndexFunc(report.Outcomes, func(o model.EdgeClientProbeOutcome) bool { return o.AttemptID == permit.AttemptID })
 		outcome := report.Outcomes[i]
-		if outcome.StartedAt.Before(permit.IssuedAt) || outcome.CompletedAt.After(at) || outcome.Attestation != nil && clientmeasurement.VerifyAttestation(*outcome.Attestation, permit, keys) != nil {
+		if outcome.StartedAt.Before(permit.IssuedAt.Add(-clientmeasurement.ClientClockSkew)) || outcome.CompletedAt.After(at.Add(clientmeasurement.ClientClockSkew)) || outcome.Attestation != nil && clientmeasurement.VerifyAttestation(*outcome.Attestation, permit, keys) != nil {
 			return nil, "capacity_unavailable"
 		}
 		if outcome.Failure != "" || outcome.HTTPStatus != 200 || outcome.Attestation == nil {
