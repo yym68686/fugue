@@ -423,6 +423,9 @@ func (s *Store) pgReleasePlatformArtifactInTransaction(ctx context.Context, tx *
 	if err := validateProducerPolicyPublication(artifact, channel); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("producer_policy", err)
 	}
+	if err := s.pgValidateInputDeferralPublication(ctx, tx, artifact, req, principal); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("producer_input_deferral", err)
+	}
 	trace.advance("reconfiguration-guard")
 	if err := s.pgProducerReconfiguration(ctx, tx, artifact, req); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("producer_reconfiguration", err)
@@ -692,6 +695,9 @@ func (s *Store) pgRollbackPlatformArtifactInTransaction(ctx context.Context, tx 
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
 	if err := validateProducerPolicyPublication(target, channel); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if current.ScopeKey == platformproducer.InputDeferralScope || target.ScopeKey == platformproducer.InputDeferralScope {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	trace.advance("override-policy")
 	overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)

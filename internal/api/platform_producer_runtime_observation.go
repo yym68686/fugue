@@ -171,21 +171,22 @@ type producerRuntimeParticipantObservation struct {
 }
 
 type producerRuntimeObservation struct {
-	SchemaVersion       string                                 `json:"schema_version"`
-	ObservedAt          time.Time                              `json:"observed_at"`
-	BootID              string                                 `json:"boot_id"`
-	StartedAt           time.Time                              `json:"started_at"`
-	PID                 int                                    `json:"pid"`
-	TrackingComplete    bool                                   `json:"tracking_complete"`
-	ProducerStarted     bool                                   `json:"producer_started"`
-	Managers            producerRuntimeCalls                   `json:"managers"`
-	Workers             producerRuntimeCalls                   `json:"workers"`
-	NewInput            producerRuntimeCalls                   `json:"new_input_boundary_calls"`
-	Scopes              []producerRuntimeScope                 `json:"scopes"`
-	ActiveWorkers       []producerRuntimeWorkerObservation     `json:"active_workers"`
-	Participant         *producerRuntimeParticipantObservation `json:"participant,omitempty"`
-	AdmissionInstalled  bool                                   `json:"admission_installed"`
-	FleetCoverageProven bool                                   `json:"fleet_coverage_proven"`
+	SchemaVersion         string                                 `json:"schema_version"`
+	ObservedAt            time.Time                              `json:"observed_at"`
+	BootID                string                                 `json:"boot_id"`
+	StartedAt             time.Time                              `json:"started_at"`
+	PID                   int                                    `json:"pid"`
+	TrackingComplete      bool                                   `json:"tracking_complete"`
+	ProducerStarted       bool                                   `json:"producer_started"`
+	Managers              producerRuntimeCalls                   `json:"managers"`
+	Workers               producerRuntimeCalls                   `json:"workers"`
+	NewInput              producerRuntimeCalls                   `json:"new_input_boundary_calls"`
+	Scopes                []producerRuntimeScope                 `json:"scopes"`
+	ActiveWorkers         []producerRuntimeWorkerObservation     `json:"active_workers"`
+	Participant           *producerRuntimeParticipantObservation `json:"participant,omitempty"`
+	AdmissionInstalled    bool                                   `json:"admission_installed"`
+	InputDeferralProtocol string                                 `json:"input_deferral_protocol"`
+	FleetCoverageProven   bool                                   `json:"fleet_coverage_proven"`
 }
 
 // ProducerRuntimeObservation is exposed only through the existing private Unix
@@ -208,7 +209,7 @@ func (s *Server) ProducerRuntimeObservation(ctx context.Context) (any, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := producerRuntimeObservation{SchemaVersion: producerRuntimeObservationSchema, ObservedAt: time.Now().UTC(), BootID: r.bootID, StartedAt: r.startedAt, PID: os.Getpid(), TrackingComplete: !r.incomplete, ProducerStarted: s.producerCaptureStarted, Managers: r.managers, Workers: r.workers, NewInput: r.newInput, Scopes: []producerRuntimeScope{}, ActiveWorkers: []producerRuntimeWorkerObservation{}, AdmissionInstalled: s.producerCaptureAdmission != nil}
+	out := producerRuntimeObservation{SchemaVersion: producerRuntimeObservationSchema, ObservedAt: time.Now().UTC(), BootID: r.bootID, StartedAt: r.startedAt, PID: os.Getpid(), TrackingComplete: !r.incomplete, ProducerStarted: s.producerCaptureStarted, Managers: r.managers, Workers: r.workers, NewInput: r.newInput, Scopes: []producerRuntimeScope{}, ActiveWorkers: []producerRuntimeWorkerObservation{}, AdmissionInstalled: s.producerCaptureAdmission != nil, InputDeferralProtocol: platformproducer.InputDeferralSchema}
 	for _, scoped := range r.scopes {
 		out.Scopes = append(out.Scopes, *scoped)
 	}

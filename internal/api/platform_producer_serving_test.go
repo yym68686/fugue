@@ -35,7 +35,12 @@ func TestCaptureDeferralPreservesRealPendingRecoveryAndObservation(t *testing.T)
 	testServingProducerProgressesRecovers(t, true, false, true)
 }
 
-func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gated bool) {
+func TestSignedInputDeferralPreservesRealPendingRecoveryAndObservation(t *testing.T) {
+	testServingProducerProgressesRecovers(t, true, false, true, true)
+}
+
+func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gated bool, signedInputGate ...bool) {
+	signedGate := len(signedInputGate) == 1 && signedInputGate[0]
 	path := t.TempDir() + "/state.json"
 	state := store.New(path)
 	if err := state.Init(); err != nil {
@@ -44,13 +49,14 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	config := ServerConfig{BundleSigningKey: "synthetic-serving-key", BundleSigningKeyID: "key"}
 	server := NewServer(state, auth.New(state, ""), nil, config)
 	deferNewInput, admissions, completions := false, 0, 0
+	setDeferral := func(value bool) { deferNewInput = value }
 	defer func() {
-		if gated && (admissions == 0 || admissions != completions) {
+		if gated && !signedGate && (admissions == 0 || admissions != completions) {
 			t.Error("capture completion handle did not cover all admitted work", admissions, completions)
 		}
 	}()
 	seedInventory := func() {
-		if gated {
+		if gated && !signedGate {
 			server.producerCaptureAdmission = func(ctx context.Context, scope string, policy model.PlatformPublicationPrecondition) (func(context.Context) error, bool, error) {
 				if scope != platformproducer.Scope || policy.ArtifactID == "" || policy.ContentHash == "" || policy.ReleaseID == "" || policy.FencingToken < 1 {
 					t.Fatal("capture gate lost exact signed authority")
@@ -120,6 +126,32 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 		return r
 	}
 	authority := activate()
+	if signedGate {
+		var control platformproducer.InputDeferral
+		setDeferral = func(value bool) {
+			t.Helper()
+			if value == deferNewInput {
+				return
+			}
+			if value {
+				a, r, found, err := state.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow")
+				if err != nil || !found {
+					t.Fatal(err)
+				}
+				at, id := time.Now().UTC().Add(-time.Second), model.NewID("finite")
+				request := platformproducer.CaptureDeferralRequest{SchemaVersion: platformproducer.CaptureDeferralSchema, OperationID: id, RequestedAt: at, ExpiresAt: at.Add(20 * time.Minute), Authorities: []platformproducer.CaptureDeferralAuthority{{Scope: a.ScopeKey, Policy: model.PlatformPublicationPrecondition{ArtifactID: a.ID, ContentHash: a.ContentHash, ReleaseID: r.ID, FencingToken: r.FencingToken}}}}
+				digest, _ := request.Digest()
+				control = platformproducer.InputDeferral{SchemaVersion: platformproducer.InputDeferralSchema, Generation: id, Action: "defer", Request: request, RequestDigest: digest}
+			} else {
+				control.Action, control.Generation = "release", control.Request.OperationID+":release"
+			}
+			a := save(model.PlatformArtifactKindPolicySnapshot, platformproducer.InputDeferralScope, control.Generation, control)
+			if _, _, _, _, err := state.ReleasePlatformArtifact(a.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: control.IdempotencyKey()}, principal); err != nil {
+				t.Fatal(err)
+			}
+			deferNewInput = value
+		}
+	}
 	if _, _, err := state.CreateEdgeNodeToken(model.EdgeNode{ID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8"}); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +174,7 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 			return platformIntentProjectionResponse{}, context.Canceled
 		})
 		cancel()
-		if !errors.Is(err, context.Canceled) || admissions != 1 || completions != 1 {
+		if !errors.Is(err, context.Canceled) || !signedGate && (admissions != 1 || completions != 1) {
 			t.Fatal("canceled capture did not finish through independent bounded exit", admissions, completions, err)
 		}
 	}
@@ -230,7 +262,7 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	if nextGray.ArtifactID == first.ID {
 		t.Fatal("new source not staged")
 	}
-	deferNewInput = gated
+	setDeferral(gated)
 	// Observation refresh must not re-enter the publishable projection's
 	// business readiness gates. Exercise the actual queue, even when its public
 	// DNS evidence is unavailable, and retain every publication/LKG identity.
@@ -333,14 +365,14 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 		if admissions != before || completions != priorCompletions || sameShadow.ID != shadow.ID || sameFull.ID != nextFull.ID {
 			t.Fatal("deferral changed a publication or admitted new input")
 		}
-		deferNewInput = false
+		setDeferral(false)
 	}
 	// Refresh under the same source creates another candidate. A failed full
 	// parent cannot prepare topology; timeout must still restore verified LKG.
 	age(shadow.ID, 301)
 	reconcile()
 	failed, badGray := active("gray")
-	deferNewInput = gated
+	setDeferral(gated)
 	_, shadow = active("shadow")
 	age(nextFull.ID, 10)
 	age(shadow.ID, 5)
@@ -427,7 +459,7 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	}
 	p.Generation = "producer-three"
 	activate()
-	deferNewInput = false
+	setDeferral(false)
 	reconcile()
 	_, fresh := active("gray")
 	if fresh.ID == badGray.ID {

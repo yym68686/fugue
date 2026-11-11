@@ -159,6 +159,10 @@ func (s *Server) handleValidatePlatformArtifact(w http.ResponseWriter, r *http.R
 }
 
 func validatePlatformPolicyArtifact(artifact model.PlatformArtifact) error {
+	if artifact.ScopeKey == platformproducer.InputDeferralScope {
+		_, err := platformproducer.DecodeInputDeferral(artifact)
+		return err
+	}
 	if artifact.ScopeKey == agentedge.PolicyScope {
 		_, err := agentedge.DecodeAuthorityPolicy(artifact)
 		return err

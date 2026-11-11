@@ -12,6 +12,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
 )
 
 func (s *Store) pgRollbackReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, channel string, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) (*model.State, error) {
@@ -194,7 +195,11 @@ func pgLockPlatformReleaseMutation(ctx context.Context, tx *sql.Tx, id string, e
 	if err := tx.QueryRowContext(ctx, `SELECT artifact_kind, scope_key FROM fugue_platform_artifacts WHERE id=$1 OR generation=$1 ORDER BY updated_at DESC, id ASC LIMIT 1`, id).Scan(&kind, &scope); err != nil {
 		return mapDBErr(err)
 	}
-	if kind != model.PlatformArtifactKindReleaseSet {
+	if scope == platformproducer.InputDeferralScope {
+		// Serialize finite-control selection with every new-input decision. This
+		// lock ends at admission commit; it never claims existing work drained.
+		exclusive = true
+	} else if kind != model.PlatformArtifactKindReleaseSet {
 		exclusive = false
 	}
 	return pgLockPromotionScope(ctx, tx, scope, exclusive)

@@ -406,6 +406,9 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 		if err := validateProducerPolicyPublication(artifact, channel); err != nil {
 			return platformReleaseRejected("producer_policy", err)
 		}
+		if err := s.validateInputDeferralPublication(state, artifact, req, principal, time.Now().UTC()); err != nil {
+			return platformReleaseRejected("producer_input_deferral", err)
+		}
 		if err := validateProducerReconfiguration(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
 			return platformReleaseRejected("producer_reconfiguration", err)
 		}
@@ -589,6 +592,9 @@ func (s *Store) rollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 
 		if err := validateProducerPolicyPublication(target, channel); err != nil {
 			return err
+		}
+		if current.ScopeKey == platformproducer.InputDeferralScope || target.ScopeKey == platformproducer.InputDeferralScope {
+			return ErrConflict // use an exact terminal release, never reactivate by rollback
 		}
 		now := time.Now().UTC()
 		overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)

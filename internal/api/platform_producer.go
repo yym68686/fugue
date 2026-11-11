@@ -235,6 +235,15 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	// A ticket covers the entire capture/compile/persist/publication attempt.
 	// Track this boundary even when durable admission is not installed. A
 	// canceled worker remains observable until its entire function returns.
+	advance("read_input_deferral")
+	deferred, err := s.store.ProducerInputDeferred(ctx, scope, model.PlatformPublicationPrecondition{ArtifactID: policyArtifact.ID, ContentHash: policyArtifact.ContentHash, ReleaseID: authority.ID, FencingToken: authority.FencingToken})
+	if err != nil {
+		return interval, errors.Join(err, s.refreshPendingProducerQuality(ctx, policy))
+	}
+	if deferred {
+		decision = "new_input_deferred"
+		return interval, s.refreshPendingProducerQuality(ctx, policy)
+	}
 	defer s.platformProducerRuntime().input(scope)()
 	if s.producerCaptureAdmission != nil {
 		advance("admit_new_input")

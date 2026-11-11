@@ -152,6 +152,20 @@ func compilerInputArtifactDependencyNode(artifact model.PlatformArtifact, cost *
 			}
 		}
 	}
+	if retainOriginal && artifact.ArtifactKind == model.PlatformArtifactKindPolicySnapshot && artifact.ScopeKey == platformproducer.InputDeferralScope {
+		control, err := platformproducer.DecodeInputDeferral(artifact)
+		if err != nil {
+			return node, err
+		}
+		for _, binding := range control.Request.Authorities {
+			if err := add("artifact", binding.Policy.ArtifactID, binding.Policy.ContentHash); err != nil {
+				return node, err
+			}
+			if err := add("release", binding.Policy.ReleaseID, ""); err != nil {
+				return node, err
+			}
+		}
+	}
 	if artifact.ArtifactKind == model.PlatformArtifactKindPolicySnapshot && artifact.Content["schema_version"] == platformproducer.Schema {
 		policy, err := platformproducer.Decode(artifact)
 		if err != nil {

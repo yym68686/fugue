@@ -59,10 +59,13 @@ func captureDeferralTestPrincipal() model.Principal {
 // existing data directory, production snapshot or environment credential is
 // accepted. The fixture contains only signed synthetic policies and work IDs.
 func captureDeferralPrivatePostgres(t *testing.T) (func() *Store, func()) {
+	return producerCapturePrivatePostgres(t, os.Getenv("FUGUE_PRODUCER_DEFERRAL_POSTGRES_BIN"), 170000)
+}
+
+func producerCapturePrivatePostgres(t *testing.T, bin string, minimumVersion int) (func() *Store, func()) {
 	t.Helper()
-	bin := os.Getenv("FUGUE_PRODUCER_DEFERRAL_POSTGRES_BIN")
 	if bin == "" {
-		t.Skip("set FUGUE_PRODUCER_DEFERRAL_POSTGRES_BIN to disposable PostgreSQL 17+ tools")
+		t.Skip("disposable PostgreSQL tools directory not configured")
 	}
 	if !filepath.IsAbs(bin) {
 		t.Fatal("PostgreSQL tools directory must be absolute")
@@ -117,7 +120,7 @@ func captureDeferralPrivatePostgres(t *testing.T) (func() *Store, func()) {
 		var actualDirectory string
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
-		if err := db.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::int,inet_server_port(),current_setting('data_directory')`).Scan(&version, &actualPort, &actualDirectory); err != nil || version < 170000 || actualPort != port || actualDirectory != data {
+		if err := db.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::int,inet_server_port(),current_setting('data_directory')`).Scan(&version, &actualPort, &actualDirectory); err != nil || version < minimumVersion || actualPort != port || actualDirectory != data {
 			t.Fatalf("private server identity: %d %d %q %v", version, actualPort, actualDirectory, err)
 		}
 		s := &Store{db: db, databaseURL: address.String()}

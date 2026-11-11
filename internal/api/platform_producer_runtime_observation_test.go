@@ -72,6 +72,9 @@ func TestProducerRuntimeRealCaptureCancellationAndPanic(t *testing.T) {
 	state, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	activateTestProducer(t, server, "runtime-observation", "shadow")
 	initial := producerRuntimeSnapshot(t, server)
+	if initial.InputDeferralProtocol != platformproducer.InputDeferralSchema {
+		t.Fatal("finite control capability not identified", initial)
+	}
 	if initial.AdmissionInstalled || initial.Participant != nil || initial.ProducerStarted {
 		t.Fatal("observation installed a production gate", initial)
 	}

@@ -37,6 +37,12 @@ func (s *Store) ReleaseProducedTrafficArtifact(id, policyReleaseID, channel, pre
 }
 
 func validateProducerPolicyPublication(a model.PlatformArtifact, channel string) error {
+	if a.ScopeKey == platformproducer.InputDeferralScope {
+		if _, err := platformproducer.DecodeInputDeferral(a); err != nil || channel != model.PlatformArtifactReleaseChannelShadow {
+			return fmt.Errorf("%w: input deferral requires valid shadow publication", ErrConflict)
+		}
+		return nil
+	}
 	if a.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || !platformproducer.IsPolicyScope(a.ScopeKey) {
 		return nil
 	}
