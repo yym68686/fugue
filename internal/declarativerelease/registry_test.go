@@ -95,7 +95,7 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 	}
 	want := []string{"api", "controller", "edge-client-front-public-a", "edge-client-front-public-b", "edge-client-front-public-b-primary", "edge-client-front-public-b-secondary", "edge-control-public-a", "edge-control-public-b", "edge-worker-public-a-candidate", "edge-worker-public-b-candidate", "edge-worker-public-b-secondary-candidate"}
 	want = append(want, "edge-client-front-public-a-quality", "edge-client-front-public-b-primary-quality", "edge-client-front-public-b-secondary-quality")
-	want = append(want, "edge-client-front-us-managed")
+	want = append(want, "edge-client-front-us-managed", "edge-client-front-us-managed-quality")
 	want = append(want, "edge-client-dns-de-e", "edge-client-dns-us-e")
 	want = append(want, "edge-client-dns-de-f", "edge-client-dns-us-f")
 	want = append(want, "edge-client-dns-independent-a", "edge-client-dns-independent-b")
