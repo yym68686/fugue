@@ -144,6 +144,17 @@ old connections before replacing their Worker, and retain DNS/code isolation unt
 all final capacity and publication gates pass. These execution steps are not
 implemented by the advisory planner.
 
+The separate declarative member-recovery lane can also repair a stale Front
+record when Pod recreation has already put the exact committed Worker in the
+active slot. It verifies both pinned running container images, group and slot,
+fresh signed publication health and paired route proofs against a current
+member, then rechecks the exact authority and predecessor under both leases.
+This case updates the record atomically without switching slots or restarting a
+process. An inactive target still requires publication preparation. The source
+record may be a committed promotion or rollback: rejecting rollback would prevent
+catch-up to the group's actual current authority. DNS and code-release holds
+remain independent and are not removed by this record repair.
+
 Recovery reads the two named prepared/activated transition journals with GET. It
 does not require listing ConfigMaps. Only an authenticated 404 means no journal;
 403, transport errors and timeouts remain unknown and keep isolation in place.

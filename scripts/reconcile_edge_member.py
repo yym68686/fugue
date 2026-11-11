@@ -2,7 +2,9 @@
 """Catch up one returned Front to the already committed group authority.
 
 This is a separately declared configuration recovery, not a new code release.
-The inactive worker must first load and prove the current signed publication.
+The selected worker must first prove the current signed publication. A returned
+node may already run current code in its active slot after Pod recreation; in
+that case only the stale activation record is reconciled, without a slot switch.
 """
 import argparse
 import base64
@@ -67,12 +69,12 @@ def validate(config, authority, source, previous):
                'bundle_generation': 'currentBundleGeneration'}
     if authority.get('currentRecordDigest') != config['authorityRecord'] or authority.get('groupId') != config['group'] or any(source.get(k) != authority.get(v) for k, v in mapping.items()):
         raise ValueError('Reference Front is not the declared committed authority')
-    if source.get('schema') != 'edge-front-group-activation/v1' or source.get('authority') != 'edge-control' or source.get('operation') != 'promote':
-        raise ValueError('Only a committed positive promotion can recover a member')
+    if source.get('schema') != 'edge-front-group-activation/v1' or source.get('authority') != 'edge-control' or source.get('operation') not in ('promote', 'rollback'):
+        raise ValueError('Only the exact committed activation can recover a member')
     if previous.get('edge_group_id') != config['group'] or previous.get('schema') != source['schema'] or previous.get('authority') != source['authority']:
         raise ValueError('Member belongs to another activation authority')
-    if without_time(previous) != without_time(source) and (previous['generation'] >= source['generation'] or previous['active_slot'] == source['active_slot']):
-        raise ValueError('Recovery requires an older member on the other slot')
+    if without_time(previous) != without_time(source) and previous['generation'] >= source['generation']:
+        raise ValueError('Recovery requires a strictly older member')
     if config['workerPort'] != {'a': 18443, 'b': 28443}[source['active_slot']]:
         raise ValueError('Worker listener does not match committed slot')
 
@@ -88,12 +90,23 @@ def validate_worker(pod, config, target, reference=False):
         raise ValueError('Worker identity changed')
     if not reference and pod['spec']['nodeName'] != config['node']:
         raise ValueError('Worker moved to another node')
+    if meta.get('labels', {}).get('fugue.io/edge-group-id') != config['group'] or meta.get('labels', {}).get('fugue.io/edge-slot') != target['active_slot']:
+        raise ValueError('Worker group or slot differs from committed authority')
     containers = [c for c in pod['spec']['containers'] if c['name'] == 'edge']
     statuses = [c for c in pod['status'].get('containerStatuses', []) if c['name'] == 'edge']
     if len(containers) != 1 or len(statuses) != 1 or not statuses[0].get('ready') or pod['status'].get('phase') != 'Running':
         raise ValueError('Worker process is not ready')
     if meta.get('annotations', {}).get('fugue.pro/source-commit') != target['worker_source_commit'] or not containers[0]['image'].endswith('@' + target['worker_image_digest']) or not statuses[0]['imageID'].endswith('@' + target['worker_image_digest']):
         raise ValueError('Worker executable differs from committed authority')
+    for name in ['edge', 'caddy']:
+        declared = [c for c in pod['spec']['containers'] if c['name'] == name]
+        running = [c for c in pod['status'].get('containerStatuses', []) if c['name'] == name]
+        if len(declared) != 1 or len(running) != 1 or not re.fullmatch(r'.+@sha256:[a-f0-9]{64}', declared[0]['image']) or not running[0].get('ready') or not running[0].get('state', {}).get('running') or running[0]['imageID'].removeprefix('docker-pullable://') != declared[0]['image']:
+            raise ValueError('Worker runtime image is not the declared pinned executable')
+    ports = [p for c in pod['spec']['containers'] if c['name'] == 'caddy' for p in c.get('ports', [])
+             if p.get('name') == 'https-slot' and p.get('protocol') == 'TCP' and p.get('containerPort') == config['workerPort']]
+    if len(ports) != 1:
+        raise ValueError('Worker HTTPS socket differs from committed slot')
     return pod['status']['podIP']
 
 
@@ -116,7 +129,9 @@ target=$4
 exec 9>"$path.lock"
 flock -n 9
 test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$expected"
-test "$(sha256sum "$path.prepared" | cut -d ' ' -f 1)" = "$prepared"
+if [ -n "$prepared" ]; then
+  test "$(sha256sum "$path.prepared" | cut -d ' ' -f 1)" = "$prepared"
+fi
 backup="$path.recovery-before-$expected"
 if [ ! -e "$backup" ]; then cp -p "$path" "$backup"; fi
 temporary=$(mktemp "$path.recovery.XXXXXX")
@@ -259,8 +274,15 @@ def main():
     if args.apply and without_time(previous) != without_time(target):
         with recovery.leases() as held:
             owner, target, previous, raw, worker, reference = recovery.snapshot()
-            prepared = recovery.prepare(previous, target)
-            deadline = min(time.monotonic() + 55, time.monotonic() + (timestamp(prepared['expires_at']) - now()).total_seconds() - 20)
+            # An active worker already obtains the current signed publication.
+            # Preparation is exclusively an inactive-slot capability: never
+            # fabricate an intermediate switch just to repair stale metadata.
+            prepared = None
+            if previous['active_slot'] != target['active_slot']:
+                prepared = recovery.prepare(previous, target)
+            deadline = time.monotonic() + 55
+            if prepared:
+                deadline = min(deadline, time.monotonic() + (timestamp(prepared['expires_at']) - now()).total_seconds() - 20)
             while True:
                 health = recovery.health(config['worker'])
                 if verified_worker_health(health, config):
@@ -276,9 +298,11 @@ def main():
             current_owner, current_target, current_previous, current_raw, _, _ = recovery.snapshot()
             if current_owner['metadata']['resourceVersion'] != owner['metadata']['resourceVersion'] or current_target != target or current_raw != raw:
                 raise ValueError('Authority changed before activation')
-            prep_raw = recovery.kube('-n', config['namespace'], 'exec', config['front'], '-c', 'edge-front', '--', 'cat', config['activationPath'] + '.prepared')
-            if json.loads(prep_raw) != prepared or timestamp(prepared['expires_at']) <= now() + dt.timedelta(seconds=15):
-                raise ValueError('Publication preparation changed or expired')
+            prep_raw = None
+            if prepared:
+                prep_raw = recovery.kube('-n', config['namespace'], 'exec', config['front'], '-c', 'edge-front', '--', 'cat', config['activationPath'] + '.prepared')
+                if json.loads(prep_raw) != prepared or timestamp(prepared['expires_at']) <= now() + dt.timedelta(seconds=15):
+                    raise ValueError('Publication preparation changed or expired')
             for lease in held:
                 current = recovery.get('lease', lease['metadata']['name'])
                 if current['metadata']['uid'] != lease['metadata']['uid'] or current['metadata']['resourceVersion'] != lease['metadata']['resourceVersion'] or timestamp(current['spec']['renewTime']) + dt.timedelta(seconds=current['spec']['leaseDurationSeconds']) <= now() + dt.timedelta(seconds=15):
@@ -287,7 +311,7 @@ def main():
             evidence['target'] = target
             save()
             after = json.loads(recovery.kube('-n', config['namespace'], 'exec', config['front'], '-c', 'edge-front', '--', 'sh', '-ceu',
-                ACTIVATION_CAS, 'sh', config['activationPath'], digest(raw), digest(prep_raw), base64.b64encode((canonical(target) + '\n').encode()).decode()))
+                ACTIVATION_CAS, 'sh', config['activationPath'], digest(raw), digest(prep_raw) if prep_raw is not None else '', base64.b64encode((canonical(target) + '\n').encode()).decode()))
             if after != target:
                 raise ValueError('Activation result is indeterminate')
             evidence['activated'] = True

@@ -33,11 +33,23 @@ class MemberRecoveryTest(unittest.TestCase):
         validate(*args)
         changed=list(copy.deepcopy(args));changed[3]=dict(changed[2],updated_at='2026-01-02T00:00:00Z');validate(*changed)
         for change in [lambda a:a[1].update(currentFrontGeneration=11), lambda a:a[3].update(generation=2),
-                       lambda a:a[2].update(worker_image_digest='sha256:'+'d'*64), lambda a:a[2].update(operation='rollback'),
+                       lambda a:a[2].update(worker_image_digest='sha256:'+'d'*64), lambda a:a[2].update(operation='initialize'),
                        lambda a:a[0].update(workerPort=18443), lambda a:a[0].update(probes=[]),
                        lambda a:a[0].update(arbitraryPath='/tmp/other')]:
             a=copy.deepcopy(fixture());change(a)
             with self.assertRaises(ValueError):validate(*a)
+
+    def test_recreated_current_worker_can_reconcile_same_slot_and_committed_rollback(self):
+        config, authority, state, previous = fixture()
+        previous['active_slot'] = state['active_slot']
+        config['previousState'] = copy.deepcopy(previous)
+        state.update(operation='rollback', rollback_of_generation=9)
+        validate(config, authority, state, previous)
+        for generation in [state['generation'], state['generation'] + 1]:
+            changed = dict(previous, generation=generation)
+            config['previousState'] = changed
+            with self.assertRaises(ValueError):
+                validate(config, authority, state, changed)
 
     def test_atomic_replacement_keeps_backup_and_rejects_changed_local_state(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -57,6 +69,24 @@ class MemberRecoveryTest(unittest.TestCase):
             again=subprocess.run(command,capture_output=True,text=True,env=env)
             self.assertNotEqual(again.returncode,0)
             self.assertEqual(state.read_text(),target)
+
+    def test_same_slot_record_repair_needs_no_inactive_preparation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / 'activation.json'
+            previous = dict(fixture()[3], active_slot='b')
+            original, target = canonical(previous) + '\n', canonical(fixture()[2]) + '\n'
+            state.write_text(original)
+            if not shutil.which('flock'):
+                lock = root / 'flock'
+                lock.write_text('#!/usr/bin/env python3\nimport fcntl,sys\nfcntl.flock(int(sys.argv[-1]),fcntl.LOCK_EX|fcntl.LOCK_NB)\n')
+                lock.chmod(0o755)
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'])
+            command = ['sh', '-ceu', ACTIVATION_CAS, 'sh', str(state), digest(original), '', base64.b64encode(target.encode()).decode()]
+            done = subprocess.run(command, capture_output=True, text=True, env=env)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(state.read_text(), target)
+            self.assertEqual(Path(str(state) + '.recovery-before-' + digest(original)).read_text(), original)
 
 
 if __name__=='__main__':unittest.main()
