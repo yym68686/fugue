@@ -1,6 +1,6 @@
 {
   "schema": "fugue.local-snapshot-cleanup/v1",
-  "enabled": false,
+  "enabled": true,
   "namespace": "fugue-system",
   "cluster": "fugue-fugue-control-plane-postgres",
   "longhornNamespace": "longhorn-system",
