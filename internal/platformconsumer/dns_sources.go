@@ -14,6 +14,11 @@ import (
 	"fugue/internal/model"
 )
 
+// Source observation includes two coherent ledger reads, complete input
+// admission and assignment rechecks. Keep that bounded work separate from the
+// small interactive request budget; an earlier caller deadline still wins.
+const dnsRouteSourceReadTimeout = 45 * time.Second
+
 // DNSRouteSources observes the routing ledger bound to this exact DNS
 // assignment. Signature/policy validation belongs to the DNS consumer.
 func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease, previous ...model.PlatformDNSRouteSourceSnapshot) (model.PlatformDNSRouteSourceSnapshot, error) {
@@ -34,7 +39,7 @@ func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.Platfo
 		}
 	}
 	endpoint := strings.TrimRight(c.BaseURL, "/") + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(a.ArtifactID) + "/route-sources?expected_consumer_set_id=" + url.QueryEscape(a.ExpectedConsumerSetID)
-	if err := c.jsonRevalidated(ctx, endpoint, id.Token, http.MethodGet, nil, &result, 16<<20, validator, unchanged); err != nil {
+	if err := c.jsonRevalidatedBudget(ctx, endpoint, id.Token, http.MethodGet, nil, &result, 16<<20, validator, unchanged, dnsRouteSourceReadTimeout); err != nil {
 		var status *responseStatusError
 		if errors.As(err, &status) && status.Code == http.StatusConflict {
 			return result.Snapshot, ErrAssignmentChanged
@@ -81,7 +86,7 @@ func (c Client) RetainedDNSRouteSources(ctx context.Context, id Identity, a mode
 		}
 	}
 	endpoint := strings.TrimRight(c.BaseURL, "/") + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(a.ArtifactID) + "/retained-route-sources?expected_consumer_set_id=" + url.QueryEscape(a.ExpectedConsumerSetID)
-	if err := c.jsonRevalidated(ctx, endpoint, id.Token, http.MethodGet, nil, &result, 16<<20, validator, unchanged); err != nil {
+	if err := c.jsonRevalidatedBudget(ctx, endpoint, id.Token, http.MethodGet, nil, &result, 16<<20, validator, unchanged, dnsRouteSourceReadTimeout); err != nil {
 		return result, err
 	}
 	got := result.Release

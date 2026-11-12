@@ -118,6 +118,13 @@ without removing an independently valid LKG. Responses are private, no-store and
 bounded to 16 MiB. Their selection digest excludes observation time; a reader
 must compare a second observation after collecting route proofs.
 
+Selected and retained source requests have a 45-second HTTP read budget because
+complete authenticated admission and the coherent selection recheck can exceed
+the ordinary 15-second interactive budget. Earlier caller deadlines still win;
+the 16 MiB response bound, one-minute observation freshness, signatures and
+exact assignment checks are unchanged. A transport timeout while decoding a
+response is an unavailable read, not a malformed or accepted source snapshot.
+
 The shared verifier authenticates source policy, parent, route/TLS children and
 the optional signed LKG, then checks consistency of the activation, publication
 and lane bindings returned by the private API. The selection digest is a change

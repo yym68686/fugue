@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -238,6 +239,10 @@ func (c Client) jsonLimit(ctx context.Context, endpoint, token, method string, i
 }
 
 func (c Client) jsonRevalidated(ctx context.Context, endpoint, token, method string, in, out any, limit int64, validator string, unchanged func(http.Header) error) error {
+	return c.jsonRevalidatedBudget(ctx, endpoint, token, method, in, out, limit, validator, unchanged, 15*time.Second)
+}
+
+func (c Client) jsonRevalidatedBudget(ctx context.Context, endpoint, token, method string, in, out any, limit int64, validator string, unchanged func(http.Header) error, timeout time.Duration) error {
 	var body io.Reader
 	if in != nil {
 		raw, err := json.Marshal(in)
@@ -257,10 +262,10 @@ func (c Client) jsonRevalidated(ctx context.Context, endpoint, token, method str
 	}
 	client := c.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = &http.Client{Timeout: timeout}
 	} else {
 		clone := *client
-		clone.Timeout = 15 * time.Second
+		clone.Timeout = timeout
 		client = &clone
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -294,10 +299,16 @@ func (c Client) jsonRevalidated(ctx context.Context, endpoint, token, method str
 	// retained both the growing transport buffer and the decoder's copy.
 	bodyLimit := &io.LimitedReader{R: resp.Body, N: limit + 1}
 	dec := json.NewDecoder(bodyLimit)
-	if err := dec.Decode(out); err == nil {
-		if err := dec.Decode(&struct{}{}); err == io.EOF && bodyLimit.N > 0 {
+	decodeErr := dec.Decode(out)
+	if decodeErr == nil {
+		decodeErr = dec.Decode(&struct{}{})
+		if decodeErr == io.EOF && bodyLimit.N > 0 {
 			return nil
 		}
+	}
+	var networkErr net.Error
+	if errors.Is(decodeErr, context.DeadlineExceeded) || errors.Is(decodeErr, context.Canceled) || (errors.As(decodeErr, &networkErr) && networkErr.Timeout()) {
+		return ErrUnavailable
 	}
 	if bodyLimit.N <= 0 {
 		return errors.New("platform response exceeds limit or is incomplete")
