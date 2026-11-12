@@ -43,6 +43,60 @@ func publicationInputValidate(t *testing.T, s *Store, id string) {
 	}
 }
 
+func TestPublicationInputPostgresCommitBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises publication beyond the ordinary ten-second admission budget")
+	}
+	s, roots, _ := inputActivationFixture(t, 0)
+	publicationInputValidate(t, s, "activation-root")
+	ordinary, err := s.prepareCompilerInputActivation(t.Context(), roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.withPreparedCompilerInputActivation(t.Context(), ordinary, nil, func(ctx context.Context, _ *sql.Tx) error {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 10*time.Second {
+			t.Fatal("ordinary admission lost its short deadline")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, cancelEarly := range []bool{false, true} {
+		proof, pins, err := s.prepareCompilerInputPublication(t.Context(), "activation-root", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+		if cancelEarly {
+			cancel()
+		}
+		before := publicationInputCounts(t, s)
+		ctx, trace := startPlatformMutationTrace(ctx, "publication-budget-test")
+		err = s.consumePreparedCompilerInput(ctx, proof, pins, false, nil, func(ctx context.Context, tx *sql.Tx) error {
+			// Represent CPU authority validation, not a SQL statement or lock
+			// wait: their five-second/250ms limits must remain unchanged.
+			timer := time.NewTimer(11 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+			}
+			_, _, _, _, err := s.pgReleasePlatformArtifactInTransaction(ctx, tx, "activation-root", model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, testPlatformPrincipal(), nil, trace)
+			return err
+		})
+		cancel()
+		if cancelEarly {
+			if err == nil || publicationInputCounts(t, s) != before {
+				t.Fatal("caller cancellation changed publication", err)
+			}
+		} else if err != nil || publicationInputCounts(t, s)[0] != before[0]+1 {
+			t.Fatal("publication did not commit within its existing budget", err)
+		}
+	}
+}
+
 func TestPublicationInputPostgresReleaseAndRollbackWithoutOldChunks(t *testing.T) {
 	s, _, pins := inputActivationFixture(t, 2)
 	first := lkgInputRelease(t, s, "activation-artifact-000")

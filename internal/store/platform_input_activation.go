@@ -736,7 +736,16 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 			return ErrInvalidInput
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	budget := 10 * time.Second
+	if proof.publication != nil {
+		// Publication already has its own bounded transaction budget. Its
+		// authority checks include signed cross-scope DNS references, not just
+		// input pin admission; do not silently shorten that existing budget.
+		// Tasks and ordinary activations retain their shorter limit, and a
+		// stricter caller deadline still wins. SQL and lock limits are unchanged.
+		budget = platformPublicationTransactionTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	// Recheck revision at entry and atomically with commit. Do not hold this
 	// read lock across apply: its ordinary signature checks take the same lock

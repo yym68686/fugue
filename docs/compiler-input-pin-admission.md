@@ -51,6 +51,13 @@ Integrated entry points retain their original request-specific authority:
 | Shadow consumer | `pgAcceptPlatformShadowConsumerHeartbeat` | Same scope/parent identity and durable admission rules |
 | Task creation / claim | `pgCreateNodeUpdateTask`, `pgClaimNodeUpdateTask` | Bind server-derived payload dependencies; pending protection precedes creation and verified pins precede claim |
 
+Publication and rollback retain their existing 30-second total work budget through
+input admission, including signed DNS source authority validation. Other activation
+transactions retain the 10-second admission limit. A shorter caller deadline always
+wins; the 5-second SQL statement and 250ms lock-wait limits remain unchanged. No
+timeout grants admission, retries a mutation, or bypasses the final epoch, signature,
+pin, selector, keyring-revision or proof-expiry checks.
+
 ## One-way enforcement transition
 
 The process-owned preparation for the private enforcement transition covers the
