@@ -19,6 +19,16 @@ SCOPE = "platform-config-producer"
 POLICY_FIELDS = {"version", "window_seconds", "bucket_seconds", "required_buckets", "minimum_records", "cooldown_seconds", "evidence_max_age_seconds", "advantage_ms", "advantage_ratio", "unknown_cost_ms", "uncertainty_ms", "failure_cost_ms", "capacity_cost_ms", "throughput_cost_ms", "throughput_target_bps", "probe_interval_seconds", "probe_budget_per_interval", "maximum_node_utilization"}
 
 
+def network_policy_fields(policy):
+    fields = POLICY_FIELDS.copy()
+    if policy.get('version') == 'physical-network-paired-continuity-v7':
+        fields.add('retain_order_seconds')
+        value = policy.get('retain_order_seconds')
+        if type(value) is not int or not max(600, policy.get('evidence_max_age_seconds', 600)) <= value <= 86400:
+            raise ValueError('explicit bounded historical order retention required')
+    return fields
+
+
 def bounded_json(value):
     if isinstance(value, dict):
         return all(isinstance(key, str) and bounded_json(item) for key, item in value.items())
@@ -52,7 +62,7 @@ def validate(config):
     if query.get("ranking_mode") != "active" or not 1 <= len(routes) <= 64 or len({route.get("hostname") for route in routes}) != len(routes) or sum(route.get("hostname") == hostname for route in routes) != 1:
         raise ValueError("explicit active physical route policy required")
     for route in routes:
-        if set(route) != {"hostname", "traffic_class", "policy"} or set(route["policy"]) != POLICY_FIELDS or route["policy"].get("version") not in ["physical-network-cohort-v2", "physical-network-bounded-v3", "physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6"] or any(route["policy"][field] is None for field in POLICY_FIELDS):
+        if set(route) != {"hostname", "traffic_class", "policy"} or set(route["policy"]) != network_policy_fields(route["policy"]) or route["policy"].get("version") not in ["physical-network-cohort-v2", "physical-network-bounded-v3", "physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6", "physical-network-paired-continuity-v7"] or any(route["policy"][field] is None for field in POLICY_FIELDS):
             raise ValueError("physical route must declare complete versioned network policy")
     return config
 

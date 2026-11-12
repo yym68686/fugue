@@ -123,6 +123,17 @@ func (s *Server) observeOfflineRecovery(node model.EdgeNode, intent *model.EdgeD
 			intent.RecoveryLastProbeAt = &o.LastAttempt
 		}
 		intent.RecoveryLastResult = o.LastResult
+		if !o.LastSuccess.IsZero() {
+			at := o.LastSuccess
+			intent.RecoveryLastSuccessAt = &at
+			if hold.Recovery.Capacity != nil && hold.Recovery.Capacity.Version == platformproducer.CapacityContinuityVersion {
+				until := at.Add(time.Duration(hold.Recovery.Capacity.RetainAdmissionSeconds) * time.Second)
+				intent.RecoveryRetainUntil = &until
+				if o.Admitted && now.After(until) {
+					intent.RecoveryState = "retention_expired"
+				}
+			}
+		}
 		intent.RecoveryCodeDetail, intent.RecoveryCodePlan = o.CodeDetail, o.CodePlan
 		if o.Capacity != nil {
 			intent.RecoveryCapacityBytesPerSecond = o.Capacity.BytesPerSecond
@@ -131,6 +142,9 @@ func (s *Server) observeOfflineRecovery(node model.EdgeNode, intent *model.EdgeD
 		}
 		if o.Ready(hold, now) {
 			intent.State, intent.Reason, intent.RecoveryState = "allowed", "", "ready"
+			if o.ReviewOverdue(hold, now) {
+				intent.RecoveryState = "review_overdue"
+			}
 		}
 		return
 	}

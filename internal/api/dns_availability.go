@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -56,6 +57,7 @@ func applyDNSAvailabilityBaseline(projection *platformIntentProjectionResponse, 
 	rules := append([]platformconfig.DNSAnswerRule(nil), projection.Policy.DNSAnswerRules...)
 	facts := append([]platformconfig.DNSSelectionObservation(nil), projection.RuntimeSnapshot.DNSSelections...)
 	matched := 0
+	now := time.Now().UTC()
 	for i, fact := range facts {
 		if fact.Hostname != hostname {
 			continue
@@ -68,6 +70,35 @@ func applyDNSAvailabilityBaseline(projection *platformIntentProjectionResponse, 
 			available[candidate.EdgeID] = true
 		}
 		order := &model.DNSPhysicalOrder{Version: "physical-order-v1"}
+		retained := false
+		if dynamic := projection.Policy.DNSQueryPolicy.DynamicQuality; dynamic != nil && dynamic.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+			for _, rule := range rules {
+				if rule.NodeID != fact.NodeID || rule.Hostname != fact.Hostname || rule.Type != fact.Type || rule.PhysicalOrder == nil || rule.PhysicalOrder.QualityObservedAt == nil {
+					continue
+				}
+				at := *rule.PhysicalOrder.QualityObservedAt
+				if at.After(now) || now.Sub(at) > time.Duration(dynamic.Policy.RetainOrderSeconds)*time.Second {
+					continue
+				}
+				allowed := map[string]bool{}
+				for _, id := range policy.OrderedEdgeIDs {
+					allowed[id] = true
+				}
+				for _, id := range rule.PhysicalOrder.OrderedEdgeIDs {
+					if allowed[id] && available[id] {
+						order.OrderedEdgeIDs = append(order.OrderedEdgeIDs, id)
+						delete(available, id)
+					}
+				}
+				retained = len(order.OrderedEdgeIDs) > 0
+				if retained {
+					order.QualityObservedAt = &at
+					if order.OrderedEdgeIDs[0] == rule.PhysicalOrder.OrderedEdgeIDs[0] {
+						order.PrimarySince = rule.PhysicalOrder.PrimarySince
+					}
+				}
+			}
+		}
 		for _, id := range policy.OrderedEdgeIDs {
 			if available[id] {
 				order.OrderedEdgeIDs = append(order.OrderedEdgeIDs, id)
@@ -94,6 +125,9 @@ func applyDNSAvailabilityBaseline(projection *platformIntentProjectionResponse, 
 		fact.PhysicalSelection, fact.PhysicalEvidence = nil, nil
 		fact.RankingVersion, fact.RankingScope = "", ""
 		fact.Reason = "availability_only_quality_unavailable"
+		if retained {
+			fact.Reason = "retained_previous_verified_order_quality_unavailable"
+		}
 		fact.SourceDigest, fact.SourceGeneration = "", ""
 		digest, err := platformconfig.Digest(fact)
 		if err != nil {

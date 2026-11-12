@@ -101,6 +101,9 @@ func (s *Server) captureQualityCapacity(ctx context.Context, snapshot *edgequali
 		return
 	}
 	evidence.Hostname = snapshot.Hostname
+	if snapshot.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+		evidence = independentQualityEvidence(*snapshot, evidence)
+	}
 	targets := qualityCapacityTargets(nodes, evidence)
 	if len(targets) == 0 {
 		return

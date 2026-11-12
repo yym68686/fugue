@@ -2,6 +2,7 @@ package edgequality
 
 import (
 	"errors"
+	"sort"
 	"time"
 
 	"fugue/internal/model"
@@ -70,6 +71,9 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 			selection.QualityState = "learning"
 		}
 	}
+	if snapshot.Policy.Version == PairedContinuityPolicyVersion {
+		selection.QualityState, selection.QualityObservedAt = result.QualityState, result.QualityObservedAt
+	}
 	primarySince := snapshot.CapturedAt
 	if primary.EdgeID == snapshot.CurrentEdgeID && snapshot.LastSwitchAt != nil {
 		primarySince = *snapshot.LastSwitchAt
@@ -92,6 +96,31 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 				}
 			}
 		}
+	}
+	if snapshot.Policy.Version == PairedContinuityPolicyVersion && result.Hypothesis == "hold" && result.QualityState != "measured" {
+		eligible := map[string]bool{}
+		for _, candidate := range snapshot.Candidates {
+			eligible[candidate.EdgeID] = len(candidate.HardGates) == 0 && proofFresh(candidate, snapshot.Policy, now)
+		}
+		order := []string{primary.EdgeID}
+		seen := map[string]bool{primary.EdgeID: true}
+		if result.QualityState == "retained" && snapshot.PreviousSelection != nil {
+			for _, id := range snapshot.PreviousSelection.OrderedEdgeIDs {
+				if eligible[id] && !seen[id] {
+					order, seen[id] = append(order, id), true
+				}
+			}
+		}
+		// Newly measured candidates without comparable client evidence are
+		// appended deterministically, never promoted by a missing score of zero.
+		ids := []string{}
+		for id, allowed := range eligible {
+			if allowed && !seen[id] {
+				ids = append(ids, id)
+			}
+		}
+		sort.Strings(ids)
+		selection.OrderedEdgeIDs = append(order, ids...)
 	}
 	if err := model.ValidateDNSPhysicalSelection(selection); err != nil {
 		return nil, err

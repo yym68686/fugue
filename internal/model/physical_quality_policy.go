@@ -10,9 +10,10 @@ const PhysicalBoundedNetworkPolicyVersion = "physical-network-bounded-v3"
 const PhysicalDeliveryNetworkPolicyVersion = "physical-network-delivery-v4"
 const PhysicalFailureAwareNetworkPolicyVersion = "physical-network-failure-aware-v5"
 const PhysicalComparableDeliveryPolicyVersion = "physical-network-comparable-delivery-v6"
+const PhysicalPairedContinuityPolicyVersion = "physical-network-paired-continuity-v7"
 
 func IsFailureAwarePhysicalNetworkPolicy(version string) bool {
-	return version == PhysicalFailureAwareNetworkPolicyVersion || version == PhysicalComparableDeliveryPolicyVersion
+	return version == PhysicalFailureAwareNetworkPolicyVersion || version == PhysicalComparableDeliveryPolicyVersion || version == PhysicalPairedContinuityPolicyVersion
 }
 
 func IsDeliveryPhysicalNetworkPolicy(version string) bool {
@@ -24,6 +25,7 @@ func IsBoundedPhysicalNetworkPolicy(version string) bool {
 }
 
 type PhysicalEdgeQualityPolicy struct {
+	RetainOrderSeconds     int     `json:"retain_order_seconds,omitempty"`
 	MaximumNodeUtilization float64 `json:"maximum_node_utilization,omitempty"`
 	Version                string  `json:"version"`
 	WindowSeconds          int     `json:"window_seconds"`
@@ -45,6 +47,13 @@ type PhysicalEdgeQualityPolicy struct {
 }
 
 func ValidatePhysicalEdgeQualityPolicy(policy PhysicalEdgeQualityPolicy) error {
+	if policy.Version == PhysicalPairedContinuityPolicyVersion {
+		if policy.RetainOrderSeconds < policy.EvidenceMaxAgeSeconds || policy.RetainOrderSeconds < 600 || policy.RetainOrderSeconds > 86400 {
+			return errors.New("paired continuity requires an explicit bounded order retention window")
+		}
+	} else if policy.RetainOrderSeconds != 0 {
+		return errors.New("historical policies cannot retain stale quality orders")
+	}
 	if (policy.Version != PhysicalNetworkPolicyVersion && !IsBoundedPhysicalNetworkPolicy(policy.Version)) || math.IsNaN(policy.MaximumNodeUtilization) || math.IsInf(policy.MaximumNodeUtilization, 0) || policy.MaximumNodeUtilization <= 0 || policy.MaximumNodeUtilization > 1 {
 		return errors.New("unsupported physical network policy or node utilization limit")
 	}

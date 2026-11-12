@@ -19,6 +19,7 @@ type QualityRouteProof struct {
 }
 
 type QualityAnswerEvidence struct {
+	PreviousSelection  *model.DNSPhysicalSelection
 	BusinessAllocation *model.DNSBusinessAllocation
 	ReceiptID          string
 	Hostname           string
@@ -67,6 +68,7 @@ func QualityEvidenceFromDNSDecision(receipt DNSDecisionReceipt, now time.Time, m
 		if model.ValidateDNSPhysicalSelection(selection) != nil || selection.CapturedAt.After(receipt.ObservedAt) {
 			return QualityAnswerEvidence{}, errors.New("actual DNS physical assignment is invalid")
 		}
+		evidence.PreviousSelection = model.CloneDNSPhysicalSelection(selection)
 		if selection.BusinessAllocation != nil {
 			evidence.BusinessAllocation = model.CloneDNSBusinessAllocation(selection.BusinessAllocation)
 			evidence.EdgeID = selection.PrimaryEdgeID
@@ -82,6 +84,27 @@ func QualityEvidenceFromDNSDecision(receipt DNSDecisionReceipt, now time.Time, m
 		}
 		at := *order.PrimarySince
 		evidence.PrimarySince = &at
+	}
+	if order := selected.Policy.PhysicalOrder; selected.Policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalOrder && order != nil && order.QualityObservedAt != nil && model.ValidateDNSPhysicalOrder(order) == nil {
+		if order.QualityObservedAt.After(receipt.ObservedAt) {
+			return QualityAnswerEvidence{}, errors.New("future retained quality observation time")
+		}
+		at := *order.QualityObservedAt
+		ordered := []string{evidence.EdgeID}
+		for _, id := range order.OrderedEdgeIDs {
+			if id != evidence.EdgeID {
+				ordered = append(ordered, id)
+			}
+		}
+		// The actual signed fallback publication carries the original timestamp
+		// across restarts; rebuilding a quality receipt cannot extend it.
+		evidence.PreviousSelection = &model.DNSPhysicalSelection{Version: model.DNSPhysicalSelectionVersion,
+			PrimaryEdgeID: evidence.EdgeID, OrderedEdgeIDs: ordered, QualityState: "retained", QualityObservedAt: &at,
+			EvidenceDigest: evidence.Publication.Digest, DNSReceiptID: evidence.ReceiptID, LoadedDigest: evidence.Publication.Digest,
+			PolicyDigest: evidence.Publication.PolicyDigest, Scope: evidence.Scope, CapturedAt: receipt.ObservedAt, PrimarySince: evidence.PrimarySince}
+		if model.ValidateDNSPhysicalSelection(evidence.PreviousSelection) != nil {
+			return QualityAnswerEvidence{}, errors.New("invalid retained quality publication identity")
+		}
 	}
 	var input dnsDecisionReplay
 	if err := json.Unmarshal(receipt.ReplayInput, &input); err != nil {

@@ -13,7 +13,7 @@ from scripts.bootstrap_cell_producer import authority_identity, digest, ensure_i
 from scripts.observe_front_candidate import now
 from scripts.publish_agent_edge_shadow import API, canonical
 from scripts.reconfigure_cell_producer import DIGEST, IDENTITY, validate_ref
-from scripts.reconfigure_physical_dns import POLICY_FIELDS, SCOPE, baseline, bounded_json, resolve_baseline
+from scripts.reconfigure_physical_dns import POLICY_FIELDS, SCOPE, baseline, bounded_json, resolve_baseline, network_policy_fields
 from scripts.configure_business_exploration import BusinessBaselineChanged, check_business_delta, check_business_retirement, resolve_business_anchors, validate_business_preview, validate_business_retirement, validate_business_retirement_preview, validate_business_routes
 
 
@@ -48,7 +48,7 @@ def validate(config):
     if type(dynamic["refresh_queries_per_cycle"]) is not int or not 1 <= dynamic["refresh_queries_per_cycle"] <= 128 or type(dynamic["refresh_concurrency"]) is not int or not 1 <= dynamic["refresh_concurrency"] <= min(8, dynamic["refresh_queries_per_cycle"]):
         raise ValueError("bounded capture concurrency required")
     network = dynamic["policy"]
-    if set(network) != POLICY_FIELDS or network.get("version") not in ["physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6"] or any(network[key] is None for key in POLICY_FIELDS):
+    if set(network) != network_policy_fields(network) or network.get("version") not in ["physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6", "physical-network-paired-continuity-v7"] or any(network[key] is None for key in POLICY_FIELDS):
         raise ValueError("complete explicit delivery policy required")
     validate_availability_routes(query.get("availability_routes", []))
     if precondition["operation"] == "business_exploration":

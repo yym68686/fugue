@@ -43,6 +43,9 @@ func (p OfflineEdgeRecoveryPolicy) Validate() error {
 	if p.Capacity != nil && (p.Capacity.Validate() != nil || p.Capacity.MinimumStableSeconds > p.FreshnessSeconds) {
 		return fmt.Errorf("capacity recovery policy is invalid or exceeds observation continuity")
 	}
+	if p.Capacity != nil && p.Capacity.Version == CapacityContinuityVersion && p.Capacity.RetainAdmissionSeconds < p.FreshnessSeconds {
+		return fmt.Errorf("capacity retention cannot be shorter than freshness")
+	}
 	return nil
 }
 
@@ -72,6 +75,9 @@ func OfflineRecoveryDigest(hold OfflineEdge) string { d, _ := platformconfig.Dig
 
 func (o OfflineRecoveryObservation) Ready(hold OfflineEdge, at time.Time) bool {
 	p := hold.Recovery
+	if p != nil && p.Capacity != nil && p.Capacity.Version == CapacityContinuityVersion {
+		return o.continuityReady(hold, at)
+	}
 	if p != nil && p.Capacity != nil && (o.Successes != p.SuccessThreshold || o.Failures != 0 || o.LastResult != "capacity_verified" || !o.Capacity.Passes(*p.Capacity, hold.EdgeID) || !o.Capacity.CheckedAt.Equal(o.LastSuccess) || o.FirstSuccess.IsZero() || o.FirstSuccess.After(o.LastSuccess) || o.LastSuccess.Sub(o.FirstSuccess) < time.Duration(p.Capacity.MinimumStableSeconds)*time.Second) {
 		return false
 	}
@@ -86,6 +92,9 @@ func (o OfflineRecoveryObservation) RecordCapacity(hold OfflineEdge, at time.Tim
 	p := hold.Recovery
 	if p == nil {
 		return OfflineRecoveryObservation{}
+	}
+	if p.Capacity != nil && p.Capacity.Version == CapacityContinuityVersion {
+		return o.recordContinuity(hold, at, passed, validUntil, capacity, result)
 	}
 	if p.Capacity != nil {
 		// Replaying one outcome cannot manufacture consecutive observations.

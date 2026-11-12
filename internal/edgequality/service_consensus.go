@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/clientmeasurement"
+	"fugue/internal/model"
 )
 
 func ServiceConsensusSnapshot(hostname string, receipts []Receipt) (Snapshot, error) {
@@ -26,6 +27,9 @@ func ServiceConsensusSnapshot(hostname string, receipts []Receipt) (Snapshot, er
 	root := Snapshot{Schema: Schema, Hostname: hostname, TrafficClass: first.TrafficClass, Scope: first.Scope, CapturedAt: first.CapturedAt, Policy: first.Policy,
 		CurrentEdgeID: first.CurrentEdgeID, LastSwitchAt: first.LastSwitchAt, ActualDNSReceipt: first.ActualDNSReceipt, ServiceReceipts: ordered,
 		Candidates: []Candidate{}, Observations: []Observation{}, Blockers: []string{}, Limitations: []string{"shared_dns_alias_requires_all_service_owners", "dns_resolver_scope_is_not_terminal_path"}}
+	if first.Policy.Version == PairedContinuityPolicyVersion {
+		root.PreviousSelection = model.CloneDNSPhysicalSelection(first.PreviousSelection)
+	}
 	seen := map[string]bool{}
 	nodes := map[string][]Candidate{}
 	for _, receipt := range ordered {
@@ -81,7 +85,7 @@ func ServiceEvidenceKey(snapshot Snapshot) string {
 	return snapshot.Hostname + "\x00" + snapshot.PathPrefix + "\x00" + snapshot.TrafficClass
 }
 
-func evaluateServiceConsensus(snapshot Snapshot) (Result, error) {
+func evaluateServiceConsensus(snapshot Snapshot) (result Result, err error) {
 	expected, err := ServiceConsensusSnapshot(snapshot.Hostname, snapshot.ServiceReceipts)
 	if err != nil {
 		return Result{}, err
@@ -91,8 +95,24 @@ func evaluateServiceConsensus(snapshot Snapshot) (Result, error) {
 	if !bytes.Equal(actualJSON, expectedJSON) {
 		return Result{}, errors.New("shared-service aggregate differs from captured service receipts")
 	}
-	result := Result{Mode: "shadow", DNSUnchanged: true, Hypothesis: "hold", ProposedEdgeID: snapshot.CurrentEdgeID, Candidates: []Assessment{}, ProbeEdgeIDs: []string{}, RejectedRecords: map[string]int{},
+	result = Result{Mode: "shadow", DNSUnchanged: true, Hypothesis: "hold", ProposedEdgeID: snapshot.CurrentEdgeID, Candidates: []Assessment{}, ProbeEdgeIDs: []string{}, RejectedRecords: map[string]int{},
 		Blockers: append([]string{"shadow_only_not_serving_authority"}, snapshot.Blockers...)}
+	if snapshot.Policy.Version == PairedContinuityPolicyVersion {
+		defer func() {
+			var oldest *time.Time
+			for _, receipt := range snapshot.ServiceReceipts {
+				if receipt.Result.QualityState != "measured" || receipt.Result.QualityObservedAt == nil {
+					classifyContinuityQuality(snapshot, &result)
+					return
+				}
+				if oldest == nil || receipt.Result.QualityObservedAt.Before(*oldest) {
+					at := *receipt.Result.QualityObservedAt
+					oldest = &at
+				}
+			}
+			result.QualityState, result.QualityObservedAt = "measured", oldest
+		}()
+	}
 	for _, candidate := range snapshot.Candidates {
 		assessment := Assessment{EdgeID: candidate.EdgeID, EdgeGroupID: candidate.EdgeGroupID, HardGates: append([]string{}, candidate.HardGates...), Ready: candidate.RouteProofVerified, Metrics: map[string]Metric{}, Missing: []string{}, BucketCount: snapshot.Policy.RequiredBuckets}
 		for _, receipt := range snapshot.ServiceReceipts {

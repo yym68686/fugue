@@ -20661,7 +20661,12 @@ components:
       required: [version, traffic_class, reference_edge_ids, minimum_bytes_per_second, max_elapsed_milliseconds, minimum_stable_seconds]
       description: Opt-in capacity recovery gate for the explicitly pinned static platform route (streaming class), in addition to route/TLS proof. Each round transfers the same signed, nonce-bound, uncompressed 1 MiB payload from the held Edge and one available declared reference. Full round elapsed time includes connection, TLS, headers and body. Both responses and socket attestations must verify. The held member's physical Front and Worker must match current group code authority before and after measurement. This grants only candidate eligibility; code-release holds, configuration publication, DNS proofs and LKG remain separate. Missing or unsupported evidence keeps the member held. No provider billing date is treated as capacity evidence.
       properties:
-        version: {type: string, enum: [edge-capacity-recovery-v1]}
+        version: {type: string, enum: [edge-capacity-recovery-v1, edge-capacity-recovery-continuity-v2]}
+        retain_admission_seconds:
+          type: integer
+          minimum: 600
+          maximum: 86400
+          description: Required only for continuity-v2 and at least freshness_seconds. Bounds reuse of a fully recovered checkpoint during missing or inconclusive observations. Does not extend route/TLS proofs, suppress confirmed failures, or admit an incomplete recovery streak. V1 must omit it.
         traffic_class: {type: string, enum: [streaming]}
         reference_edge_ids:
           type: array
@@ -20705,7 +20710,9 @@ components:
         evaluated_at: {type: string, format: date-time}
         scope: {type: string, enum: [global]}
         state: {type: string, enum: [not_configured, allowed, suspended, unavailable, identity_conflict]}
-        recovery_state: {type: string, enum: [probing, ready, unavailable]}
+        recovery_state: {type: string, enum: [probing, ready, review_overdue, retention_expired, unavailable]}
+        recovery_last_success_at: {type: string, format: date-time}
+        recovery_retain_until: {type: string, format: date-time}
         recovery_last_probe_at: {type: string, format: date-time}
         recovery_last_result:
           type: string
@@ -21424,9 +21431,14 @@ components:
     PhysicalEdgeQualityPolicy:
       type: object
       additionalProperties: false
-      description: V6 preserves historical V4/V5 replay. With comparable completed downloads or explicit excess incumbent transfer failures, a retransmission metric observed on only one edge is excluded from both comparison costs and adds one configured uncertainty budget to the challenger. Raw observations remain intact. Missing optional packet counters cannot veto otherwise sufficient delivery evidence. Every sufficiently sampled cohort must still show sustained advantage, and capacity, cooldown and route readiness gates remain mandatory.
+      description: V7 preserves historical V2-V6 replay. A new quality switch requires authenticated paired rounds from the same public peer network across completed windows; passive traffic or service RTT alone cannot establish a client winner. Explicit connection and transfer failures remain comparable even without RTT or a completed download. Candidate measurement membership is independent of serving DNS membership, with fresh exact route/TLS witnesses mandatory. Missing optional metrics stay unknown; asymmetric retransmission costs are excluded with bounded uncertainty. An earlier verified order can be retained for explicitly bounded time without renewing its original evidence timestamp or promoting a new winner. Current admission, capacity and cooldown gates remain mandatory.
       required: [version, window_seconds, bucket_seconds, required_buckets, minimum_records, cooldown_seconds, evidence_max_age_seconds, advantage_ms, advantage_ratio, unknown_cost_ms, uncertainty_ms, failure_cost_ms, capacity_cost_ms, throughput_cost_ms, throughput_target_bps, probe_interval_seconds, probe_budget_per_interval]
       properties:
+        retain_order_seconds:
+          type: integer
+          minimum: 600
+          maximum: 86400
+          description: Required for physical-network-paired-continuity-v7 only. Bounds retaining a previously measured order while comparable quality observations are unavailable; original quality_observed_at is preserved. Fresh route/TLS and current admission remain required. Never authorizes a new promotion using stale samples.
         maximum_node_utilization: {type: number, minimum: 0, maximum: 1, description: Explicit v2 node CPU/memory headroom gate. Does not declare link or application capacity.}
         version: {type: string}
         window_seconds: {type: integer}
@@ -21467,7 +21479,7 @@ components:
         client_retransmission_rate: {type: number, nullable: true, minimum: 0, maximum: 1, description: 'V4 only: retransmitted data segments divided by sent data segments in a verified public TCP delivery window. This is not a connection failure rate.'}
         client_cohort: {type: string, description: Coarse observed public TCP peer network. Never equated with the recursive DNS resolver or every terminal.}
         capacity_source: {type: string, description: Explicit capacity provenance; node capacity is not inferred from application concurrency.}
-        route_witness_id: {type: string, description: Exact captured TLS witness used to bind a historical measurement or node-capacity observation. Replay requires the original raw facts; never a substitute for fresh current DNS route proof.}
+        route_witness_id: {type: string, description: Exact captured TLS witness used to bind a historical measurement or node-capacity observation. Replay requires the original raw facts. V7 also accepts fresh exact independent candidate witnesses; current route readiness remains mandatory.}
         node_capacity_id: {type: string, description: Exact separately captured physical-node capacity observation. Mutually exclusive with route_witness_id; never fills historical network buckets or invents RTT.}
         id: {type: string}
         edge_id: {type: string}
@@ -21493,7 +21505,7 @@ components:
       type: object
       additionalProperties: false
       required: [id, edge_id, edge_group_id, address, capacity]
-      description: Read-only authenticated node facts, independent of business traffic or route witness scheduling. Address and physical identity must match the actual DNS candidate; Kubernetes node UID, limits and pressure are checked before and after collection. Current facts cannot replace missing historical capacity observations.
+      description: Read-only authenticated node facts, independent of business traffic. Address and physical identity must match a proven candidate, including a fresh independent candidate in V7; Kubernetes node UID, limits and pressure are checked before and after collection. Current facts cannot replace missing historical capacity observations.
       properties:
         id: {type: string, maxLength: 128}
         edge_id: {type: string, maxLength: 128}
@@ -21505,6 +21517,8 @@ components:
       additionalProperties: false
       required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
       properties:
+        previous_selection:
+          $ref: '#/components/schemas/DNSPhysicalSelection'
         service_receipts:
           type: array
           minItems: 2
@@ -21565,6 +21579,13 @@ components:
         state: {type: string, enum: [observed, unknown]}
         value: {type: number}
         records: {type: integer}
+        last_observed_at:
+          type: string
+          format: date-time
+          description: Original latest observation time, including stale observations whose state is unknown. V7 only.
+        score_cost_ms:
+          type: number
+          description: Contribution of this observed metric to the raw assessment score. Omitted for unknown metrics; comparison exclusions and uncertainty are reported separately.
     PhysicalEdgeQualityAssessment:
       type: object
       additionalProperties: false
@@ -21592,6 +21613,8 @@ components:
       additionalProperties: false
       required: [mode, dns_unchanged, promotion_ready, hypothesis, proposed_edge_id, probe_edge_ids, probe_executed, sustained_buckets, candidates, rejected_records, blockers]
       properties:
+        quality_state: {type: string, enum: [learning, measured, retained]}
+        quality_observed_at: {type: string, format: date-time}
         comparisons:
           type: array
           maxItems: 1024
@@ -21622,6 +21645,14 @@ components:
       required: [edge_id, incumbent_edge_id, cohort, incumbent_lower, challenger_upper, sustained_buckets, ready, advantageous]
       description: Comparison within one actually observed common TCP peer network. Bands combine observed variation and a configured uncertainty budget, not a statistical confidence interval or a worst-case bound for unobserved terminals.
       properties:
+        incumbent_metrics:
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/PhysicalEdgeQualityMetric'}
+          description: V7 metrics for the incumbent in this exact paired client cohort. Unknown values and original observation times remain explicit.
+        challenger_metrics:
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/PhysicalEdgeQualityMetric'}
+          description: V7 metrics for the challenger in the same paired client cohort. Costs are raw metric contributions before the separately reported comparison exclusions.
         excluded_metric_costs:
           type: array
           description: V6 optional metrics excluded from both comparison costs because only one side observed them; raw observations are preserved.
@@ -22885,6 +22916,7 @@ components:
       required: [version, ordered_edge_ids]
       description: Explicit immutable physical-edge order. This is configuration authority, not a claim of measured network superiority. The first currently route/TLS-ready endpoint wins. Geography, numeric candidate scores, group weights and exploration cannot reorder it. Deploying support does not convert an existing signed policy.
       properties:
+        quality_observed_at: {type: string, format: date-time, description: Optional original quality timestamp carried from a verified dynamic order. V7 fallback may retain its filtered order only within retain_order_seconds; this timestamp never renews during fallback and does not assert fresh measured quality.}
         primary_since: {type: string, format: date-time, description: Optional preserved primary assignment epoch from verified quality publication; never inferred from process start or sample time.}
         version: {type: string, enum: [physical-order-v1]}
         ordered_edge_ids: {type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
@@ -22894,7 +22926,8 @@ components:
       required: [version, primary_edge_id, ordered_edge_ids, evidence_digest, dns_receipt_id, loaded_digest, policy_digest, scope, captured_at]
       description: Immutable physical-edge order compiled from verified evidence. The historical physical-edge-network-v1 version never explores. Explicit physical-edge-business-v1 may execute only its embedded signed allocation until that allocation expires; it then preserves the declared baseline order. Both versions filter by current route/TLS readiness without legacy ranking. Allocation expiry does not invalidate a positive serving artifact.
       properties:
-        quality_state: {type: string, enum: [learning, measured], description: 'V4 distinguishes preserving a fresh route-ready current primary while collecting evidence from a measured quality selection. Learning never fabricates network metrics.'}
+        quality_state: {type: string, enum: [learning, measured, retained], description: 'Measured uses comparable fresh client evidence in V7; retained preserves the prior verified order and original quality_observed_at within explicit policy bounds; learning claims no quality winner.'}
+        quality_observed_at: {type: string, format: date-time, description: Original comparable quality evidence time. Retained orders never renew it.}
         version: {type: string, enum: [physical-edge-network-v1, physical-edge-business-v1]}
         business_allocation: {$ref: '#/components/schemas/DNSBusinessAllocation'}
         primary_edge_id: {type: string, maxLength: 128}
@@ -37747,7 +37780,7 @@ components:
             - type: object
               required: [maximum_node_utilization]
               properties:
-                version: {type: string, enum: [physical-network-delivery-v4, physical-network-failure-aware-v5, physical-network-comparable-delivery-v6]}
+                version: {type: string, enum: [physical-network-delivery-v4, physical-network-failure-aware-v5, physical-network-comparable-delivery-v6, physical-network-paired-continuity-v7]}
         refresh_queries_per_cycle: {type: integer, minimum: 1, maximum: 128}
         refresh_concurrency: {type: integer, minimum: 1, maximum: 8}
     PlatformPhysicalQualityRoute:
@@ -37765,7 +37798,7 @@ components:
             - type: object
               required: [maximum_node_utilization]
               properties:
-                version: {type: string, enum: [physical-network-cohort-v2, physical-network-bounded-v3, physical-network-delivery-v4, physical-network-failure-aware-v5, physical-network-comparable-delivery-v6]}
+                version: {type: string, enum: [physical-network-cohort-v2, physical-network-bounded-v3, physical-network-delivery-v4, physical-network-failure-aware-v5, physical-network-comparable-delivery-v6, physical-network-paired-continuity-v7]}
     PlatformDNSAuthorityPolicy:
       type: object
       additionalProperties: false

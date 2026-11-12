@@ -23,6 +23,20 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_continuity_requires_explicit_versioned_retention(self):
+        config, _ = fixture()
+        policy = config['projection_policy']['dns_query_policy']['dynamic_quality']['policy']
+        policy.update(version='physical-network-paired-continuity-v7', retain_order_seconds=86400)
+        quality.validate(config)
+        for value in [None, True, 599, 86401]:
+            changed = copy.deepcopy(config)
+            changed['projection_policy']['dns_query_policy']['dynamic_quality']['policy']['retain_order_seconds'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                quality.validate(changed)
+        policy['version'] = 'physical-network-comparable-delivery-v6'
+        with self.assertRaises(ValueError):
+            quality.validate(config)
+
     def test_redundant_availability_requires_exact_versioned_bounds(self):
         policy = {"version": "dns-availability-redundant-v2", "max_answers": 2, "ordered_edge_ids": ["edge-a", "edge-b"], "recovery_successes": 3, "recovery_min_seconds": 60}
         quality.validate_availability_routes([{"hostname": "mesh.example.test", "policy": policy}])

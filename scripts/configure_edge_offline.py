@@ -54,8 +54,13 @@ def holds(policy):
 
 def validate_capacity_policy(p, edge_id, freshness):
     required = {'version', 'traffic_class', 'reference_edge_ids', 'minimum_bytes_per_second', 'max_elapsed_milliseconds', 'minimum_stable_seconds'}
-    if not isinstance(p, dict) or set(p) != required or p['version'] != 'edge-capacity-recovery-v1' or p['traffic_class'] != 'streaming':
+    continuity = isinstance(p, dict) and p.get('version') == 'edge-capacity-recovery-continuity-v2'
+    if continuity:
+        required.add('retain_admission_seconds')
+    if not isinstance(p, dict) or set(p) != required or p['version'] not in ['edge-capacity-recovery-v1', 'edge-capacity-recovery-continuity-v2'] or p['traffic_class'] != 'streaming':
         raise ValueError('explicit capacity recovery contract required')
+    if continuity and (type(p['retain_admission_seconds']) is not int or not max(600, freshness) <= p['retain_admission_seconds'] <= 86400):
+        raise ValueError('explicit bounded recovered admission retention required')
     ids = p['reference_edge_ids']
     if not isinstance(ids, list) or not 1 <= len(ids) <= 3 or any(not isinstance(i, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', i) or i == edge_id for i in ids) or len(set(ids)) != len(ids):
         raise ValueError('unique other physical capacity references required')
@@ -71,7 +76,9 @@ def capacity_observation_ready(hold, observation, success):
     try:
         e = observation['capacity']
         code = e['code']
-        if observation.get('last_result') != 'capacity_verified' or observation['successes'] != hold['recovery']['success_threshold'] or observation['failures'] != 0:
+        continuity = policy['version'] == 'edge-capacity-recovery-continuity-v2'
+        allowed_results = ['capacity_verified', 'reference_unavailable', 'evidence_unavailable', 'code_observation_unavailable'] if continuity else ['capacity_verified']
+        if observation.get('last_result') not in allowed_results or observation['successes'] != hold['recovery']['success_threshold'] or observation['failures'] != 0:
             return False
         first = datetime.datetime.fromisoformat(observation['first_success'].replace('Z', '+00:00'))
         checked = datetime.datetime.fromisoformat(e['checked_at'].replace('Z', '+00:00'))
@@ -138,6 +145,8 @@ def recovery_declaration_digest(hold):
         value['recovery'] = {key: hold['recovery'][key] for key in ('hostname', 'path', 'probe_interval_seconds', 'probe_timeout_seconds', 'success_threshold', 'failure_threshold', 'freshness_seconds')}
         if 'capacity' in hold['recovery']:
             value['recovery']['capacity'] = {key: hold['recovery']['capacity'][key] for key in ('version', 'traffic_class', 'reference_edge_ids', 'minimum_bytes_per_second', 'max_elapsed_milliseconds', 'minimum_stable_seconds')}
+            if hold['recovery']['capacity'].get('retain_admission_seconds'):
+                value['recovery']['capacity']['retain_admission_seconds'] = hold['recovery']['capacity']['retain_admission_seconds']
     raw = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
     for character, escape in [('<', r'\u003c'), ('>', r'\u003e'), ('&', r'\u0026'), ('\u2028', r'\u2028'), ('\u2029', r'\u2029')]:
         raw = raw.replace(character, escape)
@@ -186,7 +195,10 @@ def validate_preview(previous, current, policy):
             attempt = datetime.datetime.fromisoformat(o['last_attempt'].replace('Z', '+00:00'))
             success = datetime.datetime.fromisoformat(o['last_success'].replace('Z', '+00:00'))
             expiry = datetime.datetime.fromisoformat(o['proof_valid_until'].replace('Z', '+00:00'))
-            if at.tzinfo is not None and success <= attempt <= at < expiry and (at-success).total_seconds() <= p['freshness_seconds'] and 0 <= o.get('failures', -1) < p['failure_threshold'] and 0 <= o.get('successes', -1) <= p['success_threshold'] and capacity_observation_ready(hold, o, success):
+            continuity = p.get('capacity', {}).get('version') == 'edge-capacity-recovery-continuity-v2'
+            lease_valid = success < expiry if continuity else at < expiry
+            retention = p['capacity']['retain_admission_seconds'] if continuity else p['freshness_seconds']
+            if at.tzinfo is not None and success <= attempt <= at and lease_valid and (at-success).total_seconds() <= retention and 0 <= o.get('failures', -1) < p['failure_threshold'] and 0 <= o.get('successes', -1) <= p['success_threshold'] and capacity_observation_ready(hold, o, success):
                 suspended.remove(hold['edge_id'])
                 break
     if not endpoints or len(endpoints) > 4096 or any(endpoint['edge_id'] in suspended for endpoint in endpoints):

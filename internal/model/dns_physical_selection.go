@@ -13,9 +13,10 @@ const DNSPhysicalSelectionVersion = "physical-edge-network-v1"
 const DNSPhysicalBusinessSelectionVersion = "physical-edge-business-v1"
 
 type DNSPhysicalOrder struct {
-	PrimarySince   *time.Time `json:"primary_since,omitempty"`
-	Version        string     `json:"version"`
-	OrderedEdgeIDs []string   `json:"ordered_edge_ids"`
+	QualityObservedAt *time.Time `json:"quality_observed_at,omitempty"`
+	PrimarySince      *time.Time `json:"primary_since,omitempty"`
+	Version           string     `json:"version"`
+	OrderedEdgeIDs    []string   `json:"ordered_edge_ids"`
 }
 
 func ValidateDNSPhysicalOrder(order *DNSPhysicalOrder) error {
@@ -24,6 +25,9 @@ func ValidateDNSPhysicalOrder(order *DNSPhysicalOrder) error {
 	}
 	if order.PrimarySince != nil && order.PrimarySince.IsZero() {
 		return errors.New("invalid preserved primary assignment epoch")
+	}
+	if order.QualityObservedAt != nil && order.QualityObservedAt.IsZero() {
+		return errors.New("invalid preserved quality observation time")
 	}
 	seen := map[string]bool{}
 	for _, edgeID := range order.OrderedEdgeIDs {
@@ -40,6 +44,10 @@ func CloneDNSPhysicalOrder(order *DNSPhysicalOrder) *DNSPhysicalOrder {
 		return nil
 	}
 	cloned := &DNSPhysicalOrder{Version: order.Version, OrderedEdgeIDs: append([]string(nil), order.OrderedEdgeIDs...)}
+	if order.QualityObservedAt != nil {
+		at := *order.QualityObservedAt
+		cloned.QualityObservedAt = &at
+	}
 	if order.PrimarySince != nil {
 		at := *order.PrimarySince
 		cloned.PrimarySince = &at
@@ -48,6 +56,7 @@ func CloneDNSPhysicalOrder(order *DNSPhysicalOrder) *DNSPhysicalOrder {
 }
 
 type DNSPhysicalSelection struct {
+	QualityObservedAt  *time.Time             `json:"quality_observed_at,omitempty"`
 	BusinessAllocation *DNSBusinessAllocation `json:"business_allocation,omitempty"`
 	QualityState       string                 `json:"quality_state,omitempty"`
 	Version            string                 `json:"version"`
@@ -85,8 +94,11 @@ func ValidateDNSPhysicalSelection(selection *DNSPhysicalSelection) error {
 	} else if selection.BusinessAllocation != nil {
 		return errors.New("historical physical selection cannot authorize business exploration")
 	}
-	if selection.QualityState != "" && selection.QualityState != "learning" && selection.QualityState != "measured" {
+	if selection.QualityState != "" && selection.QualityState != "learning" && selection.QualityState != "measured" && selection.QualityState != "retained" {
 		return errors.New("invalid physical-edge quality state")
+	}
+	if selection.QualityState == "retained" && selection.QualityObservedAt == nil || selection.QualityObservedAt != nil && (selection.QualityObservedAt.IsZero() || selection.QualityObservedAt.After(selection.CapturedAt)) {
+		return errors.New("invalid original quality observation time")
 	}
 	if selection.PrimarySince != nil && (selection.PrimarySince.IsZero() || selection.PrimarySince.After(selection.CapturedAt)) {
 		return errors.New("invalid physical-edge primary assignment time")
@@ -122,6 +134,10 @@ func CloneDNSPhysicalSelection(selection *DNSPhysicalSelection) *DNSPhysicalSele
 		return nil
 	}
 	cloned := *selection
+	if selection.QualityObservedAt != nil {
+		at := *selection.QualityObservedAt
+		cloned.QualityObservedAt = &at
+	}
 	cloned.BusinessAllocation = CloneDNSBusinessAllocation(selection.BusinessAllocation)
 	cloned.OrderedEdgeIDs = append([]string(nil), selection.OrderedEdgeIDs...)
 	if selection.PrimarySince != nil {

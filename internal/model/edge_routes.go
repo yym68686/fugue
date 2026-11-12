@@ -1037,6 +1037,8 @@ type EdgeDNSAdmissionIntent struct {
 	Reason                              string                `json:"reason,omitempty"`
 	ExpectedRecoveryDate                string                `json:"expected_recovery_date,omitempty"`
 	RecoveryState                       string                `json:"recovery_state,omitempty"`
+	RecoveryLastSuccessAt               *time.Time            `json:"recovery_last_success_at,omitempty"`
+	RecoveryRetainUntil                 *time.Time            `json:"recovery_retain_until,omitempty"`
 	RecoveryLastProbeAt                 *time.Time            `json:"recovery_last_probe_at,omitempty"`
 	RecoveryLastResult                  string                `json:"recovery_last_result,omitempty"`
 	RecoveryCapacityBytesPerSecond      float64               `json:"recovery_capacity_bytes_per_second,omitempty"`

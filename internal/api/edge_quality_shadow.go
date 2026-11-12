@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -40,7 +41,7 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	receipt, err := s.capturePhysicalQualityPathForDNS(ctx, hostname, pathPrefix, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultComparableDeliveryPolicy(), nil)
+	receipt, err := s.capturePhysicalQualityPathForDNS(ctx, hostname, pathPrefix, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultPairedContinuityPolicy(), nil)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -172,6 +173,9 @@ func (s *Server) capturePhysicalQualityPathForDNS(ctx context.Context, hostname,
 		} else if len(decisions.Snapshot.Receipts) != 1 {
 			snapshot.Blockers = append(snapshot.Blockers, "actual_dns_receipt_not_retained")
 		} else {
+			if networkPolicy.Version == model.PhysicalPairedContinuityPolicyVersion {
+				s.captureIndependentQualityProofs(ctx, &snapshot, nodes)
+			}
 			s.captureQualityCapacity(ctx, &snapshot, decisions.Snapshot.Receipts[0], nodes)
 			snapshot.CapturedAt = time.Now().UTC()
 			if err := bindPhysicalQualityDNS(&snapshot, decisions.Snapshot.Receipts[0]); err != nil {
@@ -228,6 +232,10 @@ func bindPhysicalQualityDNS(snapshot *edgequality.Snapshot, receipt dnsserver.DN
 }
 
 func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsserver.QualityAnswerEvidence) {
+	if snapshot.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+		snapshot.PreviousSelection = model.CloneDNSPhysicalSelection(evidence.PreviousSelection)
+		evidence = independentQualityEvidence(*snapshot, evidence)
+	}
 	snapshot.CurrentEdgeID = evidence.EdgeID
 	snapshot.LastSwitchAt = nil
 	if evidence.PrimarySince != nil {
@@ -257,7 +265,9 @@ func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsser
 			}
 		}
 		if len(proofs) != 1 {
-			candidate.HardGates = append(candidate.HardGates, "exact_service_route_proof_not_unique")
+			if !slices.Contains(candidate.HardGates, "exact_service_route_proof_not_unique") {
+				candidate.HardGates = append(candidate.HardGates, "exact_service_route_proof_not_unique")
+			}
 			continue
 		}
 		proof := proofs[0]

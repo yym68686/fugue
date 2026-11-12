@@ -65,6 +65,7 @@ type Observation struct {
 }
 
 type Snapshot struct {
+	PreviousSelection   *model.DNSPhysicalSelection   `json:"previous_selection,omitempty"`
 	PathPrefix          string                        `json:"path_prefix,omitempty"`
 	ServiceReceipts     []Receipt                     `json:"service_receipts,omitempty"`
 	DNSHostname         string                        `json:"dns_hostname,omitempty"`
@@ -87,9 +88,11 @@ type Snapshot struct {
 }
 
 type Metric struct {
-	State   string  `json:"state"`
-	Value   float64 `json:"value"`
-	Records int     `json:"records"`
+	LastObservedAt *time.Time `json:"last_observed_at,omitempty"`
+	ScoreCostMS    *float64   `json:"score_cost_ms,omitempty"`
+	State          string     `json:"state"`
+	Value          float64    `json:"value"`
+	Records        int        `json:"records"`
 }
 
 type Assessment struct {
@@ -107,18 +110,20 @@ type Assessment struct {
 }
 
 type Result struct {
-	Comparisons      []NetworkComparison `json:"comparisons,omitempty"`
-	Mode             string              `json:"mode"`
-	DNSUnchanged     bool                `json:"dns_unchanged"`
-	PromotionReady   bool                `json:"promotion_ready"`
-	Hypothesis       string              `json:"hypothesis"`
-	ProposedEdgeID   string              `json:"proposed_edge_id"`
-	ProbeEdgeIDs     []string            `json:"probe_edge_ids"`
-	ProbeExecuted    bool                `json:"probe_executed"`
-	SustainedBuckets int                 `json:"sustained_buckets"`
-	Candidates       []Assessment        `json:"candidates"`
-	RejectedRecords  map[string]int      `json:"rejected_records"`
-	Blockers         []string            `json:"blockers"`
+	QualityState      string              `json:"quality_state,omitempty"`
+	QualityObservedAt *time.Time          `json:"quality_observed_at,omitempty"`
+	Comparisons       []NetworkComparison `json:"comparisons,omitempty"`
+	Mode              string              `json:"mode"`
+	DNSUnchanged      bool                `json:"dns_unchanged"`
+	PromotionReady    bool                `json:"promotion_ready"`
+	Hypothesis        string              `json:"hypothesis"`
+	ProposedEdgeID    string              `json:"proposed_edge_id"`
+	ProbeEdgeIDs      []string            `json:"probe_edge_ids"`
+	ProbeExecuted     bool                `json:"probe_executed"`
+	SustainedBuckets  int                 `json:"sustained_buckets"`
+	Candidates        []Assessment        `json:"candidates"`
+	RejectedRecords   map[string]int      `json:"rejected_records"`
+	Blockers          []string            `json:"blockers"`
 }
 
 type Receipt struct {

@@ -383,6 +383,9 @@ func applyDynamicQualityHost(projection *platformIntentProjectionResponse, polic
 				if compiled.Selection.QualityState == "learning" {
 					state = "learning_current_ready_primary"
 				}
+				if compiled.Selection.QualityState == "retained" {
+					state = "retained_previous_verified_order"
+				}
 			}
 			return state, nil
 		}
@@ -392,11 +395,16 @@ func applyDynamicQualityHost(projection *platformIntentProjectionResponse, polic
 	if availability == nil {
 		return state, qualityErr
 	}
-	// Do not retain a quality-only order when its evidence cannot be refreshed.
-	// The independent signed host policy authorizes this order, not the failed
-	// receipt. The compiler and DNS executor still enforce topology and recovery.
+	// V7 may retain the last verified order under its explicit bound. This is
+	// availability routing with its original quality time, never fresh scoring.
+	// The compiler and DNS executor still enforce topology and recovery.
 	if err := applyDNSAvailabilityBaseline(projection, jobs[0].Route.Hostname, availability); err != nil {
 		return state, err
+	}
+	for _, fact := range projection.RuntimeSnapshot.DNSSelections {
+		if fact.Hostname == jobs[0].Route.Hostname && fact.Reason == "retained_previous_verified_order_quality_unavailable" {
+			return "retained_previous_verified_order", nil
+		}
 	}
 	return "availability_only_quality_unavailable", nil
 }
@@ -564,6 +572,7 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 	s.restorePublishedQualityEvidenceContext(ctx, *projection, jobs, baseline, time.Now)
 	orders := map[string][]string{}
 	epochs := map[string]*time.Time{}
+	qualityTimes := map[string]*time.Time{}
 	for _, view := range payload.Views {
 		for _, record := range view.Records {
 			key := view.NodeID + "\x00" + record.Name
@@ -573,9 +582,18 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 			if record.AnswerPolicy.PhysicalSelection != nil {
 				orders[key] = record.AnswerPolicy.PhysicalSelection.OrderedEdgeIDs
 				epochs[key] = record.AnswerPolicy.PhysicalSelection.PrimarySince
+				selection := record.AnswerPolicy.PhysicalSelection
+				if selection.BusinessAllocation == nil && (selection.QualityState == "measured" || selection.QualityState == "retained") {
+					at := selection.CapturedAt
+					if selection.QualityObservedAt != nil {
+						at = *selection.QualityObservedAt
+					}
+					qualityTimes[key] = &at
+				}
 			} else if record.AnswerPolicy.PhysicalOrder != nil {
 				orders[key] = record.AnswerPolicy.PhysicalOrder.OrderedEdgeIDs
 				epochs[key] = record.AnswerPolicy.PhysicalOrder.PrimarySince
+				qualityTimes[key] = record.AnswerPolicy.PhysicalOrder.QualityObservedAt
 			}
 		}
 	}
@@ -606,6 +624,12 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 			return fmt.Errorf("dynamic quality baseline has no currently authorized endpoint")
 		}
 		projection.Policy.DNSAnswerRules[index].PhysicalOrder = &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: order}
+		if dynamic := projection.Policy.DNSQueryPolicy.DynamicQuality; dynamic != nil && dynamic.Policy.Version == model.PhysicalPairedContinuityPolicyVersion && qualityTimes[key] != nil {
+			at := *qualityTimes[key]
+			if !at.After(time.Now()) && time.Since(at) <= time.Duration(dynamic.Policy.RetainOrderSeconds)*time.Second {
+				projection.Policy.DNSAnswerRules[index].PhysicalOrder.QualityObservedAt = &at
+			}
+		}
 		if len(order) > 0 && order[0] == orders[key][0] && epochs[key] != nil {
 			at := *epochs[key]
 			projection.Policy.DNSAnswerRules[index].PhysicalOrder.PrimarySince = &at

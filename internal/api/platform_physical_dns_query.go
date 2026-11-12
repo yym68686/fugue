@@ -298,6 +298,9 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 		if selection.QualityState == "learning" {
 			updated.Reason = "physical_quality_learning_current_ready_primary"
 		}
+		if selection.QualityState == "retained" {
+			updated.Reason = "physical_quality_retained_previous_verified_order"
+		}
 		updated.PhysicalEvidence = append(json.RawMessage(nil), compiled.Evidence...)
 		for _, candidate := range fact.Candidates {
 			updated.Candidates = append(updated.Candidates, platformconfig.DNSSelectionCandidate{IP: candidate.IP, EdgeID: candidate.EdgeID, EdgeGroupID: candidate.EdgeGroupID})

@@ -5,6 +5,16 @@ from scripts import configure_edge_offline as offline
 from scripts import test_configure_edge_offline as fixtures
 
 class OfflineRecoveryConfigurationTests(unittest.TestCase):
+    def test_continuity_capacity_policy_requires_explicit_bound(self):
+        policy = {'version':'edge-capacity-recovery-continuity-v2','traffic_class':'streaming','reference_edge_ids':['edge-b'],'minimum_bytes_per_second':262144,'max_elapsed_milliseconds':5000,'minimum_stable_seconds':600,'retain_admission_seconds':86400}
+        offline.validate_capacity_policy(policy, 'edge-a', 1800)
+        for value in [None, True, 1799, 86401]:
+            changed = dict(policy, retain_admission_seconds=value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                offline.validate_capacity_policy(changed, 'edge-a', 1800)
+        with self.assertRaises(ValueError):
+            offline.validate_capacity_policy(dict(policy, version='edge-capacity-recovery-v1'), 'edge-a', 1800)
+
     def test_recovered_preview_binds_runtime_typed_declaration_digest(self):
         config, _ = fixtures.OfflineConfigurationTests().fixture()
         hold = config['projection_policy']['offline_edges'][0]

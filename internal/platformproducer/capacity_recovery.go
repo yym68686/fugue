@@ -10,6 +10,7 @@ import (
 )
 
 const CapacityRecoveryVersion = "edge-capacity-recovery-v1"
+const CapacityContinuityVersion = "edge-capacity-recovery-continuity-v2"
 const CapacityRecoveryBodyBytes = 1 << 20
 
 type CapacityRecoveryPolicy struct {
@@ -19,10 +20,18 @@ type CapacityRecoveryPolicy struct {
 	MinimumBytesPerSecond  int64    `json:"minimum_bytes_per_second"`
 	MaxElapsedMilliseconds int64    `json:"max_elapsed_milliseconds"`
 	MinimumStableSeconds   int      `json:"minimum_stable_seconds"`
+	RetainAdmissionSeconds int      `json:"retain_admission_seconds,omitempty"`
 }
 
 func (p CapacityRecoveryPolicy) Validate() error {
-	if p.Version != CapacityRecoveryVersion || p.TrafficClass != "streaming" || len(p.ReferenceEdgeIDs) < 1 || len(p.ReferenceEdgeIDs) > 3 || p.MinimumBytesPerSecond < 65536 || p.MinimumBytesPerSecond > 16777216 || p.MaxElapsedMilliseconds < 1000 || p.MaxElapsedMilliseconds > 15000 || p.MinimumStableSeconds < 300 || p.MinimumStableSeconds > 7200 {
+	if p.Version == CapacityContinuityVersion {
+		if p.RetainAdmissionSeconds < 600 || p.RetainAdmissionSeconds > 86400 {
+			return fmt.Errorf("capacity continuity requires bounded retention")
+		}
+	} else if p.Version != CapacityRecoveryVersion || p.RetainAdmissionSeconds != 0 {
+		return fmt.Errorf("unsupported capacity recovery version")
+	}
+	if p.TrafficClass != "streaming" || len(p.ReferenceEdgeIDs) < 1 || len(p.ReferenceEdgeIDs) > 3 || p.MinimumBytesPerSecond < 65536 || p.MinimumBytesPerSecond > 16777216 || p.MaxElapsedMilliseconds < 1000 || p.MaxElapsedMilliseconds > 15000 || p.MinimumStableSeconds < 300 || p.MinimumStableSeconds > 7200 {
 		return fmt.Errorf("bounded explicit capacity recovery policy required")
 	}
 	seen := map[string]bool{}

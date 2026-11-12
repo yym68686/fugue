@@ -143,6 +143,13 @@ func validateExplicitPhysicalPolicy(raw json.RawMessage) error {
 		return err
 	}
 	keys := []string{"version", "maximum_node_utilization", "window_seconds", "bucket_seconds", "required_buckets", "minimum_records", "cooldown_seconds", "evidence_max_age_seconds", "advantage_ms", "advantage_ratio", "unknown_cost_ms", "uncertainty_ms", "failure_cost_ms", "capacity_cost_ms", "throughput_cost_ms", "throughput_target_bps", "probe_interval_seconds", "probe_budget_per_interval"}
+	var version string
+	if err := json.Unmarshal(policy["version"], &version); err != nil {
+		return err
+	}
+	if version == model.PhysicalPairedContinuityPolicyVersion {
+		keys = append(keys, "retain_order_seconds")
+	}
 	if len(policy) != len(keys) {
 		return fmt.Errorf("physical route requires a complete explicit network policy")
 	}
