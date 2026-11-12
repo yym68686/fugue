@@ -742,7 +742,7 @@ func (s *Server) recoverStaleBackupRuns(ctx context.Context) {
 func backupRunWaitingForCoordinationLease(run model.BackupRun) bool {
 	run = model.NormalizeBackupRun(run)
 	return run.Status == model.BackupRunStatusPending &&
-		model.NormalizeBackupTargetType(run.Target.Type) == model.BackupTargetControlPlaneDatabase &&
+		backupRunNeedsCoordinationLease(run) &&
 		strings.TrimSpace(run.LeaseOwner) == "" &&
 		run.StartedAt == nil
 }
@@ -2396,7 +2396,7 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 		coordinationLeaseLost     atomic.Bool
 		stopCoordinationHeartbeat func()
 	)
-	if model.NormalizeBackupTargetType(candidate.Target.Type) == model.BackupTargetControlPlaneDatabase {
+	if backupRunNeedsCoordinationLease(candidate) {
 		factory := s.newBackupCoordinationLease
 		if factory == nil {
 			factory = s.newKubernetesControlPlaneBackupCoordinationLease

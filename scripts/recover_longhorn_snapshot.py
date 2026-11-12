@@ -157,7 +157,7 @@ def admission_probes(config, operation):
 
 
 class Recovery:
-    def __init__(self, kube, config, approval, evidence_path):
+    def __init__(self, kube, config, approval, evidence_path, *, cleanup_policy_sha256=None):
         validate(config)
         require(set(approval) == {'schema', 'declarationSHA256', 'snapshotUID', 'authorized', 'maxWaitSeconds', 'readyURL'}, 'invalid recovery approval')
         require(approval['schema'] == 'fugue.local-snapshot-recovery/v1' and approval['authorized'] is True,
@@ -168,6 +168,8 @@ class Recovery:
         url = urllib.parse.urlparse(approval['readyURL'])
         require(url.scheme == 'https' and url.hostname and not url.username and not url.password and not url.fragment and not url.query, 'an explicit HTTPS health URL is required')
         self.kube, self.config, self.approval = kube, config, approval
+        require(cleanup_policy_sha256 is None or re.fullmatch('[a-f0-9]{64}', cleanup_policy_sha256), 'invalid cleanup policy identity')
+        self.cleanup_policy_sha256 = cleanup_policy_sha256
         self.operation = 'fugue-snapshot-recovery-' + self.digest[:20]
         self.holder = 'release/' + self.operation
         self.path = Path(evidence_path)
@@ -183,7 +185,7 @@ class Recovery:
             self.record = self.kube.replace(self.record)
 
     def lease(self):
-        return self.kube.get('leases.coordination.k8s.io', self.config['coordinationLease'], self.config['namespace'])
+        return self.kube.get('leases.coordination.k8s.io', self.config['coordinationLease'], self.config.get('coordinationNamespace', self.config['namespace']))
 
     def own_lease(self):
         lease = self.lease()
@@ -407,6 +409,29 @@ class Recovery:
             require(time.monotonic() < deadline, 'native operation has not quiesced; protection retained')
             time.sleep(5)
 
+    def recover_known_predelete(self):
+        # Only the standing reconciler may retry a known pre-delete crash.
+        # Durable false intent proves DELETE was never issued. Every fence
+        # must match the journal; an unjournaled/ambiguous create still stops.
+        require(self.cleanup_policy_sha256 is not None and self.state.get('deletion_attempted') is False,
+                'previous pre-delete attempt needs explicit recovery review')
+        expected = json.loads(self.record['data']['barriers'])
+        actual = []
+        for resource, kind in [('validatingadmissionpolicies', 'ValidatingAdmissionPolicy'),
+                               ('validatingadmissionpolicybindings', 'ValidatingAdmissionPolicyBinding')]:
+            for obj in self.kube.items('/apis/admissionregistration.k8s.io/v1/' + resource, labelSelector=OPERATION + '=' + self.operation):
+                actual.append(dict(kind=kind, name=obj['metadata']['name'], uid=obj['metadata']['uid']))
+        require(sorted(actual, key=canonical) == sorted(expected, key=canonical), 'pre-delete fence inventory differs; protection retained')
+        lease = self.lease()
+        require(lease['metadata']['uid'] == self.record['data']['lease_uid'], 'coordination Lease identity changed')
+        if lease['spec'].get('holderIdentity'):
+            self.own_lease()
+            self.remove_barriers()
+            self.release()
+        else:
+            require(not actual, 'unowned pre-delete admission fences require review')
+        self.save('aborted-before-delete')
+
     def run(self):
         c = self.config
         existing = self.kube.maybe('configmaps', self.operation, c['namespace'])
@@ -429,6 +454,8 @@ class Recovery:
                 # Record that already-proven completion; never reacquire/delete.
                 self.save('completed', after=self.health())
                 return
+            if self.state.get('deletion_attempted') is False and self.state['phase'] != 'aborted-before-delete':
+                self.recover_known_predelete()
             retry_aborted = self.state['phase'] == 'aborted-before-delete' and self.state.get('deletion_attempted') is False
             if retry_aborted:
                 require(not self.lease()['spec'].get('holderIdentity'), 'coordination Lease remains occupied')
@@ -453,12 +480,17 @@ class Recovery:
             token = secrets.token_hex(16)
             data = dict(declaration_sha256=self.digest, token=token, lease_uid=lease['metadata']['uid'],
                         **{'receipt.json': canonical(self.state), 'review.json': canonical(review), 'barriers': '[]'})
+            labels = {OPERATION: self.operation}
+            if self.cleanup_policy_sha256:
+                data.update(cleanup_policy_sha256=self.cleanup_policy_sha256,
+                            **{'declaration.json': canonical(c), 'approval.json': canonical(self.approval)})
+                labels['fugue.pro/snapshot-cleanup-policy'] = self.cleanup_policy_sha256[:40]
             if retry_aborted:
                 self.record['data'] = data
                 self.record = self.kube.replace(self.record)
             else:
                 self.record = self.kube.create(dict(apiVersion='v1', kind='ConfigMap',
-                    metadata=dict(name=self.operation, namespace=c['namespace'], labels={OPERATION: self.operation}), data=data))
+                    metadata=dict(name=self.operation, namespace=c['namespace'], labels=labels), data=data))
             lease['spec'].update(holderIdentity=self.holder, leaseDurationSeconds=120, acquireTime=timestamp(), renewTime=timestamp())
             lease['metadata'].setdefault('annotations', {}).update({TOKEN: token, OPERATION: self.operation, 'fugue.pro/recovery-required': 'true'})
             # An expired release/* holder is NOT recoverable by backup workers.

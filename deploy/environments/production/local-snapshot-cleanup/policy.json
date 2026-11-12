@@ -1,0 +1,13 @@
+{
+  "schema": "fugue.local-snapshot-cleanup/v1",
+  "enabled": false,
+  "namespace": "fugue-system",
+  "cluster": "fugue-fugue-control-plane-postgres",
+  "longhornNamespace": "longhorn-system",
+  "coordinationLease": "fugue-fugue-control-plane-db-backup",
+  "minimumExtraFreeBytes": 17179869184,
+  "workingReserveBytes": 201326592,
+  "maxFoldWriteBytes": 6442450944,
+  "maxWaitSeconds": 600,
+  "readyURL": "https://api.fugue.pro/readyz"
+}

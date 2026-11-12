@@ -121,6 +121,42 @@ class RecoveryTests(unittest.TestCase):
         self.r.run()
         self.assertEqual(self.kube.deletes, 1)
 
+    def test_cleanup_policy_and_exact_intent_survive_restart(self):
+        self.r.cleanup_policy_sha256 = 'a' * 64
+        with patch('scripts.recover_longhorn_snapshot.observe', return_value=review()):
+            self.r.run()
+        record = self.kube.objects[self.r.operation]
+        self.assertEqual(record['metadata']['labels']['fugue.pro/snapshot-cleanup-policy'], 'a' * 40)
+        self.assertEqual(json.loads(record['data']['declaration.json']), self.c)
+        self.assertEqual(json.loads(record['data']['approval.json']), approval(self.c))
+
+    def test_standing_policy_recovers_known_predelete_crash_without_early_delete(self):
+        self.r.cleanup_policy_sha256 = 'a' * 64
+        self.kube.items = lambda *args, **kwargs: []
+        with patch('scripts.recover_longhorn_snapshot.observe', return_value=review()):
+            # Model loss after journal creation but before Lease acquisition.
+            original = self.kube.replace
+            def crash(obj):
+                if obj['kind'] == 'Lease':
+                    raise TimeoutError('runner lost')
+                return original(obj)
+            self.kube.replace = crash
+            with self.assertRaises(TimeoutError):
+                self.r.run()
+            self.assertEqual(self.kube.deletes, 0)
+            self.kube.replace = original
+            self.r.run()
+        self.assertEqual(self.kube.deletes, 1)
+        self.assertEqual(self.r.state['phase'], 'completed')
+
+    def test_unknown_predelete_fence_does_not_unlock_or_delete(self):
+        self.r.cleanup_policy_sha256 = 'a' * 64
+        self.r.record = dict(data=dict(barriers='[]'))
+        self.kube.items = lambda *args, **kwargs: [dict(metadata=dict(name='unknown', uid='unknown-uid'))]
+        with self.assertRaisesRegex(ValueError, 'inventory differs'):
+            self.r.recover_known_predelete()
+        self.assertEqual(self.kube.deletes, 0)
+
     def test_no_new_delete_when_an_old_intent_is_unresolved(self):
         self.kube.fail_delete = True
         with patch('scripts.recover_longhorn_snapshot.observe', return_value=review()):

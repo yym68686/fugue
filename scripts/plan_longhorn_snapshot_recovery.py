@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import urllib.parse
 
 from scripts import longhorn_snapshot_map
 
@@ -30,9 +31,11 @@ def validate(config):
                 'pvcUID', 'volume', 'volumeUID', 'longhornNamespace', 'snapshot',
                 'snapshotUID', 'artifact', 'run', 'coordinationLease',
                 'minimumExtraFreeBytes', 'workingReserveBytes', 'maxFoldWriteBytes'}
-    require(set(config) == required and config['schema'] == 'fugue.local-snapshot-review/v1', 'invalid snapshot review declaration')
-    for key in required - {'schema', 'minimumExtraFreeBytes', 'workingReserveBytes', 'maxFoldWriteBytes', 'artifact', 'run'}:
+    ledger_keys = {'ledgerNamespace', 'ledgerPrimary', 'ledgerPrimaryUID', 'coordinationNamespace', 'targetType'}
+    require(set(config) in (required, required | ledger_keys) and config['schema'] == 'fugue.local-snapshot-review/v1', 'invalid snapshot review declaration')
+    for key in (set(config) - {'schema', 'minimumExtraFreeBytes', 'workingReserveBytes', 'maxFoldWriteBytes', 'artifact', 'run', 'targetType'}):
         require(isinstance(config[key], str) and NAME.fullmatch(config[key]), 'invalid snapshot review identity')
+    require(config.get('targetType', 'control-plane-db') in ('control-plane-db', 'app-database'), 'unsupported snapshot target type')
     for key in ('artifact', 'run'):
         require(isinstance(config[key], str) and re.fullmatch(r'[a-zA-Z0-9_-]{1,200}', config[key]), 'invalid backup ledger identity')
     for key, minimum in [('minimumExtraFreeBytes', 16 << 30), ('workingReserveBytes', 192 << 20), ('maxFoldWriteBytes', 1)]:
@@ -79,35 +82,82 @@ class ReadOnlyCluster:
         prefix = ['-n', namespace] if namespace else []
         return json.loads(self.command(prefix + ['get', resource, name, '-o', 'json']))
 
-    def items(self, path):
+    def items(self, path, **selectors):
         # Explicit pagination is unnecessary for these bounded inventories:
         # fail closed rather than accept a partial cross-reference list.
-        response = json.loads(self.command(['get', '--raw', path + '?limit=500']))
+        response = json.loads(self.command(['get', '--raw', path + '?' + urllib.parse.urlencode(dict(limit=500, **selectors))]))
         require(not response.get('metadata', {}).get('continue') and len(response['items']) <= 500, 'cross-reference inventory is truncated')
         return response['items']
 
     def ledger(self, config):
+        rows = self.volume_ledger(config, snapshot=config['snapshot'])
+        if not rows and config['artifact'] == config['run']:
+            rows = self.failed_snapshot_run(config)
+        require(0 < len(rows) <= 100, 'snapshot ledger references missing or exceed budget')
+        return rows
+
+    def failed_snapshot_run(self, config):
+        # A failed create can leave a local snapshot without ANY artifact.
+        # Such a source has no remote-retirement receipt; keep that proof
+        # distinct rather than pretending a remote backup was deleted.
+        run = config['run']
+        require(re.fullmatch(r'[a-zA-Z0-9_-]{1,200}', run), 'invalid failed run identity')
+        namespace = config.get('ledgerNamespace', config['namespace'])
+        primary = config.get('ledgerPrimary', config['primary'])
+        if config.get('ledgerPrimaryUID'):
+            same(self.get('pod', primary, namespace), primary, config['ledgerPrimaryUID'])
+        sql = f"""BEGIN READ ONLY;
+SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms'; SET LOCAL temp_file_limit=0;
+SELECT json_build_object('id',r.id,'run',r.id,'kind','failed-run','status',r.status,
+ 'protected',false,'no_artifacts',true,'run_terminal',true,'run_lease_active',false,
+ 'terminal_source',true,'restore_references',0,'target_type',r.target_type,
+ 'service_name',r.target_json->>'service_name')
+FROM fugue_backup_runs r WHERE r.id='{run}' AND r.target_json->>'engine'='longhorn-snapshot'
+ AND r.status IN ('failed','canceled') AND COALESCE(r.finished_at,r.updated_at)<now()-interval '24 hours'
+ AND COALESCE(r.locked_until<now(),true) AND (r.next_retry_at IS NULL OR r.next_retry_at<=now())
+ AND NOT EXISTS (SELECT 1 FROM fugue_backup_artifacts a WHERE a.run_id=r.id);
+COMMIT;
+"""
+        raw = self.command(['-n', namespace, 'exec', '-i', primary, '-c', 'postgres', '--',
+                            'psql', '-U', 'postgres', '-d', 'fugue', '-qAt', '-v', 'ON_ERROR_STOP=1'], stdin=sql, limit=1 << 20)
+        rows = [json.loads(line) for line in raw.splitlines() if line]
+        require(len(rows) <= 1, 'failed run proof is ambiguous')
+        return [{**r, 'snapshot': config['snapshot']} for r in rows]
+
+    def volume_ledger(self, config, *, snapshot=None):
         literal = lambda value: "'" + value.replace("'", "''") + "'"
-        volume, snapshot = literal(config['volume']), literal(config['snapshot'])
+        volume = literal(config['volume'])
+        predicate = ''
+        if snapshot is not None:
+            name = literal(snapshot)
+            predicate = f" AND (a.manifest_json#>>'{{metadata,snapshot_name}}'={name} OR a.manifest_json#>>'{{metadata,longhorn_snapshot_name}}'={name})"
+        namespace = config.get('ledgerNamespace', config['namespace'])
+        primary = config.get('ledgerPrimary', config['primary'])
+        if config.get('ledgerPrimaryUID'):
+            same(self.get('pod', primary, namespace), primary, config['ledgerPrimaryUID'])
         sql = f"""BEGIN READ ONLY;
 SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='250ms';
 SET LOCAL work_mem='1MB'; SET LOCAL temp_file_limit=0;
 SET LOCAL max_parallel_workers_per_gather=0;
 SELECT json_build_object('id',a.id,'run',a.run_id,'status',a.status,'protected',a.protected,
  'kind',a.kind,'target_type',a.target_type,'physical_deleted',a.physical_deleted_at IS NOT NULL,
+ 'snapshot',a.manifest_json#>>'{{metadata,snapshot_name}}',
+ 'alternate_snapshot',a.manifest_json#>>'{{metadata,longhorn_snapshot_name}}',
+ 'longhorn_namespace',a.manifest_json#>>'{{metadata,longhorn_namespace}}',
+ 'service_name',a.target_json->>'service_name',
  'run_terminal',r.status IN ('succeeded','failed','canceled'),
  'run_lease_active',COALESCE(r.locked_until>now(),false),
  'restore_references',(SELECT count(*) FROM fugue_backup_restore_plans p WHERE p.artifact_id=a.id AND p.status NOT IN ('succeeded','failed','canceled'))
   +(SELECT count(*) FROM fugue_backup_restore_runs u WHERE u.artifact_id=a.id AND u.status NOT IN ('succeeded','failed','canceled')))
 FROM fugue_backup_artifacts a LEFT JOIN fugue_backup_runs r ON r.id=a.run_id
 WHERE a.kind='longhorn-snapshot' AND a.manifest_json#>>'{{metadata,volume_name}}'={volume}
- AND a.manifest_json#>>'{{metadata,snapshot_name}}'={snapshot} LIMIT 101;
+ {predicate} LIMIT 501;
 COMMIT;
 """
-        raw = self.command(['-n', config['namespace'], 'exec', '-i', config['primary'], '-c', 'postgres', '--',
+        raw = self.command(['-n', namespace, 'exec', '-i', primary, '-c', 'postgres', '--',
                             'psql', '-U', 'postgres', '-d', 'fugue', '-qAt', '-v', 'ON_ERROR_STOP=1'], stdin=sql, limit=1 << 20)
         rows = [json.loads(line) for line in raw.splitlines() if line]
-        require(0 < len(rows) <= 100, 'snapshot ledger references missing or exceed budget')
+        require(len(rows) <= 500, 'volume ledger references exceed budget')
         return rows
 
 
@@ -115,9 +165,18 @@ def same(obj, name, uid):
     require(obj['metadata']['name'] == name and obj['metadata']['uid'] == uid and not obj['metadata'].get('deletionTimestamp'), 'reviewed object identity changed')
 
 
-def terminal_ledger(ledger, artifact, run):
+def terminal_ledger(ledger, artifact, run, target_type='control-plane-db'):
+    require(target_type in ('control-plane-db', 'app-database'), 'unsupported snapshot target type')
     require(any(x['id'] == artifact and x['run'] == run for x in ledger), 'exact artifact receipt is missing')
-    require(all(x['status'] in TERMINAL and x['protected'] is False and x['physical_deleted'] is True and x['run_terminal'] is True and x['run_lease_active'] is False and x['restore_references'] == 0 and x['target_type'] == 'control-plane-db' for x in ledger), 'live, protected, unverified or restoring artifact references this snapshot')
+    if len(ledger) == 1 and ledger[0].get('kind') == 'failed-run':
+        r = ledger[0]
+        require(artifact == run and r['id'] == run and r['status'] in ('failed', 'canceled') and
+                r.get('no_artifacts') is True and r.get('terminal_source') is True and
+                r.get('protected', False) is False and
+                r['run_terminal'] is True and r['run_lease_active'] is False and
+                r['target_type'] == target_type and r['restore_references'] == 0, 'failed run is not safe to retire')
+        return
+    require(all(x['status'] in TERMINAL and x['protected'] is False and x['physical_deleted'] is True and x['run_terminal'] is True and x['run_lease_active'] is False and x['restore_references'] == 0 and x['target_type'] == target_type for x in ledger), 'live, protected, unverified or restoring artifact references this snapshot')
 
 
 def collateral_purges(chain, selected):
@@ -128,6 +187,21 @@ def collateral_purges(chain, selected):
         require(set(item.get('children', {})) == {'volume-head'}, 'native purge would coalesce additional snapshots')
         collateral.append(name)
     return collateral
+
+
+def check_pending_snapshot_deletions(snapshot_crs, volume, chain, collateral):
+    for item in snapshot_crs:
+        if item['spec'].get('volume') != volume or not item['metadata'].get('deletionTimestamp'):
+            continue
+        name = item['metadata']['name']
+        native = chain.get(name, {})
+        # Longhorn retains the removed live-head parent until an immutable
+        # child exists. This quiescent, already-authorized head-parent prune
+        # is included in collateral_purges, NOT a concurrent unknown delete.
+        require(name in collateral and native.get('removed') is True and
+                set(native.get('children', {})) == {'volume-head'} and
+                item.get('status', {}).get('markRemoved') is True,
+                'another snapshot deletion is already pending')
 
 
 def observe(kube, config, *, lease_holder=None):
@@ -174,12 +248,13 @@ def observe(kube, config, *, lease_holder=None):
     # Include them explicitly; only a head-parent prune can be reviewed here.
     collateral = collateral_purges(chain, config['snapshot'])
     snapshot_crs = kube.items(base + '/snapshots')
-    require(not any(x['spec'].get('volume') == volume_name and x['metadata'].get('deletionTimestamp') for x in snapshot_crs),
-            'another snapshot deletion is already pending')
+    check_pending_snapshot_deletions(snapshot_crs, volume_name, chain, collateral)
     collateral_uids = [x['metadata']['uid'] for x in snapshot_crs
                        if x['metadata']['name'] in collateral and x['spec'].get('volume') == volume_name]
     ledger = kube.ledger(config)
-    terminal_ledger(ledger, config['artifact'], config['run'])
+    terminal_ledger(ledger, config['artifact'], config['run'], config.get('targetType', 'control-plane-db'))
+    if config.get('targetType') == 'app-database':
+        require(all(x.get('service_name') == config['cluster'] and x['run'] == config['run'] for x in ledger), 'managed database ledger binding differs')
     backups = kube.items(base + '/backups')
     require(not any(x.get('spec', {}).get('snapshotName') == config['snapshot'] for x in backups), 'remote Backup CR still refers to the candidate')
     require(not any(x.get('metadata', {}).get('labels', {}).get('backup-volume') == volume_name and
@@ -197,7 +272,7 @@ def observe(kube, config, *, lease_holder=None):
             source = claim.get('spec', {}).get(field) or {}
             require(not (source.get('kind') == 'PersistentVolumeClaim' and source.get('name') == config['primary'] and
                          source.get('namespace', claim['metadata'].get('namespace')) == ns), 'a PVC clone references this claim')
-    lease = kube.get('leases.coordination.k8s.io', config['coordinationLease'], ns)
+    lease = kube.get('leases.coordination.k8s.io', config['coordinationLease'], config.get('coordinationNamespace', ns))
     require(lease['spec'].get('holderIdentity', '') == (lease_holder or ''), 'backup or release coordination Lease is occupied')
     manager = kube.get('pod', rs['instanceManagerName'], lh)
     require(manager['spec'].get('nodeName') == replica['spec']['nodeID'] == pod['spec']['nodeName'], 'replica observer is on another node')

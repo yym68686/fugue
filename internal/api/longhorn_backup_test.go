@@ -142,8 +142,19 @@ func TestDeleteLonghornErrorBackupUsesFreshIdentityAndPreconditions(t *testing.T
 		},
 	}
 	var deleteOptions map[string]any
+	sourcePresent := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/snapshots/") {
+			if r.Method != http.MethodGet {
+				t.Fatal("failed remote cleanup must preserve its local source")
+			}
+			if sourcePresent {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"metadata": map[string]any{"name": "snapshot-error", "uid": "source-uid", "labels": map[string]any{"fugue.pro/backup-run": "run-1"}},
+					"spec":     map[string]any{"volume": "source-volume"},
+				})
+				return
+			}
 			http.NotFound(w, r)
 			return
 		}
@@ -167,6 +178,10 @@ func TestDeleteLonghornErrorBackupUsesFreshIdentityAndPreconditions(t *testing.T
 	preconditions, _ := deleteOptions["preconditions"].(map[string]any)
 	if preconditions["uid"] != "uid-1" || preconditions["resourceVersion"] != "42" {
 		t.Fatalf("expected UID/resourceVersion DeleteOptions preconditions, got %#v", deleteOptions)
+	}
+	sourcePresent = true
+	if err := deleteLonghornErrorBackup(context.Background(), client, "longhorn-system", "backup-error", object, "run-1", now, 24*time.Hour); err != nil {
+		t.Fatalf("owned local source must not deadlock zero-upload Error metadata retirement: %v", err)
 	}
 
 	object["status"].(map[string]any)["url"] = "s3://bucket?backup=backup-error&volume=volume-1"

@@ -62,6 +62,35 @@ env:
         print('Observed root-owned generated entries: 0')
 
 jobs:
+  longhorn_local_snapshot_cleanup:
+    needs: [prepush, deploy_api]
+    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success') && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-postgres-protection, cancel-in-progress: false, queue: max}
+    timeout-minutes: 15
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Validate current policy and reconcile at most one retired local snapshot
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/local-snapshot-cleanup scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py scripts/longhorn_snapshot_map.py .github/workflows/ci.yml
+          python3 -m unittest scripts.test_reconcile_longhorn_snapshot_cleanup scripts.test_recover_longhorn_snapshot scripts.test_plan_longhorn_snapshot_recovery scripts.test_longhorn_snapshot_map
+          python3 -m scripts.reconcile_longhorn_snapshot_cleanup deploy/environments/production/local-snapshot-cleanup/policy.json --apply --evidence "$RUNNER_TEMP/local-snapshot-cleanup.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: fugue-local-snapshot-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/local-snapshot-cleanup*.json
+          if-no-files-found: error
+          retention-days: 30
+
   edge_capacity_external_observation:
     needs: [prepush, deploy_api]
     if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success') && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') }}
@@ -4463,12 +4492,23 @@ jobs:
         with: {component: image-cache, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   audit:
-    if: github.event_name == 'schedule' && github.event.schedule == '23 18 * * *'
+    if: github.event_name == 'schedule' && github.event.schedule == '23 18 * * *' || github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {fetch-depth: 0}
+      - name: Select full audit for snapshot lifecycle changes or the daily schedule
+        id: selected
+        env: {BASE_SHA: '${{ github.event.before }}', EVENT_NAME: '${{ github.event_name }}'}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == schedule ]] || ! git diff --quiet "$BASE_SHA" HEAD -- scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py deploy/environments/production/local-snapshot-cleanup; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        if: steps.selected.outputs.run == 'true'
         with:
           go-version-file: go.mod
       - name: Run the full asynchronous audit
+        if: steps.selected.outputs.run == 'true'
         run: make test

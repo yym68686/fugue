@@ -1,6 +1,6 @@
 import copy
 import unittest
-from scripts.plan_longhorn_snapshot_recovery import collateral_purges, fold_budget, terminal_ledger, validate
+from scripts.plan_longhorn_snapshot_recovery import check_pending_snapshot_deletions, collateral_purges, fold_budget, terminal_ledger, validate
 
 
 class SnapshotReviewTests(unittest.TestCase):
@@ -52,6 +52,20 @@ class SnapshotReviewTests(unittest.TestCase):
         chain['unknown'] = dict(usercreated=False, removed=False, children={'kept': True})
         with self.assertRaises(ValueError):
             collateral_purges(chain, 'candidate')
+
+    def test_removed_quiescent_head_parent_does_not_deadlock_all_older_gc(self):
+        point = dict(metadata=dict(name='tail', deletionTimestamp='now'), spec=dict(volume='volume'), status=dict(markRemoved=True))
+        chain = {'tail': dict(removed=True, children={'volume-head': True})}
+        check_pending_snapshot_deletions([point], 'volume', chain, ['tail'])
+        for change in [dict(removed=False, children={'volume-head': True}),
+                       dict(removed=True, children={'immutable-point': True})]:
+            with self.assertRaises(ValueError):
+                check_pending_snapshot_deletions([point], 'volume', {'tail': change}, ['tail'])
+        with self.assertRaises(ValueError):
+            check_pending_snapshot_deletions([point], 'volume', chain, [])
+        point['status']['markRemoved'] = False
+        with self.assertRaises(ValueError):
+            check_pending_snapshot_deletions([point], 'volume', chain, ['tail'])
 
     def test_declaration_cannot_smuggle_apply_or_reduce_reserve(self):
         value = dict(schema='fugue.local-snapshot-review/v1', namespace='platform', cluster='db',

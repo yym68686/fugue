@@ -114,9 +114,9 @@ func (s *Server) canTakeOverExpiredBackupCoordinationHolder(requestedRunID, hold
 		return false
 	}
 	heldRun, err := s.store.GetBackupRun(heldRunID, "", true)
-	if err != nil || model.NormalizeBackupTargetType(heldRun.Target.Type) != model.BackupTargetControlPlaneDatabase {
+	if err != nil || !backupRunNeedsCoordinationLease(heldRun) {
 		// A missing/unknown run or a holder that does not map to the shared
-		// control-plane database target is not sufficient proof of safety.
+		// database snapshot coordination domain is not proof of safety.
 		return false
 	}
 	if heldRunID == requestedRunID {

@@ -92,10 +92,15 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	if model.NormalizeDataBackendProvider(backend.Provider) != model.DataBackendProviderCloudflareR2 {
 		return nil, fmt.Errorf("%w: Longhorn backup requires a Cloudflare R2 backend", errLonghornBackupUnavailable)
 	}
-	client, err := newKubeLogsClient("")
+	factory := s.newBackupLonghornClient
+	if factory == nil {
+		factory = newKubeLogsClient
+	}
+	client, err := factory("")
 	if err != nil {
 		return nil, fmt.Errorf("%w: kubernetes client: %v", errLonghornBackupUnavailable, err)
 	}
+	defer client.closeIdleConnections()
 	postgres := store.OwnedManagedPostgresSpec(app)
 	if postgres == nil {
 		return nil, fmt.Errorf("managed_postgres_missing: app has no Fugue-managed PostgreSQL database")
@@ -133,55 +138,21 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 		return nil, fmt.Errorf("%w: backup target %s is not an S3/R2 target", errLonghornBackupUnavailable, targetName)
 	}
 
-	namePrefix := "fugue-" + strings.Trim(strings.ReplaceAll(run.ID, "_", "-"), "-") + "-"
-	// A worker can be restarted after the Snapshot/Backup CR has been created.
-	// Reuse that labelled CR instead of creating a second remote copy.
-	var existingBackup map[string]any
-	if existingBackup, err = findLonghornBackup(ctx, client, longhornNS, run.ID); err != nil {
-		return nil, fmt.Errorf("%w: find existing backup: %v", errLonghornBackupUnavailable, err)
-	}
-	var snapshotName string
-	var backupName string
-	createdSnapshot := false
-	if existingBackup != nil {
-		backupName = longhornObjectName(existingBackup)
-		status, _ := existingBackup["status"].(map[string]any)
-		snapshotName = longhornStringValue(status["snapshotName"])
-		if backupName == "" || snapshotName == "" {
-			return nil, fmt.Errorf("%w: existing Longhorn backup is missing names", errLonghornBackupUnavailable)
-		}
-	} else {
-		snapshot := map[string]any{
-			"apiVersion": "longhorn.io/v1beta2", "kind": "Snapshot",
-			"metadata": map[string]any{"generateName": namePrefix, "namespace": longhornNS, "labels": map[string]string{"fugue.pro/backup-run": run.ID}},
-			"spec":     map[string]any{"volume": volumeName, "createSnapshot": true},
-		}
-		var created map[string]any
-		if err := longhornCreate(ctx, client, longhornNS, "snapshots", snapshot, &created); err != nil {
-			return nil, fmt.Errorf("%w: create snapshot: %v", errLonghornBackupUnavailable, err)
-		}
-		snapshotName = longhornObjectName(created)
-		if snapshotName == "" {
-			return nil, fmt.Errorf("%w: Longhorn snapshot response did not include metadata.name", errLonghornBackupUnavailable)
-		}
-		createdSnapshot = true
-	}
-	if createdSnapshot {
-		defer func() {
-			deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			defer cancel()
-			_ = longhornDelete(deleteCtx, client, longhornNS, "snapshots", snapshotName)
-		}()
-	}
-	if err := waitForLonghornSnapshot(ctx, client, longhornNS, snapshotName); err != nil {
+	snapshotName, backupName, err := ensureLonghornBackupSource(ctx, client, longhornNS, run.ID, volumeName)
+	if err != nil {
 		return nil, err
 	}
-
+	// Local snapshots are durable cleanup candidates, not process-local defers.
+	// The serialized CI reconciler retires them only after ALL ledger aliases
+	// are terminal/remote-deleted and native purge can satisfy its space gates.
 	if backupName == "" {
+		if err := waitForLonghornSnapshot(ctx, client, longhornNS, snapshotName); err != nil {
+			return nil, err
+		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		backup := map[string]any{
 			"apiVersion": "longhorn.io/v1beta2", "kind": "Backup",
-			"metadata": map[string]any{"generateName": namePrefix, "namespace": longhornNS, "labels": map[string]string{"fugue.pro/backup-run": run.ID}},
+			"metadata": map[string]any{"name": longhornRunObjectName(run.ID), "namespace": longhornNS, "labels": map[string]string{"fugue.pro/backup-run": run.ID}},
 			"spec":     map[string]any{"snapshotName": snapshotName, "backupMode": "incremental", "syncRequestedAt": now},
 		}
 		var created map[string]any
@@ -337,12 +308,23 @@ func longhornGet(ctx context.Context, client *kubeLogsClient, namespace, resourc
 }
 
 func findLonghornBackup(ctx context.Context, client *kubeLogsClient, namespace, runID string) (map[string]any, error) {
+	return findLonghornRunResource(ctx, client, namespace, "backups", runID)
+}
+
+func findLonghornRunResource(ctx context.Context, client *kubeLogsClient, namespace, resource, runID string) (map[string]any, error) {
 	query := url.Values{"labelSelector": []string{"fugue.pro/backup-run=" + runID}}
 	var list map[string]any
-	if err := client.doJSON(ctx, http.MethodGet, "/apis/longhorn.io/v1beta2/namespaces/"+url.PathEscape(namespace)+"/backups?"+query.Encode(), &list); err != nil {
+	if err := client.doJSON(ctx, http.MethodGet, "/apis/longhorn.io/v1beta2/namespaces/"+url.PathEscape(namespace)+"/"+resource+"?"+query.Encode(), &list); err != nil {
 		return nil, err
 	}
-	items, _ := list["items"].([]any)
+	meta, _ := list["metadata"].(map[string]any)
+	if longhornStringValue(meta["continue"]) != "" {
+		return nil, errors.New("Longhorn run inventory is truncated")
+	}
+	items, ok := list["items"].([]any)
+	if !ok {
+		return nil, errors.New("Longhorn run inventory is missing items")
+	}
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -350,10 +332,10 @@ func findLonghornBackup(ctx context.Context, client *kubeLogsClient, namespace, 
 	for _, raw := range items {
 		item, ok := raw.(map[string]any)
 		if !ok {
-			continue
+			return nil, errors.New("Longhorn run inventory contains an invalid item")
 		}
 		if found != nil {
-			return nil, fmt.Errorf("multiple Longhorn backups found for run %s", runID)
+			return nil, fmt.Errorf("multiple Longhorn %s found for run %s", resource, runID)
 		}
 		found = item
 	}
@@ -362,10 +344,6 @@ func findLonghornBackup(ctx context.Context, client *kubeLogsClient, namespace, 
 
 func longhornCreate(ctx context.Context, client *kubeLogsClient, namespace, resource string, body map[string]any, out *map[string]any) error {
 	return client.doJSONBody(ctx, http.MethodPost, "/apis/longhorn.io/v1beta2/namespaces/"+url.PathEscape(namespace)+"/"+resource, body, out)
-}
-
-func longhornDelete(ctx context.Context, client *kubeLogsClient, namespace, resource, name string) error {
-	return client.doJSON(ctx, http.MethodDelete, "/apis/longhorn.io/v1beta2/namespaces/"+url.PathEscape(namespace)+"/"+resource+"/"+url.PathEscape(name), nil)
 }
 
 // deleteLonghornErrorBackup re-reads the object immediately before deletion
@@ -413,8 +391,22 @@ func deleteLonghornErrorBackup(ctx context.Context, client *kubeLogsClient, name
 	if !longhornResourceName.MatchString(snapshotName) {
 		return errors.New("Longhorn Error backup lacks snapshot identity")
 	}
-	if _, err := longhornGet(ctx, client, namespace, "snapshots", snapshotName); !isKubeNotFound(err) {
-		return fmt.Errorf("Longhorn Error backup snapshot absence is unconfirmed: %v", err)
+	source, err := longhornGet(ctx, client, namespace, "snapshots", snapshotName)
+	if err != nil && !isKubeNotFound(err) {
+		return fmt.Errorf("Longhorn Error backup source observation failed: %w", err)
+	}
+	if err == nil {
+		// Zero-upload lock errors may be retired while their exact owned
+		// local source remains intact. Requiring the source to disappear
+		// first deadlocks with the durable GC's no-remote-reference gate.
+		// This deletes ONLY failed remote metadata, never the Snapshot.
+		if err := validateLonghornRunObject(source, runID); err != nil || longhornObjectName(source) != snapshotName {
+			return errors.New("Longhorn Error backup source ownership is unconfirmed")
+		}
+		sourceSpec, _ := source["spec"].(map[string]any)
+		if !longhornResourceName.MatchString(longhornStringValue(sourceSpec["volume"])) {
+			return errors.New("Longhorn Error backup source volume is unconfirmed")
+		}
 	}
 	return client.doJSONBody(ctx, http.MethodDelete, path, map[string]any{
 		"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": map[string]string{"uid": uid, "resourceVersion": revision},
