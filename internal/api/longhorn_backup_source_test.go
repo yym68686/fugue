@@ -12,11 +12,11 @@ import (
 )
 
 func TestLonghornSourceSurvivesEveryCreateWindow(t *testing.T) {
-	for _, mode := range []string{"fresh", "snapshot-only", "completed-remote", "duplicate", "wrong-volume", "deleting", "truncated", "lost-create-response"} {
+	for _, mode := range []string{"fresh", "snapshot-only", "completed-remote", "error-remote-gone-source", "pending-remote", "pending-wrong-volume", "duplicate", "wrong-volume", "deleting", "truncated", "lost-create-response"} {
 		t.Run(mode, func(t *testing.T) {
 			posts, deletes := 0, 0
 			snapshot := map[string]any{"metadata": map[string]any{"name": "point", "uid": "point-uid", "labels": map[string]any{"fugue.pro/backup-run": "run"}}, "spec": map[string]any{"volume": "volume"}}
-			if mode == "wrong-volume" {
+			if mode == "wrong-volume" || mode == "pending-wrong-volume" {
 				snapshot["spec"].(map[string]any)["volume"] = "other"
 			}
 			if mode == "deleting" {
@@ -24,6 +24,13 @@ func TestLonghornSourceSurvivesEveryCreateWindow(t *testing.T) {
 			}
 			created := false
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/snapshots/point") {
+					if mode == "completed-remote" || mode == "error-remote-gone-source" {
+						t.Error("terminal remote status must not require its old local source")
+					}
+					_ = json.NewEncoder(w).Encode(snapshot)
+					return
+				}
 				if r.Method == http.MethodDelete {
 					deletes++
 					t.Error("source acquisition must not delete anything")
@@ -45,9 +52,16 @@ func TestLonghornSourceSurvivesEveryCreateWindow(t *testing.T) {
 				}
 				items := []any{}
 				meta := map[string]any{}
-				if strings.HasSuffix(r.URL.Path, "/backups") && mode == "completed-remote" {
+				if strings.HasSuffix(r.URL.Path, "/backups") && (mode == "completed-remote" || strings.HasPrefix(mode, "pending-") || mode == "error-remote-gone-source") {
+					state, remoteVolume := "Completed", "volume"
+					if strings.HasPrefix(mode, "pending-") {
+						state, remoteVolume = "InProgress", ""
+					}
+					if mode == "error-remote-gone-source" {
+						state, remoteVolume = "Error", ""
+					}
 					items = append(items, map[string]any{"metadata": map[string]any{"name": "remote", "uid": "remote-uid", "labels": map[string]any{"fugue.pro/backup-run": "run"}},
-						"spec": map[string]any{"snapshotName": "point"}, "status": map[string]any{"state": "Completed", "snapshotName": "point", "volumeName": "volume"}})
+						"spec": map[string]any{"snapshotName": "point"}, "status": map[string]any{"state": state, "snapshotName": "point", "volumeName": remoteVolume}})
 				}
 				if strings.HasSuffix(r.URL.Path, "/snapshots") && (mode != "fresh" && mode != "lost-create-response" || created) {
 					items = append(items, snapshot)
@@ -63,7 +77,7 @@ func TestLonghornSourceSurvivesEveryCreateWindow(t *testing.T) {
 			defer server.Close()
 			client := &kubeLogsClient{baseURL: server.URL, client: server.Client()}
 			point, remote, err := ensureLonghornBackupSource(context.Background(), client, "storage", "run", "volume")
-			bad := mode == "duplicate" || mode == "wrong-volume" || mode == "deleting" || mode == "truncated" || mode == "lost-create-response"
+			bad := mode == "duplicate" || mode == "wrong-volume" || mode == "pending-wrong-volume" || mode == "deleting" || mode == "truncated" || mode == "lost-create-response"
 			if (err != nil) != bad {
 				t.Fatalf("unexpected result: %s %s %v", point, remote, err)
 			}

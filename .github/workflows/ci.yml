@@ -4502,7 +4502,7 @@ jobs:
         env: {BASE_SHA: '${{ github.event.before }}', EVENT_NAME: '${{ github.event_name }}'}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" == schedule ]] || ! git diff --quiet "$BASE_SHA" HEAD -- scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py scripts/test_runner_workspace_ownership.py deploy/environments/production/local-snapshot-cleanup; then
+          if [[ "$EVENT_NAME" == schedule ]] || ! git diff --quiet "$BASE_SHA" HEAD -- 'internal/api/longhorn*.go' internal/api/backup.go internal/api/backup_lease.go scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py scripts/test_runner_workspace_ownership.py deploy/environments/production/local-snapshot-cleanup; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
           fi
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0

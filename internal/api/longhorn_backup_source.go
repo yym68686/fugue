@@ -41,8 +41,26 @@ func ensureLonghornBackupSource(ctx context.Context, client *kubeLogsClient, nam
 		if longhornStringValue(status["state"]) == "Completed" && longhornStringValue(status["volumeName"]) != volume {
 			return "", "", fmt.Errorf("completed Longhorn backup volume is unverified")
 		}
+		if state := longhornStringValue(status["state"]); state != "Completed" && state != "Error" {
+			// A pending Backup may not have populated status.volumeName yet.
+			// Bind its source to this exact run/volume instead of trusting the
+			// label alone. Only Completed remote copies tolerate a gone source.
+			source, err := longhornGet(ctx, client, namespace, "snapshots", snapshot)
+			if err != nil {
+				return "", "", fmt.Errorf("verify pending Longhorn backup source: %w", err)
+			}
+			if err := validateLonghornRunObject(source, runID); err != nil {
+				return "", "", err
+			}
+			sourceSpec, _ := source["spec"].(map[string]any)
+			sourceStatus, _ := source["status"].(map[string]any)
+			if longhornObjectName(source) != snapshot || longhornStringValue(sourceSpec["volume"]) != volume || boolValue(sourceStatus["markRemoved"]) {
+				return "", "", fmt.Errorf("pending Longhorn backup source changed")
+			}
+		}
 		// A Completed remote backup remains reusable even if its old local
-		// snapshot has already disappeared. Do not wait on that snapshot.
+		// snapshot has already disappeared. Error copies also go straight to
+		// the status poller so the original engine error/retry class survives.
 		return snapshot, longhornObjectName(backup), nil
 	}
 	snapshot, err := findLonghornRunResource(ctx, client, namespace, "snapshots", runID)
