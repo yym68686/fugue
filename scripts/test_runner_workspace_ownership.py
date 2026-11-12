@@ -56,7 +56,12 @@ class RunnerWorkspaceOwnershipTests(unittest.TestCase):
             args = ['inspect', str(workspace), str(temporary), str(uid), str(gid)]
             if scenario == 'wrong path':
                 args[1] = str(root)
-            with patch.object(sys, 'argv', args), patch.object(Path, 'stat', observed), patch.object(os, 'rename', side_effect=rename):
+            # Python versions differ in whether Path.lstat delegates to stat
+            # or directly to os.lstat. Model both calls explicitly so the
+            # root/foreign-owner fixtures exercise the same safety branches.
+            with patch.object(sys, 'argv', args), patch.object(Path, 'stat', observed), \
+                    patch.object(Path, 'lstat', lambda path: observed(path, follow_symlinks=False)), \
+                    patch.object(os, 'rename', side_effect=rename):
                 if scenario in ['symlink', 'hardlink', 'foreign', 'wrong path']:
                     with self.assertRaises(SystemExit):
                         exec(compile(repair_source(), str(WORKFLOW), 'exec'), {})
