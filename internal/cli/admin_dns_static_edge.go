@@ -44,14 +44,20 @@ func dnsAnswerStaticEdgeProbes(client dnsStaticEdgeReader, hostname string, expl
 	if err != nil {
 		return nil, err
 	}
-	if app.ID != appID || app.TenantID != tenantID || app.Route == nil || normalizeDNSHostname(app.Route.Hostname) != hostname || model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix) != "/" {
+	if app.ID != appID || app.TenantID != tenantID {
+		return nil, fmt.Errorf("app route ownership differs from route explanation")
+	}
+	// A platform/custom domain may alias an app's primary route. Without an
+	// explicit static DNS configuration there is no endpoint to authorize, and
+	// differing primary hostnames are not a static-route ownership failure.
+	if app.Route == nil || app.Route.DNSRouting == nil {
+		return out, nil
+	}
+	if normalizeDNSHostname(app.Route.Hostname) != hostname || model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix) != "/" {
 		return nil, fmt.Errorf("app route ownership differs from route explanation")
 	}
 	if err := model.ValidateAppStaticEdgeRouting(app.Route.DNSRouting); err != nil {
 		return nil, err
-	}
-	if app.Route.DNSRouting == nil {
-		return out, nil
 	}
 	for _, candidate := range app.Route.DNSRouting.Candidates {
 		registration, err := client.GetStaticEdgeRegistration(candidate.RegistrationID)

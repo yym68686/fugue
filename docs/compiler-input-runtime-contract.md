@@ -48,10 +48,13 @@ the selective reader prepares that bounded index on its own cold read and
 continues to verify physical witnesses on warm reads. Administrative full and
 DNS-projection requests, DNS producer capture and retained traffic reads pass
 their caller cancellation/deadline through the input reader, including the
-legacy content fallback. The existing maximum read duration remains 30 seconds.
-A small projection response still requires complete input verification; these
-changes neither establish the cause of a previous timeout nor promise that a
-large legacy input will complete within that limit.
+legacy content fallback. Complete reads have a two-minute maximum, matching the
+bounded writer/full-readback budget; a shorter caller deadline still wins.
+Selective DNS reads retain their separate 30-second budget. A small projection
+response still requires complete input verification. Configuration clients must
+allow the complete-read budget when projecting large legacy inputs, and source
+selection, LKG and observation freshness are rechecked after reading. Extending
+the work budget never renews evidence or changes integrity/admission rules.
 
 These tests do not prove a real scope's complete minimal recovery set. Before
 production policy activation, complete the effective scope/consumer/task and

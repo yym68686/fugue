@@ -1,6 +1,11 @@
 import copy
 import datetime
+import json
+import os
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 from scripts import reconfigure_cell_producer as config
 from scripts.test_bootstrap_cell_producer import ArtifactAPI
 
@@ -62,6 +67,15 @@ class Ledger(ArtifactAPI):
 
 
 class ReconfigurationTests(unittest.TestCase):
+    def test_configuration_client_allows_bounded_complete_input_read(self):
+        declaration, _ = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "declaration.json"
+            path.write_text(json.dumps(declaration))
+            with patch("sys.argv", ["reconfigure", str(path), "--evidence", str(Path(directory) / "evidence.json")]), patch.dict(os.environ, {"FUGUE_API_KEY": "synthetic-test-key"}), patch.object(config, "API") as api, patch.object(config, "publish", return_value={}), patch("builtins.print"):
+                config.main()
+            api.assert_called_once_with(declaration["origin"], "synthetic-test-key", response_limit=128 << 20, timeout=120)
+
     def test_continuous_only_changes_generation_and_repetition_flag(self):
         for failure in [None, "bounds", "placement", "source", "schedule", "foreign", "operator", "unverified", "already continuous", "still once"]:
             with self.subTest(failure=failure):

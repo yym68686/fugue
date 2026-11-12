@@ -87,3 +87,26 @@ func TestDNSAnswerStaticEdgeProbeFailureCannotUseOrdinaryHostProbe(t *testing.T)
 		t.Fatal("strict probe failure was discarded or endpoint probed repeatedly", probes, calls)
 	}
 }
+
+func TestDNSAnswerStaticEdgeUnconfiguredAliasDoesNotAuthorizeEndpoints(t *testing.T) {
+	for _, scenario := range []string{"different primary", "no primary route", "foreign app", "foreign tenant"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, explain := dnsStaticEdgeTestFixture()
+			f.app.Route.Hostname = "primary.example.test"
+			f.app.Route.DNSRouting = nil
+			switch scenario {
+			case "no primary route":
+				f.app.Route = nil
+			case "foreign app":
+				f.app.ID = "foreign"
+			case "foreign tenant":
+				f.app.TenantID = "foreign"
+			}
+			probes, err := dnsAnswerStaticEdgeProbes(f, "app.example.test", explain, nil)
+			foreign := scenario == "foreign app" || scenario == "foreign tenant"
+			if len(probes) != 0 || (err != nil) != foreign {
+				t.Fatal("unconfigured alias changed static endpoint authority", probes, err)
+			}
+		})
+	}
+}

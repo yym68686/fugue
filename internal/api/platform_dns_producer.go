@@ -84,10 +84,16 @@ func (s *Server) captureDNSProducer(ctx context.Context, p platformproducer.Poli
 	// one complete signed closure and current full-readback pins BEFORE reading
 	// the signed operational input; never trigger R2 restoration on this reader.
 	if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
+		if s.log != nil {
+			s.log.Printf("DNS producer source admission failed; retaining release: %v", err)
+		}
 		return fail()
 	}
 	snapshot, err := s.store.GetPlatformArtifactRuntimeInputContext(ctx, parent)
 	if err != nil || snapshot.IntentGeneration != intent.Generation || snapshot.PolicyGeneration != policy.Generation {
+		if s.log != nil {
+			s.log.Printf("DNS producer complete runtime input unavailable; retaining release: read_error=%v lineage_matches=%t", err, snapshot.IntentGeneration == intent.Generation && snapshot.PolicyGeneration == policy.Generation)
+		}
 		return fail()
 	}
 	request, err := platformproducer.ComposeDNSProjection(p, previous, intent, policy, dnsConfigurationInput(snapshot))

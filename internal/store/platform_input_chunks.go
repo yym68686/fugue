@@ -33,6 +33,11 @@ const inputChunkBatchSize = 16
 // caller deadline or cancellation release the writer queue promptly.
 const compilerInputWriteTimeout = 2 * time.Minute
 
+// A complete authenticated legacy input can take longer than an interactive
+// projection's small response suggests. Match the bounded full-write/readback
+// budget, while preserving an earlier caller deadline and the MVCC read lease.
+const compilerInputReadTimeout = 2 * time.Minute
+
 var inputDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func compilerInputChunksTable(location string) (string, error) {
@@ -690,7 +695,7 @@ func (s *Store) GetPlatformCompilerInputContext(parent context.Context, digest s
 	if !inputDigestPattern.MatchString(digest) {
 		return platformconfig.RuntimeSnapshot{}, ErrInvalidInput
 	}
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, compilerInputReadTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return platformconfig.RuntimeSnapshot{}, err

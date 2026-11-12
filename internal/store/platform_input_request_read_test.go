@@ -97,7 +97,7 @@ func TestCompilerInputRequestCancellationReleasesReadLeasePostgres(t *testing.T)
 		t.Fatal("blocked read ignored caller deadline", err)
 	}
 	if time.Since(started) > time.Second {
-		t.Fatal("short request retained the default 30-second work budget")
+		t.Fatal("short request retained the default full-read work budget")
 	}
 	// The request had acquired a session read lease before its chunk SELECT
 	// blocked. Cancellation must release it, not just abandon the HTTP reply.

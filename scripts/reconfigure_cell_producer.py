@@ -204,7 +204,10 @@ def main():
         raise ValueError("configuration credential and retained evidence path required")
     def save(value):
         Path(args.evidence).write_text(canonical(value) + "\n")
-    print(canonical(publish(config, API(config["origin"], token, response_limit=128 << 20), save)))
+    # A DNS configuration preview verifies the complete signed legacy input,
+    # even though its response is small. Keep the client bounded but allow the
+    # server's full-read budget instead of cutting it off after 30 seconds.
+    print(canonical(publish(config, API(config["origin"], token, response_limit=128 << 20, timeout=120), save)))
 
 
 if __name__ == "__main__":
