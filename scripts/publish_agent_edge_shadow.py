@@ -45,6 +45,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class ArtifactHTTPError(RuntimeError):
+    def __init__(self, status):
+        self.status = status
+        super().__init__("artifact API returned HTTP " + str(status))
+
+
 class API:
     def __init__(self, origin, token, response_limit=1 << 20, timeout=30, connect_address=None):
         if type(response_limit) is not int or not 1 <= response_limit <= 128 << 20:
@@ -70,7 +76,9 @@ class API:
             with self.opener.open(request, timeout=self.timeout) as response:
                 raw = response.read(self.response_limit + 1)
         except urllib.error.HTTPError as error:
-            raise RuntimeError("artifact API returned HTTP " + str(error.code)) from None
+            status = error.code
+            error.close()
+            raise ArtifactHTTPError(status) from None
         except Exception:
             raise RuntimeError("artifact API transport unavailable") from None
         if len(raw) > self.response_limit:

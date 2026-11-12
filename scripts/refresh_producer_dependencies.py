@@ -5,12 +5,33 @@ baseline, and the complete signed successor. The API repeats CAS under locks.
 """
 import copy
 import re
+import time
 
 from scripts.bootstrap_cell_producer import authority_identity, digest, ensure_input, exact, selected
 from scripts.observe_front_candidate import now, timestamp
 from scripts.reconfigure_cell_producer import validate_ref
+from scripts.publish_agent_edge_shadow import ArtifactHTTPError
 
 SCHEMA = "fugue.producer-dependency-refresh/v1"
+
+
+def dns_preview(c, api, artifact):
+    # A continuously publishing source may be between full selection and LKG
+    # verification, or change its fence during a complete read. Retry ONLY the
+    # read-only 503 preview, never artifact creation, release, or a CAS failure.
+    # Eight attempts and a two-minute start budget bound the lane; the final
+    # already-bounded HTTP read can add at most two minutes.
+    deadline = time.monotonic() + 120
+    for attempt in range(8):
+        baseline(c, api)
+        if authority_identity(selected(api, "platform-config-producer", "shadow")) != c["policy"]["dns_source"]["producer_policy"]:
+            raise ValueError("approved source producer changed")
+        try:
+            return api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=configuration")
+        except ArtifactHTTPError as error:
+            if error.status != 503 or attempt == 7 or time.monotonic() + 10 >= deadline:
+                raise
+            time.sleep(10)
 
 
 def validate(c):
@@ -81,8 +102,10 @@ def publish(c, api, save):
     if c["precondition"]["operation"] == "dns_source" and authority_identity(selected(api, "platform-config-producer", "shadow")) != c["policy"]["dns_source"]["producer_policy"]:
         raise ValueError("approved source producer changed")
     artifact = ensure_input(api, "policy_snapshot", scope, c["policy"])
-    view = "runtime" if c["precondition"]["operation"] == "placement_constraints" else "configuration"
-    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=" + view)
+    if c["precondition"]["operation"] == "dns_source":
+        preview = dns_preview(c, api, artifact)
+    else:
+        preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
     if c["precondition"]["operation"] == "placement_constraints":
         from scripts.reconfigure_cell_producer import validate_output
         validate_output(c, preview.get("policy", {}))

@@ -1,6 +1,9 @@
 import copy
+import io
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import publish_agent_edge_shadow as policy
 
@@ -45,6 +48,18 @@ class FakeAPI:
 
 
 class ShadowPolicyTests(unittest.TestCase):
+    def test_http_failure_retains_only_status_and_closes_response(self):
+        api = policy.API("https://api.example.test", "synthetic-key")
+        body = io.BytesIO(b"confidential-response")
+        error = urllib.error.HTTPError(api.origin, 503, "unavailable", {}, body)
+        with patch.object(api.opener, "open", side_effect=error):
+            with self.assertRaises(policy.ArtifactHTTPError) as caught:
+                api("GET", "/v1/fixture")
+        self.assertEqual(503, caught.exception.status)
+        self.assertIsInstance(caught.exception, RuntimeError)
+        self.assertNotIn("confidential-response", str(caught.exception))
+        self.assertTrue(body.closed)
+
     def test_initial_shadow_lane_requires_an_explicit_configuration_change(self):
         workflow = Path(".github/workflows/ci.yml").read_text()
         lane = workflow.split("\n  agent_edge_shadow_policy:", 1)[1].split("\n  cell_trust_plan:", 1)[0]

@@ -49,6 +49,17 @@ existing CI lane runs `scripts.reconfigure_cell_producer`, which dispatches this
 schema to `scripts.refresh_producer_dependencies`. Preview the exact successor;
 never infer an approved source from health or silently follow a latest policy.
 
+DNS previews verify the complete immutable runtime input, with a bounded
+two-minute HTTP read budget. A continuously publishing source may temporarily
+lack a verified full selection or change its fence during that read. Only a
+read-only preview returning HTTP 503 is retried: at most eight attempts, ten
+seconds apart, with no new attempt after the two-minute retry window. A final
+in-flight read can take at most another two minutes. Each attempt rechecks the
+same declared serving baseline and exact approved producer; neither is refreshed
+to latest. Authentication, integrity/validation failures with other HTTP statuses,
+transport failures and mutation/CAS errors are not retried. No release occurs
+unless a preview succeeds and the unchanged baseline is checked again.
+
 After a global producer replacement, explicitly refresh dependent DNS producer
 pins and its generated source authorizations. The compiler projects the new
 verified source; normal shadow/gray/full progression and fresh exact HTTPS proofs
