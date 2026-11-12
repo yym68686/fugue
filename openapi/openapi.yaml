@@ -21462,6 +21462,9 @@ components:
       additionalProperties: false
       required: [edge_id, edge_group_id, route_generation, route_proof_verified, proof_observed_at, hard_gates]
       properties:
+        serving_blocked_reason:
+          type: string
+          description: V7 serving admission blocker. Independent route, capacity and client measurements may still be collected, but the candidate cannot enter a published order until admission recovers.
         edge_id: {type: string}
         edge_group_id: {type: string}
         route_generation: {type: string}

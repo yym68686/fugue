@@ -13,6 +13,7 @@ import (
 	"fugue/internal/edgequality"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/platformproducer"
 	"fugue/internal/store"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -81,9 +82,21 @@ func (s *Server) capturePhysicalQualityPathForDNS(ctx context.Context, hostname,
 		return edgequality.Receipt{}, loadErr
 	}
 	quarantine := s.activeNodeQuarantineByName()
+	var admission model.EdgeDNSAdmissionIntent
+	var holds []platformproducer.OfflineEdge
+	if networkPolicy.Version == model.PhysicalPairedContinuityPolicyVersion {
+		admission, holds = s.observeGlobalDNSAdmission(now)
+	}
 	for _, node := range nodes {
 		legacy := edgeQualityRankCandidateForNode(node, policy, now, quarantine)
 		candidate := edgequality.Candidate{EdgeID: legacy.EdgeID, EdgeGroupID: legacy.EdgeGroupID, HardGates: []string{}}
+		if networkPolicy.Version == model.PhysicalPairedContinuityPolicyVersion {
+			intent := dnsAdmissionForNode(node, admission, holds)
+			s.observeOfflineRecovery(node, intent, holds, now)
+			if intent.State != "allowed" && intent.State != "not_configured" {
+				candidate.ServingBlockedReason = "dns_admission_" + intent.State
+			}
+		}
 		if edgeQualityRankCandidateHardGated(legacy) {
 			candidate.HardGates = append(candidate.HardGates, firstNonEmpty(legacy.ExclusionReason, legacy.Reason, edgeQualityRankGateReason(legacy)))
 		}

@@ -100,7 +100,7 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 	if snapshot.Policy.Version == PairedContinuityPolicyVersion && result.Hypothesis == "hold" && result.QualityState != "measured" {
 		eligible := map[string]bool{}
 		for _, candidate := range snapshot.Candidates {
-			eligible[candidate.EdgeID] = len(candidate.HardGates) == 0 && proofFresh(candidate, snapshot.Policy, now)
+			eligible[candidate.EdgeID] = len(candidate.HardGates) == 0 && candidate.ServingBlockedReason == "" && proofFresh(candidate, snapshot.Policy, now)
 		}
 		order := []string{primary.EdgeID}
 		seen := map[string]bool{primary.EdgeID: true}

@@ -30,12 +30,13 @@ func DefaultShadowPolicy() Policy {
 }
 
 type Candidate struct {
-	EdgeID             string     `json:"edge_id"`
-	EdgeGroupID        string     `json:"edge_group_id"`
-	RouteGeneration    string     `json:"route_generation"`
-	RouteProofVerified bool       `json:"route_proof_verified"`
-	ProofObservedAt    *time.Time `json:"proof_observed_at"`
-	HardGates          []string   `json:"hard_gates"`
+	ServingBlockedReason string     `json:"serving_blocked_reason,omitempty"`
+	EdgeID               string     `json:"edge_id"`
+	EdgeGroupID          string     `json:"edge_group_id"`
+	RouteGeneration      string     `json:"route_generation"`
+	RouteProofVerified   bool       `json:"route_proof_verified"`
+	ProofObservedAt      *time.Time `json:"proof_observed_at"`
+	HardGates            []string   `json:"hard_gates"`
 }
 
 type Observation struct {

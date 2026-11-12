@@ -57,6 +57,9 @@ func ServiceConsensusSnapshot(hostname string, receipts []Receipt) (Snapshot, er
 		candidate := Candidate{EdgeID: edgeID, EdgeGroupID: candidates[0].EdgeGroupID, RouteProofVerified: len(candidates) == len(ordered), HardGates: []string{}}
 		digests := []string{}
 		for _, child := range candidates {
+			if first.Policy.Version == PairedContinuityPolicyVersion && child.ServingBlockedReason != "" {
+				candidate.ServingBlockedReason = child.ServingBlockedReason
+			}
 			if child.EdgeGroupID != candidate.EdgeGroupID || !child.RouteProofVerified || child.ProofObservedAt == nil {
 				candidate.RouteProofVerified = false
 			}

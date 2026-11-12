@@ -82,6 +82,24 @@ func TestContinuityNeverUsesServiceOnlyOrPassiveClientWinner(t *testing.T) {
 	}
 }
 
+func TestContinuitySeparatesMeasurementEligibilityFromServingAdmission(t *testing.T) {
+	snapshot := pairedAlgorithmFixture()
+	snapshot.Candidates[1].ServingBlockedReason = "dns_admission_suspended"
+	result := evaluateNetwork(snapshot)
+	if result.Hypothesis != "hold" {
+		t.Fatal("measurement eligibility bypassed serving admission", result)
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.EdgeID == "edge-b" && (candidate.Ready || len(candidate.HardGates) != 1 || candidate.Metrics["service_network_ms"].State != "observed") {
+			t.Fatal("serving blocker erased measurements or allowed publication", candidate)
+		}
+	}
+	snapshot.Candidates[1].ServingBlockedReason = ""
+	if result := evaluateNetwork(snapshot); result.Hypothesis != "switch" {
+		t.Fatal("completed recovery did not automatically reenter competition", result)
+	}
+}
+
 func TestContinuityRetainsOriginalOrderTimeAcrossSerializationAndFreshCaptures(t *testing.T) {
 	snapshot := networkFixture()
 	snapshot.Policy = DefaultPairedContinuityPolicy()

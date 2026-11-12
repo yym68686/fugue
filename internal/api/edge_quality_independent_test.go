@@ -23,6 +23,7 @@ func TestQualityCandidateOutsideDNSObtainsIndependentProofAndCapacityTarget(t *t
 	if !snapshot.Candidates[0].RouteProofVerified || len(snapshot.Candidates[0].HardGates) != 0 {
 		t.Fatal("candidate was required to win DNS before it could be measured", snapshot.Candidates)
 	}
+	snapshot.Candidates[0].ServingBlockedReason = "dns_admission_suspended"
 	augmented := independentQualityEvidence(snapshot, evidence)
 	targets := qualityCapacityTargets([]model.EdgeNode{{ID: "edge-b", EdgeGroupID: "group-b", PublicIPv4: "8.8.8.8"}}, augmented)
 	if len(targets) != 1 || targets[0].edgeID != "edge-b" || len(evidence.Candidates) != 0 {

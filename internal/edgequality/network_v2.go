@@ -272,6 +272,9 @@ func assessNetwork(candidate Candidate, observations []Observation, policy Polic
 
 func assessNetworkAt(candidate Candidate, observations []Observation, policy Policy, now, metricNow time.Time, cohort string) Assessment {
 	assessment := Assessment{EdgeID: candidate.EdgeID, EdgeGroupID: candidate.EdgeGroupID, HardGates: append([]string{}, candidate.HardGates...), Metrics: map[string]Metric{}, Missing: []string{}}
+	if policy.Version == PairedContinuityPolicyVersion && candidate.ServingBlockedReason != "" {
+		assessment.HardGates = append(assessment.HardGates, candidate.ServingBlockedReason)
+	}
 	compareClient := !model.IsBoundedPhysicalNetworkPolicy(policy.Version) || cohort != ""
 	values := map[string][]float64{}
 	latest := map[string]time.Time{}
