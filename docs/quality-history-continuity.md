@@ -28,3 +28,9 @@ All route, TLS and DNS executors must advertise V7 capability before a V7 signed
 parent can enter gray/full publication. This is executable compatibility, not a
 claim that the candidate was applied or that DNS switched. Final verification
 requires fresh consumer convergence and actual authoritative DNS answers.
+
+DNS code releases must stage an unselected private slot first. After its exact
+reader identity, current assignment, positive checkpoint and direct UDP/TCP
+answers pass the existing transport verifier, publish a separate declarative
+transport handoff. Only then replace the former public slot. A code intent must
+not restart the selected public backend or bypass this handoff protection.
