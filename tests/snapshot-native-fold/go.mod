@@ -1,6 +1,6 @@
 module fugue-tests/snapshot-native-fold
 
-go 1.26.0
+go 1.25.7
 
 require github.com/longhorn/sparse-tools v0.0.0-20260423074222-280e61de741a
 
