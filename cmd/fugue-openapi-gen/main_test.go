@@ -68,24 +68,11 @@ func TestRenderRoutesUsesDedicatedEdgeRouteIntentMiddleware(t *testing.T) {
 	}
 }
 
-func TestPendingRootAuthHasNoAlternativeCredential(t *testing.T) {
-	security := openapi3.SecurityRequirements{{"PendingRootPodBearerAuth": {}}}
-	auth, err := inferAuthKind(&openapi3.T{}, &openapi3.Operation{Security: &security})
-	if err != nil || auth != "pending-root-pod" {
-		t.Fatal(auth, err)
-	}
-	routes, err := renderRoutesFile([]routeDefinition{{Method: "POST", Path: "/v1/platform-state/compiler-inputs/pending-roots", Pattern: "POST /v1/platform-state/compiler-inputs/pending-roots", HandlerName: "handleRetainPendingCompilerInputRoot", Auth: auth}})
-	if err != nil || !strings.Contains(string(routes), "s.requirePendingRootPod(http.HandlerFunc(s.handleRetainPendingCompilerInputRoot))") {
-		t.Fatal(string(routes), err)
-	}
-	for _, combined := range []openapi3.SecurityRequirements{
-		{{"PendingRootPodBearerAuth": {}, "BearerAuth": {}}},
-		{{"PendingRootPodBearerAuth": {}, "KubernetesServiceAccountBearerAuth": {}}},
-		{{"PendingRootPodBearerAuth": {}}, {}},
-		{{"PendingRootPodBearerAuth": {}}, {"EdgeRouteIntentComponentBearerAuth": {}}},
-	} {
-		if _, err := inferAuthKind(&openapi3.T{}, &openapi3.Operation{Security: &combined}); err == nil {
-			t.Fatal("credential alternatives accepted")
+func TestRetiredOrUnknownAuthCannotGenerateAnUnauthenticatedRoute(t *testing.T) {
+	for _, scheme := range []string{"PendingRootPodBearerAuth", "UnknownBearerAuth"} {
+		security := openapi3.SecurityRequirements{{scheme: {}}}
+		if _, err := inferAuthKind(&openapi3.T{}, &openapi3.Operation{Security: &security}); err == nil {
+			t.Fatalf("unsupported authentication scheme accepted: %s", scheme)
 		}
 	}
 }

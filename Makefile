@@ -28,7 +28,6 @@ test:
 	python3 -m unittest scripts.test_publish_storage_policy
 	python3 -m unittest scripts.test_compiler_input_storage
 	python3 -m unittest scripts.test_compiler_input_history_compatibility
-	python3 -m unittest scripts.test_compiler_input_archive
 	python3 -m unittest scripts.test_compiler_input_deadline
 	python3 -m unittest scripts.test_verify_managed_ssh_image
 	python3 -m unittest scripts.test_reconcile_managed_ssh_keys

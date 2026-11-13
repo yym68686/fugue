@@ -88,7 +88,8 @@ func TestPlatformReleaseBackupReadOnlyPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 1, 1, 1, 2, 3, 456789000, time.FixedZone("test", 3600))
-	a, err := pgInsertPlatformArtifact(t.Context(), s.db, model.PlatformArtifact{ID: model.NewID("artifact"), ArtifactKind: "neutral", ScopeKey: "global", Generation: "generation-neutral", Content: map[string]any{}, CreatedAt: now, UpdatedAt: now})
+	identity := model.NewID("artifact")
+	a, err := pgInsertPlatformArtifact(t.Context(), s.db, model.PlatformArtifact{ID: identity, ArtifactKind: "neutral", ScopeKey: "global", Generation: "generation-" + identity, Content: map[string]any{}, CreatedAt: now, UpdatedAt: now})
 	if err != nil {
 		t.Fatal(err)
 	}

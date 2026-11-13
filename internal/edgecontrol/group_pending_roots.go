@@ -3,23 +3,15 @@ package edgecontrol
 import (
 	"context"
 	"errors"
-	"path/filepath"
-	"reflect"
+	"fugue/internal/inputarchive"
 	"sort"
 	"time"
-
-	"fugue/internal/inputarchive"
 )
 
-var ErrGroupPendingRoot = errors.New("edge-control pending retention registration unavailable")
-
-// Implementations must authenticate and bind this exact owner/source through
-// the independent registry transport. A receipt is retention acknowledgement,
-// never complete source custody, activation, pin or retirement authority.
-// No command/production transport opts into this capability implicitly.
-type GroupPendingRootRegistrar interface {
-	RetainPendingCompilerInputExternalRoot(context.Context, inputarchive.PendingRootRequest) (inputarchive.PendingRootReceipt, error)
-}
+// Compatibility for persisted opt-in states. New remote registrations are
+// retired. Required legacy states stay fail-closed rather than silently
+// discarding their retention contract.
+var ErrGroupPendingRoot = errors.New("edge-control legacy retention registration unavailable")
 
 type GroupPendingRootRecord struct {
 	Generation   string                          `json:"generation"`
@@ -41,87 +33,6 @@ func pendingGroupRootRegistration(group string, binding GroupOriginalPublication
 		return inputarchive.PendingRootRegistration{}, ErrGroupPendingRoot
 	}
 	return r, nil
-}
-
-// Runs inside the native local writer CAS, after candidate/publication checks
-// but BEFORE its atomic file replacement. Covers normal publication, candidate
-// promotion and recovery uniformly. Failure leaves the old LKG and all audit
-// roots intact; a remote commit followed by local failure leaves a protected
-// orphan. There is deliberately no compensating delete or automatic expiry.
-func (store *PersistentGroupStore) retainPendingGroupPublication(ctx context.Context, before *GroupPublishedBundle, state *persistentGroupState) error {
-	if state.Published == nil || before != nil && sameGroupCompileValue(before, state.Published) {
-		return nil
-	}
-	if !state.PendingRootsRequired && store.pendingRootRegistrar == nil {
-		return nil // existing serving policy, capability remains OFF
-	}
-	if store.pendingRootRegistrar == nil || !state.CompileInputAttestationsRequired || len(state.PendingRootRecords) > 32 {
-		return ErrGroupPendingRoot
-	}
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	pub := state.Published
-	if pub.PublicationSequence == 0 || pub.PublicationSequence > uint64(len(state.AuthorityLedger)) {
-		return ErrGroupPendingRoot
-	}
-	var input *GroupCompileInput
-	for i := range state.RetentionInputs {
-		if state.RetentionInputs[i].Entry.Sequence == pub.CandidateLedgerSequence {
-			input = &state.RetentionInputs[i]
-			break
-		}
-	}
-	if input == nil {
-		return ErrGroupPendingRoot // old missing source is never backfilled
-	}
-	path := filepath.Join(store.compileInputKeyringDir, state.GroupID+".json")
-	keys, err := loadGroupBundleSigningKeyring(path, state.GroupID)
-	if err != nil {
-		return ErrGroupPendingRoot
-	}
-	binding, err := bindGroupOriginalPublication(state.GroupID, *input, state.AuthorityLedger[pub.PublicationSequence-1], pub.Bundle, pub.RecoveryEpoch, keys)
-	if err != nil {
-		return ErrGroupPendingRoot
-	}
-	registration, err := pendingGroupRootRegistration(state.GroupID, binding)
-	if err != nil {
-		return err
-	}
-	var receipt inputarchive.PendingRootReceipt
-	found := false
-	for _, record := range state.PendingRootRecords {
-		if record.Generation == registration.Generation {
-			if record.SourceDigest != registration.SourceDigest || !record.Receipt.Matches(registration) {
-				return ErrGroupPendingRoot
-			}
-			receipt, found = record.Receipt, true
-			break
-		}
-	}
-	if !found {
-		if len(state.PendingRootRecords) >= 32 {
-			return ErrGroupPendingRoot
-		}
-		request, requestErr := pendingGroupRootRequest(state.GroupID, *input, state.AuthorityLedger[pub.PublicationSequence-1], pub.Bundle, pub.RecoveryEpoch, binding)
-		if requestErr != nil {
-			return ErrGroupPendingRoot
-		}
-		receipt, err = store.pendingRootRegistrar.RetainPendingCompilerInputExternalRoot(ctx, request)
-		if err != nil || !receipt.Matches(registration) {
-			return ErrGroupPendingRoot
-		}
-	}
-	// Revocation/rotation while the remote retention operation runs refuses
-	// local publication. The already-persisted remote root remains protected.
-	after, err := loadGroupBundleSigningKeyring(path, state.GroupID)
-	if err != nil || ctx.Err() != nil || !reflect.DeepEqual(keys, after) {
-		return ErrGroupPendingRoot
-	}
-	if !found {
-		state.PendingRootRecords = append(state.PendingRootRecords, GroupPendingRootRecord{registration.Generation, registration.SourceDigest, receipt})
-	}
-	state.PendingRootsRequired = true
-	return nil
 }
 
 func validateGroupPendingRoots(state persistentGroupState) error {

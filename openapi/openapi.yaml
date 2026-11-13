@@ -4546,86 +4546,6 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
-  /v1/platform-state/compiler-inputs/pending-roots:
-    post:
-      operationId: retainPendingCompilerInputRoot
-      summary: Register an authenticated producer's append-only retention root
-      description: >-
-        Private TLS only, with exact fugue-api-tls.<control-plane-namespace>.svc
-        Host and SNI, no query or forwarded identity. Requires a Pod-bound
-        ServiceAccount token for the exclusive audience
-        fugue.compiler-input.pending-root.v1, verified by Kubernetes TokenReview.
-        The server independently matches the live ServiceAccount, Pod,
-        controlling ReplicaSet and Deployment UIDs, immutable image and source
-        against explicitly configured owner authority. Existing RouteIntent,
-        consumer, tenant and administrator credentials grant no access.
-        Disabled unless trusted owner/source and allocation providers are
-        explicitly configured. No production configuration is enabled by this
-        contract. Authentication precedes body decoding and registration.
-        source_base64 preserves the exact canonical original native source JSON;
-        it does not assert signature verification, custody or current policy.
-        The server derives the registration from the original input MAC and
-        primary publication signature. Native transaction checks and current
-        source/allocation/configuration witnesses must pass before commit.
-        A complete native authorization policy must contain an unexpired lease
-        for the exact authenticated owner, Pod, ServiceAccount, Deployment,
-        source, immutable image and configured policy revision. Its singleton
-        revision and the complete append-only pending-root registry are bound
-        in the preparation snapshot and rechecked under native locks before
-        insertion; a committed revocation invalidates stale API configuration.
-        Missing policy, registry drift or expired authority refuses the entire
-        transaction, including exact retries of an earlier acknowledgement.
-        The single 60-second request budget includes authentication, decoding,
-        closure preparation and native commit; private TLS body/write deadlines
-        use that same deadline only for this path. Timeout or a lost response
-        does not prove the registration was uncommitted and never releases a
-        root or reservation. An exact retry is idempotent; no replacement,
-        deletion, expiry, serving, activation, pin or retirement is authorized.
-        Kubernetes observations are bounded preflight, not an atomic lease
-        across Kubernetes and PostgreSQL or complete external retention custody.
-      tags: [Admin]
-      x-fugue-handler: handleRetainPendingCompilerInputRoot
-      security:
-        - PendingRootPodBearerAuth: []
-      requestBody:
-        required: true
-        description: >-
-          At most 24 MiB of canonical compact JSON, without whitespace, duplicate
-          or unknown fields. Object field order is schema, registration,
-          source_schema, source_base64; registration uses schema, owner,
-          generation, source_digest, references; each reference uses kind, id,
-          and expected_hash when required. Strings use Go encoding/json escaping.
-          Decoded source is at most 16 MiB; registration at most 16 KiB and 32
-          direct typed references. The original source bytes remain unmodified.
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PendingCompilerInputRootRequest"
-      responses:
-        '200':
-          description: Exact durable retention acknowledgement; never activation or a verified restore pin.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PendingCompilerInputRootReceipt"
-        '400':
-          $ref: "#/components/responses/ErrorResponse"
-        '401':
-          $ref: "#/components/responses/ErrorResponse"
-        '403':
-          $ref: "#/components/responses/ErrorResponse"
-        '404':
-          $ref: "#/components/responses/ErrorResponse"
-        '409':
-          $ref: "#/components/responses/ErrorResponse"
-        '413':
-          $ref: "#/components/responses/ErrorResponse"
-        '415':
-          $ref: "#/components/responses/ErrorResponse"
-        '503':
-          $ref: "#/components/responses/ErrorResponse"
-        default:
-          $ref: "#/components/responses/ErrorResponse"
   /v1/platform-state/consumers/identity:
     post:
       operationId: exchangePlatformConsumerIdentity
@@ -4655,9 +4575,7 @@ paths:
         RouteIntent signing keyring. The private RouteIntent TLS listener admits
         this exact POST identity-exchange path without query parameters as well
         as the existing GET route-intents path. Host, SNI and Kubernetes Pod
-        authentication remain mandatory. The separate pending-root POST path is
-        disabled by default and requires its own exclusive-purpose Pod token;
-        identity exchange grants no pending-root registration permission.
+        authentication remain mandatory.
         The signed identity expires after two minutes. This operation does not
         report consumer health or change serving state.
       tags: [Admin]
@@ -15837,11 +15755,6 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
 components:
   securitySchemes:
-    PendingRootPodBearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-      description: Pod-bound ServiceAccount token for the exclusive fugue.compiler-input.pending-root.v1 audience; TokenReview plus exact server-configured live owner chain. No consumer or RouteIntent token exchange grants this purpose.
     BearerAuth:
       type: http
       scheme: bearer
@@ -16230,82 +16143,6 @@ components:
       schema:
         type: string
   schemas:
-    PendingCompilerInputRootRequest:
-      type: object
-      additionalProperties: false
-      required: [schema, registration, source_schema, source_base64]
-      properties:
-        schema:
-          type: string
-          enum: [fugue.compiler-input.pending-root-request.v1]
-        registration:
-          $ref: "#/components/schemas/PendingCompilerInputRootRegistration"
-        source_schema:
-          type: string
-          enum: [fugue.edge-control.pending-root-source.v1]
-        source_base64:
-          type: string
-          format: byte
-          minLength: 4
-          maxLength: 22369624
-          description: Canonical padded standard base64 of the unmodified original native source JSON, at most 16 MiB after decoding.
-    PendingCompilerInputRootRegistration:
-      type: object
-      additionalProperties: false
-      required: [schema, owner, generation, source_digest, references]
-      properties:
-        schema:
-          type: string
-          enum: [fugue.compiler-input.pending-root.v1]
-        owner:
-          type: string
-          minLength: 1
-          maxLength: 256
-          description: Must exactly equal the independently authenticated server-selected owner.
-        generation:
-          type: string
-          minLength: 1
-          maxLength: 512
-        source_digest:
-          type: string
-          pattern: '^sha256:[0-9a-f]{64}$'
-        references:
-          type: array
-          minItems: 1
-          maxItems: 32
-          description: Exact unique typed identities in canonical kind/NUL/id order, independently derived by the source verifier.
-          items:
-            type: object
-            additionalProperties: false
-            required: [kind, id]
-            properties:
-              kind:
-                type: string
-                enum: [artifact, release, input]
-              id:
-                type: string
-                minLength: 1
-                maxLength: 512
-              expected_hash:
-                type: string
-                pattern: '^sha256:[0-9a-f]{64}$'
-                description: Required for artifact/input, forbidden for release; input id must equal this hash.
-    PendingCompilerInputRootReceipt:
-      type: object
-      additionalProperties: false
-      required: [registration_sha256, registry_revision, source_epoch]
-      properties:
-        registration_sha256:
-          type: string
-          pattern: '^[0-9a-f]{64}$'
-        registry_revision:
-          type: integer
-          format: int64
-          minimum: 1
-        source_epoch:
-          type: integer
-          format: int64
-          minimum: 0
     ImageOrphanPolicy:
       type: object
       required: [generation, mode, repository_prefixes, quarantine_seconds, minimum_observations, inventory_max_age_seconds, updated_at, updated_by]

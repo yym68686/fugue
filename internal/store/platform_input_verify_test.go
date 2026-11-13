@@ -111,20 +111,20 @@ func TestChunkedCompilerInputRechecksExistingBytes(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { state.db.Exec(`DELETE FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest) })
-			query := `UPDATE fugue_platform_input_chunks SET data=set_byte(data,0,33) WHERE content_hash=$1 AND ordinal=0`
+			query := `UPDATE fugue_platform_input_hot_chunks SET data=set_byte(data,0,33) WHERE content_hash=$1 AND ordinal=0`
 			switch mutation {
 			case "data_and_claim":
-				query = `UPDATE fugue_platform_input_chunks SET data=set_byte(data,0,33),chunk_hash='sha256:'||encode(sha256(set_byte(data,0,33)),'hex') WHERE content_hash=$1 AND ordinal=0`
+				query = `UPDATE fugue_platform_input_hot_chunks SET data=set_byte(data,0,33),chunk_hash='sha256:'||encode(sha256(set_byte(data,0,33)),'hex') WHERE content_hash=$1 AND ordinal=0`
 			case "claim":
-				query = `UPDATE fugue_platform_input_chunks SET chunk_hash='sha256:'||repeat('0',64) WHERE content_hash=$1 AND ordinal=0`
+				query = `UPDATE fugue_platform_input_hot_chunks SET chunk_hash='sha256:'||repeat('0',64) WHERE content_hash=$1 AND ordinal=0`
 			case "size":
-				query = `UPDATE fugue_platform_input_chunks SET data=substring(data from 2),chunk_hash='sha256:'||encode(sha256(substring(data from 2)),'hex') WHERE content_hash=$1 AND ordinal=0`
+				query = `UPDATE fugue_platform_input_hot_chunks SET data=substring(data from 2),chunk_hash='sha256:'||encode(sha256(substring(data from 2)),'hex') WHERE content_hash=$1 AND ordinal=0`
 			case "missing":
-				query = `DELETE FROM fugue_platform_input_chunks WHERE content_hash=$1 AND ordinal=0`
+				query = `DELETE FROM fugue_platform_input_hot_chunks WHERE content_hash=$1 AND ordinal=0`
 			case "extra":
-				query = `INSERT INTO fugue_platform_input_chunks(content_hash,ordinal,chunk_hash,data) SELECT content_hash,99999,chunk_hash,data FROM fugue_platform_input_chunks WHERE content_hash=$1 AND ordinal=0`
+				query = `INSERT INTO fugue_platform_input_hot_chunks(content_hash,ordinal,chunk_hash,data) SELECT content_hash,99999,chunk_hash,data FROM fugue_platform_input_hot_chunks WHERE content_hash=$1 AND ordinal=0`
 			case "order":
-				query = `UPDATE fugue_platform_input_chunks SET ordinal=99999 WHERE content_hash=$1 AND ordinal=0`
+				query = `UPDATE fugue_platform_input_hot_chunks SET ordinal=99999 WHERE content_hash=$1 AND ordinal=0`
 			}
 			if _, err := state.db.Exec(query, digest); err != nil {
 				t.Fatal(err)

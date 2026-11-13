@@ -28,12 +28,12 @@ func TestChunkedCompilerInputVerifiesNewStoredBytesBeforeCommit(t *testing.T) {
 			if mutation == "missing_chunk" {
 				body = "RETURN NULL;"
 			}
-			statement := fmt.Sprintf(`CREATE FUNCTION fugue_test_corrupt_input() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.content_hash='%s' AND NEW.ordinal=0 THEN %s END IF; RETURN NEW; END $$; CREATE TRIGGER fugue_test_corrupt_input BEFORE INSERT ON fugue_platform_input_chunks FOR EACH ROW EXECUTE FUNCTION fugue_test_corrupt_input();`, digest, body)
+			statement := fmt.Sprintf(`CREATE FUNCTION fugue_test_corrupt_input() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.content_hash='%s' AND NEW.ordinal=0 THEN %s END IF; RETURN NEW; END $$; CREATE TRIGGER fugue_test_corrupt_input BEFORE INSERT ON fugue_platform_input_hot_chunks FOR EACH ROW EXECUTE FUNCTION fugue_test_corrupt_input();`, digest, body)
 			if _, err := state.db.Exec(statement); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() {
-				if _, err := state.db.Exec(`DROP TRIGGER fugue_test_corrupt_input ON fugue_platform_input_chunks; DROP FUNCTION fugue_test_corrupt_input();`); err != nil {
+				if _, err := state.db.Exec(`DROP TRIGGER fugue_test_corrupt_input ON fugue_platform_input_hot_chunks; DROP FUNCTION fugue_test_corrupt_input();`); err != nil {
 					t.Error(err)
 				}
 			})
@@ -41,7 +41,7 @@ func TestChunkedCompilerInputVerifiesNewStoredBytesBeforeCommit(t *testing.T) {
 				t.Fatal("altered stored representation was accepted")
 			}
 			var leaked int
-			if err := state.db.QueryRow(`SELECT (SELECT count(*) FROM fugue_platform_input_chunks WHERE content_hash=$1)+(SELECT count(*) FROM fugue_platform_input_manifests WHERE content_hash=$1)`, digest).Scan(&leaked); err != nil || leaked != 0 {
+			if err := state.db.QueryRow(`SELECT (SELECT count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1)+(SELECT count(*) FROM fugue_platform_input_manifests WHERE content_hash=$1)`, digest).Scan(&leaked); err != nil || leaked != 0 {
 				t.Fatal("failed readback committed partial input", leaked, err)
 			}
 		})

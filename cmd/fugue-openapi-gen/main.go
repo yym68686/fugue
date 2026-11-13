@@ -177,11 +177,14 @@ func inferAuthKind(doc *openapi3.T, operation *openapi3.Operation) (string, erro
 
 	auth := "none"
 	for _, requirement := range security {
-		if _, ok := requirement["PendingRootPodBearerAuth"]; ok {
-			if auth != "none" || len(security) != 1 || len(requirement) != 1 {
-				return "", errors.New("pending-root Pod auth must be exclusive")
+		for scheme := range requirement {
+			switch scheme {
+			case "BearerAuth", "RuntimeBearerAuth", "NodeUpdaterBearerAuth", "PlatformComponentBearerAuth", "EdgeRouteIntentComponentBearerAuth":
+			case "KubernetesServiceAccountBearerAuth", "EdgeToken", "DownloadToken":
+				// These purpose-specific tokens are validated by their handlers.
+			default:
+				return "", fmt.Errorf("unsupported authentication scheme %q", scheme)
 			}
-			auth = "pending-root-pod"
 		}
 		if _, ok := requirement["EdgeRouteIntentComponentBearerAuth"]; ok {
 			if auth != "none" {
@@ -229,8 +232,6 @@ func renderRoutesFile(routes []routeDefinition) ([]byte, error) {
 	for _, route := range routes {
 		handlerExpr := "http.HandlerFunc(s." + route.HandlerName + ")"
 		switch route.Auth {
-		case "pending-root-pod":
-			handlerExpr = "s.requirePendingRootPod(" + handlerExpr + ")"
 		case "api":
 			handlerExpr = "s.auth.RequireAPI(" + handlerExpr + ")"
 		case "runtime":

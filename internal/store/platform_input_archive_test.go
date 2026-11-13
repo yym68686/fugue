@@ -118,7 +118,7 @@ func prepareVerifiedRoutedArchive(t *testing.T, s *Store) (string, *archiveTestO
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err := s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 	objects := &archiveTestObjects{}
@@ -204,7 +204,7 @@ func testCompilerInputArchiveHotCopyVerifiesThenPrefersLocalBytes(t *testing.T, 
 			t.Fatal("cold/warm selective input path depended on R2 for a hot input", err)
 		}
 	}
-	if err = s.EnsurePlatformCompilerInput(got, digest); err != nil {
+	if err = s.ensureLegacyCompilerInputFixture(got, digest); err != nil {
 		t.Fatal("existing hot writer verification depended on R2", err)
 	}
 	objects.failGet = true
@@ -297,7 +297,7 @@ func TestCompilerInputArchiveHotCopyRejectsSelfConsistentSourceCorruption(t *tes
 func TestCompilerInputArchiveCopyLeaseResumePinsAndReadback(t *testing.T) {
 	s := archiveTestStore(t)
 	snapshot, digest := chunkedInputFixture(t)
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err := s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 	m, err := readInputManifest(t.Context(), s.db, digest)
@@ -356,7 +356,7 @@ func TestCompilerInputWriteFenceRoutesFallbackToHotAndBlocksMaintenanceRewrite(t
 	s := archiveTestStore(t)
 	resetArchiveFenceFixture(t, s)
 	snapshot, digest := chunkedInputFixture(t)
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err := s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 	var original inputManifest
@@ -370,7 +370,7 @@ func TestCompilerInputWriteFenceRoutesFallbackToHotAndBlocksMaintenanceRewrite(t
 
 	// Existing identities remain usable while fallback writes move to the hot
 	// relation, leaving the old relation fixed for retirement verification.
-	if err = s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err = s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal("existing input was rejected by the write fence", err)
 	}
 	changed := snapshot
@@ -379,7 +379,7 @@ func TestCompilerInputWriteFenceRoutesFallbackToHotAndBlocksMaintenanceRewrite(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.EnsurePlatformCompilerInput(changed, newDigest); err != nil {
+	if err = s.ensureLegacyCompilerInputFixture(changed, newDigest); err != nil {
 		t.Fatal("fenced writer did not use the separate hot relation", err)
 	}
 	var location string
@@ -398,7 +398,7 @@ func TestCompilerInputWriteFenceRoutesFallbackToHotAndBlocksMaintenanceRewrite(t
 		if actual, digestErr := platformconfig.RuntimeSnapshotDigest(got); digestErr != nil || actual != newDigest {
 			t.Fatal("hot input changed its canonical digest", actual, digestErr)
 		}
-		if err = s.EnsurePlatformCompilerInput(changed, newDigest); err != nil {
+		if err = s.ensureLegacyCompilerInputFixture(changed, newDigest); err != nil {
 			t.Fatal("hot input did not support idempotent ensure", err)
 		}
 	}
@@ -416,7 +416,7 @@ func TestCompilerInputDatabaseWriteFenceBlocksOldWritersAndCanBeReversedBeforeRe
 	s := archiveTestStore(t)
 	resetArchiveFenceFixture(t, s)
 	snapshot, digest := chunkedInputFixture(t)
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err := s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 
@@ -445,7 +445,7 @@ func TestCompilerInputDatabaseWriteFenceBlocksOldWritersAndCanBeReversedBeforeRe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.EnsurePlatformCompilerInput(changed, newDigest); err != nil {
+	if err = s.ensureLegacyCompilerInputFixture(changed, newDigest); err != nil {
 		t.Fatal("writer did not resume after fence removal", err)
 	}
 	var location string
@@ -478,7 +478,7 @@ func prepareRetirableCompilerInput(t *testing.T, s *Store) (platformconfig.Runti
 		t.Fatal("clear disposable legacy chunk fixtures", err)
 	}
 	snapshot, digest := chunkedInputFixture(t)
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err := s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 	objects := &archiveTestObjects{}
@@ -596,7 +596,7 @@ func resetArchiveFenceFixture(t *testing.T, s *Store) {
 func TestCompilerInputArchiveRoutedReadRequiresVerifiedBytes(t *testing.T) {
 	s := archiveTestStore(t)
 	snapshot, digest := chunkedInputFixture(t)
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err := s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 	objects := &archiveTestObjects{}
@@ -788,7 +788,7 @@ func TestCompilerInputArchiveMigrationStreamsBeyondLegacyLimit(t *testing.T) {
 	// Exercise the isolated copy's one-chunk paging above the legacy 128MiB
 	// limit; the source and its business read location must remain intact.
 	archived, err := copyCompilerInputArchive(t.Context(), s.db, objects, backend, CompilerInputArchiveMigrationOptions{Digest: digest, Apply: true, SegmentBytes: 16 << 20,
-		expectedFormat: inputFormatV1, expectedRawBytes: size, requireNew: true, sourcePageChunks: 1})
+		sourcePageChunks: 1})
 	if err != nil || int64(archived.Segments) != (size+(16<<20)-1)/(16<<20) || archived.SourceChunks != count || archived.RawBytes != size {
 		t.Fatal("streamed archive dimensions differ", archived, err)
 	}
@@ -820,7 +820,7 @@ func TestCompilerInputArchiveMigrationStreamsBeyondLegacyLimit(t *testing.T) {
 func TestCompilerInputArchiveDryRunIsReadOnlyAndNeedsNoObjectStore(t *testing.T) {
 	s := archiveTestStore(t)
 	snapshot, digest := chunkedInputFixture(t)
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err := s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 	var before int
@@ -866,7 +866,7 @@ func TestCompilerInputArchiveSourceRejectsChangedChunkBytes(t *testing.T) {
 func TestCompilerInputArchiveReaderFallsBackBeforeLedgerMigration(t *testing.T) {
 	s := boundedContentTestStore(t)
 	snapshot, digest := chunkedInputFixture(t)
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err := s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 	s.compilerInputArchiveReadLeaseEnabled = true
@@ -934,7 +934,7 @@ func TestCompilerInputArchiveWriterBarrierRetriesOnlyAfterRollback(t *testing.T)
 func TestCompilerInputInspectWaitsBehindArchiveReaderFence(t *testing.T) {
 	s := archiveTestStore(t)
 	snapshot, digest := chunkedInputFixture(t)
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	if err := s.ensureLegacyCompilerInputFixture(snapshot, digest); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_ENDPOINT", "https://archive.example.invalid")

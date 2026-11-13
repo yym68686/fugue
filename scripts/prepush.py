@@ -479,10 +479,10 @@ def main() -> int:
     if any(name.startswith("internal/inputhistory/") or name in {
             "scripts/compiler_input_history_compatibility.py", "scripts/test_compiler_input_history_compatibility.py",
             "scripts/compiler_input_storage.py", "scripts/test_compiler_input_storage.py",
-            "scripts/compiler_input_archive.py", "scripts/test_compiler_input_archive.py",
+
             "deploy/releases/components.json", ".github/workflows/ci.yml"} for name in paths):
         non_go_tasks["input-history-compatibility-tests"] = [sys.executable, "-m", "unittest",
-            "scripts.test_compiler_input_history_compatibility", "scripts.test_compiler_input_storage", "scripts.test_compiler_input_archive"]
+            "scripts.test_compiler_input_history_compatibility", "scripts.test_compiler_input_storage"]
         non_go_tasks["input-deadline-tests"] = [sys.executable, "-m", "unittest", "scripts.test_compiler_input_deadline"]
     if any(name in {"scripts/longhorn_snapshot_map.py", "scripts/plan_longhorn_snapshot_recovery.py", "scripts/recover_longhorn_snapshot.py", "scripts/reconcile_longhorn_snapshot_cleanup.py", "scripts/test_reconcile_longhorn_snapshot_cleanup.py", "scripts/test_longhorn_snapshot_map.py", "scripts/test_plan_longhorn_snapshot_recovery.py", "scripts/test_recover_longhorn_snapshot.py", ".github/workflows/ci.yml"} or name.startswith(("deploy/environments/production/local-snapshot-review/", "deploy/environments/production/local-snapshot-cleanup/", "tests/snapshot-admission-cel/", "tests/snapshot-native-fold/")) for name in paths):
         non_go_tasks["local-snapshot-review-tests"] = ["python3", "-m", "unittest", "scripts.test_longhorn_snapshot_map", "scripts.test_plan_longhorn_snapshot_recovery", "scripts.test_recover_longhorn_snapshot", "scripts.test_reconcile_longhorn_snapshot_cleanup"]

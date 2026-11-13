@@ -142,12 +142,12 @@ func TestEdgeControlTLSExposesOnlyCanonicalIdentityExchange(t *testing.T) {
 		want              int
 	}{
 		{"POST", "/v1/platform-state/consumers/identity", host, 204},
-		{"POST", edgeControlPendingRootPathV1, host, 204},
-		{"GET", edgeControlPendingRootPathV1, host, 404},
-		{"POST", edgeControlPendingRootPathV1 + "?", host, 404},
-		{"POST", edgeControlPendingRootPathV1 + "?token=foreign", host, 404},
+		{"POST", "/v1/platform-state/compiler-inputs/pending-roots", host, 404},
+		{"GET", "/v1/platform-state/compiler-inputs/pending-roots", host, 404},
+		{"POST", "/v1/platform-state/compiler-inputs/pending-roots" + "?", host, 404},
+		{"POST", "/v1/platform-state/compiler-inputs/pending-roots" + "?token=foreign", host, 404},
 		{"POST", "/v1/platform-state/compiler-inputs/%70ending-roots", host, 404},
-		{"POST", edgeControlPendingRootPathV1, "foreign.platform-system.svc", 404},
+		{"POST", "/v1/platform-state/compiler-inputs/pending-roots", "foreign.platform-system.svc", 404},
 		{"GET", "/v1/platform-state/consumers/identity", host, 404},
 		{"POST", "/v1/platform-state/consumers/identity?", host, 404},
 		{"POST", "/v1/platform-state/consumers/identity?scope=global", host, 404},
@@ -165,7 +165,7 @@ func TestEdgeControlTLSExposesOnlyCanonicalIdentityExchange(t *testing.T) {
 			t.Fatalf("%s %s got=%d want=%d", tc.method, tc.path, w.Code, tc.want)
 		}
 	}
-	if calls != 2 {
+	if calls != 1 {
 		t.Fatal("unexpected private API surface", calls)
 	}
 }

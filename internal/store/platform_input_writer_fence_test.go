@@ -3,77 +3,15 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
-	"github.com/DATA-DOG/go-sqlmock"
 )
-
-func TestCompilerInputJSONBWriterAdditiveSchemaAndCommitOutcomes(t *testing.T) {
-	for _, outcome := range []string{"success", "verify-failed", "commit-failed"} {
-		t.Run(outcome, func(t *testing.T) {
-			db, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-			s := &Store{db: db}
-			snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: "synthetic-input", PolicyGeneration: "policy"}
-			digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
-			raw, _ := platformconfig.EncodeRuntimeSnapshot(snapshot)
-			mock.ExpectBegin()
-			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock(315609238744291)`)).WillReturnResult(sqlmock.NewResult(0, 1))
-			mock.ExpectExec(regexp.QuoteMeta(`SELECT pg_advisory_xact_lock_shared(315609238744290)`)).WillReturnResult(sqlmock.NewResult(0, 1))
-			// Both additive migrations may be absent in a supported older DB.
-			for _, table := range []string{"fugue_platform_input_archive_control", "fugue_platform_input_manifests"} {
-				mock.ExpectQuery(regexp.QuoteMeta(`SELECT to_regclass('` + table + `') IS NOT NULL`)).WillReturnRows(sqlmock.NewRows([]string{"installed"}).AddRow(false))
-			}
-			mock.ExpectExec("INSERT INTO fugue_platform_artifact_contents").WithArgs(digest, raw, int64(len(raw)), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
-			if outcome == "verify-failed" {
-				raw = []byte(`{}`)
-			}
-			mock.ExpectQuery("SELECT content_json FROM fugue_platform_artifact_contents").WithArgs(digest).WillReturnRows(sqlmock.NewRows([]string{"content_json"}).AddRow(raw))
-			if outcome == "verify-failed" {
-				mock.ExpectRollback()
-			} else if outcome == "commit-failed" {
-				mock.ExpectCommit().WillReturnError(errors.New("synthetic commit uncertainty"))
-			} else {
-				mock.ExpectCommit()
-			}
-			before := compilerInputWriterStats.snapshot()
-			err = s.pgEnsurePlatformCompilerInput(t.Context(), snapshot, digest)
-			if (err == nil) != (outcome == "success") {
-				t.Fatal(outcome, err)
-			}
-			after := compilerInputWriterStats.snapshot()
-			if outcome != "success" {
-				failure := compilerInputWriterStats.diagnosticSnapshot()["last_failure"].(compilerInputWriterFailure)
-				wantPhase := "persist_verify"
-				if outcome == "commit-failed" {
-					wantPhase = "commit"
-				}
-				if failure.Phase != wantPhase || failure.WriterStateAtFailure != "active_with_deadline" || failure.DeadlineSource != "non_deadline_failure" {
-					t.Fatal("JSONB phase/cleanup diagnostic", failure)
-				}
-			}
-			want := "other_failures"
-			if outcome == "success" {
-				want = "successful_returns"
-			}
-			if after["attempts"].(uint64) != before["attempts"].(uint64)+1 || after[want].(uint64) != before[want].(uint64)+1 || after["in_flight"] != before["in_flight"] {
-				t.Fatal("JSONB full verification/commit outcome was not retained", before, after)
-			}
-			if err = mock.ExpectationsWereMet(); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
 
 func TestCompilerInputJSONBQueuedWriterSeesCommittedFence(t *testing.T) {
 	s := archiveTestStore(t)
@@ -132,14 +70,14 @@ func TestCompilerInputJSONBWriterUsesBarrierAndCallerBudget(t *testing.T) {
 		t.Fatal("unfenced policy-disabled writer", err)
 	}
 	var created time.Time
-	if err := s.db.QueryRow(`SELECT created_at FROM fugue_platform_artifact_contents WHERE content_hash=$1`, digest).Scan(&created); err != nil {
+	if err := s.db.QueryRow(`SELECT created_at FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest).Scan(&created); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.EnsurePlatformCompilerInputContext(t.Context(), snapshot, digest); err != nil {
 		t.Fatal("idempotent JSONB ensure", err)
 	}
 	var unchanged bool
-	if err := s.db.QueryRow(`SELECT created_at=$2 FROM fugue_platform_artifact_contents WHERE content_hash=$1`, digest, created).Scan(&unchanged); err != nil || !unchanged {
+	if err := s.db.QueryRow(`SELECT created_at=$2 FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest, created).Scan(&unchanged); err != nil || !unchanged {
 		t.Fatal("idempotent ensure changed the canonical observation", err)
 	}
 	after := compilerInputWriterStats.snapshot()
@@ -174,15 +112,23 @@ func TestCompilerInputJSONBWriterUsesBarrierAndCallerBudget(t *testing.T) {
 	if err = s.db.QueryRow(`SELECT count(*) FROM fugue_platform_artifact_contents WHERE content_hash=$1`, blockedDigest).Scan(&rows); err != nil || rows != 0 {
 		t.Fatal("canceled queued writer persisted bytes", rows, err)
 	}
-	if _, err = s.db.Exec(`UPDATE fugue_platform_artifact_contents SET content_json='{}'::jsonb WHERE content_hash=$1`, digest); err != nil {
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_hot_chunks SET data=set_byte(data,0,33) WHERE content_hash=$1 AND ordinal=0`, digest); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.EnsurePlatformCompilerInputContext(t.Context(), snapshot, digest); !errors.Is(err, ErrConflict) {
-		t.Fatal("corrupt original JSONB was replaced or accepted", err)
+		t.Fatal("corrupt canonical local bytes were replaced or accepted", err)
 	}
 }
 
-func TestCompilerInputFencedWriterPoliciesSurviveMissingOldTableAndRestart(t *testing.T) {
+func TestCompilerInputCurrentWriterPoliciesSurviveMissingOldTableAndRestart(t *testing.T) {
+	for _, fenced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fenced=%t", fenced), func(t *testing.T) {
+			testCompilerInputCurrentWriterPolicies(t, fenced)
+		})
+	}
+}
+
+func testCompilerInputCurrentWriterPolicies(t *testing.T, fenced bool) {
 	for _, policy := range []string{"jsonb", "v1", "v2", "v3", "v4", "separated-budget-fallback"} {
 		t.Run(policy, func(t *testing.T) {
 			s := archiveTestStore(t)
@@ -191,8 +137,10 @@ func TestCompilerInputFencedWriterPoliciesSurviveMissingOldTableAndRestart(t *te
 			s.storagePolicy.codec = compilerInputCodecPolicy{Version: 1, Enabled: policy == "v2" || policy == "separated-budget-fallback"}
 			s.storagePolicy.shared = compilerInputCodecPolicy{Version: 1, Enabled: policy == "v3"}
 			s.storagePolicy.separated = compilerInputCodecPolicy{Version: 1, Enabled: policy == "v4" || policy == "separated-budget-fallback"}
-			if _, err := RunCompilerInputArchiveWriteFence(t.Context(), s.databaseURL, true, false); err != nil {
-				t.Fatal("arm actual database fence", err)
+			if fenced {
+				if _, err := RunCompilerInputArchiveWriteFence(t.Context(), s.databaseURL, true, false); err != nil {
+					t.Fatal("arm actual database fence", err)
+				}
 			}
 			// Hide the old relation, retaining every fixture row for cleanup. New
 			// writers/readers must work without its name or any process cache.

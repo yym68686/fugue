@@ -51,7 +51,7 @@ func TestAppendWriterAllowsCommittedReadersButSerializesWritersAndMaintenance(t 
 			s := archiveTestStore(t)
 			s.storagePolicy.value.CompilerInputChunks = chunks
 			s.storagePolicy.separated = compilerInputCodecPolicy{Version: 1, Enabled: chunks}
-			snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: fmt.Sprintf("append-reader-%t", chunks), PolicyGeneration: "policy"}
+			snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: fmt.Sprintf("append-reader-%t-%d", chunks, time.Now().UnixNano()), PolicyGeneration: "policy"}
 			digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
 			if err := s.EnsurePlatformCompilerInputContext(t.Context(), snapshot, digest); err != nil {
 				t.Fatal(err)
@@ -61,10 +61,7 @@ func TestAppendWriterAllowsCommittedReadersButSerializesWritersAndMaintenance(t 
 				t.Fatal(err)
 			}
 			defer guard.Rollback()
-			table := "fugue_platform_artifact_contents"
-			if chunks {
-				table = "fugue_platform_input_manifests"
-			}
+			table := "fugue_platform_input_manifests"
 			if _, err = guard.Exec("LOCK TABLE " + table + " IN SHARE MODE"); err != nil {
 				t.Fatal(err)
 			}

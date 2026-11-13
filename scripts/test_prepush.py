@@ -41,7 +41,7 @@ class CanonicalReceiptTest(unittest.TestCase):
     def test_history_capability_gate_and_import_dependencies_are_checked(self):
         for dependency in ('internal/inputhistory/capabilities.json', 'internal/inputhistory/capabilities.go',
                            'scripts/compiler_input_history_compatibility.py', 'scripts/test_compiler_input_history_compatibility.py',
-                           'scripts/compiler_input_storage.py', 'scripts/compiler_input_archive.py', 'deploy/releases/components.json'):
+                           'scripts/compiler_input_storage.py', 'deploy/releases/components.json'):
             with self.subTest(dependency=dependency):
                 status, receipt = self.run_main_with_fake(lambda *args: (0, ''), paths=[dependency])
                 self.assertEqual(status, 0)
@@ -59,7 +59,7 @@ class CanonicalReceiptTest(unittest.TestCase):
                 self.assertNotIn("-m scripts.compiler_input_" + name, workflow)
                 self.assertFalse((root / ("scripts/compiler_input_" + name + ".py")).exists())
         self.assertIn("-m scripts.compiler_input_storage --operation", workflow)
-        self.assertIn("-m scripts.compiler_input_archive --operation", workflow)
+        self.assertNotIn("-m scripts.compiler_input_archive --operation", workflow)
         self.assertNotIn("requirements-input-readonly", workflow)
         self.assertNotIn("INPUT_READONLY_PYTHON", workflow)
 

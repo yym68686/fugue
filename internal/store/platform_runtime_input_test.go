@@ -63,7 +63,7 @@ func TestConfigurationRuntimeRetentionStillProtectsOriginalProvenancePostgres(t 
  VALUES($1,$2,$3,262144,1,now())`, digest, inputFormatV1, len(raw)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`INSERT INTO fugue_platform_input_chunks(content_hash,ordinal,chunk_hash,data) VALUES($1,0,$1,$2)`, digest, raw); err != nil {
+		if _, err := db.Exec(`INSERT INTO fugue_platform_input_hot_chunks(content_hash,ordinal,chunk_hash,data) VALUES($1,0,$1,$2)`, digest, raw); err != nil {
 			t.Fatal(err)
 		}
 	}

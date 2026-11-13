@@ -73,7 +73,6 @@ type PersistentGroupStore struct {
 	compressStateWrites      bool
 	retainCompileInputs      bool
 	compileInputKeyringDir   string
-	pendingRootRegistrar     GroupPendingRootRegistrar
 	summaryMu                sync.RWMutex
 	summaries                map[string]persistentGroupSummary
 	stateMu                  sync.Mutex
@@ -106,7 +105,6 @@ type PersistentGroupStoreOptions struct {
 	CompileInputKeyringDir string
 	// OFF unless an independently authenticated, budgeted registry transport
 	// is explicitly supplied. Durable policy cannot be disabled on reopen.
-	PendingRootRegistrar GroupPendingRootRegistrar
 }
 
 func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
@@ -115,7 +113,7 @@ func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
 
 func OpenPersistentGroupStoreWithOptions(root string, options PersistentGroupStoreOptions) (*PersistentGroupStore, error) {
 	keyringDir := strings.TrimSpace(options.CompileInputKeyringDir)
-	if keyringDir != options.CompileInputKeyringDir || keyringDir != "" && (!filepath.IsAbs(keyringDir) || filepath.Clean(keyringDir) != keyringDir) || (options.RetainCompileInputs || options.PendingRootRegistrar != nil) && keyringDir == "" {
+	if keyringDir != options.CompileInputKeyringDir || keyringDir != "" && (!filepath.IsAbs(keyringDir) || filepath.Clean(keyringDir) != keyringDir) || options.RetainCompileInputs && keyringDir == "" {
 		return nil, ErrGroupCompileInput
 	}
 	root = strings.TrimSpace(root)
@@ -150,7 +148,7 @@ func OpenPersistentGroupStoreWithOptions(root string, options PersistentGroupSto
 			}
 		}
 	}
-	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, compressStateWrites: options.CompressStateWrites, retainCompileInputs: options.RetainCompileInputs, compileInputKeyringDir: keyringDir, pendingRootRegistrar: options.PendingRootRegistrar, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState), compressedGroups: map[string]bool{}, storageReports: map[string]time.Time{}}, nil
+	return &PersistentGroupStore{root: root, deferInventoryEpochWrite: options.DeferInventoryEpochWrite, compressStateWrites: options.CompressStateWrites, retainCompileInputs: options.RetainCompileInputs, compileInputKeyringDir: keyringDir, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState), compressedGroups: map[string]bool{}, storageReports: map[string]time.Time{}}, nil
 }
 
 func (store *PersistentGroupStore) StoreGroupInventoryCAS(ctx context.Context, groupID string, expectedSequence uint64, snapshot GroupInventorySnapshot) error {
@@ -976,8 +974,8 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 	if err := store.retainGroupPublicationOriginal(ctx, before, &state); err != nil {
 		return err
 	}
-	if err := store.retainPendingGroupPublication(ctx, before, &state); err != nil {
-		return err
+	if state.PendingRootsRequired && state.Published != nil && (before == nil || !sameGroupCompileValue(before, state.Published)) {
+		return ErrGroupPendingRoot
 	}
 	compactPersistentGroupState(&state)
 	state.Revision++

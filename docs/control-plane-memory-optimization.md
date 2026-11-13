@@ -29,12 +29,18 @@ remain unchanged; no traffic or DNS selection is part of this migration.
 the independent `storage_policy` CI job. It does not depend on code tests,
 builds or component rollouts. The API reads the projected file every five
 seconds (plus Kubernetes projection latency); invalid/unavailable updates
-retain the last accepted in-process policy. A restarted API defaults to
-legacy writes until it reads a valid policy. `runtime-storage-budget` exposes
+retain the last accepted in-process policy. A restarted API always writes
+compiler inputs to current local storage, even before loading the policy.
+`runtime-storage-budget` exposes
 the accepted policy, last load time, read failure and database pool counters.
 
-`compiler_input_chunks` controls new compiler-input writes. All readers always
-support both formats. `checkpoint_pages` controls migration of legacy
+`compiler_input_chunks` remains readable for policy/rollback compatibility;
+it no longer permits PostgreSQL compiler-input writes to legacy JSONB or the
+old chunks table. Explicit encoding policies select separated/shared storage;
+their bounded fallback writes local hot chunks. A separated budget failure
+does not fall back to a top-level shared representation. Existing canonical
+content is verified, never overwritten to hide corruption. Historical readers
+remain supported. `checkpoint_pages` controls migration of legacy
 checkpoints: an existing paged checkpoint continues in that format even if
 the switch is disabled, preserving its current cursor instead of restarting
 from an old legacy copy. This compatibility behavior also applies to a code

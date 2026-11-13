@@ -201,10 +201,6 @@ type Server struct {
 	offlineEdgeRecoveryProbe               agentEdgeProbeFunc
 	offlineCapacityCode                    func(context.Context, model.EdgeNode) (platformproducer.CapacityCodeIdentity, error)
 	offlineCapacityMeasure                 func(context.Context, model.EdgeClientProbePlan) (model.EdgeClientProbeReport, error)
-	pendingRootConfigureMu                 sync.Mutex
-	pendingResourceObservationMu           sync.Mutex
-	pendingResourceStatus                  pendingResourceObservationStatus
-	pendingRootTransport                   atomic.Pointer[pendingRootTransport]
 	// Nil by default. No HTTP, environment or startup path installs this gate.
 	// Enrollment/enablement requires the separate approved rollout protocol.
 	producerCaptureAdmission   func(context.Context, string, model.PlatformPublicationPrecondition) (func(context.Context) error, bool, error)

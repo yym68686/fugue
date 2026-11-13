@@ -36,6 +36,11 @@ func boundedContentTestStore(t testing.TB) *Store {
 	if err = schemamigrate.MigrateBoundedContent(t.Context(), dsn); err != nil {
 		t.Fatal(err)
 	}
+	for _, migrate := range []func(context.Context, string) error{schemamigrate.MigrateCompilerInputCodec, schemamigrate.MigrateCompilerInputShared, schemamigrate.MigrateCompilerInputSeparated, schemamigrate.MigrateCompilerInputArchive} {
+		if err := migrate(t.Context(), dsn); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s := &Store{databaseURL: dsn, db: db, dbReady: true}
 	s.storagePolicy.value = StoragePolicy{Version: 1, CompilerInputChunks: true, CheckpointPages: true}
 	return s
@@ -80,7 +85,7 @@ func TestChunkedCompilerInputPostgresCompatibilityCorruptionAndRollback(t *testi
 	}
 	var maxChunk, count int
 	var created time.Time
-	if err = s.db.QueryRow(`SELECT max(octet_length(data)),count(*) FROM fugue_platform_input_chunks WHERE content_hash=$1`, digest).Scan(&maxChunk, &count); err != nil {
+	if err = s.db.QueryRow(`SELECT max(octet_length(data)),count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, digest).Scan(&maxChunk, &count); err != nil {
 		t.Fatal(err)
 	}
 	if maxChunk > inputChunkBytes || count < 2 {
@@ -103,7 +108,7 @@ func TestChunkedCompilerInputPostgresCompatibilityCorruptionAndRollback(t *testi
 	if !after.Equal(created) {
 		t.Fatal("retry changed manifest")
 	}
-	if _, err = s.db.Exec(`UPDATE fugue_platform_input_chunks SET data=set_byte(data,0,33) WHERE content_hash=$1 AND ordinal=0`, digest); err != nil {
+	if _, err = s.db.Exec(`UPDATE fugue_platform_input_hot_chunks SET data=set_byte(data,0,33) WHERE content_hash=$1 AND ordinal=0`, digest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.GetPlatformCompilerInput(digest); err == nil {
@@ -118,14 +123,14 @@ func TestChunkedCompilerInputPostgresCompatibilityCorruptionAndRollback(t *testi
 		t.Fatal("wrong digest accepted", err)
 	}
 	var leaked int
-	s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_chunks WHERE content_hash=$1`, wrong).Scan(&leaked)
+	s.db.QueryRow(`SELECT count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, wrong).Scan(&leaked)
 	if leaked != 0 {
 		t.Fatal("failed write leaked chunks")
 	}
 	if err = s.EnsurePlatformCompilerInput(other, otherDigest); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.db.Exec(`DELETE FROM fugue_platform_input_chunks WHERE content_hash=$1 AND ordinal=1`, otherDigest); err != nil {
+	if _, err = s.db.Exec(`DELETE FROM fugue_platform_input_hot_chunks WHERE content_hash=$1 AND ordinal=1`, otherDigest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.GetPlatformCompilerInput(otherDigest); err == nil {

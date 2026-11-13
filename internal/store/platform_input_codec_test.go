@@ -110,7 +110,7 @@ func codecTestStore(t testing.TB) *Store {
 	// Session-local prospective schema. No production schema/policy is changed.
 	s.db.SetMaxOpenConns(1)
 	s.db.SetMaxIdleConns(1)
-	_, err := s.db.Exec(`CREATE TEMP TABLE fugue_platform_input_manifests (LIKE public.fugue_platform_input_manifests INCLUDING DEFAULTS); CREATE TEMP TABLE fugue_platform_input_chunks (LIKE public.fugue_platform_input_chunks INCLUDING DEFAULTS)`)
+	_, err := s.db.Exec(`CREATE TEMP TABLE fugue_platform_input_manifests (LIKE public.fugue_platform_input_manifests INCLUDING DEFAULTS); CREATE TEMP TABLE fugue_platform_input_chunks (LIKE public.fugue_platform_input_chunks INCLUDING DEFAULTS); CREATE TEMP TABLE fugue_platform_input_hot_chunks (LIKE public.fugue_platform_input_hot_chunks INCLUDING DEFAULTS)`)
 	if err != nil {
 		t.Fatal(err)
 	}

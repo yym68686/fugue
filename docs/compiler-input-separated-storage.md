@@ -76,9 +76,16 @@ that it reads the legacy chunks table: v4 uses shared components.
 
 The one-off full-history copy/read-only/preparation CI coordinators and the
 relation retirement planner/executor have been removed. There is no supported
-`archive-retirement-plan` or `archive-retire` mode. Changing the production
+`archive-retirement-plan`, `archive-retire`, `archive-copy`,
+`archive-batch` or `archive-route-batch` mode. Changing the production
 workflow must not replay an old copy operation or recreate an incident worker.
 Durable execution receipts are historical records, not new execution requests.
+
+The uninstalled pending-root HTTP/source/admission/resource-reservation
+coordinator is also retired. Its endpoint and TLS allowlist entry are removed,
+not left unauthenticated. Read-only validation of persisted legacy registry
+records remains: partial or invalid legacy state fails closed. No production
+registry tables, archive objects, leases, pins or receipts are dropped here.
 
 Normal collection remains bounded and protects referenced shared/v4 objects.
 Existing routed inputs, verified copies and local pins are not deleted or

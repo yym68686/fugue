@@ -104,18 +104,18 @@ func TestCompilerDNSInputRejectsCorruptUnselectedChunks(t *testing.T) {
 				t.Fatal("index missing")
 			}
 			last := c.Manifest.Count - 1
-			sql := `UPDATE fugue_platform_input_chunks SET data=set_byte(data,0,33) WHERE content_hash=$1 AND ordinal=$2`
+			sql := `UPDATE fugue_platform_input_hot_chunks SET data=set_byte(data,0,33) WHERE content_hash=$1 AND ordinal=$2`
 			switch mutation {
 			case "data_and_claim":
-				sql = `UPDATE fugue_platform_input_chunks SET data=set_byte(data,0,33),chunk_hash='sha256:'||encode(sha256(set_byte(data,0,33)),'hex') WHERE content_hash=$1 AND ordinal=$2`
+				sql = `UPDATE fugue_platform_input_hot_chunks SET data=set_byte(data,0,33),chunk_hash='sha256:'||encode(sha256(set_byte(data,0,33)),'hex') WHERE content_hash=$1 AND ordinal=$2`
 			case "claim":
-				sql = `UPDATE fugue_platform_input_chunks SET chunk_hash='sha256:'||repeat('0',64) WHERE content_hash=$1 AND ordinal=$2`
+				sql = `UPDATE fugue_platform_input_hot_chunks SET chunk_hash='sha256:'||repeat('0',64) WHERE content_hash=$1 AND ordinal=$2`
 			case "size":
-				sql = `UPDATE fugue_platform_input_chunks SET data=substring(data from 2),chunk_hash='sha256:'||encode(sha256(substring(data from 2)),'hex') WHERE content_hash=$1 AND ordinal=$2`
+				sql = `UPDATE fugue_platform_input_hot_chunks SET data=substring(data from 2),chunk_hash='sha256:'||encode(sha256(substring(data from 2)),'hex') WHERE content_hash=$1 AND ordinal=$2`
 			case "missing":
-				sql = `DELETE FROM fugue_platform_input_chunks WHERE content_hash=$1 AND ordinal=$2`
+				sql = `DELETE FROM fugue_platform_input_hot_chunks WHERE content_hash=$1 AND ordinal=$2`
 			case "extra":
-				sql = `INSERT INTO fugue_platform_input_chunks(content_hash,ordinal,chunk_hash,data) SELECT content_hash,99999,chunk_hash,data FROM fugue_platform_input_chunks WHERE content_hash=$1 AND ordinal=$2`
+				sql = `INSERT INTO fugue_platform_input_hot_chunks(content_hash,ordinal,chunk_hash,data) SELECT content_hash,99999,chunk_hash,data FROM fugue_platform_input_hot_chunks WHERE content_hash=$1 AND ordinal=$2`
 			case "manifest":
 				sql = `UPDATE fugue_platform_input_manifests SET size_bytes=size_bytes-1 WHERE content_hash=$1 AND chunk_count=$2`
 				last = c.Manifest.Count

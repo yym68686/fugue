@@ -372,9 +372,9 @@ func (s *Store) pgEnsureChunkedInput(parent context.Context, snapshot platformco
 	return s.pgEnsureChunkedInputTx(ctx, tx, snapshot, digest, observation)
 }
 
-// Both policy-selected writers hold the append queue and shared lifecycle
-// barrier through full verification and commit. This helper never starts a new budget or records a
-// second outer attempt when a fenced JSONB writer uses an independent format.
+// The current local writer holds the append queue and shared lifecycle barrier
+// through full verification and commit, regardless of encoding policy. This
+// helper never starts a second budget or records a second outer attempt.
 func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot platformconfig.RuntimeSnapshot, digest string, observation *compilerInputWriterAttempt) error {
 	m, err := readInputManifest(ctx, tx, digest)
 	if err == nil {
@@ -544,7 +544,8 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 		}
 		return observation.commit(tx)
 	}
-	if s.compilerInputSeparatedEnabled() {
+	preferSeparated := s.compilerInputSeparatedEnabled()
+	if preferSeparated {
 		if _, err = tx.ExecContext(ctx, `SAVEPOINT separated_input_budget`); err != nil {
 			return err
 		}
@@ -560,7 +561,7 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 			return err
 		}
 	}
-	if s.compilerInputSharedEnabled() {
+	if !preferSeparated && s.compilerInputSharedEnabled() {
 		if _, err = tx.ExecContext(ctx, `SAVEPOINT shared_input_budget`); err != nil {
 			return err
 		}
@@ -571,20 +572,15 @@ func (s *Store) pgEnsureChunkedInputTx(ctx context.Context, tx *sql.Tx, snapshot
 		if !errors.Is(err, errSharedInputBudget) {
 			return err
 		}
-		// Pathological inputs retain the established v1/v2 path. Undo partial
-		// shared writes atomically before fallback; never hide corrupt content.
+		// A bounded local representation is the only fallback. Undo partial
+		// shared writes atomically; never hide corrupt canonical content.
 		if _, err = tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT shared_input_budget`); err != nil {
 			return err
 		}
 	}
-	legacyWritesFenced, err := compilerInputWritesFenced(ctx, tx)
-	if err != nil {
-		return err
-	}
-	location := "legacy"
-	if legacyWritesFenced {
-		location = "hot"
-	}
+	// This is independent of historical admission/fencing. Neither a policy
+	// toggle nor a metadata budget failure may repopulate the retired table.
+	const location = "hot"
 	format, chunkSize := inputFormatV1, inputChunkBytes
 	var codec *inputChunkEncoder
 	if s.compilerInputCodecEnabled() {

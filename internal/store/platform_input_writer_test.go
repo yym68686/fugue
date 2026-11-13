@@ -79,7 +79,7 @@ func TestCompilerInputCodecProductionWriterPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		s.db.Exec(`DELETE FROM fugue_platform_input_chunks WHERE content_hash=$1`, digest)
+		s.db.Exec(`DELETE FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, digest)
 		s.db.Exec(`DELETE FROM fugue_platform_input_manifests WHERE content_hash=$1`, digest)
 	})
 	m, err := readInputManifest(t.Context(), s.db, digest)
@@ -87,7 +87,7 @@ func TestCompilerInputCodecProductionWriterPostgres(t *testing.T) {
 		t.Fatal("writer did not use codec", m.Format, err)
 	}
 	var stored int64
-	if err = s.db.QueryRow(`SELECT sum(octet_length(data)) FROM fugue_platform_input_chunks WHERE content_hash=$1`, digest).Scan(&stored); err != nil {
+	if err = s.db.QueryRow(`SELECT sum(octet_length(data)) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, digest).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	if stored >= m.Size/2 {
@@ -126,7 +126,7 @@ func TestCompilerInputCodecProductionWriterPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		s.db.Exec(`DELETE FROM fugue_platform_input_chunks WHERE content_hash=$1`, d2)
+		s.db.Exec(`DELETE FROM fugue_platform_input_hot_chunks WHERE content_hash=$1`, d2)
 		s.db.Exec(`DELETE FROM fugue_platform_input_manifests WHERE content_hash=$1`, d2)
 	})
 	m, err = readInputManifest(t.Context(), s.db, d2)
@@ -142,19 +142,19 @@ func TestCompilerInputCodecWriterRollsBackChangedStoredBytes(t *testing.T) {
 	s.storagePolicy.codec = compilerInputCodecPolicy{Version: 1, Enabled: true}
 	snapshot, digest := chunkedInputFixture(t)
 	name := fmt.Sprintf("codec_corruption_%d", os.Getpid())
-	body := fmt.Sprintf(`CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.content_hash='%s' AND NEW.ordinal=1 THEN NEW.data=set_byte(NEW.data,octet_length(NEW.data)-1,(get_byte(NEW.data,octet_length(NEW.data)-1)+1)%%256);NEW.chunk_hash='sha256:'||encode(sha256(NEW.data),'hex');END IF;RETURN NEW;END $$;CREATE TRIGGER %s BEFORE INSERT ON fugue_platform_input_chunks FOR EACH ROW EXECUTE FUNCTION %s()`, name, digest, name, name)
+	body := fmt.Sprintf(`CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.content_hash='%s' AND NEW.ordinal=1 THEN NEW.data=set_byte(NEW.data,octet_length(NEW.data)-1,(get_byte(NEW.data,octet_length(NEW.data)-1)+1)%%256);NEW.chunk_hash='sha256:'||encode(sha256(NEW.data),'hex');END IF;RETURN NEW;END $$;CREATE TRIGGER %s BEFORE INSERT ON fugue_platform_input_hot_chunks FOR EACH ROW EXECUTE FUNCTION %s()`, name, digest, name, name)
 	if _, err := s.db.Exec(body); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		s.db.Exec("DROP TRIGGER " + name + " ON fugue_platform_input_chunks")
+		s.db.Exec("DROP TRIGGER " + name + " ON fugue_platform_input_hot_chunks")
 		s.db.Exec("DROP FUNCTION " + name + "()")
 	})
 	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err == nil {
 		t.Fatal("stored corruption plus false claim accepted")
 	}
 	var count int
-	if err := s.db.QueryRow(`SELECT (SELECT count(*) FROM fugue_platform_input_manifests WHERE content_hash=$1)+(SELECT count(*) FROM fugue_platform_input_chunks WHERE content_hash=$1)`, digest).Scan(&count); err != nil || count != 0 {
+	if err := s.db.QueryRow(`SELECT (SELECT count(*) FROM fugue_platform_input_manifests WHERE content_hash=$1)+(SELECT count(*) FROM fugue_platform_input_hot_chunks WHERE content_hash=$1)`, digest).Scan(&count); err != nil || count != 0 {
 		t.Fatal("transaction did not roll back", count, err)
 	}
 }

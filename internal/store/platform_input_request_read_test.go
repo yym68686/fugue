@@ -87,7 +87,7 @@ func TestCompilerInputRequestCancellationReleasesReadLeasePostgres(t *testing.T)
 		t.Fatal(err)
 	}
 	defer blocker.Rollback()
-	if _, err := blocker.ExecContext(t.Context(), `LOCK TABLE fugue_platform_input_chunks IN ACCESS EXCLUSIVE MODE`); err != nil {
+	if _, err := blocker.ExecContext(t.Context(), `LOCK TABLE fugue_platform_input_hot_chunks IN ACCESS EXCLUSIVE MODE`); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
@@ -124,9 +124,12 @@ func TestCompilerInputRequestCancellationReleasesReadLeasePostgres(t *testing.T)
 func TestCompilerInputLegacyContentReadHonorsRequestCancellationPostgres(t *testing.T) {
 	s := boundedContentTestStore(t)
 	s.storagePolicy.value.CompilerInputChunks = false
-	snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: "cancel-legacy-read", PolicyGeneration: "policy"}
+	snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: "cancel-legacy-read-" + time.Now().Format(time.RFC3339Nano), PolicyGeneration: "policy"}
 	digest, _ := platformconfig.RuntimeSnapshotDigest(snapshot)
-	if err := s.EnsurePlatformCompilerInput(snapshot, digest); err != nil {
+	// Historical compatibility fixture, not permission for a production
+	// writer to return to inline storage when its chunk policy is disabled.
+	raw, _ := platformconfig.EncodeRuntimeSnapshot(snapshot)
+	if _, err := s.db.Exec(`INSERT INTO fugue_platform_artifact_contents(content_hash,content_json,size_bytes,created_at,updated_at,content_kind) VALUES($1,$2::jsonb,$3,now(),now(),'compiler-input-v1')`, digest, raw, len(raw)); err != nil {
 		t.Fatal(err)
 	}
 	blocker, err := s.db.BeginTx(t.Context(), nil)

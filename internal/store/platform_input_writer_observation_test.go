@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"reflect"
 	"regexp"
 	"strings"
@@ -218,27 +217,12 @@ func TestCompilerInputWriterDiagnosticIsBoundedAndIndependentOfV1Counters(t *tes
 }
 
 func TestCompilerInputWriterDiagnosticBeforeTransaction(t *testing.T) {
-	for _, scenario := range []string{"invalid-digest", "encode"} {
-		t.Run(scenario, func(t *testing.T) {
-			snapshot := platformconfig.RuntimeSnapshot{Facts: map[string]any{"unsupported_number": math.NaN()}}
-			var err error
-			if scenario == "invalid-digest" {
-				err = (&Store{}).pgEnsureChunkedInput(t.Context(), snapshot, "invalid")
-			} else {
-				err = (&Store{}).pgEnsurePlatformCompilerInput(t.Context(), snapshot, "unused")
-			}
-			if err == nil {
-				t.Fatal("invalid input succeeded")
-			}
-			failure := compilerInputWriterStats.diagnosticSnapshot()["last_failure"].(compilerInputWriterFailure)
-			want := "validate"
-			if scenario == "encode" {
-				want = "encode_snapshot"
-			}
-			if failure.Phase != want || failure.WriterBudgetAfterBeginMS != -1 || failure.WriterBudgetAfterBarrierMS != -1 {
-				t.Fatal("early failure invented a transaction checkpoint", failure)
-			}
-		})
+	if err := (&Store{}).pgEnsureChunkedInput(t.Context(), platformconfig.RuntimeSnapshot{}, "invalid"); err == nil {
+		t.Fatal("invalid input succeeded")
+	}
+	failure := compilerInputWriterStats.diagnosticSnapshot()["last_failure"].(compilerInputWriterFailure)
+	if failure.Phase != "validate" || failure.WriterBudgetAfterBeginMS != -1 || failure.WriterBudgetAfterBarrierMS != -1 {
+		t.Fatal("early failure invented a transaction checkpoint", failure)
 	}
 }
 

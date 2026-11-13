@@ -35,7 +35,6 @@ type compilerInputActivationProof struct {
 	// before admission. Its descendants and selector are checked in the same
 	// RR snapshot; consume inserts this exact pending root atomically.
 	newTask      *model.NodeUpdateTask
-	pendingRoot  *compilerInputPendingRootIntent
 	publication  *compilerInputPublicationIntent
 	consumerKind string
 	// Only consumer receipts and selected-input reads may share an LKG guard:
@@ -91,10 +90,7 @@ func (s *Store) prepareOrdinaryCompilerInputProof(ctx context.Context, roots []i
 	return s.prepareCompilerInputProof(ctx, roots, task, publication, consumer, reads, true, false)
 }
 
-func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection, ordinary, inventory bool, pending ...*compilerInputPendingRootIntent) (*compilerInputActivationProof, error) {
-	if len(pending) > 1 || len(pending) == 1 && (pending[0] == nil || task != nil || publication != nil || consumer != nil || len(reads) != 0 || ordinary || inventory) {
-		return nil, ErrInvalidInput
-	}
+func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection, ordinary, inventory bool) (*compilerInputActivationProof, error) {
 	if s == nil || s.db == nil || !inventory && len(roots) == 0 && publication == nil && consumer == nil && len(reads) == 0 || len(roots) > compilerInputHotRootLimit || task != nil && publication != nil || consumer != nil && (task != nil || publication != nil || len(roots) != 0) || len(reads) != 0 && (task != nil || publication != nil || consumer != nil || len(roots) != 0) || inventory && (ordinary || task != nil || publication != nil || consumer != nil || len(reads) != 0 || len(roots) != 0) {
 		return nil, ErrInvalidInput
 	}
@@ -127,18 +123,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	keyring := s.platformArtifactKeyring
 	proof.keyringRevision = s.platformArtifactKeyringRevision
 	s.platformArtifactKeyringMu.RUnlock()
-	var tx *sql.Tx
-	var err error
-	if len(pending) == 1 {
-		var native *pendingRootNativeTx
-		native, err = beginPendingRootPolicyTx(ctx, s.db, true)
-		if err == nil {
-			tx = native.Tx
-			defer native.Rollback()
-		}
-	} else {
-		tx, err = s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
@@ -173,15 +158,6 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	var publicationSnapshots []model.PlatformLKGSnapshot
 	var publicationVerified []bool
 	publicationBytes := 0
-	if len(pending) == 1 {
-		proof.pendingRoot = pending[0]
-		if publicationBytes, err = preparePendingRootNativeWitness(ctx, tx, proof.pendingRoot); err != nil {
-			return nil, err
-		}
-		if expiry := time.Unix(proof.pendingRoot.policy.expiresUnix, 0); expiry.Before(proof.expires) {
-			proof.expires = expiry
-		}
-	}
 	if consumer != nil {
 		roots, err = prepareCompilerInputConsumerRoots(ctx, tx, consumer)
 		if err != nil {
@@ -716,8 +692,7 @@ func (s *Store) withPreparedCompilerInputTaskCreation(ctx context.Context, proof
 
 func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compilerInputActivationProof, pins []compilerInputPinBinding, pendingOnly bool, beforeInputLocks, apply func(context.Context, *sql.Tx) error) error {
 	if s == nil || proof == nil || proof.store != s || proof.database != s.db || apply == nil ||
-		!time.Now().Before(proof.expires) || pendingOnly != (proof.newTask != nil || proof.pendingRoot != nil) ||
-		proof.pendingRoot != nil && (!pendingCompilerInputProofMatches(proof) || proof.newTask != nil || proof.ordinary || proof.fullInventory) ||
+		!time.Now().Before(proof.expires) || pendingOnly != (proof.newTask != nil) ||
 		!pendingOnly && len(pins) != len(proof.inputs) || !proof.closure.MetadataComplete && !(proof.ordinary && proof.capabilityOnly) || proof.fullInventory {
 		return ErrInvalidInput
 	}
@@ -756,18 +731,7 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	if currentRevision != proof.keyringRevision {
 		return ErrConflict
 	}
-	var tx *sql.Tx
-	var err error
-	if proof.pendingRoot != nil {
-		var native *pendingRootNativeTx
-		native, err = beginPendingRootPolicyTx(ctx, s.db, false)
-		if err == nil {
-			tx = native.Tx
-			defer native.Rollback()
-		}
-	} else {
-		tx, err = s.db.BeginTx(ctx, nil)
-	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -851,21 +815,6 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	}
 	if err := apply(ctx, tx); err != nil {
 		return err
-	}
-	if proof.pendingRoot != nil && proof.pendingRoot.checkAdmission != nil {
-		// Configuration changes cannot race this final check and commit. The
-		// source and allocation witnesses must also reject their own drift.
-		s.pendingRootAdmissionMu.RLock()
-		defer s.pendingRootAdmissionMu.RUnlock()
-		if s.pendingRootAdmissionRevision != proof.pendingRoot.admissionRevision {
-			return ErrConflict
-		}
-		if err := proof.pendingRoot.checkAdmission(ctx); err != nil {
-			return err
-		}
-		if err := checkPendingRootLeaseTime(ctx, tx, proof.pendingRoot.policy.expiresUnix); err != nil {
-			return err
-		}
 	}
 	// Revocation/rotation during apply rolls back all its writes. Keep this
 	// lock only through commit, after the callback's own signature checks.
