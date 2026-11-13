@@ -49,10 +49,11 @@ def validate(config):
 
 
 def validate_recovery_budget(value):
-    require(isinstance(value, dict) and set(value) == {'schema', 'foregroundReserveBytes', 'growthSampleSeconds', 'operationWindowSeconds', 'maxDatabaseProbeSeconds', 'maxAPIProbeSeconds'}, 'invalid fixed-capacity recovery budget')
+    require(isinstance(value, dict) and set(value) == {'schema', 'foregroundReserveBytes', 'growthSampleSeconds', 'operationWindowSeconds', 'minimumFoldBytesPerSecond', 'maxDatabaseProbeSeconds', 'maxAPIProbeSeconds'}, 'invalid fixed-capacity recovery budget')
     require(value['schema'] == 'fugue.fixed-capacity-ext4/v1', 'unsupported recovery budget')
     for key, low, high in [('foregroundReserveBytes', 16 << 30, 1 << 40),
                            ('growthSampleSeconds', 2, 5), ('operationWindowSeconds', 300, 21600),
+                           ('minimumFoldBytesPerSecond', 1 << 20, 1 << 30),
                            ('maxDatabaseProbeSeconds', 1, 15), ('maxAPIProbeSeconds', 1, 15)]:
         require(type(value[key]) is int and low <= value[key] <= high, 'invalid fixed-capacity budget bound')
 
@@ -84,6 +85,8 @@ def recovery_budget(observation, config):
             written == child['mapped_bytes'] and observation['new_mapped_bytes'] == written - overlap,
             'fold direction disagrees with pinned engine')
     require(written <= config['maxFoldWriteBytes'], 'fold exceeds the declared operation write budget')
+    estimated_seconds = math.ceil(written / value['minimumFoldBytesPerSecond'])
+    require(estimated_seconds <= value['operationWindowSeconds'], 'estimated fold duration exceeds foreground growth window')
     require(observation['content_bytes_read'] == 0 and observation['sync_requested'] is False, 'unexpected data read or sync')
     free = observation['physical_available_bytes']
     foreground = max(value['foregroundReserveBytes'], math.ceil(2 * observed / elapsed * value['operationWindowSeconds']))
@@ -91,6 +94,7 @@ def recovery_budget(observation, config):
     return dict(schema=value['schema'], counter='available_bytes',
                 new_allocation_estimate_bytes=written - overlap, peak_allocation_bound_bytes=written,
                 fold_write_bytes=written, overlapping_mapped_bytes=overlap,
+                estimated_native_seconds=estimated_seconds, minimum_fold_bytes_per_second=value['minimumFoldBytesPerSecond'],
                 physical_free_bytes=observation['physical_free_bytes'], physical_available_bytes=free,
                 foreground_reserve_bytes=foreground, working_reserve_bytes=config['workingReserveBytes'],
                 extra_free_bytes=config['minimumExtraFreeBytes'], completion_floor_bytes=floor,

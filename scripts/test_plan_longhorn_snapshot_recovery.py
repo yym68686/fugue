@@ -10,12 +10,19 @@ class SnapshotReviewTests(unittest.TestCase):
                 'workingReserveBytes': 1 << 30,
                 'recoveryBudget': dict(schema='fugue.fixed-capacity-ext4/v1', foregroundReserveBytes=32 << 30,
                                        growthSampleSeconds=2, operationWindowSeconds=3600,
+                                       minimumFoldBytesPerSecond=32 << 20,
                                        maxDatabaseProbeSeconds=5, maxAPIProbeSeconds=3)}
 
     def fixed_observation(self):
         return {**self.observation(), 'physical_available_bytes': 160 << 30, 'physical_free_bytes': 210 << 30,
                 'physical_total_bytes': 900 << 30, 'filesystem': dict(type='ext4', read_only=False),
                 'growth_sample_seconds': 2.1, 'observed_growth_bytes': 1024}
+
+    def test_duration_must_fit_the_declared_foreground_growth_window(self):
+        c = self.fixed_config()
+        c['recoveryBudget']['minimumFoldBytesPerSecond'] = 1 << 20
+        with self.assertRaisesRegex(ValueError, 'duration exceeds'):
+            recovery_budget(self.fixed_observation(), c)
 
     def test_fixed_capacity_recovery_does_not_require_scheduling_headroom(self):
         value, c = self.fixed_observation(), self.fixed_config()

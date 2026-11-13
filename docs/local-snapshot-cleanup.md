@@ -77,6 +77,9 @@ readiness round-trip latency limits (including exec/network overhead).
 Feasible work is ranked by fold writes with an age weight. Byte caps authorize
 whole native operations; they are **not bandwidth limits**. Roll out one small
 canary, inspect actual duration/latency/space, then authorize larger folds. This
+also sets a conservative throughput assumption; each operation's estimated
+duration must fit its foreground-growth window. This assumption is an admission
+estimate, not an engine throughput guarantee or cancellation deadline. This
 implementation does not modify the online engine or claim native throttling.
 The pinned sparse-tools Linux test exercises the real upstream fold and retained
 data view; it does not replace production health/space admission.
