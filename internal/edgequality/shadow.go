@@ -66,6 +66,7 @@ type Observation struct {
 }
 
 type Snapshot struct {
+	HistoricalOrder     *PublishedOrderEvidence       `json:"historical_order,omitempty"`
 	HistoricalEvidence  *HistoricalEvidence           `json:"historical_evidence,omitempty"`
 	PreviousSelection   *model.DNSPhysicalSelection   `json:"previous_selection,omitempty"`
 	PathPrefix          string                        `json:"path_prefix,omitempty"`
@@ -145,6 +146,7 @@ func Capture(snapshot Snapshot) (Receipt, error) {
 	// unused history chain inside the next generation's original evidence.
 	if result.QualityState == "measured" {
 		snapshot.HistoricalEvidence = nil
+		snapshot.HistoricalOrder = nil
 	}
 	receipt := Receipt{Snapshot: snapshot, Result: result}
 	if len(snapshot.ActualDNSReceipt) > 0 {

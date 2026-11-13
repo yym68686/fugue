@@ -52,13 +52,16 @@ func (h *HistoricalEvidence) UnmarshalJSON(raw []byte) error {
 }
 
 func ValidateHistoricalEvidence(snapshot Snapshot) error {
+	if err := validatePublishedOrder(snapshot); err != nil {
+		return err
+	}
 	h := snapshot.HistoricalEvidence
 	if h == nil {
 		return nil
 	}
 	old := h.Receipt.Snapshot
 	if snapshot.Policy.Version != PairedContinuityPolicyVersion || h.SourceArtifactID == "" || len(h.InputDigest) != 71 ||
-		old.HistoricalEvidence != nil || len(old.ServiceReceipts) != 0 || old.Policy.Version == "network-only-experiment-v1" ||
+		old.HistoricalEvidence != nil || old.HistoricalOrder != nil || len(old.ServiceReceipts) != 0 || old.Policy.Version == "network-only-experiment-v1" ||
 		old.Hostname != snapshot.Hostname || DNSHostname(old) != DNSHostname(snapshot) || old.PathPrefix != snapshot.PathPrefix ||
 		old.Scope != snapshot.Scope || old.TrafficClass != snapshot.TrafficClass || old.CapturedAt.After(snapshot.CapturedAt) ||
 		model.ValidateDNSPhysicalSelection(h.Selection) != nil || h.Selection.BusinessAllocation != nil || h.Selection.History != nil ||

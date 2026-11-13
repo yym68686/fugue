@@ -631,7 +631,10 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 		projection.Policy.DNSAnswerRules[index].PhysicalOrder = &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: order}
 		if dynamic := projection.Policy.DNSQueryPolicy.DynamicQuality; dynamic != nil && dynamic.Policy.Version == model.PhysicalPairedContinuityPolicyVersion && qualityTimes[key] != nil {
 			at := *qualityTimes[key]
-			if !at.After(time.Now()) && time.Since(at) <= time.Duration(dynamic.Policy.RetainOrderSeconds)*time.Second {
+			// This timestamp came from the independently verified positive LKG,
+			// not a fresh measurement. Preserve its age even beyond the ordinary
+			// unproven predecessor retention window.
+			if !at.After(time.Now()) {
 				projection.Policy.DNSAnswerRules[index].PhysicalOrder.QualityObservedAt = &at
 			}
 		}
@@ -697,7 +700,7 @@ func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Contex
 		return
 	}
 	source, err := s.observeQualityInputSource(parent)
-	if err != nil || s.checkQualityInputSource(ctx, source) != nil {
+	if err != nil || s.checkOriginalQualityInputSource(ctx, source) != nil {
 		return // Missing historical evidence never clears independent live entries.
 	}
 	requested := map[string]dynamicQualityJob{}
@@ -714,7 +717,7 @@ func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Contex
 		s.dynamicQuality.mu.Unlock()
 		return dynamicQualityRestoreNeeded(summary, job, entry, now())
 	}
-	digest, err := platformconfig.ArtifactRuntimeInputDigest(parent)
+	digest, err := originalQualityInputDigest(parent)
 	if err != nil {
 		return
 	}

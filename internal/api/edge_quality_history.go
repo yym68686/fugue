@@ -30,10 +30,10 @@ func (s *Server) prepareHistoricalQualityInput(parentCtx context.Context, scope 
 		return parentCtx.Err()
 	}
 	source, err := s.observeQualityInputSource(parent)
-	if err != nil || s.checkQualityInputSource(ctx, source) != nil {
+	if err != nil || s.checkOriginalQualityInputSource(ctx, source) != nil {
 		return parentCtx.Err()
 	}
-	digest, err := platformconfig.ArtifactRuntimeInputDigest(parent)
+	digest, err := originalQualityInputDigest(parent)
 	if err != nil {
 		return parentCtx.Err()
 	}
@@ -64,7 +64,13 @@ func (s *Server) bindHistoricalQualityEvidence(ctx context.Context, snapshot *ed
 	if err != nil || s.checkQualityInputSource(ctx, source) != nil {
 		return
 	}
-	digest, err := platformconfig.ArtifactRuntimeInputDigest(parent)
+	// A fallback publication can legitimately retain only the signed order.
+	// Preserve that independent provenance even if raw probe history is absent.
+	s.bindPublishedQualityOrder(ctx, snapshot, nodeID, source)
+	if s.checkOriginalQualityInputSource(ctx, source) != nil {
+		return
+	}
+	digest, err := originalQualityInputDigest(parent)
 	if err != nil {
 		return
 	}
@@ -126,4 +132,20 @@ func (s *Server) bindHistoricalQualityEvidence(ctx context.Context, snapshot *ed
 		snapshot.HistoricalEvidence = history
 		return
 	}
+}
+
+// Opted-in configuration inputs deliberately omit raw probe transcripts.
+// Historical replay must read the original audit input, with its own admission.
+func originalQualityInputDigest(parent model.PlatformArtifact) (string, error) {
+	if _, err := platformconfig.ArtifactRuntimeInputDigest(parent); err != nil {
+		return "", err
+	}
+	return parent.Metadata["input_snapshot_digest"], nil
+}
+
+func (s *Server) checkOriginalQualityInputSource(ctx context.Context, source qualityInputSource) error {
+	return s.store.CheckPlatformInputRead(ctx, []store.PlatformInputReadSelection{{
+		ArtifactID: source.parent.ID, ContentHash: source.parent.ContentHash, ReleaseID: source.release.ID,
+		LKGKind: source.lkg.ArtifactKind, LKGScope: source.lkg.ScopeKey, LKG: &source.lkg, OriginalInput: true,
+	}})
 }

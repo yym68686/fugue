@@ -30,13 +30,19 @@ func physicalSelectionTestRecord(now time.Time) model.EdgeDNSRecord {
 // journal. Merely compiling an order does not prove it reaches authoritative
 // DNS, nor that recovery restores it after a readiness failure.
 func TestHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T) {
+	for _, kind := range []string{"", "published_order"} {
+		t.Run("history_"+kind, func(t *testing.T) { testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t, kind) })
+	}
+}
+
+func testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T, kind string) {
 	base, now := decisionTestState(t)
 	payload := base.payload
 	payload.Plan.Records[0].MinimumHealthyEdges = 1
 	selection := physicalSelectionTestRecord(now).AnswerPolicy.PhysicalSelection
 	original := now.Add(-48 * time.Hour)
 	selection.QualityState, selection.QualityObservedAt = "retained", &original
-	selection.History = &model.PhysicalQualityHistoryUse{SourceArtifactID: "verified-original", InputDigest: selection.EvidenceDigest, EvidenceDigest: selection.EvidenceDigest,
+	selection.History = &model.PhysicalQualityHistoryUse{EvidenceKind: kind, SourceArtifactID: "verified-original", InputDigest: selection.EvidenceDigest, EvidenceDigest: selection.EvidenceDigest,
 		PolicyVersion: model.PhysicalComparableDeliveryPolicyVersion, ObservedAt: original, AgeSeconds: 172800, Reason: "historical_order_retained_no_fresh_comparable_evidence",
 		OriginalOrder: []string{"edge-b", "edge-a"}, ReusedOrder: []string{"edge-b", "edge-a"}}
 	for i := range payload.Queries {

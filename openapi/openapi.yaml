@@ -21363,6 +21363,8 @@ components:
       additionalProperties: false
       required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
       properties:
+        historical_order:
+          $ref: '#/components/schemas/PhysicalEdgeQualityPublishedOrder'
         historical_evidence:
           $ref: '#/components/schemas/PhysicalEdgeQualityHistory'
         previous_selection:
@@ -21508,6 +21510,7 @@ components:
       required: [source_artifact_id, input_digest, evidence_digest, policy_version, observed_at, age_seconds, reason, original_order, reused_order]
       description: Auditable historical ranking fallback, not fresh client measurement or serving authorization. Fresh comparable evidence takes precedence; lack of new evidence alone does not erase this order.
       properties:
+        evidence_kind: {type: string, enum: [published_order], description: 'Diagnostic receipt only. When present only a verified published order was reused, not missing raw measurements. Omitted from compiled serving selections for strict existing V7 readers; reason and policy_version retain this distinction there.'}
         source_artifact_id: {type: string}
         input_digest: {type: string}
         evidence_digest: {type: string}
@@ -22794,10 +22797,20 @@ components:
       required: [version, ordered_edge_ids]
       description: Explicit immutable physical-edge order. This is configuration authority, not a claim of measured network superiority. The first currently route/TLS-ready endpoint wins. Geography, numeric candidate scores, group weights and exploration cannot reorder it. Deploying support does not convert an existing signed policy.
       properties:
-        quality_observed_at: {type: string, format: date-time, description: Optional original quality timestamp carried from a verified dynamic order. V7 fallback may retain its filtered order only within retain_order_seconds; this timestamp never renews during fallback and does not assert fresh measured quality.}
+        quality_observed_at: {type: string, format: date-time, description: Optional original quality timestamp carried from a verified dynamic order. An independently verified positive publication preserves this timestamp and its filtered order without new measurements; otherwise retain_order_seconds bounds predecessor retention. The timestamp never renews during fallback and does not assert fresh measured quality.}
         primary_since: {type: string, format: date-time, description: Optional preserved primary assignment epoch from verified quality publication; never inferred from process start or sample time.}
         version: {type: string, enum: [physical-order-v1]}
         ordered_edge_ids: {type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
+    PhysicalEdgeQualityPublishedOrder:
+      type: object
+      additionalProperties: false
+      required: [source_artifact_id, input_digest, evidence_digest, selection]
+      description: Independently verified positive publication order matching the actual DNS predecessor. Reuses ordering only, not missing raw measurements or a claim of network superiority. Original quality time is preserved; current admission, capacity and route/TLS checks remain mandatory. Cannot restore a different primary.
+      properties:
+        source_artifact_id: {type: string}
+        input_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        evidence_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        selection: {$ref: '#/components/schemas/DNSPhysicalSelection'}
     DNSPhysicalSelection:
       type: object
       additionalProperties: false

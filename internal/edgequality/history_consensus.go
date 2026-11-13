@@ -22,6 +22,9 @@ func applyServiceHistory(snapshot Snapshot, result *Result) bool {
 		if history.ReusedOrder[0] != h.ReusedOrder[0] || history.SourceArtifactID != h.SourceArtifactID || history.InputDigest != h.InputDigest {
 			return false
 		}
+		if h.EvidenceKind == "published_order" {
+			history.EvidenceKind = "published_order"
+		}
 		common := []string{}
 		for _, id := range history.ReusedOrder {
 			for _, other := range h.ReusedOrder {

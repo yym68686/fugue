@@ -44,3 +44,15 @@ the original positive authority. Producer captures prepare once before their
 bounded job batch, not once per candidate or DNS consumer.
 Ordinary selective reads retain their 30-second default. A timeout is logged as
 unavailable history; it never deletes live observations or renews old evidence.
+
+When a positive fallback publication contains only an order, capture verifies
+its signed DNS member and exact actual-DNS predecessor separately. The response
+labels this `history.evidence_kind=published_order`: it preserves the original
+quality timestamp and incumbent, but makes no claim of replaying missing raw
+measurements. Current eligible recovered nodes rejoin its fallback order.
+This path does not require new client probes and does not expire an otherwise
+valid order merely because no replacement measurement exists. It cannot restore
+a different historical winner. Full receipt replay still has priority, and
+fresh comparable measurements supersede both forms of history.
+Opted-in configuration inputs intentionally omit probe transcripts; receipt
+replay reads the separately admitted original input, not that projection.

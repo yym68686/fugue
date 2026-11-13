@@ -75,6 +75,7 @@ type DNSPhysicalSelection struct {
 // PhysicalQualityHistoryUse describes provenance, not renewed measurement or
 // admission. Its clock always belongs to the original evidence.
 type PhysicalQualityHistoryUse struct {
+	EvidenceKind     string    `json:"evidence_kind,omitempty"`
 	SourceArtifactID string    `json:"source_artifact_id"`
 	InputDigest      string    `json:"input_digest"`
 	EvidenceDigest   string    `json:"evidence_digest"`
@@ -123,7 +124,7 @@ func ValidateDNSPhysicalSelection(selection *DNSPhysicalSelection) error {
 		return errors.New("invalid physical-edge quality state")
 	}
 	if h := selection.History; h != nil {
-		if selection.QualityState != "retained" || selection.QualityObservedAt == nil || !selection.QualityObservedAt.Equal(h.ObservedAt) || h.SourceArtifactID == "" ||
+		if h.EvidenceKind != "" && h.EvidenceKind != "published_order" || selection.QualityState != "retained" || selection.QualityObservedAt == nil || !selection.QualityObservedAt.Equal(h.ObservedAt) || h.SourceArtifactID == "" ||
 			len(h.InputDigest) != 71 || len(h.EvidenceDigest) != 71 || h.PolicyVersion == "" || h.AgeSeconds < 0 || h.Reason == "" || len(h.OriginalOrder) == 0 ||
 			len(h.ReusedOrder) != len(selection.OrderedEdgeIDs) {
 			return errors.New("invalid historical quality provenance")

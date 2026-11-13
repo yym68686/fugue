@@ -77,7 +77,10 @@ func applyDNSAvailabilityBaseline(projection *platformIntentProjectionResponse, 
 					continue
 				}
 				at := *rule.PhysicalOrder.QualityObservedAt
-				if at.After(now) || now.Sub(at) > time.Duration(dynamic.Policy.RetainOrderSeconds)*time.Second {
+				// Only preserveDynamicQualityBaseline, after rechecking the
+				// signed positive LKG and current topology, supplies this marker.
+				verifiedOrder := fact.Reason == "physical_quality_learning_preserved_verified_order"
+				if at.After(now) || !verifiedOrder && now.Sub(at) > time.Duration(dynamic.Policy.RetainOrderSeconds)*time.Second {
 					continue
 				}
 				allowed := map[string]bool{}

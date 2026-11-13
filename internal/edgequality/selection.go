@@ -75,6 +75,12 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 	if snapshot.Policy.Version == PairedContinuityPolicyVersion {
 		selection.QualityState, selection.QualityObservedAt = result.QualityState, result.QualityObservedAt
 		selection.History = model.ClonePhysicalQualityHistoryUse(result.History)
+		if selection.History != nil {
+			// Diagnostic distinction stays in the replay receipt. Existing V7
+			// DNS readers strictly decode the serving selection; its established
+			// reason and policy_version already identify a published-order reuse.
+			selection.History.EvidenceKind = ""
+		}
 	}
 	primarySince := snapshot.CapturedAt
 	if primary.EdgeID == snapshot.CurrentEdgeID && snapshot.LastSwitchAt != nil {
@@ -103,6 +109,9 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 		eligible := map[string]bool{}
 		for _, candidate := range snapshot.Candidates {
 			eligible[candidate.EdgeID] = len(candidate.HardGates) == 0 && candidate.ServingBlockedReason == "" && proofFresh(candidate, snapshot.Policy, now)
+		}
+		for _, candidate := range result.Candidates {
+			eligible[candidate.EdgeID] = eligible[candidate.EdgeID] && len(candidate.HardGates) == 0
 		}
 		order := []string{primary.EdgeID}
 		seen := map[string]bool{primary.EdgeID: true}
