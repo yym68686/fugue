@@ -45,7 +45,9 @@ func TestClusterNodeHotPathsScriptPreservesCollectionFailure(t *testing.T) {
 }
 
 func TestClusterNodeJournalScriptIncludesImageGCFailures(t *testing.T) {
-	t.Parallel()
+	// This fixture launches a shell pipeline with a ten-second process budget.
+	// Run before the package's parallel integration fixtures: CPU/process-start
+	// contention must not turn successful journal output into a timeout.
 	output, err := runNodeDiagnosisScriptFixture(t, clusterNodeDiagnosisJournalScript, map[string]string{
 		"chroot": "#!/bin/sh\nexec /bin/sh -c \"$4\"\n",
 		"journalctl": `#!/bin/sh
