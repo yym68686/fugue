@@ -40,4 +40,4 @@ This is a source-authentication receipt. It does not establish the external
 authority registry, current retention roots, complete dependency closure,
 full input SHA, restoration, durable pins, rollback compatibility or physical
 retirement. Those require their separate real evidence. It neither enables
-the production configuration policy nor changes the public retirement refusal.
+the production configuration policy nor reinstates removed retirement tooling.

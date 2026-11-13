@@ -38,7 +38,7 @@ func testMachineSharedPoolPreservesDisabledBuilds(t *testing.T, address string) 
 	if s.db != nil {
 		defer s.db.Close()
 	}
-	tenant, err := s.CreateTenant("Workload Isolation")
+	tenant, err := s.CreateTenant(model.NewID("tenant"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,8 @@ func testMachineSharedPoolPreservesDisabledBuilds(t *testing.T, address string) 
 		t.Fatal(err)
 	}
 	labels := map[string]string{runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue, runtimepkg.BuildNodeLabelKey: runtimepkg.BuildNodeLabelValue}
-	_, runtime, err := s.BootstrapClusterNode(secret, "worker-storage", "https://worker.example.test", labels, "worker", "fingerprint")
+	clusterNode := strings.ReplaceAll(model.NewID("worker"), "_", "-")
+	_, runtime, err := s.BootstrapClusterNode(secret, clusterNode, "https://worker.example.test", labels, clusterNode, clusterNode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func testMachineSharedPoolPreservesDisabledBuilds(t *testing.T, address string) 
 	}
 	// Replay runtime registration with stale build labels and a pool refresh.
 	// Neither operational fact is allowed to re-enable explicit build intent.
-	if _, _, err := s.BootstrapClusterNode(secret, "worker-storage", "https://worker.example.test", labels, "worker", "fingerprint"); err != nil {
+	if _, _, err := s.BootstrapClusterNode(secret, clusterNode, "https://worker.example.test", labels, clusterNode, clusterNode); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.SetRuntimePoolMode(runtime.ID, model.RuntimePoolModeInternalShared); err != nil {

@@ -64,8 +64,8 @@ func inputActivationFixturePhase(t *testing.T, inputs int, enforced bool) (*Stor
 	return s, []inputarchive.HotRoot{{Source: "activation", ID: "neutral", Reference: inputarchive.HotReference{Kind: "artifact", ID: "activation-root"}}}, pins
 }
 
-// Test-only mode selection by the disposable schema owner. Tests exercising
-// the actual bounded enabling transition use the default capability fixture.
+// Test-only historical mode selection by the disposable schema owner. There is
+// no production enabling transition in this binary.
 func enforceCompilerInputHistoryTestPhase(t *testing.T, s *Store) {
 	t.Helper()
 	if _, err := s.db.Exec(`UPDATE fugue_platform_input_history_admission SET phase='enforced',plan_sha256=$1,enforced_at=now() WHERE singleton AND phase='capability'`, strings.Repeat("a", 64)); err != nil {

@@ -79,6 +79,32 @@ func TestDNSRetirementTransactionPostgres(t *testing.T) {
 		}
 	}
 	prepareCompilerInputTestSchema(t, target)
+	// Copy the fixture's real signed-input bodies and verify their local pins.
+	// Copying only artifact/release metadata is not a complete strict fixture.
+	seen := map[string]bool{}
+	var artifacts []model.PlatformArtifact
+	if err := fixture.s.withLockedState(false, func(state *model.State) error {
+		artifacts = append(artifacts, state.PlatformArtifacts...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range artifacts {
+		digest := artifact.Metadata["input_snapshot_digest"]
+		if digest == "" || seen[digest] {
+			continue
+		}
+		seen[digest] = true
+		content, err := fixture.s.GetPlatformArtifactContent(digest)
+		if err != nil {
+			t.Fatal("read fixture compiler input", err)
+		}
+		snapshot, err := platformconfig.DecodeRuntimeSnapshotContent(content.Content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepareCompiledInputPin(t, target, platformconfig.CompileResult{InputSnapshot: snapshot, Lineage: platformconfig.Lineage{InputSnapshotDigest: digest}})
+	}
 	tx, err = database.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)

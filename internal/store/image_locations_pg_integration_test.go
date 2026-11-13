@@ -129,6 +129,10 @@ WHERE id = $1
 		!demoted.UpdatedAt.After(refreshedUpdatedAt) {
 		t.Fatalf("unexpected Postgres demotion timestamps: %+v", demoted)
 	}
+	var storedLegacyDigest string
+	if err := stateStore.db.QueryRowContext(context.Background(), `SELECT digest FROM fugue_image_locations WHERE id=$1`, legacyID).Scan(&storedLegacyDigest); err != nil || storedLegacyDigest != "" {
+		t.Fatal("demotion changed stored legacy identity", storedLegacyDigest, err)
+	}
 
 	var observedCanonicalAppID, canonicalDigest, canonicalStatus, canonicalLastError string
 	var canonicalUpdatedAt time.Time

@@ -11,6 +11,7 @@ import (
 
 	"fugue/internal/imagecacheevidence"
 	"fugue/internal/model"
+	"fugue/internal/schemamigrate"
 )
 
 func TestImageCacheGraphEvidencePostgresIntegration(t *testing.T) {
@@ -117,6 +118,25 @@ INSERT INTO fugue_image_cache_manifests (
 		t.Fatalf("seed legacy image-cache manifest row: %v", err)
 	}
 
+	// Production schema installation is separate from ordinary Store startup.
+	// Install its required markers before testing the additive legacy upgrade.
+	bootstrap := &Store{db: legacyDB, databaseURL: schemaURL}
+	tx, err := legacyDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bootstrap.applyPostgresSchemaTx(ctx, tx); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for _, migrate := range []func(context.Context, string) error{schemamigrate.MigratePlatformState, schemamigrate.MigrateImageCacheManifestGraph, schemamigrate.MigrateEdgeInstanceFencing, schemamigrate.MigrateSourceUploadSessions} {
+		if err := migrate(ctx, schemaURL); err != nil {
+			t.Fatal("install disposable production schema", err)
+		}
+	}
 	stateStore := New("", schemaURL)
 	if err := stateStore.Init(); err != nil {
 		_ = legacyDB.Close()
