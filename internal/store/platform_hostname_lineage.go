@@ -23,7 +23,7 @@ func (s *Store) ListPlatformHostnameArtifacts(ctx context.Context, kind, hostnam
 		defer cancel()
 		columns := "NULL::jsonb"
 		if includeContent {
-			columns = "content_json"
+			columns = "fugue_platform_artifact_body(content_hash,content_json)"
 		}
 		query := `WITH candidates AS MATERIALIZED (
 SELECT * FROM fugue_platform_artifacts WHERE artifact_kind=$1 AND status=$2
@@ -33,7 +33,7 @@ SELECT id,artifact_kind,scope_key,scope_json,schema_version,generation,generatio
 ` + columns + `,validation_results_json,compatibility_floor,metadata_json,created_by_type,created_by_id,provenance_json,created_at,updated_at
 FROM candidates
 WHERE EXISTS (
- SELECT 1 FROM jsonb_path_query(content_json, 'strict $.** ? (@.type() == "object").keyvalue() ? (@.key like_regex "hostname" flag "i" && @.value.type() == "string").value') AS names(value)
+ SELECT 1 FROM jsonb_path_query(fugue_platform_artifact_body(content_hash,content_json), 'strict $.** ? (@.type() == "object").keyvalue() ? (@.key like_regex "hostname" flag "i" && @.value.type() == "string").value') AS names(value)
  WHERE btrim(btrim(lower(value #>> '{}'), E' \t\n\r\f\v'), '.')=$4
 )
 ORDER BY updated_at DESC,id ASC`

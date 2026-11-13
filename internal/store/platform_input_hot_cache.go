@@ -236,7 +236,7 @@ func (c *compilerInputHotCache) resolve(ctx context.Context, tx *sql.Tx, refs []
 	if len(ids) > 0 {
 		started := time.Now()
 		rows, err := tx.QueryContext(ctx, `SELECT id,xmin::text,ctid::text,tableoid::bigint,artifact_kind,scope_key,generation,content_hash
- FROM fugue_platform_artifacts WHERE id=ANY($1::text[])`, ids)
+ FROM fugue_platform_artifacts WHERE id=ANY($1::text[]) AND content_json IS NOT NULL`, ids)
 		if err != nil {
 			return nil, err
 		}
@@ -290,7 +290,12 @@ func (c *compilerInputHotCache) resolve(ctx context.Context, tx *sql.Tx, refs []
 		indexed = false
 		capture = func(node inputarchive.HotNode, sourceBytes int64, metadataBytes int) error {
 			v, exists := versions[node.Identity.ID]
-			if !exists || v.Relation != c.session.Relation {
+			// Reference bodies have a second tuple identity. Until a versioned
+			// cache binds both tuples, resolve those rows in the final snapshot.
+			if !exists {
+				return nil
+			}
+			if v.Relation != c.session.Relation {
 				return ErrConflict
 			}
 			if !compilerInputHotCacheXIDSafe(v.Xmin, c.session.Horizon) {

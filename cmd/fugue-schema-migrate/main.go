@@ -150,6 +150,9 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigrateBoundedContent(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate bounded content stores: %w", err)
 	}
+	if err := schemamigrate.MigratePlatformArtifactContent(ctx, databaseURL); err != nil {
+		return fmt.Errorf("migrate artifact content references: %w", err)
+	}
 	if err := schemamigrate.MigrateCompilerInputCodec(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate compiler input codec: %w", err)
 	}

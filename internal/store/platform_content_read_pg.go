@@ -13,15 +13,17 @@ import (
 // Every call reads current authority metadata. Only the immutable content body
 // may be omitted, and only after PostgreSQL hashes the actual current bytes.
 // The declared content_hash is never a cache validator.
-const platformArtifactConditionalReadSQL = `WITH artifact AS MATERIALIZED (
- SELECT *, sha256(convert_to(content_json::text, 'UTF8')) AS wire_content_digest
+const platformArtifactConditionalReadSQL = `WITH source AS MATERIALIZED (
+ SELECT *, fugue_platform_artifact_body(content_hash, content_json) AS resolved_content
  FROM fugue_platform_artifacts
  WHERE id = $1 OR generation = $1
  ORDER BY updated_at DESC, id ASC LIMIT 1
+), artifact AS MATERIALIZED (
+ SELECT *, sha256(convert_to(resolved_content::text, 'UTF8')) AS wire_content_digest FROM source
 )
 SELECT id, artifact_kind, scope_key, scope_json, schema_version, generation,
  generation_sequence, status, content_hash,
- CASE WHEN wire_content_digest = $2::bytea THEN NULL ELSE content_json END,
+ CASE WHEN wire_content_digest = $2::bytea THEN NULL ELSE resolved_content END,
  validation_results_json, compatibility_floor, metadata_json,
  created_by_type, created_by_id, provenance_json, created_at, updated_at,
  wire_content_digest

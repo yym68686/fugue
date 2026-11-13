@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def manifest(document):
-    if not {"namespace", "name", "policy"} <= set(document) or set(document) - {"namespace", "name", "policy", "observationRetention", "compilerInputCodec", "compilerInputShared", "compilerInputSeparated"}:
+    if not {"namespace", "name", "policy"} <= set(document) or set(document) - {"namespace", "name", "policy", "observationRetention", "compilerInputCodec", "compilerInputShared", "compilerInputSeparated", "artifactContentReferences", "compilerInputBlocks"}:
         raise ValueError("unexpected storage policy configuration")
     for field in ("namespace", "name"):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", document[field]):
@@ -24,13 +24,21 @@ def manifest(document):
     if p["database_max_open"] and (p["database_max_idle"] > p["database_max_open"] or not p["database_idle_seconds"]):
         raise ValueError("invalid connection/idle budget")
     data = {"policy.json": json.dumps(p, sort_keys=True, separators=(",", ":"))}
-    for key, filename in (("compilerInputCodec", "compiler-input-codec.json"), ("compilerInputShared", "compiler-input-shared.json"), ("compilerInputSeparated", "compiler-input-separated.json")):
+    for key, filename in (("compilerInputCodec", "compiler-input-codec.json"), ("compilerInputShared", "compiler-input-shared.json"), ("compilerInputSeparated", "compiler-input-separated.json"), ("artifactContentReferences", "artifact-content-references.json")):
         if key not in document:
             continue
         codec = document[key]
         if set(codec) != {"version", "enabled"} or type(codec["version"]) is not int or codec["version"] != 1 or type(codec["enabled"]) is not bool:
             raise ValueError("invalid compiler input codec policy")
         data[filename] = json.dumps(codec, sort_keys=True, separators=(",", ":"))
+    if "compilerInputBlocks" in document:
+        b = document['compilerInputBlocks']
+        if (set(b) != {'version', 'minimum_bytes', 'boundary_bits'} or
+                type(b['version']) is not int or b['version'] != 1 or
+                type(b['minimum_bytes']) is not int or b['minimum_bytes'] not in (256, 2048, 4096, 8192) or
+                type(b['boundary_bits']) is not int or b['boundary_bits'] not in (0, 3, 4)):
+            raise ValueError('invalid compiler input block profile')
+        data['compiler-input-blocks.json'] = json.dumps(b, sort_keys=True, separators=(',', ':'))
     if "observationRetention" in document:
         r = document["observationRetention"]
         bounds = {"interval_seconds": (30, 3600), "batch_rows": (1, 1000), "heartbeat_days": (1, 90),
@@ -53,6 +61,9 @@ def main():
     if separated.get('enabled'):
         # New writes require BOTH current and automatic rollback readers.
         subprocess.run(['python3', '-m', 'scripts.compiler_input_storage'], check=True, timeout=90)
+    if json.loads(value['data'].get('artifact-content-references.json', '{}')).get('enabled'):
+        from scripts.artifact_content_storage import check_readers
+        check_readers()
     body = json.dumps(value)
     command = ["kubectl", "apply", "--server-side", "--field-manager=fugue-storage-policy", "-f", "-"]
     if not args.apply:

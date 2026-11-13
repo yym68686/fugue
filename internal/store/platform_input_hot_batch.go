@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"fugue/internal/inputarchive"
@@ -68,19 +69,22 @@ func resolveCompilerInputHotBatchRead(ctx context.Context, tx inputQueryer, refs
 		// It preserves JSON null separately from a missing dependency key.
 		// Producer policies compare their content generation against the
 		// stored ledger envelope; never infer it from the content itself.
+		projection := strings.ReplaceAll(compilerInputHotReadProjection, "content_json", "hot_body.body")
 		statement := `SELECT id,artifact_kind,scope_key,generation,content_hash,
- left((` + compilerInputHotReadProjection + `),$2),left(metadata_json::text,16385),octet_length(compiler_input_source_text)
+ left((` + projection + `),$2),left(metadata_json::text,16385),octet_length(compiler_input_source_text)
  FROM fugue_platform_artifacts
- CROSS JOIN LATERAL (SELECT content_json::text AS compiler_input_source_text OFFSET 0) hot_source
+ CROSS JOIN LATERAL (SELECT fugue_platform_artifact_body(content_hash,content_json) AS body OFFSET 0) hot_body
+ CROSS JOIN LATERAL (SELECT hot_body.body::text AS compiler_input_source_text OFFSET 0) hot_source
  WHERE id=ANY($1::text[])`
 		if indexed {
 			statement = `SELECT a.id,a.artifact_kind,a.scope_key,a.generation,a.content_hash,
- CASE WHEN i.artifact_id IS NOT NULL THEN i.content_text ELSE left((` + compilerInputHotReadProjection + `),$2) END,
+ CASE WHEN i.artifact_id IS NOT NULL THEN i.content_text ELSE left((` + projection + `),$2) END,
  CASE WHEN i.artifact_id IS NOT NULL THEN i.metadata_text ELSE left(a.metadata_json::text,16385) END,
  CASE WHEN i.artifact_id IS NOT NULL THEN i.source_bytes ELSE octet_length(compiler_input_source_text) END
  FROM fugue_platform_artifacts a LEFT JOIN fugue_platform_input_hot_dependency_index_v1 i
  ON i.artifact_id=a.id AND ` + compilerInputHotIndexCurrent + `
- CROSS JOIN LATERAL (SELECT CASE WHEN i.artifact_id IS NULL THEN a.content_json::text END AS compiler_input_source_text OFFSET 0) hot_source
+ CROSS JOIN LATERAL (SELECT CASE WHEN i.artifact_id IS NULL THEN fugue_platform_artifact_body(a.content_hash,a.content_json) END AS body OFFSET 0) hot_body
+ CROSS JOIN LATERAL (SELECT hot_body.body::text AS compiler_input_source_text OFFSET 0) hot_source
  WHERE a.id=ANY($1::text[])`
 		}
 		rows, err := queryCompilerInputHotRows(ctx, tx, artifactCost, statement, artifacts, compilerInputHotArtifactBytes+1)

@@ -322,6 +322,8 @@ type sharedInputWriter struct {
 	hash                                    hash.Hash
 	encoder                                 inputChunkEncoder
 	splitter                                sharedSplitter
+	blockMinimum                            int
+	boundaryBits                            int
 	objects                                 map[[32]byte]sharedObject
 	order                                   [][32]byte
 	recipes                                 [][]sharedRef
@@ -358,6 +360,8 @@ func (w *sharedInputWriter) stage() error {
 		return nil
 	}
 	var refs []sharedRef
+	w.splitter.minimum = w.blockMinimum
+	w.splitter.boundaryBits = w.boundaryBits
 	err := w.splitter.blocks(w.chunk, func(raw []byte) error {
 		ref := sharedRef{Hash: sha256.Sum256(raw), Size: len(raw)}
 		w.seen[ref.Hash] = true
@@ -606,6 +610,8 @@ func (s *Store) pgWriteSharedInput(ctx context.Context, tx *sql.Tx, snapshot pla
 		}
 	}()
 	w := &sharedInputWriter{ctx: ctx, tx: tx, digest: digest, hash: sha256.New(), encoder: inputChunkEncoder{level: zlib.DefaultCompression}, objects: map[[32]byte]sharedObject{}, seen: map[[32]byte]bool{}}
+	w.blockMinimum = s.compilerInputBlockMinimum()
+	w.boundaryBits = s.compilerInputBoundaryBits()
 	if err := platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
 		return err
 	}

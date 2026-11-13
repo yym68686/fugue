@@ -12,7 +12,7 @@ import (
 // update in the same transaction, invalidates the index. The 64-bit build XID
 // horizon refuses entries across XID wrap/restore rather than trusting a reused
 // 32-bit xmin and ctid. This comparison allocates no XID in read-only inventory.
-const compilerInputHotIndexCurrent = `i.source_xmin=a.xmin AND i.source_ctid=a.ctid
+const compilerInputHotIndexCurrent = `a.content_json IS NOT NULL AND i.source_xmin=a.xmin AND i.source_ctid=a.ctid
  AND pg_snapshot_xmax(pg_current_snapshot())::text::bigint>=i.built_xid
  AND pg_snapshot_xmax(pg_current_snapshot())::text::bigint-i.built_xid<2147483648`
 
@@ -85,7 +85,9 @@ func RunCompilerInputHotIndex(ctx context.Context, databaseURL string, options C
 		}
 		return nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM fugue_platform_artifacts WHERE artifact_kind='dns_answer_bundle' AND id>$1 ORDER BY id LIMIT $2`, options.AfterID, options.Limit)
+	// The immutable v1 derivation only understands inline source tuples. CAS
+	// rows use the bounded live projection instead; never index a NULL body.
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM fugue_platform_artifacts WHERE artifact_kind='dns_answer_bundle' AND content_json IS NOT NULL AND id>$1 ORDER BY id LIMIT $2`, options.AfterID, options.Limit)
 	if err != nil {
 		return report, err
 	}

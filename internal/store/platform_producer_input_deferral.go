@@ -132,13 +132,13 @@ func (s *Store) pgInputDeferralSelection(ctx context.Context, tx *sql.Tx) (*plat
 	}
 	a, err := scanPlatformArtifact(tx.QueryRowContext(ctx, `
 SELECT a.id,a.artifact_kind,a.scope_key,a.scope_json,a.schema_version,a.generation,a.generation_sequence,a.status,a.content_hash,
- a.content_json,a.validation_results_json,a.compatibility_floor,a.metadata_json,a.created_by_type,a.created_by_id,a.provenance_json,a.created_at,a.updated_at
+ fugue_platform_artifact_body(a.content_hash,a.content_json),a.validation_results_json,a.compatibility_floor,a.metadata_json,a.created_by_type,a.created_by_id,a.provenance_json,a.created_at,a.updated_at
 FROM fugue_platform_artifact_releases r JOIN fugue_platform_release_lanes l ON l.active_release_id=r.id
 JOIN fugue_platform_artifacts a ON a.id=r.artifact_id
 WHERE r.id=$1 AND l.lane_key=$2 AND NOT l.frozen AND r.status='active'
  AND r.lane_key=l.lane_key AND r.fencing_token=l.fencing_token AND r.fencing_token>0
  AND r.artifact_kind=$3 AND r.scope_key=$4 AND r.release_channel='shadow' AND r.generation=a.generation
- AND octet_length(a.content_json::text)<=$5
+ AND octet_length(fugue_platform_artifact_body(a.content_hash,a.content_json)::text)<=$5
  AND octet_length(a.metadata_json::text)<=65536 AND octet_length(a.provenance_json::text)<=65536
  AND octet_length(a.validation_results_json::text)<=65536`, id, key, model.PlatformArtifactKindPolicySnapshot, platformproducer.InputDeferralScope, 2*platformproducer.MaxInputDeferralBytes))
 	if err != nil {
@@ -239,7 +239,7 @@ WHERE l.lane_key=$1 AND NOT l.frozen AND r.lane_key=l.lane_key AND r.status='act
 		// Producer policy size was already bounded and signed on publication.
 		// Verify the current immutable artifact again, never only caller hashes.
 		var size int
-		if err := tx.QueryRowContext(ctx, `SELECT octet_length(content_json::text) FROM fugue_platform_artifacts WHERE id=$1`, binding.ArtifactID).Scan(&size); err != nil || size > 1048576 {
+		if err := tx.QueryRowContext(ctx, `SELECT octet_length(fugue_platform_artifact_body(content_hash,content_json)::text) FROM fugue_platform_artifacts WHERE id=$1`, binding.ArtifactID).Scan(&size); err != nil || size > 1048576 {
 			return errors.Join(err, ErrConflict)
 		}
 		policy, err := pgGetPlatformArtifactForUpdate(ctx, tx, binding.ArtifactID, false)

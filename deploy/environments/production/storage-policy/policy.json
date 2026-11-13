@@ -26,5 +26,14 @@
   "compilerInputSeparated": {
     "version": 1,
     "enabled": true
+  },
+  "compilerInputBlocks": {
+    "version": 1,
+    "minimum_bytes": 256,
+    "boundary_bits": 4
+  },
+  "artifactContentReferences": {
+    "version": 1,
+    "enabled": false
   }
 }

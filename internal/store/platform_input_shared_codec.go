@@ -35,11 +35,30 @@ func sharedBlocks(raw []byte, emit func([]byte) error) error {
 type sharedSplitter struct {
 	quoted, escaped bool
 	stack           []byte
+	minimum         int // writer profile only; decoding/digests are unchanged
+	boundaryBits    int
+	objectHash      uint64
 }
 
 func (s *sharedSplitter) blocks(raw []byte, emit func([]byte) error) error {
+	minimum := s.minimum
+	if minimum == 0 {
+		minimum = sharedBlockMin
+	}
+	if minimum < sharedBlockMin || minimum > sharedBlockMax {
+		return ErrInvalidInput
+	}
+	if s.boundaryBits != 0 && s.boundaryBits != 3 && s.boundaryBits != 4 {
+		return ErrInvalidInput
+	}
 	start := 0
 	for i, b := range raw {
+		if s.boundaryBits != 0 {
+			if s.objectHash == 0 {
+				s.objectHash = 14695981039346656037
+			}
+			s.objectHash = (s.objectHash ^ uint64(b)) * 1099511628211
+		}
 		boundary := false
 		if s.escaped {
 			s.escaped = false
@@ -64,8 +83,20 @@ func (s *sharedSplitter) blocks(raw []byte, emit func([]byte) error) error {
 				boundary = b == '}' && len(s.stack) > 0 && s.stack[len(s.stack)-1] == '['
 			}
 		}
+		if boundary && s.boundaryBits != 0 {
+			// Anchor to the entire preceding record, not its position/count.
+			// Insertions/removals in a sliding window resynchronize at the next
+			// selected record. This hash chooses cuts only; SHA-256 still owns
+			// content identity and every reconstructed byte is verified.
+			h := s.objectHash
+			h ^= h >> 33
+			h *= 0xff51afd7ed558ccd
+			h ^= h >> 33
+			s.objectHash = 14695981039346656037
+			boundary = h&((1<<s.boundaryBits)-1) == 0
+		}
 		n := i + 1 - start
-		if n < sharedBlockMax && (!boundary || n < sharedBlockMin) {
+		if n < sharedBlockMax && (!boundary || n < minimum) {
 			continue
 		}
 		if err := emit(raw[start : i+1]); err != nil {

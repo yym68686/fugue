@@ -101,13 +101,8 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 		return platformConfigCompileResponse{}, err
 	}
 	advance("compiler_input")
-	if err := s.store.EnsurePlatformCompilerInputContext(runtimeobservation.WithDatabaseOperation(ctx, "compiler-input-persist"), compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
+	if err := s.store.EnsurePlatformCompilerInputPairContext(runtimeobservation.WithDatabaseOperation(ctx, "compiler-input-persist"), compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest, compiled.RuntimeInput, compiled.Lineage.RuntimeInputDigest); err != nil {
 		return platformConfigCompileResponse{}, err
-	}
-	if compiled.RuntimeInput != nil {
-		if err := s.store.EnsurePlatformCompilerInputContext(runtimeobservation.WithDatabaseOperation(ctx, "compiler-runtime-input-persist"), *compiled.RuntimeInput, compiled.Lineage.RuntimeInputDigest); err != nil {
-			return platformConfigCompileResponse{}, err
-		}
 	}
 	artifacts := []*model.PlatformArtifact{&compiled.RouteArtifact, &compiled.DNSArtifact, &compiled.TLSArtifact}
 	if compiled.ReleaseSet.PublicationRole == platformconfig.PublicationRoleCellRoutes {

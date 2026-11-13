@@ -5,6 +5,28 @@ from scripts.publish_storage_policy import manifest
 
 
 class StoragePolicyTest(unittest.TestCase):
+    def test_block_profile_is_bounded_and_does_not_change_read_format(self):
+        base = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60}}
+        base['compilerInputBlocks'] = {'version': 1, 'minimum_bytes': 256, 'boundary_bits': 4}
+        self.assertEqual(json.loads(manifest(base)['data']['compiler-input-blocks.json']), base['compilerInputBlocks'])
+        for field, value in [('minimum_bytes', 0), ('minimum_bytes', 65536), ('boundary_bits', 5), ('boundary_bits', True), ('rewrite_history', True)]:
+            changed = copy.deepcopy(base)
+            changed['compilerInputBlocks'][field] = value
+            with self.assertRaises(ValueError):
+                manifest(changed)
+
+    def test_artifact_reference_writer_uses_separate_explicit_activation(self):
+        base = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60}}
+        original = manifest(base)['data']['policy.json']
+        for enabled in (False, True):
+            base['artifactContentReferences'] = {'version': 1, 'enabled': enabled}
+            data = manifest(base)['data']
+            self.assertEqual(data['policy.json'], original)
+            self.assertEqual(json.loads(data['artifact-content-references.json'])['enabled'], enabled)
+        base['artifactContentReferences']['delete_history'] = True
+        with self.assertRaises(ValueError):
+            manifest(base)
+
     def test_separated_writer_is_independent(self):
         base = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60}}
         before = manifest(base)["data"]["policy.json"]

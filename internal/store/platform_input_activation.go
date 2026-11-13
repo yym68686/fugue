@@ -524,10 +524,10 @@ func readCompilerInputActivationArtifact(ctx context.Context, tx *sql.Tx, id str
 	var contentBytes int
 	scanner := &compilerInputActivationArtifactScanner{sqlScanner: tx.QueryRowContext(ctx, `SELECT id,artifact_kind,scope_key,
  left(scope_json::text,16385),schema_version,generation,generation_sequence,status,content_hash,
- CASE WHEN octet_length(content_json::text)<=$2 THEN content_json ELSE NULL END,
+ CASE WHEN octet_length(fugue_platform_artifact_body(content_hash,content_json)::text)<=$2 THEN fugue_platform_artifact_body(content_hash,content_json) ELSE NULL END,
  left(validation_results_json::text,16385),compatibility_floor,left(metadata_json::text,16385),
  created_by_type,created_by_id,left(provenance_json::text,16385),created_at,updated_at,
- octet_length(content_json::text)
+ octet_length(fugue_platform_artifact_body(content_hash,content_json)::text)
  FROM fugue_platform_artifacts WHERE id=$1`, id, compilerInputHotArtifactBytes), size: &contentBytes}
 	artifact, err := scanPlatformArtifactWithDecoder(scanner, func(raw []byte) (map[string]any, error) {
 		if contentBytes > compilerInputHotArtifactBytes || len(raw) == 0 {

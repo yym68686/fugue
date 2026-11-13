@@ -156,7 +156,7 @@ func (s *Store) captureDeferralObservation(ctx context.Context, tx *sql.Tx, requ
  AND r.artifact_kind=l.artifact_kind AND r.scope_key=l.scope_key
  AND r.release_channel=l.release_channel AND r.generation=a.generation
  AND a.artifact_kind=l.artifact_kind AND a.scope_key=l.scope_key AND a.status='validated'
- AND octet_length(a.content_json::text)<=1048576
+ AND octet_length(fugue_platform_artifact_body(a.content_hash,a.content_json)::text)<=1048576
  FOR SHARE OF l,r,a`,
 			platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, binding.Scope, "shadow")).Scan(&current.ArtifactID, &current.ContentHash, &current.ReleaseID, &current.FencingToken)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {

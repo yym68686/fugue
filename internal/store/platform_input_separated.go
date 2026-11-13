@@ -372,6 +372,8 @@ func (s *Store) pgWriteSeparatedInput(ctx context.Context, tx *sql.Tx, snapshot 
 	profile := &separatedInputWriteProfile{}
 	w := &separatedInputWriter{ctx: ctx, tx: tx, hash: sha256.New(), verified: map[string]bool{}, profile: profile}
 	w.batch = &sharedInputWriter{components: true, ctx: ctx, tx: tx, encoder: inputChunkEncoder{level: zlib.DefaultCompression}, objects: map[[32]byte]sharedObject{}, seen: map[[32]byte]bool{}, profile: profile}
+	w.batch.blockMinimum = s.compilerInputBlockMinimum()
+	w.batch.boundaryBits = s.compilerInputBoundaryBits()
 	started := time.Now()
 	phase := started
 	timings := map[string]int64{}

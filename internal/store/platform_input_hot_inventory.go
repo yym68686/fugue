@@ -465,7 +465,7 @@ func resolveCompilerInputHotNode(ctx context.Context, tx inputQueryer, ref input
 		var artifact model.PlatformArtifact
 		var content, metadata []byte
 		artifact.ID = ref.ID
-		err := tx.QueryRowContext(ctx, `SELECT artifact_kind,scope_key,generation,content_hash,left(content_json::text,$2),left(metadata_json::text,16385) FROM fugue_platform_artifacts WHERE id=$1`, ref.ID, compilerInputHotArtifactBytes+1).Scan(&artifact.ArtifactKind, &artifact.ScopeKey, &artifact.Generation, &artifact.ContentHash, &content, &metadata)
+		err := tx.QueryRowContext(ctx, `SELECT artifact_kind,scope_key,generation,content_hash,left(fugue_platform_artifact_body(content_hash,content_json)::text,$2),left(metadata_json::text,16385) FROM fugue_platform_artifacts WHERE id=$1`, ref.ID, compilerInputHotArtifactBytes+1).Scan(&artifact.ArtifactKind, &artifact.ScopeKey, &artifact.Generation, &artifact.ContentHash, &content, &metadata)
 		if err != nil {
 			return node, err
 		}
@@ -579,7 +579,7 @@ func compilerInputHotTaskReferences(value any) ([]inputarchive.HotReference, err
 			for key, child := range v {
 				kind := ""
 				switch key {
-				case "input_snapshot_digest":
+				case "input_snapshot_digest", "runtime_input_digest":
 					kind = "input"
 				case "artifact_id", "release_set_id", "route_artifact_id", "tls_artifact_id", "dns_artifact_id", "policy_artifact_id":
 					kind = "artifact"

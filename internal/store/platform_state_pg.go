@@ -31,6 +31,7 @@ const platformPublicationTransactionTimeout = 30 * time.Second
 func (s *Store) pgCreatePlatformArtifact(artifact model.PlatformArtifact) (model.PlatformArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	reference := s.artifactContentReferencesEnabled()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.PlatformArtifact{}, err
@@ -53,7 +54,12 @@ func (s *Store) pgCreatePlatformArtifact(artifact model.PlatformArtifact) (model
 	if _, err := pgUpsertPlatformArtifactContent(ctx, tx, buildPlatformArtifactContent(artifact)); err != nil {
 		return model.PlatformArtifact{}, err
 	}
-	out, err := pgInsertPlatformArtifact(ctx, tx, artifact)
+	if reference {
+		if err := pgAdmitPlatformArtifactContentReference(ctx, tx, artifact.ContentHash); err != nil {
+			return model.PlatformArtifact{}, err
+		}
+	}
+	out, err := pgInsertPlatformArtifact(ctx, tx, artifact, reference)
 	if err != nil {
 		return model.PlatformArtifact{}, err
 	}
@@ -104,7 +110,7 @@ func (s *Store) pgGetPlatformArtifactByIdentity(kind, scopeKey, generation strin
 	defer cancel()
 	artifact, err := scanPlatformArtifact(s.db.QueryRowContext(ctx, `
 SELECT id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
-	content_json, validation_results_json, compatibility_floor, metadata_json,
+	fugue_platform_artifact_body(content_hash, content_json), validation_results_json, compatibility_floor, metadata_json,
 	created_by_type, created_by_id, provenance_json, created_at, updated_at
 FROM fugue_platform_artifacts
 WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3`, kind, scopeKey, generation))
@@ -182,7 +188,7 @@ FROM fugue_platform_artifact_contents WHERE content_hash = $1`, content.ContentH
 	return out, nil
 }
 
-func pgInsertPlatformArtifact(ctx context.Context, db platformStateDB, artifact model.PlatformArtifact) (model.PlatformArtifact, error) {
+func pgInsertPlatformArtifact(ctx context.Context, db platformStateDB, artifact model.PlatformArtifact, reference ...bool) (model.PlatformArtifact, error) {
 	scopeJSON, err := marshalJSON(artifact.Scope)
 	if err != nil {
 		return model.PlatformArtifact{}, err
@@ -190,6 +196,11 @@ func pgInsertPlatformArtifact(ctx context.Context, db platformStateDB, artifact 
 	contentJSON, err := marshalJSON(artifact.Content)
 	if err != nil {
 		return model.PlatformArtifact{}, err
+	}
+	var contentRef any
+	if len(reference) > 0 && reference[0] {
+		contentJSON = nil
+		contentRef = artifact.ContentHash
 	}
 	validationJSON, err := marshalJSON(artifact.ValidationResults)
 	if err != nil {
@@ -207,17 +218,17 @@ func pgInsertPlatformArtifact(ctx context.Context, db platformStateDB, artifact 
 INSERT INTO fugue_platform_artifacts (
 	id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
 	content_json, validation_results_json, compatibility_floor, metadata_json,
-	created_by_type, created_by_id, provenance_json, created_at, updated_at
+	created_by_type, created_by_id, provenance_json, created_at, updated_at, content_ref_hash
 ) VALUES (
 	$1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9,
 	$10::jsonb, $11::jsonb, $12, $13::jsonb,
-	$14, $15, $16::jsonb, $17, $18
+	$14, $15, $16::jsonb, $17, $18, $19
 ) RETURNING id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
-	content_json, validation_results_json, compatibility_floor, metadata_json,
+	fugue_platform_artifact_body(content_hash, content_json), validation_results_json, compatibility_floor, metadata_json,
 	created_by_type, created_by_id, provenance_json, created_at, updated_at`,
 		artifact.ID, artifact.ArtifactKind, artifact.ScopeKey, scopeJSON, artifact.SchemaVersion, artifact.Generation, artifact.GenerationSequence, artifact.Status, artifact.ContentHash,
 		contentJSON, validationJSON, artifact.CompatibilityFloor, metadataJSON,
-		artifact.CreatedByType, artifact.CreatedByID, provenanceJSON, artifact.CreatedAt, artifact.UpdatedAt))
+		artifact.CreatedByType, artifact.CreatedByID, provenanceJSON, artifact.CreatedAt, artifact.UpdatedAt, contentRef))
 	if err != nil {
 		return model.PlatformArtifact{}, mapDBErr(err)
 	}
@@ -262,7 +273,7 @@ func (s *Store) pgListPlatformArtifactsView(filter model.PlatformArtifactFilter,
 		limit = 100
 	}
 	args := []any{}
-	contentColumn := "content_json"
+	contentColumn := "fugue_platform_artifact_body(content_hash, content_json)"
 	if !includeContent {
 		contentColumn = "NULL::jsonb AS content_json"
 	}
@@ -319,7 +330,7 @@ func (s *Store) pgGetPlatformArtifact(idOrGeneration string) (model.PlatformArti
 
 func pgGetPlatformArtifactForUpdate(ctx context.Context, db platformStateDB, idOrGeneration string, forUpdate bool) (model.PlatformArtifact, error) {
 	query := `SELECT id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
-	content_json, validation_results_json, compatibility_floor, metadata_json,
+	fugue_platform_artifact_body(content_hash, content_json), validation_results_json, compatibility_floor, metadata_json,
 	created_by_type, created_by_id, provenance_json, created_at, updated_at
 FROM fugue_platform_artifacts
 WHERE id = $1 OR generation = $1
@@ -344,7 +355,7 @@ UPDATE fugue_platform_artifacts
 SET status = $2, validation_results_json = $3::jsonb, updated_at = $4
 WHERE id = $1 OR generation = $1
 RETURNING id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
-	content_json, validation_results_json, compatibility_floor, metadata_json,
+	fugue_platform_artifact_body(content_hash, content_json), validation_results_json, compatibility_floor, metadata_json,
 	created_by_type, created_by_id, provenance_json, created_at, updated_at`, id, status, validationJSON, time.Now().UTC()))
 	if err != nil {
 		return model.PlatformArtifact{}, mapDBErr(err)
@@ -1080,7 +1091,7 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKGInTransaction(ctx context.Cont
 func pgGetPlatformArtifactByGenerationForUpdate(ctx context.Context, db platformStateDB, kind, scopeKey, generation string) (model.PlatformArtifact, error) {
 	return scanPlatformArtifact(db.QueryRowContext(ctx, `
 SELECT id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
-	content_json, validation_results_json, compatibility_floor, metadata_json,
+	fugue_platform_artifact_body(content_hash, content_json), validation_results_json, compatibility_floor, metadata_json,
 	created_by_type, created_by_id, provenance_json, created_at, updated_at
 FROM fugue_platform_artifacts
 WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3

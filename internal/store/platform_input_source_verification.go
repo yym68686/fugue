@@ -134,9 +134,9 @@ func readCompilerSourceArtifact(ctx context.Context, db platformStateDB, predica
 		return model.PlatformArtifact{}, ErrInvalidInput
 	}
 	return scanPlatformArtifact(db.QueryRowContext(ctx, `SELECT id,artifact_kind,scope_key,scope_json,schema_version,generation,generation_sequence,status,content_hash,
-content_json,validation_results_json,compatibility_floor,metadata_json,created_by_type,created_by_id,provenance_json,created_at,updated_at
+fugue_platform_artifact_body(content_hash,content_json),validation_results_json,compatibility_floor,metadata_json,created_by_type,created_by_id,provenance_json,created_at,updated_at
 FROM fugue_platform_artifacts WHERE `+predicate+` AND
-octet_length(scope_json::text)+octet_length(content_json::text)+octet_length(validation_results_json::text)+octet_length(metadata_json::text)+octet_length(provenance_json::text)+octet_length(id)+octet_length(artifact_kind)+octet_length(scope_key)+octet_length(generation)+octet_length(compatibility_floor)+octet_length(created_by_type)+octet_length(created_by_id)+octet_length(schema_version)+octet_length(status)+octet_length(content_hash)<=8388608`, args...))
+octet_length(scope_json::text)+octet_length(fugue_platform_artifact_body(content_hash,content_json)::text)+octet_length(validation_results_json::text)+octet_length(metadata_json::text)+octet_length(provenance_json::text)+octet_length(id)+octet_length(artifact_kind)+octet_length(scope_key)+octet_length(generation)+octet_length(compatibility_floor)+octet_length(created_by_type)+octet_length(created_by_id)+octet_length(schema_version)+octet_length(status)+octet_length(content_hash)<=8388608`, args...))
 }
 
 func verifyCompilerOriginalSources(parent model.PlatformArtifact, keys bundleauth.Keyring, read func(string, string, string) (model.PlatformArtifact, error)) ([]CompilerInputVerifiedSource, error) {
