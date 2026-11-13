@@ -436,6 +436,10 @@ class Recovery:
                 floor = review['budget']['completion_floor_bytes']
                 require(physical['available_bytes'] >= floor, 'native operation physical reserve failed; protection retained')
                 fields.update(physical_current=physical, health_current=health)
+                fields.update(minimum_observed_native_available_bytes=min(
+                    self.state.get('minimum_observed_native_available_bytes', physical['available_bytes']), physical['available_bytes']),
+                    maximum_database_probe_seconds=max(self.state.get('maximum_database_probe_seconds', 0), health.get('database_probe_seconds', 0)),
+                    maximum_api_probe_seconds=max(self.state.get('maximum_api_probe_seconds', 0), health.get('api_probe_seconds', 0)))
             self.save('awaiting-native-quiescence', **fields)
             if stable >= 2:
                 return self.health()

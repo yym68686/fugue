@@ -154,6 +154,19 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'physical reserve failed'):
             r.wait_native(dict(budget=dict(completion_floor_bytes=18 << 30)))
 
+    def test_native_observation_extrema_survive_later_healthy_samples(self):
+        r = self.fixed_recovery()
+        r.own_lease = lambda: None
+        r.native_state = lambda _: (None, True, True)
+        r.physical = Mock(side_effect=[dict(available_bytes=30 << 30), dict(available_bytes=40 << 30)])
+        r.health = Mock(side_effect=[dict(database_probe_seconds=.8, api_probe_seconds=1.2),
+                                   dict(database_probe_seconds=.2, api_probe_seconds=.3), {}])
+        with patch('scripts.recover_longhorn_snapshot.time.sleep'):
+            r.wait_native(dict(budget=dict(completion_floor_bytes=18 << 30)))
+        self.assertEqual(r.state['minimum_observed_native_available_bytes'], 30 << 30)
+        self.assertEqual(r.state['maximum_database_probe_seconds'], .8)
+        self.assertEqual(r.state['maximum_api_probe_seconds'], 1.2)
+
     def test_fixed_health_enforces_database_and_api_latency_limits(self):
         r = self.fixed_recovery()
         cluster = dict(metadata=dict(name='db', uid='cluster-uid'), status=dict(

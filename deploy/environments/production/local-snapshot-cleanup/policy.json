@@ -7,18 +7,18 @@
   "coordinationLease": "fugue-fugue-control-plane-db-backup",
   "minimumExtraFreeBytes": 17179869184,
   "workingReserveBytes": 1073741824,
-  "maxFoldWriteBytes": 6442450944,
-  "maxWaitSeconds": 60,
+  "maxFoldWriteBytes": 137438953472,
+  "maxWaitSeconds": 180,
   "recoveryBudget": {
     "schema": "fugue.fixed-capacity-ext4/v1",
     "foregroundReserveBytes": 34359738368,
     "growthSampleSeconds": 2,
     "operationWindowSeconds": 3600,
-    "minimumFoldBytesPerSecond": 16777216,
+    "minimumFoldBytesPerSecond": 33554432,
     "maxDatabaseProbeSeconds": 5,
     "maxAPIProbeSeconds": 3
   },
-  "maxOperationsPerPass": 1,
+  "maxOperationsPerPass": 20,
   "maxPassSeconds": 600,
   "readyURL": "https://api.fugue.pro/readyz"
 }
