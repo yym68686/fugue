@@ -11,7 +11,6 @@ import (
 	"io"
 	"strings"
 	"testing"
-	"time"
 
 	"fugue/internal/platformconfig"
 )
@@ -48,14 +47,8 @@ func TestCompilerInputArchiveHotRestoreAfterRetirementPreservesImmutableLedger(t
 				s.storagePolicy.codec = compilerInputCodecPolicy{Version: 1, Enabled: true}
 			}
 			_, digest, objects, backend := prepareRetirableCompilerInput(t, s)
-			plan, err := compilerInputArchiveRetirementPlan(t.Context(), s.db, objects, backend, true)
-			if err != nil || !plan.CanRetire {
-				t.Fatal("fixture could not produce a verified retirement plan", plan, err)
-			}
-			options := CompilerInputArchiveRetirementOptions{RoutingEnabled: true, ExpectedPlanSHA256: plan.PlanSHA256, CurrentReaderRelease: strings.Repeat("a", 40), RollbackReaderRelease: strings.Repeat("b", 40), ArchiveRetentionPolicySHA256: strings.Repeat("d", 64), ReaderDrainTimeout: time.Second}
-			if got, err := applyCompilerInputArchiveRetirement(t.Context(), s.db, backend, options, plan); err != nil || !got.Applied {
-				t.Fatal("test relation did not retire", got, err)
-			}
+			markCompilerInputTestRelationRetired(t, s)
+			var err error
 			var before string
 			ledger := `SELECT json_build_array((SELECT row_to_json(c) FROM fugue_platform_input_archive_control c WHERE singleton),(SELECT row_to_json(a) FROM fugue_platform_input_archives a WHERE content_hash=$1),(SELECT json_agg(s ORDER BY ordinal) FROM fugue_platform_input_archive_segments s WHERE content_hash=$1),(SELECT row_to_json(l) FROM fugue_platform_input_archive_leases l WHERE content_hash=$1))::text`
 			if err = s.db.QueryRow(ledger, digest).Scan(&before); err != nil {

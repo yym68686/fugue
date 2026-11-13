@@ -19,6 +19,19 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+func TestRetiredMaintenanceModesRejectBeforeDatabaseAccess(t *testing.T) {
+	for _, mode := range []string{"archive-retirement-plan", "archive-retire", "", "inspect, collect"} {
+		if validCompilerInputStorageMode(mode) {
+			t.Fatalf("unsupported maintenance mode accepted: %q", mode)
+		}
+	}
+	for _, mode := range []string{"inspect", "collect", "archive-hot-restore", "encoded-backup", "release-backup"} {
+		if !validCompilerInputStorageMode(mode) {
+			t.Fatalf("supported maintenance mode removed: %q", mode)
+		}
+	}
+}
+
 type sourceFailure struct{ cause error }
 
 func TestRootObligationDiagnosticCannotAuthorizeOrAcceptWriteFlags(t *testing.T) {
@@ -75,14 +88,6 @@ func TestCopyFailureReceiptPreservesSQLStateWithoutPrivateDetails(t *testing.T) 
 	output.Reset()
 	if err := writeArchiveCopyReport(&output, store.CompilerInputArchiveCopyReport{State: "verified"}, nil); err != nil || strings.Contains(output.String(), "failure") {
 		t.Fatal("successful receipt has failure fields", output.String(), err)
-	}
-}
-
-func TestRetirementRefusalReportsMissingProofsWithoutDriverDetails(t *testing.T) {
-	var output bytes.Buffer
-	writeRetirementError(&output, fmt.Errorf("private connection details: %w", store.ErrCompilerInputArchiveRetirementSafetyUnavailable))
-	if strings.Contains(output.String(), "private") || !strings.Contains(output.String(), "before database/object access") || !strings.Contains(output.String(), "reactivation admission") {
-		t.Fatal("retirement refusal omitted its safety reason or leaked details", output.String())
 	}
 }
 

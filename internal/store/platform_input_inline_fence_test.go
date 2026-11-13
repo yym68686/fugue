@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -194,9 +193,9 @@ func TestCompilerInputInlineFenceRejectsAlteredDefinitionAndUpgradesLegacyFence(
 			if _, err := s.db.Exec(mutate); err != nil {
 				t.Fatal(err)
 			}
-			plan, err := compilerInputArchiveRetirementPlanMetadata(t.Context(), s.db, "sha256:"+strings.Repeat("a", 64), true)
-			if err != nil || plan.WriteTriggerInstalled || plan.CanRetire {
-				t.Fatal("retirement accepted absent or altered inline isolation", err)
+			inline, err := compilerInputArchiveInlineWriteFenceState(t.Context(), s.db)
+			if err != nil || inline.installed() {
+				t.Fatal("altered inline isolation accepted", inline, err)
 			}
 			for _, disarm := range []bool{false, true} {
 				report, err := RunCompilerInputArchiveWriteFence(t.Context(), s.databaseURL, true, disarm)

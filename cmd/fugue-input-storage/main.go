@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +28,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+const compilerInputStorageModes = "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-root-obligations, archive-retention-inventory, archive-retention-prepared-inventory, archive-retention-idle-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, encoded-backup, decode-backup, release-backup, observe"
+
 func main() {
 	if handled, err := inputhistory.WriteCapabilities(os.Args[1:], "store", os.Stdout); handled {
 		if err != nil {
@@ -34,7 +38,7 @@ func main() {
 		}
 		return
 	}
-	mode := flag.String("mode", "inspect", "inspect, migrate, rollback, collect, archive, archive-copy, archive-batch, archive-route, archive-route-batch, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-root-obligations, archive-retention-inventory, archive-retention-prepared-inventory, archive-retention-idle-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, archive-retirement-plan, archive-retire, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, encoded-backup, decode-backup, release-backup, observe")
+	mode := flag.String("mode", "inspect", compilerInputStorageModes)
 	rootObligationTargets := flag.String("root-obligation-targets", "", "strict JSON array of 1..32 exact references; archive-root-obligations read-only diagnostic")
 	copyContract := flag.String("copy-contract", "", "strict single-input archive-copy JSON contract path")
 	sourceVerificationContract := flag.String("source-verification-contract", "", "strict one-parent read-only compiler-source verification contract; no caller keys")
@@ -55,11 +59,6 @@ func main() {
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
 	disarm := flag.Bool("disarm", false, "remove a pre-retirement archive write fence")
-	expectedPlanSHA256 := flag.String("expected-plan-sha256", "", "exact archive-retirement-plan hash to apply")
-	currentReaderRelease := flag.String("current-reader-release", "", "40-hex release commit with archive reader lease support")
-	rollbackReaderRelease := flag.String("rollback-reader-release", "", "40-hex rollback release commit with archive reader lease support")
-	archiveRetentionPolicySHA256 := flag.String("archive-retention-policy-sha256", "", "64-hex operator attestation of the independently reviewed archive retention policy")
-	readerDrainTimeout := flag.Duration("reader-drain-timeout", 30*time.Second, "maximum wait for session-level compiler-input readers")
 	archiveLimit := flag.Int("archive-limit", 1, "maximum archive batch inputs, 1 through 1000")
 	hotIndexAfter := flag.String("hot-index-after", "", "exclusive artifact key cursor for one derived dependency index page")
 	hotIndexLimit := flag.Int("hot-index-limit", 1, "maximum derived DNS dependency index entries, 1 through 32")
@@ -71,6 +70,10 @@ func main() {
 	rehearse := flag.Bool("rehearse", false, "encode/verify then roll back (consumes WAL and I/O)")
 	maxBytes := flag.Int64("max-input-bytes", 128<<20, "maximum logical input bytes; hard limit 128MiB")
 	flag.Parse()
+	if !validCompilerInputStorageMode(*mode) {
+		fmt.Fprintln(os.Stderr, "unsupported compiler input maintenance mode")
+		os.Exit(2)
+	}
 	// This separate read-only mode fails before database access unless the
 	// native process and all of its runtime threads have verified idle policy.
 	// Existing inspection and mutation modes never change scheduling policy.
@@ -92,7 +95,7 @@ func main() {
 	publicationTicketMode := *mode == "publication-input-plan" || *mode == "publication-input-restore" || *mode == "publication-input-confirm"
 	consumerTicketMode := *mode == "consumer-input-plan" || *mode == "consumer-input-restore" || *mode == "consumer-input-confirm"
 	localPinMode := *mode == "archive-local-pin" || *mode == "archive-local-unpin"
-	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "task-input-plan" || *mode == "publication-input-plan" || *mode == "consumer-input-plan" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || *mode == "archive-retirement-plan" || (*mode == "archive" || *mode == "archive-batch" || hotMode || *mode == "archive-local-pin" || *mode == "task-input-prepare") && !*apply
+	readOnly := *mode == "inspect" || *mode == "observe" || *mode == "task-input-plan" || *mode == "publication-input-plan" || *mode == "consumer-input-plan" || *mode == "archive-hot-inventory" || *mode == "archive-hot-roots" || *mode == "archive-hot-local-readback" || *mode == "archive-read-check" || (*mode == "archive" || *mode == "archive-batch" || hotMode || *mode == "archive-local-pin" || *mode == "task-input-prepare") && !*apply
 	readOnly = readOnly || isRetentionInventoryMode(*mode)
 	readOnly = readOnly || *mode == "compiler-source-verify"
 	backupMode := *mode == "encoded-backup" || *mode == "decode-backup"
@@ -101,8 +104,7 @@ func main() {
 	readOnly = readOnly || *mode == "archive-root-obligations"
 	routeMode := *mode == "archive-route" || *mode == "archive-route-batch" || *mode == "archive-unroute"
 	writeFenceMode := *mode == "archive-write-fence"
-	retirementMode := *mode == "archive-retire"
-	if flag.NArg() != 0 || *apply && *rehearse || (*mode == "archive" || routeMode || hotMode || localPinMode || writeFenceMode || retirementMode) && *rehearse || routeMode && !*apply || writeFenceMode && !*apply || retirementMode && !*apply || *disarm && !writeFenceMode || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
+	if flag.NArg() != 0 || *apply && *rehearse || (*mode == "archive" || routeMode || hotMode || localPinMode || writeFenceMode) && *rehearse || routeMode && !*apply || writeFenceMode && !*apply || *disarm && !writeFenceMode || !readOnly && !*apply && !*rehearse || readOnly && (*apply || *rehearse) {
 		fmt.Fprintln(os.Stderr, "select a read-only mode, or explicitly choose apply/rehearse")
 		os.Exit(2)
 	}
@@ -569,27 +571,6 @@ func main() {
 		}
 		return
 	}
-	if *mode == "archive-retirement-plan" || retirementMode {
-		dsn := os.Getenv("FUGUE_DATABASE_URL")
-		if dsn == "" {
-			fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
-			os.Exit(2)
-		}
-		report, err := store.RunCompilerInputArchiveRetirement(ctx, dsn, store.CompilerInputArchiveRetirementOptions{
-			Apply: *apply, ExpectedPlanSHA256: *expectedPlanSHA256,
-			CurrentReaderRelease: *currentReaderRelease, RollbackReaderRelease: *rollbackReaderRelease,
-			ArchiveRetentionPolicySHA256: *archiveRetentionPolicySHA256,
-			ReaderDrainTimeout:           *readerDrainTimeout,
-		})
-		if err != nil {
-			writeRetirementError(os.Stderr, err)
-			os.Exit(1)
-		}
-		if err = json.NewEncoder(os.Stdout).Encode(report); err != nil {
-			os.Exit(1)
-		}
-		return
-	}
 	dsn := os.Getenv("FUGUE_DATABASE_URL")
 	if dsn == "" {
 		fmt.Fprintln(os.Stderr, "FUGUE_DATABASE_URL is required")
@@ -672,14 +653,6 @@ func decodeTaskInputPreparationPlan(r io.Reader, now time.Time) (store.NodeTaskI
 		return p, store.ErrInvalidInput
 	}
 	return p, nil
-}
-
-func writeRetirementError(output io.Writer, err error) {
-	if errors.Is(err, store.ErrCompilerInputArchiveRetirementSafetyUnavailable) {
-		fmt.Fprintln(output, "compiler input retirement refused before database/object access: full local hot dependencies, persistent reactivation admission and actual current/rollback reader proofs are not yet enforced")
-		return
-	}
-	fmt.Fprintln(output, "compiler input retirement not confirmed; no success should be inferred; inspect control state and relation size")
 }
 
 var archiveReadCheckDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -833,4 +806,8 @@ func observeStorage(ctx context.Context) error {
 	}
 	_, err = os.Stdout.Write(append(raw, '\n'))
 	return err
+}
+
+func validCompilerInputStorageMode(mode string) bool {
+	return slices.Contains(strings.Split(compilerInputStorageModes, ", "), mode)
 }

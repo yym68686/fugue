@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -44,10 +43,6 @@ func TestCompilerInputWriteFenceRejectsAlteredCatalog(t *testing.T) {
 				if !errors.Is(err, ErrConflict) || report.Applied || report.TriggerInstalled {
 					t.Fatal("altered fence was silently accepted or replaced", disarm, report, err)
 				}
-			}
-			plan, err := compilerInputArchiveRetirementPlanMetadata(t.Context(), s.db, "sha256:"+strings.Repeat("a", 64), true)
-			if err != nil || plan.WriteTriggerInstalled || plan.CanRetire {
-				t.Fatal("storage plan accepted altered writer isolation", plan.WriteTriggerInstalled, plan.CanRetire, err)
 			}
 			var fenced bool
 			if err := s.db.QueryRow(`SELECT writes_fenced FROM fugue_platform_input_archive_control WHERE singleton`).Scan(&fenced); err != nil || !fenced {
