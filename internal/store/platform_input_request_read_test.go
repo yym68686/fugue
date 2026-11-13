@@ -90,14 +90,26 @@ func TestCompilerInputRequestCancellationReleasesReadLeasePostgres(t *testing.T)
 	if _, err := blocker.ExecContext(t.Context(), `LOCK TABLE fugue_platform_input_hot_chunks IN ACCESS EXCLUSIVE MODE`); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	started := time.Now()
-	if _, err := s.GetPlatformCompilerInputContext(ctx, digest); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal("blocked read ignored caller deadline", err)
-	}
-	if time.Since(started) > time.Second {
-		t.Fatal("short request retained the default full-read work budget")
+	for name, read := range map[string]func(context.Context) error{
+		"full": func(ctx context.Context) error {
+			_, err := s.GetPlatformCompilerInputContext(ctx, digest)
+			return err
+		},
+		"selective DNS": func(ctx context.Context) error {
+			_, err := s.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, nil)
+			return err
+		},
+	} {
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		started := time.Now()
+		err := read(ctx)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal(name, "blocked read ignored caller deadline", err)
+		}
+		if time.Since(started) > time.Second {
+			t.Fatal(name, "short request retained an independent default budget")
+		}
 	}
 	// The request had acquired a session read lease before its chunk SELECT
 	// blocked. Cancellation must release it, not just abandon the HTTP reply.
@@ -118,6 +130,15 @@ func TestCompilerInputRequestCancellationReleasesReadLeasePostgres(t *testing.T)
 	stop()
 	if _, err := s.GetPlatformCompilerInputContext(canceled, digest); !errors.Is(err, context.Canceled) {
 		t.Fatal("already canceled request accessed storage", err)
+	}
+}
+
+func TestCompilerDNSSelectionAlreadyCanceledDoesNotReadStorage(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var state Store
+	if _, err := state.GetPlatformCompilerInputDNSSelectionsContext(ctx, "invalid-digest", nil); !errors.Is(err, context.Canceled) {
+		t.Fatal("canceled selective read accessed storage or replaced its context", err)
 	}
 }
 

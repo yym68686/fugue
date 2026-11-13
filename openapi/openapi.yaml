@@ -1239,6 +1239,12 @@ paths:
         candidates, four concurrently with a two-second total deadline. These
         reads do not invoke business requests or manufacture network samples;
         missing capacity remains unknown and original metric timestamps are kept.
+        A DNS-bound capture may first spend up to 90 seconds completely verifying
+        a cold historical compiler input. This preparation precedes the fresh
+        observation clock and its separate bounded capture budget; it does not
+        run new probes, renew historical timestamps or grant serving permission.
+        Client cancellation applies to both phases. Unavailable history never
+        deletes independent live observations.
       tags: [Edge]
       x-fugue-handler: handleGetEdgeQualityShadow
       security:

@@ -310,6 +310,11 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 	if len(jobs) > 20000 {
 		return fmt.Errorf("dynamic quality query inventory exceeds bound")
 	}
+	if len(jobs) > 0 && policy.DynamicQuality.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+		if err := s.prepareHistoricalQualityInput(ctx, projection.Intent.Scope); err != nil {
+			return err
+		}
+	}
 	if err := s.preservePublishedDynamicOrderContext(ctx, projection, jobs); err != nil {
 		return err
 	}
@@ -713,7 +718,7 @@ func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Contex
 	if err != nil {
 		return
 	}
-	snapshot, err := s.store.GetPlatformCompilerInputDNSSelections(digest, needed)
+	snapshot, err := s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, needed)
 	if err != nil {
 		return
 	}
@@ -722,7 +727,7 @@ func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Contex
 	// any formerly redundant evidence has become useful in the meantime.
 	for _, omitted := range snapshot.Omitted {
 		if needed(omitted) {
-			snapshot, err = s.store.GetPlatformCompilerInputDNSSelections(digest, nil)
+			snapshot, err = s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, nil)
 			if err != nil {
 				return
 			}

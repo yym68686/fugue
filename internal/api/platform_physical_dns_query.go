@@ -26,6 +26,14 @@ func (s *Server) capturePhysicalDNSQueriesStrict(ctx context.Context, projection
 	if len(policy.PhysicalRoutes) == 0 {
 		return nil
 	}
+	for _, route := range policy.PhysicalRoutes {
+		if route.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+			if err := s.prepareHistoricalQualityInput(ctx, projection.Intent.Scope); err != nil {
+				return err
+			}
+			break
+		}
+	}
 	selections := map[string]compiledPhysicalDNSSelection{}
 	coverage := []map[string]any{}
 	for _, route := range policy.PhysicalRoutes {

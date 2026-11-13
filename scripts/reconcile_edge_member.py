@@ -47,8 +47,12 @@ def validate(config, authority, source, previous):
               'worker', 'workerUID', 'referenceFront', 'referenceFrontUID', 'referenceWorker',
               'referenceWorkerUID', 'authorityUID', 'authorityRecord', 'previousState',
               'activationPath', 'workerPort', 'probes'}
-    if set(config) != fields or config['schema'] != 'fugue.edge-member-recovery/v1':
+    if set(config) not in (fields, fields | {'refreshInactiveWorker'}) or config['schema'] != 'fugue.edge-member-recovery/v1':
         raise ValueError('Unsupported member recovery declaration')
+    refresh = config.get('refreshInactiveWorker')
+    if refresh is not None and (set(refresh) != {'daemonset', 'daemonsetUID', 'nodeUID'} or
+            any(not isinstance(v, str) or not re.fullmatch(r'[a-zA-Z0-9-]{1,200}', v) for v in refresh.values())):
+        raise ValueError('Inactive refresh requires exact workload and physical node identities')
     if config['activationPath'] != '/var/lib/fugue-edge-front/activation.json' or config['workerPort'] not in (18443, 28443):
         raise ValueError('Recovery must use the existing activation and worker slots')
     for key in ['namespace', 'component', 'group', 'node', 'front', 'worker', 'referenceFront', 'referenceWorker']:
@@ -117,6 +121,48 @@ def verified_worker_health(health, config):
             health.get('edge_group_id') == config['group'] and timestamp(health['bundle_valid_until']) > now() + dt.timedelta(seconds=30))
 
 
+def validate_inactive_refresh(config, daemonset, node, source, previous, worker, reference):
+    """Permit only normal replacement of one declared inactive OnDelete Pod.
+
+    The shared template must already be the committed code running on the
+    reference member. This cannot edit an image, a workload or an admission hold.
+    """
+    refresh = config['refreshInactiveWorker']
+    meta, spec = daemonset['metadata'], daemonset['spec']
+    template = spec['template']
+    if (meta['name'] != refresh['daemonset'] or meta['uid'] != refresh['daemonsetUID'] or
+            meta['namespace'] != config['namespace'] or meta.get('deletionTimestamp') or
+            spec.get('updateStrategy', {}).get('type') != 'OnDelete' or
+            node['metadata']['name'] != config['node'] or node['metadata']['uid'] != refresh['nodeUID'] or
+            node['metadata'].get('deletionTimestamp') or node['spec'].get('unschedulable') or
+            not spec['template']['spec'].get('nodeSelector') or
+            any(node['metadata'].get('labels', {}).get(k) != v for k, v in spec['template']['spec']['nodeSelector'].items())):
+        raise ValueError('Inactive refresh workload or schedulable node binding changed')
+    if previous['active_slot'] == source['active_slot']:
+        raise ValueError('An active Worker must never be replaced by member recovery')
+    for pod in [worker, reference]:
+        owners = [r for r in pod['metadata'].get('ownerReferences', []) if r.get('controller')]
+        if len(owners) != 1 or owners[0].get('kind') != 'DaemonSet' or owners[0]['name'] != meta['name'] or owners[0]['uid'] != meta['uid']:
+            raise ValueError('Worker does not belong to the declared shared workload')
+    labels = template['metadata'].get('labels', {})
+    if (labels.get('fugue.io/edge-slot') != source['active_slot'] or labels.get('fugue.io/edge-group-id') != config['group'] or
+            template['metadata'].get('annotations', {}).get('fugue.pro/source-commit') != source['worker_source_commit']):
+        raise ValueError('Inactive template does not bind the committed authority')
+    for name in ['edge', 'caddy']:
+        expected = [x['image'] for x in template['spec']['containers'] if x['name'] == name]
+        proven = [x['image'] for x in reference['spec']['containers'] if x['name'] == name]
+        if len(expected) != 1 or expected != proven or not re.fullmatch(r'.+@sha256:[a-f0-9]{64}', expected[0]):
+            raise ValueError('Inactive template differs from the proven reference executable')
+    validate_worker(reference, config, source, True)
+    # Verify the old process too. A source mismatch alone is permitted here;
+    # foreign ownership, an unready process or an unpinned image is not.
+    edge = next(x for x in worker['spec']['containers'] if x['name'] == 'edge')
+    old = dict(source, worker_source_commit=worker['metadata'].get('annotations', {}).get('fugue.pro/source-commit'),
+               worker_image_digest=edge['image'].split('@')[-1])
+    validate_worker(worker, config, old)
+    return old['worker_source_commit'] != source['worker_source_commit'] or old['worker_image_digest'] != source['worker_image_digest']
+
+
 # flock is the same inode/lock protocol used by the existing Go activation CAS.
 # A backup and receipt are retained; rename never interrupts established TCP
 # streams. The caller holds both release and authority Kubernetes leases.
@@ -163,7 +209,28 @@ class Recovery:
     def health(self, pod, port=7832):
         return json.loads(self.kube('get', '--raw', '/api/v1/namespaces/' + self.config['namespace'] + '/pods/' + pod + ':' + str(port) + '/proxy/healthz'))
 
-    def snapshot(self):
+    def current_worker(self, target):
+        c = self.config
+        if not c.get('refreshInactiveWorker'):
+            return self.get('pod', c['worker'])
+        inventory = json.loads(self.kube('-n', c['namespace'], 'get', 'pods', '--field-selector', 'spec.nodeName=' + c['node'], '-o', 'json'))
+        if inventory.get('metadata', {}).get('continue'):
+            raise ValueError('Replacement inventory is incomplete')
+        candidates = [p for p in inventory['items'] if not p['metadata'].get('deletionTimestamp') and
+                      any(r.get('controller') and r.get('kind') == 'DaemonSet' and r.get('name') == c['refreshInactiveWorker']['daemonset'] and
+                          r.get('uid') == c['refreshInactiveWorker']['daemonsetUID'] for r in p['metadata'].get('ownerReferences', []))]
+        if len(candidates) != 1:
+            raise ValueError('Declared inactive Worker is missing or ambiguous')
+        worker = candidates[0]
+        if worker['metadata']['uid'] != c['workerUID']:
+            binding = dict(c, worker=worker['metadata']['name'], workerUID=worker['metadata']['uid'])
+            validate_worker(worker, binding, target)
+            # A retry may observe the exact committed replacement from a
+            # previous attempt. It may never delete that new process again.
+            c.update(worker=binding['worker'], workerUID=binding['workerUID'])
+        return worker
+
+    def snapshot(self, allow_refresh=False):
         c = self.config
         owner = self.get('configmap', 'fugue-current-authority-' + c['group'])
         if owner['metadata']['uid'] != c['authorityUID'] or owner['metadata'].get('labels', {}).get('fugue.pro/authority-store') != 'true':
@@ -176,13 +243,81 @@ class Recovery:
             if pod['metadata']['uid'] != c[key + 'UID'] or pod['metadata'].get('deletionTimestamp') or (key == 'front' and pod['spec']['nodeName'] != c['node']):
                 raise ValueError('Front identity changed')
         validate(c, authority, source, previous)
-        worker, reference = self.get('pod', c['worker']), self.get('pod', c['referenceWorker'])
-        validate_worker(worker, c, source)
+        worker, reference = self.current_worker(source), self.get('pod', c['referenceWorker'])
         validate_worker(reference, c, source, True)
+        try:
+            validate_worker(worker, c, source)
+        except ValueError:
+            if not allow_refresh or not c.get('refreshInactiveWorker'):
+                raise
+            validate_inactive_refresh(c, self.get('daemonset', c['refreshInactiveWorker']['daemonset']), self.get('node', c['node']), source, previous, worker, reference)
         journals = json.loads(self.kube('-n', c['namespace'], 'get', 'configmaps', '-l', 'fugue.pro/group=' + c['group'] + ',fugue.pro/authority-kind=transition-journal', '-o', 'json'))
         if journals['items']:
             raise ValueError('Group authority has an unfinished transition')
         return owner, source, previous, raw, worker, reference
+
+    def refresh_inactive_worker(self, held, owner, target, previous, raw, worker, reference):
+        c = self.config
+        if not c.get('refreshInactiveWorker'):
+            return
+        try:
+            validate_worker(worker, c, target)
+            return
+        except ValueError:
+            pass
+        daemonset = self.get('daemonset', c['refreshInactiveWorker']['daemonset'])
+        if not validate_inactive_refresh(c, daemonset, self.get('node', c['node']), target, previous, worker, reference):
+            return
+        # Recheck authority, both physical identities and lease time before the
+        # only destructive step. UID+resourceVersion preconditions prevent a
+        # late retry from deleting a replacement Pod.
+        observed = self.snapshot(allow_refresh=True)
+        if observed[0]['metadata']['resourceVersion'] != owner['metadata']['resourceVersion'] or observed[1] != target or observed[3] != raw or observed[4]['metadata']['uid'] != worker['metadata']['uid']:
+            raise ValueError('Authority changed before inactive replacement')
+        deadline = min(timestamp(x['spec']['renewTime']) + dt.timedelta(seconds=x['spec']['leaseDurationSeconds']) for x in held)
+        if (deadline - now()).total_seconds() < 100:
+            raise ValueError('Recovery leases lack the bounded inactive replacement budget')
+        for lease in held:
+            current = self.get('lease', lease['metadata']['name'])
+            if current['metadata']['uid'] != lease['metadata']['uid'] or current['metadata']['resourceVersion'] != lease['metadata']['resourceVersion']:
+                raise ValueError('Recovery lease changed before inactive replacement')
+        meta = worker['metadata']
+        self.kube('delete', '--raw', '/api/v1/namespaces/' + c['namespace'] + '/pods/' + meta['name'], '-f', '-',
+                  body=canonical({'apiVersion': 'v1', 'kind': 'DeleteOptions', 'preconditions': {'uid': meta['uid'], 'resourceVersion': meta['resourceVersion']}}))
+        stop = time.monotonic() + 75
+        while time.monotonic() < stop:
+            inventory = json.loads(self.kube('-n', c['namespace'], 'get', 'pods', '--field-selector', 'spec.nodeName=' + c['node'], '-o', 'json'))
+            if inventory.get('metadata', {}).get('continue'):
+                raise ValueError('Replacement inventory is incomplete')
+            candidates = [p for p in inventory['items'] if not p['metadata'].get('deletionTimestamp') and
+                          any(r.get('controller') and r.get('uid') == daemonset['metadata']['uid'] for r in p['metadata'].get('ownerReferences', []))]
+            if len(candidates) > 1:
+                raise ValueError('Inactive replacement is ambiguous')
+            if candidates and candidates[0]['metadata']['uid'] != meta['uid']:
+                candidate = candidates[0]
+                binding = dict(c, worker=candidate['metadata']['name'], workerUID=candidate['metadata']['uid'])
+                try:
+                    validate_worker(candidate, binding, target)
+                except ValueError:
+                    time.sleep(2)
+                    continue
+                c.update(worker=binding['worker'], workerUID=binding['workerUID'])
+                self.snapshot()  # Still the exact authority and predecessor.
+                self.renew_leases(held)
+                return
+            time.sleep(2)
+        raise ValueError('Inactive replacement did not converge; serving Front remains unchanged')
+
+    def renew_leases(self, held):
+        for i, lease in enumerate(held):
+            current = self.get('lease', lease['metadata']['name'])
+            if (current['metadata']['uid'] != lease['metadata']['uid'] or current['metadata']['resourceVersion'] != lease['metadata']['resourceVersion'] or
+                    timestamp(current['spec']['renewTime']) + dt.timedelta(seconds=current['spec']['leaseDurationSeconds']) <= now()):
+                raise ValueError('Recovery lease expired or changed during inactive replacement')
+            patch = [{'op': 'test', 'path': '/metadata/uid', 'value': lease['metadata']['uid']},
+                     {'op': 'test', 'path': '/metadata/resourceVersion', 'value': lease['metadata']['resourceVersion']},
+                     {'op': 'replace', 'path': '/spec/renewTime', 'value': now().isoformat().replace('+00:00', 'Z')}]
+            held[i] = json.loads(self.kube('-n', self.config['namespace'], 'patch', 'lease', lease['metadata']['name'], '--type=json', '-p', canonical(patch), '-o', 'json'))
 
     @contextlib.contextmanager
     def leases(self):
@@ -260,7 +395,7 @@ def main():
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
     recovery = Recovery(config)
-    owner, target, previous, raw, worker, reference = recovery.snapshot()
+    owner, target, previous, raw, worker, reference = recovery.snapshot(allow_refresh=bool(config.get('refreshInactiveWorker')))
     evidence = {'mode': 'apply' if args.apply else 'preview', 'node': config['node'], 'previous': previous, 'target': target,
                 'authority_uid': owner['metadata']['uid'], 'authority_record': config['authorityRecord'], 'activated': False}
     save = lambda: Path(args.evidence).write_text(json.dumps(evidence, indent=2) + '\n')
@@ -273,6 +408,8 @@ def main():
         save()
     if args.apply and without_time(previous) != without_time(target):
         with recovery.leases() as held:
+            owner, target, previous, raw, worker, reference = recovery.snapshot(allow_refresh=bool(config.get('refreshInactiveWorker')))
+            recovery.refresh_inactive_worker(held, owner, target, previous, raw, worker, reference)
             owner, target, previous, raw, worker, reference = recovery.snapshot()
             # An active worker already obtains the current signed publication.
             # Preparation is exclusively an inactive-slot capability: never

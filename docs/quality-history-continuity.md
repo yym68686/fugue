@@ -34,3 +34,13 @@ reader identity, current assignment, positive checkpoint and direct UDP/TCP
 answers pass the existing transport verifier, publish a separate declarative
 transport handoff. Only then replace the former public slot. A code intent must
 not restart the selected public backend or bypass this handoff protection.
+
+A cold historical compiler input needs a complete verified read before its
+selective DNS index is available. Historical recovery explicitly allows up to
+90 seconds for that first read, before starting the separate live observation
+deadline and capture clock, still bounded by the caller's cancellation. This
+prepares only byte positions and hashes: binding rereads evidence and rechecks
+the original positive authority. Producer captures prepare once before their
+bounded job batch, not once per candidate or DNS consumer.
+Ordinary selective reads retain their 30-second default. A timeout is logged as
+unavailable history; it never deletes live observations or renews old evidence.

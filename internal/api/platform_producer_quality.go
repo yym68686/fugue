@@ -166,6 +166,16 @@ func (s *Server) refreshPendingProducerQuality(ctx context.Context, policy platf
 		return nil
 	}
 	quality := *input.DNSQueryPolicy.DynamicQuality
+	if quality.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+		if err := s.prepareHistoricalQualityInput(ctx, policy.TargetScope); err != nil {
+			return err
+		}
+		// Preparation can be slow on a cold process. Do not extend a frozen
+		// plan's lifetime just because its compiler-input index is now warm.
+		if s.pendingProducerQualityPlan(policy, time.Now().UTC()) == nil {
+			return nil
+		}
+	}
 	var nodes []model.DNSNode
 	if static.AuthorityCellID != "" {
 		_, nodes, err = s.captureCellEndpoints(ctx, static)

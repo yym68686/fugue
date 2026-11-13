@@ -174,6 +174,16 @@ record may be a committed promotion or rollback: rejecting rollback would preven
 catch-up to the group's actual current authority. DNS and code-release holds
 remain independent and are not removed by this record repair.
 
+An explicitly declared `refreshInactiveWorker` can replace a retained old
+OnDelete Pod in the inactive slot. It binds the physical Node UID, DaemonSet UID,
+old Pod UID/resourceVersion and exact committed reference executable. The shared
+template must already contain that code. Recovery never changes the shared
+template or either isolation hold, and never replaces the active slot. A normal
+UID-conditioned Pod deletion lets the existing DaemonSet maintain its declared
+instance. The replacement must prove the current signed publication before the
+Front changes. Failed staging leaves the former active Worker in place; retries
+recognize a committed replacement rather than deleting it again.
+
 Recovery reads the two named prepared/activated transition journals with GET. It
 does not require listing ConfigMaps. Only an authenticated 404 means no journal;
 403, transport errors and timeouts remain unknown and keep isolation in place.

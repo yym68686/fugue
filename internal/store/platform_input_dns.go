@@ -125,12 +125,23 @@ func (s *Store) rememberCompilerDNSInput(snapshot platformconfig.RuntimeSnapshot
 // holds byte positions and hashes, never receipt bodies or validation results.
 // Cold/legacy inputs retain the full verified read path.
 func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func(CompilerDNSSelectionSummary) bool) (CompilerInputDNSSelections, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, needed)
+}
+
+// GetPlatformCompilerInputDNSSelectionsContext lets an explicitly bounded
+// recovery read finish cold verification without restarting an implicit
+// deadline for each database phase. The caller's cancellation also covers the
+// legacy fallback; no input integrity or dependency checks are skipped.
+func (s *Store) GetPlatformCompilerInputDNSSelectionsContext(ctx context.Context, digest string, needed func(CompilerDNSSelectionSummary) bool) (CompilerInputDNSSelections, error) {
+	if err := ctx.Err(); err != nil {
+		return CompilerInputDNSSelections{}, err
+	}
 	if !inputDigestPattern.MatchString(digest) {
 		return CompilerInputDNSSelections{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
 		tx, finish, err := s.BeginCompilerInputReadLease(ctx)
 		if err != nil {
 			return CompilerInputDNSSelections{}, err
@@ -180,7 +191,7 @@ func (s *Store) GetPlatformCompilerInputDNSSelections(digest string, needed func
 		tx.Rollback()
 		finish() // Release the session lease before obtaining another reader.
 	}
-	snapshot, err := s.GetPlatformCompilerInput(digest)
+	snapshot, err := s.GetPlatformCompilerInputContext(ctx, digest)
 	if err != nil {
 		return CompilerInputDNSSelections{}, err
 	}

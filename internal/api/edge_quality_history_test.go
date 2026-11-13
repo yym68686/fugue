@@ -3,7 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,5 +106,60 @@ func TestHistoricalQualityLoadsVerifiedOriginalAcrossPolicyMigration(t *testing.
 		if current.HistoricalEvidence != nil && (current.HistoricalEvidence.Receipt.Digest != receipt.Digest || !current.HistoricalEvidence.Selection.CapturedAt.Equal(selection.CapturedAt)) {
 			t.Fatal("original evidence renewed")
 		}
+	}
+}
+
+func TestHistoricalQualityPreparationCannotCacheAuthorityOrRenewEvidence(t *testing.T) {
+	receipt := historicalBoundReceiptFixture(t)
+	selection, err := compileBoundPhysicalQualitySelection(receipt, receipt.Snapshot.CapturedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(receipt)
+	input := platformconfig.RuntimeSnapshot{IntentGeneration: "intent-a", PolicyGeneration: "policy-a", DNSSelections: []platformconfig.DNSSelectionObservation{{NodeID: "dns-a", Hostname: receipt.Snapshot.Hostname, Type: "A", PhysicalSelection: selection, PhysicalEvidence: raw}}}
+	s, _, path := qualityRestoreInputFixture(t, input)
+	live := dynamicQualityEntry{ContextDigest: "live-context", Failure: "independent-live-state"}
+	s.dynamicQuality.entries = map[string]dynamicQualityEntry{"live": live}
+	if err := s.prepareHistoricalQualityInput(t.Context(), "global"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.dynamicQuality.entries, map[string]dynamicQualityEntry{"live": live}) {
+		t.Fatal("preparation changed independent live state")
+	}
+	current := receipt.Snapshot
+	current.Policy = edgequality.DefaultPairedContinuityPolicy()
+	current.CapturedAt = time.Now().UTC()
+	s.bindHistoricalQualityEvidence(t.Context(), &current, "dns-a")
+	if current.HistoricalEvidence == nil || !current.HistoricalEvidence.Selection.CapturedAt.Equal(selection.CapturedAt) {
+		t.Fatal("preparation lost or renewed original evidence")
+	}
+	// Revoke the source after preparation. A warmed byte index is not a
+	// positive authority cache and must not make the subsequent bind succeed.
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state model.State
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatal(err)
+	}
+	state.PlatformLKGSnapshots[0].VerificationEvidenceHash = "sha256:" + strings.Repeat("b", 64)
+	body, _ = json.Marshal(state)
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	current.HistoricalEvidence = nil
+	s.bindHistoricalQualityEvidence(t.Context(), &current, "dns-a")
+	if current.HistoricalEvidence != nil {
+		t.Fatal("preparation cached revoked serving authority")
+	}
+}
+
+func TestHistoricalQualityPreparationHonorsCancellationBeforeStorage(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var s Server
+	if err := s.prepareHistoricalQualityInput(ctx, "global"); !errors.Is(err, context.Canceled) {
+		t.Fatal("preparation ignored caller cancellation", err)
 	}
 }
