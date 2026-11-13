@@ -23,6 +23,14 @@ def row():
                 run_lease_active=False, restore_references=0, target_type='control-plane-db')
 
 
+def fixed_policy():
+    from scripts.test_plan_longhorn_snapshot_recovery import SnapshotReviewTests
+    c = SnapshotReviewTests().fixed_config()
+    return {**policy(), 'schema': 'fugue.local-snapshot-cleanup/v2',
+            'recoveryBudget': c['recoveryBudget'], 'workingReserveBytes': c['workingReserveBytes'],
+            'maxFoldWriteBytes': c['maxFoldWriteBytes'], 'maxOperationsPerPass': 20, 'maxPassSeconds': 600}
+
+
 class FakeCluster:
     def __init__(self):
         self.ledger = [row()]
@@ -151,6 +159,76 @@ class CleanupTests(unittest.TestCase):
         for field, value in [('no_artifacts', False), ('terminal_source', False), ('run_lease_active', True)]:
             with self.assertRaises(ValueError):
                 gc.candidate_ledger([{**proof, field: value}], 'old-point', 'run_example')
+
+    def test_drain_replans_after_every_completion_and_stops_on_native_running(self):
+        results = [dict(phase='completed', completed=1, candidates=3),
+                   dict(phase='completed', completed=1, candidates=2),
+                   dict(phase='native-running', completed=0, candidates=1)]
+        with patch.object(gc, 'reconcile', side_effect=results) as reconcile:
+            result = gc.drain(self.kube, fixed_policy(), self.path, execute=True)
+        self.assertEqual(reconcile.call_count, 3)
+        self.assertEqual(result['completed'], 2)
+        self.assertEqual(result['phase'], 'native-running')
+
+    def test_first_canary_limit_does_not_run_a_second_native_operation(self):
+        with patch.object(gc, 'reconcile', return_value=dict(phase='completed', completed=1, candidates=3)) as reconcile:
+            gc.drain(self.kube, {**fixed_policy(), 'maxOperationsPerPass': 1}, self.path, execute=True)
+        reconcile.assert_called_once()
+
+    def test_pass_deadline_leaves_room_for_next_discovery_and_native_window(self):
+        with patch.object(gc, 'reconcile', return_value=dict(phase='completed', completed=1, candidates=3)) as reconcile, \
+             patch.object(gc.time, 'monotonic', side_effect=[0, 350, 370]):
+            result = gc.drain(self.kube, fixed_policy(), self.path, execute=True)
+        reconcile.assert_called_once()
+        self.assertIn('time budget', result['yield_reason'])
+
+    def test_observation_cannot_consume_the_entire_pass_budget(self):
+        with self.assertRaisesRegex(ValueError, 'headroom'):
+            gc.validate_policy({**fixed_policy(), 'maxWaitSeconds': 600})
+
+    def test_fifteen_steps_are_fresh_discoveries_not_a_cached_delete_batch(self):
+        results = [dict(phase='completed', completed=1, candidates=15-i) for i in range(15)]
+        results.append(dict(phase='idle', completed=0, candidates=0))
+        with patch.object(gc, 'reconcile', side_effect=results) as reconcile:
+            result = gc.drain(self.kube, fixed_policy(), self.path, execute=True)
+        self.assertEqual(reconcile.call_count, 16)
+        self.assertEqual(result['completed'], 15)
+        self.assertEqual(len({c.args[2] for c in reconcile.call_args_list}), 16)
+
+    def test_fixed_policy_selects_small_fold_not_first_snapshot_name(self):
+        original = self.kube.items
+        def items(path, **selectors):
+            values = original(path, **selectors)
+            if path.endswith('/snapshots'):
+                values += [{**copy.deepcopy(values[0]), 'metadata': dict(name='small-point', uid='small-uid',
+                            labels={'fugue.pro/backup-run': 'small_run'})}]
+            return values
+        self.kube.items = items
+        self.kube.ledger += [{**row(), 'run': 'small_run', 'snapshot': 'small-point', 'id': 'small-artifact'}]
+        def observe(_, c):
+            return {**review(), 'budget': dict(fold_write_bytes=2 if c['snapshot'] == 'small-point' else 50)}
+        with patch.object(gc, 'observe', side_effect=observe):
+            result = gc.reconcile(self.kube, fixed_policy(), self.path)
+        self.assertEqual(result['selected_snapshot'], 'small-point')
+        self.assertEqual(result['executable_candidates'], 2)
+
+    def test_policy_upgrade_resumes_original_immutable_authorization(self):
+        p, original = fixed_policy(), fixed_policy()
+        original['maxOperationsPerPass'] = 1
+        from scripts.test_plan_longhorn_snapshot_recovery import SnapshotReviewTests
+        c = SnapshotReviewTests().fixed_config()
+        c.update(ledgerNamespace='platform', ledgerPrimary='db-1', ledgerPrimaryUID='pod-uid',
+                 coordinationNamespace='platform', targetType='control-plane-db')
+        digest = hashlib.sha256(gc.canonical(original).encode()).hexdigest()
+        r = gc.Recovery(None, c, gc.approval(original, c), self.path)
+        self.kube.records = [dict(metadata=dict(name=r.operation, namespace='platform'), data=dict(
+            cleanup_policy_sha256=digest, **{'receipt.json': json.dumps(dict(phase='native-running')),
+             'declaration.json': json.dumps(c), 'approval.json': json.dumps(gc.approval(original, c)),
+             'cleanup_policy.json': json.dumps(original)}))]
+        with patch.object(gc.Recovery, 'run') as run, patch.object(gc, 'observe') as observe:
+            gc.reconcile(self.kube, p, self.path, execute=True)
+        run.assert_called_once()
+        observe.assert_not_called()
 
 
 if __name__ == '__main__':

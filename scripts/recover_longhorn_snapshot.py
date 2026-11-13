@@ -157,7 +157,7 @@ def admission_probes(config, operation):
 
 
 class Recovery:
-    def __init__(self, kube, config, approval, evidence_path, *, cleanup_policy_sha256=None):
+    def __init__(self, kube, config, approval, evidence_path, *, cleanup_policy_sha256=None, cleanup_policy=None):
         validate(config)
         require(set(approval) == {'schema', 'declarationSHA256', 'snapshotUID', 'authorized', 'maxWaitSeconds', 'readyURL'}, 'invalid recovery approval')
         require(approval['schema'] == 'fugue.local-snapshot-recovery/v1' and approval['authorized'] is True,
@@ -170,6 +170,9 @@ class Recovery:
         self.kube, self.config, self.approval = kube, config, approval
         require(cleanup_policy_sha256 is None or re.fullmatch('[a-f0-9]{64}', cleanup_policy_sha256), 'invalid cleanup policy identity')
         self.cleanup_policy_sha256 = cleanup_policy_sha256
+        require(cleanup_policy is None or hashlib.sha256(canonical(cleanup_policy).encode()).hexdigest() == cleanup_policy_sha256,
+                'cleanup policy bytes differ from authorization')
+        self.cleanup_policy = cleanup_policy
         self.operation = 'fugue-snapshot-recovery-' + self.digest[:20]
         self.holder = 'release/' + self.operation
         self.path = Path(evidence_path)
@@ -357,18 +360,31 @@ class Recovery:
         raw = self.kube.command(['-n', c['namespace'], 'exec', c['primary'], '-c', 'postgres', '--', 'df', '-Pk', '/var/lib/postgresql/data'])
         free = int(raw.splitlines()[-1].split()[3]) * 1024
         require(free >= 512 << 20, 'database space is below the hard stop')
+        probes = {}
+        if 'recoveryBudget' in c:
+            started = time.monotonic()
+            answer = self.kube.command(['-n', c['namespace'], 'exec', c['primary'], '-c', 'postgres', '--',
+                                        'psql', '-U', 'postgres', '-d', 'postgres', '-qAt', '-v', 'ON_ERROR_STOP=1',
+                                        '-c', 'SELECT 1'])
+            probes['database_probe_seconds'] = time.monotonic() - started
+            require(answer.strip() == '1' and probes['database_probe_seconds'] <= c['recoveryBudget']['maxDatabaseProbeSeconds'],
+                    'database latency gate failed')
+        started = time.monotonic()
         with urllib.request.urlopen(self.approval['readyURL'], timeout=15) as response:
             ready = json.load(response)
+        if 'recoveryBudget' in c:
+            probes['api_probe_seconds'] = time.monotonic() - started
+            require(probes['api_probe_seconds'] <= c['recoveryBudget']['maxAPIProbeSeconds'], 'public API latency gate failed')
         require(ready.get('status') == 'ok' and all(x.get('status') == 'ok' for x in ready.get('checks', {}).values()) and ready.get('checks'), 'public API readiness failed')
         return dict(database_available_bytes=free,
                     database_restarts=sum(x.get('restartCount', 0) for x in pod['status'].get('containerStatuses', [])),
-                    public_ready=True)
+                    public_ready=True, **probes)
 
     def physical(self, review):
         manager = self.kube.get('pod', review['instance_manager_name'], self.config['longhornNamespace'])
         same(manager, review['instance_manager_name'], review['instance_manager_uid'])
         # Only statvfs; no snapshot file or data is opened, and no sync/trim.
-        source = 'import json,os,sys; p=sys.stdin.read(); s=os.statvfs(p); print(json.dumps(dict(free_bytes=s.f_bfree*s.f_frsize,available_bytes=s.f_bavail*s.f_frsize,total_bytes=s.f_blocks*s.f_frsize)))'
+        source = 'import json,os,sys; p=sys.stdin.read(); s=os.statvfs(p); print(json.dumps(dict(free_bytes=s.f_bfree*s.f_frsize,available_bytes=s.f_bavail*s.f_frsize,total_bytes=s.f_blocks*s.f_frsize,io_pressure=open("/proc/pressure/io").read() if os.path.exists("/proc/pressure/io") else None)))'
         return json.loads(self.kube.command(['-n', self.config['longhornNamespace'], 'exec', '-i', review['instance_manager_name'],
                                             '-c', 'instance-manager', '--', 'python3', '-c', source], review['replica_directory']))
 
@@ -388,6 +404,8 @@ class Recovery:
                 replica['status'].get('currentState') == 'running', 'native replica health changed')
         chain, purge = es.get('snapshots', {}), es.get('purgeStatus', {})
         require(purge and all(not x.get('error') for x in purge.values()), 'native purge reported an error or unknown state')
+        self.native_progress = sorted([dict(progress=x.get('progress'), is_purging=x.get('isPurging'), state=x.get('state'))
+                                       for x in purge.values()], key=canonical)
         kept = set(review['snapshot_chain']) - {c['snapshot']} - set(review['collateral_head_parent_prunes'])
         require(kept <= set(chain), 'another recovery point disappeared')
         snapshot = self.kube.maybe('snapshots.longhorn.io', c['snapshot'], c['longhornNamespace'])
@@ -403,9 +421,26 @@ class Recovery:
             self.own_lease()
             _, completed, _ = self.native_state(review)
             stable = stable + 1 if completed else 0
-            self.save('awaiting-native-quiescence', native_quiescent=completed)
+            fields = dict(native_quiescent=completed)
+            if 'recoveryBudget' in self.config:
+                progress = getattr(self, 'native_progress', [])
+                changed = progress != self.state.get('native_progress')
+                last = timestamp() if changed else self.state.get('last_native_progress_at', timestamp())
+                stalled = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(last.replace('Z', '+00:00'))).total_seconds() >= 600
+                fields.update(native_progress=progress, last_native_progress_at=last, progress_stalled=stalled,
+                              next_observation_after=timestamp())
+                physical, health = self.physical(review), self.health()
+                floor = review['budget']['completion_floor_bytes']
+                require(physical['available_bytes'] >= floor, 'native operation physical reserve failed; protection retained')
+                fields.update(physical_current=physical, health_current=health)
+            self.save('awaiting-native-quiescence', **fields)
             if stable >= 2:
                 return self.health()
+            if 'recoveryBudget' in self.config and time.monotonic() >= deadline:
+                # An observation window ending does NOT cancel the engine or
+                # authorize a second DELETE/unlock. Persist and resume next pass.
+                self.save('native-running', **fields)
+                return None
             require(time.monotonic() < deadline, 'native operation has not quiesced; protection retained')
             time.sleep(5)
 
@@ -470,7 +505,11 @@ class Recovery:
                 if snapshot is not None:
                     require(snapshot['metadata']['uid'] == c['snapshotUID'] and snapshot['metadata'].get('deletionTimestamp'),
                             'delete outcome is not terminal; keep existing fences')
-                    self.resume_native_finalizer(review)
+                    # Ordinary asynchronous purge may still be running. The
+                    # finalizer compatibility repair is only for a gone layer.
+                    _, _, quiescent = self.native_state(review)
+                    if quiescent or 'recoveryBudget' not in c:
+                        self.resume_native_finalizer(review)
         if not existing or retry_aborted:
             review = observe(self.kube, c)
             require(review['ready_for_review'], 'working-space gate failed; no deletion permitted')
@@ -484,6 +523,8 @@ class Recovery:
             if self.cleanup_policy_sha256:
                 data.update(cleanup_policy_sha256=self.cleanup_policy_sha256,
                             **{'declaration.json': canonical(c), 'approval.json': canonical(self.approval)})
+                if self.cleanup_policy is not None:
+                    data['cleanup_policy.json'] = canonical(self.cleanup_policy)
                 labels['fugue.pro/snapshot-cleanup-policy'] = self.cleanup_policy_sha256[:40]
             if retry_aborted:
                 self.record['data'] = data
@@ -502,7 +543,7 @@ class Recovery:
                 require(fresh['ready_for_review'] and stable_chain(fresh) == stable_chain(review), 'capacity or immutable ancestry changed')
                 self.health()
                 self.record['data']['review.json'] = canonical(fresh)
-                self.save('delete-intent', deletion_attempted=True, before=before, budget=fresh['budget'])
+                self.save('delete-intent', deletion_attempted=True, native_started_at=timestamp(), before=before, budget=fresh['budget'])
                 # This is the sole destructive call. Unknown outcome is durable;
                 # no finally block releases protection after this point.
                 target = self.kube.get('snapshots.longhorn.io', c['snapshot'], c['longhornNamespace'])
@@ -518,10 +559,16 @@ class Recovery:
                     self.save('aborted-before-delete')
                 raise
         after = self.wait_native(review)
+        if after is None:
+            return
         require(after['database_restarts'] == self.state['before']['database_restarts'], 'database restarted; retain protection for review')
         physical = self.physical(review)
-        require(physical['free_bytes'] >= review['budget']['minimum_physical_free_bytes'] + self.config['minimumExtraFreeBytes'],
-                'post-operation physical reserve failed; keep protection')
+        if 'recoveryBudget' in c:
+            require(physical['available_bytes'] >= review['budget']['completion_floor_bytes'],
+                    'post-operation physical reserve failed; keep protection')
+        else:
+            require(physical['free_bytes'] >= review['budget']['minimum_physical_free_bytes'] + c['minimumExtraFreeBytes'],
+                    'post-operation physical reserve failed; keep protection')
         self.save('native-completed', native_quiescent=True, after=after, physical_after=physical,
                   physical_free_change_bytes=physical['free_bytes'] - review['budget']['physical_free_bytes'])
         self.remove_barriers()

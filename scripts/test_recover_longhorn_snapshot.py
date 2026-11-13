@@ -1,10 +1,11 @@
 import copy
 import hashlib
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts.recover_longhorn_snapshot import Cluster, Recovery, TOKEN, admission_probes, barrier_objects, canonical
 
@@ -99,6 +100,70 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.kube.objects, {})
         self.assertEqual(self.kube.deletes, 0)
         self.assertEqual(self.kube.lease['spec']['holderIdentity'], '')
+
+    def fixed_recovery(self):
+        from scripts.test_plan_longhorn_snapshot_recovery import SnapshotReviewTests
+        c = SnapshotReviewTests().fixed_config()
+        r = Recovery(self.kube, c, approval(c), Path(self.tmp.name) / 'fixed.json')
+        for name in ('install_barriers', 'remove_barriers', 'health', 'physical'):
+            setattr(r, name, getattr(self.r, name))
+        return r
+
+    def test_fixed_completion_uses_its_durable_floor_not_old_25_percent(self):
+        r = self.fixed_recovery()
+        r.wait_native = lambda _: r.health()
+        r.physical = lambda _: dict(available_bytes=20 << 30, free_bytes=30 << 30)
+        planned = {**review(), 'budget': dict(completion_floor_bytes=18 << 30, physical_free_bytes=28 << 30)}
+        with patch('scripts.recover_longhorn_snapshot.observe', return_value=planned):
+            r.run()
+        self.assertEqual(r.state['phase'], 'completed')
+        self.assertEqual(self.kube.lease['spec']['holderIdentity'], '')
+
+    def test_observation_window_retains_native_operation_without_failure_or_delete_replay(self):
+        r = self.fixed_recovery()
+        r.cleanup_policy_sha256 = 'a' * 64
+        planned = {**review(), 'budget': dict(completion_floor_bytes=18 << 30, physical_free_bytes=50 << 30)}
+        r.native_state = lambda _: (None, False, False)
+        with patch('scripts.recover_longhorn_snapshot.observe', return_value=planned), \
+             patch('scripts.recover_longhorn_snapshot.time.monotonic', side_effect=[0, 61]):
+            r.run()
+        self.assertEqual(r.state['phase'], 'native-running')
+        self.assertEqual(self.kube.lease['spec']['holderIdentity'], r.holder)
+        self.assertEqual(self.kube.deletes, 1)
+        r.native_state = lambda _: (None, True, True)
+        with patch('scripts.recover_longhorn_snapshot.time.sleep'):
+            r.run()
+        self.assertEqual(r.state['phase'], 'completed')
+        self.assertEqual(self.kube.deletes, 1)
+
+    def test_fixed_native_running_checks_actual_available_not_only_root_free(self):
+        r = self.fixed_recovery()
+        r.physical = lambda _: dict(available_bytes=2 << 30, free_bytes=100 << 30)
+        r.own_lease = lambda: None
+        r.native_state = lambda _: (None, False, False)
+        with self.assertRaisesRegex(ValueError, 'physical reserve failed'):
+            r.wait_native(dict(budget=dict(completion_floor_bytes=18 << 30)))
+
+    def test_fixed_health_enforces_database_and_api_latency_limits(self):
+        r = self.fixed_recovery()
+        cluster = dict(metadata=dict(name='db', uid='cluster-uid'), status=dict(
+            phase='Cluster in healthy state', readyInstances=1, currentPrimary='db-1', targetPrimary='db-1'))
+        pod = dict(metadata=dict(name='db-1', uid='pod-uid'), status=dict(
+            conditions=[dict(type='Ready', status='True')], containerStatuses=[dict(restartCount=0)]))
+        self.kube.get = Mock(side_effect=[cluster, pod] * 3)
+        for times, message in [([0, 6], 'database latency'), ([0, .1, 1, 5], 'API latency'),
+                               ([0, .2, 1, 1.3], None)]:
+            self.kube.command = Mock(side_effect=['Filesystem blocks used available\n/dev/data 1 1 1048576', '1\n'])
+            with patch('scripts.recover_longhorn_snapshot.time.monotonic', side_effect=times), \
+                 patch('scripts.recover_longhorn_snapshot.urllib.request.urlopen') as opened:
+                opened.return_value.__enter__.return_value = io.BytesIO(b'{"status":"ok","checks":{"store":{"status":"ok"}}}')
+                if message:
+                    with self.assertRaisesRegex(ValueError, message):
+                        Recovery.health(r)
+                else:
+                    observed = Recovery.health(r)
+                    self.assertAlmostEqual(observed['database_probe_seconds'], .2)
+                    self.assertAlmostEqual(observed['api_probe_seconds'], .3)
 
     def test_unknown_delete_outcome_retains_lease_and_never_replays(self):
         self.kube.fail_delete = True

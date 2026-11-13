@@ -6,6 +6,7 @@ DOCKER ?= docker
 
 test:
 	python3 -m unittest scripts.test_reconcile_longhorn_snapshot_cleanup scripts.test_plan_longhorn_snapshot_recovery scripts.test_recover_longhorn_snapshot scripts.test_longhorn_snapshot_map
+	go -C tests/snapshot-native-fold test -count=1 ./...
 	python3 -m unittest scripts.test_install_compiler_input_zero_temp
 	python3 -m unittest scripts.test_install_longhorn_gc
 	python3 -m unittest scripts.test_refresh_producer_dependencies

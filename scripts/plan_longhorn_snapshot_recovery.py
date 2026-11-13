@@ -8,6 +8,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -32,8 +33,12 @@ def validate(config):
                 'snapshotUID', 'artifact', 'run', 'coordinationLease',
                 'minimumExtraFreeBytes', 'workingReserveBytes', 'maxFoldWriteBytes'}
     ledger_keys = {'ledgerNamespace', 'ledgerPrimary', 'ledgerPrimaryUID', 'coordinationNamespace', 'targetType'}
-    require(set(config) in (required, required | ledger_keys) and config['schema'] == 'fugue.local-snapshot-review/v1', 'invalid snapshot review declaration')
-    for key in (set(config) - {'schema', 'minimumExtraFreeBytes', 'workingReserveBytes', 'maxFoldWriteBytes', 'artifact', 'run', 'targetType'}):
+    version = config.get('schema')
+    if version == 'fugue.local-snapshot-review/v2':
+        required = required | {'recoveryBudget'}
+        validate_recovery_budget(config['recoveryBudget'])
+    require(set(config) in (required, required | ledger_keys) and version in ('fugue.local-snapshot-review/v1', 'fugue.local-snapshot-review/v2'), 'invalid snapshot review declaration')
+    for key in (set(config) - {'schema', 'minimumExtraFreeBytes', 'workingReserveBytes', 'maxFoldWriteBytes', 'artifact', 'run', 'targetType', 'recoveryBudget'}):
         require(isinstance(config[key], str) and NAME.fullmatch(config[key]), 'invalid snapshot review identity')
     require(config.get('targetType', 'control-plane-db') in ('control-plane-db', 'app-database'), 'unsupported snapshot target type')
     for key in ('artifact', 'run'):
@@ -41,6 +46,56 @@ def validate(config):
     for key, minimum in [('minimumExtraFreeBytes', 16 << 30), ('workingReserveBytes', 192 << 20), ('maxFoldWriteBytes', 1)]:
         require(type(config[key]) is int and minimum <= config[key] <= 1 << 40, 'invalid snapshot working-space budget')
     require(config['snapshot'] != 'volume-head', 'the live head cannot be reviewed for removal')
+
+
+def validate_recovery_budget(value):
+    require(isinstance(value, dict) and set(value) == {'schema', 'foregroundReserveBytes', 'growthSampleSeconds', 'operationWindowSeconds', 'maxDatabaseProbeSeconds', 'maxAPIProbeSeconds'}, 'invalid fixed-capacity recovery budget')
+    require(value['schema'] == 'fugue.fixed-capacity-ext4/v1', 'unsupported recovery budget')
+    for key, low, high in [('foregroundReserveBytes', 16 << 30, 1 << 40),
+                           ('growthSampleSeconds', 2, 5), ('operationWindowSeconds', 300, 21600),
+                           ('maxDatabaseProbeSeconds', 1, 15), ('maxAPIProbeSeconds', 1, 15)]:
+        require(type(value[key]) is int and low <= value[key] <= high, 'invalid fixed-capacity budget bound')
+
+
+def recovery_budget(observation, config):
+    """No future reclaim credit and no dependence on new-replica scheduling.
+
+    Whole-child mapped writes bound new data allocation on the supported ext4
+    path, including overwrites; working reserve covers metadata/alignment. The
+    smaller overlap-derived estimate is informational, NOT admission authority.
+    """
+    value = config['recoveryBudget']
+    validate_recovery_budget(value)
+    require(observation.get('filesystem', {}).get('type') == 'ext4' and
+            observation['filesystem'].get('read_only') is False, 'unsupported recovery filesystem')
+    elapsed = observation.get('growth_sample_seconds', 0)
+    require(isinstance(elapsed, (int, float)) and math.isfinite(elapsed) and
+            value['growthSampleSeconds'] <= elapsed <= 30, 'filesystem growth sample unavailable')
+    observed = observation.get('observed_growth_bytes')
+    require(type(observed) is int and observed >= 0, 'filesystem growth sample unavailable')
+    parent, child = observation['files']
+    overlap, written = observation['overlap_bytes'], observation['fold_write_bytes']
+    for number in (overlap, written, parent['mapped_bytes'], child['mapped_bytes'], observation['new_mapped_bytes'],
+                   observation['physical_free_bytes'], observation['physical_available_bytes'], observation['physical_total_bytes']):
+        require(type(number) is int and number >= 0, 'invalid physical allocation observation')
+    require(observation['physical_available_bytes'] <= observation['physical_free_bytes'] <= observation['physical_total_bytes'],
+            'inconsistent physical allocation counters')
+    require(0 <= overlap <= min(parent['mapped_bytes'], child['mapped_bytes']) and
+            written == child['mapped_bytes'] and observation['new_mapped_bytes'] == written - overlap,
+            'fold direction disagrees with pinned engine')
+    require(written <= config['maxFoldWriteBytes'], 'fold exceeds the declared operation write budget')
+    require(observation['content_bytes_read'] == 0 and observation['sync_requested'] is False, 'unexpected data read or sync')
+    free = observation['physical_available_bytes']
+    foreground = max(value['foregroundReserveBytes'], math.ceil(2 * observed / elapsed * value['operationWindowSeconds']))
+    floor = config['minimumExtraFreeBytes'] + config['workingReserveBytes'] + foreground
+    return dict(schema=value['schema'], counter='available_bytes',
+                new_allocation_estimate_bytes=written - overlap, peak_allocation_bound_bytes=written,
+                fold_write_bytes=written, overlapping_mapped_bytes=overlap,
+                physical_free_bytes=observation['physical_free_bytes'], physical_available_bytes=free,
+                foreground_reserve_bytes=foreground, working_reserve_bytes=config['workingReserveBytes'],
+                extra_free_bytes=config['minimumExtraFreeBytes'], completion_floor_bytes=floor,
+                remaining_budget_bytes=free - floor - written,
+                capacity_gate_passed=free >= floor + written, reclaimable_bytes_exact=None)
 
 
 def fold_budget(observation, minimal_percent, extra, reserve, max_write):
@@ -278,12 +333,17 @@ def observe(kube, config, *, lease_holder=None):
     require(manager['spec'].get('nodeName') == replica['spec']['nodeID'] == pod['spec']['nodeName'], 'replica observer is on another node')
     require(any(c['name'] == 'instance-manager' and c.get('ready') for c in manager['status'].get('containerStatuses', [])), 'instance manager is not Ready')
     request = dict(directory='/host' + replica['spec']['diskPath'] + '/replicas/' + replica['spec']['dataDirectoryName'], parent=config['snapshot'], child=child)
+    if 'recoveryBudget' in config:
+        request['growthSampleSeconds'] = config['recoveryBudget']['growthSampleSeconds']
     source = Path(longhorn_snapshot_map.__file__).read_text()
     observation = json.loads(kube.command(['-n', lh, 'exec', '-i', manager['metadata']['name'], '-c', 'instance-manager', '--',
                                           'python3', '-c', source], json.dumps(request), limit=1 << 20))
-    setting = kube.get('settings.longhorn.io', 'storage-minimal-available-percentage', lh)
-    budget = fold_budget(observation, int(setting['value']), config['minimumExtraFreeBytes'], config['workingReserveBytes'], config['maxFoldWriteBytes'])
-    evidence = dict(schema='fugue.local-snapshot-review/v1', observed_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+    if 'recoveryBudget' in config:
+        budget = recovery_budget(observation, config)
+    else:
+        setting = kube.get('settings.longhorn.io', 'storage-minimal-available-percentage', lh)
+        budget = fold_budget(observation, int(setting['value']), config['minimumExtraFreeBytes'], config['workingReserveBytes'], config['maxFoldWriteBytes'])
+    evidence = dict(schema=config['schema'], observed_at=dt.datetime.now(dt.timezone.utc).isoformat(),
                     read_only=True, ready_for_review=budget['capacity_gate_passed'], execution_authorized=False,
                     deletion_attempted=False, declaration=config,
                     snapshot_resource_version=snapshot['metadata']['resourceVersion'],

@@ -1,9 +1,62 @@
 import copy
 import unittest
-from scripts.plan_longhorn_snapshot_recovery import check_pending_snapshot_deletions, collateral_purges, fold_budget, terminal_ledger, validate
+from scripts.plan_longhorn_snapshot_recovery import check_pending_snapshot_deletions, collateral_purges, fold_budget, recovery_budget, terminal_ledger, validate
+from scripts.test_recover_longhorn_snapshot import config
 
 
 class SnapshotReviewTests(unittest.TestCase):
+    def fixed_config(self):
+        return {**config(), 'schema': 'fugue.local-snapshot-review/v2', 'maxFoldWriteBytes': 128 << 30,
+                'workingReserveBytes': 1 << 30,
+                'recoveryBudget': dict(schema='fugue.fixed-capacity-ext4/v1', foregroundReserveBytes=32 << 30,
+                                       growthSampleSeconds=2, operationWindowSeconds=3600,
+                                       maxDatabaseProbeSeconds=5, maxAPIProbeSeconds=3)}
+
+    def fixed_observation(self):
+        return {**self.observation(), 'physical_available_bytes': 160 << 30, 'physical_free_bytes': 210 << 30,
+                'physical_total_bytes': 900 << 30, 'filesystem': dict(type='ext4', read_only=False),
+                'growth_sample_seconds': 2.1, 'observed_growth_bytes': 1024}
+
+    def test_fixed_capacity_recovery_does_not_require_scheduling_headroom(self):
+        value, c = self.fixed_observation(), self.fixed_config()
+        validate(c)
+        report = recovery_budget(value, c)
+        self.assertTrue(report['capacity_gate_passed'])
+        self.assertEqual(report['counter'], 'available_bytes')
+        self.assertEqual(report['peak_allocation_bound_bytes'], 6 << 30)
+        self.assertEqual(report['new_allocation_estimate_bytes'], 1 << 30)
+        self.assertEqual(report['completion_floor_bytes'], 49 << 30)
+        self.assertNotIn('minimum_physical_free_bytes', report)
+
+    def test_fixed_budget_never_borrows_root_reserve_or_future_reclaim(self):
+        value = self.fixed_observation()
+        value['physical_available_bytes'] = 54 << 30
+        self.assertFalse(recovery_budget(value, self.fixed_config())['capacity_gate_passed'])
+        value['physical_available_bytes'] = 55 << 30
+        self.assertTrue(recovery_budget(value, self.fixed_config())['capacity_gate_passed'])
+
+    def test_fixed_budget_includes_other_filesystem_writers(self):
+        value = self.fixed_observation()
+        value.update(growth_sample_seconds=2, observed_growth_bytes=64 << 20)
+        report = recovery_budget(value, self.fixed_config())
+        self.assertEqual(report['foreground_reserve_bytes'], 225 << 30)
+        self.assertFalse(report['capacity_gate_passed'])
+
+    def test_fixed_budget_rejects_unknown_fs_and_missing_samples(self):
+        for change in [dict(filesystem=dict(type='xfs', read_only=False)), dict(growth_sample_seconds=0),
+                       dict(growth_sample_seconds=float('nan')), dict(observed_growth_bytes=-1),
+                       dict(filesystem=dict(type='ext4', read_only=True))]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                recovery_budget({**self.fixed_observation(), **change}, self.fixed_config())
+
+    def test_large_fold_is_not_misclassified_as_six_gib_limit(self):
+        value = self.fixed_observation()
+        value.update(files=[dict(mapped_bytes=90 << 30), dict(mapped_bytes=70 << 30)],
+                     fold_write_bytes=70 << 30, overlap_bytes=8 << 30, new_mapped_bytes=62 << 30)
+        report = recovery_budget(value, self.fixed_config())
+        self.assertTrue(report['capacity_gate_passed'])
+        self.assertEqual(report['peak_allocation_bound_bytes'], 70 << 30)
+
     def observation(self):
         return dict(files=[dict(mapped_bytes=8 << 30), dict(mapped_bytes=6 << 30)],
                     overlap_bytes=5 << 30, new_mapped_bytes=1 << 30,

@@ -31,14 +31,42 @@ def identity(info):
             info.st_mtime_ns, info.st_ctime_ns]
 
 
+def filesystem(directory):
+    """Resolve the actual mount, not a path-name or fs magic heuristic."""
+    selected = None
+    with open('/proc/self/mountinfo') as mounts:
+        for line in mounts:
+            fields = line.split()
+            separator = fields.index('-')
+            mount = re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), fields[4])
+            if directory == mount or directory.startswith(mount.rstrip('/') + '/'):
+                if selected is None or len(mount) > len(selected['mount']):
+                    selected = dict(mount=mount, type=fields[separator + 1], device=fields[2],
+                                    read_only='ro' in fields[5].split(','))
+    if selected is None:
+        raise ValueError('replica filesystem is unknown')
+    return selected
+
+
 def inspect(request):
-    if set(request) != {'directory', 'parent', 'child'}:
+    required = {'directory', 'parent', 'child'}
+    if set(request) not in (required, required | {'growthSampleSeconds'}):
         raise ValueError('invalid sparse observation request')
     directory = request['directory']
     if not re.fullmatch(r'/host/[-a-zA-Z0-9_/]+/replicas/[-a-z0-9]+', directory):
         raise ValueError('invalid replica directory')
     if os.path.realpath(directory) != directory or not stat.S_ISDIR(os.stat(directory).st_mode):
         raise ValueError('replica directory identity changed')
+    sample = request.get('growthSampleSeconds', 0)
+    if type(sample) is not int or sample not in (0, 2, 3, 4, 5):
+        raise ValueError('invalid filesystem growth sample')
+    mount = filesystem(directory) if sample else None
+    if mount and (mount['type'] != 'ext4' or mount['read_only']):
+        raise ValueError('fixed-capacity recovery requires writable ext4')
+    device = os.stat(directory).st_dev
+    if mount and mount['device'] != str(os.major(device)) + ':' + str(os.minor(device)):
+        raise ValueError('replica mount device changed')
+    initial, started = os.statvfs(directory), time.monotonic()
     names = [request['parent'], request['child']]
     if len(set(names)) != 2 or any(not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,179}', n) or n == 'volume-head' for n in names):
         raise ValueError('two immutable snapshot identities are required')
@@ -48,7 +76,7 @@ def inspect(request):
         fd = os.open(directory + '/volume-snap-' + name + '.img', os.O_RDONLY | os.O_NOFOLLOW)
         try:
             before = os.fstat(fd)
-            if not stat.S_ISREG(before.st_mode):
+            if not stat.S_ISREG(before.st_mode) or before.st_dev != device or before.st_nlink != 1:
                 raise ValueError('snapshot is not a regular file')
             current, offset = [], 0
             # At most 131072 extents per file and 12 seconds for both files.
@@ -90,8 +118,15 @@ def inspect(request):
         finally:
             os.close(fd)
     overlap = intersection(*ranges)
+    if sample:
+        time.sleep(max(0, sample - (time.monotonic() - started)))
+        if filesystem(directory) != mount or os.stat(directory).st_dev != device:
+            raise ValueError('replica filesystem changed during observation')
+        for record in records:
+            if identity(os.lstat(directory + '/volume-snap-' + record['name'] + '.img')) != record['identity']:
+                raise ValueError('snapshot changed during growth sample')
     fs = os.statvfs(directory)
-    return dict(files=records, overlap_bytes=overlap,
+    result = dict(files=records, overlap_bytes=overlap,
                 # Longhorn v1.12.1 FoldFile(child,parent) overwrites all child
                 # data in the parent, then hardlinks the merged inode as child.
                 fold_write_bytes=records[1]['mapped_bytes'],
@@ -100,6 +135,11 @@ def inspect(request):
                 physical_available_bytes=fs.f_bavail * fs.f_frsize,
                 physical_total_bytes=fs.f_blocks * fs.f_frsize,
                 content_bytes_read=0, sync_requested=False)
+    if sample:
+        result.update(filesystem=mount, filesystem_device=device,
+                      growth_sample_seconds=time.monotonic() - started,
+                      observed_growth_bytes=max(0, initial.f_bavail * initial.f_frsize - fs.f_bavail * fs.f_frsize))
+    return result
 
 
 if __name__ == '__main__':

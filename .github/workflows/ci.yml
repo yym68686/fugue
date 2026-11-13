@@ -76,12 +76,13 @@ jobs:
         run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
-      - name: Validate current policy and reconcile at most one retired local snapshot
+      - name: Validate current policy and reconcile bounded retired local snapshots
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- deploy/environments/production/local-snapshot-cleanup scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py scripts/longhorn_snapshot_map.py .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/local-snapshot-cleanup scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py scripts/longhorn_snapshot_map.py tests/snapshot-native-fold .github/workflows/ci.yml
           python3 -m unittest scripts.test_reconcile_longhorn_snapshot_cleanup scripts.test_recover_longhorn_snapshot scripts.test_plan_longhorn_snapshot_recovery scripts.test_longhorn_snapshot_map
+          go -C tests/snapshot-native-fold test -count=1 ./...
           python3 -m scripts.reconcile_longhorn_snapshot_cleanup deploy/environments/production/local-snapshot-cleanup/policy.json --apply --evidence "$RUNNER_TEMP/local-snapshot-cleanup.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
@@ -4171,7 +4172,7 @@ jobs:
         env: {BASE_SHA: '${{ github.event.before }}', EVENT_NAME: '${{ github.event_name }}'}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" == schedule ]] || ! git diff --quiet "$BASE_SHA" HEAD -- 'internal/api/longhorn*.go' internal/api/backup.go internal/api/backup_lease.go scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py scripts/test_runner_workspace_ownership.py deploy/environments/production/local-snapshot-cleanup; then
+          if [[ "$EVENT_NAME" == schedule ]] || ! git diff --quiet "$BASE_SHA" HEAD -- 'internal/api/longhorn*.go' internal/api/backup.go internal/api/backup_lease.go scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py scripts/longhorn_snapshot_map.py scripts/test_runner_workspace_ownership.py tests/snapshot-native-fold deploy/environments/production/local-snapshot-cleanup; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
           fi
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0

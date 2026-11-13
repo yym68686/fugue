@@ -1,13 +1,23 @@
 {
-  "schema": "fugue.local-snapshot-cleanup/v1",
+  "schema": "fugue.local-snapshot-cleanup/v2",
   "enabled": true,
   "namespace": "fugue-system",
   "cluster": "fugue-fugue-control-plane-postgres",
   "longhornNamespace": "longhorn-system",
   "coordinationLease": "fugue-fugue-control-plane-db-backup",
   "minimumExtraFreeBytes": 17179869184,
-  "workingReserveBytes": 201326592,
+  "workingReserveBytes": 1073741824,
   "maxFoldWriteBytes": 6442450944,
-  "maxWaitSeconds": 600,
+  "maxWaitSeconds": 60,
+  "recoveryBudget": {
+    "schema": "fugue.fixed-capacity-ext4/v1",
+    "foregroundReserveBytes": 34359738368,
+    "growthSampleSeconds": 2,
+    "operationWindowSeconds": 3600,
+    "maxDatabaseProbeSeconds": 5,
+    "maxAPIProbeSeconds": 3
+  },
+  "maxOperationsPerPass": 1,
+  "maxPassSeconds": 600,
   "readyURL": "https://api.fugue.pro/readyz"
 }

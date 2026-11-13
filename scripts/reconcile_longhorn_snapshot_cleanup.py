@@ -7,13 +7,15 @@ modified. An unknown DELETE outcome is never blindly replayed.
 """
 import argparse
 import copy
+import datetime as dt
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import time
 
-from scripts.plan_longhorn_snapshot_recovery import NAME, observe, require, terminal_ledger, validate
+from scripts.plan_longhorn_snapshot_recovery import NAME, observe, require, terminal_ledger, validate, validate_recovery_budget
 from scripts.recover_longhorn_snapshot import Cluster, Recovery, canonical, timestamp
 
 POLICY_LABEL = 'fugue.pro/snapshot-cleanup-policy'
@@ -48,10 +50,18 @@ class PreflightInventory:
 
 
 def validate_policy(policy):
-    require(set(policy) == {'schema', 'enabled', 'namespace', 'cluster', 'longhornNamespace',
+    fields = {'schema', 'enabled', 'namespace', 'cluster', 'longhornNamespace',
                             'coordinationLease', 'minimumExtraFreeBytes', 'workingReserveBytes',
-                            'maxFoldWriteBytes', 'maxWaitSeconds', 'readyURL'}, 'invalid cleanup policy')
-    require(policy['schema'] == 'fugue.local-snapshot-cleanup/v1' and type(policy['enabled']) is bool, 'invalid cleanup policy version')
+                            'maxFoldWriteBytes', 'maxWaitSeconds', 'readyURL'}
+    if policy.get('schema') == 'fugue.local-snapshot-cleanup/v2':
+        fields |= {'recoveryBudget', 'maxOperationsPerPass', 'maxPassSeconds'}
+        validate_recovery_budget(policy['recoveryBudget'])
+        for key, low, high in [('maxOperationsPerPass', 1, 20), ('maxPassSeconds', 240, 600)]:
+            require(type(policy[key]) is int and low <= policy[key] <= high, 'invalid cleanup pass bound')
+        require(type(policy['maxWaitSeconds']) is int and policy['maxWaitSeconds'] + 180 <= policy['maxPassSeconds'],
+                'native observation window leaves no discovery headroom')
+    require(set(policy) == fields, 'invalid cleanup policy')
+    require(policy['schema'] in ('fugue.local-snapshot-cleanup/v1', 'fugue.local-snapshot-cleanup/v2') and type(policy['enabled']) is bool, 'invalid cleanup policy version')
     for key in ('namespace', 'cluster', 'longhornNamespace', 'coordinationLease'):
         require(isinstance(policy[key], str) and NAME.fullmatch(policy[key]), 'invalid cleanup policy identity')
     # Validate the shared budget/URL contracts without relaxing executor gates.
@@ -59,6 +69,8 @@ def validate_policy(policy):
              ('namespace', 'cluster', 'longhornNamespace', 'coordinationLease', 'minimumExtraFreeBytes', 'workingReserveBytes', 'maxFoldWriteBytes')},
              clusterUID='uid', primary='primary', primaryUID='uid', pvcUID='uid', volume='volume',
              volumeUID='uid', snapshot='snapshot', snapshotUID='uid', artifact='artifact', run='run')
+    if 'recoveryBudget' in policy:
+        c.update(schema='fugue.local-snapshot-review/v2', recoveryBudget=policy['recoveryBudget'])
     validate(c)
     Recovery(None, c, approval(policy, c), '/dev/null')
 
@@ -115,6 +127,8 @@ def declaration(kube, policy, platform, snapshot, rows, pod):
              ledgerNamespace=platform['namespace'], ledgerPrimary=platform['primary'], ledgerPrimaryUID=platform['primaryUID'],
              coordinationNamespace=platform['namespace'], targetType=target,
              **{k: policy[k] for k in ('minimumExtraFreeBytes', 'workingReserveBytes', 'maxFoldWriteBytes')})
+    if 'recoveryBudget' in policy:
+        c.update(schema='fugue.local-snapshot-review/v2', recoveryBudget=policy['recoveryBudget'])
     validate(c)
     return c
 
@@ -150,16 +164,28 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
         receipt = json.loads(data['receipt.json'])
         if receipt['phase'] == 'completed':
             continue
-        require(data.get('cleanup_policy_sha256') == digest, 'unfinished cleanup belongs to a different policy; review required')
+        if data.get('cleanup_policy_sha256') != digest:
+            require('cleanup_policy.json' in data, 'unfinished cleanup belongs to a different policy; review required')
+            original = json.loads(data['cleanup_policy.json'])
+            validate_policy(original)
+            require(hashlib.sha256(canonical(original).encode()).hexdigest() == data.get('cleanup_policy_sha256') and
+                    all(original[k] == policy[k] for k in ('namespace', 'cluster', 'longhornNamespace', 'coordinationLease')),
+                    'unfinished cleanup belongs to a different policy; review required')
         pending.append(record)
     require(len(pending) <= 1, 'multiple unfinished local snapshot operations; review required')
     if pending:
         record = pending[0]
+        original = json.loads(record['data']['cleanup_policy.json']) if 'cleanup_policy.json' in record['data'] else policy
+        validate_policy(original)
         c, a = json.loads(record['data']['declaration.json']), json.loads(record['data']['approval.json'])
-        require(a == approval(policy, c) and c['ledgerNamespace'] == platform['namespace'] and
+        require(a == approval(original, c) and c['ledgerNamespace'] == platform['namespace'] and
                 c['coordinationNamespace'] == platform['namespace'] and c['coordinationLease'] == policy['coordinationLease'] and
+                c['longhornNamespace'] == original['longhornNamespace'] and
+                all(c[k] == original[k] for k in ('minimumExtraFreeBytes', 'workingReserveBytes', 'maxFoldWriteBytes')) and
+                c.get('recoveryBudget') == original.get('recoveryBudget') and
                 record['metadata']['namespace'] == c['namespace'], 'durable cleanup authorization differs')
-        r = Recovery(kube, c, a, str(path) + '.operation.json', cleanup_policy_sha256=digest)
+        r = Recovery(kube, c, a, str(path) + '.operation.json', cleanup_policy_sha256=record['data']['cleanup_policy_sha256'],
+                     cleanup_policy=original if 'cleanup_policy.json' in record['data'] else None)
         require(record['metadata']['name'] == r.operation, 'durable cleanup operation identity differs')
         result.update(phase='pending-native-operation', operation=r.operation)
         save()
@@ -178,7 +204,8 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
     pods = kube.items('/api/v1/pods', labelSelector='cnpg.io/cluster')
     preflight = PreflightInventory(kube)
     ledger_cache = {}
-    # Bounded observations, at most ONE native deletion per scheduled pass.
+    ready = []
+    # Bounded observations, at most ONE native deletion per fresh discovery.
     # Sorting is deterministic; blocked candidates do not starve smaller ones.
     for snapshot in sorted(snapshots, key=lambda s: (s['metadata'].get('creationTimestamp', ''), s['metadata']['name'])):
         if snapshot['metadata'].get('deletionTimestamp') or snapshot.get('status', {}).get('markRemoved'):
@@ -222,16 +249,57 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
             result['blocked'].append(dict(snapshot=name, reason=str(error)))
             save()
             continue
-        result.update(phase='ready', selected_snapshot=name, budget=review['budget'])
+        ready.append((snapshot, c, review))
+        if 'recoveryBudget' not in policy:
+            break
+    if ready:
+        def cost(item):
+            snapshot, _, review = item
+            created = snapshot['metadata'].get('creationTimestamp', timestamp())
+            age = max(0, (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(created.replace('Z', '+00:00'))).total_seconds())
+            written = review['budget'].get('fold_write_bytes', 0)
+            # Age weighting prevents small new jobs indefinitely starving old
+            # layers, without putting a large, unsafe layer ahead of all work.
+            return (written / (1 + age / (7 * 86400)), created, snapshot['metadata']['name'])
+        snapshot, c, review = min(ready, key=cost)
+        result.update(phase='ready', selected_snapshot=snapshot['metadata']['name'], budget=review['budget'],
+                      executable_candidates=len(ready))
         save()
         if execute:
-            r = Recovery(kube, c, approval(policy, c), str(path) + '.operation.json', cleanup_policy_sha256=digest)
+            r = Recovery(kube, c, approval(policy, c), str(path) + '.operation.json', cleanup_policy_sha256=digest,
+                         cleanup_policy=policy)
             r.run()
             result.update(phase=r.state['phase'], operation=r.operation, completed=int(r.state['phase'] == 'completed'))
             save()
         return result
     result['phase'] = 'blocked' if result['blocked'] else 'idle'
     save()
+    return result
+
+
+def drain(kube, policy, evidence_path, *, execute=False):
+    """Bounded sequence; every operation gets a new, fresh discovery pass."""
+    validate_policy(policy)
+    if not execute or 'recoveryBudget' not in policy:
+        return reconcile(kube, policy, evidence_path, execute=execute)
+    started, passes = time.monotonic(), []
+    result = dict(schema=policy['schema'], observed_at=timestamp(), preview=False, phase='inspecting',
+                  completed=0, candidates=0, passes=passes)
+    path = Path(evidence_path)
+    for index in range(policy['maxOperationsPerPass']):
+        # Discovery can inspect twenty two-second samples, barriers and native
+        # observation add more work. Leave headroom inside the 15-minute job.
+        if index and time.monotonic() - started + policy['maxWaitSeconds'] + 180 >= policy['maxPassSeconds']:
+            result['yield_reason'] = 'pass time budget; continue on next scheduled reconciliation'
+            path.write_text(json.dumps(result, indent=2) + '\n')
+            break
+        path.write_text(json.dumps(result, indent=2) + '\n')
+        current = reconcile(kube, policy, str(path) + '.pass-' + str(index) + '.json', execute=True)
+        passes.append(current)
+        result.update(phase=current['phase'], completed=sum(p['completed'] for p in passes), candidates=current['candidates'])
+        path.write_text(json.dumps(result, indent=2) + '\n')
+        if current['phase'] != 'completed' or time.monotonic() - started >= policy['maxPassSeconds']:
+            break
     return result
 
 
@@ -245,7 +313,7 @@ def main():
         require(os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('GITHUB_REF') == 'refs/heads/main' and
                 re.fullmatch('[0-9]+', os.environ.get('GITHUB_RUN_ID', '')) and not os.environ.get('FUGUE_REVIEW_SSH_HOST'),
                 'apply requires the standard main CI lane')
-    result = reconcile(Cluster(), json.loads(Path(args.policy).read_text()), args.evidence, execute=args.apply)
+    result = drain(Cluster(), json.loads(Path(args.policy).read_text()), args.evidence, execute=args.apply)
     print(canonical({k: result[k] for k in ('phase', 'completed', 'candidates', 'preview')}))
 
 
