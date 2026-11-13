@@ -76,6 +76,8 @@ jobs:
         run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version-file: go.mod, cache: false}
       - name: Validate current policy and reconcile bounded retired local snapshots
         run: |
           set -euo pipefail

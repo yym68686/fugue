@@ -58,8 +58,10 @@ new admission rules.
 V1 retains its historical new-replica scheduling threshold. V2 deliberately
 does not change Longhorn's global scheduling setting. Its admission uses
 `f_bavail` (not root-reserved blocks) on verified writable ext4, with regular,
-single-link, non-shared immutable snapshot mappings. It requires available
-space for the **whole child's mapped writes**, plus working reserve, the
+single-link, non-shared immutable snapshot mappings. It supports only the
+reviewed official native image/build (exact Git commit and
+EngineImage UID/node deployment are rechecked, not a matching version suffix).
+It requires available space for the **whole child's mapped writes**, plus working reserve, the
 declared hard extra reserve and a foreground-growth reserve. The latter is the
 larger of the configured floor and twice the observed physical allocation rate
 over the configured operation window. The overlap-derived smaller allocation

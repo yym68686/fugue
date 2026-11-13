@@ -1,10 +1,29 @@
 import copy
 import unittest
-from scripts.plan_longhorn_snapshot_recovery import check_pending_snapshot_deletions, collateral_purges, fold_budget, recovery_budget, terminal_ledger, validate
+from scripts.plan_longhorn_snapshot_recovery import FOLD_COMMIT, FOLD_IMAGE, check_pending_snapshot_deletions, collateral_purges, engine_implementation, fold_budget, recovery_budget, terminal_ledger, validate
 from scripts.test_recover_longhorn_snapshot import config
 
 
 class SnapshotReviewTests(unittest.TestCase):
+    def test_native_build_is_exact_not_just_a_version_suffix(self):
+        from unittest.mock import Mock
+        item = dict(metadata=dict(name='engine-image', uid='image-uid'), spec=dict(image=FOLD_IMAGE),
+                    status=dict(state='deployed', version='v1.12.1', gitCommit=FOLD_COMMIT,
+                                nodeDeploymentMap={'storage-node': True}))
+        kube = Mock()
+        kube.items.return_value = [item]
+        kube.get.return_value = item
+        identity = engine_implementation(kube, 'storage', FOLD_IMAGE, 'storage-node')
+        self.assertEqual(engine_implementation(kube, 'storage', FOLD_IMAGE, 'storage-node', identity), identity)
+        for field, value in [('gitCommit', FOLD_COMMIT + '-custom'), ('nodeDeploymentMap', {'storage-node': False})]:
+            changed = copy.deepcopy(item)
+            changed['status'][field] = value
+            kube.items.return_value = [changed]
+            with self.assertRaises(ValueError):
+                engine_implementation(kube, 'storage', FOLD_IMAGE, 'storage-node')
+        with self.assertRaisesRegex(ValueError, 'image is not'):
+            engine_implementation(kube, 'storage', 'unreviewed/engine:v1.12.1', 'storage-node')
+
     def fixed_config(self):
         return {**config(), 'schema': 'fugue.local-snapshot-review/v2', 'maxFoldWriteBytes': 128 << 30,
                 'workingReserveBytes': 1 << 30,

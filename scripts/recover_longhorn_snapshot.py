@@ -18,7 +18,7 @@ import time
 import urllib.request
 import urllib.parse
 
-from scripts.plan_longhorn_snapshot_recovery import ReadOnlyCluster, observe, require, same, validate
+from scripts.plan_longhorn_snapshot_recovery import ReadOnlyCluster, engine_implementation, observe, require, same, validate
 
 TOKEN = 'fugue.pro/coordination-token'
 OPERATION = 'fugue.pro/snapshot-recovery'
@@ -402,6 +402,9 @@ class Recovery:
         same(replica, review['replica_name'], review['replica_uid'])
         require(replica['spec'].get('active') is True and not replica['spec'].get('failedAt') and
                 replica['status'].get('currentState') == 'running', 'native replica health changed')
+        if 'recoveryBudget' in c:
+            engine_implementation(self.kube, c['longhornNamespace'], es['currentImage'], replica['spec']['nodeID'],
+                                  expected=review.get('engine_implementation'))
         chain, purge = es.get('snapshots', {}), es.get('purgeStatus', {})
         require(purge and all(not x.get('error') for x in purge.values()), 'native purge reported an error or unknown state')
         self.native_progress = sorted([dict(progress=x.get('progress'), is_purging=x.get('isPurging'), state=x.get('state'))

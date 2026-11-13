@@ -20,6 +20,8 @@ from scripts import longhorn_snapshot_map
 
 NAME = re.compile(r'[a-z0-9][a-z0-9.-]{0,252}')
 TERMINAL = {'deleted', 'expired'}
+FOLD_IMAGE = 'docker.io/longhornio/longhorn-engine:v1.12.1'
+FOLD_COMMIT = '1fa902f0061b84b92af445c38392bfeb99faffb2'
 
 
 def require(value, message):
@@ -224,6 +226,25 @@ def same(obj, name, uid):
     require(obj['metadata']['name'] == name and obj['metadata']['uid'] == uid and not obj['metadata'].get('deletionTimestamp'), 'reviewed object identity changed')
 
 
+def engine_implementation(kube, namespace, image, node, expected=None):
+    """The allocation model applies to this reviewed native build, not a suffix."""
+    require(image == FOLD_IMAGE, 'native fold image is not the reviewed implementation')
+    if expected:
+        item = kube.get('engineimages.longhorn.io', expected['name'], namespace)
+        same(item, expected['name'], expected['uid'])
+    else:
+        items = [x for x in kube.items('/apis/longhorn.io/v1beta2/namespaces/' + namespace + '/engineimages')
+                 if x['spec'].get('image') == image]
+        require(len(items) == 1, 'native engine image identity is ambiguous')
+        item = items[0]
+    status = item['status']
+    require(not item['metadata'].get('deletionTimestamp') and item['spec']['image'] == image and
+            status.get('state') == 'deployed' and status.get('version') == 'v1.12.1' and
+            status.get('gitCommit') == FOLD_COMMIT and status.get('nodeDeploymentMap', {}).get(node) is True,
+            'native fold build or node deployment differs from the reviewed implementation')
+    return dict(name=item['metadata']['name'], uid=item['metadata']['uid'], image=image, git_commit=FOLD_COMMIT)
+
+
 def terminal_ledger(ledger, artifact, run, target_type='control-plane-db'):
     require(target_type in ('control-plane-db', 'app-database'), 'unsupported snapshot target type')
     require(any(x['id'] == artifact and x['run'] == run for x in ledger), 'exact artifact receipt is missing')
@@ -339,6 +360,7 @@ def observe(kube, config, *, lease_holder=None):
     request = dict(directory='/host' + replica['spec']['diskPath'] + '/replicas/' + replica['spec']['dataDirectoryName'], parent=config['snapshot'], child=child)
     if 'recoveryBudget' in config:
         request['growthSampleSeconds'] = config['recoveryBudget']['growthSampleSeconds']
+        implementation = engine_implementation(kube, lh, es['currentImage'], replica['spec']['nodeID'])
     source = Path(longhorn_snapshot_map.__file__).read_text()
     observation = json.loads(kube.command(['-n', lh, 'exec', '-i', manager['metadata']['name'], '-c', 'instance-manager', '--',
                                           'python3', '-c', source], json.dumps(request), limit=1 << 20))
@@ -363,6 +385,8 @@ def observe(kube, config, *, lease_holder=None):
                                               'fresh object UID/resourceVersion and full reference revalidation',
                                               'bounded native deletion, no manual replica-file changes',
                                               'database/API latency and post-purge physical free-space verification'])
+    if 'recoveryBudget' in config:
+        evidence['engine_implementation'] = implementation
     canonical = json.dumps(evidence, sort_keys=True, separators=(',', ':')).encode()
     evidence['review_sha256'] = hashlib.sha256(canonical).hexdigest()
     return evidence
