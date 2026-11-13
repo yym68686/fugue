@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -229,6 +230,22 @@ class CleanupTests(unittest.TestCase):
             gc.reconcile(self.kube, p, self.path, execute=True)
         run.assert_called_once()
         observe.assert_not_called()
+
+
+class CleanupWorkflowTests(unittest.TestCase):
+    def test_every_shared_protection_lane_queues_without_replacing_cleanup(self):
+        workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/ci.yml').read_text()
+        blocks = re.split(r'(?m)(?=^  [a-zA-Z0-9_-]+:$)', workflow)
+        cleanup = next(block for block in blocks if block.startswith('  longhorn_local_snapshot_cleanup:'))
+        group = re.search(r'concurrency: \{group: ([^,}]+)', cleanup).group(1)
+        shared = [block for block in blocks if re.search(
+            r'concurrency: \{group: ' + re.escape(group) + r'[,}]', block)]
+        self.assertGreaterEqual(len(shared), 2)
+        for block in shared:
+            with self.subTest(job=block.splitlines()[0].strip()):
+                concurrency = next(line for line in block.splitlines() if 'concurrency:' in line)
+                self.assertIn('cancel-in-progress: false', concurrency)
+                self.assertIn('queue: max', concurrency)
 
 
 if __name__ == '__main__':

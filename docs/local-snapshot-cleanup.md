@@ -72,6 +72,9 @@ prune; unknown additional folds remain blocked.
 The shared platform Lease serializes all Fugue-managed Longhorn backups and
 cleanup across volumes, which is stricter than a per-disk cleanup mutex. External
 filesystem writers are covered by the growth reserve, not implicitly paused.
+All CI lanes sharing the database-protection concurrency group also use
+`queue: max` and never cancel in-progress work: leaving one member at the
+default single pending slot can displace a queued cleanup/resumption pass.
 There is no guarantee against arbitrary unbounded concurrent growth. Admission
 and native monitoring also enforce explicit database `SELECT 1` and public API
 readiness round-trip latency limits (including exec/network overhead).
