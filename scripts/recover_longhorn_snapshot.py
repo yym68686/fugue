@@ -546,13 +546,15 @@ class Recovery:
                 require(fresh['ready_for_review'] and stable_chain(fresh) == stable_chain(review), 'capacity or immutable ancestry changed')
                 self.health()
                 self.record['data']['review.json'] = canonical(fresh)
-                self.save('delete-intent', deletion_attempted=True, native_started_at=timestamp(), before=before, budget=fresh['budget'])
-                # This is the sole destructive call. Unknown outcome is durable;
-                # no finally block releases protection after this point.
                 target = self.kube.get('snapshots.longhorn.io', c['snapshot'], c['longhornNamespace'])
                 same(target, c['snapshot'], c['snapshotUID'])
                 require(target['metadata']['resourceVersion'] == fresh['snapshot_resource_version'], 'snapshot changed after review')
                 self.own_lease()
+                # Final read-only gates can fail without issuing DELETE. Do not
+                # falsely journal an unknown delete outcome for those failures.
+                self.save('delete-intent', deletion_attempted=True, native_started_at=timestamp(), before=before, budget=fresh['budget'])
+                # This is the sole destructive call. Unknown outcome is durable;
+                # no finally block releases protection after this point.
                 self.kube.delete('/apis/longhorn.io/v1beta2/namespaces/' + c['longhornNamespace'] + '/snapshots/' + c['snapshot'], target)
                 review = fresh
             except Exception:

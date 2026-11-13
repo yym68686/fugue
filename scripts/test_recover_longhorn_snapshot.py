@@ -101,6 +101,16 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.kube.deletes, 0)
         self.assertEqual(self.kube.lease['spec']['holderIdentity'], '')
 
+    def test_final_resource_version_race_remains_a_known_predelete_abort(self):
+        self.kube.snapshot['metadata']['resourceVersion'] = '13'
+        with patch('scripts.recover_longhorn_snapshot.observe', return_value=review()):
+            with self.assertRaisesRegex(ValueError, 'snapshot changed after review'):
+                self.r.run()
+        self.assertEqual(self.kube.deletes, 0)
+        self.assertFalse(self.r.state['deletion_attempted'])
+        self.assertEqual(self.r.state['phase'], 'aborted-before-delete')
+        self.assertEqual(self.kube.lease['spec']['holderIdentity'], '')
+
     def fixed_recovery(self):
         from scripts.test_plan_longhorn_snapshot_recovery import SnapshotReviewTests
         c = SnapshotReviewTests().fixed_config()
