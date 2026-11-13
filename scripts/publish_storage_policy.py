@@ -62,8 +62,10 @@ def main():
         # New writes require BOTH current and automatic rollback readers.
         subprocess.run(['python3', '-m', 'scripts.compiler_input_storage'], check=True, timeout=90)
     if json.loads(value['data'].get('artifact-content-references.json', '{}')).get('enabled'):
-        from scripts.artifact_content_storage import check_readers
-        check_readers()
+        # This publisher is also invoked as a standalone script. Its sys.path
+        # starts at scripts/, not the repository; run the gate as a module just
+        # like the separated-input gate rather than importing scripts inline.
+        subprocess.run(['python3', '-m', 'scripts.artifact_content_storage'], check=True, timeout=90)
     body = json.dumps(value)
     command = ["kubectl", "apply", "--server-side", "--field-manager=fugue-storage-policy", "-f", "-"]
     if not args.apply:

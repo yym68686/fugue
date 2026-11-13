@@ -1,10 +1,43 @@
 import copy
+import builtins
 import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
 import unittest
+from unittest.mock import patch
 from scripts.publish_storage_policy import manifest
 
 
 class StoragePolicyTest(unittest.TestCase):
+    def test_standalone_publisher_gates_before_dry_run_or_apply(self):
+        document = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60},
+                    "compilerInputSeparated": {"version": 1, "enabled": True},
+                    "artifactContentReferences": {"version": 1, "enabled": True}}
+        script = Path(__file__).resolve().with_name('publish_storage_policy.py')
+        real_import = builtins.__import__
+        def standalone_import(name, *args, **kwargs):
+            if name == 'scripts.artifact_content_storage':
+                raise ModuleNotFoundError("No module named 'scripts'")
+            return real_import(name, *args, **kwargs)
+        for apply in (False, True):
+            argv = [str(script), 'policy.json'] + (['--apply'] if apply else [])
+            with patch.object(sys, 'argv', argv), patch.object(Path, 'read_text', return_value=json.dumps(document)), patch('subprocess.run') as run, patch('builtins.__import__', side_effect=standalone_import):
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual([call.args[0] for call in run.call_args_list[:2]], [
+                ['python3', '-m', 'scripts.compiler_input_storage'],
+                ['python3', '-m', 'scripts.artifact_content_storage']])
+            self.assertEqual(run.call_args_list[1].kwargs, {'check': True, 'timeout': 90})
+            command = run.call_args_list[2].args[0]
+            self.assertEqual(command[0:2], ['kubectl', 'apply'])
+            self.assertEqual('--dry-run=server' in command, not apply)
+            # Refusal of the compatibility gate must prevent ANY kubectl call.
+            with patch.object(sys, 'argv', argv), patch.object(Path, 'read_text', return_value=json.dumps(document)), patch('subprocess.run', side_effect=[None, subprocess.CalledProcessError(1, ['reader-gate'])]) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    runpy.run_path(str(script), run_name='__main__')
+                self.assertEqual(run.call_count, 2)
+
     def test_block_profile_is_bounded_and_does_not_change_read_format(self):
         base = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60}}
         base['compilerInputBlocks'] = {'version': 1, 'minimum_bytes': 256, 'boundary_bits': 4}
