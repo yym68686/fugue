@@ -1042,11 +1042,6 @@ jobs:
           version: v4.2.0
       - name: Download Go modules before the bounded test budget
         run: go mod download
-      - name: Install the bounded readonly executor test dependency
-        run: |
-          python3 -m venv "$RUNNER_TEMP/input-readonly-python"
-          "$RUNNER_TEMP/input-readonly-python/bin/python" -m pip install -r scripts/requirements-input-readonly.txt
-          echo "INPUT_READONLY_PYTHON=$RUNNER_TEMP/input-readonly-python/bin/python" >> "$GITHUB_ENV"
       - name: Run the repository prepush contract
         env:
           PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}

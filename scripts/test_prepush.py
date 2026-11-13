@@ -60,6 +60,8 @@ class CanonicalReceiptTest(unittest.TestCase):
                 self.assertFalse((root / ("scripts/compiler_input_" + name + ".py")).exists())
         self.assertIn("-m scripts.compiler_input_storage --operation", workflow)
         self.assertIn("-m scripts.compiler_input_archive --operation", workflow)
+        self.assertNotIn("requirements-input-readonly", workflow)
+        self.assertNotIn("INPUT_READONLY_PYTHON", workflow)
 
     def test_nested_modules_use_their_own_go_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
