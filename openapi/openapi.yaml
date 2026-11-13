@@ -21520,6 +21520,8 @@ components:
       additionalProperties: false
       required: [schema, captured_at, hostname, traffic_class, scope, policy, current_edge_id, last_switch_at, candidates, observations, blockers]
       properties:
+        historical_evidence:
+          $ref: '#/components/schemas/PhysicalEdgeQualityHistory'
         previous_selection:
           $ref: '#/components/schemas/DNSPhysicalSelection'
         service_receipts:
@@ -21616,6 +21618,8 @@ components:
       additionalProperties: false
       required: [mode, dns_unchanged, promotion_ready, hypothesis, proposed_edge_id, probe_edge_ids, probe_executed, sustained_buckets, candidates, rejected_records, blockers]
       properties:
+        history:
+          $ref: '#/components/schemas/PhysicalEdgeQualityHistoryUse'
         quality_state: {type: string, enum: [learning, measured, retained]}
         quality_observed_at: {type: string, format: date-time}
         comparisons:
@@ -21642,6 +21646,34 @@ components:
         blockers:
           type: array
           items: {type: string}
+    PhysicalEdgeQualityHistory:
+      type: object
+      additionalProperties: false
+      required: [source_artifact_id, input_digest, selection, receipt]
+      description: Original verified compiler-input evidence. Replayed at its original clock and under its original policy, never converted into new V7 probe rounds. Nested historical evidence is forbidden. Current admission and route/TLS proofs remain mandatory.
+      properties:
+        source_artifact_id: {type: string}
+        input_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        selection: {$ref: '#/components/schemas/DNSPhysicalSelection'}
+        receipt:
+          type: string
+          format: byte
+          description: Base64 of the complete original JSON receipt. Preserves byte-order-sensitive legacy embedded DNS evidence across JSON export/import without changing its digest.
+    PhysicalEdgeQualityHistoryUse:
+      type: object
+      additionalProperties: false
+      required: [source_artifact_id, input_digest, evidence_digest, policy_version, observed_at, age_seconds, reason, original_order, reused_order]
+      description: Auditable historical ranking fallback, not fresh client measurement or serving authorization. Fresh comparable evidence takes precedence; lack of new evidence alone does not erase this order.
+      properties:
+        source_artifact_id: {type: string}
+        input_digest: {type: string}
+        evidence_digest: {type: string}
+        policy_version: {type: string}
+        observed_at: {type: string, format: date-time}
+        age_seconds: {type: integer, format: int64, minimum: 0}
+        reason: {type: string}
+        original_order: {type: array, items: {type: string}}
+        reused_order: {type: array, items: {type: string}}
     PhysicalEdgeQualityComparison:
       type: object
       additionalProperties: false
@@ -22929,7 +22961,9 @@ components:
       required: [version, primary_edge_id, ordered_edge_ids, evidence_digest, dns_receipt_id, loaded_digest, policy_digest, scope, captured_at]
       description: Immutable physical-edge order compiled from verified evidence. The historical physical-edge-network-v1 version never explores. Explicit physical-edge-business-v1 may execute only its embedded signed allocation until that allocation expires; it then preserves the declared baseline order. Both versions filter by current route/TLS readiness without legacy ranking. Allocation expiry does not invalidate a positive serving artifact.
       properties:
-        quality_state: {type: string, enum: [learning, measured, retained], description: 'Measured uses comparable fresh client evidence in V7; retained preserves the prior verified order and original quality_observed_at within explicit policy bounds; learning claims no quality winner.'}
+        history:
+          $ref: '#/components/schemas/PhysicalEdgeQualityHistoryUse'
+        quality_state: {type: string, enum: [learning, measured, retained], description: 'Measured uses comparable fresh client evidence in V7. Retained with history replays original verified evidence without extending its clock; lack of new measurements alone does not erase it. Without history the explicit retain_order_seconds bound still applies. Learning claims no quality winner. Current serving gates always apply.'}
         quality_observed_at: {type: string, format: date-time, description: Original comparable quality evidence time. Retained orders never renew it.}
         version: {type: string, enum: [physical-edge-network-v1, physical-edge-business-v1]}
         business_allocation: {$ref: '#/components/schemas/DNSBusinessAllocation'}

@@ -102,6 +102,9 @@ func evaluateServiceConsensus(snapshot Snapshot) (result Result, err error) {
 		Blockers: append([]string{"shadow_only_not_serving_authority"}, snapshot.Blockers...)}
 	if snapshot.Policy.Version == PairedContinuityPolicyVersion {
 		defer func() {
+			if result.History != nil {
+				return
+			}
 			var oldest *time.Time
 			for _, receipt := range snapshot.ServiceReceipts {
 				if receipt.Result.QualityState != "measured" || receipt.Result.QualityObservedAt == nil {
@@ -159,6 +162,9 @@ func evaluateServiceConsensus(snapshot Snapshot) (result Result, err error) {
 		if candidate.EdgeID == snapshot.CurrentEdgeID {
 			currentGated = len(candidate.HardGates) > 0
 		}
+	}
+	if applyServiceHistory(snapshot, &result) {
+		return result, nil
 	}
 	for _, candidate := range result.Candidates {
 		if !candidate.Ready || candidate.EdgeID == snapshot.CurrentEdgeID {

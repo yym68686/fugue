@@ -56,19 +56,44 @@ func CloneDNSPhysicalOrder(order *DNSPhysicalOrder) *DNSPhysicalOrder {
 }
 
 type DNSPhysicalSelection struct {
-	QualityObservedAt  *time.Time             `json:"quality_observed_at,omitempty"`
-	BusinessAllocation *DNSBusinessAllocation `json:"business_allocation,omitempty"`
-	QualityState       string                 `json:"quality_state,omitempty"`
-	Version            string                 `json:"version"`
-	PrimaryEdgeID      string                 `json:"primary_edge_id"`
-	OrderedEdgeIDs     []string               `json:"ordered_edge_ids"`
-	EvidenceDigest     string                 `json:"evidence_digest"`
-	DNSReceiptID       string                 `json:"dns_receipt_id"`
-	LoadedDigest       string                 `json:"loaded_digest"`
-	PolicyDigest       string                 `json:"policy_digest"`
-	Scope              string                 `json:"scope"`
-	CapturedAt         time.Time              `json:"captured_at"`
-	PrimarySince       *time.Time             `json:"primary_since,omitempty"`
+	History            *PhysicalQualityHistoryUse `json:"history,omitempty"`
+	QualityObservedAt  *time.Time                 `json:"quality_observed_at,omitempty"`
+	BusinessAllocation *DNSBusinessAllocation     `json:"business_allocation,omitempty"`
+	QualityState       string                     `json:"quality_state,omitempty"`
+	Version            string                     `json:"version"`
+	PrimaryEdgeID      string                     `json:"primary_edge_id"`
+	OrderedEdgeIDs     []string                   `json:"ordered_edge_ids"`
+	EvidenceDigest     string                     `json:"evidence_digest"`
+	DNSReceiptID       string                     `json:"dns_receipt_id"`
+	LoadedDigest       string                     `json:"loaded_digest"`
+	PolicyDigest       string                     `json:"policy_digest"`
+	Scope              string                     `json:"scope"`
+	CapturedAt         time.Time                  `json:"captured_at"`
+	PrimarySince       *time.Time                 `json:"primary_since,omitempty"`
+}
+
+// PhysicalQualityHistoryUse describes provenance, not renewed measurement or
+// admission. Its clock always belongs to the original evidence.
+type PhysicalQualityHistoryUse struct {
+	SourceArtifactID string    `json:"source_artifact_id"`
+	InputDigest      string    `json:"input_digest"`
+	EvidenceDigest   string    `json:"evidence_digest"`
+	PolicyVersion    string    `json:"policy_version"`
+	ObservedAt       time.Time `json:"observed_at"`
+	AgeSeconds       int64     `json:"age_seconds"`
+	Reason           string    `json:"reason"`
+	OriginalOrder    []string  `json:"original_order"`
+	ReusedOrder      []string  `json:"reused_order"`
+}
+
+func ClonePhysicalQualityHistoryUse(history *PhysicalQualityHistoryUse) *PhysicalQualityHistoryUse {
+	if history == nil {
+		return nil
+	}
+	cloned := *history
+	cloned.OriginalOrder = append([]string(nil), history.OriginalOrder...)
+	cloned.ReusedOrder = append([]string(nil), history.ReusedOrder...)
+	return &cloned
 }
 
 func ValidateDNSPhysicalSelection(selection *DNSPhysicalSelection) error {
@@ -96,6 +121,18 @@ func ValidateDNSPhysicalSelection(selection *DNSPhysicalSelection) error {
 	}
 	if selection.QualityState != "" && selection.QualityState != "learning" && selection.QualityState != "measured" && selection.QualityState != "retained" {
 		return errors.New("invalid physical-edge quality state")
+	}
+	if h := selection.History; h != nil {
+		if selection.QualityState != "retained" || selection.QualityObservedAt == nil || !selection.QualityObservedAt.Equal(h.ObservedAt) || h.SourceArtifactID == "" ||
+			len(h.InputDigest) != 71 || len(h.EvidenceDigest) != 71 || h.PolicyVersion == "" || h.AgeSeconds < 0 || h.Reason == "" || len(h.OriginalOrder) == 0 ||
+			len(h.ReusedOrder) != len(selection.OrderedEdgeIDs) {
+			return errors.New("invalid historical quality provenance")
+		}
+		for i, id := range h.ReusedOrder {
+			if id != selection.OrderedEdgeIDs[i] {
+				return errors.New("historical quality order differs from selection")
+			}
+		}
 	}
 	if selection.QualityState == "retained" && selection.QualityObservedAt == nil || selection.QualityObservedAt != nil && (selection.QualityObservedAt.IsZero() || selection.QualityObservedAt.After(selection.CapturedAt)) {
 		return errors.New("invalid original quality observation time")
@@ -134,6 +171,7 @@ func CloneDNSPhysicalSelection(selection *DNSPhysicalSelection) *DNSPhysicalSele
 		return nil
 	}
 	cloned := *selection
+	cloned.History = ClonePhysicalQualityHistoryUse(selection.History)
 	if selection.QualityObservedAt != nil {
 		at := *selection.QualityObservedAt
 		cloned.QualityObservedAt = &at

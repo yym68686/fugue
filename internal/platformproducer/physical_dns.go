@@ -77,6 +77,7 @@ func validatePhysicalDNSUpdate(previous, next Policy, static, oldDNS, newDNS mod
 				}
 			}
 			oldPolicy.DNSQueryPolicy.PhysicalRoutes = nil
+			newPolicy.DNSQueryPolicy.PhysicalRoutes = nil
 		}
 		oldPolicy.DNSQueryPolicy.DynamicQuality, newPolicy.DNSQueryPolicy.DynamicQuality = nil, nil
 		oldPolicy.Generation, newPolicy.Generation = "", ""

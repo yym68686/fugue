@@ -36,6 +36,10 @@ const PhysicalNetworkBoundedCapabilityV3 = "physical_network_bounded_v3"
 const PhysicalNetworkDeliveryCapabilityV4 = "physical_network_delivery_v4"
 const PhysicalNetworkFailureAwareCapabilityV5 = "physical_network_failure_aware_v5"
 const PhysicalComparableDeliveryCapabilityV6 = "physical_network_comparable_delivery_v6"
+
+// V7 readers understand paired continuity and historical ranking provenance.
+// Advertising V6 alone is not sufficient to decode a V7 signed child.
+const PhysicalPairedContinuityCapabilityV7 = "physical_network_paired_continuity_v7"
 const PhysicalDynamicQualityCapabilityV1 = "physical_dynamic_quality_v1"
 const PhysicalOrderCapabilityV1 = "physical_order_v1"
 const PhysicalOrderProjectionCapabilityV1 = "physical_order_projection_v1"

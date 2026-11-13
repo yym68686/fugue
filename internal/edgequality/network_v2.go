@@ -162,6 +162,7 @@ func evaluateNetwork(snapshot Snapshot) Result {
 	}
 	if snapshot.Policy.Version == PairedContinuityPolicyVersion {
 		classifyContinuityQuality(snapshot, &result)
+		applyHistoricalContinuity(snapshot, &result)
 	}
 	return result
 }

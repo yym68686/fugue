@@ -170,6 +170,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if comparableDeliveryRequired && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalComparableDeliveryCapabilityV6) {
 					return fail("required consumer lacks physical comparable delivery v6 capability")
 				}
+				if required.pairedContinuity && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalPairedContinuityCapabilityV7) {
+					return fail("required consumer lacks physical paired continuity v7 capability")
+				}
 				if required.business && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.BusinessEdgeExplorationCapabilityV1) {
 					return fail("required consumer lacks business edge exploration v1 capability")
 				}
@@ -226,7 +229,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	return nil
 }
 
-type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, order, projection, business, businessDNSBaseline, businessUnified, availability, redundantAvailability, retainedRoutes, staticEdge, staticEdgePolicy bool }
+type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, pairedContinuity, order, projection, business, businessDNSBaseline, businessUnified, availability, redundantAvailability, retainedRoutes, staticEdge, staticEdgePolicy bool }
 
 func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapabilities, error) {
 	var out physicalCapabilities
@@ -267,6 +270,7 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 			out.delivery = true
 			out.failureAware = query.DynamicQuality.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion
 			out.comparableDelivery = query.DynamicQuality.Policy.Version == model.PhysicalComparableDeliveryPolicyVersion
+			out.pairedContinuity = query.DynamicQuality.Policy.Version == model.PhysicalPairedContinuityPolicyVersion
 		}
 		for _, route := range query.PhysicalRoutes {
 			out.business = out.business || route.BusinessExploration != nil
@@ -280,6 +284,7 @@ func physicalCapabilitiesRequired(artifact model.PlatformArtifact) (physicalCapa
 			out.delivery = out.delivery || model.IsDeliveryPhysicalNetworkPolicy(route.Policy.Version)
 			out.failureAware = out.failureAware || route.Policy.Version == model.PhysicalFailureAwareNetworkPolicyVersion
 			out.comparableDelivery = out.comparableDelivery || route.Policy.Version == model.PhysicalComparableDeliveryPolicyVersion
+			out.pairedContinuity = out.pairedContinuity || route.Policy.Version == model.PhysicalPairedContinuityPolicyVersion
 		}
 	}
 	for _, rule := range payload.Policy.Rules {

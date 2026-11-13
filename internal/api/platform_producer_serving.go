@@ -68,7 +68,8 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 				state.full.RollbackTargetGeneration == state.lkg.Generation &&
 				state.full.PinnedRollbackGeneration == state.lkg.Generation &&
 				state.fullArtifact.Metadata[platformproducer.PolicyReleaseMetadata] != "" &&
-				state.fullArtifact.Metadata[platformproducer.PolicyReleaseMetadata] != authority.ID {
+				state.fullArtifact.Metadata[platformproducer.PolicyReleaseMetadata] != authority.ID &&
+				!s.validateReleaseSetConvergence(ctx, state.fullArtifact).Pass {
 				return false, nil
 			}
 			if _, err := s.preparePlatformReleaseSetConsumers(ctx, principal, state.fullArtifact, state.full); err != nil {

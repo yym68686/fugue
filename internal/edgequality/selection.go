@@ -51,12 +51,13 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 		}
 	}
 	learning := false
+	historical := result.History != nil && result.ProposedEdgeID == result.History.ReusedOrder[0]
 	if IsDeliveryNetworkPolicy(snapshot.Policy.Version) && result.Hypothesis == "hold" && result.ProposedEdgeID == snapshot.CurrentEdgeID && primary != nil && !primary.Ready && len(primary.HardGates) == 0 {
 		for _, candidate := range snapshot.Candidates {
 			learning = learning || candidate.EdgeID == primary.EdgeID && proofFresh(candidate, snapshot.Policy, now)
 		}
 	}
-	if primary == nil || !primary.Ready && !learning || len(primary.HardGates) != 0 {
+	if primary == nil || !primary.Ready && !learning && !historical || len(primary.HardGates) != 0 {
 		return nil, errors.New("physical selection primary lacks complete network evidence")
 	}
 	if result.Hypothesis != "hold" && result.Hypothesis != "switch" && result.Hypothesis != "failover" {
@@ -73,6 +74,7 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 	}
 	if snapshot.Policy.Version == PairedContinuityPolicyVersion {
 		selection.QualityState, selection.QualityObservedAt = result.QualityState, result.QualityObservedAt
+		selection.History = model.ClonePhysicalQualityHistoryUse(result.History)
 	}
 	primarySince := snapshot.CapturedAt
 	if primary.EdgeID == snapshot.CurrentEdgeID && snapshot.LastSwitchAt != nil {
@@ -121,6 +123,23 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 		}
 		sort.Strings(ids)
 		selection.OrderedEdgeIDs = append(order, ids...)
+	}
+	if historical {
+		// Recheck at publication time, not just at capture time. Historical
+		// ranking never extends a current route lease or admission grant.
+		order := []string{}
+		for _, id := range result.History.ReusedOrder {
+			for _, candidate := range snapshot.Candidates {
+				if candidate.EdgeID == id && len(candidate.HardGates) == 0 && candidate.ServingBlockedReason == "" && proofFresh(candidate, snapshot.Policy, now) {
+					order = append(order, id)
+				}
+			}
+		}
+		if len(order) == 0 || order[0] != selection.PrimaryEdgeID {
+			return nil, errors.New("historical primary lacks current route proof")
+		}
+		selection.OrderedEdgeIDs = order
+		selection.History.ReusedOrder = append([]string(nil), order...)
 	}
 	if err := model.ValidateDNSPhysicalSelection(selection); err != nil {
 		return nil, err

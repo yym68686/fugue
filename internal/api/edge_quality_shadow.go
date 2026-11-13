@@ -194,6 +194,7 @@ func (s *Server) capturePhysicalQualityPathForDNS(ctx context.Context, hostname,
 			if err := bindPhysicalQualityDNS(&snapshot, decisions.Snapshot.Receipts[0]); err != nil {
 				snapshot.Blockers = append(snapshot.Blockers, "actual_dns_evidence_unbound")
 			}
+			s.bindHistoricalQualityEvidence(ctx, &snapshot, dnsNodeID)
 		}
 	}
 	return edgequality.Capture(snapshot)

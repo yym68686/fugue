@@ -66,6 +66,7 @@ type Observation struct {
 }
 
 type Snapshot struct {
+	HistoricalEvidence  *HistoricalEvidence           `json:"historical_evidence,omitempty"`
 	PreviousSelection   *model.DNSPhysicalSelection   `json:"previous_selection,omitempty"`
 	PathPrefix          string                        `json:"path_prefix,omitempty"`
 	ServiceReceipts     []Receipt                     `json:"service_receipts,omitempty"`
@@ -111,20 +112,21 @@ type Assessment struct {
 }
 
 type Result struct {
-	QualityState      string              `json:"quality_state,omitempty"`
-	QualityObservedAt *time.Time          `json:"quality_observed_at,omitempty"`
-	Comparisons       []NetworkComparison `json:"comparisons,omitempty"`
-	Mode              string              `json:"mode"`
-	DNSUnchanged      bool                `json:"dns_unchanged"`
-	PromotionReady    bool                `json:"promotion_ready"`
-	Hypothesis        string              `json:"hypothesis"`
-	ProposedEdgeID    string              `json:"proposed_edge_id"`
-	ProbeEdgeIDs      []string            `json:"probe_edge_ids"`
-	ProbeExecuted     bool                `json:"probe_executed"`
-	SustainedBuckets  int                 `json:"sustained_buckets"`
-	Candidates        []Assessment        `json:"candidates"`
-	RejectedRecords   map[string]int      `json:"rejected_records"`
-	Blockers          []string            `json:"blockers"`
+	History           *model.PhysicalQualityHistoryUse `json:"history,omitempty"`
+	QualityState      string                           `json:"quality_state,omitempty"`
+	QualityObservedAt *time.Time                       `json:"quality_observed_at,omitempty"`
+	Comparisons       []NetworkComparison              `json:"comparisons,omitempty"`
+	Mode              string                           `json:"mode"`
+	DNSUnchanged      bool                             `json:"dns_unchanged"`
+	PromotionReady    bool                             `json:"promotion_ready"`
+	Hypothesis        string                           `json:"hypothesis"`
+	ProposedEdgeID    string                           `json:"proposed_edge_id"`
+	ProbeEdgeIDs      []string                         `json:"probe_edge_ids"`
+	ProbeExecuted     bool                             `json:"probe_executed"`
+	SustainedBuckets  int                              `json:"sustained_buckets"`
+	Candidates        []Assessment                     `json:"candidates"`
+	RejectedRecords   map[string]int                   `json:"rejected_records"`
+	Blockers          []string                         `json:"blockers"`
 }
 
 type Receipt struct {
@@ -138,6 +140,11 @@ func Capture(snapshot Snapshot) (Receipt, error) {
 	result, err := Evaluate(snapshot)
 	if err != nil {
 		return Receipt{}, err
+	}
+	// Fresh comparable evidence supersedes optional history. Do not retain an
+	// unused history chain inside the next generation's original evidence.
+	if result.QualityState == "measured" {
+		snapshot.HistoricalEvidence = nil
 	}
 	receipt := Receipt{Snapshot: snapshot, Result: result}
 	if len(snapshot.ActualDNSReceipt) > 0 {
@@ -213,6 +220,9 @@ func receiptDigest(receipt Receipt) (string, error) {
 }
 
 func Evaluate(snapshot Snapshot) (Result, error) {
+	if err := ValidateHistoricalEvidence(snapshot); err != nil {
+		return Result{}, err
+	}
 	if len(snapshot.ServiceReceipts) > 0 {
 		return evaluateServiceConsensus(snapshot)
 	}
