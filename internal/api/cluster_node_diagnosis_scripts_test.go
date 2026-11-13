@@ -45,7 +45,7 @@ func TestClusterNodeHotPathsScriptPreservesCollectionFailure(t *testing.T) {
 }
 
 func TestClusterNodeJournalScriptIncludesImageGCFailures(t *testing.T) {
-	// This fixture launches a shell pipeline with a ten-second process budget.
+	// This fixture launches a shell pipeline with a bounded process budget.
 	// Run before the package's parallel integration fixtures: CPU/process-start
 	// contention must not turn successful journal output into a timeout.
 	output, err := runNodeDiagnosisScriptFixture(t, clusterNodeDiagnosisJournalScript, map[string]string{
@@ -94,7 +94,9 @@ func runNodeDiagnosisScriptFixture(t *testing.T, script string, programs map[str
 			t.Fatal(err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// This is a fixture process/startup deadline, not the production collection
+	// timeout. Loaded development hosts can spend >10s starting its shell tools.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bash, "-c", script)
 	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
