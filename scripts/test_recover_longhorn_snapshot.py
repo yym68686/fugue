@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.recover_longhorn_snapshot import Cluster, Recovery, TOKEN, admission_probes, barrier_objects, canonical
+from scripts.recover_longhorn_snapshot import CapacityBlocked, Cluster, Recovery, TOKEN, admission_probes, barrier_objects, canonical
 
 
 def config():
@@ -100,6 +100,20 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.kube.objects, {})
         self.assertEqual(self.kube.deletes, 0)
         self.assertEqual(self.kube.lease['spec']['holderIdentity'], '')
+
+    def test_fresh_capacity_block_keeps_exact_budget_without_creating_intent(self):
+        blocked = {**review(), 'ready_for_review': False, 'budget': dict(remaining_budget_bytes=-1)}
+        for after_fencing in [False, True]:
+            with self.subTest(after_fencing=after_fencing):
+                samples = [review(), blocked] if after_fencing else [blocked]
+                with patch('scripts.recover_longhorn_snapshot.observe', side_effect=samples):
+                    with self.assertRaises(CapacityBlocked) as caught:
+                        self.r.run()
+                self.assertEqual(caught.exception.budget, blocked['budget'])
+                self.assertEqual(caught.exception.stage, 'fenced' if after_fencing else 'preflight')
+                self.assertEqual(self.kube.deletes, 0)
+                self.assertFalse(self.r.state['deletion_attempted'])
+                self.assertEqual(self.kube.lease['spec']['holderIdentity'], '')
 
     def test_final_resource_version_race_remains_a_known_predelete_abort(self):
         self.kube.snapshot['metadata']['resourceVersion'] = '13'

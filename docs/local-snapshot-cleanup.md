@@ -104,6 +104,11 @@ the summary and per-operation evidence even on failure; an incomplete native
 operation with an error fails the job; a healthy `native-running` operation is
 not falsely marked failed. Blocked candidates retry on later passes. Snapshot
 size sums are never reported as guaranteed reclaimable bytes.
+If the executor's fresh capacity sample denies admission after discovery, the
+pass records `blocked` with that exact budget and sampling stage, not the stale
+successful preflight. A fenced denial first unwinds only its known pre-delete
+protection; native errors still fail, preserve partial-pass evidence and never
+automatically unlock an issued/ambiguous DELETE.
 
 Read-only preview (SSH, when used, remains observation-only):
 

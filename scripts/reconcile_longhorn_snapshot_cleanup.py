@@ -16,7 +16,7 @@ import re
 import time
 
 from scripts.plan_longhorn_snapshot_recovery import NAME, observe, require, terminal_ledger, validate, validate_recovery_budget
-from scripts.recover_longhorn_snapshot import Cluster, Recovery, canonical, timestamp
+from scripts.recover_longhorn_snapshot import CapacityBlocked, Cluster, Recovery, canonical, timestamp
 
 POLICY_LABEL = 'fugue.pro/snapshot-cleanup-policy'
 
@@ -143,6 +143,19 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
     def save():
         path.write_text(json.dumps(result, indent=2) + '\n')
 
+    def execute_recovery(recovery):
+        try:
+            recovery.run()
+        except CapacityBlocked as error:
+            # Only pre-DELETE capacity denials use this type. Native errors and
+            # ambiguous outcomes must still fail with protection intact.
+            result.update(phase='blocked', completed=0)
+            result['blocked'].append(dict(snapshot=recovery.config['snapshot'], reason=str(error),
+                                          admission_stage=error.stage, budget=error.budget))
+        else:
+            result.update(phase=recovery.state['phase'], completed=int(recovery.state['phase'] == 'completed'))
+        save()
+
     save()
     if not policy['enabled']:
         pending = [r for r in kube.items('/api/v1/configmaps', labelSelector=POLICY_LABEL)
@@ -190,9 +203,7 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
         result.update(phase='pending-native-operation', operation=r.operation)
         save()
         if execute:
-            r.run()
-            result.update(phase=r.state['phase'], completed=int(r.state['phase'] == 'completed'))
-            save()
+            execute_recovery(r)
         return result
     lease = kube.get('leases.coordination.k8s.io', policy['coordinationLease'], policy['namespace'])
     if lease['spec'].get('holderIdentity'):
@@ -268,9 +279,8 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
         if execute:
             r = Recovery(kube, c, approval(policy, c), str(path) + '.operation.json', cleanup_policy_sha256=digest,
                          cleanup_policy=policy)
-            r.run()
-            result.update(phase=r.state['phase'], operation=r.operation, completed=int(r.state['phase'] == 'completed'))
-            save()
+            result['operation'] = r.operation
+            execute_recovery(r)
         return result
     result['phase'] = 'blocked' if result['blocked'] else 'idle'
     save()
@@ -294,7 +304,21 @@ def drain(kube, policy, evidence_path, *, execute=False):
             path.write_text(json.dumps(result, indent=2) + '\n')
             break
         path.write_text(json.dumps(result, indent=2) + '\n')
-        current = reconcile(kube, policy, str(path) + '.pass-' + str(index) + '.json', execute=True)
+        pass_path = Path(str(path) + '.pass-' + str(index) + '.json')
+        try:
+            current = reconcile(kube, policy, str(pass_path), execute=True)
+        except Exception as error:
+            # Do not leave the aggregate falsely at "inspecting" when an
+            # executor fails. Preserve the last partial pass and re-raise.
+            try:
+                partial = json.loads(pass_path.read_text())
+            except (OSError, ValueError):
+                partial = None
+            if partial is not None:
+                passes.append(partial)
+            result.update(phase='failed', error=dict(type=type(error).__name__, message=str(error)))
+            path.write_text(json.dumps(result, indent=2) + '\n')
+            raise
         passes.append(current)
         result.update(phase=current['phase'], completed=sum(p['completed'] for p in passes), candidates=current['candidates'])
         path.write_text(json.dumps(result, indent=2) + '\n')

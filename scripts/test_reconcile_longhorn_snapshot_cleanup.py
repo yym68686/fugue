@@ -103,6 +103,34 @@ class CleanupTests(unittest.TestCase):
             executor.return_value.run.assert_called_once()
             self.assertIn('cleanup_policy_sha256', executor.call_args.kwargs)
 
+    def test_executor_capacity_resample_is_blocked_with_fresh_evidence(self):
+        budget = dict(capacity_gate_passed=False, remaining_budget_bytes=-1)
+        with patch.object(gc, 'observe', return_value=review()), \
+             patch.object(gc.Recovery, 'run', side_effect=gc.CapacityBlocked(budget, 'preflight')):
+            result = gc.drain(self.kube, fixed_policy(), self.path, execute=True)
+        self.assertEqual(result['phase'], 'blocked')
+        self.assertEqual(result['completed'], 0)
+        failure = result['passes'][0]['blocked'][-1]
+        self.assertEqual(failure['snapshot'], 'old-point')
+        self.assertEqual(failure['budget'], budget)
+        self.assertEqual(failure['admission_stage'], 'preflight')
+        self.assertIn('retry', failure['reason'])
+        self.assertEqual(json.loads(self.path.read_text()), result)
+
+    def test_unexpected_native_error_fails_and_preserves_partial_pass_evidence(self):
+        def reconcile(kube, policy, path, **kwargs):
+            partial = dict(phase='ready', selected_snapshot='old-point', completed=0, candidates=2)
+            Path(path).write_text(json.dumps(partial))
+            raise ValueError('native purge error; protection retained')
+        with patch.object(gc, 'reconcile', side_effect=reconcile):
+            with self.assertRaisesRegex(ValueError, 'native purge error'):
+                gc.drain(self.kube, fixed_policy(), self.path, execute=True)
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(saved['phase'], 'failed')
+        self.assertEqual(saved['completed'], 0)
+        self.assertEqual(saved['passes'][0]['selected_snapshot'], 'old-point')
+        self.assertIn('native purge error', saved['error']['message'])
+
     def test_restart_resumes_intent_even_after_snapshot_is_gone(self):
         p, c = policy(), config()
         c.update(ledgerNamespace='platform', ledgerPrimary='db-1', ledgerPrimaryUID='pod-uid',

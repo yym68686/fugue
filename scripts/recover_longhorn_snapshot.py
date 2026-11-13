@@ -32,6 +32,13 @@ def timestamp():
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')
 
 
+class CapacityBlocked(ValueError):
+    """A fresh admission denial, only raised before any native DELETE intent."""
+    def __init__(self, budget, stage):
+        super().__init__('working-space gate failed; retry with a fresh observation; no deletion permitted')
+        self.budget, self.stage = dict(budget), stage
+
+
 class Cluster(ReadOnlyCluster):
     def write(self, args, body):
         require(not os.environ.get('FUGUE_REVIEW_SSH_HOST'), 'maintenance writes cannot run through SSH')
@@ -519,7 +526,8 @@ class Recovery:
                         self.resume_native_finalizer(review)
         if not existing or retry_aborted:
             review = observe(self.kube, c)
-            require(review['ready_for_review'], 'working-space gate failed; no deletion permitted')
+            if not review['ready_for_review']:
+                raise CapacityBlocked(review['budget'], 'preflight')
             before = self.health()
             lease = self.lease()
             require(not lease['spec'].get('holderIdentity'), 'coordination Lease is occupied')
@@ -547,7 +555,9 @@ class Recovery:
                 self.own_lease()
                 self.install_barriers(review)
                 fresh = observe(self.kube, c, lease_holder=self.holder)
-                require(fresh['ready_for_review'] and stable_chain(fresh) == stable_chain(review), 'capacity or immutable ancestry changed')
+                if not fresh['ready_for_review']:
+                    raise CapacityBlocked(fresh['budget'], 'fenced')
+                require(stable_chain(fresh) == stable_chain(review), 'immutable ancestry changed')
                 self.health()
                 self.record['data']['review.json'] = canonical(fresh)
                 target = self.kube.get('snapshots.longhorn.io', c['snapshot'], c['longhornNamespace'])
