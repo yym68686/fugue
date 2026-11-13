@@ -84,7 +84,9 @@ jobs:
           git fetch origin main
           git diff --exit-code HEAD origin/main -- deploy/environments/production/local-snapshot-cleanup scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py scripts/longhorn_snapshot_map.py tests/snapshot-native-fold .github/workflows/ci.yml
           python3 -m unittest scripts.test_reconcile_longhorn_snapshot_cleanup scripts.test_recover_longhorn_snapshot scripts.test_plan_longhorn_snapshot_recovery scripts.test_longhorn_snapshot_map
-          go -C tests/snapshot-native-fold test -count=1 ./...
+          # The production runner's /tmp is tmpfs; exercise native ext4 I/O on
+          # its existing workspace filesystem, not on an in-memory substitute.
+          TMPDIR="$RUNNER_TEMP" go -C tests/snapshot-native-fold test -count=1 ./...
           python3 -m scripts.reconcile_longhorn_snapshot_cleanup deploy/environments/production/local-snapshot-cleanup/policy.json --apply --evidence "$RUNNER_TEMP/local-snapshot-cleanup.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
