@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import os
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -21,6 +22,17 @@ def config():
 
 
 class DiagnosticPublicationTest(unittest.TestCase):
+    def test_storage_probe_reports_single_copy_and_block_profile(self):
+        value = json.loads((Path(__file__).resolve().parents[1] /
+                            'deploy/environments/production/diagnostics/catalog.json').read_text())
+        probes = [p for p in value['catalog']['probes'] if p['id'] == 'runtime-storage-budget']
+        self.assertEqual(len(probes), 1)
+        collectors = probes[0]['config']['collectors']
+        fields = next(c['fields'] for c in collectors if c.get('path') == '/v1/snapshots/storage')
+        self.assertTrue({'artifact_content_references', 'artifact_content_references_read_failed',
+                         'artifact_content_deduplicated_rows', 'artifact_content_deduplicate_failed',
+                         'compiler_input_blocks', 'compiler_input_blocks_read_failed'} <= set(fields))
+
     def test_initial_recovery_waits_without_creating_partial_configuration(self):
         with mock.patch.object(publisher, "get", return_value=None), mock.patch.object(publisher, "put") as put:
             publisher.publish(config(), "", True)
