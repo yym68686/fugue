@@ -54,7 +54,7 @@ func newServingFixture(t *testing.T, dsn string, legacyPolicyInput ...bool) serv
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = s.pgEnsureChunkedInput(t.Context(), snapshot, coldDigest); err != nil {
+		if err = s.ensureLegacyCompilerInputFixture(snapshot, coldDigest); err != nil {
 			t.Fatal(err)
 		}
 		coldObjects = &archiveTestObjects{}
@@ -118,6 +118,11 @@ func (f servingFixture) candidate(t *testing.T) model.PlatformArtifact {
 	compiled, err := platformconfig.Compile(request)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if f.s.db == nil {
+		if err := f.s.EnsurePlatformCompilerInput(compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
+			t.Fatal("persist file-store fixture compiler input", err)
+		}
 	}
 	prepareCompiledInputPin(t, f.s, compiled)
 	save := func(a model.PlatformArtifact) model.PlatformArtifact {

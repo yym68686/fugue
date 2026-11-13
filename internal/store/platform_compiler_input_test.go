@@ -117,8 +117,12 @@ func testCompilerInputRetention(t *testing.T, dsn string) {
 		t.Fatal("retry mutated input", err)
 	}
 	if dsn != "" {
-		if _, err = s.db.Exec(`UPDATE fugue_platform_artifact_contents SET content_json=content_json || '{"unexpected":true}'::jsonb WHERE content_hash=$1`, digest); err != nil {
+		result, err := s.db.Exec(`UPDATE fugue_platform_input_hot_chunks SET data=data || ' '::bytea WHERE content_hash=$1`, digest)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows == 0 {
+			t.Fatal("corruption fixture did not change current stored input", rows, err)
 		}
 	} else {
 		if err = s.withLockedState(true, func(st *model.State) error {

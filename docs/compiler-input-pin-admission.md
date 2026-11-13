@@ -6,8 +6,9 @@ controls ordinary requests: `capability` preserves their original business
 checks, while `enforced` also requires the signed dependency closure and exact
 durable readback pins. Explicit preparation confirmation is strict in either
 phase. Fenced or retired storage cannot use the capability compatibility path.
-The complete production enforcement coordinator and physical retirement are
-still unfinished; public retirement remains refused.
+The migration-only full-history enabling coordinator and physical retirement
+entry points have been removed. Existing persisted enforcement is still read
+and enforced; removing the coordinator does not downgrade an old database.
 
 The existing local-pin protocol first commits a protective pending record,
 performs complete independent local SHA readback outside the writer lock, then
@@ -58,27 +59,20 @@ wins; the 5-second SQL statement and 250ms lock-wait limits remain unchanged. No
 timeout grants admission, retries a mutation, or bypasses the final epoch, signature,
 pin, selector, keyring-revision or proof-expiry checks.
 
-## One-way enforcement transition
+## Historical admission-state compatibility
 
-The process-owned preparation for the private enforcement transition covers the
-complete native retained census, signed closure and existing verified pins. Its
-short commit takes exclusive GC/archive barriers and root-table SHARE locks,
-then rechecks roots, tuple identities, pin tokens/representations, epoch, keyring
-and expiry before the one-way phase CAS. The persisted enforced phase cannot be
-downgraded, erased or replaced by a different plan.
+There is no full-history enabling operation in the current binary. The unused
+retained-census preparation, enabling CAS and all-session/prepared-transaction
+drain observer have been removed, rather than exposed as another migration
+coordinator. Ordinary proof preparation can only start from selected runtime
+roots; it has no switch to expand into the complete retained census.
 
-Both before witness checks and after the CAS, fresh PostgreSQL statistics must
-show no outstanding old snapshot transaction or prepared transaction. Effective
-full statistics visibility is required; hidden NULL fields cannot prove an idle
-session. Statistics are cleared before each check. Failure rolls back the CAS;
-the transition never cancels sessions or resolves another prepared transaction.
-This catches a reader that has not touched an input table or application lease.
-
-Transaction drainage is separate from complete reader inventory. It cannot
-certify an unregistered or offline binary, all promised rollback versions,
-external retention authorities, resource headroom or a confidential restore.
-The private switch has no production HTTP/CLI activation path: the formal
-coordinator must verify those remaining real prerequisites before exposing one.
+The existing phase/epoch reader and transaction-side locks remain until the
+current runtime dependencies have a complete replacement contract. An existing
+enforced phase cannot be downgraded, erased or replaced by a different plan.
+Missing or invalid state fails closed, and a stale capability proof cannot cross
+a persisted state change. This is compatibility with stored obligations, not
+permission to resume full-history migration or retire relations.
 
 Signatures, authorization, lease/TTL, rollback retention and missing-history
 isolation remain mandatory. Complete H/C/D/U, exhaustive reader/writer coverage,
@@ -90,8 +84,8 @@ local readback. They cover fresh-connection persistence, concurrent admissions,
 unpin exclusion through commit, exact token/digest/key, pending/epoch/schema/
 representation failures, timeout tightening, old snapshots, cancellation,
 writer contention and multi-pin rollback. Isolated PostgreSQL 18 additionally
-checks native phase enforcement, unregistered old snapshots, prepared
-transactions, effective statistics privilege and durable downgrade refusal.
+checks persisted phase compatibility, fresh-pool enforcement, concurrent state
+changes, missing state and durable downgrade refusal.
 Synthetic local tests are not a production restore or activation exercise.
 
 The registered binary/current/LKG checker keeps executable capability JSON at

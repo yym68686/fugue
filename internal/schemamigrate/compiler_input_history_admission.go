@@ -1,9 +1,10 @@
 package schemamigrate
 
-// Capability deployment preserves the original business admission while the
-// retained input set is prepared. Enforcing is durable and cannot be disabled
-// by a restart, environment flag, schema rerun, DELETE or TRUNCATE. This state
-// grants neither archive routing nor write fencing nor physical retirement.
+// Historical admission state remains compatible until runtime admission is
+// independently replaced. Existing enforcement is durable and cannot be
+// disabled by a restart, environment flag, schema rerun, DELETE or TRUNCATE.
+// The migration-only enabling implementation has been removed. This DDL grants
+// neither archive routing nor write fencing nor physical retirement.
 const CompilerInputHistoryAdmissionSQL = `
 CREATE TABLE IF NOT EXISTS fugue_platform_input_history_admission (
  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),

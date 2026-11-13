@@ -26,8 +26,8 @@ omitted physical evidence is unavailable, never treated as verified evidence.
 Operational admission follows the new runtime dependency. Retention inventory
 and explicit full-history reads retain **both** input dependencies. Existing
 full-input provenance, pins, rollback and history obligations are not released
-by opting in, and no old artifact is rewritten. The public retirement path
-remains unavailable until its existing safety capabilities are implemented.
+by opting in, and no old artifact is rewritten. The migration-only public
+retirement path and unused full-history enabling coordinator have been removed.
 
 Full retention also resolves both original compiler source generations (intent
 and policy) by their exact kind and scope. Missing or conflicting declared
@@ -62,6 +62,8 @@ promised rollback inventory with actual stored bytes; prove compatible readers;
 and exercise the real same-version current, DNS, publication, cold start,
 rollback and task paths in an admitted confidential environment with old chunks
 and cold archive inaccessible and caches cleared. Measure the added storage,
-peak WAL and growth against the original resource gates. Full H/C/D/U, legal D
-disposition, persistent reactivation, all old writer/fallback isolation, natural
-drain and public retirement integration remain separate unfinished work.
+peak WAL and growth against the original resource gates. New writers no longer
+write legacy JSONB/chunks, but that alone does not prove all old writers have
+drained. Historical disposition, complete reader/rollback coverage and schema
+retirement still require their own evidence; no public retirement operation is
+being completed as part of runtime activation.

@@ -162,7 +162,10 @@ RETURNING id, tenant_id, app_id, image_ref, digest, source_operation_id, node_id
 	if err != nil {
 		return model.ImageLocation{}, mapDBErr(err)
 	}
-	return normalizeImageLocation(location), nil
+	// Preserve the historical identity in the receipt as well as in storage,
+	// matching the file-store contract. Normalization derives a digest from a
+	// digest-qualified reference and would report a different canonical row.
+	return location, nil
 }
 
 func (s *Store) pgListImageLocations(filter model.ImageLocationFilter) ([]model.ImageLocation, error) {

@@ -59,8 +59,8 @@ func TestConfigurationRuntimeRetentionStillProtectsOriginalProvenancePostgres(t 
 			t.Fatal(err)
 		}
 		raw, _ := json.Marshal(snapshot)
-		if _, err := db.Exec(`INSERT INTO fugue_platform_input_manifests(content_hash,format,size_bytes,chunk_size,chunk_count,created_at)
- VALUES($1,$2,$3,262144,1,now())`, digest, inputFormatV1, len(raw)); err != nil {
+		if _, err := db.Exec(`INSERT INTO fugue_platform_input_manifests(content_hash,format,size_bytes,chunk_size,chunk_count,storage_location,created_at)
+ VALUES($1,$2,$3,262144,1,'hot',now())`, digest, inputFormatV1, len(raw)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.Exec(`INSERT INTO fugue_platform_input_hot_chunks(content_hash,ordinal,chunk_hash,data) VALUES($1,0,$1,$2)`, digest, raw); err != nil {

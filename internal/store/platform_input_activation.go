@@ -19,7 +19,7 @@ import (
 // It covers the COMPLETE closure of the supplied server-derived roots, not the
 // complete retained inventory. Authority/TTL/convergence remain entry-point
 // checks. Task claim, LKG promotion, release and rollback consume this proof;
-// remaining activation entry points and retirement still need their own checks.
+// remaining activation entry points still need their own checks.
 type compilerInputActivationProof struct {
 	store           *Store
 	database        *sql.DB
@@ -46,7 +46,6 @@ type compilerInputActivationProof struct {
 	// confirmation, enforcement, fencing or retirement.
 	capabilityOnly bool
 	ordinary       bool
-	fullInventory  bool
 }
 
 type compilerInputActivationTuple struct {
@@ -83,20 +82,20 @@ func (s *Store) prepareCompilerInputActivationIntent(ctx context.Context, roots 
 // but consume them without installing or advancing any business state. Original
 // request-specific ownership and serving checks remain the reader's authority.
 func (s *Store) prepareCompilerInputDependencyProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection) (*compilerInputActivationProof, error) {
-	return s.prepareCompilerInputProof(ctx, roots, task, publication, consumer, reads, false, false)
+	return s.prepareCompilerInputProof(ctx, roots, task, publication, consumer, reads, false)
 }
 
 func (s *Store) prepareOrdinaryCompilerInputProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection) (*compilerInputActivationProof, error) {
-	return s.prepareCompilerInputProof(ctx, roots, task, publication, consumer, reads, true, false)
+	return s.prepareCompilerInputProof(ctx, roots, task, publication, consumer, reads, true)
 }
 
-func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection, ordinary, inventory bool) (*compilerInputActivationProof, error) {
-	if s == nil || s.db == nil || !inventory && len(roots) == 0 && publication == nil && consumer == nil && len(reads) == 0 || len(roots) > compilerInputHotRootLimit || task != nil && publication != nil || consumer != nil && (task != nil || publication != nil || len(roots) != 0) || len(reads) != 0 && (task != nil || publication != nil || consumer != nil || len(roots) != 0) || inventory && (ordinary || task != nil || publication != nil || consumer != nil || len(reads) != 0 || len(roots) != 0) {
+func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection, ordinary bool) (*compilerInputActivationProof, error) {
+	if s == nil || s.db == nil || len(roots) == 0 && publication == nil && consumer == nil && len(reads) == 0 || len(roots) > compilerInputHotRootLimit || task != nil && publication != nil || consumer != nil && (task != nil || publication != nil || len(roots) != 0) || len(reads) != 0 && (task != nil || publication != nil || consumer != nil || len(roots) != 0) {
 		return nil, ErrInvalidInput
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	proof := &compilerInputActivationProof{store: s, database: s.db, expires: time.Now().Add(time.Minute), inputManifests: map[string]inputManifest{}, ordinary: ordinary, fullInventory: inventory, lkgReadOnly: consumer != nil || len(reads) != 0}
+	proof := &compilerInputActivationProof{store: s, database: s.db, expires: time.Now().Add(time.Minute), inputManifests: map[string]inputManifest{}, ordinary: ordinary, lkgReadOnly: consumer != nil || len(reads) != 0}
 	// Validate the current global LKG while its artifact is in the bounded
 	// batch, then discard the body. Never cache the entire closure's bodies or
 	// fetch them again outside the batch transport budget. If a mixed root set
@@ -145,12 +144,6 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	}
 	if ordinary {
 		proof.capabilityOnly, err = compilerInputCapabilityPhase(ctx, tx, false)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if inventory {
-		roots, err = compilerInputHotRoots(ctx, tx)
 		if err != nil {
 			return nil, err
 		}
@@ -306,7 +299,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 					configurationVerified = platformsafety.EvaluatePlatformLKGSnapshot(*configurationSnapshot, artifact, keyring, time.Now()).Pass
 				}
 				var node inputarchive.HotNode
-				if inventory || compilerInputReadRetainsOriginal(reads) {
+				if compilerInputReadRetainsOriginal(reads) {
 					node, err = compilerInputArtifactHotNode(artifact)
 				} else {
 					node, err = compilerInputArtifactRuntimeNode(artifact)
@@ -693,7 +686,7 @@ func (s *Store) withPreparedCompilerInputTaskCreation(ctx context.Context, proof
 func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compilerInputActivationProof, pins []compilerInputPinBinding, pendingOnly bool, beforeInputLocks, apply func(context.Context, *sql.Tx) error) error {
 	if s == nil || proof == nil || proof.store != s || proof.database != s.db || apply == nil ||
 		!time.Now().Before(proof.expires) || pendingOnly != (proof.newTask != nil) ||
-		!pendingOnly && len(pins) != len(proof.inputs) || !proof.closure.MetadataComplete && !(proof.ordinary && proof.capabilityOnly) || proof.fullInventory {
+		!pendingOnly && len(pins) != len(proof.inputs) || !proof.closure.MetadataComplete && !(proof.ordinary && proof.capabilityOnly) {
 		return ErrInvalidInput
 	}
 	ordered := append([]compilerInputPinBinding(nil), pins...)
