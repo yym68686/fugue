@@ -57,6 +57,7 @@ type DNSSelectionScope struct {
 
 type DNSSelectionObservation struct {
 	PhysicalEvidence          json.RawMessage             `json:"physical_evidence,omitempty"`
+	RetainedPhysicalEvidence  json.RawMessage             `json:"retained_physical_evidence,omitempty"`
 	PhysicalSelection         *model.DNSPhysicalSelection `json:"physical_selection,omitempty"`
 	NodeID                    string                      `json:"node_id"`
 	Hostname                  string                      `json:"hostname"`
@@ -148,6 +149,7 @@ func normalizeDNSSelections(in []DNSSelectionObservation) []DNSSelectionObservat
 	for index := range out {
 		out[index].PhysicalSelection = model.CloneDNSPhysicalSelection(in[index].PhysicalSelection)
 		out[index].PhysicalEvidence = append(json.RawMessage(nil), in[index].PhysicalEvidence...)
+		out[index].RetainedPhysicalEvidence = append(json.RawMessage(nil), in[index].RetainedPhysicalEvidence...)
 	}
 	clone := func(candidates []DNSSelectionCandidate) []DNSSelectionCandidate {
 		out := append([]DNSSelectionCandidate(nil), candidates...)
@@ -233,6 +235,9 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 		}
 		if len(f.PhysicalEvidence) > 0 && (f.PhysicalSelection == nil || len(f.PhysicalEvidence) > 8<<20 || !json.Valid(f.PhysicalEvidence)) {
 			return nil, fmt.Errorf("invalid captured physical publication evidence")
+		}
+		if len(f.RetainedPhysicalEvidence) > 8<<20 || len(f.RetainedPhysicalEvidence) > 0 && !json.Valid(f.RetainedPhysicalEvidence) {
+			return nil, fmt.Errorf("invalid retained physical comparison evidence")
 		}
 		scopes := map[string]bool{}
 		for _, scope := range f.ScopedCandidates {

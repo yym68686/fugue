@@ -610,6 +610,9 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 	if !s.qualityInputSourceUnchanged(ctx, inputSource) {
 		return fmt.Errorf("dynamic quality baseline input authority changed")
 	}
+	if err := s.carryPreparedHistoricalQuality(ctx, projection, covered); err != nil {
+		return err
+	}
 	for index, rule := range projection.Policy.DNSAnswerRules {
 		key := rule.NodeID + "\x00" + rule.Hostname
 		if !covered[key] || rule.Type != "A" || rule.PhysicalOrder == nil {
@@ -722,7 +725,13 @@ func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Contex
 	if err != nil {
 		return
 	}
-	snapshot, err := s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, needed)
+	var snapshot store.CompilerInputDNSSelections
+	p, shared := ctx.Value(historicalQualityPreparationKey{}).(*historicalQualityPreparation)
+	if shared {
+		snapshot, err = p.input, p.inputErr
+	} else {
+		snapshot, err = s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, needed)
+	}
 	if err != nil {
 		return
 	}
@@ -731,6 +740,11 @@ func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Contex
 	// any formerly redundant evidence has become useful in the meantime.
 	for _, omitted := range snapshot.Omitted {
 		if needed(omitted) {
+			if shared {
+				// Respect the batch byte bound. Missing optional history cannot
+				// trigger another complete input read inside a live capture.
+				break
+			}
 			snapshot, err = s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, nil)
 			if err != nil {
 				return

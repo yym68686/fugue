@@ -33,6 +33,21 @@ func (s *Server) capturePhysicalDNSQueriesStrict(ctx context.Context, projection
 			if err != nil {
 				return err
 			}
+			covered := map[string]bool{}
+			hosts := map[string]bool{}
+			for _, physical := range policy.PhysicalRoutes {
+				if physical.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+					hosts[physical.Hostname] = true
+				}
+			}
+			for _, fact := range projection.RuntimeSnapshot.DNSSelections {
+				if hosts[fact.Hostname] {
+					covered[fact.NodeID+"\x00"+fact.Hostname] = true
+				}
+			}
+			if err := s.carryPreparedHistoricalQuality(ctx, projection, covered); err != nil {
+				return err
+			}
 			break
 		}
 	}
@@ -312,6 +327,7 @@ func applyPhysicalDNSSelections(projection *platformIntentProjectionResponse, po
 			updated.Reason = "physical_quality_retained_previous_verified_order"
 		}
 		updated.PhysicalEvidence = append(json.RawMessage(nil), compiled.Evidence...)
+		updated.RetainedPhysicalEvidence = retainedPhysicalHistory(fact, compiled.Evidence)
 		for _, candidate := range fact.Candidates {
 			updated.Candidates = append(updated.Candidates, platformconfig.DNSSelectionCandidate{IP: candidate.IP, EdgeID: candidate.EdgeID, EdgeGroupID: candidate.EdgeGroupID})
 		}

@@ -81,8 +81,59 @@ func separatedFixture(t testing.TB) platformconfig.RuntimeSnapshot {
 	for i := 0; i < 8; i++ {
 		raw, _ := json.Marshal(map[string]any{"snapshot": map[string]any{"network_samples": items, "node_id": fmt.Sprintf("node-%d", i%2)}, "captured_at": "2026-01-01T00:00:00Z"})
 		s.DNSSelections = append(s.DNSSelections, platformconfig.DNSSelectionObservation{NodeID: fmt.Sprintf("node-%d", i), Hostname: "service.example.test", Type: "A", PhysicalEvidence: raw})
+		if i == 2 || i == 3 {
+			s.DNSSelections[i].RetainedPhysicalEvidence = append(json.RawMessage(nil), raw...)
+		}
+		if i == 3 {
+			s.DNSSelections[i].PhysicalEvidence = nil
+		}
 	}
 	return s
+}
+
+func TestSeparatedInputDetachesCurrentAndRetainedEvidenceWithoutChangingBytes(t *testing.T) {
+	raw, _ := json.Marshal(map[string]string{"payload": strings.Repeat("x", 256<<10)})
+	digest := sharedHash(sha256.Sum256(raw))
+	// Mark the immutable component as verified to exercise only the canonical
+	// writer/layout boundary, without requiring a database or staging bodies.
+	w := &separatedInputWriter{hash: sha256.New(), verified: map[string]bool{digest: true}}
+	snapshot := platformconfig.RuntimeSnapshot{Facts: map[string]any{"retained_physical_evidence": map[string]any{"literal": true}}}
+	wantEvidence := 0
+	for i := 0; i < 80; i++ {
+		fact := platformconfig.DNSSelectionObservation{NodeID: fmt.Sprintf("dns-%d", i), Hostname: "app.example.test", Type: "A"}
+		if i%3 != 0 {
+			fact.PhysicalEvidence = raw
+			wantEvidence++
+		}
+		if i%3 != 1 {
+			fact.RetainedPhysicalEvidence = raw
+			wantEvidence++
+		}
+		snapshot.DNSSelections = append(snapshot.DNSSelections, fact)
+	}
+	if err := platformconfig.WriteRuntimeSnapshot(w, snapshot); err != nil {
+		t.Fatal("audit evidence overflowed the configuration frame", err)
+	}
+	if len(w.frame) > 64<<10 || w.depth != 0 || w.quoted {
+		t.Fatal("large audit bodies leaked into frame or changed JSON boundary tracking")
+	}
+	var rebuilt bytes.Buffer
+	evidence := 0
+	for _, part := range w.parts {
+		if part.Evidence {
+			if part.Digest != digest || part.Size != uint32(len(raw)) {
+				t.Fatal("evidence reference changed")
+			}
+			rebuilt.Write(raw)
+			evidence++
+		} else {
+			rebuilt.Write(w.frame[part.Offset : part.Offset+part.Size])
+		}
+	}
+	expected, _ := platformconfig.EncodeRuntimeSnapshot(snapshot)
+	if evidence != wantEvidence || !bytes.Equal(rebuilt.Bytes(), expected) || sharedHashBytes(w.hash.Sum(nil)) != sharedHash(sha256.Sum256(expected)) {
+		t.Fatal("separation changed a signed byte or missed a typed audit field")
+	}
 }
 
 func assertSeparatedEquivalent(t *testing.T, s *Store, snapshot platformconfig.RuntimeSnapshot, digest string) {

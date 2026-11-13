@@ -16,6 +16,7 @@ func TestRuntimeSnapshotStreamPreservesV1BytesAndDigest(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 123456789, time.FixedZone("offset", 3600))
 	for _, snapshot := range []RuntimeSnapshot{
 		{},
+		{DNSSelections: []DNSSelectionObservation{{NodeID: "dns-a", RetainedPhysicalEvidence: json.RawMessage(`{"snapshot":{"z":2,"a":1},"result":{}}`)}}},
 		{IsolateTrafficAvailability: true},
 		{RetainedTrafficPartitions: []RetainedTrafficPartition{{AppID: "synthetic-app", InputDigest: "sha256:synthetic", ObservedAt: now, ExpiresAt: now.Add(time.Minute), Routes: []CompiledRoute{{RouteIntent: RouteIntent{Hostname: "example.test", AppID: "synthetic-app"}}}}}},
 		{IntentGeneration: "<&\u2028\x00", PolicyGeneration: "policy", CapturedAt: &now, Facts: map[string]any{"z": nil, "a": []any{1.25, "中文", map[string]any{"a": true}}, "invalid\xff": -0.001}},
@@ -59,7 +60,7 @@ func TestRuntimeSnapshotStreamRejectsWriteAndEncodingFailures(t *testing.T) {
 	if err := WriteRuntimeSnapshot(shortSnapshotWriter{}, RuntimeSnapshot{}); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatal(err)
 	}
-	for _, s := range []RuntimeSnapshot{{Facts: map[string]any{"invalid": make(chan int)}}, {DNSSelections: []DNSSelectionObservation{{PhysicalEvidence: json.RawMessage("{")}}}} {
+	for _, s := range []RuntimeSnapshot{{Facts: map[string]any{"invalid": make(chan int)}}, {DNSSelections: []DNSSelectionObservation{{PhysicalEvidence: json.RawMessage("{")}}}, {DNSSelections: []DNSSelectionObservation{{RetainedPhysicalEvidence: json.RawMessage("{")}}}} {
 		if err := WriteRuntimeSnapshot(io.Discard, s); err == nil {
 			t.Fatal("invalid value accepted")
 		}

@@ -327,6 +327,7 @@ type dnsAnswerCheckReport struct {
 
 type dnsAnswerCheckNode struct {
 	DNSNodeID        string   `json:"dns_node_id"`
+	PhysicalNodeID   string   `json:"physical_node_id,omitempty"`
 	EdgeGroupID      string   `json:"edge_group_id,omitempty"`
 	Zone             string   `json:"zone"`
 	PublicIP         string   `json:"public_ip,omitempty"`
@@ -407,13 +408,14 @@ func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQue
 			continue
 		}
 		nodeReport := dnsAnswerCheckNode{
-			DNSNodeID:   strings.TrimSpace(node.ID),
-			EdgeGroupID: strings.TrimSpace(node.EdgeGroupID),
-			Zone:        strings.TrimSpace(node.Zone),
-			PublicIP:    firstNonEmpty(strings.TrimSpace(node.PublicIPv4), strings.TrimSpace(node.PublicIPv6)),
-			Status:      strings.TrimSpace(node.Status),
-			Healthy:     node.Healthy,
-			Answers:     []string{},
+			DNSNodeID:      strings.TrimSpace(node.ID),
+			PhysicalNodeID: strings.TrimSpace(node.PhysicalNodeID),
+			EdgeGroupID:    strings.TrimSpace(node.EdgeGroupID),
+			Zone:           strings.TrimSpace(node.Zone),
+			PublicIP:       firstNonEmpty(strings.TrimSpace(node.PublicIPv4), strings.TrimSpace(node.PublicIPv6)),
+			Status:         strings.TrimSpace(node.Status),
+			Healthy:        node.Healthy,
+			Answers:        []string{},
 		}
 		answers, warnings, err := queryDNSNodeAnswers(queryName, node, clientIP)
 		if err != nil {
@@ -623,15 +625,18 @@ func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
 func addDNSDecisionExplanation(client *Client, report *dnsAnswerCheckReport) {
 	seen := map[string]bool{}
 	for _, node := range report.Nodes {
-		if node.DNSNodeID == "" || seen[node.DNSNodeID] {
+		// A hosted-zone inventory row is not the DNS process identity. Use
+		// the explicitly reported physical owner, never parse an ID suffix.
+		physical := firstNonEmpty(node.PhysicalNodeID, node.DNSNodeID)
+		if physical == "" || seen[physical] {
 			continue
 		}
-		seen[node.DNSNodeID] = true
+		seen[physical] = true
 		query := url.Values{"hostname": {firstNonEmpty(report.QueryName, report.Hostname)}, "limit": {"1"}}
 		var response struct {
 			Snapshot dnsserver.DNSDecisionSnapshot `json:"snapshot"`
 		}
-		if err := client.doJSON(http.MethodGet, "/v1/admin/platform-state/dns-decisions/"+url.PathEscape(node.DNSNodeID)+"?"+query.Encode(), nil, &response); err != nil {
+		if err := client.doJSON(http.MethodGet, "/v1/admin/platform-state/dns-decisions/"+url.PathEscape(physical)+"?"+query.Encode(), nil, &response); err != nil {
 			report.ExplanationErrors = append(report.ExplanationErrors, node.DNSNodeID+": "+err.Error())
 			continue
 		}

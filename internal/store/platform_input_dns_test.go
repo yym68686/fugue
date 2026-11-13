@@ -21,6 +21,9 @@ func compilerDNSFixture(t testing.TB) (platformconfig.RuntimeSnapshot, string) {
 	for i := 0; i < 5; i++ {
 		raw, _ := json.Marshal(map[string]any{"payload": strings.Repeat(fmt.Sprintf("evidence-%d<&中文-", i), 23000)})
 		s.DNSSelections = append(s.DNSSelections, platformconfig.DNSSelectionObservation{NodeID: "dns-a", Hostname: fmt.Sprintf("service-%d.example.test", i), Type: "A", PhysicalEvidence: raw, PhysicalSelection: &model.DNSPhysicalSelection{CapturedAt: now.Add(time.Duration(i) * time.Second), OrderedEdgeIDs: []string{"edge-a", "edge-b"}}, Candidates: []platformconfig.DNSSelectionCandidate{{EdgeID: "edge-a", IP: "8.8.8.8", ScoreBreakdown: map[string]float64{"quality": 2.5}}}})
+		if i == 2 {
+			s.DNSSelections[i].RetainedPhysicalEvidence = append(json.RawMessage(nil), raw...)
+		}
 	}
 	d, err := platformconfig.RuntimeSnapshotDigest(s)
 	if err != nil {

@@ -41,6 +41,30 @@ func TestDNSAnswerExplanationReadsReceiptsWithoutRankingAndToleratesAuditFailure
 	}
 }
 
+func TestDNSAnswerExplanationUsesExplicitPhysicalOwnerForHostedZones(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.URL.Path != "/v1/admin/platform-state/dns-decisions/physical-a" || request.URL.Query().Get("hostname") != "app.example.test" {
+			t.Error("zone inventory ID was mistaken for process owner", request.URL)
+		}
+		json.NewEncoder(writer).Encode(map[string]any{"snapshot": dnsserver.DNSDecisionSnapshot{NodeID: "physical-a", Receipts: []dnsserver.DNSDecisionReceipt{}}})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := dnsAnswerCheckReport{Hostname: "app.example.test", Nodes: []dnsAnswerCheckNode{
+		{DNSNodeID: "zone-inventory-a", PhysicalNodeID: "physical-a"},
+		{DNSNodeID: "zone-inventory-b", PhysicalNodeID: "physical-a"},
+	}}
+	addDNSDecisionExplanation(client, &report)
+	if requests != 1 || len(report.DNSDecisions) != 1 || len(report.ExplanationErrors) != 0 {
+		t.Fatal("physical owner was lost or the same process was queried repeatedly", report)
+	}
+}
+
 func TestDNSAnswerEdgeReadyAllowsDNSTargetInventoryCheck(t *testing.T) {
 	t.Parallel()
 

@@ -27,6 +27,7 @@ func ConfigurationRuntimeInput(in RuntimeSnapshot) RuntimeSnapshot {
 	out.DNSSelections = append([]DNSSelectionObservation(nil), in.DNSSelections...)
 	for i := range out.DNSSelections {
 		out.DNSSelections[i].PhysicalEvidence = nil
+		out.DNSSelections[i].RetainedPhysicalEvidence = nil
 	}
 	return out
 }

@@ -43,7 +43,7 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 	requestContext := r.Context()
 	if dnsNodeID != "" {
 		var err error
-		requestContext, err = s.prepareHistoricalQualityContext(requestContext, scope.key())
+		requestContext, err = s.prepareHistoricalQualityContext(requestContext, scope.key(), dnsNodeID+"\x00"+hostname)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return

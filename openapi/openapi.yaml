@@ -1245,6 +1245,10 @@ paths:
         run new probes, renew historical timestamps or grant serving permission.
         Client cancellation applies to both phases. Unavailable history never
         deletes independent live observations.
+        Preparation shares one bounded immutable history read within the request
+        or refresh batch, while rechecking the current signed publication before
+        binding. Availability-only publications retain replayable comparison
+        evidence separately from serving order; neither operation renews its age.
       tags: [Edge]
       x-fugue-handler: handleGetEdgeQualityShadow
       security:
@@ -37768,6 +37772,10 @@ components:
       additionalProperties: false
       required: [node_id, hostname, type, source_generation, source_digest, observed_at, candidates]
       properties:
+        retained_physical_evidence:
+          allOf:
+            - $ref: '#/components/schemas/PhysicalEdgeQualityReceipt'
+          description: Audit-only last replayable non-learning quality receipt for this exact DNS query. Retained independently of availability order and current quality publication, with original protocol and timestamps. Never serving permission or a fresh observation. Omitted from configuration runtime inputs. At most 8 MiB.
         physical_evidence:
           $ref: '#/components/schemas/PhysicalEdgeQualityReceipt'
         physical_selection:

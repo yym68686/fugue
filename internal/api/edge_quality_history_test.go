@@ -158,12 +158,15 @@ func TestHistoricalQualityPreparationCannotCacheAuthorityOrRenewEvidence(t *test
 
 func TestHistoricalQualityRequestAdmissionDoesNotRepeatColdReadInLiveWindow(t *testing.T) {
 	source := qualityInputSource{parent: model.PlatformArtifact{ID: "verified-parent", ContentHash: "immutable-source"}}
-	for _, scenario := range []string{"admitted", "original unavailable", "expired", "different source", "cancelled"} {
+	for _, scenario := range []string{"admitted", "original unavailable", "runtime unavailable", "expired", "different source", "cancelled"} {
 		t.Run(scenario, func(t *testing.T) {
 			p := &historicalQualityPreparation{source: source, original: true, expires: time.Now().Add(time.Second)}
 			selected := source
 			if scenario == "original unavailable" {
 				p.original = false
+			}
+			if scenario == "runtime unavailable" {
+				p.runtimeErr = context.DeadlineExceeded
 			}
 			if scenario == "expired" {
 				p.expires = time.Now().Add(-time.Second)

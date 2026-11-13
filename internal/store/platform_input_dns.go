@@ -26,6 +26,8 @@ const compilerDNSRangeLimit = 20000
 type CompilerDNSSelectionSummary struct {
 	NodeID, Hostname, Type    string
 	HasSelection, HasEvidence bool
+	HasRetainedEvidence       bool
+	EvidenceBytes             int
 	CapturedAt                time.Time
 }
 type CompilerInputDNSSelections struct {
@@ -91,6 +93,8 @@ func (c *compilerDNSInputCache) put(v *compilerDNSInput) {
 }
 func compilerDNSSelectionSummary(f platformconfig.DNSSelectionObservation) CompilerDNSSelectionSummary {
 	s := CompilerDNSSelectionSummary{NodeID: f.NodeID, Hostname: f.Hostname, Type: f.Type, HasSelection: f.PhysicalSelection != nil, HasEvidence: len(f.PhysicalEvidence) > 0}
+	s.HasRetainedEvidence = len(f.RetainedPhysicalEvidence) > 0
+	s.EvidenceBytes = len(f.PhysicalEvidence) + len(f.RetainedPhysicalEvidence)
 	if f.PhysicalSelection != nil {
 		s.CapturedAt = f.PhysicalSelection.CapturedAt
 	}

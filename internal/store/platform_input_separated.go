@@ -217,10 +217,23 @@ func boolInt(value bool) int64 {
 
 func (w *separatedInputWriter) Write(p []byte) (int, error) {
 	// The canonical encoder writes each DNS selection as one JSON value.
-	// Detach its first physical_evidence field without changing the encoder,
-	// its field order, or a single signed byte. Unknown shapes stay literal.
-	prefix := []byte(`{"physical_evidence":`)
-	if w.dnsArray && w.depth == 2 && len(p) > len(prefix) && bytes.HasPrefix(p, prefix) {
+	// Detach the leading typed audit fields without changing the encoder,
+	// their field order, or a single signed byte. A retained-only observation
+	// has no current physical_evidence. Unknown shapes stay literal.
+	var prefix []byte
+	if w.dnsArray && !w.quoted {
+		if w.depth == 2 {
+			for _, candidate := range []string{`{"physical_evidence":`, `{"retained_physical_evidence":`} {
+				if bytes.HasPrefix(p, []byte(candidate)) {
+					prefix = []byte(candidate)
+					break
+				}
+			}
+		} else if w.depth == 3 && bytes.HasPrefix(p, []byte(`,"retained_physical_evidence":`)) {
+			prefix = []byte(`,"retained_physical_evidence":`)
+		}
+	}
+	if len(prefix) > 0 && len(p) > len(prefix) {
 		d := json.NewDecoder(bytes.NewReader(p[len(prefix):]))
 		var evidence json.RawMessage
 		if err := d.Decode(&evidence); err != nil {

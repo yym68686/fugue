@@ -125,6 +125,7 @@ func applyDNSAvailabilityBaseline(projection *platformIntentProjectionResponse, 
 		if !found {
 			return fmt.Errorf("availability lacks an exact owned DNS rule")
 		}
+		fact.RetainedPhysicalEvidence = retainedPhysicalHistory(fact, nil)
 		fact.PhysicalSelection, fact.PhysicalEvidence = nil, nil
 		fact.RankingVersion, fact.RankingScope = "", ""
 		fact.Reason = "availability_only_quality_unavailable"

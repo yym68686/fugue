@@ -31,11 +31,13 @@ func physicalSelectionTestRecord(now time.Time) model.EdgeDNSRecord {
 // DNS, nor that recovery restores it after a readiness failure.
 func TestHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T) {
 	for _, kind := range []string{"", "published_order"} {
-		t.Run("history_"+kind, func(t *testing.T) { testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t, kind) })
+		for _, network := range []string{"udp", "tcp"} {
+			t.Run(network+"_history_"+kind, func(t *testing.T) { testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t, kind, network) })
+		}
 	}
 }
 
-func testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T, kind string) {
+func testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T, kind, network string) {
 	base, now := decisionTestState(t)
 	payload := base.payload
 	payload.Plan.Records[0].MinimumHealthyEdges = 1
@@ -57,12 +59,22 @@ func testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T, kind s
 	service.platformServingBound.Store(true)
 	journal := decisionTestJournal(t)
 	service.decisionAudit.Store(journal)
-	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
 	started := make(chan struct{})
-	server := &dns.Server{PacketConn: packet, Handler: service, NotifyStartedFunc: func() { close(started) }}
+	server := &dns.Server{Handler: service, NotifyStartedFunc: func() { close(started) }}
+	var address string
+	if network == "udp" {
+		packet, err := net.ListenPacket(network, "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server.PacketConn, address = packet, packet.LocalAddr().String()
+	} else {
+		listener, err := net.Listen(network, "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server.Listener, address = listener, listener.Addr().String()
+	}
 	completed := make(chan error, 1)
 	go func() { completed <- server.ActivateAndServe() }()
 	<-started
@@ -90,7 +102,7 @@ func testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T, kind s
 		service.platformServing.Store(state)
 		query := new(dns.Msg)
 		query.SetQuestion("target.example.test.", dns.TypeA)
-		answer, _, err := (&dns.Client{Net: "udp", Timeout: time.Second}).Exchange(query, packet.LocalAddr().String())
+		answer, _, err := (&dns.Client{Net: network, Timeout: time.Second}).Exchange(query, address)
 		want := "9.9.9.9"
 		if phase == "failure" {
 			want = "8.8.8.8"

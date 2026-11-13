@@ -49,9 +49,12 @@ func TestConfigurationRuntimeContractIsExplicitAndPreservesOriginalFacts(t *test
 func TestConfigurationRuntimeProjectionPreservesTypedLeaseAndSelection(t *testing.T) {
 	at := time.Now().UTC().Add(-time.Hour)
 	in := RuntimeSnapshot{CapturedAt: &at, Facts: map[string]any{"audit": true}, IsolateTrafficAvailability: true,
-		DNSSelections: []DNSSelectionObservation{{ObservedAt: at, PhysicalSelection: &model.DNSPhysicalSelection{CapturedAt: at}, PhysicalEvidence: json.RawMessage(`{"original":true}`)}},
+		DNSSelections: []DNSSelectionObservation{{ObservedAt: at, PhysicalSelection: &model.DNSPhysicalSelection{CapturedAt: at}, PhysicalEvidence: json.RawMessage(`{"original":true}`), RetainedPhysicalEvidence: json.RawMessage(`{"retained":true}`)}},
 		Releases:      []ReleaseObservation{{ID: "release", ObservedAt: at}}, RetainedTrafficPartitions: []RetainedTrafficPartition{{ExpiresAt: at}}}
 	out := ConfigurationRuntimeInput(in)
+	if len(out.DNSSelections[0].RetainedPhysicalEvidence) != 0 || len(in.DNSSelections[0].RetainedPhysicalEvidence) == 0 {
+		t.Fatal("audit history leaked into legacy Worker runtime input or mutated the audit source")
+	}
 	if out.Facts != nil || len(out.DNSSelections[0].PhysicalEvidence) != 0 || len(in.DNSSelections[0].PhysicalEvidence) == 0 ||
 		!out.DNSSelections[0].ObservedAt.Equal(at) || !out.DNSSelections[0].PhysicalSelection.CapturedAt.Equal(at) ||
 		!out.RetainedTrafficPartitions[0].ExpiresAt.Equal(at) || !out.Releases[0].ObservedAt.Equal(at) || !out.IsolateTrafficAvailability {
