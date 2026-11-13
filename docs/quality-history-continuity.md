@@ -44,6 +44,20 @@ the original positive authority. Producer captures prepare once before their
 bounded job batch, not once per candidate or DNS consumer.
 Ordinary selective reads retain their 30-second default. A timeout is logged as
 unavailable history; it never deletes live observations or renews old evidence.
+The same preparation phase completes the runtime and original-input read
+admissions. Its immutable source binding is shared only in that request/batch
+for at most 30 seconds after preparation; it is never stored on the server.
+Live binding rereads the signed source and positive LKG and rejects any change.
+It does not rerun a potentially minute-long closure check inside a five-second
+fresh-probe window. Missing original admission can still retain an independently
+admitted published order. Publication keeps its separate complete admission.
+On restart or delayed reader ACKs, the producer retries its exact owned shadow
+before capturing a replacement, within the configured rollout timeout. Current
+publication gates remain mandatory, and a failed-source marker still prevents
+retrying a rejected source. Stale process observations cannot veto new reader
+compatibility; missing fresh support still blocks publication.
+CLI capture with an explicit DNS node allows two minutes for this cold-history
+request; ordinary commands retain their timeout and caller cancellation wins.
 
 When a positive fallback publication contains only an order, capture verifies
 its signed DNS member and exact actual-DNS predecessor separately. The response

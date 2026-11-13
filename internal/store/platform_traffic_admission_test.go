@@ -339,6 +339,21 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 					t.Fatal("capability admission claimed a positive LKG", kind, err)
 				}
 			}
+			if scenario == "paired missing route" && address == "" {
+				if err := s.withLockedState(true, func(st *model.State) error {
+					for i := range st.PlatformConsumerInstances {
+						if st.PlatformConsumerInstances[i].ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle {
+							st.PlatformConsumerInstances[i].LastHeartbeatAt = now.Add(-time.Hour)
+						}
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := publish(); !errors.Is(err, ErrConflict) || strings.Contains(err.Error(), "lacks physical paired") {
+					t.Fatal("stale old process capability was treated as current incompatibility", err)
+				}
+			}
 		})
 	}
 }

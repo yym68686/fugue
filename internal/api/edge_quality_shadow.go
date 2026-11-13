@@ -40,13 +40,16 @@ func (s *Server) handleGetEdgeQualityShadow(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusForbidden, "artifact.read scope required to bind actual DNS evidence")
 		return
 	}
+	requestContext := r.Context()
 	if dnsNodeID != "" {
-		if err := s.prepareHistoricalQualityInput(r.Context(), scope.key()); err != nil {
+		var err error
+		requestContext, err = s.prepareHistoricalQualityContext(requestContext, scope.key())
+		if err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(requestContext, 5*time.Second)
 	defer cancel()
 	receipt, err := s.capturePhysicalQualityPathForDNS(ctx, hostname, pathPrefix, hostname, trafficClass, scope, dnsNodeID, edgequality.DefaultPairedContinuityPolicy(), nil)
 	if err != nil {

@@ -42,6 +42,9 @@ func (s *Server) observeQualityInputSource(parent model.PlatformArtifact) (quali
 }
 
 func (s *Server) checkQualityInputSource(ctx context.Context, source qualityInputSource) error {
+	if prepared, err := preparedHistoricalQualityAdmission(ctx, source, false); prepared {
+		return err
+	}
 	return s.store.CheckPlatformInputRead(ctx, []store.PlatformInputReadSelection{{
 		ArtifactID: source.parent.ID, ContentHash: source.parent.ContentHash, ReleaseID: source.release.ID,
 		LKGKind: source.lkg.ArtifactKind, LKGScope: source.lkg.ScopeKey, LKG: &source.lkg,

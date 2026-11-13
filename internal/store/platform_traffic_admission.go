@@ -161,6 +161,10 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				if fact.ConsumerID != expected.ConsumerID || fact.ArtifactKind != child.ArtifactKind || fact.ScopeKey != parent.ScopeKey {
 					continue
 				}
+				// A historical process version cannot veto a recovered reader.
+				if !trafficCapabilityFactFresh(expected, fact, now) {
+					continue
+				}
 				if deliveryRequired && (!slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkDeliveryCapabilityV4) || !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalDynamicQualityCapabilityV1)) {
 					return fail("required consumer lacks physical network delivery v4 capability")
 				}

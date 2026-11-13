@@ -24,11 +24,16 @@ func (c *CLI) newAdminEdgeQualityShadowCommand() *cobra.Command {
 				return err
 			}
 			query := url.Values{"traffic_class": {trafficClass}, "scope": {scope}}
+			timeout := time.Duration(0)
 			if dnsNodeID != "" {
 				query.Set("dns_node_id", dnsNodeID)
+				// The server can spend 90 seconds verifying cold history before
+				// starting its separate live-evidence clock. Keep this scoped to
+				// capture; caller cancellation and other command budgets remain.
+				timeout = 2 * time.Minute
 			}
 			var result edgequality.Receipt
-			if err := client.doJSON(http.MethodGet, "/v1/edge/quality-shadow/"+url.PathEscape(args[0])+"?"+query.Encode(), nil, &result); err != nil {
+			if err := client.doJSONWithTimeout(http.MethodGet, "/v1/edge/quality-shadow/"+url.PathEscape(args[0])+"?"+query.Encode(), nil, &result, timeout); err != nil {
 				return err
 			}
 			return c.writeJSON(result)

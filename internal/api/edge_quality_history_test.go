@@ -120,7 +120,8 @@ func TestHistoricalQualityPreparationCannotCacheAuthorityOrRenewEvidence(t *test
 	s, _, path := qualityRestoreInputFixture(t, input)
 	live := dynamicQualityEntry{ContextDigest: "live-context", Failure: "independent-live-state"}
 	s.dynamicQuality.entries = map[string]dynamicQualityEntry{"live": live}
-	if err := s.prepareHistoricalQualityInput(t.Context(), "global"); err != nil {
+	preparedContext, err := s.prepareHistoricalQualityContext(t.Context(), "global")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(s.dynamicQuality.entries, map[string]dynamicQualityEntry{"live": live}) {
@@ -129,7 +130,7 @@ func TestHistoricalQualityPreparationCannotCacheAuthorityOrRenewEvidence(t *test
 	current := receipt.Snapshot
 	current.Policy = edgequality.DefaultPairedContinuityPolicy()
 	current.CapturedAt = time.Now().UTC()
-	s.bindHistoricalQualityEvidence(t.Context(), &current, "dns-a")
+	s.bindHistoricalQualityEvidence(preparedContext, &current, "dns-a")
 	if current.HistoricalEvidence == nil || !current.HistoricalEvidence.Selection.CapturedAt.Equal(selection.CapturedAt) {
 		t.Fatal("preparation lost or renewed original evidence")
 	}
@@ -149,9 +150,42 @@ func TestHistoricalQualityPreparationCannotCacheAuthorityOrRenewEvidence(t *test
 		t.Fatal(err)
 	}
 	current.HistoricalEvidence = nil
-	s.bindHistoricalQualityEvidence(t.Context(), &current, "dns-a")
+	s.bindHistoricalQualityEvidence(preparedContext, &current, "dns-a")
 	if current.HistoricalEvidence != nil {
 		t.Fatal("preparation cached revoked serving authority")
+	}
+}
+
+func TestHistoricalQualityRequestAdmissionDoesNotRepeatColdReadInLiveWindow(t *testing.T) {
+	source := qualityInputSource{parent: model.PlatformArtifact{ID: "verified-parent", ContentHash: "immutable-source"}}
+	for _, scenario := range []string{"admitted", "original unavailable", "expired", "different source", "cancelled"} {
+		t.Run(scenario, func(t *testing.T) {
+			p := &historicalQualityPreparation{source: source, original: true, expires: time.Now().Add(time.Second)}
+			selected := source
+			if scenario == "original unavailable" {
+				p.original = false
+			}
+			if scenario == "expired" {
+				p.expires = time.Now().Add(-time.Second)
+			}
+			if scenario == "different source" {
+				selected.parent.ID = "replacement-parent"
+			}
+			ctx, cancel := context.WithTimeout(context.WithValue(t.Context(), historicalQualityPreparationKey{}, p), 100*time.Millisecond)
+			defer cancel()
+			if scenario == "cancelled" {
+				cancel()
+			}
+			// No Store: repeating the complete cold graph read in this live
+			// phase would panic, rather than consume the prepared request check.
+			var s Server
+			runtimeErr := s.checkQualityInputSource(ctx, selected)
+			originalErr := s.checkOriginalQualityInputSource(ctx, selected)
+			wantRuntime := scenario == "admitted" || scenario == "original unavailable"
+			if (runtimeErr == nil) != wantRuntime || (originalErr == nil) != (scenario == "admitted") {
+				t.Fatal("request admission repeated cold reads or widened authority", runtimeErr, originalErr)
+			}
+		})
 	}
 }
 
@@ -159,7 +193,7 @@ func TestHistoricalQualityPreparationHonorsCancellationBeforeStorage(t *testing.
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	var s Server
-	if err := s.prepareHistoricalQualityInput(ctx, "global"); !errors.Is(err, context.Canceled) {
+	if _, err := s.prepareHistoricalQualityContext(ctx, "global"); !errors.Is(err, context.Canceled) {
 		t.Fatal("preparation ignored caller cancellation", err)
 	}
 }

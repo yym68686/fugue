@@ -153,6 +153,36 @@ func (s *Server) producedSourcePreviouslyFailed(scope, policyReleaseID, sourceDi
 	return gray.VerificationState == model.PlatformArtifactVerificationStateFailed && gray.VerificationEvidence["producer_policy_release_id"] == policyReleaseID && gray.VerificationEvidence["failed_source_digest"] == sourceDigest, nil
 }
 
+// Retry without waiving current-source, compatibility, freshness or CAS gates.
+// Failure must not freeze corrected input or retry a durably rejected source.
+func (s *Server) resumeProducedShadow(ctx context.Context, policy platformproducer.Policy, authority model.PlatformArtifactRelease, parent model.PlatformArtifact) (bool, error) {
+	state, err := s.producedTrafficState(policy.TargetScope)
+	if err != nil || state.lkg == nil || !state.hasFull || state.full.ArtifactID == parent.ID || parent.Status != model.PlatformArtifactStatusValidated {
+		return false, err
+	}
+	failed, err := s.producedSourcePreviouslyFailed(policy.TargetScope, authority.ID, parent.Metadata[platformproducer.SourceDigestMetadata])
+	if err != nil || failed {
+		return false, err
+	}
+	_, shadow, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, policy.TargetScope, model.PlatformArtifactReleaseChannelShadow)
+	if err != nil || !found || shadow.ArtifactID != parent.ID {
+		return false, err
+	}
+	if _, err = s.preparePlatformReleaseSetConsumers(ctx, platformProducerPrincipal(), parent, shadow); err == nil {
+		err = s.stageProducedTraffic(ctx, policy, authority, parent)
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if s.log != nil {
+			s.log.Printf("producer shadow not ready; capture may supersede it artifact=%s: %v", parent.ID, err)
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
 func (s *Server) stageProducedTraffic(ctx context.Context, policy platformproducer.Policy, authority model.PlatformArtifactRelease, parent model.PlatformArtifact) error {
 	state, err := s.producedTrafficState(policy.TargetScope)
 	if err != nil || state.lkg == nil || !state.hasFull || state.full.ArtifactID == parent.ID {

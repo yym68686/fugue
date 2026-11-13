@@ -224,6 +224,15 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		return interval, err
 	}
 	owned := haveCurrent && previous.ReleasedByType == model.ActorTypeBootstrap && previous.ReleasedByID == platformproducer.Actor && current.Metadata[platformproducer.PolicyReleaseMetadata] == authority.ID
+	if owned && policy.Mode == "serving" && time.Since(previous.ReleasedAt) < time.Duration(policy.Serving.RolloutTimeoutSeconds)*time.Second {
+		// Retry the exact shadow before replacing the assignment its newly
+		// arrived executable-reader ACKs authenticate.
+		handled, err := s.resumeProducedShadow(ctx, policy, authority, current)
+		if handled || err != nil {
+			decision = "resume_shadow"
+			return interval, err
+		}
+	}
 	if owned && policy.Mode != "serving" {
 		// Complete a prior publication interrupted before expectation preparation.
 		if _, err := s.preparePlatformReleaseSetConsumers(ctx, principal, current, previous); err != nil {

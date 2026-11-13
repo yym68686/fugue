@@ -28,7 +28,9 @@ func (s *Server) capturePhysicalDNSQueriesStrict(ctx context.Context, projection
 	}
 	for _, route := range policy.PhysicalRoutes {
 		if route.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
-			if err := s.prepareHistoricalQualityInput(ctx, projection.Intent.Scope); err != nil {
+			var err error
+			ctx, err = s.prepareHistoricalQualityContext(ctx, projection.Intent.Scope)
+			if err != nil {
 				return err
 			}
 			break

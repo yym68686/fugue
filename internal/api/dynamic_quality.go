@@ -311,7 +311,8 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 		return fmt.Errorf("dynamic quality query inventory exceeds bound")
 	}
 	if len(jobs) > 0 && policy.DynamicQuality.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
-		if err := s.prepareHistoricalQualityInput(ctx, projection.Intent.Scope); err != nil {
+		ctx, err = s.prepareHistoricalQualityContext(ctx, projection.Intent.Scope)
+		if err != nil {
 			return err
 		}
 	}

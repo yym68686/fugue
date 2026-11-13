@@ -36,11 +36,18 @@ func TestCaptureDeferralPreservesRealPendingRecoveryAndObservation(t *testing.T)
 }
 
 func TestSignedInputDeferralPreservesRealPendingRecoveryAndObservation(t *testing.T) {
-	testServingProducerProgressesRecovers(t, true, false, true, true)
+	testServingProducerProgressesRecovers(t, true, false, true, servingProducerTestOptions{signedInputGate: true})
 }
 
-func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gated bool, signedInputGate ...bool) {
-	signedGate := len(signedInputGate) == 1 && signedInputGate[0]
+type servingProducerTestOptions struct{ signedInputGate, delayedShadow bool }
+
+func TestServingProducerResumesShadowAfterDelayedReaderEvidenceWithoutRecapture(t *testing.T) {
+	testServingProducerProgressesRecovers(t, false, false, false, servingProducerTestOptions{delayedShadow: true})
+}
+
+func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gated bool, options ...servingProducerTestOptions) {
+	signedGate := len(options) == 1 && options[0].signedInputGate
+	delayedShadow := len(options) == 1 && options[0].delayedShadow
 	path := t.TempDir() + "/state.json"
 	state := store.New(path)
 	if err := state.Init(); err != nil {
@@ -256,7 +263,30 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	}
 	p.Generation = "producer-two"
 	authority = activate()
-	reconcile()
+	if delayedShadow {
+		edit(func(st *model.State) {
+			for i := range st.PlatformConsumerInstances {
+				st.PlatformConsumerInstances[i].LastHeartbeatAt = time.Now().Add(-3 * time.Minute)
+			}
+		})
+		if _, err := server.reconcilePlatformConfiguration(ctx); !errors.Is(err, store.ErrConflict) {
+			t.Fatal("missing reader evidence did not block gray", err)
+		}
+		waiting, selected := active("shadow")
+		report(waiting, selected)
+		if _, err := server.reconcilePlatformConfigurationWithCapture(ctx, func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
+			t.Fatal("arriving shadow evidence was superseded by a new capture")
+			return platformIntentProjectionResponse{}, errors.New("unexpected recapture")
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_, resumed := active("gray")
+		if resumed.ArtifactID != waiting.ID {
+			t.Fatal("shadow was replaced instead of resumed")
+		}
+	} else {
+		reconcile()
+	}
 	candidate, nextGray := active("gray")
 	_, shadow = active("shadow")
 	if nextGray.ArtifactID == first.ID {

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"time"
 
 	"fugue/internal/edgequality"
@@ -11,31 +12,74 @@ import (
 	"fugue/internal/store"
 )
 
-// Prepare only the bounded byte-position/hash index, not a cached quality
-// decision. Run this before starting the fresh capture deadline and clock:
-// completely verifying a cold retained input can exceed a live observation's
-// short budget. The later bind must reread its evidence and authority.
-func (s *Server) prepareHistoricalQualityInput(parentCtx context.Context, scope string) error {
+type historicalQualityPreparationKey struct{}
+
+// Request-local read admission, not a serving lease or persisted authority
+// cache. Binding still rereads the current signed source and LKG. Publishing
+// independently executes its normal complete dependency admission.
+type historicalQualityPreparation struct {
+	source   qualityInputSource
+	original bool
+	expires  time.Time
+}
+
+func preparedHistoricalQualityAdmission(ctx context.Context, source qualityInputSource, original bool) (bool, error) {
+	p, prepared := ctx.Value(historicalQualityPreparationKey{}).(*historicalQualityPreparation)
+	if !prepared {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return true, err
+	}
+	if p == nil || !time.Now().Before(p.expires) || original && !p.original || !reflect.DeepEqual(p.source, source) {
+		return true, store.ErrConflict
+	}
+	return true, nil
+}
+
+// Complete expensive dependency admission before the fresh observation clock.
+// Carry it only through this bounded request/batch, never in Server state.
+func (s *Server) prepareHistoricalQualityContext(parentCtx context.Context, scope string) (context.Context, error) {
 	if err := parentCtx.Err(); err != nil {
-		return err
+		return parentCtx, err
 	}
 	ctx, cancel := context.WithTimeout(parentCtx, 90*time.Second)
 	defer cancel()
 	lkg, err := s.store.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, scope)
 	if err != nil || lkg == nil {
-		return parentCtx.Err()
+		return parentCtx, parentCtx.Err()
 	}
 	parent, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
 	if err != nil {
-		return parentCtx.Err()
+		return parentCtx, parentCtx.Err()
 	}
 	source, err := s.observeQualityInputSource(parent)
-	if err != nil || s.checkOriginalQualityInputSource(ctx, source) != nil {
-		return parentCtx.Err()
+	if err != nil {
+		return parentCtx, parentCtx.Err()
 	}
+	if err := s.checkQualityInputSource(ctx, source); err != nil {
+		if s.log != nil {
+			s.log.Printf("historical quality runtime admission unavailable artifact=%s: %v", parent.ID, err)
+		}
+		return parentCtx, parentCtx.Err()
+	}
+	p := &historicalQualityPreparation{source: source}
+	prepared := func() (context.Context, error) {
+		// The original clocks and source are never renewed. This lifetime only
+		// bounds sharing of a completed read check within the current batch.
+		p.expires = time.Now().Add(30 * time.Second)
+		return context.WithValue(parentCtx, historicalQualityPreparationKey{}, p), parentCtx.Err()
+	}
+	if err := s.checkOriginalQualityInputSource(ctx, source); err != nil {
+		if s.log != nil {
+			s.log.Printf("historical quality original admission unavailable artifact=%s: %v", parent.ID, err)
+		}
+		return prepared()
+	}
+	p.original = true
 	digest, err := originalQualityInputDigest(parent)
 	if err != nil {
-		return parentCtx.Err()
+		return prepared()
 	}
 	_, err = s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, func(store.CompilerDNSSelectionSummary) bool { return false })
 	if err != nil && s.log != nil {
@@ -43,7 +87,7 @@ func (s *Server) prepareHistoricalQualityInput(parentCtx context.Context, scope 
 	}
 	// Optional history failure cannot suppress independent live evidence. Only
 	// cancellation of the enclosing request/capture cancels both phases.
-	return parentCtx.Err()
+	return prepared()
 }
 
 // Read history from the independently verified LKG, not the active shadow or
@@ -144,6 +188,9 @@ func originalQualityInputDigest(parent model.PlatformArtifact) (string, error) {
 }
 
 func (s *Server) checkOriginalQualityInputSource(ctx context.Context, source qualityInputSource) error {
+	if prepared, err := preparedHistoricalQualityAdmission(ctx, source, true); prepared {
+		return err
+	}
 	return s.store.CheckPlatformInputRead(ctx, []store.PlatformInputReadSelection{{
 		ArtifactID: source.parent.ID, ContentHash: source.parent.ContentHash, ReleaseID: source.release.ID,
 		LKGKind: source.lkg.ArtifactKind, LKGScope: source.lkg.ScopeKey, LKG: &source.lkg, OriginalInput: true,
