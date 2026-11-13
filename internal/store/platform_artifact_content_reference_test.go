@@ -3,6 +3,8 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -116,6 +118,11 @@ func TestArtifactContentDeduplicationBoundedAndPreservesSignedHistory(t *testing
 		}
 		artifacts = append(artifacts, a)
 	}
+	// Legacy CAS rows predate the explicit kind. Exact verified matches can
+	// be classified before compaction; a missing kind is not a missing body.
+	if _, err := db.Exec(`UPDATE fugue_platform_artifact_contents SET content_kind=''`); err != nil {
+		t.Fatal(err)
+	}
 	if count, err := s.deduplicatePlatformArtifactContent(t.Context()); err != nil || count != 0 {
 		t.Fatal("inactive writer migrated history", count, err)
 	}
@@ -142,5 +149,26 @@ func TestArtifactContentDeduplicationBoundedAndPreservesSignedHistory(t *testing
 		if err := db.QueryRow(`SELECT content_json IS NULL AND content_ref_hash=content_hash FROM fugue_platform_artifacts WHERE id=$1`, before.ID).Scan(&reference); err != nil || !reference {
 			t.Fatal("inline duplicate remained", err)
 		}
+	}
+}
+
+func TestArtifactContentReferencePolicyFailsClosed(t *testing.T) {
+	s := &Store{}
+	path := filepath.Join(t.TempDir(), "references.json")
+	for _, raw := range []string{`{"version":1,"enabled":true}`, `{"version":1,"enabled":false}`, `{"version":2,"enabled":true}`, `{"version":1,"enabled":true,"delete_history":true}`, `{`} {
+		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		s.loadArtifactContentPolicy(path)
+		if s.artifactContentReferencesEnabled() != (raw == `{"version":1,"enabled":true}`) {
+			t.Fatal("invalid policy activated writer")
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	s.loadArtifactContentPolicy(path)
+	if s.artifactContentReferencesEnabled() {
+		t.Fatal("missing activation enabled writer")
 	}
 }

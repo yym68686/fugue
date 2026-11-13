@@ -3434,15 +3434,15 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.before }}
         run: |
-          if git diff --quiet "$BASE_SHA" HEAD -- deploy/environments/production/storage-policy scripts/publish_storage_policy.py scripts/test_publish_storage_policy.py; then
+          if git diff --quiet "$BASE_SHA" HEAD -- deploy/environments/production/storage-policy scripts/publish_storage_policy.py scripts/test_publish_storage_policy.py scripts/artifact_content_storage.py scripts/test_artifact_content_storage.py; then
             exit 0
           fi
           git fetch origin main
-          if ! git diff --quiet HEAD origin/main -- deploy/environments/production/storage-policy scripts/publish_storage_policy.py; then
+          if ! git diff --quiet HEAD origin/main -- deploy/environments/production/storage-policy scripts/publish_storage_policy.py scripts/artifact_content_storage.py; then
             echo "A newer storage policy supersedes this run."
             exit 0
           fi
-          python3 -m unittest scripts.test_publish_storage_policy scripts.test_compiler_input_storage scripts.test_compiler_input_history_compatibility
+          python3 -m unittest scripts.test_publish_storage_policy scripts.test_artifact_content_storage scripts.test_compiler_input_storage scripts.test_compiler_input_history_compatibility
           python3 scripts/publish_storage_policy.py deploy/environments/production/storage-policy/policy.json
           python3 scripts/publish_storage_policy.py deploy/environments/production/storage-policy/policy.json --apply
 

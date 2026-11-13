@@ -23,6 +23,9 @@ must stay disabled until **all registered readers AND their automatic rollback
 revisions** contain the new reads. The publisher performs that gate before
 activation; merely installing the schema is insufficient. Disabling new writes
 does not disable reference reads or reverse the physical migration.
+The declarative component lane also gates every later store-reader candidate,
+even with the writer disabled, so a subsequent release cannot silently remove
+the reference reader required by already migrated history.
 
 After activation, each storage-policy tick may convert at most four historical
 bodies/8MiB in a five-second transaction. A database advisory lock and durable

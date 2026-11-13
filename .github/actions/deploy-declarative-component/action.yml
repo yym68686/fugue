@@ -34,6 +34,12 @@ runs:
       env:
         CANDIDATE_REVISION: ${{ github.sha }}
       run: python3 -m scripts.compiler_input_storage --mode check-api-candidate --candidate-revision "${CANDIDATE_REVISION}"
+    - name: Preserve single-copy artifact reader support
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        CANDIDATE_REVISION: ${{ github.sha }}
+      run: python3 -m scripts.artifact_content_storage --component "${COMPONENT}" --candidate-revision "${CANDIDATE_REVISION}"
     - name: Prepare the durable server-side apply plan
       shell: bash
       env:
