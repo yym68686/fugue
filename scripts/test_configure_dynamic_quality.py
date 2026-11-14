@@ -23,6 +23,18 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_last_valid_policy_has_no_implicit_age_expiry(self):
+        config, source = fixture()
+        policy = config['projection_policy']['dns_query_policy']['dynamic_quality']['policy']
+        policy['version'] = 'physical-network-last-valid-v8'
+        quality.validate(config)
+        quality.check_delta(source, config['projection_policy'])
+        for value in [0, None, 86400]:
+            changed = copy.deepcopy(config)
+            changed['projection_policy']['dns_query_policy']['dynamic_quality']['policy']['retain_order_seconds'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                quality.validate(changed)
+
     def test_continuity_requires_explicit_versioned_retention(self):
         config, _ = fixture()
         policy = config['projection_policy']['dns_query_policy']['dynamic_quality']['policy']

@@ -14,7 +14,7 @@ func sortedNetworkValues(values []float64) []float64 {
 }
 
 func comparisonCohorts(policy Policy, current, challenger []Observation) []string {
-	if policy.Version != PairedContinuityPolicyVersion {
+	if !IsContinuityNetworkPolicy(policy.Version) {
 		return networkSharedCohorts(current, challenger)
 	}
 	rounds := map[string]string{}
@@ -41,7 +41,7 @@ func comparisonCohorts(policy Policy, current, challenger []Observation) []strin
 // network. Passive connections and one-sided successful rounds cannot give an
 // incumbent a sampling advantage. Service and capacity observations stay intact.
 func pairedComparisonObservations(policy Policy, observations map[string][]Observation, current, challenger, cohort string) map[string][]Observation {
-	if policy.Version != PairedContinuityPolicyVersion {
+	if !IsContinuityNetworkPolicy(policy.Version) {
 		return observations
 	}
 	rounds := map[string]bool{}
@@ -115,7 +115,7 @@ func classifyContinuityQuality(snapshot Snapshot, result *Result) {
 	}
 	if result.Hypothesis == "hold" && snapshot.PreviousSelection != nil && snapshot.PreviousSelection.PrimaryEdgeID == snapshot.CurrentEdgeID && snapshot.PreviousSelection.Scope == snapshot.Scope {
 		at := originalQualityTime(snapshot.PreviousSelection)
-		if at != nil && !at.After(snapshot.CapturedAt) && snapshot.CapturedAt.Sub(*at) <= time.Duration(snapshot.Policy.RetainOrderSeconds)*time.Second {
+		if at != nil && !at.After(snapshot.CapturedAt) && (snapshot.Policy.Version == LastValidPolicyVersion || snapshot.CapturedAt.Sub(*at) <= time.Duration(snapshot.Policy.RetainOrderSeconds)*time.Second) {
 			result.QualityState, result.QualityObservedAt = "retained", at
 			result.Blockers = append(result.Blockers, "comparable_client_evidence_stale_previous_order_retained")
 			return

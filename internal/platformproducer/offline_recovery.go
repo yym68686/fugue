@@ -37,7 +37,11 @@ func (p OfflineEdgeRecoveryPolicy) Validate() error {
 			return fmt.Errorf("invalid recovery probe hostname")
 		}
 	}
-	if p.ProbeIntervalSeconds < 300 || p.ProbeIntervalSeconds > 3600 || p.ProbeTimeoutSeconds < 1 || p.ProbeTimeoutSeconds > 5 || p.SuccessThreshold < 2 || p.SuccessThreshold > 5 || p.FailureThreshold < 1 || p.FailureThreshold > 3 || p.FreshnessSeconds < 600 || p.FreshnessSeconds > 10800 || p.FreshnessSeconds < 2*p.ProbeIntervalSeconds+p.ProbeTimeoutSeconds {
+	thresholds := p.SuccessThreshold >= 2 && p.SuccessThreshold <= 5 && p.FailureThreshold >= 1 && p.FailureThreshold <= 3
+	if p.Capacity != nil && p.Capacity.Version == CapacitySingleVersion {
+		thresholds = p.SuccessThreshold == 1 && p.FailureThreshold == 1
+	}
+	if p.ProbeIntervalSeconds < 300 || p.ProbeIntervalSeconds > 3600 || p.ProbeTimeoutSeconds < 1 || p.ProbeTimeoutSeconds > 5 || !thresholds || p.FreshnessSeconds < 600 || p.FreshnessSeconds > 10800 || p.FreshnessSeconds < 2*p.ProbeIntervalSeconds+p.ProbeTimeoutSeconds {
 		return fmt.Errorf("recovery probe bounds invalid")
 	}
 	if p.Capacity != nil && (p.Capacity.Validate() != nil || p.Capacity.MinimumStableSeconds > p.FreshnessSeconds) {
@@ -75,6 +79,9 @@ func OfflineRecoveryDigest(hold OfflineEdge) string { d, _ := platformconfig.Dig
 
 func (o OfflineRecoveryObservation) Ready(hold OfflineEdge, at time.Time) bool {
 	p := hold.Recovery
+	if p != nil && p.Capacity != nil && p.Capacity.Version == CapacitySingleVersion {
+		return o.singleReady(hold, at)
+	}
 	if p != nil && p.Capacity != nil && p.Capacity.Version == CapacityContinuityVersion {
 		return o.continuityReady(hold, at)
 	}
@@ -92,6 +99,9 @@ func (o OfflineRecoveryObservation) RecordCapacity(hold OfflineEdge, at time.Tim
 	p := hold.Recovery
 	if p == nil {
 		return OfflineRecoveryObservation{}
+	}
+	if p.Capacity != nil && p.Capacity.Version == CapacitySingleVersion {
+		return o.recordSingle(hold, at, passed, validUntil, capacity, result)
 	}
 	if p.Capacity != nil && p.Capacity.Version == CapacityContinuityVersion {
 		return o.recordContinuity(hold, at, passed, validUntil, capacity, result)

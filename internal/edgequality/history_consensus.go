@@ -6,7 +6,7 @@ import "fugue/internal/model"
 // independently replays and approves it. One service cannot lend its history
 // or freshness to another owner or path.
 func applyServiceHistory(snapshot Snapshot, result *Result) bool {
-	if snapshot.Policy.Version != PairedContinuityPolicyVersion || len(snapshot.ServiceReceipts) < 2 {
+	if !IsContinuityNetworkPolicy(snapshot.Policy.Version) || len(snapshot.ServiceReceipts) < 2 {
 		return false
 	}
 	var history *model.PhysicalQualityHistoryUse

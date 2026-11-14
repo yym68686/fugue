@@ -1,5 +1,28 @@
 # Quality history continuity
 
+## Last-valid quality (V8)
+
+`physical-network-last-valid-v8` omits `retain_order_seconds`. It retains the
+most recent valid comparable quality receipt, or the exact verified published
+order when original measurements are unavailable, without an age cutoff. A new
+learning/incomplete capture cannot displace that comparison. A newer complete
+comparison supersedes it, including explicit failed transfers; original source,
+timestamps, age and restoration/retention reason remain visible. Measurements
+are replayed under their original policy and clock, never relabeled as fresh.
+Current identity, owner/path/network scope, health, admission, capacity and fresh
+route/TLS checks still apply. Without a valid comparison, an earlier order is
+retained but no new quality winner is invented.
+
+V8 policy decoding requires `physical_network_last_valid_v8` on every required
+Edge/TLS/DNS consumer before publication. V7 capability alone cannot authorize a
+V8 child. Release code first, verify reader capabilities, then activate each
+independently fenced configuration successor through the declarative CI lane.
+This does not introduce a measurement service or change the Actions probe
+schedule. UDP/TCP regressions exercise old-quality answers, real readiness
+failure and recovery, separately from ranking evidence retention.
+
+## Original V7 behavior
+
 V7 separates ranking age from permission to serve. A new capture may carry one
 original quality receipt recovered from the independently verified full LKG's
 compiler input. The original selection is reconstructed at its original time,
@@ -46,7 +69,7 @@ Ordinary selective reads retain their 30-second default. A timeout is logged as
 unavailable history; it never deletes live observations or renews old evidence.
 The same preparation phase completes the runtime and original-input read
 admissions. Its immutable source binding is shared only in that request/batch
-for at most 30 seconds after preparation; it is never stored on the server.
+for at most two minutes after preparation; it is never stored on the server.
 Live binding rereads the signed source and positive LKG and rejects any change.
 It does not rerun a potentially minute-long closure check inside a five-second
 fresh-probe window. Missing original admission can still retain an independently

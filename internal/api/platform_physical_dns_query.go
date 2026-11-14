@@ -27,7 +27,7 @@ func (s *Server) capturePhysicalDNSQueriesStrict(ctx context.Context, projection
 		return nil
 	}
 	for _, route := range policy.PhysicalRoutes {
-		if route.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+		if model.IsContinuityPhysicalNetworkPolicy(route.Policy.Version) {
 			var err error
 			ctx, err = s.prepareHistoricalQualityContext(ctx, projection.Intent.Scope)
 			if err != nil {
@@ -36,7 +36,7 @@ func (s *Server) capturePhysicalDNSQueriesStrict(ctx context.Context, projection
 			covered := map[string]bool{}
 			hosts := map[string]bool{}
 			for _, physical := range policy.PhysicalRoutes {
-				if physical.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+				if model.IsContinuityPhysicalNetworkPolicy(physical.Policy.Version) {
 					hosts[physical.Hostname] = true
 				}
 			}

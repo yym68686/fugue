@@ -44,7 +44,9 @@ def holds(policy):
                 raise ValueError('canonical recovery probe hostname required')
             if not isinstance(p['path'], str) or not p['path'].startswith('/') or p['path'].startswith('//') or len(p['path']) > 1024 or any(c in p['path'] for c in ['?', '#', '\n', '\r']):
                 raise ValueError('canonical recovery probe path required')
-            if not (300 <= p['probe_interval_seconds'] <= 3600 and 1 <= p['probe_timeout_seconds'] <= 5 and 2 <= p['success_threshold'] <= 5 and 1 <= p['failure_threshold'] <= 3 and max(600, 2*p['probe_interval_seconds']+p['probe_timeout_seconds']) <= p['freshness_seconds'] <= 10800):
+            single = isinstance(p.get('capacity'), dict) and p['capacity'].get('version') == 'edge-capacity-recovery-single-v3'
+            thresholds = p['success_threshold'] == 1 and p['failure_threshold'] == 1 if single else 2 <= p['success_threshold'] <= 5 and 1 <= p['failure_threshold'] <= 3
+            if not (300 <= p['probe_interval_seconds'] <= 3600 and 1 <= p['probe_timeout_seconds'] <= 5 and thresholds and max(600, 2*p['probe_interval_seconds']+p['probe_timeout_seconds']) <= p['freshness_seconds'] <= 10800):
                 raise ValueError('recovery probe bounds invalid')
             if 'capacity' in p:
                 validate_capacity_policy(p['capacity'], hold['edge_id'], p['freshness_seconds'])
@@ -57,14 +59,15 @@ def validate_capacity_policy(p, edge_id, freshness):
     continuity = isinstance(p, dict) and p.get('version') == 'edge-capacity-recovery-continuity-v2'
     if continuity:
         required.add('retain_admission_seconds')
-    if not isinstance(p, dict) or set(p) != required or p['version'] not in ['edge-capacity-recovery-v1', 'edge-capacity-recovery-continuity-v2'] or p['traffic_class'] != 'streaming':
+    if not isinstance(p, dict) or set(p) != required or p['version'] not in ['edge-capacity-recovery-v1', 'edge-capacity-recovery-continuity-v2', 'edge-capacity-recovery-single-v3'] or p['traffic_class'] != 'streaming':
         raise ValueError('explicit capacity recovery contract required')
     if continuity and (type(p['retain_admission_seconds']) is not int or not max(600, freshness) <= p['retain_admission_seconds'] <= 86400):
         raise ValueError('explicit bounded recovered admission retention required')
     ids = p['reference_edge_ids']
     if not isinstance(ids, list) or not 1 <= len(ids) <= 3 or any(not isinstance(i, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', i) or i == edge_id for i in ids) or len(set(ids)) != len(ids):
         raise ValueError('unique other physical capacity references required')
-    for key, low, high in [('minimum_bytes_per_second', 65536, 16777216), ('max_elapsed_milliseconds', 1000, 15000), ('minimum_stable_seconds', 300, min(7200, freshness))]:
+    single = p['version'] == 'edge-capacity-recovery-single-v3'
+    for key, low, high in [('minimum_bytes_per_second', 65536, 16777216), ('max_elapsed_milliseconds', 1000, 15000), ('minimum_stable_seconds', 0 if single else 300, 0 if single else min(7200, freshness))]:
         if type(p[key]) is not int or not low <= p[key] <= high:
             raise ValueError('capacity recovery policy exceeds bound')
 
@@ -76,13 +79,14 @@ def capacity_observation_ready(hold, observation, success):
     try:
         e = observation['capacity']
         code = e['code']
-        continuity = policy['version'] == 'edge-capacity-recovery-continuity-v2'
+        single = policy['version'] == 'edge-capacity-recovery-single-v3'
+        continuity = policy['version'] == 'edge-capacity-recovery-continuity-v2' or single
         allowed_results = ['capacity_verified', 'reference_unavailable', 'evidence_unavailable', 'code_observation_unavailable'] if continuity else ['capacity_verified']
         if observation.get('last_result') not in allowed_results or observation['successes'] != hold['recovery']['success_threshold'] or observation['failures'] != 0:
             return False
         first = datetime.datetime.fromisoformat(observation['first_success'].replace('Z', '+00:00'))
         checked = datetime.datetime.fromisoformat(e['checked_at'].replace('Z', '+00:00'))
-        if checked != success or first.tzinfo is None or first > success or (success-first).total_seconds() < policy['minimum_stable_seconds']:
+        if checked != success or first.tzinfo is None or first > success or (success-first).total_seconds() < policy['minimum_stable_seconds'] or single and first != success:
             return False
         if not DIGEST.fullmatch(e['report_digest']) or not DIGEST.fullmatch(e['route_digest']) or e['reference_edge_id'] not in policy['reference_edge_ids'] or e['reference_edge_id'] == hold['edge_id'] or e['bytes'] != 1 << 20:
             return False
@@ -195,10 +199,11 @@ def validate_preview(previous, current, policy):
             attempt = datetime.datetime.fromisoformat(o['last_attempt'].replace('Z', '+00:00'))
             success = datetime.datetime.fromisoformat(o['last_success'].replace('Z', '+00:00'))
             expiry = datetime.datetime.fromisoformat(o['proof_valid_until'].replace('Z', '+00:00'))
+            single = p.get('capacity', {}).get('version') == 'edge-capacity-recovery-single-v3'
             continuity = p.get('capacity', {}).get('version') == 'edge-capacity-recovery-continuity-v2'
-            lease_valid = success < expiry if continuity else at < expiry
+            lease_valid = success < expiry if continuity or single else at < expiry
             retention = p['capacity']['retain_admission_seconds'] if continuity else p['freshness_seconds']
-            if at.tzinfo is not None and success <= attempt <= at and lease_valid and (at-success).total_seconds() <= retention and 0 <= o.get('failures', -1) < p['failure_threshold'] and 0 <= o.get('successes', -1) <= p['success_threshold'] and capacity_observation_ready(hold, o, success):
+            if at.tzinfo is not None and success <= attempt <= at and lease_valid and (single or (at-success).total_seconds() <= retention) and 0 <= o.get('failures', -1) < p['failure_threshold'] and 0 <= o.get('successes', -1) <= p['success_threshold'] and capacity_observation_ready(hold, o, success):
                 suspended.remove(hold['edge_id'])
                 break
     if not endpoints or len(endpoints) > 4096 or any(endpoint['edge_id'] in suspended for endpoint in endpoints):

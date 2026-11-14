@@ -48,7 +48,7 @@ def validate(config):
     if type(dynamic["refresh_queries_per_cycle"]) is not int or not 1 <= dynamic["refresh_queries_per_cycle"] <= 128 or type(dynamic["refresh_concurrency"]) is not int or not 1 <= dynamic["refresh_concurrency"] <= min(8, dynamic["refresh_queries_per_cycle"]):
         raise ValueError("bounded capture concurrency required")
     network = dynamic["policy"]
-    if set(network) != network_policy_fields(network) or network.get("version") not in ["physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6", "physical-network-paired-continuity-v7"] or any(network[key] is None for key in POLICY_FIELDS):
+    if set(network) != network_policy_fields(network) or network.get("version") not in ["physical-network-delivery-v4", "physical-network-failure-aware-v5", "physical-network-comparable-delivery-v6", "physical-network-paired-continuity-v7", "physical-network-last-valid-v8"] or any(network[key] is None for key in POLICY_FIELDS):
         raise ValueError("complete explicit delivery policy required")
     validate_availability_routes(query.get("availability_routes", []))
     if precondition["operation"] == "business_exploration":

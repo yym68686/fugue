@@ -72,7 +72,7 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 			selection.QualityState = "learning"
 		}
 	}
-	if snapshot.Policy.Version == PairedContinuityPolicyVersion {
+	if IsContinuityNetworkPolicy(snapshot.Policy.Version) {
 		selection.QualityState, selection.QualityObservedAt = result.QualityState, result.QualityObservedAt
 		selection.History = model.ClonePhysicalQualityHistoryUse(result.History)
 		if selection.History != nil {
@@ -105,7 +105,7 @@ func CompileSelection(receipt Receipt, binding DNSBinding, now time.Time) (*mode
 			}
 		}
 	}
-	if snapshot.Policy.Version == PairedContinuityPolicyVersion && result.Hypothesis == "hold" && result.QualityState != "measured" {
+	if IsContinuityNetworkPolicy(snapshot.Policy.Version) && result.Hypothesis == "hold" && result.QualityState != "measured" {
 		eligible := map[string]bool{}
 		for _, candidate := range snapshot.Candidates {
 			eligible[candidate.EdgeID] = len(candidate.HardGates) == 0 && candidate.ServingBlockedReason == "" && proofFresh(candidate, snapshot.Policy, now)

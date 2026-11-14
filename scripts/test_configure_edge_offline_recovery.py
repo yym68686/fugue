@@ -5,6 +5,35 @@ from scripts import configure_edge_offline as offline
 from scripts import test_configure_edge_offline as fixtures
 
 class OfflineRecoveryConfigurationTests(unittest.TestCase):
+    def test_single_round_policy_and_preview_survive_collector_gap(self):
+        config, _ = fixtures.OfflineConfigurationTests().fixture()
+        hold = config['projection_policy']['offline_edges'][0]
+        capacity = {'version':'edge-capacity-recovery-single-v3','traffic_class':'streaming','reference_edge_ids':['edge-b'],'minimum_bytes_per_second':262144,'max_elapsed_milliseconds':5000,'minimum_stable_seconds':0}
+        hold['recovery'] = {'hostname':'api.example.test','path':'/','probe_interval_seconds':300,'probe_timeout_seconds':5,'success_threshold':1,'failure_threshold':1,'freshness_seconds':1800,'capacity':capacity}
+        offline.validate(config)
+        for key, value in [('success_threshold',3),('failure_threshold',2)]:
+            changed = copy.deepcopy(config)
+            changed['projection_policy']['offline_edges'][0]['recovery'][key] = value
+            with self.assertRaises(ValueError): offline.validate(changed)
+        for changes in [{'minimum_stable_seconds':600}, {'retain_admission_seconds':86400}, {'version':'edge-capacity-recovery-v1'}]:
+            with self.assertRaises(ValueError):
+                offline.validate_capacity_policy(dict(capacity, **changes), hold['edge_id'], 1800)
+        success = datetime.datetime.fromisoformat('2030-01-01T00:00:00+00:00')
+        code = {k:k for k in ['node_uid','front_pod_uid','worker_pod_uid','service_uid','authority_uid']}
+        code.update({k:'sha256:'+'a'*64 for k in ['authority_record_digest','worker_image_digest','front_image_digest','proxy_image_digest']})
+        code.update(worker_source_sha='b'*40,slot='a',fence=1,bundle='bundle-a')
+        evidence = {'checked_at':success.isoformat(),'report_digest':'sha256:'+'c'*64,'route_digest':'sha256:'+'d'*64,'reference_edge_id':'edge-b','bytes':1<<20,'elapsed_milliseconds':2000,'bytes_per_second':524288,'code':code}
+        observation = {'edge_id':hold['edge_id'],'declaration_digest':offline.recovery_declaration_digest(hold),'first_success':success.isoformat(),'last_success':success.isoformat(),'last_attempt':'2031-01-01T00:00:00Z','proof_valid_until':'2030-01-01T00:01:00Z','last_result':'reference_unavailable','successes':1,'failures':0,'admitted':True,'capacity':evidence}
+        before = {'business_snapshot_revision':'before','intent':{'dns':[{'hostname':'app.example.test'}]},'policy':{'minimum_healthy_edges':1},'issues':[]}
+        after = copy.deepcopy(before)
+        after['runtime_snapshot'] = {'dns_edge_endpoints':[{'edge_id':hold['edge_id']},{'edge_id':'edge-b'}],'facts':{'offline_edge_recovery':{'captured_at':'2031-01-01T00:00:01Z','observations':[observation]}}}
+        self.assertEqual(offline.validate_preview(before, after, config['projection_policy']), [hold['edge_id'],'edge-b'])
+        for key, value in [('last_result','capacity_unavailable'),('successes',0),('failures',1),('admitted',False),('first_success','2029-12-31T23:00:00Z')]:
+            changed = copy.deepcopy(after)
+            changed['runtime_snapshot']['facts']['offline_edge_recovery']['observations'][0][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                offline.validate_preview(before, changed, config['projection_policy'])
+
     def test_continuity_capacity_policy_requires_explicit_bound(self):
         policy = {'version':'edge-capacity-recovery-continuity-v2','traffic_class':'streaming','reference_edge_ids':['edge-b'],'minimum_bytes_per_second':262144,'max_elapsed_milliseconds':5000,'minimum_stable_seconds':600,'retain_admission_seconds':86400}
         offline.validate_capacity_policy(policy, 'edge-a', 1800)

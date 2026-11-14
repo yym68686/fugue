@@ -37,6 +37,14 @@ func TestHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T) {
 	}
 }
 
+func TestLastValidPhysicalOrderPublishesOverUDPAndTCPWithoutAgeCutoff(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t, "last_valid", network)
+		})
+	}
+}
+
 func testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T, kind, network string) {
 	base, now := decisionTestState(t)
 	payload := base.payload
@@ -47,6 +55,12 @@ func testHistoricalPhysicalOrderPublishesOverUDPAndRecovers(t *testing.T, kind, 
 	selection.History = &model.PhysicalQualityHistoryUse{EvidenceKind: kind, SourceArtifactID: "verified-original", InputDigest: selection.EvidenceDigest, EvidenceDigest: selection.EvidenceDigest,
 		PolicyVersion: model.PhysicalComparableDeliveryPolicyVersion, ObservedAt: original, AgeSeconds: 172800, Reason: "historical_order_retained_no_fresh_comparable_evidence",
 		OriginalOrder: []string{"edge-b", "edge-a"}, ReusedOrder: []string{"edge-b", "edge-a"}}
+	if kind == "last_valid" {
+		original = now.Add(-365 * 24 * time.Hour)
+		selection.History.EvidenceKind = ""
+		selection.History.PolicyVersion = model.PhysicalLastValidPolicyVersion
+		selection.History.ObservedAt, selection.History.AgeSeconds = original, int64(now.Sub(original)/time.Second)
+	}
 	for i := range payload.Queries {
 		for j := range payload.Queries[i].Records {
 			if payload.Queries[i].Records[j].Name == "target.example.test" {

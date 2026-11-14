@@ -1,5 +1,18 @@
 # Edge capacity recovery
 
+## Single-round recovery (V3)
+
+`edge-capacity-recovery-single-v3` explicitly sets both success and failure
+thresholds to one, `minimum_stable_seconds` to zero, and omits
+`retain_admission_seconds`. One complete, authenticated paired capacity round
+restores candidate eligibility. A collector gap, an unavailable reference or an
+unavailable code observation does not expire a completed recovery or renew its
+original timestamp. `review_overdue` is advisory. A confirmed subject failure,
+failed route or identity conflict retracts admission immediately; changed
+declarations cannot borrow a different declaration's success. Current health,
+route/TLS, code authority, DNS readiness and signed publication remain independent
+gates. V1/V2 policies retain their original replay and multi-round behavior.
+
 An offline member can answer a small HEAD request while its provider limits
 bandwidth enough to make application traffic unusable. A heartbeat, Ready pod,
 billing date, or successful HEAD response does not establish recovered capacity.
@@ -50,9 +63,11 @@ publication to other authorized members. Preview and inventory calls do not prob
   allowance; request duration still uses the complete start-to-finish interval.
 - Observe the held member's physical code again and require it to be unchanged.
   Bind its socket attestation to the observed public Front, Service and slot.
-- Persist the signed round before recording success. Require distinct scheduled
+- Persist the signed round before recording success. V1/V2 require distinct scheduled
   successes spanning the configured stability period, on the same physical code.
-  A failure, code replacement or stale sequence resets progress. A failed capacity
+  V3 requires one complete round, including when recovering a replaced Worker.
+  For V1/V2 an incomplete stale sequence resets progress; a V3 collector gap does not.
+  A failed capacity
   round immediately retracts capacity admission, irrespective of legacy HEAD
   failure hysteresis.
 
@@ -71,7 +86,9 @@ know whether the provider has reset a quota.
 a passing reference transfer. An HTTP rejection, incomplete body, missing
 attestation or transport failure is `capacity_unavailable`. A failed or slow
 reference is `reference_unavailable`, even when the subject was also slow. All
-three results retain the hold and reset recovery progress. The bounded audit ring
+three results block incomplete recovery. For V2/V3, an unavailable reference alone
+does not retract an already completed recovery; an explicit subject failure does.
+The bounded audit ring
 also keeps failed rounds so their attempt IDs, status and failure stage can be
 investigated without inventing a throughput diagnosis.
 

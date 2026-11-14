@@ -60,7 +60,7 @@ func ValidateHistoricalEvidence(snapshot Snapshot) error {
 		return nil
 	}
 	old := h.Receipt.Snapshot
-	if snapshot.Policy.Version != PairedContinuityPolicyVersion || h.SourceArtifactID == "" || len(h.InputDigest) != 71 ||
+	if !IsContinuityNetworkPolicy(snapshot.Policy.Version) || h.SourceArtifactID == "" || len(h.InputDigest) != 71 ||
 		old.HistoricalEvidence != nil || old.HistoricalOrder != nil || len(old.ServiceReceipts) != 0 || old.Policy.Version == "network-only-experiment-v1" ||
 		old.Hostname != snapshot.Hostname || DNSHostname(old) != DNSHostname(snapshot) || old.PathPrefix != snapshot.PathPrefix ||
 		old.Scope != snapshot.Scope || old.TrafficClass != snapshot.TrafficClass || old.CapturedAt.After(snapshot.CapturedAt) ||

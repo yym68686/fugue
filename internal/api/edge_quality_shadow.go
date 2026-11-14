@@ -93,13 +93,13 @@ func (s *Server) capturePhysicalQualityPathForDNS(ctx context.Context, hostname,
 	quarantine := s.activeNodeQuarantineByName()
 	var admission model.EdgeDNSAdmissionIntent
 	var holds []platformproducer.OfflineEdge
-	if networkPolicy.Version == model.PhysicalPairedContinuityPolicyVersion {
+	if model.IsContinuityPhysicalNetworkPolicy(networkPolicy.Version) {
 		admission, holds = s.observeGlobalDNSAdmission(now)
 	}
 	for _, node := range nodes {
 		legacy := edgeQualityRankCandidateForNode(node, policy, now, quarantine)
 		candidate := edgequality.Candidate{EdgeID: legacy.EdgeID, EdgeGroupID: legacy.EdgeGroupID, HardGates: []string{}}
-		if networkPolicy.Version == model.PhysicalPairedContinuityPolicyVersion {
+		if model.IsContinuityPhysicalNetworkPolicy(networkPolicy.Version) {
 			intent := dnsAdmissionForNode(node, admission, holds)
 			s.observeOfflineRecovery(node, intent, holds, now)
 			if intent.State != "allowed" && intent.State != "not_configured" {
@@ -195,7 +195,7 @@ func (s *Server) capturePhysicalQualityPathForDNS(ctx context.Context, hostname,
 		} else if len(decisions.Snapshot.Receipts) != 1 {
 			snapshot.Blockers = append(snapshot.Blockers, "actual_dns_receipt_not_retained")
 		} else {
-			if networkPolicy.Version == model.PhysicalPairedContinuityPolicyVersion {
+			if model.IsContinuityPhysicalNetworkPolicy(networkPolicy.Version) {
 				s.captureIndependentQualityProofs(ctx, &snapshot, nodes)
 			}
 			s.captureQualityCapacity(ctx, &snapshot, decisions.Snapshot.Receipts[0], nodes)
@@ -255,7 +255,7 @@ func bindPhysicalQualityDNS(snapshot *edgequality.Snapshot, receipt dnsserver.DN
 }
 
 func bindPhysicalQualityEvidence(snapshot *edgequality.Snapshot, evidence dnsserver.QualityAnswerEvidence) {
-	if snapshot.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+	if model.IsContinuityPhysicalNetworkPolicy(snapshot.Policy.Version) {
 		snapshot.PreviousSelection = model.CloneDNSPhysicalSelection(evidence.PreviousSelection)
 		evidence = independentQualityEvidence(*snapshot, evidence)
 	}

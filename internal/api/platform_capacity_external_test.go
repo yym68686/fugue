@@ -8,8 +8,46 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 )
+
+func TestSingleCapacityRoundRestoresPublishedMembershipAndSurvivesRestart(t *testing.T) {
+	s, _, hold, input := capacityRecoveryFixture(t)
+	hold.Recovery.SuccessThreshold, hold.Recovery.FailureThreshold = 1, 1
+	hold.Recovery.Capacity.Version, hold.Recovery.Capacity.MinimumStableSeconds = platformproducer.CapacitySingleVersion, 0
+	input.OfflineEdges = []platformproducer.OfflineEdge{hold}
+	ctx := t.Context()
+	plan, err := s.claimExternalCapacity(ctx, hold, input.OfflineEdges, "observer-a")
+	if err != nil || plan == nil {
+		t.Fatal("single-round policy could not claim a signed measurement", err)
+	}
+	started := time.Now().UTC()
+	time.Sleep(time.Millisecond)
+	report := capacityReport(t, s, plan.Plan, started, time.Now().UTC())
+	for i := 0; i < 2; i++ {
+		if result, err := s.recordExternalCapacity(ctx, input.OfflineEdges, "observer-a", report); err != nil || result != "capacity_verified" {
+			t.Fatal("one complete round or its idempotent completion failed", result, err)
+		}
+	}
+	observation, err := s.readOfflineRecovery(ctx, hold)
+	later := time.Now().UTC().Add(365 * 24 * time.Hour)
+	if err != nil || !observation.Ready(hold, later) || observation.Successes != 1 {
+		t.Fatal("completed recovery was lost on checkpoint reload or by age", observation, err)
+	}
+	nodes := []model.EdgeNode{{ID: hold.EdgeID, EdgeGroupID: hold.EdgeGroupID, PublicIPv4: hold.PublicIPv4}, {ID: "edge-b", EdgeGroupID: hold.EdgeGroupID, PublicIPv4: "9.9.9.9"}}
+	projection := platformIntentProjectionResponse{Policy: platformconfig.PolicySnapshot{Generation: "old", Scope: "global"}}
+	if err := s.projectDNSReadinessWithRecovery(ctx, &projection, nodes, later, &input); err != nil || len(projection.RuntimeSnapshot.DNSEdgeEndpoints) != 2 {
+		t.Fatal("single success did not restore candidate membership", err)
+	}
+	parent := model.PlatformArtifact{Metadata: map[string]string{}, Provenance: model.PlatformArtifactProvenance{SignedAt: later}}
+	if err := pinOfflineRecoveryEvidence(&parent, projection.RuntimeSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if frozen, err := platformproducer.PublicationOfflineHolds(parent, input.OfflineEdges); err != nil || len(frozen) != 0 {
+		t.Fatal("signed publication did not preserve recovered membership", err)
+	}
+}
 
 func TestCapacityExternalClaimsAreBoundedAndReportsCannotReplayOrChangeIdentity(t *testing.T) {
 	for _, scenario := range []string{"valid", "replay", "resume_completion", "foreign_observer", "forged", "code_changed", "superseded", "reference_failed", "changed_policy"} {

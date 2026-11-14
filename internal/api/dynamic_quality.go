@@ -310,7 +310,7 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 	if len(jobs) > 20000 {
 		return fmt.Errorf("dynamic quality query inventory exceeds bound")
 	}
-	if len(jobs) > 0 && policy.DynamicQuality.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+	if len(jobs) > 0 && model.IsContinuityPhysicalNetworkPolicy(policy.DynamicQuality.Policy.Version) {
 		ctx, err = s.prepareHistoricalQualityContext(ctx, projection.Intent.Scope)
 		if err != nil {
 			return err
@@ -633,7 +633,7 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 			return fmt.Errorf("dynamic quality baseline has no currently authorized endpoint")
 		}
 		projection.Policy.DNSAnswerRules[index].PhysicalOrder = &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: order}
-		if dynamic := projection.Policy.DNSQueryPolicy.DynamicQuality; dynamic != nil && dynamic.Policy.Version == model.PhysicalPairedContinuityPolicyVersion && qualityTimes[key] != nil {
+		if dynamic := projection.Policy.DNSQueryPolicy.DynamicQuality; dynamic != nil && model.IsContinuityPhysicalNetworkPolicy(dynamic.Policy.Version) && qualityTimes[key] != nil {
 			at := *qualityTimes[key]
 			// This timestamp came from the independently verified positive LKG,
 			// not a fresh measurement. Preserve its age even beyond the ordinary

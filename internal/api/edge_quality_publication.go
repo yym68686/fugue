@@ -77,7 +77,7 @@ func compileBoundPhysicalQualitySelectionWithDeadline(receipt edgequality.Receip
 }
 
 func validateBoundPhysicalQualitySnapshot(snapshot edgequality.Snapshot, evidence dnsserver.QualityAnswerEvidence) error {
-	if snapshot.Policy.Version == model.PhysicalPairedContinuityPolicyVersion && !reflect.DeepEqual(snapshot.PreviousSelection, evidence.PreviousSelection) {
+	if model.IsContinuityPhysicalNetworkPolicy(snapshot.Policy.Version) && !reflect.DeepEqual(snapshot.PreviousSelection, evidence.PreviousSelection) {
 		return errors.New("previous quality order differs from actual DNS receipt")
 	}
 	if evidence.Hostname != edgequality.DNSHostname(snapshot) || evidence.Scope != snapshot.Scope || evidence.EdgeID != snapshot.CurrentEdgeID ||
@@ -117,7 +117,7 @@ func validateBoundPhysicalQualitySnapshot(snapshot edgequality.Snapshot, evidenc
 		if candidate.RouteGeneration != bound.RouteGeneration || candidate.RouteProofVerified != bound.RouteProofVerified || !sameQualityTime(candidate.ProofObservedAt, bound.ProofObservedAt) {
 			return errors.New("physical publication candidate differs from captured route proof")
 		}
-		if snapshot.Policy.Version == model.PhysicalPairedContinuityPolicyVersion && !slices.Equal(candidate.HardGates, bound.HardGates) {
+		if model.IsContinuityPhysicalNetworkPolicy(snapshot.Policy.Version) && !slices.Equal(candidate.HardGates, bound.HardGates) {
 			return errors.New("physical publication candidate gates differ from current route evidence")
 		}
 	}

@@ -40,6 +40,10 @@ const PhysicalComparableDeliveryCapabilityV6 = "physical_network_comparable_deli
 // V7 readers understand paired continuity and historical ranking provenance.
 // Advertising V6 alone is not sufficient to decode a V7 signed child.
 const PhysicalPairedContinuityCapabilityV7 = "physical_network_paired_continuity_v7"
+
+// V8 accepts the explicit last-valid policy without an order-expiry field.
+// V7 readers reject that policy even though the serving selection wire is stable.
+const PhysicalLastValidCapabilityV8 = "physical_network_last_valid_v8"
 const PhysicalDynamicQualityCapabilityV1 = "physical_dynamic_quality_v1"
 const PhysicalOrderCapabilityV1 = "physical_order_v1"
 const PhysicalOrderProjectionCapabilityV1 = "physical_order_projection_v1"

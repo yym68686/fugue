@@ -27,7 +27,7 @@ func ServiceConsensusSnapshot(hostname string, receipts []Receipt) (Snapshot, er
 	root := Snapshot{Schema: Schema, Hostname: hostname, TrafficClass: first.TrafficClass, Scope: first.Scope, CapturedAt: first.CapturedAt, Policy: first.Policy,
 		CurrentEdgeID: first.CurrentEdgeID, LastSwitchAt: first.LastSwitchAt, ActualDNSReceipt: first.ActualDNSReceipt, ServiceReceipts: ordered,
 		Candidates: []Candidate{}, Observations: []Observation{}, Blockers: []string{}, Limitations: []string{"shared_dns_alias_requires_all_service_owners", "dns_resolver_scope_is_not_terminal_path"}}
-	if first.Policy.Version == PairedContinuityPolicyVersion {
+	if IsContinuityNetworkPolicy(first.Policy.Version) {
 		root.PreviousSelection = model.CloneDNSPhysicalSelection(first.PreviousSelection)
 	}
 	seen := map[string]bool{}
@@ -57,7 +57,7 @@ func ServiceConsensusSnapshot(hostname string, receipts []Receipt) (Snapshot, er
 		candidate := Candidate{EdgeID: edgeID, EdgeGroupID: candidates[0].EdgeGroupID, RouteProofVerified: len(candidates) == len(ordered), HardGates: []string{}}
 		digests := []string{}
 		for _, child := range candidates {
-			if first.Policy.Version == PairedContinuityPolicyVersion && child.ServingBlockedReason != "" {
+			if IsContinuityNetworkPolicy(first.Policy.Version) && child.ServingBlockedReason != "" {
 				candidate.ServingBlockedReason = child.ServingBlockedReason
 			}
 			if child.EdgeGroupID != candidate.EdgeGroupID || !child.RouteProofVerified || child.ProofObservedAt == nil {
@@ -100,7 +100,7 @@ func evaluateServiceConsensus(snapshot Snapshot) (result Result, err error) {
 	}
 	result = Result{Mode: "shadow", DNSUnchanged: true, Hypothesis: "hold", ProposedEdgeID: snapshot.CurrentEdgeID, Candidates: []Assessment{}, ProbeEdgeIDs: []string{}, RejectedRecords: map[string]int{},
 		Blockers: append([]string{"shadow_only_not_serving_authority"}, snapshot.Blockers...)}
-	if snapshot.Policy.Version == PairedContinuityPolicyVersion {
+	if IsContinuityNetworkPolicy(snapshot.Policy.Version) {
 		defer func() {
 			if result.History != nil {
 				return

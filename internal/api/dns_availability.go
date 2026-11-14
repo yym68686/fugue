@@ -71,7 +71,7 @@ func applyDNSAvailabilityBaseline(projection *platformIntentProjectionResponse, 
 		}
 		order := &model.DNSPhysicalOrder{Version: "physical-order-v1"}
 		retained := false
-		if dynamic := projection.Policy.DNSQueryPolicy.DynamicQuality; dynamic != nil && dynamic.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+		if dynamic := projection.Policy.DNSQueryPolicy.DynamicQuality; dynamic != nil && model.IsContinuityPhysicalNetworkPolicy(dynamic.Policy.Version) {
 			for _, rule := range rules {
 				if rule.NodeID != fact.NodeID || rule.Hostname != fact.Hostname || rule.Type != fact.Type || rule.PhysicalOrder == nil || rule.PhysicalOrder.QualityObservedAt == nil {
 					continue
@@ -80,7 +80,7 @@ func applyDNSAvailabilityBaseline(projection *platformIntentProjectionResponse, 
 				// Only preserveDynamicQualityBaseline, after rechecking the
 				// signed positive LKG and current topology, supplies this marker.
 				verifiedOrder := fact.Reason == "physical_quality_learning_preserved_verified_order"
-				if at.After(now) || !verifiedOrder && now.Sub(at) > time.Duration(dynamic.Policy.RetainOrderSeconds)*time.Second {
+				if at.After(now) || dynamic.Policy.Version != model.PhysicalLastValidPolicyVersion && !verifiedOrder && now.Sub(at) > time.Duration(dynamic.Policy.RetainOrderSeconds)*time.Second {
 					continue
 				}
 				allowed := map[string]bool{}

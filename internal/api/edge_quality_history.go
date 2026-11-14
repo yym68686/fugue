@@ -150,7 +150,7 @@ func boundedHistoricalQualitySelector(requested map[string]bool, remaining *int)
 // Read history from the independently verified LKG, not the active shadow or
 // a volatile freshness cache. Missing history never deletes live observations.
 func (s *Server) bindHistoricalQualityEvidence(ctx context.Context, snapshot *edgequality.Snapshot, nodeID string) {
-	if snapshot.Policy.Version != model.PhysicalPairedContinuityPolicyVersion {
+	if !model.IsContinuityPhysicalNetworkPolicy(snapshot.Policy.Version) {
 		return
 	}
 	lkg, err := s.store.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, snapshot.Scope)

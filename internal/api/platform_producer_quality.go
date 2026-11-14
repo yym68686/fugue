@@ -166,7 +166,7 @@ func (s *Server) refreshPendingProducerQuality(ctx context.Context, policy platf
 		return nil
 	}
 	quality := *input.DNSQueryPolicy.DynamicQuality
-	if quality.Policy.Version == model.PhysicalPairedContinuityPolicyVersion {
+	if model.IsContinuityPhysicalNetworkPolicy(quality.Policy.Version) {
 		ctx, err = s.prepareHistoricalQualityContext(ctx, policy.TargetScope)
 		if err != nil {
 			return err

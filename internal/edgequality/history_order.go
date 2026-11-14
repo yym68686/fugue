@@ -24,7 +24,7 @@ func validatePublishedOrder(snapshot Snapshot) error {
 		return nil
 	}
 	previous := snapshot.PreviousSelection
-	if snapshot.Policy.Version != PairedContinuityPolicyVersion || h.SourceArtifactID == "" || len(h.InputDigest) != 71 || len(h.EvidenceDigest) != 71 ||
+	if !IsContinuityNetworkPolicy(snapshot.Policy.Version) || h.SourceArtifactID == "" || len(h.InputDigest) != 71 || len(h.EvidenceDigest) != 71 ||
 		model.ValidateDNSPhysicalSelection(h.Selection) != nil || previous == nil || !reflect.DeepEqual(previous, h.Selection) ||
 		previous.BusinessAllocation != nil || previous.Scope != snapshot.Scope || previous.PrimaryEdgeID != snapshot.CurrentEdgeID ||
 		previous.CapturedAt.After(snapshot.CapturedAt) || originalQualityTime(previous) == nil {

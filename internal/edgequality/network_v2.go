@@ -16,6 +16,11 @@ const DeliveryNetworkPolicyVersion = model.PhysicalDeliveryNetworkPolicyVersion
 const FailureAwareNetworkPolicyVersion = model.PhysicalFailureAwareNetworkPolicyVersion
 const ComparableDeliveryPolicyVersion = model.PhysicalComparableDeliveryPolicyVersion
 const PairedContinuityPolicyVersion = model.PhysicalPairedContinuityPolicyVersion
+const LastValidPolicyVersion = model.PhysicalLastValidPolicyVersion
+
+func IsContinuityNetworkPolicy(version string) bool {
+	return model.IsContinuityPhysicalNetworkPolicy(version)
+}
 
 func IsDeliveryNetworkPolicy(version string) bool {
 	return model.IsDeliveryPhysicalNetworkPolicy(version)
@@ -69,6 +74,12 @@ func DefaultComparableDeliveryPolicy() Policy {
 func DefaultPairedContinuityPolicy() Policy {
 	policy := DefaultComparableDeliveryPolicy()
 	policy.Version, policy.RetainOrderSeconds = PairedContinuityPolicyVersion, 86400
+	return policy
+}
+
+func DefaultLastValidPolicy() Policy {
+	policy := DefaultPairedContinuityPolicy()
+	policy.Version, policy.RetainOrderSeconds = LastValidPolicyVersion, 0
 	return policy
 }
 
@@ -160,7 +171,7 @@ func evaluateNetwork(snapshot Snapshot) Result {
 			result.ProbeEdgeIDs = append(result.ProbeEdgeIDs, unknown[(offset+index)%len(unknown)])
 		}
 	}
-	if snapshot.Policy.Version == PairedContinuityPolicyVersion {
+	if IsContinuityNetworkPolicy(snapshot.Policy.Version) {
 		classifyContinuityQuality(snapshot, &result)
 		applyHistoricalContinuity(snapshot, &result)
 		applyPublishedOrderContinuity(snapshot, &result)
@@ -175,7 +186,7 @@ func selectNetworkChallenger(snapshot Snapshot, nodes map[string]Candidate, obse
 			continue
 		}
 		cohorts := comparisonCohorts(snapshot.Policy, observations[current.EdgeID], observations[candidate.EdgeID])
-		if snapshot.Policy.Version != PairedContinuityPolicyVersion && model.IsBoundedPhysicalNetworkPolicy(snapshot.Policy.Version) && len(cohorts) == 0 &&
+		if !IsContinuityNetworkPolicy(snapshot.Policy.Version) && model.IsBoundedPhysicalNetworkPolicy(snapshot.Policy.Version) && len(cohorts) == 0 &&
 			(!hasClientNetworkCohort(observations[current.EdgeID]) || !hasClientNetworkCohort(observations[candidate.EdgeID])) {
 			cohorts = []string{""}
 		}
@@ -196,7 +207,7 @@ func selectNetworkChallenger(snapshot Snapshot, nodes map[string]Candidate, obse
 			challenger, incumbent = comparableRetransmissionAssessments(challenger, incumbent, snapshot.Policy)
 			comparison := NetworkComparison{EdgeID: candidate.EdgeID, IncumbentEdgeID: current.EdgeID, Cohort: cohort,
 				IncumbentLower: incumbent.Lower, ChallengerUpper: challenger.Upper, Ready: incumbent.Ready && challenger.Ready}
-			if snapshot.Policy.Version == PairedContinuityPolicyVersion {
+			if IsContinuityNetworkPolicy(snapshot.Policy.Version) {
 				comparison.IncumbentMetrics, comparison.ChallengerMetrics = incumbent.Metrics, challenger.Metrics
 			}
 			if excludeRetransmissions {
@@ -274,7 +285,7 @@ func assessNetwork(candidate Candidate, observations []Observation, policy Polic
 
 func assessNetworkAt(candidate Candidate, observations []Observation, policy Policy, now, metricNow time.Time, cohort string) Assessment {
 	assessment := Assessment{EdgeID: candidate.EdgeID, EdgeGroupID: candidate.EdgeGroupID, HardGates: append([]string{}, candidate.HardGates...), Metrics: map[string]Metric{}, Missing: []string{}}
-	if policy.Version == PairedContinuityPolicyVersion && candidate.ServingBlockedReason != "" {
+	if IsContinuityNetworkPolicy(policy.Version) && candidate.ServingBlockedReason != "" {
 		assessment.HardGates = append(assessment.HardGates, candidate.ServingBlockedReason)
 	}
 	compareClient := !model.IsBoundedPhysicalNetworkPolicy(policy.Version) || cohort != ""
@@ -325,7 +336,7 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 	// A complete set of explicit failed paired attempts is meaningful even when
 	// connection failure prevents an RTT or a completed download. Keep RTT
 	// unknown; failure cost and paired outcome counts carry the evidence.
-	failedClient := policy.Version == PairedContinuityPolicyVersion && len(values["client_failure_rate"]) >= policy.MinimumRecords && networkQuantile(sortedNetworkValues(values["client_failure_rate"]), 0.5) > 0
+	failedClient := IsContinuityNetworkPolicy(policy.Version) && len(values["client_failure_rate"]) >= policy.MinimumRecords && networkQuantile(sortedNetworkValues(values["client_failure_rate"]), 0.5) > 0
 	metricNames := []string{"client_network_ms", "service_network_ms", "upload_bps", "download_bps", "client_failure_rate", "service_failure_rate", "capacity_utilization"}
 	if IsDeliveryNetworkPolicy(policy.Version) {
 		metricNames = append(metricNames, "client_retransmission_rate")
@@ -344,7 +355,7 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 		}
 		if !fresh {
 			assessment.Metrics[name] = Metric{State: "unknown", Records: len(measured)}
-			if policy.Version == PairedContinuityPolicyVersion && !latest[name].IsZero() {
+			if IsContinuityNetworkPolicy(policy.Version) && !latest[name].IsZero() {
 				metric, at := assessment.Metrics[name], latest[name]
 				metric.LastObservedAt = &at
 				assessment.Metrics[name] = metric
@@ -384,7 +395,7 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 					assessment.Score += cost
 					assessment.Lower += deliveryCost(networkQuantile(measured, 0.9), policy)
 					assessment.Upper += deliveryCost(networkQuantile(measured, 0.1), policy)
-					if policy.Version == PairedContinuityPolicyVersion {
+					if IsContinuityNetworkPolicy(policy.Version) {
 						metric, at := assessment.Metrics[name], latest[name]
 						metric.LastObservedAt, metric.ScoreCostMS = &at, &cost
 						assessment.Metrics[name] = metric
@@ -402,7 +413,7 @@ func assessNetworkAt(candidate Candidate, observations []Observation, policy Pol
 			assessment.Lower += cost
 			assessment.Upper += cost
 		}
-		if policy.Version == PairedContinuityPolicyVersion {
+		if IsContinuityNetworkPolicy(policy.Version) {
 			metric, at, cost := assessment.Metrics[name], latest[name], assessment.Score-previousScore
 			metric.LastObservedAt, metric.ScoreCostMS = &at, &cost
 			assessment.Metrics[name] = metric
@@ -475,7 +486,7 @@ func networkAdvantageous(challenger, current Assessment, policy Policy) bool {
 				if model.IsFailureAwarePhysicalNetworkPolicy(policy.Version) && metric == "download_bps" && comparableDeliveryEvidence(challenger, current) {
 					continue
 				}
-				if (policy.Version == ComparableDeliveryPolicyVersion || policy.Version == PairedContinuityPolicyVersion) && metric == "client_retransmission_rate" && comparableDeliveryEvidence(challenger, current) {
+				if (policy.Version == ComparableDeliveryPolicyVersion || IsContinuityNetworkPolicy(policy.Version)) && metric == "client_retransmission_rate" && comparableDeliveryEvidence(challenger, current) {
 					continue
 				}
 				return false
@@ -511,6 +522,6 @@ func comparableRetransmissionAssessments(challenger, current Assessment, policy 
 }
 
 func excludeAsymmetricRetransmissions(challenger, current Assessment, policy Policy) bool {
-	return (policy.Version == ComparableDeliveryPolicyVersion || policy.Version == PairedContinuityPolicyVersion) &&
+	return (policy.Version == ComparableDeliveryPolicyVersion || IsContinuityNetworkPolicy(policy.Version)) &&
 		(challenger.Metrics["client_retransmission_rate"].State == "observed") != (current.Metrics["client_retransmission_rate"].State == "observed") && comparableDeliveryEvidence(challenger, current)
 }
