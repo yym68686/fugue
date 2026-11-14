@@ -35,7 +35,13 @@ func validatePublishedOrder(snapshot Snapshot) error {
 
 func applyPublishedOrderContinuity(snapshot Snapshot, result *Result) {
 	h := snapshot.HistoricalOrder
-	if h == nil || result.History != nil || result.QualityState == "measured" || len(snapshot.Blockers) != 0 {
+	if h == nil || result.History != nil || len(snapshot.Blockers) != 0 {
+		return
+	}
+	at := originalQualityTime(h.Selection)
+	newerHistory := result.QualityState == "measured"
+	if newerHistory && (snapshot.Policy.Version != LastValidPolicyVersion || at == nil ||
+		result.QualityObservedAt != nil && !at.After(*result.QualityObservedAt)) {
 		return
 	}
 	eligible := map[string]bool{}
@@ -62,8 +68,10 @@ func applyPublishedOrderContinuity(snapshot Snapshot, result *Result) {
 	}
 	sort.Strings(recovered)
 	order = append(order, recovered...)
-	at := originalQualityTime(h.Selection)
 	reason := "verified_published_order_retained_no_fresh_comparable_evidence"
+	if newerHistory {
+		reason = "verified_published_order_newer_than_captured_measurements"
+	}
 	result.History = &model.PhysicalQualityHistoryUse{EvidenceKind: "published_order", SourceArtifactID: h.SourceArtifactID, InputDigest: h.InputDigest,
 		EvidenceDigest: h.EvidenceDigest, PolicyVersion: "published-physical-order-v1", ObservedAt: *at,
 		AgeSeconds: int64(snapshot.CapturedAt.Sub(*at) / time.Second), Reason: reason,

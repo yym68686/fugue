@@ -9,6 +9,9 @@ learning/incomplete capture cannot displace that comparison. A newer complete
 comparison supersedes it, including explicit failed transfers; original source,
 timestamps, age and restoration/retention reason remain visible. Measurements
 are replayed under their original policy and clock, never relabeled as fresh.
+Comparisons are ordered by their original quality observation time, not by the
+time a collector rereads them. A delayed complete comparison cannot replace a
+newer retained result; its reuse reason explicitly reports that distinction.
 Current identity, owner/path/network scope, health, admission, capacity and fresh
 route/TLS checks still apply. Without a valid comparison, an earlier order is
 retained but no new quality winner is invented.

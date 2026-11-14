@@ -80,8 +80,31 @@ func ValidateHistoricalEvidence(snapshot Snapshot) error {
 
 func applyHistoricalContinuity(snapshot Snapshot, result *Result) {
 	h := snapshot.HistoricalEvidence
-	if h == nil || result.QualityState == "measured" || len(snapshot.Blockers) != 0 {
+	if h == nil || len(snapshot.Blockers) != 0 {
 		return
+	}
+	if snapshot.Policy.Version == LastValidPolicyVersion && snapshot.HistoricalOrder != nil {
+		comparisonAt, publishedAt := originalQualityTime(h.Selection), originalQualityTime(snapshot.HistoricalOrder.Selection)
+		if comparisonAt != nil && publishedAt != nil && publishedAt.After(*comparisonAt) {
+			// Prefer the newer result only if it still passes admission. A
+			// blocked incumbent must not hide a usable older fallback order.
+			applyPublishedOrderContinuity(snapshot, result)
+			if result.History != nil {
+				return
+			}
+		}
+	}
+	newerHistory := false
+	if result.QualityState == "measured" {
+		at := originalQualityTime(h.Selection)
+		if snapshot.Policy.Version != LastValidPolicyVersion || at == nil ||
+			result.QualityObservedAt != nil && !at.After(*result.QualityObservedAt) {
+			return
+		}
+		// A fresh capture may read delayed or previously seen samples. V8
+		// chooses the latest comparison, not the most recently read receipt.
+		// Keep V7 replay unchanged and recheck all current serving gates below.
+		newerHistory = true
 	}
 	eligible := map[string]bool{}
 	for _, candidate := range snapshot.Candidates {
@@ -127,6 +150,9 @@ func applyHistoricalContinuity(snapshot Snapshot, result *Result) {
 	reason := "historical_order_retained_no_fresh_comparable_evidence"
 	if order[0] != snapshot.CurrentEdgeID {
 		reason = "historical_order_restored_after_current_admission_checks"
+	}
+	if newerHistory {
+		reason = "historical_comparison_newer_than_captured_measurements"
 	}
 	result.History = &model.PhysicalQualityHistoryUse{SourceArtifactID: h.SourceArtifactID, InputDigest: h.InputDigest,
 		EvidenceDigest: h.Receipt.Digest, PolicyVersion: h.Receipt.Snapshot.Policy.Version, ObservedAt: *at,

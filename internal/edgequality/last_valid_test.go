@@ -118,3 +118,72 @@ func TestLastValidNewCompleteComparisonReplacesOldWinnerIncludingFailures(t *tes
 		t.Fatal("V8 accepted an age-based expiry")
 	}
 }
+
+func TestLastValidOlderCompleteComparisonCannotReplaceNewerHistory(t *testing.T) {
+	history, _ := historicalFixture(t)
+	for _, version := range []string{LastValidPolicyVersion, PairedContinuityPolicyVersion} {
+		t.Run(version, func(t *testing.T) {
+			fresh := pairedAlgorithmFixture()
+			fresh.Policy = DefaultLastValidPolicy()
+			fresh.Policy.Version = version
+			if version == PairedContinuityPolicyVersion {
+				fresh.Policy.RetainOrderSeconds = 86400
+			}
+			fresh.CurrentEdgeID = "edge-b"
+			fresh.HistoricalEvidence = history.HistoricalEvidence
+			// The read is new, but its complete comparison predates the
+			// retained result. Reading older samples must not roll quality back.
+			at := history.HistoricalEvidence.Selection.CapturedAt.Add(10 * time.Second)
+			shift := at.Sub(fresh.CapturedAt)
+			fresh.CapturedAt = at
+			fresh.Candidates = append([]Candidate(nil), history.Candidates...)
+			for i := range fresh.Candidates {
+				fresh.Candidates[i].ProofObservedAt = timePointer(at)
+			}
+			for i := range fresh.Observations {
+				o := &fresh.Observations[i]
+				o.ObservedAt = o.ObservedAt.Add(shift)
+				if o.EdgeID == "edge-a" {
+					o.EdgeID = "edge-b"
+				} else {
+					o.EdgeID = "edge-a"
+				}
+			}
+			result := evaluateNetwork(fresh)
+			if version == PairedContinuityPolicyVersion {
+				if result.QualityState != "measured" || result.ProposedEdgeID != "edge-a" {
+					t.Fatal("legacy replay semantics changed", result)
+				}
+				return
+			}
+			if result.QualityState != "retained" || result.ProposedEdgeID != "edge-b" || result.History == nil ||
+				!result.QualityObservedAt.Equal(history.HistoricalEvidence.Selection.CapturedAt) {
+				t.Fatal("a new read of older samples displaced the latest valid comparison", result)
+			}
+			// The exact previously published order also has an original clock;
+			// it remains useful even when raw comparison history is unavailable.
+			fresh.PreviousSelection = model.CloneDNSPhysicalSelection(history.HistoricalEvidence.Selection)
+			fresh.HistoricalOrder = &PublishedOrderEvidence{SourceArtifactID: "verified-parent", InputDigest: history.HistoricalEvidence.InputDigest,
+				EvidenceDigest: history.HistoricalEvidence.Receipt.Digest, Selection: fresh.PreviousSelection}
+			fresh.HistoricalEvidence = nil
+			result = evaluateNetwork(fresh)
+			if result.QualityState != "retained" || result.ProposedEdgeID != "edge-b" || result.History == nil || result.History.EvidenceKind != "published_order" ||
+				!result.QualityObservedAt.Equal(history.HistoricalEvidence.Selection.CapturedAt) {
+				t.Fatal("older samples displaced a newer verified published order", result)
+			}
+			fresh.HistoricalEvidence = history.HistoricalEvidence
+			newest := at.Add(-time.Second)
+			fresh.PreviousSelection.CapturedAt = at
+			fresh.PreviousSelection.QualityObservedAt = &newest
+			result = evaluateNetwork(fresh)
+			if result.History == nil || result.History.EvidenceKind != "published_order" || !result.QualityObservedAt.Equal(newest) {
+				t.Fatal("older raw comparison displaced a newer verified result without transcripts", result)
+			}
+			fresh.Candidates[1].ServingBlockedReason = "dns_admission_suspended"
+			result = evaluateNetwork(fresh)
+			if result.History == nil || result.ProposedEdgeID != "edge-a" || result.History.EvidenceKind == "published_order" {
+				t.Fatal("unusable newer order hid an eligible older fallback", result)
+			}
+		})
+	}
+}
