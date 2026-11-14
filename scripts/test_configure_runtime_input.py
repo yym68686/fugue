@@ -143,6 +143,19 @@ class RuntimeInputConfigurationTests(unittest.TestCase):
         runner.publish(c, api, lambda _: None)
         sleep.assert_called_once_with(10)
 
+    @patch.object(runtime.time, "sleep")
+    def test_newer_gray_is_waited_out_without_bypassing_server_guard(self, sleep):
+        c, old, source = fixture()
+        api = Ledger(c, old, source)
+        full = api.authorities[("release_set", "global", "full")]
+        full["release"]["released_at"] = "2026-01-01T00:00:00Z"
+        gray = copy.deepcopy(full)
+        gray["release"].update(id="gray", release_channel="gray", released_at="2026-01-01T00:00:01Z", verification_state="serving_unverified")
+        api.authorities[("release_set", "global", "gray")] = gray
+        sleep.side_effect = lambda _: gray["release"].update(verification_state="failed")
+        runner.publish(c, api, lambda _: None)
+        sleep.assert_called_once_with(10)
+
     @patch.object(runtime, "command", return_value="legacy")
     def test_old_or_invalid_revision_refused(self, command):
         for revision in ("main", "", "a" * 40):
