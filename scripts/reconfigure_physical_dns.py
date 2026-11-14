@@ -99,10 +99,7 @@ def resolve_baseline(config, api):
     full = selected(api, "global", "full", "release_set")
     reference = authority_identity(full)
     declared = config["precondition"]["serving_full"]
-    if reference == declared:
-        baseline(config, api)
-        return config
-    if reference["fencing_token"] <= declared["fencing_token"] or full["artifact"].get("metadata", {}).get("producer_policy_release_id") != config["precondition"]["previous_policy"]["release_id"]:
+    if (reference != declared and reference["fencing_token"] <= declared["fencing_token"]) or full["artifact"].get("metadata", {}).get("producer_policy_release_id") != config["precondition"]["previous_policy"]["release_id"]:
         raise ValueError("renewed baseline changed the declared producer or regressed its fence")
     lkg = api("GET", "/v1/admin/artifacts/" + full["artifact"]["id"] + "/lkg").get("lkg", {})
     evidence_hash = lkg.get("verification_evidence_hash", "")

@@ -80,13 +80,44 @@ class DynamicQualityConfigurationTests(unittest.TestCase):
         config, _ = fixture()
         resolved = copy.deepcopy(config)
         resolved["precondition"]["serving_full"]["fencing_token"] += 2
-        with patch.object(quality, "resolve_baseline", side_effect=[ValueError("baseline is not the predecessor's verified producer publication"), resolved]), patch.object(quality, "baseline"), patch.object(quality.time, "sleep") as wait:
+        with patch.object(quality, "resolve_baseline", side_effect=[ValueError("baseline is not the predecessor's verified producer publication"), resolved]), patch.object(quality, "baseline"), patch.object(quality, "selected", return_value={}), patch.object(quality.time, "sleep") as wait:
             self.assertEqual(quality.wait_verified_baseline(config, None), resolved)
             wait.assert_called_once_with(10)
         with patch.object(quality, "resolve_baseline", side_effect=ValueError("renewed baseline changed the declared producer or regressed its fence")), patch.object(quality.time, "sleep") as wait:
             with self.assertRaises(ValueError):
                 quality.wait_verified_baseline(config, None)
             wait.assert_not_called()
+
+    def test_configuration_waits_for_newer_gray_without_bypassing_failed_or_declared_guards(self):
+        config, _ = fixture()
+        full = {'release': {'released_at': '2020-01-01T00:00:00Z'}}
+        gray = {'release': {'released_at': '2020-01-01T00:01:00Z', 'verification_state': 'serving_unverified'}}
+        with patch.object(quality, 'resolve_baseline', return_value=config), patch.object(quality, 'baseline', return_value=full), patch.object(quality, 'selected', side_effect=[gray, {}]), patch.object(quality.time, 'sleep') as wait:
+            self.assertEqual(quality.wait_verified_baseline(config, None), config)
+            wait.assert_called_once_with(10)
+        gray['release']['verification_state'] = 'failed'
+        with patch.object(quality, 'resolve_baseline', return_value=config), patch.object(quality, 'baseline', return_value=full), patch.object(quality, 'selected', return_value=gray), patch.object(quality.time, 'sleep') as wait:
+            quality.wait_verified_baseline(config, None)
+            wait.assert_not_called()
+        gray['release']['verification_state'] = 'serving_unverified'
+        config['baseline_mode'] = 'declared'
+        with patch.object(quality, 'resolve_baseline', return_value=config), patch.object(quality, 'baseline', return_value=full), patch.object(quality, 'selected', return_value=gray), patch.object(quality.time, 'sleep') as wait:
+            with self.assertRaisesRegex(ValueError, 'newer gray'):
+                quality.wait_verified_baseline(config, None)
+            wait.assert_not_called()
+
+    def test_publication_conflict_revalidates_but_other_errors_fail_closed(self):
+        from scripts import configure_edge_offline as offline
+        for module in (quality, offline):
+            config = {'baseline_mode': 'latest_verified_same_policy'}
+            with self.subTest(module=module.__name__), patch.object(module, 'publish_once', side_effect=[quality.ArtifactHTTPError(409), {'accepted': True}]) as publish, patch.object(module.time, 'sleep'):
+                self.assertEqual(module.publish(config, None, None), {'accepted': True})
+                self.assertEqual(publish.call_count, 2)
+            for mode, error, calls in [('declared', quality.ArtifactHTTPError(409), 1), ('latest_verified_same_policy', quality.ArtifactHTTPError(403), 1), ('latest_verified_same_policy', quality.ArtifactHTTPError(409), 3), ('latest_verified_same_policy', ValueError('producer changed'), 1)]:
+                with self.subTest(module=module.__name__, mode=mode, error=str(error)), patch.object(module, 'publish_once', side_effect=error) as publish, patch.object(module.time, 'sleep'):
+                    with self.assertRaises(type(error)):
+                        module.publish({'baseline_mode': mode}, None, None)
+                    self.assertEqual(publish.call_count, calls)
 
     def test_entrypoint_uses_supported_bounded_transport(self):
         config, _ = fixture()

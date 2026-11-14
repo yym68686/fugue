@@ -8,12 +8,13 @@ import math
 import os
 from pathlib import Path
 import re
+import time
 import urllib.parse
 
 from scripts.bootstrap_cell_producer import authority_identity, digest, ensure_input, exact, selected
 from scripts.configure_dynamic_quality import wait_verified_baseline
 from scripts.observe_front_candidate import now
-from scripts.publish_agent_edge_shadow import API, canonical
+from scripts.publish_agent_edge_shadow import API, ArtifactHTTPError, canonical
 from scripts.reconcile_agent_edge_trust import strict_json
 from scripts.reconfigure_cell_producer import DIGEST, IDENTITY, validate_ref
 from scripts.reconfigure_physical_dns import SCOPE, baseline, bounded_json
@@ -236,6 +237,18 @@ def preview_evidence(previous, current):
 
 
 def publish(config, api, save):
+    for attempt in range(3):
+        try:
+            return publish_once(config, api, save)
+        except ArtifactHTTPError as error:
+            if error.status != 409 or config.get('baseline_mode') != 'latest_verified_same_policy' or attempt == 2:
+                raise
+            # Preserve fencing: resolve a verified same-producer baseline and
+            # validate all inputs/previews again before retrying a conflict.
+            time.sleep(10)
+
+
+def publish_once(config, api, save):
     validate(config)
     declaration = digest(config)
     config = wait_verified_baseline(config, api)

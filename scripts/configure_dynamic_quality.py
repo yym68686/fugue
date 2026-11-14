@@ -10,8 +10,8 @@ import urllib.parse
 
 from scripts import dns_availability_recovery
 from scripts.bootstrap_cell_producer import authority_identity, digest, ensure_input, exact, selected
-from scripts.observe_front_candidate import now
-from scripts.publish_agent_edge_shadow import API, canonical
+from scripts.observe_front_candidate import now, timestamp
+from scripts.publish_agent_edge_shadow import API, ArtifactHTTPError, canonical
 from scripts.reconfigure_cell_producer import DIGEST, IDENTITY, validate_ref
 from scripts.reconfigure_physical_dns import POLICY_FIELDS, SCOPE, baseline, bounded_json, resolve_baseline, network_policy_fields
 from scripts.configure_business_exploration import BusinessBaselineChanged, check_business_delta, check_business_retirement, resolve_business_anchors, validate_business_preview, validate_business_retirement, validate_business_retirement_preview, validate_business_routes
@@ -152,6 +152,12 @@ def publish(config, api, save):
             if config.get("business_anchor_mode") != "latest_verified_same_baseline" or attempt == 2:
                 raise
             time.sleep(10)
+        except ArtifactHTTPError as error:
+            if error.status != 409 or config.get("baseline_mode") != "latest_verified_same_policy" or attempt == 2:
+                raise
+            # Re-run every predecessor, source-delta, preview and LKG check.
+            # Never turn a stale CAS into an unconditional publication.
+            time.sleep(10)
     raise ValueError("business DNS baseline did not settle")
 
 
@@ -243,11 +249,14 @@ def wait_verified_baseline(config, api):
         config = dns_availability_recovery.resolve_baseline(config, api)
         dns_availability_recovery.baseline(config, api)
         return config
-    transient = {"baseline is not the predecessor's verified producer publication", "serving full publication changed", "exact unexpired positive LKG required"}
+    transient = {"baseline is not the predecessor's verified producer publication", "serving full publication changed", "exact unexpired positive LKG required", "a newer gray publication is still in progress"}
     for attempt in range(25):
         try:
             resolved = resolve_baseline(config, api)
-            baseline(resolved, api)
+            full = baseline(resolved, api)
+            gray = selected(api, "global", "gray", "release_set").get("release")
+            if gray and gray.get("verification_state") != "failed" and timestamp(gray["released_at"]) > timestamp(full["release"]["released_at"]):
+                raise ValueError("a newer gray publication is still in progress")
             return resolved
         except ValueError as error:
             if config.get("baseline_mode") != "latest_verified_same_policy" or str(error) not in transient or attempt == 24:

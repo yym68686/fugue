@@ -103,6 +103,18 @@ class PhysicalDNSConfigurationTests(unittest.TestCase):
         self.assertEqual(resolved["precondition"], result["resolved_precondition"])
         self.assertTrue(result["producer_activated"])
 
+    def test_same_release_can_refresh_positive_lkg_without_refreshing_quality(self):
+        config, old, source = fixture()
+        config['baseline_mode'] = 'latest_verified_same_policy'
+        ledger = Ledger(config, old, source)
+        ledger.lkg['verification_evidence_hash'] = 'sha256:' + 'e'*64
+        before = copy.deepcopy(config)
+        resolved = routing.resolve_baseline(config, ledger)
+        self.assertEqual(resolved['precondition']['serving_full'], config['precondition']['serving_full'])
+        self.assertEqual(resolved['precondition']['verification_evidence_hash'], ledger.lkg['verification_evidence_hash'])
+        self.assertEqual(resolved['projection_policy'], config['projection_policy'])
+        self.assertEqual(config, before)
+
     def test_baseline_refresh_never_weakens_lkg_or_transaction_guards(self):
         for failure in ["regressed", "foreign producer", "unverified", "expired", "foreign lkg", "after capture"]:
             with self.subTest(failure=failure):
