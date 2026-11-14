@@ -5,6 +5,7 @@ DOCKER ?= docker
 .PHONY: test test-scripts prepush generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
 
 test:
+	python3 -m unittest scripts.test_configure_runtime_input
 	python3 -m unittest scripts.test_reconcile_longhorn_snapshot_cleanup scripts.test_plan_longhorn_snapshot_recovery scripts.test_recover_longhorn_snapshot scripts.test_longhorn_snapshot_map
 	go -C tests/snapshot-native-fold test -count=1 ./...
 	python3 -m unittest scripts.test_install_compiler_input_zero_temp
@@ -56,6 +57,7 @@ test:
 	$(MAKE) test-static-edge-observability
 
 test-scripts:
+	python3 -m unittest scripts.test_configure_runtime_input
 	python3 -m unittest scripts.test_install_compiler_input_zero_temp
 	python3 -m unittest scripts.test_refresh_producer_dependencies
 	python3 -m unittest scripts.test_cnpg_backup_retention scripts.test_cnpg_backup_history

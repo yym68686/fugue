@@ -26,6 +26,9 @@ def compatible_revision(revision):
         body = command(['git', 'show', revision+':'+path])
         if any(marker not in body for marker in markers):
             raise ValueError('artifact current/rollback reader lacks reference support')
+    # Existing signed runtime inputs remain necessary when writers are off.
+    from scripts.configure_runtime_input import compatible_revision as runtime_compatible
+    runtime_compatible(revision)
 
 
 def check_readers():

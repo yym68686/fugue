@@ -27,6 +27,9 @@ def validate_ref(ref):
 
 
 def validate(config):
+    if config.get("schema") == "fugue.runtime-input-reconfiguration/v1":
+        from scripts.configure_runtime_input import validate as validate_runtime
+        return validate_runtime(config)
     if config.get("schema") == "fugue.producer-dependency-refresh/v1":
         from scripts.refresh_producer_dependencies import validate as validate_dependencies
         return validate_dependencies(config)
@@ -126,6 +129,9 @@ def validate_output(config, policy):
 
 
 def publish(config, api, save):
+    if config.get("schema") == "fugue.runtime-input-reconfiguration/v1":
+        from scripts.configure_runtime_input import publish as publish_runtime
+        return publish_runtime(config, api, save)
     if config.get("schema") == "fugue.producer-dependency-refresh/v1":
         from scripts.refresh_producer_dependencies import publish as publish_dependencies
         return publish_dependencies(config, api, save)
@@ -202,6 +208,9 @@ def main():
     token = os.environ.pop("FUGUE_API_KEY", "")
     if not token or not args.evidence:
         raise ValueError("configuration credential and retained evidence path required")
+    if config["schema"] == "fugue.runtime-input-reconfiguration/v1":
+        from scripts.configure_runtime_input import check_readers
+        check_readers()
     def save(value):
         Path(args.evidence).write_text(canonical(value) + "\n")
     # A DNS configuration preview verifies the complete signed legacy input,

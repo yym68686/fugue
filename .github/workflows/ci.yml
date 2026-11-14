@@ -1398,7 +1398,7 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producers deploy/environments/production/cell-producer-reconfiguration deploy/environments/production/cell-membership-expansion deploy/environments/production/producer-renewal/renewal.json)
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producers deploy/environments/production/cell-producer-reconfiguration deploy/environments/production/cell-membership-expansion deploy/environments/production/runtime-input-reconfiguration deploy/environments/production/producer-renewal/renewal.json)
           if (( ${#declarations[@]} > 1 )); then
             echo 'one Cell producer declaration per configuration atom is required' >&2
             exit 1
@@ -1490,21 +1490,21 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producer-reconfiguration deploy/environments/production/cell-membership-expansion)
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producer-reconfiguration deploy/environments/production/cell-membership-expansion deploy/environments/production/runtime-input-reconfiguration)
           if (( ${#declarations[@]} > 1 )); then
             echo 'one existing Cell producer per configuration atom is required' >&2
             exit 1
           fi
           if (( ${#declarations[@]} == 1 )); then
             config="${declarations[0]}"
-            [[ "$config" =~ ^deploy/environments/production/(cell-producer-reconfiguration|cell-membership-expansion)/cell-[a-z0-9-]+\.json$ ]]
+            [[ "$config" =~ ^deploy/environments/production/((cell-producer-reconfiguration|cell-membership-expansion)/cell-[a-z0-9-]+|runtime-input-reconfiguration/(global|cell-[a-z0-9-]+))\.json$ ]]
             runner=scripts.reconfigure_cell_producer
             if [[ "$config" == deploy/environments/production/cell-membership-expansion/* ]]; then
               runner=scripts.expand_cell_membership
             fi
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/refresh_producer_dependencies.py scripts/test_refresh_producer_dependencies.py scripts/reconfigure_cell_producer.py scripts/test_reconfigure_cell_producer.py scripts/expand_cell_membership.py scripts/test_expand_cell_membership.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py; then
-              python3 -m unittest scripts.test_reconfigure_cell_producer scripts.test_expand_cell_membership scripts.test_refresh_producer_dependencies
+            if git diff --quiet HEAD origin/main -- "$config" scripts/configure_runtime_input.py scripts/test_configure_runtime_input.py scripts/refresh_producer_dependencies.py scripts/test_refresh_producer_dependencies.py scripts/reconfigure_cell_producer.py scripts/test_reconfigure_cell_producer.py scripts/expand_cell_membership.py scripts/test_expand_cell_membership.py scripts/bootstrap_cell_producer.py scripts/publish_agent_edge_shadow.py; then
+              python3 -m unittest scripts.test_configure_runtime_input scripts.test_reconfigure_cell_producer scripts.test_expand_cell_membership scripts.test_refresh_producer_dependencies
               python3 -m "$runner" "$config" --validate-only
               echo "config=$config" >> "$GITHUB_OUTPUT"
               echo "runner=$runner" >> "$GITHUB_OUTPUT"

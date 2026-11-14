@@ -18,6 +18,18 @@ LKG. This operation accepts no unverified rollback-fence exception, soft overrid
 forced publication or combined canary change. A newer pending gray publication,
 frozen lane, changed baseline or competing successor conflicts without writes.
 
+The existing producer configuration CI lane accepts one
+`fugue.runtime-input-reconfiguration/v1` declaration under
+`deploy/environments/production/runtime-input-reconfiguration/` per push.
+It pins the predecessor, derives the successor from its exact signed projection
+(only generation and runtime input mode change), and checks current
+and automatic rollback readers. `baseline_mode=latest_verified_same_policy`
+may resolve a newer verified full/LKG from only that exact predecessor to
+survive queue delay; declared and resolved pins are retained. It cannot accept
+a regressed fence or waive positive LKG. Only a configuration preview is
+fetched, not physical transcripts. A configuration receipt is not serving
+acceptance: observe subsequent runtime digests and verified LKGs separately.
+
 The store locks the producer scope before its target scope, then rechecks the
 signed sources, publication and LKG in the same transaction. An identical retry
 succeeds only while that exact successor and baseline remain current. The
