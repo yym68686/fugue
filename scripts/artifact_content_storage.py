@@ -7,6 +7,32 @@ import re
 from scripts.compiler_input_storage import command, readers
 
 
+def reader_registry():
+    """Use the planner's complete inventory, including data-defined groups.
+
+    A group component is not necessarily a database reader. Determine that from
+    its source roots, exactly as for a static component; never bypass the gate
+    based on a component name or family.
+    """
+    registry = json.loads(Path('deploy/releases/components.json').read_text())
+    components = list(registry['components'])
+    group_path = registry.get('edgeGroupRegistryPath', '')
+    if group_path:
+        path = Path(group_path)
+        if path.is_absolute() or '..' in path.parts or str(path) != group_path:
+            raise ValueError('edge group registry path is not repository-relative')
+        groups = json.loads(path.read_text())
+        if (groups.get('apiVersion') != 'release.fugue.dev/v1' or
+                groups.get('kind') != 'EdgeGroupRegistry' or not groups.get('groups')):
+            raise ValueError('edge group registry identity is invalid')
+        for group in groups['groups']:
+            components.extend(group[key] for key in ('client', 'control', 'worker'))
+    ids = [component['id'] for component in components]
+    if len(ids) != len(set(ids)):
+        raise ValueError('artifact reader component registration is ambiguous')
+    return {**registry, 'components': components}
+
+
 def compatible_revision(revision):
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('artifact reader source revision is missing')
@@ -32,14 +58,14 @@ def compatible_revision(revision):
 
 
 def check_readers():
-    population = readers(json.loads(Path('deploy/releases/components.json').read_text()), archive_required=True)
+    population = readers(reader_registry(), archive_required=True)
     for revision in sorted({r[key] for r in population for key in ('revision', 'rollback_revision')}):
         compatible_revision(revision)
     return population
 
 
 def check_candidate(component_id, revision):
-    registry = json.loads(Path('deploy/releases/components.json').read_text())
+    registry = reader_registry()
     matches = [c for c in registry['components'] if c['id'] == component_id]
     if len(matches) != 1:
         raise ValueError('artifact reader component is not registered')
