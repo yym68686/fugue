@@ -822,7 +822,7 @@ func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformc
 	h.CompatibilityCapabilities = dnsExecutionCapabilities()
 	h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 	var receipt model.PlatformConsumerHeartbeatResponse
-	if err := client.PostJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id.Token, h, &receipt); err != nil {
+	if err := client.PostIdentityJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id, h, &receipt); err != nil {
 		return err
 	}
 	if !receipt.Consumer.IdentityVerified || receipt.Consumer.ConsumerID != h.ConsumerID || receipt.Consumer.Sequence != sequence || receipt.Consumer.EvidenceHash != h.EvidenceHash || receipt.Consumer.ExpectedConsumerSetID != a.ExpectedConsumerSetID {

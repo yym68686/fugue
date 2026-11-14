@@ -318,7 +318,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 	if s.shadowValidationParent != nil {
 		endpoint = "/v1/platform-state/consumers/shadow-heartbeat"
 	}
-	if err = client.PostJSON(ctx, endpoint, identity.Token, heartbeat, &receipt); err != nil {
+	if err = client.PostIdentityJSON(ctx, endpoint, identity, heartbeat, &receipt); err != nil {
 		return err
 	}
 	if !receipt.Consumer.IdentityVerified || receipt.Consumer.ConsumerID != heartbeat.ConsumerID || receipt.Consumer.Sequence != heartbeat.Sequence || receipt.Consumer.ExpectedConsumerSetID != chosen.ExpectedConsumerSetID || receipt.Consumer.EvidenceHash != heartbeat.EvidenceHash {

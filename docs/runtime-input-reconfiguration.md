@@ -66,3 +66,13 @@ current-trust verification and durable pin before activation. A newly working
 current generation does not prove that an unavailable historical generation can
 be restored or lawfully discarded. The public history-retirement safety refusal
 is unaffected by this configuration transaction.
+
+An observation may exceed the two-minute component credential lifetime. Parent
+and source reads, assignment rechecks, and DNS heartbeat submission renew a
+near-expiry credential from the current projected Pod token, preserving the
+exact component, node, authority, consumer, scope and complete artifact-kind
+set. Renewal does not extend the credential lifetime, reselect an assignment,
+renew a physical proof, or retry a heartbeat after an ambiguous response.
+Authorization rejection and changed assignments still fail closed. Inspect
+fresh authenticated consumer heartbeats, not just listener liveness, after
+upgrading a long-running input reader.

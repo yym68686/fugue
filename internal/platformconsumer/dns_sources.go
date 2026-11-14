@@ -22,6 +22,10 @@ const dnsRouteSourceReadTimeout = 45 * time.Second
 // DNSRouteSources observes the routing ledger bound to this exact DNS
 // assignment. Signature/policy validation belongs to the DNS consumer.
 func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease, previous ...model.PlatformDNSRouteSourceSnapshot) (model.PlatformDNSRouteSourceSnapshot, error) {
+	id, err := c.RefreshIdentity(ctx, id)
+	if err != nil {
+		return model.PlatformDNSRouteSourceSnapshot{}, err
+	}
 	var result model.PlatformConsumerDNSRouteSourcesResponse
 	validator := ""
 	var unchanged func(http.Header) error
@@ -69,6 +73,10 @@ func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.Platfo
 // Verification metadata may advance after the cached release was applied; its
 // immutable publication binding and exact expected membership must not change.
 func (c Client) RetainedDNSRouteSources(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease, previous ...model.PlatformConsumerRetainedDNSRouteSourcesResponse) (model.PlatformConsumerRetainedDNSRouteSourcesResponse, error) {
+	id, err := c.RefreshIdentity(ctx, id)
+	if err != nil {
+		return model.PlatformConsumerRetainedDNSRouteSourcesResponse{}, err
+	}
 	var result model.PlatformConsumerRetainedDNSRouteSourcesResponse
 	validator := ""
 	var unchanged func(http.Header) error

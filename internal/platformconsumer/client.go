@@ -180,6 +180,10 @@ func (c Client) CheckServingAssignment(ctx context.Context, identity Identity, a
 	return c.checkAssignment(ctx, identity, assignment, true)
 }
 func (c Client) checkAssignment(ctx context.Context, identity Identity, assignment model.PlatformConsumerAssignment, serving bool) error {
+	identity, err := c.RefreshIdentity(ctx, identity)
+	if err != nil {
+		return err
+	}
 	var current model.PlatformConsumerAssignmentResponse
 	path := "/v1/platform-state/consumers/assignment"
 	if serving {
@@ -209,6 +213,16 @@ func (c Client) checkAssignment(ctx context.Context, identity Identity, assignme
 
 func (c Client) PostJSON(ctx context.Context, path, token string, in, out any) error {
 	return c.requestJSON(ctx, path, token, http.MethodPost, in, out)
+}
+
+// PostIdentityJSON performs one authenticated write, with no response retry.
+// Callers retain their exact assignment and evidence rechecks.
+func (c Client) PostIdentityJSON(ctx context.Context, path string, identity Identity, in, out any) error {
+	identity, err := c.RefreshIdentity(ctx, identity)
+	if err != nil {
+		return err
+	}
+	return c.PostJSON(ctx, path, identity.Token, in, out)
 }
 
 func (c Client) GetJSON(ctx context.Context, path, token string, out any) error {
@@ -353,6 +367,10 @@ func (c Client) classifyAssignmentReadError(ctx context.Context, id Identity, a 
 func (c Client) ReleaseSet(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease) (model.PlatformArtifact, error) {
 	if a.ReleaseSetID == "" || a.ExpectedConsumerSetID == "" || id.ScopeKey != a.ScopeKey || !slices.Contains(id.ArtifactKinds, a.ArtifactKind) {
 		return model.PlatformArtifact{}, errors.New("parent assignment identity invalid")
+	}
+	id, err := c.RefreshIdentity(ctx, id)
+	if err != nil {
+		return model.PlatformArtifact{}, err
 	}
 	base, err := url.Parse(strings.TrimSpace(c.BaseURL))
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil {
