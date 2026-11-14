@@ -1,6 +1,6 @@
 {
   "authority_cell_id": "cell-dns-availability",
-  "generation": 7,
+  "generation": 8,
   "origin": "https://api.fugue.pro",
   "policy": {
     "authority_cell_id": "cell-dns-availability",
@@ -98,13 +98,13 @@
         ]
       },
       "producer_policy": {
-        "artifact_id": "artifact_1794632792_bd597b2e8f43",
-        "content_hash": "sha256:020bf2ec17862da32e93ada056121e61504b696c5c006fd647943568635d129d",
-        "fencing_token": 56,
-        "release_id": "artifactrel_1794635060_4e7b2c147273"
+        "artifact_id": "artifact_1794637309_9cc0c14a6245",
+        "content_hash": "sha256:5dcc894c22455f70de14d0a6e804dcdfb9186f161e993a6c0bd146fe5087e178",
+        "fencing_token": 57,
+        "release_id": "artifactrel_1794641874_1406adc78dee"
       }
     },
-    "generation": "cell-dns-availability-configuration-input-20261114-1",
+    "generation": "cell-dns-availability-configuration-input-20261114-2",
     "input_source": "verified-global-dns",
     "interval_seconds": 60,
     "mode": "serving",
@@ -122,18 +122,18 @@
   "precondition": {
     "operation": "dns_source",
     "previous_policy": {
-      "artifact_id": "artifact_1794502362_2fbd32ab65a8",
-      "content_hash": "sha256:8a85bdd9a1d5e5b6e46412304c3e92122a77b38c6684c290bdf6e4cbacf1c156",
-      "fencing_token": 3,
-      "release_id": "artifactrel_1794505487_2accbabc58ac"
+      "artifact_id": "artifact_1794636324_609d95f7a913",
+      "content_hash": "sha256:3158dd702792feff07aa02cf8ff942bcd5aca1f696313e2463549a9a790a07e8",
+      "fencing_token": 4,
+      "release_id": "artifactrel_1794636358_13bc88fa7dc2"
     },
     "serving_full": {
-      "artifact_id": "artifact_1794509663_30a155a74ff5",
-      "content_hash": "sha256:32c67a9129606e8ae5855a524a25e66ad0d8775b8e89f9e32074162d604fd206",
-      "fencing_token": 310,
-      "release_id": "artifactrel_1794509889_bbc5e0c97a61"
+      "artifact_id": "artifact_1794637781_428069753ee7",
+      "content_hash": "sha256:08410796422ecb1f3c46a77cda86b2d139e76645411700d3e0519bedc5fdf26a",
+      "fencing_token": 313,
+      "release_id": "artifactrel_1794641710_6440311ebfd6"
     },
-    "verification_evidence_hash": "sha256:aea725c9e80361166144fc4ee50740f878c20825d34cfc5c3a87cc19d93bf6ab"
+    "verification_evidence_hash": "sha256:3f1dd48a143aa68bccd3076a55878b0c60d293d83602e732a1b1e9e458d9e5e0"
   },
   "schema": "fugue.producer-dependency-refresh/v1"
 }
