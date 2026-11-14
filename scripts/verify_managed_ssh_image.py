@@ -62,15 +62,39 @@ def validate_metadata(metadata, source):
     return metadata["Architecture"]
 
 
+def canonical_repository_digest(value):
+    match = re.fullmatch(r"([^@\s]+)@(sha256:[a-f0-9]{64})", value)
+    if not match:
+        raise ValueError("repository digest is missing")
+    repository = match[1]
+    if '/' not in repository:
+        repository = 'docker.io/library/' + repository
+    elif not any(character in repository.split('/')[0] for character in '.:') and not repository.startswith('localhost/'):
+        repository = 'docker.io/' + repository
+    return repository + '@' + match[2]
+
+
+def verify_cri_identity(observed, docker_metadata, expected_digests):
+    status = observed.get('status', {})
+    spec = observed.get('info', {}).get('imageSpec', {})
+    actual = {canonical_repository_digest(value) for value in status.get('repoDigests', [])}
+    # Docker's containerd store may report an index as Id; CRI reports a
+    # platform config as id. Bind the immutable repository AND native platform,
+    # not two implementation-dependent local identifiers.
+    if (not expected_digests or not actual.intersection(expected_digests) or
+            not re.fullmatch(r'sha256:[a-f0-9]{64}', status.get('id', '')) or
+            docker_metadata.get('Os') != 'linux' or docker_metadata.get('Architecture') not in {'amd64', 'arm64'} or
+            spec.get('os') != docker_metadata['Os'] or spec.get('architecture') != docker_metadata['Architecture']):
+        raise ValueError('CRI image repository digest or native platform differs from Docker')
+    return status['id']
+
+
 def pull_candidate_into_test_node(node, image, docker_metadata):
     if not re.fullmatch(r"fugue-ssh-artifact-[a-f0-9]{10}-control-plane",node):
         raise ValueError("candidate pull is restricted to the task-owned kind node")
     run(["docker","exec",node,"crictl","pull",image],timeout=180)
     observed=json.loads(run(["docker","exec",node,"crictl","inspecti",image]))
-    status=observed.get("status",{})
-    if status.get("id")!=docker_metadata.get("Id") or image not in status.get("repoDigests",[]):
-        raise ValueError("CRI candidate identity differs from the verified registry image")
-    return status["id"]
+    return verify_cri_identity(observed, docker_metadata, {canonical_repository_digest(image)})
 
 
 def pull_fixture_into_test_node(node, image):
@@ -87,13 +111,12 @@ def pull_fixture_into_test_node(node, image):
         raise ValueError("explicit fixture image required")
     run(["docker", "pull", image], timeout=180)
     metadata = json.loads(run(["docker", "image", "inspect", image]))[0]
-    if not re.fullmatch(r"sha256:[a-f0-9]{64}", metadata.get("Id", "")):
-        raise ValueError("fixture config identity is missing")
+    expected = {canonical_repository_digest(value) for value in metadata.get('RepoDigests', [])}
+    if not expected:
+        raise ValueError('fixture repository digest is missing')
     run(["docker", "exec", node, "crictl", "pull", image], timeout=180)
     observed = json.loads(run(["docker", "exec", node, "crictl", "inspecti", image]))
-    if observed.get("status", {}).get("id") != metadata["Id"]:
-        raise ValueError("CRI fixture identity differs from the verified Docker image")
-    return metadata["Id"]
+    return verify_cri_identity(observed, metadata, expected)
 
 
 def validate_native_acceptance(output):

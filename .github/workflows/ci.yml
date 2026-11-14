@@ -787,7 +787,7 @@ jobs:
           set -euo pipefail
           base="$BASE_SHA"
           if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
-          if ! git diff --quiet "$base" HEAD -- Dockerfile.ssh-front cmd/fugue-ssh-front internal/sshfront internal/config internal/bundleauth internal/model scripts/verify_ssh_front_image.py scripts/test_verify_ssh_front_image.py scripts/verify_ssh_front_transport.py go.mod go.sum; then
+          if ! git diff --quiet "$base" HEAD -- Dockerfile.ssh-front cmd/fugue-ssh-front internal/sshfront internal/config internal/bundleauth internal/model scripts/verify_ssh_front_image.py scripts/test_verify_ssh_front_image.py scripts/verify_ssh_front_transport.py scripts/verify_managed_ssh_image.py scripts/test_verify_managed_ssh_image.py go.mod go.sum; then
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c

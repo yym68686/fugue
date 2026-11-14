@@ -1,4 +1,5 @@
 import copy
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -7,6 +8,12 @@ from scripts import verify_ssh_front_transport as transport
 
 
 class SSHFrontArtifactTest(unittest.TestCase):
+    def test_front_acceptance_rechecks_shared_image_loader_changes(self):
+        workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/ci.yml').read_text()
+        selection = workflow.split('Select SSH front artifact changes', 1)[1].split('uses: docker/setup-buildx-action', 1)[0]
+        for path in ('scripts/verify_ssh_front_transport.py', 'scripts/verify_managed_ssh_image.py', 'scripts/test_verify_managed_ssh_image.py'):
+            self.assertIn(path, selection)
+
     def test_transport_pods_use_an_explicit_account_before_admission(self):
         resources = transport.fixture_resources('fixture', 'test-control-plane', 29000)
         available = set()
