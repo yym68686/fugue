@@ -21,6 +21,16 @@ This does not introduce a measurement service or change the Actions probe
 schedule. UDP/TCP regressions exercise old-quality answers, real readiness
 failure and recovery, separately from ranking evidence retention.
 
+The declarative quality configuration lane requests `runtime_summary` for both
+live previews. The server still captures and validates the complete evidence;
+only raw physical probe transcripts are omitted from the exported response.
+The publisher verifies the explicit omission accounting, retains both full
+snapshot digests and checkpoints each phase before making the next API call.
+One transient GET failure may be retried. Creates, validations and releases
+are never automatically retried at the transport layer, and all predecessor,
+source-delta and positive-LKG checks remain mandatory. Activating the producer
+is recorded separately from actual DNS/consumer acceptance.
+
 ## Original V7 behavior
 
 V7 separates ranking age from permission to serve. A new capture may carry one

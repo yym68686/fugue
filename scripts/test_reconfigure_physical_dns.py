@@ -1,5 +1,6 @@
 import copy
 import datetime
+import json
 from pathlib import Path
 import unittest
 
@@ -51,7 +52,16 @@ class Ledger(ArtifactAPI):
             assert "&view=runtime" in path
             if self.on_capture:
                 self.on_capture(self)
-            return copy.deepcopy(self.preview)
+            preview = copy.deepcopy(self.preview)
+            if path.endswith("&view=runtime_summary"):
+                snapshot = preview["runtime_snapshot"]
+                full_digest = routing.digest(snapshot)
+                omitted = [fact.pop("physical_evidence") for fact in snapshot.get("dns_selections", []) if "physical_evidence" in fact]
+                preview.update(preview_mode="runtime_summary", omitted_runtime_fields=["runtime_snapshot.dns_selections[].physical_evidence"],
+                               runtime_summary={"schema": "fugue.runtime-preview-summary/v1", "full_snapshot_digest": full_digest,
+                                                "omitted_physical_evidence_count": len(omitted),
+                                                "omitted_physical_evidence_bytes": sum(len(json.dumps(raw).encode()) for raw in omitted)})
+            return preview
         if method == "POST" and path.endswith("/release"):
             self.release_bodies.append(copy.deepcopy(body))
             if self.fail_release:

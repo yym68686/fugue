@@ -11,10 +11,22 @@ import urllib.parse
 from scripts import dns_availability_recovery
 from scripts.bootstrap_cell_producer import authority_identity, digest, ensure_input, exact, selected
 from scripts.observe_front_candidate import now, timestamp
-from scripts.publish_agent_edge_shadow import API, ArtifactHTTPError, canonical
+from scripts.publish_agent_edge_shadow import API, ArtifactHTTPError, ArtifactTransportError, canonical
 from scripts.reconfigure_cell_producer import DIGEST, IDENTITY, validate_ref
-from scripts.reconfigure_physical_dns import POLICY_FIELDS, SCOPE, baseline, bounded_json, resolve_baseline, network_policy_fields
+from scripts.reconfigure_physical_dns import POLICY_FIELDS, SCOPE, baseline, bounded_json, resolve_baseline, network_policy_fields, validate_runtime_summary
 from scripts.configure_business_exploration import BusinessBaselineChanged, check_business_delta, check_business_retirement, resolve_business_anchors, validate_business_preview, validate_business_retirement, validate_business_retirement_preview, validate_business_routes
+
+
+class ConfigurationAPI(API):
+    """Retry one read, never an ambiguous create, validation or release write."""
+    def __call__(self, method, path, body=None):
+        for attempt in range(2):
+            try:
+                return super().__call__(method, path, body)
+            except (ArtifactTransportError, ArtifactHTTPError) as error:
+                if method != "GET" or body is not None or attempt or isinstance(error, ArtifactHTTPError) and error.status not in (502, 503, 504):
+                    raise
+                time.sleep(2)
 
 
 def validate(config):
@@ -164,10 +176,17 @@ def publish(config, api, save):
 def publish_once(config, api, save):
     validate(config)
     declaration = digest(config)
+    evidence = {"schema": "fugue.dynamic-quality-reconfiguration-result/v1", "declaration_digest": declaration,
+                "producer_activated": False, "routing_acceptance_complete": False}
+    def checkpoint(phase, **fields):
+        evidence.update(phase=phase, **fields)
+        save(copy.deepcopy(evidence))
+    checkpoint("resolve_baseline")
     config = wait_verified_baseline(config, api)
     recovery = config["precondition"]["operation"] == "dns_availability_recovery"
     serving = dns_availability_recovery.baseline(config, api) if recovery else baseline(config, api)
     precondition = config["precondition"]
+    checkpoint("read_predecessor", resolved_precondition=precondition)
     old = api("GET", "/v1/admin/artifacts/" + precondition["previous_policy"]["artifact_id"])["artifact"]
     previous = old["content"]
     if old.get("content_hash") != precondition["previous_policy"]["content_hash"] or not exact(old, "policy_snapshot", SCOPE, previous) or previous.get("target_scope") != "global" or previous.get("publication_role") or previous.get("mode") != "serving" or not previous.get("serving") or previous["serving"].get("single_publication", False):
@@ -193,22 +212,27 @@ def publish_once(config, api, save):
     current = selected(api, SCOPE, "shadow")
     if authority_identity(current) != precondition["previous_policy"] and current.get("artifact", {}).get("generation") != config["producer_generation"]:
         raise ValueError("producer changed")
+    checkpoint("prepare_inputs")
     source = ensure_input(api, "policy_snapshot", "global", config["projection_policy"])
     successor = copy.deepcopy(previous)
     successor.update(generation=config["producer_generation"], dns_policy_artifact_id=source["id"], dns_policy_digest=source["content_hash"])
     if authority_identity(current) != precondition["previous_policy"] and not exact(current.get("artifact", {}), "policy_snapshot", SCOPE, successor):
         raise ValueError("successor differs")
     artifact = ensure_input(api, "policy_snapshot", SCOPE, successor)
-    prior_view = "configuration" if recovery else "runtime"
+    prior_view = "configuration" if recovery else "runtime_summary"
+    checkpoint("capture_predecessor", artifact_id=artifact["id"])
     before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"] + "&view=" + prior_view)
-    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime")
+    if not recovery:
+        evidence["predecessor_runtime_summary"] = validate_runtime_summary(before)
+    checkpoint("capture_successor")
+    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime_summary")
+    evidence["successor_runtime_summary"] = validate_runtime_summary(preview)
+    checkpoint("validate_preview")
     recovery_preview = None
     if recovery:
         after = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=configuration")
         recovery_preview = dns_availability_recovery.preview_evidence(before, after, preview)
-        save({"schema": "fugue.dynamic-quality-reconfiguration-result/v1", "declaration_digest": declaration,
-              "resolved_precondition": precondition, "artifact_id": artifact["id"], "producer_activated": False,
-              "routing_acceptance_complete": False, "phase": "validate_preview", "preview_comparison": recovery_preview})
+        checkpoint("validate_preview", preview_comparison=recovery_preview)
         coverage = dns_availability_recovery.validate_preview(before, after, preview, config["projection_policy"], changed_hostname)
     else:
         coverage = validate_preview(before, preview)
@@ -218,6 +242,7 @@ def publish_once(config, api, save):
         coverage = validate_business_preview(preview, config["projection_policy"], changed_hostname)
         if "business_retirement" in config:
             coverage = validate_business_retirement_preview(before, preview, config, changed_hostname)
+    checkpoint("revalidate_baseline")
     if config.get("business_anchor_mode") == "latest_verified_same_baseline":
         try:
             baseline(config, api)
@@ -228,19 +253,19 @@ def publish_once(config, api, save):
     else:
         config = wait_verified_baseline(config, api)
     precondition = config["precondition"]
-    evidence = {"schema": "fugue.dynamic-quality-reconfiguration-result/v1", "declaration_digest": declaration, "resolved_precondition": precondition, "artifact_id": artifact["id"], "coverage": coverage, "producer_activated": False, "routing_acceptance_complete": False}
+    evidence.update(resolved_precondition=precondition, coverage=coverage)
     if recovery_preview is not None:
         evidence['preview_comparison'] = recovery_preview
     if config.get("business_anchor_mode") == "latest_verified_same_baseline":
         evidence.update(resolved_policy_digest=digest(config["projection_policy"]), resolved_dns_anchors=next(route["business_exploration"]["initial_dns_publications"] for route in config["projection_policy"]["dns_query_policy"]["physical_routes"] if route["hostname"] == changed_hostname))
-    save(evidence)
+    checkpoint("activate_producer")
     key = "producer-reconfiguration/" + digest({"artifact_id": artifact["id"], "content_hash": artifact["content_hash"], "precondition": precondition})
     api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/release", {"release_channel": "shadow", "producer_reconfiguration": precondition, "idempotency_key": key, "reason": "Declarative per-host availability policy with preserved explicit constraints" if availability else "Declarative universal dynamic quality policy with preserved explicit constraints"})
+    checkpoint("confirm_producer")
     current = selected(api, SCOPE, "shadow")
     if not exact(current.get("artifact", {}), "policy_snapshot", SCOPE, successor):
         raise ValueError("producer activation not confirmed")
-    evidence.update(producer_activated=True, authority=authority_identity(current), completed_at=now().isoformat())
-    save(evidence)
+    checkpoint("producer_activated", producer_activated=True, authority=authority_identity(current), completed_at=now().isoformat())
     return evidence
 
 
@@ -283,7 +308,7 @@ def main():
         raise ValueError("configuration credential and evidence path required")
     def save(value):
         Path(args.evidence).write_text(canonical(value) + "\n")
-    print(canonical(publish(config, API(config["origin"], token, response_limit=128 << 20, timeout=120, connect_address=config.get("api_connect_address")), save)))
+    print(canonical(publish(config, ConfigurationAPI(config["origin"], token, response_limit=128 << 20, timeout=120, connect_address=config.get("api_connect_address")), save)))
 
 
 if __name__ == "__main__":

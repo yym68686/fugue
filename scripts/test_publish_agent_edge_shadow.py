@@ -48,6 +48,14 @@ class FakeAPI:
 
 
 class ShadowPolicyTests(unittest.TestCase):
+    def test_transport_failure_is_typed_and_never_discloses_credentials(self):
+        api = policy.API("https://api.example.test", "synthetic-key")
+        with patch.object(api.opener, "open", side_effect=TimeoutError("confidential-transport-detail")):
+            with self.assertRaises(policy.ArtifactTransportError) as caught:
+                api("GET", "/v1/fixture")
+        self.assertIsInstance(caught.exception, RuntimeError)
+        self.assertEqual(str(caught.exception), "artifact API transport unavailable")
+
     def test_http_failure_retains_only_status_and_closes_response(self):
         api = policy.API("https://api.example.test", "synthetic-key")
         body = io.BytesIO(b"confidential-response")

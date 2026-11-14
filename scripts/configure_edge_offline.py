@@ -17,7 +17,7 @@ from scripts.observe_front_candidate import now
 from scripts.publish_agent_edge_shadow import API, ArtifactHTTPError, canonical
 from scripts.reconcile_agent_edge_trust import strict_json
 from scripts.reconfigure_cell_producer import DIGEST, IDENTITY, validate_ref
-from scripts.reconfigure_physical_dns import SCOPE, baseline, bounded_json
+from scripts.reconfigure_physical_dns import SCOPE, baseline, bounded_json, validate_runtime_summary
 
 
 def holds(policy):
@@ -156,20 +156,6 @@ def recovery_declaration_digest(hold):
     for character, escape in [('<', r'\u003c'), ('>', r'\u003e'), ('&', r'\u0026'), ('\u2028', r'\u2028'), ('\u2029', r'\u2029')]:
         raw = raw.replace(character, escape)
     return 'sha256:' + hashlib.sha256(raw.encode()).hexdigest()
-
-
-def validate_runtime_summary(view):
-    summary = view.get('runtime_summary', {})
-    omitted_path = 'runtime_snapshot.dns_selections[].physical_evidence'
-    if not isinstance(summary, dict) or not isinstance(view.get('omitted_runtime_fields'), list) or view.get('preview_mode') != 'runtime_summary' or summary.get('schema') != 'fugue.runtime-preview-summary/v1' or not isinstance(summary.get('full_snapshot_digest'), str) or not DIGEST.fullmatch(summary['full_snapshot_digest']) or omitted_path not in view.get('omitted_runtime_fields', []):
-        raise ValueError('explicit complete-capture runtime summary required')
-    count, size = summary.get('omitted_physical_evidence_count'), summary.get('omitted_physical_evidence_bytes')
-    selections = view.get('runtime_snapshot', {}).get('dns_selections', [])
-    if not isinstance(selections, list) or type(count) is not int or type(size) is not int or not 0 <= count <= len(selections) or size < 0 or (count == 0) != (size == 0) or any('physical_evidence' in fact for fact in selections):
-        raise ValueError('runtime summary omission accounting invalid')
-    if any(path not in ['selected_edge_group', 'decision_id', 'exclusion_evidence', omitted_path] for path in view.get('omitted_runtime_fields', [])):
-        raise ValueError('runtime summary omits unexpected evidence')
-    return summary
 
 
 def validate_preview(previous, current, policy):

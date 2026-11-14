@@ -63,10 +63,10 @@ class AvailabilityRecoveryTests(unittest.TestCase):
         ledger.preview['intent'] = {'generation': 'changed-business'}
         evidence = []
         with self.assertRaises(ValueError): quality.publish_once(config, ledger, evidence.append)
-        self.assertEqual(len(evidence), 1)
-        self.assertEqual(evidence[0]['phase'], 'validate_preview')
+        self.assertGreater(len(evidence), 1)
+        self.assertEqual(evidence[-1]['phase'], 'validate_preview')
         self.assertFalse(evidence[0]['producer_activated'])
-        self.assertFalse(evidence[0]['preview_comparison']['comparisons']['after_runtime']['equal'])
+        self.assertFalse(evidence[-1]['preview_comparison']['comparisons']['after_runtime']['equal'])
         self.assertEqual(ledger.release_bodies, [])
 
     def test_explicit_same_artifact_renewal_resolves_current_transaction_fences(self):

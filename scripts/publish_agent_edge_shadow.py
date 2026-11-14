@@ -51,6 +51,11 @@ class ArtifactHTTPError(RuntimeError):
         super().__init__("artifact API returned HTTP " + str(status))
 
 
+class ArtifactTransportError(RuntimeError):
+    def __init__(self):
+        super().__init__("artifact API transport unavailable")
+
+
 class API:
     def __init__(self, origin, token, response_limit=1 << 20, timeout=30, connect_address=None):
         if type(response_limit) is not int or not 1 <= response_limit <= 128 << 20:
@@ -80,7 +85,7 @@ class API:
             error.close()
             raise ArtifactHTTPError(status) from None
         except Exception:
-            raise RuntimeError("artifact API transport unavailable") from None
+            raise ArtifactTransportError() from None
         if len(raw) > self.response_limit:
             raise ValueError("artifact API response exceeds bound")
         return json.loads(raw)

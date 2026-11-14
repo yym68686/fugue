@@ -39,6 +39,20 @@ def bounded_json(value):
     return value is None or type(value) in [str, int, bool]
 
 
+def validate_runtime_summary(view):
+    summary = view.get('runtime_summary', {})
+    omitted_path = 'runtime_snapshot.dns_selections[].physical_evidence'
+    if not isinstance(summary, dict) or not isinstance(view.get('omitted_runtime_fields'), list) or view.get('preview_mode') != 'runtime_summary' or summary.get('schema') != 'fugue.runtime-preview-summary/v1' or not isinstance(summary.get('full_snapshot_digest'), str) or not DIGEST.fullmatch(summary['full_snapshot_digest']) or omitted_path not in view.get('omitted_runtime_fields', []):
+        raise ValueError('explicit complete-capture runtime summary required')
+    count, size = summary.get('omitted_physical_evidence_count'), summary.get('omitted_physical_evidence_bytes')
+    selections = view.get('runtime_snapshot', {}).get('dns_selections', [])
+    if not isinstance(selections, list) or type(count) is not int or type(size) is not int or not 0 <= count <= len(selections) or size < 0 or (count == 0) != (size == 0) or any('physical_evidence' in fact for fact in selections):
+        raise ValueError('runtime summary omission accounting invalid')
+    if any(path not in ['selected_edge_group', 'decision_id', 'exclusion_evidence', omitted_path] for path in view.get('omitted_runtime_fields', [])):
+        raise ValueError('runtime summary omits unexpected evidence')
+    return summary
+
+
 def validate(config):
     fields = {"schema", "generation", "origin", "hostname", "producer_generation", "precondition", "projection_policy"}
     if not isinstance(config, dict) or not fields.issubset(config) or set(config) - fields - {"baseline_mode"} or not bounded_json(config) or config["schema"] != "fugue.physical-dns-reconfiguration/v1" or type(config["generation"]) is not int or config["generation"] < 1 or config.get("baseline_mode", "declared") not in ["declared", "latest_verified_same_policy"]:
