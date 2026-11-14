@@ -1,0 +1,25 @@
+{
+  "schema": "fugue.runtime-input-reconfiguration/v1",
+  "generation": 1,
+  "origin": "https://api.fugue.pro",
+  "target_scope": "authority-cell:cell-public-b",
+  "producer_generation": "cell-public-b-configuration-input-20261114-1",
+  "projection_generation": "cell-public-b-configuration-projection-20261114-1",
+  "baseline_mode": "latest_verified_same_policy",
+  "precondition": {
+    "operation": "runtime_input",
+    "previous_policy": {
+      "artifact_id": "artifact_1793688177_a4b701f610a5",
+      "content_hash": "sha256:c49c1566e5f2e6c31122a32102712534e63aaa4fd138f28a98ad7b9343325cf1",
+      "release_id": "artifactrel_1793688188_52754054ec45",
+      "fencing_token": 12
+    },
+    "serving_full": {
+      "artifact_id": "artifact_1794631881_01ca603ed1a8",
+      "content_hash": "sha256:ef28fd119c38c46782f8332b28f97920aa652c7bb250c04bbb3158cc5374a70c",
+      "release_id": "artifactrel_1794631943_bbff1a22fdfc",
+      "fencing_token": 6487
+    },
+    "verification_evidence_hash": "sha256:6a0289f406cb36532a4ce146a1db46b147ea8eb9b8780f43fdf42f3652b18d79"
+  }
+}
