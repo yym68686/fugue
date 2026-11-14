@@ -73,6 +73,9 @@ class RuntimeInputConfigurationTests(unittest.TestCase):
         blocks = re.split(r"(?m)(?=^  [a-zA-Z0-9_-]+:$)", workflow)
         cutover = next(block for block in blocks if block.startswith("  cell_producer_reconfiguration:"))
         group = re.search(r"concurrency: \{group: ([^,}]+)", cutover).group(1)
+        # An already queued legacy request can still replace a waiting request
+        # in its old single-pending namespace during a workflow migration.
+        self.assertEqual(group, "fugue-production-cell-producer-shadow-queued-v2")
         shared = [block for block in blocks if re.search(
             r"concurrency: \{group: " + re.escape(group) + r"[,}]", block)]
         self.assertGreaterEqual(len(shared), 2)

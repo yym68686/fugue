@@ -36,6 +36,11 @@ a pending input cutover. Queueing does not waive the executor's current-source,
 positive-LKG, declaration-freshness or transactional CAS checks; stale queued
 declarations still stop without changing serving authority.
 
+The queue uses a new `-queued-v2` concurrency namespace so requests from older
+workflow revisions with single-pending semantics cannot cancel its waiting
+declarations during migration. This is queue isolation, not a serving lock:
+old and new jobs must still pass the same backend scope locks and exact CAS.
+
 The store locks the producer scope before its target scope, then rechecks the
 signed sources, publication and LKG in the same transaction. An identical retry
 succeeds only while that exact successor and baseline remain current. The
