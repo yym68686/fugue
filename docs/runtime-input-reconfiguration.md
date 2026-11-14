@@ -30,6 +30,16 @@ a regressed fence or waive positive LKG. Only a configuration preview is
 fetched, not physical transcripts. A configuration receipt is not serving
 acceptance: observe subsequent runtime digests and verified LKGs separately.
 
+The direct database-reader gate does not establish executable DNS acceptance.
+Dependent DNS consumers, including isolated/private deployments, must decode the
+v37 signed candidate and provide fresh authenticated shadow capability facts.
+Check the actual source revision and immutable release record, not only Pod
+readiness or `/livez`. Update existing consumers through their component intents
+before expecting a dependent DNS producer to progress. Check promised automatic
+rollback readers too; a retained v36 checkpoint is not proof that an old binary
+can restart from a newly written v37 checkpoint. Preserve resource counts,
+public transport, signatures, source authority and positive-LKG gates.
+
 Every member of the shared producer concurrency group uses `queue: max` and
 `cancel-in-progress: false`. A newer unrelated configuration must not replace
 a pending input cutover. Queueing does not waive the executor's current-source,

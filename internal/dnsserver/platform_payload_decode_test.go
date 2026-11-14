@@ -15,7 +15,15 @@ import (
 )
 
 func sharedDNSPayloadFixture(t testing.TB, records int) (*Service, model.PlatformArtifact, dnsPlatformCandidate) {
+	return dnsPayloadFixtureWithRuntimeMode(t, records, "")
+}
+
+func dnsPayloadFixtureWithRuntimeMode(t testing.TB, records int, runtimeMode string) (*Service, model.PlatformArtifact, dnsPlatformCandidate) {
 	req := celldns.TransitionRequest(t)
+	req.Policy.RuntimeInputMode = runtimeMode
+	if runtimeMode != "" {
+		req.RuntimeSnapshot.Facts = map[string]any{"audit-transcript": "synthetic audit-only input"}
+	}
 	for i := 0; i < records; i++ {
 		req.Intent.DNS = append(req.Intent.DNS, platformconfig.DNSIntent{Hostname: fmt.Sprintf("static-%d.example.test", i), Type: "TXT", TTL: 60, Values: []string{"synthetic-value"}})
 	}
@@ -26,6 +34,44 @@ func sharedDNSPayloadFixture(t testing.TB, records int) (*Service, model.Platfor
 	assignment := model.PlatformConsumerAssignment{ArtifactID: c.DNSArtifact.ID, ArtifactKind: c.DNSArtifact.ArtifactKind, ArtifactReleaseID: release.ID, ReleaseSetID: c.ReleaseArtifact.ID, ExpectedConsumerSetID: "dns-expected", Revision: 1, ScopeKey: c.DNSArtifact.ScopeKey, ExpectedGeneration: c.DNSArtifact.Generation, GenerationSequence: c.DNSArtifact.GenerationSequence, ContentHash: c.DNSArtifact.ContentHash, FencingToken: 1, ReleaseChannel: "full"}
 	candidate := dnsPlatformCandidate{Artifact: c.DNSArtifact, Assignment: assignment, Release: release}
 	return s, c.ReleaseArtifact, candidate
+}
+
+func TestDNSRuntimeInputCutoverPreservesColdCheckpointRead(t *testing.T) {
+	for _, mode := range []string{"", platformconfig.RuntimeInputConfigurationV1} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			s, parent, candidate := dnsPayloadFixtureWithRuntimeMode(t, 0, mode)
+			want, _, err := s.verifyDNSServingRelease(parent, candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == platformconfig.RuntimeInputConfigurationV1 {
+				if want.Lineage.CompilerVersion != platformconfig.ConfigurationInputCompilerVersion || want.Lineage.RuntimeInputDigest == "" || want.Lineage.RuntimeInputDigest == want.Lineage.InputSnapshotDigest {
+					t.Fatal("configuration input lineage was lost or merged with audit provenance")
+				}
+			} else if want.Lineage.CompilerVersion != platformconfig.CompilerVersion || want.Lineage.RuntimeInputDigest != "" {
+				t.Fatal("legacy checkpoint was silently opted in")
+			}
+			record := dnsServingCheckpoint{Schema: "fugue.dns.positive-checkpoint/v1", NodeID: s.Config.DNSNodeID, GroupID: s.Config.EdgeGroupID, Parent: parent, Candidate: candidate, AppliedAt: time.Now().UTC(), Positive: true}
+			if err := s.signDNSCheckpoint(&record); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Restore serialized state without inheriting this service's serving
+			// state; current signature trust must still be checked on every read.
+			cold := NewService(s.Config, nil)
+			_, got, _, err := cold.decodeDNSCheckpointPayload(raw)
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Fatal("fresh reader changed signed checkpoint behavior or provenance", err)
+			}
+			cold.Config.BundleRevokedKeyIDs = []string{cold.Config.BundleSigningKeyID}
+			if _, _, _, err := cold.decodeDNSCheckpointPayload(raw); err == nil {
+				t.Fatal("runtime checkpoint bypassed current signature trust")
+			}
+		})
+	}
 }
 
 func TestSharedDNSPayloadDecodeKeepsStrictEmbeddedFields(t *testing.T) {
