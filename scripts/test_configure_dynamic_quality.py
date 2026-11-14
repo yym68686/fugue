@@ -23,6 +23,44 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_business_drift_restarts_every_check_but_never_relaxes_intent_equality(self):
+        for mode, failures, expected in [("latest_verified_same_policy", 1, 2), ("latest_verified_same_policy", 3, 3), ("declared", 1, 1)]:
+            outcomes = [quality.QualityPreviewChanged("changed intent")] * failures + [{"accepted": True}]
+            with self.subTest(mode=mode, failures=failures), patch.object(quality, "publish_once", side_effect=outcomes) as publish, patch.object(quality.time, "sleep"):
+                if failures == 1 and mode == "latest_verified_same_policy":
+                    self.assertEqual(quality.publish({"baseline_mode": mode}, None, None), {"accepted": True})
+                else:
+                    with self.assertRaises(quality.QualityPreviewChanged):
+                        quality.publish({"baseline_mode": mode}, None, None)
+                self.assertEqual(publish.call_count, expected)
+        before = {"business_snapshot_revision": "revision-a", "intent": {"generation": "unchanged"}}
+        after = dict(before, intent={"generation": "changed"})
+        with self.assertRaises(quality.QualityPreviewChanged):
+            quality.validate_preview(before, after)
+        after["business_snapshot_revision"] = ""
+        with self.assertRaises(ValueError) as caught:
+            quality.validate_preview(before, after)
+        self.assertNotIsInstance(caught.exception, quality.QualityPreviewChanged)
+
+    def test_business_drift_retains_only_structural_differences_and_cannot_release(self):
+        config, ledger = self.publication_fixture()
+        captures, evidence = 0, []
+        def api(method, path, body=None):
+            nonlocal captures
+            if "/routes/project?" in path:
+                captures += 1
+                if captures == 2:
+                    ledger.preview["intent"]["generation"] = "private-new-tenant-value"
+            return ledger(method, path, body)
+        with self.assertRaises(quality.QualityPreviewChanged):
+            quality.publish_once(config, api, evidence.append)
+        self.assertEqual(evidence[-1]["phase"], "validate_preview")
+        comparison = evidence[-1]["preview_comparison"]["comparisons"]["before_after"]
+        self.assertFalse(comparison["equal"])
+        self.assertIn("/intent/generation", comparison["changed_paths"])
+        self.assertNotIn("private-new-tenant-value", str(evidence))
+        self.assertEqual(ledger.release_bodies, [])
+
     def test_only_complete_summary_reads_receive_the_longer_capture_budget(self):
         import io
         client = quality.ConfigurationAPI("https://api.example.test", "synthetic-key", timeout=120)

@@ -17,6 +17,10 @@ from scripts.reconfigure_physical_dns import POLICY_FIELDS, SCOPE, baseline, bou
 from scripts.configure_business_exploration import BusinessBaselineChanged, check_business_delta, check_business_retirement, resolve_business_anchors, validate_business_preview, validate_business_retirement, validate_business_retirement_preview, validate_business_routes
 
 
+class QualityPreviewChanged(ValueError):
+    pass
+
+
 class ConfigurationAPI(API):
     """Retry one read, never an ambiguous create, validation or release write."""
     def _open(self, request):
@@ -155,8 +159,10 @@ def check_delta(previous, successor):
 
 
 def validate_preview(previous, current):
-    if not previous.get("business_snapshot_revision") or not current.get("business_snapshot_revision") or not previous.get("intent") or previous["intent"] != current.get("intent"):
+    if not previous.get("business_snapshot_revision") or not current.get("business_snapshot_revision") or not previous.get("intent") or not current.get("intent"):
         raise ValueError("quality preview changed frozen business or static intent")
+    if previous["intent"] != current["intent"]:
+        raise QualityPreviewChanged("quality preview changed frozen business or static intent")
     if any(issue not in previous.get("issues", []) for issue in current.get("issues", [])):
         raise ValueError("quality preview introduced a configuration issue")
     coverage = current.get("runtime_snapshot", {}).get("facts", {}).get("dynamic_quality_coverage", {})
@@ -172,6 +178,12 @@ def publish(config, api, save):
         except BusinessBaselineChanged:
             if config.get("business_anchor_mode") != "latest_verified_same_baseline" or attempt == 2:
                 raise
+            time.sleep(10)
+        except QualityPreviewChanged:
+            if config.get("baseline_mode") != "latest_verified_same_policy" or attempt == 2:
+                raise
+            # A tenant deployment can advance during two long live captures.
+            # Start over; never accept mixed intents or reuse a stale preview.
             time.sleep(10)
         except ArtifactHTTPError as error:
             if error.status != 409 or config.get("baseline_mode") != "latest_verified_same_policy" or attempt == 2:
@@ -236,7 +248,7 @@ def publish_once(config, api, save):
     checkpoint("capture_successor")
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime_summary")
     evidence["successor_runtime_summary"] = validate_runtime_summary(preview)
-    checkpoint("validate_preview")
+    checkpoint("validate_preview", preview_comparison=dns_availability_recovery.preview_evidence(before, preview, preview))
     recovery_preview = None
     if recovery:
         after = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=configuration")

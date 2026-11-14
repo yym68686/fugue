@@ -35,6 +35,11 @@ the full live capture can exceed the ordinary 120-second API ceiling before
 response projection. Other methods, paths and views retain their original
 timeouts. The CI lane has a 20-minute overall budget including both previews,
 one retry per read and baseline revalidation; it never skips a slow validation.
+If desired business intent changes between previews, the explicit
+`latest_verified_same_policy` mode may restart the entire fenced transaction
+at most twice. Each attempt must still compare equal complete intents and
+revalidate the producer/LKG. Persistent differences fail closed. Diagnostics
+retain only bounded changed paths and digests, never tenant values.
 
 ## Original V7 behavior
 
