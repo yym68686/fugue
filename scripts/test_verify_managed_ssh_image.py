@@ -9,6 +9,28 @@ from scripts import verify_managed_ssh_image as artifact
 
 
 class ManagedSSHImageTest(unittest.TestCase):
+    def test_fixture_pull_avoids_exporting_partial_multiplatform_indexes(self):
+        identity = 'sha256:'+'a'*64
+        image = 'registry.example/fixture:1'
+        for family in ('artifact', 'transport'):
+            node = 'fugue-ssh-'+family+'-0123456789-control-plane'
+            output = [b'', json.dumps([{'Id': identity}]).encode(), b'', json.dumps({'status': {'id': identity}}).encode()]
+            with self.subTest(family=family), mock.patch.object(artifact, 'run', side_effect=output) as execute:
+                self.assertEqual(artifact.pull_fixture_into_test_node(node, image), identity)
+                self.assertEqual(execute.call_args_list[2].args[0], ['docker', 'exec', node, 'crictl', 'pull', image])
+                self.assertNotIn('docker-image', str(execute.call_args_list))
+        output[-1] = json.dumps({'status': {'id': 'sha256:'+'b'*64}}).encode()
+        with mock.patch.object(artifact, 'run', side_effect=output):
+            with self.assertRaisesRegex(ValueError, 'identity differs'):
+                artifact.pull_fixture_into_test_node(node, image)
+
+    def test_fixture_pull_never_targets_production_or_ambiguous_images(self):
+        with mock.patch.object(artifact, 'run') as execute:
+            for node, image in [('production-node', 'fixture:1'), ('fugue-ssh-artifact-0123456789-control-plane', 'fixture:1 --all-platforms')]:
+                with self.assertRaises(ValueError):
+                    artifact.pull_fixture_into_test_node(node, image)
+            execute.assert_not_called()
+
     def test_native_acceptance_requires_cross_session_background_service(self):
         complete = b"--- PASS: TestManagedSSHIsolatedKubernetes\nnative detached bootstrap and cross-session Unix socket verified"
         artifact.validate_native_acceptance(complete)

@@ -73,6 +73,29 @@ def pull_candidate_into_test_node(node, image, docker_metadata):
     return status["id"]
 
 
+def pull_fixture_into_test_node(node, image):
+    """Resolve native fixture layers with CRI, not Docker index export/import.
+
+    Docker's containerd store can retain a multi-platform index without every
+    platform's content. Exporting that index through kind then fails before the
+    actual acceptance tests run. Compare config identity after an independent
+    native pull so a moved fixture tag cannot silently change the test image.
+    """
+    if not re.fullmatch(r"fugue-ssh-(?:artifact|transport)-[a-f0-9]{10}-control-plane", node):
+        raise ValueError("fixture pull is restricted to the task-owned kind node")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9./:_-]*", image):
+        raise ValueError("explicit fixture image required")
+    run(["docker", "pull", image], timeout=180)
+    metadata = json.loads(run(["docker", "image", "inspect", image]))[0]
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", metadata.get("Id", "")):
+        raise ValueError("fixture config identity is missing")
+    run(["docker", "exec", node, "crictl", "pull", image], timeout=180)
+    observed = json.loads(run(["docker", "exec", node, "crictl", "inspecti", image]))
+    if observed.get("status", {}).get("id") != metadata["Id"]:
+        raise ValueError("CRI fixture identity differs from the verified Docker image")
+    return metadata["Id"]
+
+
 def validate_native_acceptance(output):
     required = [b"--- PASS: TestManagedSSHIsolatedKubernetes", b"native detached bootstrap and cross-session Unix socket verified"]
     if any(marker not in output for marker in required):
@@ -119,8 +142,7 @@ def verify(image, source):
             run(kube+["create", "-f", str(calico)], timeout=120)
             run(kube+["rollout", "status", "daemonset/calico-node", "-n", "kube-system", "--timeout=300s"], timeout=310)
             run(kube+["wait", "--for=condition=Ready", "node", "--all", "--timeout=60s"], timeout=70)
-            run(["docker", "pull", "alpine:3.22"], timeout=180)
-            run(kind+["load", "docker-image", "--name", cluster, "alpine:3.22"], timeout=180)
+            pull_fixture_into_test_node(node, "alpine:3.22")
             pull_candidate_into_test_node(node,image,metadata)
             internal = json.loads(run(["kubectl", "--kubeconfig", str(kubeconfig), "config", "view", "--raw", "-o", "json"]))
             for configured in internal["clusters"]:

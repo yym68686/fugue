@@ -6,7 +6,7 @@ import tempfile
 import time
 import uuid
 
-from scripts.verify_managed_ssh_image import run
+from scripts.verify_managed_ssh_image import run, pull_fixture_into_test_node
 
 
 class Connection:
@@ -78,8 +78,7 @@ def verify():
         try:
             created = True
             run(kind+['create','cluster','--name',cluster,'--image','kindest/node:v1.34.0','--kubeconfig',str(kubeconfig)],timeout=180)
-            run(['docker','pull','alpine:3.22'],timeout=180)
-            run(kind+['load','docker-image','--name',cluster,'alpine:3.22'],timeout=180)
+            pull_fixture_into_test_node(cluster+'-control-plane', 'alpine:3.22')
             kube = ['kubectl','--kubeconfig',str(kubeconfig)]
             nodes = json.loads(run(kube+['get','nodes','-o','json']))['items']
             if len(nodes)!=1 or nodes[0]['metadata']['name']!=cluster+'-control-plane':
