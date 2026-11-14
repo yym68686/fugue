@@ -1688,7 +1688,9 @@ jobs:
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-cell-producer-shadow-queued-v2, cancel-in-progress: false, queue: max}
-    timeout-minutes: 10
+    # Two complete previews, one bounded read retry each, and fenced baseline
+    # revalidation must fit without cancelling an otherwise valid capture.
+    timeout-minutes: 20
     permissions: {contents: read}
     env:
       CONFIG: ${{ needs.dynamic_quality_plan.outputs.config }}

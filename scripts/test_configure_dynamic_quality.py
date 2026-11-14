@@ -23,6 +23,28 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_only_complete_summary_reads_receive_the_longer_capture_budget(self):
+        import io
+        client = quality.ConfigurationAPI("https://api.example.test", "synthetic-key", timeout=120)
+        paths = [("GET", "/v1/admin/platform-config/routes/project?view=runtime_summary", None, 240),
+                 ("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=policy&view=runtime_summary", None, 240),
+                 ("GET", "/v1/admin/platform-config/routes/project?view=configuration", None, 120),
+                 ("GET", "/v1/admin/platform-config/routes/project?view=runtime_summary&view=runtime", None, 120),
+                 ("GET", "/v1/other?view=runtime_summary", None, 120),
+                 ("POST", "/v1/admin/platform-config/routes/project?view=runtime_summary", {}, 120)]
+        for method, path, body, timeout in paths:
+            with self.subTest(method=method, path=path), patch.object(client.opener, "open", return_value=io.BytesIO(b"{}")) as opened:
+                self.assertEqual(client(method, path, body), {})
+                self.assertEqual(opened.call_args.kwargs["timeout"], timeout)
+                request = opened.call_args.args[0]
+                self.assertEqual(request.full_url, client.origin + path)
+                self.assertEqual(request.get_header("Authorization"), "Bearer synthetic-key")
+        workflow = quality.Path(".github/workflows/ci.yml").read_text()
+        # Match the job block, not an unrelated publisher's time budget.
+        lane = workflow.split("\n  dynamic_quality_reconfiguration:", 1)[1]
+        lane = quality.re.split(r"\n  [a-z][a-z_0-9]*:", lane, maxsplit=1)[0]
+        self.assertIn("timeout-minutes: 20", lane)
+
     def test_configuration_retries_only_one_transient_read(self):
         client = quality.ConfigurationAPI("https://api.example.test", "synthetic-key")
         for failure in [quality.ArtifactTransportError(), *(quality.ArtifactHTTPError(status) for status in [502, 503, 504])]:

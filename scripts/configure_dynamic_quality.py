@@ -19,6 +19,15 @@ from scripts.configure_business_exploration import BusinessBaselineChanged, chec
 
 class ConfigurationAPI(API):
     """Retry one read, never an ambiguous create, validation or release write."""
+    def _open(self, request):
+        target = urllib.parse.urlsplit(request.full_url)
+        # Complete live captures include cold history admission and a bounded
+        # all-domain DNS batch. Production takes >120s; changing only export
+        # size cannot shorten that computation. Ordinary API bounds stay put.
+        if request.get_method() == "GET" and request.data is None and target.path == "/v1/admin/platform-config/routes/project" and urllib.parse.parse_qs(target.query).get("view") == ["runtime_summary"]:
+            return self.opener.open(request, timeout=240)
+        return super()._open(request)
+
     def __call__(self, method, path, body=None):
         for attempt in range(2):
             try:

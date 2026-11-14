@@ -30,6 +30,11 @@ One transient GET failure may be retried. Creates, validations and releases
 are never automatically retried at the transport layer, and all predecessor,
 source-delta and positive-LKG checks remain mandatory. Activating the producer
 is recorded separately from actual DNS/consumer acceptance.
+Only complete `runtime_summary` preview GETs receive a 240-second read budget:
+the full live capture can exceed the ordinary 120-second API ceiling before
+response projection. Other methods, paths and views retain their original
+timeouts. The CI lane has a 20-minute overall budget including both previews,
+one retry per read and baseline revalidation; it never skips a slow validation.
 
 ## Original V7 behavior
 

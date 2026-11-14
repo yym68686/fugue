@@ -73,12 +73,15 @@ class API:
             handlers.append(ExplicitAddressHTTPSHandler(origin, connect_address))
         self.opener = urllib.request.build_opener(*handlers)
 
+    def _open(self, request):
+        return self.opener.open(request, timeout=self.timeout)
+
     def __call__(self, method, path, body=None):
         if not path.startswith("/v1/") or "\n" in path:
             raise ValueError("invalid artifact API path")
         request = urllib.request.Request(self.origin + path, method=method, data=None if body is None else canonical(body).encode(), headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
         try:
-            with self.opener.open(request, timeout=self.timeout) as response:
+            with self._open(request) as response:
                 raw = response.read(self.response_limit + 1)
         except urllib.error.HTTPError as error:
             status = error.code
