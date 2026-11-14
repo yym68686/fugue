@@ -1,6 +1,6 @@
 {
   "authority_cell_id": "cell-dns-availability",
-  "generation": 6,
+  "generation": 7,
   "origin": "https://api.fugue.pro",
   "policy": {
     "authority_cell_id": "cell-dns-availability",
@@ -98,10 +98,10 @@
         ]
       },
       "producer_policy": {
-        "artifact_id": "artifact_1794631498_3e081dd1ec23",
-        "content_hash": "sha256:39a3413ba9925da8982b701719a4cab2472e815dfdc5343de794357395f87675",
-        "fencing_token": 55,
-        "release_id": "artifactrel_1794631504_fc745e6ee7e9"
+        "artifact_id": "artifact_1794632792_bd597b2e8f43",
+        "content_hash": "sha256:020bf2ec17862da32e93ada056121e61504b696c5c006fd647943568635d129d",
+        "fencing_token": 56,
+        "release_id": "artifactrel_1794635060_4e7b2c147273"
       }
     },
     "generation": "cell-dns-availability-configuration-input-20261114-1",
