@@ -2,6 +2,8 @@ import copy
 import datetime
 import json
 import os
+from pathlib import Path
+import re
 import unittest
 from unittest.mock import patch
 
@@ -66,6 +68,20 @@ class Ledger(ArtifactAPI):
 
 
 class RuntimeInputConfigurationTests(unittest.TestCase):
+    def test_every_shared_producer_lane_queues_without_replacing_cutover(self):
+        workflow = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text()
+        blocks = re.split(r"(?m)(?=^  [a-zA-Z0-9_-]+:$)", workflow)
+        cutover = next(block for block in blocks if block.startswith("  cell_producer_reconfiguration:"))
+        group = re.search(r"concurrency: \{group: ([^,}]+)", cutover).group(1)
+        shared = [block for block in blocks if re.search(
+            r"concurrency: \{group: " + re.escape(group) + r"[,}]", block)]
+        self.assertGreaterEqual(len(shared), 2)
+        for block in shared:
+            with self.subTest(job=block.splitlines()[0].strip()):
+                concurrency = next(line for line in block.splitlines() if "concurrency:" in line)
+                self.assertIn("cancel-in-progress: false", concurrency)
+                self.assertIn("queue: max", concurrency)
+
     def test_global_and_cell_preserve_controls_full_lkg_and_retry(self):
         for cell in (False, True):
             c, old, source = fixture(cell)

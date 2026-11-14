@@ -1336,7 +1336,8 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.cell_producer_plan.outputs.renewal == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    # All members retain queued declarations; each executor still rechecks CAS.
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false, queue: max}
     timeout-minutes: 5
     permissions: {contents: read}
     steps:
@@ -1416,7 +1417,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.cell_producer_plan.outputs.shadow == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false, queue: max}
     timeout-minutes: 20
     permissions: {contents: read}
     steps:
@@ -1471,7 +1472,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.cell_producer_plan.outputs.reconfiguration == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false, queue: max}
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
@@ -1564,7 +1565,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.physical_dns_plan.outputs.selected == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false, queue: max}
     timeout-minutes: 10
     permissions: {contents: read}
     env:
@@ -1604,7 +1605,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false, queue: max}
     timeout-minutes: 15
     permissions: {contents: read}
     steps:
@@ -1686,7 +1687,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dynamic_quality_plan.outputs.selected == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false, queue: max}
     timeout-minutes: 10
     permissions: {contents: read}
     env:
@@ -1758,7 +1759,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dns_selector_retirement_plan.outputs.selected == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false, queue: max}
     timeout-minutes: 10
     permissions: {contents: read}
     env:

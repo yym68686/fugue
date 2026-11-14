@@ -30,6 +30,12 @@ a regressed fence or waive positive LKG. Only a configuration preview is
 fetched, not physical transcripts. A configuration receipt is not serving
 acceptance: observe subsequent runtime digests and verified LKGs separately.
 
+Every member of the shared producer concurrency group uses `queue: max` and
+`cancel-in-progress: false`. A newer unrelated configuration must not replace
+a pending input cutover. Queueing does not waive the executor's current-source,
+positive-LKG, declaration-freshness or transactional CAS checks; stale queued
+declarations still stop without changing serving authority.
+
 The store locks the producer scope before its target scope, then rechecks the
 signed sources, publication and LKG in the same transaction. An identical retry
 succeeds only while that exact successor and baseline remain current. The
