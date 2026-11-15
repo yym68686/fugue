@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -23,8 +24,10 @@ type logSourceObservation struct {
 	Attempts        uint64    `json:"attempts"`
 	Errors          uint64    `json:"errors"`
 	ErrorClass      string    `json:"error_class,omitempty"`
+	HTTPStatus      int       `json:"http_status,omitempty"`
 	LastErrorAt     time.Time `json:"last_error_at,omitempty"`
 	LastErrorClass  string    `json:"last_error_class,omitempty"`
+	LastHTTPStatus  int       `json:"last_http_status,omitempty"`
 	LastErrorStage  string    `json:"last_error_stage,omitempty"`
 	LastErrorMillis int64     `json:"last_error_ms,omitempty"`
 	LineLimitBytes  int       `json:"line_limit_bytes"`
@@ -32,6 +35,10 @@ type logSourceObservation struct {
 	TotalLines      uint64    `json:"total_lines"`
 	RotationFiles   int       `json:"rotation_files,omitempty"`
 	RotationBytes   int64     `json:"rotation_bytes,omitempty"`
+	GapEvents       uint64    `json:"gap_events"`
+	GapReason       string    `json:"gap_reason,omitempty"`
+	GapLowerBound   time.Time `json:"gap_lower_bound,omitempty"`
+	GapUpperBound   time.Time `json:"gap_upper_bound,omitempty"`
 }
 
 type sourceErrorSummary struct {
@@ -42,6 +49,7 @@ type sourceErrorSummary struct {
 	Errors         uint64    `json:"errors"`
 	LastErrorAt    time.Time `json:"last_error_at,omitempty"`
 	MaxErrorMillis int64     `json:"max_error_ms,omitempty"`
+	HTTPStatus     int       `json:"http_status,omitempty"`
 }
 
 func (p *Pipeline) observeLogSource(v logSourceObservation) {
@@ -69,10 +77,16 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	v.Errors = prior.Errors
 	v.TotalLines = prior.TotalLines + uint64(v.Lines)
 	v.LastErrorAt, v.LastErrorClass = prior.LastErrorAt, prior.LastErrorClass
+	v.LastHTTPStatus = prior.LastHTTPStatus
 	v.LastErrorStage, v.LastErrorMillis = prior.LastErrorStage, prior.LastErrorMillis
+	if v.GapEvents == 0 {
+		v.GapReason, v.GapLowerBound, v.GapUpperBound = prior.GapReason, prior.GapLowerBound, prior.GapUpperBound
+	}
+	v.GapEvents += prior.GapEvents
 	if v.Outcome == "open_error" || v.Outcome == "scan_error" || v.Outcome == "rotation_recovery_error" {
 		v.Errors++
 		v.LastErrorAt, v.LastErrorClass = v.ObservedAt, v.ErrorClass
+		v.LastHTTPStatus = v.HTTPStatus
 		v.LastErrorStage, v.LastErrorMillis = v.Outcome, v.TotalMillis
 	}
 	p.sourceObservations[v.Identity] = v
@@ -104,9 +118,10 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 		if stage == "" {
 			stage = "unknown"
 		}
-		key := row.Node + "\x00" + class + "\x00" + stage
+		key := row.Node + "\x00" + class + "\x00" + stage + "\x00" + strconv.Itoa(row.LastHTTPStatus)
 		summary := byError[key]
 		summary.Node, summary.ErrorClass, summary.Stage = row.Node, class, stage
+		summary.HTTPStatus = row.LastHTTPStatus
 		summary.Sources++
 		summary.Errors += row.Errors
 		if row.LastErrorAt.After(summary.LastErrorAt) {
@@ -128,7 +143,11 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 		if errorSummary[i].Node != errorSummary[j].Node {
 			return errorSummary[i].Node < errorSummary[j].Node
 		}
-		return errorSummary[i].ErrorClass+"/"+errorSummary[i].Stage < errorSummary[j].ErrorClass+"/"+errorSummary[j].Stage
+		a, b := errorSummary[i], errorSummary[j]
+		if a.ErrorClass+"/"+a.Stage != b.ErrorClass+"/"+b.Stage {
+			return a.ErrorClass+"/"+a.Stage < b.ErrorClass+"/"+b.Stage
+		}
+		return a.HTTPStatus < b.HTTPStatus
 	})
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
@@ -148,7 +167,10 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	if truncated {
 		rows = rows[:512]
 	}
-	return map[string]any{"schema": "fugue.pipeline.sources.v1", "observed_at": time.Now().UTC(), "sources": rows, "source_count": total, "truncated": truncated, "evicted_sources": evicted, "error_summary": errorSummary, "cycle": cycle, "queue_depth": p.queueDepth.Load(), "queued_bytes": p.queuedBytes.Load()}, nil
+	return map[string]any{"schema": "fugue.pipeline.sources.v1", "observed_at": time.Now().UTC(), "sources": rows, "source_count": total, "truncated": truncated, "evicted_sources": evicted, "error_summary": errorSummary,
+		"error_summary_coverage": "retained_source_lifetime_errors_grouped_by_latest_error_not_per_class_event_totals",
+		"gap_coverage":           "retained_source_lifetime_gap_counts_with_most_recent_gap_bounds_not_reconstructed_log_contents",
+		"cycle":                  cycle, "queue_depth": p.queueDepth.Load(), "queued_bytes": p.queuedBytes.Load()}, nil
 }
 
 type logCycleObservation struct {

@@ -3,9 +3,13 @@ package observability
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"net/http"
@@ -120,5 +124,44 @@ func TestSourceErrorSummarySurvivesDetailTruncation(t *testing.T) {
 	summaries := result["error_summary"].([]sourceErrorSummary)
 	if len(summaries) != 2 || summaries[0].Node != "node-a" || summaries[0].Sources != 700 || summaries[0].Errors != 700 || summaries[1].Node != "node-b" {
 		t.Fatalf("error summary lost sources outside detail window: %+v", summaries)
+	}
+}
+
+func TestSourceRecoveryRetainsGapAndHTTPStatusWithoutCountingBackoffAsRead(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	now := time.Now().UTC()
+	lower, upper := now.Add(-time.Hour), now.Add(-time.Minute)
+	p.observeLogSource(logSourceObservation{Identity: "source", Node: "node-a", ObservedAt: now, Outcome: "open_error", ErrorClass: "forbidden", HTTPStatus: 403,
+		GapEvents: 1, GapReason: "retention_window", GapLowerBound: lower, GapUpperBound: upper})
+	p.observeLogSource(logSourceObservation{Identity: "source", Node: "node-a", ObservedAt: now, Outcome: "node_backoff"})
+	p.observeLogSource(logSourceObservation{Identity: "source", Node: "node-a", ObservedAt: now, Outcome: "drained"})
+	value, _ := p.DiagnosticSources(t.Context())
+	row := value.(map[string]any)["sources"].([]logSourceObservation)[0]
+	if row.Attempts != 2 || row.Errors != 1 || row.HTTPStatus != 0 || row.LastHTTPStatus != 403 || row.GapEvents != 1 || row.GapReason != "retention_window" || !row.GapLowerBound.Equal(lower) || !row.GapUpperBound.Equal(upper) {
+		t.Fatalf("recovery/backoff lost evidence or counted synthetic reads: %+v", row)
+	}
+	p.observeLogSource(logSourceObservation{Identity: "source", Node: "node-a", ObservedAt: now, Outcome: "rotation_gap", GapEvents: 1, GapReason: "rotation_boundary_missing", GapLowerBound: upper, GapUpperBound: now})
+	row = p.sourceObservations["source"]
+	if row.GapEvents != 2 || row.GapReason != "rotation_boundary_missing" || !row.GapLowerBound.Equal(upper) || !row.GapUpperBound.Equal(now) {
+		t.Fatalf("new gap did not accumulate and replace latest bounds: %+v", row)
+	}
+}
+
+func TestLogReadErrorMetadataIsTypedAndDoesNotDependOnBody(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		class  string
+		status int
+	}{
+		{apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "synthetic"), "not_found", 404},
+		{apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "synthetic", errors.New("private-response-body")), "forbidden", 403},
+		{apierrors.NewTooManyRequests("private-response-body", 1), "rate_limited", 429},
+		{context.DeadlineExceeded, "deadline", 0},
+		{io.ErrUnexpectedEOF, "unexpected_eof", 0},
+	} {
+		err := fmt.Errorf("wrapped: %w", tc.err)
+		if logReadErrorClass(err) != tc.class || logReadHTTPStatus(err) != tc.status {
+			t.Fatalf("lost typed read failure: %s %d", logReadErrorClass(err), logReadHTTPStatus(err))
+		}
 	}
 }

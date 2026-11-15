@@ -2170,7 +2170,7 @@ func (c *clusterNodeClient) doJSONWithBody(ctx context.Context, method, apiPath 
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("kubernetes request %s %s failed: status=%d body=%s", method, apiPath, resp.StatusCode, strings.TrimSpace(string(body)))
+		return &kubernetesHTTPStatusError{status: resp.StatusCode, detail: fmt.Errorf("kubernetes request %s %s failed: status=%d body=%s", method, apiPath, resp.StatusCode, strings.TrimSpace(string(body)))}
 	}
 	if out != nil && len(body) > 0 {
 		if err := json.Unmarshal(body, out); err != nil {

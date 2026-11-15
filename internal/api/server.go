@@ -37,6 +37,7 @@ import (
 type Server struct {
 	operationOnce                          sync.Once
 	operations                             *runtimeobservation.Operations
+	captures                               captureObservations
 	certificateImportRoots                 *x509.CertPool
 	newObjectStorageClient                 func(string, string) *objectstorage.Client
 	cleanupObjectStoreBatch                func(context.Context, model.DataBackend) (objectstorage.CleanupBatch, error)

@@ -252,56 +252,83 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 	return *source, nil
 }
 
-func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (platformDNSRuntimeFactsResponse, error) {
+func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (response platformDNSRuntimeFactsResponse, readErr error) {
+	ctx, trace := s.beginCaptureTrace(ctx, "dns-runtime-facts")
+	stage := "source"
+	var transportErr error
+	defer func() {
+		outcome := "ready"
+		if readErr != nil {
+			outcome = stage
+		} else if !response.Ready {
+			outcome = "not_ready"
+		}
+		observeCapture(ctx, captureEvent{Stage: stage, Node: node, ErrorClass: captureErrorClass(transportErr), HTTPStatus: captureHTTPStatus(transportErr), Rejection: captureDNSRejection(transportErr)})
+		s.finishCaptureTrace(trace, outcome, readErr, 0, 0)
+	}()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	source, err := s.currentDNSFactSource(ctx, node)
 	if err != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
-	var response platformDNSRuntimeFactsResponse
 	transportReady := false
+	stage = "backend_selection"
 	// Negative/expired observations are useful for diagnosis. Transport must be
 	// uniquely selected and live, but a failing readiness probe must not hide it.
 	status := s.inspectDNSBackend(ctx, source.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, func(ctx context.Context, client *clusterNodeClient, pod corev1.Pod, svc corev1.Service, ready bool) int {
 		transportReady = ready
 		port, ok := dnsBackendObservationPort(pod, svc)
 		if !ok {
+			stage = "backend_observation_port"
 			return http.StatusServiceUnavailable
 		}
+		stage = "backend_snapshot"
 		path := "/api/v1/namespaces/" + url.PathEscape(pod.Namespace) + "/pods/" + url.PathEscape(pod.Name+":"+strconv.Itoa(int(port))) + "/proxy/runtime-facts"
 		if err := readDNSPodSnapshot(ctx, client, path, &response.Snapshot); err != nil {
+			transportErr = err
 			return http.StatusServiceUnavailable
 		}
 		response.Backend = dnsRuntimeBackend{Namespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID), ServiceName: svc.Name, ServiceUID: string(svc.UID)}
 		return http.StatusOK
 	})
 	if status != http.StatusOK {
+		if transportErr == nil {
+			transportErr = &dnsObservationReadFailure{class: "backend_selection", status: status}
+		}
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
 	// Re-resolve immutable inputs and current publication; do not reuse an
 	// artifact-reader cache across the network request or renew heartbeat time.
+	stage = "authority_recheck"
 	current, err := s.currentDNSFactSource(ctx, node)
 	if err != nil || current.consumer.CredentialID != source.consumer.CredentialID || current.parent.ContentHash != source.parent.ContentHash || !reflect.DeepEqual(current.lookup.Assignment, source.lookup.Assignment) || current.group != source.group || ctx.Err() != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
 	if response.Snapshot.RouteSources != nil {
+		stage = "route_source_selection"
 		observed, err := s.store.ObserveDNSRouteSources(ctx, current.lookup.Artifact)
 		if err != nil || observed.SelectionDigest != response.Snapshot.RouteSources.Snapshot.SelectionDigest {
 			return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 		}
+		stage = "route_source_plan"
 		plans, err := dnsroutesource.Build(current.lookup.Artifact, response.Snapshot.RouteSources.Snapshot, s.bundleKeyring(), time.Now().UTC())
 		if err != nil {
 			return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 		}
+		stage = "route_source_replay"
 		current.payload.ReadinessPlan, err = plans.Replay(response.Snapshot.RouteSources)
 		if err != nil {
 			return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 		}
 		current.cellBindings = plans.Bindings
-	} else if approvals, err := platformconfig.DNSRouteSourceAuthorizations(current.lookup.Artifact); err != nil || len(approvals) > 0 {
-		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
+	} else {
+		stage = "route_source_required"
+		if approvals, err := platformconfig.DNSRouteSourceAuthorizations(current.lookup.Artifact); err != nil || len(approvals) > 0 {
+			return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
+		}
 	}
+	stage = "snapshot_validation"
 	response.EvaluatedAt = time.Now().UTC()
 	response.ReadyProbeIDs, response.Ready, err = evaluateDNSRuntimeSnapshot(response.Snapshot, current, response.EvaluatedAt)
 	response.Ready = response.Ready && transportReady
@@ -366,7 +393,7 @@ func readDNSPodSnapshot(ctx context.Context, client *clusterNodeClient, path str
 func readDNSPodObservation(ctx context.Context, client *clusterNodeClient, path string, out any, maximum int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, client.baseURL+path, nil)
 	if err != nil {
-		return errDNSRuntimeFacts
+		return &dnsObservationReadFailure{class: "request"}
 	}
 	req.Header.Set("Authorization", "Bearer "+client.bearerToken)
 	req.Header.Set("Accept", "application/json")
@@ -374,20 +401,23 @@ func readDNSPodObservation(ctx context.Context, client *clusterNodeClient, path 
 	reader.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := reader.Do(req)
 	if err != nil {
-		return errDNSRuntimeFacts
+		return &dnsObservationReadFailure{class: captureErrorClass(err)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return errDNSRuntimeFacts
+		return &dnsObservationReadFailure{class: "http_status", status: resp.StatusCode, rejection: dnsObservationRejection(resp.Header.Get("X-Fugue-DNS-Observation-Rejection"))}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maximum+1))
-	if err != nil || int64(len(raw)) > maximum {
-		return errDNSRuntimeFacts
+	if err != nil {
+		return &dnsObservationReadFailure{class: captureErrorClass(err), status: resp.StatusCode}
+	}
+	if int64(len(raw)) > maximum {
+		return &dnsObservationReadFailure{class: "response_budget", status: resp.StatusCode}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(out) != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return errDNSRuntimeFacts
+		return &dnsObservationReadFailure{class: "decode", status: resp.StatusCode}
 	}
 	return nil
 }

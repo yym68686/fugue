@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"fugue/internal/agentedge"
@@ -49,7 +50,14 @@ func readAgentCapacity(ctx context.Context, c *clusterNodeClient, nodeID, addres
 }
 
 func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, nodeID, address string, p agentedge.CapacityPolicy, clockNow func() time.Time, observe func(string)) (agentCapacityEvidence, error) {
+	event := captureEvent{Stage: "agent-capacity-ok", Node: nodeID, Capacity: &captureCapacity{MaxCPUPercent: p.MaxNodeCPUPercent, MaxMemoryPercent: p.MaxNodeMemoryPercent}}
+	traceStarted := time.Now()
+	defer func() {
+		event.DurationMS = time.Since(traceStarted).Milliseconds()
+		observeCapture(ctx, event)
+	}()
 	fail := func(stage string) (agentCapacityEvidence, error) {
+		event.Stage = stage
 		if observe != nil {
 			observe(stage)
 		}
@@ -58,10 +66,35 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 	started := clockNow().UTC()
 	var node corev1.Node
 	path := "/api/v1/nodes/" + url.PathEscape(nodeID)
-	if c.doJSON(ctx, http.MethodGet, path, &node) != nil || node.Name != nodeID || !agentCapacityNodeReady(node, address) {
+	nodeErr := c.doJSON(ctx, http.MethodGet, path, &node)
+	event.ErrorClass = captureErrorClass(nodeErr)
+	event.HTTPStatus = captureHTTPStatus(nodeErr)
+	event.Capacity.NodeUID = string(node.UID)
+	event.Capacity.Unschedulable = node.Spec.Unschedulable
+	event.Capacity.AddressOwned = slices.ContainsFunc(node.Status.Addresses, func(a corev1.NodeAddress) bool { return a.Address == address })
+	for _, condition := range node.Status.Conditions {
+		status := string(condition.Status)
+		switch condition.Type {
+		case corev1.NodeReady:
+			event.Capacity.NodeReady = status
+		case corev1.NodeMemoryPressure:
+			event.Capacity.MemoryPressure = status
+		case corev1.NodeDiskPressure:
+			event.Capacity.DiskPressure = status
+		case corev1.NodePIDPressure:
+			event.Capacity.PIDPressure = status
+		case corev1.NodeNetworkUnavailable:
+			event.Capacity.NetworkUnavailable = status
+		}
+	}
+	if nodeErr != nil || node.Name != nodeID || !agentCapacityNodeReady(node, address) {
 		return fail("agent-capacity-node-unavailable")
 	}
+	event.Capacity.CPUMilliCores = node.Status.Allocatable.Cpu().MilliValue()
+	event.Capacity.MemoryAvailable = node.Status.Allocatable.Memory().Value()
 	summary, err := c.getNodeSummary(ctx, nodeID)
+	event.ErrorClass = captureErrorClass(err)
+	event.HTTPStatus = captureHTTPStatus(err)
 	if err != nil || summary == nil || summary.Node.NodeName != nodeID || summary.Node.CPU.UsageNanoCores == nil {
 		return fail("agent-capacity-summary-unavailable")
 	}
@@ -72,6 +105,8 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 	if used == nil {
 		return fail("agent-capacity-summary-unavailable")
 	}
+	event.Capacity.CPUNanoCores = *summary.Node.CPU.UsageNanoCores
+	event.Capacity.MemoryBytes = *used
 	// Kubelet may collect a sample while this authenticated request is in
 	// flight. Compare it with read completion, never with request start. The
 	// observation and expiry below remain the original metric timestamps.
@@ -81,6 +116,7 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 	}
 	cpuAt, e1 := time.Parse(time.RFC3339Nano, summary.Node.CPU.Time)
 	memoryAt, e2 := time.Parse(time.RFC3339Nano, summary.Node.Memory.Time)
+	event.Capacity.CPUTime, event.Capacity.MemoryTime = cpuAt, memoryAt
 	if e1 != nil || e2 != nil || cpuAt.After(now) || memoryAt.After(now) || cpuAt.Before(node.CreationTimestamp.Time) || memoryAt.Before(node.CreationTimestamp.Time) {
 		return fail("agent-capacity-time-invalid")
 	}
@@ -89,6 +125,7 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 		observed = memoryAt
 	}
 	until := observed.Add(time.Duration(p.FactMaxAgeSeconds) * time.Second)
+	event.Capacity.ValidUntil = until
 	if !until.After(now) {
 		return fail("agent-capacity-expired")
 	}
@@ -99,7 +136,10 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 		return fail("agent-capacity-pressure")
 	}
 	var current corev1.Node
-	if c.doJSON(ctx, http.MethodGet, path, &current) != nil || current.UID != node.UID || !agentCapacityNodeReady(current, address) ||
+	recheckErr := c.doJSON(ctx, http.MethodGet, path, &current)
+	event.ErrorClass = captureErrorClass(recheckErr)
+	event.HTTPStatus = captureHTTPStatus(recheckErr)
+	if recheckErr != nil || current.UID != node.UID || !agentCapacityNodeReady(current, address) ||
 		current.Status.Allocatable.Cpu().MilliValue() != cpu || current.Status.Allocatable.Memory().Value() != memory {
 		return fail("agent-capacity-node-changed")
 	}

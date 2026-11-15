@@ -6,11 +6,15 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"io"
+	"net"
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type kubernetesLogCursor struct {
@@ -123,11 +127,14 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	}
 	// Runtime retention is a finite bound, not permission to silently skip an
 	// unbounded backlog. Make any gap visible before resetting the lower bound.
+	gap := logSourceObservation{}
 	if maxAge := c.pipeline.cfg.Retention; maxAge > 0 && now.Sub(cur.Time) > maxAge {
+		previous := cur.Time
 		cur.Time = now.Add(-maxAge)
 		cur.Boundary = map[[32]byte]int{}
 		if cur.DrainedThrough.Before(cur.Time) {
 			c.pipeline.kubernetesLogCursorGaps.Add(1)
+			gap.GapEvents, gap.GapReason, gap.GapLowerBound, gap.GapUpperBound = 1, "retention_window", previous, cur.Time
 		}
 	}
 	ticket, retryAt, allowed := c.beginLogNodeRead(target.pod.Spec.NodeName, now)
@@ -140,13 +147,18 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		c.cursors[key] = cur
 		c.cursorsMu.Unlock()
 		c.pipeline.kubernetesLogBackoffSkips.Add(1)
-		c.pipeline.observeLogSource(logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, CursorAfter: cur.Time, PendingAt: cur.PendingAt, DrainedThrough: cur.DrainedThrough, Outcome: "node_backoff", NextAttempt: retryAt})
+		gap.Identity, gap.Node, gap.Previous = key, target.pod.Spec.NodeName, target.previous
+		gap.ObservedAt, gap.CursorBefore, gap.CursorAfter = now, cur.Time, cur.Time
+		gap.PendingAt, gap.DrainedThrough, gap.NextAttempt = cur.PendingAt, cur.DrainedThrough, retryAt
+		gap.Outcome = "node_backoff"
+		c.pipeline.observeLogSource(gap)
 		return
 	}
 	cur.LastRead = now
 	c.cycleReads.Add(1)
 	original := cur.Time
 	observation := logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, Outcome: "drained", LineLimitBytes: c.pipeline.cfg.KubernetesLogMaxLineBytes}
+	observation.GapEvents, observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = gap.GapEvents, gap.GapReason, gap.GapLowerBound, gap.GapUpperBound
 	defer func() {
 		observation.CursorAfter = cur.Time
 		observation.PendingAt = cur.PendingAt
@@ -189,6 +201,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		emitWarning := finishNodeRead(err)
 		observation.Outcome = "open_error"
 		observation.ErrorClass = logReadErrorClass(err)
+		observation.HTTPStatus = logReadHTTPStatus(err)
 		if parent.Err() != nil {
 			observation.Outcome = "canceled"
 		}
@@ -242,6 +255,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		if recoveryErr != nil {
 			observation.Outcome = "rotation_recovery_error"
 			observation.ErrorClass = logReadErrorClass(recoveryErr)
+			observation.HTTPStatus = logReadHTTPStatus(recoveryErr)
 			if parent.Err() != nil {
 				observation.Outcome = "canceled"
 			}
@@ -280,6 +294,8 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			// message after container GC. Count the loss once and retry with backoff.
 			if !cur.SourceUnavailable {
 				c.pipeline.kubernetesLogCursorGaps.Add(1)
+				observation.GapEvents++
+				observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = "runtime_log_unavailable", cur.Time, now
 			}
 			cur.SourceUnavailable = true
 			cur.NextAttempt = now.Add(5 * time.Minute)
@@ -303,6 +319,8 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 				rotationGap = true
 				observation.Outcome = "rotation_gap"
 				c.pipeline.kubernetesLogCursorGaps.Add(1)
+				observation.GapEvents++
+				observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = "rotation_boundary_missing", original, ts
 				c.pipeline.recordError(fmt.Errorf("retained Kubernetes logs no longer contain cursor boundary source=%s", key))
 			}
 		}
@@ -355,6 +373,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	if err = scanner.Err(); err != nil && parent.Err() == nil {
 		observation.Outcome = "scan_error"
 		observation.ErrorClass = logReadErrorClass(err)
+		observation.HTTPStatus = logReadHTTPStatus(err)
 		if cur.PendingAt.IsZero() {
 			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
 		}
@@ -383,6 +402,8 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			rotationGap = true
 			observation.Outcome = "rotation_gap"
 			c.pipeline.kubernetesLogCursorGaps.Add(1)
+			observation.GapEvents++
+			observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = "rotation_boundary_missing", original, now
 			c.pipeline.recordError(fmt.Errorf("retained Kubernetes logs no longer contain cursor boundary source=%s", key))
 		}
 		cur.RecoveringRotation = false
@@ -424,9 +445,35 @@ func logReadErrorClass(err error) string {
 		return "deadline"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "unexpected_eof"
+	case apierrors.IsNotFound(err):
+		return "not_found"
+	case apierrors.IsUnauthorized(err):
+		return "unauthorized"
+	case apierrors.IsForbidden(err):
+		return "forbidden"
+	case apierrors.IsTooManyRequests(err):
+		return "rate_limited"
+	case apierrors.IsTimeout(err), apierrors.IsServerTimeout(err):
+		return "api_timeout"
+	case apierrors.IsServiceUnavailable(err):
+		return "api_unavailable"
 	default:
+		var network net.Error
+		if errors.As(err, &network) && network.Timeout() {
+			return "network_timeout"
+		}
 		return "source_read"
 	}
+}
+
+func logReadHTTPStatus(err error) int {
+	var status apierrors.APIStatus
+	if errors.As(err, &status) {
+		return int(status.Status().Code)
+	}
+	return 0
 }
 
 func maxLogTime(a, b time.Time) time.Time {

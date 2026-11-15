@@ -66,7 +66,7 @@ func (s *Server) handlePreviewAgentEdgeCandidates(w http.ResponseWriter, r *http
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
-	grant, policy, diagnostics, err := s.captureAgentEdgeGrant(r.Context(), ids[0], "")
+	grant, policy, diagnostics, err := s.captureAgentEdgeGrant(context.WithValue(r.Context(), capturePurposeKey{}, "agent-preview"), ids[0], "")
 	result := agentEdgePreview{Diagnostics: diagnostics}
 	if err == nil {
 		result.Ready = true
@@ -98,7 +98,7 @@ func (s *Server) handleAgentEdgeCandidates(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
-	grant, policy, _, err := s.captureAgentEdgeGrant(r.Context(), p.ActorID, hint)
+	grant, policy, _, err := s.captureAgentEdgeGrant(context.WithValue(r.Context(), capturePurposeKey{}, "agent-request"), p.ActorID, hint)
 	if err != nil {
 		s.operationObservations().Observe("agent-response-capture-failed", 0)
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -316,26 +316,49 @@ func cloneAgentMinimums(m map[string]int) map[string]int {
 	return out
 }
 
-func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred string) (agentedge.Grant, agentedge.AuthorityPolicy, map[string]string, error) {
+func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred string) (result agentedge.Grant, policy agentedge.AuthorityPolicy, details map[string]string, captureErr error) {
 	defer s.observeOperation("agent-grant")()
+	kind, _ := ctx.Value(capturePurposeKey{}).(string)
+	if kind != "agent-request" && kind != "agent-preview" {
+		kind = "agent-internal"
+	}
+	ctx, trace := s.beginCaptureTrace(ctx, kind)
+	diagnostics := map[string]string{}
+	stage := "authority"
+	defer func() {
+		outcome := "ok"
+		if captureErr != nil {
+			outcome = stage
+		}
+		keys := make([]string, 0, len(diagnostics))
+		for key := range diagnostics {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			observeCapture(ctx, captureEvent{Stage: diagnostics[key], Node: key})
+		}
+		s.finishCaptureTrace(trace, outcome, captureErr, len(result.Candidates), max(result.MinimumCandidates, policy.Constraint.MinCandidates))
+	}()
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	diagnostics := map[string]string{}
-	var result agentedge.Grant
 	p, policyArtifact, policyRelease, err := s.currentAgentAuthority()
 	if err != nil {
 		diagnostics["authority"] = "policy_unavailable"
 		return result, p, diagnostics, err
 	}
+	stage = "runtime"
 	if _, err = s.store.GetRuntime(audience); err != nil {
 		diagnostics["audience"] = "runtime_unavailable"
 		return result, p, diagnostics, err
 	}
+	stage = "topology"
 	topology, err := s.agentTopology(p)
 	if err != nil {
 		diagnostics["authority"] = "topology_unavailable"
 		return result, p, diagnostics, err
 	}
+	stage = "inventory"
 	nodes, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
 		return result, p, diagnostics, err
@@ -349,6 +372,7 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 	if factory == nil {
 		factory = newClusterNodeClient
 	}
+	stage = "observer"
 	client, err := factory()
 	if err != nil {
 		diagnostics["capacity"] = "authenticated_observer_unavailable"
@@ -357,6 +381,7 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 	defer client.closeIdleConnections()
 	sources := map[string]agentCellSource{}
 	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	stage = "cell_authorization"
 	for _, cell := range topology.Cells {
 		if ctx.Err() != nil {
 			return result, p, diagnostics, ctx.Err()
@@ -451,6 +476,9 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 			observed := s.observeOperation("agent-observation")
 			value, reason := captureAgentEdgeObservationWithObserver(ctx, client, p, edge, node, source, prober, func(stage string) {
 				s.operationObservations().Observe(stage, 0)
+				if !strings.HasPrefix(stage, "agent-capacity-") {
+					observeCapture(ctx, captureEvent{Stage: stage, Node: edge.ID})
+				}
 			})
 			observed()
 			mu.Lock()
@@ -464,9 +492,11 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 		}(t.edge, t.node, t.source)
 	}
 	wg.Wait()
+	stage = "observation"
 	if ctx.Err() != nil {
 		return result, p, diagnostics, ctx.Err()
 	}
+	stage = "inventory_recheck"
 	latest, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
 		return result, p, diagnostics, err
@@ -495,11 +525,13 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 		source := sources[o.candidate.AuthorityCellID]
 		eligible, e := topology.EligibleCandidates(source.grant, facts, result.IssuedAt)
 		if e != nil || !slices.ContainsFunc(eligible, func(c edgetopology.Candidate) bool { return c.EdgeID == o.candidate.EdgeID }) {
+			observeCapture(ctx, captureEvent{Stage: "hard_constraint_unmet", Node: o.candidate.EdgeID})
 			diagnostics[o.candidate.EdgeID] = "hard_constraint_unmet"
 			continue
 		}
 		current, release, found, e := s.selectTrafficRouteRelease(source.cell.ServingGroupID())
 		if e != nil || !found || current.ID != source.parent.ID || current.ContentHash != source.parent.ContentHash || release.ID != source.release.ID || release.FencingToken != source.release.FencingToken {
+			observeCapture(ctx, captureEvent{Stage: "cell_publication_changed", Node: o.candidate.EdgeID})
 			// A cell's publication race removes that cell's observation only.
 			// Other cells retain independent authority; final grant validation
 			// still enforces every signed hard floor using surviving candidates.
@@ -517,15 +549,18 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 		}
 	}
 	sort.Slice(result.Candidates, func(i, j int) bool { return result.Candidates[i].EdgeID < result.Candidates[j].EdgeID })
+	stage = "authority_recheck"
 	_, current, currentRelease, err := s.currentAgentAuthority()
 	if err != nil || current.ID != policyArtifact.ID || current.ContentHash != policyArtifact.ContentHash || currentRelease.ID != policyRelease.ID || currentRelease.FencingToken != policyRelease.FencingToken {
 		s.operationObservations().Observe("agent-authority-changed", 0)
 		return result, p, diagnostics, errAgentEdgeUnavailable
 	}
+	stage = "evidence_lease"
 	if result.ValidUntil.Sub(time.Now()) < p.MinimumLease() {
 		s.operationObservations().Observe("agent-evidence-expired", 0)
 		return result, p, diagnostics, errAgentEdgeUnavailable
 	}
+	stage = "grant_constraint"
 	if result.Validate() != nil {
 		s.operationObservations().Observe("agent-grant-constraint-unmet", 0)
 		return result, p, diagnostics, errAgentEdgeUnavailable
@@ -588,6 +623,8 @@ func captureAgentEdgeObservationWithObserver(ctx context.Context, client *cluste
 				b.ReleaseSetID != source.parent.ID || b.ReleaseSetDigest != source.parent.ContentHash || b.RouteArtifactID != source.route.ID || b.RouteArtifactDigest != source.route.ContentHash ||
 				b.ReleaseID != source.release.ID || b.ReleaseChannel != source.release.ReleaseChannel || b.FencingToken != source.release.FencingToken || b.ScopeKey != source.publication.ScopeKey ||
 				b.PolicyDigest != source.publication.PolicyDigest || b.IntentDigest != source.publication.IntentDigest || b.InputSnapshotDigest != source.publication.InputSnapshotDigest {
+				observeCapture(ctx, captureEvent{Stage: "route_proof_rejected", Node: edge.ID, ErrorClass: captureErrorClass(err),
+					Mismatches: agentRouteProofMismatches(proof, edge, source, digest, time.Now())})
 				if observe != nil {
 					if err != nil {
 						observe("agent-route-proof-unavailable")
@@ -621,9 +658,39 @@ func captureAgentEdgeObservationWithObserver(ctx context.Context, client *cluste
 		evidence, _ := platformconfig.Digest(map[string]any{"capacity": capacity, "routes": proofs, "inventory_heartbeat": node.LastHeartbeatAt})
 		candidate := agentedge.Candidate{Publication: source.publication, EdgeID: edge.ID, AuthorityCellID: edge.AuthorityCellID, Address: address, RouteDigests: digests, FailureDomains: edge.FailureDomains, EvidenceDigest: evidence, EvidenceObservedAt: observed, EvidenceValidUntil: until}
 		fact := edgetopology.RouteFact{EdgeID: edge.ID, LegacyGroupID: node.EdgeGroupID, ReadyRouteDigests: digests, TLSHostname: p.Constraint.Hostname, ObservedAt: observed, ValidUntil: until, Healthy: true, RouteReady: true, TLSReady: true, CapacityAvailable: true}
+		observeCapture(ctx, captureEvent{Stage: "candidate_ready", Node: edge.ID})
 		return resultType{candidate: candidate, fact: fact}, ""
 	}
 	return fail("fresh_route_or_capacity_unavailable")
+}
+
+// Describe only mismatched field names, never Host/path/address, proofs or keys.
+func agentRouteProofMismatches(proof routeprobe.Proof, edge edgetopology.Edge, source agentCellSource, digest string, now time.Time) []string {
+	checks := map[string]bool{"version": proof.Version != "", "digest": proof.Digest == digest, "edge_id": proof.EdgeID == edge.ID,
+		"group_id": proof.GroupID == source.cell.ServingGroupID(), "state": proof.State == "", "checked_at": !proof.CheckedAt.IsZero() && !proof.CheckedAt.After(now)}
+	if b := proof.TrafficRelease; b == nil {
+		checks["publication"] = false
+	} else {
+		checks["release_set_id"] = b.ReleaseSetID == source.parent.ID
+		checks["release_set_digest"] = b.ReleaseSetDigest == source.parent.ContentHash
+		checks["route_artifact_id"] = b.RouteArtifactID == source.route.ID
+		checks["route_artifact_digest"] = b.RouteArtifactDigest == source.route.ContentHash
+		checks["release_id"] = b.ReleaseID == source.release.ID
+		checks["release_channel"] = b.ReleaseChannel == source.release.ReleaseChannel
+		checks["fencing_token"] = b.FencingToken == source.release.FencingToken
+		checks["scope_key"] = b.ScopeKey == source.publication.ScopeKey
+		checks["policy_digest"] = b.PolicyDigest == source.publication.PolicyDigest
+		checks["intent_digest"] = b.IntentDigest == source.publication.IntentDigest
+		checks["input_snapshot_digest"] = b.InputSnapshotDigest == source.publication.InputSnapshotDigest
+	}
+	var mismatches []string
+	for key, valid := range checks {
+		if !valid {
+			mismatches = append(mismatches, key)
+		}
+	}
+	sort.Strings(mismatches)
+	return mismatches
 }
 
 func agentStaticEdgeAllowed(edge edgetopology.Edge, g edgetopology.RouteGrant) bool {

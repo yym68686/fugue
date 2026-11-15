@@ -39,5 +39,10 @@ func (s *Server) observeOperation(stage string) func() {
 // OperationSnapshot is consumed by the local Live Diagnostics endpoint. Stage
 // names are fixed; no request values, credentials or tenant IDs are recorded.
 func (s *Server) OperationSnapshot(ctx context.Context) (any, error) {
-	return s.operationObservations().Snapshot(ctx)
+	value, err := s.operationObservations().Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	value.(map[string]any)["captures"] = s.captureSnapshot()
+	return value, nil
 }
