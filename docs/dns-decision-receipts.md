@@ -54,6 +54,13 @@ signature or proof against an administrator who can rewrite the entire receipt.
 - Each record includes the input/materialized candidates and score breakdowns,
   scope source and resolution, selected group, exact answer candidates, materialization
   filtering, policy rejection, answer-limit omissions and exploration outcome.
+  New receipts distinguish `outside_physical_selection` and
+  `outside_physical_order` from `not_selected_by_answer_limit`. Independent
+  availability fallback/redundancy can extend the quality order, so its
+  authorized candidates are not rejected merely for being outside that order.
+  The opaque replay input carries `filter_reasons_version: 1`; receipts without
+  it retain their original diagnostic classification when replayed. This
+  diagnostic version changes neither selection nor the receipt's HTTP shape.
 - `cooldown_until` / `cooldown_result` describe the published scoped cooldown
   window at the captured clock, not a new cooldown decision. Global profiles
   carry no deadline and report `not_recorded`; absence is never called expiry.

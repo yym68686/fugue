@@ -282,11 +282,15 @@ passes, including passes resumed after a budget stop. Source diagnostics include
 errors. The service account needs read access to `nodes/proxy`, and the kubelet
 log handler must expose retained container logs.
 
-A log-open transport failure opens a circuit shared by all sources on that
+A log transport failure opens a circuit shared by all sources on that
 physical node. Initially in-flight reads are bounded by collector concurrency;
 subsequent cycles skip the node until one half-open probe is due. Retries grow
 from the normal poll interval (at least 15 seconds) to a five-minute ceiling,
 with jitter. A late success from an earlier request cannot reset a newer failure.
+A successful HTTP header does not close the
+probe: it remains leased through body scanning and retained-file recovery.
+Transport errors at any read stage open the same node circuit exactly once;
+parent-cycle cancellation remains a scheduling deferral, not a node failure.
 Container-specific errors, authentication failures and API throttling use
 source-local backoff instead of suppressing other containers on the node.
 

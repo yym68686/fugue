@@ -163,20 +163,30 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	readTimeout := min(5*time.Second, c.pipeline.cfg.KubernetesLogPollInterval/3)
 	ctx, cancel := context.WithTimeout(parent, readTimeout)
 	defer cancel()
+	// Opening response headers is not a completed read. Keep a half-open
+	// node probe leased until its body (including rotation recovery) finishes,
+	// and report transport failures from every stage exactly once.
+	nodeReadFinished := false
+	finishNodeRead := func(readErr error) bool {
+		if nodeReadFinished {
+			return false
+		}
+		nodeReadFinished = true
+		if isBenignKubernetesLogReadError(readErr) {
+			readErr = nil
+		}
+		if parent.Err() != nil {
+			// A shared scheduling deadline is not evidence of node failure.
+			readErr = context.Canceled
+		}
+		return c.finishLogNodeRead(ticket, readErr, c.logNow())
+	}
+	defer func() { finishNodeRead(nil) }()
 	since := metav1.NewTime(cur.Time)
 	stream, err := c.client.CoreV1().Pods(target.pod.Namespace).GetLogs(target.pod.Name, &corev1.PodLogOptions{Container: target.container, Timestamps: true, SinceTime: &since, Previous: target.previous}).Stream(ctx)
 	observation.OpenMillis = c.logNow().Sub(now).Milliseconds()
-	nodeResult := err
-	if isBenignKubernetesLogReadError(err) {
-		nodeResult = nil
-	}
-	if parent.Err() != nil {
-		// The shared cycle deadline is a scheduling bound, not evidence of
-		// an unavailable node (DeadlineExceeded otherwise looks like net.Error).
-		nodeResult = context.Canceled
-	}
-	emitWarning := c.finishLogNodeRead(ticket, nodeResult, c.logNow())
 	if err != nil {
+		emitWarning := finishNodeRead(err)
 		observation.Outcome = "open_error"
 		observation.ErrorClass = logReadErrorClass(err)
 		if parent.Err() != nil {
@@ -237,7 +247,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			}
 			if parent.Err() == nil {
 				c.pipeline.kubernetesLogErrors.Add(1)
-				c.pipeline.recordError(fmt.Errorf("recover rotated Kubernetes logs source=%s: %w", key, recoveryErr))
+				if finishNodeRead(recoveryErr) {
+					c.pipeline.recordError(fmt.Errorf("recover rotated Kubernetes logs node=%s source=%s: %w", target.pod.Spec.NodeName, key, recoveryErr))
+				}
 				c.deferLogSource(&cur)
 			}
 			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
@@ -347,7 +359,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
 		}
 		c.pipeline.kubernetesLogErrors.Add(1)
-		c.pipeline.recordError(fmt.Errorf("scan Kubernetes cursor logs: %w", err))
+		if finishNodeRead(err) {
+			c.pipeline.recordError(fmt.Errorf("scan Kubernetes cursor logs node=%s source=%s: %w", target.pod.Spec.NodeName, key, err))
+		}
 		c.deferLogSource(&cur)
 	}
 	if parent.Err() != nil {

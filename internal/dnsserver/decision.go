@@ -21,6 +21,8 @@ import (
 const DNSDecisionSchema = "fugue.dns-decision/v1"
 const DNSDecisionMaxBytes = 256 << 10
 
+const dnsDecisionFilterReasonsVersion = 1
+
 type DNSDecisionPublication struct {
 	ReleaseSetID        string `json:"release_set_id,omitempty"`
 	ParentDigest        string `json:"parent_digest,omitempty"`
@@ -155,10 +157,11 @@ type dnsDecisionStage struct {
 }
 
 type dnsDecisionReplay struct {
-	Version        string              `json:"version"`
-	Query          []byte              `json:"query"`
-	Stages         []*dnsDecisionStage `json:"stages"`
-	NoServingState bool                `json:"no_serving_state,omitempty"`
+	Version              string              `json:"version"`
+	FilterReasonsVersion int                 `json:"filter_reasons_version,omitempty"`
+	Query                []byte              `json:"query"`
+	Stages               []*dnsDecisionStage `json:"stages"`
+	NoServingState       bool                `json:"no_serving_state,omitempty"`
 }
 
 type dnsDecisionCapture struct {
@@ -413,6 +416,21 @@ func (capture *dnsDecisionCapture) describeRecord(entry dnsServingRecord, materi
 				case policy.PolicyKind != model.DNSAnswerPolicyKindDisabled && !actual.TLSReady:
 					reason = "tls_ready_required"
 				}
+				// Historical receipts must replay their original diagnostics.
+				// Availability fallback/redundancy may legitimately extend the
+				// quality order; otherwise membership is checked before readiness
+				// by the physical selectors, not by the answer-count limit.
+				if (!capture.replaying || capture.input.FilterReasonsVersion == dnsDecisionFilterReasonsVersion) &&
+					(policy.Availability == nil || policy.Availability.Version != model.DNSAvailabilityRedundantVersion && !record.Availability.FallbackUsed) {
+					switch {
+					case policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalQuality && policy.PhysicalSelection != nil &&
+						policy.PhysicalSelection.Version == model.DNSPhysicalSelectionVersion && !slices.Contains(policy.PhysicalSelection.OrderedEdgeIDs, candidate.EdgeID):
+						reason = "outside_physical_selection"
+					case policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalOrder && policy.PhysicalOrder != nil &&
+						!slices.Contains(policy.PhysicalOrder.OrderedEdgeIDs, candidate.EdgeID):
+						reason = "outside_physical_order"
+					}
+				}
 			}
 			if availability := policy.Availability; availability != nil {
 				if !slices.Contains(availability.OrderedEdgeIDs, candidate.EdgeID) {
@@ -497,7 +515,7 @@ func ReplayDNSDecision(receipt DNSDecisionReceipt) (result DNSDecisionReplayResu
 		return DNSDecisionReplayResult{}, errors.New("decision schema, bounds or evidence digest invalid")
 	}
 	var input dnsDecisionReplay
-	if err := json.Unmarshal(receipt.ReplayInput, &input); err != nil || input.Version != DNSDecisionSchema || len(input.Stages) > 2 || len(input.Stages) == 0 && !input.NoServingState {
+	if err := json.Unmarshal(receipt.ReplayInput, &input); err != nil || input.Version != DNSDecisionSchema || input.FilterReasonsVersion < 0 || input.FilterReasonsVersion > dnsDecisionFilterReasonsVersion || len(input.Stages) > 2 || len(input.Stages) == 0 && !input.NoServingState {
 		return DNSDecisionReplayResult{}, errors.New("decision replay input invalid")
 	}
 	var query dns.Msg
