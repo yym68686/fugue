@@ -158,6 +158,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	c.cycleReads.Add(1)
 	original := cur.Time
 	observation := logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, Outcome: "drained", LineLimitBytes: c.pipeline.cfg.KubernetesLogMaxLineBytes}
+	readTrace := &logReadTransportTrace{}
 	observation.GapEvents, observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = gap.GapEvents, gap.GapReason, gap.GapLowerBound, gap.GapUpperBound
 	defer func() {
 		observation.CursorAfter = cur.Time
@@ -165,6 +166,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		observation.NextAttempt = cur.NextAttempt
 		observation.DrainedThrough = cur.DrainedThrough
 		observation.TotalMillis = time.Since(now).Milliseconds()
+		if observation.ErrorClass != "" {
+			observation.LastErrorRead = readTrace.snapshot()
+		}
 		c.pipeline.observeLogSource(observation)
 	}()
 	boundary := cur.Boundary
@@ -175,6 +179,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	readTimeout := min(5*time.Second, c.pipeline.cfg.KubernetesLogPollInterval/3)
 	ctx, cancel := context.WithTimeout(parent, readTimeout)
 	defer cancel()
+	ctx = context.WithValue(ctx, logReadTransportKey{}, readTrace)
 	// Opening response headers is not a completed read. Keep a half-open
 	// node probe leased until its body (including rotation recovery) finishes,
 	// and report transport failures from every stage exactly once.
@@ -195,7 +200,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	}
 	defer func() { finishNodeRead(nil) }()
 	since := metav1.NewTime(cur.Time)
-	stream, err := c.client.CoreV1().Pods(target.pod.Namespace).GetLogs(target.pod.Name, &corev1.PodLogOptions{Container: target.container, Timestamps: true, SinceTime: &since, Previous: target.previous}).Stream(ctx)
+	stream, err := observedLogStream(ctx, "pod_log", func(ctx context.Context) (io.ReadCloser, error) {
+		return c.client.CoreV1().Pods(target.pod.Namespace).GetLogs(target.pod.Name, &corev1.PodLogOptions{Container: target.container, Timestamps: true, SinceTime: &since, Previous: target.previous}).Stream(ctx)
+	})
 	observation.OpenMillis = c.logNow().Sub(now).Milliseconds()
 	if err != nil {
 		emitWarning := finishNodeRead(err)

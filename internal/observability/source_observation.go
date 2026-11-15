@@ -8,37 +8,38 @@ import (
 )
 
 type logSourceObservation struct {
-	Identity        string    `json:"identity"`
-	Node            string    `json:"node"`
-	Previous        bool      `json:"previous"`
-	ObservedAt      time.Time `json:"observed_at"`
-	CursorBefore    time.Time `json:"cursor_before"`
-	CursorAfter     time.Time `json:"cursor_after"`
-	NextAttempt     time.Time `json:"next_attempt,omitempty"`
-	PendingAt       time.Time `json:"pending_at,omitempty"`
-	DrainedThrough  time.Time `json:"drained_through,omitempty"`
-	OpenMillis      int64     `json:"open_ms"`
-	TotalMillis     int64     `json:"total_ms"`
-	Lines           int       `json:"lines"`
-	Outcome         string    `json:"outcome"`
-	Attempts        uint64    `json:"attempts"`
-	Errors          uint64    `json:"errors"`
-	ErrorClass      string    `json:"error_class,omitempty"`
-	HTTPStatus      int       `json:"http_status,omitempty"`
-	LastErrorAt     time.Time `json:"last_error_at,omitempty"`
-	LastErrorClass  string    `json:"last_error_class,omitempty"`
-	LastHTTPStatus  int       `json:"last_http_status,omitempty"`
-	LastErrorStage  string    `json:"last_error_stage,omitempty"`
-	LastErrorMillis int64     `json:"last_error_ms,omitempty"`
-	LineLimitBytes  int       `json:"line_limit_bytes"`
-	MaxLineBytes    int       `json:"max_line_bytes"`
-	TotalLines      uint64    `json:"total_lines"`
-	RotationFiles   int       `json:"rotation_files,omitempty"`
-	RotationBytes   int64     `json:"rotation_bytes,omitempty"`
-	GapEvents       uint64    `json:"gap_events"`
-	GapReason       string    `json:"gap_reason,omitempty"`
-	GapLowerBound   time.Time `json:"gap_lower_bound,omitempty"`
-	GapUpperBound   time.Time `json:"gap_upper_bound,omitempty"`
+	Identity        string                       `json:"identity"`
+	Node            string                       `json:"node"`
+	Previous        bool                         `json:"previous"`
+	ObservedAt      time.Time                    `json:"observed_at"`
+	CursorBefore    time.Time                    `json:"cursor_before"`
+	CursorAfter     time.Time                    `json:"cursor_after"`
+	NextAttempt     time.Time                    `json:"next_attempt,omitempty"`
+	PendingAt       time.Time                    `json:"pending_at,omitempty"`
+	DrainedThrough  time.Time                    `json:"drained_through,omitempty"`
+	OpenMillis      int64                        `json:"open_ms"`
+	TotalMillis     int64                        `json:"total_ms"`
+	Lines           int                          `json:"lines"`
+	Outcome         string                       `json:"outcome"`
+	Attempts        uint64                       `json:"attempts"`
+	Errors          uint64                       `json:"errors"`
+	ErrorClass      string                       `json:"error_class,omitempty"`
+	HTTPStatus      int                          `json:"http_status,omitempty"`
+	LastErrorAt     time.Time                    `json:"last_error_at,omitempty"`
+	LastErrorClass  string                       `json:"last_error_class,omitempty"`
+	LastHTTPStatus  int                          `json:"last_http_status,omitempty"`
+	LastErrorStage  string                       `json:"last_error_stage,omitempty"`
+	LastErrorMillis int64                        `json:"last_error_ms,omitempty"`
+	LastErrorRead   *logReadTransportObservation `json:"last_error_read,omitempty"`
+	LineLimitBytes  int                          `json:"line_limit_bytes"`
+	MaxLineBytes    int                          `json:"max_line_bytes"`
+	TotalLines      uint64                       `json:"total_lines"`
+	RotationFiles   int                          `json:"rotation_files,omitempty"`
+	RotationBytes   int64                        `json:"rotation_bytes,omitempty"`
+	GapEvents       uint64                       `json:"gap_events"`
+	GapReason       string                       `json:"gap_reason,omitempty"`
+	GapLowerBound   time.Time                    `json:"gap_lower_bound,omitempty"`
+	GapUpperBound   time.Time                    `json:"gap_upper_bound,omitempty"`
 }
 
 type sourceErrorSummary struct {
@@ -79,11 +80,18 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	v.LastErrorAt, v.LastErrorClass = prior.LastErrorAt, prior.LastErrorClass
 	v.LastHTTPStatus = prior.LastHTTPStatus
 	v.LastErrorStage, v.LastErrorMillis = prior.LastErrorStage, prior.LastErrorMillis
+	failed := v.Outcome == "open_error" || v.Outcome == "scan_error" || v.Outcome == "rotation_recovery_error"
+	if !failed {
+		v.LastErrorRead = prior.LastErrorRead
+	} else if v.LastErrorRead != nil {
+		copy := *v.LastErrorRead
+		v.LastErrorRead = &copy
+	}
 	if v.GapEvents == 0 {
 		v.GapReason, v.GapLowerBound, v.GapUpperBound = prior.GapReason, prior.GapLowerBound, prior.GapUpperBound
 	}
 	v.GapEvents += prior.GapEvents
-	if v.Outcome == "open_error" || v.Outcome == "scan_error" || v.Outcome == "rotation_recovery_error" {
+	if failed {
 		v.Errors++
 		v.LastErrorAt, v.LastErrorClass = v.ObservedAt, v.ErrorClass
 		v.LastHTTPStatus = v.HTTPStatus
@@ -101,6 +109,10 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	p.sourceObservationMu.Lock()
 	rows := make([]logSourceObservation, 0, len(p.sourceObservations))
 	for _, row := range p.sourceObservations {
+		if row.LastErrorRead != nil {
+			copy := *row.LastErrorRead
+			row.LastErrorRead = &copy
+		}
 		rows = append(rows, row)
 	}
 	evicted, cycle := p.sourceObservationEvicted, p.sourceObservationCycle

@@ -27,6 +27,16 @@ groups source-lifetime error totals by each source's **latest** error, not by th
 historical class of each individual failure. Detail truncation and source
 eviction remain explicit.
 
+`last_error_read` is one fixed-size transport receipt for the failing log HTTP
+stream, preserved through recovery/backoff. Its phase distinguishes the Pod log,
+both retained inventories, opening the pinned current file, and retained-file
+reads. It records only observed HTTP milestones, header-wait time and body byte
+counts, including a body failure from an older stream held across inventory
+reads. Milestones are not a root-cause verdict: a false value means not observed,
+and header time includes client admission, retry and server wait. No trace callback
+arguments, addresses, URLs, headers, bodies or raw errors are retained. A new
+failure without transport evidence cannot borrow a previous failure's receipt.
+
 All these observations are metadata-only. They do not authorize an Edge, renew
 an evidence lease, loosen a capacity threshold, change a collector cursor,
 change public DNS transport, or recover traffic on their own.

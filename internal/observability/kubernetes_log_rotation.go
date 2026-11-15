@@ -135,26 +135,28 @@ func (c *kubernetesLogCollector) openRotationLogs(ctx context.Context, target ku
 	if !ok {
 		return nil, fmt.Errorf("retained log source identity is unavailable")
 	}
-	get := func(name string) (io.ReadCloser, error) {
-		return c.client.CoreV1().RESTClient().Get().AbsPath(directory + name).Stream(ctx)
+	get := func(name, phase string) (io.ReadCloser, error) {
+		return observedLogStream(ctx, phase, func(ctx context.Context) (io.ReadCloser, error) {
+			return c.client.CoreV1().RESTClient().Get().AbsPath(directory + name).Stream(ctx)
+		})
 	}
-	list := func() ([]rotationLogFile, error) {
-		body, err := get("")
+	list := func(phase string) ([]rotationLogFile, error) {
+		body, err := get("", phase)
 		if err != nil {
 			return nil, err
 		}
 		defer body.Close()
 		return parseRotationLogFiles(body, prefix)
 	}
-	before, err := list()
+	before, err := list("rotation_inventory_before")
 	if err != nil {
 		return nil, err
 	}
-	current, err := get(prefix)
+	current, err := get(prefix, "rotation_current")
 	if err != nil {
 		return nil, err
 	}
-	after, err := list()
+	after, err := list("rotation_inventory_after")
 	bases := func(files []rotationLogFile) []string {
 		out := make([]string, len(files))
 		for i, f := range files {
@@ -170,7 +172,9 @@ func (c *kubernetesLogCollector) openRotationLogs(ctx context.Context, target ku
 		current.Close()
 		return nil, fmt.Errorf("retained log inventory changed")
 	}
-	return &rotationLogReader{files: after, current: current, get: get, maxLine: c.pipeline.cfg.KubernetesLogMaxLineBytes, partial: map[string]*rotationCRIRecord{}}, nil
+	return &rotationLogReader{files: after, current: current, get: func(name string) (io.ReadCloser, error) {
+		return get(name, "rotation_retained")
+	}, maxLine: c.pipeline.cfg.KubernetesLogMaxLineBytes, partial: map[string]*rotationCRIRecord{}}, nil
 }
 
 type rotationCRIRecord struct {
