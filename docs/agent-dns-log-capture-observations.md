@@ -63,3 +63,10 @@ failure without transport evidence cannot borrow a previous failure's receipt.
 All these observations are metadata-only. They do not authorize an Edge, renew
 an evidence lease, loosen a capacity threshold, change a collector cursor,
 change public DNS transport, or recover traffic on their own.
+
+DNS management preflight messages distinguish an unavailable selected-backend
+observation, a known but not-ready selected backend, and legacy cache errors.
+The stable `cache_errors_zero` check name does not imply that an unknown
+observation proves cache corruption: enrolled consumers still require current
+serving/cache readiness, independently of historical inventory error counters.
+Only diagnostic wording changes; all existing preflight gates remain intact.

@@ -341,7 +341,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 		model.DNSDelegationPreflightCheck{
 			Name:    "cache_errors_zero",
 			Pass:    dnsNodeCacheHealthyAll(nodeChecks),
-			Message: "cache write errors must be zero; cache load errors are allowed after successful LKG recovery",
+			Message: "enrolled consumers require current selected DNS serving/cache readiness; legacy nodes require zero cache write errors and recovered cache load errors",
 		},
 		model.DNSDelegationPreflightCheck{
 			Name:    "kubernetes_health_gate",
@@ -490,15 +490,32 @@ func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNS
 
 	messageParts := []string{}
 	if !healthOK {
-		messageParts = append(messageParts, "DNS heartbeat is not healthy")
+		if node.ServingObservation == nil {
+			messageParts = append(messageParts, "DNS heartbeat is not healthy")
+		} else {
+			switch node.ServingObservation.State {
+			case "ready", "not_ready":
+				messageParts = append(messageParts, "selected DNS backend is not ready")
+			default:
+				messageParts = append(messageParts, "selected DNS backend observation is unavailable")
+			}
+		}
 	} else if model.NormalizeEdgeHealthStatus(node.Status) == model.EdgeHealthDegraded {
 		messageParts = append(messageParts, "DNS heartbeat is degraded but serving DNS probes pass")
 	}
 	if !bundleOK {
-		messageParts = append(messageParts, "DNS bundle version is empty")
+		if node.ServingObservation != nil {
+			messageParts = append(messageParts, "selected DNS bundle version is unavailable")
+		} else {
+			messageParts = append(messageParts, "DNS bundle version is empty")
+		}
 	}
 	if !cacheOK {
-		messageParts = append(messageParts, "cache has unrecovered write/load errors")
+		if node.ServingObservation == nil {
+			messageParts = append(messageParts, "cache has unrecovered write/load errors")
+		} else if node.CacheStatus != "ready" {
+			messageParts = append(messageParts, "selected DNS cache readiness has not passed")
+		}
 	}
 	if policyErr != nil {
 		messageParts = append(messageParts, "Kubernetes node health is unavailable")

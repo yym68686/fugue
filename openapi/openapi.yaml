@@ -23585,6 +23585,11 @@ components:
             type: string
     DNSDelegationPreflightCheck:
       type: object
+      description: >-
+        Diagnostic messages distinguish unavailable or not-ready selected DNS
+        observations from legacy cache errors. The cache_errors_zero check keeps
+        its stable name but requires current serving and cache readiness for
+        enrolled consumers, not zero historical inventory error counters.
       additionalProperties: false
       required: [name, pass]
       properties:
@@ -23599,7 +23604,9 @@ components:
       description: >-
         For enrolled Kubernetes consumers, serving_observation supplies current
         serving health. Legacy counters remain historical and cannot independently
-        pass or fail the selected backend cache/readiness gate.
+        pass or fail the selected backend cache/readiness gate. An unavailable or
+        not-ready serving observation is not evidence of cache write/load errors;
+        diagnostic messages report the missing readiness evidence instead.
       additionalProperties: false
       required:
         - dns_node_id
