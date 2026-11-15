@@ -262,6 +262,53 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Run("assignment rejection receipts", func(t *testing.T) {
+		baseline, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			reason string
+			change func(*model.PlatformConsumerInstance)
+		}{
+			{"", func(*model.PlatformConsumerInstance) {}},
+			{"fact_expected_set", func(f *model.PlatformConsumerInstance) { f.ExpectedConsumerSetID = "private-foreign-set" }},
+			{"fact_release_set", func(f *model.PlatformConsumerInstance) { f.ReleaseSetID = "private-foreign-parent" }},
+			{"fact_fence", func(f *model.PlatformConsumerInstance) { f.FencingToken++ }},
+			{"fact_generation_sequence", func(f *model.PlatformConsumerInstance) { f.GenerationSequence++ }},
+			{"fact_heartbeat_missing", func(f *model.PlatformConsumerInstance) { f.LastHeartbeatAt = time.Time{} }},
+			{"fact_heartbeat_future", func(f *model.PlatformConsumerInstance) { f.LastHeartbeatAt = time.Now().Add(time.Hour) }},
+			{"fact_heartbeat_stale", func(f *model.PlatformConsumerInstance) { f.LastHeartbeatAt = time.Now().Add(-24 * time.Hour) }},
+		} {
+			t.Run(tc.reason, func(t *testing.T) {
+				fact := source.consumer
+				tc.change(&fact)
+				ctx, trace := s.beginCaptureTrace(context.Background(), "dns-runtime-facts")
+				_, err := s.dnsFactSourceForConsumer(ctx, f.claims.NodeID, fact, source.claims)
+				s.finishCaptureTrace(trace, "test", err, 0, 0)
+				if (err != nil) != (tc.reason != "") || err != nil && err != errDNSRuntimeFacts {
+					t.Fatal("diagnostics changed the rejection contract", err)
+				}
+				rows := captureReceipts(t, s)
+				events := rows[len(rows)-1].Events
+				if tc.reason == "" {
+					if len(events) != 0 {
+						t.Fatal("successful source invented a rejection", events)
+					}
+				} else if len(events) != 1 || events[0].Stage != "source_assignment_rejected" || events[0].Rejection != tc.reason {
+					t.Fatal("assignment failure lost its fixed reason", events)
+				}
+				raw, _ := json.Marshal(events)
+				if strings.Contains(string(raw), "private-foreign") {
+					t.Fatal("receipt retained a private identity")
+				}
+			})
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || !reflect.DeepEqual(baseline, after) {
+			t.Fatal("diagnostics mutated durable state", err)
+		}
+	})
 	digest, _ := platformconfig.Digest(source.payload.ReadinessPlan)
 	snapshot = dnsfacts.Snapshot{Schema: dnsfacts.Schema, NodeID: f.claims.NodeID, EdgeGroupID: source.group, Assignment: source.lookup.Assignment, ParentDigest: source.parent.ContentHash, RouteArtifactID: source.routeID, PlanDigest: digest, ObservedAt: now, EvaluatedAt: now, CheckpointValidUntil: now.Add(time.Hour), Ready: true, Facts: []dnsfacts.Probe{}}
 	baseline, err := os.ReadFile(path)
@@ -392,6 +439,9 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 				found := false
 				for _, event := range rows[len(rows)-1].Events {
 					found = found || event.Stage == "snapshot_validation_rejected" && event.Rejection == reason
+					if scenario == "foreign assignment" && event.Stage == "snapshot_validation_rejected" && !reflect.DeepEqual(event.Mismatches, []string{"fencing_token"}) {
+						t.Fatal("assignment mismatch lost its exact field", event)
+					}
 				}
 				if !found {
 					t.Fatal("HTTP failure lost its bounded validation reason", reason)
@@ -431,6 +481,38 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 	cancel()
 	if _, err := s.readPlatformDNSRuntimeFacts(ctx, f.claims.NodeID); err == nil {
 		t.Fatal("canceled read accepted")
+	}
+}
+
+func TestDNSAssignmentMismatchFieldsCoverEveryFieldWithoutValues(t *testing.T) {
+	var expected model.PlatformConsumerAssignment
+	typ := reflect.TypeOf(expected)
+	if typ.NumField() != 17 {
+		t.Fatal("new assignment fields need bounded diagnostic coverage", typ.NumField())
+	}
+	if fields := dnsAssignmentMismatchFields(expected, expected); len(fields) != 0 {
+		t.Fatal("equal assignment invented differences", fields)
+	}
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		t.Run(field.Name, func(t *testing.T) {
+			observed := expected
+			value := reflect.ValueOf(&observed).Elem().Field(i)
+			switch value.Kind() {
+			case reflect.String:
+				value.SetString("private-assignment-value")
+			case reflect.Int64:
+				value.SetInt(1)
+			case reflect.Slice:
+				value.Set(reflect.ValueOf([]string{})) // nil and empty are not DeepEqual.
+			default:
+				value.Set(reflect.ValueOf(time.Now().UTC()))
+			}
+			name := strings.Split(field.Tag.Get("json"), ",")[0]
+			if fields := dnsAssignmentMismatchFields(observed, expected); !reflect.DeepEqual(fields, []string{name}) {
+				t.Fatal("missing, misnamed or private mismatch field", fields)
+			}
+		})
 	}
 }
 

@@ -144,7 +144,7 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 				return fail("backend_disambiguation")
 			}
 		}
-		source, err := s.dnsFactSourceForConsumer(node, candidate.fact, candidate.claims)
+		source, err := s.dnsFactSourceForConsumer(ctx, node, candidate.fact, candidate.claims)
 		if err != nil {
 			return fail("consumer_assignment_unavailable")
 		}
@@ -159,12 +159,15 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 	return *selected, nil
 }
 
-func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsumerInstance, claims platformcontrol.PlatformComponentIdentityClaims) (dnsFactSource, error) {
-	fail := func() (dnsFactSource, error) { return dnsFactSource{}, errDNSRuntimeFacts }
+func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact model.PlatformConsumerInstance, claims platformcontrol.PlatformComponentIdentityClaims) (dnsFactSource, error) {
+	fail := func(reason string) (dnsFactSource, error) {
+		observeCapture(ctx, captureEvent{Stage: "source_assignment_rejected", Node: node, Rejection: reason})
+		return dnsFactSource{}, errDNSRuntimeFacts
+	}
 	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
 	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil {
-		return fail()
+		return fail("assignment_resolution")
 	}
 	var source *dnsFactSource
 	for _, item := range resolved {
@@ -173,7 +176,7 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 		}
 		set, err := s.store.GetPlatformExpectedConsumerSet(item.Assignment.ExpectedConsumerSetID)
 		if err != nil {
-			return fail()
+			return fail("assignment_expected_set_read")
 		}
 		group, freshness := "", 0
 		for _, expected := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
@@ -182,55 +185,69 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 			}
 		}
 		if group == "" || freshness <= 0 {
-			return fail()
+			return fail("assignment_expected_member_missing")
 		}
 		parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, claims.ScopeKey)
 		if err != nil {
-			return fail()
+			return fail("traffic_release_selection")
 		}
 		if !found || release.ID != item.Release.ID {
 			continue
 		}
 		now := time.Now().UTC()
-		if source != nil || fact.ExpectedConsumerSetID != set.ID || fact.ReleaseSetID != parent.ID || fact.FencingToken != release.FencingToken || fact.GenerationSequence != item.Artifact.GenerationSequence || fact.LastHeartbeatAt.IsZero() || fact.LastHeartbeatAt.After(now) || !fact.LastHeartbeatAt.Add(time.Duration(freshness)*time.Second).After(now) {
-			return fail()
+		for _, check := range []struct {
+			rejected bool
+			reason   string
+		}{
+			{source != nil, "ambiguous_assignment"},
+			{fact.ExpectedConsumerSetID != set.ID, "fact_expected_set"},
+			{fact.ReleaseSetID != parent.ID, "fact_release_set"},
+			{fact.FencingToken != release.FencingToken, "fact_fence"},
+			{fact.GenerationSequence != item.Artifact.GenerationSequence, "fact_generation_sequence"},
+			{fact.LastHeartbeatAt.IsZero(), "fact_heartbeat_missing"},
+			{fact.LastHeartbeatAt.After(now), "fact_heartbeat_future"},
+			{!fact.LastHeartbeatAt.Add(time.Duration(freshness) * time.Second).After(now), "fact_heartbeat_stale"},
+		} {
+			if check.rejected {
+				return fail(check.reason)
+			}
 		}
 		payload, err := decodePlatformDNSArtifact(item.Artifact)
 		if err != nil || payload.ReadinessPlan == nil || payload.Policy.DNSReadiness == nil {
-			return fail()
+			return fail("artifact_payload")
 		}
 		viewFound := false
 		for _, view := range payload.ConsumerViews {
 			if view.NodeID == node {
 				if view.EdgeGroupID != group {
-					return fail()
+					return fail("consumer_view_group")
 				}
 				viewFound = true
 			}
 		}
 		if !viewFound {
-			return fail()
+			return fail("consumer_view_missing")
 		}
 		candidateSource := &dnsFactSource{consumer: fact, claims: claims, parent: parent, lookup: item, payload: payload, group: group, heartbeatValidUntil: fact.LastHeartbeatAt.Add(time.Duration(freshness) * time.Second)}
 		if payload.Policy.PublicationRole == platformconfig.PublicationRoleCellDNS {
 			pubs, err := cellpublication.VerifyDNSArtifact(item.Artifact, s.bundleKeyring())
 			if err != nil {
-				return fail()
+				return fail("cell_publication_verification")
 			}
 			candidateSource.cellBindings = map[string]*model.TrafficReleaseBinding{}
 			if payload.PreviousTrafficPublication != nil {
 				if payload.CellDNSSource == nil {
-					return fail()
+					return fail("previous_traffic_source_missing")
 				}
 				aliases, err := platformconfig.RouteAuthorityAliases(payload.CellDNSSource.Intent)
 				if err != nil {
-					return fail()
+					return fail("route_authority_aliases")
 				}
 				digest, _ := platformconfig.Digest(payload.PreviousTrafficPublication.Reference)
 				for group := range aliases {
 					binding, err := platformconfig.PreviousTrafficPublicationBinding(*payload.PreviousTrafficPublication, group)
 					if err != nil {
-						return fail()
+						return fail("previous_traffic_binding")
 					}
 					candidateSource.cellBindings[digest] = binding
 					break
@@ -240,7 +257,7 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 			for _, input := range pubs {
 				b, err := platformconfig.CellRoutePublicationBinding(input)
 				if err != nil {
-					return fail()
+					return fail("cell_route_binding")
 				}
 				digest, _ := platformconfig.Digest(input.Reference)
 				candidateSource.cellBindings[digest] = b
@@ -248,14 +265,14 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 		} else {
 			projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, readArtifact)
 			if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
-				return fail()
+				return fail("route_projection")
 			}
 			candidateSource.routeID, candidateSource.trafficBinding = projection.TrafficRelease.RouteArtifactID, projection.TrafficRelease
 		}
 		source = candidateSource
 	}
 	if source == nil {
-		return fail()
+		return fail("selected_assignment_missing")
 	}
 	return *source, nil
 }
@@ -339,7 +356,11 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	stage = "snapshot_validation"
 	response.EvaluatedAt = time.Now().UTC()
 	response.ReadyProbeIDs, response.Ready, err = evaluateDNSRuntimeSnapshotWithRejection(response.Snapshot, current, response.EvaluatedAt, func(reason string) {
-		observeCapture(ctx, captureEvent{Stage: "snapshot_validation_rejected", Node: node, Rejection: reason})
+		event := captureEvent{Stage: "snapshot_validation_rejected", Node: node, Rejection: reason}
+		if reason == "assignment" {
+			event.Mismatches = dnsAssignmentMismatchFields(response.Snapshot.Assignment, current.lookup.Assignment)
+		}
+		observeCapture(ctx, event)
 	})
 	response.Ready = response.Ready && transportReady
 	response.lkgGeneration = current.consumer.LKGGeneration
@@ -348,6 +369,40 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
 	return response, nil
+}
+
+// Field names only: retain the exact failed comparison without exposing either
+// assignment or accepting an old checkpoint. Keep DeepEqual semantics (including
+// nil/empty capabilities and time metadata) identical to snapshot validation.
+func dnsAssignmentMismatchFields(observed, expected model.PlatformConsumerAssignment) []string {
+	fields := []string{}
+	for _, check := range []struct {
+		name string
+		a, b any
+	}{
+		{"expected_consumer_set_id", observed.ExpectedConsumerSetID, expected.ExpectedConsumerSetID},
+		{"release_set_id", observed.ReleaseSetID, expected.ReleaseSetID},
+		{"artifact_release_id", observed.ArtifactReleaseID, expected.ArtifactReleaseID},
+		{"artifact_kind", observed.ArtifactKind, expected.ArtifactKind},
+		{"scope_key", observed.ScopeKey, expected.ScopeKey},
+		{"expected_generation", observed.ExpectedGeneration, expected.ExpectedGeneration},
+		{"revision", observed.Revision, expected.Revision},
+		{"artifact_id", observed.ArtifactID, expected.ArtifactID},
+		{"content_hash", observed.ContentHash, expected.ContentHash},
+		{"generation_sequence", observed.GenerationSequence, expected.GenerationSequence},
+		{"release_channel", observed.ReleaseChannel, expected.ReleaseChannel},
+		{"fencing_token", observed.FencingToken, expected.FencingToken},
+		{"expected_protocol_version", observed.ExpectedProtocolVersion, expected.ExpectedProtocolVersion},
+		{"expected_schema_version", observed.ExpectedSchemaVersion, expected.ExpectedSchemaVersion},
+		{"compatibility_capabilities", observed.CompatibilityCapabilities, expected.CompatibilityCapabilities},
+		{"heartbeat_deadline", observed.HeartbeatDeadline, expected.HeartbeatDeadline},
+		{"convergence_deadline", observed.ConvergenceDeadline, expected.ConvergenceDeadline},
+	} {
+		if !reflect.DeepEqual(check.a, check.b) {
+			fields = append(fields, check.name)
+		}
+	}
+	return fields
 }
 
 // Resolve the HTTP readiness port from the one container that owns all Service

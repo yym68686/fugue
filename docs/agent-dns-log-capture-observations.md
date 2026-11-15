@@ -32,6 +32,15 @@ not invent a validation rejection or become ready.
 `source_rejected` separates consumer/expected-set reads, identity ambiguity,
 backend disambiguation and current assignment failures. Stale heartbeats get
 their own fixed event; their rejection and freshness rules are unchanged.
+`source_assignment_rejected` further separates assignment resolution, selected
+publication, the first mismatched heartbeat binding field (expected set, parent,
+fence or generation sequence), heartbeat time bounds, artifact/view validation
+and route projection. These are fixed local check names, not raw errors or
+identities. The original source failure, HTTP status and validation order remain
+unchanged; a check name alone does not establish the cause of publication lag.
+Snapshot assignment rejection also records only the differing assignment field
+names, including expected-set revision, publication fence and deadlines. It does
+not retain either assignment or treat a same-content old assignment as current.
 
 `started`, `completed`, `in_flight`, `evicted` and `events_dropped` describe the
 coverage limits. The ring is process-local and non-durable. Polling it cannot
