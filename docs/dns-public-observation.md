@@ -38,6 +38,12 @@ selection/ranking correctness or client traffic share. A failure to capture
 authenticated expectations is a distinct failed CI job, not evidence of healthy
 DNS. Live readiness and actual SERVFAIL still require investigation separately.
 
+Capture failures retain a fixed verifier category (checkpoint authentication,
+authority/freshness, policy shape, timeout, or bounded output validation).
+Unknown verifier stderr is reduced to `verifier_failed`; raw stderr, checkpoints,
+keys and private proof payloads are never surfaced. These categories diagnose
+the failed gate and do not make it pass or renew evidence.
+
 An intervening policy/authority cutover or a recursive cache holding an older
 generation can cause a conservative mismatch. Capture a fresh receipt and
 inspect version/TTL evidence; do not learn an allowlist from the observed answer,

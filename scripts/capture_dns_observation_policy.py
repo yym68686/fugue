@@ -15,6 +15,42 @@ from scripts import reconcile_dns_transport as transport
 from scripts.recover_dns_transport import candidate_request
 
 
+# Only fixed verifier messages may become diagnostic categories. Unknown stderr
+# can include sensitive subprocess details and must never enter CI output.
+POLICY_VERIFIER_REJECTIONS = {
+    'invalid bounded DNS verification input': 'input',
+    'DNS observation policy checkpoint authentication failed': 'checkpoint_authentication',
+    'DNS observation policy authority or freshness mismatch': 'authority_or_freshness',
+    'bounded unique address observation queries required': 'query_identity',
+    'ambiguous or unsupported DNS observation policy': 'unsupported_policy',
+    'invalid DNS observation physical order': 'physical_order',
+    'invalid DNS observation physical selection': 'physical_selection',
+    'unsupported DNS observation candidate policy': 'candidate_policy',
+    'invalid DNS observation availability policy': 'availability_policy',
+    'invalid DNS observation address family': 'address_family',
+}
+
+
+def verified_policy(request, verifier):
+    try:
+        checked = subprocess.run([verifier, '--export-policy'], input=json.dumps(request),
+                                 text=True, capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise ValueError('DNS observation policy authentication unavailable: verifier_timeout') from None
+    if checked.returncode:
+        category = POLICY_VERIFIER_REJECTIONS.get(checked.stderr.strip(), 'verifier_failed')
+        raise ValueError('DNS observation policy authentication unavailable: ' + category)
+    if len(checked.stdout) > 256 << 10:
+        raise ValueError('DNS observation policy authentication unavailable: output_size')
+    try:
+        policy = json.loads(checked.stdout)
+    except ValueError:
+        raise ValueError('DNS observation policy verifier output invalid: output_encoding') from None
+    if not isinstance(policy, dict) or policy.get('schema') != 'fugue.dns-observation-policy/v1':
+        raise ValueError('DNS observation policy verifier output invalid: output_schema')
+    return policy
+
+
 def capture(declaration, declaration_bytes, config, verifier):
     if not os.path.isabs(verifier):
         raise ValueError('absolute DNS observation verifier required')
@@ -51,14 +87,7 @@ def capture(declaration, declaration_bytes, config, verifier):
         binding = dict(config, recovery={'candidate_image': images[0], 'candidate_pod_uid': pod['metadata']['uid']})
         request = candidate_request(candidate, binding)
         request['observation_queries'] = queries
-        checked = subprocess.run([verifier, '--export-policy'], input=json.dumps(request),
-                                 text=True, capture_output=True, timeout=30)
-        if checked.returncode or len(checked.stdout) > 256 << 10:
-            # Never surface subprocess input/output containing private material.
-            raise ValueError('DNS observation policy authentication unavailable')
-        policy = json.loads(checked.stdout)
-        if policy.get('schema') != 'fugue.dns-observation-policy/v1':
-            raise ValueError('DNS observation policy verifier output invalid')
+        policy = verified_policy(request, verifier)
         for kind, before in [('service', current), ('pod', pod)]:
             after = transport.read_json('get', kind, before['metadata']['name'], '-n', config['namespace'], '-o', 'json')
             if any(before['metadata'][key] != after['metadata'].get(key) for key in ['uid', 'resourceVersion']):

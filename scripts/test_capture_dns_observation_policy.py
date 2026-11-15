@@ -85,6 +85,35 @@ class ObservationPolicyTests(unittest.TestCase):
         self.assertTrue(any(q.get('answer_source') == 'verified_serving_policy' for q in declaration['queries']))
         self.assertTrue(all(not q.get('allowed_answers') for q in declaration['queries'] if q.get('answer_source')))
 
+    def test_verifier_failures_keep_only_allowlisted_categories(self):
+        cases = [(message, category) for message, category in observation.POLICY_VERIFIER_REJECTIONS.items()]
+        cases += [('synthetic-private-material', 'verifier_failed'),
+                  ('DNS observation policy authority or freshness mismatch\nsynthetic-private-material', 'verifier_failed')]
+        for message, category in cases:
+            with self.subTest(category=category, message=message), patch.object(
+                    observation.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                        ['/approved/verifier', '--export-policy'], 1, 'synthetic-private-material', message)):
+                with self.assertRaisesRegex(ValueError, ': ' + category + '$') as raised:
+                    observation.verified_policy({'signing_key': 'synthetic-private-material'}, '/approved/verifier')
+                self.assertNotIn('synthetic-private-material', str(raised.exception))
+
+    def test_verifier_output_and_timeout_fail_closed_without_private_details(self):
+        cases = [('not-json synthetic-private-material', 'output_encoding'),
+                 (json.dumps(['synthetic-private-material']), 'output_schema'),
+                 (json.dumps({'schema': 'synthetic-private-material'}), 'output_schema'),
+                 ('synthetic-private-material' * (256 << 10), 'output_size')]
+        for output, category in cases:
+            with self.subTest(category=category), patch.object(observation.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess(['/approved/verifier'], 0, output, 'synthetic-private-material')):
+                with self.assertRaisesRegex(ValueError, ': ' + category + '$') as raised:
+                    observation.verified_policy({}, '/approved/verifier')
+                self.assertNotIn('synthetic-private-material', str(raised.exception))
+        with patch.object(observation.subprocess, 'run', side_effect=subprocess.TimeoutExpired(
+                ['/approved/verifier'], 30, output='synthetic-private-material', stderr='synthetic-private-material')):
+            with self.assertRaisesRegex(ValueError, ': verifier_timeout$') as raised:
+                observation.verified_policy({}, '/approved/verifier')
+            self.assertNotIn('synthetic-private-material', str(raised.exception))
+
 
 if __name__ == '__main__':
     unittest.main()
