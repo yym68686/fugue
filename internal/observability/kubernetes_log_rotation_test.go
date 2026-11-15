@@ -273,6 +273,67 @@ func TestRotationMissingRetainedBoundaryIsReported(t *testing.T) {
 		t.Fatal("missing gap outcome")
 	}
 }
+
+func TestRotationGapRetryDoesNotCountTheSameUnreadBoundaryAgain(t *testing.T) {
+	c, target, rotated, _ := rotationFixture(t, 10, "B stdout F retained\n", "C stdout F after\n")
+	now := time.Now().UTC()
+	c.clock = func() time.Time { return now }
+	rotationPoll(t, c, target)
+	key := logTargetKey(target)
+	before := c.cursors[key].Time
+	// Leave the original record admitted, but reserve every ordinary slot so
+	// the missing-boundary replay cannot admit its first remaining record.
+	c.pipeline.ordinaryQueuedSlots.Store(int64(cap(c.pipeline.queue)))
+	rotated.Store(true)
+	for i := 0; i < 3; i++ {
+		rotationPoll(t, c, target)
+		cur := c.cursors[key]
+		row := c.pipeline.sourceObservations[key]
+		if !cur.Time.Equal(before) || !cur.RecoveringRotation || row.Outcome != "queue_rejected" || row.Lines != 0 {
+			t.Fatalf("retry moved the cursor or did not exercise admission rejection: cursor=%+v row=%+v", cur, row)
+		}
+		if got := c.pipeline.kubernetesLogCursorGaps.Load(); got != 1 || row.GapEvents != 1 {
+			t.Fatalf("same unread boundary counted again on retry %d: counter=%d source=%d", i, got, row.GapEvents)
+		}
+		now = cur.NextAttempt.Add(time.Second)
+	}
+	c.pipeline.ordinaryQueuedSlots.Store(1)
+	rotationPoll(t, c, target)
+	if got := rotationMessages(t, c.pipeline); !reflect.DeepEqual(got, []string{"before", "retained", "after"}) {
+		t.Fatal("retry skipped or duplicated retained records", got)
+	}
+	row := c.pipeline.sourceObservations[key]
+	if row.GapEvents != 1 || row.GapReason != "rotation_boundary_missing" || !row.GapLowerBound.Equal(before) || c.cursors[key].RecoveringRotation {
+		t.Fatal("recovery lost the known gap or remained pending", row)
+	}
+}
+
+func TestRotationGapDeduplicationDoesNotHideANewBoundaryOrWiderInterval(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	c := newKubernetesLogCollectorWithClient(p, nil)
+	lower := time.Now().UTC().Add(-time.Minute)
+	cur := kubernetesLogCursor{Time: lower}
+	for i, upper := range []time.Time{lower.Add(time.Second), lower.Add(2 * time.Second), lower.Add(time.Second)} {
+		row := logSourceObservation{Identity: "source", Outcome: "queue_rejected"}
+		c.observeRotationGap(&cur, &row, lower, upper, "source")
+		p.observeLogSource(row)
+		if got := p.kubernetesLogCursorGaps.Load(); got != 1 || !cur.Time.Equal(lower) {
+			t.Fatalf("retry %d advanced the cursor or repeated a gap: %d", i, got)
+		}
+	}
+	row := p.sourceObservations["source"]
+	if row.GapEvents != 1 || !row.GapUpperBound.Equal(lower.Add(2*time.Second)) {
+		t.Fatal("wider gap evidence was erased", row)
+	}
+	nextLower := lower.Add(3 * time.Second)
+	row = logSourceObservation{Identity: "source", Outcome: "rotation_gap"}
+	c.observeRotationGap(&cur, &row, nextLower, nextLower.Add(time.Second), "source")
+	p.observeLogSource(row)
+	if got := p.kubernetesLogCursorGaps.Load(); got != 2 || p.sourceObservations["source"].GapEvents != 2 {
+		t.Fatal("new boundary gap was hidden", got)
+	}
+}
+
 func TestRotationDirectoryIgnoresForeignPathsAndRestarts(t *testing.T) {
 	body := "<a href=\"0.log\">current</a><a href=\"0.log.20260101-010101.gz\">old</a>" +
 		"<a href=\"../0.log.20260101-020202\">escape</a><a href=\"https://example.test/0.log\">remote</a>" +

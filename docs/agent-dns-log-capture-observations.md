@@ -48,6 +48,13 @@ groups source-lifetime error totals by each source's **latest** error, not by th
 historical class of each individual failure. Detail truncation and source
 eviction remain explicit.
 
+One missing rotation boundary is counted once while its cursor remains unread,
+including queue, cycle-budget and transport retries. If retention widens that
+same unproven interval, its upper bound is updated without adding another gap
+event. Admission at or after the cursor changes the inclusive boundary; a
+subsequent missing boundary is a new event. This does not advance an unread
+cursor, erase historical loss, or claim that retained records were recovered.
+
 `last_error_read` is one fixed-size transport receipt for the failing log HTTP
 stream, preserved through recovery/backoff. Its phase distinguishes the Pod log,
 both retained inventories, opening the pinned current file, and retained-file

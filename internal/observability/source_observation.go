@@ -87,7 +87,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 		copy := *v.LastErrorRead
 		v.LastErrorRead = &copy
 	}
-	if v.GapEvents == 0 {
+	if v.GapReason == "" {
 		v.GapReason, v.GapLowerBound, v.GapUpperBound = prior.GapReason, prior.GapLowerBound, prior.GapUpperBound
 	}
 	v.GapEvents += prior.GapEvents

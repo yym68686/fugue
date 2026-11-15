@@ -147,6 +147,21 @@ func TestSourceRecoveryRetainsGapAndHTTPStatusWithoutCountingBackoffAsRead(t *te
 	}
 }
 
+func TestSameGapWideningPreservesCountAndUpdatedCoverageBounds(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	now := time.Now().UTC()
+	lower, firstUpper, secondUpper := now.Add(-time.Hour), now.Add(-time.Minute), now
+	p.observeLogSource(logSourceObservation{Identity: "source", ObservedAt: now, Outcome: "queue_rejected",
+		GapEvents: 1, GapReason: "rotation_boundary_missing", GapLowerBound: lower, GapUpperBound: firstUpper})
+	p.observeLogSource(logSourceObservation{Identity: "source", ObservedAt: now, Outcome: "queue_rejected",
+		GapReason: "rotation_boundary_missing", GapLowerBound: lower, GapUpperBound: secondUpper})
+	p.observeLogSource(logSourceObservation{Identity: "source", ObservedAt: now, Outcome: "node_backoff"})
+	row := p.sourceObservations["source"]
+	if row.GapEvents != 1 || row.GapReason != "rotation_boundary_missing" || !row.GapLowerBound.Equal(lower) || !row.GapUpperBound.Equal(secondUpper) {
+		t.Fatal("same-gap extension lost coverage or fabricated another event", row)
+	}
+}
+
 func TestLogReadErrorMetadataIsTypedAndDoesNotDependOnBody(t *testing.T) {
 	for _, tc := range []struct {
 		err    error

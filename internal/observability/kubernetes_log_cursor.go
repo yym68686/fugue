@@ -18,18 +18,20 @@ import (
 )
 
 type kubernetesLogCursor struct {
-	Time               time.Time
-	Boundary           map[[32]byte]int
-	Visited            time.Time
-	FirstObserved      time.Time
-	LastRead           time.Time
-	DrainedThrough     time.Time
-	Complete           bool
-	NextAttempt        time.Time
-	Failures           uint32
-	SourceUnavailable  bool
-	PendingAt          time.Time
-	RecoveringRotation bool
+	Time                  time.Time
+	Boundary              map[[32]byte]int
+	Visited               time.Time
+	FirstObserved         time.Time
+	LastRead              time.Time
+	DrainedThrough        time.Time
+	Complete              bool
+	NextAttempt           time.Time
+	Failures              uint32
+	SourceUnavailable     bool
+	PendingAt             time.Time
+	RecoveringRotation    bool
+	RotationGapBoundary   time.Time
+	RotationGapUpperBound time.Time
 }
 
 func logTargetFinishedAt(t kubernetesLogTarget) time.Time {
@@ -325,10 +327,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 				// remaining records, but never report this as complete recovery.
 				rotationGap = true
 				observation.Outcome = "rotation_gap"
-				c.pipeline.kubernetesLogCursorGaps.Add(1)
-				observation.GapEvents++
-				observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = "rotation_boundary_missing", original, ts
-				c.pipeline.recordError(fmt.Errorf("retained Kubernetes logs no longer contain cursor boundary source=%s", key))
+				c.observeRotationGap(&cur, &observation, original, ts, key)
 			}
 		}
 		hash := sha256.Sum256([]byte(msg))
@@ -359,6 +358,11 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			break
 		}
 		cur.PendingAt = time.Time{}
+		// Only an admission at or after the cursor changes its inclusive
+		// boundary. Older interleaved CRI records do not end that gap's retry.
+		if !ts.Before(cur.Time) {
+			cur.RotationGapBoundary, cur.RotationGapUpperBound = time.Time{}, time.Time{}
+		}
 		n++
 		observation.Lines = n
 		c.pipeline.kubernetesLogLines.Add(1)
@@ -408,10 +412,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		if rotationAttempted && !rotationGap && logBoundaryMissing(boundary, seen) {
 			rotationGap = true
 			observation.Outcome = "rotation_gap"
-			c.pipeline.kubernetesLogCursorGaps.Add(1)
-			observation.GapEvents++
-			observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = "rotation_boundary_missing", original, now
-			c.pipeline.recordError(fmt.Errorf("retained Kubernetes logs no longer contain cursor boundary source=%s", key))
+			c.observeRotationGap(&cur, &observation, original, now, key)
 		}
 		cur.RecoveringRotation = false
 		if rotationAttempted && !rotationGap {
@@ -433,6 +434,20 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	c.cursors[key] = cur
 	c.cursorsMu.Unlock()
 	return
+}
+
+// Preserve one missing-boundary event across queue/budget/transport retries.
+// The unread cursor never advances here. A widening unproven interval updates
+// its bounds without fabricating another loss event for the same boundary.
+func (c *kubernetesLogCollector) observeRotationGap(cur *kubernetesLogCursor, observation *logSourceObservation, lower, upper time.Time, key string) {
+	if !cur.RotationGapBoundary.Equal(lower) {
+		cur.RotationGapBoundary, cur.RotationGapUpperBound = lower, upper
+		c.pipeline.kubernetesLogCursorGaps.Add(1)
+		observation.GapEvents++
+		c.pipeline.recordError(fmt.Errorf("retained Kubernetes logs no longer contain cursor boundary source=%s", key))
+	}
+	cur.RotationGapUpperBound = maxLogTime(cur.RotationGapUpperBound, upper)
+	observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = "rotation_boundary_missing", lower, cur.RotationGapUpperBound
 }
 
 func logBoundaryMissing(boundary, seen map[[32]byte]int) bool {
