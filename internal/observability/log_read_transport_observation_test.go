@@ -43,7 +43,7 @@ func TestLogReadTransportMilestonesPreserveStreamAndExistingTrace(t *testing.T) 
 	}
 	body.Close()
 	fact := timing.snapshot()
-	if !seen || fact.Attempts != 1 || !fact.ConnectionReady || !fact.RequestWritten || !fact.FirstResponseByte || !fact.HeadersReturned || fact.BodyBytes != 12 || fact.BodyReadError {
+	if !seen || fact.Attempts != 1 || !fact.ConnectionReady || !fact.RequestWritten || !fact.FirstResponseByte || !fact.StreamOpened || fact.BodyBytes != 12 || fact.BodyReadError {
 		t.Fatalf("missing HTTP milestones: %+v", fact)
 	}
 	encoded, _ := json.Marshal(fact)
@@ -109,7 +109,7 @@ func TestLogReadTransportConcurrentCallbacksAndCancellation(t *testing.T) {
 		return nil, ctx.Err()
 	})
 	fact := timing.snapshot()
-	if !errors.Is(err, context.Canceled) || fact.Phase != "other" || fact.Attempts != 400 || fact.HeadersReturned {
+	if !errors.Is(err, context.Canceled) || fact.Phase != "other" || fact.Attempts != 400 || fact.StreamOpened {
 		t.Fatalf("unbounded or incorrect trace: %+v %v", fact, err)
 	}
 }
@@ -131,7 +131,7 @@ func TestLogReadTransportRecoveryDoesNotKeepEarlierOpenFailure(t *testing.T) {
 	}
 	io.ReadAll(body)
 	body.Close()
-	if fact := timing.snapshot(); !fact.HeadersReturned || fact.BodyBytes != 9 || fact.BodyReadError {
+	if fact := timing.snapshot(); !fact.StreamOpened || fact.BodyBytes != 9 || fact.BodyReadError {
 		t.Fatalf("retained an already recovered failure: %+v", fact)
 	}
 }

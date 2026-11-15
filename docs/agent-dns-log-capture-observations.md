@@ -12,6 +12,16 @@ statuses, and mismatched route-proof **field names**. DNS runtime-fact failures
 retain only allowlisted rejection codes. They do not retain audiences, origins,
 paths, response bodies, credentials or raw error text.
 
+`snapshot_validation_rejected` records the first failed local DNS validation
+check: snapshot identity/digests/assignment, observation/checkpoint bounds,
+duplicate or unknown probes, and physical proof identity/deadline/publication.
+These fixed reason names describe the rejected check, not why the source became
+inconsistent. Negative or expired evidence that remains structurally valid does
+not invent a validation rejection or become ready.
+`source_rejected` separates consumer/expected-set reads, identity ambiguity,
+backend disambiguation and current assignment failures. Stale heartbeats get
+their own fixed event; their rejection and freshness rules are unchanged.
+
 `started`, `completed`, `in_flight`, `evicted` and `events_dropped` describe the
 coverage limits. The ring is process-local and non-durable. Polling it cannot
 reconstruct already-evicted events or failures before that process started. A
@@ -30,10 +40,12 @@ eviction remain explicit.
 `last_error_read` is one fixed-size transport receipt for the failing log HTTP
 stream, preserved through recovery/backoff. Its phase distinguishes the Pod log,
 both retained inventories, opening the pinned current file, and retained-file
-reads. It records only observed HTTP milestones, header-wait time and body byte
+reads. It records only observed HTTP milestones, stream-open time and body byte
 counts, including a body failure from an older stream held across inventory
 reads. Milestones are not a root-cause verdict: a false value means not observed,
-and header time includes client admission, retry and server wait. No trace callback
+and open time includes client admission, retry, server wait and error-response
+processing. `stream_opened` means that client-go returned a successful body,
+not that an HTTP error response had no headers. No trace callback
 arguments, addresses, URLs, headers, bodies or raw errors are retained. A new
 failure without transport evidence cannot borrow a previous failure's receipt.
 

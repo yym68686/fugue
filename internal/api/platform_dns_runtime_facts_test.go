@@ -149,6 +149,14 @@ func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.
 			if _, err := s.readPlatformDNSRuntimeFacts(context.Background(), f.claims.NodeID); err == nil {
 				t.Fatal("no selected backend reused retained receipt")
 			}
+			rows := captureReceipts(t, s)
+			foundSourceRejection := false
+			for _, event := range rows[len(rows)-1].Events {
+				foundSourceRejection = foundSourceRejection || event.Stage == "source_rejected" && event.Rejection == "no_current_source"
+			}
+			if !foundSourceRejection {
+				t.Fatal("source selection failure lost its bounded reason")
+			}
 			projected, err = s.dnsInventoryServingFacts(context.Background(), inventory)
 			if err != nil || len(projected) != 1 || projected[0].Healthy || projected[0].ServingGeneration != "" || projected[0].ServingObservation == nil || projected[0].ServingObservation.State != "unknown" {
 				t.Fatal("unavailable scoped consumer fell back to legacy health", projected, err)
@@ -379,6 +387,16 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 			if r.Code != want || strings.Contains(r.Body.String(), "private-node-error") {
 				t.Fatal(r.Code, r.Body.String())
 			}
+			if reason := (map[string]string{"bad schema": "schema", "bad plan": "plan_digest", "foreign assignment": "assignment"})[scenario]; reason != "" {
+				rows := captureReceipts(t, s)
+				found := false
+				for _, event := range rows[len(rows)-1].Events {
+					found = found || event.Stage == "snapshot_validation_rejected" && event.Rejection == reason
+				}
+				if !found {
+					t.Fatal("HTTP failure lost its bounded validation reason", reason)
+				}
+			}
 			if want == 200 {
 				var response platformDNSRuntimeFactsResponse
 				mustDecodeJSON(t, r, &response)
@@ -428,7 +446,7 @@ func TestDNSRuntimeSnapshotValidatesProofsWithoutRenewingThem(t *testing.T) {
 	proof := routeprobe.Proof{Digest: p.RouteDigest, EdgeID: p.EdgeID, GroupID: p.EdgeGroupID, Version: "v1", CheckedAt: now.Add(-time.Second), ValidUntil: now.Add(time.Minute), TrafficRelease: &model.TrafficReleaseBinding{ReleaseSetID: "parent", ReleaseSetDigest: "parent-digest", RouteArtifactID: "route", ReleaseID: "release", ReleaseChannel: "full", FencingToken: 3, ScopeKey: "global", IntentDigest: "intent", PolicyDigest: "policy", InputSnapshotDigest: "input"}}
 	source.trafficBinding = proof.TrafficRelease
 	base := dnsfacts.Snapshot{Schema: dnsfacts.Schema, NodeID: "node", EdgeGroupID: "group", Assignment: assignment, ParentDigest: "parent-digest", RouteArtifactID: "route", PlanDigest: digest, ObservedAt: now.Add(-time.Second), EvaluatedAt: now, CheckpointValidUntil: now.Add(time.Hour), Ready: true, Facts: []dnsfacts.Probe{{ProbeID: p.ID, Ready: true, Proof: proof}}}
-	for _, scenario := range []string{"valid", "expired proof", "negative", "missing", "duplicate", "unknown probe", "wrong digest", "wrong edge", "wrong group", "wrong state", "foreign release", "future", "renewed validity", "checkpoint extended", "dualstack absent"} {
+	for _, scenario := range []string{"valid", "expired proof", "negative", "missing", "duplicate", "unknown probe", "wrong digest", "wrong edge", "wrong group", "wrong state", "foreign release", "future", "renewed validity", "checkpoint extended", "dualstack absent", "schema", "node_identity", "group_identity", "parent_digest", "route_artifact", "plan_digest", "assignment", "observed_at_missing", "evaluated_before_observation", "evaluated_in_future", "checkpoint_deadline_missing", "fact_count_budget", "readiness_contract_missing", "proof_version_missing", "proof_observed_at_missing", "proof_publication_missing"} {
 		t.Run(scenario, func(t *testing.T) {
 			raw, _ := json.Marshal(base)
 			var snapshot dnsfacts.Snapshot
@@ -436,6 +454,54 @@ func TestDNSRuntimeSnapshotValidatesProofsWithoutRenewingThem(t *testing.T) {
 			input := source
 			wantReady, wantErr := false, false
 			switch scenario {
+			case "schema":
+				snapshot.Schema = "private-invalid-schema"
+				wantErr = true
+			case "node_identity":
+				snapshot.NodeID = "private-other-node"
+				wantErr = true
+			case "group_identity":
+				snapshot.EdgeGroupID = "private-other-group"
+				wantErr = true
+			case "parent_digest":
+				snapshot.ParentDigest = "private-other-parent"
+				wantErr = true
+			case "route_artifact":
+				snapshot.RouteArtifactID = "private-other-route"
+				wantErr = true
+			case "plan_digest":
+				snapshot.PlanDigest = "private-other-plan"
+				wantErr = true
+			case "assignment":
+				snapshot.Assignment.FencingToken++
+				wantErr = true
+			case "observed_at_missing":
+				snapshot.ObservedAt = time.Time{}
+				wantErr = true
+			case "evaluated_before_observation":
+				snapshot.EvaluatedAt = snapshot.ObservedAt.Add(-time.Second)
+				wantErr = true
+			case "evaluated_in_future":
+				snapshot.EvaluatedAt = now.Add(time.Second)
+				wantErr = true
+			case "checkpoint_deadline_missing":
+				snapshot.CheckpointValidUntil = time.Time{}
+				wantErr = true
+			case "fact_count_budget":
+				snapshot.Facts = make([]dnsfacts.Probe, 4097)
+				wantErr = true
+			case "readiness_contract_missing":
+				input.payload.ReadinessPlan = nil
+				wantErr = true
+			case "proof_version_missing":
+				snapshot.Facts[0].Proof.Version = ""
+				wantErr = true
+			case "proof_observed_at_missing":
+				snapshot.Facts[0].Proof.CheckedAt = time.Time{}
+				wantErr = true
+			case "proof_publication_missing":
+				snapshot.Facts[0].Proof.TrafficRelease = nil
+				wantErr = true
 			case "valid":
 				wantReady = true
 			case "expired proof":
@@ -483,12 +549,25 @@ func TestDNSRuntimeSnapshotValidatesProofsWithoutRenewingThem(t *testing.T) {
 			}
 			before, _ := json.Marshal(snapshot)
 			ids, ready, err := evaluateDNSRuntimeSnapshot(snapshot, input, now)
+			var reasons []string
+			observedIDs, observedReady, observedErr := evaluateDNSRuntimeSnapshotWithRejection(snapshot, input, now, func(reason string) { reasons = append(reasons, reason) })
+			after, _ := json.Marshal(snapshot)
+			if !reflect.DeepEqual(ids, observedIDs) || ready != observedReady || err != observedErr || !reflect.DeepEqual(before, after) {
+				t.Fatal("rejection diagnostics changed validation or evidence")
+			}
+			if wantErr {
+				wantReason := map[string]string{"duplicate": "duplicate_probe", "unknown probe": "probe_not_in_plan", "wrong digest": "proof_requirement", "wrong edge": "proof_requirement", "wrong group": "proof_requirement", "wrong state": "proof_state", "foreign release": "proof_publication_binding", "future": "proof_observed_after_evaluation", "renewed validity": "proof_deadline_exceeds_policy", "checkpoint extended": "checkpoint_deadline_exceeds_policy"}[scenario]
+				if wantReason == "" {
+					wantReason = scenario
+				}
+				if !reflect.DeepEqual(reasons, []string{wantReason}) {
+					t.Fatalf("imprecise or unsafe rejection: got %v, want %s", reasons, wantReason)
+				}
+			} else if len(reasons) != 0 {
+				t.Fatal("valid, negative or expired evidence invented a validation rejection", reasons)
+			}
 			if (err != nil) != wantErr || ready != wantReady {
 				t.Fatal(ids, ready, err)
-			}
-			after, _ := json.Marshal(snapshot)
-			if string(before) != string(after) {
-				t.Fatal("evaluation rewrote original proof")
 			}
 		})
 	}

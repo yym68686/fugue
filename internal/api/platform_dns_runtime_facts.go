@@ -79,10 +79,13 @@ func (s *Server) handleGetPlatformDNSRuntimeFacts(w http.ResponseWriter, r *http
 }
 
 func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFactSource, error) {
-	fail := func() (dnsFactSource, error) { return dnsFactSource{}, errDNSRuntimeFacts }
+	fail := func(reason string) (dnsFactSource, error) {
+		observeCapture(ctx, captureEvent{Stage: "source_rejected", Node: node, Rejection: reason})
+		return dnsFactSource{}, errDNSRuntimeFacts
+	}
 	consumers, err := s.store.ListPlatformAuthorityConsumers(model.PlatformArtifactKindDNSAnswerBundle, node)
 	if err != nil {
-		return fail()
+		return fail("consumer_inventory_read")
 	}
 	type candidate struct {
 		fact   model.PlatformConsumerInstance
@@ -97,31 +100,32 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 		}
 		set, err := s.store.GetPlatformExpectedConsumerSet(c.ExpectedConsumerSetID)
 		if err != nil {
-			return fail()
+			return fail("expected_set_read")
 		}
 		var member *model.PlatformExpectedConsumer
 		for _, expected := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
 			if expected.ConsumerID == c.ConsumerID {
 				if member != nil {
-					return fail()
+					return fail("ambiguous_expected_member")
 				}
 				copy := expected
 				member = &copy
 			}
 		}
 		if member == nil || member.HeartbeatFreshnessSeconds <= 0 {
-			return fail()
+			return fail("expected_member_missing")
 		}
 		claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: c.CredentialID, Component: c.Component, NodeID: node, ScopeKey: c.ScopeKey, ArtifactKinds: c.SupportedKinds, AuthorityID: member.AuthorityID}
 		if !platformcontrol.ExpectedConsumerIdentityMatches(*member, claims) {
-			return fail()
+			return fail("consumer_identity")
 		}
 		if c.LastHeartbeatAt.IsZero() || !c.LastHeartbeatAt.Add(time.Duration(member.HeartbeatFreshnessSeconds)*time.Second).After(time.Now().UTC()) {
+			observeCapture(ctx, captureEvent{Stage: "source_heartbeat_rejected", Node: node, Rejection: "consumer_heartbeat_stale"})
 			continue
 		}
 		identityKey := c.ScopeKey + "/" + c.ConsumerID
 		if seen[identityKey] {
-			return fail()
+			return fail("duplicate_consumer_receipt")
 		}
 		seen[identityKey] = true
 		candidates = append(candidates, candidate{fact: *c, claims: claims})
@@ -136,17 +140,21 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 				continue
 			}
 			if status != http.StatusOK {
-				return fail()
+				observeCapture(ctx, captureEvent{Stage: "source_backend_rejected", Node: node, HTTPStatus: status})
+				return fail("backend_disambiguation")
 			}
 		}
 		source, err := s.dnsFactSourceForConsumer(node, candidate.fact, candidate.claims)
-		if err != nil || selected != nil {
-			return fail()
+		if err != nil {
+			return fail("consumer_assignment_unavailable")
+		}
+		if selected != nil {
+			return fail("ambiguous_selected_source")
 		}
 		selected = &source
 	}
 	if selected == nil {
-		return fail()
+		return fail("no_current_source")
 	}
 	return *selected, nil
 }
@@ -330,7 +338,9 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	}
 	stage = "snapshot_validation"
 	response.EvaluatedAt = time.Now().UTC()
-	response.ReadyProbeIDs, response.Ready, err = evaluateDNSRuntimeSnapshot(response.Snapshot, current, response.EvaluatedAt)
+	response.ReadyProbeIDs, response.Ready, err = evaluateDNSRuntimeSnapshotWithRejection(response.Snapshot, current, response.EvaluatedAt, func(reason string) {
+		observeCapture(ctx, captureEvent{Stage: "snapshot_validation_rejected", Node: node, Rejection: reason})
+	})
 	response.Ready = response.Ready && transportReady
 	response.lkgGeneration = current.consumer.LKGGeneration
 	response.heartbeatValidUntil = current.heartbeatValidUntil
@@ -423,14 +433,47 @@ func readDNSPodObservation(ctx context.Context, client *clusterNodeClient, path 
 }
 
 func evaluateDNSRuntimeSnapshot(snapshot dnsfacts.Snapshot, source dnsFactSource, now time.Time) ([]string, bool, error) {
-	fail := func() ([]string, bool, error) { return nil, false, errDNSRuntimeFacts }
+	return evaluateDNSRuntimeSnapshotWithRejection(snapshot, source, now, nil)
+}
+
+// Rejection names are fixed local metadata. They neither replace validation nor
+// expose the snapshot, proof, hostnames, credentials or raw error text.
+func evaluateDNSRuntimeSnapshotWithRejection(snapshot dnsfacts.Snapshot, source dnsFactSource, now time.Time, reject func(string)) ([]string, bool, error) {
+	fail := func(reason string) ([]string, bool, error) {
+		if reject != nil {
+			reject(reason)
+		}
+		return nil, false, errDNSRuntimeFacts
+	}
 	plan, policy := source.payload.ReadinessPlan, source.payload.Policy.DNSReadiness
 	if plan == nil || policy == nil {
-		return fail()
+		return fail("readiness_contract_missing")
 	}
 	digest, err := platformconfig.Digest(plan)
-	if err != nil || snapshot.Schema != dnsfacts.Schema || snapshot.NodeID != source.claims.NodeID || snapshot.EdgeGroupID != source.group || snapshot.ParentDigest != source.parent.ContentHash || snapshot.RouteArtifactID != source.routeID || snapshot.PlanDigest != digest || !reflect.DeepEqual(snapshot.Assignment, source.lookup.Assignment) || snapshot.ObservedAt.IsZero() || snapshot.EvaluatedAt.Before(snapshot.ObservedAt) || snapshot.EvaluatedAt.After(now) || snapshot.CheckpointValidUntil.IsZero() || snapshot.CheckpointValidUntil.After(snapshot.EvaluatedAt.Add(time.Duration(source.payload.Policy.MaxStaleSeconds)*time.Second)) || len(snapshot.Facts) > 4096 {
-		return fail()
+	if err != nil {
+		return fail("plan_digest_unavailable")
+	}
+	for _, check := range []struct {
+		rejected bool
+		reason   string
+	}{
+		{snapshot.Schema != dnsfacts.Schema, "schema"},
+		{snapshot.NodeID != source.claims.NodeID, "node_identity"},
+		{snapshot.EdgeGroupID != source.group, "group_identity"},
+		{snapshot.ParentDigest != source.parent.ContentHash, "parent_digest"},
+		{snapshot.RouteArtifactID != source.routeID, "route_artifact"},
+		{snapshot.PlanDigest != digest, "plan_digest"},
+		{!reflect.DeepEqual(snapshot.Assignment, source.lookup.Assignment), "assignment"},
+		{snapshot.ObservedAt.IsZero(), "observed_at_missing"},
+		{snapshot.EvaluatedAt.Before(snapshot.ObservedAt), "evaluated_before_observation"},
+		{snapshot.EvaluatedAt.After(now), "evaluated_in_future"},
+		{snapshot.CheckpointValidUntil.IsZero(), "checkpoint_deadline_missing"},
+		{snapshot.CheckpointValidUntil.After(snapshot.EvaluatedAt.Add(time.Duration(source.payload.Policy.MaxStaleSeconds) * time.Second)), "checkpoint_deadline_exceeds_policy"},
+		{len(snapshot.Facts) > 4096, "fact_count_budget"},
+	} {
+		if check.rejected {
+			return fail(check.reason)
+		}
 	}
 	requirements := map[string]platformconfig.DNSReadinessProbe{}
 	for _, p := range plan.Probes {
@@ -440,8 +483,11 @@ func evaluateDNSRuntimeSnapshot(snapshot dnsfacts.Snapshot, source dnsFactSource
 	factsByID := map[string]dnsfacts.Probe{}
 	for _, fact := range snapshot.Facts {
 		req, found := requirements[fact.ProbeID]
-		if !found || seen[fact.ProbeID] {
-			return fail()
+		if !found {
+			return fail("probe_not_in_plan")
+		}
+		if seen[fact.ProbeID] {
+			return fail("duplicate_probe")
 		}
 		seen[fact.ProbeID] = true
 		factsByID[fact.ProbeID] = fact
@@ -450,7 +496,7 @@ func evaluateDNSRuntimeSnapshot(snapshot dnsfacts.Snapshot, source dnsFactSource
 		}
 		p, b := fact.Proof, fact.Proof.TrafficRelease
 		if until := snapshot.RouteSources.ProofDeadline(b); !until.IsZero() && p.ValidUntil.After(until) {
-			return fail()
+			return fail("proof_exceeds_source_deadline")
 		}
 		bindingMatches := source.trafficBinding != nil && reflect.DeepEqual(b, source.trafficBinding)
 		if source.payload.Policy.PublicationRole == platformconfig.PublicationRoleCellDNS {
@@ -460,8 +506,22 @@ func evaluateDNSRuntimeSnapshot(snapshot dnsfacts.Snapshot, source dnsFactSource
 				bindingMatches = bindingMatches || expected != nil && reflect.DeepEqual(b, expected)
 			}
 		}
-		if !platformconfig.DNSReadinessProofMatches(req, p.EdgeID, p.GroupID, p.Digest) || p.State != req.State || p.Version == "" || p.CheckedAt.IsZero() || p.CheckedAt.After(snapshot.EvaluatedAt) || p.ValidUntil.After(p.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(req, policy))*time.Second)) || b == nil || !bindingMatches {
-			return fail()
+		for _, check := range []struct {
+			rejected bool
+			reason   string
+		}{
+			{!platformconfig.DNSReadinessProofMatches(req, p.EdgeID, p.GroupID, p.Digest), "proof_requirement"},
+			{p.State != req.State, "proof_state"},
+			{p.Version == "", "proof_version_missing"},
+			{p.CheckedAt.IsZero(), "proof_observed_at_missing"},
+			{p.CheckedAt.After(snapshot.EvaluatedAt), "proof_observed_after_evaluation"},
+			{p.ValidUntil.After(p.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(req, policy)) * time.Second)), "proof_deadline_exceeds_policy"},
+			{b == nil, "proof_publication_missing"},
+			{!bindingMatches, "proof_publication_binding"},
+		} {
+			if check.rejected {
+				return fail(check.reason)
+			}
 		}
 		valid[fact.ProbeID] = p.ValidUntil.After(now) && snapshot.CheckpointValidUntil.After(now)
 	}

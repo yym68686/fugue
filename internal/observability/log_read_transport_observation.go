@@ -18,8 +18,8 @@ type logReadTransportObservation struct {
 	ConnectionReused  bool   `json:"connection_reused"`
 	RequestWritten    bool   `json:"request_written"`
 	FirstResponseByte bool   `json:"first_response_byte"`
-	HeadersReturned   bool   `json:"headers_returned"`
-	HeaderMillis      int64  `json:"header_ms"`
+	StreamOpened      bool   `json:"stream_opened"`
+	OpenMillis        int64  `json:"open_ms"`
 	BodyBytes         int64  `json:"body_bytes"`
 	BodyReadError     bool   `json:"body_read_error"`
 }
@@ -104,8 +104,8 @@ func observedLogStream(ctx context.Context, phase string, open func(context.Cont
 	started := time.Now()
 	body, err := open(httptrace.WithClientTrace(ctx, trace))
 	a.mu.Lock()
-	a.fact.HeaderMillis = time.Since(started).Milliseconds()
-	a.fact.HeadersReturned = err == nil && body != nil
+	a.fact.OpenMillis = time.Since(started).Milliseconds()
+	a.fact.StreamOpened = err == nil && body != nil
 	a.mu.Unlock()
 	if err != nil {
 		a.failure()
