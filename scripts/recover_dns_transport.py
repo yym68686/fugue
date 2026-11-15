@@ -61,7 +61,8 @@ def validate_publication(snapshot, publication):
         raise ValueError('DNS recovery candidate does not match current verified full authority')
 
 
-def verify_candidate(candidate, config):
+def candidate_request(candidate, config):
+    """Read verification input without printing or persisting signing material."""
     pod, snapshot = candidate['pod'], candidate['snapshot']
     containers = [container for container in pod['spec']['containers'] if container.get('image') == config['recovery']['candidate_image']]
     if len(containers) != 1 or pod['metadata']['uid'] != config['recovery']['candidate_pod_uid']:
@@ -101,6 +102,11 @@ def verify_candidate(candidate, config):
     request['checkpoint'] = transport.read_json('exec', '-n', config['namespace'], pod['metadata']['name'], '-c', container['name'], '--', 'cat', cache + '.platform-serving.json')
     candidate['snapshot'] = transport.read_json('get', '--raw', candidate['snapshot_path'])
     request['snapshot'] = candidate['snapshot']
+    return request
+
+
+def verify_candidate(candidate, config):
+    request = candidate_request(candidate, config)
     verifier = os.environ.get('FUGUE_DNS_OBSERVATION_VERIFIER', '')
     if not verifier or not os.path.isabs(verifier):
         raise ValueError('DNS recovery observation verifier unavailable')

@@ -30,7 +30,7 @@ func TestOperationObservationsAreBoundedAndConcurrent(t *testing.T) {
 			Count int    `json:"count"`
 		} `json:"stages"`
 	}
-	if json.Unmarshal(raw, &result) != nil || len(result.Stages) != 26 {
+	if json.Unmarshal(raw, &result) != nil || len(result.Stages) != 35 {
 		t.Fatal("unexpected stage inventory")
 	}
 	for _, stage := range result.Stages {

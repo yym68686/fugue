@@ -1,5 +1,5 @@
 {
-  "schema": "fugue.dns-public-observation/v1",
+  "schema": "fugue.dns-public-observation/v2",
   "servers": [
     "15.204.94.71",
     "51.38.126.103"
@@ -14,20 +14,13 @@
       "hostname": "api.fugue.pro",
       "type": "A",
       "minimum_answers": 1,
-      "allowed_answers": [
-        "15.204.94.71",
-        "51.38.126.103",
-        "95.169.10.156"
-      ]
+      "answer_source": "verified_serving_policy"
     },
     {
       "hostname": "i00.pro",
       "type": "A",
       "minimum_answers": 1,
-      "allowed_answers": [
-        "15.204.94.71",
-        "95.169.10.156"
-      ]
+      "answer_source": "verified_serving_policy"
     },
     {
       "hostname": "ssh.fugue.pro",

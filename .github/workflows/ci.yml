@@ -3007,9 +3007,38 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-  dns_public_observation:
+  dns_observation_policy:
     needs: [dns_transport, dns_port_retirement]
     if: ${{ always() && (github.event_name == 'schedule' && github.event.schedule == '23 18 * * *' || github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', clean: false}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version-file: go.mod, cache: false}
+      - name: Capture authenticated membership from the actual public DNS backends
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_capture_dns_observation_policy scripts.test_recover_dns_transport
+          go test ./internal/dnsserver -run 'TestObservationPolicy' -count=1
+          go build -trimpath -o "$RUNNER_TEMP/fugue-dns-observation-verify" ./cmd/fugue-dns-observation-verify
+          python3 -m scripts.capture_dns_observation_policy deploy/environments/production/dns-observation/public.json deploy/environments/production/dns-transport/transport.json --verifier "$RUNNER_TEMP/fugue-dns-observation-verify" --output "$RUNNER_TEMP/dns-observation-expectations.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-dns-observation-expectations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-observation-expectations.json
+          if-no-files-found: error
+          retention-days: 90
+
+  dns_public_observation:
+    needs: [dns_observation_policy]
+    if: ${{ always() && (github.event_name == 'schedule' && github.event.schedule == '23 18 * * *' || github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.dns_observation_policy.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {contents: read}
@@ -3018,11 +3047,15 @@ jobs:
         with: {ref: '${{ github.sha }}'}
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with: {go-version-file: go.mod}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: fugue-dns-observation-expectations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-observation-input
       - name: Observe authoritative UDP and TCP outside the cluster
         run: |
           set -euo pipefail
           go test ./cmd/fugue-dns-observe
-          go run ./cmd/fugue-dns-observe deploy/environments/production/dns-observation/public.json > "$RUNNER_TEMP/dns-public-observation.json"
+          go run ./cmd/fugue-dns-observe deploy/environments/production/dns-observation/public.json "$RUNNER_TEMP/dns-observation-input/dns-observation-expectations.json" > "$RUNNER_TEMP/dns-public-observation.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

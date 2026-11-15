@@ -100,16 +100,24 @@ func (s *Server) handleAgentEdgeCandidates(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Cache-Control", "private, no-store")
 	grant, policy, _, err := s.captureAgentEdgeGrant(r.Context(), p.ActorID, hint)
 	if err != nil {
+		s.operationObservations().Observe("agent-response-capture-failed", 0)
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.operationObservations().Observe("agent-response-context-deadline", 0)
+		} else if errors.Is(err, context.Canceled) {
+			s.operationObservations().Observe("agent-response-context-canceled", 0)
+		}
 		httpx.WriteError(w, 503, errAgentEdgeUnavailable.Error())
 		return
 	}
 	ring, err := agentedge.LoadPrivateKeyring(s.agentEdgeSigningKeyFile)
 	if err != nil {
+		s.operationObservations().Observe("agent-response-keyring-unavailable", 0)
 		httpx.WriteError(w, 503, errAgentEdgeUnavailable.Error())
 		return
 	}
 	private, key, err := ring.SigningKey(policy.SigningKeyID, time.Now())
 	if err != nil {
+		s.operationObservations().Observe("agent-response-signing-key-invalid", 0)
 		httpx.WriteError(w, 503, errAgentEdgeUnavailable.Error())
 		return
 	}
@@ -117,19 +125,23 @@ func (s *Server) handleAgentEdgeCandidates(w http.ResponseWriter, r *http.Reques
 		grant.ValidUntil = key.NotAfter
 	}
 	if grant.ValidUntil.Sub(time.Now()) < policy.MinimumLease() {
+		s.operationObservations().Observe("agent-response-lease-short", 0)
 		httpx.WriteError(w, 503, errAgentEdgeUnavailable.Error())
 		return
 	}
 	current, err := agentedge.LoadPrivateKeyring(s.agentEdgeSigningKeyFile)
 	if err != nil || !reflect.DeepEqual(current, ring) || !s.agentGrantAuthorityUnchanged(grant) {
+		s.operationObservations().Observe("agent-response-authority-recheck-failed", 0)
 		httpx.WriteError(w, 503, errAgentEdgeUnavailable.Error())
 		return
 	}
 	signed, err := agentedge.Sign(grant, policy.SigningKeyID, private)
 	if err != nil {
+		s.operationObservations().Observe("agent-response-sign-failed", 0)
 		httpx.WriteError(w, 503, errAgentEdgeUnavailable.Error())
 		return
 	}
+	s.operationObservations().Observe("agent-response-ok", 0)
 	httpx.WriteJSON(w, 200, signed)
 }
 

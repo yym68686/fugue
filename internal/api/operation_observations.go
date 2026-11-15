@@ -19,6 +19,9 @@ func (s *Server) operationObservations() *runtimeobservation.Operations {
 			"agent-capacity-node-unavailable", "agent-capacity-summary-unavailable", "agent-capacity-time-invalid",
 			"agent-capacity-expired", "agent-capacity-pressure", "agent-capacity-node-changed",
 			"agent-heartbeat-unavailable", "agent-route-proof-unavailable", "agent-route-binding-mismatch", "agent-observation-lease-short",
+			"agent-response-ok", "agent-response-capture-failed", "agent-response-keyring-unavailable",
+			"agent-response-signing-key-invalid", "agent-response-lease-short", "agent-response-authority-recheck-failed", "agent-response-sign-failed",
+			"agent-response-context-deadline", "agent-response-context-canceled",
 		)
 		if err != nil {
 			panic(err) // Fixed source-defined names are a programmer invariant.
