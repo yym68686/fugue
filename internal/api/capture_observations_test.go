@@ -14,6 +14,7 @@ import (
 
 	"fugue/internal/agentedge"
 	"fugue/internal/dnsfacts"
+	"fugue/internal/model"
 	"fugue/internal/routeprobe"
 )
 
@@ -37,8 +38,11 @@ func TestCaptureReceiptsBoundedDetachedAndConcurrent(t *testing.T) {
 				ctx, trace := s.beginCaptureTrace(context.Background(), "synthetic")
 				for range captureEventLimit + 2 {
 					capacity := &captureCapacity{NodeUID: strings.Repeat("x", 129), CPUNanoCores: 123}
-					observeCapture(ctx, captureEvent{Stage: "synthetic", Node: strings.Repeat("n", 254), Capacity: capacity})
+					publication := &capturePublicationPair{Expected: capturePublicationReference("expected-set", "expected-route", "expected-release", "full", 9),
+						Observed: &capturePublication{ReleaseHash: captureIdentityHash("observed-release"), Channel: "gray", FencingToken: 8}}
+					observeCapture(ctx, captureEvent{Stage: "synthetic", Node: strings.Repeat("n", 254), Capacity: capacity, Publication: publication})
 					capacity.CPUNanoCores = 999
+					publication.Expected.FencingToken, publication.Observed.FencingToken = 999, 999
 				}
 				s.finishCaptureTrace(trace, "unavailable", errors.New(fmt.Sprintf("private-secret-%d-%d", worker, iteration)), 0, 1)
 				_, _ = s.OperationSnapshot(context.Background())
@@ -55,6 +59,9 @@ func TestCaptureReceiptsBoundedDetachedAndConcurrent(t *testing.T) {
 		if len(row.Events) != captureEventLimit || row.Dropped != 2 || row.Events[0].Capacity.CPUNanoCores != 123 || row.ErrorClass != "unavailable" {
 			t.Fatal("event copy or budget lost", row)
 		}
+		if row.Events[0].Publication.Expected.FencingToken != 9 || row.Events[0].Publication.Observed.FencingToken != 8 {
+			t.Fatal("publication pair shares mutable input")
+		}
 	}
 	raw, _ := json.Marshal(snapshot)
 	if len(raw) > 1<<20 || strings.Contains(string(raw), "private-secret") || strings.Contains(string(raw), strings.Repeat("x", 129)) {
@@ -65,6 +72,105 @@ func TestCaptureReceiptsBoundedDetachedAndConcurrent(t *testing.T) {
 	s.finishCaptureTrace(trace, "ok", nil, 1, 1)
 	if rows[0].Sequence != oldSequence {
 		t.Fatal("snapshot shares eviction backing array")
+	}
+}
+
+func TestAgentRejectedProofRetainsSameReadPublicationPairWithoutChangingDecision(t *testing.T) {
+	for _, scenario := range []string{"ok", "different_publication", "transport_error_with_partial_proof", "missing_binding"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := setupAgentAuthorityFixture(t)
+			original := f.s.agentEdgeProbe
+			f.s.agentEdgeProbe = func(ctx context.Context, host, path, address, state string, timeout time.Duration) (routeprobe.Proof, error) {
+				proof, err := original(ctx, host, path, address, state, timeout)
+				if err != nil || scenario == "ok" {
+					return proof, err
+				}
+				if scenario == "missing_binding" {
+					proof.TrafficRelease = nil
+					return proof, nil
+				}
+				copy := *proof.TrafficRelease
+				copy.ReleaseSetID, copy.RouteArtifactID, copy.ReleaseID = "private-set-identity", "private-route-identity", "private-release-identity"
+				copy.ReleaseChannel, copy.FencingToken = "full", 123
+				proof.TrafficRelease = &copy
+				if scenario == "transport_error_with_partial_proof" {
+					return proof, errors.New("private-transport-error")
+				}
+				return proof, nil
+			}
+			response := performJSONRequest(t, f.s, http.MethodGet, "/v1/agent/edge-candidates", f.runtimeKey, nil)
+			wantStatus := http.StatusServiceUnavailable
+			if scenario == "ok" {
+				wantStatus = http.StatusOK
+			}
+			rows := captureReceipts(t, f.s)
+			if response.Code != wantStatus || len(rows) != 1 {
+				t.Fatal("observation changed grant decision", response.Code, len(rows))
+			}
+			rejected := 0
+			for _, event := range rows[0].Events {
+				if event.Stage != "route_proof_rejected" {
+					continue
+				}
+				rejected++
+				if event.Publication == nil {
+					t.Fatal("same-read publication evidence missing")
+				}
+				cell := f.topology.Cells[0]
+				if event.Node == f.topology.Edges[1].ID {
+					cell = f.topology.Cells[1]
+				}
+				source, err := f.s.agentCellAuthorization(f.policy, f.topology, cell)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := capturePublicationReference(source.parent.ID, source.route.ID, source.release.ID, source.release.ReleaseChannel, source.release.FencingToken)
+				if event.Publication.Expected != want {
+					t.Fatal("expected evidence is not the captured publication", event.Publication.Expected, want)
+				}
+				if scenario != "different_publication" {
+					if event.Publication.Observed != nil {
+						t.Fatal("unavailable proof labeled as observed")
+					}
+					continue
+				}
+				observed := event.Publication.Observed
+				if observed == nil || observed.ReleaseSetHash != captureIdentityHash("private-set-identity") ||
+					observed.RouteArtifactHash != captureIdentityHash("private-route-identity") || observed.ReleaseHash != captureIdentityHash("private-release-identity") ||
+					observed.Channel != "full" || observed.FencingToken != 123 {
+					t.Fatal("observed evidence is not the rejected proof", observed)
+				}
+			}
+			if scenario == "ok" && rejected != 0 || scenario != "ok" && rejected == 0 {
+				t.Fatal("rejection evidence coverage changed", rejected)
+			}
+			raw, _ := json.Marshal(rows)
+			for _, secret := range []string{"private-set-identity", "private-route-identity", "private-release-identity", "private-transport-error", f.runtimeKey, "api.example.test"} {
+				if strings.Contains(string(raw), secret) {
+					t.Fatal("publication receipt retained private input")
+				}
+			}
+		})
+	}
+}
+
+func TestPublicationEvidenceHashesAndBoundsUntrustedValues(t *testing.T) {
+	if got := captureIdentityHash("abc"); got != "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Fatal("identity hash contract changed", got)
+	}
+	if captureIdentityHash("") != "" || captureIdentityHash(strings.Repeat("x", 257)) != "identity_exceeds_budget" || len(captureIdentityHash(strings.Repeat("x", 256))) != 71 {
+		t.Fatal("identity hash bounds changed")
+	}
+	source := agentCellSource{parent: model.PlatformArtifact{ID: "expected-set"}, route: model.PlatformArtifact{ID: "expected-route"},
+		release: model.PlatformArtifactRelease{ID: "expected-release", ReleaseChannel: "gray", FencingToken: 10}}
+	proof := &model.TrafficReleaseBinding{ReleaseSetID: strings.Repeat("private", 100), RouteArtifactID: "private-route", ReleaseID: "private-release", ReleaseChannel: "private-channel", FencingToken: 11}
+	pair := agentPublicationEvidence(source, proof, true)
+	if pair.Observed.ReleaseSetHash != "identity_exceeds_budget" || pair.Observed.Channel != "unrecognized" {
+		t.Fatal("wire values exceeded diagnostic bounds", pair.Observed)
+	}
+	raw, _ := json.Marshal(pair)
+	if len(raw) > 1024 || strings.Contains(string(raw), "private") {
+		t.Fatal("untrusted publication metadata leaked or exceeded bounds", len(raw))
 	}
 }
 

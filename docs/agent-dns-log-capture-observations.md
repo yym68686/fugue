@@ -12,6 +12,17 @@ statuses, and mismatched route-proof **field names**. DNS runtime-fact failures
 retain only allowlisted rejection codes. They do not retain audiences, origins,
 paths, response bodies, credentials or raw error text.
 
+Rejected Agent route proofs also retain a same-read `publication` pair. Each
+side has separate SHA-256 hashes of the release-set, route-artifact and release
+IDs, an allowlisted channel, and its numeric fence. Hashes are SHA-256 of the
+original identity bytes (with the `sha256:` prefix), not hashes of JSON. This
+allows read-only inventory correlation without raw identities or another
+network probe. The observed side is omitted if the probe returned an error or
+no binding. A version mismatch is not itself proof of a bug: publication
+changes and consumer propagation still require independent evidence. This does
+not accept a stale proof or alter any equality, freshness or authorization
+check. The existing 24-receipt / 12-event bounds remain unchanged.
+
 `snapshot_validation_rejected` records the first failed local DNS validation
 check: snapshot identity/digests/assignment, observation/checkpoint bounds,
 duplicate or unknown probes, and physical proof identity/deadline/publication.

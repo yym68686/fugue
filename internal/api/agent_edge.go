@@ -624,7 +624,8 @@ func captureAgentEdgeObservationWithObserver(ctx context.Context, client *cluste
 				b.ReleaseID != source.release.ID || b.ReleaseChannel != source.release.ReleaseChannel || b.FencingToken != source.release.FencingToken || b.ScopeKey != source.publication.ScopeKey ||
 				b.PolicyDigest != source.publication.PolicyDigest || b.IntentDigest != source.publication.IntentDigest || b.InputSnapshotDigest != source.publication.InputSnapshotDigest {
 				observeCapture(ctx, captureEvent{Stage: "route_proof_rejected", Node: edge.ID, ErrorClass: captureErrorClass(err),
-					Mismatches: agentRouteProofMismatches(proof, edge, source, digest, time.Now())})
+					Mismatches:  agentRouteProofMismatches(proof, edge, source, digest, time.Now()),
+					Publication: agentPublicationEvidence(source, b, err == nil)})
 				if observe != nil {
 					if err != nil {
 						observe("agent-route-proof-unavailable")

@@ -2,11 +2,15 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
 	"sync"
 	"time"
+
+	"fugue/internal/model"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -38,14 +42,62 @@ type captureReceipt struct {
 }
 
 type captureEvent struct {
-	Stage      string           `json:"stage"`
-	Node       string           `json:"node,omitempty"`
-	ErrorClass string           `json:"error_class,omitempty"`
-	DurationMS int64            `json:"duration_ms"`
-	Capacity   *captureCapacity `json:"capacity,omitempty"`
-	Mismatches []string         `json:"mismatches,omitempty"`
-	HTTPStatus int              `json:"http_status,omitempty"`
-	Rejection  string           `json:"rejection,omitempty"`
+	Stage       string                  `json:"stage"`
+	Node        string                  `json:"node,omitempty"`
+	ErrorClass  string                  `json:"error_class,omitempty"`
+	DurationMS  int64                   `json:"duration_ms"`
+	Capacity    *captureCapacity        `json:"capacity,omitempty"`
+	Mismatches  []string                `json:"mismatches,omitempty"`
+	HTTPStatus  int                     `json:"http_status,omitempty"`
+	Rejection   string                  `json:"rejection,omitempty"`
+	Publication *capturePublicationPair `json:"publication,omitempty"`
+}
+
+// Publication references are hashed independently so a local read-only
+// inventory can identify both sides of one rejected proof without retaining
+// the proof, raw identities, Host/path, credentials or arbitrary wire strings.
+type capturePublication struct {
+	ReleaseSetHash    string `json:"release_set_hash"`
+	RouteArtifactHash string `json:"route_artifact_hash"`
+	ReleaseHash       string `json:"release_hash"`
+	Channel           string `json:"channel"`
+	FencingToken      int64  `json:"fencing_token"`
+}
+
+type capturePublicationPair struct {
+	Expected capturePublication  `json:"expected"`
+	Observed *capturePublication `json:"observed,omitempty"`
+}
+
+func captureIdentityHash(value string) string {
+	if value == "" {
+		return ""
+	}
+	if len(value) > 256 {
+		return "identity_exceeds_budget"
+	}
+	sum := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func capturePublicationReference(releaseSet, routeArtifact, release, channel string, fence int64) capturePublication {
+	switch channel {
+	case model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull:
+	default:
+		channel = "unrecognized"
+	}
+	return capturePublication{ReleaseSetHash: captureIdentityHash(releaseSet), RouteArtifactHash: captureIdentityHash(routeArtifact),
+		ReleaseHash: captureIdentityHash(release), Channel: channel, FencingToken: fence}
+}
+
+func agentPublicationEvidence(source agentCellSource, proof *model.TrafficReleaseBinding, proofAvailable bool) *capturePublicationPair {
+	pair := &capturePublicationPair{Expected: capturePublicationReference(source.parent.ID, source.route.ID, source.release.ID, source.release.ReleaseChannel, source.release.FencingToken)}
+	// A transport/parser failure must never label a partial proof as observed.
+	if proofAvailable && proof != nil {
+		observed := capturePublicationReference(proof.ReleaseSetID, proof.RouteArtifactID, proof.ReleaseID, proof.ReleaseChannel, proof.FencingToken)
+		pair.Observed = &observed
+	}
+	return pair
 }
 
 type captureCapacity struct {
@@ -114,6 +166,14 @@ func observeCapture(ctx context.Context, event captureEvent) {
 		event.Capacity = &copy
 	}
 	event.Mismatches = append([]string(nil), event.Mismatches...)
+	if event.Publication != nil {
+		copy := *event.Publication
+		if copy.Observed != nil {
+			observed := *copy.Observed
+			copy.Observed = &observed
+		}
+		event.Publication = &copy
+	}
 	trace.receipt.Events = append(trace.receipt.Events, event)
 }
 
