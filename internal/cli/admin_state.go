@@ -91,12 +91,33 @@ func (c *CLI) loadArtifactStateOnce(client *Client, id, channel string, requireC
 			filter.ArtifactReleaseID = current.Release.ID
 		}
 	}
+	// Convergence lists retain immutable expectation history. The state of a
+	// release is determined by its newest revision per member, not by AND-ing
+	// superseded revisions whose receipts have necessarily moved on.
+	var expectations map[string]model.PlatformExpectedConsumerSet
+	var expectationErr error
+	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+		if filter.ArtifactReleaseID == "" {
+			result.MissingEvidence = append(result.MissingEvidence, "matching_current_release")
+		} else {
+			expectations, expectationErr = latestArtifactExpectations(client, filter)
+			if expectationErr != nil {
+				result.MissingEvidence = append(result.MissingEvidence, "current_expected_consumer_sets")
+			}
+		}
+	}
 	assessments, err := client.ListPlatformConsumerConvergence(filter)
 	if err != nil {
 		result.MissingEvidence = append(result.MissingEvidence, "authoritative_consumer_convergence")
 	} else {
 		result.ConsumersConverged = true
 		for _, assessment := range assessments {
+			if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+				set, found := expectations[assessment.ArtifactKind]
+				if !found || assessment.ExpectedConsumerSetID != set.ID || assessment.ScopeKey != set.ScopeKey || assessment.ExpectedGeneration != set.ExpectedGeneration {
+					continue
+				}
+			}
 			if artifact.ArtifactKind != model.PlatformArtifactKindReleaseSet && assessment.ExpectedGeneration != artifact.Generation {
 				continue
 			}
@@ -126,6 +147,16 @@ func (c *CLI) loadArtifactStateOnce(client *Client, id, channel string, requireC
 					result.MissingEvidence = append(result.MissingEvidence, "release_set_member_convergence")
 				}
 			}
+		}
+	}
+	if expectations != nil && expectationErr == nil {
+		finalExpectations, err := latestArtifactExpectations(client, filter)
+		if err != nil {
+			result.MissingEvidence = append(result.MissingEvidence, "final_expected_consumer_sets")
+			return result, artifact.ID, false, nil
+		}
+		if !reflect.DeepEqual(expectations, finalExpectations) {
+			return result, artifact.ID, false, nil
 		}
 	}
 	// The producer may publish while the evidence reads are in flight. Re-read
@@ -158,6 +189,32 @@ func (c *CLI) loadArtifactStateOnce(client *Client, id, channel string, requireC
 		result.VerifiedLKG = finalCurrent.Artifact.ID == artifact.ID && finalCurrent.Release.ArtifactID == artifact.ID && finalCurrent.Release.Status == model.PlatformArtifactReleaseStatusActive && finalCurrent.Release.VerificationState == model.PlatformArtifactVerificationStateVerified && lkg.ArtifactID == artifact.ID && lkg.ContentHash == artifact.ContentHash && lkg.Generation == artifact.Generation && lkg.ExpiresAt.After(result.ObservedAt) && lkg.GenerationSequence > 0 && lkg.VerifiedByReleaseID == finalCurrent.Release.ID && lkg.VerificationEvidenceHash != "" && lkg.SnapshotProvenance.Signature != "" && lkg.ArtifactProvenance.Signature != ""
 	}
 	return result, artifact.ID, true, nil
+}
+
+func latestArtifactExpectations(client *Client, filter model.PlatformExpectedConsumerSetFilter) (map[string]model.PlatformExpectedConsumerSet, error) {
+	sets, err := client.ListPlatformExpectedConsumerSets(filter)
+	if err != nil {
+		return nil, err
+	}
+	// The endpoint has no continuation token. At its limit the client cannot
+	// establish that every member's newest revision was returned.
+	if filter.Limit <= 0 || len(sets) >= filter.Limit {
+		return nil, fmt.Errorf("expected consumer inventory completeness unavailable")
+	}
+	latest := map[string]model.PlatformExpectedConsumerSet{}
+	for _, set := range sets {
+		if set.ID == "" || set.Revision <= 0 || set.ArtifactKind == "" || set.ReleaseSetID != filter.ReleaseSetID || set.ArtifactReleaseID != filter.ArtifactReleaseID || set.ScopeKey != filter.ScopeKey {
+			return nil, fmt.Errorf("expected consumer identity differs from the selected release")
+		}
+		prior, found := latest[set.ArtifactKind]
+		if found && prior.Revision == set.Revision && !reflect.DeepEqual(prior, set) {
+			return nil, fmt.Errorf("expected consumer revision is ambiguous")
+		}
+		if !found || set.Revision > prior.Revision {
+			latest[set.ArtifactKind] = set
+		}
+	}
+	return latest, nil
 }
 
 func samePlatformStateSnapshot(a, b platformStateArtifactEnvelope) bool {

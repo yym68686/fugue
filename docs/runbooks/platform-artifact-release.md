@@ -90,6 +90,12 @@ fugue admin artifact release <artifact-id> --channel full --idempotency-key <key
 
 ## Verification
 
+- `fugue admin state show --kind release_set --scope <scope> --channel <channel>`
+  summarizes the newest expected-consumer revision per member of the exact
+  selected release. Superseded revisions remain available in the consumer
+  history commands but do not block current convergence. Missing, ambiguous,
+  or incomplete evidence cannot report convergence; changes during the read
+  are retried at most three times before returning an indeterminate result.
 - Active release generation matches the expected artifact.
 - Consumers report desired and actual generation convergence.
 - Release state is `verified`, not `serving_unverified`.

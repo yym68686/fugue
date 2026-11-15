@@ -89,11 +89,13 @@ func TestCLIUsesAuthoritativeConvergenceAndRequiresAllReleaseMembers(t *testing.
 			json.NewEncoder(w).Encode(map[string]any{"artifact": artifact, "release": model.PlatformArtifactRelease{ID: "current-release", ArtifactID: artifact.ID, Status: "active"}})
 		case "/v1/admin/artifacts/release-set/consumers":
 			fmt.Fprint(w, `{"consumers":[]}`)
+		case "/v1/admin/expected-consumer-sets":
+			json.NewEncoder(w).Encode(map[string]any{"expected_consumer_sets": []model.PlatformExpectedConsumerSet{{ID: "expect-route", Revision: 1, ReleaseSetID: artifact.ID, ArtifactReleaseID: "current-release", ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ScopeKey: artifact.ScopeKey, ExpectedGeneration: "route"}}})
 		case "/v1/admin/platform-state/convergence":
 			if r.URL.Query().Get("release_set_id") != artifact.ID || r.URL.Query().Get("artifact_release_id") != "current-release" || r.URL.Query().Get("artifact_kind") != "" {
 				t.Fatal("CLI did not bind release query")
 			}
-			json.NewEncoder(w).Encode(map[string]any{"convergence": []model.PlatformConsumerConvergenceStatus{{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, Pass: true}}})
+			json.NewEncoder(w).Encode(map[string]any{"convergence": []model.PlatformConsumerConvergenceStatus{{ExpectedConsumerSetID: "expect-route", ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ScopeKey: artifact.ScopeKey, ExpectedGeneration: "route", Pass: true}}})
 		default:
 			t.Errorf("unexpected local-evaluation read %s", r.URL.Path)
 			w.WriteHeader(404)
@@ -134,11 +136,21 @@ func TestCLIStateRetriesWhenServingArtifactChangesDuringRead(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"artifact": artifactB, "release": releaseB})
 		case "/v1/admin/artifacts/artifact-b/consumers":
 			fmt.Fprint(w, `{"consumers":[]}`)
+		case "/v1/admin/expected-consumer-sets":
+			sets := []model.PlatformExpectedConsumerSet{}
+			for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig} {
+				sets = append(sets, model.PlatformExpectedConsumerSet{ID: "expect-" + kind, Revision: 1, ReleaseSetID: artifactB.ID, ArtifactReleaseID: releaseB.ID, ArtifactKind: kind, ScopeKey: artifactB.ScopeKey, ExpectedGeneration: kind + "-b"})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"expected_consumer_sets": sets})
 		case "/v1/admin/platform-state/convergence":
 			if r.URL.Query().Get("release_set_id") != artifactB.ID || r.URL.Query().Get("artifact_release_id") != releaseB.ID || r.URL.Query().Get("artifact_kind") != "" {
 				t.Fatalf("convergence was not bound to retried release: %s", r.URL.RawQuery)
 			}
-			json.NewEncoder(w).Encode(map[string]any{"convergence": []model.PlatformConsumerConvergenceStatus{{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ExpectedGeneration: "route-b", Pass: true}, {ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ExpectedGeneration: "dns-b", Pass: true}, {ArtifactKind: model.PlatformArtifactKindCaddyRouteConfig, ExpectedGeneration: "tls-b", Pass: true}}})
+			statuses := []model.PlatformConsumerConvergenceStatus{}
+			for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig} {
+				statuses = append(statuses, model.PlatformConsumerConvergenceStatus{ExpectedConsumerSetID: "expect-" + kind, ArtifactKind: kind, ScopeKey: artifactB.ScopeKey, ExpectedGeneration: kind + "-b", Pass: true})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"convergence": statuses})
 		default:
 			t.Errorf("unexpected state read %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
