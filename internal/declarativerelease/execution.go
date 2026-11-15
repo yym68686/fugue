@@ -275,6 +275,11 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	alreadyConverged := false
 	degradedPredecessor := false
 	degradedRoute := false
+	// Keep diagnostics independently of the recovery and forward-health attempts:
+	// neither a recovery refusal nor a later failed read explains the first
+	// predecessor health failure. These values do not authorize recovery.
+	var predecessorHealthFailure error
+	var predecessorPreparationFailure error
 	controlledEdgeRecovery := release.ExpectedPreviousPresent && release.SupersedesFailedConfigSHA != "" &&
 		release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil
 	if controlledEdgeRecovery {
@@ -321,14 +326,18 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		}
 		if release.ExpectedPreviousPresent && errors.Is(lkgObserveErr, ErrDegradedPredecessorHealth) {
 			degradedRoute = errors.Is(lkgObserveErr, ErrPublicRouteHealth)
+			predecessorHealthFailure = lkgObserveErr
 			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+			predecessorPreparationFailure = err
 			degradedPredecessor = err == nil
 		} else if release.ExpectedPreviousPresent && lkgObserveErr != nil {
 			var healthyLKG Observation
 			healthyLKG, err = cluster.WaitHealthy(WithPrewritePredecessorHealthWait(ctx), release, lkg, rendered.LKG)
 			if errors.Is(err, ErrDegradedPredecessorHealth) {
 				degradedRoute = errors.Is(err, ErrPublicRouteHealth)
+				predecessorHealthFailure = err
 				prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+				predecessorPreparationFailure = err
 				degradedPredecessor = err == nil
 			} else if err == nil && healthyLKG.Matches(lkg, release, true) {
 				prewrite, err = cluster.Observe(ctx, release, lkg, rendered.LKG)
@@ -345,7 +354,9 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 					_, err = cluster.WaitHealthy(WithPrewritePredecessorHealthWait(ctx), release, lkg, rendered.LKG)
 					if errors.Is(err, ErrDegradedPredecessorHealth) {
 						degradedRoute = errors.Is(err, ErrPublicRouteHealth)
+						predecessorHealthFailure = err
 						prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+						predecessorPreparationFailure = err
 						degradedPredecessor = err == nil
 					}
 				}
@@ -380,6 +391,12 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		}
 	}
 	if err != nil {
+		if predecessorHealthFailure != nil {
+			if predecessorPreparationFailure != nil && !errors.Is(err, predecessorPreparationFailure) {
+				err = fmt.Errorf("%w; degraded predecessor preparation: %w", err, predecessorPreparationFailure)
+			}
+			err = fmt.Errorf("%w; predecessor health observation: %w", err, predecessorHealthFailure)
+		}
 		return ExecutionPlan{}, fmt.Errorf("observe prewrite state: %w", err)
 	}
 	if alreadyConverged {

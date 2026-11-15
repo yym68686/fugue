@@ -2335,7 +2335,7 @@ func typedPrewritePredecessorHealth(ctx context.Context, release declarativerele
 		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
 	}
 	if errors.Is(err, errPodHTTPHealth) {
-		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
+		return fmt.Errorf("%w: %w", declarativerelease.ErrDegradedPredecessorHealth, err)
 	}
 	if errors.Is(err, errPublicRouteHTTPHealth) {
 		return fmt.Errorf("%w: %w: %v", declarativerelease.ErrDegradedPredecessorHealth, declarativerelease.ErrPublicRouteHealth, err)
@@ -2671,7 +2671,10 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			for _, pod := range pods {
 				body, err := readPodHTTP(ctx, pod, probe.Path)
 				if err != nil || (probe.Expected != "" && !bytes.Contains(body, []byte(probe.Expected))) {
-					return "", fmt.Errorf("%w: pod health probe %q failed", errPodHTTPHealth, pod.Name)
+					if err == nil {
+						err = podHTTPFailureEvidence(pod, probe.Path, "expected_marker", http.StatusOK, body, true, nil)
+					}
+					return "", fmt.Errorf("%w: pod health probe %q failed: %w", errPodHTTPHealth, pod.Name, err)
 				}
 				evidence = append(evidence, probe.Type+":"+pod.Name+":"+digestBytesLocal(body))
 			}

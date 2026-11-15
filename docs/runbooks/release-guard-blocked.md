@@ -22,6 +22,15 @@ Check `blocked_reasons`, `gate_policy_violations`, artifact validation failures,
 and platform consumer drift. If the block comes from a tenant workload, confirm
 whether that workload is an explicit platform release signal.
 
+For a declarative prewrite rejection, keep both the recovery refusal and the
+original predecessor health observation. Pod HTTP failures include the observed
+time, Pod UID, address, path, phase, status, captured byte count and body digest;
+the response body is never printed. A successful HTTP response without the
+required marker is reported as `expected_marker`, not as a transport failure.
+These diagnostics do not authorize degraded recovery or change the health gate.
+A later successful probe cannot explain an earlier failure whose evidence was
+not retained; do not infer its historical cause from current readiness.
+
 ## Safety Rules
 
 - Do not continue a normal rollout while a `block_publish` incident is active.
