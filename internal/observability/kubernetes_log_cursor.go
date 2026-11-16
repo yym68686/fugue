@@ -30,6 +30,8 @@ type kubernetesLogCursor struct {
 	SourceUnavailable     bool
 	PendingAt             time.Time
 	RecoveringRotation    bool
+	RecoveryBoundary      map[[32]byte]int
+	RecoveryUnproven      bool
 	RotationGapBoundary   time.Time
 	RotationGapUpperBound time.Time
 }
@@ -109,10 +111,11 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		c.cursors = map[string]kubernetesLogCursor{}
 	}
 	cur, exists := c.cursors[key]
-	c.cursorsMu.Unlock()
 	if !exists {
-		cur = kubernetesLogCursor{Time: now.Add(-5 * time.Minute), Boundary: map[[32]byte]int{}, FirstObserved: now}
+		cur = c.restoreCursor(key, now)
 	}
+	c.retryFailedDelivery(key, &cur)
+	c.cursorsMu.Unlock()
 	finished := logTargetFinishedAt(target)
 	if cur.Complete || now.Before(cur.NextAttempt) || (!finished.IsZero() && finished.Before(cur.Time)) {
 		cur.Visited = now
@@ -134,6 +137,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		previous := cur.Time
 		cur.Time = now.Add(-maxAge)
 		cur.Boundary = map[[32]byte]int{}
+		cur.RecoveryBoundary, cur.RecoveryUnproven = nil, true
 		if cur.DrainedThrough.Before(cur.Time) {
 			c.pipeline.kubernetesLogCursorGaps.Add(1)
 			gap.GapEvents, gap.GapReason, gap.GapLowerBound, gap.GapUpperBound = 1, "retention_window", previous, cur.Time
@@ -167,6 +171,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		observation.PendingAt = cur.PendingAt
 		observation.NextAttempt = cur.NextAttempt
 		observation.DrainedThrough = cur.DrainedThrough
+		observation.RecoveryUnproven = cur.RecoveryUnproven
 		observation.TotalMillis = time.Since(now).Milliseconds()
 		if observation.ErrorClass != "" {
 			observation.LastErrorRead = readTrace.snapshot()
@@ -174,6 +179,10 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		c.pipeline.observeLogSource(observation)
 	}()
 	boundary := cur.Boundary
+	requiredBoundary := boundary
+	if len(cur.RecoveryBoundary) > 0 {
+		requiredBoundary = cur.RecoveryBoundary
+	}
 	seen := map[[32]byte]int{}
 	// An independent I/O timeout must expire before the shared cycle deadline.
 	// Otherwise a hung kubelet is canceled as a scheduling deferral on every
@@ -319,7 +328,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		// An inclusive read must return the cursor boundary before newer
 		// records. Its absence means the API's current file lost that prefix.
 		// Recover retained files before admitting any newer record.
-		if ts.After(original) && logBoundaryMissing(boundary, seen) && !rotationGap {
+		if ts.After(original) && logBoundaryMissing(requiredBoundary, seen) && !rotationGap {
 			if _, _, eligible := rotationLogDirectory(target); eligible && !rotationAttempted {
 				recoverRotation()
 				continue
@@ -352,7 +361,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			cur.PendingAt = ts
 			break
 		}
-		if !c.pipeline.ingestLogLineWithAdmission(ctx, source, msg, attrs, ts, true, &admission) {
+		delivery := c.deliveries.begin(key, ts)
+		if !c.pipeline.ingestLogLineWithDelivery(ctx, source, msg, attrs, ts, true, &admission, delivery) {
+			delivery.discard()
 			observation.Outcome = "queue_rejected"
 			observation.LastAdmission = &admission
 			budget.Add(1)
@@ -412,7 +423,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		}
 	}
 	if err == nil && !invalid && !truncated && parent.Err() == nil {
-		if rotationAttempted && !rotationGap && logBoundaryMissing(boundary, seen) {
+		if rotationAttempted && !rotationGap && logBoundaryMissing(requiredBoundary, seen) {
 			rotationGap = true
 			observation.Outcome = "rotation_gap"
 			c.observeRotationGap(&cur, &observation, original, now, key)
@@ -420,12 +431,24 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		cur.RecoveringRotation = false
 		if rotationAttempted && !rotationGap {
 			observation.Outcome = "rotation_recovered"
+			if cur.RecoveryUnproven {
+				observation.Outcome = "checkpoint_replayed_unproven"
+				c.pipeline.sourceObservationMu.Lock()
+				c.pipeline.sourceCheckpoint.UnprovenReplays++
+				c.pipeline.sourceObservationMu.Unlock()
+			}
 		}
 		cur.PendingAt = time.Time{}
 		cur.DrainedThrough = now
 		cur.Complete = !finished.IsZero()
 		cur.SourceUnavailable = false
 		cur.NextAttempt = time.Time{}
+	}
+	if cur.Time.After(original) || !cur.RecoveringRotation {
+		cur.RecoveryBoundary = nil
+	}
+	if !cur.RecoveringRotation {
+		cur.RecoveryUnproven = false
 	}
 	if truncated {
 		if kubernetesLogPriorityTarget(target) {

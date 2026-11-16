@@ -312,3 +312,40 @@ inclusive cursor and is deferred until the next poll, including during catch-up.
 replayable capacity deferrals; they do not emit per-record loss warnings or
 increment dropped-event counters. Live inputs without a source cursor retain
 normal loss reporting. Export failures and retention gaps remain separate signals.
+
+## Kubernetes log checkpoints
+
+The standalone collector stores inclusive source positions in a Kubernetes Lease.
+Set `FUGUE_TELEMETRY_LOG_CHECKPOINT_NAMESPACE` and
+`FUGUE_TELEMETRY_LOG_CHECKPOINT_NAME` together; the shipped Deployment supplies
+both. The service account needs Lease get/create/update access. Other embedded
+pipelines keep their existing in-memory collection unless explicitly configured.
+The Lease is created by the collector and must not be periodically reapplied or
+deleted by deployment tooling. Its holder and positions share one
+resourceVersion-fenced update. A rolling successor waits for release or expiry;
+a fenced predecessor stops collecting. An unavailable or malformed checkpoint
+stops source reads and reports `checkpoint.state=unavailable` in the existing
+owner-only log-sources snapshot, rather than resetting to a newer lookback.
+
+Positions remain behind every queued or failed export until all configured
+exporters acknowledge it. A restart replays the inclusive boundary and retained
+CRI files: delivery can be duplicated, and recovery still depends on source
+discovery and finite runtime retention. Neither an admitted record nor a saved
+cursor is proof that historical logs remain recoverable. First enablement has
+the existing five-minute initial lookback; upgrading from a version without
+checkpoints cannot recover that process's in-memory positions.
+
+The checkpoint contains hashed source identities, timestamps and hashed boundary
+witnesses, never log text or attributes. It is limited to 2,048 exact source
+positions and 240 KiB. When necessary, old positions are conservatively compacted
+into a shared inclusive replay floor, at or before every removed unread frontier,
+and a fixed 8 KiB membership filter. The filter has no false negatives for
+compacted identities; false positives cause extra replay. Its bits are not
+cleared, so long-running churn can saturate it and increase replay work, but
+cannot advance an unread frontier. Exact positions take precedence over it.
+Such replay lacks an exact witness and is explicitly marked
+`checkpoint_replayed_unproven`; it is not reported as proven complete recovery.
+The snapshot exposes exact source count, serialized bytes, membership bits set
+(out of 65,536), replay floor, last save and unproven replay count.
+Acknowledged completed sources may retire after their inactive cache TTL;
+undiscovered unread sources do not silently expire with that TTL.

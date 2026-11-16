@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"runtime/debug"
 	"strings"
@@ -32,6 +33,9 @@ func main() {
 	debug.SetMemoryLimit(telemetryAgentGoMemoryLimitBytes)
 	cfg := config.TelemetryAgentFromEnv()
 	observabilityConfig := boundTelemetryAgentMemory(cfg.Observability)
+	// Only the standalone cluster collector owns this durable source position.
+	observabilityConfig.LogCheckpointNamespace = strings.TrimSpace(os.Getenv("FUGUE_TELEMETRY_LOG_CHECKPOINT_NAMESPACE"))
+	observabilityConfig.LogCheckpointName = strings.TrimSpace(os.Getenv("FUGUE_TELEMETRY_LOG_CHECKPOINT_NAME"))
 	logger := log.Default()
 	if requested := cfg.Observability.Normalize().KubernetesLogMaxPods; requested != observabilityConfig.KubernetesLogMaxPods {
 		logger.Printf("Kubernetes log per-cycle pod budget bounded configured=%d effective=%d; discovery remains complete and sources rotate across cycles", requested, observabilityConfig.KubernetesLogMaxPods)
@@ -69,7 +73,9 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -85,12 +91,13 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatalf("listen and serve: %v", err)
 	}
+	<-shutdownDone
 }
 
 func boundTelemetryAgentMemory(cfg observability.Config) observability.Config {
 	cfg = cfg.Normalize()
 	// Queue payload bytes are independently bounded by admission. Count limits
-	// must allow the declared default throughput; the slot array is at most 1 MiB.
+	// must allow the declared default throughput; the slot array stays bounded.
 	if cfg.MemoryLimitBytes > telemetryAgentMemoryLimitBytes {
 		cfg.MemoryLimitBytes = telemetryAgentMemoryLimitBytes
 	}

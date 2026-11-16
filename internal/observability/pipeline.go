@@ -44,6 +44,7 @@ type Event struct {
 type queuedEvent struct {
 	payload  []byte
 	critical bool
+	delivery *logDeliveryReceipt
 }
 
 const telemetryCriticalQueueReserveDivisor int64 = 10
@@ -128,6 +129,7 @@ type Pipeline struct {
 	sourceGapReceipts              []logGapObservation
 	sourceGapReceiptTotal          uint64
 	sourceGapReceiptEvicted        uint64
+	sourceCheckpoint               logCheckpointObservation
 	kubernetesLogCycleMillis       atomic.Int64
 	kubernetesLogBacklogMillis     atomic.Int64
 	kubernetesLogDeferredTargets   atomic.Int64
@@ -335,6 +337,10 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 }
 
 func (p *Pipeline) ingestWithAdmission(ctx context.Context, event Event, replayable bool, admission *logAdmissionObservation) bool {
+	return p.ingestWithDelivery(ctx, event, replayable, admission, nil)
+}
+
+func (p *Pipeline) ingestWithDelivery(ctx context.Context, event Event, replayable bool, admission *logAdmissionObservation, delivery *logDeliveryReceipt) bool {
 	event = classifyPlatformRequestFact(event)
 	criticalDecisionEvidence := edgeRouteDecisionEvidenceEvent(event)
 	if criticalDecisionEvidence {
@@ -375,7 +381,7 @@ func (p *Pipeline) ingestWithAdmission(ctx context.Context, event Event, replaya
 		}
 		return false
 	}
-	queued := queuedEvent{payload: payload, critical: criticalDecisionEvidence}
+	queued := queuedEvent{payload: payload, critical: criticalDecisionEvidence, delivery: delivery}
 	size := int64(len(payload))
 	ordinarySlotReserved := false
 	if !criticalDecisionEvidence {
@@ -742,6 +748,10 @@ func (p *Pipeline) ingestLogLine(ctx context.Context, source string, line string
 }
 
 func (p *Pipeline) ingestLogLineWithAdmission(ctx context.Context, source string, line string, attrs map[string]string, timestamp time.Time, replayable bool, admission *logAdmissionObservation) bool {
+	return p.ingestLogLineWithDelivery(ctx, source, line, attrs, timestamp, replayable, admission, nil)
+}
+
+func (p *Pipeline) ingestLogLineWithDelivery(ctx context.Context, source string, line string, attrs map[string]string, timestamp time.Time, replayable bool, admission *logAdmissionObservation, delivery *logDeliveryReceipt) bool {
 	event, redacted := EventFromLogLine(source, line)
 	p.redacted.Add(uint64(redacted))
 	if !timestamp.IsZero() {
@@ -758,7 +768,7 @@ func (p *Pipeline) ingestLogLineWithAdmission(ctx context.Context, source string
 			event.Attributes[key] = value
 		}
 	}
-	return p.ingestWithAdmission(ctx, event, replayable, admission)
+	return p.ingestWithDelivery(ctx, event, replayable, admission, delivery)
 }
 
 func EventFromLogLine(source string, line string) (Event, int) {
@@ -869,6 +879,7 @@ func (p *Pipeline) runBatchExporter() {
 	defer ticker.Stop()
 
 	batch := make([]Event, 0, p.cfg.BatchSize)
+	var deliveries []*logDeliveryReceipt
 	var batchBytes int64
 	// Bound decoded batch size independently of its record count. One oversized
 	// event is flushed alone; the remaining batch stays below this queue fraction.
@@ -877,7 +888,11 @@ func (p *Pipeline) runBatchExporter() {
 		if len(batch) == 0 {
 			return
 		}
-		p.exportBatch(batch)
+		success := p.exportBatchResult(batch)
+		for _, delivery := range deliveries {
+			delivery.finish(success)
+		}
+		deliveries = nil
 		batch = make([]Event, 0, p.cfg.BatchSize)
 		batchBytes = 0
 	}
@@ -897,11 +912,13 @@ func (p *Pipeline) runBatchExporter() {
 			}
 			var event Event
 			if err := json.Unmarshal(queued.payload, &event); err != nil {
+				queued.delivery.finish(false)
 				p.dropped.Add(1)
 				p.recordError(fmt.Errorf("decode telemetry queue event: %w", err))
 				continue
 			}
 			batch = append(batch, event)
+			deliveries = append(deliveries, queued.delivery)
 			batchBytes += int64(len(queued.payload))
 			if len(batch) >= p.cfg.BatchSize || batchBytes >= batchByteLimit {
 				flush()
@@ -913,6 +930,10 @@ func (p *Pipeline) runBatchExporter() {
 }
 
 func (p *Pipeline) exportBatch(batch []Event) {
+	p.exportBatchResult(batch)
+}
+
+func (p *Pipeline) exportBatchResult(batch []Event) bool {
 	p.batches.Add(1)
 
 	attempts := p.cfg.RetryMaxAttempts
@@ -927,7 +948,7 @@ func (p *Pipeline) exportBatch(batch []Event) {
 		err = multi.ExportWithRetryTimeout(ctx, batch, attempts, p.cfg.ExportTimeout)
 		if err == nil {
 			p.exported.Add(uint64(len(batch)))
-			return
+			return true
 		}
 	} else {
 		ctx, cancel := context.WithTimeout(p.ctx, exportBatchTimeout(p.cfg.ExportTimeout, attempts, 1))
@@ -938,7 +959,7 @@ func (p *Pipeline) exportBatch(batch []Event) {
 			attemptCancel()
 			if err == nil {
 				p.exported.Add(uint64(len(batch)))
-				return
+				return true
 			}
 			if attempt < attempts {
 				select {
@@ -956,6 +977,7 @@ func (p *Pipeline) exportBatch(batch []Event) {
 		}
 	}
 	p.recordError(fmt.Errorf("export via %s failed: %w", p.exporter.Name(), err))
+	return false
 }
 
 func exportBatchTimeout(exportTimeout time.Duration, attempts int, exporterCount int) time.Duration {

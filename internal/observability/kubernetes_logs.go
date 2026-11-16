@@ -46,6 +46,12 @@ type kubernetesLogCollector struct {
 	nextTargetKey string
 	cycleVisited  atomic.Int64
 	cycleReads    atomic.Int64
+	checkpoint    *logCheckpoint
+	deliveries    *logDeliveryTracker
+	restored      map[string]logCheckpointPosition
+	replayFloor   int64
+	replayFilter  []byte
+	checkpointErr error
 }
 
 type kubernetesLogTarget struct {
@@ -82,7 +88,15 @@ func newKubernetesLogCollector(p *Pipeline) (*kubernetesLogCollector, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newKubernetesLogCollectorWithClient(p, client), nil
+	collector := newKubernetesLogCollectorWithClient(p, client)
+	if p.cfg.LogCheckpointName != "" || p.cfg.LogCheckpointNamespace != "" {
+		collector.checkpoint, err = newLogCheckpoint(client.CoordinationV1().Leases(p.cfg.LogCheckpointNamespace), p.cfg.LogCheckpointNamespace, p.cfg.LogCheckpointName)
+		if err != nil {
+			return nil, err
+		}
+		collector.deliveries = &logDeliveryTracker{}
+	}
+	return collector, nil
 }
 
 func newKubernetesLogCollectorWithClient(p *Pipeline, client kubernetes.Interface) *kubernetesLogCollector {
@@ -101,7 +115,55 @@ func newKubernetesLogCollectorWithClient(p *Pipeline, client kubernetes.Interfac
 }
 
 func (c *kubernetesLogCollector) run() {
-	c.runCollectionLoop(c.collectOnce)
+	if c.checkpoint == nil {
+		c.runCollectionLoop(c.collectOnce)
+		return
+	}
+	loaded, failed := false, false
+	c.runCollectionLoop(func(ctx context.Context) {
+		checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		state, acquired, err := c.checkpoint.acquire(checkCtx, c.logNow())
+		cancel()
+		if err == nil && acquired {
+			if !loaded {
+				c.restored = state.Sources
+				c.replayFloor = state.ReplayFloor
+				c.replayFilter = state.ReplayFilter
+				loaded = true
+			}
+			c.collectOnce(ctx)
+			err = c.checkpointErr
+			if err == nil {
+				err = c.saveCheckpoint(ctx, false)
+			}
+		}
+		outcome := "standby"
+		if acquired {
+			outcome = "saved"
+		}
+		if err != nil {
+			outcome = "unavailable"
+			if !failed {
+				c.pipeline.kubernetesLogErrors.Add(1)
+				c.pipeline.recordError(fmt.Errorf("Kubernetes log checkpoint: %w", err))
+			}
+		}
+		c.pipeline.sourceObservationMu.Lock()
+		observation := &c.pipeline.sourceCheckpoint
+		observation.Enabled, observation.State, observation.ObservedAt = true, outcome, c.logNow()
+		if outcome == "saved" {
+			observation.LastSavedAt = c.logNow()
+		}
+		c.pipeline.sourceObservationMu.Unlock()
+		failed = err != nil
+	})
+	if loaded {
+		// Exporter cancellation can leave queued records; their receipts still
+		// pin the replay frontier. Do not wait for or discard those payloads here.
+		if err := c.saveCheckpoint(context.Background(), true); err != nil {
+			c.pipeline.recordError(err)
+		}
+	}
 }
 
 func (c *kubernetesLogCollector) runCollectionLoop(collect func(context.Context)) {
@@ -119,6 +181,7 @@ func (c *kubernetesLogCollector) runCollectionLoop(collect func(context.Context)
 }
 
 func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
+	c.checkpointErr = nil
 	started := time.Now()
 	ctx, cancel := context.WithDeadline(ctx, started.Add(c.pipeline.cfg.KubernetesLogPollInterval))
 	defer cancel()
@@ -146,8 +209,9 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		if !exists {
 			// Initialize even deferred sources now: a rolling five-minute
 			// lookback at their eventual first turn would silently lose the wait.
-			cur = kubernetesLogCursor{Time: now.Add(-5 * time.Minute), Boundary: map[[32]byte]int{}, FirstObserved: now}
+			cur = c.restoreCursor(key, now)
 		}
+		c.retryFailedDelivery(key, &cur)
 		cur.Visited = now
 		if finished := logTargetFinishedAt(target); !finished.IsZero() && finished.Before(cur.Time) {
 			cur.Complete = true
@@ -159,6 +223,17 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		unique = append(unique, target)
 	}
 	c.cursorsMu.Unlock()
+	c.pruneInactiveLogCursors()
+	if c.checkpoint != nil {
+		// Discovery creates positions even for deferred sources. Save them before
+		// any stream is opened; a crash during the first read must not recreate
+		// a newer five-minute lower bound. Failed storage stops this cycle.
+		if err := c.saveCheckpoint(ctx, false); err != nil {
+			c.checkpointErr = err
+			c.pipeline.kubernetesLogCycleMillis.Store(time.Since(started).Milliseconds())
+			return
+		}
+	}
 	targets = unique
 	// Resume by source identity rather than an array index, so insertion or
 	// removal of earlier pods cannot repeatedly move the next source away.
@@ -319,11 +394,7 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	c.pipeline.kubernetesLogReads.Store(c.cycleReads.Load())
 	c.pipeline.kubernetesLogBackoffTargets.Store(backoffTargets)
 	c.pipeline.kubernetesLogMaxWaitMillis.Store(maxWait)
-	for key, cur := range c.cursors {
-		if time.Since(cur.Visited) > time.Hour {
-			delete(c.cursors, key)
-		}
-	}
+	c.deliveries.pruneFailures(c.cursors)
 	var backingOff int64
 	for node, retry := range c.nodeRetries {
 		if c.logNow().Sub(retry.Visited) > time.Hour {
@@ -342,6 +413,24 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	c.pipeline.sourceObservationMu.Lock()
 	c.pipeline.sourceObservationCycle = logCycleObservation{At: started, Targets: len(targets), Scheduled: scheduled, Visited: visited, CatchupReads: catchupReads, InitialBudget: budget, RemainingBudget: remaining.Load(), PollMillis: c.pipeline.cfg.KubernetesLogPollInterval.Milliseconds(), PerSourceLimit: c.pipeline.cfg.KubernetesLogTailLines, CycleLimit: c.pipeline.cfg.KubernetesLogMaxLinesPerCycle}
 	c.pipeline.sourceObservationMu.Unlock()
+}
+
+// Prune before the admission checkpoint, not only after a successful read cycle.
+// A cache TTL can retire delivery-acknowledged completed sources, never unread
+// or pending sources. Capacity compaction uses a conservative replay floor.
+func (c *kubernetesLogCollector) pruneInactiveLogCursors() {
+	c.cursorsMu.Lock()
+	defer c.cursorsMu.Unlock()
+	for key, cur := range c.cursors {
+		if c.logNow().Sub(cur.Visited) > time.Hour && (c.checkpoint == nil || cur.Complete && c.deliveries.sourceDelivered(key)) {
+			delete(c.cursors, key)
+		}
+	}
+	for key, position := range c.restored {
+		if position.Complete && c.logNow().Sub(time.Unix(position.Visited, 0)) > time.Hour {
+			delete(c.restored, key)
+		}
+	}
 }
 
 func (c *kubernetesLogCollector) catchupCursorTargets(ctx context.Context, targets []kubernetesLogTarget, remaining *atomic.Int64) int {

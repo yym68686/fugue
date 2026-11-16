@@ -8,40 +8,41 @@ import (
 )
 
 type logSourceObservation struct {
-	Identity        string                       `json:"identity"`
-	Node            string                       `json:"node"`
-	Previous        bool                         `json:"previous"`
-	ObservedAt      time.Time                    `json:"observed_at"`
-	CursorBefore    time.Time                    `json:"cursor_before"`
-	CursorAfter     time.Time                    `json:"cursor_after"`
-	NextAttempt     time.Time                    `json:"next_attempt,omitempty"`
-	PendingAt       time.Time                    `json:"pending_at,omitempty"`
-	DrainedThrough  time.Time                    `json:"drained_through,omitempty"`
-	OpenMillis      int64                        `json:"open_ms"`
-	TotalMillis     int64                        `json:"total_ms"`
-	Lines           int                          `json:"lines"`
-	Outcome         string                       `json:"outcome"`
-	Attempts        uint64                       `json:"attempts"`
-	Errors          uint64                       `json:"errors"`
-	ErrorClass      string                       `json:"error_class,omitempty"`
-	HTTPStatus      int                          `json:"http_status,omitempty"`
-	LastErrorAt     time.Time                    `json:"last_error_at,omitempty"`
-	LastErrorClass  string                       `json:"last_error_class,omitempty"`
-	LastHTTPStatus  int                          `json:"last_http_status,omitempty"`
-	LastErrorStage  string                       `json:"last_error_stage,omitempty"`
-	LastErrorMillis int64                        `json:"last_error_ms,omitempty"`
-	LastErrorRead   *logReadTransportObservation `json:"last_error_read,omitempty"`
-	LastAdmission   *logAdmissionObservation     `json:"last_admission,omitempty"`
-	InvalidRecord   *logInvalidRecordObservation `json:"invalid_record,omitempty"`
-	LineLimitBytes  int                          `json:"line_limit_bytes"`
-	MaxLineBytes    int                          `json:"max_line_bytes"`
-	TotalLines      uint64                       `json:"total_lines"`
-	RotationFiles   int                          `json:"rotation_files,omitempty"`
-	RotationBytes   int64                        `json:"rotation_bytes,omitempty"`
-	GapEvents       uint64                       `json:"gap_events"`
-	GapReason       string                       `json:"gap_reason,omitempty"`
-	GapLowerBound   time.Time                    `json:"gap_lower_bound,omitempty"`
-	GapUpperBound   time.Time                    `json:"gap_upper_bound,omitempty"`
+	Identity         string                       `json:"identity"`
+	Node             string                       `json:"node"`
+	Previous         bool                         `json:"previous"`
+	ObservedAt       time.Time                    `json:"observed_at"`
+	CursorBefore     time.Time                    `json:"cursor_before"`
+	CursorAfter      time.Time                    `json:"cursor_after"`
+	NextAttempt      time.Time                    `json:"next_attempt,omitempty"`
+	PendingAt        time.Time                    `json:"pending_at,omitempty"`
+	DrainedThrough   time.Time                    `json:"drained_through,omitempty"`
+	OpenMillis       int64                        `json:"open_ms"`
+	TotalMillis      int64                        `json:"total_ms"`
+	Lines            int                          `json:"lines"`
+	Outcome          string                       `json:"outcome"`
+	Attempts         uint64                       `json:"attempts"`
+	Errors           uint64                       `json:"errors"`
+	ErrorClass       string                       `json:"error_class,omitempty"`
+	HTTPStatus       int                          `json:"http_status,omitempty"`
+	LastErrorAt      time.Time                    `json:"last_error_at,omitempty"`
+	LastErrorClass   string                       `json:"last_error_class,omitempty"`
+	LastHTTPStatus   int                          `json:"last_http_status,omitempty"`
+	LastErrorStage   string                       `json:"last_error_stage,omitempty"`
+	LastErrorMillis  int64                        `json:"last_error_ms,omitempty"`
+	LastErrorRead    *logReadTransportObservation `json:"last_error_read,omitempty"`
+	LastAdmission    *logAdmissionObservation     `json:"last_admission,omitempty"`
+	InvalidRecord    *logInvalidRecordObservation `json:"invalid_record,omitempty"`
+	LineLimitBytes   int                          `json:"line_limit_bytes"`
+	MaxLineBytes     int                          `json:"max_line_bytes"`
+	TotalLines       uint64                       `json:"total_lines"`
+	RotationFiles    int                          `json:"rotation_files,omitempty"`
+	RotationBytes    int64                        `json:"rotation_bytes,omitempty"`
+	RecoveryUnproven bool                         `json:"recovery_unproven,omitempty"`
+	GapEvents        uint64                       `json:"gap_events"`
+	GapReason        string                       `json:"gap_reason,omitempty"`
+	GapLowerBound    time.Time                    `json:"gap_lower_bound,omitempty"`
+	GapUpperBound    time.Time                    `json:"gap_upper_bound,omitempty"`
 }
 
 type sourceErrorSummary struct {
@@ -56,6 +57,18 @@ type sourceErrorSummary struct {
 }
 
 const logGapReceiptLimit = 64
+
+type logCheckpointObservation struct {
+	Sources         int       `json:"sources"`
+	SerializedBytes int       `json:"serialized_bytes"`
+	MembershipBits  int       `json:"membership_bits_set"`
+	ReplayFloor     time.Time `json:"replay_floor"`
+	UnprovenReplays uint64    `json:"unproven_replays"`
+	Enabled         bool      `json:"enabled"`
+	State           string    `json:"state"`
+	ObservedAt      time.Time `json:"observed_at"`
+	LastSavedAt     time.Time `json:"last_saved_at"`
+}
 
 // Keep each newly reported loss separately from the truncated source view.
 // Bounds describe unproven coverage, not reconstructed missing log contents.
@@ -184,6 +197,7 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 		rows = append(rows, row)
 	}
 	evicted, cycle := p.sourceObservationEvicted, p.sourceObservationCycle
+	checkpoint := p.sourceCheckpoint
 	gapReceipts := append([]logGapObservation(nil), p.sourceGapReceipts...)
 	for i := range gapReceipts {
 		row := &gapReceipts[i]
@@ -266,6 +280,7 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 		"error_summary_coverage": "retained_source_lifetime_errors_grouped_by_latest_error_not_per_class_event_totals",
 		"gap_coverage":           "retained_source_lifetime_gap_counts_with_most_recent_gap_bounds_not_reconstructed_log_contents",
 		"gap_history":            gapHistory,
+		"checkpoint":             checkpoint,
 		"cycle":                  cycle, "queue_depth": p.queueDepth.Load(), "queued_bytes": p.queuedBytes.Load()}, nil
 }
 

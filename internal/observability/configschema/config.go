@@ -53,6 +53,8 @@ type Config struct {
 	KubernetesLogMaxLineBytes      int
 	KubernetesLogMaxPods           int
 	KubernetesLogMaxLinesPerCycle  int
+	LogCheckpointNamespace         string
+	LogCheckpointName              string
 	BatchSize                      int
 	MaxPayloadBytes                int64
 	ClickHouseQueryMaxPayloadBytes int64
@@ -110,6 +112,8 @@ func (c Config) Normalize() Config {
 	c.KubernetesLogNamespaces = normalizeStringList(c.KubernetesLogNamespaces)
 	c.KubernetesLogNamespacePrefixes = normalizeStringList(c.KubernetesLogNamespacePrefixes)
 	c.KubernetesLogLabelSelector = strings.TrimSpace(c.KubernetesLogLabelSelector)
+	c.LogCheckpointNamespace = strings.TrimSpace(c.LogCheckpointNamespace)
+	c.LogCheckpointName = strings.TrimSpace(c.LogCheckpointName)
 	c.Identity = c.Identity.Normalize()
 	if c.Retention <= 0 {
 		c.Retention = DefaultRetention
@@ -283,6 +287,12 @@ func (c Config) Mode() string {
 
 func (c Config) Validate() error {
 	c = c.Normalize()
+	if (c.LogCheckpointNamespace == "") != (c.LogCheckpointName == "") {
+		return fmt.Errorf("log checkpoint namespace and name must be configured together")
+	}
+	if c.LogCheckpointName != "" && c.KubernetesLogsEnabled && !c.HasExporters() {
+		return fmt.Errorf("durable Kubernetes log collection requires an exporter")
+	}
 	if err := validateOptionalHTTPURL("metrics remote write URL", c.MetricsRemoteWriteURL); err != nil {
 		return err
 	}

@@ -50,6 +50,12 @@ spec:
               containerPort: {{ .Values.observability.agent.port }}
               protocol: TCP
           env:
+            - name: FUGUE_TELEMETRY_LOG_CHECKPOINT_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: FUGUE_TELEMETRY_LOG_CHECKPOINT_NAME
+              value: {{ printf "%s-log-cursors" (include "fugue.fullname" .) | quote }}
             - name: FUGUE_TELEMETRY_AGENT_BIND_ADDR
               value: {{ .Values.observability.agent.bindAddr | quote }}
             - name: FUGUE_OBSERVABILITY_ENABLED
