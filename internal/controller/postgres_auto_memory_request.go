@@ -133,15 +133,25 @@ func validateManagedPostgresAutomaticMemoryTarget(actor string, snapshot managed
 		return fmt.Errorf("automatic PostgreSQL memory request database or process identity changed")
 	}
 	current := snapshot.Observation.DesiredResources
-	for _, pair := range [][2]string{{current.Requests["cpu"], target.Requests["cpu"]}, {current.Limits["cpu"], target.Limits["cpu"]}, {current.Limits["memory"], target.Limits["memory"]}} {
+	for _, pair := range [][2]string{{current.Requests["cpu"], target.Requests["cpu"]}, {current.Limits["memory"], target.Limits["memory"]}} {
 		if !resizeQuantitiesEqual(pair[0], pair[1]) {
 			return fmt.Errorf("automatic PostgreSQL memory request resize cannot change CPU or limits; live envelope changed")
 		}
+	}
+	if !optionalResizeQuantitiesEqual(current.Limits["cpu"], target.Limits["cpu"]) {
+		return fmt.Errorf("automatic PostgreSQL memory request resize cannot change the CPU limit; live envelope changed")
 	}
 	if !resizeQuantitiesEqual(current.Requests["memory"], fmt.Sprintf("%dMi", source)) && !resizeQuantitiesEqual(current.Requests["memory"], target.Requests["memory"]) {
 		return fmt.Errorf("automatic PostgreSQL memory request changed since recommendation")
 	}
 	return nil
+}
+
+func optionalResizeQuantitiesEqual(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return strings.TrimSpace(left) == "" && strings.TrimSpace(right) == ""
+	}
+	return resizeQuantitiesEqual(left, right)
 }
 
 // Call only after validateManagedPostgresAutomaticMemoryTarget has authenticated

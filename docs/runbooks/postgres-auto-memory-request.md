@@ -51,6 +51,12 @@ QoS restrictions are not bypassed. Failure never falls back to Pod deletion,
 restart, eviction or a CNPG template update. Persisted `runtime_resources` are
 updated only after verified completion; bootstrap `resources` stay unchanged.
 
+An accepted automatic resize that outlives a worker is observed by periodic
+recovery without another `/resize` PATCH. Recovery restores the exact Cluster
+and Pod generation, process identity and node from durable accepted evidence;
+it does not trust a new baseline. Deferred capacity waits retain the database
+operation interlock until actual resources converge and SQL probes pass.
+
 Verify completed operations and their `postgres_resize_*` evidence, desired
 and actual Pod resources, UID, restart count and container start time. Merely
 seeing the enabled environment flag is not proof that a database was resized.

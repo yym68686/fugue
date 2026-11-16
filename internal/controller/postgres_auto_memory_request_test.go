@@ -123,7 +123,12 @@ func TestManagedPostgresAutoMemoryFencesIdentityAndEnvelope(t *testing.T) {
 		func(s *managedPostgresResizeSnapshot) { s.Observation.ContainerStartedAt = "changed" },
 		func(s *managedPostgresResizeSnapshot) { s.Observation.DesiredResources.Requests["memory"] = "960Mi" },
 		func(s *managedPostgresResizeSnapshot) { s.Observation.DesiredResources.Requests["cpu"] = "200m" },
-		func(s *managedPostgresResizeSnapshot) { s.Observation.DesiredResources.Limits["cpu"] = "300m" },
+		func(s *managedPostgresResizeSnapshot) {
+			if s.Observation.DesiredResources.Limits == nil {
+				s.Observation.DesiredResources.Limits = map[string]string{}
+			}
+			s.Observation.DesiredResources.Limits["cpu"] = "300m"
+		},
 		func(s *managedPostgresResizeSnapshot) { s.Observation.DesiredResources.Limits["memory"] = "2Gi" },
 	} {
 		changed := cloneManagedPostgresResizeSnapshot(f.snapshot)
@@ -146,6 +151,135 @@ func TestManagedPostgresAutoMemoryFencesIdentityAndEnvelope(t *testing.T) {
 	}
 	if f.patchCalls != 1 || final.Observation.PodUID != f.initialPodUID || final.Observation.RestartCount != f.initialRestartCount || final.Observation.ContainerStartedAt != f.initialStartedAt {
 		t.Fatal("memory resize changed Pod/process identity")
+	}
+}
+
+func TestManagedPostgresAutoMemoryPreservesUnlimitedCPU(t *testing.T) {
+	f := newManagedPostgresResizeExecutorFixture(t)
+	f.snapshot.Cluster.Status.SystemID = "system-id"
+	delete(f.snapshot.Observation.DesiredResources.Limits, "cpu")
+	delete(f.snapshot.Observation.ActualResources.Limits, "cpu")
+	f.snapshot.Observation.Containers[0].Resources = cloneKubeResourceRequirements(f.snapshot.Observation.DesiredResources)
+	actor := managedPostgresMemoryActor(f.snapshot, 1024)
+	target := cloneKubeResourceRequirements(f.snapshot.Observation.DesiredResources)
+	target.Requests["memory"] = "768Mi"
+	if err := validateManagedPostgresAutomaticMemoryTarget(actor, f.snapshot, target); err != nil {
+		t.Fatalf("unchanged absent CPU limits must remain unlimited: %v", err)
+	}
+	final, err := executeManagedPostgresResizeStages(context.Background(), target, config.ManagedPostgresInPlaceResizeConfig{Enabled: true, MemoryRequestDownscaleEnabled: true}, time.Second, time.Millisecond, f.hooks())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, set := final.Observation.DesiredResources.Limits["cpu"]; set {
+		t.Fatal("memory resize synthesized a CPU limit")
+	}
+	if f.patchCalls != 1 || final.Observation.PodUID != f.initialPodUID || final.Observation.RestartCount != f.initialRestartCount {
+		t.Fatal("unexpected mutation/restart")
+	}
+	changed := cloneKubeResourceRequirements(target)
+	changed.Limits["cpu"] = "200m"
+	if err := validateManagedPostgresAutomaticMemoryTarget(actor, f.snapshot, changed); err == nil {
+		t.Fatal("introducing a CPU limit was accepted")
+	}
+	delete(changed.Limits, "cpu")
+	changed.Requests["cpu"] = "200m"
+	if err := validateManagedPostgresAutomaticMemoryTarget(actor, f.snapshot, changed); err == nil {
+		t.Fatal("changing CPU request was accepted")
+	}
+}
+
+func TestManagedPostgresAutoMemoryRecoveryWaitsWithoutRepatch(t *testing.T) {
+	f := newManagedPostgresResizeExecutorFixture(t)
+	target := cloneKubeResourceRequirements(f.snapshot.Observation.DesiredResources)
+	target.Requests["memory"] = "1280Mi"
+	f.snapshot.Observation.DesiredResources = cloneKubeResourceRequirements(target)
+	f.snapshot.Observation.Containers[0].Resources = cloneKubeResourceRequirements(target)
+	f.snapshot.Observation.Generation++
+	f.snapshot.Observation.Conditions = []managedPostgresResizeCondition{{Type: "PodResizePending", Status: "True", Reason: "Deferred", Message: "node memory capacity unavailable"}}
+	baseline, err := captureManagedPostgresResizeInvariantBaseline(f.snapshot.Observation.Namespace, f.snapshot.Cluster.Metadata.Name, f.snapshot.Cluster, func() managedPostgresResizeObservation {
+		o := f.snapshot.Observation
+		o.Conditions = nil
+		o.ObservedGeneration = o.Generation
+		return o
+	}())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := f.hooks()
+	hooks.AcceptedBaseline = &baseline
+	final, err := executeManagedPostgresResizeStages(context.Background(), target, config.ManagedPostgresInPlaceResizeConfig{Enabled: true, RecoveryEnabled: true, MemoryRequestUpscaleEnabled: true}, time.Second, time.Millisecond, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.patchCalls != 0 || f.waitCalls == 0 || final.Observation.PodUID != f.initialPodUID || final.Observation.RestartCount != f.initialRestartCount {
+		t.Fatal("recovery replayed resize or changed process identity")
+	}
+}
+
+func TestManagedPostgresAutoMemoryRecoveryFencesAcceptedIdentity(t *testing.T) {
+	for _, drift := range []string{"cluster generation", "pod generation", "pod uid", "restart", "target", "no accepted evidence"} {
+		t.Run(drift, func(t *testing.T) {
+			f := newManagedPostgresResizeExecutorFixture(t)
+			target := cloneKubeResourceRequirements(f.snapshot.Observation.DesiredResources)
+			target.Requests["memory"] = "1280Mi"
+			baseline, err := captureManagedPostgresResizeInvariantBaseline(f.snapshot.Observation.Namespace, f.snapshot.Cluster.Metadata.Name, f.snapshot.Cluster, f.snapshot.Observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.snapshot.Observation.DesiredResources = cloneKubeResourceRequirements(target)
+			f.snapshot.Observation.Conditions = []managedPostgresResizeCondition{{Type: "PodResizePending", Status: "True", Reason: "Deferred"}}
+			hooks := f.hooks()
+			hooks.AcceptedBaseline = &baseline
+			switch drift {
+			case "cluster generation":
+				f.snapshot.Cluster.Metadata.Generation++
+			case "pod generation":
+				f.snapshot.Observation.Generation++
+			case "pod uid":
+				f.snapshot.Observation.PodUID = "replacement"
+			case "restart":
+				f.snapshot.Observation.RestartCount++
+			case "target":
+				f.snapshot.Observation.DesiredResources.Requests["memory"] = "1536Mi"
+			case "no accepted evidence":
+				hooks.AcceptedBaseline = nil
+			}
+			_, err = executeManagedPostgresResizeStages(context.Background(), target, config.ManagedPostgresInPlaceResizeConfig{Enabled: true, RecoveryEnabled: true, MemoryRequestUpscaleEnabled: true}, time.Second, time.Millisecond, hooks)
+			if err == nil || f.patchCalls != 0 {
+				t.Fatalf("recovery accepted drift or replayed mutation: patches=%d err=%v", f.patchCalls, err)
+			}
+		})
+	}
+}
+
+func TestManagedPostgresResizeAcceptedBaseline(t *testing.T) {
+	f := newManagedPostgresResizeExecutorFixture(t)
+	o := f.snapshot.Observation
+	evidence := model.OperationEvidence{
+		Type: model.OperationEvidenceTypePostgresResizeAccepted, PayloadVersion: managedPostgresResizeEvidencePayloadVersion,
+		SubjectNamespace: o.Namespace, SubjectUID: o.PodUID, PodName: o.PodName, NodeName: o.NodeName, ContainerName: o.ContainerName,
+		Payload: map[string]any{"cluster_name": f.snapshot.Cluster.Metadata.Name, "cluster_uid": f.snapshot.Cluster.Metadata.UID,
+			"cluster_generation": f.snapshot.Cluster.Metadata.Generation, "pod_uid": o.PodUID, "pod_generation": o.Generation,
+			"restart_count": o.RestartCount, "container_started_at": o.ContainerStartedAt},
+	}
+	// Round-trip through generic JSON exactly as the evidence store does.
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := managedPostgresResizeAcceptedBaseline(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateManagedPostgresResizeInvariantDuringResize(baseline, f.snapshot.Cluster, o); err != nil {
+		t.Fatal(err)
+	}
+	delete(evidence.Payload, "pod_generation")
+	if _, err := managedPostgresResizeAcceptedBaseline(evidence); err == nil {
+		t.Fatal("incomplete evidence accepted")
 	}
 }
 
