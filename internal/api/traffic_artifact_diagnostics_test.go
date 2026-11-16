@@ -113,6 +113,16 @@ func TestPublishedTrafficDiagnosticsBindPublicationAndFreshFacts(t *testing.T) {
 			if _, err := s.inspectPublishedTrafficArtifacts(context.Background(), "example.test", owners); err == nil {
 				t.Fatal("invalid published state became passing diagnostics")
 			}
+			failures := s.captureSnapshot().(map[string]any)["traffic_failures"].(map[string]any)["receipts"].([]trafficDiagnosticFailure)
+			if len(failures) == 0 || failures[len(failures)-1].Stage == "" {
+				t.Fatal("failed published read discarded its diagnostic category")
+			}
+			if scenario == "stale heartbeat" || scenario == "foreign release" {
+				last := failures[len(failures)-1]
+				if last.Kind != model.PlatformArtifactKindEdgeRouteBundle || last.Publication == nil || len(last.Assessments) == 0 || len(last.Assessments[0].Reasons) == 0 {
+					t.Fatal("failed convergence discarded the assessment actually used", last)
+				}
+			}
 		})
 	}
 	if err := os.WriteFile(path, raw, 0600); err != nil {

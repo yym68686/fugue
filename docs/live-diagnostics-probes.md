@@ -164,6 +164,19 @@ operation counters. Both rings are process-local metadata with explicit overwrit
 and restart boundaries, not durable or complete 24-hour request tracing. They do
 not renew facts, change admission or erase historical failures.
 
+The API capture snapshot's independent `traffic_failures` ring retains twelve
+failed published-traffic diagnostic reads, including DNS route-invariant checks.
+It records the source-defined failure stage and, for failed convergence, the
+same-read publication/expectation hashes, revision, required/passing counts,
+unexpected-consumer count and up to eight nonpassing assessments. Assessments
+retain hashed consumer/binding identities, heartbeat/freshness timestamps and
+fixed reason codes; omitted assessments and ring overwrites are counted.
+Successful reads cannot evict these failures. Credentials, nonces, proofs,
+hostnames, arbitrary errors and consumer payloads are not retained. This adds
+no reads, probes or retries and changes no convergence decision or HTTP schema.
+A reason identifies the failed check, not the upstream cause of that condition;
+process-local retention does not establish complete 24-hour coverage.
+
 Runtime snapshots deduplicate shared Unix sockets across helper processes and
 bind each row to the socket's kernel-reported peer PID in the frozen target set.
 Only that provider's lifetime and socket identity determine snapshot continuity;

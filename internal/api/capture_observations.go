@@ -21,14 +21,17 @@ const captureReceiptLimit = 24
 const captureEventLimit = 12
 
 type captureObservations struct {
-	mu                  sync.Mutex
-	sequence            uint64
-	completed           uint64
-	evicted             uint64
-	receipts            []captureReceipt
-	agentFailures       []captureReceipt
-	agentFailureTotal   uint64
-	agentFailureEvicted uint64
+	mu                    sync.Mutex
+	sequence              uint64
+	completed             uint64
+	evicted               uint64
+	receipts              []captureReceipt
+	agentFailures         []captureReceipt
+	agentFailureTotal     uint64
+	agentFailureEvicted   uint64
+	trafficFailures       []trafficDiagnosticFailure
+	trafficFailureTotal   uint64
+	trafficFailureEvicted uint64
 }
 
 type captureReceipt struct {
@@ -327,5 +330,8 @@ func (s *Server) captureSnapshot() any {
 		"agent_failures": map[string]any{"receipts": append([]captureReceipt(nil), s.captures.agentFailures...),
 			"total": s.captures.agentFailureTotal, "evicted": s.captures.agentFailureEvicted, "limit": captureReceiptLimit,
 			"coverage": "completed_agent_request_capture_errors_not_all_http_response_failures"},
+		"traffic_failures": map[string]any{"receipts": append([]trafficDiagnosticFailure(nil), s.captures.trafficFailures...),
+			"total": s.captures.trafficFailureTotal, "evicted": s.captures.trafficFailureEvicted, "limit": trafficFailureLimit,
+			"coverage": "failed_published_traffic_diagnostic_reads_not_all_dns_checks_or_request_causes"},
 		"coverage": "bounded_completed_local_reads_not_full_request_tracing", "authorizes_traffic": false}
 }

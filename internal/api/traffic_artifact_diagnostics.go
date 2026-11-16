@@ -27,7 +27,11 @@ func (d trafficArtifactDiagnostic) evidence() map[string]string {
 // They never compile business state or advance an artifact/recovery pointer.
 func (s *Server) inspectPublishedTrafficArtifacts(ctx context.Context, zone string, owners map[string]string) (trafficArtifactDiagnostic, error) {
 	out := trafficArtifactDiagnostic{}
+	failure := trafficDiagnosticFailure{}
 	fail := func(message string) (trafficArtifactDiagnostic, error) {
+		// All messages are source-defined categories, never request values.
+		failure.Stage = message
+		s.retainTrafficDiagnosticFailure(failure)
 		return out, fmt.Errorf("published traffic diagnostics: %s", message)
 	}
 	if err := ctx.Err(); err != nil {
@@ -111,6 +115,7 @@ func (s *Server) inspectPublishedTrafficArtifacts(ctx context.Context, zone stri
 			}
 			status := s.evaluateLiveConsumerConvergence(ctx, platformcontrol.ProjectExpectedConsumerOwners(set), consumers, binding)
 			if !status.Pass || status.RequiredExpected == 0 {
+				failure = trafficConvergenceObservation(set, binding, status)
 				return fail("required consumers have not converged for " + set.ArtifactKind)
 			}
 			out.RequiredConsumers += status.RequiredPassing
