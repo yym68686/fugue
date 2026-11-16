@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"fmt"
 	"strings"
 
 	"fugue/internal/model"
@@ -18,12 +17,15 @@ func (p *storagePlacement) validateSameNodeOnlineRollout(app model.App, scheduli
 	}
 	node := strings.TrimSpace(scheduling.NodeSelector[kubeHostnameLabelKey])
 	if len(p.claims) == 0 {
-		return fmt.Errorf("Longhorn online rollout requires observed claims and a validated current-node placement")
+		return &storagePlacementRejection{code: "storage_claims_unobserved", message: "online rollout requires observed claims and a validated current-node placement", detail: "Longhorn online rollout requires observed claims and a validated current-node placement"}
 	}
 	for _, claim := range p.claims {
 		prefix := "Longhorn online rollout claim " + claim.name + ": "
+		reject := func(code, message string) error {
+			return &storagePlacementRejection{code: code, message: message, detail: prefix + message}
+		}
 		if claim.class.Provisioner != longhornCSIDriver || (claim.pv != nil && claim.driver != longhornCSIDriver) {
-			return fmt.Errorf("%slive volume and storage class must use the Longhorn CSI driver", prefix)
+			return reject("storage_driver_incompatible", "live volume and storage class must use the Longhorn CSI driver")
 		}
 		pvc, pv := claim.pvc, claim.pv
 		// Initial creation can carry an online intent after a failed build.
@@ -33,17 +35,17 @@ func (p *storagePlacement) validateSameNodeOnlineRollout(app model.App, scheduli
 			continue
 		}
 		if pvc == nil || pv == nil || pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName != pv.Name || pv.Spec.ClaimRef == nil || pv.Spec.StorageClassName != claim.class.Name {
-			return fmt.Errorf("%sa bound matching PVC and PV are required", prefix)
+			return reject("storage_binding_unverified", "a bound matching PVC and PV are required")
 		}
 		if !filesystemRWO(pvc.Spec.AccessModes, pvc.Spec.VolumeMode) || !filesystemRWO(pv.Spec.AccessModes, pv.Spec.VolumeMode) {
-			return fmt.Errorf("%sonly filesystem ReadWriteOnce volumes support this online rollout", prefix)
+			return reject("storage_access_mode_incompatible", "only filesystem ReadWriteOnce volumes support this online rollout")
 		}
 		if node == "" {
-			return fmt.Errorf("%sa validated current-node placement is required", prefix)
+			return reject("storage_same_node_pin_required", "a validated current-node placement is required")
 		}
 		for attached := range claim.attachedNodes {
 			if attached != node {
-				return fmt.Errorf("%svolume is in use on a different node", prefix)
+				return reject("storage_single_writer_conflict", "volume is in use on a different node")
 			}
 		}
 	}

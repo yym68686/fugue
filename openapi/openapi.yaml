@@ -26378,6 +26378,94 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/BuilderPlacementNodeInspection"
+    SchedulingResources:
+      type: object
+      additionalProperties: false
+      required: [cpu_milli, memory_bytes, ephemeral_bytes]
+      properties:
+        cpu_milli: {type: integer, format: int64}
+        memory_bytes: {type: integer, format: int64}
+        ephemeral_bytes: {type: integer, format: int64}
+    SchedulingRejection:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message:
+          type: string
+          description: Tenant-safe explanation; no physical node identity, topology values or foreign workload identifiers.
+    SchedulingVolumeDecision:
+      type: object
+      additionalProperties: false
+      required: [volume_id, bound, single_node, requested_bytes, node_affinity_required]
+      properties:
+        volume_id: {type: string}
+        bound: {type: boolean}
+        single_node: {type: boolean}
+        requested_bytes: {type: integer, format: int64}
+        node_affinity_required: {type: boolean}
+    SchedulingVolumeMatch:
+      type: object
+      additionalProperties: false
+      required: [volume_id]
+      properties:
+        volume_id: {type: string}
+        affinity_matches: {type: boolean}
+        rejections:
+          type: array
+          items: {$ref: "#/components/schemas/SchedulingRejection"}
+    SchedulingNodeDecision:
+      type: object
+      additionalProperties: false
+      required: [candidate_id, runtime_matches, eligible, preserved, resource_inventory_observed, allocatable, requested, existing_app, effective_requested, budget]
+      properties:
+        candidate_id:
+          type: string
+          description: Observation-local alias, not a physical node name.
+        runtime_matches: {type: boolean}
+        eligible: {type: boolean}
+        preserved: {type: boolean}
+        resource_inventory_observed: {type: boolean}
+        allocatable: {$ref: "#/components/schemas/SchedulingResources"}
+        requested: {$ref: "#/components/schemas/SchedulingResources"}
+        existing_app: {$ref: "#/components/schemas/SchedulingResources"}
+        effective_requested: {$ref: "#/components/schemas/SchedulingResources"}
+        budget: {$ref: "#/components/schemas/SchedulingResources"}
+        available_pod_addresses: {type: integer, format: int64}
+        rejections:
+          type: array
+          items: {$ref: "#/components/schemas/SchedulingRejection"}
+        volumes:
+          type: array
+          items: {$ref: "#/components/schemas/SchedulingVolumeMatch"}
+    SchedulingDecision:
+      type: object
+      additionalProperties: false
+      required: [observed_at, stage, outcome, demand, memory_request_ratio, cpu_overcommit_ratio, cpu_capacity_enforced, required_pod_addresses]
+      description: Durable inputs from the actual operation evaluation, not a reconstruction from current cluster state. CPU is recorded for ranking, not a hard admission gate. Preserved serving placements intentionally bypass new-placement capacity policy. Absent snapshots are never inferred from later observations.
+      properties:
+        observed_at: {type: string, format: date-time}
+        stage: {type: string, enum: [app_placement, surge_capacity, storage_validation]}
+        outcome: {type: string, enum: [selected, rejected, preserved, delegated, skipped, observation_failed]}
+        demand: {$ref: "#/components/schemas/SchedulingResources"}
+        memory_request_ratio: {type: number}
+        cpu_overcommit_ratio: {type: number}
+        cpu_capacity_enforced: {type: boolean}
+        required_pod_addresses: {type: integer, format: int64}
+        selected_candidate: {type: string}
+        nodes:
+          type: array
+          items: {$ref: "#/components/schemas/SchedulingNodeDecision"}
+        volumes:
+          type: array
+          items: {$ref: "#/components/schemas/SchedulingVolumeDecision"}
+        missing_evidence:
+          type: array
+          items: {type: string}
+        rejections:
+          type: array
+          items: {$ref: "#/components/schemas/SchedulingRejection"}
     OperationDiagnosis:
       type: object
       additionalProperties: false
@@ -26400,6 +26488,8 @@ components:
         builder_placement:
           description: Persisted inputs from the failed builder admission decision. Omitted with missing_evidence when the historical configuration or snapshot was not captured.
           $ref: "#/components/schemas/BuilderPlacementInspection"
+        scheduling_decision:
+          $ref: "#/components/schemas/SchedulingDecision"
         dependency_chain:
           type: array
           items:
@@ -26509,6 +26599,15 @@ components:
           type: object
           additionalProperties: true
           properties:
+            scheduling_decision_id: {type: string}
+            scheduling_decision_part: {type: integer, minimum: 1}
+            scheduling_decision_parts: {type: integer, minimum: 1}
+            scheduling_decision:
+              $ref: "#/components/schemas/SchedulingDecision"
+            scheduling_diagnostics:
+              type: object
+              additionalProperties: true
+              description: Administrator-only mapping of candidate and volume aliases to physical node names, required selectors, taints, PVC/PV names and affinity expressions. Never contains Pod specs, environment, host paths, credentials or foreign workload identities. Omitted from tenant evidence, timelines and debug bundles.
             build_attempt:
               $ref: "#/components/schemas/BuilderAttemptEvidence"
             builder_diagnostics:

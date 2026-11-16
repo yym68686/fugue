@@ -980,6 +980,7 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 }
 
 func (s *Service) executeManagedOperation(ctx context.Context, op model.Operation) (err error) {
+	ctx = context.WithValue(ctx, schedulingOperationKey{}, op.ID)
 	if op.Type == model.OperationTypeDeploy && op.ConfigBaseSpec != nil {
 		op, err = s.Store.RebaseDeployOperationForExecution(op.ID)
 		if err != nil {

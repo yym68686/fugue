@@ -749,7 +749,7 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		if !expectedDeploymentFound {
 			return model.App{}, fmt.Errorf("rendered serving workload has no deployment for capacity preflight")
 		}
-		if message, err := zeroDowntimeRolloutCapacityBlockMessage(ctx, client, expectedDeployment, desired.Spec.Replicas); err != nil {
+		if message, err := s.observeZeroDowntimeCapacity(ctx, desired, client, expectedDeployment); err != nil {
 			return model.App{}, err
 		} else if strings.TrimSpace(message) != "" {
 			return model.App{}, fmt.Errorf("%s", message)

@@ -63,6 +63,9 @@ func (s *Server) attachOperationEvidenceDiagnosis(ctx context.Context, op model.
 		}
 		return err
 	}
+	if attachSchedulingDecisionDiagnosis(op, evidence, diagnosis) {
+		return nil
+	}
 	best, ok := primaryDiagnosisEvidence(evidence)
 	if ok {
 		diagnosis.PrimaryEvidenceID = best.ID
@@ -945,6 +948,9 @@ func (s *Server) attachOperationBackupDiagnosis(op model.Operation, diagnosis *m
 	}
 	diagnosis.Evidence = append(diagnosis.Evidence, findings...)
 	backupHint := "Resolve failed or stale app backups before destructive restore, failover, or migration work; inspect with fugue app backup status/show."
+	if diagnosis.Category == "scheduling-rejected" || diagnosis.Category == "scheduling-observation-failed" {
+		return // Unrelated backup history is not a scheduling remedy.
+	}
 	if strings.TrimSpace(diagnosis.Hint) == "" {
 		diagnosis.Hint = backupHint
 	} else if !strings.Contains(strings.ToLower(diagnosis.Hint), "backup") {

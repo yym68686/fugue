@@ -815,7 +815,7 @@ func TestZeroDowntimeRolloutCapacityBlockMessageReportsInsufficientMemory(t *tes
 		t.Fatalf("capacity preflight: %v", err)
 	}
 	if !strings.Contains(message, "zero-downtime rollout blocked") ||
-		!strings.Contains(message, "node-a") ||
+		!strings.Contains(message, "candidate-1") || strings.Contains(message, "node-a") ||
 		!strings.Contains(message, "224Mi memory") ||
 		!strings.Contains(message, "512Mi memory") ||
 		strings.Contains(message, "CPU") {

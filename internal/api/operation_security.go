@@ -85,6 +85,7 @@ func redactOperationEvidenceForAPI(items []model.OperationEvidence, includePaylo
 			out[index].Payload = redactOperationDiagnosticMap(item.Payload)
 			if len(platformAdmin) == 0 || !platformAdmin[0] {
 				delete(out[index].Payload, "builder_diagnostics")
+				delete(out[index].Payload, "scheduling_diagnostics")
 			}
 		} else {
 			out[index].Payload = nil
@@ -106,6 +107,7 @@ func redactOperationTimelineForAPI(items []model.OperationTimelineEntry, include
 		if includePayload {
 			out[index].Payload = redactOperationDiagnosticMap(item.Payload)
 			delete(out[index].Payload, "builder_diagnostics")
+			delete(out[index].Payload, "scheduling_diagnostics")
 		} else {
 			out[index].Payload = nil
 		}
@@ -140,6 +142,15 @@ func redactOperationDiagnosisForAPI(in model.OperationDiagnosis) model.Operation
 			placement.Nodes[index].Reasons = redactOperationDiagnosticStrings(placement.Nodes[index].Reasons)
 		}
 		out.BuilderPlacement = &placement
+	}
+	if in.SchedulingDecision != nil {
+		data, err := json.Marshal(redactOperationDiagnosticMap(map[string]any{"decision": in.SchedulingDecision})["decision"])
+		var decision model.SchedulingDecision
+		if err == nil && json.Unmarshal(data, &decision) == nil {
+			out.SchedulingDecision = &decision
+		} else {
+			out.SchedulingDecision = nil
+		}
 	}
 	return out
 }

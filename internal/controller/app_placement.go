@@ -15,7 +15,15 @@ type appPlacementPolicy struct {
 	memoryRequestRatio float64
 }
 
-func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app model.App) (runtimepkg.SchedulingConstraints, error) {
+func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app model.App) (_ runtimepkg.SchedulingConstraints, err error) {
+	observation := newSchedulingObservation(app, "app_placement")
+	ctx = context.WithValue(ctx, schedulingObservationKey{}, observation)
+	defer func() {
+		s.recordSchedulingObservation(ctx, app, observation, err)
+		if err != nil && observation.decision.Outcome == "observation_failed" {
+			err = schedulingObservationError{cause: err}
+		}
+	}()
 	base, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
 	if err != nil {
 		return runtimepkg.SchedulingConstraints{}, err
@@ -23,12 +31,14 @@ func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app mo
 	if s == nil || s.Store == nil || strings.TrimSpace(app.Spec.RuntimeID) == "" {
 		return base, nil
 	}
+	observation.diagnostics["required_selector"] = base.NodeSelector
 	runtimeObj, err := s.Store.GetRuntime(app.Spec.RuntimeID)
 	if err != nil {
 		return runtimepkg.SchedulingConstraints{}, fmt.Errorf("load app runtime %s: %w", app.Spec.RuntimeID, err)
 	}
 	// Stopping a workload must not depend on a new attachment being possible.
 	if app.Spec.Replicas <= 0 {
+		observation.decision.Demand = model.SchedulingResources{}
 		return base, nil
 	}
 	if app.Spec.PersistentStorage != nil || app.Spec.Workspace != nil {
@@ -41,6 +51,8 @@ func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app mo
 		} else if found && managedDeploymentStatusReady(live, app.Spec.Replicas) {
 			observed := runtimepkg.SchedulingConstraints{NodeSelector: live.Spec.Template.Spec.NodeSelector, Tolerations: live.Spec.Template.Spec.Tolerations}
 			if desiredStringMapSubset(observed.NodeSelector, base.NodeSelector) && deploymentTargetsExpectedRollout(live, s.expectedManagedAppReleaseKey(s.Renderer.PrepareApp(app), observed), strings.TrimSpace(app.Spec.Image)) {
+				observation.decision.Outcome = "preserved"
+				observation.diagnostics["serving_selector"] = observed.NodeSelector
 				return observed, nil
 			}
 		}
@@ -61,6 +73,7 @@ func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app mo
 		}
 	}
 	if runtimeObj.Type != model.RuntimeTypeManagedShared {
+		observation.decision.Outcome = "delegated"
 		return base, nil
 	}
 	if !shouldPinManagedSharedApp(app) {
@@ -99,6 +112,12 @@ func (s *Service) selectManagedSharedAppNode(ctx context.Context, app model.App,
 
 func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, constraints runtimepkg.SchedulingConstraints, storage *storagePlacement) (string, bool, error) {
 	selector := constraints.NodeSelector
+	observation, _ := ctx.Value(schedulingObservationKey{}).(*schedulingObservation)
+	if observation == nil {
+		observation = newSchedulingObservation(app, "app_placement")
+	}
+	observation.diagnostics["required_selector"] = selector
+	observation.storage(storage)
 	client, err := s.kubeClient()
 	if err != nil {
 		if storage != nil {
@@ -107,6 +126,8 @@ func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, const
 		if s.Logger != nil {
 			s.Logger.Printf("initialize app placement client for app=%s failed, continuing with runtime-only scheduling: %v", app.ID, err)
 		}
+		observation.decision.Outcome = "delegated"
+		observation.decision.MissingEvidence = []string{"kubernetes_client"}
 		return "", false, nil
 	}
 	pods, hasNodeRequests, err := client.listAllPods(ctx)
@@ -117,8 +138,11 @@ func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, const
 		if s.Logger != nil {
 			s.Logger.Printf("resolve app node request inventory for app=%s failed, continuing with runtime-only scheduling: %v", app.ID, err)
 		}
+		observation.decision.Outcome = "delegated"
+		observation.decision.MissingEvidence = []string{"pod_resource_inventory"}
 		return "", false, nil
 	}
+	observation.resourceInventoryObserved = true
 	nodeRequestsByName := managedSharedNodeRequestsByPods(pods)
 	appRequestsByNode := managedAppRequestsByNode(app, pods)
 	readyAppNodesByName := managedReadyAppNodesByNode(app, pods)
@@ -131,12 +155,12 @@ func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, const
 	request := managedAppPlacementRequest(app)
 	policy := managedAppPlacementPolicy(app)
 	candidates := make([]managedSharedNodeCandidate, 0, len(nodeNames))
-	var rejected []string
 	for _, nodeName := range nodeNames {
 		node, found, err := client.getNode(ctx, nodeName)
 		if err != nil {
 			return "", false, fmt.Errorf("read kubernetes node %s: %w", nodeName, err)
 		}
+		nodeDecision := observation.observeNode(nodeName, node, found, nodeRequestsByName[nodeName], appRequestsByNode[nodeName], selector, constraints.Tolerations, pods, storage)
 		if !found || !nodeLabelsMatchSelector(node.Metadata.Labels, selector) {
 			continue
 		}
@@ -145,9 +169,9 @@ func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, const
 		}
 		if reason := storage.rejection(node); reason != "" {
 			if _, serving := readyAppNodesByName[nodeName]; serving {
-				return "", false, fmt.Errorf("preserving serving app on node %s; new storage placement blocked: %s", nodeName, reason)
+				observation.decision.Outcome = "rejected"
+				return "", false, fmt.Errorf("preserving serving app; new storage placement blocked: %s", observation.decision.Summary())
 			}
-			rejected = append(rejected, nodeName+": "+reason)
 			continue
 		}
 		// Preserve a healthy app's existing node pin even when the node is
@@ -155,10 +179,14 @@ func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, const
 		// new placement; it must not make reconciliation evict a serving app.
 		if len(readyAppNodesByName) == 1 {
 			if _, serving := readyAppNodesByName[nodeName]; serving {
+				nodeDecision.Eligible, nodeDecision.Preserved = true, true
+				observation.decision.Outcome = "preserved"
+				observation.decision.SelectedCandidate = nodeDecision.CandidateID
 				return nodeName, true, nil
 			}
 		}
 		requested := nodeRequestsByName[nodeName]
+		observation.capacity(nodeDecision)
 		if free, known := availablePodAddresses(node, pods); known && free < int64(app.Spec.Replicas) {
 			continue
 		}
@@ -179,19 +207,32 @@ func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, const
 		if !managedSharedNodeCandidateFitsPolicy(candidate, request, policy) {
 			continue
 		}
+		nodeDecision.Eligible = true
 		candidate.remainingCPUMilli = resourceCapacityWithRatio(candidate.allocatableCPUMilli, policy.cpuOvercommitRatio) - candidate.requestedCPUMilli - request.cpuMilli
 		candidate.remainingMemoryBytes = resourceCapacityWithRatio(candidate.allocatableMemoryBytes, policy.memoryRequestRatio) - candidate.requestedMemoryBytes - request.memoryBytes
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		if storage != nil {
-			return "", false, fmt.Errorf("no eligible storage attachment node matches runtime/capacity constraints: %s", strings.Join(rejected, "; "))
+			observation.decision.Outcome = "rejected"
+			return "", false, fmt.Errorf("no eligible storage attachment node matches runtime/capacity constraints: %s", observation.decision.Summary())
 		}
+		observation.decision.Outcome = "delegated"
 		return "", false, nil
+	}
+	selected := func(name string) (string, bool, error) {
+		observation.decision.Outcome = "selected"
+		for i, detail := range observation.nodes {
+			if detail["node_name"] == name {
+				observation.decision.SelectedCandidate = observation.decision.Nodes[i].CandidateID
+				break
+			}
+		}
+		return name, true, nil
 	}
 	for _, candidate := range candidates {
 		if _, ok := appRequestsByNode[candidate.nodeName]; ok {
-			return candidate.nodeName, true, nil
+			return selected(candidate.nodeName)
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -205,7 +246,7 @@ func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, const
 		}
 		return left.nodeName < right.nodeName
 	})
-	return candidates[0].nodeName, true, nil
+	return selected(candidates[0].nodeName)
 }
 
 func managedSharedNodeRequestsByPods(pods []kubePod) map[string]managedSharedNodeRequests {

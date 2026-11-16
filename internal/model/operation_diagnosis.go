@@ -20,6 +20,7 @@ type OperationDiagnosis struct {
 	ProbableCause          *OperationDiagnosisCause    `json:"probable_cause,omitempty"`
 	RecommendedNextActions []string                    `json:"recommended_next_actions,omitempty"`
 	BuilderPlacement       *BuilderPlacementInspection `json:"builder_placement,omitempty"`
+	SchedulingDecision     *SchedulingDecision         `json:"scheduling_decision,omitempty"`
 	DependencyChain        []string                    `json:"dependency_chain,omitempty"`
 	BlockedBy              []OperationDiagnosisBlocker `json:"blocked_by,omitempty"`
 	ControllerLane         *OperationControllerLane    `json:"controller_lane,omitempty"`

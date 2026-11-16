@@ -343,11 +343,27 @@ func readyLonghornAttachmentNodes(ctx context.Context, client *kubeClient) (map[
 }
 
 func (p *storagePlacement) rejection(node kubeNode) string {
+	if rejection := p.rejectionDetail(node); rejection != nil {
+		return rejection.detail
+	}
+	return ""
+}
+
+type storagePlacementRejection struct {
+	code, message, detail string
+}
+
+func (r *storagePlacementRejection) Error() string { return r.detail }
+
+func (p *storagePlacement) rejectionDetail(node kubeNode) *storagePlacementRejection {
 	if p == nil {
-		return ""
+		return nil
 	}
 	for _, c := range p.claims {
 		prefix := "claim " + c.name + ": "
+		reject := func(code, message, detail string) *storagePlacementRejection {
+			return &storagePlacementRejection{code: code, message: message, detail: prefix + detail}
+		}
 		if c.pv == nil && c.requestedBytes > 0 {
 			observed, fits := false, false
 			for _, capacity := range p.capacities {
@@ -371,14 +387,14 @@ func (p *storagePlacement) rejection(node kubeNode) string {
 			// Unknown capacity does not prove a shortage. Multiple observations
 			// can describe separate pools: one suitable pool is sufficient.
 			if observed && !fits {
-				return prefix + "CSIStorageCapacity is below requested volume size"
+				return reject("storage_capacity_insufficient", "observed storage capacity is below the requested volume size", "CSIStorageCapacity is below requested volume size")
 			}
 		}
 		if c.pv == nil && c.selectedNode != "" && c.selectedNode != node.Metadata.Name {
-			return prefix + "selected-node requires " + c.selectedNode
+			return reject("storage_selected_node_mismatch", "the unbound volume requires a different selected node", "selected-node requires "+c.selectedNode)
 		}
 		if c.pv != nil && c.pv.Spec.NodeAffinity != nil && c.pv.Spec.NodeAffinity.Required != nil && !storageNodeSelectorMatches(node, *c.pv.Spec.NodeAffinity.Required) {
-			return prefix + "PV node affinity excludes target"
+			return reject("storage_node_affinity_mismatch", "PV node affinity excludes target", "PV node affinity excludes target")
 		}
 		if c.pv == nil && len(c.class.AllowedTopologies) > 0 {
 			match := false
@@ -396,22 +412,22 @@ func (p *storagePlacement) rejection(node kubeNode) string {
 				match = match || ok
 			}
 			if !match {
-				return prefix + "StorageClass allowedTopologies excludes target"
+				return reject("storage_topology_mismatch", "StorageClass allowedTopologies excludes target", "StorageClass allowedTopologies excludes target")
 			}
 		}
 		if c.driver != "" && !p.csiNodes[node.Metadata.Name][c.driver] {
-			return prefix + "CSI driver " + c.driver + " is not registered on target"
+			return reject("storage_driver_unavailable", "the required CSI driver is not registered on target", "CSI driver "+c.driver+" is not registered on target")
 		}
 		if c.driver == longhornCSIDriver && !p.longhornNodes[node.Metadata.Name] {
-			return prefix + "target is not a Ready Longhorn attachment node"
+			return reject("storage_attachment_node_unready", "target is not a Ready storage attachment node", "target is not a Ready Longhorn attachment node")
 		}
 		for attached := range c.attachedNodes {
 			if attached != node.Metadata.Name {
-				return prefix + "volume is attached or in use on " + attached + "; fenced migration required"
+				return reject("storage_single_writer_conflict", "volume is attached or in use on another node; fenced migration required", "volume is attached or in use on "+attached+"; fenced migration required")
 			}
 		}
 	}
-	return ""
+	return nil
 }
 
 func storageNodeSelectorMatches(node kubeNode, selector corev1.NodeSelector) bool {
@@ -465,10 +481,18 @@ func (s *Service) appStoragePlacement(ctx context.Context, client *kubeClient, a
 
 // Validate at the write boundary as well: online rollout, recovery, and
 // rollback must not bypass the storage-aware placement decision.
-func (s *Service) validateAppStoragePlacement(ctx context.Context, client *kubeClient, app model.App, scheduling runtime.SchedulingConstraints, objects []map[string]any) error {
+func (s *Service) validateAppStoragePlacement(ctx context.Context, client *kubeClient, app model.App, scheduling runtime.SchedulingConstraints, objects []map[string]any) (err error) {
 	if app.Spec.Replicas <= 0 || (app.Spec.PersistentStorage == nil && app.Spec.Workspace == nil) {
 		return nil
 	}
+	observation := newSchedulingObservation(app, "storage_validation")
+	observation.diagnostics["required_selector"] = scheduling.NodeSelector
+	defer func() {
+		s.recordSchedulingObservation(ctx, app, observation, err)
+		if err != nil && observation.decision.Outcome == "observation_failed" {
+			err = schedulingObservationError{cause: err}
+		}
+	}()
 	live, found, err := client.getDeployment(ctx, runtime.NamespaceForTenant(app.TenantID), runtime.RuntimeAppResourceName(app))
 	if err != nil {
 		return fmt.Errorf("observe serving workload before storage preflight: %w", err)
@@ -485,6 +509,7 @@ func (s *Service) validateAppStoragePlacement(ctx context.Context, client *kubeC
 	if canonicalOnly && found && deploymentTargetsExpectedRollout(live, s.expectedManagedAppReleaseKey(s.Renderer.PrepareApp(app), scheduling), strings.TrimSpace(app.Spec.Image)) && managedDeploymentStatusReady(live, app.Spec.Replicas) {
 		// No replacement is needed. Missing inventory must not evict an
 		// already verified serving release.
+		observation.decision.Outcome = "preserved"
 		return nil
 	}
 	storage, err := s.appStoragePlacement(ctx, client, app, objects)
@@ -494,29 +519,44 @@ func (s *Service) validateAppStoragePlacement(ctx context.Context, client *kubeC
 	if storage == nil {
 		return nil
 	}
+	observation.storage(storage)
 	if err := storage.validateSameNodeOnlineRollout(app, scheduling, !found); err != nil {
-		return err
+		observation.decision.Outcome = "rejected"
+		rejection, known := err.(*storagePlacementRejection)
+		if !known {
+			observation.decision.Outcome = "observation_failed"
+			return err
+		}
+		observation.decision.Rejections = []model.SchedulingRejection{{Code: rejection.code, Message: rejection.message}}
+		observation.diagnostics["storage_rollout_rejection"] = err.Error()
+		return fmt.Errorf("storage placement rejected: %s", observation.decision.Summary())
 	}
 	names, err := client.listNodeNames(ctx)
 	if err != nil {
 		return err
 	}
+	sort.Strings(names)
 	eligible := 0
 	for _, name := range names {
 		node, found, err := client.getNode(ctx, name)
 		if err != nil {
 			return err
 		}
+		nodeDecision := observation.observeNode(name, node, found, managedSharedNodeRequests{}, managedSharedNodeRequests{}, scheduling.NodeSelector, scheduling.Tolerations, nil, storage)
 		if !found || !nodeLabelsMatchSelector(node.Metadata.Labels, scheduling.NodeSelector) || !kubeNodeReady(node) || node.Spec.Unschedulable || kubeNodeConditionTrue(node.Status.Conditions, "DiskPressure") || !kubeTaintsTolerated(node.Spec.Taints, scheduling.Tolerations) {
 			continue
 		}
 		if reason := storage.rejection(node); reason != "" {
-			return fmt.Errorf("storage placement rejected node %s: %s", name, reason)
+			observation.decision.Outcome = "rejected"
+			return fmt.Errorf("storage placement rejected: %s", observation.decision.Summary())
 		}
+		nodeDecision.Eligible = true
 		eligible++
 	}
 	if eligible == 0 {
-		return fmt.Errorf("storage placement has no eligible node within the requested runtime")
+		observation.decision.Outcome = "rejected"
+		return fmt.Errorf("storage placement has no eligible node within the requested runtime: %s", observation.decision.Summary())
 	}
+	observation.decision.Outcome = "selected"
 	return nil
 }

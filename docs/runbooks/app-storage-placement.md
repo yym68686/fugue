@@ -17,6 +17,49 @@ Existing PVC allocation is monotonic during reconciliation: preserve the larger 
 
 Replica-only intent is compared after removing Fugue-generated environment fields. User environment changes and restart tokens remain significant. A requested replica count of zero is an intentional stop, including for a Pending workload; it does not need a healthy storage target and preserves the PVC.
 
+## Durable scheduling decisions
+
+Every managed operation that evaluates application placement, surge capacity,
+or the workload-write storage boundary records `scheduling_decision` evidence
+before returning. Read it with:
+
+```sh
+fugue operation show op_example --json
+fugue api request GET '/v1/operations/op_example/evidence?type=scheduling_decision&include_payload=true'
+```
+
+The snapshot records the actual evaluation time, stage and outcome, each observed
+candidate's rejection codes, allocatable resources, total requests, existing-app
+requests subtracted for replacement, effective requests, memory-policy ratio and
+budget, CPU ranking ratio, Pod IP availability, and volume-affinity matches.
+Application placement uses the existing workload-class budget and app request;
+surge admission uses the rendered Pod request (including sidecars), a 100% memory
+budget and no subtraction of the serving Pod. CPU remains a ranking input, not a
+new Fugue admission gate. `resource_inventory_observed=false` distinguishes a
+storage-only recheck or an unrelated runtime from an observed zero request.
+
+Tenant views use observation-local `candidate-N` and `volume-N` aliases, expose
+capacity only for runtime-matching candidates, and never include physical node
+names, selector values, PV identities, host paths or foreign workload identities.
+Platform administrators can read the separate `scheduling_diagnostics` payload
+through the operation evidence endpoint with `include_payload=true`. It contains
+the alias mapping, required selectors, taints and PVC/PV affinity expressions,
+but not complete Node/Pod/PV specifications or application environment. Timelines
+and debug bundles omit that administrator-only payload.
+
+Inventories are split into correlated parts under the existing evidence row-size
+and retention bounds. Readers require a complete latest observation and a failure
+message matching that observation before reporting a confirmed scheduling cause.
+Missing, truncated or superseded evidence is explicitly insufficient; current
+node status must never be substituted for historical evidence. Earlier operations
+without snapshots remain `insufficient_evidence` with
+`missing_evidence=[scheduling_decision]`, not a fabricated memory/storage diagnosis
+or a recommendation to redeploy merely to obtain logs.
+
+Evidence writes are best-effort and do not alter the scheduling outcome. Healthy
+serving-node preservation, unknown-observation fallback, deliberate stops,
+replica counts, capacity budgets and volume single-writer protections are unchanged.
+
 ## Release and verification
 
 Publish controller code through `main` and the declarative CI release. The Helm chart grants storage observation permissions for new installations. Existing production permissions are maintained by the independent storage observation configuration step in the same CI workflow.

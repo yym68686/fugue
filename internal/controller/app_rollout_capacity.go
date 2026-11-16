@@ -31,7 +31,7 @@ func (s *Service) preflightManagedAppZeroDowntimeRolloutCapacity(ctx context.Con
 	if !found {
 		return nil
 	}
-	message, err := zeroDowntimeRolloutCapacityBlockMessage(ctx, client, deployment, app.Spec.Replicas)
+	message, err := s.observeZeroDowntimeCapacity(ctx, app, client, deployment)
 	if err != nil {
 		return err
 	}
@@ -41,11 +41,33 @@ func (s *Service) preflightManagedAppZeroDowntimeRolloutCapacity(ctx context.Con
 	return nil
 }
 
+func (s *Service) observeZeroDowntimeCapacity(ctx context.Context, app model.App, client *kubeClient, deployment kubeDeployment) (message string, err error) {
+	observation := newSchedulingObservation(app, "surge_capacity")
+	observation.decision.MemoryRequestRatio, observation.decision.CPUOvercommitRatio = 1, 1
+	observation.decision.RequiredPodAddresses = 1
+	ctx = context.WithValue(ctx, schedulingObservationKey{}, observation)
+	defer func() {
+		s.recordSchedulingObservation(ctx, app, observation, err)
+		if err != nil && observation.decision.Outcome == "observation_failed" {
+			err = schedulingObservationError{cause: err}
+		}
+	}()
+	return zeroDowntimeRolloutCapacityBlockMessage(ctx, client, deployment, app.Spec.Replicas)
+}
+
 func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeClient, deployment kubeDeployment, desiredReplicas int) (string, error) {
 	if client == nil || desiredReplicas <= 0 || !deploymentNeedsZeroDowntimeSurgeCapacity(deployment) {
 		return "", nil
 	}
 	request := deploymentTemplateRequests(deployment)
+	observation, _ := ctx.Value(schedulingObservationKey{}).(*schedulingObservation)
+	if observation == nil {
+		observation = newSchedulingObservation(model.App{}, "surge_capacity")
+		observation.decision.MemoryRequestRatio, observation.decision.CPUOvercommitRatio = 1, 1
+		observation.decision.RequiredPodAddresses = 1
+	}
+	observation.decision.Demand = schedulingResources(request)
+	observation.diagnostics["required_selector"] = deployment.Spec.Template.Spec.NodeSelector
 	// CPU is compressible and its request is a contention guarantee, not a
 	// forecast of the surge Pod's peak demand. Kubernetes still enforces that
 	// request; Fugue's preflight only hard-gates non-compressible resources.
@@ -54,8 +76,11 @@ func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeCl
 	}
 	pods, found, err := client.listAllPods(ctx)
 	if err != nil || !found {
+		observation.decision.Outcome = "observation_failed"
+		observation.decision.MissingEvidence = []string{"pod_resource_inventory"}
 		return "", err
 	}
+	observation.resourceInventoryObserved = true
 	requestsByNode := managedSharedNodeRequestsByPods(pods)
 	nodeNames, err := client.listNodeNames(ctx)
 	if err != nil {
@@ -69,9 +94,11 @@ func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeCl
 		if err != nil {
 			return "", fmt.Errorf("read kubernetes node %s for zero-downtime capacity preflight: %w", nodeName, err)
 		}
+		nodeDecision := observation.observeNode(nodeName, node, found, requestsByNode[nodeName], managedSharedNodeRequests{}, deployment.Spec.Template.Spec.NodeSelector, deployment.Spec.Template.Spec.Tolerations, pods, nil)
 		if !found || !nodeEligibleForDeploymentTemplate(node, deployment) {
 			continue
 		}
+		observation.capacity(nodeDecision)
 		requested := requestsByNode[nodeName]
 		candidate := rolloutCapacityCandidate{
 			nodeName:               nodeName,
@@ -80,14 +107,18 @@ func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeCl
 		}
 		candidate.remainingPodAddresses, candidate.podAddressesKnown = availablePodAddresses(node, pods)
 		if rolloutCapacityCandidateFits(candidate, request) {
+			nodeDecision.Eligible = true
+			observation.decision.Outcome = "selected"
+			observation.decision.SelectedCandidate = nodeDecision.CandidateID
 			return "", nil
 		}
 		candidates = append(candidates, candidate)
 	}
 
 	required := formatRolloutCapacityRequest(request)
+	observation.decision.Outcome = "rejected"
 	if len(candidates) == 0 {
-		return fmt.Sprintf("zero-downtime rollout blocked: no schedulable node matches the deployment template; surge pod requires %s", required), nil
+		return fmt.Sprintf("zero-downtime rollout blocked: no schedulable node matches the deployment template; surge pod requires %s; %s", required, observation.decision.Summary()), nil
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		left := candidates[i]
@@ -101,11 +132,19 @@ func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeCl
 		return left.nodeName < right.nodeName
 	})
 	best := candidates[0]
+	alias := "candidate"
+	for i, detail := range observation.nodes {
+		if detail["node_name"] == best.nodeName {
+			alias = observation.decision.Nodes[i].CandidateID
+			break
+		}
+	}
 	return fmt.Sprintf(
-		"zero-downtime rollout blocked: no eligible node has capacity for the surge pod; best node %s has %s free, surge pod requires %s",
-		best.nodeName,
+		"zero-downtime rollout blocked: no eligible node has capacity for the surge pod; best node %s has %s free, surge pod requires %s; %s",
+		alias,
 		formatRolloutCapacityCandidate(best),
 		required,
+		observation.decision.Summary(),
 	), nil
 }
 

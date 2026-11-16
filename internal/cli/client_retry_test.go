@@ -207,8 +207,11 @@ func TestSourceUploadChunkUsesConfigurableTimeout(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("resume upload session: %v", err)
 			}
-			if chunks.Load() != 1 {
-				t.Fatalf("expected one chunk request without retries, got %d", chunks.Load())
+			// A deadline may expire during connection setup, before the handler
+			// observes the request. Both zero and one attempts are valid on the
+			// timeout path; more than one would be an unintended retry.
+			if got := chunks.Load(); got > 1 || !tt.wantTimeout && got != 1 {
+				t.Fatalf("expected no chunk retries (one request on success), got %d", got)
 			}
 			if client.httpClient.Timeout != tt.requestTimeout {
 				t.Fatalf("source upload changed base timeout from %s to %s", tt.requestTimeout, client.httpClient.Timeout)
