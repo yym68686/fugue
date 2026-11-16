@@ -1047,6 +1047,11 @@ jobs:
           version: v4.2.0
       - name: Download Go modules before the bounded test budget
         run: go mod download
+      - name: Compile test binaries before the bounded test budget
+        timeout-minutes: 10
+        # Cold compilation is separately bounded. The prepush step below still
+        # runs every selected test; an empty run here never substitutes for it.
+        run: go test ./... -run '^$'
       - name: Run the repository prepush contract
         env:
           PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
