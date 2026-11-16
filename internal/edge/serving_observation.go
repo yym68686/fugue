@@ -50,28 +50,30 @@ type servingProbeObservation struct {
 }
 
 type servingNegativeObservation struct {
-	Stage     string `json:"stage,omitempty"`
-	Sequence  int64  `json:"heartbeat_sequence,omitempty"`
-	Attempted int    `json:"attempted"`
-	Accepted  int    `json:"accepted"`
-	Error     string `json:"error_class,omitempty"`
+	Stage     string                                      `json:"stage,omitempty"`
+	Sequence  int64                                       `json:"heartbeat_sequence,omitempty"`
+	Attempted int                                         `json:"attempted"`
+	Accepted  int                                         `json:"accepted"`
+	Error     string                                      `json:"error_class,omitempty"`
+	Request   *platformconsumer.RequestFailureObservation `json:"request_failure,omitempty"`
 }
 
 type servingObservation struct {
-	Sequence   uint64                        `json:"sequence"`
-	StartedAt  time.Time                     `json:"started_at"`
-	FinishedAt time.Time                     `json:"finished_at"`
-	Stage      string                        `json:"stage"`
-	Outcome    string                        `json:"outcome"`
-	Error      string                        `json:"error_class,omitempty"`
-	Cause      string                        `json:"cause_class,omitempty"`
-	Bundle     string                        `json:"bundle_hash,omitempty"`
-	Applied    servingPublicationObservation `json:"applied"`
-	Expected   servingPublicationObservation `json:"expected"`
-	Reused     bool                          `json:"reused_probes"`
-	Routes     servingProbeObservation       `json:"routes"`
-	TLS        servingProbeObservation       `json:"tls"`
-	Negative   servingNegativeObservation    `json:"negative"`
+	Sequence   uint64                                      `json:"sequence"`
+	StartedAt  time.Time                                   `json:"started_at"`
+	FinishedAt time.Time                                   `json:"finished_at"`
+	Stage      string                                      `json:"stage"`
+	Outcome    string                                      `json:"outcome"`
+	Error      string                                      `json:"error_class,omitempty"`
+	Cause      string                                      `json:"cause_class,omitempty"`
+	Bundle     string                                      `json:"bundle_hash,omitempty"`
+	Applied    servingPublicationObservation               `json:"applied"`
+	Expected   servingPublicationObservation               `json:"expected"`
+	Reused     bool                                        `json:"reused_probes"`
+	Routes     servingProbeObservation                     `json:"routes"`
+	TLS        servingProbeObservation                     `json:"tls"`
+	Negative   servingNegativeObservation                  `json:"negative"`
+	Request    *platformconsumer.RequestFailureObservation `json:"request_failure,omitempty"`
 }
 
 func servingIdentityHash(value string) string {
@@ -187,6 +189,14 @@ func servingTLSObservation(receipt *platformTLSReadinessReceipt, version string,
 func cloneServingObservation(value servingObservation) servingObservation {
 	value.Routes.Failures = slices.Clone(value.Routes.Failures)
 	value.TLS.Failures = slices.Clone(value.TLS.Failures)
+	if value.Request != nil {
+		copy := *value.Request
+		value.Request = &copy
+	}
+	if value.Negative.Request != nil {
+		copy := *value.Negative.Request
+		value.Negative.Request = &copy
+	}
 	return value
 }
 

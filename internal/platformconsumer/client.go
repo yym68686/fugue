@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"reflect"
@@ -283,16 +284,19 @@ func (c Client) jsonRevalidatedBudget(ctx context.Context, endpoint, token, meth
 		client = &clone
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	observation := newRequestFailureTrace(req.URL.Path)
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), observation.trace()))
+	defer observation.finish("complete", 0, nil)
 	resp, err := client.Do(req)
 	if err != nil {
-		return ErrUnavailable
+		return &requestFailureError{observation: observation.finish("request", 0, err)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified && validator != "" && unchanged != nil && resp.Header.Get("ETag") == validator {
 		return unchanged(resp.Header)
 	}
 	if resp.StatusCode != http.StatusOK {
-		status := &responseStatusError{Code: resp.StatusCode}
+		status := &responseStatusError{Code: resp.StatusCode, observation: observation.finish("status", resp.StatusCode, nil)}
 		if resp.StatusCode == http.StatusConflict && (req.URL.Path == "/v1/platform-state/consumers/trusted-heartbeat" || req.URL.Path == "/v1/platform-state/consumers/shadow-heartbeat") {
 			var body struct {
 				Code string `json:"code"`
@@ -322,7 +326,7 @@ func (c Client) jsonRevalidatedBudget(ctx context.Context, endpoint, token, meth
 	}
 	var networkErr net.Error
 	if errors.Is(decodeErr, context.DeadlineExceeded) || errors.Is(decodeErr, context.Canceled) || (errors.As(decodeErr, &networkErr) && networkErr.Timeout()) {
-		return ErrUnavailable
+		return &requestFailureError{observation: observation.finish("decode", resp.StatusCode, decodeErr)}
 	}
 	if bodyLimit.N <= 0 {
 		return errors.New("platform response exceeds limit or is incomplete")
@@ -330,7 +334,10 @@ func (c Client) jsonRevalidatedBudget(ctx context.Context, endpoint, token, meth
 	return errors.New("platform response invalid")
 }
 
-type responseStatusError struct{ Code int }
+type responseStatusError struct {
+	Code        int
+	observation RequestFailureObservation
+}
 
 func (e *responseStatusError) Error() string {
 	return fmt.Sprintf("platform request rejected: HTTP %d", e.Code)

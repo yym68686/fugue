@@ -32,7 +32,7 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "valid-group-generation", "valid-static-policy", "valid-bundle-renewal", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-group-generation", "valid-static-policy", "valid-bundle-renewal", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "positive-report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
@@ -165,6 +165,14 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 						t.Error("executor capability missing")
 					}
 					reports = append(reports, h)
+					if mode == "positive-report-rejected" {
+						if h.ApplyStatus == "applied" {
+							w.WriteHeader(http.StatusBadGateway)
+						} else {
+							w.WriteHeader(http.StatusServiceUnavailable)
+						}
+						return
+					}
 					if rejectReport && h.ArtifactKind == route.ArtifactKind {
 						w.WriteHeader(http.StatusServiceUnavailable)
 						return
@@ -258,6 +266,15 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				return &platformTLSCertificate{Leaf: leaf, ValidUntil: leaf.NotAfter}, nil
 			}
 			err = s.syncPlatformServing(context.Background(), probe, tlsProbe)
+			if mode == "positive-report-rejected" {
+				s.servingObservations.mu.Lock()
+				observed := cloneServingObservation(s.servingObservations.latest)
+				s.servingObservations.mu.Unlock()
+				if err == nil || len(reports) != 3 || observed.Stage != "positive_route_report" || observed.Request == nil || observed.Request.HTTPStatus != 502 || observed.Negative.Request == nil || observed.Negative.Request.HTTPStatus != 503 || observed.Negative.Attempted != 2 || observed.Negative.Accepted != 0 || s.platformServingEvidence != nil {
+					t.Fatal("original and negative request failures were conflated", err, reports, observed)
+				}
+				return
+			}
 			if mode == "tls-failed" || mode == "route-proof-mismatch" || mode == "cache-missing" || mode == "caddy-not-applied" {
 				s.servingObservations.mu.Lock()
 				observed := cloneServingObservation(s.servingObservations.latest)
@@ -339,6 +356,19 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				rejectReport = mode == "report-rejected"
 				if err := s.syncPlatformServingOnce(context.Background(), probe, tlsProbe); err == nil || len(reports) != 4 || s.platformServingEvidence != nil {
 					t.Fatal("failure retained positive convergence", err, reports)
+				}
+				if mode == "report-rejected" {
+					s.servingObservations.mu.Lock()
+					observed := cloneServingObservation(s.servingObservations.latest)
+					s.servingObservations.mu.Unlock()
+					if observed.Stage != "executor_validation" || observed.Cause != "executor_not_current" || observed.Request != nil || observed.Negative.Request == nil || observed.Negative.Request.HTTPStatus != 503 || observed.Negative.Request.Operation != "trusted_heartbeat" || observed.Negative.Request.Phase != "status" {
+						t.Fatal("negative reporting failure was confused with original verification failure", observed)
+					}
+					cloned := cloneServingObservation(observed)
+					cloned.Negative.Request.HTTPStatus = 401
+					if observed.Negative.Request.HTTPStatus != 503 {
+						t.Fatal("request receipt aliases snapshot")
+					}
 				}
 				for _, h := range reports[2:] {
 					assertTrafficServingFailure(t, h)

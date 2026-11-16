@@ -112,7 +112,12 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
 	observation := servingObservation{StartedAt: time.Now().UTC(), Stage: "selection", Outcome: "ok"}
-	defer func() { s.retainServingObservation(observation, result) }()
+	defer func() {
+		if observation.Cause == "" {
+			observation.Request = platformconsumer.RequestFailure(result)
+		}
+		s.retainServingObservation(observation, result)
+	}()
 	defer func() {
 		if result != nil {
 			if ctx.Err() != nil {
@@ -243,6 +248,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 			return
 		}
 		observation.Cause = servingErrorClass(result)
+		observation.Request = platformconsumer.RequestFailure(result)
 		if ctx.Err() != nil || servingObservationChanged(result) {
 			return
 		}
@@ -410,7 +416,10 @@ func (s *Service) nextPlatformServingSequence() (int64, error) {
 }
 
 func (s *Service) reportPlatformServingFailure(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, bundle model.EdgeRouteBundle, selection routeSourceSelection, assignments []model.PlatformConsumerAssignment, observation *servingNegativeObservation) (result error) {
-	defer func() { observation.Error = servingErrorClass(result) }()
+	defer func() {
+		observation.Error = servingErrorClass(result)
+		observation.Request = platformconsumer.RequestFailure(result)
+	}()
 	observation.Stage = "activation"
 	current := func() error {
 		selected, err := s.selectRouteBundleSource()

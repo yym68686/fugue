@@ -105,6 +105,17 @@ surviving only in rotated-away logs. Reading the provider performs no additional
 probe, network or filesystem work, and none of the checks, reports, retries,
 signed probe bounds, executor configuration or public DNS selection change.
 
+When a platform request fails, the original check and its subsequent negative
+report each retain their own `request_failure`, if present. It distinguishes a
+non-200 HTTP response from a failed request or timed-out response decode, with
+the status, fixed operation/class, start time, elapsed milliseconds and observed
+DNS/connect/TLS/connection/write/first-byte callbacks. Completion callbacks only
+mean the callback ran, not that the phase succeeded. Missing callbacks are not
+proof of zero latency; connection attempts may overlap. Late callbacks cannot
+rewrite a completed receipt. No URL, query, address, body, token or raw error is
+retained. Existing outage and conflict classifications, request budgets, retries,
+response validation and reporting remain unchanged.
+
 The telemetry process's owner-only `GET /v1/snapshots/exports` also separates
 export attempts from their HTTP work. Exporter counters include encoding and all
 of that attempt's requests; `http` has eight fixed purposes (metrics, logs, five
