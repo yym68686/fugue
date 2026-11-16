@@ -89,7 +89,9 @@ func (s *Store) prepareOrdinaryCompilerInputProof(ctx context.Context, roots []i
 	return s.prepareCompilerInputProof(ctx, roots, task, publication, consumer, reads, true)
 }
 
-func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection, ordinary bool) (*compilerInputActivationProof, error) {
+func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarchive.HotRoot, task *model.NodeUpdateTask, publication *compilerInputPublicationIntent, consumer *compilerInputConsumerIntent, reads []PlatformInputReadSelection, ordinary bool) (_ *compilerInputActivationProof, returnedErr error) {
+	check := "arguments"
+	defer func() { observePlatformInputReadFailure(ctx, "prepare", check, nil, nil, returnedErr) }()
 	if s == nil || s.db == nil || len(roots) == 0 && publication == nil && consumer == nil && len(reads) == 0 || len(roots) > compilerInputHotRootLimit || task != nil && publication != nil || consumer != nil && (task != nil || publication != nil || len(roots) != 0) || len(reads) != 0 && (task != nil || publication != nil || consumer != nil || len(roots) != 0) {
 		return nil, ErrInvalidInput
 	}
@@ -122,27 +124,33 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	keyring := s.platformArtifactKeyring
 	proof.keyringRevision = s.platformArtifactKeyringRevision
 	s.platformArtifactKeyringMu.RUnlock()
+	check = "begin_snapshot"
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	check = "transaction_limits"
 	for _, statement := range []string{`SET LOCAL statement_timeout='5s'`, `SET LOCAL lock_timeout='250ms'`, `SET LOCAL work_mem='1MB'`, `SET LOCAL max_parallel_workers_per_gather=0`} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return nil, err
 		}
 	}
+	check = "zero_temp"
 	if err := schemamigrate.EnforceCompilerInputZeroTemp(ctx, tx); err != nil {
 		return nil, err
 	}
+	check = "snapshot_horizon"
 	if err := tx.QueryRowContext(ctx, `SELECT pg_snapshot_xmax(pg_current_snapshot())::text::bigint`).Scan(&proof.horizon); err != nil {
 		return nil, err
 	}
+	check = "source_epoch"
 	proof.sourceEpoch, err = readInputArchiveEpoch(ctx, tx, -1)
 	if err != nil {
 		return nil, err
 	}
 	if ordinary {
+		check = "capability_phase"
 		proof.capabilityOnly, err = compilerInputCapabilityPhase(ctx, tx, false)
 		if err != nil {
 			return nil, err
@@ -152,6 +160,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	var publicationVerified []bool
 	publicationBytes := 0
 	if consumer != nil {
+		check = "consumer_roots"
 		roots, err = prepareCompilerInputConsumerRoots(ctx, tx, consumer)
 		if err != nil {
 			return nil, err
@@ -162,6 +171,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 		proof.consumerKind = consumer.artifactKind
 	}
 	if len(reads) != 0 {
+		check = "read_roots"
 		roots, publicationSnapshots, publicationBytes, err = prepareCompilerInputReadRoots(ctx, tx, proof, reads)
 		if err != nil {
 			return nil, err
@@ -169,6 +179,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 		publicationVerified = make([]bool, len(publicationSnapshots))
 	}
 	if publication != nil {
+		check = "publication_roots"
 		roots, publicationSnapshots, err = prepareCompilerInputPublicationRoots(ctx, tx, proof, *publication)
 		if err != nil {
 			return nil, err
@@ -196,6 +207,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 		}
 	}
 	if proof.capabilityOnly {
+		check = "capability_commit"
 		proof.closure.Roots = append([]inputarchive.HotRoot(nil), roots...)
 		if err := tx.Commit(); err != nil {
 			return nil, err
@@ -234,6 +246,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 		}
 		return 0, nil
 	}
+	check = "closure_resolution"
 	proof.closure, err = inputarchive.PlanHotClosureBatched(ctx, roots,
 		inputarchive.HotClosureBudget{Roots: compilerInputHotRootLimit, Nodes: 32768, Edges: 262144, Bindings: 524288},
 		func(ctx context.Context, refs []inputarchive.HotReference) (map[inputarchive.HotReference]inputarchive.HotNode, error) {
@@ -347,14 +360,17 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	if err != nil {
 		return nil, err
 	}
+	check = "closure_complete"
 	if !proof.closure.MetadataComplete || len(proof.closure.Blockers) != 0 {
 		return nil, fmt.Errorf("activation dependency closure incomplete: %w", ErrConflict)
 	}
+	check = "publication_integrity"
 	for _, verified := range publicationVerified {
 		if !verified {
 			return nil, fmt.Errorf("dependency LKG integrity unavailable: %w", ErrConflict)
 		}
 	}
+	check = "witness_consistency"
 	seen := map[string]bool{}
 	physical := make(map[string]compilerInputActivationTuple, len(proof.tuples))
 	unique := proof.tuples[:0]
@@ -371,6 +387,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 	}
 	proof.tuples = unique
 	for _, node := range proof.closure.Nodes {
+		check = "dependency_witness"
 		var table, key string
 		switch node.Identity.Kind {
 		case "artifact":
@@ -382,6 +399,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 		case "task":
 			table, key = "fugue_node_update_tasks", node.Identity.ID
 		case "input":
+			check = "input_manifest"
 			// Inline historical inputs cannot be consumed until the existing
 			// durable local-pin protocol can prove their independent bytes.
 			if node.Format == "legacy-inline" {
@@ -414,6 +432,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 			proof.tuples = append(proof.tuples, witness)
 		}
 		if node.Identity.Kind == "task" {
+			check = "task_configuration"
 			var taskType string
 			var raw []byte
 			if prospective {
@@ -453,6 +472,7 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 		a, b := proof.tuples[i], proof.tuples[j]
 		return a.table < b.table || a.table == b.table && a.key < b.key
 	})
+	check = "snapshot_commit"
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -683,7 +703,9 @@ func (s *Store) withPreparedCompilerInputTaskCreation(ctx context.Context, proof
 	return s.consumePreparedCompilerInput(ctx, proof, nil, true, nil, apply)
 }
 
-func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compilerInputActivationProof, pins []compilerInputPinBinding, pendingOnly bool, beforeInputLocks, apply func(context.Context, *sql.Tx) error) error {
+func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compilerInputActivationProof, pins []compilerInputPinBinding, pendingOnly bool, beforeInputLocks, apply func(context.Context, *sql.Tx) error) (returnedErr error) {
+	check := "proof_and_pins"
+	defer func() { observePlatformInputReadFailure(ctx, "admission", check, nil, nil, returnedErr) }()
 	if s == nil || proof == nil || proof.store != s || proof.database != s.db || apply == nil ||
 		!time.Now().Before(proof.expires) || pendingOnly != (proof.newTask != nil) ||
 		!pendingOnly && len(pins) != len(proof.inputs) || !proof.closure.MetadataComplete && !(proof.ordinary && proof.capabilityOnly) {
@@ -718,17 +740,20 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	// Recheck revision at entry and atomically with commit. Do not hold this
 	// read lock across apply: its ordinary signature checks take the same lock
 	// and a queued writer would make a recursive read lock deadlock.
+	check = "entry_keyring_revision"
 	s.platformArtifactKeyringMu.RLock()
 	currentRevision := s.platformArtifactKeyringRevision
 	s.platformArtifactKeyringMu.RUnlock()
 	if currentRevision != proof.keyringRevision {
 		return ErrConflict
 	}
+	check = "begin_transaction"
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	check = "transaction_limits"
 	if err := setCompilerInputAdmissionTimeouts(ctx, tx); err != nil {
 		return err
 	}
@@ -736,18 +761,22 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	// This hook may acquire those locks, never activate or do body/network I/O;
 	// every proof, epoch and pin check below still precedes apply.
 	if beforeInputLocks != nil {
+		check = "publication_locks"
 		if err := beforeInputLocks(ctx, tx); err != nil {
 			return err
 		}
 	}
+	check = "admission_barrier"
 	epoch, err := lockCompilerInputAdmissionBarrier(ctx, tx)
 	if err != nil {
 		return err
 	}
+	check = "source_epoch"
 	if epoch != proof.sourceEpoch {
 		return ErrConflict
 	}
 	if proof.ordinary {
+		check = "capability_phase"
 		capability, err := compilerInputCapabilityPhase(ctx, tx, true)
 		if err != nil {
 			return err
@@ -756,6 +785,7 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 			return ErrConflict
 		}
 	}
+	check = "snapshot_horizon"
 	var horizon int64
 	if err := tx.QueryRowContext(ctx, `SELECT pg_snapshot_xmax(pg_current_snapshot())::text::bigint`).Scan(&horizon); err != nil {
 		return err
@@ -764,10 +794,12 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 		return ErrConflict
 	}
 	if len(ordered) > 0 {
+		check = "pin_schema"
 		if err := schemamigrate.VerifyCompilerInputLocalPins(ctx, tx); err != nil {
 			return err
 		}
 	}
+	check = "verified_pins"
 	for start := 0; start < len(ordered); start += 32 {
 		if err := checkCompilerInputVerifiedPins(ctx, tx, ordered[start:min(start+32, len(ordered))], epoch); err != nil {
 			return err
@@ -793,28 +825,35 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 		}
 	}
 	if guard != "" {
+		check = "lkg_relation_guard"
 		if _, err := tx.ExecContext(ctx, guard); err != nil {
 			return err
 		}
 	}
+	check = "dependency_witness"
 	for _, original := range proof.tuples {
 		current := original
 		if err := readCompilerInputActivationTupleMode(ctx, tx, &current, true, proof.lkgReadOnly); err != nil {
+			observePlatformInputReadFailure(ctx, "admission", "dependency_read", &original, nil, err)
 			return fmt.Errorf("activation dependency no longer available: %w", ErrConflict)
 		}
 		if current != original {
+			observePlatformInputReadFailure(ctx, "admission", "dependency_changed", &original, compilerInputTupleChangedFields(original, current), ErrConflict)
 			return fmt.Errorf("activation dependency changed after preparation: %w", ErrConflict)
 		}
 	}
+	check = "apply"
 	if err := apply(ctx, tx); err != nil {
 		return err
 	}
 	// Revocation/rotation during apply rolls back all its writes. Keep this
 	// lock only through commit, after the callback's own signature checks.
+	check = "commit_keyring_or_expiry"
 	s.platformArtifactKeyringMu.RLock()
 	defer s.platformArtifactKeyringMu.RUnlock()
 	if s.platformArtifactKeyringRevision != proof.keyringRevision || !time.Now().Before(proof.expires) {
 		return ErrConflict
 	}
+	check = "commit"
 	return tx.Commit()
 }

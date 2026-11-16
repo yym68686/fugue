@@ -42,7 +42,9 @@ func compilerInputReadRetainsOriginal(reads []PlatformInputReadSelection) bool {
 // current verified input pins without R2, restoration, root installation or
 // mutation. Callers retain their original identity/selection/ownership checks
 // and recheck those after this check before disclosing data or credentials.
-func (s *Store) CheckPlatformInputRead(ctx context.Context, selections []PlatformInputReadSelection) error {
+func (s *Store) CheckPlatformInputRead(ctx context.Context, selections []PlatformInputReadSelection) (returnedErr error) {
+	phase := "selection_validation"
+	defer func() { observePlatformInputReadFailure(ctx, phase, "", nil, nil, returnedErr) }()
 	if s == nil || len(selections) == 0 || len(selections) > compilerInputHotRootLimit {
 		return ErrInvalidInput
 	}
@@ -66,16 +68,20 @@ func (s *Store) CheckPlatformInputRead(ctx context.Context, selections []Platfor
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	if !s.usingDatabase() {
+		phase = "file_read"
 		return s.checkFilePlatformInputRead(ctx, reads)
 	}
+	phase = "prepare"
 	proof, err := s.prepareOrdinaryCompilerInputProof(ctx, nil, nil, nil, nil, reads)
 	if err != nil {
 		return errors.Join(err, ErrConflict)
 	}
+	phase = "pins"
 	proof, pins, err := s.prepareCompilerInputActivationPins(ctx, proof)
 	if err != nil {
 		return errors.Join(err, ErrConflict)
 	}
+	phase = "admission"
 	return s.withPreparedCompilerInputActivation(ctx, proof, pins, func(context.Context, *sql.Tx) error { return nil })
 }
 

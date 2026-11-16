@@ -29,7 +29,9 @@ func (s *Store) prepareNodeTaskCreateAdmission(ctx context.Context, task model.N
 	return proof, nil
 }
 
-func (s *Store) prepareCompilerInputActivationPins(ctx context.Context, proof *compilerInputActivationProof) (*compilerInputActivationProof, []compilerInputPinBinding, error) {
+func (s *Store) prepareCompilerInputActivationPins(ctx context.Context, proof *compilerInputActivationProof) (_ *compilerInputActivationProof, _ []compilerInputPinBinding, returnedErr error) {
+	check := "begin_transaction"
+	defer func() { observePlatformInputReadFailure(ctx, "pins", check, nil, nil, returnedErr) }()
 	if len(proof.inputs) == 0 {
 		return proof, nil, nil
 	}
@@ -38,18 +40,22 @@ func (s *Store) prepareCompilerInputActivationPins(ctx context.Context, proof *c
 		return nil, nil, err
 	}
 	defer tx.Rollback()
+	check = "transaction_limits"
 	for _, q := range []string{`SET LOCAL statement_timeout='5s'`, `SET LOCAL lock_timeout='250ms'`, `SET LOCAL work_mem='1MB'`, `SET LOCAL max_parallel_workers_per_gather=0`} {
 		if _, err := tx.ExecContext(ctx, q); err != nil {
 			return nil, nil, err
 		}
 	}
+	check = "zero_temp"
 	if err := schemamigrate.EnforceCompilerInputZeroTemp(ctx, tx); err != nil {
 		return nil, nil, err
 	}
+	check = "pin_schema"
 	if err := schemamigrate.VerifyCompilerInputLocalPins(ctx, tx); err != nil {
 		return nil, nil, err
 	}
 	pins := make([]compilerInputPinBinding, 0, len(proof.inputs))
+	check = "verified_pin_selection"
 	for _, digest := range proof.inputs {
 		binding := compilerInputPinBinding{Digest: digest}
 		// Selection is not proof. The current writable transaction later
@@ -66,6 +72,7 @@ func (s *Store) prepareCompilerInputActivationPins(ctx context.Context, proof *c
 		}
 		pins = append(pins, binding)
 	}
+	check = "commit"
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}

@@ -332,6 +332,18 @@ pairing unrelated failures. Authentication, decoding, expected conflict response
 and other handlers are outside this ring's coverage. Neither ring reconstructs
 events before deployment or authorizes serving traffic.
 
+Assignment `input_recheck` failures additionally retain the original synchronous
+read's fixed substage. Store failures distinguish preparation, pin selection
+and admission checks. A failed dependency read retains its original typed error
+category/allowlisted SQLSTATE even when the existing public conflict response
+discards that cause. A changed physical witness records its fixed relation,
+SHA-256 key identity and changed physical field names, never raw keys or tuples.
+Final authority comparisons retain only changed top-level field names from the
+fixed artifact, assignment and release structs; map keys and values are omitted.
+This adds no query, replay, retry, public response field or admission exception.
+It describes the immediate failing check, not the upstream cause of a concurrent
+publication or evidence change.
+
 On Linux a non-root component's runtime profile socket accepts only kernel
 credentials identifying root or the component's own UID. Diagnostic Jobs drop
 DAC_OVERRIDE, so filesystem owner-only mode by itself prevents those Jobs from

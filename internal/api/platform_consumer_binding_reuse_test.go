@@ -2,14 +2,18 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"reflect"
 	"testing"
+	"time"
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/routeartifact"
+	"fugue/internal/store"
 )
 
 func TestConsumerBindingReuseRetainsFreshTopologyTrustAndPublication(t *testing.T) {
@@ -79,6 +83,22 @@ func TestConsumerBindingReuseRetainsFreshTopologyTrustAndPublication(t *testing.
 	fresh := func(id string) (model.PlatformArtifact, error) { freshLoads++; return load(id) }
 	if err := server.checkConsumerInputReadsWithLoader(context.Background(), claims, selected, sharedRead, true, fresh); err != nil || freshLoads == 0 {
 		t.Fatal("fresh authority pass missing", err)
+	}
+	// The exact original rejection is observed without changing the authority
+	// check or copying a mutable release envelope into diagnostics.
+	changed := append([]consumerArtifactLookup(nil), selected...)
+	changed[0].Release.UpdatedAt = changed[0].Release.UpdatedAt.Add(-time.Second)
+	ctx := withConsumerInputReadObservation(context.Background())
+	if err := server.checkConsumerInputReadsWithLoader(ctx, claims, changed, sharedRead, true, fresh); !errors.Is(err, store.ErrConflict) {
+		t.Fatal("changed release was admitted", err)
+	}
+	detail := consumerInputReadFailureFromContext(ctx)
+	if detail == nil || detail.Stage != "assignment_changed" || !reflect.DeepEqual(detail.ChangedFields, []string{"release.updated_at"}) {
+		t.Fatal("original comparison failure was not retained", detail)
+	}
+	ctx = withConsumerInputReadObservation(context.Background())
+	if err := server.checkConsumerInputReadsWithLoader(ctx, claims, selected, sharedRead, true, fresh); err != nil || consumerInputReadFailureFromContext(ctx) != nil {
+		t.Fatal("successful read acquired a failure", err)
 	}
 	server.bundleRevokedKeyIDs = append(server.bundleRevokedKeyIDs, compiled.RouteArtifact.Provenance.KeyID)
 	if err := server.checkConsumerInputReadsWithLoader(context.Background(), claims, selected, sharedRead, true, fresh); err == nil {

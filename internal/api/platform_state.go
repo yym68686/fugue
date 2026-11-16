@@ -1344,6 +1344,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 	defer s.observeOperation("consumer-assignment")()
 	started := time.Now().UTC()
 	r = r.WithContext(runtimeobservation.WithDatabaseOperation(r.Context(), "consumer-assignment"))
+	r = r.WithContext(withConsumerInputReadObservation(r.Context()))
 	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
 	if !ok {
 		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")

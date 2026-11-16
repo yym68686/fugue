@@ -23,6 +23,7 @@ type consumerRequestFailure struct {
 	ErrorClass        string                               `json:"error_class"`
 	Conflict          bool                                 `json:"store_conflict"`
 	SQLState          string                               `json:"sql_state,omitempty"`
+	InputRead         *consumerInputReadFailure            `json:"input_read,omitempty"`
 }
 
 func (s *Server) retainConsumerRequestFailure(ctx context.Context, start time.Time, operation, stage string, err error) {
@@ -41,6 +42,9 @@ func (s *Server) retainConsumerRequestFailure(ctx context.Context, start time.Ti
 	}
 	receipt := consumerRequestFailure{StartedAt: start, FinishedAt: time.Now().UTC(), Operation: operation,
 		DatabaseOperation: runtimeobservation.DatabaseOperationFromContext(ctx), Stage: stage, ErrorClass: captureErrorClass(err), Conflict: errors.Is(err, store.ErrConflict)}
+	if stage == "input_recheck" {
+		receipt.InputRead = consumerInputReadFailureFromContext(ctx)
+	}
 	var databaseError interface{ SQLState() string }
 	if errors.As(err, &databaseError) {
 		switch state := databaseError.SQLState(); state {

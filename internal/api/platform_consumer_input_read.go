@@ -49,17 +49,20 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 	for _, item := range selected {
 		parent, err := read(item.Assignment.ReleaseSetID)
 		if err != nil {
+			observeConsumerInputReadFailure(ctx, "selected_parent_read", store.PlatformInputReadFailure{}, nil, nil)
 			return err
 		}
 		parents = append(parents, parent)
 		reads = append(reads, consumerInputReadSelection(item, parent))
 	}
-	if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
+	if detail, err := s.store.CheckPlatformInputReadObserved(ctx, reads); err != nil {
+		observeConsumerInputReadFailure(ctx, "store_input_read", detail, nil, nil)
 		return err
 	}
 	freshRead := newConsumerArtifactReader(load)
 	current, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, freshRead)
 	if err != nil {
+		observeConsumerInputReadFailure(ctx, "fresh_authority_resolve", store.PlatformInputReadFailure{}, nil, nil)
 		return err
 	}
 	for i, before := range selected {
@@ -71,11 +74,17 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 			if reflect.DeepEqual(before, after) {
 				parent, err := freshRead(after.Assignment.ReleaseSetID)
 				if err != nil || !reflect.DeepEqual(parent, parents[i]) {
+					stage := "parent_changed"
+					if err != nil {
+						stage = "fresh_parent_read"
+					}
+					observeConsumerInputReadFailure(ctx, stage, store.PlatformInputReadFailure{}, nil, nil)
 					return store.ErrConflict
 				}
 				if servingOnly {
 					set, err := s.store.GetPlatformExpectedConsumerSet(after.Assignment.ExpectedConsumerSetID)
 					if err != nil {
+						observeConsumerInputReadFailure(ctx, "fresh_expected_set", store.PlatformInputReadFailure{}, nil, nil)
 						return err
 					}
 					group := ""
@@ -87,6 +96,11 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 					}
 					ok, err := s.consumerAssignmentIsSelected(after, group, freshRead)
 					if err != nil || !ok {
+						stage := "serving_not_selected"
+						if err != nil {
+							stage = "serving_selection_read"
+						}
+						observeConsumerInputReadFailure(ctx, stage, store.PlatformInputReadFailure{}, nil, nil)
 						return store.ErrConflict
 					}
 				}
@@ -95,6 +109,18 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 			}
 		}
 		if !found {
+			var sameLane *consumerArtifactLookup
+			for j := range current {
+				if current[j].Assignment.ArtifactKind == before.Assignment.ArtifactKind && current[j].Assignment.ReleaseChannel == before.Assignment.ReleaseChannel {
+					sameLane = &current[j]
+					break
+				}
+			}
+			stage := "assignment_absent"
+			if sameLane != nil {
+				stage = "assignment_changed"
+			}
+			observeConsumerInputReadFailure(ctx, stage, store.PlatformInputReadFailure{}, &before, sameLane)
 			return store.ErrConflict
 		}
 	}

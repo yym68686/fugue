@@ -107,3 +107,23 @@ func TestConsumerFailureConcurrentSnapshots(t *testing.T) {
 		t.Fatal("concurrent counts lost", v)
 	}
 }
+
+func TestConsumerInputReadFailureCopiesOnlyFixedFieldNames(t *testing.T) {
+	s := &Server{}
+	ctx := withConsumerInputReadObservation(t.Context())
+	before := consumerArtifactLookup{Artifact: model.PlatformArtifact{ID: "private-artifact", Content: map[string]any{"private-map-key": "private-content"}}}
+	after := before
+	after.Artifact.ID = "private-other-artifact"
+	after.Artifact.Content = map[string]any{"private-other-key": "private-other-content"}
+	observeConsumerInputReadFailure(ctx, "assignment_changed", store.PlatformInputReadFailure{}, &before, &after)
+	s.retainConsumerRequestFailure(ctx, time.Now(), "assignment", "input_recheck", store.ErrConflict)
+	retained := s.captureSnapshot().(map[string]any)["consumer_failures"].(map[string]any)["receipts"].([]consumerRequestFailure)[0]
+	if retained.InputRead == nil || len(retained.InputRead.ChangedFields) != 2 {
+		t.Fatal("comparison fields missing", retained)
+	}
+	ctx.Value(consumerInputReadObservationKey{}).(*consumerInputReadFailure).ChangedFields[0] = "private-mutation"
+	raw, _ := json.Marshal(retained)
+	if strings.Contains(string(raw), "private") || !strings.Contains(string(raw), "artifact.content") || !strings.Contains(string(raw), "artifact.id") {
+		t.Fatal("receipt retained values or caller backing memory", string(raw))
+	}
+}
