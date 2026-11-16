@@ -555,6 +555,12 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	// must belong to the immutable candidate before zero can be meaningful.
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	waitStarted := time.Now()
+	lastActive, endpointsReady := -1, false
+	pending := func() error {
+		return fmt.Errorf("%w: stage=canonical_drain_wait last_observed_active_connections=%d pod_count=%d endpoints_ready=%t elapsed_ms=%d context=%s",
+			errSafeCanonicalHandoffPending, lastActive, len(before.Pods), endpointsReady, time.Since(waitStarted).Milliseconds(), drainObservationContext(waitCtx))
+	}
 	var quietSince time.Time
 	quiet := 2 * time.Second
 	for _, p := range before.Pods {
@@ -564,7 +570,7 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	}
 	for {
 		if err := waitCtx.Err(); err != nil {
-			return nil, fmt.Errorf("%w: %v", errSafeCanonicalHandoffPending, err)
+			return nil, pending()
 		}
 		ready := true
 		for _, serviceName := range services {
@@ -582,7 +588,9 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 				}
 				active += *receipt.ActiveConnections
 			}
+			lastActive = active
 		}
+		endpointsReady = ready
 		if ready && active == 0 {
 			if quietSince.IsZero() {
 				quietSince = time.Now()
@@ -595,7 +603,7 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		}
 		select {
 		case <-waitCtx.Done():
-			return nil, errSafeCanonicalHandoffPending
+			return nil, pending()
 		case <-time.After(200 * time.Millisecond):
 		}
 	}

@@ -469,42 +469,57 @@ func (s *Service) captureDrainWorkloadState(ctx context.Context, client *kubeCli
 	return out, nil
 }
 
-func (c *kubeClient) observeReleasePodDrain(ctx context.Context, namespace string, pod releaseDrainPod) (drainprotocol.Snapshot, error) {
-	var result drainprotocol.Snapshot
+func (c *kubeClient) observeReleasePodDrain(ctx context.Context, namespace string, pod releaseDrainPod) (result drainprotocol.Snapshot, resultErr error) {
+	observation := newPodDrainObservation(ctx, namespace, pod)
+	fail := func(stage, cause string, err error) error {
+		observation.Stage, observation.Cause = stage, cause
+		return &podDrainProxyError{observation: observation.finish(ctx), err: err}
+	}
+	defer func() {
+		if resultErr == nil {
+			observation.Stage = "complete"
+			observation.ActiveConnections = *result.ActiveConnections
+		}
+		recordPodDrainObservation(observation.finish(ctx))
+	}()
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
-		return result, err
+		return result, fail("nonce", "random_unavailable", err)
 	}
 	nonce := hex.EncodeToString(random[:])
 	path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods/" + url.PathEscape(pod.Name+":"+strconv.Itoa(pod.Port)) + "/proxy/drain/observe?nonce=" + nonce
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
-		return result, err
+		return result, fail("request", "invalid_request", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
 	client := *c.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Do(req)
 	if err != nil {
-		return result, fmt.Errorf("Pod drain proxy request failed")
+		return result, fail("request", podDrainFailureCause(err), err)
 	}
 	defer response.Body.Close()
+	observation.StatusCode = response.StatusCode
 	if response.StatusCode != http.StatusOK {
-		return result, fmt.Errorf("Pod drain proxy returned %d", response.StatusCode)
+		return result, fail("status", "http_status", nil)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 4097))
-	if err != nil || len(body) > 4096 {
-		return result, fmt.Errorf("oversized or unreadable Pod observation")
+	if err != nil {
+		return result, fail("body", podDrainFailureCause(err), err)
+	}
+	if len(body) > 4096 {
+		return result, fail("body", "response_too_large", nil)
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil {
-		return result, fmt.Errorf("invalid Pod drain receipt")
+		return result, fail("receipt", "invalid_json", err)
 	}
 	var extra any
 	if decoder.Decode(&extra) != io.EOF || result.APIVersion != drainprotocol.Version || result.Nonce != nonce || result.Pod != pod.Name || result.Namespace != namespace ||
 		result.ActiveConnections == nil || *result.ActiveConnections < 0 || !reflect.DeepEqual(result.AppPorts, pod.AppPorts) {
-		return result, fmt.Errorf("incomplete Pod drain receipt")
+		return result, fail("receipt", "incomplete_receipt", nil)
 	}
 	return result, nil
 }
