@@ -30,6 +30,15 @@ func (s *Server) handleGetPlatformArtifactCompilerInput(w http.ResponseWriter, r
 		httpx.WriteError(w, http.StatusConflict, "compiler input artifact signature is invalid")
 		return
 	}
+	retainsOriginal, err := platformconfig.ArtifactRetainsOriginalInput(a)
+	if err != nil {
+		httpx.WriteError(w, http.StatusConflict, "compiler input contract is invalid")
+		return
+	}
+	if view != "dns_configuration" && !retainsOriginal {
+		httpx.WriteError(w, http.StatusGone, "original compiler input was not retained by this compiler version")
+		return
+	}
 	digest := a.Metadata["input_snapshot_digest"]
 	if digest == "" {
 		httpx.WriteError(w, http.StatusNotFound, "artifact has no compiler runtime input")

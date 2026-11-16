@@ -56,7 +56,9 @@ func compilerInputArtifactDependencyNode(artifact model.PlatformArtifact, cost *
 			return node, err
 		}
 	}
-	if original := artifact.Metadata["input_snapshot_digest"]; retainOriginal && artifact.Metadata["runtime_input_digest"] != "" && original != input {
+	// ArtifactRuntimeInputDigest already verified v38's exact signed lineage and
+	// metadata. Avoid decoding the potentially large typed policy a second time.
+	if original := artifact.Metadata["input_snapshot_digest"]; retainOriginal && artifact.Metadata["compiler_version"] != platformconfig.CompactOnlyInputCompilerVersion && artifact.Metadata["runtime_input_digest"] != "" && original != input {
 		if err := add("input", original, original); err != nil {
 			return node, err
 		}

@@ -35,6 +35,7 @@ import (
 )
 
 type Server struct {
+	compilerInputOmitOriginal              bool
 	operationOnce                          sync.Once
 	operations                             *runtimeobservation.Operations
 	captures                               captureObservations
@@ -234,6 +235,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		imageStoreMinReplicas = imageStoreMinimumReplicasFromEnv()
 	}
 	server := &Server{
+		compilerInputOmitOriginal:       cfg.CompilerInputOmitOriginal,
 		store:                           store,
 		auth:                            authn,
 		log:                             logger,
@@ -428,6 +430,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.metricsSnapshot.Write(w, "api")
 	s.store.WriteReadMetrics(w)
 	s.store.WriteStorageLifecycleMetrics(w)
+	s.store.WritePlatformQualityEvidenceMetrics(w)
+	omitOriginal := float64(0)
+	if s.compilerInputOmitOriginal {
+		omitOriginal = 1
+	}
+	observability.WriteGaugeMetric(w, "fugue_compiler_input_omit_original_enabled", "Whether new compiler generations omit complete original input persistence.", nil, omitOriginal)
 }
 
 func (s *Server) collectMetrics(ctx context.Context, w io.Writer) error {

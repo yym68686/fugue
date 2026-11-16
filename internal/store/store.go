@@ -34,10 +34,11 @@ var (
 )
 
 type Store struct {
-	compilerDNSInputs     compilerDNSInputCache
-	readMetrics           [2]storeReadCounters
-	platformContentHintMu sync.Mutex
-	platformContentHints  map[string][32]byte
+	qualityEvidenceMetrics qualityEvidenceCounters
+	compilerDNSInputs      compilerDNSInputCache
+	readMetrics            [2]storeReadCounters
+	platformContentHintMu  sync.Mutex
+	platformContentHints   map[string][32]byte
 
 	path                                 string
 	databaseURL                          string

@@ -103,7 +103,7 @@ func (s *Server) prepareHistoricalQualityContext(parentCtx context.Context, scop
 	for _, key := range queryKeys {
 		requested[key] = true
 	}
-	p.input, p.inputErr = s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, boundedHistoricalQualitySelector(requested, &remaining))
+	p.input, p.inputErr = s.store.GetPlatformArtifactQualityInputContext(ctx, parent, boundedHistoricalQualitySelector(requested, &remaining))
 	err = p.inputErr
 	if err != nil && s.log != nil {
 		s.log.Printf("historical quality preparation unavailable artifact=%s input=%s: %v", parent.ID, digest, err)
@@ -260,7 +260,7 @@ func (s *Server) historicalQualityFacts(ctx context.Context, source qualityInput
 	if err != nil {
 		return nil, err
 	}
-	input, err := s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, func(summary store.CompilerDNSSelectionSummary) bool {
+	input, err := s.store.GetPlatformArtifactQualityInputContext(ctx, source.parent, func(summary store.CompilerDNSSelectionSummary) bool {
 		return summary.NodeID == nodeID && summary.Hostname == hostname && (summary.HasEvidence && summary.HasSelection || summary.HasRetainedEvidence)
 	})
 	if err != nil {
@@ -276,13 +276,22 @@ func (s *Server) historicalQualityFacts(ctx context.Context, source qualityInput
 	return facts, nil
 }
 
-// Opted-in configuration inputs deliberately omit raw probe transcripts.
-// Historical replay must read the original audit input, with its own admission.
+// Legacy generations read their complete audit input. The explicit v38
+// contract instead reads an independently signed, optional evidence object.
 func originalQualityInputDigest(parent model.PlatformArtifact) (string, error) {
-	if _, err := platformconfig.ArtifactRuntimeInputDigest(parent); err != nil {
+	retained, err := platformconfig.ArtifactRetainsOriginalInput(parent)
+	if err != nil {
 		return "", err
 	}
+	if !retained {
+		return parent.Metadata[platformconfig.QualityEvidenceDigestMetadata], nil
+	}
 	return parent.Metadata["input_snapshot_digest"], nil
+}
+
+func qualityHistoryNeedsOriginal(parent model.PlatformArtifact) bool {
+	retained, err := platformconfig.ArtifactRetainsOriginalInput(parent)
+	return err != nil || retained
 }
 
 func (s *Server) checkOriginalQualityInputSource(ctx context.Context, source qualityInputSource) error {
@@ -291,6 +300,6 @@ func (s *Server) checkOriginalQualityInputSource(ctx context.Context, source qua
 	}
 	return s.store.CheckPlatformInputRead(ctx, []store.PlatformInputReadSelection{{
 		ArtifactID: source.parent.ID, ContentHash: source.parent.ContentHash, ReleaseID: source.release.ID,
-		LKGKind: source.lkg.ArtifactKind, LKGScope: source.lkg.ScopeKey, LKG: &source.lkg, OriginalInput: true,
+		LKGKind: source.lkg.ArtifactKind, LKGScope: source.lkg.ScopeKey, LKG: &source.lkg, OriginalInput: qualityHistoryNeedsOriginal(source.parent),
 	}})
 }

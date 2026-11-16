@@ -358,7 +358,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		}
 	}
 	advance("compile")
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot, PreviousTrafficPublication: dnsRequest.PreviousTrafficPublication})
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{OmitOriginalInput: s.compilerInputOmitOriginal, Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot, PreviousTrafficPublication: dnsRequest.PreviousTrafficPublication})
 	if err == nil && policy.InputSource == platformproducer.DNSProducerInputSource {
 		err = platformproducer.ValidateDNSProducerOutput(policy, compiled.DNSArtifact)
 	}

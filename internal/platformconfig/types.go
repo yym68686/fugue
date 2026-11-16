@@ -206,6 +206,9 @@ type ArtifactDependency struct {
 }
 
 type CompileRequest struct {
+	// Explicit platform persistence policy. Existing generations and replay
+	// contracts are unchanged unless the writer selects the new version.
+	OmitOriginalInput          bool
 	PreviousTrafficPublication *PreviousTrafficPublicationInput
 	CellRoutePublications      []CellRoutePublicationInput
 	Intent                     PlatformIntent
@@ -254,6 +257,7 @@ type ReleaseObservation struct {
 type CompileResult struct {
 	InputSnapshot   RuntimeSnapshot
 	RuntimeInput    *RuntimeSnapshot
+	QualityInput    *RuntimeSnapshot
 	IntentArtifact  model.PlatformArtifact
 	PolicyArtifact  model.PlatformArtifact
 	RouteArtifact   model.PlatformArtifact
@@ -419,8 +423,8 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		InputSnapshotDigest: snapshotDigest,
 		CompilerVersion:     CompilerVersion,
 	}
-	var runtimeInput *RuntimeSnapshot
-	if policy.RuntimeInputMode == RuntimeInputConfigurationV1 {
+	var runtimeInput, qualityInput *RuntimeSnapshot
+	if policy.RuntimeInputMode == RuntimeInputConfigurationV1 || req.OmitOriginalInput {
 		compact := ConfigurationRuntimeInput(runtimeSnapshot)
 		lineage.RuntimeInputDigest, err = RuntimeSnapshotDigest(compact)
 		if err != nil {
@@ -428,6 +432,11 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		}
 		lineage.CompilerVersion = ConfigurationInputCompilerVersion
 		runtimeInput = &compact
+		if req.OmitOriginalInput {
+			lineage.CompilerVersion = CompactOnlyInputCompilerVersion
+			quality := QualityEvidenceInput(runtimeSnapshot)
+			qualityInput = &quality
+		}
 	}
 	if intent.Scope != policy.Scope {
 		return CompileResult{}, fmt.Errorf("intent and policy scopes must match")
@@ -554,9 +563,21 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	}
 
 	releaseArtifact := buildArtifact(model.PlatformArtifactKindReleaseSet, intent.Scope, releaseSet.Generation, releaseSet, metadata, now)
+	if qualityInput != nil {
+		qualityDigest, err := RuntimeSnapshotDigest(*qualityInput)
+		if err != nil {
+			return CompileResult{}, err
+		}
+		for _, artifact := range []*model.PlatformArtifact{&routeArtifact, &dnsArtifact, &tlsArtifact, &releaseArtifact} {
+			if artifact.ArtifactKind != "" {
+				artifact.Metadata[QualityEvidenceDigestMetadata] = qualityDigest
+			}
+		}
+	}
 	return CompileResult{
 		InputSnapshot:   runtimeSnapshot,
 		RuntimeInput:    runtimeInput,
+		QualityInput:    qualityInput,
 		IntentArtifact:  intentArtifact,
 		PolicyArtifact:  policyArtifact,
 		RouteArtifact:   routeArtifact,

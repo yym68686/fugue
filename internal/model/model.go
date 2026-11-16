@@ -3551,6 +3551,7 @@ type State struct {
 	StorePromotions            []StorePromotion               `json:"store_promotions,omitempty"`
 	PlatformArtifacts          []PlatformArtifact             `json:"platform_artifacts,omitempty"`
 	PlatformArtifactContents   []PlatformArtifactContent      `json:"platform_artifact_contents,omitempty"`
+	PlatformQualityEvidence    []PlatformQualityEvidence      `json:"platform_quality_evidence,omitempty"`
 	PlatformArtifactReleases   []PlatformArtifactRelease      `json:"platform_artifact_releases,omitempty"`
 	PlatformReleaseLanes       []PlatformReleaseLane          `json:"platform_release_lanes,omitempty"`
 	PlatformReleaseMessages    []PlatformReleaseMessage       `json:"platform_release_messages,omitempty"`
@@ -3586,6 +3587,16 @@ type State struct {
 	DataGrants                []DataGrant                `json:"data_grants,omitempty"`
 	DataWorkspaceAccessGrants []DataWorkspaceAccessGrant `json:"data_workspace_access_grants,omitempty"`
 	DataRuntimeCaches         []RuntimeDataCacheMetadata `json:"data_runtime_caches,omitempty"`
+}
+
+// PlatformQualityEvidence stores only typed DNS selection evidence needed for
+// historical quality comparison; full compiler invocation inputs are omitted.
+type PlatformQualityEvidence struct {
+	ContentHash string          `json:"content_hash"`
+	Evidence    json.RawMessage `json:"evidence"`
+	SizeBytes   int64           `json:"size_bytes"`
+	CreatedAt   time.Time       `json:"created_at"`
+	ExpiresAt   time.Time       `json:"expires_at"`
 }
 
 // DatabaseMigration is a provider-neutral, durable storage migration intent.

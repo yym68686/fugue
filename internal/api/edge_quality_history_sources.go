@@ -69,7 +69,7 @@ func (s *Server) preparePriorQualityHistory(ctx context.Context, p *historicalQu
 		if s.store.CheckPlatformInputRead(ctx, []store.PlatformInputReadSelection{
 			{ArtifactID: p.source.parent.ID, ContentHash: p.source.parent.ContentHash, ReleaseID: p.source.release.ID,
 				LKGKind: p.source.lkg.ArtifactKind, LKGScope: p.source.lkg.ScopeKey, LKG: &p.source.lkg},
-			{ArtifactID: parent.ID, ContentHash: parent.ContentHash, ReleaseID: release.ID, OriginalInput: true},
+			{ArtifactID: parent.ID, ContentHash: parent.ContentHash, ReleaseID: release.ID, OriginalInput: qualityHistoryNeedsOriginal(parent)},
 		}) != nil {
 			continue
 		}
@@ -77,7 +77,7 @@ func (s *Server) preparePriorQualityHistory(ctx context.Context, p *historicalQu
 		if err != nil {
 			continue
 		}
-		input, err := s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, boundedHistoricalQualitySelector(missing, remaining))
+		input, err := s.store.GetPlatformArtifactQualityInputContext(ctx, parent, boundedHistoricalQualitySelector(missing, remaining))
 		if err != nil || input.IntentGeneration != parent.Metadata["intent_generation"] || input.PolicyGeneration != parent.Metadata["policy_generation"] ||
 			!s.qualityInputSourceUnchanged(ctx, p.source) {
 			continue

@@ -68,6 +68,19 @@ def primary(resources, workload):
     return items[0]
 
 
+def compact_only_revision(revision):
+    if not re.fullmatch('[0-9a-f]{40}', revision):
+        raise ValueError('compact-only reader source revision is missing')
+    for path, markers in {
+        'internal/platformconfig/runtime_input.go': ('platform-config-compiler/v38', 'ArtifactRetainsOriginalInput'),
+        'internal/store/platform_quality_evidence.go': ('EnsurePlatformCompilationInputsContext', 'GetPlatformArtifactQualityInputContext'),
+        'internal/store/platform_input_hot_dependencies.go': ('CompactOnlyInputCompilerVersion',),
+    }.items():
+        body = command(['git', 'show', revision+':'+path])
+        if not all(marker in body for marker in markers):
+            raise ValueError('API reader lacks compact-only input support')
+
+
 def owned_pods(namespace, deployment):
     # Legacy Deployment selectors can also match unrelated workloads. Bind the
     # population by controller UID through ReplicaSets, never by labels alone.
@@ -197,6 +210,18 @@ def main():
         if args.operation or args.apply:
             raise ValueError('API candidate check is read-only and does not accept an operation')
         compatible_revision(args.candidate_revision, archive_required=True)
+        compact_only_revision(args.candidate_revision)
+        # The activation release must roll back to an already compatible reader,
+        # never to the pre-v38 binary from the initial additive rollout.
+        registry = json.loads(Path('deploy/releases/components.json').read_text())
+        api = next(x for x in registry['components'] if x['id'] == 'api')
+        resources = json.loads(Path(api['manifestPath']).read_text())
+        deployment = primary(resources, api['workload'])
+        containers = deployment['spec']['template']['spec']['containers']
+        container = next(x for x in containers if x['name'] == api['workload']['container'])
+        if any(x.get('name') == 'FUGUE_COMPILER_INPUT_OMIT_ORIGINAL' and x.get('value') == 'true' for x in container.get('env', [])):
+            live = get(api['workload']['namespace'], 'deployment', api['workload']['name'])
+            compact_only_revision(live['spec']['template']['metadata']['annotations']['fugue.pro/source-commit'])
         print(json.dumps({'archive_reader_candidate': args.candidate_revision, 'startup_guard': 'present'}))
         return
     if args.mode in ('migrate', 'rollback') and args.expected_format not in ('runtime-snapshot-json-v1', 'runtime-snapshot-json-chunk-codec-v2', 'runtime-snapshot-shared-v3', FORMAT):

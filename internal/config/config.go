@@ -20,6 +20,7 @@ import (
 const DefaultManagedAppRolloutTimeout = time.Hour
 
 type APIConfig struct {
+	CompilerInputOmitOriginal              bool
 	BindAddr                               string
 	MetricsBindAddr                        string
 	StorePath                              string
@@ -423,6 +424,7 @@ func APIFromEnv() APIConfig {
 		DNSBundleTTL:                           getenvInt("FUGUE_DNS_TTL", 60),
 		EdgeAuthorityServicesJSON:              strings.TrimSpace(os.Getenv("FUGUE_EDGE_AUTHORITY_SERVICES_JSON")),
 		PlatformRoutesJSON:                     strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
+		CompilerInputOmitOriginal:              getenvBool("FUGUE_COMPILER_INPUT_OMIT_ORIGINAL", false),
 		EdgeQualityRankingMode:                 getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),
 		AppSafeZeroDowntimePublicEnabled:       getenvBool("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", true),
 		ImageStoreMode:                         getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),

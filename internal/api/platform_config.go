@@ -64,6 +64,7 @@ func (s *Server) handleCompilePlatformConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{
+		OmitOriginalInput:          s.compilerInputOmitOriginal,
 		PreviousTrafficPublication: request.PreviousTrafficPublication, CellRoutePublications: request.CellRoutePublications,
 		Intent:          request.Intent,
 		Policy:          request.Policy,
@@ -176,7 +177,7 @@ func (s *Server) handleCompilePlatformConfigFromArtifacts(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusConflict, "artifact scope does not match typed content")
 		return
 	}
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{PreviousTrafficPublication: request.PreviousTrafficPublication, CellRoutePublications: request.CellRoutePublications, Intent: intent, Policy: policy, RuntimeSnapshot: request.RuntimeSnapshot, CreatedAt: time.Now().UTC()})
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{OmitOriginalInput: s.compilerInputOmitOriginal, PreviousTrafficPublication: request.PreviousTrafficPublication, CellRoutePublications: request.CellRoutePublications, Intent: intent, Policy: policy, RuntimeSnapshot: request.RuntimeSnapshot, CreatedAt: time.Now().UTC()})
 	if err != nil {
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 		return

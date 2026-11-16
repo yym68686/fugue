@@ -2,13 +2,53 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/store"
 )
+
+func TestCompactOnlyCompileNeverStoresFullInputAndReportsNotRetained(t *testing.T) {
+	st, server, tenant, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	server.compilerInputOmitOriginal = true
+	at := time.Now().UTC().Add(-time.Minute)
+	req := platformConfigCompileRequest{Intent: platformconfig.PlatformIntent{Generation: "compact-intent"}, Policy: platformconfig.PolicySnapshot{Generation: "compact-policy"},
+		RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &at, Facts: map[string]any{"raw": "never persist this full snapshot"}}}
+	r := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, req)
+	if r.Code != http.StatusCreated {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	var compiled platformConfigCompileResponse
+	mustDecodeJSON(t, r, &compiled)
+	if compiled.Lineage.CompilerVersion != platformconfig.CompactOnlyInputCompilerVersion {
+		t.Fatal("wrong contract")
+	}
+	if _, err := st.GetPlatformCompilerInput(compiled.Lineage.InputSnapshotDigest); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("full original persisted", err)
+	}
+	path := "/v1/admin/artifacts/" + compiled.ReleaseArtifact.ID + "/compiler-input"
+	for _, suffix := range []string{"", "?view=full"} {
+		r := performJSONRequest(t, server, http.MethodGet, path+suffix, admin, nil)
+		if r.Code != http.StatusGone || !strings.Contains(r.Body.String(), "not retained") {
+			t.Fatal("absence misreported", r.Code, r.Body.String())
+		}
+	}
+	if r := performJSONRequest(t, server, http.MethodGet, path, tenant, nil); r.Code != http.StatusForbidden {
+		t.Fatal("retention state disclosed to tenant")
+	}
+	r = performJSONRequest(t, server, http.MethodGet, path+"?view=dns_configuration", admin, nil)
+	if r.Code != http.StatusOK || strings.Contains(r.Body.String(), "never persist") {
+		t.Fatal("operational view unavailable or contains replay", r.Code, r.Body.String())
+	}
+	if err := st.CheckPlatformInputRead(t.Context(), []store.PlatformInputReadSelection{{ArtifactID: compiled.ReleaseArtifact.ID, ContentHash: compiled.ReleaseArtifact.ContentHash}}); err != nil {
+		t.Fatal("new closure required original", err)
+	}
+}
 
 func TestCompilerInputIsFrozenReplayableAndAdminOnly(t *testing.T) {
 	state, server, tenant, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")

@@ -101,7 +101,7 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 		return platformConfigCompileResponse{}, err
 	}
 	advance("compiler_input")
-	if err := s.store.EnsurePlatformCompilerInputPairContext(runtimeobservation.WithDatabaseOperation(ctx, "compiler-input-persist"), compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest, compiled.RuntimeInput, compiled.Lineage.RuntimeInputDigest); err != nil {
+	if err := s.store.EnsurePlatformCompilationInputsContext(runtimeobservation.WithDatabaseOperation(ctx, "compiler-input-persist"), compiled); err != nil {
 		return platformConfigCompileResponse{}, err
 	}
 	artifacts := []*model.PlatformArtifact{&compiled.RouteArtifact, &compiled.DNSArtifact, &compiled.TLSArtifact}
@@ -166,6 +166,9 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	}
 	advance("parent_build")
 	parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, compiled.ReleaseSet.ArtifactIDs, time.Now().UTC())
+	if digest := compiled.ReleaseArtifact.Metadata[platformconfig.QualityEvidenceDigestMetadata]; digest != "" {
+		parent.Metadata[platformconfig.QualityEvidenceDigestMetadata] = digest
+	}
 	if len(sources) == 1 {
 		parent.Metadata[platformproducer.PolicyReleaseMetadata] = sources[0].PolicyReleaseID
 		parent.Metadata[platformproducer.SourceDigestMetadata] = sources[0].SourceDigest

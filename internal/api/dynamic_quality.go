@@ -721,16 +721,12 @@ func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Contex
 		s.dynamicQuality.mu.Unlock()
 		return dynamicQualityRestoreNeeded(summary, job, entry, now())
 	}
-	digest, err := originalQualityInputDigest(parent)
-	if err != nil {
-		return
-	}
 	var snapshot store.CompilerInputDNSSelections
 	p, shared := ctx.Value(historicalQualityPreparationKey{}).(*historicalQualityPreparation)
 	if shared {
 		snapshot, err = p.input, p.inputErr
 	} else {
-		snapshot, err = s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, needed)
+		snapshot, err = s.store.GetPlatformArtifactQualityInputContext(ctx, parent, needed)
 	}
 	if err != nil {
 		return
@@ -745,7 +741,7 @@ func (s *Server) restorePublishedQualityEvidenceContext(parentCtx context.Contex
 				// trigger another complete input read inside a live capture.
 				break
 			}
-			snapshot, err = s.store.GetPlatformCompilerInputDNSSelectionsContext(ctx, digest, nil)
+			snapshot, err = s.store.GetPlatformArtifactQualityInputContext(ctx, parent, nil)
 			if err != nil {
 				return
 			}

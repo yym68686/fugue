@@ -19,6 +19,7 @@ func imageStoreMinimumReplicasFromEnv() int {
 }
 
 type ServerConfig struct {
+	CompilerInputOmitOriginal              bool
 	BackupInventory                        BackupInventoryConfig
 	DatabaseURL                            string
 	ObjectStorageUsageTimeout              time.Duration

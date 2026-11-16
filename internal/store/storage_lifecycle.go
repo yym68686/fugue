@@ -207,7 +207,8 @@ WITH requested(name) AS (VALUES
  ('fugue_source_uploads'), ('fugue_platform_artifacts'), ('fugue_platform_artifact_contents'),
  ('fugue_audit_events'), ('fugue_platform_input_shared_packs'), ('fugue_platform_input_shared_objects'),
  ('fugue_platform_input_component_refs'), ('fugue_platform_input_component_recipes'),
- ('fugue_platform_input_separated_refs'), ('fugue_platform_input_components'))
+ ('fugue_platform_input_separated_refs'), ('fugue_platform_input_components'),
+ ('fugue_platform_quality_evidence'))
 SELECT r.name,c.oid IS NOT NULL,COALESCE(pg_relation_size(c.oid),0),
  COALESCE(pg_table_size(c.oid),0),COALESCE(pg_indexes_size(c.oid),0),COALESCE(pg_total_relation_size(c.oid),0)
 FROM requested r LEFT JOIN pg_namespace n ON n.nspname=current_schema()

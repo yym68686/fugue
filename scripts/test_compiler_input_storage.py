@@ -4,10 +4,26 @@ import json
 import unittest
 from unittest.mock import call, patch
 
-from scripts.compiler_input_storage import compatible_revision, validate_reader, free_bytes, owned_pods, command
+from scripts.compiler_input_storage import compatible_revision, compact_only_revision, validate_reader, free_bytes, owned_pods, command
 
 
 class CompilerInputStorageTest(unittest.TestCase):
+    @patch('scripts.compiler_input_storage.command')
+    def test_compact_only_requires_reader_and_retention_support(self, command):
+        supported = ['platform-config-compiler/v38 ArtifactRetainsOriginalInput',
+                     'EnsurePlatformCompilationInputsContext GetPlatformArtifactQualityInputContext',
+                     'CompactOnlyInputCompilerVersion']
+        command.side_effect = supported
+        compact_only_revision('a'*40)
+        for index in range(len(supported)):
+            missing = supported.copy()
+            missing[index] = 'legacy implementation'
+            command.side_effect = missing
+            with self.assertRaises(ValueError):
+                compact_only_revision('a'*40)
+        with self.assertRaises(ValueError):
+            compact_only_revision('main')
+
     @patch('scripts.compiler_input_storage.subprocess.run')
     def test_failed_command_reports_only_static_stage_and_executor_category(self, run):
         import subprocess
