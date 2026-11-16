@@ -11,6 +11,24 @@ from scripts.publish_storage_policy import manifest
 
 
 class StoragePolicyTest(unittest.TestCase):
+    def test_lifecycle_is_audit_only_and_never_weakens_history_protection(self):
+        base = json.loads((Path(__file__).resolve().parents[1] / 'deploy/environments/production/storage-policy/policy.json').read_text())
+        before = manifest(base)['data']['policy.json']
+        self.assertEqual(base['storageLifecycle']['mode'], 'audit')
+        self.assertEqual(json.loads(manifest(base)['data']['storage-lifecycle.json']), base['storageLifecycle'])
+        for key, value in [('mode', 'enforce'), ('mode', True), ('version', True), ('history_days', 6),
+                           ('minimum_verified_versions', 2), ('source_page_rows', 129), ('interval_seconds', 299),
+                           ('unused_upload_hours', 23), ('unreferenced_upload_days', 29),
+                           ('critical_free_percent', 15), ('effective_from', '2026-02-30T00:00:00Z'),
+                           ('effective_from', '2026-01-01'), ('tables', ['fugue_apps'])]:
+            changed = copy.deepcopy(base)
+            changed['storageLifecycle'][key] = value
+            with self.assertRaises(ValueError, msg=key):
+                manifest(changed)
+        del base['storageLifecycle']
+        self.assertNotIn('storage-lifecycle.json', manifest(base)['data'])
+        self.assertEqual(manifest(base)['data']['policy.json'], before)
+
     def test_standalone_publisher_gates_before_dry_run_or_apply(self):
         document = {"namespace": "control", "name": "storage-policy", "policy": {"version": 1, "compiler_input_chunks": True, "checkpoint_pages": True, "database_max_open": 24, "database_max_idle": 8, "database_idle_seconds": 60},
                     "compilerInputSeparated": {"version": 1, "enabled": True},

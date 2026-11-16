@@ -152,6 +152,7 @@ func (s *Store) StorageObservation(ctx context.Context) (any, error) {
 	}
 	out["compiler_input_history_capabilities"] = capabilities
 	out["observation_retention"] = s.retentionObservation()
+	out["storage_lifecycle"] = s.StorageLifecycleObservation()
 	if s.db != nil {
 		out["database_pool"] = s.db.Stats()
 	}

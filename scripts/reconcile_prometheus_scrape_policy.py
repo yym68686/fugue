@@ -13,6 +13,51 @@ from urllib.parse import urlencode
 
 MANAGED_BEGIN = "  # BEGIN Fugue additional scrape configs\n"
 MANAGED_END = "  # END Fugue additional scrape configs\n"
+LIFECYCLE_RULE_FILE = 'fugue-storage-lifecycle-rules.yml'
+LIFECYCLE_RULE_PATH = '  - /etc/prometheus/fugue-storage-lifecycle-*.yml\n'
+LIFECYCLE_RULE_OWNER = '# Managed Fugue storage lifecycle alerts v1\n'
+
+
+def lifecycle_rules(policy):
+    setting = policy.get('storageLifecycleAlerts', {'version': 1, 'enabled': False})
+    if (not isinstance(setting, dict) or set(setting) != {'version', 'enabled'} or
+            type(setting['version']) is not int or setting['version'] != 1 or type(setting['enabled']) is not bool):
+        raise ValueError('invalid storage lifecycle alert configuration')
+    if not setting['enabled']:
+        return None
+    rules = []
+    for name, expression, duration in [
+        ('FugueStorageLifecyclePolicyInvalid', 'fugue_storage_lifecycle_policy_read_failed == 1', '5m'),
+        ('FugueStorageLifecycleAuditFailed', '(fugue_storage_lifecycle_last_run_failed == 1) and (fugue_storage_lifecycle_audit_enabled == 1)', '10m'),
+        ('FugueStorageLifecycleAuditStale', '(time() - fugue_storage_lifecycle_last_success_timestamp_seconds > 2 * fugue_storage_lifecycle_interval_seconds) and (fugue_storage_lifecycle_audit_enabled == 1)', '10m'),
+        ('FugueObservationRetentionFailed', '(fugue_observation_retention_last_run_failed == 1) and (fugue_observation_retention_enabled == 1)', '10m'),
+    ]:
+        rules.append({'alert': name, 'expr': expression, 'for': duration,
+                      'labels': {'severity': 'warning'}, 'annotations': {'summary': name, 'description': 'Storage observation/cleanup needs investigation; this alert does not authorize deleting protected history.'}})
+    # Capacity monitoring intentionally covers EVERY measured PVC in a namespace
+    # opting into lifecycle audit, including but not falsely limited to PostgreSQL.
+    free = '(100 * max by(namespace,persistentvolumeclaim) (kubelet_volume_stats_available_bytes) / max by(namespace,persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes))'
+    for level, severity in [('warning', 'warning'), ('pressure', 'warning'), ('critical', 'page')]:
+        threshold = f'max by(namespace) (fugue_storage_lifecycle_free_percent_threshold{{level="{level}"}})'
+        expression = free + ' < on(namespace) group_left ' + threshold
+        # A removed/invalid/disabled policy must not keep old thresholds active.
+        expression += ' and on(namespace) (max by(namespace) (fugue_storage_lifecycle_audit_enabled) == 1)'
+        rules.append({'alert': 'FugueStorageVolumeFree' + level.title(), 'expr': expression, 'for': '10m',
+                      'labels': {'severity': severity}, 'annotations': {'summary': 'Low available space on a measured Fugue namespace PVC', 'description': 'Investigate PVC space and WAL/maintenance headroom. Unknown and protected history must not be deleted to satisfy a threshold.'}})
+    return LIFECYCLE_RULE_OWNER + json.dumps({'groups': [{'name': 'fugue-storage-lifecycle', 'rules': rules}]}, sort_keys=True) + '\n'
+
+
+def lifecycle_rule_path(config, policy):
+    if config.count(LIFECYCLE_RULE_PATH) > 1:
+        raise ValueError('duplicate managed lifecycle rule path')
+    config = config.replace(LIFECYCLE_RULE_PATH, '')
+    if lifecycle_rules(policy) is None:
+        return config
+    headers = list(re.finditer(r'(?m)^rule_files:[ \t]*\n', config))
+    if len(headers) != 1:
+        raise ValueError('expected one block-style rule_files section')
+    at = headers[0].end()
+    return config[:at] + LIFECYCLE_RULE_PATH + config[at:]
 
 
 def additional_scrapes(config, policy):
@@ -99,7 +144,7 @@ def project(config, policy):
             return replacement
         return ""
     block = rule.sub(replace, block)
-    return additional_scrapes(config[:start] + block + config[end:], policy)
+    return lifecycle_rule_path(additional_scrapes(config[:start] + block + config[end:], policy), policy)
 
 
 def query_prometheus(proxy, expression):
@@ -169,6 +214,10 @@ def main():
     cm = json.loads(run(base + ["get", "configmap", policy["configMap"], "-o", "json"]))
     old = cm["data"]["prometheus.yml"]
     new = project(old, policy)
+    rules = lifecycle_rules(policy)
+    old_rules = cm['data'].get(LIFECYCLE_RULE_FILE)
+    if old_rules is not None and not old_rules.startswith(LIFECYCLE_RULE_OWNER):
+        raise ValueError('lifecycle rule filename is owned by another publisher')
     deployment = json.loads(run(base + ["get", "deployment", policy["deployment"], "-o", "json"]))
     selector = ",".join(k + "=" + v for k, v in deployment["spec"]["selector"]["matchLabels"].items())
     pods = json.loads(run(base + ["get", "pods", "-l", selector, "-o", "json"]))["items"]
@@ -176,12 +225,18 @@ def main():
     if not pods:
         raise RuntimeError("no Ready Prometheus process to validate and reload")
     for pod in pods:
+        if rules is not None:
+            run(base + ["exec", "-i", pod["metadata"]["name"], "-c", policy["container"], "--", "/bin/promtool", "check", "rules", "/dev/stdin"], rules)
         run(base + ["exec", "-i", pod["metadata"]["name"], "-c", policy["container"], "--", "/bin/promtool", "check", "config", "/dev/stdin"], new)
-    print(json.dumps({"changed": old != new, "validatedPods": len(pods), "apply": args.apply}))
+    print(json.dumps({"changed": old != new or old_rules != rules, "validatedPods": len(pods), "apply": args.apply}))
     if not args.apply:
         return
-    if old != new:
+    if old != new or old_rules != rules:
         patch = [{"op": "test", "path": "/metadata/resourceVersion", "value": cm["metadata"]["resourceVersion"]}, {"op": "replace", "path": "/data/prometheus.yml", "value": new}]
+        if rules is not None:
+            patch.append({'op': 'add', 'path': '/data/' + LIFECYCLE_RULE_FILE, 'value': rules})
+        elif old_rules is not None:
+            patch.append({'op': 'remove', 'path': '/data/' + LIFECYCLE_RULE_FILE})
         run(base + ["patch", "configmap", policy["configMap"], "--type=json", "--patch-file=/dev/stdin"], json.dumps(patch))
     for pod in pods:
         name = pod["metadata"]["name"]
@@ -190,6 +245,13 @@ def main():
             if time.monotonic() >= deadline:
                 raise RuntimeError("projected Prometheus config has not converged")
             time.sleep(5)
+        if rules is not None:
+            rule_path = str(Path(policy['configPath']).parent / LIFECYCLE_RULE_FILE)
+            while run(base + ['exec', name, '-c', policy['container'], '--', 'cat', rule_path]) != rules:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('projected lifecycle rules have not converged')
+                time.sleep(5)
+            run(base + ['exec', name, '-c', policy['container'], '--', '/bin/promtool', 'check', 'rules', rule_path])
         run(base + ["exec", name, "-c", policy["container"], "--", "/bin/promtool", "check", "config", policy["configPath"]])
         proxy = "/api/v1/namespaces/" + policy["namespace"] + "/pods/" + name + ":9090/proxy"
         before = query_prometheus(proxy, "prometheus_config_last_reload_success_timestamp_seconds")
@@ -214,6 +276,11 @@ def main():
                 raise RuntimeError("Prometheus did not load the new scrape policy")
             time.sleep(2)
         verify_queries(proxy.removesuffix("/api/v1/status/config"), policy.get("verificationQueries", []))
+        if rules is not None:
+            loaded_rules = json.loads(run(['kubectl', 'get', '--raw', proxy.removesuffix('/api/v1/status/config') + '/api/v1/rules']))
+            groups = loaded_rules.get('data', {}).get('groups', [])
+            if not any(group.get('name') == 'fugue-storage-lifecycle' and len(group.get('rules', [])) == 7 for group in groups):
+                raise RuntimeError('Prometheus did not load lifecycle alert rules')
         if policy.get("publicDNSTargets"):
             verify_public_dns_targets(base, proxy.removesuffix("/api/v1/status/config"), policy["publicDNSTargets"])
     print("Prometheus scrape policy loaded without replacing Pods or TSDB")

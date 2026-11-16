@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def manifest(document):
-    if not {"namespace", "name", "policy"} <= set(document) or set(document) - {"namespace", "name", "policy", "observationRetention", "compilerInputCodec", "compilerInputShared", "compilerInputSeparated", "artifactContentReferences", "compilerInputBlocks"}:
+    if not {"namespace", "name", "policy"} <= set(document) or set(document) - {"namespace", "name", "policy", "observationRetention", "storageLifecycle", "compilerInputCodec", "compilerInputShared", "compilerInputSeparated", "artifactContentReferences", "compilerInputBlocks"}:
         raise ValueError("unexpected storage policy configuration")
     for field in ("namespace", "name"):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", document[field]):
@@ -48,6 +48,24 @@ def manifest(document):
         if any(type(r[k]) is not int or not low <= r[k] <= high for k, (low, high) in bounds.items()):
             raise ValueError("observation retention exceeds safety bounds")
         data["observation-retention.json"] = json.dumps(r, sort_keys=True, separators=(",", ":"))
+    if "storageLifecycle" in document:
+        from datetime import datetime
+        lifecycle = document["storageLifecycle"]
+        bounds = {"interval_seconds": (300, 3600), "source_page_rows": (1, 128),
+                  "history_days": (7, 90), "minimum_verified_versions": (3, 100),
+                  "unused_upload_hours": (24, 720), "unreferenced_upload_days": (30, 365),
+                  "warning_free_percent": (5, 50), "pressure_free_percent": (5, 50), "critical_free_percent": (5, 50)}
+        if (set(lifecycle) != {"version", "mode", "effective_from", *bounds} or
+                type(lifecycle["version"]) is not int or lifecycle["version"] != 1 or
+                lifecycle["mode"] not in ("disabled", "audit") or
+                any(type(lifecycle[k]) is not int or not low <= lifecycle[k] <= high for k, (low, high) in bounds.items()) or
+                not lifecycle["critical_free_percent"] < lifecycle["pressure_free_percent"] < lifecycle["warning_free_percent"]):
+            raise ValueError("invalid or unsupported storage lifecycle policy")
+        at = lifecycle["effective_from"]
+        if (not isinstance(at, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})", at) or
+                datetime.fromisoformat(at.replace('Z', '+00:00')).year <= 1):
+            raise ValueError("invalid lifecycle effective timestamp")
+        data["storage-lifecycle.json"] = json.dumps(lifecycle, sort_keys=True, separators=(",", ":"))
     return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"namespace": document["namespace"], "name": document["name"]}, "data": data}
 
 

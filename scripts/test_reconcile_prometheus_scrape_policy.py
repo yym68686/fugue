@@ -3,10 +3,29 @@ from pathlib import Path
 import re
 import unittest
 from unittest.mock import patch
-from scripts.reconcile_prometheus_scrape_policy import additional_scrapes, project, verify_queries, public_dns_targets_match
+from scripts.reconcile_prometheus_scrape_policy import additional_scrapes, project, verify_queries, public_dns_targets_match, lifecycle_rules, lifecycle_rule_path, LIFECYCLE_RULE_PATH
 
 
 class ScrapePolicyTest(unittest.TestCase):
+    def test_lifecycle_rules_are_owned_idempotent_and_do_not_replace_existing_rules(self):
+        policy = {'storageLifecycleAlerts': {'version': 1, 'enabled': True}}
+        original = 'rule_files:\n  - /etc/prometheus/original.yml\nalerting:\n  alertmanagers: []\n'
+        added = lifecycle_rule_path(original, policy)
+        self.assertEqual(added.count(LIFECYCLE_RULE_PATH), 1)
+        self.assertEqual(lifecycle_rule_path(added, policy), added)
+        self.assertEqual(lifecycle_rule_path(added, {}), original)
+        rules = json.loads(lifecycle_rules(policy).split('\n', 1)[1])['groups'][0]['rules']
+        self.assertEqual(len(rules), 7)
+        self.assertEqual(len({rule['alert'] for rule in rules}), 7)
+        for rule in rules:
+            if rule['alert'].startswith('FugueStorageVolumeFree'):
+                self.assertIn('persistentvolumeclaim', rule['expr'])
+                self.assertIn('fugue_storage_lifecycle_audit_enabled', rule['expr'])
+        with self.assertRaises(ValueError):
+            lifecycle_rule_path('rule_files: []\n', policy)
+        with self.assertRaises(ValueError):
+            lifecycle_rules({'storageLifecycleAlerts': {'version': 1, 'enabled': 'true'}})
+
     def test_public_dns_verification_rejects_old_or_missing_backends(self):
         check = {"job": "public-dns", "serviceNamePattern": "dns-public-[a-z]+"}
         services = [{"metadata": {"name": name}} for name in ("dns-public-east", "dns-public-west")]
@@ -98,7 +117,9 @@ remote_write:
 
     def test_exact_component_port_contract_and_idempotence(self):
         policy = json.loads(Path("deploy/environments/production/observability/scrape-policy.json").read_text())
-        old = '''scrape_configs:
+        old = '''rule_files:
+  - /etc/prometheus/existing.yml
+scrape_configs:
   - job_name: fugue-control-plane-pods
     relabel_configs:
       - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]

@@ -31,7 +31,7 @@ class DiagnosticPublicationTest(unittest.TestCase):
         fields = next(c['fields'] for c in collectors if c.get('path') == '/v1/snapshots/storage')
         self.assertTrue({'artifact_content_references', 'artifact_content_references_read_failed',
                          'artifact_content_deduplicated_rows', 'artifact_content_deduplicate_failed',
-                         'compiler_input_blocks', 'compiler_input_blocks_read_failed'} <= set(fields))
+                         'compiler_input_blocks', 'compiler_input_blocks_read_failed', 'storage_lifecycle'} <= set(fields))
 
     def test_initial_recovery_waits_without_creating_partial_configuration(self):
         with mock.patch.object(publisher, "get", return_value=None), mock.patch.object(publisher, "put") as put:

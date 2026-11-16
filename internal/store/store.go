@@ -46,6 +46,7 @@ type Store struct {
 	dbReady                              bool
 	storagePolicy                        storagePolicyState
 	retention                            observationRetentionState
+	lifecycle                            storageLifecycleState
 	compilerInputArchiveObjects          inputarchive.Objects
 	compilerInputArchiveReadLeaseEnabled bool
 

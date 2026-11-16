@@ -32,6 +32,20 @@
     "minimum_bytes": 256,
     "boundary_bits": 4
   },
+  "storageLifecycle": {
+    "version": 1,
+    "mode": "audit",
+    "effective_from": "2026-11-16T00:00:00Z",
+    "interval_seconds": 300,
+    "source_page_rows": 64,
+    "history_days": 7,
+    "minimum_verified_versions": 3,
+    "unused_upload_hours": 24,
+    "unreferenced_upload_days": 30,
+    "warning_free_percent": 20,
+    "pressure_free_percent": 15,
+    "critical_free_percent": 10
+  },
   "artifactContentReferences": {
     "version": 1,
     "enabled": true
