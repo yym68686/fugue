@@ -51,6 +51,7 @@ POLICY_VERIFIER_REJECTIONS.update({
 CAPTURE_MAX_ATTEMPTS = 6
 CAPTURE_RETRY_INTERVAL_SECONDS = 2
 CAPTURE_RETRY_BUDGET_SECONDS = 60
+CAPTURE_PAIR_REJECTIONS = frozenset(('checkpoint_deadline', 'snapshot_parent'))
 
 
 class PolicyVerificationRejected(ValueError):
@@ -111,8 +112,8 @@ def coherent_policy(candidate, binding, verifier, queries, current):
     # The DNS listener publishes a signed in-memory state before its wire and
     # assignment checks finish and the checkpoint is atomically persisted.
     # Separate disk/runtime reads can therefore span a normal same-assignment
-    # refresh. Never repair timestamps or weaken the verifier: discard that
-    # whole pair and verify a completely new observation instead.
+    # refresh or a publication change. Never repair timestamps or parent
+    # identities: discard that whole pair and fully verify a new observation.
     retry_deadline = time.monotonic() + CAPTURE_RETRY_BUDGET_SECONDS
     last_rejection = None
     for attempt in range(1, CAPTURE_MAX_ATTEMPTS + 1):
@@ -124,7 +125,7 @@ def coherent_policy(candidate, binding, verifier, queries, current):
             policy = verified_policy(request, verifier)
         except PolicyVerificationRejected as error:
             last_rejection = error
-            retry = (error.category == 'checkpoint_deadline' and attempt < CAPTURE_MAX_ATTEMPTS and
+            retry = (error.category in CAPTURE_PAIR_REJECTIONS and attempt < CAPTURE_MAX_ATTEMPTS and
                      time.monotonic() + CAPTURE_RETRY_INTERVAL_SECONDS < retry_deadline)
             capture_diagnostic(request, attempt, 'retry' if retry else 'rejected', error.category,
                                candidate['pod']['metadata']['uid'])

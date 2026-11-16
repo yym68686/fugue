@@ -97,10 +97,47 @@ class ObservationPolicyTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue().splitlines()[-1])['outcome'], 'rejected')
         self.assertNotIn('synthetic-private-material', output.getvalue())
 
-    def test_only_the_authenticated_deadline_gate_can_trigger_a_retry(self):
+    def test_publication_change_discards_mixed_parent_and_fully_reverifies(self):
+        config, candidate, current, queries, first = self.coherent_fixture()
+        first['checkpoint']['parent'] = {'content_hash': 'old-parent'}
+        first['snapshot']['parent_digest'] = 'new-parent'
+        last = copy.deepcopy(first)
+        last['checkpoint']['parent']['content_hash'] = 'new-parent'
+        seen = []
+        def verify(args, **kwargs):
+            request = json.loads(kwargs['input'])
+            seen.append(request)
+            mixed = request['checkpoint']['parent']['content_hash'] != request['snapshot']['parent_digest']
+            return subprocess.CompletedProcess(args, int(mixed),
+                json.dumps({'schema': 'fugue.dns-observation-policy/v1'}),
+                'DNS observation policy rejected: snapshot_parent' if mixed else '')
+        with patch.object(observation, 'candidate_request', side_effect=[first, last]), \
+                patch.object(observation.subprocess, 'run', side_effect=verify), \
+                patch.object(observation, 'unchanged_backend') as unchanged, \
+                patch.object(observation.time, 'sleep'), \
+                patch.object(observation.sys, 'stderr', io.StringIO()):
+            observation.coherent_policy(candidate, config, '/approved/verifier', queries, current)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(unchanged.call_count, 2)
+        self.assertEqual(seen[0]['checkpoint']['parent']['content_hash'], 'old-parent')
+
+    def test_persistent_parent_mismatch_never_becomes_verified(self):
+        config, candidate, current, queries, request = self.coherent_fixture()
+        with patch.object(observation, 'candidate_request', return_value=request) as read, \
+                patch.object(observation.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                    [], 1, '', 'DNS observation policy rejected: snapshot_parent')), \
+                patch.object(observation, 'unchanged_backend'), \
+                patch.object(observation.time, 'monotonic', return_value=0), \
+                patch.object(observation.time, 'sleep'), \
+                patch.object(observation.sys, 'stderr', io.StringIO()):
+            with self.assertRaisesRegex(ValueError, ': snapshot_parent$'):
+                observation.coherent_policy(candidate, config, '/approved/verifier', queries, current)
+        self.assertEqual(read.call_count, observation.CAPTURE_MAX_ATTEMPTS)
+
+    def test_only_allowlisted_pair_mismatches_can_trigger_a_retry(self):
         config, candidate, current, queries, request = self.coherent_fixture()
         messages = [message for message, category in observation.POLICY_VERIFIER_REJECTIONS.items()
-                    if category != 'checkpoint_deadline']
+                    if category not in observation.CAPTURE_PAIR_REJECTIONS]
         messages += ['synthetic-private-material',
                      'DNS observation policy rejected: checkpoint_deadline\nsynthetic-private-material']
         for message in messages:
