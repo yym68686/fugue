@@ -382,8 +382,8 @@ func TestAutoRightSizingQueuesSafeDownscaleWithoutPostgres(t *testing.T) {
 	if resources == nil {
 		t.Fatal("expected desired app resources")
 	}
-	if resources.CPUMilliCores != 30 || resources.MemoryMebibytes != 512 || resources.MemoryLimitMebibytes != 1024 {
-		t.Fatalf("expected direct CPU guarantee downscale with memory floor preserved, got %+v", resources)
+	if resources.CPUMilliCores != 30 || resources.MemoryMebibytes != 384 || resources.MemoryLimitMebibytes != 768 {
+		t.Fatalf("expected direct CPU guarantee downscale and gradual memory downscale below the creation default, got %+v", resources)
 	}
 	if op.DesiredSpec.Postgres != nil {
 		t.Fatalf("auto right-sizing must not mutate postgres resources, got %+v", op.DesiredSpec.Postgres)
@@ -1001,8 +1001,8 @@ func TestAutoRightSizingDownscaleDimensionsAreIndependent(t *testing.T) {
 		}
 		recommended := &model.ResourceSpec{
 			CPUMilliCores:        25,
-			MemoryMebibytes:      256,
-			MemoryLimitMebibytes: 512,
+			MemoryMebibytes:      280,
+			MemoryLimitMebibytes: 560,
 		}
 		decision := autoRightSizingAppResourceChange(current, recommended)
 		if !decision.allowed || decision.resources == nil {
@@ -1039,7 +1039,7 @@ func TestAutoRightSizingDownscaleDimensionsAreIndependent(t *testing.T) {
 		t.Parallel()
 
 		current := &model.ResourceSpec{CPUMilliCores: 50, MemoryMebibytes: 256}
-		recommended := &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 288}
+		recommended := &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 264}
 		decision := autoRightSizingAppResourceChange(current, recommended)
 		if !decision.allowed || decision.resources == nil {
 			t.Fatalf("expected CPU downscale, got %+v", decision)
@@ -1050,7 +1050,7 @@ func TestAutoRightSizingDownscaleDimensionsAreIndependent(t *testing.T) {
 	})
 }
 
-func TestAutoRightSizingDownscaleNeverRaisesResourcesToDefaults(t *testing.T) {
+func TestAutoRightSizingDownscaleContinuesBelowManagedCreationDefault(t *testing.T) {
 	t.Parallel()
 
 	current := &model.ResourceSpec{
@@ -1067,8 +1067,145 @@ func TestAutoRightSizingDownscaleNeverRaisesResourcesToDefaults(t *testing.T) {
 	if !decision.allowed || decision.resources == nil {
 		t.Fatalf("expected CPU downscale, got %+v", decision)
 	}
-	if got := decision.resources; got.CPUMilliCores != 25 || got.MemoryMebibytes != 400 || got.MemoryLimitMebibytes != 800 {
-		t.Fatalf("downscale must not raise resources to managed defaults, got %+v", got)
+	if got := decision.resources; got.CPUMilliCores != 25 || got.MemoryMebibytes != 304 || got.MemoryLimitMebibytes != 608 {
+		t.Fatalf("downscale must keep reducing memory below managed creation defaults, got %+v", got)
+	}
+}
+
+func TestAutoRightSizingMemoryChangesUseOnlyFivePercentThreshold(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name               string
+		current, target    int64
+		allowed, downscale bool
+	}{
+		{"exact five percent decrease", 320, 304, true, true},
+		{"below five percent decrease", 320, 305, false, false},
+		{"exact five percent increase", 320, 336, true, false},
+		{"below five percent increase", 320, 335, false, false},
+		{"small absolute decrease", 16, 15, true, true},
+		{"small absolute increase", 16, 17, true, false},
+		{"no change", 320, 320, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			current := &model.ResourceSpec{CPUMilliCores: 10, MemoryMebibytes: test.current}
+			target := &model.ResourceSpec{CPUMilliCores: 10, MemoryMebibytes: test.target}
+			decision := autoRightSizingAppResourceChange(current, target)
+			if decision.allowed != test.allowed || decision.downscale != test.downscale {
+				t.Fatalf("unexpected decision for %dMi -> %dMi: %+v", test.current, test.target, decision)
+			}
+			if !test.allowed {
+				return
+			}
+			if decision.resources == nil || decision.resources.CPUMilliCores != current.CPUMilliCores {
+				t.Fatalf("memory-only change must preserve CPU: %+v", decision)
+			}
+			got := decision.resources.MemoryMebibytes
+			if test.downscale {
+				if got >= test.current || got < test.target {
+					t.Fatalf("memory downscale must progress without undershooting recommendation: %+v", decision)
+				}
+			} else if got != test.target {
+				t.Fatalf("expected memory increase to %dMi, got %dMi", test.target, got)
+			}
+		})
+	}
+}
+
+func TestAutoRightSizingMemoryDownscaleConvergesWithoutDefaultFloor(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name            string
+		current, target int64
+	}{
+		{"below creation default", 512, 96},
+		{"already below creation default", 400, 64},
+		{"below recommendation policy floors", 64, 16},
+		{"below rounding quantum", 16, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			current := &model.ResourceSpec{CPUMilliCores: 10, MemoryMebibytes: test.current, MemoryLimitMebibytes: 2 * test.current}
+			target := &model.ResourceSpec{CPUMilliCores: 10, MemoryMebibytes: test.target, MemoryLimitMebibytes: 2 * test.target}
+			for scan := 0; current.MemoryMebibytes != test.target; scan++ {
+				if scan >= 64 {
+					t.Fatalf("did not converge to %dMi: %+v", test.target, current)
+				}
+				decision := autoRightSizingAppResourceChange(current, target)
+				if !decision.allowed || !decision.memoryDownscale || decision.resources == nil {
+					t.Fatalf("memory downscale stalled above %dMi: current=%+v decision=%+v", test.target, current, decision)
+				}
+				next := decision.resources
+				if next.MemoryMebibytes >= current.MemoryMebibytes || next.MemoryMebibytes < test.target {
+					t.Fatalf("invalid memory progression: current=%+v next=%+v", current, next)
+				}
+				if next.MemoryLimitMebibytes < next.MemoryMebibytes || next.MemoryLimitMebibytes > current.MemoryLimitMebibytes {
+					t.Fatalf("invalid memory limit progression: current=%+v next=%+v", current, next)
+				}
+				current = next
+			}
+		})
+	}
+}
+
+func TestAutoRightSizingQueuesMemoryOnlyDownscaleBelowCreationDefault(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name                                   string
+		current, usage, wantRequest, wantLimit int64
+	}{
+		{"creation default", 512, 64, 384, 768},
+		{"five percent only", 320, 250, 304, 608},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+			if err := stateStore.Init(); err != nil {
+				t.Fatal(err)
+			}
+			tenant, err := stateStore.CreateTenant("Memory Resize Tenant")
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			raiseManagedTestCap(t, stateStore, tenant.ID)
+			app, err := stateStore.CreateApp(tenant.ID, project.ID, "worker", "", model.AppSpec{
+				Image: "ghcr.io/example/worker:latest", Ports: []int{8080}, Replicas: 1,
+				RuntimeID: "runtime_managed_shared",
+				Resources: &model.ResourceSpec{CPUMilliCores: 20, MemoryMebibytes: test.current, MemoryLimitMebibytes: 2 * test.current},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			samples := rightSizingUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindApp, app.ID, []rightSizingUsageValue{
+				{cpuMilli: 20, memoryMiB: test.usage},
+				{cpuMilli: 20, memoryMiB: test.usage},
+				{cpuMilli: 20, memoryMiB: test.usage},
+			})
+			if err := stateStore.RecordResourceUsageSamples(samples, time.Time{}); err != nil {
+				t.Fatal(err)
+			}
+			server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+			_, op, alreadyCurrent, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
+			if err != nil || alreadyCurrent || op == nil || op.DesiredSpec == nil || op.DesiredSpec.Resources == nil {
+				t.Fatalf("expected memory-only deploy, op=%+v already_current=%t err=%v", op, alreadyCurrent, err)
+			}
+			got := op.DesiredSpec.Resources
+			if op.Type != model.OperationTypeDeploy || op.RequestedByID != rightSizingAutoDownscaleRequestedByID || got.CPUMilliCores != 20 || got.MemoryMebibytes != test.wantRequest || got.MemoryLimitMebibytes != test.wantLimit {
+				t.Fatalf("unexpected memory-only operation: op=%+v resources=%+v", op, got)
+			}
+			_, duplicate, _, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
+			if err != nil || duplicate != nil {
+				t.Fatalf("memory resize must retain active-operation deduplication: op=%+v err=%v", duplicate, err)
+			}
+		})
 	}
 }
 

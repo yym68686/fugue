@@ -27,13 +27,13 @@ const (
 	rightSizingAutoApplyRequestedByID     = model.OperationRequestedByRightSizing
 	rightSizingAutoDownscaleRequestedByID = model.OperationRequestedByRightSizingDownscale
 	rightSizingAutoApplyMinCPUIncrease    = int64(5)
-	rightSizingAutoApplyMinMemIncrease    = int64(128)
+	rightSizingAutoApplyMinMemIncrease    = int64(0)
 	rightSizingAutoApplyMinCPUIncreaseR   = 0.05
-	rightSizingAutoApplyMinMemIncreaseR   = 0.20
+	rightSizingAutoApplyMinMemIncreaseR   = 0.05
 	rightSizingAutoApplyMinCPUDecrease    = int64(5)
-	rightSizingAutoApplyMinMemDecrease    = int64(256)
+	rightSizingAutoApplyMinMemDecrease    = int64(0)
 	rightSizingAutoApplyMinCPUDecreaseR   = 0.05
-	rightSizingAutoApplyMinMemDecreaseR   = 0.20
+	rightSizingAutoApplyMinMemDecreaseR   = 0.05
 	rightSizingAutoDownscaleStepRatio     = 0.75
 	rightSizingAutoDownscaleOOMWindow     = 48 * time.Hour
 	rightSizingRolloutCPUHeadroomRatio    = 0.15
@@ -617,7 +617,6 @@ func autoRightSizingUpscaleTarget(current, recommended model.ResourceSpec) *mode
 }
 
 func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec, downscaleCPU, downscaleMemory bool) *model.ResourceSpec {
-	defaults := model.DefaultManagedAppResources()
 	target := current
 	if downscaleCPU && recommended.CPUMilliCores < current.CPUMilliCores {
 		// CPU is compressible. Converge directly to the measured guarantee;
@@ -626,9 +625,11 @@ func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec, dow
 	}
 	if downscaleMemory && recommended.MemoryMebibytes < current.MemoryMebibytes {
 		floor := roundUpInt64(int64(math.Ceil(float64(current.MemoryMebibytes)*rightSizingAutoDownscaleStepRatio)), 16)
+		// Creation defaults are not right-sizing floors. Keep the conservative
+		// step, but never let its rounding prevent a material reduction at small
+		// requests. The recommendation already carries the workload usage policy.
+		floor = min(floor, current.MemoryMebibytes-1)
 		target.MemoryMebibytes = maxInt64(recommended.MemoryMebibytes, floor)
-		target.MemoryMebibytes = maxInt64(target.MemoryMebibytes, defaults.MemoryMebibytes)
-		target.MemoryMebibytes = min(target.MemoryMebibytes, current.MemoryMebibytes)
 		if recommended.MemoryLimitMebibytes < current.MemoryLimitMebibytes {
 			target.MemoryLimitMebibytes = recommended.MemoryLimitMebibytes
 		}
