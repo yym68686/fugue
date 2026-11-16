@@ -13,6 +13,17 @@ The normal CI entrypoint first captures expectations on the production runner:
    checkpoint MAC, current signing-key revocations, artifact signatures, parent
    composition, scope, generation, fence, plan and checkpoint freshness using the
    DNS consumer's existing verifier. Recheck Service and Pod UID/resourceVersion.
+   A normal same-assignment refresh may publish signed in-memory state before
+   its post-activation checks finish and its checkpoint is persisted. If, and
+   only if, the verifier reaches `checkpoint_deadline`, discard the mixed pair
+   and recollect the entire request, including current trust material. Every new
+   pair must pass the complete unchanged verifier. Retry at most six total
+   observations per backend, with two-second spacing and no new retry starting
+   after a sixty-second retry-initiation budget. Individual Kubernetes reads and
+   verification retain their existing bounded timeouts. A changed Pod or Service
+   identity/resourceVersion aborts capture, including between retries. All other
+   verifier rejections fail immediately; a persistent deadline mismatch still
+   fails with `checkpoint_deadline` rather than exporting an old receipt.
 3. Export only the requested address records and reduced provenance. Membership
    comes from signed candidates intersected with physical order/selection and
    explicit availability pools and allowed groups. Temporary proof failure does
@@ -47,10 +58,14 @@ the failed gate and do not make it pass or renew evidence.
 Policy authority/freshness rejection identifies the first failing gate in its
 original order: query bounds, checkpoint time, snapshot schema/node/group/parent/
 plan, assignment (fixed field name), checkpoint deadline, or evaluation time.
-It never emits expected/observed values or private verifier input. A gate is
-evidence of the failed comparison, not proof of the upstream cause (for example,
-cross-read cutover versus delayed propagation). No retry, freshness allowance,
-readiness requirement or serving decision is changed by this diagnostic.
+The gate category never includes arbitrary verifier stderr or private input.
+The collector also records bounded `dns_observation_policy_capture` events with
+attempt/outcome, opaque Pod UID, a canonical checkpoint digest and strictly
+formatted applied/evaluation/valid-until timestamps. It never records signing
+material, checkpoint contents, assignments or proof payloads. These events
+distinguish a recovered cross-read race from a persistent mismatch without
+changing freshness, readiness or serving decisions. A gate by itself remains
+evidence of the failed comparison, not proof of the upstream cause.
 
 An intervening policy/authority cutover or a recursive cache holding an older
 generation can cause a conservative mismatch. Capture a fresh receipt and

@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+import time
 
 from scripts import reconcile_dns_transport as transport
 from scripts.recover_dns_transport import candidate_request
@@ -46,6 +48,18 @@ POLICY_VERIFIER_REJECTIONS.update({
 })
 
 
+CAPTURE_MAX_ATTEMPTS = 6
+CAPTURE_RETRY_INTERVAL_SECONDS = 2
+CAPTURE_RETRY_BUDGET_SECONDS = 60
+
+
+class PolicyVerificationRejected(ValueError):
+    """An allowlisted rejection, never arbitrary verifier stderr."""
+    def __init__(self, category):
+        self.category = category if category in POLICY_VERIFIER_REJECTIONS.values() else 'verifier_failed'
+        super().__init__('DNS observation policy authentication unavailable: ' + self.category)
+
+
 def verified_policy(request, verifier):
     try:
         checked = subprocess.run([verifier, '--export-policy'], input=json.dumps(request),
@@ -54,7 +68,7 @@ def verified_policy(request, verifier):
         raise ValueError('DNS observation policy authentication unavailable: verifier_timeout') from None
     if checked.returncode:
         category = POLICY_VERIFIER_REJECTIONS.get(checked.stderr.strip(), 'verifier_failed')
-        raise ValueError('DNS observation policy authentication unavailable: ' + category)
+        raise PolicyVerificationRejected(category)
     if len(checked.stdout) > 256 << 10:
         raise ValueError('DNS observation policy authentication unavailable: output_size')
     try:
@@ -64,6 +78,66 @@ def verified_policy(request, verifier):
     if not isinstance(policy, dict) or policy.get('schema') != 'fugue.dns-observation-policy/v1':
         raise ValueError('DNS observation policy verifier output invalid: output_schema')
     return policy
+
+
+def capture_diagnostic(request, attempt, outcome, category=None, pod_uid=None):
+    """Bounded metadata only: no keys, checkpoint contents or proof payloads."""
+    def timestamp(value):
+        if isinstance(value, str) and re.fullmatch(
+                r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})', value):
+            return value
+        return None
+    checkpoint, snapshot = request.get('checkpoint', {}), request.get('snapshot', {})
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    digest = hashlib.sha256(json.dumps(checkpoint, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    print(json.dumps({'event': 'dns_observation_policy_capture', 'attempt': attempt, 'outcome': outcome,
+                      'pod_uid': pod_uid if isinstance(pod_uid, str) and re.fullmatch(r'[a-f0-9-]{36}', pod_uid) else None,
+                      'category': category, 'checkpoint_digest': 'sha256:' + digest,
+                      'checkpoint_applied_at': timestamp(checkpoint.get('applied_at')),
+                      'snapshot_checkpoint_valid_until': timestamp(snapshot.get('checkpoint_valid_until')),
+                      'snapshot_evaluated_at': timestamp(snapshot.get('evaluated_at'))}, sort_keys=True),
+          file=sys.stderr, flush=True)
+
+
+def unchanged_backend(namespace, current, pod):
+    for kind, before in [('service', current), ('pod', pod)]:
+        after = transport.read_json('get', kind, before['metadata']['name'], '-n', namespace, '-o', 'json')
+        if any(before['metadata'][key] != after['metadata'].get(key) for key in ['uid', 'resourceVersion']):
+            raise ValueError('public DNS backend changed during policy capture')
+
+
+def coherent_policy(candidate, binding, verifier, queries, current):
+    # The DNS listener publishes a signed in-memory state before its wire and
+    # assignment checks finish and the checkpoint is atomically persisted.
+    # Separate disk/runtime reads can therefore span a normal same-assignment
+    # refresh. Never repair timestamps or weaken the verifier: discard that
+    # whole pair and verify a completely new observation instead.
+    retry_deadline = time.monotonic() + CAPTURE_RETRY_BUDGET_SECONDS
+    last_rejection = None
+    for attempt in range(1, CAPTURE_MAX_ATTEMPTS + 1):
+        if last_rejection is not None and time.monotonic() >= retry_deadline:
+            raise last_rejection
+        request = candidate_request(candidate, binding)
+        request['observation_queries'] = queries
+        try:
+            policy = verified_policy(request, verifier)
+        except PolicyVerificationRejected as error:
+            last_rejection = error
+            retry = (error.category == 'checkpoint_deadline' and attempt < CAPTURE_MAX_ATTEMPTS and
+                     time.monotonic() + CAPTURE_RETRY_INTERVAL_SECONDS < retry_deadline)
+            capture_diagnostic(request, attempt, 'retry' if retry else 'rejected', error.category,
+                               candidate['pod']['metadata']['uid'])
+            if not retry:
+                raise
+            # A Pod/Service replacement is not this race. Do not retry using
+            # a stale container identity, environment or transport binding.
+            unchanged_backend(binding['namespace'], current, candidate['pod'])
+            time.sleep(CAPTURE_RETRY_INTERVAL_SECONDS)
+            continue
+        unchanged_backend(binding['namespace'], current, candidate['pod'])
+        capture_diagnostic(request, attempt, 'verified', pod_uid=candidate['pod']['metadata']['uid'])
+        return policy
 
 
 def capture(declaration, declaration_bytes, config, verifier):
@@ -100,13 +174,7 @@ def capture(declaration, declaration_bytes, config, verifier):
         if len(images) != 1 or not re.fullmatch(r'[^\s@]+@sha256:[a-f0-9]{64}', images[0]):
             raise ValueError('immutable DNS backend image required')
         binding = dict(config, recovery={'candidate_image': images[0], 'candidate_pod_uid': pod['metadata']['uid']})
-        request = candidate_request(candidate, binding)
-        request['observation_queries'] = queries
-        policy = verified_policy(request, verifier)
-        for kind, before in [('service', current), ('pod', pod)]:
-            after = transport.read_json('get', kind, before['metadata']['name'], '-n', config['namespace'], '-o', 'json')
-            if any(before['metadata'][key] != after['metadata'].get(key) for key in ['uid', 'resourceVersion']):
-                raise ValueError('public DNS backend changed during policy capture')
+        policy = coherent_policy(candidate, binding, verifier, queries, current)
         result['servers'].append({'server': address, 'service_uid': current['metadata']['uid'],
                                   'pod_uid': pod['metadata']['uid'], 'policy': policy})
     return result
