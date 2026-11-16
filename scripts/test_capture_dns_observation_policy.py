@@ -88,7 +88,9 @@ class ObservationPolicyTests(unittest.TestCase):
     def test_verifier_failures_keep_only_allowlisted_categories(self):
         cases = [(message, category) for message, category in observation.POLICY_VERIFIER_REJECTIONS.items()]
         cases += [('synthetic-private-material', 'verifier_failed'),
-                  ('DNS observation policy authority or freshness mismatch\nsynthetic-private-material', 'verifier_failed')]
+                  ('DNS observation policy authority or freshness mismatch\nsynthetic-private-material', 'verifier_failed'),
+                  ('DNS observation policy rejected: snapshot_plan\nsynthetic-private-material', 'verifier_failed'),
+                  ('DNS observation policy rejected: synthetic-private-material', 'verifier_failed')]
         for message, category in cases:
             with self.subTest(category=category, message=message), patch.object(
                     observation.subprocess, 'run', return_value=subprocess.CompletedProcess(

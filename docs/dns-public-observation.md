@@ -44,6 +44,14 @@ Unknown verifier stderr is reduced to `verifier_failed`; raw stderr, checkpoints
 keys and private proof payloads are never surfaced. These categories diagnose
 the failed gate and do not make it pass or renew evidence.
 
+Policy authority/freshness rejection identifies the first failing gate in its
+original order: query bounds, checkpoint time, snapshot schema/node/group/parent/
+plan, assignment (fixed field name), checkpoint deadline, or evaluation time.
+It never emits expected/observed values or private verifier input. A gate is
+evidence of the failed comparison, not proof of the upstream cause (for example,
+cross-read cutover versus delayed propagation). No retry, freshness allowance,
+readiness requirement or serving decision is changed by this diagnostic.
+
 An intervening policy/authority cutover or a recursive cache holding an older
 generation can cause a conservative mismatch. Capture a fresh receipt and
 inspect version/TTL evidence; do not learn an allowlist from the observed answer,

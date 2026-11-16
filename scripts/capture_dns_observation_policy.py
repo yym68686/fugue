@@ -31,6 +31,21 @@ POLICY_VERIFIER_REJECTIONS = {
 }
 
 
+POLICY_VERIFIER_REJECTIONS.update({
+    'DNS observation policy rejected: ' + reason: reason
+    for reason in (
+        'plan_encoding', 'query_count', 'checkpoint_future', 'checkpoint_expired',
+        'snapshot_schema', 'snapshot_node', 'snapshot_group', 'snapshot_parent', 'snapshot_plan',
+        'assignment_expected_set', 'assignment_release_set', 'assignment_release', 'assignment_kind',
+        'assignment_scope', 'assignment_generation', 'assignment_revision', 'assignment_artifact',
+        'assignment_content', 'assignment_sequence', 'assignment_channel', 'assignment_fence',
+        'assignment_protocol', 'assignment_schema', 'assignment_capabilities',
+        'assignment_heartbeat_deadline', 'assignment_convergence_deadline', 'assignment_other',
+        'checkpoint_deadline', 'evaluation_missing', 'evaluation_future', 'evaluation_stale',
+    )
+})
+
+
 def verified_policy(request, verifier):
     try:
         checked = subprocess.run([verifier, '--export-policy'], input=json.dumps(request),

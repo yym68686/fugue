@@ -22,7 +22,6 @@ import (
 // The caller binds the checkpoint to the actual public Service/Pod via read-only
 // Kubernetes observations; external observations remain independently acquired.
 func VerifiedObservationPolicy(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, queries []dnsobservation.Query, now time.Time) (dnsobservation.Policy, error) {
-	fail := errors.New("DNS observation policy authority or freshness mismatch")
 	service := &Service{Config: configuration}
 	c, p, _, err := service.decodeDNSCheckpointPayload(checkpoint)
 	if err != nil {
@@ -30,12 +29,41 @@ func VerifiedObservationPolicy(configuration config.DNSConfig, checkpoint []byte
 	}
 	until := c.AppliedAt.Add(time.Duration(p.Policy.MaxStaleSeconds) * time.Second)
 	planDigest, err := platformconfig.Digest(p.Plan)
-	if err != nil || len(queries) < 1 || len(queries) > 32 || c.AppliedAt.After(now) || !until.After(now) ||
-		snapshot.Schema != dnsfacts.Schema || snapshot.NodeID != c.NodeID || snapshot.EdgeGroupID != c.GroupID ||
-		snapshot.ParentDigest != c.Parent.ContentHash || snapshot.PlanDigest != planDigest ||
-		!reflect.DeepEqual(snapshot.Assignment, c.Candidate.Assignment) || !snapshot.CheckpointValidUntil.Equal(until) ||
-		snapshot.EvaluatedAt.IsZero() || snapshot.EvaluatedAt.After(now) || now.Sub(snapshot.EvaluatedAt) > time.Duration(p.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second {
-		return dnsobservation.Policy{}, fail
+	// Preserve the ordered fail-closed checks. Only fixed gate names may leave
+	// this verifier: never values, private input, proof data or nested errors.
+	reason := ""
+	switch {
+	case err != nil:
+		reason = "plan_encoding"
+	case len(queries) < 1 || len(queries) > 32:
+		reason = "query_count"
+	case c.AppliedAt.After(now):
+		reason = "checkpoint_future"
+	case !until.After(now):
+		reason = "checkpoint_expired"
+	case snapshot.Schema != dnsfacts.Schema:
+		reason = "snapshot_schema"
+	case snapshot.NodeID != c.NodeID:
+		reason = "snapshot_node"
+	case snapshot.EdgeGroupID != c.GroupID:
+		reason = "snapshot_group"
+	case snapshot.ParentDigest != c.Parent.ContentHash:
+		reason = "snapshot_parent"
+	case snapshot.PlanDigest != planDigest:
+		reason = "snapshot_plan"
+	case !reflect.DeepEqual(snapshot.Assignment, c.Candidate.Assignment):
+		reason = observationPolicyAssignmentRejection(snapshot.Assignment, c.Candidate.Assignment)
+	case !snapshot.CheckpointValidUntil.Equal(until):
+		reason = "checkpoint_deadline"
+	case snapshot.EvaluatedAt.IsZero():
+		reason = "evaluation_missing"
+	case snapshot.EvaluatedAt.After(now):
+		reason = "evaluation_future"
+	case now.Sub(snapshot.EvaluatedAt) > time.Duration(p.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second:
+		reason = "evaluation_stale"
+	}
+	if reason != "" {
+		return dnsobservation.Policy{}, errors.New("DNS observation policy rejected: " + reason)
 	}
 	// This bounds transport/queue delay, not readiness leases. Readiness and
 	// recovery windows remain enforced by the DNS consumer on every answer.
@@ -81,6 +109,48 @@ func VerifiedObservationPolicy(configuration config.DNSConfig, checkpoint []byte
 		result.Records = append(result.Records, entry)
 	}
 	return result, nil
+}
+
+func observationPolicyAssignmentRejection(observed, expected model.PlatformConsumerAssignment) string {
+	switch {
+	case observed.ExpectedConsumerSetID != expected.ExpectedConsumerSetID:
+		return "assignment_expected_set"
+	case observed.ReleaseSetID != expected.ReleaseSetID:
+		return "assignment_release_set"
+	case observed.ArtifactReleaseID != expected.ArtifactReleaseID:
+		return "assignment_release"
+	case observed.ArtifactKind != expected.ArtifactKind:
+		return "assignment_kind"
+	case observed.ScopeKey != expected.ScopeKey:
+		return "assignment_scope"
+	case observed.ExpectedGeneration != expected.ExpectedGeneration:
+		return "assignment_generation"
+	case observed.Revision != expected.Revision:
+		return "assignment_revision"
+	case observed.ArtifactID != expected.ArtifactID:
+		return "assignment_artifact"
+	case observed.ContentHash != expected.ContentHash:
+		return "assignment_content"
+	case observed.GenerationSequence != expected.GenerationSequence:
+		return "assignment_sequence"
+	case observed.ReleaseChannel != expected.ReleaseChannel:
+		return "assignment_channel"
+	case observed.FencingToken != expected.FencingToken:
+		return "assignment_fence"
+	case observed.ExpectedProtocolVersion != expected.ExpectedProtocolVersion:
+		return "assignment_protocol"
+	case observed.ExpectedSchemaVersion != expected.ExpectedSchemaVersion:
+		return "assignment_schema"
+	case !reflect.DeepEqual(observed.CompatibilityCapabilities, expected.CompatibilityCapabilities):
+		return "assignment_capabilities"
+	case !reflect.DeepEqual(observed.HeartbeatDeadline, expected.HeartbeatDeadline):
+		return "assignment_heartbeat_deadline"
+	case !reflect.DeepEqual(observed.ConvergenceDeadline, expected.ConvergenceDeadline):
+		return "assignment_convergence_deadline"
+	default:
+		// The outer DeepEqual remains authoritative if the model gains fields.
+		return "assignment_other"
+	}
 }
 
 func observationRecordAddresses(record model.EdgeDNSRecord, now time.Time) ([]string, error) {
