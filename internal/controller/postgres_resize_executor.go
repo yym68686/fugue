@@ -97,6 +97,10 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	gates := s.Config.ManagedPostgresInPlaceResize
 	enrollment := managedPostgresCPUEnrollment(gates, target.ServiceID, namespace, clusterName)
 	automaticCPU := strings.HasPrefix(op.RequestedByID, managedPostgresAutoCPUActor+"/")
+	automaticMemory := strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/")
+	if automaticMemory && (op.RequestedByType != model.ActorTypeSystem || !gates.AutoMemoryRequestResizeEnabled) {
+		return s.blockManagedPostgresResizeOperation(op, app, "automatic_memory_policy_disabled", "automatic PostgreSQL memory request resize requires the enabled database policy and a system actor")
+	}
 	if automaticCPU &&
 		(enrollment == nil || op.RequestedByID != managedPostgresCPUActor(*enrollment)) {
 		return s.blockManagedPostgresResizeOperation(op, app, "automatic_cpu_enrollment_changed", "automatic PostgreSQL CPU request enrollment no longer matches the queued database identity")
@@ -115,6 +119,25 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 			}
 			if err == nil && automaticCPU {
 				err = validateManagedPostgresAutomaticCPUTarget(snapshot.Observation.DesiredResources, targetResources)
+			}
+			if err == nil && automaticMemory {
+				err = validateManagedPostgresAutomaticMemoryTarget(op.RequestedByID, snapshot, targetResources)
+				if err == nil {
+					if _, readErr := managedPostgresLiveResourceSpec(snapshot.Observation.DesiredResources); readErr != nil {
+						return managedPostgresResizeSnapshot{}, readErr
+					}
+					if op.CreatedAt.Before(time.Now().UTC().Add(-15*time.Minute)) && !resizeQuantitiesEqual(snapshot.Observation.DesiredResources.Requests["memory"], targetResources.Requests["memory"]) {
+						return managedPostgresResizeSnapshot{}, fmt.Errorf("automatic PostgreSQL memory request recommendation expired before mutation")
+					}
+					node, found, nodeErr := client.getNode(callCtx, snapshot.Observation.NodeName)
+					if nodeErr != nil {
+						return managedPostgresResizeSnapshot{}, nodeErr
+					}
+					// Keep the downscale pressure guard active after our own patch,
+					// when the desired memory request already equals the target.
+					source := automaticPostgresMemorySource(op.RequestedByID)
+					err = validateManagedPostgresAutoMemoryNode(node, found, op.DesiredSpec.Postgres.RuntimeResources.MemoryMebibytes < source)
+				}
 			}
 			return snapshot, err
 		},

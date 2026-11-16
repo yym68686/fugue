@@ -310,6 +310,17 @@ func TestManagedPostgresCPURequestEnrollmentFailsClosed(t *testing.T) {
 	}
 }
 
+func TestManagedPostgresAutoMemoryRequestDefaultsOnAndCanBeDisabled(t *testing.T) {
+	t.Setenv("FUGUE_MANAGED_POSTGRES_AUTO_MEMORY_REQUEST_RESIZE_ENABLED", "")
+	if !ControllerFromEnv().ManagedPostgresInPlaceResize.AutoMemoryRequestResizeEnabled {
+		t.Fatal("database memory request policy should default on independently of app/CPU policy")
+	}
+	t.Setenv("FUGUE_MANAGED_POSTGRES_AUTO_MEMORY_REQUEST_RESIZE_ENABLED", "false")
+	if ControllerFromEnv().ManagedPostgresInPlaceResize.AutoMemoryRequestResizeEnabled {
+		t.Fatal("explicit memory auto-resize kill switch was ignored")
+	}
+}
+
 func TestControllerFromEnvReadsManagedPostgresInPlaceResizeGates(t *testing.T) {
 	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", "true")
 	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", "true")

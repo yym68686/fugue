@@ -191,6 +191,7 @@ func TestManagedPostgresInPlaceResizeGatesMatchReviewedDefaultsAndCanClose(t *te
 		enabled bool
 	}{
 		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", "enabled", true},
+		{"FUGUE_MANAGED_POSTGRES_AUTO_MEMORY_REQUEST_RESIZE_ENABLED", "autoMemoryRequestResizeEnabled", true},
 		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", "cpuRequestUpscaleEnabled", false},
 		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED", "cpuRequestDownscaleEnabled", false},
 		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED", "memoryRequestUpscaleEnabled", true},

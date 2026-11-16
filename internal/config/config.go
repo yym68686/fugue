@@ -113,6 +113,7 @@ type ManagedPostgresInPlaceResizeConfig struct {
 	MemoryLimitDownscaleEnabled    bool
 	RecoveryEnabled                bool
 	AutoCPURequestDownscaleTargets []ManagedPostgresCPURequestTarget
+	AutoMemoryRequestResizeEnabled bool
 }
 
 // Enrollment is explicit and bound to database identity, not a reusable name.
@@ -629,6 +630,7 @@ func ControllerFromEnv() ControllerConfig {
 			MemoryLimitDownscaleEnabled:    getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED", false),
 			RecoveryEnabled:                getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED", false),
 			AutoCPURequestDownscaleTargets: parseManagedPostgresCPURequestTargets(os.Getenv("FUGUE_MANAGED_POSTGRES_AUTO_CPU_REQUEST_DOWNSCALE_TARGETS_JSON")),
+			AutoMemoryRequestResizeEnabled: getenvBool("FUGUE_MANAGED_POSTGRES_AUTO_MEMORY_REQUEST_RESIZE_ENABLED", true),
 		},
 	}
 	if cfg.RegistryPullBase == "" {

@@ -150,6 +150,40 @@ func managedPostgresResizeOperation(f managedPostgresResizeFixture, target model
 	}
 }
 
+func TestManagedPostgresMemoryResizeStandaloneRequiresSystemActorAndExclusiveBinding(t *testing.T) {
+	f := newManagedPostgresResizeFixture(t)
+	mutateResizeFixtureState(t, f.store, func(state *model.State) {
+		state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = ""
+	})
+	target := f.bootstrap
+	target.MemoryMebibytes = 384
+	request := managedPostgresResizeOperation(f, target)
+	request.RequestedByID = ManagedPostgresAutoMemoryRequestActorPrefix + "/identity-hash/512"
+	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("non-system actor resized standalone database: %v", err)
+	}
+	request.RequestedByType = model.ActorTypeSystem
+	op, _, err := f.store.CreateOperationWithResult(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.CompleteManagedOperation(op.ID, "", "verified request-only resize"); err != nil {
+		t.Fatal(err)
+	}
+	service, err := f.store.GetBackingService(f.service.ID)
+	if err != nil || service.OwnerAppID != "" || *service.Spec.Postgres.Resources != f.bootstrap || *service.Spec.Postgres.RuntimeResources != target {
+		t.Fatalf("resize changed ownership/bootstrap or lost runtime target: service=%+v err=%v", service, err)
+	}
+	mutateResizeFixtureState(t, f.store, func(state *model.State) {
+		state.ServiceBindings = append(state.ServiceBindings, model.ServiceBinding{ID: "other-binding", TenantID: f.tenant.ID, AppID: "other-app", ServiceID: f.service.ID})
+	})
+	target.MemoryMebibytes = 320
+	request.DesiredSpec.Postgres.RuntimeResources = &target
+	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("shared database admitted: %v", err)
+	}
+}
+
 func TestManagedPostgresResizePersistsOnlyExactRuntimeTarget(t *testing.T) {
 	t.Parallel()
 	f := newManagedPostgresResizeFixture(t)

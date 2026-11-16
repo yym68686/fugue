@@ -223,6 +223,15 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		case hasActiveOp:
 			return nil
 		default:
+			if managed.Metadata.DeletionTimestamp == "" {
+				if queued, err := s.reconcileManagedPostgresAutoMemoryRequest(ctx, client, storedApp); err != nil {
+					if s.Logger != nil {
+						s.Logger.Printf("automatic PostgreSQL memory request reconciliation deferred app=%s: %v", storedApp.ID, err)
+					}
+				} else if queued {
+					return nil
+				}
+			}
 			if queued, err := s.reconcileManagedPostgresAutoCPURequest(ctx, client, storedApp); err != nil {
 				return err
 			} else if queued {

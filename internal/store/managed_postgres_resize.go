@@ -8,6 +8,7 @@ import (
 )
 
 const ManagedPostgresAutoCPURequestActorPrefix = "fugue-controller/postgres-cpu-request-downscale"
+const ManagedPostgresAutoMemoryRequestActorPrefix = "fugue-controller/postgres-memory-request"
 
 // normalizeManagedPostgresResizeTarget requires a complete resource envelope.
 // A zero CPU limit preserves an existing unlimited allowance. The live resize
@@ -46,9 +47,10 @@ func prepareManagedPostgresResizeOperation(app model.App, op *model.Operation) e
 		return ErrInvalidInput
 	}
 	// The public resize contract remains app-owned. Only the internal automatic
-	// CPU operation may enroll an exclusively bound standalone database.
+	// request-only operations may resize an exclusively bound standalone database.
 	if !target.AppOwned && (op.RequestedByType != model.ActorTypeSystem ||
-		!strings.HasPrefix(op.RequestedByID, ManagedPostgresAutoCPURequestActorPrefix+"/")) {
+		(!strings.HasPrefix(op.RequestedByID, ManagedPostgresAutoCPURequestActorPrefix+"/") &&
+			!strings.HasPrefix(op.RequestedByID, ManagedPostgresAutoMemoryRequestActorPrefix+"/"))) {
 		return ErrConflict
 	}
 	if target.Postgres.Suspended {
