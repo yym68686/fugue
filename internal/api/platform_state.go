@@ -22,6 +22,7 @@ import (
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
 	"fugue/internal/routeartifact"
+	"fugue/internal/runtimeobservation"
 	"fugue/internal/store"
 )
 
@@ -1156,6 +1157,12 @@ func (s *Server) handlePlatformShadowConsumerHeartbeat(w http.ResponseWriter, r 
 }
 
 func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, r *http.Request, shadow bool) {
+	started := time.Now().UTC()
+	operation := "trusted_heartbeat"
+	if shadow {
+		operation = "shadow_heartbeat"
+	}
+	r = r.WithContext(runtimeobservation.WithDatabaseOperation(r.Context(), "consumer-heartbeat"))
 	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
 	if !ok {
 		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
@@ -1168,6 +1175,7 @@ func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, 
 	}
 	set, err := s.store.GetPlatformExpectedConsumerSet(heartbeat.ExpectedConsumerSetID)
 	if err != nil {
+		s.retainConsumerRequestFailure(r.Context(), started, operation, "expected_set", err)
 		s.writeStoreError(w, err)
 		return
 	}
@@ -1179,6 +1187,7 @@ func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, 
 		}
 		sets, listErr := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: set.ReleaseSetID, ArtifactReleaseID: set.ArtifactReleaseID, ArtifactKind: set.ArtifactKind, ScopeKey: set.ScopeKey})
 		if listErr != nil {
+			s.retainConsumerRequestFailure(r.Context(), started, operation, "list_expectations", listErr)
 			s.writeStoreError(w, listErr)
 			return
 		}
@@ -1190,6 +1199,9 @@ func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, 
 		}
 	}
 	if status, standby := s.validateDNSHeartbeatBackendSelection(r.Context(), claims, heartbeat, set); status != http.StatusOK {
+		if status >= http.StatusInternalServerError {
+			s.retainConsumerRequestFailure(r.Context(), started, operation, "backend_validation", errDNSRuntimeFacts)
+		}
 		if standby {
 			httpx.WriteJSON(w, status, httpx.ErrorResponse{Error: "DNS backend is not selected by public transport", Code: "dns_backend_not_selected", Category: "conflict"})
 			return
@@ -1199,11 +1211,12 @@ func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, 
 	}
 	var consumer model.PlatformConsumerInstance
 	if shadow {
-		consumer, err = s.store.AcceptPlatformShadowConsumerHeartbeat(claims, heartbeat, time.Now().UTC(), s.heartbeatAuditKeyring)
+		consumer, err = s.store.AcceptPlatformShadowConsumerHeartbeatObserved(r.Context(), claims, heartbeat, time.Now().UTC(), s.heartbeatAuditKeyring)
 	} else {
-		consumer, err = s.store.AcceptTrustedPlatformConsumerHeartbeatWithAudit(claims, heartbeat.ExpectedConsumerSetID, heartbeat, time.Now().UTC(), platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}, s.heartbeatAuditKeyring)
+		consumer, err = s.store.AcceptTrustedPlatformConsumerHeartbeatWithAuditObserved(r.Context(), claims, heartbeat.ExpectedConsumerSetID, heartbeat, time.Now().UTC(), platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}, s.heartbeatAuditKeyring)
 	}
 	if err != nil {
+		s.retainConsumerRequestFailure(r.Context(), started, operation, "store_admission", err)
 		writeTrustedPlatformConsumerHeartbeatError(w, err)
 		return
 	}
@@ -1329,6 +1342,8 @@ func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcon
 
 func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *http.Request) {
 	defer s.observeOperation("consumer-assignment")()
+	started := time.Now().UTC()
+	r = r.WithContext(runtimeobservation.WithDatabaseOperation(r.Context(), "consumer-assignment"))
 	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
 	if !ok {
 		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
@@ -1339,6 +1354,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 	readBinding := routeartifact.NewRequestBindingReader()
 	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil {
+		s.retainConsumerRequestFailure(r.Context(), started, "assignment", "resolve", err)
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
@@ -1374,6 +1390,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 				return isSelected, nil
 			})
 			if selectErr != nil {
+				s.retainConsumerRequestFailure(r.Context(), started, "assignment", "serving_selection", selectErr)
 				httpx.WriteError(w, http.StatusServiceUnavailable, selectErr.Error())
 				return
 			}
@@ -1385,6 +1402,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 		return
 	}
 	if err := s.checkConsumerInputReadsWithLoader(r.Context(), claims, resolved, readArtifact, servingOnly, loadArtifact); err != nil {
+		s.retainConsumerRequestFailure(r.Context(), started, "assignment", "input_recheck", err)
 		httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
 		return
 	}

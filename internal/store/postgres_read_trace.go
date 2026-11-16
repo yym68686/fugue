@@ -73,8 +73,8 @@ func (t *postgresReadTracer) connection(conn *pgx.Conn) databaseConnectionFact {
 func (t *postgresReadTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	connection := t.connection(conn)
 	if conn != nil && connection.sequence != 0 {
-		id := runtimeobservation.DatabaseObservations.Start(ctx, conn.PgConn().PID(), connection.sequence, connection.observed, data.SQL, data.Args)
-		ctx = context.WithValue(ctx, databaseQueryKey{}, id)
+		fact := runtimeobservation.DatabaseObservations.StartQuery(ctx, conn.PgConn().PID(), connection.sequence, connection.observed, data.SQL, data.Args)
+		ctx = context.WithValue(ctx, databaseQueryKey{}, fact)
 	} else {
 		runtimeobservation.DatabaseObservations.Drop()
 	}
@@ -85,8 +85,8 @@ func (t *postgresReadTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn
 }
 
 func (*postgresReadTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
-	if id, ok := ctx.Value(databaseQueryKey{}).(uint64); ok {
-		runtimeobservation.DatabaseObservations.Finish(id, data.Err != nil)
+	if fact, ok := ctx.Value(databaseQueryKey{}).(runtimeobservation.DatabaseQueryFact); ok {
+		runtimeobservation.DatabaseObservations.FinishQuery(fact, data.Err)
 	}
 	if started, ok := ctx.Value(queryTraceStartKey{}).(time.Time); ok {
 		recordReadStage(ctx, readStageName(ctx)+"_query", started)

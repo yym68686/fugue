@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"runtime"
 	"sort"
 	"strings"
@@ -24,6 +25,11 @@ type DatabaseOperation struct {
 }
 
 var operationSequence atomic.Uint64
+
+func DatabaseOperationFromContext(ctx context.Context) DatabaseOperation {
+	operation, _ := ctx.Value(databaseOperationKey{}).(DatabaseOperation)
+	return operation
+}
 
 func WithDatabaseOperation(ctx context.Context, name string) context.Context {
 	if !namePattern.MatchString(name) {
@@ -70,6 +76,20 @@ type DatabaseRecorder struct {
 	dropped         atomic.Uint64
 	completed       uint64
 	largeCompleted  uint64
+	failureMu       sync.Mutex
+	failures        []DatabaseFailureFact
+	failureNext     int
+	failureRecorded uint64
+	failureTotal    atomic.Uint64
+	failureDropped  atomic.Uint64
+}
+
+const databaseFailureLimit = 32
+
+type DatabaseFailureFact struct {
+	DatabaseQueryFact
+	Class    string `json:"error_class"`
+	SQLState string `json:"sql_state,omitempty"`
 }
 
 func SQLFingerprint(sql string) string { h := md5.Sum([]byte(sql)); return hex.EncodeToString(h[:]) }
@@ -94,6 +114,22 @@ func DatabaseCaller() string {
 	return caller
 }
 func (r *DatabaseRecorder) Start(ctx context.Context, pid uint32, connection uint64, first time.Time, sql string, args []any) uint64 {
+	fact, tracked := r.startQuery(ctx, pid, connection, first, sql, args)
+	if !tracked {
+		return 0
+	}
+	return fact.ID
+}
+
+// Keep one metadata-only value in the driver's existing query context even
+// when the best-effort active map is full. A failed query must not depend on
+// successfully recording its start, or on outlasting ordinary query churn.
+func (r *DatabaseRecorder) StartQuery(ctx context.Context, pid uint32, connection uint64, first time.Time, sql string, args []any) DatabaseQueryFact {
+	fact, _ := r.startQuery(ctx, pid, connection, first, sql, args)
+	return fact
+}
+
+func (r *DatabaseRecorder) startQuery(ctx context.Context, pid uint32, connection uint64, first time.Time, sql string, args []any) (DatabaseQueryFact, bool) {
 	id := r.sequence.Add(1)
 	operation, _ := ctx.Value(databaseOperationKey{}).(DatabaseOperation)
 	fact := DatabaseQueryFact{ID: id, Operation: operation, BackendPID: pid, Connection: connection, ConnectionFirstObserved: first, Fingerprint: SQLFingerprint(sql), PrefixFingerprint: SQLFingerprint(sql[:min(len(sql), 1023)]), SQLBytes: len(sql), Caller: DatabaseCaller(), Started: time.Now().UTC()}
@@ -110,7 +146,7 @@ func (r *DatabaseRecorder) Start(ctx context.Context, pid uint32, connection uin
 	}
 	if !r.mu.TryLock() {
 		r.dropped.Add(1)
-		return 0
+		return fact, false
 	}
 	defer r.mu.Unlock()
 	if r.active == nil {
@@ -126,10 +162,50 @@ func (r *DatabaseRecorder) Start(ctx context.Context, pid uint32, connection uin
 	}
 	if len(r.active) >= 128 {
 		r.dropped.Add(1)
-		return 0
+		return fact, false
 	}
 	r.active[id] = fact
-	return id
+	return fact, true
+}
+
+// This independent non-blocking ring records only actual driver failures.
+// Successful queries cannot evict failures or acquire this ring's mutex.
+func (r *DatabaseRecorder) FinishQuery(fact DatabaseQueryFact, err error) {
+	r.Finish(fact.ID, err != nil)
+	if err == nil || fact.ID == 0 {
+		return
+	}
+	r.failureTotal.Add(1)
+	now := time.Now().UTC()
+	fact.Finished, fact.Failed = &now, true
+	failure := DatabaseFailureFact{DatabaseQueryFact: fact, Class: "unclassified"}
+	var databaseError interface{ SQLState() string }
+	switch {
+	case errors.As(err, &databaseError):
+		failure.Class = "database"
+		switch state := databaseError.SQLState(); state {
+		case "55P03", "57014", "40001", "40P01", "08000", "08003", "08006", "57P01", "53300", "53100", "53200":
+			failure.SQLState = state
+		default:
+			failure.SQLState = "other"
+		}
+	case errors.Is(err, context.DeadlineExceeded):
+		failure.Class = "deadline"
+	case errors.Is(err, context.Canceled):
+		failure.Class = "canceled"
+	}
+	if !r.failureMu.TryLock() {
+		r.failureDropped.Add(1)
+		return
+	}
+	defer r.failureMu.Unlock()
+	r.failureRecorded++
+	if len(r.failures) < databaseFailureLimit {
+		r.failures = append(r.failures, failure)
+	} else {
+		r.failures[r.failureNext] = failure
+		r.failureNext = (r.failureNext + 1) % databaseFailureLimit
+	}
 }
 func (r *DatabaseRecorder) Finish(id uint64, failed bool) {
 	if id == 0 {
@@ -189,7 +265,14 @@ func (r *DatabaseRecorder) Snapshot(ctx context.Context) (any, error) {
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	sort.Slice(large, func(i, j int) bool { return large[i].ID < large[j].ID })
 	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
-	return map[string]any{"schema": "fugue.database.observation.v1", "observed_at": now, "queries": rows, "large_queries": large, "active": active, "completed_total": completed, "large_completed_total": big, "overwritten": completed > 256 || big > 128, "dropped_events": r.dropped.Load(), "note": "fingerprints only; known_input_bytes counts existing string/byte buffers, not protocol bytes; other parameter encodings and generic result sizes are unknown; active includes starts whose completion observation was dropped; correlate PID and connection lifetime with database backend_start"}, nil
+	r.failureMu.Lock()
+	failures := append([]DatabaseFailureFact(nil), r.failures...)
+	recorded := r.failureRecorded
+	r.failureMu.Unlock()
+	sort.Slice(failures, func(i, j int) bool { return failures[i].ID < failures[j].ID })
+	return map[string]any{"schema": "fugue.database.observation.v1", "observed_at": now, "queries": rows, "large_queries": large, "active": active, "completed_total": completed, "large_completed_total": big, "overwritten": completed > 256 || big > 128, "dropped_events": r.dropped.Load(),
+		"failures": map[string]any{"receipts": failures, "total": r.failureTotal.Load(), "recorded": recorded, "dropped": r.failureDropped.Load(), "evicted": recorded - uint64(len(failures)), "limit": databaseFailureLimit, "coverage": "observed_driver_query_errors_not_all_store_or_request_failures"},
+		"note":     "fingerprints only; known_input_bytes counts existing string/byte buffers, not protocol bytes; other parameter encodings and generic result sizes are unknown; active includes starts whose completion observation was dropped; correlate PID and connection lifetime with database backend_start"}, nil
 }
 
 // RecordDatabaseOutput measures an existing decoded buffer at a known boundary.

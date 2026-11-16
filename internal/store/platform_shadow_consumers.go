@@ -13,6 +13,7 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
+	"fugue/internal/runtimeobservation"
 )
 
 func validateShadowObservation(state *model.State, set model.PlatformExpectedConsumerSet, h platformcontrol.PlatformConsumerHeartbeatEnvelope, keys bundleauth.Keyring) error {
@@ -127,8 +128,12 @@ func acceptShadowObservation(state *model.State, claims platformcontrol.Platform
 }
 
 func (s *Store) AcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
+	return s.AcceptPlatformShadowConsumerHeartbeatObserved(context.Background(), claims, h, at, audit)
+}
+
+func (s *Store) AcceptPlatformShadowConsumerHeartbeatObserved(observation context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
 	if s.db != nil {
-		return s.pgAcceptPlatformShadowConsumerHeartbeat(claims, h, at, audit)
+		return s.pgAcceptPlatformShadowConsumerHeartbeat(claims, h, at, audit, observation)
 	}
 	var out model.PlatformConsumerInstance
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -189,13 +194,16 @@ func (s *Store) ListPlatformShadowConsumers(kind, scope string) ([]model.Platfor
 	return out, err
 }
 
-func (s *Store) pgAcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
+func (s *Store) pgAcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring, observation ...context.Context) (model.PlatformConsumerInstance, error) {
 	h, size, err := cloneCompilerInputConsumerHeartbeat(h)
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if len(observation) == 1 {
+		ctx = runtimeobservation.CopyDatabaseOperation(ctx, observation[0])
+	}
 	proof, pins, err := s.prepareCompilerInputConsumer(ctx, compilerInputConsumerIntent{expectedID: h.ExpectedConsumerSetID, heartbeat: &h, bytes: size})
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err

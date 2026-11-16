@@ -312,6 +312,26 @@ propagates operation lineage without changing the store's existing timeout or
 cancellation semantics. Runtime requests never expose SQL text, parameters,
 result payloads, credentials or raw error messages.
 
+An independent 32-entry `failures` ring retains original driver query failures,
+including starts that could not enter the ordinary active-query map. Successful
+queries cannot evict them. Fixed error classes and allowlisted typed SQLSTATEs
+are retained alongside the query's existing metadata; error text is not parsed.
+Failure-ring contention drops an observation without blocking business work.
+Total, recorded, dropped and evicted counters make that coverage explicit;
+concurrently sampled counters are not a transactional snapshot. This observes
+driver query errors, not every store, transaction-commit or HTTP failure.
+
+The API operations snapshot also retains up to 24 `captures.consumer_failures`
+from the original assignment or verified heartbeat read/admission failure.
+Fixed operation/stage names, error categories, typed SQLSTATE and store-conflict
+flags are recorded without identifiers, request bodies or arbitrary errors.
+Successful requests cannot evict them. Heartbeat store writes copy only the
+operation lineage, preserving their existing independent timeout/cancellation.
+Operation IDs are local to one process; absent lineage must not be inferred by
+pairing unrelated failures. Authentication, decoding, expected conflict responses
+and other handlers are outside this ring's coverage. Neither ring reconstructs
+events before deployment or authorizes serving traffic.
+
 On Linux a non-root component's runtime profile socket accepts only kernel
 credentials identifying root or the component's own UID. Diagnostic Jobs drop
 DAC_OVERRIDE, so filesystem owner-only mode by itself prevents those Jobs from

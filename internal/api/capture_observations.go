@@ -21,17 +21,20 @@ const captureReceiptLimit = 24
 const captureEventLimit = 12
 
 type captureObservations struct {
-	mu                    sync.Mutex
-	sequence              uint64
-	completed             uint64
-	evicted               uint64
-	receipts              []captureReceipt
-	agentFailures         []captureReceipt
-	agentFailureTotal     uint64
-	agentFailureEvicted   uint64
-	trafficFailures       []trafficDiagnosticFailure
-	trafficFailureTotal   uint64
-	trafficFailureEvicted uint64
+	mu                     sync.Mutex
+	sequence               uint64
+	completed              uint64
+	evicted                uint64
+	receipts               []captureReceipt
+	agentFailures          []captureReceipt
+	agentFailureTotal      uint64
+	agentFailureEvicted    uint64
+	trafficFailures        []trafficDiagnosticFailure
+	trafficFailureTotal    uint64
+	trafficFailureEvicted  uint64
+	consumerFailures       []consumerRequestFailure
+	consumerFailureTotal   uint64
+	consumerFailureEvicted uint64
 }
 
 type captureReceipt struct {
@@ -333,5 +336,8 @@ func (s *Server) captureSnapshot() any {
 		"traffic_failures": map[string]any{"receipts": append([]trafficDiagnosticFailure(nil), s.captures.trafficFailures...),
 			"total": s.captures.trafficFailureTotal, "evicted": s.captures.trafficFailureEvicted, "limit": trafficFailureLimit,
 			"coverage": "failed_published_traffic_diagnostic_reads_not_all_dns_checks_or_request_causes"},
+		"consumer_failures": map[string]any{"receipts": append([]consumerRequestFailure(nil), s.captures.consumerFailures...),
+			"total": s.captures.consumerFailureTotal, "evicted": s.captures.consumerFailureEvicted, "limit": consumerFailureLimit,
+			"coverage": "assignment_and_heartbeat_read_or_admission_errors_not_all_http_rejections"},
 		"coverage": "bounded_completed_local_reads_not_full_request_tracing", "authorizes_traffic": false}
 }

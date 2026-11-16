@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -984,6 +985,12 @@ func (s *Store) AcceptTrustedPlatformConsumerHeartbeatWithAudit(
 	return s.acceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy, &auditKeyring)
 }
 
+// Only diagnostic lineage is copied. Store-owned cancellation and deadlines
+// remain independent of the HTTP request, including a disconnected caller.
+func (s *Store) AcceptTrustedPlatformConsumerHeartbeatWithAuditObserved(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, expectedSetID string, heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope, receivedAt time.Time, policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy, auditKeyring bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
+	return s.acceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy, &auditKeyring, ctx)
+}
+
 func (s *Store) acceptTrustedPlatformConsumerHeartbeat(
 	claims platformcontrol.PlatformComponentIdentityClaims,
 	expectedSetID string,
@@ -991,13 +998,14 @@ func (s *Store) acceptTrustedPlatformConsumerHeartbeat(
 	receivedAt time.Time,
 	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
 	auditKeyring *bundleauth.Keyring,
+	observation ...context.Context,
 ) (model.PlatformConsumerInstance, error) {
 	expectedSetID = strings.TrimSpace(expectedSetID)
 	if expectedSetID == "" {
 		return model.PlatformConsumerInstance{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgAcceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy, auditKeyring)
+		return s.pgAcceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy, auditKeyring, observation...)
 	}
 	var out model.PlatformConsumerInstance
 	err := s.withLockedState(true, func(state *model.State) error {

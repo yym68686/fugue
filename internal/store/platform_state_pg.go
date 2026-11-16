@@ -14,6 +14,7 @@ import (
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
+	"fugue/internal/runtimeobservation"
 )
 
 type platformStateDB interface {
@@ -1897,6 +1898,7 @@ func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeat(
 	receivedAt time.Time,
 	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
 	auditKeyring *bundleauth.Keyring,
+	observation ...context.Context,
 ) (model.PlatformConsumerInstance, error) {
 	heartbeat, size, err := cloneCompilerInputConsumerHeartbeat(heartbeat)
 	if err != nil {
@@ -1904,6 +1906,9 @@ func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeat(
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if len(observation) == 1 {
+		ctx = runtimeobservation.CopyDatabaseOperation(ctx, observation[0])
+	}
 	proof, pins, err := s.prepareCompilerInputConsumer(ctx, compilerInputConsumerIntent{expectedID: expectedSetID, heartbeat: &heartbeat, bytes: size})
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
