@@ -24,7 +24,13 @@ is Repeatable Read and READ ONLY, with SQL2s, lock100ms, zero temporary files,
 1MiB work memory, no parallel workers/JIT and a six-second operation deadline.
 It reads database allocation, heap/table/index/total allocations of ten fixed
 relations, and one primary-key page of at most128 upload metadata rows. The
-production page is64. No body, token, filename, SQL error or tenant/upload ID is
+production page is64. Apps, operations and import-job reference metadata are
+independently primary-key paged, each limited to the same page size plus one.
+This is only a bounded positive-reference sample: reference pages need not
+overlap a source page, so non-matches stay unknown, not unreferenced.
+The existing verified fixed zero-temp guard works with ordinary database roles;
+missing/changed guards fail closed without granting broader SET authority.
+No archive/artifact body, token, filename, SQL error or tenant/upload ID is
 exported. The private keyset cursor advances only after the entire sample
 succeeds, resets after the last page, and resets when policy changes.
 

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/schemamigrate"
 )
 
 // Dedicated, loopback-only database. Never use the production DATABASE_URL.
@@ -25,6 +27,12 @@ func TestStorageLifecyclePostgresReadOnlyPaginationAndPositiveReferences(t *test
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	// Install only in this disposable database, then exercise the audit as a
+	// least-privileged reader. A superuser fixture hid an ordinary-role SET
+	// failure in the first rollout; direct SET must remain forbidden.
+	if _, err = db.Exec(schemamigrate.CompilerInputZeroTempSQL); err != nil {
+		t.Fatal(err)
+	}
 	schema := fmt.Sprintf("lifecycle_%d", time.Now().UnixNano())
 	if _, err = db.Exec(`CREATE SCHEMA ` + schema + `; SET search_path TO ` + schema); err != nil {
 		t.Fatal(err)
@@ -56,18 +64,37 @@ CREATE VIEW fugue_source_uploads AS SELECT id,tenant_id,created_at,require_reado
 	if err != nil {
 		t.Fatal(err)
 	}
+	role := fmt.Sprintf("lifecycle_reader_%d", time.Now().UnixNano())
+	if _, err = db.Exec(`CREATE ROLE ` + role + ` NOLOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB;
+GRANT USAGE ON SCHEMA ` + schema + ` TO ` + role + `;
+GRANT SELECT ON ALL TABLES IN SCHEMA ` + schema + ` TO ` + role + `;
+SET ROLE ` + role); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := db.Exec(`RESET ROLE; DROP OWNED BY ` + role + `; DROP ROLE ` + role); err != nil {
+			t.Error(err)
+		}
+	}()
+	var ordinary bool
+	if err = db.QueryRow(`SELECT NOT rolsuper FROM pg_roles WHERE rolname=current_user`).Scan(&ordinary); err != nil || !ordinary {
+		t.Fatal("audit must use an ordinary role", ordinary, err)
+	}
+	if _, err = db.Exec(`SET temp_file_limit='0'`); err == nil {
+		t.Fatal("ordinary role unexpectedly acquired SET authority")
+	}
 	s := &Store{db: db}
 	p := testLifecyclePolicy()
 	now := time.Now().UTC()
-	one, cursor, err := s.collectStorageLifecycleSample(t.Context(), p, "policy", "", now)
+	one, cursor, err := s.collectStorageLifecycleSample(t.Context(), p, "policy", storageLifecycleCursor{}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cursor != "b" || one.SourcePage.Rows != 2 || one.SourcePage.ReferencedRows != 1 || one.SourcePage.UnknownRows != 1 || one.SourcePage.OlderThan30DaysBytes != 100 || one.SourcePage.PageAtEnd {
-		t.Fatalf("invalid first page: %+v cursor=%s", one.SourcePage, cursor)
+	if cursor.Source != "b" || one.SourcePage.Rows != 2 || one.SourcePage.ReferencedRows != 1 || one.SourcePage.UnknownRows != 1 || one.SourcePage.OlderThan30DaysBytes != 100 || one.SourcePage.PageAtEnd {
+		t.Fatalf("invalid first page: %+v cursor=%+v", one.SourcePage, cursor)
 	}
 	two, cursor, err := s.collectStorageLifecycleSample(t.Context(), p, "policy", cursor, now)
-	if err != nil || cursor != "" || two.SourcePage.ReferencedRows != 2 || !two.SourcePage.PageAtEnd || two.SourcePage.EligibleRows != 0 {
+	if err != nil || cursor != (storageLifecycleCursor{}) || two.SourcePage.ReferencedRows != 2 || !two.SourcePage.PageAtEnd || two.SourcePage.EligibleRows != 0 {
 		t.Fatal(two.SourcePage, cursor, err)
 	}
 	var count int
@@ -77,5 +104,28 @@ CREATE VIEW fugue_source_uploads AS SELECT id,tenant_id,created_at,require_reado
 	// The tripwire also proves that a normal read-write transaction is refused.
 	if err = db.QueryRow(`SELECT size_bytes FROM fugue_source_uploads LIMIT 1`).Scan(&count); err == nil {
 		t.Fatal("read-only tripwire was not exercised")
+	}
+	// Poison later historical envelopes: even with no reverse-reference index,
+	// the audit must apply its primary-key limit before reading their JSON.
+	_, err = db.Exec(`RESET ROLE;
+INSERT INTO fugue_operations VALUES ('op-a','tenant-a','{}'),('op-b','tenant-a','{}'),('op-c','tenant-a','{}'),('op-d','tenant-a','{}');
+ALTER TABLE fugue_operations RENAME TO fixture_operations;
+CREATE FUNCTION bounded_reference_envelope(identifier text, body jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE AS $$
+BEGIN
+ IF identifier > 'op-c' THEN RAISE EXCEPTION 'read beyond bounded reference page'; END IF;
+ RETURN body;
+END $$;
+CREATE VIEW fugue_operations AS SELECT id,tenant_id,bounded_reference_envelope(id,desired_source_json) AS desired_source_json FROM fixture_operations;
+GRANT SELECT ON fugue_operations TO ` + role + `; SET ROLE ` + role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cursor, err = s.collectStorageLifecycleSample(t.Context(), p, "policy", storageLifecycleCursor{}, now)
+	if err != nil || cursor.Operations != "op-b" {
+		t.Fatal("reference pagination read beyond its bound", cursor, err)
+	}
+	empty, cursor, err := s.collectStorageLifecycleSample(t.Context(), p, "policy", storageLifecycleCursor{Source: "z", Operations: "op"}, now)
+	if err != nil || empty.SourcePage.Rows != 0 || cursor.Source != "" || cursor.Operations != "op-c" {
+		t.Fatal("empty source page stalled independent reference cursor", empty.SourcePage, cursor, err)
 	}
 }

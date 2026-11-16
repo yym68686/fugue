@@ -71,10 +71,10 @@ func TestStorageLifecycleRejectsNegativeSourceSizeWithoutPublishingSample(t *tes
 	s, mock := lifecycleMock(t)
 	p := testLifecyclePolicy()
 	expectLifecyclePrefix(mock)
-	mock.ExpectQuery(regexp.QuoteMeta(storageLifecycleSourceSQL)).WithArgs("", p.SourcePageRows+1).
-		WillReturnRows(sourceAuditRows().AddRow("a", time.Now(), -1, false)).RowsWillBeClosed()
+	mock.ExpectQuery(regexp.QuoteMeta(storageLifecycleSourceSQL)).WithArgs("", p.SourcePageRows+1, "", "", "").
+		WillReturnRows(sourceAuditRows().AddRow("a", time.Now(), -1, false, "", "", "")).RowsWillBeClosed()
 	mock.ExpectRollback()
-	if _, _, err := s.collectStorageLifecycleSample(t.Context(), p, "policy", "", time.Now()); err == nil {
+	if _, _, err := s.collectStorageLifecycleSample(t.Context(), p, "policy", storageLifecycleCursor{}, time.Now()); err == nil {
 		t.Fatal("negative declared size accepted")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -92,11 +92,31 @@ func lifecycleMock(t *testing.T) (*Store, sqlmock.Sqlmock) {
 	return &Store{db: db}, mock
 }
 
-func expectLifecyclePrefix(mock sqlmock.Sqlmock) {
+func expectLifecycleSettings(mock sqlmock.Sqlmock) {
 	mock.ExpectBegin()
-	for _, q := range []string{`SET LOCAL statement_timeout='2s'`, `SET LOCAL lock_timeout='100ms'`, `SET LOCAL temp_file_limit='0'`, `SET LOCAL work_mem='1MB'`, `SET LOCAL max_parallel_workers_per_gather=0`, `SET LOCAL jit=off`} {
+	for _, q := range []string{`SET LOCAL statement_timeout='2s'`, `SET LOCAL lock_timeout='100ms'`, `SET LOCAL work_mem='1MB'`, `SET LOCAL max_parallel_workers_per_gather=0`, `SET LOCAL jit=off`} {
 		mock.ExpectExec(regexp.QuoteMeta(q)).WillReturnResult(sqlmock.NewResult(0, 0))
 	}
+}
+
+func TestStorageLifecycleUnavailableZeroTempGuardStopsBeforeInventory(t *testing.T) {
+	s, mock := lifecycleMock(t)
+	expectLifecycleSettings(mock)
+	mock.ExpectQuery(`SELECT p.prosrc=\$1 AND p.prosecdef`).WithArgs(sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"exact"}).AddRow(false))
+	mock.ExpectRollback()
+	if _, _, err := s.collectStorageLifecycleSample(t.Context(), testLifecyclePolicy(), "policy", storageLifecycleCursor{}, time.Now()); err == nil {
+		t.Fatal("unverified zero-temp guard allowed an inventory query")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func expectLifecyclePrefix(mock sqlmock.Sqlmock) {
+	expectLifecycleSettings(mock)
+	mock.ExpectQuery(`SELECT p.prosrc=\$1 AND p.prosecdef`).WithArgs(sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"exact"}).AddRow(true))
+	mock.ExpectExec(regexp.QuoteMeta(`SELECT fugue_input_safety.zero_temp_v1()`)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT current_setting('temp_file_limit')='0'`)).WillReturnRows(sqlmock.NewRows([]string{"zero"}).AddRow(true))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT pg_database_size(current_database())`)).WillReturnRows(sqlmock.NewRows([]string{"size"}).AddRow(4096))
 	mock.ExpectQuery(regexp.QuoteMeta(storageLifecycleRelationSQL)).WillReturnRows(sqlmock.NewRows([]string{"name", "present", "heap", "table", "index", "total"}).
 		AddRow("fugue_source_uploads", true, 8192, 16384, 8192, 24576).
@@ -105,12 +125,12 @@ func expectLifecyclePrefix(mock sqlmock.Sqlmock) {
 
 func expectLifecyclePage(mock sqlmock.Sqlmock, cursor string, p StorageLifecyclePolicy, rows *sqlmock.Rows) {
 	expectLifecyclePrefix(mock)
-	mock.ExpectQuery(regexp.QuoteMeta(storageLifecycleSourceSQL)).WithArgs(cursor, p.SourcePageRows+1).WillReturnRows(rows).RowsWillBeClosed()
+	mock.ExpectQuery(regexp.QuoteMeta(storageLifecycleSourceSQL)).WithArgs(cursor, p.SourcePageRows+1, "", "", "").WillReturnRows(rows).RowsWillBeClosed()
 	mock.ExpectCommit()
 }
 
 func sourceAuditRows() *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"id", "created", "size", "referenced"})
+	return sqlmock.NewRows([]string{"id", "created", "size", "referenced", "apps_cursor", "operations_cursor", "import_jobs_cursor"})
 }
 
 func TestStorageLifecycleBoundedPageNeverTreatsUnknownOrAgeAsDeletable(t *testing.T) {
@@ -118,16 +138,16 @@ func TestStorageLifecycleBoundedPageNeverTreatsUnknownOrAgeAsDeletable(t *testin
 	p := testLifecyclePolicy()
 	now := p.EffectiveFrom.Add(100 * 24 * time.Hour)
 	expectLifecyclePage(mock, "", p, sourceAuditRows().
-		AddRow("private-upload-a", p.EffectiveFrom.Add(-time.Hour), 100, false).
-		AddRow("private-upload-b", now.Add(-time.Hour), 200, true).
-		AddRow("sentinel", now, 5000, false))
-	sample, next, err := s.collectStorageLifecycleSample(t.Context(), p, "policy-one", "", now)
+		AddRow("private-upload-a", p.EffectiveFrom.Add(-time.Hour), 100, false, "app-next", "op-next", "job-next").
+		AddRow("private-upload-b", now.Add(-time.Hour), 200, true, "app-next", "op-next", "job-next").
+		AddRow("sentinel", now, 5000, false, "app-next", "op-next", "job-next"))
+	sample, next, err := s.collectStorageLifecycleSample(t.Context(), p, "policy-one", storageLifecycleCursor{}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	page := sample.SourcePage
-	if next != "private-upload-b" || page.Rows != 2 || page.DeclaredBytes != 300 || page.ReferencedRows != 1 || page.UnknownRows != 1 || page.LegacyRows != 1 || page.OlderThan30DaysBytes != 100 || page.PageAtEnd || page.ReferencesComplete || page.RetirementAuthorized || page.EligibleRows != 0 {
-		t.Fatalf("unsafe or unbounded page: %+v next=%s", page, next)
+	if next != (storageLifecycleCursor{"private-upload-b", "app-next", "op-next", "job-next"}) || page.Rows != 2 || page.DeclaredBytes != 300 || page.ReferencedRows != 1 || page.UnknownRows != 1 || page.LegacyRows != 1 || page.OlderThan30DaysBytes != 100 || page.PageAtEnd || page.ReferencesComplete || page.RetirementAuthorized || page.EligibleRows != 0 {
+		t.Fatalf("unsafe or unbounded page: %+v next=%+v", page, next)
 	}
 	s.lifecycle.observation.Sample = &sample
 	observation := s.StorageLifecycleObservation()
@@ -153,9 +173,9 @@ func TestStorageLifecycleBoundedPageNeverTreatsUnknownOrAgeAsDeletable(t *testin
 func TestStorageLifecycleEndOfSweepResetsWithoutClaimingGlobalCompleteness(t *testing.T) {
 	s, mock := lifecycleMock(t)
 	p := testLifecyclePolicy()
-	expectLifecyclePage(mock, "last-id", p, sourceAuditRows())
-	sample, next, err := s.collectStorageLifecycleSample(t.Context(), p, "policy", "last-id", time.Now())
-	if err != nil || next != "" || !sample.SourcePage.PageAtEnd || sample.SourcePage.ReferencesComplete {
+	expectLifecyclePage(mock, "last-id", p, sourceAuditRows().AddRow(nil, nil, nil, false, "app-next", "op-next", "job-next"))
+	sample, next, err := s.collectStorageLifecycleSample(t.Context(), p, "policy", storageLifecycleCursor{Source: "last-id"}, time.Now())
+	if err != nil || next != (storageLifecycleCursor{"", "app-next", "op-next", "job-next"}) || !sample.SourcePage.PageAtEnd || sample.SourcePage.ReferencesComplete {
 		t.Fatal(sample, next, err)
 	}
 	if err = mock.ExpectationsWereMet(); err != nil {
@@ -172,14 +192,14 @@ func TestStorageLifecycleFailedReadKeepsLastSampleAndCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	expectLifecyclePage(mock, "", p, sourceAuditRows().AddRow("a", now, 1, false).AddRow("b", now, 2, false).AddRow("c", now, 3, false))
+	expectLifecyclePage(mock, "", p, sourceAuditRows().AddRow("a", now, 1, false, "app", "op", "job").AddRow("b", now, 2, false, "app", "op", "job").AddRow("c", now, 3, false, "app", "op", "job"))
 	s.storageLifecycleTick(t.Context(), path, now)
 	expectLifecyclePrefix(mock)
-	mock.ExpectQuery(regexp.QuoteMeta(storageLifecycleSourceSQL)).WithArgs("b", p.SourcePageRows+1).WillReturnError(errors.New("secret driver detail"))
+	mock.ExpectQuery(regexp.QuoteMeta(storageLifecycleSourceSQL)).WithArgs("b", p.SourcePageRows+1, "app", "op", "job").WillReturnError(errors.New("secret driver detail"))
 	mock.ExpectRollback()
 	s.storageLifecycleTick(t.Context(), path, now.Add(300*time.Second))
 	o := s.StorageLifecycleObservation()
-	if !o.LastRunFailed || o.Failures != 1 || o.FailureCategory != "bounded_read_failed" || s.lifecycle.cursor != "b" || !o.Sample.ObservedAt.Equal(now) {
+	if !o.LastRunFailed || o.Failures != 1 || o.FailureCategory != "bounded_read_failed" || s.lifecycle.cursor != (storageLifecycleCursor{"b", "app", "op", "job"}) || !o.Sample.ObservedAt.Equal(now) {
 		t.Fatalf("failure advanced or replaced last successful page: %+v", o)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
