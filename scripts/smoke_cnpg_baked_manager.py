@@ -19,6 +19,24 @@ MANIFEST_SHA256 = "858854263f9cbb4f0cf3f393305396f123a72073d33a0710c8cc389f0b7c4
 CHECKS = ["default_initdb_without_bootstrap", "sql_read_write", "container_restart", "pod_recreation", "legacy_unchanged"]
 
 
+def manifest_objects(value):
+    # kubectl create -f a multi-document YAML emits consecutive JSON objects,
+    # not a JSON List. Decode every document without accepting trailing junk.
+    decoder, items = json.JSONDecoder(), []
+    remaining = value.strip()
+    while remaining:
+        document, end = decoder.raw_decode(remaining)
+        if not isinstance(document, dict):
+            raise ValueError("installation manifest contains a non-object")
+        items.extend(document["items"] if document.get("kind") == "List" else [document])
+        if len(items) > 256:
+            raise ValueError("installation manifest exceeds object bound")
+        remaining = remaining[end:].lstrip()
+    if not items:
+        raise ValueError("installation manifest is empty")
+    return {"apiVersion": "v1", "kind": "List", "items": items}
+
+
 class Rehearsal:
     def __init__(self, args):
         self.args = args
@@ -83,7 +101,7 @@ class Rehearsal:
         catalog = contract.validate(json.loads(args.catalog.read_text()))
         if hashlib.sha256(args.operator_manifest.read_bytes()).hexdigest() != MANIFEST_SHA256:
             raise ValueError("operator installation manifest is not the pinned upstream version")
-        objects = self.kube("create", "--dry-run=client", "--validate=false", "-f", str(args.operator_manifest), "-o", "json")
+        objects = manifest_objects(self.kube("create", "--dry-run=client", "--validate=false", "-f", str(args.operator_manifest), "-o", "json", raw=True))
         deployments = [item for item in objects["items"] if item["kind"] == "Deployment"]
         if len(deployments) != 1:
             raise ValueError("upstream controller Deployment is ambiguous")

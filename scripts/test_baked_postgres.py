@@ -8,11 +8,20 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import baked_postgres_contract as contract
-from scripts.smoke_cnpg_baked_manager import Rehearsal
+from scripts.smoke_cnpg_baked_manager import Rehearsal, manifest_objects
 from scripts import verify_baked_postgres as verifier
 
 
 class BakedPostgresTests(unittest.TestCase):
+    def test_installation_accepts_kubectl_json_stream_and_lists(self):
+        items = [{"kind": "Namespace", "metadata": {"name": "operator"}}, {"kind": "Deployment", "metadata": {"name": "controller"}}]
+        expected = {"apiVersion": "v1", "kind": "List", "items": items}
+        self.assertEqual(manifest_objects("\n".join(json.dumps(i) for i in items)), expected)
+        self.assertEqual(manifest_objects(json.dumps(expected)), expected)
+        for invalid in ("", "[]", json.dumps(items[0]) + "trailing"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                manifest_objects(invalid)
+
     def test_platform_checks_pin_child_manifests_not_the_shared_index(self):
         image = "registry.invalid/postgres:18.3@sha256:" + "f" * 64
         entries = [{"platform": {"os": "linux", "architecture": arch}, "digest": "sha256:" + value * 64}
