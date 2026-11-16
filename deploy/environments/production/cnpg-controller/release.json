@@ -8,21 +8,75 @@
   "uid": "b2ad8bd3-64f9-4609-ac6a-be638e4f88d9",
   "preservedSpecSHA256": "1a9ddca812aaa239ff86b6788302f86667f98877f8b21adc2bdd2675e67a63f5",
   "predecessor": {
-    "image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:f0ed838145bd4ce5fcd0a073ec8c6a8230eb7aa5903bd9cafc7f3c0f6c790c14",
-    "revision": "98ba96f23795e3619c7b1873db9cb3cec359abc6",
+    "image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:350e517d95bbcbdbe55d9cd617c4f78c5086b1e0fc8cb73d73a5de486dc6b96d",
+    "revision": "feddb7973c0c37296650e8410d05e579db90bd14",
     "command": [
       "/fugue-cnpg-controller"
     ],
-    "specImage": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:f0ed838145bd4ce5fcd0a073ec8c6a8230eb7aa5903bd9cafc7f3c0f6c790c14"
+    "specImage": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:350e517d95bbcbdbe55d9cd617c4f78c5086b1e0fc8cb73d73a5de486dc6b96d"
   },
   "candidate": {
-    "image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:350e517d95bbcbdbe55d9cd617c4f78c5086b1e0fc8cb73d73a5de486dc6b96d",
-    "revision": "feddb7973c0c37296650e8410d05e579db90bd14",
+    "image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:cc38055a457a6904939e3610b87e596c7c01945501a469cfbadae8b3dc167fdb",
+    "revision": "a5bfd758d3a7c23fc8f3a93477112b8c88dc3582",
     "command": [
       "/fugue-cnpg-controller"
     ]
   },
   "candidateReceipt": {
+    "baked_postgres_contract": {
+      "defaultImage": "ghcr.io/yym68686/fugue-cnpg-controller:18.3-baked-a5bfd758d3a7c23fc8f3a93477112b8c88dc3582@sha256:aed9c9ac7cbb820a431f5fa84af63e82e8a147a3b9da39ef0d63e099c33d6611",
+      "images": [
+        "ghcr.io/yym68686/fugue-cnpg-controller:18.3-baked-a5bfd758d3a7c23fc8f3a93477112b8c88dc3582@sha256:aed9c9ac7cbb820a431f5fa84af63e82e8a147a3b9da39ef0d63e099c33d6611"
+      ],
+      "managerImage": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e",
+      "managerSHA256": {
+        "manager_amd64": "b77f8f908fdc909122fe24fa164f8247c0689c4ca8c01ccef07fc50e7be8f6f1",
+        "manager_arm64": "97fa01dc1c6abcd7f64a51d16f2e4ef9c7bb8d4d842e01adc9d07060e6b84157"
+      },
+      "schema": "fugue.cnpg.baked-manager.v1"
+    },
+    "baked_postgres_verification": {
+      "image": "ghcr.io/yym68686/fugue-cnpg-controller:18.3-baked-a5bfd758d3a7c23fc8f3a93477112b8c88dc3582@sha256:aed9c9ac7cbb820a431f5fa84af63e82e8a147a3b9da39ef0d63e099c33d6611",
+      "manager_image": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e",
+      "manager_sha256": {
+        "manager_amd64": "b77f8f908fdc909122fe24fa164f8247c0689c4ca8c01ccef07fc50e7be8f6f1",
+        "manager_arm64": "97fa01dc1c6abcd7f64a51d16f2e4ef9c7bb8d4d842e01adc9d07060e6b84157"
+      },
+      "platforms": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "postgres_base": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4",
+      "readonly_startup_verified": true,
+      "source_revision": "a5bfd758d3a7c23fc8f3a93477112b8c88dc3582",
+      "upgrade_path_verified": true
+    },
+    "base_image": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e",
+    "candidate_image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:cc38055a457a6904939e3610b87e596c7c01945501a469cfbadae8b3dc167fdb",
+    "controller_command_verified": true,
+    "instance_manager_sha256": {
+      "manager_amd64": "b77f8f908fdc909122fe24fa164f8247c0689c4ca8c01ccef07fc50e7be8f6f1",
+      "manager_arm64": "97fa01dc1c6abcd7f64a51d16f2e4ef9c7bb8d4d842e01adc9d07060e6b84157"
+    },
+    "isolated_cluster_verification": {
+      "baked_image": "ghcr.io/yym68686/fugue-cnpg-controller:18.3-baked-a5bfd758d3a7c23fc8f3a93477112b8c88dc3582@sha256:aed9c9ac7cbb820a431f5fa84af63e82e8a147a3b9da39ef0d63e099c33d6611",
+      "baked_pod_uid": "09b86f3f-94e8-4ca2-9549-6df6f49065b5",
+      "candidate_image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:cc38055a457a6904939e3610b87e596c7c01945501a469cfbadae8b3dc167fdb",
+      "checks": [
+        "default_initdb_without_bootstrap",
+        "sql_read_write",
+        "container_restart",
+        "pod_recreation",
+        "legacy_unchanged"
+      ],
+      "initdb_job_uid": "56354c60-9a1c-48b1-a839-1ccaf6b690b4",
+      "legacy_pod_uid": "a5db5465-7542-41fa-97a6-4a7145daed05",
+      "source_revision": "a5bfd758d3a7c23fc8f3a93477112b8c88dc3582"
+    },
+    "production_deployed": false,
+    "source_revision": "a5bfd758d3a7c23fc8f3a93477112b8c88dc3582"
+  },
+  "predecessorReceipt": {
     "base_image": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e",
     "candidate_image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:350e517d95bbcbdbe55d9cd617c4f78c5086b1e0fc8cb73d73a5de486dc6b96d",
     "controller_command_verified": true,
@@ -32,17 +86,6 @@
     },
     "production_deployed": false,
     "source_revision": "feddb7973c0c37296650e8410d05e579db90bd14"
-  },
-  "predecessorReceipt": {
-    "base_image": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e",
-    "candidate_image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:f0ed838145bd4ce5fcd0a073ec8c6a8230eb7aa5903bd9cafc7f3c0f6c790c14",
-    "source_revision": "98ba96f23795e3619c7b1873db9cb3cec359abc6",
-    "controller_command_verified": true,
-    "production_deployed": false,
-    "instance_manager_sha256": {
-      "manager_amd64": "b77f8f908fdc909122fe24fa164f8247c0689c4ca8c01ccef07fc50e7be8f6f1",
-      "manager_arm64": "97fa01dc1c6abcd7f64a51d16f2e4ef9c7bb8d4d842e01adc9d07060e6b84157"
-    }
   },
   "configurationGuards": [
     {
