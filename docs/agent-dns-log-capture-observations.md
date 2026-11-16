@@ -109,3 +109,12 @@ It preserves existing trace hooks, response bodies, timeouts and retries. No
 destination, URL, query, arbitrary table name, header, credential, event body or
 raw error is retained. Read repeated same-process snapshots and the global gap
 counters before attributing a throughput bottleneck or declaring recovery.
+
+Successful metrics, logs and analytics exports best-effort consume at most
+4 KiB of the response before closing it, within the existing request/client
+timeout. This permits HTTP/1 connection reuse for small responses, including
+empty chunked responses whose terminating framing still needs to be read.
+Large or interrupted bodies may still prevent reuse. Draining does not change
+the existing status-based acknowledgement or cause another write/retry when a
+successful response body cannot be read. Its time is included in exporter
+attempt duration, not the HTTP Do receipt. Non-2xx error handling is unchanged.

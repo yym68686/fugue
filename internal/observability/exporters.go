@@ -25,6 +25,15 @@ import (
 
 const defaultClickHouseDatabase = "fugue_observability"
 
+// Successful exporters acknowledge the HTTP status, not an application body.
+// Consume small responses (including empty chunked framing) before Close so
+// HTTP/1 connections can be reused. This is best-effort, bounded to 4 KiB and
+// the request's existing context/client timeout. A read failure must not turn
+// an acknowledged write into a retry, which could duplicate persisted events.
+func drainExporterSuccessResponse(body io.Reader) {
+	_, _ = io.CopyN(io.Discard, body, 4096)
+}
+
 type MultiExporter struct {
 	exporters    []Exporter
 	observations *exportObservations
@@ -189,6 +198,7 @@ func (e *PrometheusRemoteWriteExporter) Export(ctx context.Context, events []Eve
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("push Prometheus remote write payload returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
 	}
+	drainExporterSuccessResponse(resp.Body)
 	commit()
 	return nil
 }
@@ -435,6 +445,7 @@ func (e LokiExporter) Export(ctx context.Context, events []Event) error {
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("push Loki payload returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
 	}
+	drainExporterSuccessResponse(resp.Body)
 	return nil
 }
 
@@ -603,6 +614,7 @@ func (e ClickHouseExporter) insertRows(ctx context.Context, table string, rows [
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("insert ClickHouse rows into %s returned %s: %s", table, resp.Status, strings.TrimSpace(string(responseBody)))
 	}
+	drainExporterSuccessResponse(resp.Body)
 	return nil
 }
 
