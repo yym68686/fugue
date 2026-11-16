@@ -201,7 +201,9 @@ func retainDNSFactsForSourceRenewal(old *dnsServingState, current []dnsReadiness
 func dnsReadinessFailureSummary(plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, now time.Time) string {
 	valid := validDNSReadinessFacts(plan, policy, facts, now)
 	counts := map[string]int{}
+	observed := make(map[string]bool, len(facts))
 	for _, fact := range facts {
+		observed[fact.ProbeID] = true
 		if _, ready := valid[fact.ProbeID]; ready {
 			continue
 		}
@@ -213,12 +215,57 @@ func dnsReadinessFailureSummary(plan *platformconfig.DNSReadinessPlan, policy *p
 		}
 		counts[reason]++
 	}
+	// Probe validity alone does not establish record readiness. Missing facts,
+	// incoherent target publications and record topology/quorum failures must
+	// remain visible even when every supplied fact is individually valid.
+	for _, requirement := range plan.Probes {
+		if !observed[requirement.ID] {
+			counts["missing_fact"]++
+		}
+	}
+	lookup := func(id string) (string, *model.TrafficReleaseBinding, bool) {
+		fact, ok := valid[id]
+		return fact.Proof.GroupID, fact.Proof.TrafficRelease, ok
+	}
+	for _, record := range plan.Records {
+		for _, target := range record.Targets {
+			if !target.RequireSinglePublication || len(target.ProbeIDs) == 0 {
+				continue
+			}
+			complete := true
+			for _, id := range target.ProbeIDs {
+				if _, ok := valid[id]; !ok {
+					complete = false
+					break
+				}
+			}
+			if complete && !platformconfig.DNSReadinessTargetReady(target, lookup) {
+				counts["target_publication_incoherent"]++
+			}
+		}
+		if !platformconfig.DNSReadinessQuorum(record, func(target platformconfig.DNSReadinessTarget) bool {
+			return platformconfig.DNSReadinessTargetReady(target, lookup)
+		}) {
+			counts["record_quorum_unavailable"]++
+		}
+	}
 	parts := make([]string, 0, len(counts))
 	for reason, count := range counts {
 		parts = append(parts, fmt.Sprintf("%s=%d", reason, count))
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ",")
+}
+
+func dnsServingReadinessFailureSummary(st *dnsServingState, now time.Time) string {
+	summary := dnsReadinessFailureSummary(st.payload.Plan, st.payload.Policy.DNSReadiness, st.facts, now)
+	if st.record.AppliedAt.Add(time.Duration(st.payload.Policy.MaxStaleSeconds) * time.Second).Before(now) {
+		if summary == "" {
+			return "checkpoint_expired=1"
+		}
+		return "checkpoint_expired=1," + summary
+	}
+	return summary
 }
 
 func summarizeDNSReadiness(plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, digest string, checkedAt, now time.Time) DNSReadinessStatus {

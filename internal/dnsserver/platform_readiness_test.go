@@ -252,8 +252,99 @@ func TestDNSReadinessFailureSummaryContainsOnlyBoundedCodes(t *testing.T) {
 		{ProbeID: plan.Probes[3].ID, Reason: "raw private upstream failure"},
 	}
 	got := dnsReadinessFailureSummary(&plan, &policy, facts, time.Now())
-	want := "invalid_or_expired=1,not_observed=1,probe_unavailable=1,traffic_release_mismatch=1"
+	want := "invalid_or_expired=1,not_observed=1,probe_unavailable=1,record_quorum_unavailable=1,traffic_release_mismatch=1"
 	if got != want {
 		t.Fatalf("diagnostic codes are not bounded and deterministic: %q", got)
+	}
+}
+
+func TestDNSReadinessFailureSummaryExplainsRecordFailuresWithValidProbes(t *testing.T) {
+	now := time.Now().UTC()
+	for _, scenario := range []string{"missing-facts", "empty-targets", "distinct-edges", "mixed-publications", "ready"} {
+		t.Run(scenario, func(t *testing.T) {
+			plan, policy := readinessTestPlan()
+			var facts []dnsReadinessFact
+			for _, p := range plan.Probes {
+				facts = append(facts, dnsReadinessFact{ProbeID: p.ID, Ready: true,
+					Proof: routeprobe.Proof{Digest: p.RouteDigest, Version: "serving", EdgeID: p.EdgeID, GroupID: p.EdgeGroupID,
+						CheckedAt: now.Add(-time.Second), ValidUntil: now.Add(20 * time.Second), State: p.State}})
+			}
+			want := "record_quorum_unavailable=1"
+			switch scenario {
+			case "missing-facts":
+				facts = facts[:1]
+				want = "missing_fact=3,record_quorum_unavailable=1"
+			case "empty-targets":
+				plan.Records[0].Targets = nil
+			case "distinct-edges":
+				plan.Records[0].Targets[1].EdgeID = plan.Records[0].Targets[0].EdgeID
+			case "mixed-publications":
+				plan.Records[0].Targets[0].RequireSinglePublication = true
+				facts[0].Proof.TrafficRelease = &model.TrafficReleaseBinding{ReleaseID: "publication-a"}
+				facts[1].Proof.TrafficRelease = &model.TrafficReleaseBinding{ReleaseID: "publication-b"}
+				want += ",target_publication_incoherent=1"
+			case "ready":
+				want = ""
+			}
+			before, _ := json.Marshal(facts)
+			got := dnsReadinessFailureSummary(&plan, &policy, facts, now)
+			if got != want {
+				t.Fatalf("readiness failure not explained: got %q want %q", got, want)
+			}
+			after, _ := json.Marshal(facts)
+			if string(before) != string(after) {
+				t.Fatal("diagnostic summary mutated evidence")
+			}
+		})
+	}
+}
+
+func TestDNSServingReadinessFailureSummaryExplainsExpiredCheckpoint(t *testing.T) {
+	plan, policy := readinessTestPlan()
+	plan.Probes, plan.Records = nil, nil
+	now := time.Now().UTC()
+	st := &dnsServingState{record: dnsServingCheckpoint{AppliedAt: now.Add(-2 * time.Minute)},
+		payload: dnsServingPayload{Plan: &plan, Policy: platformconfig.PolicySnapshot{DNSReadiness: &policy, MaxStaleSeconds: 60}}}
+	if got := dnsServingReadinessFailureSummary(st, now); got != "checkpoint_expired=1" {
+		t.Fatalf("expired checkpoint was not distinguished: %q", got)
+	}
+	if got := dnsServingReadinessFailureSummary(st, st.record.AppliedAt.Add(time.Minute)); got != "" {
+		t.Fatalf("diagnostics changed the exact expiry boundary: %q", got)
+	}
+}
+
+func TestRetainedProofCannotRestoreRecoveryAfterUnavailableProbe(t *testing.T) {
+	plan, policy := readinessTestPlan()
+	now := time.Now().UTC()
+	requirement := plan.Probes[0]
+	previous := dnsReadinessFact{ProbeID: requirement.ID, Ready: true,
+		Proof: routeprobe.Proof{Digest: requirement.RouteDigest, Version: "serving", EdgeID: requirement.EdgeID, GroupID: requirement.EdgeGroupID,
+			CheckedAt: now.Add(-time.Second), ValidUntil: now.Add(20 * time.Second), State: requirement.State},
+		ProbeHistory:       []time.Time{now.Add(-12 * time.Second), now.Add(-6 * time.Second), now.Add(-time.Second)},
+		HistoryObservation: &dnsProbeHistoryObservation{ResetReason: "history_started"},
+	}
+	for _, reason := range []string{"probe_unavailable", "not_observed"} {
+		t.Run(reason, func(t *testing.T) {
+			observation := &dnsProbeHistoryObservation{ResetReason: "negative_observation", ResetAt: now, ObservationReason: reason}
+			current := dnsReadinessFact{ProbeID: requirement.ID, Reason: reason, HistoryObservation: observation}
+			got := retainValidDNSReadinessFacts(&plan, &policy, []dnsReadinessFact{previous}, []dnsReadinessFact{current}, now)[0]
+			if !got.Ready || got.Reason != "retained_valid_proof" || got.Proof != previous.Proof {
+				t.Fatal("retention lost or renewed the original valid proof", got)
+			}
+			if reason == "probe_unavailable" {
+				if len(got.ProbeHistory) != 0 || got.HistoryObservation == nil || *got.HistoryObservation != *observation {
+					t.Fatal("failed refresh restored pre-failure recovery history", got.ProbeHistory, got.HistoryObservation)
+				}
+				got.HistoryObservation.ResetReason = "caller-mutation"
+				if observation.ResetReason != "negative_observation" {
+					t.Fatal("retained diagnostics alias the current observation")
+				}
+			} else if len(got.ProbeHistory) != len(previous.ProbeHistory) {
+				t.Fatal("an unattempted probe erased recovery history", got.ProbeHistory)
+			}
+			if len(previous.ProbeHistory) != 3 || previous.HistoryObservation.ResetReason != "history_started" || current.Ready {
+				t.Fatal("retention mutated its input")
+			}
+		})
 	}
 }

@@ -57,6 +57,20 @@ failure receipts to independent observation storage with explicit retention and
 resource budgets. Observation failures must never prevent serving, publish an
 artifact, extend proof validity or replace a positive checkpoint.
 
+Readiness failure summaries contain fixed reason codes and counts, never record
+names or raw proofs. `missing_fact` counts required probes absent from the fact
+set. `target_publication_incoherent` counts single-publication targets whose
+individually valid dependencies cannot form one publication. The aggregate
+`record_quorum_unavailable` counts records rejected by the existing readiness
+quorum (including empty targets or insufficient distinct edges/cells/domains).
+These counts overlap; they are not additive failure-event totals.
+`checkpoint_expired` separately identifies the original checkpoint age limit.
+The candidate summary is captured before retained-state handling replaces the
+temporary candidate, and does not alter readiness, authorization or DNS answers.
+All supplied probes can be valid while a record quorum is unavailable; an empty
+probe-level summary must not be interpreted as evidence that the failure has no
+cause.
+
 Regression coverage verifies stage-specific decode errors, preserved wrapped
 causes, reference authority boundaries, and rejection of a signed incompatible
 candidate while the previous positive release continues serving unchanged.

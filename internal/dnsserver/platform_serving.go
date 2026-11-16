@@ -431,6 +431,12 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	// the same guarded transition used by an incomplete readiness scan.
 	// Neither condition authorizes a positive checkpoint or successful ACK.
 	if !ready || snapshotErr != nil {
+		// Capture the rejected candidate's metadata before retained/transition
+		// handling can replace st. Diagnostics cannot change the verdict above.
+		summary := ""
+		if !ready {
+			summary = dnsServingReadinessFailureSummary(st, now)
+		}
 		// Negative observations also belong to an exact assignment. A publisher
 		// may advance while probing, so check authority before replacing any
 		// previously positive facts or refreshing with this candidate's bridge.
@@ -485,7 +491,6 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		if snapshotErr != nil {
 			return snapshotErr
 		}
-		summary := dnsReadinessFailureSummary(p.Plan, p.Policy.DNSReadiness, facts, now)
 		if !same && old != nil && old.record.Positive && a.ConvergenceDeadline.After(now) &&
 			dnsServingReady(s.platformServing.Load(), now) && dnsKnownReleaseOverlap(old, p, observations, facts, now) {
 			return fmt.Errorf("%w: %s", errDNSReleaseConverging, summary)
