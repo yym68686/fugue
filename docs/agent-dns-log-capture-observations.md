@@ -86,3 +86,26 @@ The stable `cache_errors_zero` check name does not imply that an unknown
 observation proves cache corruption: enrolled consumers still require current
 serving/cache readiness, independently of historical inventory error counters.
 Only diagnostic wording changes; all existing preflight gates remain intact.
+
+The telemetry process's owner-only `GET /v1/snapshots/exports` also separates
+export attempts from their HTTP work. Exporter counters include encoding and all
+of that attempt's requests; `http` has eight fixed purposes (metrics, logs, five
+allowlisted analytics tables, and other). Each purpose holds concurrent counters
+and only its latest completed and latest failed HTTP receipt. A success does not
+erase the failed receipt. Queries are not export requests and are excluded.
+
+HTTP receipts record status, start/completion times, total `http.Client.Do`
+duration, bounded connection/reuse counts and the first observed DNS, connect,
+TLS, connection-ready, request-write and first-response-byte callbacks. These
+are offsets from that Do call's start, not exclusive phase durations; a missing
+callback does not mean zero latency. Redirects, parallel connection attempts and
+transport retries may share one Do call. Callbacks arriving after Do returns do
+not rewrite its completed receipt. Inflight counts reveal unfinished calls but
+do not claim to describe their current phase.
+
+This does not measure encoding, response-body reads, queue wait or backoff, and
+does not prove that a successful HTTP status means all records were persisted.
+It preserves existing trace hooks, response bodies, timeouts and retries. No
+destination, URL, query, arbitrary table name, header, credential, event body or
+raw error is retained. Read repeated same-process snapshots and the global gap
+counters before attributing a throughput bottleneck or declaring recovery.

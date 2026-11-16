@@ -31,6 +31,10 @@ type MultiExporter struct {
 }
 
 func NewConfiguredExporter(cfg Config, client *http.Client) Exporter {
+	return newConfiguredObservedExporter(cfg, client, nil)
+}
+
+func newConfiguredObservedExporter(cfg Config, client *http.Client, observations *exportObservations) Exporter {
 	cfg = cfg.Normalize()
 	if client == nil {
 		client = &http.Client{Timeout: cfg.ExportTimeout}
@@ -40,16 +44,20 @@ func NewConfiguredExporter(cfg Config, client *http.Client) Exporter {
 		exporters = append(exporters, &PrometheusRemoteWriteExporter{
 			Client:         client,
 			RemoteWriteURL: cfg.MetricsRemoteWriteURL,
+			observations:   observations,
 		})
 	}
 	if cfg.LokiURL != "" {
 		exporters = append(exporters, LokiExporter{
-			Client:  client,
-			PushURL: normalizeLokiPushURL(cfg.LokiURL),
+			Client:       client,
+			PushURL:      normalizeLokiPushURL(cfg.LokiURL),
+			observations: observations,
 		})
 	}
 	if cfg.ClickHouseDSN != "" {
-		exporters = append(exporters, NewClickHouseExporter(cfg.ClickHouseDSN, client))
+		exporter := NewClickHouseExporter(cfg.ClickHouseDSN, client)
+		exporter.observations = observations
+		exporters = append(exporters, exporter)
 	}
 	switch len(exporters) {
 	case 0:
@@ -127,6 +135,7 @@ func exportAttemptContext(ctx context.Context, timeout time.Duration) (context.C
 type PrometheusRemoteWriteExporter struct {
 	Client         *http.Client
 	RemoteWriteURL string
+	observations   *exportObservations
 	mu             sync.Mutex
 	lastTimestamp  map[string]int64
 }
@@ -171,7 +180,7 @@ func (e *PrometheusRemoteWriteExporter) Export(ctx context.Context, events []Eve
 	req.Header.Set("Content-Type", "application/x-protobuf")
 	req.Header.Set("Content-Encoding", "snappy")
 	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
-	resp, err := e.Client.Do(req)
+	resp, err := observedExportHTTP(e.Client, req, e.observations, exportHTTPMetrics)
 	if err != nil {
 		return fmt.Errorf("push Prometheus remote write payload: %w", err)
 	}
@@ -353,8 +362,9 @@ func encodeProtoVarint(value uint64) []byte {
 }
 
 type LokiExporter struct {
-	Client  *http.Client
-	PushURL string
+	Client       *http.Client
+	PushURL      string
+	observations *exportObservations
 }
 
 type lokiPushRequest struct {
@@ -416,7 +426,7 @@ func (e LokiExporter) Export(ctx context.Context, events []Event) error {
 		return fmt.Errorf("create Loki request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := e.Client.Do(req)
+	resp, err := observedExportHTTP(e.Client, req, e.observations, exportHTTPLogs)
 	if err != nil {
 		return fmt.Errorf("push Loki payload: %w", err)
 	}
@@ -504,9 +514,10 @@ func normalizeLokiPushURL(raw string) string {
 }
 
 type ClickHouseExporter struct {
-	Client   *http.Client
-	Target   clickHouseTarget
-	parseErr error
+	Client       *http.Client
+	Target       clickHouseTarget
+	parseErr     error
+	observations *exportObservations
 }
 
 type clickHouseTarget struct {
@@ -583,7 +594,7 @@ func (e ClickHouseExporter) insertRows(ctx context.Context, table string, rows [
 	if e.Target.Username != "" {
 		req.SetBasicAuth(e.Target.Username, e.Target.Password)
 	}
-	resp, err := e.Client.Do(req)
+	resp, err := observedExportHTTP(e.Client, req, e.observations, exportHTTPTableIndex(table))
 	if err != nil {
 		return fmt.Errorf("insert ClickHouse rows into %s: %w", table, err)
 	}

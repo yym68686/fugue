@@ -12,6 +12,7 @@ import (
 // content, tenant identifier or caller-provided label is retained.
 type exportObservations struct {
 	stages [5]exportAttemptCounters
+	http   [exportHTTPStageCount]exportHTTPStageCounters
 }
 
 type exportAttemptCounters struct {
@@ -106,10 +107,12 @@ type exportAttemptSnapshot struct {
 }
 
 type exportObservationSnapshot struct {
-	Schema     string                  `json:"schema"`
-	ObservedAt time.Time               `json:"observed_at"`
-	Exporters  []exportAttemptSnapshot `json:"exporters"`
-	Coverage   string                  `json:"coverage"`
+	Schema       string                    `json:"schema"`
+	ObservedAt   time.Time                 `json:"observed_at"`
+	Exporters    []exportAttemptSnapshot   `json:"exporters"`
+	HTTP         []exportHTTPStageSnapshot `json:"http"`
+	Coverage     string                    `json:"coverage"`
+	HTTPCoverage string                    `json:"http_coverage"`
 }
 
 func exportObservedTime(nanos int64) *time.Time {
@@ -138,5 +141,7 @@ func (p *Pipeline) DiagnosticExports(ctx context.Context) (any, error) {
 			LastStartedAt: exportObservedTime(c.lastStarted.Load()), LastFinishedAt: exportObservedTime(c.lastFinished.Load())}
 	}
 	return exportObservationSnapshot{Schema: "fugue.telemetry-export-observation/v1", ObservedAt: time.Now().UTC(), Exporters: rows,
-		Coverage: "independent_concurrent_process_counters_attempt_events_include_retries_not_unique_or_persisted_events_durations_exclude_queue_wait_and_backoff"}, nil
+		HTTP:         p.exportObservations.httpSnapshot(),
+		Coverage:     "independent_concurrent_process_counters_attempt_events_include_retries_not_unique_or_persisted_events_durations_exclude_queue_wait_and_backoff",
+		HTTPCoverage: "export_HTTP_Do_only_not_queries_or_encoding_or_response_body_reads; milestones_are_first_callback_offsets_from_Do_start_not_exclusive_phase_durations; redirects_and_transport_retries_may_share_one_request; absent_callback_is_not_zero_latency; latest_failed_is_retained_after_success; concurrent_counters_are_not_transactional"}, nil
 }

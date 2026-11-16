@@ -204,16 +204,17 @@ func NewPipeline(cfg Config, logger *log.Logger) *Pipeline {
 	httpClient := &http.Client{
 		Timeout: cfg.ExportTimeout,
 	}
-	return &Pipeline{
+	p := &Pipeline{
 		cfg:                cfg,
 		logger:             logger,
 		queue:              make(chan queuedEvent, cfg.QueueSize),
-		exporter:           NewConfiguredExporter(cfg, httpClient),
 		httpClient:         httpClient,
 		tenantQuotaBuckets: map[string]telemetryQuotaBucket{},
 		appQuotaBuckets:    map[string]telemetryQuotaBucket{},
 		tenantMeters:       map[string]telemetryTenantMeter{},
 	}
+	p.exporter = newConfiguredObservedExporter(cfg, httpClient, &p.exportObservations)
+	return p
 }
 
 func (p *Pipeline) Start(ctx context.Context) error {
