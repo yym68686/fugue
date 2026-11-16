@@ -11,6 +11,7 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/edge"
 	"fugue/internal/livediagnostics/runtimeprofile"
+	"fugue/internal/runtimeobservation"
 )
 
 func main() {
@@ -25,6 +26,9 @@ func main() {
 
 	service := edge.NewServiceWithEdgeSources(cfg, edge.RouteBundleSourceFromEnv(), edge.InventoryProducerConfigFromEnv(), logger)
 	service.PlatformTokenFile = os.Getenv("FUGUE_EDGE_PLATFORM_TOKEN_FILE")
+	if err := runtimeobservation.Start(ctx, "edge", map[string]runtimeobservation.Provider{"traffic-serving": service.ServingObservationSnapshot}); err != nil {
+		logger.Printf("local serving observation endpoint unavailable: %v", err)
+	}
 	if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Fatalf("edge exited: %v", err)
 	}

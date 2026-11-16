@@ -258,6 +258,28 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				return &platformTLSCertificate{Leaf: leaf, ValidUntil: leaf.NotAfter}, nil
 			}
 			err = s.syncPlatformServing(context.Background(), probe, tlsProbe)
+			if mode == "tls-failed" || mode == "route-proof-mismatch" || mode == "cache-missing" || mode == "caddy-not-applied" {
+				s.servingObservations.mu.Lock()
+				observed := cloneServingObservation(s.servingObservations.latest)
+				s.servingObservations.mu.Unlock()
+				if observed.Outcome != "failed" || observed.Negative.Attempted != 2 || observed.Negative.Accepted != 2 || observed.Negative.Sequence != reports[0].Sequence || observed.Applied != observed.Expected {
+					t.Fatal("lost negative heartbeat cause or publication", observed)
+				}
+				switch mode {
+				case "tls-failed":
+					if observed.Stage != "tls_readiness" || observed.Cause != "tls_incomplete" || observed.TLS.Failed != 1 || observed.TLS.Failures[0].Reason != "tls_handshake_failed" {
+						t.Fatal(observed)
+					}
+				case "route-proof-mismatch":
+					if observed.Stage != "route_probes" || observed.Routes.Failed != 1 || observed.Routes.Failures[0].Reason != "route_proof_mismatch" {
+						t.Fatal(observed)
+					}
+				default:
+					if observed.Stage != "executor_validation" || observed.Cause == "" {
+						t.Fatal(observed)
+					}
+				}
+			}
 			if mode == "valid-bundle-renewal" {
 				if err != nil || len(reports) != 2 || routeCalls != 2 || tlsCalls != 2 {
 					t.Fatal("renewal failed to re-observe without negative or stale reports", err, reports, routeCalls, tlsCalls)

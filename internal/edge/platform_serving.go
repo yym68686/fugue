@@ -111,6 +111,8 @@ func (s *Service) syncPlatformServing(ctx context.Context, routeProbe platformSe
 func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platformServingRouteProbe, tlsProbe platformTLSProbe) (result error) {
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
+	observation := servingObservation{StartedAt: time.Now().UTC(), Stage: "selection", Outcome: "ok"}
+	defer func() { s.retainServingObservation(observation, result) }()
 	defer func() {
 		if result != nil {
 			if ctx.Err() != nil {
@@ -135,30 +137,38 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		return err
 	}
 	bundle, ok := s.Bundle()
+	observation.Bundle, observation.Applied = servingIdentityHash(bundle.Version), servingPublication(bundle.TrafficRelease)
 	if selection.candidate || !ok || bundle.TrafficRelease == nil {
+		observation.Outcome = "awaiting_release"
 		s.mu.Lock()
 		s.platformServing = PlatformServingStatus{State: "awaiting_release"}
 		s.mu.Unlock()
 		return nil
 	}
 	b := bundle.TrafficRelease
+	observation.Stage = "group_binding"
 	if err = trafficbinding.ValidateGroup(b, s.Config.EdgeGroupID, true); err != nil {
 		return err
 	}
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
+	observation.Stage = "route_assignment"
 	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		return err
 	}
 	keys := bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)
+	observation.Stage = "release_set"
 	parent, err := client.ReleaseSet(ctx, id, a, release)
 	if err != nil {
 		return err
 	}
+	observation.Stage = "route_projection"
 	projection, err := routeartifact.ProjectRelease(parent, artifact, a, release, keys)
 	if err != nil {
 		return err
 	}
+	observation.Expected = servingPublication(projection.TrafficRelease)
+	observation.Stage = "publication_binding"
 	if !reflect.DeepEqual(b, projection.TrafficRelease) {
 		// Route synchronization and platform assignment publication are
 		// independent loops. The bundle can be replaced after the initial
@@ -169,13 +179,16 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		if refreshed, ok := s.Bundle(); ok && reflect.DeepEqual(refreshed.TrafficRelease, projection.TrafficRelease) {
 			bundle = refreshed
 			b = refreshed.TrafficRelease
+			observation.Bundle, observation.Applied = servingIdentityHash(bundle.Version), servingPublication(b)
 		} else {
 			return fmt.Errorf("%w: bundle_release_set=%s assignment_release_set=%s bundle_route_generation=%s assignment_route_generation=%s bundle_release=%s bundle_channel=%s bundle_fence=%d assignment_release=%s assignment_channel=%s assignment_fence=%d", errServingTrafficReleaseMismatch, b.ReleaseSetID, projection.TrafficRelease.ReleaseSetID, b.RouteArtifactGeneration, projection.TrafficRelease.RouteArtifactGeneration, b.ReleaseID, b.ReleaseChannel, b.FencingToken, projection.TrafficRelease.ReleaseID, projection.TrafficRelease.ReleaseChannel, projection.TrafficRelease.FencingToken)
 		}
 	}
+	observation.Stage = "route_validation"
 	if _, err = s.verifyPlatformRouteCandidate(artifact, a, release); err != nil {
 		return err
 	}
+	observation.Stage = "tls_assignment"
 	_, ta, tlsArtifact, tr, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindCaddyRouteConfig)
 	if err != nil {
 		if errors.Is(err, platformconsumer.ErrNoServingAssignment) {
@@ -185,6 +198,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		}
 		return err
 	}
+	observation.Stage = "tls_membership"
 	member, memberKind := false, false
 	ids, idsOK := parent.Content["artifact_ids"].([]any)
 	kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
@@ -207,6 +221,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	}
 	routeCandidate := edgePlatformCandidate{Artifact: artifact, Assignment: a, Release: release, ReleaseSet: &parent, TrafficRelease: b}
 	tlsCandidate := edgePlatformCandidate{Artifact: tlsArtifact, Assignment: ta, Release: tr}
+	observation.Stage = "tls_validation"
 	payload, err := s.verifyPlatformTLSCandidate(tlsCandidate, routeCandidate)
 	if err != nil {
 		for _, selected := range []model.PlatformConsumerAssignment{a, ta} {
@@ -216,6 +231,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		}
 		return err
 	}
+	observation.Stage = "probe_policy"
 	policy := payload.Policy.TLSReadiness
 	if policy == nil || platformconfig.ValidateReadinessProbePolicy(policy) != nil {
 		return errors.New("serving verification requires signed probe policy")
@@ -226,6 +242,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		if result == nil {
 			return
 		}
+		observation.Cause = servingErrorClass(result)
 		if ctx.Err() != nil || servingObservationChanged(result) {
 			return
 		}
@@ -233,14 +250,16 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 			result = errServingBundleChanged
 			return
 		}
-		if reportErr := s.reportPlatformServingFailure(ctx, client, id, bundle, selection, []model.PlatformConsumerAssignment{a, ta}); reportErr != nil {
+		if reportErr := s.reportPlatformServingFailure(ctx, client, id, bundle, selection, []model.PlatformConsumerAssignment{a, ta}, &observation.Negative); reportErr != nil {
 			result = errors.Join(result, reportErr)
 		}
 	}()
+	observation.Stage = "serving_projection"
 	verifiedProjection, err := preparePlatformServingProjection(projection, s.Config.EdgeGroupID)
 	if err != nil {
 		return err
 	}
+	observation.Stage = "executor_validation"
 	if err = s.validatePlatformServingBundle(bundle, verifiedProjection); err != nil {
 		return err
 	}
@@ -258,33 +277,45 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	}
 	if reuse {
 		probes, tlsEvidence, verifiedAt = previousEvidence.Probes, previousEvidence.TLSReadiness, previousEvidence.VerifiedAt
+		observation.Reused = true
+		observation.Routes.Total = len(probes)
 	} else {
-		probes, err = s.observePlatformServingRoutes(ctx, bundle, policy, routeProbe)
+		observation.Stage = "route_probes"
+		probes, err = s.observePlatformServingRoutesObserved(ctx, bundle, policy, routeProbe, &observation.Routes)
 		if err != nil {
 			return err
 		}
+		observation.Stage = "tls_probes"
 		tlsEvidence, err = s.observePlatformTLSReadinessWithProbe(ctx, tlsCandidate, artifact, payload, tlsProbe)
 		if err != nil {
 			return err
 		}
 	}
-	readiness := summarizePlatformTLSReadiness(tlsEvidence, bundle.Version, time.Now().UTC())
+	observation.Stage = "tls_readiness"
+	readinessAt := time.Now().UTC()
+	readiness := summarizePlatformTLSReadiness(tlsEvidence, bundle.Version, readinessAt)
+	observation.TLS = servingTLSObservation(tlsEvidence, bundle.Version, readinessAt)
 	if readiness == nil || readiness.Probes == 0 || readiness.ReadyProbes != readiness.Probes {
 		return errors.New("traffic TLS readiness is incomplete")
 	}
+	observation.Stage = "route_assignment_recheck"
 	if err = client.CheckServingAssignment(ctx, id, a); err != nil {
 		return err
 	}
+	observation.Stage = "tls_assignment_recheck"
 	if err = client.CheckServingAssignment(ctx, id, ta); err != nil {
 		return err
 	}
+	observation.Stage = "activation_recheck"
 	currentSelection, err := s.selectRouteBundleSource()
 	if err != nil || currentSelection != selection {
 		return errors.New("traffic serving activation changed")
 	}
+	observation.Stage = "executor_recheck"
 	if err = s.validatePlatformServingBundle(bundle, verifiedProjection); err != nil {
 		return err
 	}
+	observation.Stage = "receipt_persistence"
 	path := s.Config.CachePath + ".platform-serving.json"
 	if strings.TrimSpace(s.Config.CachePath) == "" {
 		return errors.New("traffic serving receipt path unavailable")
@@ -303,16 +334,20 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		return err
 	}
 	for _, assigned := range []model.PlatformConsumerAssignment{a, ta} {
+		observation.Stage = "report_activation_recheck"
 		currentSelection, err := s.selectRouteBundleSource()
 		if err != nil || currentSelection != selection {
 			return errors.New("traffic serving activation changed before report")
 		}
+		observation.Stage = "report_executor_recheck"
 		if err = s.validatePlatformServingBundle(bundle, verifiedProjection); err != nil {
 			return err
 		}
+		observation.Stage = "report_assignment_recheck"
 		if err = client.CheckServingAssignment(ctx, id, assigned); err != nil {
 			return err
 		}
+		observation.Stage = "report_evidence_freshness"
 		for _, proof := range probes {
 			if !proof.ValidUntil.After(time.Now().UTC()) {
 				return errors.New("traffic route evidence expired before report")
@@ -322,6 +357,10 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		if fresh == nil || fresh.ReadyProbes != fresh.Probes {
 			return errors.New("traffic TLS evidence expired before report")
 		}
+		observation.Stage = "positive_route_report"
+		if assigned.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig {
+			observation.Stage = "positive_tls_report"
+		}
 		if err = s.reportPlatformServingFact(ctx, client, id, assigned, receipt.Sequence, true); err != nil {
 			return err
 		}
@@ -330,6 +369,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	s.mu.Lock()
 	s.platformServing = PlatformServingStatus{State: "serving_verified", TrafficRelease: trafficbinding.Clone(b), BundleVersion: bundle.Version, RouteProbes: len(probes), TLSProbes: readiness.Probes, VerifiedAt: receipt.VerifiedAt, ReportedAt: time.Now().UTC()}
 	s.mu.Unlock()
+	observation.Stage = "complete"
 	return nil
 }
 
@@ -369,7 +409,9 @@ func (s *Service) nextPlatformServingSequence() (int64, error) {
 	return sequence, nil
 }
 
-func (s *Service) reportPlatformServingFailure(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, bundle model.EdgeRouteBundle, selection routeSourceSelection, assignments []model.PlatformConsumerAssignment) error {
+func (s *Service) reportPlatformServingFailure(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, bundle model.EdgeRouteBundle, selection routeSourceSelection, assignments []model.PlatformConsumerAssignment, observation *servingNegativeObservation) (result error) {
+	defer func() { observation.Error = servingErrorClass(result) }()
+	observation.Stage = "activation"
 	current := func() error {
 		selected, err := s.selectRouteBundleSource()
 		actual, ok := s.Bundle()
@@ -382,25 +424,37 @@ func (s *Service) reportPlatformServingFailure(ctx context.Context, client platf
 		return err
 	}
 	for _, a := range assignments {
+		observation.Stage = "assignment"
 		if err := client.CheckServingAssignment(ctx, id, a); err != nil {
 			return err
 		}
 	}
+	observation.Stage = "cursor"
 	sequence, err := s.nextPlatformServingSequence()
 	if err != nil {
 		return err
 	}
 	var reports error
+	observation.Sequence = sequence
 	for _, a := range assignments {
+		observation.Stage = "report_activation"
 		if err := current(); err != nil {
 			return errors.Join(reports, err)
 		}
+		observation.Stage = "report_assignment"
 		if err := client.CheckServingAssignment(ctx, id, a); err != nil {
 			return errors.Join(reports, err)
 		}
-		reports = errors.Join(reports, s.reportPlatformServingFact(ctx, client, id, a, sequence, false))
+		observation.Stage = "report"
+		observation.Attempted++
+		err := s.reportPlatformServingFact(ctx, client, id, a, sequence, false)
+		if err == nil {
+			observation.Accepted++
+		}
+		reports = errors.Join(reports, err)
 	}
 	if reports == nil {
+		observation.Stage = "complete"
 		s.mu.Lock()
 		s.platformServing.ReportedAt = time.Now().UTC()
 		s.mu.Unlock()
@@ -514,6 +568,10 @@ func (s *Service) validatePlatformServingBundle(expected model.EdgeRouteBundle, 
 type platformServingRouteProbe func(context.Context, model.EdgeRouteBinding, time.Duration) (routeprobe.Proof, error)
 
 func (s *Service) observePlatformServingRoutes(ctx context.Context, bundle model.EdgeRouteBundle, policy *platformconfig.ReadinessProbePolicy, probe platformServingRouteProbe) ([]routeprobe.Proof, error) {
+	return s.observePlatformServingRoutesObserved(ctx, bundle, policy, probe, nil)
+}
+
+func (s *Service) observePlatformServingRoutesObserved(ctx context.Context, bundle model.EdgeRouteBundle, policy *platformconfig.ReadinessProbePolicy, probe platformServingRouteProbe, observation *servingProbeObservation) ([]routeprobe.Proof, error) {
 	if policy == nil || platformconfig.ValidateReadinessProbePolicy(policy) != nil || len(bundle.Routes) > policy.MaxProbes {
 		return nil, errors.New("traffic route probes exceed signed bounds")
 	}
@@ -558,6 +616,14 @@ func (s *Service) observePlatformServingRoutes(ctx context.Context, bundle model
 	}
 	close(jobs)
 	wg.Wait()
+	if observation != nil {
+		observation.Total = len(routes)
+		for i, err := range errs {
+			if err != nil {
+				observation.failure(routes[i].Hostname+"\x00"+model.NormalizeAppRoutePathPrefix(routes[i].PathPrefix), servingErrorClass(err))
+			}
+		}
+	}
 	for _, err := range errs {
 		if err != nil {
 			return nil, err

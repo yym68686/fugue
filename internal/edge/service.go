@@ -136,6 +136,7 @@ type Service struct {
 	platformConsumerMu       sync.Mutex
 	platformServingEvidence  *platformServingEvidence
 	platformServing          PlatformServingStatus
+	servingObservations      servingObservations
 	platformCandidate        PlatformCandidateStatus
 	platformTLSReadiness     *platformTLSReadinessReceipt
 	platformTLSCandidate     PlatformTLSCandidateStatus

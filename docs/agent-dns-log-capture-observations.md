@@ -87,6 +87,24 @@ observation proves cache corruption: enrolled consumers still require current
 serving/cache readiness, independently of historical inventory error counters.
 Only diagnostic wording changes; all existing preflight gates remain intact.
 
+The Edge worker's owner-only observation socket exposes
+`GET /v1/snapshots/traffic-serving`. It keeps the latest completed serving check
+and a separate 24-entry failure ring, with completed/failed/evicted counts. Each
+entry records the actual check stage, fixed error category, independently hashed
+applied/expected publication identities, probe reuse, and route/TLS failure
+counts. At most eight hashed route or TLS identities and fixed reasons are kept
+per check, with an explicit omitted count. Unknown errors remain `unclassified`;
+raw errors, hostnames, paths, proof payloads and credentials are never retained.
+
+Negative reports retain their original verification cause separately from the
+failure-report stage, trusted heartbeat sequence and attempted/accepted counts.
+An accepted negative report means the control plane acknowledged that failure;
+it does not make the route ready. Success does not erase prior failures. These
+process-local receipts cannot reconstruct failures predating deployment or
+surviving only in rotated-away logs. Reading the provider performs no additional
+probe, network or filesystem work, and none of the checks, reports, retries,
+signed probe bounds, executor configuration or public DNS selection change.
+
 The telemetry process's owner-only `GET /v1/snapshots/exports` also separates
 export attempts from their HTTP work. Exporter counters include encoding and all
 of that attempt's requests; `http` has eight fixed purposes (metrics, logs, five
