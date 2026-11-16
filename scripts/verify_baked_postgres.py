@@ -25,6 +25,19 @@ def run(*args):
     subprocess.run(args, check=True, timeout=300, stdout=sys.stderr)
 
 
+def platform_reference(image, arch):
+    # An image-index reference is not a platform identity in Docker's local
+    # containerd store: inspect can select the host platform even after an
+    # explicit foreign-platform pull. Pin the child manifest for every use.
+    index = json.loads(output("docker", "buildx", "imagetools", "inspect", "--raw", image))
+    matches = [m for m in index.get("manifests", [])
+               if m.get("platform", {}).get("os") == "linux" and
+               m.get("platform", {}).get("architecture") == arch]
+    if len(matches) != 1 or not re.fullmatch(r"sha256:[0-9a-f]{64}", matches[0].get("digest", "")):
+        raise ValueError("image must contain exactly one immutable linux/" + arch + " manifest")
+    return image.rsplit("@", 1)[0] + "@" + matches[0]["digest"]
+
+
 def verify_startup(image):
     with tempfile.TemporaryDirectory(prefix="baked-manager-startup-") as tmp:
         os.chmod(tmp, 0o777)
@@ -51,14 +64,15 @@ def verify(image, revision):
     if not contract.immutable_image(image) or not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("baked image needs an immutable tagged digest and full revision")
     hashes = {}
-    # Pull amd64 last so the isolated native execution cannot select arm64.
+    native = None
     for arch in ("arm64", "amd64"):
         platform = "linux/" + arch
-        for ref in (contract.POSTGRES_IMAGE, image):
+        original_ref, operand_ref = (platform_reference(ref, arch) for ref in (contract.POSTGRES_IMAGE, image))
+        for ref in (original_ref, operand_ref):
             run("docker", "pull", "--platform", platform, ref)
-        original = json.loads(output("docker", "image", "inspect", contract.POSTGRES_IMAGE))[0]
-        metadata = json.loads(output("docker", "image", "inspect", image))[0]
-        if metadata["Architecture"] != arch or metadata["Os"] != "linux":
+        original = json.loads(output("docker", "image", "inspect", original_ref))[0]
+        metadata = json.loads(output("docker", "image", "inspect", operand_ref))[0]
+        if any(m["Architecture"] != arch or m["Os"] != "linux" for m in (original, metadata)):
             raise ValueError("operand architecture mismatch")
         config = metadata["Config"]
         if config.get("Labels", {}).get("org.opencontainers.image.revision") != revision:
@@ -66,7 +80,7 @@ def verify(image, revision):
         for field in ("User", "Entrypoint", "Cmd", "Env", "WorkingDir", "ExposedPorts", "Volumes", "Healthcheck"):
             if config.get(field) != original["Config"].get(field):
                 raise ValueError("upstream PostgreSQL configuration changed: " + field)
-        cid = output("docker", "create", "--platform", platform, "--network=none", image)
+        cid = output("docker", "create", "--platform", platform, "--network=none", operand_ref)
         try:
             with tempfile.TemporaryDirectory(prefix="baked-manager-binary-") as tmp:
                 binary, entry = Path(tmp) / "manager", Path(tmp) / "entry"
@@ -77,9 +91,11 @@ def verify(image, revision):
                     raise ValueError("startup entrypoint identity differs")
         finally:
             run("docker", "rm", cid)
+        if arch == "amd64":
+            native = operand_ref
     if hashes != contract.MANAGER_SHA256:
         raise ValueError("preinstalled managers differ from the operator's original binaries")
-    verify_startup(image)
+    verify_startup(native)
     return {"image": image, "source_revision": revision, "postgres_base": contract.POSTGRES_IMAGE,
             "manager_image": contract.MANAGER_IMAGE, "manager_sha256": hashes,
             "platforms": ["linux/amd64", "linux/arm64"], "readonly_startup_verified": True, "upgrade_path_verified": True}

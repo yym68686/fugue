@@ -9,9 +9,22 @@ from unittest.mock import patch
 
 from scripts import baked_postgres_contract as contract
 from scripts.smoke_cnpg_baked_manager import Rehearsal
+from scripts import verify_baked_postgres as verifier
 
 
 class BakedPostgresTests(unittest.TestCase):
+    def test_platform_checks_pin_child_manifests_not_the_shared_index(self):
+        image = "registry.invalid/postgres:18.3@sha256:" + "f" * 64
+        entries = [{"platform": {"os": "linux", "architecture": arch}, "digest": "sha256:" + value * 64}
+                   for arch, value in (("amd64", "a"), ("arm64", "b"), ("unknown", "c"))]
+        with patch.object(verifier, "output", return_value=json.dumps({"manifests": entries})):
+            for arch, value in (("amd64", "a"), ("arm64", "b")):
+                self.assertEqual(verifier.platform_reference(image, arch), image.rsplit("@", 1)[0] + "@sha256:" + value * 64)
+        for invalid in ([], [entries[0]], [entries[1], entries[1]], [dict(entries[1], digest="mutable")]):
+            with self.subTest(manifests=invalid), patch.object(verifier, "output", return_value=json.dumps({"manifests": invalid})):
+                with self.assertRaisesRegex(ValueError, "exactly one immutable"):
+                    verifier.platform_reference(image, "arm64")
+
     def test_rehearsal_refuses_production_contexts_before_writing(self):
         args = SimpleNamespace(revision="a" * 40, cluster_name="production", kubeconfig=Path("unused"))
         with self.assertRaisesRegex(ValueError, "disposable"):
