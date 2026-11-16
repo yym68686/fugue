@@ -300,6 +300,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		ts, msg := splitKubernetesLogLine(scanner.Text())
 		if ts.IsZero() {
 			observation.Outcome = "source_unavailable"
+			observation.InvalidRecord = observeInvalidLogRecord(scanner.Text(), readTrace)
 			// Kubelet can return HTTP 200 with an untimestamped unavailable-log
 			// message after container GC. Count the loss once and retry with backoff.
 			if !cur.SourceUnavailable {

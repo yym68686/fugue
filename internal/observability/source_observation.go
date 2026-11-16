@@ -32,6 +32,7 @@ type logSourceObservation struct {
 	LastErrorMillis int64                        `json:"last_error_ms,omitempty"`
 	LastErrorRead   *logReadTransportObservation `json:"last_error_read,omitempty"`
 	LastAdmission   *logAdmissionObservation     `json:"last_admission,omitempty"`
+	InvalidRecord   *logInvalidRecordObservation `json:"invalid_record,omitempty"`
 	LineLimitBytes  int                          `json:"line_limit_bytes"`
 	MaxLineBytes    int                          `json:"max_line_bytes"`
 	TotalLines      uint64                       `json:"total_lines"`
@@ -60,27 +61,28 @@ const logGapReceiptLimit = 64
 // Bounds describe unproven coverage, not reconstructed missing log contents.
 // Outcome and prior read error are context, not a claim of causal attribution.
 type logGapObservation struct {
-	Sequence       uint64                   `json:"sequence"`
-	Identity       string                   `json:"identity"`
-	Node           string                   `json:"node"`
-	Previous       bool                     `json:"previous"`
-	ObservedAt     time.Time                `json:"observed_at"`
-	Events         uint64                   `json:"events"`
-	Reason         string                   `json:"reason"`
-	LowerBound     time.Time                `json:"lower_bound"`
-	UpperBound     time.Time                `json:"upper_bound"`
-	Outcome        string                   `json:"outcome"`
-	CursorBefore   time.Time                `json:"cursor_before"`
-	CursorAfter    time.Time                `json:"cursor_after"`
-	PendingAt      time.Time                `json:"pending_at"`
-	DrainedThrough time.Time                `json:"drained_through"`
-	Lines          int                      `json:"lines"`
-	RotationFiles  int                      `json:"rotation_files"`
-	RotationBytes  int64                    `json:"rotation_bytes"`
-	LastErrorAt    time.Time                `json:"last_error_at"`
-	LastErrorClass string                   `json:"last_error_class,omitempty"`
-	LastErrorStage string                   `json:"last_error_stage,omitempty"`
-	LastAdmission  *logAdmissionObservation `json:"last_admission,omitempty"`
+	Sequence       uint64                       `json:"sequence"`
+	Identity       string                       `json:"identity"`
+	Node           string                       `json:"node"`
+	Previous       bool                         `json:"previous"`
+	ObservedAt     time.Time                    `json:"observed_at"`
+	Events         uint64                       `json:"events"`
+	Reason         string                       `json:"reason"`
+	LowerBound     time.Time                    `json:"lower_bound"`
+	UpperBound     time.Time                    `json:"upper_bound"`
+	Outcome        string                       `json:"outcome"`
+	CursorBefore   time.Time                    `json:"cursor_before"`
+	CursorAfter    time.Time                    `json:"cursor_after"`
+	PendingAt      time.Time                    `json:"pending_at"`
+	DrainedThrough time.Time                    `json:"drained_through"`
+	Lines          int                          `json:"lines"`
+	RotationFiles  int                          `json:"rotation_files"`
+	RotationBytes  int64                        `json:"rotation_bytes"`
+	LastErrorAt    time.Time                    `json:"last_error_at"`
+	LastErrorClass string                       `json:"last_error_class,omitempty"`
+	LastErrorStage string                       `json:"last_error_stage,omitempty"`
+	LastAdmission  *logAdmissionObservation     `json:"last_admission,omitempty"`
+	InvalidRecord  *logInvalidRecordObservation `json:"invalid_record,omitempty"`
 }
 
 func (p *Pipeline) observeLogSource(v logSourceObservation) {
@@ -90,6 +92,10 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 		p.sourceObservations = map[string]logSourceObservation{}
 	}
 	prior, exists := p.sourceObservations[v.Identity]
+	if v.InvalidRecord != nil {
+		copy := *v.InvalidRecord
+		v.InvalidRecord = &copy
+	}
 	newGapEvents := v.GapEvents
 	if !exists && len(p.sourceObservations) >= 2048 {
 		oldest := ""
@@ -149,7 +155,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 			CursorBefore: v.CursorBefore, CursorAfter: v.CursorAfter, PendingAt: v.PendingAt, DrainedThrough: v.DrainedThrough,
 			Lines: v.Lines, RotationFiles: v.RotationFiles, RotationBytes: v.RotationBytes,
 			LastErrorAt: v.LastErrorAt, LastErrorClass: v.LastErrorClass, LastErrorStage: v.LastErrorStage,
-			LastAdmission: v.LastAdmission,
+			LastAdmission: v.LastAdmission, InvalidRecord: v.InvalidRecord,
 		})
 	}
 }
@@ -163,6 +169,10 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	p.sourceObservationMu.Lock()
 	rows := make([]logSourceObservation, 0, len(p.sourceObservations))
 	for _, row := range p.sourceObservations {
+		if row.InvalidRecord != nil {
+			copy := *row.InvalidRecord
+			row.InvalidRecord = &copy
+		}
 		if row.LastAdmission != nil {
 			copy := *row.LastAdmission
 			row.LastAdmission = &copy
@@ -177,6 +187,10 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	gapReceipts := append([]logGapObservation(nil), p.sourceGapReceipts...)
 	for i := range gapReceipts {
 		row := &gapReceipts[i]
+		if row.InvalidRecord != nil {
+			copy := *row.InvalidRecord
+			row.InvalidRecord = &copy
+		}
 		if row.LastAdmission != nil {
 			copy := *row.LastAdmission
 			row.LastAdmission = &copy
