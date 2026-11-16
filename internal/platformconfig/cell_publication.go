@@ -202,14 +202,25 @@ func decodeCellRoutePublications(raw []byte) ([]CellRoutePublicationInput, Polic
 	// without Cell references. Keep its failure separate from reference decoding:
 	// an older policy reader must not diagnose an absent Cell topology as corrupt.
 	var payload struct {
-		Publications json.RawMessage    `json:"cell_route_publications"`
-		Policy       json.RawMessage    `json:"policy"`
-		Source       *CellDNSPlanSource `json:"cell_dns_source"`
+		Publications dnsDependencyJSONView `json:"cell_route_publications"`
+		Policy       dnsDependencyJSONView `json:"policy"`
+		Source       *CellDNSPlanSource    `json:"cell_dns_source"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil, policy, fmt.Errorf("DNS artifact envelope cannot be decoded: %w", err)
+		// A top-level type error includes the anonymous destination's exact
+		// Go type in its public cause. Preserve the original copying decoder
+		// on rejection rather than changing that compatibility contract.
+		var original struct {
+			Publications json.RawMessage    `json:"cell_route_publications"`
+			Policy       json.RawMessage    `json:"policy"`
+			Source       *CellDNSPlanSource `json:"cell_dns_source"`
+		}
+		return nil, policy, fmt.Errorf("DNS artifact envelope cannot be decoded: %w", json.Unmarshal(raw, &original))
 	}
-	return decodeCellRoutePublicationFields(payload.Publications, payload.Policy, payload.Source)
+	// Borrow only while this synchronous decoder owns raw. The typed field
+	// decoders allocate their returned maps, slices and strings as before; no
+	// input bytes escape. Keep the same full envelope/error order and aliases.
+	return decodeCellRoutePublicationFields(json.RawMessage(payload.Publications), json.RawMessage(payload.Policy), payload.Source)
 }
 
 func decodeCellRoutePublicationFields(publicationsRaw, policyRaw json.RawMessage, source *CellDNSPlanSource) ([]CellRoutePublicationInput, PolicySnapshot, error) {
