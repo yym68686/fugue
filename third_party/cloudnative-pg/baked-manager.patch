@@ -1,0 +1,452 @@
+diff --git a/cmd/manager/main.go b/cmd/manager/main.go
+index 86bb259..923d516 100644
+--- a/cmd/manager/main.go
++++ b/cmd/manager/main.go
+@@ -23,6 +23,7 @@ The manager command is the main entrypoint of CloudNativePG operator.
+ package main
+ 
+ import (
++	"fmt"
+ 	"os"
+ 
+ 	"github.com/cloudnative-pg/machinery/pkg/log"
+@@ -38,11 +39,16 @@ import (
+ 	"github.com/cloudnative-pg/cloudnative-pg/internal/cmd/manager/walarchive"
+ 	"github.com/cloudnative-pg/cloudnative-pg/internal/cmd/manager/walrestore"
+ 	"github.com/cloudnative-pg/cloudnative-pg/internal/cmd/versions"
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/bakedmanager"
+ 
+ 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+ )
+ 
+ func main() {
++	if len(os.Args) == 2 && os.Args[1] == "fugue-instance-manager-contract" {
++		fmt.Print(string(bakedmanager.EmbeddedJSON()))
++		return
++	}
+ 	cobra.EnableTraverseRunHooks = true
+ 
+ 	logFlags := &log.Flags{}
+diff --git a/internal/configuration/configuration.go b/internal/configuration/configuration.go
+index eeab144..53f44e9 100644
+--- a/internal/configuration/configuration.go
++++ b/internal/configuration/configuration.go
+@@ -28,6 +28,7 @@ import (
+ 
+ 	"github.com/cloudnative-pg/machinery/pkg/log"
+ 
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/bakedmanager"
+ 	"github.com/cloudnative-pg/cloudnative-pg/pkg/configparser"
+ 	"github.com/cloudnative-pg/cloudnative-pg/pkg/versions"
+ )
+@@ -185,7 +186,7 @@ func newDefaultConfig() *Data {
+ 	return &Data{
+ 		OperatorPullSecretName:  DefaultOperatorPullSecretName,
+ 		OperatorImageName:       versions.DefaultOperatorImageName,
+-		PostgresImageName:       versions.DefaultImageName,
++		PostgresImageName:       bakedmanager.Current.Default(versions.DefaultImageName),
+ 		PgbouncerImageName:      versions.DefaultPgbouncerImage,
+ 		PluginSocketDir:         DefaultPluginSocketDir,
+ 		CreateAnyService:        false,
+diff --git a/internal/controller/baked_manager_test.go b/internal/controller/baked_manager_test.go
+new file mode 100644
+index 0000000..4bd4d3f
+--- /dev/null
++++ b/internal/controller/baked_manager_test.go
+@@ -0,0 +1,41 @@
++package controller
++
++import (
++	"context"
++	"strings"
++	"testing"
++
++	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
++	"github.com/cloudnative-pg/cloudnative-pg/internal/configuration"
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/bakedmanager"
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++func TestBakedManagerNoSpuriousRollout(t *testing.T) {
++	original := bakedmanager.Current
++	oldConfiguration := configuration.Current
++	t.Cleanup(func() { bakedmanager.Current = original; configuration.Current = oldConfiguration })
++	catalog := *original
++	image := "registry.invalid/postgres:18.3-baked@sha256:" + strings.Repeat("a", 64)
++	catalog.Images = []string{image}
++	bakedmanager.Current = &catalog
++	cfg := *configuration.Current
++	cfg.EnableInstanceManagerInplaceUpdates = false
++	configuration.Current = &cfg
++	cluster := apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "sample", Namespace: "tenant"},
++		Spec: apiv1.ClusterSpec{ImageName: image}, Status: apiv1.ClusterStatus{Image: image}}
++	cluster.SetDefaults()
++	pod, err := specs.NewInstance(context.Background(), cluster, 1, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	roll, err := checkPodSpecIsOutdated(context.Background(), pod, &cluster)
++	if err != nil || roll.required {
++		t.Fatalf("baked pod triggers rollout: %+v %v", roll, err)
++	}
++	roll, err = checkPodBootstrapImage(context.Background(), pod, &cluster)
++	if err != nil || roll.required {
++		t.Fatalf("baked pod lost manager identity: %+v %v", roll, err)
++	}
++}
+diff --git a/pkg/bakedmanager/catalog.go b/pkg/bakedmanager/catalog.go
+new file mode 100644
+index 0000000..115d477
+--- /dev/null
++++ b/pkg/bakedmanager/catalog.go
+@@ -0,0 +1,86 @@
++// Package bakedmanager binds preinstalled instance managers to immutable,
++// CI-verified PostgreSQL images. Arbitrary image labels are never trusted.
++package bakedmanager
++
++import (
++	"bytes"
++	_ "embed"
++	"encoding/json"
++	"fmt"
++	"io"
++	"regexp"
++)
++
++const Entrypoint = "/usr/local/bin/fugue-cnpg-manager"
++
++//go:embed images.json
++var embedded []byte
++
++type Catalog struct {
++	Schema        string            `json:"schema"`
++	DefaultImage  string            `json:"defaultImage"`
++	ManagerImage  string            `json:"managerImage"`
++	ManagerSHA256 map[string]string `json:"managerSHA256"`
++	Images        []string          `json:"images"`
++}
++
++var immutable = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
++var taggedImmutable = regexp.MustCompile(`^[^\s@]+:[^/:\s@]+@sha256:[0-9a-f]{64}$`)
++var hash = regexp.MustCompile(`^[0-9a-f]{64}$`)
++var Current = mustParse(embedded)
++
++// Parse rejects incomplete or ambiguous catalogs before the controller starts.
++func Parse(data []byte) (*Catalog, error) {
++	var value Catalog
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(&value); err != nil {
++		return nil, err
++	}
++	if err := decoder.Decode(new(any)); err != io.EOF {
++		return nil, fmt.Errorf("trailing instance-manager catalog content")
++	}
++	if value.Schema != "fugue.cnpg.baked-manager.v1" || !immutable.MatchString(value.ManagerImage) ||
++		len(value.ManagerSHA256) != 2 || !hash.MatchString(value.ManagerSHA256["manager_amd64"]) ||
++		!hash.MatchString(value.ManagerSHA256["manager_arm64"]) || len(value.Images) > 256 {
++		return nil, fmt.Errorf("invalid instance-manager catalog")
++	}
++	seen := make(map[string]bool, len(value.Images))
++	for _, image := range value.Images {
++		if !taggedImmutable.MatchString(image) || seen[image] {
++			return nil, fmt.Errorf("instance-manager image must be unique, tagged and digest-pinned: %q", image)
++		}
++		seen[image] = true
++	}
++	if value.DefaultImage != "" && !seen[value.DefaultImage] {
++		return nil, fmt.Errorf("default image is not approved")
++	}
++	return &value, nil
++}
++
++func mustParse(data []byte) *Catalog {
++	value, err := Parse(data)
++	if err != nil {
++		panic(err)
++	}
++	return value
++}
++
++func (c *Catalog) Approved(image string) bool {
++	for _, approved := range c.Images {
++		if image == approved {
++			return true
++		}
++	}
++	return false
++}
++
++func (c *Catalog) Default(fallback string) string {
++	if c.DefaultImage == "" {
++		return fallback
++	}
++	return c.DefaultImage
++}
++
++// EmbeddedJSON exposes the exact build input for independent artifact verification.
++func EmbeddedJSON() []byte { return append([]byte(nil), embedded...) }
+diff --git a/pkg/bakedmanager/catalog_test.go b/pkg/bakedmanager/catalog_test.go
+new file mode 100644
+index 0000000..0d026df
+--- /dev/null
++++ b/pkg/bakedmanager/catalog_test.go
+@@ -0,0 +1,40 @@
++package bakedmanager
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++)
++
++func TestBakedManagerCatalog(t *testing.T) {
++	value, err := Parse(embedded)
++	if err != nil {
++		t.Fatal(err)
++	}
++	image := "registry.invalid/postgres:18.3@sha256:" + strings.Repeat("a", 64)
++	value.Images = []string{image}
++	value.DefaultImage = image
++	data, _ := json.Marshal(value)
++	parsed, err := Parse(data)
++	if err != nil || !parsed.Approved(image) || parsed.Approved("registry.invalid/postgres:18.3") {
++		t.Fatalf("immutable approval failed: %v", err)
++	}
++	for _, mutate := range []func(*Catalog){
++		func(c *Catalog) { c.Images = []string{"registry.invalid/postgres:18.3"} },
++		func(c *Catalog) { c.Images = append(c.Images, image) },
++		func(c *Catalog) { c.DefaultImage = "not-approved" },
++		func(c *Catalog) { c.ManagerSHA256 = map[string]string{"manager_amd64": "bad"} },
++		func(c *Catalog) { c.Schema = "unknown" },
++	} {
++		var invalid Catalog
++		_ = json.Unmarshal(data, &invalid)
++		mutate(&invalid)
++		bad, _ := json.Marshal(invalid)
++		if _, err := Parse(bad); err == nil {
++			t.Fatalf("accepted invalid catalog: %s", bad)
++		}
++	}
++	if _, err := Parse(append(data, []byte(` {}`)...)); err == nil {
++		t.Fatal("accepted trailing JSON")
++	}
++}
+diff --git a/pkg/bakedmanager/images.json b/pkg/bakedmanager/images.json
+new file mode 100644
+index 0000000..f1b0f29
+--- /dev/null
++++ b/pkg/bakedmanager/images.json
+@@ -0,0 +1,10 @@
++{
++  "schema": "fugue.cnpg.baked-manager.v1",
++  "defaultImage": "",
++  "managerImage": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e",
++  "managerSHA256": {
++    "manager_amd64": "b77f8f908fdc909122fe24fa164f8247c0689c4ca8c01ccef07fc50e7be8f6f1",
++    "manager_arm64": "97fa01dc1c6abcd7f64a51d16f2e4ef9c7bb8d4d842e01adc9d07060e6b84157"
++  },
++  "images": []
++}
+diff --git a/pkg/specs/baked_manager.go b/pkg/specs/baked_manager.go
+new file mode 100644
+index 0000000..7827c40
+--- /dev/null
++++ b/pkg/specs/baked_manager.go
+@@ -0,0 +1,38 @@
++package specs
++
++import (
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/bakedmanager"
++	corev1 "k8s.io/api/core/v1"
++)
++
++// useBakedInstanceManager changes only trusted images and only the generated
++// bootstrap/manager command. Keep /controller writable: CNPG also stores
++// certificates, WAL helpers and atomic in-place manager upgrades there.
++func useBakedInstanceManager(pod *corev1.PodSpec, image string) {
++	if !bakedmanager.Current.Approved(image) {
++		return
++	}
++	for i := range pod.Containers {
++		container := &pod.Containers[i]
++		if container.Image == image && len(container.Command) > 0 && container.Command[0] == "/controller/manager" {
++			container.Command = append([]string{bakedmanager.Entrypoint}, container.Command[1:]...)
++		}
++	}
++	init := make([]corev1.Container, 0, len(pod.InitContainers))
++	for _, container := range pod.InitContainers {
++		if container.Name != BootstrapControllerContainerName {
++			init = append(init, container)
++		}
++	}
++	pod.InitContainers = init
++}
++
++func hasBakedInstanceManager(pod corev1.Pod) bool {
++	for _, container := range pod.Spec.Containers {
++		if container.Name == PostgresContainerName && bakedmanager.Current.Approved(container.Image) &&
++			len(container.Command) > 0 && container.Command[0] == bakedmanager.Entrypoint {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/pkg/specs/baked_manager_test.go b/pkg/specs/baked_manager_test.go
+new file mode 100644
+index 0000000..b563f36
+--- /dev/null
++++ b/pkg/specs/baked_manager_test.go
+@@ -0,0 +1,86 @@
++package specs
++
++import (
++	"context"
++	"encoding/json"
++	"reflect"
++	"strings"
++	"testing"
++
++	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
++	"github.com/cloudnative-pg/cloudnative-pg/internal/configuration"
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/bakedmanager"
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
++	corev1 "k8s.io/api/core/v1"
++	"k8s.io/apimachinery/pkg/api/equality"
++	"k8s.io/apimachinery/pkg/api/resource"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++func TestBakedManagerPodAndJob(t *testing.T) {
++	original := bakedmanager.Current
++	t.Cleanup(func() { bakedmanager.Current = original })
++	image := "registry.invalid/postgres:18.3-baked@sha256:" + strings.Repeat("a", 64)
++	copy := *original
++	copy.Images = []string{image}
++	copy.DefaultImage = image
++	cluster := apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "sample", Namespace: "tenant"},
++		Spec: apiv1.ClusterSpec{ImageName: image, Bootstrap: &apiv1.BootstrapConfiguration{InitDB: &apiv1.BootstrapInitDB{}},
++			Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
++				corev1.ResourceCPU: resource.MustParse("5m"), corev1.ResourceMemory: resource.MustParse("10Mi")}}},
++		Status: apiv1.ClusterStatus{Image: image}}
++	empty := *original
++	empty.Images = nil
++	bakedmanager.Current = &empty
++	legacy, err := NewInstance(context.Background(), cluster, 1, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	bakedmanager.Current = &copy
++	baked, err := NewInstance(context.Background(), cluster, 1, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := legacy.DeepCopy()
++	want.Spec.InitContainers = []corev1.Container{}
++	want.Spec.Containers[0].Command[0] = bakedmanager.Entrypoint
++	if !equality.Semantic.DeepEqual(want.Spec, baked.Spec) {
++		t.Fatal("baked mode changed fields outside bootstrap and manager command")
++	}
++	var stored corev1.PodSpec
++	if err := json.Unmarshal([]byte(baked.Annotations[utils.PodSpecAnnotationName]), &stored); err != nil {
++		t.Fatal(err)
++	}
++	if !equality.Semantic.DeepEqual(stored, baked.Spec) {
++		t.Fatal("stored PodSpec lost baked mode")
++	}
++	if source, err := GetBootstrapControllerImageName(*baked); err != nil || source != configuration.Current.OperatorImageName {
++		t.Fatalf("missing effective manager identity: %q %v", source, err)
++	}
++	if baked.Spec.Containers[0].Resources.Requests.Memory().Value() != 10*1024*1024 {
++		t.Fatal("baked manager imposed a scheduling memory floor")
++	}
++	job := CreatePrimaryJobViaInitdb(cluster, 1)
++	if len(job.Spec.Template.Spec.InitContainers) != 0 || job.Spec.Template.Spec.Containers[0].Command[0] != bakedmanager.Entrypoint {
++		t.Fatal("initdb still copies the instance manager")
++	}
++	// A mutable tag, even one with a trusted name, must remain on the old path.
++	cluster.Status.Image = "registry.invalid/postgres:18.3-baked"
++	old, err := NewInstance(context.Background(), cluster, 1, true)
++	if err != nil || len(old.Spec.InitContainers) != 1 || old.Spec.Containers[0].Command[0] != "/controller/manager" {
++		t.Fatalf("unapproved image lost bootstrap: %v", err)
++	}
++	broken := baked.DeepCopy()
++	broken.Spec.Containers[0].Command[0] = "/not-a-manager"
++	if _, err := GetBootstrapControllerImageName(*broken); err == nil {
++		t.Fatal("accepted a missing manager")
++	}
++	// Other initialization steps must survive; caller-owned command slices must not change.
++	pod := legacy.Spec.DeepCopy()
++	pod.InitContainers = append(pod.InitContainers, corev1.Container{Name: "extension"})
++	before := append([]string(nil), pod.Containers[0].Command...)
++	useBakedInstanceManager(pod, image)
++	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != "extension" || !reflect.DeepEqual(before, legacy.Spec.Containers[0].Command) {
++		t.Fatal("baked mode changed extensions or caller-owned command")
++	}
++}
+diff --git a/pkg/specs/jobs.go b/pkg/specs/jobs.go
+index b3c57e2..4223193 100644
+--- a/pkg/specs/jobs.go
++++ b/pkg/specs/jobs.go
+@@ -399,6 +399,8 @@ func CreatePrimaryJob(
+ 		},
+ 	}
+ 
++	useBakedInstanceManager(&job.Spec.Template.Spec, cluster.Status.Image)
++
+ 	if configuration.Current.CreateAnyService {
+ 		job.Spec.Template.Spec.Subdomain = cluster.GetServiceAnyName()
+ 	}
+diff --git a/pkg/specs/pg_pods.go b/pkg/specs/pg_pods.go
+index 1ca30e5..f175d0c 100644
+--- a/pkg/specs/pg_pods.go
++++ b/pkg/specs/pg_pods.go
+@@ -26,6 +26,7 @@ import (
+ 	corev1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
++	"github.com/cloudnative-pg/cloudnative-pg/internal/configuration"
+ 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
+ )
+ 
+@@ -72,6 +73,17 @@ func GetPostgresImageName(pod corev1.Pod) (string, error) {
+ 
+ // GetBootstrapControllerImageName get the controller image name used to bootstrap a Pod
+ func GetBootstrapControllerImageName(pod corev1.Pod) (string, error) {
++	// Approved baked images contain exactly the same original manager binaries
++	// as this controller's /operator inventory. CI refuses catalogs from a
++	// different inventory; release guards independently fence operand hashes.
++	if hasBakedInstanceManager(pod) {
++		for _, container := range pod.Spec.InitContainers {
++			if container.Name == BootstrapControllerContainerName {
++				return container.Image, nil
++			}
++		}
++		return configuration.Current.OperatorImageName, nil
++	}
+ 	return GetInitContainerImageName(pod, BootstrapControllerContainerName)
+ }
+ 
+diff --git a/pkg/specs/pods.go b/pkg/specs/pods.go
+index 5c262dd..9c83f03 100644
+--- a/pkg/specs/pods.go
++++ b/pkg/specs/pods.go
+@@ -185,7 +185,7 @@ func createClusterPodSpec(
+ 	gracePeriod int64,
+ 	enableHTTPS bool,
+ ) corev1.PodSpec {
+-	return corev1.PodSpec{
++	podSpec := corev1.PodSpec{
+ 		Hostname: podName,
+ 		InitContainers: []corev1.Container{
+ 			createBootstrapContainer(cluster, getExtensions(&cluster)),
+@@ -201,6 +201,8 @@ func createClusterPodSpec(
+ 		TerminationGracePeriodSeconds: &gracePeriod,
+ 		TopologySpreadConstraints:     cluster.Spec.TopologySpreadConstraints,
+ 	}
++	useBakedInstanceManager(&podSpec, cluster.Status.Image)
++	return podSpec
+ }
+ 
+ // createPostgresContainers create the PostgreSQL containers that are

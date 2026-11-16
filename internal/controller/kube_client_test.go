@@ -1048,6 +1048,9 @@ func TestReplaceObjectSpecsByKindDoesNotSkipRemovedOptionalCloudNativePGFields(t
 	if len(patch) != 1 {
 		t.Fatalf("expected one patch operation, got %#v", patch)
 	}
+	if spec, _ := patch[0]["value"].(map[string]any); spec["imageName"] != "postgres:18" {
+		t.Fatalf("unrelated spec update reset the defaulted database image: %#v", spec)
+	}
 	if summary := client.writeStats.summary(); !strings.Contains(summary, "replace_spec_attempted[postgresql.cnpg.io/v1/Cluster]=1") {
 		t.Fatalf("expected replace attempt in write summary, got %q", summary)
 	}

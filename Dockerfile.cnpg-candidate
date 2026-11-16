@@ -12,12 +12,17 @@ COPY third_party/cloudnative-pg/role-binding-cache.patch /tmp/role-binding-cache
 RUN git apply --check /tmp/role-binding-cache.patch && git apply /tmp/role-binding-cache.patch
 COPY third_party/cloudnative-pg/bootstrap-cpu-isolation.patch /tmp/bootstrap-cpu-isolation.patch
 RUN git apply --check /tmp/bootstrap-cpu-isolation.patch && git apply /tmp/bootstrap-cpu-isolation.patch
+COPY third_party/cloudnative-pg/baked-manager.patch /tmp/baked-manager.patch
+RUN git apply --check /tmp/baked-manager.patch && git apply /tmp/baked-manager.patch
+# CI fills this catalog only after independently verifying each image's manager
+# hashes on both architectures. The source-tree placeholder enables no images.
+COPY third_party/cloudnative-pg/baked-postgres-images.json /src/pkg/bakedmanager/images.json
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    go test -race ./internal/controller -run '^(TestNoopStatusRegression|TestRoleBindingRegression)' -count=1 \
-    && go test -race ./pkg/specs -run '^TestBootstrapCPURequestIsolation$' -count=1 \
+    go test -race ./internal/controller -run '^(TestNoopStatusRegression|TestRoleBindingRegression|TestBakedManager)' -count=1 \
+    && go test -race ./pkg/specs ./pkg/bakedmanager -run '^Test(BootstrapCPURequestIsolation|BakedManager)' -count=1 \
     && CGO_ENABLED=0 go build -trimpath \
-       -ldflags '-X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildVersion=1.29.0-fugue-bootstrap1 -X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildCommit=23eae00cd+fugue-bootstrap1' \
+       -ldflags '-X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildVersion=1.29.0-fugue-baked1 -X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildCommit=23eae00cd+fugue-baked1' \
        -o /out/fugue-cnpg-controller ./cmd/manager
 
 # Retain the original instance-manager executables byte-for-byte. The candidate
@@ -27,5 +32,6 @@ COPY --from=build --chown=65532:65532 --chmod=0755 /out/fugue-cnpg-controller /f
 COPY third_party/cloudnative-pg/semantic-status.patch /licenses/fugue-cnpg-semantic-status.patch
 COPY third_party/cloudnative-pg/role-binding-cache.patch /licenses/fugue-cnpg-role-binding-cache.patch
 COPY third_party/cloudnative-pg/bootstrap-cpu-isolation.patch /licenses/fugue-cnpg-bootstrap-cpu-isolation.patch
+COPY third_party/cloudnative-pg/baked-manager.patch /licenses/fugue-cnpg-baked-manager.patch
 USER 65532:65532
 ENTRYPOINT ["/fugue-cnpg-controller"]

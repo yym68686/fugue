@@ -1,0 +1,10 @@
+{
+  "schema": "fugue.cnpg.baked-manager.v1",
+  "defaultImage": "",
+  "managerImage": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e",
+  "managerSHA256": {
+    "manager_amd64": "b77f8f908fdc909122fe24fa164f8247c0689c4ca8c01ccef07fc50e7be8f6f1",
+    "manager_arm64": "97fa01dc1c6abcd7f64a51d16f2e4ef9c7bb8d4d842e01adc9d07060e6b84157"
+  },
+  "images": []
+}

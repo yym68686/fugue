@@ -10,6 +10,11 @@ import subprocess
 import time
 from pathlib import Path
 
+try:
+    from . import baked_postgres_contract as baked
+except ImportError:
+    import baked_postgres_contract as baked
+
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -70,6 +75,24 @@ def load_config(path):
             raise ValueError("invalid ConfigMap guard")
     if config["operandGuard"] != "cnpg-instance-identity-v1":
         raise ValueError("unsupported operand guard")
+    catalog = receipt.get("baked_postgres_contract")
+    previous_catalog = config.get("predecessorReceipt", {}).get("baked_postgres_contract")
+    if previous_catalog and not catalog:
+        raise ValueError("cannot remove support for existing baked-manager images")
+    if catalog:
+        baked.validate(catalog)
+        if catalog["managerSHA256"] != hashes:
+            raise ValueError("baked catalog differs from the candidate manager inventory")
+        if previous_catalog and not set(baked.validate(previous_catalog)["images"]) <= set(catalog["images"]):
+            raise ValueError("candidate dropped an existing baked-manager image")
+        proof = receipt.get("baked_postgres_verification", {})
+        baked.build_catalog(proof, receipt)
+        smoke = receipt.get("isolated_cluster_verification", {})
+        if (proof.get("image") != catalog["defaultImage"] or proof.get("source_revision") != config["candidate"]["revision"] or
+                smoke.get("candidate_image") != config["candidate"]["image"] or smoke.get("source_revision") != config["candidate"]["revision"] or
+                smoke.get("baked_image") != catalog["defaultImage"] or
+                smoke.get("checks") != ["default_initdb_without_bootstrap", "sql_read_write", "container_restart", "pod_recreation", "legacy_unchanged"]):
+            raise ValueError("baked-manager release requires complete isolated cluster verification")
     return config
 
 
@@ -247,6 +270,21 @@ def wait_healthy(config, artifact, verification, operands, check_operands=True):
     raise RuntimeError("controller rollout did not converge within 240 seconds")
 
 
+def assert_rollback_preserves_baked_support(config):
+    current = config["candidateReceipt"].get("baked_postgres_contract", {}).get("images", [])
+    previous = config.get("predecessorReceipt", {}).get("baked_postgres_contract", {}).get("images", [])
+    removed = set(current) - set(previous)
+    if not removed:
+        return
+    clusters = kube("get", "clusters.postgresql.cnpg.io", "-A", "-o", "json")["items"]
+    pods = kube("get", "pods", "-A", "-l", "cnpg.io/cluster", "-o", "json")["items"]
+    in_use = {c.get("spec", {}).get("imageName") for c in clusters}
+    in_use.update(c.get("status", {}).get("image") for c in clusters)
+    in_use.update(c.get("image") for p in pods for c in p.get("spec", {}).get("containers", []))
+    if removed & in_use:
+        raise ValueError("automatic rollback would remove support for an active baked-manager database; retain the capable controller and submit a compatible corrective release")
+
+
 def execute(config, prepared):
     if not config["apply"]:
         raise ValueError("this release intent authorizes preflight only")
@@ -272,6 +310,7 @@ def execute(config, prepared):
             validate_workload(config, live, config["predecessor"])
             raise RuntimeError(f"candidate failed before activation; predecessor unchanged: {error}") from error
         validate_workload(config, live, config["candidate"])
+        assert_rollback_preserves_baked_support(config)
         patch(config, live, config["predecessor"])
         wait_healthy(config, config["predecessor"], fresh["predecessorVerification"], prepared["operands"], False)
         raise RuntimeError(f"candidate failed; predecessor restored: {error}") from error

@@ -474,6 +474,12 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if any(name.startswith("third_party/cloudnative-pg/") or name in {
+            "Dockerfile.cnpg-candidate", "Dockerfile.postgres-baked-manager", "scripts/baked_postgres_contract.py",
+            "scripts/verify_baked_postgres.py", "scripts/verify_cnpg_candidate.py", "scripts/postgres_baked_manager.sh",
+            "scripts/smoke_cnpg_baked_manager.py", "scripts/test_baked_postgres.py", "scripts/release_external_controller.py",
+            "scripts/test_release_external_controller.py", ".github/workflows/ci.yml"} for name in paths):
+        non_go_tasks["baked-postgres-tests"] = ["python3", "-m", "unittest", "scripts.test_baked_postgres", "scripts.test_release_external_controller"]
     if any(name in {"scripts/install_compiler_input_zero_temp.py", "scripts/test_install_compiler_input_zero_temp.py", "internal/schemamigrate/compiler_input_zero_temp.sql", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/compiler-input-safety/") for name in paths):
         non_go_tasks["input-zero-temp-tests"] = ["python3", "-m", "unittest", "scripts.test_install_compiler_input_zero_temp"]
     if any(name.startswith("internal/inputhistory/") or name in {

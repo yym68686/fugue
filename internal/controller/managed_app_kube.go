@@ -374,6 +374,7 @@ func (c *kubeClient) shouldSkipApply(ctx context.Context, apiPath string, obj ma
 		return "apply_skipped_existing", true, nil
 	}
 	preserveCloudNativePGResizePolicy(current, obj)
+	preserveCloudNativePGDefaultedImage(current, obj)
 	if desiredObjectAlreadyApplied(current, obj) {
 		return "apply_skipped_noop", true, nil
 	}
@@ -454,6 +455,26 @@ func preserveCloudNativePGResizePolicy(current, desired map[string]any) {
 	}
 	if value, present := currentStorage["resizeInUseVolumes"]; present {
 		desiredStorage["resizeInUseVolumes"] = value
+	}
+}
+
+// An omitted image means "use the platform default when creating a database",
+// not "upgrade this existing database whenever that default changes". CNPG's
+// admission webhook persists its choice in imageName. Preserve that persisted
+// choice on later SSA and full-spec updates unless the user supplies an image.
+func preserveCloudNativePGDefaultedImage(current, desired map[string]any) {
+	if !cloudNativePGObject(desired) {
+		return
+	}
+	desiredSpec := objectMapField(desired, "spec")
+	if desiredSpec == nil || desiredSpec["imageCatalogRef"] != nil {
+		return
+	}
+	if strings.TrimSpace(objectStringField(desiredSpec, "imageName")) != "" {
+		return
+	}
+	if image := strings.TrimSpace(objectStringField(objectMapField(current, "spec"), "imageName")); image != "" {
+		desiredSpec["imageName"] = image
 	}
 }
 
@@ -917,6 +938,7 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 				return nil
 			}
 			preserveCloudNativePGResizePolicy(current, obj)
+			preserveCloudNativePGDefaultedImage(current, obj)
 			preservePostgresBootstrap(current, obj)
 			if desiredSpecAlreadyApplied(current, obj) {
 				c.writeStats.record("replace_spec_skipped_noop", obj)

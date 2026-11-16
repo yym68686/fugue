@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import release_external_controller as release
+from scripts import baked_postgres_contract as baked
 
 
 def fixture():
@@ -24,6 +25,48 @@ def fixture():
 
 
 class ExternalControllerReleaseTests(unittest.TestCase):
+    def test_baked_release_binds_both_images_and_full_rehearsal(self):
+        config, _ = fixture()
+        proof = {"image": "registry.invalid/postgres:18.3@sha256:" + "f" * 64,
+                 "source_revision": config["candidate"]["revision"], "manager_image": baked.MANAGER_IMAGE,
+                 "manager_sha256": baked.MANAGER_SHA256.copy(), "postgres_base": baked.POSTGRES_IMAGE,
+                 "platforms": ["linux/amd64", "linux/arm64"], "readonly_startup_verified": True, "upgrade_path_verified": True}
+        receipt = config["candidateReceipt"]
+        receipt.update(base_image=baked.MANAGER_IMAGE, instance_manager_sha256=baked.MANAGER_SHA256.copy())
+        config["predecessorReceipt"] = dict(receipt, candidate_image=config["predecessor"]["image"], source_revision=config["predecessor"]["revision"])
+        receipt["baked_postgres_contract"] = baked.build_catalog(proof, {})
+        receipt["baked_postgres_verification"] = proof
+        receipt["isolated_cluster_verification"] = {"candidate_image": config["candidate"]["image"], "source_revision": config["candidate"]["revision"],
+            "baked_image": proof["image"], "checks": ["default_initdb_without_bootstrap", "sql_read_write", "container_restart", "pod_recreation", "legacy_unchanged"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "release.json"
+            path.write_text(json.dumps(config))
+            self.assertEqual(release.load_config(path), config)
+            for field, value in (("isolated_cluster_verification", {}), ("baked_postgres_verification", {})):
+                invalid = copy.deepcopy(config)
+                invalid["candidateReceipt"][field] = value
+                path.write_text(json.dumps(invalid))
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    release.load_config(path)
+            invalid = copy.deepcopy(config)
+            old_catalog = copy.deepcopy(receipt["baked_postgres_contract"])
+            old_catalog["images"].append("registry.invalid/postgres:18.3@sha256:" + "a" * 64)
+            invalid["predecessorReceipt"]["baked_postgres_contract"] = old_catalog
+            path.write_text(json.dumps(invalid))
+            with self.assertRaisesRegex(ValueError, "dropped"):
+                release.load_config(path)
+
+    def test_rollback_cannot_orphan_a_new_baked_database(self):
+        config, _ = fixture()
+        image = "registry.invalid/postgres:18.3@sha256:" + "f" * 64
+        config["candidateReceipt"]["baked_postgres_contract"] = {"images": [image]}
+        for inventory in (({"items": [{"spec": {"imageName": image}}]}, {"items": []}),
+                          ({"items": []}, {"items": [{"spec": {"containers": [{"image": image}]}}]})):
+            with patch.object(release, "kube", side_effect=inventory), self.assertRaisesRegex(ValueError, "active baked-manager"):
+                release.assert_rollback_preserves_baked_support(config)
+        with patch.object(release, "kube", return_value={"items": []}):
+            release.assert_rollback_preserves_baked_support(config)
+
     def test_contract_binds_candidate_receipt_and_explicit_preflight(self):
         config, _ = fixture()
         with tempfile.TemporaryDirectory() as directory:
