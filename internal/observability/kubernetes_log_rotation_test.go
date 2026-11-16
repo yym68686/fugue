@@ -3,6 +3,7 @@ package observability
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -131,6 +132,70 @@ func TestRotationInventoryChangeCannotReturnMixedFiles(t *testing.T) {
 	}
 	if err == nil || reader != nil {
 		t.Fatal("mixed rotation inventory accepted")
+	}
+	if got := logReadErrorClass(err); got != "rotation_inventory_changed" {
+		t.Fatalf("inventory change lost its fixed classification: %q", got)
+	}
+}
+
+func TestRotationInventoryFailureClasses(t *testing.T) {
+	var files strings.Builder
+	for i := 0; i < 17; i++ {
+		fmt.Fprintf(&files, "<a href=\"0.log.20260101-0000%02d\">retained</a>", i)
+	}
+	for _, tc := range []struct{ name, input, class string }{
+		{"bytes", strings.Repeat("x", (64<<10)+1), "rotation_inventory_limit"},
+		{"files", files.String(), "rotation_inventory_limit"},
+		{"current_missing", "<a href=\"0.log.20260101-000000\">retained</a>", "rotation_current_missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseRotationLogFiles(strings.NewReader(tc.input), "0.log")
+			if got := logReadErrorClass(err); err == nil || got != tc.class {
+				t.Fatalf("classification=%q error=%v; want %q", got, err, tc.class)
+			}
+		})
+	}
+}
+
+func TestRotationCompressionKeepsTransportErrorsDistinct(t *testing.T) {
+	for _, tc := range []struct {
+		name, class string
+		reader      io.Reader
+		cause       error
+	}{
+		{"invalid_header", "rotation_compression_invalid", strings.NewReader("invalid gzip header"), gzip.ErrHeader},
+		{"transport", "deadline", rotationErrorReader{context.DeadlineExceeded}, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &rotationLogReader{
+				files:   []rotationLogFile{{"0.log.20260101-000001", "0.log.20260101-000001.gz"}, {"0.log", "0.log"}},
+				current: io.NopCloser(strings.NewReader("")),
+				get:     func(string) (io.ReadCloser, error) { return io.NopCloser(tc.reader), nil },
+			}
+			t.Cleanup(func() { r.Close() })
+			_, err := r.Read(make([]byte, 1))
+			if !errors.Is(err, tc.cause) || logReadErrorClass(err) != tc.class {
+				t.Fatalf("classification=%q error=%v; want %q and cause %v", logReadErrorClass(err), err, tc.class, tc.cause)
+			}
+		})
+	}
+}
+
+type rotationErrorReader struct{ err error }
+
+func (r rotationErrorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestRotationFailureClassesPreserveUnderlyingError(t *testing.T) {
+	root := errors.New("private cause")
+	err := rotationFailuref("rotation_inventory_changed", "rotation inventory failed: %w", root)
+	if !errors.Is(err, root) {
+		t.Fatal("fixed classification discarded the underlying error")
+	}
+	if got := logReadErrorClass(err); got != "rotation_inventory_changed" {
+		t.Fatalf("unexpected fixed classification %q", got)
+	}
+	if got := logReadErrorClass(fmt.Errorf("wrapped: %w", err)); got != "rotation_inventory_changed" {
+		t.Fatalf("wrapping lost fixed classification: %q", got)
 	}
 }
 
@@ -396,22 +461,24 @@ func TestRotationCRIFragmentsSurviveFilesAndStreamInterleaving(t *testing.T) {
 }
 func TestRotationCRIRejectsTruncatedMalformedAndOversizedSources(t *testing.T) {
 	at := "2026-01-01T00:00:00Z"
-	for name, input := range map[string]string{
-		"partial_record": at + " stdout P incomplete\n", "partial_file": at + " stdout F cut",
-		"invalid_stream": at + " other F message\n", "invalid_timestamp": "yesterday stdout F message\n",
-		"large_record": at + " stdout F " + strings.Repeat("x", 129) + "\n",
+	for name, tc := range map[string]struct{ input, class string }{
+		"partial_record":    {at + " stdout P incomplete\n", "unexpected_eof"},
+		"partial_file":      {at + " stdout F cut", "unexpected_eof"},
+		"invalid_stream":    {at + " other F message\n", "rotation_cri_record_invalid"},
+		"invalid_timestamp": {"yesterday stdout F message\n", "rotation_cri_timestamp_invalid"},
+		"large_record":      {at + " stdout F " + strings.Repeat("x", 129) + "\n", "rotation_cri_record_limit"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := rawRotationReader(t, "", input, 128)
-			if _, err := io.ReadAll(r); err == nil {
-				t.Fatal("invalid CRI source accepted")
+			r := rawRotationReader(t, "", tc.input, 128)
+			if _, err := io.ReadAll(r); err == nil || logReadErrorClass(err) != tc.class {
+				t.Fatalf("classification=%q error=%v; want %q", logReadErrorClass(err), err, tc.class)
 			}
 		})
 	}
 	r := rawRotationReader(t, "", at+" stdout F bounded\n", 128)
 	r.decodedBytes = rotationReadLimit
-	if _, err := io.ReadAll(r); err == nil {
-		t.Fatal("decoded-byte bound ignored")
+	if _, err := io.ReadAll(r); err == nil || logReadErrorClass(err) != "rotation_decoded_limit" {
+		t.Fatalf("decoded-byte bound classification=%q error=%v", logReadErrorClass(err), err)
 	}
 	r = rawRotationReader(t, "", at+" stdout F complete\n"+at+" stdout F cut", 128)
 	got, err := io.ReadAll(r)

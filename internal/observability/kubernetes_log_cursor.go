@@ -462,6 +462,10 @@ func logBoundaryMissing(boundary, seen map[[32]byte]int) bool {
 }
 
 func logReadErrorClass(err error) string {
+	var rotationFailure *rotationReadFailure
+	if errors.As(err, &rotationFailure) {
+		return rotationFailure.class
+	}
 	switch {
 	case errors.Is(err, bufio.ErrTooLong):
 		return "line_too_long"

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -60,13 +61,29 @@ func rotationLogDirectory(t kubernetesLogTarget) (string, string, bool) {
 
 type rotationLogFile struct{ base, name string }
 
+type rotationReadFailure struct {
+	class string
+	err   error
+}
+
+func (e *rotationReadFailure) Error() string { return e.err.Error() }
+func (e *rotationReadFailure) Unwrap() error { return e.err }
+
+func rotationFailure(class, message string) error {
+	return &rotationReadFailure{class: class, err: fmt.Errorf("%s", message)}
+}
+
+func rotationFailuref(class, format string, args ...any) error {
+	return &rotationReadFailure{class: class, err: fmt.Errorf(format, args...)}
+}
+
 func parseRotationLogFiles(body io.Reader, prefix string) ([]rotationLogFile, error) {
 	raw, err := io.ReadAll(io.LimitReader(body, (64<<10)+1))
 	if err != nil {
 		return nil, fmt.Errorf("read retained log directory: %w", err)
 	}
 	if len(raw) > 64<<10 {
-		return nil, fmt.Errorf("retained log directory exceeds bound")
+		return nil, rotationFailure("rotation_inventory_limit", "retained log directory exceeds bound")
 	}
 	files := map[string]string{}
 	z := html.NewTokenizer(strings.NewReader(string(raw)))
@@ -106,12 +123,12 @@ func parseRotationLogFiles(body io.Reader, prefix string) ([]rotationLogFile, er
 				files[base] = name
 			}
 			if len(files) > 16 {
-				return nil, fmt.Errorf("retained log file count exceeds bound")
+				return nil, rotationFailure("rotation_inventory_limit", "retained log file count exceeds bound")
 			}
 		}
 	}
 	if files[prefix] == "" {
-		return nil, fmt.Errorf("current container log is absent from retained inventory")
+		return nil, rotationFailure("rotation_current_missing", "current container log is absent from retained inventory")
 	}
 	out := make([]rotationLogFile, 0, len(files))
 	for base, name := range files {
@@ -133,7 +150,7 @@ func parseRotationLogFiles(body io.Reader, prefix string) ([]rotationLogFile, er
 func (c *kubernetesLogCollector) openRotationLogs(ctx context.Context, target kubernetesLogTarget) (*rotationLogReader, error) {
 	directory, prefix, ok := rotationLogDirectory(target)
 	if !ok {
-		return nil, fmt.Errorf("retained log source identity is unavailable")
+		return nil, rotationFailure("rotation_identity_invalid", "retained log source identity is unavailable")
 	}
 	get := func(name, phase string) (io.ReadCloser, error) {
 		return observedLogStream(ctx, phase, func(ctx context.Context) (io.ReadCloser, error) {
@@ -170,7 +187,7 @@ func (c *kubernetesLogCollector) openRotationLogs(ctx context.Context, target ku
 	}
 	if !reflect.DeepEqual(bases(before), bases(after)) {
 		current.Close()
-		return nil, fmt.Errorf("retained log inventory changed")
+		return nil, rotationFailure("rotation_inventory_changed", "retained log inventory changed")
 	}
 	return &rotationLogReader{files: after, current: current, get: func(name string) (io.ReadCloser, error) {
 		return get(name, "rotation_retained")
@@ -248,13 +265,16 @@ func (r *rotationLogReader) nextFile() error {
 		return err
 	}
 	if body == nil {
-		return fmt.Errorf("retained log stream is unavailable")
+		return rotationFailure("rotation_file_unavailable", "retained log stream is unavailable")
 	}
 	r.active = body
 	var reader io.Reader = io.LimitReader(body, rotationReadLimit+1)
 	if strings.HasSuffix(f.name, ".gz") {
 		z, err := gzip.NewReader(reader)
 		if err != nil {
+			if errors.Is(err, gzip.ErrHeader) {
+				return rotationFailuref("rotation_compression_invalid", "%w", err)
+			}
 			return err
 		}
 		reader = z
@@ -297,14 +317,14 @@ func (r *rotationLogReader) Read(p []byte) (int, error) {
 		line := r.scanner.Text()
 		r.decodedBytes += int64(len(line) + 1)
 		if r.decodedBytes > rotationReadLimit {
-			return 0, fmt.Errorf("retained log decoded bytes exceed bound")
+			return 0, rotationFailure("rotation_decoded_limit", "retained log decoded bytes exceed bound")
 		}
 		parts := strings.SplitN(line, " ", 4)
 		if len(parts) != 4 || (parts[1] != "stdout" && parts[1] != "stderr") || (parts[2] != "P" && parts[2] != "F") {
-			return 0, fmt.Errorf("invalid retained CRI record")
+			return 0, rotationFailure("rotation_cri_record_invalid", "invalid retained CRI record")
 		}
 		if _, err := time.Parse(time.RFC3339Nano, parts[0]); err != nil {
-			return 0, fmt.Errorf("invalid retained CRI timestamp")
+			return 0, rotationFailure("rotation_cri_timestamp_invalid", "invalid retained CRI timestamp")
 		}
 		v := r.partial[parts[1]]
 		if v == nil {
@@ -312,7 +332,7 @@ func (r *rotationLogReader) Read(p []byte) (int, error) {
 			r.records = append(r.records, v)
 		}
 		if v.body.Len()+len(parts[3]) > r.maxLine || r.pendingBytes+len(parts[3]) > 2*r.maxLine || len(r.records) > 4096 {
-			return 0, fmt.Errorf("retained CRI record buffer exceeds bound")
+			return 0, rotationFailure("rotation_cri_record_limit", "retained CRI record buffer exceeds bound")
 		}
 		v.body.WriteString(parts[3])
 		r.pendingBytes += len(parts[3])
