@@ -136,14 +136,33 @@ stale runnable markers; they do not invalidate otherwise complete wait pairs.
 Duplicate wakeups while one runnable wait is pending are handled the same way,
 with the earliest timestamp retained.
 
-The telemetry source snapshot includes an `error_summary` grouped by node,
-error class, and stage across every retained source, independent of the 512-row
-detail projection. This keeps source error attribution complete when the detail
-list is marked truncated.
 It reads already mounted host tracefs metadata and opens temporary perf event
 descriptors; it does not mount tracefs, enable schedstats, or modify global
 tracing configuration. Its filters include wakeups issued outside the target
 cgroup. A wait measures runnable scheduling delay, not its workload-level cause.
+
+The telemetry source snapshot includes an `error_summary` grouped by node,
+error class, and stage across every retained source, independent of the 512-row
+detail projection. This keeps source error attribution complete when the detail
+list is marked truncated.
+
+The source snapshot also keeps an independent `gap_history` ring of 64 new gap
+observations. Ordinary reads, backoff, retained cumulative counts, source-detail
+eviction and the 512-row projection cannot evict those receipts. New gap
+observations alone advance its sequence and overwrite its oldest entry; `total`
+counts observations (each has its own `events` delta), and `evicted` reports
+overwrite. Receipt bounds are captured at detection and are not silently updated
+by later interval widening. Read outcome and latest error provide context, not a
+proven cause. No log contents or cursors are reconstructed or changed.
+
+The API operations snapshot's `captures.agent_failures` has an independent
+24-receipt budget for completed real Agent-request capture errors. DNS reads,
+previews, internal calls and successful requests cannot displace those failures.
+Its total/evicted counters describe that ring, not all HTTP 503 responses: failures
+after capture (for example authority recheck or response signing) remain separate
+operation counters. Both rings are process-local metadata with explicit overwrite
+and restart boundaries, not durable or complete 24-hour request tracing. They do
+not renew facts, change admission or erase historical failures.
 
 Runtime snapshots deduplicate shared Unix sockets across helper processes and
 bind each row to the socket's kernel-reported peer PID in the frozen target set.

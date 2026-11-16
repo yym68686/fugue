@@ -21,11 +21,14 @@ const captureReceiptLimit = 24
 const captureEventLimit = 12
 
 type captureObservations struct {
-	mu        sync.Mutex
-	sequence  uint64
-	completed uint64
-	evicted   uint64
-	receipts  []captureReceipt
+	mu                  sync.Mutex
+	sequence            uint64
+	completed           uint64
+	evicted             uint64
+	receipts            []captureReceipt
+	agentFailures       []captureReceipt
+	agentFailureTotal   uint64
+	agentFailureEvicted uint64
 }
 
 type captureReceipt struct {
@@ -202,6 +205,17 @@ func (s *Server) finishCaptureTrace(trace *captureTrace, outcome string, err err
 		s.captures.evicted++
 	}
 	s.captures.receipts = append(s.captures.receipts, receipt)
+	// Successful DNS/preview reads share the ordinary ring, but cannot evict
+	// evidence of a real Agent request failure from this independent budget.
+	if receipt.Kind == "agent-request" && err != nil {
+		s.captures.agentFailureTotal++
+		if len(s.captures.agentFailures) == captureReceiptLimit {
+			copy(s.captures.agentFailures, s.captures.agentFailures[1:])
+			s.captures.agentFailures = s.captures.agentFailures[:captureReceiptLimit-1]
+			s.captures.agentFailureEvicted++
+		}
+		s.captures.agentFailures = append(s.captures.agentFailures, receipt)
+	}
 }
 
 func captureErrorClass(err error) string {
@@ -310,5 +324,8 @@ func (s *Server) captureSnapshot() any {
 	return map[string]any{"schema": "fugue.capture-receipts/v1", "receipts": append([]captureReceipt(nil), s.captures.receipts...),
 		"started": s.captures.sequence, "evicted": s.captures.evicted, "limit": captureReceiptLimit,
 		"completed": s.captures.completed, "in_flight": s.captures.sequence - s.captures.completed,
+		"agent_failures": map[string]any{"receipts": append([]captureReceipt(nil), s.captures.agentFailures...),
+			"total": s.captures.agentFailureTotal, "evicted": s.captures.agentFailureEvicted, "limit": captureReceiptLimit,
+			"coverage": "completed_agent_request_capture_errors_not_all_http_response_failures"},
 		"coverage": "bounded_completed_local_reads_not_full_request_tracing", "authorizes_traffic": false}
 }

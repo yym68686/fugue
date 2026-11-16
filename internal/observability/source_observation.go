@@ -53,6 +53,34 @@ type sourceErrorSummary struct {
 	HTTPStatus     int       `json:"http_status,omitempty"`
 }
 
+const logGapReceiptLimit = 64
+
+// Keep each newly reported loss separately from the truncated source view.
+// Bounds describe unproven coverage, not reconstructed missing log contents.
+// Outcome and prior read error are context, not a claim of causal attribution.
+type logGapObservation struct {
+	Sequence       uint64    `json:"sequence"`
+	Identity       string    `json:"identity"`
+	Node           string    `json:"node"`
+	Previous       bool      `json:"previous"`
+	ObservedAt     time.Time `json:"observed_at"`
+	Events         uint64    `json:"events"`
+	Reason         string    `json:"reason"`
+	LowerBound     time.Time `json:"lower_bound"`
+	UpperBound     time.Time `json:"upper_bound"`
+	Outcome        string    `json:"outcome"`
+	CursorBefore   time.Time `json:"cursor_before"`
+	CursorAfter    time.Time `json:"cursor_after"`
+	PendingAt      time.Time `json:"pending_at"`
+	DrainedThrough time.Time `json:"drained_through"`
+	Lines          int       `json:"lines"`
+	RotationFiles  int       `json:"rotation_files"`
+	RotationBytes  int64     `json:"rotation_bytes"`
+	LastErrorAt    time.Time `json:"last_error_at"`
+	LastErrorClass string    `json:"last_error_class,omitempty"`
+	LastErrorStage string    `json:"last_error_stage,omitempty"`
+}
+
 func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	p.sourceObservationMu.Lock()
 	defer p.sourceObservationMu.Unlock()
@@ -60,6 +88,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 		p.sourceObservations = map[string]logSourceObservation{}
 	}
 	prior, exists := p.sourceObservations[v.Identity]
+	newGapEvents := v.GapEvents
 	if !exists && len(p.sourceObservations) >= 2048 {
 		oldest := ""
 		var at time.Time
@@ -98,6 +127,22 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 		v.LastErrorStage, v.LastErrorMillis = v.Outcome, v.TotalMillis
 	}
 	p.sourceObservations[v.Identity] = v
+	if newGapEvents > 0 {
+		p.sourceGapReceiptTotal++
+		if len(p.sourceGapReceipts) == logGapReceiptLimit {
+			copy(p.sourceGapReceipts, p.sourceGapReceipts[1:])
+			p.sourceGapReceipts = p.sourceGapReceipts[:logGapReceiptLimit-1]
+			p.sourceGapReceiptEvicted++
+		}
+		p.sourceGapReceipts = append(p.sourceGapReceipts, logGapObservation{
+			Sequence: p.sourceGapReceiptTotal, Identity: v.Identity, Node: v.Node, Previous: v.Previous,
+			ObservedAt: v.ObservedAt, Events: newGapEvents, Reason: v.GapReason,
+			LowerBound: v.GapLowerBound, UpperBound: v.GapUpperBound, Outcome: v.Outcome,
+			CursorBefore: v.CursorBefore, CursorAfter: v.CursorAfter, PendingAt: v.PendingAt, DrainedThrough: v.DrainedThrough,
+			Lines: v.Lines, RotationFiles: v.RotationFiles, RotationBytes: v.RotationBytes,
+			LastErrorAt: v.LastErrorAt, LastErrorClass: v.LastErrorClass, LastErrorStage: v.LastErrorStage,
+		})
+	}
 }
 
 // DiagnosticSources projects metadata only; neither log contents nor queue
@@ -116,6 +161,9 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 		rows = append(rows, row)
 	}
 	evicted, cycle := p.sourceObservationEvicted, p.sourceObservationCycle
+	gapHistory := map[string]any{"receipts": append([]logGapObservation(nil), p.sourceGapReceipts...),
+		"total": p.sourceGapReceiptTotal, "evicted": p.sourceGapReceiptEvicted, "limit": logGapReceiptLimit,
+		"coverage": "new_gap_observations_not_cumulative_source_counts_or_reconstructed_logs"}
 	p.sourceObservationMu.Unlock()
 	byError := map[string]sourceErrorSummary{}
 	for _, row := range rows {
@@ -182,6 +230,7 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	return map[string]any{"schema": "fugue.pipeline.sources.v1", "observed_at": time.Now().UTC(), "sources": rows, "source_count": total, "truncated": truncated, "evicted_sources": evicted, "error_summary": errorSummary,
 		"error_summary_coverage": "retained_source_lifetime_errors_grouped_by_latest_error_not_per_class_event_totals",
 		"gap_coverage":           "retained_source_lifetime_gap_counts_with_most_recent_gap_bounds_not_reconstructed_log_contents",
+		"gap_history":            gapHistory,
 		"cycle":                  cycle, "queue_depth": p.queueDepth.Load(), "queued_bytes": p.queuedBytes.Load()}, nil
 }
 

@@ -35,7 +35,7 @@ func TestCaptureReceiptsBoundedDetachedAndConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for iteration := range 16 {
-				ctx, trace := s.beginCaptureTrace(context.Background(), "synthetic")
+				ctx, trace := s.beginCaptureTrace(context.Background(), "agent-request")
 				for range captureEventLimit + 2 {
 					capacity := &captureCapacity{NodeUID: strings.Repeat("x", 129), CPUNanoCores: 123}
 					publication := &capturePublicationPair{Expected: capturePublicationReference("expected-set", "expected-route", "expected-release", "full", 9),
@@ -54,6 +54,10 @@ func TestCaptureReceiptsBoundedDetachedAndConcurrent(t *testing.T) {
 	rows := snapshot["receipts"].([]captureReceipt)
 	if len(rows) != captureReceiptLimit || snapshot["started"] != uint64(128) || snapshot["evicted"] != uint64(128-captureReceiptLimit) {
 		t.Fatal("unbounded or unaccounted retention", len(rows), snapshot["started"], snapshot["evicted"])
+	}
+	failures := snapshot["agent_failures"].(map[string]any)
+	if len(failures["receipts"].([]captureReceipt)) != captureReceiptLimit || failures["total"] != uint64(128) || failures["evicted"] != uint64(128-captureReceiptLimit) {
+		t.Fatal("concurrent failure retention is unbounded or unaccounted", failures)
 	}
 	for _, row := range rows {
 		if len(row.Events) != captureEventLimit || row.Dropped != 2 || row.Events[0].Capacity.CPUNanoCores != 123 || row.ErrorClass != "unavailable" {

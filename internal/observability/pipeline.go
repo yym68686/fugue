@@ -124,6 +124,9 @@ type Pipeline struct {
 	sourceObservations             map[string]logSourceObservation
 	sourceObservationEvicted       uint64
 	sourceObservationCycle         logCycleObservation
+	sourceGapReceipts              []logGapObservation
+	sourceGapReceiptTotal          uint64
+	sourceGapReceiptEvicted        uint64
 	kubernetesLogCycleMillis       atomic.Int64
 	kubernetesLogBacklogMillis     atomic.Int64
 	kubernetesLogDeferredTargets   atomic.Int64
