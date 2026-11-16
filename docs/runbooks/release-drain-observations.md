@@ -40,3 +40,15 @@ bodies and raw transport error strings. Error wrapping retains `errors.Is` /
 `errors.As` causes for in-process callers without interpolating those strings.
 If the historical failure predates these observations, do not infer its exact
 cause from a later successful probe; collect a new failure first.
+
+## Superseded release with a canceled deployment
+
+An operation can be canceled after its candidate was already promoted. Its
+cancellation history must remain intact, but cancellation alone must not retain
+that immutable revision forever after a newer stable release supersedes it.
+Only a bound previous/draining revision with a valid promotion timestamp before
+the terminal operation's completion can enter the ordinary retirement gates.
+Pending/running operations and unpromoted cancellations cannot use this path.
+The same retention, grace, fresh traffic withdrawal, canonical Service reference,
+complete Pod identity, positive drain and final compare-and-swap guards apply;
+this is not permission to stop a busy process or retire an active release.

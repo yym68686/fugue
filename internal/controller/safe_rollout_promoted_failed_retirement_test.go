@@ -10,13 +10,21 @@ import (
 )
 
 func TestPromotedReleaseWithFailedOperationRetiresOnlyAfterDrainProof(t *testing.T) {
-	for _, scenario := range []string{"idle", "busy", "unconfirmed_traffic", "still_referenced", "retention", "retire_grace", "unpromoted", "zero_promotion_time", "future_promotion", "promotion_before_creation", "changed_after_drain"} {
+	testPromotedTerminalReleaseRetirement(t, model.OperationStatusFailed)
+}
+
+func TestPromotedReleaseWithCanceledOperationRetiresOnlyAfterDrainProof(t *testing.T) {
+	testPromotedTerminalReleaseRetirement(t, model.OperationStatusCanceled)
+}
+
+func testPromotedTerminalReleaseRetirement(t *testing.T, terminalStatus string) {
+	for _, scenario := range []string{"idle", "busy", "unconfirmed_traffic", "still_referenced", "retention", "retire_grace", "unpromoted", "zero_promotion_time", "future_promotion", "promotion_before_creation", "promotion_after_completion", "changed_after_drain"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
-			s, app, previous, fixture := newDrainWorkloadFixtureWithOutcome(t, true)
+			s, app, previous, fixture := newDrainWorkloadFixtureWithTerminalOutcome(t, true, false, terminalStatus == model.OperationStatusCanceled)
 			op, err := s.Store.GetOperation(previous.RevisionWorkload.OperationID)
 			if err != nil || op.CompletedAt == nil {
-				t.Fatal("failed operation must have finished", err)
+				t.Fatal("terminal operation must have finished", err)
 			}
 			// Promotion succeeded before a later canonical-alignment failure.
 			// A subsequent release has superseded this serving revision.
@@ -35,6 +43,9 @@ func TestPromotedReleaseWithFailedOperationRetiresOnlyAfterDrainProof(t *testing
 			case "promotion_before_creation":
 				before := previous.CreatedAt.Add(-time.Second)
 				previous.PromotedAt = &before
+			case "promotion_after_completion":
+				after := op.CompletedAt.Add(time.Nanosecond)
+				previous.PromotedAt = &after
 			case "retention":
 				future := time.Now().Add(time.Hour)
 				previous.RetentionUntil = &future
@@ -84,14 +95,14 @@ func TestPromotedReleaseWithFailedOperationRetiresOnlyAfterDrainProof(t *testing
 			}
 			if scenario == "idle" {
 				if got.Status != model.AppReleaseStatusRetired || fixture.deleteCalls != 2 || fixture.proxyCalls < 4 {
-					t.Fatalf("promoted revision from failed operation was not retired: status=%s deletes=%d observations=%d", got.Status, fixture.deleteCalls, fixture.proxyCalls)
+					t.Fatalf("promoted revision from %s operation was not retired: status=%s deletes=%d observations=%d", terminalStatus, got.Status, fixture.deleteCalls, fixture.proxyCalls)
 				}
 			} else if got.Status == model.AppReleaseStatusRetired || fixture.deleteCalls != 0 {
 				t.Fatalf("revision retired without complete proof: status=%s deletes=%d", got.Status, fixture.deleteCalls)
 			}
 			currentOperation, err := s.Store.GetOperation(op.ID)
-			if err != nil || currentOperation.Status != model.OperationStatusFailed {
-				t.Fatal("retirement must preserve failed operation history", err)
+			if err != nil || currentOperation.Status != terminalStatus {
+				t.Fatal("retirement must preserve terminal operation history", err)
 			}
 			currentPolicy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
 			if err != nil || currentPolicy != policy {

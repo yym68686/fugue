@@ -621,14 +621,15 @@ func (s *Service) retryOneAppReleaseRetirement(ctx context.Context, app model.Ap
 		return
 	}
 	if previous.Status == model.AppReleaseStatusDraining && op.Status != model.OperationStatusCompleted {
-		// A release can serve successfully before its deploy operation fails
-		// during canonical alignment. Once superseded, that terminal outcome
+		// A release can serve successfully before its deploy operation fails or
+		// is canceled during canonical alignment. Once superseded, that outcome
 		// must not prevent the independent traffic, retention and drain proofs
 		// below from retiring its immutable workload. An unpromoted or active
 		// operation still cannot gain this retirement path.
 		promoted := previous.PromotedAt
-		if op.Status != model.OperationStatusFailed || promoted == nil || promoted.IsZero() ||
-			promoted.Before(previous.CreatedAt) || promoted.After(time.Now().UTC()) {
+		terminal := op.Status == model.OperationStatusFailed || op.Status == model.OperationStatusCanceled
+		if !terminal || op.CompletedAt == nil || promoted == nil || promoted.IsZero() ||
+			promoted.Before(previous.CreatedAt) || promoted.After(*op.CompletedAt) || promoted.After(time.Now().UTC()) {
 			return
 		}
 	}

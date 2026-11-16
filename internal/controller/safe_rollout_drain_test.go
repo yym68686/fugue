@@ -43,6 +43,10 @@ func newDrainWorkloadFixtureWithOutcome(t *testing.T, failed bool, historical ..
 }
 
 func newDrainWorkloadFixtureWithSnapshot(t *testing.T, failed, snapshot bool, historical ...bool) (*Service, model.App, model.AppRelease, *drainWorkloadFixture) {
+	return newDrainWorkloadFixtureWithTerminalOutcome(t, failed, snapshot, false, historical...)
+}
+
+func newDrainWorkloadFixtureWithTerminalOutcome(t *testing.T, failed, snapshot, canceled bool, historical ...bool) (*Service, model.App, model.AppRelease, *drainWorkloadFixture) {
 	t.Helper()
 	st, app, _, op := newSafeRolloutTestState(t)
 	if _, ok, err := st.TryClaimPendingOperation(op.ID); err != nil || !ok {
@@ -91,7 +95,9 @@ func newDrainWorkloadFixtureWithSnapshot(t *testing.T, failed, snapshot bool, hi
 			t.Fatal(err)
 		}
 	}
-	if failed {
+	if canceled {
+		_, err = st.CancelOperation(op.ID, "superseded after promotion")
+	} else if failed {
 		_, err = st.FailOperation(op.ID, old.StatusReason)
 	} else {
 		_, err = st.CompleteManagedOperation(op.ID, "", "done")
