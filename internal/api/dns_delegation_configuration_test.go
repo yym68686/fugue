@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,6 +257,49 @@ func TestDelegationPlanCannotReplaceDeclaredGlueWithInventoryAddress(t *testing.
 	in := platformproducer.StaticIntentInput{Consumers: c, DNS: []model.EdgeDNSRecord{{Name: "ns.example.test", Type: "A", Values: []string{"192.0.2.1"}, ValueExpirations: map[string]time.Time{"192.0.2.1": now.Add(-time.Second)}}}}
 	if _, err := dnsDelegationHintsFromPinned("example.test", in, p, nil, now); err == nil {
 		t.Fatal("expired glue allowed inventory fallback")
+	}
+}
+
+func TestDelegationPlanReadinessNoteDoesNotMisreportAddressInventory(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		nodes []model.DNSDelegationNodeCheck
+		ready int
+	}{
+		{name: "addressed but unready", nodes: []model.DNSDelegationNodeCheck{
+			{DNSNodeID: "dns-a", PublicIP: "192.0.2.1"},
+			{DNSNodeID: "dns-b", PublicIP: "192.0.2.2"},
+		}},
+		{name: "one unready", nodes: []model.DNSDelegationNodeCheck{
+			{DNSNodeID: "dns-a", PublicIP: "192.0.2.1", Pass: true},
+			{DNSNodeID: "dns-b", PublicIP: "192.0.2.2"},
+		}, ready: 1},
+		{name: "missing address", nodes: []model.DNSDelegationNodeCheck{
+			{DNSNodeID: "dns-a", PublicIP: "  ", Pass: true},
+		}},
+		{name: "empty"},
+		{name: "ready", nodes: []model.DNSDelegationNodeCheck{
+			{DNSNodeID: "dns-a", PublicIP: "192.0.2.1", Pass: true},
+			{DNSNodeID: "dns-b", PublicIP: "192.0.2.2", Pass: true},
+		}, ready: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := buildDNSDelegationPlan("example.test", tc.nodes, nil, dnsDelegationPlanHint{})
+			if len(plan.PlannedARecords) != tc.ready || len(plan.PlannedNSRecords) != tc.ready || len(plan.RollbackDeleteRecords) != 2*tc.ready {
+				t.Fatal("diagnostic note changed eligible delegation records", plan)
+			}
+			want := fmt.Sprintf("Only %d DNS nodes passed preflight with a public IPv4; resolve failing checks before production delegation.", tc.ready)
+			found := false
+			for _, note := range plan.Notes {
+				if strings.Contains(note, "have public IPv4") || strings.Contains(note, "add another node") {
+					t.Fatal("readiness failure misrepresented as missing address or capacity", note)
+				}
+				found = found || note == want
+			}
+			if found != (tc.ready < defaultDNSDelegationMinHealthyNodes) {
+				t.Fatal("readiness note must describe the actual preflight predicate", plan.Notes)
+			}
+		})
 	}
 }
 

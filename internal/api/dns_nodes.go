@@ -939,7 +939,7 @@ func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, c
 		rollback = append(rollback, model.DNSDelegationRecord{Name: zone, Type: "NS", Values: []string{nsHost}, Comment: "delete if delegation is rolled back"})
 	}
 	if len(eligible) < defaultDNSDelegationMinHealthyNodes {
-		notes = append(notes, fmt.Sprintf("Only %d DNS nodes have public IPv4; add another node before production delegation.", len(eligible)))
+		notes = append(notes, fmt.Sprintf("Only %d DNS nodes passed preflight with a public IPv4; resolve failing checks before production delegation.", len(eligible)))
 	}
 	return model.DNSDelegationPlan{
 		CurrentParentNS:       currentParentNS,
