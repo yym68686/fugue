@@ -9,25 +9,29 @@ import (
 	"fugue/internal/model"
 )
 
-// CPU resize owns only the app container's CPU request, never its deployment
-// template, source, environment, limits, memory or backing services.
-func prepareAppCPUResizeOperation(app model.App, op *model.Operation) error {
+// App request resize owns exactly one app-container request, never the release
+// template, source, environment, limits or backing services.
+func prepareAppRequestResizeOperation(app model.App, op *model.Operation) error {
 	if op.DesiredSpec == nil || op.DesiredSpec.Resources == nil || app.Spec.Resources == nil ||
-		app.Spec.Resources.CPUMilliCores <= 0 || op.DesiredSpec.Resources.CPUMilliCores <= 0 ||
+		!model.IsAppRequestResize(op.Type) ||
 		app.Spec.Replicas <= 0 {
 		return ErrInvalidInput
 	}
-	cpu := op.DesiredSpec.Resources.CPUMilliCores
-	restoring := app.Spec.CPURequestTemplateMilliCores != nil && cpu == app.Spec.Resources.CPUMilliCores
+	key := appRequestResizeField(op.Type)
+	current, target := appRequestResizeValue(app.Spec.Resources, key), appRequestResizeValue(op.DesiredSpec.Resources, key)
+	if current <= 0 || target <= 0 {
+		return ErrInvalidInput
+	}
+	restoring := appRequestResizeTemplateValue(app.Spec, op.Type) != nil && target == current
 	if !restoring && app.Status.CurrentReplicas != app.Spec.Replicas {
 		return ErrInvalidInput
 	}
-	if app.Spec.Resources.CPULimitMilliCores > 0 && cpu > app.Spec.Resources.CPULimitMilliCores {
+	if limit := appRequestResizeLimit(app.Spec.Resources, key); limit > 0 && target > limit {
 		return ErrInvalidInput
 	}
 	desired := cloneAppSpec(&app.Spec)
 	desired.Resources = model.CloneResourceSpec(app.Spec.Resources)
-	desired.Resources.CPUMilliCores = cpu
+	setAppRequestResizeValue(desired.Resources, key, target)
 	op.DesiredSpec = desired
 	op.ConfigBaseSpec = cloneAppSpec(&app.Spec)
 	op.ServiceID = ""
@@ -37,24 +41,24 @@ func prepareAppCPUResizeOperation(app model.App, op *model.Operation) error {
 	return nil
 }
 
-func applyAppCPUResize(app *model.App, op *model.Operation) error {
+func applyAppRequestResize(app *model.App, op *model.Operation) error {
 	if op.DesiredSpec == nil || op.DesiredSpec.Resources == nil || op.ConfigBaseSpec == nil ||
 		model.AppSpecSHA256(app.Spec) != model.AppSpecSHA256(*op.ConfigBaseSpec) {
 		return ErrConflict
 	}
-	if app.Spec.CPURequestTemplateMilliCores == nil {
-		cpu := app.Spec.Resources.CPUMilliCores
-		app.Spec.CPURequestTemplateMilliCores = &cpu
+	key := appRequestResizeField(op.Type)
+	if appRequestResizeTemplateValue(app.Spec, op.Type) == nil {
+		setAppRequestResizeTemplate(app, op.Type, appRequestResizeValue(app.Spec.Resources, key))
 	}
 	app.Spec.Resources = model.CloneResourceSpec(app.Spec.Resources)
-	app.Spec.Resources.CPUMilliCores = op.DesiredSpec.Resources.CPUMilliCores
+	setAppRequestResizeValue(app.Spec.Resources, key, appRequestResizeValue(op.DesiredSpec.Resources, key))
 	app.UpdatedAt = time.Now().UTC()
 	return nil
 }
 
-func activeAppCPUResize(ops []model.Operation, appID string) bool {
+func activeAppRequestResize(ops []model.Operation, appID string) bool {
 	for _, op := range ops {
-		if op.AppID == appID && op.Type == model.OperationTypeAppCPUResize &&
+		if op.AppID == appID && model.IsAppRequestResize(op.Type) &&
 			(op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning || op.Status == model.OperationStatusWaitingAgent) {
 			return true
 		}
@@ -62,38 +66,90 @@ func activeAppCPUResize(ops []model.Operation, appID string) bool {
 	return false
 }
 
-func (s *Store) pgHasActiveAppCPUResizeTx(ctx context.Context, tx *sql.Tx, appID string) (bool, error) {
+func (s *Store) pgHasActiveAppRequestResizeTx(ctx context.Context, tx *sql.Tx, appID string) (bool, error) {
 	var active bool
-	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type=$2 AND status IN ('pending','running','waiting-agent'))`, appID, model.OperationTypeAppCPUResize).Scan(&active)
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type IN ($2,$3) AND status IN ('pending','running','waiting-agent'))`, appID, model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize).Scan(&active)
 	return active, err
 }
 
 // Only normal deployments fold a verified runtime request into a new template.
 // Reject a fabricated server-owned snapshot on all other caller-provided specs.
-func reconcileAppCPUResizeSnapshot(op *model.Operation, app model.App) error {
+func reconcileAppRequestResizeSnapshot(op *model.Operation, app model.App) error {
 	if op.DesiredSpec != nil && op.DesiredSpec.NodeLoss == nil {
 		op.DesiredSpec.NodeLoss = model.CloneAppNodeLossPolicy(app.Spec.NodeLoss)
 	}
-	if op.DesiredSpec == nil || op.Type == model.OperationTypeAppCPUResize {
+	if op.DesiredSpec == nil || model.IsAppRequestResize(op.Type) {
 		return nil
 	}
 	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeImport {
 		op.DesiredSpec.CPURequestTemplateMilliCores = nil
+		op.DesiredSpec.MemoryRequestTemplateMebibytes = nil
 		return nil
 	}
 	if p := op.DesiredSpec.CPURequestTemplateMilliCores; p != nil &&
 		(app.Spec.CPURequestTemplateMilliCores == nil || *p != *app.Spec.CPURequestTemplateMilliCores) {
 		return ErrInvalidInput
 	}
+	if p := op.DesiredSpec.MemoryRequestTemplateMebibytes; p != nil &&
+		(app.Spec.MemoryRequestTemplateMebibytes == nil || *p != *app.Spec.MemoryRequestTemplateMebibytes) {
+		return ErrInvalidInput
+	}
 	if app.Spec.CPURequestTemplateMilliCores != nil {
 		cpu := *app.Spec.CPURequestTemplateMilliCores
 		op.DesiredSpec.CPURequestTemplateMilliCores = &cpu
 	}
+	if app.Spec.MemoryRequestTemplateMebibytes != nil {
+		memory := *app.Spec.MemoryRequestTemplateMebibytes
+		op.DesiredSpec.MemoryRequestTemplateMebibytes = &memory
+	}
 	return nil
 }
 
-func (s *Store) CreateAppCPUResizeOperation(op model.Operation, baseline model.AppSpec) (model.Operation, error) {
-	if op.Type != model.OperationTypeAppCPUResize || strings.TrimSpace(op.AppID) == "" {
+func appRequestResizeField(operationType string) string {
+	if operationType == model.OperationTypeAppMemoryResize {
+		return "memory"
+	}
+	return "cpu"
+}
+
+func appRequestResizeValue(resources *model.ResourceSpec, key string) int64 {
+	if resources == nil {
+		return 0
+	}
+	if key == "memory" {
+		return resources.MemoryMebibytes
+	}
+	return resources.CPUMilliCores
+}
+func setAppRequestResizeValue(resources *model.ResourceSpec, key string, value int64) {
+	if key == "memory" {
+		resources.MemoryMebibytes = value
+	} else {
+		resources.CPUMilliCores = value
+	}
+}
+func appRequestResizeLimit(resources *model.ResourceSpec, key string) int64 {
+	if key == "memory" {
+		return resources.MemoryLimitMebibytes
+	}
+	return resources.CPULimitMilliCores
+}
+func appRequestResizeTemplateValue(spec model.AppSpec, operationType string) *int64 {
+	if operationType == model.OperationTypeAppMemoryResize {
+		return spec.MemoryRequestTemplateMebibytes
+	}
+	return spec.CPURequestTemplateMilliCores
+}
+func setAppRequestResizeTemplate(app *model.App, operationType string, value int64) {
+	if operationType == model.OperationTypeAppMemoryResize {
+		app.Spec.MemoryRequestTemplateMebibytes = &value
+	} else {
+		app.Spec.CPURequestTemplateMilliCores = &value
+	}
+}
+
+func (s *Store) CreateAppRequestResizeOperation(op model.Operation, baseline model.AppSpec) (model.Operation, error) {
+	if !model.IsAppRequestResize(op.Type) || strings.TrimSpace(op.AppID) == "" {
 		return model.Operation{}, ErrInvalidInput
 	}
 	created, _, err := s.createOperationWithPolicy(op, operationCreatePolicy{ExpectedAppSpecHash: model.AppSpecSHA256(baseline)})

@@ -186,6 +186,7 @@ observability:
 
 api:
   appCPURequestResizeEnabled: false
+  appMemoryRequestResizeEnabled: true
   replicaCount: 2
   controlPlaneBackupCoordination:
     durationSeconds: 120
@@ -266,6 +267,7 @@ api:
 
 controller:
   appCPURequestResizeEnabled: false
+  appMemoryRequestResizeEnabled: true
   ownership: helm
   replicaCount: 2
   # Keep source builds reproducible and independently reversible from the

@@ -164,6 +164,10 @@ func (s *Server) applyAppRightSizingRecommendation(
 		op, err := s.queueAppCPUResize(app, recommendation.App.RequestTarget.CPUMilliCores, actorType, actorID)
 		return recommendation, op, op == nil && err == nil, err
 	}
+	if recommendation.App.Ready && app.Spec.Replicas > 0 && app.Status.CurrentReplicas == app.Spec.Replicas && appMemoryRequestOnlyChange(app.Spec.Resources, recommendation.App.RequestTarget) && s.appMemoryResizeEnabled(app) && !backingServiceRightSizingChange(app, recommendation) {
+		op, err := s.queueAppMemoryResize(app, recommendation.App.RequestTarget.MemoryMebibytes, actorType, actorID)
+		return recommendation, op, op == nil && err == nil, err
+	}
 	spec, source, err := s.recoverAppDeployBaseline(app)
 	if err != nil {
 		return recommendation, nil, false, err
@@ -226,9 +230,32 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	if err != nil {
 		return recommendation, nil, false, err
 	}
-	// Stage independent CPU request changes first. Memory/limit/backing-service
-	// suggestions remain recommendations and are evaluated on subsequent scans;
-	// they are never folded into an in-place mutation or silently marked applied.
+	// Memory requests do not need a new Pod. Stage this dimension separately
+	// from limits, CPU and database changes, preserving the existing gradual
+	// downscale/OOM/billing/backoff policy but avoiding rollout surge admission.
+	memoryDecision := autoAppMemoryRequestChange(app.Spec.Resources, recommendation.App.RequestTarget)
+	if recommendation.App.Ready && app.Spec.Replicas > 0 && app.Status.CurrentReplicas == app.Spec.Replicas && memoryDecision.allowed && s.appMemoryResizeEnabled(app) {
+		memoryBlocked := false
+		if memoryDecision.memoryDownscale {
+			oom, err := s.appHasRecentOOMRightSizingOperation(app, time.Now().UTC().Add(-rightSizingAutoDownscaleOOMWindow))
+			if err != nil {
+				return recommendation, nil, false, err
+			}
+			if oom {
+				s.logRightSizingDecision(app, "recent_oom_memory_blocked", "in-place memory request downscale blocked by recent OOM; limits and serving Pods unchanged", nil)
+				memoryBlocked = true
+			}
+		}
+		if !memoryBlocked {
+			op, err := s.queueAppMemoryResize(app, memoryDecision.resources.MemoryMebibytes, model.ActorTypeSystem, memoryDecision.requestedByID)
+			if errors.Is(err, store.ErrConflict) {
+				s.logRightSizingDecision(app, "memory_resize_deferred", "in-place memory resize deferred by an active operation or target failure backoff; no rolling fallback", nil)
+				return recommendation, nil, true, nil
+			}
+			return recommendation, op, op == nil && err == nil, err
+		}
+	}
+	// Free memory reservations before CPU admission can defer another dimension.
 	cpuDecision := autoAppCPURequestChange(app.Spec.Resources, recommendation.App.RequestTarget)
 	if recommendation.App.Ready && cpuDecision.allowed && s.appCPUResizeEnabled(app) {
 		op, err := s.queueAppCPUResize(app, cpuDecision.resources.CPUMilliCores, model.ActorTypeSystem, cpuDecision.requestedByID)
@@ -488,7 +515,7 @@ func (s *Server) appHasRecentAutoRightSizingFailure(app model.App, desired model
 		return false, err
 	}
 	for _, op := range ops {
-		if (op.Type != model.OperationTypeDeploy && op.Type != model.OperationTypeAppCPUResize) || op.Status != model.OperationStatusFailed ||
+		if (op.Type != model.OperationTypeDeploy && !model.IsAppRequestResize(op.Type)) || op.Status != model.OperationStatusFailed ||
 			op.RequestedByType != model.ActorTypeSystem ||
 			(op.RequestedByID != model.OperationRequestedByRightSizing && op.RequestedByID != model.OperationRequestedByRightSizingDownscale) {
 			continue
@@ -500,7 +527,11 @@ func (s *Server) appHasRecentAutoRightSizingFailure(app model.App, desired model
 		if at == nil || at.Before(since) || op.DesiredSpec == nil || op.DesiredSpec.Resources == nil {
 			continue
 		}
-		if resourceSpecsEqual(op.DesiredSpec.Resources, desired.Resources) {
+		matches := resourceSpecsEqual(op.DesiredSpec.Resources, desired.Resources)
+		if op.Type == model.OperationTypeAppMemoryResize {
+			matches = op.DesiredSpec.Resources.MemoryMebibytes == desired.Resources.MemoryMebibytes
+		}
+		if matches {
 			return true, nil
 		}
 	}

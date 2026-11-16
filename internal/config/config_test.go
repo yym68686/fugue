@@ -227,6 +227,17 @@ func TestAPIFromEnvReadsSafeZeroDowntimePublicFlag(t *testing.T) {
 	}
 }
 
+func TestControllerAppMemoryRequestResizeDefaultAndDisable(t *testing.T) {
+	t.Setenv("FUGUE_APP_MEMORY_REQUEST_RESIZE_ENABLED", "")
+	if !ControllerFromEnv().AppMemoryRequestResizeEnabled {
+		t.Fatal("app memory request resize must default enabled")
+	}
+	t.Setenv("FUGUE_APP_MEMORY_REQUEST_RESIZE_ENABLED", "false")
+	if ControllerFromEnv().AppMemoryRequestResizeEnabled {
+		t.Fatal("explicit disable ignored")
+	}
+}
+
 func TestAPIFromEnvReadsAutomationShadowLoopConfiguration(t *testing.T) {
 	t.Setenv("FUGUE_AUTOMATION_SHADOW_LOOP_ENABLED", "")
 	t.Setenv("FUGUE_AUTOMATION_SHADOW_LOOP_INTERVAL", "")

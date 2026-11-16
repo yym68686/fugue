@@ -237,10 +237,23 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			} else if queued {
 				return nil
 			}
+			if managed.Metadata.DeletionTimestamp == "" && storedApp.Spec.MemoryRequestTemplateMebibytes != nil && s.Config.AppMemoryRequestResizeEnabled {
+				queued, err := s.reconcileAppMemoryResizeTarget(ctx, client, storedApp)
+				if message, waiting := appMemoryResizeWaitingCondition(err); waiting {
+					return s.syncManagedAppObservedStatus(ctx, client, namespace, managed, storedApp, nil, managed.Status.CurrentReleaseKey, false,
+						runtime.ManagedAppCondition{Type: "MemoryRequestRestoreWaiting", Status: "True", Reason: "PreflightDeferred", Message: message})
+				}
+				if err != nil {
+					return err
+				}
+				if queued {
+					return nil
+				}
+			}
 			if managed.Metadata.DeletionTimestamp == "" && storedApp.Spec.CPURequestTemplateMilliCores != nil && s.Config.AppCPURequestResizeEnabled {
 				queued, err := s.reconcileAppCPUResizeTarget(ctx, client, storedApp)
 				if err != nil {
-					var waiting *appCPUResizeWaiting
+					var waiting *appRequestResizeWaiting
 					if errors.As(err, &waiting) && managed.Metadata.DeletionTimestamp == "" {
 						return s.syncManagedAppObservedStatus(ctx, client, namespace, managed, storedApp, nil, managed.Status.CurrentReleaseKey, false,
 							runtime.ManagedAppCondition{Type: "CPURequestRestoreWaiting", Status: "True", Reason: "PreflightDeferred", Message: waiting.Error()})
@@ -1011,6 +1024,7 @@ func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOper
 	if managedAppBaselineNeedsRecovery(stored) {
 		app := managedSnapshot
 		model.PreserveVerifiedAppCPURequest(&app.Spec, stored.Spec)
+		model.PreserveVerifiedAppMemoryRequest(&app.Spec, stored.Spec)
 		backfillManagedAppSource(&app, stored)
 		backfillManagedAppBackingServices(&app, stored)
 		return app, false
@@ -1018,6 +1032,7 @@ func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOper
 	if managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored) {
 		app := managedSnapshot
 		model.PreserveVerifiedAppCPURequest(&app.Spec, stored.Spec)
+		model.PreserveVerifiedAppMemoryRequest(&app.Spec, stored.Spec)
 		backfillManagedAppSource(&app, stored)
 		backfillManagedAppBackingServices(&app, stored)
 		return app, false

@@ -6,24 +6,27 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 )
 
-type appCPUResizeWaiting struct{ reason string }
+type appRequestResizeWaiting struct{ reason string }
 
-func (e *appCPUResizeWaiting) Error() string { return e.reason }
+func (e *appRequestResizeWaiting) Error() string { return e.reason }
 
 // Both enqueue and execution use this preflight. A terminating Pod remains in
 // the cohort: excluding it cannot prove that a partitioned old writer stopped.
-// Pending replacements remain eligible for restoring a previously verified CPU
+// Pending replacements remain eligible for restoring a previously verified resource
 // request; readiness is not a prerequisite for that narrow operation.
-func (s *Service) planAppCPUResize(ctx context.Context, c *kubeClient, app model.App, cpu int64) (appCPUResizeJournal, string, bool, error) {
-	var plan appCPUResizeJournal
-	workload, err := appCPUResizeWorkload(ctx, c, app)
+func (s *Service) planAppCPUResize(ctx context.Context, c *kubeClient, app model.App, cpu int64) (appRequestResizeJournal, string, bool, error) {
+	return s.planAppRequestResize(ctx, c, app, appRequestResizeTarget{"cpu", cpu})
+}
+
+func (s *Service) planAppRequestResize(ctx context.Context, c *kubeClient, app model.App, target appRequestResizeTarget) (appRequestResizeJournal, string, bool, error) {
+	var plan appRequestResizeJournal
+	workload, err := appRequestResizeWorkload(ctx, c, app)
 	if err != nil {
 		return plan, "", false, err
 	}
@@ -32,9 +35,9 @@ func (s *Service) planAppCPUResize(ctx context.Context, c *kubeClient, app model
 		return plan, "", false, err
 	}
 	if !found || deployment.Metadata.UID == "" || deployment.Metadata.DeletionTimestamp != "" || deployment.Status.ObservedGeneration < deployment.Metadata.Generation || deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != app.Spec.Replicas {
-		return plan, "deployment-unstable", false, &appCPUResizeWaiting{reason: "app CPU resize requires a stable deployment"}
+		return plan, "deployment-unstable", false, &appRequestResizeWaiting{reason: "app resource request resize requires a stable deployment"}
 	}
-	pods, err := listAppCPUResizePods(ctx, c, app, workload)
+	pods, err := listAppRequestResizePods(ctx, c, app, workload)
 	if err != nil {
 		return plan, "", false, err
 	}
@@ -48,37 +51,43 @@ func (s *Service) planAppCPUResize(ctx context.Context, c *kubeClient, app model
 		}
 		facts = append(facts, []any{pod.Metadata.UID, pod.Metadata.DeletionTimestamp, pod.Spec, pod.Status.Phase, statuses})
 	}
-	raw, _ := json.Marshal([]any{model.AppSpecSHA256(app.Spec), cpu, deployment.Metadata.UID, deployment.Metadata.Generation, facts})
+	raw, _ := json.Marshal([]any{model.AppSpecSHA256(app.Spec), target, deployment.Metadata.UID, deployment.Metadata.Generation, facts})
 	hash := sha256.Sum256(raw)
 	fingerprint := hex.EncodeToString(hash[:])
-	wait := func(reason string) (appCPUResizeJournal, string, bool, error) {
-		return plan, fingerprint, false, &appCPUResizeWaiting{reason: reason}
+	wait := func(reason string) (appRequestResizeJournal, string, bool, error) {
+		return plan, fingerprint, false, &appRequestResizeWaiting{reason: reason}
 	}
 	if len(pods) != app.Spec.Replicas {
-		return wait(fmt.Sprintf("app CPU resize requires the complete replica set (%d/%d)", len(pods), app.Spec.Replicas))
+		return wait(fmt.Sprintf("app resource request resize requires the complete replica set (%d/%d)", len(pods), app.Spec.Replicas))
 	}
-	plan = appCPUResizeJournal{CreatedAt: s.cpuResizeNow(), Workload: workload, DeploymentUID: deployment.Metadata.UID, Generation: deployment.Metadata.Generation, CPU: cpu}
+	plan = appRequestResizeJournal{CreatedAt: s.cpuResizeNow(), Workload: workload, DeploymentUID: deployment.Metadata.UID, Generation: deployment.Metadata.Generation}
+	if target.Resource == "memory" {
+		plan.Memory = target.Value
+	} else {
+		plan.CPU = target.Value
+	}
 	needed := false
 	for _, pod := range pods {
 		if pod.Metadata.DeletionTimestamp != "" || pod.Status.Phase == "Failed" || pod.Status.Phase == "Succeeded" {
-			return wait("app CPU resize is waiting for a live stable Pod cohort")
+			return wait("app resource request resize is waiting for a live stable Pod cohort")
 		}
-		ob, err := observeAppCPUResizePod(pod, runtime.RuntimeResourceName(app.Name))
+		ob, err := observeAppRequestResizePod(pod, runtime.RuntimeResourceName(app.Name))
 		if err != nil {
 			return wait(err.Error())
 		}
-		if err = verifyAppCPUResizeOwner(ctx, c, app, pod, workload, deployment.Metadata.UID); err != nil {
+		if err = verifyAppRequestResizeOwner(ctx, c, app, pod, workload, deployment.Metadata.UID); err != nil {
 			return plan, fingerprint, false, err
 		}
-		restoring := app.Spec.CPURequestTemplateMilliCores != nil && app.Spec.Resources != nil && app.Spec.Resources.CPUMilliCores == cpu
+		restoring := app.Spec.Resources != nil && ((target.Resource == "cpu" && app.Spec.CPURequestTemplateMilliCores != nil && app.Spec.Resources.CPUMilliCores == target.Value) ||
+			(target.Resource == "memory" && app.Spec.MemoryRequestTemplateMebibytes != nil && app.Spec.Resources.MemoryMebibytes == target.Value))
 		pending := restoring && ob.Phase == "Pending"
-		if err = assessAppCPURequestResize(ob, cpu, pending); err != nil {
+		if err = assessAppRequestResize(ob, target, pending); err != nil {
 			return wait(err.Error())
 		}
-		needed = needed || !resizeQuantitiesEqual(ob.DesiredResources.Requests["cpu"], strconv.FormatInt(cpu, 10)+"m")
-		plan.Pods = append(plan.Pods, appCPUResizePodBaseline{Name: ob.PodName, UID: ob.PodUID, Node: ob.NodeName, Restarts: ob.RestartCount, StartedAt: ob.ContainerStartedAt, Resources: ob.DesiredResources, Pending: pending})
+		needed = needed || !resizeQuantitiesEqual(ob.DesiredResources.Requests[target.Resource], target.quantity())
+		plan.Pods = append(plan.Pods, appRequestResizePodBaseline{Name: ob.PodName, UID: ob.PodUID, Node: ob.NodeName, Restarts: ob.RestartCount, StartedAt: ob.ContainerStartedAt, Resources: ob.DesiredResources, Pending: pending})
 	}
-	additional, deferred, err := additionalAppCPUResizeBaselines(ctx, c, app, workload, cpu)
+	additional, deferred, err := additionalAppRequestResizeBaselines(ctx, c, app, workload, target)
 	if err != nil {
 		return plan, fingerprint, false, err
 	}
@@ -104,13 +113,17 @@ func (s *Service) cpuResizeNow() time.Time {
 	}
 	return time.Now().UTC()
 }
-func appCPUResizeRetryKey(app model.App) string {
-	return "app-cpu-request-reconcile/v1/" + app.TenantID + "/" + app.ID
+func appCPUResizeRetryKey(app model.App, dimension ...string) string {
+	resource := "cpu"
+	if len(dimension) > 0 && dimension[0] == "memory" {
+		resource = "memory"
+	}
+	return "app-" + resource + "-request-reconcile/v1/" + app.TenantID + "/" + app.ID
 }
 
-func (s *Service) recordAppCPUResizeWait(ctx context.Context, app model.App, fingerprint, reason string) error {
+func (s *Service) recordAppCPUResizeWait(ctx context.Context, app model.App, fingerprint, reason string, dimension ...string) error {
 	changed := false
-	_, err := s.Store.UpdateObservationCheckpoint(ctx, appCPUResizeRetryKey(app), func(raw []byte) ([]byte, error) {
+	_, err := s.Store.UpdateObservationCheckpoint(ctx, appCPUResizeRetryKey(app, dimension...), func(raw []byte) ([]byte, error) {
 		var state appCPUResizeRetry
 		if len(raw) > 0 {
 			if err := json.Unmarshal(raw, &state); err != nil {
@@ -124,7 +137,7 @@ func (s *Service) recordAppCPUResizeWait(ctx context.Context, app model.App, fin
 		return json.Marshal(appCPUResizeRetry{Fingerprint: fingerprint, Reason: reason})
 	})
 	if err == nil && changed && s.Logger != nil {
-		s.Logger.Printf("app CPU request restore waiting app_id=%s reason=%s", app.ID, reason)
+		s.Logger.Printf("app resource request restore waiting app_id=%s reason=%s", app.ID, reason)
 	}
 	return err
 }
@@ -132,10 +145,10 @@ func (s *Service) recordAppCPUResizeWait(ctx context.Context, app model.App, fin
 // Reserve a bounded retry before enqueue. Even a fast preflight race followed
 // by terminal failure cannot create a notification-driven operation storm.
 // The checkpoint survives leader changes and contains no mutation authority.
-func (s *Service) admitAppCPUResizeReconcile(ctx context.Context, app model.App, fingerprint string) (bool, error) {
+func (s *Service) admitAppCPUResizeReconcile(ctx context.Context, app model.App, fingerprint string, dimension ...string) (bool, error) {
 	admitted := false
 	now := s.cpuResizeNow()
-	locked, err := s.Store.UpdateObservationCheckpoint(ctx, appCPUResizeRetryKey(app), func(raw []byte) ([]byte, error) {
+	locked, err := s.Store.UpdateObservationCheckpoint(ctx, appCPUResizeRetryKey(app, dimension...), func(raw []byte) ([]byte, error) {
 		var state appCPUResizeRetry
 		if len(raw) > 0 {
 			if err := json.Unmarshal(raw, &state); err != nil {

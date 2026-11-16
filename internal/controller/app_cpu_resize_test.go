@@ -31,14 +31,14 @@ func appResizeTestPod(t *testing.T) kubeResizePod {
 
 func TestAppCPUResizeSafetyAndConvergence(t *testing.T) {
 	pod := appResizeTestPod(t)
-	ob, err := observeAppCPUResizePod(pod, "service")
+	ob, err := observeAppRequestResizePod(pod, "service")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := assessAppCPURequestResize(ob, 75, false); err != nil {
 		t.Fatal(err)
 	}
-	baseline := appCPUResizePodBaseline{Name: ob.PodName, UID: ob.PodUID, Node: ob.NodeName, Restarts: ob.RestartCount, StartedAt: ob.ContainerStartedAt, Resources: ob.DesiredResources}
+	baseline := appRequestResizePodBaseline{Name: ob.PodName, UID: ob.PodUID, Node: ob.NodeName, Restarts: ob.RestartCount, StartedAt: ob.ContainerStartedAt, Resources: ob.DesiredResources}
 	if appCPURequestResizeConverged(ob, 75) {
 		t.Fatal("old actual resources counted as resized")
 	}
@@ -56,7 +56,7 @@ func TestAppCPUResizeSafetyAndConvergence(t *testing.T) {
 		case "deleting":
 			changed.DeletionTimestamp = "now"
 		}
-		if validateAppCPUResizeIdentity(changed, baseline) == nil {
+		if validateAppRequestResizeIdentity(changed, baseline) == nil {
 			t.Fatal("identity drift accepted", change)
 		}
 	}
@@ -83,9 +83,17 @@ func TestAppCPUResizeSafetyAndConvergence(t *testing.T) {
 }
 
 func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(t *testing.T) {
-	for _, scenario := range []string{"normal", "legacy", "lost-response", "legacy-lost-response", "restart-compensation", "deadline-compensation"} {
+	testAppRequestResizeExecutor(t, "cpu")
+}
+
+func TestAppMemoryResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(t *testing.T) {
+	testAppRequestResizeExecutor(t, "memory")
+}
+
+func testAppRequestResizeExecutor(t *testing.T, dimension string) {
+	for _, scenario := range []string{"normal", "legacy", "lost-response", "legacy-lost-response", "restart-compensation", "deadline-compensation", "disable-after-acceptance"} {
 		t.Run(scenario, func(t *testing.T) {
-			lostResponse := strings.Contains(scenario, "lost-response") || strings.HasSuffix(scenario, "compensation")
+			lostResponse := strings.Contains(scenario, "lost-response") || strings.HasSuffix(scenario, "compensation") || scenario == "disable-after-acceptance"
 			s := store.New(t.TempDir() + "/state.json")
 			if err := s.Init(); err != nil {
 				t.Fatal(err)
@@ -112,7 +120,13 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 			desired := app.Spec
 			desired.Resources = model.CloneResourceSpec(app.Spec.Resources)
 			desired.Resources.CPUMilliCores = 75
-			op, err := s.CreateAppCPUResizeOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec)
+			opType := model.OperationTypeAppCPUResize
+			if dimension == "memory" {
+				opType = model.OperationTypeAppMemoryResize
+				desired.Resources.CPUMilliCores = 100
+				desired.Resources.MemoryMebibytes = 96
+			}
+			op, err := s.CreateAppRequestResizeOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: opType, DesiredSpec: &desired}, app.Spec)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -161,7 +175,11 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 					json.NewEncoder(w).Encode(pod)
 				case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/resize"):
 					patches++
-					evidence, err := s.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: tenant.ID, OperationID: op.ID, Types: []string{appCPUResizePreflight}})
+					kind := appCPUResizePreflight
+					if dimension == "memory" {
+						kind = "app_memory_resize_preflight"
+					}
+					evidence, err := s.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: tenant.ID, OperationID: op.ID, Types: []string{kind}})
 					if err != nil || len(evidence) < 1 {
 						t.Error("PATCH without durable preflight journal")
 					}
@@ -171,10 +189,15 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 					}
 					resources := patch.Spec.Containers[0].Resources
 					expectedCPU := "75m"
+					expectedMemory := "128Mi"
+					if dimension == "memory" {
+						expectedCPU, expectedMemory = "100m", "96Mi"
+					}
 					if patches > 1 {
 						expectedCPU = "100m"
+						expectedMemory = "128Mi"
 					}
-					if resources.Requests["cpu"] != expectedCPU || resources.Requests["ephemeral-storage"] != "1Gi" || resources.Limits["memory"] != "256Mi" || patch.Metadata.ResourceVersion != pod.Metadata.ResourceVersion {
+					if resources.Requests["cpu"] != expectedCPU || resources.Requests["memory"] != expectedMemory || resources.Requests["ephemeral-storage"] != "1Gi" || resources.Limits["memory"] != "256Mi" || patch.Metadata.ResourceVersion != pod.Metadata.ResourceVersion {
 						t.Error("unsafe resize payload", patch)
 					}
 					pod.Spec.Containers[0].Resources = resources
@@ -182,7 +205,7 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 					pod.Metadata.Generation++
 					pod.Status.ObservedGeneration = pod.Metadata.Generation
 					pod.Status.ContainerStatuses[0].Resources = &resources
-					pod.Status.ContainerStatuses[0].AllocatedResources = map[string]string{"cpu": expectedCPU}
+					pod.Status.ContainerStatuses[0].AllocatedResources = map[string]string{"cpu": expectedCPU, "memory": expectedMemory}
 					if lostResponse && patches == 1 {
 						http.Error(w, "response lost after acceptance", http.StatusBadGateway)
 						return
@@ -194,12 +217,12 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 				}
 			}))
 			defer server.Close()
-			svc := &Service{Store: s, Config: config.ControllerConfig{KubectlApply: true, AppCPURequestResizeEnabled: true}, newKubeClient: func(string) (*kubeClient, error) {
+			svc := &Service{Store: s, Config: config.ControllerConfig{KubectlApply: true, AppCPURequestResizeEnabled: true, AppMemoryRequestResizeEnabled: true}, newKubeClient: func(string) (*kubeClient, error) {
 				return &kubeClient{baseURL: server.URL, client: server.Client(), bearerToken: "test"}, nil
 			}}
-			err = svc.executeAppCPUResize(context.Background(), op, app)
+			err = svc.executeAppRequestResize(context.Background(), op, app)
 			if lostResponse {
-				if !errors.Is(err, errAppCPUResizeUnsettled) {
+				if !errors.Is(err, errAppRequestResizeUnsettled) {
 					t.Fatal("ambiguous PATCH lost interlock", err)
 				}
 				current, _ := s.GetOperation(op.ID)
@@ -209,24 +232,28 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 				if scenario == "restart-compensation" {
 					pod.Status.ContainerStatuses[0].RestartCount++
 				}
+				if scenario == "disable-after-acceptance" {
+					svc.Config.AppCPURequestResizeEnabled = false
+					svc.Config.AppMemoryRequestResizeEnabled = false
+				}
 				if scenario == "deadline-compensation" {
-					journal, _, err := svc.loadAppCPUResizeJournal(op)
+					journal, _, err := svc.loadAppRequestResizeJournal(op)
 					if err != nil {
 						t.Fatal(err)
 					}
 					journal.CreatedAt = time.Now().Add(-time.Hour)
-					if err := svc.recordAppCPUResizeEvidence(op, app, appCPUResizePreflight, "expired preflight", journal); err != nil {
+					if err := svc.recordAppRequestResizeEvidence(op, app, appCPUResizePreflight, "expired preflight", journal); err != nil {
 						t.Fatal(err)
 					}
 				}
-				err = svc.executeAppCPUResize(context.Background(), op, app)
+				err = svc.executeAppRequestResize(context.Background(), op, app)
 			}
 			if strings.HasSuffix(scenario, "compensation") {
-				if !errors.Is(err, errAppCPUResizeUnsettled) {
+				if !errors.Is(err, errAppRequestResizeUnsettled) {
 					t.Fatal("compensation finalized before actual resource verification", err)
 				}
-				err = svc.executeAppCPUResize(context.Background(), op, app)
-				if !errors.Is(err, errAppCPUResizeAborted) || patches != 2 {
+				err = svc.executeAppRequestResize(context.Background(), op, app)
+				if !errors.Is(err, errAppRequestResizeAborted) || patches != 2 {
 					t.Fatal("interrupted resize not safely compensated", patches, err)
 				}
 				if _, err := s.FailManagedOperationGuarded(op, err.Error()); err != nil {
@@ -252,7 +279,7 @@ func TestAppCPUResizeExecutorRecoversAcceptedPatchWithoutReplayingOrRedeploying(
 				t.Fatal(current.Status)
 			}
 			actual, _ := s.GetApp(app.ID)
-			if actual.Spec.Resources.CPUMilliCores != 75 || !reflect.DeepEqual(actual.Status, app.Status) {
+			if actual.Spec.Resources.CPUMilliCores != desired.Resources.CPUMilliCores || actual.Spec.Resources.MemoryMebibytes != desired.Resources.MemoryMebibytes || !reflect.DeepEqual(actual.Status, app.Status) {
 				t.Fatal("resize lost serving state")
 			}
 		})
@@ -330,18 +357,18 @@ func TestAppCPUResizeLegacyPodsRequireVerifiedDeploymentOwnership(t *testing.T) 
 			}))
 			defer server.Close()
 			client := &kubeClient{baseURL: server.URL, client: server.Client()}
-			selected, err := listAppCPUResizePods(t.Context(), client, app, workload)
+			selected, err := listAppRequestResizePods(t.Context(), client, app, workload)
 			switch scenario {
 			case "mixed-revisions":
 				if err != nil || len(selected) != 2 || selected[0].Metadata.Name != "legacy-a" || selected[1].Metadata.Name != "modern-z" {
 					t.Fatalf("serving cohort was not isolated: pods=%+v err=%v", selected, err)
 				}
 				for _, pod := range selected {
-					if err := verifyAppCPUResizeOwner(t.Context(), client, app, pod, workload, "deployment-one"); err != nil {
+					if err := verifyAppRequestResizeOwner(t.Context(), client, app, pod, workload, "deployment-one"); err != nil {
 						t.Fatal(err)
 					}
 				}
-				if err := verifyAppCPUResizeOwner(t.Context(), client, app, candidate, workload, "deployment-one"); err == nil {
+				if err := verifyAppRequestResizeOwner(t.Context(), client, app, candidate, workload, "deployment-one"); err == nil {
 					t.Fatal("unlabeled candidate passed serving ownership verification")
 				}
 			case "replaced-deployment":

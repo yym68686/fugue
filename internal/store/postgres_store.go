@@ -2855,7 +2855,7 @@ func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.A
 	if activeDatabaseMutation {
 		return model.App{}, ErrConflict
 	}
-	activeCPUResize, err := s.pgHasActiveAppCPUResizeTx(ctx, tx, app.ID)
+	activeCPUResize, err := s.pgHasActiveAppRequestResizeTx(ctx, tx, app.ID)
 	if err != nil {
 		return model.App{}, err
 	}
@@ -2868,6 +2868,7 @@ func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.A
 		return model.App{}, ErrInvalidInput
 	}
 	model.PreserveVerifiedAppCPURequest(spec, app.Spec)
+	model.PreserveVerifiedAppMemoryRequest(spec, app.Spec)
 	model.PreserveAppNodeLossPolicy(spec, app.Spec)
 	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 		return model.App{}, err
@@ -2920,7 +2921,7 @@ func (s *Store) pgSyncObservedManagedAppBaseline(id string, desiredSpec model.Ap
 	if activeDatabaseMutation {
 		return model.App{}, ErrConflict
 	}
-	activeCPUResize, err := s.pgHasActiveAppCPUResizeTx(ctx, tx, app.ID)
+	activeCPUResize, err := s.pgHasActiveAppRequestResizeTx(ctx, tx, app.ID)
 	if err != nil {
 		return model.App{}, err
 	}
@@ -2933,6 +2934,7 @@ func (s *Store) pgSyncObservedManagedAppBaseline(id string, desiredSpec model.Ap
 		return model.App{}, ErrInvalidInput
 	}
 	model.PreserveVerifiedAppCPURequest(spec, app.Spec)
+	model.PreserveVerifiedAppMemoryRequest(spec, app.Spec)
 	model.PreserveAppNodeLossPolicy(spec, app.Spec)
 	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 		return model.App{}, err
@@ -3266,7 +3268,7 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if err := rebaseImportDeployConfiguration(&op, app, policy.ImportConfigBase); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
-	if err := reconcileAppCPUResizeSnapshot(&op, app); err != nil {
+	if err := reconcileAppRequestResizeSnapshot(&op, app); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	if op.Type == model.OperationTypeImport || op.Type == model.OperationTypeDeploy {
@@ -3287,7 +3289,7 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 			return model.Operation{}, operationCreateOutcome{}, ErrConflict
 		}
 	}
-	if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize && op.Type != model.OperationTypeAppCPUResize {
+	if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
 		if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
@@ -3844,7 +3846,7 @@ WHERE app_id = $1
 				return model.Operation{}, operationCreateOutcome{}, ErrManagedPostgresImportInProgressConflict
 			}
 		}
-	case model.OperationTypeAppCPUResize:
+	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
 		var active bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND status IN ('pending','running','waiting-agent'))`, app.ID).Scan(&active); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
@@ -3859,7 +3861,7 @@ WHERE app_id = $1
 		if rt.Type != model.RuntimeTypeManagedShared && rt.Type != model.RuntimeTypeManagedOwned {
 			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
-		if err := prepareAppCPUResizeOperation(app, &op); err != nil {
+		if err := prepareAppRequestResizeOperation(app, &op); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
 	case model.OperationTypeDatabaseResize:
@@ -3940,7 +3942,7 @@ WHERE app_id = $1
 	}
 	// Still under the app row lock: reject a new mutation before persistence,
 	// without replacing the existing actionable database validation errors.
-	activeCPUResize, err := s.pgHasActiveAppCPUResizeTx(ctx, tx, app.ID)
+	activeCPUResize, err := s.pgHasActiveAppRequestResizeTx(ctx, tx, app.ID)
 	if err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
@@ -4710,7 +4712,7 @@ func (s *Store) pgCompleteOperationGuarded(id, runtimeID, manifestPath, message 
 		}
 	}
 	immutableDesiredOperation := isManagedPostgresLifecycleOperationType(op.Type) ||
-		op.Type == model.OperationTypeDatabaseResize || op.Type == model.OperationTypeAppCPUResize
+		op.Type == model.OperationTypeDatabaseResize || model.IsAppRequestResize(op.Type)
 	if desiredSpec != nil && !immutableDesiredOperation {
 		op.DesiredSpec = cloneAppSpec(desiredSpec)
 	}
@@ -6476,8 +6478,8 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		// The exact runtime target is applied to the backing service in the same
 		// transaction. Do not change AppSpec, status, or timestamps.
 		return nil
-	case model.OperationTypeAppCPUResize:
-		return applyAppCPUResize(app, op)
+	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
+		return applyAppRequestResize(app, op)
 	default:
 		return ErrInvalidInput
 	}
@@ -6494,7 +6496,7 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 	if operationOnlyChangesRolloutConstraints(*app, *op) {
 		return nil
 	}
-	if isManagedPostgresServiceOperation(op.Type) || op.Type == model.OperationTypeAppCPUResize {
+	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) {
 		return nil
 	}
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
@@ -6514,7 +6516,7 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 }
 
 func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
-	if isManagedPostgresServiceOperation(op.Type) || op.Type == model.OperationTypeAppCPUResize {
+	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) {
 		return
 	}
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
@@ -6532,7 +6534,7 @@ func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 }
 
 func applyCanceledOperationToAppModel(app *model.App, op *model.Operation) {
-	if app == nil || isManagedPostgresServiceOperation(op.Type) || op.Type == model.OperationTypeAppCPUResize || isDeletedApp(*app) {
+	if app == nil || isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) || isDeletedApp(*app) {
 		return
 	}
 	if !operationOnlyChangesRolloutConstraints(*app, *op) {

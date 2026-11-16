@@ -2620,7 +2620,7 @@ func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.App
 			return ErrNotFound
 		}
 		hydrateAppBackingServices(state, &app)
-		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) || activeAppCPUResize(state.Operations, app.ID) {
+		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) || activeAppRequestResize(state.Operations, app.ID) {
 			return ErrConflict
 		}
 
@@ -2629,6 +2629,7 @@ func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.App
 			return ErrInvalidInput
 		}
 		model.PreserveVerifiedAppCPURequest(spec, app.Spec)
+		model.PreserveVerifiedAppMemoryRequest(spec, app.Spec)
 		model.PreserveAppNodeLossPolicy(spec, app.Spec)
 		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 			return err
@@ -2672,7 +2673,7 @@ func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppS
 			return ErrNotFound
 		}
 		hydrateAppBackingServices(state, &app)
-		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) || activeAppCPUResize(state.Operations, app.ID) {
+		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) || activeAppRequestResize(state.Operations, app.ID) {
 			return ErrConflict
 		}
 
@@ -2681,6 +2682,7 @@ func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppS
 			return ErrInvalidInput
 		}
 		model.PreserveVerifiedAppCPURequest(spec, app.Spec)
+		model.PreserveVerifiedAppMemoryRequest(spec, app.Spec)
 		model.PreserveAppNodeLossPolicy(spec, app.Spec)
 		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 			return err
@@ -2767,7 +2769,7 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	if route != nil && route.DNSRouting != nil {
 		return model.App{}, ErrInvalidInput
 	}
-	if spec.CPURequestTemplateMilliCores != nil {
+	if spec.CPURequestTemplateMilliCores != nil || spec.MemoryRequestTemplateMebibytes != nil {
 		return model.App{}, ErrInvalidInput
 	}
 	name = strings.TrimSpace(name)
@@ -3010,10 +3012,10 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		if err := rebaseImportDeployConfiguration(&op, app, policy.ImportConfigBase); err != nil {
 			return err
 		}
-		if activeAppCPUResize(state.Operations, app.ID) {
+		if activeAppRequestResize(state.Operations, app.ID) {
 			return ErrConflict
 		}
-		if err := reconcileAppCPUResizeSnapshot(&op, app); err != nil {
+		if err := reconcileAppRequestResizeSnapshot(&op, app); err != nil {
 			return err
 		}
 		if err := validateDataReferencesState(state, op.TenantID, op.DesiredSpec); err != nil {
@@ -3025,7 +3027,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		if policy.ExpectedAppSpecHash != "" && (model.AppSpecSHA256(app.Spec) != policy.ExpectedAppSpecHash || hasInFlightOperationForApp(state.Operations, app.ID)) {
 			return ErrConflict
 		}
-		if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize && op.Type != model.OperationTypeAppCPUResize {
+		if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
 			if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 				return err
 			}
@@ -3389,7 +3391,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 				hasActiveAppDatabaseImportJobForManagedPostgres(state, app, op.ServiceID) {
 				return ErrManagedPostgresImportInProgressConflict
 			}
-		case model.OperationTypeAppCPUResize:
+		case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
 			if hasInFlightOperationForApp(state.Operations, app.ID) {
 				return ErrConflict
 			}
@@ -3397,7 +3399,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			if ri < 0 || (state.Runtimes[ri].Type != model.RuntimeTypeManagedShared && state.Runtimes[ri].Type != model.RuntimeTypeManagedOwned) {
 				return ErrInvalidInput
 			}
-			if err := prepareAppCPUResizeOperation(app, &op); err != nil {
+			if err := prepareAppRequestResizeOperation(app, &op); err != nil {
 				return err
 			}
 		case model.OperationTypeDatabaseResize:
@@ -4106,7 +4108,7 @@ func (s *Store) completeOperationGuarded(id, runtimeID, manifestPath, message st
 			return ErrConflict
 		}
 		immutableDesiredOperation := isManagedPostgresLifecycleOperationType(state.Operations[index].Type) ||
-			state.Operations[index].Type == model.OperationTypeDatabaseResize || state.Operations[index].Type == model.OperationTypeAppCPUResize
+			state.Operations[index].Type == model.OperationTypeDatabaseResize || model.IsAppRequestResize(state.Operations[index].Type)
 		if desiredSpec != nil && !immutableDesiredOperation {
 			state.Operations[index].DesiredSpec = cloneAppSpec(desiredSpec)
 		}
@@ -5084,6 +5086,10 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		cpu := *in.CPURequestTemplateMilliCores
 		out.CPURequestTemplateMilliCores = &cpu
 	}
+	if in.MemoryRequestTemplateMebibytes != nil {
+		memory := *in.MemoryRequestTemplateMebibytes
+		out.MemoryRequestTemplateMebibytes = &memory
+	}
 	if len(in.Command) > 0 {
 		out.Command = append([]string(nil), in.Command...)
 	}
@@ -5344,8 +5350,8 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		if err := applyManagedPostgresLifecycleState(state, app, op); err != nil {
 			return err
 		}
-	case model.OperationTypeAppCPUResize:
-		return applyAppCPUResize(app, op)
+	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
+		return applyAppRequestResize(app, op)
 	case model.OperationTypeDatabaseResize:
 		return applyManagedPostgresResizeState(state, app, op)
 	default:
@@ -5368,7 +5374,7 @@ func applyInFlightOperationToApp(state *model.State, op *model.Operation) error 
 	if operationOnlyChangesRolloutConstraints(state.Apps[appIndex], *op) {
 		return nil
 	}
-	if isManagedPostgresServiceOperation(op.Type) || op.Type == model.OperationTypeAppCPUResize {
+	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) {
 		return nil
 	}
 	if isDeletedApp(state.Apps[appIndex]) && op.Type != model.OperationTypeDelete {
@@ -5409,7 +5415,7 @@ func operationCanUpdateProgress(op model.Operation) bool {
 func isRequeueableManagedOperation(op model.Operation) bool {
 	// Resize recovery must retain the original attempt and its durable journal.
 	// Requeueing would make an already accepted mutation cancellable as pending.
-	return op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged && op.Type != model.OperationTypeAppCPUResize
+	return op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged && !model.IsAppRequestResize(op.Type)
 }
 
 func requeueManagedOperationState(op *model.Operation, message string) {
@@ -5456,8 +5462,8 @@ func inFlightOperationPhase(op model.Operation) (string, error) {
 		return "database-resume", nil
 	case model.OperationTypeDatabaseResize:
 		return "database-resize", nil
-	case model.OperationTypeAppCPUResize:
-		return "app-cpu-resize", nil
+	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
+		return op.Type, nil
 	default:
 		return "", ErrInvalidInput
 	}
@@ -5511,8 +5517,8 @@ func operationActionLabel(op model.Operation) string {
 		return "database resume"
 	case model.OperationTypeDatabaseResize:
 		return "database resize"
-	case model.OperationTypeAppCPUResize:
-		return "app CPU request resize"
+	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
+		return "app resource request resize"
 	default:
 		return "operation"
 	}
@@ -5532,7 +5538,7 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 	if appIndex < 0 {
 		return
 	}
-	if isManagedPostgresServiceOperation(op.Type) || op.Type == model.OperationTypeAppCPUResize {
+	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) {
 		return
 	}
 	if isDeletedApp(state.Apps[appIndex]) && op.Type != model.OperationTypeDelete {
@@ -5552,7 +5558,7 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 
 func applyCanceledOperationToApp(state *model.State, op *model.Operation) {
 	appIndex := findApp(state, op.AppID)
-	if appIndex < 0 || isManagedPostgresServiceOperation(op.Type) || op.Type == model.OperationTypeAppCPUResize || isDeletedApp(state.Apps[appIndex]) {
+	if appIndex < 0 || isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) || isDeletedApp(state.Apps[appIndex]) {
 		return
 	}
 	app := &state.Apps[appIndex]

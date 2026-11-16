@@ -86,6 +86,7 @@ func rebaseImportDeployConfiguration(op *model.Operation, current model.App, bas
 	// A real deployment folds the effective CPU target into its new template;
 	// the old immutable-template snapshot must not be resurrected by the merge.
 	spec.CPURequestTemplateMilliCores = nil
+	spec.MemoryRequestTemplateMebibytes = nil
 	if err := normalizeAppSpecResources(&spec); err != nil {
 		return err
 	}

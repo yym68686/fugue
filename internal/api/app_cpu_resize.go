@@ -32,7 +32,7 @@ func (s *Server) queueAppCPUResize(app model.App, cpu int64, actorType, actorID 
 		s.logRightSizingDecision(app, "failure_backoff", "in-place CPU resize target failed recently; no rolling fallback", nil)
 		return nil, store.ErrConflict
 	}
-	op, err := s.store.CreateAppCPUResizeOperation(model.Operation{
+	op, err := s.store.CreateAppRequestResizeOperation(model.Operation{
 		TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize,
 		RequestedByType: actorType, RequestedByID: actorID, DesiredSpec: &spec,
 	}, app.Spec)

@@ -18,6 +18,14 @@ func (spec AppSpec) DeepCopy() AppSpec {
 	}
 	out.NetworkPolicy = cloneNetworkPolicy(spec.NetworkPolicy)
 	out.Resources = CloneResourceSpec(spec.Resources)
+	if spec.CPURequestTemplateMilliCores != nil {
+		v := *spec.CPURequestTemplateMilliCores
+		out.CPURequestTemplateMilliCores = &v
+	}
+	if spec.MemoryRequestTemplateMebibytes != nil {
+		v := *spec.MemoryRequestTemplateMebibytes
+		out.MemoryRequestTemplateMebibytes = &v
+	}
 	if spec.RightSizing != nil {
 		v := *spec.RightSizing
 		out.RightSizing = &v

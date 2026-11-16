@@ -50,7 +50,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 			}
 			continue
 		}
-		if op.Type == model.OperationTypeAppCPUResize && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
+		if model.IsAppRequestResize(op.Type) && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
 			s.operationClaimMu.Lock()
 			owner := new(int)
 			_, owned := s.runningManagedOperations.LoadOrStore(op.ID, owner)
@@ -59,15 +59,15 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 				call, cancel := context.WithTimeout(ctx, 20*time.Second)
 				app, err := s.Store.GetApp(op.AppID)
 				if err == nil {
-					err = s.executeAppCPUResize(call, op, app)
+					err = s.executeAppRequestResize(call, op, app)
 				}
-				if err != nil && !errors.Is(err, errAppCPUResizeUnsettled) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				if err != nil && !errors.Is(err, errAppRequestResizeUnsettled) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					_, err = s.Store.FailManagedOperationGuarded(op, err.Error())
 				}
 				cancel()
 				s.runningManagedOperations.CompareAndDelete(op.ID, owner)
 				if err != nil && s.Logger != nil {
-					s.Logger.Printf("app CPU resize recovery %s remains pending: %v", op.ID, err)
+					s.Logger.Printf("app resource request resize recovery %s remains pending: %v", op.ID, err)
 				}
 			}
 			continue

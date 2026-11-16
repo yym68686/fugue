@@ -169,6 +169,7 @@ const (
 	OperationTypeImport                   = "import"
 	OperationTypeDeploy                   = "deploy"
 	OperationTypeAppCPUResize             = "app-cpu-resize"
+	OperationTypeAppMemoryResize          = "app-memory-resize"
 	OperationTypeScale                    = "scale"
 	OperationTypeMigrate                  = "migrate"
 	OperationTypeFailover                 = "failover"
@@ -1787,24 +1788,25 @@ type AppSpec struct {
 	Ports         []int                          `json:"ports,omitempty"`
 	Replicas      int                            `json:"replicas"`
 	Resources     *ResourceSpec                  `json:"resources,omitempty"`
-	// CPURequestTemplateMilliCores preserves the serving template while Resources
-	// records the verified runtime target. Only the resize operation writes it.
-	CPURequestTemplateMilliCores  *int64                      `json:"cpu_request_template_millicores,omitempty"`
-	RightSizing                   *AppRightSizingSpec         `json:"right_sizing,omitempty"`
-	RuntimeID                     string                      `json:"runtime_id"`
-	Files                         []AppFile                   `json:"files,omitempty"`
-	Workspace                     *AppWorkspaceSpec           `json:"workspace,omitempty"`
-	Data                          *AppDataMaterializationSpec `json:"data,omitempty"`
-	PersistentStorage             *AppPersistentStorageSpec   `json:"persistent_storage,omitempty"`
-	VolumeReplication             *AppVolumeReplicationSpec   `json:"volume_replication,omitempty"`
-	Postgres                      *AppPostgresSpec            `json:"postgres,omitempty"`
-	Failover                      *AppFailoverSpec            `json:"failover,omitempty"`
-	NodeLoss                      *AppNodeLossPolicy          `json:"node_loss,omitempty"`
-	Continuity                    *AppContinuityPolicy        `json:"continuity,omitempty"`
-	ImageMirrorLimit              int                         `json:"image_mirror_limit,omitempty"`
-	TerminationGracePeriodSeconds int64                       `json:"termination_grace_period_seconds,omitempty"`
-	RestartToken                  string                      `json:"restart_token,omitempty"`
-	RolloutIntent                 string                      `json:"-"`
+	// Request template snapshots preserve the immutable serving template while
+	// Resources records verified runtime targets. Only resize operations write them.
+	CPURequestTemplateMilliCores   *int64                      `json:"cpu_request_template_millicores,omitempty"`
+	MemoryRequestTemplateMebibytes *int64                      `json:"memory_request_template_mebibytes,omitempty"`
+	RightSizing                    *AppRightSizingSpec         `json:"right_sizing,omitempty"`
+	RuntimeID                      string                      `json:"runtime_id"`
+	Files                          []AppFile                   `json:"files,omitempty"`
+	Workspace                      *AppWorkspaceSpec           `json:"workspace,omitempty"`
+	Data                           *AppDataMaterializationSpec `json:"data,omitempty"`
+	PersistentStorage              *AppPersistentStorageSpec   `json:"persistent_storage,omitempty"`
+	VolumeReplication              *AppVolumeReplicationSpec   `json:"volume_replication,omitempty"`
+	Postgres                       *AppPostgresSpec            `json:"postgres,omitempty"`
+	Failover                       *AppFailoverSpec            `json:"failover,omitempty"`
+	NodeLoss                       *AppNodeLossPolicy          `json:"node_loss,omitempty"`
+	Continuity                     *AppContinuityPolicy        `json:"continuity,omitempty"`
+	ImageMirrorLimit               int                         `json:"image_mirror_limit,omitempty"`
+	TerminationGracePeriodSeconds  int64                       `json:"termination_grace_period_seconds,omitempty"`
+	RestartToken                   string                      `json:"restart_token,omitempty"`
+	RolloutIntent                  string                      `json:"-"`
 }
 
 type AppNetworkPolicySpec struct {

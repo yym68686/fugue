@@ -66,6 +66,8 @@ spec:
           env:
             - name: FUGUE_APP_CPU_REQUEST_RESIZE_ENABLED
               value: {{ .Values.controller.appCPURequestResizeEnabled | quote }}
+            - name: FUGUE_APP_MEMORY_REQUEST_RESIZE_ENABLED
+              value: {{ .Values.controller.appMemoryRequestResizeEnabled | quote }}
             {{- if .Values.controller.metrics.enabled }}
             - name: FUGUE_CONTROLLER_METRICS_BIND_ADDR
               value: {{ printf ":%v" .Values.controller.metrics.port | quote }}

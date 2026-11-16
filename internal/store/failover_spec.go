@@ -80,7 +80,7 @@ func isManagedPostgresServiceOperation(operationType string) bool {
 
 func operationRequiresManagedController(operationType string) bool {
 	switch operationType {
-	case model.OperationTypeAppCPUResize:
+	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
 		return true
 	case model.OperationTypeImport,
 		storagerecovery.OperationType,

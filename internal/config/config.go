@@ -235,8 +235,9 @@ type ControllerConfig struct {
 	// Managed PostgreSQL in-place resize is intentionally split into explicit
 	// capabilities. All capabilities default to false so installing the code
 	// cannot change production behavior until each gate is deliberately armed.
-	ManagedPostgresInPlaceResize ManagedPostgresInPlaceResizeConfig
-	AppCPURequestResizeEnabled   bool
+	ManagedPostgresInPlaceResize  ManagedPostgresInPlaceResizeConfig
+	AppCPURequestResizeEnabled    bool
+	AppMemoryRequestResizeEnabled bool
 }
 
 type AgentConfig struct {
@@ -618,6 +619,7 @@ func ControllerFromEnv() ControllerConfig {
 		ControlPlaneNamespace:                      getenv("FUGUE_CONTROL_PLANE_NAMESPACE", "fugue-system"),
 		ControlPlanePostgresClusterName:            getenv("FUGUE_CONTROL_PLANE_POSTGRES_CLUSTER_NAME", "fugue-fugue-control-plane-postgres"),
 		AppCPURequestResizeEnabled:                 getenvBool("FUGUE_APP_CPU_REQUEST_RESIZE_ENABLED", false),
+		AppMemoryRequestResizeEnabled:              getenvBool("FUGUE_APP_MEMORY_REQUEST_RESIZE_ENABLED", true),
 		ManagedPostgresInPlaceResize: ManagedPostgresInPlaceResizeConfig{
 			Enabled:                        getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", false),
 			CPURequestUpscaleEnabled:       getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", false),

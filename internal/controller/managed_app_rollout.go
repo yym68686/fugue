@@ -1420,11 +1420,13 @@ func deploymentReadyPodsMatchTemplate(ctx context.Context, client *kubeClient, n
 // the same release identity and every other template resource. The marker is
 // consumed by normal releases, which keep the strict ordinary template check.
 func podMatchesManagedAppDeploymentTemplate(pod kubePod, deployment kubeDeployment, app model.App) bool {
-	marker := app.Spec.CPURequestTemplateMilliCores
-	if marker == nil {
+	marker, memoryMarker := app.Spec.CPURequestTemplateMilliCores, app.Spec.MemoryRequestTemplateMebibytes
+	if marker == nil && memoryMarker == nil {
 		return podMatchesDeploymentTemplate(pod, deployment)
 	}
-	if *marker <= 0 || app.Spec.Resources == nil || app.Spec.Resources.CPUMilliCores <= 0 || pod.ObservedResizeState == nil {
+	if app.Spec.Resources == nil || pod.ObservedResizeState == nil ||
+		(marker != nil && (*marker <= 0 || app.Spec.Resources.CPUMilliCores <= 0)) ||
+		(memoryMarker != nil && (*memoryMarker <= 0 || app.Spec.Resources.MemoryMebibytes <= 0)) {
 		return false
 	}
 	containerName := runtime.RuntimeResourceName(app.Name)
@@ -1434,11 +1436,19 @@ func podMatchesManagedAppDeploymentTemplate(pod kubePod, deployment kubeDeployme
 		if containers[i].Name != containerName {
 			continue
 		}
-		if !resizeQuantitiesEqual(containers[i].Resources.Requests["cpu"], strconv.FormatInt(*marker, 10)+"m") {
+		if marker != nil && !resizeQuantitiesEqual(containers[i].Resources.Requests["cpu"], strconv.FormatInt(*marker, 10)+"m") {
+			return false
+		}
+		if memoryMarker != nil && !resizeQuantitiesEqual(containers[i].Resources.Requests["memory"], strconv.FormatInt(*memoryMarker, 10)+"Mi") {
 			return false
 		}
 		containers[i].Resources = cloneKubeResourceRequirements(containers[i].Resources)
-		containers[i].Resources.Requests["cpu"] = strconv.FormatInt(app.Spec.Resources.CPUMilliCores, 10) + "m"
+		if marker != nil {
+			containers[i].Resources.Requests["cpu"] = strconv.FormatInt(app.Spec.Resources.CPUMilliCores, 10) + "m"
+		}
+		if memoryMarker != nil {
+			containers[i].Resources.Requests["memory"] = strconv.FormatInt(app.Spec.Resources.MemoryMebibytes, 10) + "Mi"
+		}
 		found = true
 	}
 	if !found {
@@ -1448,8 +1458,10 @@ func podMatchesManagedAppDeploymentTemplate(pod kubePod, deployment kubeDeployme
 	if !podMatchesDeploymentTemplate(pod, deployment) {
 		return false
 	}
-	observation, err := observeAppCPUResizePod(*pod.ObservedResizeState, containerName)
-	return err == nil && observation.PodResources == nil && appCPURequestResizeConverged(observation, app.Spec.Resources.CPUMilliCores)
+	observation, err := observeAppRequestResizePod(*pod.ObservedResizeState, containerName)
+	return err == nil && observation.PodResources == nil &&
+		(marker == nil || appRequestResizeConverged(observation, appRequestResizeTarget{"cpu", app.Spec.Resources.CPUMilliCores})) &&
+		(memoryMarker == nil || appRequestResizeConverged(observation, appRequestResizeTarget{"memory", app.Spec.Resources.MemoryMebibytes}))
 }
 
 func deploymentTemplatePodFailureMessage(pods []kubePod, deployment kubeDeployment) string {

@@ -866,7 +866,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"group: fugue-build-${{ matrix.build_lane }}-${{ matrix.component }}-${{ github.sha }}",
 		"environment: production",
 		"needs: [prepush, component-build, deploy_schema]",
-		"needs: [prepush, component-build, deploy_schema, deploy_release_guardian]",
+		"needs: [prepush, component-build, deploy_schema, deploy_release_guardian, deploy_controller]",
 		"needs: [prepush, component-build, deploy_api, deploy_release_guardian]",
 		"needs: [prepush, component-build, deploy_api, deploy_edge_control, deploy_release_guardian]",
 		"edge_control_matrix",

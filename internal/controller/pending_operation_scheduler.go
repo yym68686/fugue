@@ -19,7 +19,7 @@ func pendingOperationRetryReady(op model.Operation, now time.Time) bool {
 }
 
 func pendingOperationMatchesLane(op model.Operation, lane operationLane) bool {
-	restoring := op.Type == model.OperationTypeAppCPUResize && op.RequestedByType == model.ActorTypeSystem && op.RequestedByID == "app-cpu-resize-reconcile"
+	restoring := model.IsAppRequestResize(op.Type) && op.RequestedByType == model.ActorTypeSystem && (op.RequestedByID == "app-cpu-resize-reconcile" || op.RequestedByID == "app-memory-resize-reconcile")
 	if restoring || lane == operationLaneCPURequestRestore {
 		return restoring && lane == operationLaneCPURequestRestore
 	}

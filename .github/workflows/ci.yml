@@ -4121,8 +4121,10 @@ jobs:
         with: {component: ssh-control, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   deploy_api:
-    needs: [prepush, component-build, deploy_schema, deploy_release_guardian]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && (needs.deploy_release_guardian.result == 'success' || needs.deploy_release_guardian.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'api') }}
+    # New API operation types must not reach an older controller during a
+    # mixed-version rollout. Controller-only and API-only releases still work.
+    needs: [prepush, component-build, deploy_schema, deploy_release_guardian, deploy_controller]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && (needs.deploy_release_guardian.result == 'success' || needs.deploy_release_guardian.result == 'skipped') && (needs.deploy_controller.result == 'success' || needs.deploy_controller.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'api') }}
     # Allow the bounded 15-minute Guardian wait, the existing 8-minute
     # committed-authority reconciliation, setup and terminal receipt upload.
     timeout-minutes: 35

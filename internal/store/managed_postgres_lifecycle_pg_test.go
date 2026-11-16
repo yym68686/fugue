@@ -223,7 +223,7 @@ func TestPGCreateManagedPostgresSuspendLocksExactLifecycleTarget(t *testing.T) {
 }
 
 func expectPGNoActiveAppCPUResize(mock sqlmock.Sqlmock, appID string) {
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type=$2 AND status IN ('pending','running','waiting-agent'))`)).WithArgs(appID, model.OperationTypeAppCPUResize).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type IN ($2,$3) AND status IN ('pending','running','waiting-agent'))`)).WithArgs(appID, model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 }
 
 func TestPGCreateManagedPostgresLifecycleRetryRequiresExactUniqueActiveOperation(t *testing.T) {

@@ -924,8 +924,8 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 			if errors.Is(err, errSafeRolloutTrafficPending) {
 				return s.deferSafeRolloutTrafficConfirmation(ctx, op)
 			}
-			if errors.Is(err, errAppCPUResizeUnsettled) {
-				s.Logger.Printf("operation %s retained active pending app CPU resize verification: %v", op.ID, err)
+			if errors.Is(err, errAppRequestResizeUnsettled) {
+				s.Logger.Printf("operation %s retained active pending app resource request resize verification: %v", op.ID, err)
 				return nil
 			}
 			if errors.Is(err, context.Canceled) {
@@ -1010,8 +1010,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	s.markReleaseAttemptOperationRunning(op, app)
 
 	switch op.Type {
-	case model.OperationTypeAppCPUResize:
-		return s.executeAppCPUResize(ctx, op, app)
+	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
+		return s.executeAppRequestResize(ctx, op, app)
 	case model.OperationTypeImport:
 		return s.executeManagedImportOperation(ctx, op, app)
 	case model.OperationTypeFailover:

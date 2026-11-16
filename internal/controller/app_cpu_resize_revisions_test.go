@@ -16,6 +16,14 @@ import (
 )
 
 func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
+	testAppRequestResizeRevisions(t, "cpu")
+}
+
+func TestAppMemoryResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
+	testAppRequestResizeRevisions(t, "memory")
+}
+
+func testAppRequestResizeRevisions(t *testing.T, dimension string) {
 	for _, scenario := range []string{"ready", "not-ready", "unstable", "pending", "pending-scheduled", "pending-running", "lost-response", "retired", "replacement", "restart-compensation", "foreign-owner", "policy-blocked", "actual-missing"} {
 		t.Run(scenario, func(t *testing.T) {
 			st := store.New(t.TempDir() + "/state.json")
@@ -36,7 +44,13 @@ func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 			desired := app.Spec
 			desired.Resources = model.CloneResourceSpec(app.Spec.Resources)
 			desired.Resources.CPUMilliCores = 75
-			op, err := st.CreateAppCPUResizeOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec)
+			opType, original := model.OperationTypeAppCPUResize, "100m"
+			if dimension == "memory" {
+				opType, original = model.OperationTypeAppMemoryResize, "128Mi"
+				desired.Resources.CPUMilliCores = 100
+				desired.Resources.MemoryMebibytes = 96
+			}
+			op, err := st.CreateAppRequestResizeOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: opType, DesiredSpec: &desired}, app.Spec)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -69,7 +83,7 @@ func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 						pod.Status.ContainerStatuses = nil
 					}
 					if scenario == "policy-blocked" {
-						pod.Spec.Containers[0].ResizePolicy = []kubeResizePolicy{{ResourceName: "cpu", RestartPolicy: "RestartContainer"}}
+						pod.Spec.Containers[0].ResizePolicy = []kubeResizePolicy{{ResourceName: dimension, RestartPolicy: "RestartContainer"}}
 					}
 					if scenario == "actual-missing" {
 						pod.Status.ContainerStatuses[0].Resources = nil
@@ -128,7 +142,7 @@ func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 						t.Fatal(err)
 					}
-					journal, recorded, err := (&Service{Store: st}).loadAppCPUResizeJournal(op)
+					journal, recorded, err := (&Service{Store: st}).loadAppRequestResizeJournal(op)
 					wantPods := 2
 					if scenario == "foreign-owner" || scenario == "policy-blocked" || scenario == "actual-missing" || scenario == "unstable" {
 						wantPods = 1
@@ -137,7 +151,11 @@ func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 						t.Errorf("mutation preceded complete serving/revision journal: %+v %v", journal, err)
 					}
 					resources := patch.Spec.Containers[0].Resources
-					if patch.Metadata.ResourceVersion != pod.Metadata.ResourceVersion || resources.Requests["memory"] != "128Mi" || resources.Requests["ephemeral-storage"] != "1Gi" || resources.Limits["memory"] != "256Mi" {
+					otherDimension, otherValue := "memory", "128Mi"
+					if dimension == "memory" {
+						otherDimension, otherValue = "cpu", "100m"
+					}
+					if patch.Metadata.ResourceVersion != pod.Metadata.ResourceVersion || resources.Requests[otherDimension] != otherValue || resources.Requests["ephemeral-storage"] != "1Gi" || resources.Limits["memory"] != "256Mi" {
 						t.Error("resize changed the resource envelope or omitted CAS")
 					}
 					patches[name]++
@@ -157,7 +175,7 @@ func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 					}
 					if len(pod.Status.ContainerStatuses) > 0 {
 						pod.Status.ContainerStatuses[0].Resources = &resources
-						pod.Status.ContainerStatuses[0].AllocatedResources["cpu"] = resources.Requests["cpu"]
+						pod.Status.ContainerStatuses[0].AllocatedResources[dimension] = resources.Requests[dimension]
 					}
 					pods[name] = pod
 					if lostResponse && name == revision+"-pod" && patches[name] == 1 {
@@ -171,12 +189,12 @@ func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			svc := &Service{Store: st, Config: config.ControllerConfig{KubectlApply: true, AppCPURequestResizeEnabled: true}, newKubeClient: func(string) (*kubeClient, error) {
+			svc := &Service{Store: st, Config: config.ControllerConfig{KubectlApply: true, AppCPURequestResizeEnabled: true, AppMemoryRequestResizeEnabled: true}, newKubeClient: func(string) (*kubeClient, error) {
 				return &kubeClient{baseURL: server.URL, client: server.Client()}, nil
 			}}
-			err = svc.executeAppCPUResize(context.Background(), op, app)
+			err = svc.executeAppRequestResize(context.Background(), op, app)
 			if lostResponse {
-				if !errors.Is(err, errAppCPUResizeUnsettled) {
+				if !errors.Is(err, errAppRequestResizeUnsettled) {
 					t.Fatal("accepted candidate PATCH lost its interlock", err)
 				}
 				if scenario == "retired" {
@@ -186,10 +204,10 @@ func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 					pod := pods[revision+"-pod"]
 					pod.Metadata.UID = "replacement-pod-uid"
 					resources := cloneKubeResourceRequirements(pod.Spec.Containers[0].Resources)
-					resources.Requests["cpu"] = "100m"
+					resources.Requests[dimension] = original
 					pod.Spec.Containers[0].Resources = resources
 					pod.Status.ContainerStatuses[0].Resources = &resources
-					pod.Status.ContainerStatuses[0].AllocatedResources = map[string]string{"cpu": "100m"}
+					pod.Status.ContainerStatuses[0].AllocatedResources = map[string]string{dimension: original}
 					pods[revision+"-pod"] = pod
 				}
 				if scenario == "restart-compensation" {
@@ -197,17 +215,17 @@ func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 					pod.Status.ContainerStatuses[0].RestartCount++
 					pods[revision+"-pod"] = pod
 				}
-				err = svc.executeAppCPUResize(context.Background(), op, app)
+				err = svc.executeAppRequestResize(context.Background(), op, app)
 			}
 			if scenario == "restart-compensation" {
-				for attempt := 0; attempt < 3 && !errors.Is(err, errAppCPUResizeAborted); attempt++ {
-					err = svc.executeAppCPUResize(context.Background(), op, app)
+				for attempt := 0; attempt < 3 && !errors.Is(err, errAppRequestResizeAborted); attempt++ {
+					err = svc.executeAppRequestResize(context.Background(), op, app)
 				}
-				if !errors.Is(err, errAppCPUResizeAborted) {
+				if !errors.Is(err, errAppRequestResizeAborted) {
 					t.Fatal("revision drift did not compensate the whole cohort", err)
 				}
 				for _, pod := range pods {
-					if pod.Spec.Containers[0].Resources.Requests["cpu"] != "100m" {
+					if pod.Spec.Containers[0].Resources.Requests[dimension] != original {
 						t.Fatal("surviving Pod not restored", pod.Metadata.Name)
 					}
 				}
@@ -227,18 +245,23 @@ func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 				t.Fatal("revision was skipped, replayed or not owned", patches)
 			}
 			actual, _ := st.GetApp(app.ID)
-			if actual.Spec.Resources.CPUMilliCores != 75 || actual.Status.Phase != app.Status.Phase {
+			if actual.Spec.Resources.CPUMilliCores != desired.Resources.CPUMilliCores || actual.Spec.Resources.MemoryMebibytes != desired.Resources.MemoryMebibytes || actual.Status.Phase != app.Status.Phase {
 				t.Fatal("resize did not preserve and commit app state")
 			}
 			if scenario == "replacement" {
 				client, _ := svc.kubeClient()
-				queued, err := svc.reconcileAppCPUResizeTarget(t.Context(), client, actual)
+				var queued bool
+				if dimension == "memory" {
+					queued, err = svc.reconcileAppMemoryResizeTarget(t.Context(), client, actual)
+				} else {
+					queued, err = svc.reconcileAppCPUResizeTarget(t.Context(), client, actual)
+				}
 				if err != nil || !queued || patches[revision+"-pod"] != 1 {
 					t.Fatal("replacement revision did not queue a fresh guarded resize", queued, patches, err)
 				}
 			}
 			if scenario == "policy-blocked" || scenario == "actual-missing" || scenario == "unstable" {
-				journal, _, _ := svc.loadAppCPUResizeJournal(op)
+				journal, _, _ := svc.loadAppRequestResizeJournal(op)
 				if len(journal.Deferred) != 1 || journal.Deferred[0].Reason == "" {
 					t.Fatal("unsafe revision was not explained in the journal", journal.Deferred)
 				}

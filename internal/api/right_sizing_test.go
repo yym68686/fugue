@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -353,6 +354,10 @@ func TestAutoRightSizingQueuesSafeDownscaleWithoutPostgres(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 	postgresService := app.BackingServices[0]
+	if err := stateStore.SyncManagedAppObservedStatus(app.ID, "ready", 1, "serving", nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	app, _ = stateStore.GetApp(app.ID)
 	samples := rightSizingUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindApp, app.ID, []rightSizingUsageValue{
 		{cpuMilli: 20, memoryMiB: 64},
 		{cpuMilli: 30, memoryMiB: 80},
@@ -382,11 +387,11 @@ func TestAutoRightSizingQueuesSafeDownscaleWithoutPostgres(t *testing.T) {
 	if resources == nil {
 		t.Fatal("expected desired app resources")
 	}
-	if resources.CPUMilliCores != 30 || resources.MemoryMebibytes != 384 || resources.MemoryLimitMebibytes != 768 {
-		t.Fatalf("expected direct CPU guarantee downscale and gradual memory downscale below the creation default, got %+v", resources)
+	if op.Type != model.OperationTypeAppMemoryResize || resources.CPUMilliCores != 500 || resources.MemoryMebibytes != 384 || resources.MemoryLimitMebibytes != 1024 {
+		t.Fatalf("expected memory-first request-only downscale below creation default, got %+v", resources)
 	}
-	if op.DesiredSpec.Postgres != nil {
-		t.Fatalf("auto right-sizing must not mutate postgres resources, got %+v", op.DesiredSpec.Postgres)
+	if !reflect.DeepEqual(op.DesiredSpec.Postgres, app.Spec.Postgres) {
+		t.Fatalf("request-only resizing must preserve postgres resources, got %+v", op.DesiredSpec.Postgres)
 	}
 	if !recommendation.App.Ready || len(recommendation.BackingServices) != 1 || !recommendation.BackingServices[0].Ready {
 		t.Fatalf("expected ready app and postgres recommendations, got %+v", recommendation)
@@ -519,6 +524,10 @@ func TestAutoRightSizingAlreadyCurrentReturnsBenignSkipWithoutOperation(t *testi
 	}
 
 	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	if err := stateStore.SyncManagedAppObservedStatus(app.ID, "ready", 1, "serving", nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	app, _ = stateStore.GetApp(app.ID)
 	_, first, alreadyCurrent, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
 	if err != nil {
 		t.Fatalf("apply initial auto recommendation: %v", err)
@@ -577,6 +586,10 @@ func TestAutoRightSizingRecentOOMPreservesMemoryButAllowsCPURequestDownscale(t *
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
+	if err := stateStore.SyncManagedAppObservedStatus(app.ID, "ready", 1, "serving", nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	app, _ = stateStore.GetApp(app.ID)
 	oomOp, err := stateStore.CreateOperation(model.Operation{
 		TenantID:        tenant.ID,
 		Type:            model.OperationTypeDeploy,
@@ -1158,8 +1171,8 @@ func TestAutoRightSizingQueuesMemoryOnlyDownscaleBelowCreationDefault(t *testing
 		name                                   string
 		current, usage, wantRequest, wantLimit int64
 	}{
-		{"creation default", 512, 64, 384, 768},
-		{"five percent only", 320, 250, 304, 608},
+		{"creation default", 512, 64, 384, 1024},
+		{"five percent only", 320, 250, 304, 640},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -1193,12 +1206,16 @@ func TestAutoRightSizingQueuesMemoryOnlyDownscaleBelowCreationDefault(t *testing
 				t.Fatal(err)
 			}
 			server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+			if err := stateStore.SyncManagedAppObservedStatus(app.ID, "ready", 1, "serving", nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			app, _ = stateStore.GetApp(app.ID)
 			_, op, alreadyCurrent, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
 			if err != nil || alreadyCurrent || op == nil || op.DesiredSpec == nil || op.DesiredSpec.Resources == nil {
-				t.Fatalf("expected memory-only deploy, op=%+v already_current=%t err=%v", op, alreadyCurrent, err)
+				t.Fatalf("expected memory-only resize, op=%+v already_current=%t err=%v", op, alreadyCurrent, err)
 			}
 			got := op.DesiredSpec.Resources
-			if op.Type != model.OperationTypeDeploy || op.RequestedByID != rightSizingAutoDownscaleRequestedByID || got.CPUMilliCores != 20 || got.MemoryMebibytes != test.wantRequest || got.MemoryLimitMebibytes != test.wantLimit {
+			if op.Type != model.OperationTypeAppMemoryResize || op.RequestedByID != rightSizingAutoDownscaleRequestedByID || got.CPUMilliCores != 20 || got.MemoryMebibytes != test.wantRequest || got.MemoryLimitMebibytes != test.wantLimit {
 				t.Fatalf("unexpected memory-only operation: op=%+v resources=%+v", op, got)
 			}
 			_, duplicate, _, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)

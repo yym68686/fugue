@@ -47,7 +47,7 @@ func TestAppCPUResizePreservesServingStateAndFencesOtherOperations(t *testing.T)
 	desired.Image = "registry.example/untrusted:other"
 	desired.Env = map[string]string{"UNRELATED": "change"}
 	desired.Resources.CPUMilliCores, desired.Resources.MemoryMebibytes = 75, 999
-	op, err := s.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec)
+	op, err := s.CreateAppRequestResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,13 +97,13 @@ func TestAppCPUResizeRejectsStaleBaselineAndInvalidTargets(t *testing.T) {
 	for _, cpu := range []int64{0, -1} {
 		desired := *cloneAppSpec(&app.Spec)
 		desired.Resources.CPUMilliCores = cpu
-		if _, err := s.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec); !errors.Is(err, ErrInvalidInput) {
+		if _, err := s.CreateAppRequestResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("invalid CPU %d: %v", cpu, err)
 		}
 	}
 	stale := *cloneAppSpec(&app.Spec)
 	stale.Image = "stale"
-	if _, err := s.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &app.Spec}, stale); !errors.Is(err, ErrConflict) {
+	if _, err := s.CreateAppRequestResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &app.Spec}, stale); !errors.Is(err, ErrConflict) {
 		t.Fatal("stale baseline accepted", err)
 	}
 	copy := cloneAppSpec(&app.Spec)
@@ -139,7 +139,7 @@ func TestAppCPUResizeSurvivesStaleObservedBaseline(t *testing.T) {
 			s, app := cpuResizeStoreFixture(t)
 			desired := *cloneAppSpec(&app.Spec)
 			desired.Resources.CPUMilliCores = 75
-			op, err := s.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec)
+			op, err := s.CreateAppRequestResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec)
 			if err != nil {
 				t.Fatal(err)
 			}

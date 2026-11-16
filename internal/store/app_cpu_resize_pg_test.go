@@ -44,8 +44,8 @@ func TestPGAppCPUResizeFencesObservedBaselineAndPreservesVerifiedTarget(t *testi
 						AddRow(appID, "tenant_cpu", "project_cpu", "service", "", []byte("null"), []byte("null"), encoded, []byte(`{"phase":"ready","current_replicas":1}`), now, now))
 				expectPGLifecycleAppHydration(mock, appID)
 				expectPGManagedPostgresExclusiveMutation(mock, appID, "", false)
-				mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type=$2 AND status IN ('pending','running','waiting-agent'))`)).
-					WithArgs(appID, model.OperationTypeAppCPUResize).
+				mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type IN ($2,$3) AND status IN ('pending','running','waiting-agent'))`)).
+					WithArgs(appID, model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize).
 					WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(active))
 				if active {
 					mock.ExpectRollback()

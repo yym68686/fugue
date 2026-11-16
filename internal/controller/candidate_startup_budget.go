@@ -61,6 +61,7 @@ func (s *Service) candidateStartupFingerprint(app model.App, digest string) stri
 	app.Spec.Image = strings.ToLower(strings.TrimSpace(digest))
 	app.Spec.RestartToken, app.Spec.RolloutIntent = "", ""
 	app.Spec.CPURequestTemplateMilliCores = nil
+	app.Spec.MemoryRequestTemplateMebibytes = nil
 	if app.Spec.Workspace != nil {
 		app.Spec.Workspace.ResetToken = ""
 	}

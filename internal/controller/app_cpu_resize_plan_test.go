@@ -33,7 +33,7 @@ func TestAppCPUResizeOutageDoesNotCreateOperationsAndPendingReplacementRecovers(
 	desired := app.Spec
 	desired.Resources = model.CloneResourceSpec(desired.Resources)
 	desired.Resources.CPUMilliCores = 75
-	op, err := st.CreateAppCPUResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec)
+	op, err := st.CreateAppRequestResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize, DesiredSpec: &desired}, app.Spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestAppCPUResizeOutageDoesNotCreateOperationsAndPendingReplacementRecovers(
 	// A full nine-hour outage at the normal 15-second reconciliation interval.
 	for n := 0; n < 2160; n++ {
 		queued, err := svc.reconcileAppCPUResizeTarget(t.Context(), c, app)
-		var waiting *appCPUResizeWaiting
+		var waiting *appRequestResizeWaiting
 		if queued || !errors.As(err, &waiting) {
 			t.Fatalf("outage attempt %d: queued=%v err=%v", n, queued, err)
 		}
@@ -125,7 +125,7 @@ func TestAppCPUResizeOutageDoesNotCreateOperationsAndPendingReplacementRecovers(
 		}
 	}
 	queued, err = svc.reconcileAppCPUResizeTarget(t.Context(), c, app)
-	var waiting *appCPUResizeWaiting
+	var waiting *appRequestResizeWaiting
 	if queued || !errors.As(err, &waiting) {
 		t.Fatal("fast failure bypassed backoff", queued, err)
 	}

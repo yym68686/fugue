@@ -21,7 +21,9 @@ func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp
 	// Ignore only that bookkeeping in classification; Resources still describes
 	// the actual requested CPU/memory change and participates in the plan.
 	currentApp.Spec.CPURequestTemplateMilliCores = nil
+	currentApp.Spec.MemoryRequestTemplateMebibytes = nil
 	desiredApp.Spec.CPURequestTemplateMilliCores = nil
+	desiredApp.Spec.MemoryRequestTemplateMebibytes = nil
 	if !appSupportsOnlineRolloutIntent(desiredApp) {
 		return ""
 	}
