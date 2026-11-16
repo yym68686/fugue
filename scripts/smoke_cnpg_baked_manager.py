@@ -37,6 +37,14 @@ def manifest_objects(value):
     return {"apiVersion": "v1", "kind": "List", "items": items}
 
 
+def verify_initdb_job(job):
+    spec = job["spec"]["template"]["spec"]
+    containers = spec.get("containers", [])
+    if spec.get("initContainers") or not any(c.get("command", [])[:1] == ["/usr/local/bin/fugue-cnpg-manager"] for c in containers):
+        raise ValueError("observed initdb job still reserves bootstrap resources or uses the old command")
+    return job["metadata"]["uid"]
+
+
 class Rehearsal:
     def __init__(self, args):
         self.args = args
@@ -89,11 +97,15 @@ class Rehearsal:
         return self.kube("-n", "manager-check", "exec", pod["metadata"]["name"], "-c", "postgres", "--",
                          "psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc", statement, raw=True)
 
-    def cluster(self, name, image=None):
+    def cluster(self, name, image=None, hold_initdb=False):
         spec = {"instances": 1, "storage": {"size": "1Gi"}, "enableSuperuserAccess": False,
                 "resources": {"requests": {"cpu": "5m", "memory": "10Mi"}, "limits": {"cpu": "1", "memory": "512Mi"}}}
         if image:
             spec["imageName"] = image
+        if hold_initdb:
+            # Only this disposable fixture: keep the completed-job GC from
+            # racing the observation of the real initialization Job spec.
+            spec["bootstrap"] = {"initdb": {"postInitSQL": ["SELECT pg_sleep(10)"]}}
         self.apply({"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster", "metadata": {"name": name, "namespace": "manager-check"}, "spec": spec})
 
     def execute(self):
@@ -120,14 +132,16 @@ class Rehearsal:
         legacy = self.wait(lambda: self.pod("legacy"), self.ready, "legacy database failed startup")
         if not any(c["name"] == "bootstrap-controller" for c in legacy["spec"].get("initContainers", [])):
             raise ValueError("unapproved legacy image lost its bootstrap")
-        self.cluster("baked")
+        self.cluster("baked", hold_initdb=True)
+        jobs = self.wait(lambda: self.kube("-n", "manager-check", "get", "jobs", "-l", "cnpg.io/cluster=baked", "-o", "json")["items"],
+                         bool, "initialization Job was not observed before cleanup", timeout=120)
+        initdb_job_uid = verify_initdb_job(jobs[0])
         baked = self.wait(lambda: self.pod("baked"), self.ready, "baked database failed startup")
         current = self.kube("-n", "manager-check", "get", "cluster", "baked", "-o", "json")
         if current["spec"]["imageName"] != catalog["defaultImage"]:
             raise ValueError("new Cluster did not persist its approved default image")
-        jobs = self.kube("-n", "manager-check", "get", "jobs", "-l", "cnpg.io/cluster=baked", "-o", "json")["items"]
-        if baked["spec"].get("initContainers") or not jobs or any(j["spec"]["template"]["spec"].get("initContainers") for j in jobs):
-            raise ValueError("baked instance or initdb job still reserves bootstrap resources")
+        if baked["spec"].get("initContainers"):
+            raise ValueError("baked instance still reserves bootstrap resources")
         pg = next(c for c in baked["spec"]["containers"] if c["name"] == "postgres")
         if pg["resources"]["requests"]["memory"] != "10Mi" or pg["command"][0] != "/usr/local/bin/fugue-cnpg-manager":
             raise ValueError("baked startup command or scheduling request changed")
@@ -158,7 +172,8 @@ class Rehearsal:
         if not self.ready(old) or old["metadata"]["uid"] != legacy["metadata"]["uid"] or old["status"]["containerStatuses"] != legacy["status"]["containerStatuses"]:
             raise ValueError("legacy database changed during baked operations")
         return {"candidate_image": args.candidate, "source_revision": args.revision, "baked_image": catalog["defaultImage"],
-                "checks": CHECKS, "baked_pod_uid": stable["metadata"]["uid"], "legacy_pod_uid": old["metadata"]["uid"]}
+                "checks": CHECKS, "initdb_job_uid": initdb_job_uid,
+                "baked_pod_uid": stable["metadata"]["uid"], "legacy_pod_uid": old["metadata"]["uid"]}
 
 
 if __name__ == "__main__":
@@ -175,10 +190,22 @@ if __name__ == "__main__":
         print(json.dumps(rehearsal.execute(), sort_keys=True))
     except Exception:
         for command in (("get", "pods,jobs,clusters.postgresql.cnpg.io", "-A", "-o", "wide"),
+                        ("-n", "manager-check", "get", "pods,jobs,clusters.postgresql.cnpg.io", "-o", "json"),
                         ("get", "events", "-A", "--sort-by=.lastTimestamp"),
                         ("-n", "cnpg-system", "logs", "deployment/cnpg-controller-manager", "--tail=150")):
             try:
                 print(rehearsal.kube(*command, raw=True), file=sys.stderr)
             except Exception as diagnostic_error:
                 print(str(diagnostic_error), file=sys.stderr)
+        try:
+            for pod in rehearsal.kube("-n", "manager-check", "get", "pods", "-o", "json")["items"][:10]:
+                for container in (pod["spec"].get("initContainers", []) + pod["spec"].get("containers", []))[:4]:
+                    for previous in ([], ["--previous"]):
+                        try:
+                            print(rehearsal.kube("-n", "manager-check", "logs", pod["metadata"]["name"], "-c", container["name"],
+                                                 "--tail=120", *previous, raw=True), file=sys.stderr)
+                        except Exception as diagnostic_error:
+                            print(str(diagnostic_error), file=sys.stderr)
+        except Exception as diagnostic_error:
+            print(str(diagnostic_error), file=sys.stderr)
         raise

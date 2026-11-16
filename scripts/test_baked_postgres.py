@@ -8,11 +8,21 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import baked_postgres_contract as contract
-from scripts.smoke_cnpg_baked_manager import Rehearsal, manifest_objects
+from scripts.smoke_cnpg_baked_manager import Rehearsal, manifest_objects, verify_initdb_job
 from scripts import verify_baked_postgres as verifier
 
 
 class BakedPostgresTests(unittest.TestCase):
+    def test_initialization_evidence_is_verified_before_job_garbage_collection(self):
+        job = {"metadata": {"uid": "initialization-job"}, "spec": {"template": {"spec": {
+            "containers": [{"command": ["/usr/local/bin/fugue-cnpg-manager", "instance", "init"]}]}}}}
+        self.assertEqual(verify_initdb_job(job), "initialization-job")
+        for change in ({"initContainers": [{"name": "bootstrap-controller"}]}, {"containers": []}):
+            invalid = copy.deepcopy(job)
+            invalid["spec"]["template"]["spec"].update(change)
+            with self.assertRaisesRegex(ValueError, "observed initdb job"):
+                verify_initdb_job(invalid)
+
     def test_installation_accepts_kubectl_json_stream_and_lists(self):
         items = [{"kind": "Namespace", "metadata": {"name": "operator"}}, {"kind": "Deployment", "metadata": {"name": "controller"}}]
         expected = {"apiVersion": "v1", "kind": "List", "items": items}
