@@ -55,7 +55,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := runtimeobservation.Start(ctx, "telemetry-agent", map[string]runtimeobservation.Provider{"log-sources": agent.pipeline.DiagnosticSources}); err != nil {
+	if err := runtimeobservation.Start(ctx, "telemetry-agent", map[string]runtimeobservation.Provider{
+		"log-sources": agent.pipeline.DiagnosticSources, "exports": agent.pipeline.DiagnosticExports,
+	}); err != nil {
 		logger.Printf("runtime observations unavailable: %v", err)
 	}
 	if err := agent.pipeline.Start(ctx); err != nil {

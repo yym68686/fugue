@@ -120,6 +120,7 @@ type telemetryTenantMeterSnapshot struct {
 }
 
 type Pipeline struct {
+	exportObservations             exportObservations
 	sourceObservationMu            sync.Mutex
 	sourceObservations             map[string]logSourceObservation
 	sourceObservationEvicted       uint64
@@ -919,6 +920,7 @@ func (p *Pipeline) exportBatch(batch []Event) {
 	}
 	var err error
 	if multi, ok := p.exporter.(MultiExporter); ok {
+		multi.observations = &p.exportObservations
 		ctx, cancel := context.WithTimeout(p.ctx, exportBatchTimeout(p.cfg.ExportTimeout, attempts, len(multi.exporters)))
 		defer cancel()
 		err = multi.ExportWithRetryTimeout(ctx, batch, attempts, p.cfg.ExportTimeout)
@@ -931,7 +933,7 @@ func (p *Pipeline) exportBatch(batch []Event) {
 		defer cancel()
 		for attempt := 1; attempt <= attempts; attempt++ {
 			attemptCtx, attemptCancel := exportAttemptContext(ctx, p.cfg.ExportTimeout)
-			err = p.exporter.Export(attemptCtx, batch)
+			err = p.exportObservations.export(attemptCtx, p.exporter, batch, attempt)
 			attemptCancel()
 			if err == nil {
 				p.exported.Add(uint64(len(batch)))

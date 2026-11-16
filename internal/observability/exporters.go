@@ -26,7 +26,8 @@ import (
 const defaultClickHouseDatabase = "fugue_observability"
 
 type MultiExporter struct {
-	exporters []Exporter
+	exporters    []Exporter
+	observations *exportObservations
 }
 
 func NewConfiguredExporter(cfg Config, client *http.Client) Exporter {
@@ -72,7 +73,7 @@ func (e MultiExporter) Name() string {
 func (e MultiExporter) Export(ctx context.Context, events []Event) error {
 	var errs []error
 	for _, exporter := range e.exporters {
-		if err := exporter.Export(ctx, events); err != nil {
+		if err := e.observations.export(ctx, exporter, events, 1); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", exporter.Name(), err))
 		}
 	}
@@ -94,7 +95,7 @@ func (e MultiExporter) ExportWithRetryTimeout(ctx context.Context, events []Even
 		failed := remaining[:0]
 		for _, exporter := range remaining {
 			attemptCtx, cancel := exportAttemptContext(ctx, timeout)
-			err := exporter.Export(attemptCtx, events)
+			err := e.observations.export(attemptCtx, exporter, events, attempt)
 			cancel()
 			if err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", exporter.Name(), err))

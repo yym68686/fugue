@@ -320,3 +320,16 @@ HTTP parsing and closes other peers. Root-owned sockets keep mode 0600; non-root
 sockets permit connection but do not grant profile access without the peer
 check. No TCP listener or extra diagnostic capability is introduced. Non-Linux
 providers retain the owner-only filesystem mode.
+
+The telemetry agent's owner-only `exports` runtime provider has five fixed
+exporter buckets (metrics, logs, analytics, noop, other). It records attempts,
+completed attempts, retries, inflight work, attempted event counts, summed/max
+attempt duration and fixed success/deadline/canceled/timeout/error outcomes.
+No destination, event contents, tenant labels or raw errors enter this view.
+Compare counters from the same process and use `inflight` with the timestamps;
+the independently sampled atomic fields are not a transactional snapshot, and
+the last-start timestamp is not an identity of every concurrent active attempt.
+Attempt events include retries, not unique received or durably stored events.
+Durations include exporter encoding/network work, not queue wait or backoff;
+these counters do not identify the slow phase within an exporter. Collection,
+admission, memory, batch, retry and timeout behavior is unchanged.
