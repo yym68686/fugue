@@ -3691,10 +3691,12 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          base="$BASE_SHA"
-          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then
-            base="$(git rev-parse HEAD^)"
-          fi
+          # Compare with the declared operator's source, not just the preceding
+          # push: a corrected intent after a failed prepush must still build all
+          # pending candidate changes from the original source commit.
+          base="$(python3 -c 'import json; print(json.load(open("deploy/environments/production/cnpg-controller/release.json"))["candidateReceipt"]["source_revision"])')"
+          [[ "$base" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$base" HEAD
           changed=false
           if ! git diff --quiet "$base" HEAD -- Dockerfile.cnpg-candidate Dockerfile.postgres-baked-manager third_party/cloudnative-pg scripts/verify_cnpg_candidate.py scripts/verify_baked_postgres.py scripts/baked_postgres_contract.py scripts/postgres_baked_manager.sh scripts/smoke_cnpg_baked_manager.py scripts/test_baked_postgres.py; then
             changed=true

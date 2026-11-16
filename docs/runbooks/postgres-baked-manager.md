@@ -39,6 +39,10 @@ Controller-only fixes can preserve the manager inventory and all existing Pods.
 ## Release and verification
 
 Use only `git push` to `main` and `.github/workflows/ci.yml`.
+Changes to Fugue's own controller also require the component's same-commit
+`deploy/releases/controller/intent.json`, with its verified live predecessor.
+The candidate lane compares source paths against the declared operator's source
+revision, so correcting a failed intent cannot silently skip pending builds.
 
 The `cnpg_candidate_artifact` lane first publishes amd64/arm64 PostgreSQL variants
 in the existing public controller artifact package (versioned tags start with

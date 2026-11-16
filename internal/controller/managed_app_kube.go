@@ -475,6 +475,10 @@ func preserveCloudNativePGDefaultedImage(current, desired map[string]any) {
 	}
 	if image := strings.TrimSpace(objectStringField(objectMapField(current, "spec"), "imageName")); image != "" {
 		desiredSpec["imageName"] = image
+	} else if catalog := objectMapField(objectMapField(current, "spec"), "imageCatalogRef"); catalog != nil {
+		// An operator-managed catalog is also a persisted image selection,
+		// not an invitation to switch the database to the new image default.
+		desiredSpec["imageCatalogRef"] = cloneKubeMap(catalog)
 	}
 }
 

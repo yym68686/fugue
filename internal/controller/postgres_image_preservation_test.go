@@ -25,6 +25,12 @@ func TestPreserveCloudNativePGDefaultedImage(t *testing.T) {
 			t.Fatalf("image changed without explicit intent: got %v, want %s", got, want)
 		}
 	}
+	current := map[string]any{"spec": map[string]any{"imageCatalogRef": map[string]any{"name": "versions", "major": 18}}}
+	desired := map[string]any{"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster", "spec": map[string]any{"instances": 1}}
+	preserveCloudNativePGDefaultedImage(current, desired)
+	if catalog := objectMapField(objectMapField(desired, "spec"), "imageCatalogRef"); catalog["name"] != "versions" {
+		t.Fatalf("defaulted image catalog was lost: %#v", desired)
+	}
 }
 
 func TestExistingPostgresDefaultImageIsNotResetByApplyOrSpecReplacement(t *testing.T) {
