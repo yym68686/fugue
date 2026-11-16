@@ -250,6 +250,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	invalid := false
 	rotationAttempted, rotationGap := false, false
 	var rotationReplay *rotationLogReader
+	var admission logAdmissionObservation
 	defer func() {
 		if rotationReplay != nil {
 			observation.RotationBytes = rotationReplay.decodedBytes
@@ -350,8 +351,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			cur.PendingAt = ts
 			break
 		}
-		if !c.pipeline.ingestLogLine(ctx, source, msg, attrs, ts, true) {
+		if !c.pipeline.ingestLogLineWithAdmission(ctx, source, msg, attrs, ts, true, &admission) {
 			observation.Outcome = "queue_rejected"
+			observation.LastAdmission = &admission
 			budget.Add(1)
 			truncated = true
 			cur.PendingAt = ts

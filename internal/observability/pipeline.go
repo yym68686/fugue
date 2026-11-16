@@ -329,12 +329,17 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 // Replayable source records remain behind their cursor when admission is deferred.
 // Live ingestion still reports capacity rejection as an actual dropped event.
 func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) bool {
+	return p.ingestWithAdmission(ctx, event, replayable, nil)
+}
+
+func (p *Pipeline) ingestWithAdmission(ctx context.Context, event Event, replayable bool, admission *logAdmissionObservation) bool {
 	event = classifyPlatformRequestFact(event)
 	criticalDecisionEvidence := edgeRouteDecisionEvidenceEvent(event)
 	if criticalDecisionEvidence {
 		p.edgeRouteDecisionEvents.Add(1)
 	}
 	if !p.cfg.Enabled {
+		p.observeLogAdmission(admission, "disabled", 0, 0, 0)
 		p.dropped.Add(1)
 		if criticalDecisionEvidence {
 			p.edgeRouteDecisionDrops.Add(1)
@@ -342,6 +347,7 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 		return false
 	}
 	if !criticalDecisionEvidence && p.cfg.SampleRate < 1 && rand.Float64() > p.cfg.SampleRate {
+		p.observeLogAdmission(admission, "sampled", 0, 0, 0)
 		p.dropped.Add(1)
 		return false
 	}
@@ -349,6 +355,7 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 	event, redacted := p.prepareEvent(event)
 	p.redacted.Add(uint64(redacted))
 	if !criticalDecisionEvidence && !p.allowWithinTelemetryQuota(event) {
+		p.observeLogAdmission(admission, "quota", 0, 0, 0)
 		p.dropped.Add(1)
 		p.quotaDropped.Add(1)
 		p.recordTenantMeter(event, "dropped")
@@ -357,6 +364,7 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {
+		p.observeLogAdmission(admission, "encoding", 0, 0, 0)
 		p.dropped.Add(1)
 		p.recordTenantMeter(event, "dropped")
 		p.recordError(fmt.Errorf("encode telemetry queue event: %w", err))
@@ -378,8 +386,10 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 			// admission, including streams already open when a cycle fills up.
 			ordinaryLimit -= ordinaryLimit / telemetryReplayQueueReserveDivisor
 		}
-		if p.ordinaryQueuedSlots.Add(1) > ordinaryLimit {
+		nextSlots := p.ordinaryQueuedSlots.Add(1)
+		if nextSlots > ordinaryLimit {
 			p.ordinaryQueuedSlots.Add(-1)
+			p.observeLogAdmission(admission, "ordinary_slots", size, nextSlots, ordinaryLimit)
 			if replayable {
 				p.kubernetesLogAdmissionDeferred.Add(1)
 				return false
@@ -405,6 +415,7 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 			if ordinarySlotReserved {
 				p.ordinaryQueuedSlots.Add(-1)
 			}
+			p.observeLogAdmission(admission, "queued_bytes", size, nextSize, admissionLimit)
 			if replayable {
 				p.kubernetesLogAdmissionDeferred.Add(1)
 				return false
@@ -432,6 +443,11 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 		if ordinarySlotReserved {
 			p.ordinaryQueuedSlots.Add(-1)
 		}
+		reason := "context_canceled"
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			reason = "context_deadline"
+		}
+		p.observeLogAdmission(admission, reason, size, 0, 0)
 		if replayable {
 			p.kubernetesLogAdmissionDeferred.Add(1)
 			return false
@@ -450,6 +466,7 @@ func (p *Pipeline) ingest(ctx context.Context, event Event, replayable bool) boo
 		if ordinarySlotReserved {
 			p.ordinaryQueuedSlots.Add(-1)
 		}
+		p.observeLogAdmission(admission, "queue_full", size, 0, 0)
 		if replayable {
 			p.kubernetesLogAdmissionDeferred.Add(1)
 			return false
@@ -719,6 +736,10 @@ func (p *Pipeline) IngestLogLineWithAttributes(ctx context.Context, source strin
 }
 
 func (p *Pipeline) ingestLogLine(ctx context.Context, source string, line string, attrs map[string]string, timestamp time.Time, replayable bool) bool {
+	return p.ingestLogLineWithAdmission(ctx, source, line, attrs, timestamp, replayable, nil)
+}
+
+func (p *Pipeline) ingestLogLineWithAdmission(ctx context.Context, source string, line string, attrs map[string]string, timestamp time.Time, replayable bool, admission *logAdmissionObservation) bool {
 	event, redacted := EventFromLogLine(source, line)
 	p.redacted.Add(uint64(redacted))
 	if !timestamp.IsZero() {
@@ -735,7 +756,7 @@ func (p *Pipeline) ingestLogLine(ctx context.Context, source string, line string
 			event.Attributes[key] = value
 		}
 	}
-	return p.ingest(ctx, event, replayable)
+	return p.ingestWithAdmission(ctx, event, replayable, admission)
 }
 
 func EventFromLogLine(source string, line string) (Event, int) {

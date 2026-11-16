@@ -155,6 +155,17 @@ overwrite. Receipt bounds are captured at detection and are not silently updated
 by later interval widening. Read outcome and latest error provide context, not a
 proven cause. No log contents or cursors are reconstructed or changed.
 
+Each retained source and new gap receipt can include `last_admission`, the most
+recent failed queue admission for that source. Fixed reason codes distinguish
+ordinary-slot and byte bounds, a full physical queue, canceled/expired context,
+sampling, quota, disabled collection and encoding failure. Slot/byte rejection
+records the exact atomic reservation value and limit used by the failing check;
+other queue gauges are independent concurrent samples after refund, not an
+atomic snapshot. The timestamp may precede the current source outcome or gap:
+context is not causal attribution. Only numeric metadata is retained, never an
+event payload. Recovery preserves this evidence without changing admission,
+queue budgets, retries, cursors or loss counters.
+
 The API operations snapshot's `captures.agent_failures` has an independent
 24-receipt budget for completed real Agent-request capture errors. DNS reads,
 previews, internal calls and successful requests cannot displace those failures.

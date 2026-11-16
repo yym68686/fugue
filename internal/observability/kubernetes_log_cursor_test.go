@@ -381,6 +381,11 @@ func TestCursorCapacityDeferralRetainsRecordAndBoundsCatchup(t *testing.T) {
 	if !cur.PendingAt.Equal(ts) || !cur.Time.Before(ts) || cur.NextAttempt.IsZero() || p.dropped.Load() != 0 || p.kubernetesLogAdmissionDeferred.Load() != 1 {
 		t.Fatalf("invalid deferral: %+v", cur)
 	}
+	row := p.sourceObservations[logTargetKey(target)]
+	if row.Outcome != "queue_rejected" || row.LastAdmission == nil || row.LastAdmission.Reason != "ordinary_slots" || row.LastAdmission.ComparedValue != 9 || row.LastAdmission.ComparedLimit != 7 {
+		t.Fatalf("cursor lost exact admission rejection: %+v", row)
+	}
+	rejectedAt := row.LastAdmission.ObservedAt
 	c.catchupCursorTargets(t.Context(), []kubernetesLogTarget{target}, &budget)
 	if reads.Load() != 1 || budget.Load() != 10 {
 		t.Fatal("catchup retried saturated source")
@@ -396,5 +401,9 @@ func TestCursorCapacityDeferralRetainsRecordAndBoundsCatchup(t *testing.T) {
 	c.collectCursorTarget(t.Context(), target, &budget)
 	if reads.Load() != 2 || p.kubernetesLogLines.Load() != 1 || p.dropped.Load() != 0 || !c.cursors[logTargetKey(target)].PendingAt.IsZero() {
 		t.Fatal("retained record failed to resume")
+	}
+	row = p.sourceObservations[logTargetKey(target)]
+	if row.Outcome != "drained" || row.LastAdmission == nil || !row.LastAdmission.ObservedAt.Equal(rejectedAt) {
+		t.Fatal("successful cursor read erased or renewed admission evidence")
 	}
 }
