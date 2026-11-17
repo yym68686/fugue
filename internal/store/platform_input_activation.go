@@ -762,11 +762,13 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	// every proof, epoch and pin check below still precedes apply.
 	if beforeInputLocks != nil {
 		check = "publication_locks"
+		advancePlatformMutationTrace(ctx, "admission-publication-locks")
 		if err := beforeInputLocks(ctx, tx); err != nil {
 			return err
 		}
 	}
 	check = "admission_barrier"
+	advancePlatformMutationTrace(ctx, "admission-barrier")
 	epoch, err := lockCompilerInputAdmissionBarrier(ctx, tx)
 	if err != nil {
 		return err
@@ -800,6 +802,7 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 		}
 	}
 	check = "verified_pins"
+	advancePlatformMutationTrace(ctx, "admission-verified-pins")
 	for start := 0; start < len(ordered); start += 32 {
 		if err := checkCompilerInputVerifiedPins(ctx, tx, ordered[start:min(start+32, len(ordered))], epoch); err != nil {
 			return err
@@ -831,6 +834,7 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 		}
 	}
 	check = "dependency_witness"
+	advancePlatformMutationTrace(ctx, "admission-dependencies")
 	for _, original := range proof.tuples {
 		current := original
 		if err := readCompilerInputActivationTupleMode(ctx, tx, &current, true, proof.lkgReadOnly); err != nil {
@@ -849,11 +853,13 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	// Revocation/rotation during apply rolls back all its writes. Keep this
 	// lock only through commit, after the callback's own signature checks.
 	check = "commit_keyring_or_expiry"
+	advancePlatformMutationTrace(ctx, "admission-commit-keyring")
 	s.platformArtifactKeyringMu.RLock()
 	defer s.platformArtifactKeyringMu.RUnlock()
 	if s.platformArtifactKeyringRevision != proof.keyringRevision || !time.Now().Before(proof.expires) {
 		return ErrConflict
 	}
 	check = "commit"
+	advancePlatformMutationTrace(ctx, "admission-commit")
 	return tx.Commit()
 }

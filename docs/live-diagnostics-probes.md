@@ -344,6 +344,19 @@ This adds no query, replay, retry, public response field or admission exception.
 It describes the immediate failing check, not the upstream cause of a concurrent
 publication or evidence change.
 
+The API's local `storage` provider retains `platform_mutations` for completed
+publication, rollback and LKG verification operations: 12 recent receipts and
+an independent 12-failure ring. Each receipt includes the existing operation
+lineage, fixed stage durations and at most 48 original driver query timings
+(the first 16 and final 32). Query fingerprints, caller, backend PID and bounded
+connection identity can be matched to a separately observed PostgreSQL lock
+witness. SQL text, parameter values, result bodies, raw errors and credentials
+are never retained. Successful operations cannot evict the failure ring;
+contention drops observations and all overwrites/drops are counted. These are
+completed driver and code-stage durations, not measurements of CPU use or exact
+server lock-hold intervals. They add no SQL, replay, retry, timeout change or
+admission exception, and do not explain failures predating deployment.
+
 On Linux a non-root component's runtime profile socket accepts only kernel
 credentials identifying root or the component's own UID. Diagnostic Jobs drop
 DAC_OVERRIDE, so filesystem owner-only mode by itself prevents those Jobs from

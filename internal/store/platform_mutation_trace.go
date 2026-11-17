@@ -23,12 +23,17 @@ type platformMutationTrace struct {
 	durations            map[string]time.Duration
 	order                []string
 	now                  func() time.Time
+	database             platformMutationDatabaseTrace
+	recorded             bool
 }
+
+type platformMutationTraceKey struct{}
 
 func startPlatformMutationTrace(ctx context.Context, operation string) (context.Context, *platformMutationTrace) {
 	ctx = runtimeobservation.WithDatabaseOperation(ctx, operation)
 	now := time.Now()
-	return ctx, &platformMutationTrace{ctx: ctx, operation: operation, started: now, timeOfStage: now, stage: "setup", durations: map[string]time.Duration{}, now: time.Now}
+	trace := &platformMutationTrace{ctx: ctx, operation: operation, started: now, timeOfStage: now, stage: "setup", durations: map[string]time.Duration{}, now: time.Now}
+	return context.WithValue(ctx, platformMutationTraceKey{}, trace), trace
 }
 
 func (t *platformMutationTrace) advance(stage string) {
@@ -41,6 +46,10 @@ func (t *platformMutationTrace) advance(stage string) {
 }
 
 func (t *platformMutationTrace) finish(err error) error {
+	if !t.recorded {
+		t.recorded = true
+		platformMutationObservations.record(t, err)
+	}
 	if err == nil {
 		return nil
 	}

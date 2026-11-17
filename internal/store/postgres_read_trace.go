@@ -87,6 +87,7 @@ func (t *postgresReadTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn
 func (*postgresReadTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
 	if fact, ok := ctx.Value(databaseQueryKey{}).(runtimeobservation.DatabaseQueryFact); ok {
 		runtimeobservation.DatabaseObservations.FinishQuery(fact, data.Err)
+		observePlatformMutationQuery(ctx, fact, data.Err)
 	}
 	if started, ok := ctx.Value(queryTraceStartKey{}).(time.Time); ok {
 		recordReadStage(ctx, readStageName(ctx)+"_query", started)
