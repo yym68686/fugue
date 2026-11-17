@@ -4439,16 +4439,34 @@ request_k3s_agent_restart_for_cluster_rejoin() {
 
 __FUGUE_K3S_UPGRADE_LIBRARY__
 
-upgrade_node_updater() {
+upgrade_node_updater() (
   local script_url="${FUGUE_NODE_UPDATE_TASK_NODE_UPDATER_SCRIPT_URL:-${FUGUE_API_BASE}/install/node-updater.sh}"
-  local tmp=""
-  tmp="$(mktemp)"
+  local stage="" tmp="" candidate_version=""
+  stage="$(mktemp -d /usr/local/bin/.fugue-node-updater.XXXXXX)" || return 1
+  tmp="${stage}/candidate"
+  trap 'rm -f -- "${tmp}"; rmdir -- "${stage}"' EXIT
   log_task "downloading node updater script from ${script_url}"
-  curl -fsSL "${script_url}" -o "${tmp}"
-  install -m 0755 "${tmp}" /usr/local/bin/fugue-node-updater
-  rm -f "${tmp}"
-  log_task "node updater script installed"
-}
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --connect-timeout 10 --max-time 180 --retry 2 "${script_url}" -o "${tmp}" || return 1
+  [ -s "${tmp}" ] || return 1
+  bash -n "${tmp}" || return 1
+  candidate_version="$(python3 - "${tmp}" "${FUGUE_NODE_UPDATER_SCRIPT_VERSION}" "${FUGUE_NODE_UPDATE_TASK_TARGET_VERSION:-}" <<'PY_UPDATER_VERSION'
+import pathlib, re, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(r'^FUGUE_NODE_UPDATER_SCRIPT_VERSION="(v[1-9][0-9]*)"$', source, re.MULTILINE)
+current, target = sys.argv[2:]
+if (not match or not re.fullmatch(r"v[1-9][0-9]*", current) or
+    int(match[1][1:]) < int(current[1:]) or (target and match[1] != target)):
+    sys.exit("downloaded updater version does not match the non-downgrading target")
+print(match[1])
+PY_UPDATER_VERSION
+  )" || return 1
+  chmod 0755 "${tmp}" || return 1
+  # Same-filesystem atomic replacement also preserves the currently executing
+  # Bash script inode. A failed/empty download must never truncate the updater.
+  mv -f -- "${tmp}" /usr/local/bin/fugue-node-updater || return 1
+  log_task "node updater script installed and validated: ${candidate_version}"
+)
 
 diagnose_node() {
   log_task "hostname=$(hostname 2>/dev/null || true)"
