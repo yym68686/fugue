@@ -119,10 +119,10 @@ func executeVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host vo
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	p := preview.Plan
-	if p.Schema != volumeRetirementSchema || retirementDigest(p) != preview.SHA256 || !preview.CanExecute || len(preview.Blockers) != 0 || strings.TrimSpace(reason) == "" {
+	if p.Schema != volumeRetirementSchema || !retirementSourceValid(p) || retirementDigest(p) != preview.SHA256 || !preview.CanExecute || len(preview.Blockers) != 0 || strings.TrimSpace(reason) == "" {
 		return nil, fmt.Errorf("invalid retirement preview or reason")
 	}
-	name := retirementReceiptName(p.PVUID)
+	name := retirementReceiptName(retirementIdentity(p))
 	cm, err := kube(ctx, nil, "get", "configmap", name, "-o", "json", "--ignore-not-found")
 	if err != nil {
 		return nil, err
@@ -159,7 +159,7 @@ func executeVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host vo
 			return receipt, nil
 		}
 	} else {
-		blockers, err := reviewRetirement(ctx, kube, p, false)
+		blockers, err := reviewRetirement(ctx, kube, p, p.Source != "")
 		if err != nil {
 			return nil, err
 		}
@@ -234,43 +234,45 @@ func executeVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host vo
 			return result, save(ctx)
 		}
 	}
-	pvc, err := kube(ctx, nil, "get", "pvc", p.PVC, "-o", "json", "--ignore-not-found")
-	if err != nil {
-		return result, err
-	}
-	if len(pvc) > 0 {
-		if physicalString(physicalMap(pvc, "metadata"), "uid") != p.PVCUID {
-			return result, fmt.Errorf("PVC name was reused; refusing retirement")
-		}
-		if physicalString(physicalMap(pvc, "metadata"), "deletionTimestamp") == "" {
-			blockers, err := reviewRetirement(ctx, kube, p, false)
-			if err != nil {
-				return result, err
-			}
-			if len(blockers) > 0 {
-				return result, fmt.Errorf("retirement blocked: %s", strings.Join(blockers, "; "))
-			}
-			if err := retirementDelete(ctx, kube, "persistentvolumeclaims", p.PVC, p.Namespace, pvc); err != nil {
-				return result, err
-			}
-		}
-	}
-	err = retirementWait(ctx, func() (bool, error) {
-		claim, err := kube(ctx, nil, "get", "pvc", p.PVC, "-o", "json", "--ignore-not-found")
+	if p.Source == "" {
+		pvc, err := kube(ctx, nil, "get", "pvc", p.PVC, "-o", "json", "--ignore-not-found")
 		if err != nil {
-			return false, err
+			return result, err
 		}
-		if len(claim) != 0 {
-			if physicalString(physicalMap(claim, "metadata"), "uid") != p.PVCUID {
-				return false, fmt.Errorf("PVC name was reused during retirement")
+		if len(pvc) > 0 {
+			if physicalString(physicalMap(pvc, "metadata"), "uid") != p.PVCUID {
+				return result, fmt.Errorf("PVC name was reused; refusing retirement")
 			}
-			return false, nil
+			if physicalString(physicalMap(pvc, "metadata"), "deletionTimestamp") == "" {
+				blockers, err := reviewRetirement(ctx, kube, p, false)
+				if err != nil {
+					return result, err
+				}
+				if len(blockers) > 0 {
+					return result, fmt.Errorf("retirement blocked: %s", strings.Join(blockers, "; "))
+				}
+				if err := retirementDelete(ctx, kube, "persistentvolumeclaims", p.PVC, p.Namespace, pvc); err != nil {
+					return result, err
+				}
+			}
 		}
-		pv, err := kube(ctx, nil, "get", "pv", p.PV, "-o", "json", "--ignore-not-found")
-		return physicalString(physicalMap(pv, "status"), "phase") == "Released", err
-	})
-	if err != nil {
-		return result, err
+		err = retirementWait(ctx, func() (bool, error) {
+			claim, err := kube(ctx, nil, "get", "pvc", p.PVC, "-o", "json", "--ignore-not-found")
+			if err != nil {
+				return false, err
+			}
+			if len(claim) != 0 {
+				if physicalString(physicalMap(claim, "metadata"), "uid") != p.PVCUID {
+					return false, fmt.Errorf("PVC name was reused during retirement")
+				}
+				return false, nil
+			}
+			pv, err := kube(ctx, nil, "get", "pv", p.PV, "-o", "json", "--ignore-not-found")
+			return physicalString(physicalMap(pv, "status"), "phase") == "Released", err
+		})
+		if err != nil {
+			return result, err
+		}
 	}
 	blockers, err := reviewRetirement(ctx, kube, p, true)
 	if err != nil {
@@ -280,6 +282,9 @@ func executeVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host vo
 		return result, fmt.Errorf("released volume is blocked: %s", strings.Join(blockers, "; "))
 	}
 	receipt["phase"] = "claim_deleted"
+	if p.Source == "orphan-directory" {
+		receipt["phase"] = "unregistered"
+	}
 	if err := save(ctx); err != nil {
 		return result, err
 	}
@@ -301,21 +306,23 @@ func executeVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host vo
 	if len(blockers) > 0 {
 		return result, fmt.Errorf("data removed but PV retirement is blocked: %s", strings.Join(blockers, "; "))
 	}
-	pv, err := kube(ctx, nil, "get", "pv", p.PV, "-o", "json")
-	if err != nil {
-		return result, err
-	}
-	if !retirementPVMatches(pv, p) || physicalString(physicalMap(pv, "status"), "phase") != "Released" {
-		return result, fmt.Errorf("PV identity changed before final retirement")
-	}
-	if err := retirementDelete(ctx, kube, "persistentvolumes", p.PV, "", pv); err != nil {
-		return result, err
-	}
-	if err := retirementWait(ctx, func() (bool, error) {
-		pv, err := kube(ctx, nil, "get", "pv", p.PV, "-o", "json", "--ignore-not-found")
-		return len(pv) == 0, err
-	}); err != nil {
-		return result, err
+	if p.Source != "orphan-directory" {
+		pv, err := kube(ctx, nil, "get", "pv", p.PV, "-o", "json")
+		if err != nil {
+			return result, err
+		}
+		if !retirementPVMatches(pv, p) || physicalString(physicalMap(pv, "status"), "phase") != "Released" {
+			return result, fmt.Errorf("PV identity changed before final retirement")
+		}
+		if err := retirementDelete(ctx, kube, "persistentvolumes", p.PV, "", pv); err != nil {
+			return result, err
+		}
+		if err := retirementWait(ctx, func() (bool, error) {
+			pv, err := kube(ctx, nil, "get", "pv", p.PV, "-o", "json", "--ignore-not-found")
+			return len(pv) == 0, err
+		}); err != nil {
+			return result, err
+		}
 	}
 	blockers, err = reviewRetirement(ctx, kube, p, true, true)
 	if err != nil || len(blockers) > 0 {
@@ -330,5 +337,9 @@ func executeVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host vo
 }
 
 func retirementNodeVerified(receipt map[string]any, preview retirementPreview) bool {
-	return receipt["verified_absent"] == true && physicalString(receipt, "plan_sha256") == preview.SHA256 && physicalString(receipt, "pv_uid") == preview.Plan.PVUID && physicalString(receipt, "state") == "data_deleted"
+	identityMatches := physicalString(receipt, "pv_uid") == preview.Plan.PVUID
+	if preview.Plan.Source == "orphan-directory" {
+		identityMatches = identityMatches && physicalString(receipt, "retirement_id") == preview.Plan.RetirementID
+	}
+	return identityMatches && receipt["verified_absent"] == true && physicalString(receipt, "plan_sha256") == preview.SHA256 && physicalString(receipt, "state") == "data_deleted"
 }

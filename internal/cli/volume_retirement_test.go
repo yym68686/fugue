@@ -121,13 +121,14 @@ func (f *retirementFake) host(_ context.Context, request map[string]any) (map[st
 		return map[string]any{"host": map[string]any{"hostname": "storage-node", "machine_id": "machine-id", "boot_id": "boot-id"}, "tree": map[string]any{"device": 42, "inode": 9007199254740993, "allocated_bytes": 8192, "entry_count": 2, "tree_sha256": "tree-hash"}, "blockers": []any{}}, nil
 	}
 	f.hostCalls++
-	if len(f.pvc) > 0 || physicalString(physicalMap(f.pv, "status"), "phase") != "Released" && len(f.pv) > 0 {
+	p := request["plan"].(retirementPlan)
+	if p.Source != "orphan-directory" && (len(f.pvc) > 0 || physicalString(physicalMap(f.pv, "status"), "phase") != "Released" && len(f.pv) > 0) {
 		f.t.Fatal("data deletion without a released, retained PV")
 	}
 	if f.failHost {
 		return nil, fmt.Errorf("node interruption")
 	}
-	return map[string]any{"state": "data_deleted", "plan_sha256": request["plan_sha256"], "pv_uid": "volume-uid", "verified_absent": true, "deleted_allocated_bytes": 8192}, nil
+	return map[string]any{"state": "data_deleted", "plan_sha256": request["plan_sha256"], "pv_uid": p.PVUID, "retirement_id": p.RetirementID, "verified_absent": true, "deleted_allocated_bytes": 8192}, nil
 }
 
 func (f *retirementFake) plan() retirementPreview {

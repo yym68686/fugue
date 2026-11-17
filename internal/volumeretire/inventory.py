@@ -23,7 +23,7 @@ def reference(value):
         return any(reference(child) for child in value.values())
     if isinstance(value, list):
         return any(reference(child) for child in value)
-    return isinstance(value, str) and (value == claim or target in value)
+    return isinstance(value, str) and ((bool(claim) and value == claim) or target in value)
 
 
 items = []

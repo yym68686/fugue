@@ -25,6 +25,7 @@ const volumeRetirementSchema = "fugue.local-volume-retirement/v1"
 type volumeRetirementOptions struct {
 	namespace, ssh, nodeSSH, kubeconfig, kubeContext, storageRoot string
 	allowTerminalJobs                                             bool
+	releasedPV, directory, node, databaseCluster, formerPV        string
 }
 
 type retirementTree struct {
@@ -37,6 +38,8 @@ type retirementTree struct {
 
 type retirementPlan struct {
 	Schema            string            `json:"schema"`
+	Source            string            `json:"source,omitempty"`
+	RetirementID      string            `json:"retirement_id,omitempty"`
 	ObservedAt        time.Time         `json:"observed_at"`
 	Namespace         string            `json:"namespace"`
 	PVC               string            `json:"pvc"`
@@ -207,7 +210,7 @@ func retirementItems(value map[string]any) []map[string]any {
 func retirementHasReference(value any, claim, localPath string) bool {
 	switch value := value.(type) {
 	case map[string]any:
-		if physicalString(physicalMap(value, "persistentVolumeClaim"), "claimName") == claim {
+		if claim != "" && physicalString(physicalMap(value, "persistentVolumeClaim"), "claimName") == claim {
 			return true
 		}
 		if source := physicalString(physicalMap(value, "hostPath"), "path"); source != "" {
@@ -233,7 +236,7 @@ func retirementHasReference(value any, claim, localPath string) bool {
 	case string:
 		// Recovery Jobs and custom CNPG bootstrap specs can name a claim or
 		// source directory in arguments/env rather than a PVC volume source.
-		return value == claim || strings.Contains(value, localPath)
+		return claim != "" && value == claim || strings.Contains(value, localPath)
 	}
 	return false
 }
@@ -353,7 +356,11 @@ func reviewRetirement(ctx context.Context, kube physicalKubeFunc, p retirementPl
 	if err != nil {
 		return nil, err
 	}
-	if len(pv) == 0 {
+	if p.Source == "orphan-directory" {
+		if len(pv) != 0 {
+			blockers = append(blockers, "former PV name exists again")
+		}
+	} else if len(pv) == 0 {
 		if len(allowAbsentPV) == 0 || !allowAbsentPV[0] {
 			blockers = append(blockers, "pinned PV is absent")
 		}
@@ -372,9 +379,12 @@ func reviewRetirement(ctx context.Context, kube physicalKubeFunc, p retirementPl
 			blockers = append(blockers, "PV has an explicit retirement hold")
 		}
 	}
-	pvc, err := kube(ctx, nil, "get", "pvc", p.PVC, "-o", "json", "--ignore-not-found")
-	if err != nil {
-		return nil, err
+	pvc := map[string]any{}
+	if p.PVC != "" {
+		pvc, err = kube(ctx, nil, "get", "pvc", p.PVC, "-o", "json", "--ignore-not-found")
+		if err != nil {
+			return nil, err
+		}
 	}
 	if released && len(pvc) != 0 {
 		blockers = append(blockers, "PVC still exists or its name was reused")
@@ -432,7 +442,7 @@ func reviewRetirement(ctx context.Context, kube physicalKubeFunc, p retirementPl
 		return nil, err
 	}
 	for _, volume := range retirementItems(volumes) {
-		if physicalString(physicalMap(volume, "metadata"), "uid") == p.PVUID {
+		if p.PVUID != "" && physicalString(physicalMap(volume, "metadata"), "uid") == p.PVUID {
 			continue
 		}
 		for _, kind := range []string{"local", "hostPath"} {
@@ -456,7 +466,7 @@ func reviewRetirement(ctx context.Context, kube physicalKubeFunc, p retirementPl
 			return nil, err
 		}
 		status := physicalMap(cluster, "status")
-		if physicalString(physicalMap(cluster, "metadata"), "uid") != p.DatabaseUID || !retirementDatabaseHealthy(cluster) || physicalString(status, "currentPrimary") != p.CurrentPrimary || p.CurrentPrimary == p.PVC {
+		if physicalString(physicalMap(cluster, "metadata"), "uid") != p.DatabaseUID || !retirementDatabaseHealthy(cluster) || physicalString(status, "currentPrimary") != p.CurrentPrimary || p.PVC != "" && p.CurrentPrimary == p.PVC {
 			blockers = append(blockers, "database identity, primary or health changed")
 		}
 		if retirementHasReference(cluster["spec"], p.PVC, p.Path) {
@@ -499,6 +509,15 @@ func planVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host volum
 	if p.Node == "" {
 		return result, fmt.Errorf("local PV has no single hostname affinity")
 	}
+	p.DatabaseCluster = physicalString(physicalMap(meta, "labels"), "cnpg.io/cluster")
+	return inspectVolumeRetirementPlan(ctx, kube, host, p)
+}
+
+func inspectVolumeRetirementPlan(ctx context.Context, kube physicalKubeFunc, host volumeHostFunc, p retirementPlan) (retirementPreview, error) {
+	result := retirementPreview{Blockers: []string{}}
+	if !path.IsAbs(p.Path) || path.Clean(p.Path) != p.Path || path.Dir(p.Path) != p.StorageRoot || len(strings.Split(p.StorageRoot, "/")) < 4 {
+		return result, fmt.Errorf("one exact directory directly below --storage-root is required")
+	}
 	node, err := kube(ctx, nil, "get", "node", p.Node, "-o", "json")
 	if err != nil {
 		return result, err
@@ -512,7 +531,6 @@ func planVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host volum
 		return result, err
 	}
 	p.KubeSystemUID = physicalString(physicalMap(system, "metadata"), "uid")
-	p.DatabaseCluster = physicalString(physicalMap(meta, "labels"), "cnpg.io/cluster")
 	if p.DatabaseCluster != "" {
 		cluster, err := kube(ctx, nil, "get", "clusters.postgresql.cnpg.io", p.DatabaseCluster, "-o", "json")
 		if err != nil {
@@ -522,7 +540,11 @@ func planVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host volum
 		p.CurrentPrimary = physicalString(physicalMap(cluster, "status"), "currentPrimary")
 		p.BackupObserved = physicalString(physicalMap(cluster, "status"), "lastSuccessfulBackup")
 	}
-	blockers, err := reviewRetirement(ctx, kube, p, false)
+	if p.Source == "orphan-directory" {
+		digest := sha256.Sum256([]byte(p.KubeSystemUID + "\x00" + p.NodeUID + "\x00" + p.Path))
+		p.RetirementID = "orphan-" + hex.EncodeToString(digest[:16])
+	}
+	blockers, err := reviewRetirement(ctx, kube, p, p.Source != "")
 	if err != nil {
 		return result, err
 	}
@@ -570,7 +592,7 @@ func loadRetirementPlan(filename, expectedSHA string) (retirementPreview, error)
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return result, fmt.Errorf("unexpected trailing retirement plan data")
 	}
-	if result.Plan.Schema != volumeRetirementSchema || !result.CanExecute || len(result.Blockers) != 0 || expectedSHA == "" || result.SHA256 != expectedSHA || retirementDigest(result.Plan) != expectedSHA {
+	if result.Plan.Schema != volumeRetirementSchema || !retirementSourceValid(result.Plan) || !result.CanExecute || len(result.Blockers) != 0 || expectedSHA == "" || result.SHA256 != expectedSHA || retirementDigest(result.Plan) != expectedSHA {
 		return result, fmt.Errorf("an executable preview and its exact --plan-sha256 are required")
 	}
 	return result, nil
@@ -578,7 +600,7 @@ func loadRetirementPlan(filename, expectedSHA string) (retirementPreview, error)
 
 func (c *CLI) newVolumeRetirementCommand() *cobra.Command {
 	opts := volumeRetirementOptions{namespace: "default"}
-	root := &cobra.Command{Use: "volume-retirement", Short: "Preview and retire one unused local Retain volume with an identity-bound receipt", Long: "Use explicit Kubernetes credentials (or --ssh) and --node-ssh. Preview reads metadata only. Execution irreversibly removes one pinned local PV's data; it never deletes CSI/LVM pools, forces finalizers, changes replicas or restarts workloads. Kubernetes and node audit receipts preserve partial progress for retry."}
+	root := &cobra.Command{Use: "volume-retirement", Short: "Preview and retire one unused local volume or unregistered directory with an identity-bound receipt", Long: "Use explicit Kubernetes credentials (or --ssh) and --node-ssh. Preview reads metadata only. Execution irreversibly removes one pinned local volume or unregistered directory; it never deletes CSI/LVM pools, forces finalizers, changes replicas or restarts workloads. Kubernetes and node audit receipts preserve partial progress for retry."}
 	root.Example = "fugue admin storage volume-retirement plan archive-db-2 --namespace test-system --ssh control-node --node-ssh storage-node --storage-root /var/lib/storage --output-file plan.json\nfugue admin storage volume-retirement status --namespace test-system --ssh control-node --pv-uid volume-uid"
 	f := root.PersistentFlags()
 	f.StringVar(&opts.namespace, "namespace", "default", "Namespace owning the exact PVC")
@@ -588,17 +610,23 @@ func (c *CLI) newVolumeRetirementCommand() *cobra.Command {
 	f.StringVar(&opts.kubeContext, "kube-context", "", "Kubernetes context")
 	f.StringVar(&opts.storageRoot, "storage-root", "", "Exact parent storage directory, required for preview")
 	f.BoolVar(&opts.allowTerminalJobs, "allow-terminal-job-references", false, "Explicitly allow terminal Job history with no active, terminating or uncounted Pods; Pod references still block")
-	root.AddCommand(&cobra.Command{Use: "plan PVC", Short: "Read references and node metadata without writing remote state", Example: strings.Split(root.Example, "\n")[0], Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	plan := &cobra.Command{Use: "plan [PVC]", Short: "Read references and node metadata without writing remote state", Example: strings.Split(root.Example, "\n")[0], Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		kube, host, err := volumeRetirementRunners(opts)
 		if err != nil {
 			return err
 		}
-		preview, err := planVolumeRetirement(cmd.Context(), kube, host, opts, args[0])
+		preview, err := planSelectedVolumeRetirement(cmd.Context(), kube, host, opts, args)
 		if err != nil {
 			return err
 		}
 		return c.writeJSON(preview)
-	}})
+	}}
+	plan.Flags().StringVar(&opts.releasedPV, "released-pv", "", "Exact Released local Retain PV whose original PVC is absent")
+	plan.Flags().StringVar(&opts.directory, "orphan-directory", "", "Exact unregistered local directory; requires --former-pv and --node")
+	plan.Flags().StringVar(&opts.formerPV, "former-pv", "", "Exact absent former PV name for --orphan-directory")
+	plan.Flags().StringVar(&opts.node, "node", "", "Exact Kubernetes node name for --orphan-directory")
+	plan.Flags().StringVar(&opts.databaseCluster, "database-cluster", "", "Explicit current CNPG cluster to pin and require healthy for historical data")
+	root.AddCommand(plan)
 	var filename, expectedSHA, reason string
 	var acknowledge bool
 	execute := &cobra.Command{Use: "execute", Short: "Recheck a saved preview, retire its claim and data, and verify the result", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -634,7 +662,7 @@ func (c *CLI) newVolumeRetirementCommand() *cobra.Command {
 	var statusPVUID string
 	status := &cobra.Command{Use: "status", Short: "Read a durable retirement receipt without making changes", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if !regexp.MustCompile(`^[a-zA-Z0-9-]{1,64}$`).MatchString(statusPVUID) {
-			return fmt.Errorf("--pv-uid is required")
+			return fmt.Errorf("--pv-uid or --retirement-id is required")
 		}
 		kube, _, err := volumeRetirementRunners(opts, true)
 		if err != nil {
@@ -651,6 +679,8 @@ func (c *CLI) newVolumeRetirementCommand() *cobra.Command {
 		return c.writeJSON(receipt)
 	}}
 	status.Flags().StringVar(&statusPVUID, "pv-uid", "", "Exact original PV UID")
+	status.Flags().StringVar(&statusPVUID, "retirement-id", "", "Retirement identity from an orphan directory plan")
+	status.MarkFlagsMutuallyExclusive("pv-uid", "retirement-id")
 	root.AddCommand(status)
 	return root
 }

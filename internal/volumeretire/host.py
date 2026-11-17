@@ -205,15 +205,16 @@ def retire(request):
     if not re.fullmatch(r"[a-f0-9]{64}", request["plan_sha256"]):
         raise ValueError("invalid plan digest")
     pv_uid = plan["pv_uid"]
-    if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", pv_uid):
-        raise ValueError("invalid PV identity")
+    retirement_id = plan.get("retirement_id") or pv_uid
+    if not re.fullmatch(r"[a-zA-Z0-9-]{1,64}", retirement_id):
+        raise ValueError("invalid retirement identity")
     host = identity()
     if host != plan["host"]:
         raise ValueError("node identity or boot changed; preview again")
     if not shutil.rmtree.avoids_symlink_attacks:
         raise ValueError("host lacks fd-safe directory removal")
-    receipt_path = os.path.join(root, ".fugue-volume-retire-" + pv_uid + ".json")
-    quarantine = os.path.join(root, ".fugue-volume-retired-" + pv_uid)
+    receipt_path = os.path.join(root, ".fugue-volume-retire-" + retirement_id + ".json")
+    quarantine = os.path.join(root, ".fugue-volume-retired-" + retirement_id)
     lock_path = receipt_path + ".lock"
     lock = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
@@ -223,7 +224,8 @@ def retire(request):
             with os.fdopen(fd, encoding="utf-8") as stream:
                 receipt = json.load(stream)
             if (receipt.get("plan_sha256") != request["plan_sha256"] or
-                    receipt.get("path") != path or receipt.get("pv_uid") != pv_uid):
+                    receipt.get("path") != path or receipt.get("pv_uid") != pv_uid or
+                    (receipt.get("retirement_id") or pv_uid) != retirement_id):
                 raise ValueError("node retirement receipt belongs to another plan")
         else:
             if os.path.lexists(quarantine):
@@ -235,6 +237,8 @@ def retire(request):
             receipt = {"plan_sha256": request["plan_sha256"], "pv_uid": pv_uid,
                        "path": path, "quarantine": quarantine, "state": "prepared",
                        "tree": plan["tree"], "filesystem_before": filesystem(root)}
+            if plan.get("retirement_id"):
+                receipt["retirement_id"] = retirement_id
             atomic_json(receipt_path, receipt)
         state = receipt["state"]
         if state == "prepared":

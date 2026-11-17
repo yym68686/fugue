@@ -63,6 +63,19 @@ class RetirementHostTest(unittest.TestCase):
             host.retire(request)
         self.assertTrue(os.path.isdir(self.path))
 
+    def test_orphan_directory_uses_separate_durable_identity(self):
+        plan = self.plan()
+        plan["pv_uid"] = ""
+        plan["retirement_id"] = "orphan-fixture-identity"
+        request = self.request(plan)
+        receipt = host.retire(request)
+        self.assertEqual(receipt["pv_uid"], "")
+        self.assertEqual(receipt["retirement_id"], "orphan-fixture-identity")
+        self.assertTrue(receipt["verified_absent"])
+        self.assertTrue(os.path.isfile(self.root + "/.fugue-volume-retire-orphan-fixture-identity.json"))
+        self.assertEqual(host.retire(request)["completed_at_unix"], receipt["completed_at_unix"])
+        self.assertFalse(os.path.exists(self.path))
+
     def test_symlink_hardlink_and_special_files_fail_closed(self):
         for kind in ["symlink", "hardlink", "fifo"]:
             with self.subTest(kind=kind):
