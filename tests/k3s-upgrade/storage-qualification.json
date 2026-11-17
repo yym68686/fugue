@@ -3,5 +3,5 @@
   "cnpg_chart": "deploy/helm/fugue/charts/cloudnative-pg-0.28.0.tgz",
   "postgres_image": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie",
   "longhorn_baseline": "1.12.1",
-  "longhorn_candidate": "1.12.2"
+  "longhorn_candidate": "1.12.1"
 }

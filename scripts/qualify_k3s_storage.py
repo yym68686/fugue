@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
 import threading
 import time
 
@@ -146,8 +147,37 @@ class StorageQualification:
                                     kernel_waits[str(pid)][field] = Path(f"/proc/{pid}/{field}").read_text()
                                 except OSError as exc:
                                     kernel_waits[str(pid)][field] = type(exc).__name__
+                            # Only process identity and syscall metadata. Never
+                            # collect environment variables or credential files.
+                            kernel_waits[str(pid)]["command"] = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+                            kernel_waits[str(pid)]["identity"] = [line for line in Path(f"/proc/{pid}/status").read_text().splitlines()
+                                                                 if line.startswith(("Uid:", "Gid:", "State:", "NSpid:", "Seccomp:"))]
                             pending.extend(int(row[0]) for row in rows if int(row[1]) == pid)
                         self.write(name + "-kernel-waits.json", kernel_waits)
+                        if self.baseline is None:
+                            # Observe this disposable container only. -s 0
+                            # prevents PostgreSQL protocol/password payloads
+                            # from entering the diagnostic artifact.
+                            cgroup = Path(f"/proc/{host_pid}/cgroup").read_text()
+                            if host_pid <= 1 or not container_id or container_id not in cgroup:
+                                raise RuntimeError("refusing ptrace of an unverified disposable container")
+                            trace = subprocess.Popen(["strace", "-tt", "-T", "-f", "-s", "0",
+                                                      "-e", "trace=network,process,signal",
+                                                      *[arg for pid in kernel_waits for arg in ("-p", pid)],
+                                                      "-o", str(self.evidence / (name + "-socket-trace.txt"))],
+                                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            try:
+                                time.sleep(1)
+                                for host in ("/controller/run", "127.0.0.1"):
+                                    probe = kubectl("-n", namespace, "exec", name, "-c", "initdb", "--", "env",
+                                                    "PGCONNECT_TIMEOUT=3", "psql", "-X", "-h", host, "-U", "postgres",
+                                                    "-d", "postgres", "-Atc", "SELECT 1", check=False)
+                                    self.write(name + ("-unix" if host.startswith("/") else "-tcp") + "-connection.json",
+                                               {"exit_code": probe.returncode, "stdout": probe.stdout, "stderr": probe.stderr})
+                            finally:
+                                trace.send_signal(signal.SIGINT)
+                                output, errors = trace.communicate(timeout=10)
+                                self.write(name + "-trace-status.json", {"exit_code": trace.returncode, "stdout": output, "stderr": errors})
                     result = kubectl("-n", namespace, "exec", name, "-c", "initdb", "--", "ps",
                                      "-e", "-o", "pid,ppid,stat,wchan:30,comm", check=False)
                     (self.evidence / (name + "-processes.txt")).write_text(result.stdout + result.stderr)

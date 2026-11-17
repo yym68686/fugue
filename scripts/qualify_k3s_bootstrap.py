@@ -12,13 +12,15 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
 
-VERSIONS = ("v1.35.10+k3s1", "v1.36.6+k3s1", "v1.37.2+k3s1")
+VERSIONS = ("v1.35.10+k3s1", "v1.36.6+k3s1")
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -129,11 +131,52 @@ def wait_ready(version):
     raise RuntimeError("node failed to reach Ready at " + version)
 
 
+def rehearse_recovery(evidence, version, node_uid):
+    """Restore ONLY this invocation's disposable datastore with its own token.
+
+    The copied snapshot and token are outside the uploaded evidence directory.
+    This is not a production rollback policy or a production snapshot export.
+    """
+    assert Path("/etc/rancher/k3s/k3s.yaml").is_file()
+    kubectl("-n", "upgrade-qualification", "create", "configmap", "recovery-marker",
+            "--from-literal=value=before-snapshot")
+    run("k3s", "etcd-snapshot", "save", "--name", "qualification-recovery", timeout=120)
+    snapshots = list(Path("/var/lib/rancher/k3s/server/db/snapshots").glob("qualification-recovery-qualification-control-*"))
+    assert len(snapshots) == 1, "snapshot identity is ambiguous"
+    recovery = Path(tempfile.mkdtemp(prefix="fugue-disposable-recovery-", dir="/var/tmp"))
+    snapshot = recovery / "snapshot"
+    token = recovery / "token"
+    shutil.copyfile(snapshots[0], snapshot)
+    shutil.copyfile("/var/lib/rancher/k3s/server/token", token)
+    snapshot.chmod(0o600)
+    token.chmod(0o600)
+    witness = {"passed": False, "version": version,
+               "snapshot_sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+               "snapshot_bytes": snapshot.stat().st_size,
+               "token_copied_outside_artifacts": True}
+    kubectl("-n", "upgrade-qualification", "patch", "configmap", "recovery-marker", "--type=merge",
+            "-p", '{"data":{"value":"after-snapshot"}}')
+    run("systemctl", "stop", "k3s", timeout=180)
+    try:
+        run("k3s", "server", "--cluster-reset", "--cluster-reset-restore-path", str(snapshot),
+            "--token-file", str(token), "--disable", "traefik", "--disable", "servicelb",
+            "--node-name", "qualification-control", timeout=240)
+    finally:
+        run("systemctl", "start", "k3s", timeout=180)
+    assert wait_ready(version) == node_uid
+    marker = json.loads(kubectl("-n", "upgrade-qualification", "get", "configmap", "recovery-marker", "-o", "json").stdout)
+    assert marker["data"]["value"] == "before-snapshot", "restored datastore did not revert the canary"
+    witness["passed"] = True
+    witness["restored_canary"] = marker["data"]["value"]
+    (evidence / "recovery.json").write_text(json.dumps(witness, indent=2) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--disposable-host", action="store_true", required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--with-storage", action="store_true")
+    parser.add_argument("--with-recovery", action="store_true")
     args = parser.parse_args()
     assert platform.system() == "Linux" and platform.machine() == "x86_64"
     assert os.geteuid() == 0
@@ -207,7 +250,7 @@ def main():
         observer.start()
         for index, version in enumerate(VERSIONS):
             if index:
-                if index == 1 and storage:
+                if index == 1 and storage and storage.config["longhorn_candidate"] != storage.config["longhorn_baseline"]:
                     storage.upgrade_longhorn()
                 binary = download(version, binaries, evidence)
                 # Atomic binary replacement preserves every installer-managed setting.
@@ -258,6 +301,11 @@ def main():
                 kubectl("-n", "upgrade-qualification", "delete", "pod", "capacity-probe", "--wait=false")
                 run("k3s", "kubectl", "-n", "upgrade-qualification", "wait", "--for=delete",
                     "pod/capacity-probe", "--timeout=60s", timeout=70)
+        if args.with_recovery:
+            rehearse_recovery(evidence, VERSIONS[-1], node_uid)
+            after_recovery = pod()
+            assert after_recovery["metadata"]["uid"] == pod_uid
+            assert after_recovery["status"]["containerStatuses"][0]["containerID"] == container_id
         assert not failures, "HTTP continuity failed"
         report["passed"] = True
     finally:

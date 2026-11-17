@@ -7,7 +7,8 @@ The qualification runner must never receive production credentials or backups.
 ## Required evidence, in order
 
 1. **Bootstrap benefit.** On disposable native x86_64 Linux, run exact K3s
-   `v1.35.10+k3s1 -> v1.36.6+k3s1 -> v1.37.2+k3s1`. Demonstrate the baseline
+   `v1.35.10+k3s1 -> v1.36.6+k3s1`. This qualification stops at the explicitly
+   selected 1.36 target; it must not silently promote 1.37. Demonstrate the baseline
    refusal, resize an already completed ordinary init container, preserve the
    main container and Pod identities, and demonstrate actual freed scheduler
    capacity. A successful `/resize` response alone is insufficient.
@@ -26,8 +27,8 @@ The qualification runner must never receive production credentials or backups.
    workload backup paths. A snapshot listing is not a restore rehearsal.
 4. **Dependency compatibility.** Record exact CNPG, Longhorn and CSI versions
    and their documented Kubernetes support, plus the above integration results.
-   Production CNPG 1.29 and Longhorn 1.12.1 must not silently be labeled
-   compatible with Kubernetes 1.37. Any dependency update needs its own tested
+   Production CNPG 1.29 must not silently be labeled officially supported on
+   Kubernetes 1.36. Longhorn remains at 1.12.1 for this target. Any dependency update needs its own tested
    declarative release and continuity evidence before Kubernetes promotion.
 5. **Fugue readiness.** Release the fail-closed updater through main/CI; verify
    each selected node actually reports the new updater version before submitting
@@ -48,9 +49,9 @@ The qualification runner must never receive production credentials or backups.
    then handle the remaining healthy workers sequentially, each with the same
    before/after checks and observation window. Never drain single-instance
    databases to make an upgrade appear safe.
-5. After the whole 1.36 cohort and dependency gates pass, repeat server first,
-   worker canary, then sequential workers for 1.37.2. Observe the completed
-   cohort for at least 30 minutes. Do not enqueue a fleet of upgrade tasks.
+5. Stop at 1.36.6 and observe the completed cohort for at least 30 minutes.
+   A future minor needs a new qualification and explicit release intent.
+   Do not enqueue a fleet of upgrade tasks.
 6. Only then consider an independently tested Fugue completed-init resize
    operation. Upgrading Kubernetes alone does not change existing Pod requests
    or teach Fugue's current resize controller to resize init containers.
