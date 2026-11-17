@@ -176,11 +176,33 @@ func PreviousTrafficPublicationBinding(p PreviousTrafficPublicationInput, group 
 }
 
 func DecodePreviousTrafficPublication(a model.PlatformArtifact) (*PreviousTrafficPublicationInput, error) {
-	raw, err := json.Marshal(a.Content)
+	raw, err := marshalPreviousPublicationFields(a.Content)
 	if err != nil {
 		return nil, fmt.Errorf("previous traffic publication cannot be decoded")
 	}
 	return decodePreviousTrafficPublication(raw)
+}
+
+// This decoder reads only these two fields. A bounded native-tree check first
+// establishes that ignored values are JSON encodable without calling methods
+// or scanning large string bodies. Keep every case alias in encoding/json's
+// sorted order, so its typed merge, null and rejection behavior is unchanged.
+// Non-native, invalid or over-budget trees use the original complete encoder,
+// including custom-marshaler calls and errors in otherwise ignored fields.
+// This is not an integrity check or cache: every predecessor is still decoded
+// into owned values and validated below on every call.
+func marshalPreviousPublicationFields(content map[string]any) ([]byte, error) {
+	remaining := 262144
+	if !dnsValidationNativeTree(content, 0, &remaining) {
+		return json.Marshal(content)
+	}
+	fields := make(map[string]any, 2)
+	for key, value := range content {
+		if strings.EqualFold(key, "previous_traffic_publication") || strings.EqualFold(key, "cell_dns_source") {
+			fields[key] = value
+		}
+	}
+	return json.Marshal(fields)
 }
 
 func decodePreviousTrafficPublication(raw []byte) (*PreviousTrafficPublicationInput, error) {
