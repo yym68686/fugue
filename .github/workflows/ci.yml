@@ -65,17 +65,33 @@ jobs:
   k3s_bootstrap_qualification:
     # Disposable native Linux VM. No environment, secrets, production credentials,
     # self-hosted runner or deploy dependency: this lane cannot mutate production.
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/codex/k3s-native-upgrade-') }}
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.selected.outputs.changed }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-        with: {ref: '${{ github.sha }}'}
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select changed qualification inputs
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then BASE_SHA=$(git rev-parse HEAD^); fi
+          changed=false
+          if ! git diff --quiet "$BASE_SHA" HEAD -- tests/k3s-upgrade scripts/qualify_k3s_bootstrap.py scripts/qualify_k3s_storage.py scripts/test_qualify_k3s_bootstrap.py internal/api/k3s_upgrade.sh; then changed=true; fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      - name: Test qualification quantities and pinned version ordering
+        if: steps.selected.outputs.changed == 'true'
+        run: python3 -m unittest scripts.test_qualify_k3s_bootstrap
       - name: Verify completed-init resize and surviving workloads across minor upgrades
+        if: steps.selected.outputs.changed == 'true'
         run: sudo python3 scripts/qualify_k3s_bootstrap.py --disposable-host --evidence "$RUNNER_TEMP/k3s-qualification"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
+        if: always() && steps.selected.outputs.changed == 'true'
         with:
           name: fugue-k3s-bootstrap-qualification-${{ github.sha }}
           path: ${{ runner.temp }}/k3s-qualification
@@ -83,7 +99,7 @@ jobs:
 
   k3s_storage_qualification:
     needs: k3s_bootstrap_qualification
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/codex/k3s-native-upgrade-') }}
+    if: ${{ github.event_name != 'schedule' && needs.k3s_bootstrap_qualification.outputs.selected == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions: {contents: read}

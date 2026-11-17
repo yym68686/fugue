@@ -40,9 +40,11 @@ class StorageQualification:
         chart = ROOT / self.config["cnpg_chart"]
         rendered = run("helm", "template", "qualification-cnpg", str(chart), "--namespace",
                        "cnpg-system", "--include-crds", "--set", "image.tag=1.29.0").stdout
-        documents = list(yaml.safe_load_all(rendered))
+        documents = [document for document in yaml.safe_load_all(rendered) if document is not None]
+        deployments = []
         for document in documents:
             if document and document.get("kind") == "Deployment":
+                deployments.append(document["metadata"]["name"])
                 for container in document["spec"]["template"]["spec"]["containers"]:
                     if container["name"] == "manager":
                         container["image"] = self.config["cnpg_operator_image"]
@@ -55,8 +57,9 @@ class StorageQualification:
         manifest = self.evidence / "cnpg-operator.yaml"
         manifest.write_text(yaml.safe_dump_all(documents))
         kubectl("apply", "--server-side", "-f", str(manifest))
+        assert len(deployments) == 1
         run("k3s", "kubectl", "-n", "cnpg-system", "rollout", "status",
-            "deployment/qualification-cnpg", "--timeout=300s", timeout=320)
+            "deployment/" + deployments[0], "--timeout=300s", timeout=320)
         for offset, (name, instances) in enumerate((("single", 1), ("replicated", 2))):
             cluster = {"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
                        "metadata": {"name": name, "namespace": "upgrade-qualification"},
@@ -74,7 +77,7 @@ class StorageQualification:
         deadline = time.monotonic() + 600
         while time.monotonic() < deadline:
             clusters = json.loads(kubectl("-n", "upgrade-qualification", "get", "clusters", "-o", "json").stdout)["items"]
-            if len(clusters) == 2 and all(c["status"].get("readyInstances") == c["spec"]["instances"] for c in clusters):
+            if len(clusters) == 2 and all(c.get("status", {}).get("readyInstances") == c["spec"]["instances"] for c in clusters):
                 break
             time.sleep(3)
         else:
@@ -132,7 +135,7 @@ class StorageQualification:
                     self.samples[name].append({"at": time.time(), "id": row[0], "backend_pid": row[1], "postmaster_start": identity[1]})
                     counter += 1
                 except Exception as exc:
-                    self.failures.append({"database": name, "at": time.time(), "error": type(exc).__name__})
+                    self.failures.append({"database": name, "at": time.time(), "error": type(exc).__name__, "detail": str(exc)})
                     return
                 self.stop.wait(0.2)
         for name, connection in self.connections.items():

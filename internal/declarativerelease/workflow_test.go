@@ -103,6 +103,49 @@ func TestPhysicalBackupExecutorInstallsThroughIndependentDeclarativeLane(t *test
 	}
 }
 
+func TestK3sUpgradeQualificationIsIsolatedFromProduction(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	jobs := yamlMappingValue(t, document.Content[0], "jobs")
+	for _, name := range []string{"k3s_bootstrap_qualification", "k3s_storage_qualification"} {
+		job := yamlMappingValue(t, jobs, name)
+		if yamlMappingValue(t, job, "runs-on").Value != "ubuntu-latest" {
+			t.Fatal("upgrade qualification requires a disposable native Linux VM")
+		}
+		for _, key := range yamlMappingKeys(t, job) {
+			if key == "environment" || key == "concurrency" {
+				t.Fatal("qualification must not obtain production credentials or rollout locks")
+			}
+		}
+		permissions := yamlMappingValue(t, job, "permissions")
+		if !reflect.DeepEqual(yamlMappingKeys(t, permissions), []string{"contents"}) || yamlMappingValue(t, permissions, "contents").Value != "read" {
+			t.Fatal("qualification needs only repository read permission")
+		}
+		encoded, err := yaml.Marshal(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"secrets.", "deploy-declarative-component", "refs/heads/codex/"} {
+			if strings.Contains(string(encoded), forbidden) {
+				t.Fatalf("qualification must be generic and isolated: %s", forbidden)
+			}
+		}
+		if !strings.Contains(string(encoded), "--disposable-host") || !strings.Contains(string(encoded), "actions/upload-artifact@") {
+			t.Fatal("qualification requires an explicit disposable-host guard and retained evidence")
+		}
+	}
+	storage := yamlMappingValue(t, jobs, "k3s_storage_qualification")
+	if yamlMappingValue(t, storage, "needs").Value != "k3s_bootstrap_qualification" {
+		t.Fatal("storage qualification must follow proven bootstrap benefit")
+	}
+}
+
 func TestK3sTransportVerificationIsIsolatedFromProduction(t *testing.T) {
 	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
