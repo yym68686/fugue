@@ -9312,6 +9312,46 @@ paths:
                 $ref: "#/components/schemas/AppRoutePatchResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/migrate-image:
+    post:
+      operationId: migrateBackingServiceImage
+      summary: Plan or perform a guarded PostgreSQL baked-manager image migration
+      description: >-
+        Defaults to a read-only configuration plan. Apply requires explicit downtime
+        acknowledgement and the configuration hash from that plan. Only an approved,
+        digest-pinned baked-manager image is accepted. This dedicated single-instance
+        database operation preserves its Cluster, PVCs, placement, resource envelope,
+        secrets, and consumer app configuration. It never deploys the consumer app.
+        Fresh live identity, storage, node and SQL checks run before mutation.
+        An accepted image change retains its exclusive mutation lease until verified;
+        failures never trigger deletion, failover, storage copying or automatic rollback.
+      tags: [Backing Services]
+      x-fugue-handler: handleMigrateBackingServiceImage
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostgresImageMigrationRequest"
+      responses:
+        '200':
+          description: Read-only configuration plan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostgresImageMigrationResponse"
+        '202':
+          description: Dedicated database image migration accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostgresImageMigrationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/backing-services/{id}/resize:
     post:
       operationId: resizeBackingService
@@ -24049,6 +24089,10 @@ components:
       properties:
         image:
           type: string
+        image_migration_config_hash:
+          type: string
+          readOnly: true
+          description: Operation-only configuration precondition for image migration; never persisted as database configuration.
         database:
           type: string
         user:
@@ -31710,6 +31754,34 @@ components:
         memory_mebibytes: {type: integer, format: int64, minimum: 1}
         cpu_limit_millicores: {type: integer, format: int64, minimum: 0, description: "Zero preserves an existing unlimited CPU allowance; removing a configured CPU limit is rejected by the live resize preflight."}
         memory_limit_mebibytes: {type: integer, format: int64, minimum: 1}
+    PostgresImageMigrationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        image: {type: string, description: Approved immutable baked-manager image; omission selects the verified release default.}
+        apply: {type: boolean, default: false}
+        acknowledge_downtime: {type: boolean, default: false}
+        expected_config_hash: {type: string, description: Exact configuration hash returned by a preceding plan.}
+    PostgresImageMigrationPlan:
+      type: object
+      additionalProperties: false
+      required: [service_id, app_id, target_image, config_hash, requires_downtime, live_preflight_pending, stages]
+      properties:
+        service_id: {type: string}
+        app_id: {type: string}
+        target_image: {type: string}
+        config_hash: {type: string}
+        requires_downtime: {type: boolean}
+        live_preflight_pending: {type: boolean}
+        stages: {type: array, items: {type: string}}
+    PostgresImageMigrationResponse:
+      type: object
+      additionalProperties: false
+      required: [plan, dry_run]
+      properties:
+        plan: {$ref: "#/components/schemas/PostgresImageMigrationPlan"}
+        dry_run: {type: boolean}
+        operation: {$ref: "#/components/schemas/Operation"}
     ManagedPostgresResizeRequest:
       type: object
       additionalProperties: false

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/pgimage"
 	runtimepkg "fugue/internal/runtime"
 )
 
@@ -3289,7 +3290,7 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 			return model.Operation{}, operationCreateOutcome{}, ErrConflict
 		}
 	}
-	if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
+	if op.DesiredSpec != nil && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
 		if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
@@ -3864,11 +3865,15 @@ WHERE app_id = $1
 		if err := prepareAppRequestResizeOperation(app, &op); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
-	case model.OperationTypeDatabaseResize:
+	case pgimage.OperationType, model.OperationTypeDatabaseResize:
 		if _, err := s.pgValidateManagedPostgresResizeTargetTx(ctx, tx, &app, op.ServiceID); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
-		if err := prepareManagedPostgresResizeOperation(app, &op); err != nil {
+		prepare := prepareManagedPostgresResizeOperation
+		if op.Type == pgimage.OperationType {
+			prepare = preparePostgresImageMigration
+		}
+		if err := prepare(app, &op); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		active, err := s.pgActiveOperationsForLifecycleTargetTx(ctx, tx, app.ID, op.ServiceID)
@@ -3876,7 +3881,7 @@ WHERE app_id = $1
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if len(active) > 0 {
-			if len(active) == 1 && managedPostgresResizeRetryMatches(active[0], op) {
+			if len(active) == 1 && (managedPostgresResizeRetryMatches(active[0], op) || postgresImageMigrationRetryMatches(active[0], op)) {
 				return active[0], operationCreateOutcome{
 					ExistingOperationID:     active[0].ID,
 					ReusedExistingOperation: true,
@@ -4712,7 +4717,7 @@ func (s *Store) pgCompleteOperationGuarded(id, runtimeID, manifestPath, message 
 		}
 	}
 	immutableDesiredOperation := isManagedPostgresLifecycleOperationType(op.Type) ||
-		op.Type == model.OperationTypeDatabaseResize || model.IsAppRequestResize(op.Type)
+		op.Type == pgimage.OperationType || op.Type == model.OperationTypeDatabaseResize || model.IsAppRequestResize(op.Type)
 	if desiredSpec != nil && !immutableDesiredOperation {
 		op.DesiredSpec = cloneAppSpec(desiredSpec)
 	}
@@ -4762,6 +4767,8 @@ func (s *Store) pgCompleteOperationGuarded(id, runtimeID, manifestPath, message 
 			err = s.pgApplyManagedPostgresLifecycleTx(ctx, tx, &app, &op)
 		case model.OperationTypeDatabaseResize:
 			err = s.pgApplyManagedPostgresResizeTx(ctx, tx, &app, &op)
+		case pgimage.OperationType:
+			err = s.pgApplyPostgresImageMigration(ctx, tx, &app, &op)
 		default:
 			err = s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, op.DesiredSpec)
 		}
@@ -4776,7 +4783,7 @@ func (s *Store) pgCompleteOperationGuarded(id, runtimeID, manifestPath, message 
 	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
 		return model.Operation{}, err
 	}
-	if op.Type != model.OperationTypeDatabaseResize {
+	if op.Type != model.OperationTypeDatabaseResize && op.Type != pgimage.OperationType {
 		if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
 			return model.Operation{}, err
 		}
@@ -4867,6 +4874,9 @@ func (s *Store) pgFailOperationGuarded(id, message string, guard *operationFinal
 	op, err := s.pgGetOperationTx(ctx, tx, id, true)
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
+	}
+	if op.Type == pgimage.OperationType && op.Status == model.OperationStatusRunning && guard == nil {
+		return model.Operation{}, ErrConflict
 	}
 
 	if guard != nil {
@@ -6474,7 +6484,7 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 	case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
 		// The exact backing service lifecycle intent is applied transactionally
 		// before this model update. AppSpec must remain untouched.
-	case model.OperationTypeDatabaseResize:
+	case pgimage.OperationType, model.OperationTypeDatabaseResize:
 		// The exact runtime target is applied to the backing service in the same
 		// transaction. Do not change AppSpec, status, or timestamps.
 		return nil
