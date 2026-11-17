@@ -115,8 +115,8 @@ func TestK3sUpgradeQualificationIsIsolatedFromProduction(t *testing.T) {
 	jobs := yamlMappingValue(t, document.Content[0], "jobs")
 	for _, name := range []string{"k3s_bootstrap_qualification", "k3s_storage_qualification"} {
 		job := yamlMappingValue(t, jobs, name)
-		if yamlMappingValue(t, job, "runs-on").Value != "ubuntu-latest" {
-			t.Fatal("upgrade qualification requires a disposable native Linux VM")
+		if yamlMappingValue(t, job, "runs-on").Value != "ubuntu-24.04" {
+			t.Fatal("upgrade qualification requires a disposable native Linux VM with a pinned OS")
 		}
 		for _, key := range yamlMappingKeys(t, job) {
 			if key == "environment" || key == "concurrency" {
