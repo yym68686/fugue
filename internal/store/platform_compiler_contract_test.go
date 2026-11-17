@@ -6,7 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
@@ -109,11 +110,23 @@ func TestCompilerContractPostgresTransitionWaitsForObserveWriter(t *testing.T) {
 	}
 	// An old writer has passed observe admission but has not committed. The
 	// epoch transition must wait for that writer, rather than overtake it.
-	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
-	defer cancel()
-	_, err = s.db.ExecContext(ctx, `UPDATE fugue_platform_compiler_contract SET epoch=epoch+1,phase='enforced',plan_sha256=$1,enforced_at=now() WHERE singleton`, strings.Repeat("a", 64))
-	if err == nil {
-		t.Fatal("transition overtook an admitted observe writer")
+	transition, err := s.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transition.Rollback()
+	if _, err := transition.Exec(`SET LOCAL lock_timeout='100ms'`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = transition.Exec(`UPDATE fugue_platform_compiler_contract SET epoch=epoch+1,phase='enforced',plan_sha256=$1,enforced_at=now() WHERE singleton`, strings.Repeat("a", 64))
+	var blocked *pgconn.PgError
+	if !errors.As(err, &blocked) || blocked.Code != "55P03" {
+		t.Fatal("transition did not wait for an admitted observe writer", err)
+	}
+	// A caller deadline alone leaves an autocommit query's outcome uncertain.
+	// Roll back the server-side lock timeout before releasing the writer.
+	if err := transition.Rollback(); err != nil {
+		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
