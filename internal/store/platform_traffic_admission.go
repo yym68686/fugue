@@ -104,7 +104,7 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 			component = model.PlatformConsumerComponentDNSServer
 			if !verifiedRecovery {
 				trace.advance(admissionDNSReferences)
-				if err := validateCellDNSReferencesInState(state, child, keys); err != nil {
+				if err := validateCellDNSReferencesInStateWithTrace(state, child, keys, trace); err != nil {
 					return err
 				}
 			}

@@ -16,25 +16,35 @@ import (
 // Called while the publication transaction holds its authority locks. A DNS
 // publication cannot endorse a stale Cell fence read before that transaction.
 func validateCellDNSReferencesInState(state *model.State, child model.PlatformArtifact, keys bundleauth.Keyring) error {
+	return validateCellDNSReferencesInStateWithTrace(state, child, keys, nil)
+}
+
+func validateCellDNSReferencesInStateWithTrace(state *model.State, child model.PlatformArtifact, keys bundleauth.Keyring, admission *platformAdmissionTrace) error {
+	trace := beginPlatformDNSReferenceTrace(admission)
+	defer trace.finish()
 	_, err := cellpublication.VerifyDNSArtifact(child, keys)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrConflict, err)
 	}
+	trace.advance(dnsReferenceProducerBindings)
 	if err := validateDNSRouteProducerBindings(state, child, keys); err != nil {
 		return err
 	}
 	fail := func() error {
 		return platformReleaseRejected("routing_source_selection", fmt.Errorf("%w: referenced Cell publication is no longer selected", ErrConflict))
 	}
+	trace.advance(dnsReferenceDependencyDecode)
 	dependencies, err := platformconfig.DNSRouteDependencies(child)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrConflict, err)
 	}
+	trace.advance(dnsReferenceSourceAuthorization)
 	sources, err := platformconfig.DNSRouteSourceAuthorizations(child)
 	if err != nil {
 		return fail()
 	}
 	if len(sources) > 0 {
+		trace.advance(dnsReferenceSourceObservation)
 		now := time.Now().UTC()
 		_, err := observeDNSRouteSources(context.Background(), child, stateDNSRouteSourceReader(state), keys, now)
 		if err != nil {
@@ -42,6 +52,7 @@ func validateCellDNSReferencesInState(state *model.State, child model.PlatformAr
 		}
 	}
 
+	trace.advance(dnsReferenceDependencyLedger)
 	for _, dependency := range dependencies {
 		for _, embedded := range dependency.Artifacts {
 			index := platformArtifactIndex(state.PlatformArtifacts, embedded.ID)

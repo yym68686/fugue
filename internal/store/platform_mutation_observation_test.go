@@ -94,6 +94,11 @@ func TestPlatformMutationObservationFailureRetentionAndResponseBudget(t *testing
 		}
 		for i := 0; i < platformAdmissionObservationLimit; i++ {
 			admission := beginPlatformAdmissionTrace(ctx, nil)
+			dns := beginPlatformDNSReferenceTrace(admission)
+			for phase := dnsReferenceAuthentication; phase < dnsReferencePhaseCount; phase++ {
+				dns.advance(phase)
+			}
+			dns.finish()
 			for phase := admissionSetup; phase < admissionPhaseCount; phase++ {
 				admission.advance(phase)
 			}

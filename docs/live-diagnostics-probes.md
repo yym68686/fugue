@@ -392,6 +392,15 @@ of required consumers/projections/facts examined. They omit artifact and
 consumer identities, content, policy values and errors; omitted samples are
 counted. Subphase durations are wall time, not CPU attribution.
 
+Each DNS reference check also partitions its existing work into six fixed nested
+stages: artifact authentication, producer bindings, dependency decoding, source
+authorization, selected-source observation and dependency ledger checks. Early
+rejection retains only stages actually reached. The nested stages share the
+four-admission retention limit and contain only names and elapsed milliseconds;
+they do not retain content, source identities or error strings. No check is
+cached, reordered or skipped, and the existing clocks used for authorization,
+transaction locks, query deadlines and returned errors remain unchanged.
+
 On Linux a non-root component's runtime profile socket accepts only kernel
 credentials identifying root or the component's own UID. Diagnostic Jobs drop
 DAC_OVERRIDE, so filesystem owner-only mode by itself prevents those Jobs from

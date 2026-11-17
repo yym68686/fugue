@@ -43,6 +43,7 @@ type platformAdmissionObservation struct {
 	Failed                bool                    `json:"failed"`
 	FinalPhase            string                  `json:"final_phase"`
 	Stages                []platformMutationStage `json:"stages"`
+	DNSReferences         []platformMutationStage `json:"dns_reference_stages,omitempty"`
 	Artifacts             int                     `json:"artifacts"`
 	ExpectedSets          int                     `json:"expected_sets"`
 	ServingFacts          int                     `json:"serving_facts"`
@@ -53,12 +54,72 @@ type platformAdmissionObservation struct {
 }
 
 type platformAdmissionTrace struct {
-	mutation *platformMutationTrace
-	value    platformAdmissionObservation
-	phase    platformAdmissionPhase
-	last     time.Time
-	duration [admissionPhaseCount]time.Duration
-	visited  [admissionPhaseCount]bool
+	mutation    *platformMutationTrace
+	value       platformAdmissionObservation
+	phase       platformAdmissionPhase
+	last        time.Time
+	duration    [admissionPhaseCount]time.Duration
+	visited     [admissionPhaseCount]bool
+	dnsDuration [dnsReferencePhaseCount]time.Duration
+	dnsVisited  [dnsReferencePhaseCount]bool
+}
+
+type platformDNSReferencePhase uint8
+
+const (
+	dnsReferenceAuthentication platformDNSReferencePhase = iota
+	dnsReferenceProducerBindings
+	dnsReferenceDependencyDecode
+	dnsReferenceSourceAuthorization
+	dnsReferenceSourceObservation
+	dnsReferenceDependencyLedger
+	dnsReferencePhaseCount
+)
+
+var platformDNSReferencePhaseNames = [dnsReferencePhaseCount]string{
+	"artifact_authentication", "producer_bindings", "dependency_decode",
+	"source_authorization", "source_observation", "dependency_ledger",
+}
+
+// Nested wall-clock stages share the enclosing admission's clock and lifetime.
+// The fixed array bounds retention regardless of artifact or dependency counts.
+type platformDNSReferenceTrace struct {
+	admission *platformAdmissionTrace
+	phase     platformDNSReferencePhase
+	last      time.Time
+	duration  [dnsReferencePhaseCount]time.Duration
+	visited   [dnsReferencePhaseCount]bool
+}
+
+func beginPlatformDNSReferenceTrace(admission *platformAdmissionTrace) *platformDNSReferenceTrace {
+	if admission == nil {
+		return nil
+	}
+	return &platformDNSReferenceTrace{admission: admission, last: admission.mutation.now()}
+}
+
+func (t *platformDNSReferenceTrace) advance(phase platformDNSReferencePhase) {
+	if t == nil {
+		return
+	}
+	now := t.admission.mutation.now()
+	t.duration[t.phase] += now.Sub(t.last)
+	t.visited[t.phase] = true
+	t.phase, t.last = phase, now
+}
+
+func (t *platformDNSReferenceTrace) finish() {
+	if t == nil {
+		return
+	}
+	t.duration[t.phase] += t.admission.mutation.now().Sub(t.last)
+	t.visited[t.phase] = true
+	for phase, duration := range t.duration {
+		if t.visited[phase] {
+			t.admission.dnsDuration[phase] += duration
+			t.admission.dnsVisited[phase] = true
+		}
+	}
 }
 
 func beginPlatformAdmissionTrace(ctx context.Context, state *model.State) *platformAdmissionTrace {
@@ -101,6 +162,12 @@ func (t *platformAdmissionTrace) finish(err error) {
 	for phase, duration := range t.duration {
 		if t.visited[phase] {
 			t.value.Stages = append(t.value.Stages, platformMutationStage{platformAdmissionPhaseNames[phase], duration.Milliseconds()})
+		}
+	}
+	for phase, duration := range t.dnsDuration {
+		if t.dnsVisited[phase] {
+			t.value.DNSReferences = append(t.value.DNSReferences,
+				platformMutationStage{platformDNSReferencePhaseNames[phase], duration.Milliseconds()})
 		}
 	}
 	t.mutation.admissions = append(t.mutation.admissions, t.value)
