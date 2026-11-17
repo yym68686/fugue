@@ -68,6 +68,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	defer cancel()
 	client, err := s.newClusterNodeClient()
 	if err != nil {
+		observeCapture(ctx, captureEvent{Stage: "backend_metadata_client", Node: claims.NodeID, ErrorClass: captureErrorClass(err)})
 		return http.StatusServiceUnavailable
 	}
 	defer client.closeIdleConnections()
@@ -80,7 +81,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 		// may use another account, so that path retains the full node inventory.
 		query.Set("fieldSelector", query.Get("fieldSelector")+",spec.serviceAccountName="+identity[2])
 	}
-	if client.doJSON(ctx, http.MethodGet, base+"/pods?"+query.Encode(), &pods) != nil || pods.Continue != "" {
+	if readDNSBackendMetadata(ctx, client, claims.NodeID, "pod_list", base+"/pods?"+query.Encode(), &pods) != nil || pods.Continue != "" {
 		return http.StatusServiceUnavailable
 	}
 	var pod *corev1.Pod
@@ -110,7 +111,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 		return http.StatusConflict
 	}
 	var node corev1.Node
-	if client.doJSON(ctx, http.MethodGet, "/api/v1/nodes/"+url.PathEscape(claims.NodeID), &node) != nil {
+	if readDNSBackendMetadata(ctx, client, claims.NodeID, "node", "/api/v1/nodes/"+url.PathEscape(claims.NodeID), &node) != nil {
 		return http.StatusServiceUnavailable
 	}
 	if node.Name != claims.NodeID || node.UID == "" || node.DeletionTimestamp != nil {
@@ -118,7 +119,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	}
 	var services corev1.ServiceList
 	query = url.Values{"labelSelector": {"app.kubernetes.io/managed-by=" + dnsTransportManager}, "limit": {"256"}}
-	if client.doJSON(ctx, http.MethodGet, base+"/services?"+query.Encode(), &services) != nil || services.Continue != "" {
+	if readDNSBackendMetadata(ctx, client, claims.NodeID, "service_list", base+"/services?"+query.Encode(), &services) != nil || services.Continue != "" {
 		return http.StatusServiceUnavailable
 	}
 	selected, transportStatus := publicDNSTransportForNode(services.Items, node, identity[1])
@@ -133,7 +134,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 			if selected != nil && len(notSelected) == 1 && notSelected[0] != nil {
 				var currentPod corev1.Pod
 				var currentService corev1.Service
-				if client.doJSON(ctx, http.MethodGet, base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil || client.doJSON(ctx, http.MethodGet, base+"/services/"+url.PathEscape(selected.Name), &currentService) != nil {
+				if readDNSBackendMetadata(ctx, client, claims.NodeID, "standby_pod_recheck", base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil || readDNSBackendMetadata(ctx, client, claims.NodeID, "standby_service_recheck", base+"/services/"+url.PathEscape(selected.Name), &currentService) != nil {
 					return http.StatusServiceUnavailable
 				}
 				if currentPod.UID == pod.UID && currentPod.ResourceVersion == pod.ResourceVersion && currentService.UID == selected.UID && currentService.ResourceVersion == selected.ResourceVersion {
@@ -150,7 +151,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	}
 	slicePath := "/apis/discovery.k8s.io/v1/namespaces/" + url.PathEscape(identity[1]) + "/endpointslices?" + url.Values{"labelSelector": {discoveryv1.LabelServiceName + "=" + selected.Name}, "limit": {"256"}}.Encode()
 	var endpoints discoveryv1.EndpointSliceList
-	if client.doJSON(ctx, http.MethodGet, slicePath, &endpoints) != nil || endpoints.Continue != "" {
+	if readDNSBackendMetadata(ctx, client, claims.NodeID, "endpoints", slicePath, &endpoints) != nil || endpoints.Continue != "" {
 		return http.StatusServiceUnavailable
 	}
 	if !dnsBackendEndpointsMatch(*selected, *pod, endpoints.Items, positive) {
@@ -167,9 +168,9 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	var currentPod corev1.Pod
 	var currentService corev1.Service
 	var currentEndpoints discoveryv1.EndpointSliceList
-	if client.doJSON(ctx, http.MethodGet, base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil ||
-		client.doJSON(ctx, http.MethodGet, base+"/services/"+url.PathEscape(selected.Name), &currentService) != nil ||
-		client.doJSON(ctx, http.MethodGet, slicePath, &currentEndpoints) != nil || currentEndpoints.Continue != "" {
+	if readDNSBackendMetadata(ctx, client, claims.NodeID, "pod_recheck", base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil ||
+		readDNSBackendMetadata(ctx, client, claims.NodeID, "service_recheck", base+"/services/"+url.PathEscape(selected.Name), &currentService) != nil ||
+		readDNSBackendMetadata(ctx, client, claims.NodeID, "endpoints_recheck", slicePath, &currentEndpoints) != nil || currentEndpoints.Continue != "" {
 		return http.StatusServiceUnavailable
 	}
 	if currentPod.UID != pod.UID || currentPod.ResourceVersion != pod.ResourceVersion || currentService.UID != selected.UID || currentService.ResourceVersion != selected.ResourceVersion || !reflect.DeepEqual(endpoints.Items, currentEndpoints.Items) {
@@ -179,6 +180,18 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 		return privateGuard.recheck(ctx, client)
 	}
 	return http.StatusOK
+}
+
+// Callers supply fixed stage names. Preserve the original result and request
+// order; retain no URL, credential, response body or arbitrary error text.
+func readDNSBackendMetadata(ctx context.Context, client *clusterNodeClient, node, stage, path string, out any) error {
+	started := time.Now()
+	err := client.doJSON(ctx, http.MethodGet, path, out)
+	if err != nil {
+		observeCapture(ctx, captureEvent{Stage: "backend_metadata_" + stage, Node: node,
+			ErrorClass: captureErrorClass(err), HTTPStatus: captureHTTPStatus(err), DurationMS: time.Since(started).Milliseconds()})
+	}
+	return err
 }
 
 func dnsBackendPodReady(pod corev1.Pod) bool {

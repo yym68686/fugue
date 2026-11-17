@@ -25,6 +25,7 @@ type dnsBackendFixture struct {
 	slices       discoveryv1.EndpointSliceList
 	claims       platformcontrol.PlatformComponentIdentityClaims
 	failPath     string
+	failMatch    int
 	changePath   string
 	extraService bool
 	podListDelay time.Duration
@@ -54,14 +55,18 @@ func (f *dnsBackendFixture) install(t *testing.T, server *Server) {
 	t.Helper()
 	server.controlPlaneNamespace = f.pod.Namespace
 	sliceReads := 0
+	failureMatches := 0
 	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer metadata-only-reader" {
 			t.Error("backend validation must only read metadata with its own credential")
 		}
 		if strings.HasSuffix(r.URL.Path, f.failPath) && f.failPath != "" {
-			w.WriteHeader(500)
-			w.Write([]byte("sensitive-kubernetes-error"))
-			return
+			failureMatches++
+			if f.failMatch == 0 || failureMatches == f.failMatch {
+				w.WriteHeader(500)
+				w.Write([]byte("sensitive-kubernetes-error"))
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		base := "/api/v1/namespaces/" + f.pod.Namespace
@@ -133,6 +138,53 @@ func (f *dnsBackendFixture) setAuthority(authority string) {
 	f.pod.Annotations[platformConsumerIdentityAnnotation] = string(raw)
 	if authority != "" {
 		f.pod.Labels["fugue.io/edge-group-id"] = authority
+	}
+}
+
+func TestDNSBackendMetadataFailurePreservesExactReadAndRejection(t *testing.T) {
+	for _, tc := range []struct {
+		stage, path string
+		match       int
+		standby     bool
+	}{
+		{"pod_list", "/pods", 0, false},
+		{"node", "/nodes/dns-node", 0, false},
+		{"service_list", "/services", 0, false},
+		{"endpoints", "/endpointslices", 1, false},
+		{"pod_recheck", "/pods/backend", 0, false},
+		{"service_recheck", "/services/dns-public", 0, false},
+		{"endpoints_recheck", "/endpointslices", 2, false},
+		{"standby_pod_recheck", "/pods/backend", 0, true},
+		{"standby_service_recheck", "/services/dns-public", 0, true},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			f := newDNSBackendFixture(t)
+			f.failPath, f.failMatch = tc.path, tc.match
+			if tc.standby {
+				f.pod.Labels["app"] = "standby"
+			}
+			s := &Server{}
+			f.install(t, s)
+			ctx, trace := s.beginCaptureTrace(t.Context(), "dns-runtime-facts")
+			standby := false
+			status := s.inspectDNSBackendTransport(ctx, f.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil, false, &standby)
+			s.finishCaptureTrace(trace, "backend_selection", errDNSRuntimeFacts, 0, 0)
+			if status != http.StatusServiceUnavailable || standby {
+				t.Fatalf("read failure changed rejection: status=%d standby=%t", status, standby)
+			}
+			rows := captureReceipts(t, s)
+			if len(rows) != 1 || len(rows[0].Events) != 1 {
+				t.Fatalf("exact failed read missing: %+v", rows)
+			}
+			event := rows[0].Events[0]
+			if event.Stage != "backend_metadata_"+tc.stage || event.Node != f.claims.NodeID || event.HTTPStatus != 500 || event.ErrorClass != "unavailable" || event.DurationMS < 0 {
+				t.Fatal("failed metadata read misclassified", event)
+			}
+			raw, err := json.Marshal(rows)
+			if err != nil || strings.Contains(string(raw), "sensitive-kubernetes-error") || strings.Contains(string(raw), "metadata-only-reader") || strings.Contains(string(raw), f.claims.CredentialID) || strings.Contains(string(raw), tc.path) {
+				t.Fatal("metadata receipt retained path, credential or body")
+			}
+		})
 	}
 }
 

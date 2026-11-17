@@ -119,7 +119,7 @@ func selectPrivateDNSValidationService(ctx context.Context, client *clusterNodeC
 	}
 	query := url.Values{"labelSelector": {"app.kubernetes.io/managed-by=" + dnsPrivateTransportManager}, "limit": {"256"}}
 	var services corev1.ServiceList
-	if client.doJSON(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(pod.Namespace)+"/services?"+query.Encode(), &services) != nil || services.Continue != "" {
+	if readDNSBackendMetadata(ctx, client, claims.NodeID, "private_service_list", "/api/v1/namespaces/"+url.PathEscape(pod.Namespace)+"/services?"+query.Encode(), &services) != nil || services.Continue != "" {
 		return fail(http.StatusServiceUnavailable)
 	}
 	selected := privateDNSTransportForMember(services.Items, pod.Namespace, claims.AuthorityID, claims.NodeID)
@@ -172,7 +172,7 @@ func (g *dnsPrivatePublicGuard) recheck(ctx context.Context, client *clusterNode
 	base := "/api/v1/namespaces/" + url.PathEscape(g.namespace)
 	privateQuery := url.Values{"labelSelector": {"app.kubernetes.io/managed-by=" + dnsPrivateTransportManager}, "limit": {"256"}}
 	var privateServices corev1.ServiceList
-	if client.doJSON(ctx, http.MethodGet, base+"/services?"+privateQuery.Encode(), &privateServices) != nil || privateServices.Continue != "" {
+	if readDNSBackendMetadata(ctx, client, g.node.Name, "private_service_recheck", base+"/services?"+privateQuery.Encode(), &privateServices) != nil || privateServices.Continue != "" {
 		return http.StatusServiceUnavailable
 	}
 	private := privateDNSTransportForMember(privateServices.Items, g.namespace, g.authority, g.node.Name)
@@ -180,7 +180,7 @@ func (g *dnsPrivatePublicGuard) recheck(ctx context.Context, client *clusterNode
 		return http.StatusConflict
 	}
 	var currentNode corev1.Node
-	if client.doJSON(ctx, http.MethodGet, "/api/v1/nodes/"+url.PathEscape(g.node.Name), &currentNode) != nil {
+	if readDNSBackendMetadata(ctx, client, g.node.Name, "private_node_recheck", "/api/v1/nodes/"+url.PathEscape(g.node.Name), &currentNode) != nil {
 		return http.StatusServiceUnavailable
 	}
 	if currentNode.UID != g.node.UID || currentNode.ResourceVersion != g.node.ResourceVersion {
@@ -188,7 +188,7 @@ func (g *dnsPrivatePublicGuard) recheck(ctx context.Context, client *clusterNode
 	}
 	query := url.Values{"labelSelector": {"app.kubernetes.io/managed-by=" + dnsTransportManager}, "limit": {"256"}}
 	var services corev1.ServiceList
-	if client.doJSON(ctx, http.MethodGet, base+"/services?"+query.Encode(), &services) != nil || services.Continue != "" {
+	if readDNSBackendMetadata(ctx, client, g.node.Name, "private_public_service_recheck", base+"/services?"+query.Encode(), &services) != nil || services.Continue != "" {
 		return http.StatusServiceUnavailable
 	}
 	current, status := publicDNSTransportForNode(services.Items, currentNode, g.namespace)
@@ -205,7 +205,7 @@ func (g *dnsPrivatePublicGuard) recheck(ctx context.Context, client *clusterNode
 		return http.StatusConflict
 	}
 	var pod corev1.Pod
-	if client.doJSON(ctx, http.MethodGet, base+"/pods/"+url.PathEscape(g.pod.Name), &pod) != nil {
+	if readDNSBackendMetadata(ctx, client, g.node.Name, "private_public_pod_recheck", base+"/pods/"+url.PathEscape(g.pod.Name), &pod) != nil {
 		return http.StatusServiceUnavailable
 	}
 	if pod.UID != g.pod.UID || pod.ResourceVersion != g.pod.ResourceVersion {

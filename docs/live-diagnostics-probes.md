@@ -209,6 +209,16 @@ Opaque references are hashed, and credentials, nonces, bodies and arbitrary
 errors are omitted. This evidence identifies which states disagreed; it does
 not establish why a consumer had not converged or weaken any equality check.
 
+Failed Kubernetes metadata reads during DNS backend selection retain a fixed
+`backend_metadata_*` stage, authenticated node, error category, numeric HTTP
+status when present and elapsed milliseconds in the existing capture trace.
+Initial lookups, standby verification and final replacement checks have distinct
+stages. These events retain the original failing call without retrying it;
+paths, credentials, response bodies and arbitrary error text are omitted.
+They share the existing event/ring limits and cover only requests with a capture
+trace, not all heartbeat validation calls. A later successful read cannot
+identify the cause of an earlier uninstrumented failure.
+
 The API capture snapshot's independent `traffic_failures` ring retains twelve
 failed published-traffic diagnostic reads, including DNS route-invariant checks.
 It records the source-defined failure stage and, for failed convergence, the
