@@ -4,6 +4,13 @@ metadata:
   name: upgrade-qualification
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: upgrade-qualification
+automountServiceAccountToken: false
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: bootstrap-floor-fixture

@@ -110,6 +110,14 @@ def main():
         run("sh", str(installer), env=env, timeout=600)
         node_uid = wait_ready(VERSIONS[0])
         assert run("systemctl", "show", "k3s", "-p", "KillMode", "--value").stdout.strip() == "process"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            result = kubectl("-n", "kube-system", "get", "serviceaccount", "default", "-o", "json", check=False)
+            if not result.returncode:
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError("default service account controller did not converge")
         kubectl("apply", "-f", str(ROOT / "tests/k3s-upgrade/bootstrap-floor.yaml"))
         run("k3s", "kubectl", "-n", "upgrade-qualification", "wait", "--for=condition=Ready",
             "pod/bootstrap-floor-fixture", "--timeout=180s", timeout=200)
