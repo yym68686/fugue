@@ -7,6 +7,7 @@ import (
 	"reflect"
 
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 // A never-scheduled Pod cannot supply a CRI receipt. Cancel its failed source
@@ -14,7 +15,18 @@ import (
 // no owned Pods before accepting the ordinary retirement transaction.
 func (s *Service) captureUnstartedReleaseWorkload(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease) (releaseDrainWorkload, error) {
 	if release.Role != model.AppReleaseRoleCandidate || release.Status != model.AppReleaseStatusFailed || release.PromotedAt != nil {
-		return releaseDrainWorkload{}, fmt.Errorf("unstarted cancellation requires an unpromoted failed candidate")
+		// A serving release's original revision may already have been drained
+		// and scaled to zero after canonical alignment. Once superseded, allow
+		// its ordinary retirement to verify zero replicas and no owned Pods.
+		b := release.RevisionWorkload
+		if !store.AppReleaseAwaitingDrain(release) || b == nil {
+			return releaseDrainWorkload{}, fmt.Errorf("zero-replica observation requires a withdrawn release")
+		}
+		object, found, err := client.getRawObject(ctx, deploymentAPIPath(b.Namespace, b.DeploymentName))
+		if err != nil || !found || nestedObjectValue(object, "spec", "replicas") != float64(0) ||
+			objectStringMapValue(objectMapField(object, "metadata")["annotations"])[alignedRevisionQuiescedAnnotation] != release.ID {
+			return releaseDrainWorkload{}, fmt.Errorf("withdrawn revision has no confirmed canonical quiescence")
+		}
 	}
 	return s.captureDrainWorkloadState(ctx, client, app, release, false, false, true)
 }

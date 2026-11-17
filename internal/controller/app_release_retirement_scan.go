@@ -60,7 +60,7 @@ func (p appReleaseRetirementPosition) before(other appReleaseRetirementPosition)
 func orderAppReleaseRetirementScan(releases []model.AppRelease, after appReleaseRetirementPosition) []model.AppRelease {
 	queue := make([]model.AppRelease, 0, len(releases))
 	for _, release := range releases {
-		if store.AppReleaseAwaitingDrain(release) || release.Status == model.AppReleaseStatusRetired && release.RevisionWorkload != nil {
+		if store.AppReleaseAwaitingDrain(release) || store.AppReleaseHasAlignedRevision(release) || release.Status == model.AppReleaseStatusRetired && release.RevisionWorkload != nil {
 			queue = append(queue, release)
 		}
 	}
@@ -147,7 +147,7 @@ type prioritizedReleaseRetirement struct {
 func prioritizeAppReleaseRetirement(releases []model.AppRelease, positions [3]appReleaseRetirementPosition, inv *releaseDrainInventory) []prioritizedReleaseRetirement {
 	var classes [3][]model.AppRelease
 	for _, r := range releases {
-		if !store.AppReleaseAwaitingDrain(r) && !(r.Status == model.AppReleaseStatusRetired && r.RevisionWorkload != nil) {
+		if !store.AppReleaseAwaitingDrain(r) && !store.AppReleaseHasAlignedRevision(r) && !(r.Status == model.AppReleaseStatusRetired && r.RevisionWorkload != nil) {
 			continue
 		}
 		priority := 1

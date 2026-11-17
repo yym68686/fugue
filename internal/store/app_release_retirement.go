@@ -25,7 +25,14 @@ func (s *Store) ListAppReleaseRetirementTargets(ctx context.Context) ([]AppRelea
 		}
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT tenant_id, app_id FROM fugue_app_releases WHERE (role='candidate' AND status='failed') OR (role='previous' AND status='draining') OR (status='retired' AND revision_workload_json IS NOT NULL) ORDER BY tenant_id, app_id`)
+		rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT tenant_id, app_id FROM fugue_app_releases
+			WHERE (role='candidate' AND status='failed') OR (role='previous' AND status='draining')
+			OR (status='retired' AND revision_workload_json IS NOT NULL)
+			OR (role='stable' AND status='serving' AND deployment_name<>'' AND service_name<>''
+				AND COALESCE(revision_workload_json->>'deployment_name','')<>''
+				AND COALESCE(revision_workload_json->>'service_name','')<>''
+				AND deployment_name<>(revision_workload_json->>'deployment_name')
+				AND service_name<>(revision_workload_json->>'service_name')) ORDER BY tenant_id, app_id`)
 		if err != nil {
 			return nil, err
 		}
@@ -44,7 +51,7 @@ func (s *Store) ListAppReleaseRetirementTargets(ctx context.Context) ([]AppRelea
 	err := s.withLockedState(false, func(state *model.State) error {
 		seen := map[AppReleaseRetirementTarget]bool{}
 		for _, r := range state.AppReleases {
-			if AppReleaseAwaitingDrain(r) || r.Status == model.AppReleaseStatusRetired && r.RevisionWorkload != nil {
+			if AppReleaseAwaitingDrain(r) || AppReleaseHasAlignedRevision(r) || r.Status == model.AppReleaseStatusRetired && r.RevisionWorkload != nil {
 				seen[AppReleaseRetirementTarget{r.TenantID, r.AppID}] = true
 			}
 		}
@@ -67,6 +74,16 @@ func (s *Store) ListAppReleaseRetirementTargets(ctx context.Context) ([]AppRelea
 func AppReleaseAwaitingDrain(release model.AppRelease) bool {
 	return release.Role == model.AppReleaseRolePrevious && release.Status == model.AppReleaseStatusDraining ||
 		release.Role == model.AppReleaseRoleCandidate && release.Status == model.AppReleaseStatusFailed
+}
+
+// AppReleaseHasAlignedRevision discovers an original immutable workload after
+// its serving release moved to a different target. The release itself remains
+// serving; only the redundant workload may be drained, never the stable target.
+func AppReleaseHasAlignedRevision(release model.AppRelease) bool {
+	b := release.RevisionWorkload
+	return release.Role == model.AppReleaseRoleStable && release.Status == model.AppReleaseStatusServing && b != nil &&
+		release.DeploymentName != "" && release.ServiceName != "" && b.DeploymentName != "" && b.ServiceName != "" &&
+		release.DeploymentName != b.DeploymentName && release.ServiceName != b.ServiceName
 }
 
 // RetireDrainedAppRelease commits against the exact release and policy versions

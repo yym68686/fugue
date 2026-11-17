@@ -56,6 +56,12 @@ type releaseDrainWorkload struct {
 }
 
 func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.Context, app model.App, previous model.AppRelease, since time.Time) (safeRolloutDrainMetrics, error) {
+	return q.queryReleaseDrainMetrics(ctx, app, previous, since, false)
+}
+
+// The aligned path withdraws one workload, not its still-serving release.
+// It must prove the same release now serves through its canonical target.
+func (q kubeSafeRolloutDrainObserver) queryReleaseDrainMetrics(ctx context.Context, app model.App, previous model.AppRelease, since time.Time, aligned bool) (safeRolloutDrainMetrics, error) {
 	out := safeRolloutDrainMetrics{Source: "kubernetes_pod_drain", Summary: map[string]any{"release_id": previous.ID, "previous_deployment": previous.DeploymentName}}
 	s := q.service
 	if s == nil || s.Store == nil || !s.Config.KubectlApply {
@@ -74,11 +80,11 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 	// would not prove anything about this release's original connections.
 	if previous.ID == "" || previous.AppID != app.ID || previous.TenantID != app.TenantID ||
 		previous.DeploymentName == "" || previous.DeploymentName == runtime.RuntimeAppResourceName(app) ||
-		previous.RuntimeID == "" || previous.ResolvedImageRef == "" || !store.AppReleaseAwaitingDrain(previous) {
+		previous.RuntimeID == "" || previous.ResolvedImageRef == "" || (!aligned && !store.AppReleaseAwaitingDrain(previous)) || (aligned && !store.AppReleaseHasAlignedRevision(expected)) {
 		return out, fmt.Errorf("drain requires an independent release workload identity")
 	}
 	policy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
-	if err != nil || policy.Mode != model.AppTrafficModeSingle || policy.StableWeight != 100 || policy.CandidateWeight != 0 || policy.CandidateReleaseID != "" || policy.StableReleaseID == previous.ID || policy.StableReleaseID == "" {
+	if err != nil || policy.Mode != model.AppTrafficModeSingle || policy.StableWeight != 100 || policy.CandidateWeight != 0 || policy.CandidateReleaseID != "" || policy.StableReleaseID == "" || (!aligned && policy.StableReleaseID == previous.ID) || (aligned && policy.StableReleaseID != previous.ID) {
 		return out, fmt.Errorf("release traffic has not been withdrawn")
 	}
 	stable, err := s.Store.GetAppRelease(app.TenantID, true, policy.StableReleaseID)
@@ -87,6 +93,9 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 	}
 	if stable.DeploymentName == previous.DeploymentName || stable.ServiceName == previous.ServiceName {
 		return out, fmt.Errorf("stable traffic still uses the previous workload")
+	}
+	if aligned && !sameReleaseDrainTarget(expected, stable) {
+		return out, fmt.Errorf("aligned serving release changed before drain")
 	}
 	proof, err := s.observeSafeRolloutRetirementTraffic(ctx, app, stable, since)
 	if err != nil {
