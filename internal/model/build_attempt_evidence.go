@@ -10,16 +10,19 @@ const OperationEvidenceTypeBuildAttempt = "build_attempt"
 // BuilderAttemptEvidence is a user-safe projection. Never add raw logs, URLs,
 // node names, pod names, credentials or arbitrary exception strings here.
 type BuilderAttemptEvidence struct {
-	Attempt               int       `json:"attempt"`
-	Outcome               string    `json:"outcome"`
-	StartedAt             time.Time `json:"started_at"`
-	FinishedAt            time.Time `json:"finished_at"`
-	Causes                []string  `json:"causes"`
-	MissingEvidence       []string  `json:"missing_evidence"`
-	MemoryRequestBytes    int64     `json:"memory_request_bytes,omitempty"`
-	MemoryLimitBytes      int64     `json:"memory_limit_bytes,omitempty"`
-	EphemeralRequestBytes int64     `json:"ephemeral_request_bytes,omitempty"`
-	EphemeralLimitBytes   int64     `json:"ephemeral_limit_bytes,omitempty"`
+	Attempt                int       `json:"attempt"`
+	Outcome                string    `json:"outcome"`
+	StartedAt              time.Time `json:"started_at"`
+	FinishedAt             time.Time `json:"finished_at"`
+	Causes                 []string  `json:"causes"`
+	MissingEvidence        []string  `json:"missing_evidence"`
+	MemoryRequestBytes     int64     `json:"memory_request_bytes,omitempty"`
+	MemoryLimitBytes       int64     `json:"memory_limit_bytes,omitempty"`
+	PeakMemoryBytes        int64     `json:"peak_memory_bytes,omitempty"`
+	MemoryPeakComplete     bool      `json:"memory_peak_complete,omitempty"`
+	MemoryAllocationSource string    `json:"memory_allocation_source,omitempty"`
+	EphemeralRequestBytes  int64     `json:"ephemeral_request_bytes,omitempty"`
+	EphemeralLimitBytes    int64     `json:"ephemeral_limit_bytes,omitempty"`
 }
 
 // PublicDeploymentCause is an allowlist, not a redactor. Unknown text is never

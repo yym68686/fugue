@@ -14,9 +14,15 @@ import (
 )
 
 func TestHeavyPlacementReservesLiveHeadroomBelowLegacySixGiFloor(t *testing.T) {
-	for _, mode := range []string{"normal", "capacity changes under lock", "lock contention", "equal OOM limit", "lower than OOM limit", "greater than OOM limit"} {
+	for _, mode := range []string{"normal", "capacity changes under lock", "lock contention", "equal OOM limit", "lower than OOM limit", "greater than OOM limit", "learned budget", "learned budget unavailable"} {
 		t.Run(mode, func(t *testing.T) {
 			policy := defaultBuilderPodPolicy()
+			if strings.HasPrefix(mode, "learned budget") {
+				policy.memoryTargetBytes = 1 << 30
+				if mode == "learned budget unavailable" {
+					policy.memoryTargetBytes = 6 << 30
+				}
+			}
 			demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
 			if err != nil {
 				t.Fatal(err)
@@ -94,7 +100,7 @@ func TestHeavyPlacementReservesLiveHeadroomBelowLegacySixGiFloor(t *testing.T) {
 				ctx = WithBuilderOOMGuard(ctx, func(context.Context, string) (int64, error) { return limit, nil }, nil)
 			}
 			placement, reservation, err := s.tryReservePlacement(ctx, "build-first")
-			if mode == "equal OOM limit" || mode == "lower than OOM limit" {
+			if mode == "equal OOM limit" || mode == "lower than OOM limit" || mode == "learned budget unavailable" {
 				var blocked *builderPlacementError
 				if !errors.As(err, &blocked) || reservation != "" {
 					t.Fatalf("unsafe reservation: %+v %s %v", placement, reservation, err)
@@ -110,6 +116,9 @@ func TestHeavyPlacementReservesLiveHeadroomBelowLegacySixGiFloor(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantNode, wantMemory := "worker-a", "5Gi"
+			if mode == "learned budget" {
+				wantMemory = "1Gi"
+			}
 			if mode == "capacity changes under lock" || mode == "lock contention" {
 				wantNode, wantMemory = "worker-b", "4Gi"
 			}

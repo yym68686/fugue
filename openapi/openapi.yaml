@@ -26730,6 +26730,18 @@ components:
         memory_limit_bytes:
           type: integer
           format: int64
+        peak_memory_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Conservative peak across all build stages, including init containers. Only present when every stage supplied a valid cgroup high-water mark.
+        memory_peak_complete:
+          type: boolean
+          description: True only when every build container supplied a valid whole-stage memory high-water mark. Missing observations never imply zero usage.
+        memory_allocation_source:
+          type: string
+          enum: [cold_start, history, oom_retry]
+          description: Source of the build memory allocation; learned allocations remain subject to the configured ceiling and OOM admission guard.
         ephemeral_request_bytes:
           type: integer
           format: int64

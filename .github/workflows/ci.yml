@@ -1066,6 +1066,11 @@ jobs:
           tools_dir="$(mktemp -d "$RUNNER_TEMP/fugue-workers-tools.XXXXXX")"
           npm install --prefix "$tools_dir" --no-audit --no-fund --save-exact workerd@1.20261108.1 esbuild@0.28.2
           FUGUE_TEST_WORKERS_NODE_MODULES="$tools_dir/node_modules" go test ./internal/sourceimport -run '^TestWorkersRuntime$' -count=1 -v
+      - name: Verify build memory measurement on disposable containers
+        timeout-minutes: 6
+        env:
+          FUGUE_TEST_BUILDER_MEMORY_CONTAINER: "1"
+        run: go test ./internal/sourceimport -run '^TestBuilderMemory(ContainerContract|NestedDockerContract)$' -count=1 -v
       - name: Materialize the exact declarative component plan
         id: release
         env:

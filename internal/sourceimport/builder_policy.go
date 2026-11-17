@@ -49,6 +49,10 @@ type BuilderToleration struct {
 }
 
 type BuilderPodPolicy struct {
+	// Internal prediction, not a new authorization ceiling or public policy.
+	memoryTargetBytes            int64
+	memoryHistoryKey             string
+	memoryAllocationSource       string
 	BuildNodeLabelKey            string                `json:"buildNodeLabelKey,omitempty"`
 	BuildNodeLabelValue          string                `json:"buildNodeLabelValue,omitempty"`
 	CandidateCount               int                   `json:"candidateCount,omitempty"`
@@ -206,10 +210,20 @@ func builderPodPolicyForJobAttempt(policy BuilderPodPolicy, profile builderWorkl
 		return current, nil
 	}
 	if attempt.MinimumMemoryBytes > 0 {
+		if current.memoryTargetBytes > 0 {
+			current.memoryTargetBytes = maxInt64(current.memoryTargetBytes, minInt64(parseBuilderBytes(current.HeavyMemoryLimitCeiling), attempt.MinimumMemoryBytes+attempt.MinimumMemoryBytes/2))
+			current.memoryAllocationSource = "oom_retry"
+		}
 		current.HeavyMemoryMinimum = formatBuilderMemoryBytes(maxInt64(parseBuilderBytes(current.HeavyMemoryMinimum), attempt.MinimumMemoryBytes))
 		if parseBuilderBytes(current.HeavyMemoryMinimum) > parseBuilderBytes(current.HeavyMemoryLimitCeiling) {
 			return BuilderPodPolicy{}, &BuilderResourceFailure{Resource: "memory", LimitBytes: parseBuilderBytes(current.HeavyMemoryLimitCeiling), Preflight: true}
 		}
+	}
+	if attempt.Number >= oomBuilderJobMaxAttempts && attempt.OOMRetryCount > 0 && current.memoryTargetBytes > 0 {
+		// Reserve the last bounded retry for the original live-headroom policy,
+		// so a large source change is not stuck behind an obsolete prediction.
+		current.memoryTargetBytes = 0
+		current.memoryAllocationSource = "oom_retry"
 	}
 	if attempt.EphemeralRetryCount > 0 {
 		previous := builderPodPolicyForRetryCounts(policy, profile, attempt.OOMRetryCount, attempt.EphemeralRetryCount-1)
@@ -369,6 +383,9 @@ func applyBuilderPodPolicy(podSpec map[string]any, policy BuilderPodPolicy, prof
 	applyBuilderResources(podSpec, workloadPolicy.Resources)
 	applyBuilderVolumeSizeLimits(podSpec, workloadPolicy)
 	applyBuilderTolerations(podSpec, policy.Tolerations)
+	if profile == builderWorkloadProfileHeavy {
+		instrumentBuilderMemory(podSpec)
+	}
 }
 
 func applyBuilderResources(podSpec map[string]any, resources BuilderResourceRequirements) {

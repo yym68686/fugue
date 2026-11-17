@@ -23,7 +23,11 @@ func WithBuilderEvidenceRecorder(ctx context.Context, record func(model.BuilderA
 func recordBuilderAttempt(ctx context.Context, jobName string, attempt builderJobAttempt, started time.Time, runErr error) {
 	record, _ := ctx.Value(builderEvidenceRecorderKey{}).(builderEvidenceRecorder)
 	if record == nil {
-		return
+		history, _ := ctx.Value(builderMemoryHistoryKey{}).(builderMemoryHistory)
+		if history.record == nil {
+			return
+		}
+		record = func(model.BuilderAttemptEvidence, map[string]any) {}
 	}
 	diagnostics := map[string]any{"job_name": jobName}
 	fact := model.BuilderAttemptEvidence{Attempt: attempt.Number, Outcome: "succeeded", StartedAt: started, FinishedAt: time.Now().UTC(), Causes: []string{}, MissingEvidence: []string{}}
@@ -113,6 +117,10 @@ func recordBuilderAttempt(ctx context.Context, jobName string, attempt builderJo
 	diagnostics["namespace"] = namespace
 	var snapshots []any
 	pods, err := listBuilderPods(captureCtx, namespace, jobName)
+	fact.PeakMemoryBytes, fact.MemoryPeakComplete, fact.MemoryAllocationSource = recordBuilderMemory(captureCtx, pods, started, runErr == nil && err == nil)
+	if !fact.MemoryPeakComplete {
+		fact.MissingEvidence = append(fact.MissingEvidence, "build_memory_peak")
+	}
 	if err != nil || len(pods) == 0 {
 		fact.MissingEvidence = append(fact.MissingEvidence, "build_snapshot")
 	}

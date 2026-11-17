@@ -425,11 +425,16 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 	}
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix, jobLabels)
 	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
+	recipeDigest, err := builderMemoryRecipeDigest(src.RootDir, dockerfilePath)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
 	buildReq := dockerfileBuildRequest{
 		CommitSHA:             src.ArchiveSHA256,
 		SourceLabel:           src.DefaultAppName,
 		ArchiveDownloadURL:    strings.TrimSpace(archiveDownloadURL),
 		DockerfilePath:        dockerfilePath,
+		BuildRecipeDigest:     recipeDigest,
 		BuildContextDir:       buildContextDir,
 		ImageRef:              imageRef,
 		DestinationImageRef:   destinationImageRef,

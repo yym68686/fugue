@@ -135,6 +135,11 @@ func builderPolicyAfterOOM(policy BuilderPodPolicy, profile builderWorkloadProfi
 		return policy, &BuilderMemoryAdmissionError{limit, ceiling}
 	}
 	policy.HeavyMemoryMinimum = formatBuilderMemoryBytes(maxInt64(minimum, parseBuilderBytes(policy.HeavyMemoryMinimum)))
+	if policy.memoryTargetBytes > 0 {
+		// Recover from an underestimated prediction in bounded, meaningful steps.
+		policy.memoryTargetBytes = maxInt64(policy.memoryTargetBytes, minInt64(ceiling, limit+limit/2))
+		policy.memoryAllocationSource = "oom_retry"
+	}
 	return policy, nil
 }
 

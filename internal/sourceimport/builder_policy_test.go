@@ -223,7 +223,7 @@ func TestBuildBuildpacksJobObjectInjectsSourceOverlayBeforeBuild(t *testing.T) {
 	if got := initContainers[1]["name"]; got != "source-overlay" {
 		t.Fatalf("expected source-overlay init container, got %#v", got)
 	}
-	command := initContainers[1]["command"].([]string)
+	command := initContainers[1]["args"].([]string)
 	if !strings.Contains(command[2], "requirements.txt") {
 		t.Fatalf("expected overlay command to mention requirements.txt, got %q", command[2])
 	}
@@ -244,7 +244,7 @@ func TestBuildBuildpacksJobObjectUsesHostNetworkForPackBuild(t *testing.T) {
 
 	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
 	container := podSpec["containers"].([]map[string]any)[0]
-	command := container["command"].([]string)
+	command := container["args"].([]string)
 	if !strings.Contains(command[2], "--network") || !strings.Contains(command[2], defaultBuildpacksContainerNetwork) {
 		t.Fatalf("expected pack build command to use host network, got %q", command[2])
 	}
@@ -342,7 +342,7 @@ func TestBuildBuildpacksJobObjectAddsAptAndLanguageBuildpacksWhenRequested(t *te
 
 	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
 	container := podSpec["containers"].([]map[string]any)[0]
-	command := container["command"].([]string)
+	command := container["args"].([]string)
 	if !strings.Contains(command[2], defaultPaketoAptBuildpack) {
 		t.Fatalf("expected pack build command to include apt buildpack, got %q", command[2])
 	}
@@ -462,7 +462,7 @@ func TestGeneratedBuilderJobsPushToNodeLocalRegistryWhenConfigured(t *testing.T)
 			t.Fatalf("dnsPolicy = %#v, want ClusterFirstWithHostNet", got)
 		}
 		container := podSpec["containers"].([]map[string]any)[0]
-		command := container["command"].([]string)
+		command := container["args"].([]string)
 		if !strings.Contains(command[2], "127.0.0.1:5000/fugue-apps/demo:git-abc123") {
 			t.Fatalf("expected buildpacks destination to use node-local registry, got %q", command[2])
 		}

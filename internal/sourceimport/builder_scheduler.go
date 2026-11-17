@@ -52,10 +52,11 @@ const (
 var errNoBuilderPlacement = errors.New("no eligible builder nodes")
 
 type builderJobPlacement struct {
-	CandidateHostnames []string
-	PreferredHostname  string
-	AllocatedDemand    builderResourceDemand
-	verifyReservation  func(context.Context) error
+	CandidateHostnames     []string
+	PreferredHostname      string
+	AllocatedDemand        builderResourceDemand
+	memoryAllocationSource string
+	verifyReservation      func(context.Context) error
 }
 
 type builderResourceDemand struct {
@@ -560,6 +561,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 
 		placement := buildBuilderPlacement(refreshedCandidates, candidate.Node.Name)
 		placement.AllocatedDemand = allocatedDemand
+		placement.memoryAllocationSource = s.policy.memoryAllocationSource
 		return placement, reservationName, nil
 	}
 
@@ -1074,7 +1076,11 @@ func builderDemandForProfile(policy BuilderPodPolicy, profile builderWorkloadPro
 
 func builderMemorySchedulingDemand(policy BuilderPodPolicy, profile builderWorkloadProfile, request, limit int64) int64 {
 	if profile == builderWorkloadProfileHeavy {
-		return parseBuilderBytes(policy.HeavyMemoryMinimum)
+		minimum := parseBuilderBytes(policy.HeavyMemoryMinimum)
+		if policy.memoryTargetBytes > 0 {
+			minimum = maxInt64(minimum, minInt64(policy.memoryTargetBytes, parseBuilderBytes(policy.HeavyMemoryLimitCeiling)))
+		}
+		return parseBuilderBytes(formatBuilderMemoryBytes(minimum))
 	}
 	return builderSchedulingDemand(request, limit)
 }
@@ -1086,6 +1092,11 @@ func builderAllocatedDemand(policy BuilderPodPolicy, profile builderWorkloadProf
 	}
 	ceiling := parseBuilderBytes(normalizeBuilderPodPolicy(policy).HeavyMemoryLimitCeiling)
 	if ceiling <= 0 {
+		return demand
+	}
+	if policy.memoryTargetBytes > 0 {
+		// A learned build waits for its full predicted budget; never silently
+		// squeeze it into the node's remaining capacity.
 		return demand
 	}
 	if candidate.Available.MemoryBytes < ceiling {

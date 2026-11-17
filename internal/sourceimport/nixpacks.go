@@ -344,6 +344,8 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 		ImageRef:           req.ImageRef,
 		JobLabels:          req.JobLabels,
 	})
+	req.PodPolicy = prepareBuilderMemory(ctx, req.PodPolicy, req.WorkloadProfile,
+		builderMemoryConfiguration("nixpacks", defaultNixpacksImage, defaultKanikoImage, defaultGitCloneImage, req.SourceDir, req.SourceOverlayFiles, req.SystemPackages))
 	ctx = withBuilderEffectivePolicy(ctx, req.PodPolicy, req.WorkloadProfile)
 	return runBuilderJobWithRetry(ctx, "nixpacks", jobName, req.ImageRef, logger, func(attemptCtx context.Context, attempt builderJobAttempt) error {
 		attemptPolicy, err := builderPodPolicyForJobAttempt(req.PodPolicy, req.WorkloadProfile, attempt)
@@ -367,6 +369,7 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 		attemptReq := req
 		attemptReq.Placement = placement
 		attemptReq.PodPolicy = builderPodPolicyWithAllocatedDemand(attemptPolicy, req.WorkloadProfile, placement.AllocatedDemand)
+		attemptReq.PodPolicy.memoryAllocationSource = placement.memoryAllocationSource
 		logger.Printf("builder job preflight complete kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
 		logger.Printf(
 			"builder job start kind=nixpacks name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
@@ -472,6 +475,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
 	applyBuilderPlacement(podSpec, req.Placement)
 	applyBuilderRegistryNetwork(podSpec, destinationImageRef)
+	annotateBuilderMemory(jobObject, req.PodPolicy)
 	return jobObject, nil
 }
 

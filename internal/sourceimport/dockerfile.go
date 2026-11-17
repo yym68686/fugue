@@ -60,6 +60,7 @@ type dockerfileBuildRequest struct {
 	SourceLabel           string
 	ArchiveDownloadURL    string
 	DockerfilePath        string
+	BuildRecipeDigest     string
 	BuildContextDir       string
 	ImageRef              string
 	DestinationImageRef   string
@@ -130,12 +131,17 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix, jobLabels)
 	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
+	recipeDigest, err := builderMemoryRecipeDigest(repo.RepoDir, dockerfilePath)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
 	buildReq := dockerfileBuildRequest{
 		RepoURL:               repoURL,
 		RepoAuthToken:         repoAuthToken,
 		Branch:                repo.Branch,
 		CommitSHA:             repo.CommitSHA,
 		DockerfilePath:        dockerfilePath,
+		BuildRecipeDigest:     recipeDigest,
 		BuildContextDir:       buildContextDir,
 		ImageRef:              imageRef,
 		DestinationImageRef:   destinationImageRef,
@@ -369,6 +375,8 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 	}
 
 	jobName := buildJobName(req)
+	req.PodPolicy = prepareBuilderMemory(ctx, req.PodPolicy, req.WorkloadProfile,
+		builderMemoryConfiguration("dockerfile", defaultKanikoImage, defaultGitCloneImage, req.DockerfilePath, req.BuildRecipeDigest, req.BuildContextDir, req.SourceOverlayFiles))
 	ctx = withBuilderEffectivePolicy(ctx, req.PodPolicy, req.WorkloadProfile)
 	return runBuilderJobWithRetry(ctx, "dockerfile", jobName, req.ImageRef, logger, func(attemptCtx context.Context, attempt builderJobAttempt) error {
 		attemptPolicy, err := builderPodPolicyForJobAttempt(req.PodPolicy, req.WorkloadProfile, attempt)
@@ -392,6 +400,7 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 		attemptReq := req
 		attemptReq.Placement = placement
 		attemptReq.PodPolicy = builderPodPolicyWithAllocatedDemand(attemptPolicy, req.WorkloadProfile, placement.AllocatedDemand)
+		attemptReq.PodPolicy.memoryAllocationSource = placement.memoryAllocationSource
 		logger.Printf("builder job preflight complete kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
 		logger.Printf(
 			"builder job start kind=dockerfile name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
@@ -580,6 +589,7 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
 	applyBuilderPlacement(podSpec, req.Placement)
 	applyBuilderRegistryNetwork(podSpec, destinationImageRef)
+	annotateBuilderMemory(jobObject, req.PodPolicy)
 	return jobObject, nil
 }
 

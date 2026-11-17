@@ -176,6 +176,8 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 		ImageRef:           req.ImageRef,
 		JobLabels:          req.JobLabels,
 	})
+	req.PodPolicy = prepareBuilderMemory(ctx, req.PodPolicy, req.WorkloadProfile,
+		builderMemoryConfiguration("buildpacks", defaultBuildpacksImage, defaultPackVersion, defaultGitCloneImage, req.BuilderImage, req.RunImage, os.Getenv(buildpacksBuilderImageEnv), os.Getenv(buildpacksRunImageEnv), defaultPaketoBuilderImage, defaultPaketoRunImage, req.SourceDir, req.DetectedProvider, req.SourceOverlayFiles, req.IncludeAptBuildpack))
 	ctx = withBuilderEffectivePolicy(ctx, req.PodPolicy, req.WorkloadProfile)
 	return runBuilderJobWithRetry(ctx, "buildpacks", jobName, req.ImageRef, logger, func(attemptCtx context.Context, attempt builderJobAttempt) error {
 		attemptPolicy, err := builderPodPolicyForJobAttempt(req.PodPolicy, req.WorkloadProfile, attempt)
@@ -199,6 +201,7 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 		attemptReq := req
 		attemptReq.Placement = placement
 		attemptReq.PodPolicy = builderPodPolicyWithAllocatedDemand(attemptPolicy, req.WorkloadProfile, placement.AllocatedDemand)
+		attemptReq.PodPolicy.memoryAllocationSource = placement.memoryAllocationSource
 		logger.Printf("builder job preflight complete kind=buildpacks stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
 		logger.Printf(
 			"builder job start kind=buildpacks name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
@@ -312,6 +315,7 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
 	applyBuilderPlacement(podSpec, req.Placement)
 	applyBuilderRegistryNetwork(podSpec, destinationImageRef)
+	annotateBuilderMemory(jobObject, req.PodPolicy)
 	return jobObject, nil
 }
 
@@ -384,7 +388,11 @@ func buildpacksJobScript(workingDir, imageRef, builderImage, runImage, provider 
 apk add --no-cache curl tar >/dev/null
 export DOCKER_HOST=unix:///var/run/docker.sock
 mkdir -p /var/run /workspace/bin
-dockerd --host="$DOCKER_HOST" --data-root /var/lib/docker%s >/workspace/dockerd.log 2>&1 &
+set --
+if [ -n "${FUGUE_BUILD_MEMORY_CGROUP:-}" ]; then
+  set -- --exec-opt native.cgroupdriver=cgroupfs --cgroup-parent "$FUGUE_BUILD_MEMORY_CGROUP"
+fi
+dockerd --host="$DOCKER_HOST" --data-root /var/lib/docker%s "$@" >/workspace/dockerd.log 2>&1 &
 dockerd_pid=$!
 cleanup() {
   kill "$dockerd_pid" >/dev/null 2>&1 || true

@@ -37,9 +37,10 @@ type builderPodList struct {
 
 type builderPod struct {
 	Metadata struct {
-		Name              string    `json:"name"`
-		UID               string    `json:"uid"`
-		CreationTimestamp time.Time `json:"creationTimestamp"`
+		Name              string            `json:"name"`
+		UID               string            `json:"uid"`
+		Annotations       map[string]string `json:"annotations,omitempty"`
+		CreationTimestamp time.Time         `json:"creationTimestamp"`
 	} `json:"metadata"`
 	Spec struct {
 		NodeName       string                     `json:"nodeName,omitempty"`
@@ -50,8 +51,9 @@ type builderPod struct {
 }
 
 type builderEvidenceContainer struct {
-	Name      string                      `json:"name"`
-	Resources BuilderResourceRequirements `json:"resources"`
+	Name          string                      `json:"name"`
+	RestartPolicy string                      `json:"restartPolicy,omitempty"`
+	Resources     BuilderResourceRequirements `json:"resources"`
 }
 
 type builderPodStatus struct {
@@ -64,9 +66,10 @@ type builderPodStatus struct {
 }
 
 type builderContainerStatus struct {
-	Name      string              `json:"name"`
-	State     builderRuntimeState `json:"state,omitempty"`
-	LastState builderRuntimeState `json:"lastState,omitempty"`
+	Name         string              `json:"name"`
+	RestartCount int                 `json:"restartCount,omitempty"`
+	State        builderRuntimeState `json:"state,omitempty"`
+	LastState    builderRuntimeState `json:"lastState,omitempty"`
 }
 
 type builderRuntimeState struct {

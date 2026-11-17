@@ -56,6 +56,13 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		})
 	}
 	importCtx = sourceimport.WithBuilderEvidenceRecorder(importCtx, recordBuildEvidence)
+	memoryLedgerKey := buildMemoryLedgerKey(app)
+	memoryScope := buildMemoryScope(*op.DesiredSource, *op.DesiredSpec)
+	importCtx = sourceimport.WithBuilderMemoryHistory(importCtx, func(readCtx context.Context, profile string) (int64, error) {
+		return s.readBuildMemoryTarget(readCtx, memoryLedgerKey, buildMemoryProfile(memoryScope, profile))
+	}, func(writeCtx context.Context, profile, uid string, peak int64) error {
+		return s.recordBuildMemoryPeak(writeCtx, memoryLedgerKey, buildMemoryProfile(memoryScope, profile), uid, peak)
+	})
 
 	jobLabels := map[string]string{
 		"fugue.pro/operation-id": op.ID,
