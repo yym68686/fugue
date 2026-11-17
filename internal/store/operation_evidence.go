@@ -856,7 +856,7 @@ func normalizeEvidenceRedactionStatus(raw string) string {
 }
 
 func operationEvidenceMatchesFilter(e model.OperationEvidence, filter model.OperationEvidenceFilter) bool {
-	if isLongLivedMigrationEvidenceType(e.Type) && !filter.IncludeMigrationLedger {
+	if isLongLivedMigrationEvidenceType(e.Type) && !strings.HasPrefix(e.Type,"postgres_image_migration_") && !filter.IncludeMigrationLedger {
 		return false
 	}
 	if !filter.PlatformAdmin && strings.TrimSpace(filter.TenantID) != "" && strings.TrimSpace(e.TenantID) != strings.TrimSpace(filter.TenantID) {
@@ -944,7 +944,7 @@ func retainOperationEvidenceScope(items []model.OperationEvidence, inScope func(
 			continue
 		}
 		if isLongLivedMigrationEvidenceType(item.Type) {
-			if !item.CollectedAt.IsZero() && item.CollectedAt.Before(migrationCutoff) {
+			if !strings.HasPrefix(item.Type, "postgres_image_migration_") && !item.CollectedAt.IsZero() && item.CollectedAt.Before(migrationCutoff) {
 				continue
 			}
 			migration = append(migration, item)
@@ -982,6 +982,8 @@ func retainOperationEvidenceScope(items []model.OperationEvidence, inScope func(
 
 func isLongLivedMigrationEvidenceType(evidenceType string) bool {
 	switch strings.TrimSpace(evidenceType) {
+	case "postgres_image_migration_baseline", "postgres_image_migration_intent", "postgres_image_migration_verified":
+		return true
 	case model.OperationEvidenceTypeMigrationStarted,
 		model.OperationEvidenceTypeMigrationCompleted,
 		model.OperationEvidenceTypeMigrationFailed:

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/pgimage"
 )
 
 // FailoverDesiredSpec moves the app to the failover target and consumes the
@@ -52,6 +53,7 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 	}
 	switch op.Type {
 	case model.OperationTypeDeploy,
+		pgimage.OperationType,
 		model.OperationTypeMigrate,
 		model.OperationTypeDatabaseSwitchover,
 		model.OperationTypeDatabaseLocalize, storagerecovery.OperationType,
@@ -67,6 +69,8 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 
 func isManagedPostgresServiceOperation(operationType string) bool {
 	switch operationType {
+	case pgimage.OperationType:
+		return true
 	case model.OperationTypeDatabaseSwitchover,
 		model.OperationTypeDatabaseLocalize, storagerecovery.OperationType,
 		model.OperationTypeDatabaseSuspend,
@@ -80,6 +84,8 @@ func isManagedPostgresServiceOperation(operationType string) bool {
 
 func operationRequiresManagedController(operationType string) bool {
 	switch operationType {
+	case pgimage.OperationType:
+		return true
 	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
 		return true
 	case model.OperationTypeImport,

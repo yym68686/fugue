@@ -8,6 +8,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/pgimage"
 	"fugue/internal/store"
 )
 
@@ -79,6 +80,12 @@ func (s *Server) handleForceDeleteApp(
 		})
 		httpx.WriteError(w, http.StatusConflict, managedPostgresResizeForceDeleteConflictMessage)
 		return
+	}
+	for _, op := range operations {
+		if op.Type == pgimage.OperationType && isActiveAppOperationStatus(op.Status) {
+			httpx.WriteError(w, http.StatusConflict, "app force delete is blocked while database image migration is active")
+			return
+		}
 	}
 
 	abortedCount := 0

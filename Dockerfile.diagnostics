@@ -7,6 +7,7 @@ RUN go mod download
 COPY assets ./assets
 COPY cmd ./cmd
 COPY internal ./internal
+COPY deploy/environments/production/cnpg-controller ./deploy/environments/production/cnpg-controller
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o /out/fugue-diagnostic-probe ./cmd/fugue-diagnostic-probe \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o /out/fugue-diagnostic-agent ./cmd/fugue-api/diagnostic_agent \

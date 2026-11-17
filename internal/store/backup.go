@@ -14,6 +14,7 @@ import (
 
 	"fugue/internal/backupschedule"
 	"fugue/internal/model"
+	"fugue/internal/pgimage"
 )
 
 const (
@@ -2633,6 +2634,7 @@ func activeManagedPostgresExclusiveMutationForBackupRun(state *model.State, run 
 	// Preserve the established suspend conflict when malformed legacy state
 	// contains more than one active database mutation; resume and resize follow.
 	for _, operationType := range []string{
+		pgimage.OperationType,
 		model.OperationTypeDatabaseSuspend,
 		model.OperationTypeDatabaseResume,
 		model.OperationTypeDatabaseResize,
@@ -2746,7 +2748,7 @@ SELECT operation.type
 FROM fugue_operations AS operation
 JOIN fugue_backing_services AS service ON service.id = operation.service_id
 WHERE operation.app_id = $1
-  AND operation.type IN ($2, $3, $4)
+  AND operation.type IN ($2, $3, $4, 'database-image-migrate')
   AND operation.status IN ($5, $6, $7)
   AND (
 	$8 = ''
