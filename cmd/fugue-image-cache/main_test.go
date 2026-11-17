@@ -2390,6 +2390,102 @@ func TestImageCachePruneKeepsBlobsWhenDigestManifestStillServed(t *testing.T) {
 	}
 }
 
+func TestImageCachePruneDeletesBlobsAfterAllAliasesAreRemoved(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit:   imageCacheDiskLimit{Enabled: true, HighWatermarkPercent: 100, LowWatermarkPercent: 99, MaxDeleteBytesPerRun: 1 << 30},
+	}
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte(`{"config":"aliases"}`))
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("unshared-layer"))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	manifestDigest := manifestBodyDigest([]byte(manifest))
+	repo := "fugue-apps/synthetic"
+	tag := "git-deadbeef-build-operation"
+	for _, target := range []string{tag, manifestDigest} {
+		request := httptest.NewRequest(http.MethodPut, "http://image-cache.test/v2/"+repo+"/manifests/"+target, strings.NewReader(manifest))
+		request.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		response := httptest.NewRecorder()
+		cache.registry.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("put manifest target %s: status=%d body=%q", target, response.Code, response.Body.String())
+		}
+		if err := cache.persistManifest(repo, target, "application/vnd.oci.image.manifest.v1+json", []byte(manifest)); err != nil {
+			t.Fatalf("persist manifest target %s: %v", target, err)
+		}
+	}
+
+	result := postImageCachePrune(t, cache, fmt.Sprintf(`{"dry_run":false,"allow_delete":true,"include_unreferenced_blobs":true,"targets":[{"repo":%q,"target":%q,"digest":%q},{"repo":%q,"target":%q,"digest":%q}],"max_delete_bytes":"1Gi"}`, repo, tag, manifestDigest, repo, manifestDigest, manifestDigest))
+	if result.ExecutionStatus != "completed" || result.DeletedBlobBytes == 0 || result.DeletedBytes != result.PlannedDeleteBytes {
+		t.Fatalf("prune did not complete the selected image reclamation: %+v", result)
+	}
+	if result.DeletedManifestBytes == 0 || result.RemainingUnreferencedCount != 0 || !result.RemainingSnapshotValid {
+		t.Fatalf("unexpected prune receipt: %+v", result)
+	}
+	for _, digest := range []string{configDigest, layerDigest} {
+		if _, err := os.Stat(imageCacheBlobPath(storeDir, digest)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected unreferenced blob %s deleted in the same run, stat err=%v", digest, err)
+		}
+	}
+}
+
+func TestImageCachePruneDefersWhenContentMutationIsActive(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit:   imageCacheDiskLimit{Enabled: true, HighWatermarkPercent: 100, LowWatermarkPercent: 99, MaxDeleteBytesPerRun: 1 << 30},
+	}
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte(`{"config":"concurrent"}`))
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("concurrent-layer"))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	manifestDigest := manifestBodyDigest([]byte(manifest))
+	put := httptest.NewRequest(http.MethodPut, "http://image-cache.test/v2/fugue-apps/synthetic/manifests/git-deadbeef-build-operation", strings.NewReader(manifest))
+	put.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+	putResponse := httptest.NewRecorder()
+	cache.registry.ServeHTTP(putResponse, put)
+	if putResponse.Code != http.StatusCreated {
+		t.Fatalf("put manifest: status=%d body=%q", putResponse.Code, putResponse.Body.String())
+	}
+	if err := cache.persistManifest("fugue-apps/synthetic", "git-deadbeef-build-operation", "application/vnd.oci.image.manifest.v1+json", []byte(manifest)); err != nil {
+		t.Fatal(err)
+	}
+	records, err := cache.managementManifestRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, inactive := cache.contentSnapshot()
+	plan, err := cache.planImageCachePrune(imageCachePruneRequest{
+		targets:     []imageCachePruneTarget{{Repo: "fugue-apps/synthetic", Target: "git-deadbeef-build-operation", Digest: manifestDigest}},
+		allowDelete: true, requestMaxBytes: 1 << 30,
+	}, records, map[string]struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.contentGeneration, plan.contentSnapshotValid = generation, inactive
+	finishMutation := cache.beginContentMutation()
+	if err := cache.executeImageCachePrunePlan(&plan); err != nil {
+		t.Fatal(err)
+	}
+	finishMutation()
+	if plan.ExecutionStatus != "deferred" || plan.SkippedReason != "content_changed" || plan.Deleted {
+		t.Fatalf("expected safe deferral before any mutation, got %+v", plan)
+	}
+	if _, err := os.Stat(imageCacheBlobPath(storeDir, configDigest)); err != nil {
+		t.Fatalf("config blob was removed during active mutation: %v", err)
+	}
+	if _, err := os.Stat(imageCacheBlobPath(storeDir, layerDigest)); err != nil {
+		t.Fatalf("layer blob was removed during active mutation: %v", err)
+	}
+}
+
 func TestImageCacheBatchPruneDryRunDoesNotMutateFilesystem(t *testing.T) {
 	t.Parallel()
 
@@ -2770,14 +2866,21 @@ func TestReportIncludesClusterNodeIdentity(t *testing.T) {
 }
 
 type imageCachePruneTestResult struct {
-	Deleted            bool                      `json:"deleted"`
-	SkippedReason      string                    `json:"skipped_reason"`
-	DeletedBytes       int64                     `json:"deleted_bytes"`
-	PlannedDeleteBytes int64                     `json:"planned_delete_bytes"`
-	SelectedCount      int                       `json:"selected_count"`
-	BudgetExhausted    bool                      `json:"budget_exhausted"`
-	SkippedManifests   []imageCacheManifestEntry `json:"skipped_manifests"`
-	SelectedManifests  []imageCacheManifestEntry `json:"selected_manifests"`
+	Deleted                    bool                      `json:"deleted"`
+	SkippedReason              string                    `json:"skipped_reason"`
+	DeletedBytes               int64                     `json:"deleted_bytes"`
+	ExecutionStatus            string                    `json:"execution_status"`
+	DeletedManifestBytes       int64                     `json:"deleted_manifest_bytes"`
+	DeletedBlobBytes           int64                     `json:"deleted_blob_bytes"`
+	SkippedBlobBytes           int64                     `json:"skipped_blob_bytes"`
+	RemainingUnreferencedBytes int64                     `json:"remaining_unreferenced_bytes"`
+	RemainingUnreferencedCount int                       `json:"remaining_unreferenced_count"`
+	RemainingSnapshotValid     bool                      `json:"remaining_snapshot_valid"`
+	PlannedDeleteBytes         int64                     `json:"planned_delete_bytes"`
+	SelectedCount              int                       `json:"selected_count"`
+	BudgetExhausted            bool                      `json:"budget_exhausted"`
+	SkippedManifests           []imageCacheManifestEntry `json:"skipped_manifests"`
+	SelectedManifests          []imageCacheManifestEntry `json:"selected_manifests"`
 }
 
 func postImageCachePrune(t *testing.T, cache *imageCache, body string) imageCachePruneTestResult {

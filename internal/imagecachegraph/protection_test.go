@@ -111,6 +111,22 @@ func TestOrderCandidatesParentsFirstBeforeApplyingTargetLimit(t *testing.T) {
 	}
 }
 
+func TestSelectCandidatesKeepsImageAliasesTogether(t *testing.T) {
+	t.Parallel()
+
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	candidates := []model.ImageCachePruneCandidate{
+		{Repo: "fugue-apps/synthetic", Target: "git-deadbeef-build-operation", Digest: digest, Reason: "deleted_image_generation", PlannedDeleteBytes: 100},
+		{Repo: "fugue-apps/synthetic", Target: digest, Digest: digest, Reason: "deleted_image_generation", PlannedDeleteBytes: 100},
+		{Repo: "fugue-apps/other", Target: "git-cafebabe-build-operation", Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Reason: "deleted_image_generation"},
+	}
+
+	got := SelectCandidatesWithGraphClosure(candidates, 1)
+	if len(got) != 2 || got[0].Digest != digest || got[1].Digest != digest {
+		t.Fatalf("selected candidates split an image alias group: %+v", got)
+	}
+}
+
 func TestSelectCandidatesWithGraphClosureUsesSoftLimit(t *testing.T) {
 	t.Parallel()
 

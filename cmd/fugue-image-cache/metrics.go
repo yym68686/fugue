@@ -24,6 +24,11 @@ type imageCacheMetrics struct {
 	uploadExpiredBytes    atomic.Uint64
 	uploadStateMismatches atomic.Uint64
 	uploadDeletedBytes    atomic.Uint64
+	prunePlannedBytes     atomic.Uint64
+	pruneDeletedBytes     atomic.Uint64
+	pruneSkippedBytes     atomic.Uint64
+	pruneDeferred         atomic.Uint64
+	pruneErrors           atomic.Uint64
 }
 
 func (m *imageCacheMetrics) writePrometheus(w io.Writer) {
@@ -45,6 +50,11 @@ func (m *imageCacheMetrics) writePrometheus(w io.Writer) {
 	write("fugue_image_cache_disk_pressure_total", "Inventory observations where the configured disk pressure guard was active.", m.diskPressureTotal.Load())
 	write("fugue_image_cache_upload_gc_errors_total", "Failed upload maintenance passes.", m.uploadGCErrors.Load())
 	write("fugue_image_cache_upload_deleted_bytes_total", "Expired temporary upload bytes removed.", m.uploadDeletedBytes.Load())
+	write("fugue_image_cache_prune_planned_bytes_total", "Bytes planned across prune execution attempts.", m.prunePlannedBytes.Load())
+	write("fugue_image_cache_prune_deleted_bytes_total", "Bytes actually removed by prune execution.", m.pruneDeletedBytes.Load())
+	write("fugue_image_cache_prune_skipped_blob_bytes_total", "Planned blob bytes retained by final execution checks.", m.pruneSkippedBytes.Load())
+	write("fugue_image_cache_prune_deferred_total", "Prune attempts deferred before deletion.", m.pruneDeferred.Load())
+	write("fugue_image_cache_prune_errors_total", "Prune execution errors.", m.pruneErrors.Load())
 	for name, value := range map[string]uint64{
 		"fugue_image_cache_upload_tmp_bytes":            m.uploadTempBytes.Load(),
 		"fugue_image_cache_upload_expired_bytes":        m.uploadExpiredBytes.Load(),

@@ -8,6 +8,32 @@ quarantined regardless of age. In delete mode unsafe aliases are protected
 before graph propagation, preserving all child manifests and shared layers.
 Tag targets are bound to the expected digest at both claim and node execution.
 
+Prune execution deletes admitted manifests first, then calculates final blob
+references from surviving journals and the serving registry. It checks complete
+manifest graphs, aliases and shared blobs. A transient registry/read failure
+cannot establish absence. Pins protect every alias of their immutable digest.
+Selection keeps admitted same-digest aliases and graph children in one batch.
+
+Uploads, replication and pin updates invalidate an optimistic content generation.
+They do not wait for a whole GC pass. Final unlink operations run under a short
+generation check; a changed observation defers remaining deletion. File identity,
+size and mtime are rechecked. Targeted retirement does not sweep unrelated orphan
+blobs. Automatic tasks carry an explicit inventory-derived orphan digest set,
+revalidated at claim time and bounded to 1,024 entries per task. A newly uploaded
+blob awaiting its manifest is outside that grant. Budget, cooldown and retirement
+authorization are unchanged.
+
+Execution receipts distinguish `execution_status` (`completed`, `partial`,
+`deferred`, `failed`, or `dry_run`), planned bytes, actual manifest/blob deletion,
+skipped blob bytes/reasons and remaining unreferenced count/bytes. The remaining
+snapshot is usable only when `remaining_snapshot_valid` is true. Completion is
+per attempt, not a declaration that all retired images have been reclaimed.
+The node task result carries this distinction; fixed-cardinality Prometheus
+counters expose planned, deleted, skipped, deferred and failed work.
+Updater v49 forwards the explicit orphan digest grant and execution receipt.
+The existing declarative node-policy rollout upgrades the listed storage nodes;
+the persisted resource limits themselves are unchanged.
+
 `fugue_image_retirements` retains immutable generation decisions independently
 of business image/app rows. PostgreSQL archives transitions transactionally;
 existing retiring generations are backfilled idempotently. A restored live

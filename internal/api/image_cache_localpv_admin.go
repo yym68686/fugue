@@ -287,6 +287,11 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 		dryRun = *req.DryRun
 	}
 	allowDelete := req.AllowDelete && !dryRun && mode == model.ImageCachePruneModeDelete
+	orphanDigestsRaw, err := json.Marshal(imagecachegraph.OrphanBlobDigests(plan.UnreferencedBlobs))
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	task, err := s.store.CreateNodeUpdateTask(principal, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{
 		"prune_plan_id":              plan.ID,
 		"plan_hash":                  plan.PlanHash,
@@ -297,6 +302,7 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 		"max_delete_bytes":           fmt.Sprintf("%d", plan.MaxDeleteBytes),
 		"min_manifest_age":           imagecachepolicy.ExecutionMinAge(plan),
 		"include_unreferenced_blobs": fmt.Sprintf("%t", plan.CandidateBlobCount > 0),
+		"unreferenced_blob_digests":  string(orphanDigestsRaw),
 		"candidate_blob_bytes":       fmt.Sprintf("%d", plan.CandidateBlobBytes),
 		"candidate_manifest_count":   fmt.Sprintf("%d", plan.CandidateManifestCount),
 		"candidate_blob_count":       fmt.Sprintf("%d", plan.CandidateBlobCount),

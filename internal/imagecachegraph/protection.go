@@ -9,6 +9,27 @@ import (
 	"fugue/internal/model"
 )
 
+// Bound the serialized task variable below the host's single-argument limit.
+func OrphanBlobDigests(blobs []model.ImageCachePruneBlobCandidate) []string {
+	const maxDigests = 1024
+	out := make([]string, 0, min(len(blobs), maxDigests))
+	seen := map[string]struct{}{}
+	for _, blob := range blobs {
+		if blob.Digest == "" {
+			continue
+		}
+		if _, exists := seen[blob.Digest]; exists {
+			continue
+		}
+		seen[blob.Digest] = struct{}{}
+		out = append(out, blob.Digest)
+		if len(out) == maxDigests {
+			break
+		}
+	}
+	return out
+}
+
 func AutomaticDeleteReasonSafe(reason string) bool {
 	switch strings.TrimSpace(reason) {
 	case "deleted_image_generation", "stale_replica", "excess_replica", "orphan_retirement":
@@ -156,6 +177,11 @@ func candidateGraphClosure(candidates []model.ImageCachePruneCandidate, children
 		}
 		seen[index] = struct{}{}
 		closure = append(closure, index)
+		// Tag and immutable digest records are one physical image. Keep all
+		// admitted aliases in the same batch, including aliases of graph children.
+		for _, aliasIndex := range childrenByDigest[manifestDigestKey(candidates[index].Repo, candidates[index].Digest)] {
+			visit(aliasIndex)
+		}
 		for _, digest := range candidates[index].ReferencedManifests {
 			for _, childIndex := range childrenByDigest[manifestDigestKey(candidates[index].Repo, digest)] {
 				visit(childIndex)

@@ -252,6 +252,10 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		// Persistence deliberately drops detailed candidates. Preserve the
 		// execution guard derived from the full, admitted retirement plan.
 		executionMinAge := imagecachepolicy.ExecutionMinAge(plan)
+		orphanDigestsRaw, err := json.Marshal(imagecachegraph.OrphanBlobDigests(plan.UnreferencedBlobs))
+		if err != nil {
+			return err
+		}
 		persisted, err := s.Store.UpsertImageCachePrunePlanSummary(plan)
 		if err != nil {
 			return err
@@ -269,6 +273,7 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 			"max_delete_bytes":           fmt.Sprintf("%d", plan.MaxDeleteBytes),
 			"min_manifest_age":           executionMinAge,
 			"include_unreferenced_blobs": fmt.Sprintf("%t", plan.CandidateBlobCount > 0),
+			"unreferenced_blob_digests":  string(orphanDigestsRaw),
 			"candidate_blob_count":       fmt.Sprintf("%d", plan.CandidateBlobCount),
 			"candidate_blob_bytes":       fmt.Sprintf("%d", plan.CandidateBlobBytes),
 			"prune_reason":               "image-cache-orphan",

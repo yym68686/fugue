@@ -632,6 +632,9 @@ func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.Nod
 				return "", err
 			}
 			if plan.CandidateBlobCount > 0 || plan.CandidateBlobBytes > 0 {
+				if reason := imageCacheOrphanDigestRefusal(task.Payload, plan); reason != "" {
+					return reason, nil
+				}
 				return "", nil
 			}
 			return "refuse prune-image-cache delete task before execution: latest plan has no unreferenced blob candidates", nil
@@ -653,6 +656,9 @@ func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.Nod
 	if err != nil {
 		return "", err
 	}
+	if reason := imageCacheOrphanDigestRefusal(task.Payload, plan); reason != "" {
+		return reason, nil
+	}
 	for _, target := range targets {
 		candidate, ok := imageCachePrunePlanCandidateForTaskTarget(plan.Candidates, target)
 		if !ok {
@@ -666,6 +672,27 @@ func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.Nod
 		}
 	}
 	return "", nil
+}
+
+func imageCacheOrphanDigestRefusal(payload map[string]string, plan model.ImageCachePrunePlan) string {
+	raw := strings.TrimSpace(payload["unreferenced_blob_digests"])
+	if raw == "" {
+		return ""
+	}
+	var digests []string
+	if json.Unmarshal([]byte(raw), &digests) != nil {
+		return "refuse prune-image-cache: invalid orphan digest set"
+	}
+	admitted := make(map[string]struct{}, len(plan.UnreferencedBlobs))
+	for _, blob := range plan.UnreferencedBlobs {
+		admitted[blob.Digest] = struct{}{}
+	}
+	for _, digest := range digests {
+		if _, ok := admitted[digest]; !ok {
+			return "refuse prune-image-cache: orphan digest is stale or protected in latest plan"
+		}
+	}
+	return ""
 }
 
 func nodeUpdateTaskIsRepair(taskType string) bool {
@@ -1051,6 +1078,7 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		"max_delete_bytes",
 		"min_manifest_age",
 		"include_unreferenced_blobs",
+		"unreferenced_blob_digests",
 		"candidate_blob_count",
 		"candidate_blob_bytes",
 		"expected_image_size_bytes",
@@ -5059,10 +5087,12 @@ prune_image_cache() {
   local min_manifest_age="${FUGUE_NODE_UPDATE_TASK_MIN_MANIFEST_AGE:-}"
   local include_unreferenced_blobs="${FUGUE_NODE_UPDATE_TASK_INCLUDE_UNREFERENCED_BLOBS:-false}"
   local targets_json="${FUGUE_NODE_UPDATE_TASK_TARGETS_JSON:-[]}"
+  local orphan_digests="${FUGUE_NODE_UPDATE_TASK_UNREFERENCED_BLOB_DIGESTS:-[]}"
   local body
   local response
   local planned_delete_bytes
   local deleted_bytes
+  local execution_status skipped_reason skipped_blob_bytes remaining_unreferenced_bytes remaining_snapshot_valid
   local candidate_count
   case "${dry_run}" in true|false) ;; *) dry_run=true ;; esac
   case "${allow_delete}" in true|false) ;; *) allow_delete=false ;; esac
@@ -5071,10 +5101,16 @@ prune_image_cache() {
     \[*\]) ;;
     *) targets_json="[]" ;;
   esac
-  body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete},\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"max_delete_bytes\":\"$(json_escape_shell "${max_delete_bytes}")\",\"min_manifest_age\":\"$(json_escape_shell "${min_manifest_age}")\",\"include_unreferenced_blobs\":${include_unreferenced_blobs},\"targets\":${targets_json}}"
+  case "${orphan_digests}" in \[*\]) ;; *) orphan_digests="[]" ;; esac
+  body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete},\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"max_delete_bytes\":\"$(json_escape_shell "${max_delete_bytes}")\",\"min_manifest_age\":\"$(json_escape_shell "${min_manifest_age}")\",\"include_unreferenced_blobs\":${include_unreferenced_blobs},\"unreferenced_blob_digests\":${orphan_digests},\"targets\":${targets_json}}"
   response="$(image_cache_api_json /fugue/cache/v1/prune "${body}")"
   planned_delete_bytes="$(printf '%s' "${response}" | sed -n 's/.*"planned_delete_bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
   deleted_bytes="$(printf '%s' "${response}" | sed -n 's/.*"deleted_bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  execution_status="$(printf '%s' "${response}" | sed -n 's/.*"execution_status"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' | head -n 1)"
+  skipped_reason="$(printf '%s' "${response}" | sed -n 's/.*"skipped_reason"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' | head -n 1)"
+  skipped_blob_bytes="$(printf '%s' "${response}" | sed -n 's/.*"skipped_blob_bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  remaining_unreferenced_bytes="$(printf '%s' "${response}" | sed -n 's/.*"remaining_unreferenced_bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  remaining_snapshot_valid="$(printf '%s' "${response}" | sed -En 's/.*"remaining_snapshot_valid"[[:space:]]*:[[:space:]]*(true|false).*/\1/p' | head -n 1)"
   candidate_count="$(printf '%s' "${response}" | sed -n 's/.*"candidate_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
   if printf '%s' "${response}" | grep -Eq '"deleted"[[:space:]]*:[[:space:]]*true'; then
     if [ -n "${image_id}" ]; then
@@ -5085,7 +5121,7 @@ prune_image_cache() {
     log_task "image-cache prune delete completed; reporting post-prune inventory"
     report_image_cache_inventory
   fi
-  FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="image-cache prune completed dry_run=${dry_run} allow_delete=${allow_delete} planned_delete_bytes=${planned_delete_bytes:-0} deleted_bytes=${deleted_bytes:-0} candidate_count=${candidate_count:-0}"
+  FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="image-cache prune completed dry_run=${dry_run} allow_delete=${allow_delete} planned_delete_bytes=${planned_delete_bytes:-0} deleted_bytes=${deleted_bytes:-0} candidate_count=${candidate_count:-0} execution_status=${execution_status:-unknown} skipped_reason=${skipped_reason:-none} skipped_blob_bytes=${skipped_blob_bytes:-0} remaining_unreferenced_bytes=${remaining_unreferenced_bytes:-0} remaining_snapshot_valid=${remaining_snapshot_valid:-false}"
   export FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE
   log_task "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE}"
 }

@@ -83,6 +83,9 @@ type imageCache struct {
 	uploadBarrier        sync.RWMutex
 	uploadLocks          [64]sync.Mutex
 	uploadOpenFiles      func() (map[string]bool, error)
+	contentActivity      imageCacheContentActivity
+	pruneMu              sync.Mutex
+	pinMu                sync.Mutex
 	hydrateMu            sync.Mutex
 	hydrateCalls         map[string]*hydrateCall
 	sourceMu             sync.RWMutex
@@ -590,6 +593,9 @@ func (c *imageCache) handleManagementReplicate(w http.ResponseWriter, r *http.Re
 }
 
 func (c *imageCache) handleManagementPin(w http.ResponseWriter, r *http.Request) {
+	defer c.beginContentMutation()()
+	c.pinMu.Lock()
+	defer c.pinMu.Unlock()
 	var req struct {
 		ImageRef  string     `json:"image_ref"`
 		Repo      string     `json:"repo"`
@@ -640,6 +646,9 @@ func (c *imageCache) handleManagementPin(w http.ResponseWriter, r *http.Request)
 }
 
 func (c *imageCache) handleManagementUnpin(w http.ResponseWriter, r *http.Request) {
+	defer c.beginContentMutation()()
+	c.pinMu.Lock()
+	defer c.pinMu.Unlock()
 	var req struct {
 		ImageRef string `json:"image_ref"`
 		Repo     string `json:"repo"`
@@ -677,6 +686,11 @@ func (c *imageCache) handleManagementUnpin(w http.ResponseWriter, r *http.Reques
 }
 
 func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Request) {
+	// Serialize maintenance, not request traffic. Writers invalidate this
+	// optimistic observation and take priority over reclamation.
+	c.pruneMu.Lock()
+	defer c.pruneMu.Unlock()
+	generation, inactive := c.contentSnapshot()
 	var req struct {
 		DryRun                   *bool                   `json:"dry_run"`
 		AllowDelete              bool                    `json:"allow_delete"`
@@ -688,6 +702,7 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		MaxDeleteBytes           string                  `json:"max_delete_bytes"`
 		MinManifestAge           string                  `json:"min_manifest_age"`
 		IncludeUnreferencedBlobs bool                    `json:"include_unreferenced_blobs"`
+		UnreferencedBlobDigests  []string                `json:"unreferenced_blob_digests"`
 	}
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -743,6 +758,7 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		requestMaxBytes:          requestMaxDeleteBytes,
 		minManifestAge:           minManifestAge,
 		includeUnreferencedBlobs: req.IncludeUnreferencedBlobs,
+		unreferencedBlobDigests:  req.UnreferencedBlobDigests,
 	}, records, pinned)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -751,33 +767,43 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 	// Upload maintenance has its own independently configured expiry policy.
 	// A targeted manifest prune cannot implicitly broaden its deletion scope.
 	if !dryRun && req.AllowDelete {
+		plan.contentGeneration, plan.contentSnapshotValid = generation, inactive
 		if err := c.executeImageCachePrunePlan(&plan); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
 	writeManagementJSON(w, http.StatusOK, map[string]any{
-		"dry_run":              dryRun,
-		"allow_delete":         req.AllowDelete,
-		"deleted":              !dryRun && req.AllowDelete && plan.Deleted,
-		"planned_delete_bytes": plan.PlannedDeleteBytes,
-		"deleted_bytes":        plan.DeletedBytes,
-		"deleted_manifests":    plan.DeletedManifests,
-		"deleted_blobs":        plan.DeletedBlobs,
-		"candidate_count":      len(plan.Candidates),
-		"selected_count":       len(plan.SelectedManifests),
-		"candidates":           plan.Candidates,
-		"selected_manifests":   plan.SelectedManifests,
-		"unreferenced_blobs":   plan.UnreferencedBlobs,
-		"skipped_manifests":    plan.SkippedManifests,
-		"delete_budget_bytes":  plan.DeleteBudgetBytes,
-		"needed_delete_bytes":  plan.NeededDeleteBytes,
-		"budget_exhausted":     plan.BudgetExhausted,
-		"skipped_reason":       plan.SkippedReason,
-		"disk":                 plan.Disk,
-		"target_repo":          repo,
-		"target":               target,
-		"target_digest":        normalizeImageCacheDigest(req.Digest),
+		"dry_run":                      dryRun,
+		"allow_delete":                 req.AllowDelete,
+		"deleted":                      !dryRun && req.AllowDelete && plan.Deleted,
+		"planned_delete_bytes":         plan.PlannedDeleteBytes,
+		"deleted_bytes":                plan.DeletedBytes,
+		"execution_status":             plan.ExecutionStatus,
+		"deleted_manifest_bytes":       plan.DeletedManifestBytes,
+		"deleted_blob_bytes":           plan.DeletedBlobBytes,
+		"skipped_blob_bytes":           plan.SkippedBlobBytes,
+		"skipped_blobs":                plan.SkippedBlobs,
+		"remaining_unreferenced_bytes": plan.RemainingUnreferencedBytes,
+		"remaining_unreferenced_count": plan.RemainingUnreferencedCount,
+		"remaining_snapshot_valid":     plan.RemainingSnapshotValid,
+		"deleted_manifests":            plan.DeletedManifests,
+		"deleted_blobs":                plan.DeletedBlobs,
+		"candidate_count":              len(plan.Candidates),
+		"selected_count":               len(plan.SelectedManifests),
+		"candidates":                   plan.Candidates,
+		"selected_manifests":           plan.SelectedManifests,
+		"unreferenced_blobs":           plan.UnreferencedBlobs,
+		"skipped_manifests":            plan.SkippedManifests,
+		"delete_budget_bytes":          plan.DeleteBudgetBytes,
+		"needed_delete_bytes":          plan.NeededDeleteBytes,
+		"budget_exhausted":             plan.BudgetExhausted,
+		"skipped_reason":               plan.SkippedReason,
+		"skip_details":                 plan.SkipDetails,
+		"disk":                         plan.Disk,
+		"target_repo":                  repo,
+		"target":                       target,
+		"target_digest":                normalizeImageCacheDigest(req.Digest),
 	})
 }
 
@@ -797,6 +823,7 @@ type imageCachePruneRequest struct {
 	requestMaxBytes          int64
 	minManifestAge           time.Duration
 	includeUnreferencedBlobs bool
+	unreferencedBlobDigests  []string
 }
 
 type imageCachePrunePlan struct {
@@ -815,8 +842,19 @@ type imageCachePrunePlan struct {
 	DeletedBlobs       []imageCacheBlobEntry     `json:"deleted_blobs"`
 	SkippedReason      string                    `json:"skipped_reason,omitempty"`
 
-	deleteManifests []imageCacheManifestRecord
-	deleteBlobs     []imageCacheBlobRecord
+	deleteManifests            []imageCacheManifestRecord
+	deleteBlobs                []imageCacheBlobRecord
+	contentGeneration          uint64
+	contentSnapshotValid       bool
+	ExecutionStatus            string                `json:"execution_status"`
+	DeletedManifestBytes       int64                 `json:"deleted_manifest_bytes"`
+	DeletedBlobBytes           int64                 `json:"deleted_blob_bytes"`
+	SkippedBlobBytes           int64                 `json:"skipped_blob_bytes"`
+	SkippedBlobs               []imageCacheBlobEntry `json:"skipped_blobs"`
+	RemainingUnreferencedBytes int64                 `json:"remaining_unreferenced_bytes"`
+	RemainingUnreferencedCount int                   `json:"remaining_unreferenced_count"`
+	RemainingSnapshotValid     bool                  `json:"remaining_snapshot_valid"`
+	SkipDetails                []string              `json:"skip_details,omitempty"`
 }
 
 type imageCacheDiskStats struct {
@@ -875,15 +913,18 @@ type imageCacheBlobRecord struct {
 	Path       string
 	SizeBytes  int64
 	ModifiedAt time.Time
+	info       os.FileInfo
 }
 
 type imageCacheBlobEntry struct {
 	Digest     string `json:"digest"`
 	SizeBytes  int64  `json:"size_bytes"`
 	ModifiedAt string `json:"modified_at,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []imageCacheManifestRecord, pinned map[string]struct{}) (imageCachePrunePlan, error) {
+	generation, inactive := c.contentSnapshot()
 	limit := c.normalizedDiskLimit()
 	disk, err := c.imageCacheDiskStats(limit)
 	if err != nil {
@@ -974,13 +1015,16 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		budget = req.requestMaxBytes
 	}
 	plan := imageCachePrunePlan{
-		Disk:              disk,
-		Candidates:        manifestEntries(candidates, blobByDigest),
-		SelectedManifests: manifestEntries(selected, blobByDigest),
-		SkippedManifests:  manifestEntriesWithSkipReasons(skipped, blobByDigest, skipReasons),
-		UnreferencedBlobs: blobEntries(unreferenced),
-		DeleteBudgetBytes: budget,
-		NeededDeleteBytes: disk.NeededDeleteBytes,
+		ExecutionStatus:      "dry_run",
+		contentGeneration:    generation,
+		contentSnapshotValid: inactive,
+		Disk:                 disk,
+		Candidates:           manifestEntries(candidates, blobByDigest),
+		SelectedManifests:    manifestEntries(selected, blobByDigest),
+		SkippedManifests:     manifestEntriesWithSkipReasons(skipped, blobByDigest, skipReasons),
+		UnreferencedBlobs:    blobEntries(unreferenced),
+		DeleteBudgetBytes:    budget,
+		NeededDeleteBytes:    disk.NeededDeleteBytes,
 	}
 	if budget <= 0 {
 		plan.SkippedReason = "delete_budget_zero"
@@ -1027,6 +1071,16 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 	// manifest does not fit in this run's delete budget.
 	unreferenced = unreferencedImageCacheBlobs(records, blobs, plan.deleteManifests)
 	plan.UnreferencedBlobs = blobEntries(unreferenced)
+	// A retirement cannot sweep unrelated blobs uploaded between requests.
+	// Automatic tasks bind orphan deletion to the exact admitted inventory set.
+	preexistingOrphans := map[string]struct{}{}
+	for _, blob := range unreferencedImageCacheBlobs(records, blobs, nil) {
+		preexistingOrphans[blob.Digest] = struct{}{}
+	}
+	admittedOrphans := map[string]struct{}{}
+	for _, digest := range req.unreferencedBlobDigests {
+		admittedOrphans[normalizeImageCacheDigest(digest)] = struct{}{}
+	}
 	blobBudget := budget - planned
 	if blobBudget < 0 {
 		blobBudget = 0
@@ -1039,6 +1093,16 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		blobNeed = blobBudget
 	}
 	for _, blob := range unreferenced {
+		if _, orphan := preexistingOrphans[blob.Digest]; orphan {
+			if !req.includeUnreferencedBlobs {
+				continue
+			}
+			if req.unreferencedBlobDigests != nil {
+				if _, admitted := admittedOrphans[blob.Digest]; !admitted {
+					continue
+				}
+			}
+		}
 		if blobBudget <= 0 || blobNeed <= 0 {
 			if blobNeed > 0 {
 				plan.BudgetExhausted = true
@@ -1064,39 +1128,6 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 	return plan, nil
 }
 
-func (c *imageCache) executeImageCachePrunePlan(plan *imageCachePrunePlan) error {
-	if plan == nil {
-		return nil
-	}
-	stillReferenced := map[string]struct{}{}
-	for _, record := range plan.deleteManifests {
-		if err := c.deleteLocalManifest(record.Repo, record.Target); err != nil {
-			return err
-		}
-		plan.Deleted = true
-		plan.DeletedBytes += record.SizeBytes
-		plan.DeletedManifests = append(plan.DeletedManifests, manifestEntry(record, nil))
-		for _, digest := range c.localManifestReferencedBlobDigests(record.Repo, record.Digest) {
-			stillReferenced[digest] = struct{}{}
-		}
-	}
-	for _, blob := range plan.deleteBlobs {
-		if _, ok := stillReferenced[blob.Digest]; ok {
-			continue
-		}
-		if err := os.Remove(blob.Path); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return fmt.Errorf("delete blob %s: %w", blob.Digest, err)
-		}
-		plan.Deleted = true
-		plan.DeletedBytes += blob.SizeBytes
-		plan.DeletedBlobs = append(plan.DeletedBlobs, blobEntry(blob))
-	}
-	return nil
-}
-
 func (c *imageCache) deleteLocalManifest(repo, target string) error {
 	if c != nil && c.registry != nil {
 		req := httptestRequest(http.MethodDelete, "/v2/"+strings.Trim(strings.TrimSpace(repo), "/")+"/manifests/"+strings.TrimSpace(target), "", nil)
@@ -1113,38 +1144,59 @@ func (c *imageCache) deleteLocalManifest(repo, target string) error {
 	return c.deletePersistedManifest(repo, target)
 }
 
-func (c *imageCache) localManifestReferencedBlobDigests(repo, target string) []string {
+func (c *imageCache) localManifestReferencedBlobDigests(repo, target string) ([]string, error) {
 	if c == nil || c.registry == nil {
-		return nil
+		return nil, nil
 	}
 	target = normalizeImageCacheDigest(target)
 	if target == "" {
-		return nil
-	}
-	path := "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/manifests/" + target
-	req := httptestRequest(http.MethodGet, path, "", nil)
-	rec := &memoryResponseWriter{header: http.Header{}}
-	c.serveObservedRegistry(rec, req)
-	if rec.statusCode() < 200 || rec.statusCode() >= 300 || rec.body.Len() == 0 {
-		return nil
+		return nil, fmt.Errorf("invalid manifest digest")
 	}
 	seen := map[string]struct{}{}
+	visited := map[string]struct{}{}
 	out := []string{}
-	for _, descriptor := range manifestReferencedTargets(rec.body.Bytes()) {
-		if descriptor.kind != registryTargetBlob {
-			continue
+	var visit func(string, bool) error
+	visit = func(digest string, required bool) error {
+		if _, exists := visited[digest]; exists {
+			return nil
 		}
-		digest := normalizeImageCacheDigest(descriptor.target)
-		if digest == "" {
-			continue
+		visited[digest] = struct{}{}
+		path := "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/manifests/" + digest
+		req := httptestRequest(http.MethodGet, path, "", nil)
+		rec := &memoryResponseWriter{header: http.Header{}}
+		c.serveObservedRegistry(rec, req)
+		if rec.statusCode() == http.StatusNotFound && !required {
+			return nil
 		}
-		if _, ok := seen[digest]; ok {
-			continue
+		if rec.statusCode() < 200 || rec.statusCode() >= 300 {
+			return fmt.Errorf("manifest reference check status=%d", rec.statusCode())
 		}
-		seen[digest] = struct{}{}
-		out = append(out, digest)
+		if _, err := decodeImageManifest(rec.body.Bytes()); err != nil {
+			return fmt.Errorf("decode surviving manifest: %w", err)
+		}
+		if manifestBodyDigest(rec.body.Bytes()) != digest {
+			return fmt.Errorf("surviving manifest digest mismatch")
+		}
+		for _, descriptor := range manifestReferencedTargets(rec.body.Bytes()) {
+			ref, err := strictImageCacheDigest(descriptor.target)
+			if err != nil {
+				return err
+			}
+			if descriptor.kind == registryTargetManifest {
+				if err := visit(ref, true); err != nil {
+					return err
+				}
+			} else if _, exists := seen[ref]; !exists {
+				seen[ref] = struct{}{}
+				out = append(out, ref)
+			}
+		}
+		return nil
 	}
-	return out
+	if err := visit(target, false); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func manifestMatchesPruneTarget(record imageCacheManifestRecord, req imageCachePruneRequest) bool {
@@ -1549,6 +1601,9 @@ func (c *imageCache) managementManifestRecords() ([]imageCacheManifestRecord, er
 		if err := json.Unmarshal(raw, &manifest); err != nil {
 			return nil, err
 		}
+		if _, err := decodeImageManifest(manifest.Body); err != nil {
+			return nil, fmt.Errorf("cannot establish manifest references: %w", err)
+		}
 		referenced := []string{}
 		seenReferenced := map[string]struct{}{}
 		referencedManifests := []string{}
@@ -1816,6 +1871,7 @@ func (c *imageCache) imageCacheBlobRecords() ([]imageCacheBlobRecord, error) {
 				Path:       filepath.Join(algorithmDir, blobEntry.Name()),
 				SizeBytes:  info.Size(),
 				ModifiedAt: info.ModTime(),
+				info:       info,
 			})
 		}
 	}
@@ -1957,6 +2013,7 @@ func firstNonEmptyCacheString(values ...string) string {
 }
 
 func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) {
+	defer c.beginContentMutation()()
 	if c.serveBlobUpload(w, r) {
 		return
 	}
@@ -2993,6 +3050,7 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 }
 
 func (c *imageCache) copyImage(ctx context.Context, src, dst string) error {
+	defer c.beginContentMutation()()
 	c.metrics.copyInvocations.Add(1)
 	release, err := acquireSemaphore(ctx, c.hydrateSlots)
 	if err != nil {
@@ -3456,6 +3514,7 @@ func (c *imageCache) ensureLocalManifestTreeWithStats(ctx context.Context, sourc
 	if c == nil || c.registry == nil {
 		return nil
 	}
+	defer c.beginContentMutation()()
 	// A manifest can survive while its config/layers have been pruned.  Treat
 	// the whole local graph as the cache hit; a manifest HEAD alone is not
 	// enough to skip hydration.

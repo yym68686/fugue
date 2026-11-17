@@ -129,6 +129,17 @@ x-fugue-image-cache-retirement:
     uncertain open-file observations, changed files, unknown layouts and
     malformed upload state remain protected. Interrupted writes persist their
     actual byte count for resumption. No serving configuration or LKG changes.
+    Node-local prune executes manifest deletion before checking final blob
+    reachability. A surviving alias or shared graph protects its blobs; failed
+    reference checks never establish absence. Concurrent content mutations
+    defer reclamation rather than waiting behind a whole GC pass. The local
+    prune receipt distinguishes execution_status, deleted_manifest_bytes,
+    deleted_blob_bytes, skipped_blob_bytes, and remaining_unreferenced_bytes;
+    remaining_snapshot_valid indicates whether the latter is authoritative
+    for that observation. Task completion is not a claim that backlog is empty.
+    Automatic tasks bind unrelated orphan reclamation to an explicit
+    unreferenced_blob_digests inventory set; a targeted retirement alone
+    never authorizes deleting unrelated newly uploaded blobs.
 servers:
   - url: /
 x-fugue-edge-request-body-buffer:
