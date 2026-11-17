@@ -302,7 +302,9 @@ func (r *rotationLogReader) Read(p []byte) (int, error) {
 		if r.scanner == nil {
 			if err := r.nextFile(); err != nil {
 				if err == io.EOF && len(r.records) != 0 {
-					return 0, io.ErrUnexpectedEOF
+					// A successful transport may end mid-write. Retry this source,
+					// not every container sharing its otherwise healthy node.
+					return 0, errIncompleteKubernetesLogRecord
 				}
 				return 0, err
 			}
@@ -353,7 +355,7 @@ func scanCompleteCRILine(data []byte, atEOF bool) (int, []byte, error) {
 		return i + 1, data[:i], nil
 	}
 	if atEOF && len(data) > 0 {
-		return 0, nil, io.ErrUnexpectedEOF
+		return 0, nil, errIncompleteKubernetesLogRecord
 	}
 	return 0, nil, nil
 }

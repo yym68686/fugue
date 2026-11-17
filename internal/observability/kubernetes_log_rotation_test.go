@@ -462,8 +462,8 @@ func TestRotationCRIFragmentsSurviveFilesAndStreamInterleaving(t *testing.T) {
 func TestRotationCRIRejectsTruncatedMalformedAndOversizedSources(t *testing.T) {
 	at := "2026-01-01T00:00:00Z"
 	for name, tc := range map[string]struct{ input, class string }{
-		"partial_record":    {at + " stdout P incomplete\n", "unexpected_eof"},
-		"partial_file":      {at + " stdout F cut", "unexpected_eof"},
+		"partial_record":    {at + " stdout P incomplete\n", "record_incomplete"},
+		"partial_file":      {at + " stdout F cut", "record_incomplete"},
 		"invalid_stream":    {at + " other F message\n", "rotation_cri_record_invalid"},
 		"invalid_timestamp": {"yesterday stdout F message\n", "rotation_cri_timestamp_invalid"},
 		"large_record":      {at + " stdout F " + strings.Repeat("x", 129) + "\n", "rotation_cri_record_limit"},
@@ -482,7 +482,7 @@ func TestRotationCRIRejectsTruncatedMalformedAndOversizedSources(t *testing.T) {
 	}
 	r = rawRotationReader(t, "", at+" stdout F complete\n"+at+" stdout F cut", 128)
 	got, err := io.ReadAll(r)
-	if !errors.Is(err, io.ErrUnexpectedEOF) || string(got) != at+" complete\n" {
+	if !errors.Is(err, errIncompleteKubernetesLogRecord) || string(got) != at+" complete\n" {
 		t.Fatalf("safe prefix/truncation lost: %q %v", got, err)
 	}
 }
