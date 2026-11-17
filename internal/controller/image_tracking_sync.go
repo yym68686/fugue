@@ -14,6 +14,9 @@ import (
 )
 
 func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.markImageTrackingSyncStarted()
 	defer func(startedAt time.Time) {
 		s.markImageTrackingSyncFinished(startedAt, err)
@@ -29,6 +32,9 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 	}
 
 	for _, tracking := range trackings {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		startedAt := s.currentTime()
 		app, err := s.Store.GetApp(tracking.AppID)
 		if err != nil {
@@ -69,6 +75,9 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 		}
 
 		digest, err := s.resolveTrackedImageDigest(ctx, tracking.ImageRef)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			if updated, recordErr := s.Store.RecordAppImageTrackingCheck(tracking.ID, "", "", "poll", err.Error()); recordErr != nil && s.Logger != nil {
 				s.Logger.Printf("image tracking check record failed app=%s image=%s: %v", app.ID, tracking.ImageRef, recordErr)
@@ -107,6 +116,9 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 			continue
 		}
 		retryReason, err := s.imageTrackingRetrySuppression(ctx, app, tracking, digest)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
 				App: app, Tracking: tracking, ObservedDigest: digest,

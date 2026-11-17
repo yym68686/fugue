@@ -435,7 +435,7 @@ func (s *Service) markImageTrackingSyncFinished(startedAt time.Time, syncErr err
 	s.imageTrackingSyncRunning = false
 	s.imageTrackingLastSyncFinishedAt = finishedAt
 	s.imageTrackingLastSyncDuration = duration
-	if syncErr != nil {
+	if syncErr != nil && !errors.Is(syncErr, context.Canceled) {
 		s.imageTrackingLastSyncErrorAt = finishedAt
 		s.imageTrackingLastSyncError = syncErr.Error()
 	}

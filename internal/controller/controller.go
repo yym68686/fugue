@@ -340,6 +340,8 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	defer stopMigrations()
 	stopSourceSync := s.startGitHubSourceSync(ctx, triggerBackgroundOps)
 	defer stopSourceSync()
+	stopImageTracking := s.startAppImageTracking(ctx, triggerBackgroundOps)
+	defer stopImageTracking()
 	if s.Config.HostJournaldPolicyEnabled {
 		if err := s.scheduleHostJournaldPolicyReconciliation(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.Logger.Printf("initial host journald policy scheduling error: %v", err)
@@ -349,11 +351,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if !eventDriven {
 		ticker := time.NewTicker(s.Config.PollInterval)
 		defer ticker.Stop()
-		var imageTrackingTicker *time.Ticker
-		if s.Config.ImageTrackingInterval > 0 {
-			imageTrackingTicker = time.NewTicker(s.Config.ImageTrackingInterval)
-			defer imageTrackingTicker.Stop()
-		}
 		var imageRetentionSweepTicker *time.Ticker
 		if s.Config.ImageRetentionSweepInterval > 0 {
 			imageRetentionSweepTicker = time.NewTicker(s.Config.ImageRetentionSweepInterval)
@@ -392,12 +389,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-githubTickerChan(imageTrackingTicker):
-				if err := s.syncTrackedAppImages(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					s.Logger.Printf("image tracking sync error: %v", err)
-				} else {
-					triggerBackgroundOps()
-				}
 			case <-githubTickerChan(imageRetentionSweepTicker):
 				if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("managed app image retention sweep error: %v", err)
@@ -425,13 +416,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 
 	if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		s.Logger.Printf("reconcile error: %v", err)
-	}
-	if s.Config.ImageTrackingInterval > 0 {
-		if err := s.syncTrackedAppImages(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			s.Logger.Printf("initial image tracking sync error: %v", err)
-		} else {
-			triggerBackgroundOps()
-		}
 	}
 	if s.imageStoreDistributedMode() && s.Config.ImageRetentionSweepInterval > 0 {
 		if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -480,11 +464,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	defer fallbackTicker.Stop()
 	managedAppFallbackTicker := time.NewTicker(s.Config.ManagedAppReconcileFallbackInterval)
 	defer managedAppFallbackTicker.Stop()
-	var imageTrackingTicker *time.Ticker
-	if s.Config.ImageTrackingInterval > 0 {
-		imageTrackingTicker = time.NewTicker(s.Config.ImageTrackingInterval)
-		defer imageTrackingTicker.Stop()
-	}
 	var imageRetentionSweepTicker *time.Ticker
 	if s.Config.ImageRetentionSweepInterval > 0 {
 		imageRetentionSweepTicker = time.NewTicker(s.Config.ImageRetentionSweepInterval)
@@ -539,12 +518,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("fallback managed app reconcile error: %v", err)
 				}
-			}
-		case <-githubTickerChan(imageTrackingTicker):
-			if err := s.syncTrackedAppImages(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				s.Logger.Printf("image tracking sync error: %v", err)
-			} else {
-				triggerBackgroundOps()
 			}
 		case <-githubTickerChan(imageRetentionSweepTicker):
 			if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
