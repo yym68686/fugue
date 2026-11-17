@@ -76,7 +76,7 @@ def schedule_capacity_probe(version, evidence, overflow):
     assert request > 0
     manifest = {"apiVersion": "v1", "kind": "Pod",
                 "metadata": {"name": "capacity-probe", "namespace": "upgrade-qualification"},
-                "spec": {"automountServiceAccountToken": False, "containers": [
+                "spec": {"automountServiceAccountToken": False, "terminationGracePeriodSeconds": 1, "containers": [
                     {"name": "reserve-only", "image": "busybox:1.37.0",
                      "command": ["/bin/sleep", "100000"],
                      "resources": {"requests": {"cpu": "1m", "memory": str(request)}}}]}}
@@ -95,7 +95,7 @@ def schedule_capacity_probe(version, evidence, overflow):
     raise RuntimeError("scheduler did not confirm Insufficient memory before resize")
 
 
-def download(version, directory):
+def download(version, directory, evidence):
     release = "https://github.com/k3s-io/k3s/releases/download/" + version.replace("+", "%2B")
     checksums = run("curl", "-fsSL", "--retry", "3", "--max-time", "300",
                     release + "/sha256sum-amd64.txt").stdout
@@ -106,6 +106,9 @@ def download(version, directory):
     run("curl", "-fsSL", "--retry", "3", "--max-time", "300",
         release + "/k3s", "-o", str(candidate), timeout=1000)
     assert hashlib.sha256(candidate.read_bytes()).hexdigest() == expected[0]
+    (evidence / (version + "-artifact.json")).write_text(json.dumps(
+        {"version": version, "source": release, "sha256": expected[0],
+         "size": candidate.stat().st_size}, indent=2) + "\n")
     candidate.chmod(0o755)
     assert run(str(candidate), "--version").stdout.split()[2] == version
     return candidate
@@ -139,6 +142,8 @@ def main():
     assert virtualization not in {"docker", "lxc", "podman", "systemd-nspawn"}, virtualization
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=False)
+    binaries = evidence.parent / (evidence.name + "-binaries")
+    binaries.mkdir(parents=True, exist_ok=False)
     report = {"versions": list(VERSIONS), "virtualization": virtualization,
               "kernel": platform.release(), "results": [], "passed": False}
     failures, samples = [], []
@@ -163,7 +168,7 @@ def main():
     try:
         installer = evidence / "install.sh"
         installer.write_text(run("curl", "-fsSL", "https://get.k3s.io").stdout)
-        binary = download(VERSIONS[0], evidence)
+        binary = download(VERSIONS[0], binaries, evidence)
         run("install", "-m", "0755", str(binary), "/usr/local/bin/k3s")
         env = dict(os.environ, INSTALL_K3S_SKIP_DOWNLOAD="true",
                    INSTALL_K3S_EXEC="server --cluster-init --disable traefik --disable servicelb --node-name qualification-control")
@@ -193,7 +198,7 @@ def main():
         observer.start()
         for index, version in enumerate(VERSIONS):
             if index:
-                binary = download(version, evidence)
+                binary = download(version, binaries, evidence)
                 # Atomic binary replacement preserves every installer-managed setting.
                 run("install", "-m", "0755", str(binary), "/usr/local/bin/k3s.next")
                 os.replace("/usr/local/bin/k3s.next", "/usr/local/bin/k3s")
@@ -236,6 +241,8 @@ def main():
                 entry["scheduler_capacity_released"] = True
                 write_json("report.json", report)
             kubectl("-n", "upgrade-qualification", "delete", "pod", "capacity-probe", "--wait=false")
+            run("k3s", "kubectl", "-n", "upgrade-qualification", "wait", "--for=delete",
+                "pod/capacity-probe", "--timeout=60s", timeout=70)
         assert not failures, "HTTP continuity failed"
         report["passed"] = True
     finally:
