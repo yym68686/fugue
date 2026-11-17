@@ -556,7 +556,7 @@ func (s *Store) pgReleasePlatformArtifactInTransaction(ctx context.Context, tx *
 		now = time.Now().UTC()
 	}
 	trace.advance("verify-admission")
-	if err := validateLeasedTrafficAdmission(promotionSnapshot, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+	if err := validateLeasedTrafficAdmissionObserved(ctx, promotionSnapshot, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("capability_admission", err)
 	}
 	trace.advance("release-ledger")
@@ -615,7 +615,7 @@ func (s *Store) pgReleasePlatformArtifactInTransaction(ctx context.Context, tx *
 		}
 	}
 	trace.advance("verify-admission")
-	if err := validateLeasedTrafficAdmission(promotionSnapshot, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+	if err := validateLeasedTrafficAdmissionObserved(ctx, promotionSnapshot, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("capability_admission", err)
 	}
 	trace.advance("reconfiguration-guard")
@@ -782,7 +782,7 @@ func (s *Store) pgRollbackPlatformArtifactInTransaction(ctx context.Context, tx 
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	trace.advance("verify-recovery")
-	if err := validateVerifiedTrafficRecoveryAdmission(admissionSnapshot, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC(), lkg, guard); err != nil {
+	if err := validateVerifiedTrafficRecoveryAdmissionObserved(ctx, admissionSnapshot, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC(), lkg, guard); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	trace.advance("release-ledger")
@@ -859,7 +859,7 @@ func (s *Store) pgRollbackPlatformArtifactInTransaction(ctx context.Context, tx 
 		}
 	}
 	trace.advance("verify-recovery")
-	if err := validateVerifiedTrafficRecoveryAdmission(admissionSnapshot, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC(), lkg, guard); err != nil {
+	if err := validateVerifiedTrafficRecoveryAdmissionObserved(ctx, admissionSnapshot, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC(), lkg, guard); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	return target, release, message, lkg, nil

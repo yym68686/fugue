@@ -280,6 +280,24 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 			if scenario == "soft override" {
 				principal = testPlatformSoftOverridePrincipal()
 			}
+			if address == "" && (scenario == "availability supported" || scenario == "missing DNS capability") {
+				if err := s.withLockedState(false, func(state *model.State) error {
+					checkedAt := time.Now().UTC()
+					want := validateLeasedTrafficAdmission(state, f.parent, request.ReleaseChannel, request.CanaryRuleRef, s.platformArtifactSigningKeyring(), checkedAt)
+					ctx, mutation := startPlatformMutationTrace(context.Background(), "admission-observation-parity-test")
+					got := validateLeasedTrafficAdmissionObserved(ctx, state, f.parent, request.ReleaseChannel, request.CanaryRuleRef, s.platformArtifactSigningKeyring(), checkedAt)
+					if (want == nil) != (got == nil) || want != nil && got.Error() != want.Error() {
+						return errors.New("admission observation changed decision")
+					}
+					if len(mutation.admissions) != 1 || mutation.admissions[0].Failed != (want != nil) ||
+						mutation.admissions[0].CapabilityProjections == 0 || mutation.admissions[0].CapabilityFacts == 0 {
+						return errors.New("admission subphase observation incomplete")
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			publish := func() error {
 				if strings.HasPrefix(scenario, "rollback") {
 					_, _, _, _, err := s.RollbackPlatformArtifact(f.parent.ID, model.PlatformArtifactRollbackRequest{ReleaseChannel: "gray", ToGeneration: f.parent.Generation, CanaryRuleRef: "cohort=test", Reason: "explicit recovery"}, principal)

@@ -33,6 +33,11 @@ func verifiedTrafficRecovery(parent model.PlatformArtifact, channel string, keys
 }
 
 func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, verifiedRecovery bool) error {
+	return validateLeasedTrafficAdmissionWithTrace(state, parent, channel, canaryRef, keys, now, verifiedRecovery, nil)
+}
+
+func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, verifiedRecovery bool, trace *platformAdmissionTrace) (resultErr error) {
+	defer func() { trace.finish(resultErr) }()
 	if channel == model.PlatformArtifactReleaseChannelShadow {
 		return nil
 	}
@@ -53,6 +58,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	cellRoutes := role == platformconfig.PublicationRoleCellRoutes
 	cellDNS := role == platformconfig.PublicationRoleCellDNS
 	leased := false
+	trace.advance(admissionExpiry)
 	for _, id := range ids {
 		value, ok := id.(string)
 		if !ok {
@@ -71,11 +77,13 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		return nil
 	}
 	kinds, _ := parent.Content["artifact_kinds"].([]any)
+	trace.advance(admissionComposition)
 	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
 	if compositionErr != nil || len(ids) != len(kinds) || parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass {
 		return fail("complete signed traffic parent required")
 	}
 	var groups []string
+	trace.advance(admissionCohort)
 	if channel == model.PlatformArtifactReleaseChannelGray {
 		var err error
 		groups, err = platformconfig.ResolveTrafficCanary(parent, canaryRef)
@@ -87,6 +95,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 	}
 	seen := map[string]bool{}
 	for i, raw := range ids {
+		trace.advance(admissionMemberIntegrity)
 		child := state.PlatformArtifacts[platformArtifactIndex(state.PlatformArtifacts, raw.(string))]
 		component := model.PlatformConsumerComponentEdgeWorker
 		switch child.ArtifactKind {
@@ -94,6 +103,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		case model.PlatformArtifactKindDNSAnswerBundle:
 			component = model.PlatformConsumerComponentDNSServer
 			if !verifiedRecovery {
+				trace.advance(admissionDNSReferences)
 				if err := validateCellDNSReferencesInState(state, child, keys); err != nil {
 					return err
 				}
@@ -101,20 +111,24 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 		default:
 			return fail("unsupported member")
 		}
+		trace.advance(admissionMemberIntegrity)
 		if seen[child.ArtifactKind] || kinds[i] != child.ArtifactKind || child.ScopeKey != parent.ScopeKey || child.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(child, keys).Pass || child.Metadata["release_set_generation"] != parent.Generation {
 			return fail("member integrity or ownership invalid")
 		}
 		seen[child.ArtifactKind] = true
 		authorityTransition := child.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && child.Content["previous_traffic_publication"] != nil
+		trace.advance(admissionSourceAuthorization)
 		sources, sourceErr := platformconfig.DNSRouteSourceAuthorizations(child)
 		if sourceErr != nil {
 			return fail("DNS routing source authorization invalid")
 		}
+		trace.advance(admissionPhysicalPolicy)
 		required, err := physicalCapabilitiesRequired(child)
 		if err != nil {
 			return fail("physical network policy cannot be decoded")
 		}
 		physicalRequired, deliveryRequired, failureAwareRequired, comparableDeliveryRequired, orderRequired, projectionRequired := required.network, required.delivery, required.failureAware, required.comparableDelivery, required.order, required.projection
+		trace.advance(admissionLineage)
 		for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
 			if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
 				return fail("member lineage differs")
@@ -124,6 +138,7 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 			return fail("member cohort policy differs")
 		}
 		var latest *model.PlatformExpectedConsumerSet
+		trace.advance(admissionTopology)
 		for _, set := range state.ExpectedConsumerSets {
 			if set.ReleaseSetID != parent.ID || set.ArtifactKind != child.ArtifactKind || set.ScopeKey != parent.ScopeKey {
 				continue
@@ -147,6 +162,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 			if !expected.Required || len(groups) > 0 && !platformconfig.TrafficCanaryContains(groups, expected.Cohort) {
 				continue
 			}
+			if trace != nil {
+				trace.value.RequiredConsumers++
+			}
 			claims := platformcontrol.PlatformComponentIdentityClaims{Component: component, NodeID: expected.NodeID, AuthorityID: expected.AuthorityID}
 			if !platformcontrol.ExpectedConsumerIdentityMatches(expected, claims) || expected.ArtifactKind != child.ArtifactKind || expected.ScopeKey != parent.ScopeKey || expected.ExpectedGeneration != child.Generation || expected.Cohort == "" {
 				return fail("required consumer ownership invalid")
@@ -157,7 +175,16 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 				continue
 			}
 			found := false
-			for _, fact := range trafficCapabilityObservations(state, parent, child, *latest, now) {
+			trace.advance(admissionCapabilityProjection)
+			facts := trafficCapabilityObservations(state, parent, child, *latest, now)
+			if trace != nil {
+				trace.value.CapabilityProjections++
+			}
+			trace.advance(admissionCapabilityFacts)
+			for _, fact := range facts {
+				if trace != nil {
+					trace.value.CapabilityFacts++
+				}
 				if fact.ConsumerID != expected.ConsumerID || fact.ArtifactKind != child.ArtifactKind || fact.ScopeKey != parent.ScopeKey {
 					continue
 				}
@@ -223,7 +250,9 @@ func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model
 			}
 			count++
 			cohorts[expected.Cohort] = true
+			trace.advance(admissionTopology)
 		}
+		trace.advance(admissionCompleteness)
 		if count == 0 {
 			return fail("required member consumer set is empty")
 		}

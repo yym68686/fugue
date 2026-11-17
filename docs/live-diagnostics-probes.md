@@ -383,6 +383,15 @@ completed driver and code-stage durations, not measurements of CPU use or exact
 server lock-hold intervals. They add no SQL, replay, retry, timeout change or
 admission exception, and do not explain failures predating deployment.
 
+Release and rollback admission receipts additionally retain at most four
+fixed subphase samples per mutation. They partition validation wall time into
+expiry, composition, DNS references, member integrity, source authorization,
+physical policy, lineage, topology, capability projection/fact scans and
+completeness. Samples include only bounded collection cardinalities and counts
+of required consumers/projections/facts examined. They omit artifact and
+consumer identities, content, policy values and errors; omitted samples are
+counted. Subphase durations are wall time, not CPU attribution.
+
 On Linux a non-root component's runtime profile socket accepts only kernel
 credentials identifying root or the component's own UID. Diagnostic Jobs drop
 DAC_OVERRIDE, so filesystem owner-only mode by itself prevents those Jobs from

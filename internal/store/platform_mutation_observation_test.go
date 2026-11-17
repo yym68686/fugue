@@ -92,6 +92,13 @@ func TestPlatformMutationObservationFailureRetentionAndResponseBudget(t *testing
 		for i := 0; i < 40; i++ {
 			trace.advance("neutral-fixed-stage-" + strings.Repeat("x", i))
 		}
+		for i := 0; i < platformAdmissionObservationLimit; i++ {
+			admission := beginPlatformAdmissionTrace(ctx, nil)
+			for phase := admissionSetup; phase < admissionPhaseCount; phase++ {
+				admission.advance(phase)
+			}
+			admission.finish(nil)
+		}
 		var err error
 		if failed {
 			err = errors.New("never-retain-this-error-or-credential")
@@ -118,6 +125,47 @@ func TestPlatformMutationObservationFailureRetentionAndResponseBudget(t *testing
 	encoded, err := json.Marshal(snapshot)
 	if err != nil || len(encoded) > 800<<10 || strings.Contains(string(encoded), "never-retain") {
 		t.Fatal("owner-only observation exceeded budget or retained private errors", len(encoded), err)
+	}
+}
+
+func TestPlatformAdmissionObservationIsBoundedAndRedacted(t *testing.T) {
+	ctx, trace := startPlatformMutationTrace(context.Background(), "platform-release")
+	at := trace.started
+	trace.now = func() time.Time { return at }
+	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{{ID: "private-artifact-marker"}},
+		ExpectedConsumerSets:      []model.PlatformExpectedConsumerSet{{ID: "private-expectation-marker"}},
+		PlatformConsumerInstances: []model.PlatformConsumerInstance{{ConsumerID: "private-consumer-marker"}}}
+	for i := 0; i < platformAdmissionObservationLimit+1; i++ {
+		observation := beginPlatformAdmissionTrace(ctx, state)
+		if observation == nil {
+			continue
+		}
+		at = at.Add(5 * time.Millisecond)
+		observation.advance(admissionTopology)
+		at = at.Add(7 * time.Millisecond)
+		observation.value.RequiredConsumers = 2
+		observation.value.CapabilityProjections = 2
+		observation.value.CapabilityFacts = 5
+		observation.advance(admissionCapabilityProjection)
+		at = at.Add(11 * time.Millisecond)
+		observation.finish(ErrConflict)
+	}
+	recorder := &platformMutationRecorder{}
+	recorder.record(trace, nil)
+	receipts := recorder.snapshot()["receipts"].([]platformMutationReceipt)
+	if len(receipts) != 1 || len(receipts[0].Admissions) != platformAdmissionObservationLimit || receipts[0].AdmissionsOmitted != 1 {
+		t.Fatal("admission observation limit or omission count incorrect", receipts)
+	}
+	got := receipts[0].Admissions[0]
+	want := []platformMutationStage{{"setup", 5}, {"topology", 7}, {"capability_projection", 11}}
+	if !got.Failed || got.FinalPhase != "capability_projection" || !reflect.DeepEqual(got.Stages, want) ||
+		got.Artifacts != 1 || got.ExpectedSets != 1 || got.ServingFacts != 1 || got.RequiredConsumers != 2 ||
+		got.CapabilityProjections != 2 || got.CapabilityFacts != 5 {
+		t.Fatal("fixed admission phase measurements or bounded counts incorrect", got)
+	}
+	encoded, err := json.Marshal(receipts[0])
+	if err != nil || strings.Contains(string(encoded), "private-") || len(encoded) > 800<<10 {
+		t.Fatal("admission receipt retained private state or exceeded budget", len(encoded), err)
 	}
 }
 

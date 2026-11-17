@@ -25,6 +25,8 @@ type platformMutationTrace struct {
 	now                  func() time.Time
 	database             platformMutationDatabaseTrace
 	recorded             bool
+	admissions           []platformAdmissionObservation
+	admissionsOmitted    uint64
 }
 
 type platformMutationTraceKey struct{}

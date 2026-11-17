@@ -84,20 +84,22 @@ type platformMutationStage struct {
 }
 
 type platformMutationReceipt struct {
-	Operation     runtimeobservation.DatabaseOperation `json:"database_operation"`
-	Started       time.Time                            `json:"started_at"`
-	Finished      time.Time                            `json:"finished_at"`
-	Stage         string                               `json:"final_stage"`
-	Failed        bool                                 `json:"failed"`
-	Failure       PlatformInputReadFailure             `json:"failure"`
-	Stages        []platformMutationStage              `json:"stages"`
-	Queries       []platformMutationQuery              `json:"queries"`
-	Completed     uint64                               `json:"queries_completed"`
-	Omitted       uint64                               `json:"queries_evicted"`
-	Dropped       uint64                               `json:"query_observations_dropped"`
-	Locks         []platformMutationQuery              `json:"promotion_lock_queries"`
-	LockCompleted uint64                               `json:"promotion_lock_queries_completed"`
-	LockOmitted   uint64                               `json:"promotion_lock_queries_evicted"`
+	Operation         runtimeobservation.DatabaseOperation `json:"database_operation"`
+	Started           time.Time                            `json:"started_at"`
+	Finished          time.Time                            `json:"finished_at"`
+	Stage             string                               `json:"final_stage"`
+	Failed            bool                                 `json:"failed"`
+	Failure           PlatformInputReadFailure             `json:"failure"`
+	Stages            []platformMutationStage              `json:"stages"`
+	Queries           []platformMutationQuery              `json:"queries"`
+	Completed         uint64                               `json:"queries_completed"`
+	Omitted           uint64                               `json:"queries_evicted"`
+	Dropped           uint64                               `json:"query_observations_dropped"`
+	Locks             []platformMutationQuery              `json:"promotion_lock_queries"`
+	LockCompleted     uint64                               `json:"promotion_lock_queries_completed"`
+	LockOmitted       uint64                               `json:"promotion_lock_queries_evicted"`
+	Admissions        []platformAdmissionObservation       `json:"admissions,omitempty"`
+	AdmissionsOmitted uint64                               `json:"admissions_omitted"`
 }
 
 type platformMutationRecorder struct {
@@ -115,6 +117,8 @@ func (r *platformMutationRecorder) record(trace *platformMutationTrace, err erro
 	now := trace.now()
 	receipt := platformMutationReceipt{Operation: runtimeobservation.DatabaseOperationFromContext(trace.ctx),
 		Started: trace.started, Finished: now, Stage: trace.stage, Failed: err != nil}
+	receipt.Admissions = append([]platformAdmissionObservation(nil), trace.admissions...)
+	receipt.AdmissionsOmitted = trace.admissionsOmitted
 	// Reuse the fixed typed error classifier. Never retain err.Error().
 	ctx := context.WithValue(context.Background(), platformInputReadObservationKey{}, &receipt.Failure)
 	observePlatformInputReadFailure(ctx, "publication", trace.stage, nil, nil, err)
@@ -178,6 +182,7 @@ func (r *platformMutationRecorder) snapshot() map[string]any {
 		"failure_evicted": failed - uint64(len(failures)), "dropped": r.dropped.Load(),
 		"limit": platformMutationReceiptLimit, "query_limit": platformMutationQueryLimit,
 		"promotion_lock_query_limit": platformMutationLockQueryLimit,
+		"admission_limit":            platformAdmissionObservationLimit,
 		"coverage":                   "completed_publication_stage_and_driver_timings_not_lock_hold_or_cpu_measurements"}
 }
 
