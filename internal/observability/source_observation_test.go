@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"net/http"
@@ -124,6 +125,192 @@ func TestSourceErrorSummarySurvivesDetailTruncation(t *testing.T) {
 	summaries := result["error_summary"].([]sourceErrorSummary)
 	if len(summaries) != 2 || summaries[0].Node != "node-a" || summaries[0].Sources != 700 || summaries[0].Errors != 700 || summaries[1].Node != "node-b" {
 		t.Fatalf("error summary lost sources outside detail window: %+v", summaries)
+	}
+}
+
+func TestSourceObservationProjectsSelectedInventoryLifecycle(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	now := time.Now().UTC()
+	current := kubernetesLogTarget{pod: runningLogPod("current"), container: "app"}
+	retired := kubernetesLogTarget{pod: runningLogPod("retired"), container: "app"}
+	p.observeLogSource(logSourceObservation{Identity: logTargetKey(current), Node: "node-a", ObservedAt: now, Outcome: "drained"})
+	p.observeLogSource(logSourceObservation{Identity: logTargetKey(retired), Node: "node-b", ObservedAt: now, Outcome: "open_error", ErrorClass: "not_found"})
+	value, _ := p.DiagnosticSources(t.Context())
+	if value.(map[string]any)["selected_inventory"] != nil || value.(map[string]any)["sources"].([]logSourceObservation)[0].SelectedInventoryState != "" {
+		t.Fatal("invented membership before successful discovery")
+	}
+	c := newKubernetesLogCollectorWithClient(p, nil)
+	c.clock = func() time.Time { return now }
+	c.observeSelectedLogInventory([]kubernetesLogTarget{current})
+	// A late read result preserves absent membership and its failure evidence.
+	p.observeLogSource(logSourceObservation{Identity: logTargetKey(retired), ObservedAt: now, Outcome: "drained"})
+
+	value, err := p.DiagnosticSources(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := value.(map[string]any)
+	rows := result["sources"].([]logSourceObservation)
+	states := map[string]string{}
+	for _, row := range rows {
+		states[row.Identity] = row.SelectedInventoryState
+		if row.Identity == logTargetKey(retired) && (row.Errors != 1 || row.LastErrorClass != "not_found") {
+			t.Fatal("inventory erased retained failure evidence")
+		}
+	}
+	if states[logTargetKey(current)] != "present" || states[logTargetKey(retired)] != "absent" {
+		t.Fatalf("inventory lifecycle missing: %+v", states)
+	}
+	inventory := result["selected_inventory"].(map[string]any)
+	if inventory["targets"] != 1 || inventory["tracked_sources"] != 2 || inventory["tracked_present"] != 1 || inventory["tracked_absent"] != 1 || inventory["tracked_unknown"] != 0 || !inventory["observed_at"].(time.Time).Equal(now) {
+		t.Fatalf("selected inventory summary inconsistent: %+v", inventory)
+	}
+}
+
+func TestSelectedInventoryUsesPodAndContainerIdentityAndDoesNotGuessNewMembership(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	c := newKubernetesLogCollectorWithClient(p, nil)
+	pod := runningLogPod("shared-name")
+	pod.UID = types.UID("pod-current")
+	pod.Status.ContainerStatuses[0].ContainerID = "containerd://current"
+	pod.Status.ContainerStatuses[0].LastTerminationState.Terminated = &corev1.ContainerStateTerminated{ContainerID: "containerd://previous"}
+	current := kubernetesLogTarget{pod: pod, container: "app"}
+	previous := kubernetesLogTarget{pod: pod, container: "app", previous: true}
+	oldPod := current
+	oldPod.pod = *pod.DeepCopy()
+	oldPod.pod.UID = types.UID("pod-retired")
+	oldContainer := current
+	oldContainer.pod = *pod.DeepCopy()
+	oldContainer.pod.Status.ContainerStatuses[0].ContainerID = "containerd://retired"
+	for _, target := range []kubernetesLogTarget{oldPod, oldContainer, previous} {
+		p.observeLogSource(logSourceObservation{Identity: logTargetKey(target), ObservedAt: time.Now()})
+	}
+	c.observeSelectedLogInventory([]kubernetesLogTarget{current, previous})
+	p.observeLogSource(logSourceObservation{Identity: logTargetKey(current), ObservedAt: time.Now(), SelectedInventoryState: "present"})
+	value, _ := p.DiagnosticSources(t.Context())
+	states := map[string]string{}
+	for _, row := range value.(map[string]any)["sources"].([]logSourceObservation) {
+		states[row.Identity] = row.SelectedInventoryState
+	}
+	if states[logTargetKey(current)] != "unknown" || states[logTargetKey(previous)] != "present" || states[logTargetKey(oldPod)] != "absent" || states[logTargetKey(oldContainer)] != "absent" {
+		t.Fatal("membership confused replacements, previous logs, or new observations", states)
+	}
+	c.observeSelectedLogInventory([]kubernetesLogTarget{current, previous})
+	if p.sourceObservations[logTargetKey(current)].SelectedInventoryState != "present" {
+		t.Fatal("next successful inventory did not resolve unknown membership")
+	}
+}
+
+func TestSelectedInventorySummaryCoversBoundedRetentionNotOnlyDetailRows(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	c := newKubernetesLogCollectorWithClient(p, nil)
+	targets := make([]kubernetesLogTarget, 2200)
+	for i := range targets {
+		targets[i] = kubernetesLogTarget{pod: runningLogPod(fmt.Sprintf("pod-%04d", i)), container: "app"}
+		p.observeLogSource(logSourceObservation{Identity: logTargetKey(targets[i]), ObservedAt: time.Unix(int64(i), 0)})
+	}
+	c.observeSelectedLogInventory(targets[:2100])
+	p.observeLogSource(logSourceObservation{Identity: "new-after-discovery", ObservedAt: time.Now()})
+	value, _ := p.DiagnosticSources(t.Context())
+	result := value.(map[string]any)
+	inventory := result["selected_inventory"].(map[string]any)
+	if len(p.sourceObservations) != 2048 || result["source_count"] != 2048 || len(result["sources"].([]logSourceObservation)) != 512 || result["truncated"] != true || inventory["targets"] != 2100 || inventory["tracked_sources"] != 2048 || inventory["tracked_present"] != 1947 || inventory["tracked_absent"] != 100 || inventory["tracked_unknown"] != 1 {
+		t.Fatal("inventory retention or full-set summary is incorrect", inventory)
+	}
+}
+
+func TestSelectedInventoryIgnoresFailedPartialDiscoveryAndRetainsCompletedSources(t *testing.T) {
+	var phase atomic.Int32
+	var unexpectedReads atomic.Int32
+	pod := runningLogPod("selected")
+	pod.Status.ContainerStatuses[0].ContainerID = "containerd://current"
+	pod.Status.ContainerStatuses[0].LastTerminationState.Terminated = &corev1.ContainerStateTerminated{ContainerID: "containerd://previous"}
+	other := runningLogPod("not-selected")
+	other.Namespace = "excluded"
+	c, p := coverageCollector(t, Config{KubernetesLogNamespaces: []string{"ns"}, KubernetesLogLabelSelector: "app=example"}, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/pods" {
+			unexpectedReads.Add(1)
+			http.Error(w, "unexpected log read", http.StatusInternalServerError)
+			return
+		}
+		if r.URL.Query().Get("labelSelector") != "app=example" {
+			t.Error("discovery changed the label selector")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch phase.Load() {
+		case 0:
+			json.NewEncoder(w).Encode(corev1.PodList{Items: []corev1.Pod{pod, other}})
+		case 1:
+			if r.URL.Query().Get("continue") == "" {
+				json.NewEncoder(w).Encode(corev1.PodList{ListMeta: metav1.ListMeta{Continue: "page-two"}, Items: []corev1.Pod{other}})
+			} else {
+				http.Error(w, "inventory unavailable", http.StatusForbidden)
+			}
+		default:
+			json.NewEncoder(w).Encode(corev1.PodList{})
+		}
+	})
+	now := time.Now().UTC()
+	c.clock = func() time.Time { return now }
+	c.cursors = map[string]kubernetesLogCursor{}
+	for _, previous := range []bool{false, true} {
+		target := kubernetesLogTarget{pod: pod, container: "app", previous: previous}
+		key := logTargetKey(target)
+		p.observeLogSource(logSourceObservation{Identity: key, ObservedAt: now, Outcome: "drained"})
+		c.cursors[key] = kubernetesLogCursor{Time: now, Visited: now, Complete: true}
+	}
+	c.collectOnce(t.Context())
+	if p.sourceInventoryTargetCount != 2 || !p.sourceInventoryObservedAt.Equal(now) || p.kubernetesLogDiscoveryComplete.Load() != 1 {
+		t.Fatal("successful discovery did not include completed current/previous sources")
+	}
+	phase.Store(1)
+	now = now.Add(time.Second)
+	c.collectOnce(t.Context())
+	if !p.sourceInventoryObservedAt.Equal(now.Add(-time.Second)) || p.sourceInventoryTargetCount != 2 || p.kubernetesLogDiscoveryComplete.Load() != 0 {
+		t.Fatal("partial failed discovery replaced the last successful inventory")
+	}
+	for _, row := range p.sourceObservations {
+		if row.SelectedInventoryState != "present" || row.Attempts != 1 {
+			t.Fatal("completed source membership or read counters changed", row)
+		}
+	}
+	phase.Store(2)
+	now = now.Add(time.Second)
+	c.collectOnce(t.Context())
+	if p.sourceInventoryTargetCount != 0 || !p.sourceInventoryObservedAt.Equal(now) || unexpectedReads.Load() != 0 {
+		t.Fatal("empty successful inventory was ignored or annotation caused log reads")
+	}
+	for _, row := range p.sourceObservations {
+		if row.SelectedInventoryState != "absent" || row.Attempts != 1 {
+			t.Fatal("empty inventory fabricated delivery or modified read counters", row)
+		}
+	}
+}
+
+func TestSelectedInventoryConcurrentObservationAndProjection(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	c := newKubernetesLogCollectorWithClient(p, nil)
+	target := kubernetesLogTarget{pod: runningLogPod("concurrent"), container: "app"}
+	var wg sync.WaitGroup
+	for i := range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				switch i {
+				case 0:
+					c.observeSelectedLogInventory([]kubernetesLogTarget{target})
+				case 1:
+					p.observeLogSource(logSourceObservation{Identity: logTargetKey(target), ObservedAt: time.Now()})
+				case 2:
+					p.DiagnosticSources(t.Context())
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if p.sourceObservations[logTargetKey(target)].Attempts != 100 {
+		t.Fatal("inventory annotation changed read accounting")
 	}
 }
 

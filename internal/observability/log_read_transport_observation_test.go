@@ -268,6 +268,9 @@ func TestLogReadTransportTimingsFitSourceSnapshotResponseBudget(t *testing.T) {
 			GapEvents: 1, GapReason: "runtime_log_unavailable", GapLowerBound: now, GapUpperBound: now,
 		})
 	}
+	collector := newKubernetesLogCollectorWithClient(p, nil)
+	collector.clock = func() time.Time { return now }
+	collector.observeSelectedLogInventory(nil)
 	value, err := p.DiagnosticSources(t.Context())
 	if err != nil {
 		t.Fatal(err)

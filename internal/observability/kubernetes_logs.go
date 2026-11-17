@@ -191,6 +191,7 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		c.pipeline.kubernetesLogCycleMillis.Store(time.Since(started).Milliseconds())
 		return
 	}
+	c.observeSelectedLogInventory(targets)
 	c.pipeline.kubernetesLogDiscoveryComplete.Store(1)
 	unique := targets[:0]
 	seenTargets := map[string]bool{}
@@ -413,6 +414,26 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	c.pipeline.sourceObservationMu.Lock()
 	c.pipeline.sourceObservationCycle = logCycleObservation{At: started, Targets: len(targets), Scheduled: scheduled, Visited: visited, CatchupReads: catchupReads, InitialBudget: budget, RemainingBudget: remaining.Load(), PollMillis: c.pipeline.cfg.KubernetesLogPollInterval.Milliseconds(), PerSourceLimit: c.pipeline.cfg.KubernetesLogTailLines, CycleLimit: c.pipeline.cfg.KubernetesLogMaxLinesPerCycle}
 	c.pipeline.sourceObservationMu.Unlock()
+}
+
+func (c *kubernetesLogCollector) observeSelectedLogInventory(targets []kubernetesLogTarget) {
+	// Annotate only the bounded retained observation set; do not retain a second,
+	// potentially unbounded copy of the discovered Kubernetes inventory.
+	c.pipeline.sourceObservationMu.Lock()
+	defer c.pipeline.sourceObservationMu.Unlock()
+	for key, row := range c.pipeline.sourceObservations {
+		row.SelectedInventoryState = "absent"
+		c.pipeline.sourceObservations[key] = row
+	}
+	for _, target := range targets {
+		key := logTargetKey(target)
+		if row, ok := c.pipeline.sourceObservations[key]; ok {
+			row.SelectedInventoryState = "present"
+			c.pipeline.sourceObservations[key] = row
+		}
+	}
+	c.pipeline.sourceInventoryObservedAt = c.logNow()
+	c.pipeline.sourceInventoryTargetCount = len(targets)
 }
 
 // Prune before the admission checkpoint, not only after a successful read cycle.

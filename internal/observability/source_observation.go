@@ -8,31 +8,32 @@ import (
 )
 
 type logSourceObservation struct {
-	Identity        string                       `json:"identity"`
-	Node            string                       `json:"node"`
-	Previous        bool                         `json:"previous"`
-	ObservedAt      time.Time                    `json:"observed_at"`
-	CursorBefore    time.Time                    `json:"cursor_before"`
-	CursorAfter     time.Time                    `json:"cursor_after"`
-	NextAttempt     time.Time                    `json:"next_attempt,omitempty"`
-	PendingAt       time.Time                    `json:"pending_at,omitempty"`
-	DrainedThrough  time.Time                    `json:"drained_through,omitempty"`
-	OpenMillis      int64                        `json:"open_ms"`
-	TotalMillis     int64                        `json:"total_ms"`
-	Lines           int                          `json:"lines"`
-	Outcome         string                       `json:"outcome"`
-	Attempts        uint64                       `json:"attempts"`
-	Errors          uint64                       `json:"errors"`
-	ErrorClass      string                       `json:"error_class,omitempty"`
-	HTTPStatus      int                          `json:"http_status,omitempty"`
-	LastErrorAt     time.Time                    `json:"last_error_at,omitempty"`
-	LastErrorClass  string                       `json:"last_error_class,omitempty"`
-	LastHTTPStatus  int                          `json:"last_http_status,omitempty"`
-	LastErrorStage  string                       `json:"last_error_stage,omitempty"`
-	LastErrorMillis int64                        `json:"last_error_ms,omitempty"`
-	LastErrorRead   *logReadTransportObservation `json:"last_error_read,omitempty"`
-	LastAdmission   *logAdmissionObservation     `json:"last_admission,omitempty"`
-	InvalidRecord   *logInvalidRecordObservation `json:"invalid_record,omitempty"`
+	Identity               string                       `json:"identity"`
+	Node                   string                       `json:"node"`
+	SelectedInventoryState string                       `json:"selected_inventory_state,omitempty"`
+	Previous               bool                         `json:"previous"`
+	ObservedAt             time.Time                    `json:"observed_at"`
+	CursorBefore           time.Time                    `json:"cursor_before"`
+	CursorAfter            time.Time                    `json:"cursor_after"`
+	NextAttempt            time.Time                    `json:"next_attempt,omitempty"`
+	PendingAt              time.Time                    `json:"pending_at,omitempty"`
+	DrainedThrough         time.Time                    `json:"drained_through,omitempty"`
+	OpenMillis             int64                        `json:"open_ms"`
+	TotalMillis            int64                        `json:"total_ms"`
+	Lines                  int                          `json:"lines"`
+	Outcome                string                       `json:"outcome"`
+	Attempts               uint64                       `json:"attempts"`
+	Errors                 uint64                       `json:"errors"`
+	ErrorClass             string                       `json:"error_class,omitempty"`
+	HTTPStatus             int                          `json:"http_status,omitempty"`
+	LastErrorAt            time.Time                    `json:"last_error_at,omitempty"`
+	LastErrorClass         string                       `json:"last_error_class,omitempty"`
+	LastHTTPStatus         int                          `json:"last_http_status,omitempty"`
+	LastErrorStage         string                       `json:"last_error_stage,omitempty"`
+	LastErrorMillis        int64                        `json:"last_error_ms,omitempty"`
+	LastErrorRead          *logReadTransportObservation `json:"last_error_read,omitempty"`
+	LastAdmission          *logAdmissionObservation     `json:"last_admission,omitempty"`
+	InvalidRecord          *logInvalidRecordObservation `json:"invalid_record,omitempty"`
 	// The independent 64-entry gap ring exposes this witness. Do not multiply
 	// its payload across the 512-row source projection's response budget.
 	BoundaryCheck    *logBoundaryObservation `json:"-"`
@@ -109,6 +110,10 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 		p.sourceObservations = map[string]logSourceObservation{}
 	}
 	prior, exists := p.sourceObservations[v.Identity]
+	// Membership refers exclusively to the last successful discovery, not to a
+	// read attempt. Newly retained identities stay unknown until discovery runs
+	// again; a read must not fabricate membership or overwrite an absent result.
+	v.SelectedInventoryState = prior.SelectedInventoryState
 	if v.InvalidRecord != nil {
 		copy := *v.InvalidRecord
 		v.InvalidRecord = &copy
@@ -188,6 +193,9 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	p.sourceObservationMu.Lock()
 	rows := make([]logSourceObservation, 0, len(p.sourceObservations))
 	for _, row := range p.sourceObservations {
+		if !p.sourceInventoryObservedAt.IsZero() && row.SelectedInventoryState == "" {
+			row.SelectedInventoryState = "unknown"
+		}
 		row.BoundaryCheck = cloneLogBoundaryObservation(row.BoundaryCheck)
 		if row.InvalidRecord != nil {
 			copy := *row.InvalidRecord
@@ -204,6 +212,20 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 		rows = append(rows, row)
 	}
 	evicted, cycle := p.sourceObservationEvicted, p.sourceObservationCycle
+	inventoryAt, inventoryTargets := p.sourceInventoryObservedAt, p.sourceInventoryTargetCount
+	trackedPresent, trackedAbsent, trackedUnknown := 0, 0, 0
+	if !inventoryAt.IsZero() {
+		for _, row := range rows {
+			switch row.SelectedInventoryState {
+			case "present":
+				trackedPresent++
+			case "absent":
+				trackedAbsent++
+			default:
+				trackedUnknown++
+			}
+		}
+	}
 	checkpoint := p.sourceCheckpoint
 	gapReceipts := append([]logGapObservation(nil), p.sourceGapReceipts...)
 	for i := range gapReceipts {
@@ -284,7 +306,12 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	if truncated {
 		rows = rows[:512]
 	}
-	return map[string]any{"schema": "fugue.pipeline.sources.v1", "observed_at": time.Now().UTC(), "sources": rows, "source_count": total, "truncated": truncated, "evicted_sources": evicted, "error_summary": errorSummary,
+	selectedInventory := any(nil)
+	if !inventoryAt.IsZero() {
+		selectedInventory = map[string]any{"observed_at": inventoryAt, "targets": inventoryTargets,
+			"tracked_sources": total, "tracked_present": trackedPresent, "tracked_absent": trackedAbsent, "tracked_unknown": trackedUnknown}
+	}
+	return map[string]any{"schema": "fugue.pipeline.sources.v1", "observed_at": time.Now().UTC(), "sources": rows, "source_count": total, "truncated": truncated, "evicted_sources": evicted, "selected_inventory": selectedInventory, "error_summary": errorSummary,
 		"error_summary_coverage": "retained_source_lifetime_errors_grouped_by_latest_error_not_per_class_event_totals",
 		"gap_coverage":           "retained_source_lifetime_gap_counts_with_most_recent_gap_bounds_not_reconstructed_log_contents",
 		"gap_history":            gapHistory,

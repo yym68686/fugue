@@ -146,6 +146,18 @@ error class, and stage across every retained source, independent of the 512-row
 detail projection. This keeps source error attribution complete when the detail
 list is marked truncated.
 
+After successful Kubernetes discovery, the same snapshot records the selected
+source count and marks retained sources as `present` or `absent` from the latest
+successful namespace/label inventory. Sources first retained after that inventory
+are `unknown` until the next successful discovery. Membership annotates only the
+bounded retained source set; it does not retain a second full inventory. The
+summary counts all retained sources, including those outside the 512-row detail
+projection. `absent` means only that the source is no
+longer selected; it does not establish why it disappeared or whether its logs
+were fully delivered. Discovery errors do not replace the last successful
+inventory. This metadata does not change collection, retry, checkpoint, or
+cursor behavior.
+
 The source snapshot also keeps an independent `gap_history` ring of 64 new gap
 observations. Ordinary reads, backoff, retained cumulative counts, source-detail
 eviction and the 512-row projection cannot evict those receipts. New gap

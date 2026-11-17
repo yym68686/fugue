@@ -126,6 +126,8 @@ type Pipeline struct {
 	sourceObservations             map[string]logSourceObservation
 	sourceObservationEvicted       uint64
 	sourceObservationCycle         logCycleObservation
+	sourceInventoryObservedAt      time.Time
+	sourceInventoryTargetCount     int
 	sourceGapReceipts              []logGapObservation
 	sourceGapReceiptTotal          uint64
 	sourceGapReceiptEvicted        uint64
