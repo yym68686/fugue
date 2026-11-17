@@ -44,6 +44,7 @@ func (c *CLI) newAdminStorageCommand() *cobra.Command {
 	cmd.AddCommand(c.newAdminOrphanManifestCommand())
 	cmd.AddCommand(c.newAdminStorageJobsCommand())
 	cmd.AddCommand(c.newCompilerInputArchiveBackendCommand())
+	cmd.AddCommand(c.newVolumeRetirementCommand())
 	return cmd
 }
 
