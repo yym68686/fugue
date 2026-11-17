@@ -13,6 +13,7 @@ from pathlib import Path
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -132,6 +133,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--disposable-host", action="store_true", required=True)
     parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--with-storage", action="store_true")
     args = parser.parse_args()
     assert platform.system() == "Linux" and platform.machine() == "x86_64"
     assert os.geteuid() == 0
@@ -165,6 +167,7 @@ def main():
             stop.wait(0.1)
 
     observer = None
+    storage = None
     try:
         installer = evidence / "install.sh"
         installer.write_text(run("curl", "-fsSL", "https://get.k3s.io").stdout)
@@ -194,23 +197,33 @@ def main():
         assert before["status"]["initContainerStatuses"][0]["state"]["terminated"]["exitCode"] == 0
         container_id = before["status"]["containerStatuses"][0]["containerID"]
         pod_uid = before["metadata"]["uid"]
+        if args.with_storage:
+            sys.path.insert(0, str(ROOT))
+            from scripts.qualify_k3s_storage import StorageQualification
+            storage = StorageQualification(evidence)
+            storage.setup()
+            storage.observe()
         observer = threading.Thread(target=observe)
         observer.start()
         for index, version in enumerate(VERSIONS):
             if index:
+                if index == 1 and storage:
+                    storage.upgrade_longhorn()
                 binary = download(version, binaries, evidence)
                 # Atomic binary replacement preserves every installer-managed setting.
                 run("install", "-m", "0755", str(binary), "/usr/local/bin/k3s.next")
                 os.replace("/usr/local/bin/k3s.next", "/usr/local/bin/k3s")
                 run("systemctl", "restart", "k3s", timeout=300)
                 assert wait_ready(version) == node_uid
+            if storage:
+                storage.checkpoint(version)
             initial = pod()
             assert initial["metadata"]["uid"] == pod_uid
             assert initial["status"]["containerStatuses"][0]["containerID"] == container_id
             # Only resize an ALREADY COMPLETED ordinary init container. Main
             # container memory, executable inode, UID and connections stay intact.
             target = "128Mi" if index < 2 else "96Mi"
-            capacity = schedule_capacity_probe(version, evidence, (128 if index < 2 else 16) * 1024 ** 2)
+            capacity = None if storage else schedule_capacity_probe(version, evidence, (128 if index < 2 else 16) * 1024 ** 2)
             patch = json.dumps({"spec": {"initContainers": [{"name": "bootstrap",
                                   "resources": {"requests": {"memory": target},
                                                 "limits": {"memory": target}}}]}})
@@ -236,17 +249,26 @@ def main():
             else:
                 assert result.returncode == 0, "completed-init resize failed; bootstrap benefit NOT proven"
                 assert entry["init_request"] == target
-                run("k3s", "kubectl", "-n", "upgrade-qualification", "wait", "--for=condition=PodScheduled",
-                    "pod/capacity-probe", "--timeout=90s", timeout=100)
-                entry["scheduler_capacity_released"] = True
+                if not storage:
+                    run("k3s", "kubectl", "-n", "upgrade-qualification", "wait", "--for=condition=PodScheduled",
+                        "pod/capacity-probe", "--timeout=90s", timeout=100)
+                    entry["scheduler_capacity_released"] = True
                 write_json("report.json", report)
-            kubectl("-n", "upgrade-qualification", "delete", "pod", "capacity-probe", "--wait=false")
-            run("k3s", "kubectl", "-n", "upgrade-qualification", "wait", "--for=delete",
-                "pod/capacity-probe", "--timeout=60s", timeout=70)
+            if not storage:
+                kubectl("-n", "upgrade-qualification", "delete", "pod", "capacity-probe", "--wait=false")
+                run("k3s", "kubectl", "-n", "upgrade-qualification", "wait", "--for=delete",
+                    "pod/capacity-probe", "--timeout=60s", timeout=70)
         assert not failures, "HTTP continuity failed"
         report["passed"] = True
     finally:
         stop.set()
+        storage_error = None
+        if storage:
+            try:
+                storage.finish()
+            except Exception as exc:
+                storage_error = exc
+                report["passed"] = False
         if observer:
             observer.join(timeout=5)
         write_json("http.json", {"samples": samples, "failures": failures})
@@ -259,6 +281,8 @@ def main():
         (evidence / "fixture-logs.txt").write_text(result.stdout + result.stderr)
         result = kubectl("get", "events", "-A", "-o", "json", check=False)
         (evidence / "events.json").write_text(result.stdout)
+        if storage_error:
+            raise storage_error
 
 
 if __name__ == "__main__":

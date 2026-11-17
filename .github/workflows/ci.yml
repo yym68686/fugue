@@ -81,6 +81,32 @@ jobs:
           path: ${{ runner.temp }}/k3s-qualification
           retention-days: 14
 
+  k3s_storage_qualification:
+    needs: k3s_bootstrap_qualification
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/codex/k3s-native-upgrade-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}'}
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+        with: {version: v4.2.0}
+      - name: Prepare disposable Linux storage tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y open-iscsi nfs-common python3-yaml python3-psycopg
+          sudo modprobe iscsi_tcp
+          sudo systemctl start iscsid
+      - name: Keep PostgreSQL connections and Longhorn volumes alive across dependency and K3s updates
+        run: sudo env "PATH=$PATH" python3 scripts/qualify_k3s_bootstrap.py --disposable-host --with-storage --evidence "$RUNNER_TEMP/k3s-storage-qualification"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: fugue-k3s-storage-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/k3s-storage-qualification
+          retention-days: 14
+
   longhorn_local_snapshot_cleanup:
     needs: [prepush, deploy_api]
     if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success') && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') }}

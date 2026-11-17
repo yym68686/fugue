@@ -1,0 +1,7 @@
+{
+  "cnpg_operator_image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:cc38055a457a6904939e3610b87e596c7c01945501a469cfbadae8b3dc167fdb",
+  "cnpg_chart": "deploy/helm/fugue/charts/cloudnative-pg-0.28.0.tgz",
+  "postgres_image": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie",
+  "longhorn_baseline": "1.12.1",
+  "longhorn_candidate": "1.12.2"
+}
