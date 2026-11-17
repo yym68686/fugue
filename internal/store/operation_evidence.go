@@ -856,7 +856,7 @@ func normalizeEvidenceRedactionStatus(raw string) string {
 }
 
 func operationEvidenceMatchesFilter(e model.OperationEvidence, filter model.OperationEvidenceFilter) bool {
-	if isLongLivedMigrationEvidenceType(e.Type) && !strings.HasPrefix(e.Type,"postgres_image_migration_") && !filter.IncludeMigrationLedger {
+	if isLongLivedMigrationEvidenceType(e.Type) && !strings.HasPrefix(e.Type, "postgres_image_migration_") && !filter.IncludeMigrationLedger {
 		return false
 	}
 	if !filter.PlatformAdmin && strings.TrimSpace(filter.TenantID) != "" && strings.TrimSpace(e.TenantID) != strings.TrimSpace(filter.TenantID) {

@@ -2176,7 +2176,7 @@ func AppZeroDowntimeRequirementSource(spec AppSpec) string {
 }
 
 type AppPostgresSpec struct {
-	ImageMigrationConfigHash string `json:"image_migration_config_hash,omitempty"`
+	ImageMigrationConfigHash         string `json:"image_migration_config_hash,omitempty"`
 	Image                            string `json:"image,omitempty"`
 	Database                         string `json:"database,omitempty"`
 	User                             string `json:"user,omitempty"`
