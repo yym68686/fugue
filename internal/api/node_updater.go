@@ -4380,8 +4380,8 @@ wait_for_unit_active() {
 
 restart_k3s_agent() {
   log_task "restarting k3s-agent"
-  systemctl restart k3s-agent
-  wait_for_unit_active k3s-agent 900
+  systemctl restart k3s-agent || return 1
+  wait_for_unit_active k3s-agent 900 || return 1
   log_task "k3s-agent is active"
 }
 
@@ -4402,8 +4402,8 @@ restart_k3s_agent_for_config_reload() {
     return 0
   fi
   log "restarting k3s-agent so containerd reloads updated join/registry configuration"
-  systemctl restart k3s-agent
-  wait_for_unit_active k3s-agent 900
+  systemctl restart k3s-agent || return 1
+  wait_for_unit_active k3s-agent 900 || return 1
   log "k3s-agent is active after join/registry configuration reload"
 }
 
@@ -4437,29 +4437,36 @@ request_k3s_agent_restart_for_cluster_rejoin() {
   log "queued non-blocking k3s-agent restart for cluster rejoin"
 }
 
-upgrade_k3s_agent() {
-  local channel="${FUGUE_NODE_UPDATE_TASK_K3S_CHANNEL:-${FUGUE_K3S_CHANNEL:-stable}}"
-  local target_version="${FUGUE_NODE_UPDATE_TASK_TARGET_K3S_VERSION:-}"
-  local install_env=(INSTALL_K3S_EXEC=agent INSTALL_K3S_SKIP_START=true INSTALL_K3S_CHANNEL="${channel}")
-  if [ -n "${target_version}" ]; then
-    install_env+=(INSTALL_K3S_VERSION="${target_version}")
-  fi
-  log_task "installing k3s agent channel=${channel} target=${target_version:-latest}"
-  curl -sfL https://get.k3s.io | env "${install_env[@]}" sh -
-  restart_k3s_agent
-  log_task "k3s agent version after upgrade: $(k3s_version)"
-}
+__FUGUE_K3S_UPGRADE_LIBRARY__
 
-upgrade_node_updater() {
+upgrade_node_updater() (
   local script_url="${FUGUE_NODE_UPDATE_TASK_NODE_UPDATER_SCRIPT_URL:-${FUGUE_API_BASE}/install/node-updater.sh}"
-  local tmp=""
-  tmp="$(mktemp)"
+  local stage="" tmp="" candidate_version=""
+  stage="$(mktemp -d /usr/local/bin/.fugue-node-updater.XXXXXX)" || return 1
+  tmp="${stage}/candidate"
+  trap 'rm -f -- "${tmp}"; rmdir -- "${stage}"' EXIT
   log_task "downloading node updater script from ${script_url}"
-  curl -fsSL "${script_url}" -o "${tmp}"
-  install -m 0755 "${tmp}" /usr/local/bin/fugue-node-updater
-  rm -f "${tmp}"
-  log_task "node updater script installed"
-}
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --connect-timeout 10 --max-time 180 --retry 2 "${script_url}" -o "${tmp}" || return 1
+  [ -s "${tmp}" ] || return 1
+  bash -n "${tmp}" || return 1
+  candidate_version="$(python3 - "${tmp}" "${FUGUE_NODE_UPDATER_SCRIPT_VERSION}" "${FUGUE_NODE_UPDATE_TASK_TARGET_VERSION:-}" <<'PY_UPDATER_VERSION'
+import pathlib, re, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(r'^FUGUE_NODE_UPDATER_SCRIPT_VERSION="(v[1-9][0-9]*)"$', source, re.MULTILINE)
+current, target = sys.argv[2:]
+if (not match or not re.fullmatch(r"v[1-9][0-9]*", current) or
+    int(match[1][1:]) < int(current[1:]) or (target and match[1] != target)):
+    sys.exit("downloaded updater version does not match the non-downgrading target")
+print(match[1])
+PY_UPDATER_VERSION
+  )" || return 1
+  chmod 0755 "${tmp}" || return 1
+  # Same-filesystem atomic replacement also preserves the currently executing
+  # Bash script inode. A failed/empty download must never truncate the updater.
+  mv -f -- "${tmp}" /usr/local/bin/fugue-node-updater || return 1
+  log_task "node updater script installed and validated: ${candidate_version}"
+)
 
 diagnose_node() {
   log_task "hostname=$(hostname 2>/dev/null || true)"
@@ -5898,5 +5905,6 @@ esac
 		"__FUGUE_POD_CAPACITY_LIBRARY__", podCapacityShellLibrary(),
 		"__FUGUE_HOST_JOURNALD_POLICY_LIBRARY__", hostJournaldPolicyShellLibrary(),
 		"__FUGUE_LOCALPV_UNIT_LIBRARY__", localPVUnitShellLibrary(),
+		"__FUGUE_K3S_UPGRADE_LIBRARY__", guardedK3SUpgradeShell,
 	).Replace(script)
 }
