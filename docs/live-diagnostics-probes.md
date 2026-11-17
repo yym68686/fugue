@@ -197,6 +197,18 @@ operation counters. Both rings are process-local metadata with explicit overwrit
 and restart boundaries, not durable or complete 24-hour request tracing. They do
 not renew facts, change admission or erase historical failures.
 
+`captures.dns_failures` independently retains the last eight completed DNS
+runtime-fact read errors. Successful reads cannot evict them; total and eviction
+counts describe process-local read failures, not public DNS query errors.
+Assignment rejection events retain the exact compared expected assignment and
+heartbeat reference hashes, generation sequences, fences and heartbeat time.
+Snapshot assignment mismatches also retain the compared snapshot's reference
+hashes, revision, channel and deadlines. These values come from the failing
+comparison without extra queries; a later successful read cannot replace them.
+Opaque references are hashed, and credentials, nonces, bodies and arbitrary
+errors are omitted. This evidence identifies which states disagreed; it does
+not establish why a consumer had not converged or weaken any equality check.
+
 The API capture snapshot's independent `traffic_failures` ring retains twelve
 failed published-traffic diagnostic reads, including DNS route-invariant checks.
 It records the source-defined failure stage and, for failed convergence, the

@@ -19,6 +19,7 @@ import (
 // authorize a candidate, renew a fact or store tenant identity, paths or errors.
 const captureReceiptLimit = 24
 const captureEventLimit = 12
+const dnsCaptureFailureLimit = 8
 
 type captureObservations struct {
 	mu                     sync.Mutex
@@ -29,6 +30,9 @@ type captureObservations struct {
 	agentFailures          []captureReceipt
 	agentFailureTotal      uint64
 	agentFailureEvicted    uint64
+	dnsFailures            []captureReceipt
+	dnsFailureTotal        uint64
+	dnsFailureEvicted      uint64
 	trafficFailures        []trafficDiagnosticFailure
 	trafficFailureTotal    uint64
 	trafficFailureEvicted  uint64
@@ -51,15 +55,60 @@ type captureReceipt struct {
 }
 
 type captureEvent struct {
-	Stage       string                  `json:"stage"`
-	Node        string                  `json:"node,omitempty"`
-	ErrorClass  string                  `json:"error_class,omitempty"`
-	DurationMS  int64                   `json:"duration_ms"`
-	Capacity    *captureCapacity        `json:"capacity,omitempty"`
-	Mismatches  []string                `json:"mismatches,omitempty"`
-	HTTPStatus  int                     `json:"http_status,omitempty"`
-	Rejection   string                  `json:"rejection,omitempty"`
-	Publication *capturePublicationPair `json:"publication,omitempty"`
+	Stage        string                  `json:"stage"`
+	Node         string                  `json:"node,omitempty"`
+	ErrorClass   string                  `json:"error_class,omitempty"`
+	DurationMS   int64                   `json:"duration_ms"`
+	Capacity     *captureCapacity        `json:"capacity,omitempty"`
+	Mismatches   []string                `json:"mismatches,omitempty"`
+	HTTPStatus   int                     `json:"http_status,omitempty"`
+	Rejection    string                  `json:"rejection,omitempty"`
+	Publication  *capturePublicationPair `json:"publication,omitempty"`
+	DNSAuthority *captureDNSAuthority    `json:"dns_authority,omitempty"`
+}
+
+// These values come from the exact failed comparison. No subsequent store
+// read may replace them with a newer heartbeat or expectation. All opaque
+// references are hashed; credentials, nonces, evidence and bodies are omitted.
+type captureDNSAssignment struct {
+	ExpectedSetHash     string    `json:"expected_set_hash"`
+	ReleaseSetHash      string    `json:"release_set_hash"`
+	ReleaseHash         string    `json:"release_hash"`
+	ArtifactHash        string    `json:"artifact_hash"`
+	GenerationSequence  int64     `json:"generation_sequence"`
+	Revision            int64     `json:"revision"`
+	FencingToken        int64     `json:"fencing_token"`
+	Channel             string    `json:"channel"`
+	HeartbeatDeadline   time.Time `json:"heartbeat_deadline"`
+	ConvergenceDeadline time.Time `json:"convergence_deadline"`
+}
+
+type captureDNSHeartbeat struct {
+	ExpectedSetHash    string    `json:"expected_set_hash"`
+	ReleaseSetHash     string    `json:"release_set_hash"`
+	GenerationSequence int64     `json:"generation_sequence"`
+	FencingToken       int64     `json:"fencing_token"`
+	LastHeartbeatAt    time.Time `json:"last_heartbeat_at"`
+}
+
+type captureDNSAuthority struct {
+	Expected  captureDNSAssignment  `json:"expected"`
+	Heartbeat captureDNSHeartbeat   `json:"heartbeat"`
+	Snapshot  *captureDNSAssignment `json:"snapshot,omitempty"`
+}
+
+func captureDNSAssignmentReference(a model.PlatformConsumerAssignment) captureDNSAssignment {
+	publication := capturePublicationReference(a.ReleaseSetID, a.ArtifactID, a.ArtifactReleaseID, a.ReleaseChannel, a.FencingToken)
+	return captureDNSAssignment{ExpectedSetHash: captureIdentityHash(a.ExpectedConsumerSetID),
+		ReleaseSetHash: publication.ReleaseSetHash, ReleaseHash: publication.ReleaseHash, ArtifactHash: publication.RouteArtifactHash,
+		GenerationSequence: a.GenerationSequence, Revision: a.Revision, FencingToken: a.FencingToken, Channel: publication.Channel,
+		HeartbeatDeadline: a.HeartbeatDeadline, ConvergenceDeadline: a.ConvergenceDeadline}
+}
+
+func captureDNSAuthorityEvidence(a model.PlatformConsumerAssignment, fact model.PlatformConsumerInstance) *captureDNSAuthority {
+	return &captureDNSAuthority{Expected: captureDNSAssignmentReference(a), Heartbeat: captureDNSHeartbeat{
+		ExpectedSetHash: captureIdentityHash(fact.ExpectedConsumerSetID), ReleaseSetHash: captureIdentityHash(fact.ReleaseSetID),
+		GenerationSequence: fact.GenerationSequence, FencingToken: fact.FencingToken, LastHeartbeatAt: fact.LastHeartbeatAt}}
 }
 
 // Publication references are hashed independently so a local read-only
@@ -183,6 +232,14 @@ func observeCapture(ctx context.Context, event captureEvent) {
 		}
 		event.Publication = &copy
 	}
+	if event.DNSAuthority != nil {
+		copy := *event.DNSAuthority
+		if copy.Snapshot != nil {
+			snapshot := *copy.Snapshot
+			copy.Snapshot = &snapshot
+		}
+		event.DNSAuthority = &copy
+	}
 	trace.receipt.Events = append(trace.receipt.Events, event)
 }
 
@@ -221,6 +278,17 @@ func (s *Server) finishCaptureTrace(trace *captureTrace, outcome string, err err
 			s.captures.agentFailureEvicted++
 		}
 		s.captures.agentFailures = append(s.captures.agentFailures, receipt)
+	}
+	// Frequent successful management reads must not erase the failed comparison
+	// before an operator can correlate it with the exact release metadata.
+	if receipt.Kind == "dns-runtime-facts" && err != nil {
+		s.captures.dnsFailureTotal++
+		if len(s.captures.dnsFailures) == dnsCaptureFailureLimit {
+			copy(s.captures.dnsFailures, s.captures.dnsFailures[1:])
+			s.captures.dnsFailures = s.captures.dnsFailures[:dnsCaptureFailureLimit-1]
+			s.captures.dnsFailureEvicted++
+		}
+		s.captures.dnsFailures = append(s.captures.dnsFailures, receipt)
 	}
 }
 
@@ -333,6 +401,9 @@ func (s *Server) captureSnapshot() any {
 		"agent_failures": map[string]any{"receipts": append([]captureReceipt(nil), s.captures.agentFailures...),
 			"total": s.captures.agentFailureTotal, "evicted": s.captures.agentFailureEvicted, "limit": captureReceiptLimit,
 			"coverage": "completed_agent_request_capture_errors_not_all_http_response_failures"},
+		"dns_failures": map[string]any{"receipts": append([]captureReceipt(nil), s.captures.dnsFailures...),
+			"total": s.captures.dnsFailureTotal, "evicted": s.captures.dnsFailureEvicted, "limit": dnsCaptureFailureLimit,
+			"coverage": "completed_dns_runtime_fact_read_errors_not_public_dns_query_failures"},
 		"traffic_failures": map[string]any{"receipts": append([]trafficDiagnosticFailure(nil), s.captures.trafficFailures...),
 			"total": s.captures.trafficFailureTotal, "evicted": s.captures.trafficFailureEvicted, "limit": trafficFailureLimit,
 			"coverage": "failed_published_traffic_diagnostic_reads_not_all_dns_checks_or_request_causes"},

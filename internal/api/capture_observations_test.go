@@ -27,6 +27,67 @@ func captureReceipts(t *testing.T, s *Server) []captureReceipt {
 	return value.(map[string]any)["captures"].(map[string]any)["receipts"].([]captureReceipt)
 }
 
+func TestDNSCaptureFailuresSurviveSuccessfulReadsWithDetachedBoundedEvidence(t *testing.T) {
+	s := &Server{}
+	now := time.Now().UTC()
+	a := model.PlatformConsumerAssignment{ExpectedConsumerSetID: "private-expectation", ReleaseSetID: "private-parent",
+		ArtifactReleaseID: "private-release", ArtifactID: "private-artifact", ReleaseChannel: "full", Revision: 8,
+		GenerationSequence: 20, FencingToken: 7, HeartbeatDeadline: now.Add(time.Minute), ConvergenceDeadline: now.Add(2 * time.Minute)}
+	fact := model.PlatformConsumerInstance{ExpectedConsumerSetID: "private-old-expectation", ReleaseSetID: a.ReleaseSetID,
+		GenerationSequence: 19, FencingToken: 6, LastHeartbeatAt: now, CredentialID: "private-credential", Nonce: "private-nonce", LastError: "private-error"}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range dnsCaptureFailureLimit {
+				ctx, trace := s.beginCaptureTrace(context.Background(), "dns-runtime-facts")
+				pair := captureDNSAuthorityEvidence(a, fact)
+				snapshot := captureDNSAssignmentReference(a)
+				snapshot.FencingToken--
+				pair.Snapshot = &snapshot
+				observeCapture(ctx, captureEvent{Stage: "snapshot_validation_rejected", Rejection: "assignment", DNSAuthority: pair})
+				pair.Expected.Revision, pair.Heartbeat.FencingToken, snapshot.FencingToken = 999, 999, 999
+				s.finishCaptureTrace(trace, "snapshot_validation", errDNSRuntimeFacts, 0, 0)
+				_, _ = s.OperationSnapshot(context.Background())
+			}
+		}()
+	}
+	wg.Wait()
+	for range captureReceiptLimit + 1 {
+		_, trace := s.beginCaptureTrace(context.Background(), "dns-runtime-facts")
+		s.finishCaptureTrace(trace, "ready", nil, 0, 0)
+	}
+	snapshot := s.captureSnapshot().(map[string]any)
+	failures := snapshot["dns_failures"].(map[string]any)
+	rows := failures["receipts"].([]captureReceipt)
+	if failures["total"] != uint64(4*dnsCaptureFailureLimit) || failures["evicted"] != uint64(3*dnsCaptureFailureLimit) || len(rows) != dnsCaptureFailureLimit {
+		t.Fatal("DNS failure retention lost accounting or bounds", failures)
+	}
+	for _, row := range rows {
+		pair := row.Events[0].DNSAuthority
+		if pair.Expected != captureDNSAssignmentReference(a) || pair.Heartbeat.ExpectedSetHash != captureIdentityHash(fact.ExpectedConsumerSetID) ||
+			pair.Heartbeat.FencingToken != 6 || !pair.Heartbeat.LastHeartbeatAt.Equal(now) || pair.Snapshot == nil || pair.Snapshot.FencingToken != 6 {
+			t.Fatal("failed comparison evidence changed after capture", pair)
+		}
+	}
+	for _, row := range snapshot["receipts"].([]captureReceipt) {
+		if row.ErrorClass != "" {
+			t.Fatal("successful reads failed to exercise ordinary-ring eviction")
+		}
+	}
+	raw, _ := json.Marshal(snapshot)
+	if len(raw) > 128<<10 || strings.Contains(string(raw), "private-") {
+		t.Fatal("DNS metadata leaked raw inputs or exceeded budget", len(raw))
+	}
+	sequence := rows[0].Sequence
+	_, trace := s.beginCaptureTrace(context.Background(), "dns-runtime-facts")
+	s.finishCaptureTrace(trace, "source", errDNSRuntimeFacts, 0, 0)
+	if rows[0].Sequence != sequence {
+		t.Fatal("DNS snapshot shares eviction backing array")
+	}
+}
+
 func TestCaptureReceiptsBoundedDetachedAndConcurrent(t *testing.T) {
 	s := &Server{}
 	var wg sync.WaitGroup

@@ -298,6 +298,9 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 				} else if len(events) != 1 || events[0].Stage != "source_assignment_rejected" || events[0].Rejection != tc.reason {
 					t.Fatal("assignment failure lost its fixed reason", events)
 				}
+				if tc.reason != "" && !reflect.DeepEqual(events[0].DNSAuthority, captureDNSAuthorityEvidence(source.lookup.Assignment, fact)) {
+					t.Fatal("assignment rejection did not retain the exact compared heartbeat and expectation", events)
+				}
 				raw, _ := json.Marshal(events)
 				if strings.Contains(string(raw), "private-foreign") {
 					t.Fatal("receipt retained a private identity")
@@ -441,6 +444,12 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 					found = found || event.Stage == "snapshot_validation_rejected" && event.Rejection == reason
 					if scenario == "foreign assignment" && event.Stage == "snapshot_validation_rejected" && !reflect.DeepEqual(event.Mismatches, []string{"fencing_token"}) {
 						t.Fatal("assignment mismatch lost its exact field", event)
+					}
+					if scenario == "foreign assignment" && event.Stage == "snapshot_validation_rejected" {
+						pair := event.DNSAuthority
+						if pair == nil || pair.Expected != captureDNSAssignmentReference(source.lookup.Assignment) || pair.Snapshot == nil || *pair.Snapshot != captureDNSAssignmentReference(snapshot.Assignment) {
+							t.Fatal("snapshot rejection lost its exact compared assignments", pair)
+						}
 					}
 				}
 				if !found {

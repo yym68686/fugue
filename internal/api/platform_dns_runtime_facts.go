@@ -209,7 +209,9 @@ func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact
 			{!fact.LastHeartbeatAt.Add(time.Duration(freshness) * time.Second).After(now), "fact_heartbeat_stale"},
 		} {
 			if check.rejected {
-				return fail(check.reason)
+				observeCapture(ctx, captureEvent{Stage: "source_assignment_rejected", Node: node, Rejection: check.reason,
+					DNSAuthority: captureDNSAuthorityEvidence(item.Assignment, fact)})
+				return dnsFactSource{}, errDNSRuntimeFacts
 			}
 		}
 		payload, err := decodePlatformDNSArtifact(item.Artifact)
@@ -359,6 +361,9 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		event := captureEvent{Stage: "snapshot_validation_rejected", Node: node, Rejection: reason}
 		if reason == "assignment" {
 			event.Mismatches = dnsAssignmentMismatchFields(response.Snapshot.Assignment, current.lookup.Assignment)
+			event.DNSAuthority = captureDNSAuthorityEvidence(current.lookup.Assignment, current.consumer)
+			snapshot := captureDNSAssignmentReference(response.Snapshot.Assignment)
+			event.DNSAuthority.Snapshot = &snapshot
 		}
 		observeCapture(ctx, event)
 	})
