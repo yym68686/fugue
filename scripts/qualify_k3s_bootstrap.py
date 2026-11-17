@@ -269,6 +269,10 @@ def main():
             except Exception as exc:
                 storage_error = exc
                 report["passed"] = False
+            try:
+                storage.diagnostics()
+            except Exception as exc:
+                report["diagnostic_error"] = type(exc).__name__
         if observer:
             observer.join(timeout=5)
         write_json("http.json", {"samples": samples, "failures": failures})

@@ -77,6 +77,7 @@ class StorageQualification:
         deadline = time.monotonic() + 600
         while time.monotonic() < deadline:
             clusters = json.loads(kubectl("-n", "upgrade-qualification", "get", "clusters", "-o", "json").stdout)["items"]
+            self.write("clusters-latest.json", clusters)
             if len(clusters) == 2 and all(c.get("status", {}).get("readyInstances") == c["spec"]["instances"] for c in clusters):
                 break
             time.sleep(3)
@@ -97,6 +98,29 @@ class StorageQualification:
 
     def write(self, filename, value):
         (self.evidence / filename).write_text(json.dumps(value, indent=2, default=str) + "\n")
+
+    def diagnostics(self):
+        # Failed baseline setup is not an upgrade failure. Preserve enough
+        # evidence to distinguish admission, image, initdb, I/O and API waits.
+        for namespace, resource in [("upgrade-qualification", "clusters"),
+                                    ("upgrade-qualification", "pvc"),
+                                    ("longhorn-system", "volumes.longhorn.io"),
+                                    ("longhorn-system", "engines.longhorn.io"),
+                                    ("longhorn-system", "replicas.longhorn.io")]:
+            result = kubectl("-n", namespace, "get", resource, "-o", "json", check=False)
+            (self.evidence / (namespace + "-" + resource + ".json")).write_text(result.stdout + result.stderr)
+        for namespace in ("upgrade-qualification", "cnpg-system"):
+            result = kubectl("-n", namespace, "get", "pods", "-o", "json", check=False)
+            if result.returncode:
+                continue
+            for item in json.loads(result.stdout)["items"]:
+                name = item["metadata"]["name"]
+                result = kubectl("-n", namespace, "logs", name, "--all-containers", "--tail=200", check=False)
+                (self.evidence / (namespace + "-" + name + ".log")).write_text(result.stdout + result.stderr)
+                if "initdb" in name:
+                    result = kubectl("-n", namespace, "exec", name, "-c", "initdb", "--", "ps",
+                                     "-e", "-o", "pid,ppid,stat,wchan:30,comm", check=False)
+                    (self.evidence / (name + "-processes.txt")).write_text(result.stdout + result.stderr)
 
     def capture(self):
         pods = json.loads(kubectl("-n", "upgrade-qualification", "get", "pods", "-l", "cnpg.io/cluster", "-o", "json").stdout)["items"]
