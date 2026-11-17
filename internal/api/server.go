@@ -235,7 +235,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		imageStoreMinReplicas = imageStoreMinimumReplicasFromEnv()
 	}
 	server := &Server{
-		compilerInputOmitOriginal:       cfg.CompilerInputOmitOriginal,
+		compilerInputOmitOriginal:       true,
 		store:                           store,
 		auth:                            authn,
 		log:                             logger,

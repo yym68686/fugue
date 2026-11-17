@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 )
 
@@ -68,7 +69,8 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 				state.full.RollbackTargetGeneration == state.lkg.Generation &&
 				state.full.PinnedRollbackGeneration == state.lkg.Generation &&
 				state.fullArtifact.Metadata[platformproducer.PolicyReleaseMetadata] != "" &&
-				state.fullArtifact.Metadata[platformproducer.PolicyReleaseMetadata] != authority.ID &&
+				(state.fullArtifact.Metadata[platformproducer.PolicyReleaseMetadata] != authority.ID ||
+					legacyProducedCompiler(state.fullArtifact)) &&
 				!s.validateReleaseSetConvergence(ctx, state.fullArtifact).Pass {
 				return false, nil
 			}
@@ -143,6 +145,15 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 		s.appendAudit(principal, "platform_config.serving_verified", "platform_release_set", parent.ID, "", map[string]string{"policy_release_id": authority.ID, "release_id": current.ID})
 	}
 	return true, err
+}
+
+// The continuous producer's existing signed intent authorizes fresh captures.
+// An unreachable legacy rollback must not block that work just because its
+// producer policy did not change. This never verifies the old fence, rewrites
+// its input or waives the successor's ordinary shadow/gray/full/LKG checks.
+func legacyProducedCompiler(a model.PlatformArtifact) bool {
+	v := a.Metadata["compiler_version"]
+	return v == platformconfig.CompilerVersion || v == platformconfig.ConfigurationInputCompilerVersion
 }
 
 func (s *Server) producedSourcePreviouslyFailed(scope, policyReleaseID, sourceDigest string) (bool, error) {

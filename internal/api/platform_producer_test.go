@@ -56,6 +56,9 @@ func createTestProjectionPolicy(t *testing.T, s *Server, base model.PlatformArti
 
 func TestPlatformProducerPublishesAndReusesShadow(t *testing.T) {
 	state, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	// This historical compatibility fixture asserts exact full-input replay.
+	// Production compact-only compilations intentionally do not promise it.
+	server.compilerInputOmitOriginal = false
 	if _, _, err := state.CreateEdgeNodeToken(model.EdgeNode{ID: "edge-a", EdgeGroupID: "group-a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +94,7 @@ func TestPlatformProducerPublishesAndReusesShadow(t *testing.T) {
 		}
 	}
 	server = NewServer(state, auth.New(state, ""), nil, ServerConfig{BundleSigningKey: server.bundleSigningKey, BundleSigningKeyID: server.bundleSigningKeyID})
+	server.compilerInputOmitOriginal = false
 	if _, err := server.reconcilePlatformConfigurationWithCapture(context.Background(), capture); err != nil {
 		t.Fatal(err)
 	}

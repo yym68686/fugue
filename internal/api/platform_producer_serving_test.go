@@ -39,7 +39,11 @@ func TestSignedInputDeferralPreservesRealPendingRecoveryAndObservation(t *testin
 	testServingProducerProgressesRecovers(t, true, false, true, servingProducerTestOptions{signedInputGate: true})
 }
 
-type servingProducerTestOptions struct{ signedInputGate, delayedShadow bool }
+type servingProducerTestOptions struct{ signedInputGate, delayedShadow, legacyRecovery bool }
+
+func TestServingProducerReplacesUnreachableLegacyRollbackWithFreshV38UnderSameAuthority(t *testing.T) {
+	testServingProducerProgressesRecovers(t, false, false, false, servingProducerTestOptions{legacyRecovery: true})
+}
 
 func TestServingProducerResumesShadowAfterDelayedReaderEvidenceWithoutRecapture(t *testing.T) {
 	testServingProducerProgressesRecovers(t, false, false, false, servingProducerTestOptions{delayedShadow: true})
@@ -48,6 +52,7 @@ func TestServingProducerResumesShadowAfterDelayedReaderEvidenceWithoutRecapture(
 func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gated bool, options ...servingProducerTestOptions) {
 	signedGate := len(options) == 1 && options[0].signedInputGate
 	delayedShadow := len(options) == 1 && options[0].delayedShadow
+	legacyRecovery := len(options) == 1 && options[0].legacyRecovery
 	path := t.TempDir() + "/state.json"
 	state := store.New(path)
 	if err := state.Init(); err != nil {
@@ -55,6 +60,9 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	}
 	config := ServerConfig{BundleSigningKey: "synthetic-serving-key", BundleSigningKeyID: "key"}
 	server := NewServer(state, auth.New(state, ""), nil, config)
+	if legacyRecovery {
+		server.compilerInputOmitOriginal = false
+	}
 	deferNewInput, admissions, completions := false, 0, 0
 	setDeferral := func(value bool) { deferNewInput = value }
 	defer func() {
@@ -351,6 +359,9 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	}
 	report(candidate, nextGray)
 	server = NewServer(state, auth.New(state, ""), nil, config)
+	if legacyRecovery {
+		server.compilerInputOmitOriginal = false
+	}
 	seedInventory()
 	assertProducerRejectsRetiredDNSBackend(t, server, path, authority)
 	reconcile()
@@ -444,17 +455,23 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 		t.Fatal("historical baseline facts verified a new recovery fence")
 	}
 	age(recovered.ID, 61)
-	if supersede {
+	if supersede || legacyRecovery {
 		// A new operator authority must be able to repair an unavailable
 		// historical baseline without inventing evidence for its recovery fence.
-		p.Generation = "producer-repair"
-		repairAuthority := activate()
+		repairAuthority := authority
+		if supersede {
+			p.Generation = "producer-repair"
+			repairAuthority = activate()
+		}
 		server = NewServer(state, auth.New(state, ""), nil, config)
 		seedInventory()
 		reconcile()
 		repair, fresh := active("gray")
 		if fresh.ID == badGray.ID || repair.Metadata[platformproducer.PolicyReleaseMetadata] != repairAuthority.ID {
 			t.Fatal("new authority remained blocked on unavailable recovery")
+		}
+		if legacyRecovery && (repair.Metadata["compiler_version"] != platformconfig.CompactOnlyInputCompilerVersion || candidate.Metadata["compiler_version"] == platformconfig.CompactOnlyInputCompilerVersion) {
+			t.Fatal("fixture did not replace a legacy rollback with actual v38 compilation")
 		}
 		_, repairShadow := active("shadow")
 		age(repairShadow.ID, 5)
