@@ -537,7 +537,7 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	intent := retirementIntentVersion(app, stable, policy)
 	ready := make([]model.AppRelease, 0, len(releases))
 	for _, release := range releases {
-		if !store.AppReleaseAwaitingDrain(release) && !(release.Status == model.AppReleaseStatusRetired && release.RevisionWorkload != nil) {
+		if !store.AppReleaseAwaitingDrain(release) && !store.AppReleaseHasAlignedRevision(release) && !(release.Status == model.AppReleaseStatusRetired && release.RevisionWorkload != nil) {
 			continue
 		}
 		key := retirementRetryKey{app.TenantID, app.ID, release.ID}
@@ -600,6 +600,12 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 }
 
 func (s *Service) retryOneAppReleaseRetirement(ctx context.Context, app model.App, previous, stable model.AppRelease, policy model.AppTrafficPolicy) {
+	if store.AppReleaseHasAlignedRevision(previous) && previous.ID == stable.ID {
+		if err := s.quiesceAlignedReleaseRevision(ctx, app, stable, policy); err != nil && s.Logger != nil {
+			s.Logger.Printf("retain aligned release revision %s: %v", stable.ID, err)
+		}
+		return
+	}
 	if previous.Status == model.AppReleaseStatusRetired && previous.RevisionWorkload != nil {
 		if err := s.retryRetiredAppReleaseCleanup(ctx, app, previous, stable); err != nil {
 			if s.Logger != nil {
